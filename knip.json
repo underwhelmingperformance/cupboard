@@ -1,0 +1,11 @@
+{
+	"$schema": "https://unpkg.com/knip@5/schema.json",
+	"workspaces": {
+		"packages/cli": {},
+		"packages/server": {
+			"entry": ["src/do.ts"]
+		}
+	},
+	"ignoreDependencies": ["cloudflare"],
+	"ignore": [".wrangler/**", "worker-configuration.d.ts"]
+}

@@ -1,0 +1,41 @@
+{
+	"name": "cupboard",
+	"version": "0.0.0",
+	"devDependencies": {
+		"@eslint/js": "^10.0.1",
+		"@types/node": "^25.5.0",
+		"eslint": "^10.1.0",
+		"eslint-config-prettier": "^10.1.8",
+		"eslint-plugin-simple-import-sort": "^12.1.1",
+		"eslint-plugin-unicorn": "^63.0.0",
+		"globals": "^17.4.0",
+		"jiti": "^2.6.1",
+		"knip": "^6.0.4",
+		"prettier": "^3.8.1",
+		"syncpack": "^14.2.1",
+		"typescript": "^6.0.2",
+		"typescript-eslint": "^8.57.2"
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"packageManager": "pnpm@11.1.2+sha512.415a1cc25974731e75455c1468371be74c5aa5fb7621b50d4056d222451609f11412f23fd602e6169f1e060466641f798597e1be961a10688836a67b16569499",
+	"private": true,
+	"scripts": {
+		"check": "pnpm run '/^check:.*/'",
+		"check:deps": "syncpack lint",
+		"check:format": "prettier --check .",
+		"check:knip": "knip --include dependencies,unlisted --no-progress",
+		"check:lint": "eslint .",
+		"check:test": "pnpm -r run test",
+		"check:types": "pnpm -r run check:types",
+		"cli": "pnpm --filter @cupboard/cli cli",
+		"deploy": "pnpm --filter @cupboard/server deploy",
+		"dev": "pnpm --filter @cupboard/server dev",
+		"fix": "pnpm run '/^fix:.*/'",
+		"fix:deps": "syncpack format",
+		"fix:format": "prettier --write .",
+		"fix:lint": "eslint . --fix"
+	},
+	"type": "module"
+}

@@ -1,0 +1,22 @@
+name = "cupboard"
+main = "src/worker.ts"
+compatibility_date = "2026-05-15"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "CUPBOARD_DO"
+class_name = "CupboardServer"
+
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "cupboard-blobs"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CupboardServer"]
+
+[observability]
+enabled = true
+
+[triggers]
+crons = ["0 4 * * *"]

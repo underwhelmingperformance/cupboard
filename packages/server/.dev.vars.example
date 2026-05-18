@@ -1,0 +1,7 @@
+# Local secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
+# `.dev.vars` is gitignored; this template is committed.
+#
+# Production secrets are set with `wrangler secret put <NAME>`.
+
+# Bearer token required for write and admin routes.
+CUPBOARD_WRITE_TOKEN=replace-me
