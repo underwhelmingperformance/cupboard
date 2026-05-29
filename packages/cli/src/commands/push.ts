@@ -1,7 +1,13 @@
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
-import { createReporter, formatBytes, formatCount } from '../reporter.ts';
+import { CupboardClient } from '../client.ts';
+import { runPush } from '../push.ts';
+import { createReporter } from '../reporter.ts';
+
+interface PushOptions {
+	readonly token: string;
+}
 
 export function registerPushCommand(program: Command): void {
 	program
@@ -9,41 +15,18 @@ export function registerPushCommand(program: Command): void {
 		.description(
 			'Push one or more store paths to the configured cupboard cache.'
 		)
+		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<paths...>', 'Nix store paths to push')
-		.action(async (paths: string[]) => {
+		.requiredOption('--token <token>', 'write token')
+		.action(async (url: string, paths: string[], options: PushOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
+			const { token } = options;
 
-			await reporter.phase('Resolving store closure', (ctx) => {
-				ctx.fact('roots', formatCount(paths.length));
-				throw new Error('push not yet implemented');
+			await runPush(paths, reporter, {
+				client: CupboardClient.fromUrl(url),
+				token
 			});
-
-			await reporter.phase('Computing NAR hashes', (ctx) => {
-				ctx.fact('paths', formatCount(0));
-				throw new Error('push not yet implemented');
-			});
-
-			await reporter.phase('Negotiating with cache', (ctx) => {
-				ctx.fact('missing', formatCount(0));
-				throw new Error('push not yet implemented');
-			});
-
-			await reporter.phase('Compressing and uploading', (ctx) => {
-				ctx.fact('uploaded', formatBytes(0));
-				throw new Error('push not yet implemented');
-			});
-
-			await reporter.phase('Committing metadata', (ctx) => {
-				ctx.fact('committed', formatCount(0));
-				throw new Error('push not yet implemented');
-			});
-
-			reporter.result([
-				{ label: 'Pushed', value: '(not yet implemented)' },
-				{ label: 'Skipped', value: '(not yet implemented)' },
-				{ label: 'Uploaded', value: '(not yet implemented)' }
-			]);
 		});
 }

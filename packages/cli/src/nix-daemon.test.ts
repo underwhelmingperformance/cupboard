@@ -3,7 +3,11 @@ import { describe, expect, it } from 'vitest';
 import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
 
 import { NixSha256Hash } from './nar.ts';
-import { NixDaemonStoreClient, type NixDaemonTransport } from './nix-daemon.ts';
+import {
+	NixDaemonStoreClient,
+	type NixDaemonTransport,
+	UnsupportedNixDaemonProtocolError
+} from './nix-daemon.ts';
 import {
 	NixStorePathNotFoundError,
 	type NixValidPathInfo
@@ -88,6 +92,17 @@ describe('NixDaemonStoreClient', () => {
 			NixStorePathNotFoundError
 		);
 	});
+
+	it('rejects daemon protocol minors older than the SetOptions frame it sends', async () => {
+		const client = new NixDaemonStoreClient({
+			connect: () =>
+				Promise.resolve(new FakeDaemonTransport({}, { protocolMinor: 37 }))
+		});
+
+		await expect(client.queryPathInfo(appPath)).rejects.toThrow(
+			UnsupportedNixDaemonProtocolError
+		);
+	});
 });
 
 interface FakePathInfo {
@@ -103,13 +118,18 @@ class FakeDaemonTransport implements NixDaemonTransport {
 	private readonly pendingBytes: Buffer[] = [];
 	private writeCount = 0;
 
-	constructor(private readonly paths: Readonly<Record<string, FakePathInfo>>) {}
+	constructor(
+		private readonly paths: Readonly<Record<string, FakePathInfo>>,
+		private readonly options: { readonly protocolMinor?: number } = {}
+	) {}
 
 	write(bytes: Uint8Array): Promise<void> {
 		this.writeCount += 1;
 
 		if (this.writeCount === 1) {
-			this.pendingBytes.push(handshakeResponse());
+			this.pendingBytes.push(
+				handshakeResponse(this.options.protocolMinor ?? 38)
+			);
 			return Promise.resolve();
 		}
 
@@ -208,10 +228,10 @@ function readRequestStorePath(request: Buffer): string {
 	return request.subarray(offset, offset + length).toString('utf8');
 }
 
-function handshakeResponse(): Buffer {
+function handshakeResponse(protocolMinor: number): Buffer {
 	const response = new ProtocolWriter();
 	response.writeInteger(0x64_78_69_6f);
-	response.writeInteger((1 << 8) | 38);
+	response.writeInteger((1 << 8) | protocolMinor);
 
 	return response.bytes();
 }

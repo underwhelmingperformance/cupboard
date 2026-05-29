@@ -53,8 +53,8 @@ successfully substitute that path from the Worker.
 
 ### Write path
 
-- [ ] Push store paths from a companion CLI.
-- [ ] Compress NARs with zstd by default at upload time, and record
+- [x] Push store paths from a companion CLI.
+- [x] Compress NARs with zstd by default at upload time, and record
       `Compression`, `FileHash`, and `FileSize` for the compressed blob
       alongside the uncompressed `NarHash` and `NarSize`.
 - [ ] Authenticate write and admin operations with one deploy-time secret or
@@ -69,7 +69,7 @@ successfully substitute that path from the Worker.
 - [ ] Provide deterministic, resumable-ish upload behaviour:
   - [ ] client computes the uncompressed NAR hash and size
   - [ ] server tells the client which blobs are missing
-  - [ ] client uploads missing content directly to R2 with an R2-validated
+  - [x] client uploads missing content directly to R2 with an R2-validated
         SHA-256 checksum header
   - [ ] server commits metadata once R2 confirms the blob is present
 - [ ] Tests:
@@ -83,20 +83,20 @@ successfully substitute that path from the Worker.
 
 ### Client
 
-- [ ] Configure against a personal Worker URL and write token.
+- [x] Configure against a personal Worker URL and write token.
 - [x] Compute NAR hash and size locally while streaming the same NAR into zstd,
       so each path is read once.
-- [ ] Upload only missing blobs.
-- [ ] Show progress through a `Reporter` abstraction with two renderers,
+- [x] Upload only missing blobs.
+- [x] Show progress through a `Reporter` abstraction with two renderers,
       auto-selected from `stderr.isTTY`:
-  - [ ] Terminal: `ora` spinners, `picocolors` for ANSI, `cli-table3` for result
+  - [x] Terminal: `ora` spinners, `picocolors` for ANSI, `cli-table3` for result
         blocks. One phase per logical step (resolve closure, negotiate, prepare
         missing NARs, upload, commit), each collapsing to one line on completion
         with inline facts.
-  - [ ] JSON: line-delimited events for CI logs and piping to `jq`. Event types
+  - [x] JSON: line-delimited events for CI logs and piping to `jq`. Event types
         are `phase`, `result`, `warn`, and `info`; phase events carry `status`,
         `durationMs`, and a `facts` object.
-- [ ] `--colour` / `--no-colour` flags override the TTY auto-detection.
+- [x] `--colour` / `--no-colour` flags override the TTY auto-detection.
 - [ ] Print Nix configuration:
   - [ ] `substituters = ...`
   - [ ] `trusted-public-keys = ...`

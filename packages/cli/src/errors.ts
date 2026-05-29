@@ -1,0 +1,51 @@
+export abstract class CliError extends Error {}
+
+export class CupboardHttpError extends CliError {
+	constructor(
+		public readonly method: string,
+		public readonly path: string,
+		public readonly status: number,
+		public readonly body: string
+	) {
+		super(`${method} ${path} failed with ${String(status)}: ${body}`);
+		this.name = 'CupboardHttpError';
+	}
+}
+
+export class CupboardUploadError extends CliError {
+	constructor(
+		public readonly r2Key: string,
+		public readonly status: number,
+		public readonly body: string
+	) {
+		super(`Upload to ${r2Key} failed with ${String(status)}: ${body}`);
+		this.name = 'CupboardUploadError';
+	}
+}
+
+export class PushNarMetadataMismatchError extends CliError {
+	constructor(
+		public readonly storePath: string,
+		public readonly expectedNarHash: string,
+		public readonly actualNarHash: string,
+		public readonly expectedNarSize: number,
+		public readonly actualNarSize: number
+	) {
+		super(
+			`Computed NAR metadata does not match local Nix metadata: ${storePath}`
+		);
+		this.name = 'PushNarMetadataMismatchError';
+	}
+}
+
+export class UnexpectedUploadDecisionError extends CliError {
+	constructor(
+		public readonly storePathHash: string,
+		public readonly narHash: string
+	) {
+		super(
+			`Upload decision did not match a prepared path: ${storePathHash} ${narHash}`
+		);
+		this.name = 'UnexpectedUploadDecisionError';
+	}
+}

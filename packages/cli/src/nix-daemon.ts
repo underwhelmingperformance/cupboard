@@ -12,7 +12,7 @@ const workerMagic1 = 0x6e_69_78_63;
 const workerMagic2 = 0x64_78_69_6f;
 const protocolMajor = 1;
 const protocolMinor = 38;
-const minimumProtocolMinor = 18;
+const minimumProtocolMinor = 38;
 
 const opSetOptions = 19;
 const opQueryPathInfo = 26;
