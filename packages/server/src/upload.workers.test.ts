@@ -8,6 +8,10 @@ import {
 	type UploadNegotiateResponse,
 	type UploadPathMetadataFields
 } from '@cupboard/shared';
+import {
+	createExecutionContext,
+	waitOnExecutionContext
+} from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -216,8 +220,26 @@ describe('upload flow', () => {
 		await expectNarResponse(metadata.narHash, 'GET');
 		await expectNarResponse(metadata.narHash, 'HEAD');
 		await expectNarResponse(metadata.narHash.replace(':', '%3A'), 'GET');
-		await expectConditionalNotModified(`/nar/${metadata.narHash}.nar.zst`);
-		await expectDateConditionalNotModified(`/nar/${metadata.narHash}.nar.zst`);
+		await expectConditionalNotModified(
+			`/nar/${metadata.narHash}.nar.zst`,
+			readFetch
+		);
+		await expectDateConditionalNotModified(
+			`/nar/${metadata.narHash}.nar.zst`,
+			readFetch
+		);
+	});
+
+	it('returns 404 for a valid NAR hash with no stored blob', async () => {
+		const missing = await readFetch(`/nar/${nixSha256Hash('7')}.nar.zst`);
+
+		expect({
+			status: missing.status,
+			body: await missing.text()
+		}).toStrictEqual({
+			status: StatusCodes.NOT_FOUND,
+			body: 'Not found\n'
+		});
 	});
 
 	it('reuses an existing blob for another store path', async () => {
@@ -771,7 +793,7 @@ async function expectNarResponse(
 	hash: string,
 	method: 'GET' | 'HEAD'
 ): Promise<void> {
-	const response = await fetchPath(`/nar/${hash}.nar.zst`, { method });
+	const response = await readFetch(`/nar/${hash}.nar.zst`, { method });
 	const etag = response.headers.get('etag');
 
 	expect({
@@ -795,13 +817,19 @@ async function expectNarResponse(
 	expect([...body]).toStrictEqual(method === 'HEAD' ? [] : [...narBytes]);
 }
 
-async function expectConditionalNotModified(pathname: string): Promise<void> {
-	const fresh = await fetchPath(pathname);
+async function expectConditionalNotModified(
+	pathname: string,
+	fetcher: (
+		pathname: string,
+		init?: RequestInit
+	) => Promise<Response> = fetchPath
+): Promise<void> {
+	const fresh = await fetcher(pathname);
 	const etag = fresh.headers.get('etag');
 
 	expect(typeof etag).toBe('string');
 
-	const response = await fetchPath(pathname, {
+	const response = await fetcher(pathname, {
 		headers: {
 			'if-none-match': etag ?? ''
 		}
@@ -823,14 +851,18 @@ async function expectConditionalNotModified(pathname: string): Promise<void> {
 }
 
 async function expectDateConditionalNotModified(
-	pathname: string
+	pathname: string,
+	fetcher: (
+		pathname: string,
+		init?: RequestInit
+	) => Promise<Response> = fetchPath
 ): Promise<void> {
-	const fresh = await fetchPath(pathname);
+	const fresh = await fetcher(pathname);
 	const lastModified = fresh.headers.get('last-modified');
 
 	expect(typeof lastModified).toBe('string');
 
-	const response = await fetchPath(pathname, {
+	const response = await fetcher(pathname, {
 		headers: {
 			'if-modified-since': lastModified ?? ''
 		}
@@ -929,6 +961,21 @@ function fetchPath(pathname: string, init?: RequestInit): Promise<Response> {
 
 function workerFetch(pathname: string, init?: RequestInit): Promise<Response> {
 	return defaultWorkerServer().fetch(new URL(pathname, origin), init);
+}
+
+async function readFetch(
+	pathname: string,
+	init?: RequestInit
+): Promise<Response> {
+	const ctx = createExecutionContext();
+	const request = new Request<unknown, IncomingRequestCfProperties>(
+		new URL(pathname, origin),
+		init as RequestInit<IncomingRequestCfProperties>
+	);
+	const response = await worker.fetch(request, env, ctx);
+	await waitOnExecutionContext(ctx);
+
+	return response;
 }
 
 async function clearBlobStorage(): Promise<void> {

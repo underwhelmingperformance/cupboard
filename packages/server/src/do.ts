@@ -48,6 +48,7 @@ import {
 	UploadedObjectChecksumMissingError,
 	UploadNotPreparedError
 } from './errors.ts';
+import { isNotModified, narObjectKey } from './http.ts';
 import { R2Presigner } from './presign.ts';
 
 type WidenStringBindings<T> = {
@@ -139,18 +140,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 
 			return this.narInfoResponse(context.req.raw, storePathHash);
-		});
-
-		this.app.on(['GET', 'HEAD'], '/nar/:narName', (context) => {
-			const narHash = parseNarName(context.req.param('narName'));
-
-			if (narHash === undefined) {
-				return new Response('Not found\n', {
-					status: StatusCodes.NOT_FOUND
-				});
-			}
-
-			return this.narResponse(context.req.raw, narHash);
 		});
 
 		this.app.post('/admin/init', (context) => this.handleInit(context.req.raw));
@@ -599,39 +588,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	private async narResponse(
-		request: Request,
-		narHash: string
-	): Promise<Response> {
-		const key = narObjectKey(narHash);
-		const object = await this.env.BLOBS.get(key);
-
-		if (object === null) {
-			return new Response('Not found\n', { status: StatusCodes.NOT_FOUND });
-		}
-
-		const headers = new Headers({
-			'cache-control': 'public, max-age=31536000, immutable',
-			'content-type': 'application/zstd',
-			etag: object.httpEtag,
-			'last-modified': object.uploaded.toUTCString()
-		});
-		headers.set('content-length', String(object.size));
-
-		if (isNotModified(request, headers)) {
-			return new Response(undefined, {
-				status: StatusCodes.NOT_MODIFIED,
-				headers
-			});
-		}
-
-		if (request.method === 'HEAD') {
-			return new Response(undefined, { headers });
-		}
-
-		return new Response(object.body, { headers });
-	}
-
 	private stats(): StatsResponse {
 		const storePaths = this.db
 			.select({ count: count() })
@@ -1026,10 +982,6 @@ function uploadHeadersFor(
 	};
 }
 
-function narObjectKey(narHash: string): string {
-	return `nar/${narHash}.nar.zst`;
-}
-
 function verifyObjectChecksum(
 	metadata: UploadPathCommitMetadata,
 	object: R2Object
@@ -1067,23 +1019,6 @@ function parseNarInfoName(name: string): string | undefined {
 	}
 
 	return storePathHash;
-}
-
-function parseNarName(name: string): string | undefined {
-	const prefix = 'sha256:';
-	const suffix = '.nar.zst';
-
-	if (!name.startsWith(prefix) || !name.endsWith(suffix)) {
-		return undefined;
-	}
-
-	const hash = name.slice(0, -suffix.length);
-
-	if (!/^sha256:[0-9a-df-np-sv-z]{52}$/.test(hash)) {
-		return undefined;
-	}
-
-	return hash;
 }
 
 async function textResponse(
@@ -1136,21 +1071,4 @@ class TextBody {
 
 		return this.metadataPromise;
 	}
-}
-
-function isNotModified(request: Request, headers: Headers): boolean {
-	const etag = headers.get('etag');
-
-	if (etag !== null && request.headers.get('if-none-match') === etag) {
-		return true;
-	}
-
-	const lastModified = headers.get('last-modified');
-	const ifModifiedSince = request.headers.get('if-modified-since');
-
-	if (lastModified === null || ifModifiedSince === null) {
-		return false;
-	}
-
-	return Date.parse(ifModifiedSince) >= Date.parse(lastModified);
 }

@@ -307,7 +307,7 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
 
 ### Worker read routing
 
-- [ ] Add `packages/server/src/read.ts` owning the read routes. `handler.ts`
+- [x] Add `packages/server/src/read.ts` owning the read routes. `handler.ts`
       tries it first and forwards everything else to the DO stub. Thread `ctx`
       into the Worker `fetch` so cache writes can use `ctx.waitUntil`.
 - [ ] Move `parseNarName`, `parseNarInfoName`, and the conditional-request
@@ -320,26 +320,26 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
       once and caches it. This assumes a stable signing key; key rotation is a
       V3 concern, so revisit Worker-side pubkey caching when rotation lands
       rather than leaving hidden staleness to unwind later.
-- [ ] Only `GET` responses go into `caches.default`. `HEAD` is answered from R2
+- [x] Only `GET` responses go into `caches.default`. `HEAD` is answered from R2
       metadata (`BLOBS.head`) with no body and is never cached, since caching
       HEAD responses invites body and header mismatches.
 
 ### NAR blobs from R2 and the edge
 
-- [ ] Serve `GET` `/nar/<narHash>.nar.zst` in the Worker: check
+- [x] Serve `GET` `/nar/<narHash>.nar.zst` in the Worker: check
       `caches.default`, then `BLOBS.get`, building the existing `immutable`
       response from the R2 object metadata (ETag, uploaded, size). On a miss,
       populate the cache with `ctx.waitUntil(caches.default.put(...))`. `HEAD`
       is answered from `BLOBS.head` without touching the cache.
-- [ ] Keep conditional `If-None-Match` and `If-Modified-Since` 304 handling.
-- [ ] NAR objects are content-addressed and immutable, so edge copies never need
+- [x] Keep conditional `If-None-Match` and `If-Modified-Since` 304 handling.
+- [x] NAR objects are content-addressed and immutable, so edge copies never need
       invalidation; deleting one only frees R2 storage. `/nar/<hash>` stays
       public and is guessable by anyone who knows the hash, so the safety
       property GC must preserve is not "narinfo gates access" but the narrower:
       a stale cached narinfo must not point at a deleted NAR before its TTL
       expires (see TTL-ordered garbage collection).
-- [ ] Tests:
-  - [ ] Integration: GET and HEAD return the expected bytes and headers through
+- [x] Tests:
+  - [x] Integration: GET and HEAD return the expected bytes and headers through
         the Worker entrypoint; an unknown hash is 404; conditional GETs
         return 304. Assert correctness rather than cache hits, since the test
         pool's Cache API may not surface them.
