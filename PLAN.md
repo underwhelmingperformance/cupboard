@@ -42,10 +42,10 @@ successfully substitute that path from the Worker.
 - [ ] Allow public unauthenticated reads, since Nix substituters usually need
       simple HTTP access.
 - [ ] Tests:
-  - [ ] Unit: `nix-cache-info` serialiser; narinfo serialiser and parser
+  - [x] Unit: `nix-cache-info` serialiser; narinfo serialiser and parser
         round-trip; fingerprint construction; generated valid narinfo
         round-trips with `fast-check`.
-  - [ ] Unit: `fast-check` parser permissiveness properties for field order,
+  - [x] Unit: `fast-check` parser permissiveness properties for field order,
         optional fields, and blank lines.
   - [ ] Integration: GET each route returns the expected body and headers; HEAD
         returns the same headers with no body. Unknown hash returns 404 and a
@@ -59,9 +59,9 @@ successfully substitute that path from the Worker.
       alongside the uncompressed `NarHash` and `NarSize`.
 - [ ] Authenticate write and admin operations with one deploy-time secret or
       token.
-- [ ] Validate uploaded NAR metadata:
-  - [ ] required: store path hash, NAR hash, NAR size, references
-  - [ ] optional: deriver and CA fields
+- [x] Validate uploaded NAR metadata:
+  - [x] required: store path hash, NAR hash, NAR size, references
+  - [x] optional: deriver and CA fields
 - [ ] Upload large NARs directly to R2 via Worker-generated R2 S3 presigned PUT
       URLs. Streaming bodies through the Worker request is not an option given
       Workers' body-size and CPU limits; this is a hard requirement, not a
@@ -73,7 +73,7 @@ successfully substitute that path from the Worker.
         SHA-256 checksum header
   - [ ] server commits metadata once R2 confirms the blob is present
 - [ ] Tests:
-  - [ ] Unit: NAR metadata validation (hash, size, references); rejecting
+  - [x] Unit: NAR metadata validation (hash, size, references); rejecting
         narinfos missing required fields; recording compressed-blob metadata
         alongside uncompressed.
   - [ ] Integration: full upload flow (negotiate, presigned PUT, commit)
@@ -165,7 +165,7 @@ successfully substitute that path from the Worker.
 - [ ] `@cloudflare/vitest-pool-workers` configured in `packages/server` for Tier
       2, picking up `*.workers.test.ts` only so the unit run is not slowed by
       Worker boot.
-- [ ] `fast-check` added as a dev dependency for property tests.
+- [x] `fast-check` added as a dev dependency for property tests.
 - [ ] Fixture generation script that runs `nix-store --dump` against a small set
       of synthetic store paths; outputs committed under `tests/fixtures/`.
 - [ ] E2E harness under `tests/e2e/`: clean-env Miniflare Worker runner, local
