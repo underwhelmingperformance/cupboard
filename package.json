@@ -11,10 +11,13 @@
 		"globals": "^17.4.0",
 		"jiti": "^2.6.1",
 		"knip": "^6.0.4",
+		"miniflare": "^4.20260526.0",
 		"prettier": "^3.8.1",
 		"syncpack": "^14.2.1",
 		"typescript": "^6.0.2",
-		"typescript-eslint": "^8.57.2"
+		"typescript-eslint": "^8.57.2",
+		"vite": "^8.0.14",
+		"vitest": "^4.1.6"
 	},
 	"engines": {
 		"node": ">=24"
@@ -29,6 +32,7 @@
 		"check:lint": "eslint .",
 		"check:test": "pnpm -r run test",
 		"check:types": "pnpm -r run check:types",
+		"check:types:tests": "tsc -p tests/e2e/tsconfig.json",
 		"cli": "pnpm --filter @cupboard/cli cli",
 		"deploy": "pnpm --filter @cupboard/server deploy",
 		"dev": "pnpm --filter @cupboard/server dev",
@@ -36,7 +40,8 @@
 		"fix:deps": "syncpack format",
 		"fix:format": "prettier --write .",
 		"fix:lint": "eslint . --fix",
-		"fixtures:generate": "node tests/fixtures/generate.ts"
+		"fixtures:generate": "node tests/fixtures/generate.ts",
+		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts"
 	},
 	"type": "module"
 }

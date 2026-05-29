@@ -100,10 +100,10 @@ successfully substitute that path from the Worker.
 - [x] Print Nix configuration:
   - [x] `substituters = ...`
   - [x] `trusted-public-keys = ...`
-- [ ] Tests:
+- [x] Tests:
   - [x] Unit: locally-computed NAR hash and size match what `nix-store --dump`
         produces (run against fixture paths); substituter config rendering.
-  - [ ] E2E: push a fixture, configure a clean tmp Nix store with the
+  - [x] E2E: push a fixture, configure a clean tmp Nix store with the
         substituter URL and public key, substitute the path back, assert the
         signature verifies. This is the Tier 3 golden-path scenario.
 
@@ -168,11 +168,11 @@ successfully substitute that path from the Worker.
 - [x] `fast-check` added as a dev dependency for property tests.
 - [x] Fixture generation script that runs `nix-store --dump` against a small set
       of synthetic store paths; outputs committed under `tests/fixtures/`.
-- [ ] E2E harness under `tests/e2e/`: clean-env Miniflare Worker runner, local
+- [x] E2E harness under `tests/e2e/`: clean-env Miniflare Worker runner, local
       HTTP server for Nix, scoped `nix` invocation builder, and localhost URL
       validation. Enforces the Isolation invariants documented in the Testing
       section.
-- [ ] `pnpm test:e2e` script wired at the root.
+- [x] `pnpm test:e2e` script wired at the root.
 
 ## Infrastructure
 
@@ -256,24 +256,24 @@ E2E tests must be incapable of touching a deployed cupboard or the developer's
 local `/nix/store`, even if the surrounding shell has production credentials or
 Nix configuration. Enforced by the harness, not by convention.
 
-- [ ] All child processes (`nix`, `nix-store`, and fixture helpers) spawn with
+- [x] All child processes (`nix`, `nix-store`, and fixture helpers) spawn with
       an explicitly constructed env containing only `PATH`, a per-test temporary
       `HOME`, and variables the test sets deliberately. The parent `process.env`
       is not inherited.
-- [ ] The Worker runs in local Miniflare, fronted by a test-owned HTTP server.
+- [x] The Worker runs in local Miniflare, fronted by a test-owned HTTP server.
       There is no code path from a test to a real deployment.
-- [ ] `nix` invocations get `--store local?root=<tmpdir>`,
+- [x] `nix` invocations get `--store local?root=<tmpdir>`,
       `NIX_USER_CONF_FILES=/dev/null`, and `NIX_CONF_DIR=<tmpdir>/etc` so they
       cannot read or write the developer's `/nix/store` or pick up their
       substituter config.
-- [ ] Cupboard URLs are produced by the local test server and rejected unless
+- [x] Cupboard URLs are produced by the local test server and rejected unless
       the host is `127.0.0.1` or `localhost`.
 
 ### Fixtures
 
 - [x] Generate a small synthetic store path once with `nix-store --dump`. Commit
       it as a binary fixture under `tests/fixtures/`.
-- [ ] Unit tests parse them; integration and E2E tests push and re-fetch them.
+- [x] Unit tests parse them; integration and E2E tests push and re-fetch them.
 
 ### Principles
 
