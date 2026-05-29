@@ -17,6 +17,7 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildVersion } from './build-info.generated.ts';
+import { narInfoObjectKey } from './http.ts';
 import type { CupboardServer } from './worker.ts';
 import worker from './worker.ts';
 
@@ -274,6 +275,65 @@ describe('upload flow', () => {
 		}).toStrictEqual({
 			status: StatusCodes.NOT_FOUND,
 			body: 'Not found\n'
+		});
+	});
+
+	it('materialises the signed narinfo to R2 once and never rewrites it', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		const first = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, first, metadata);
+		await putNarBytes(first.r2Key);
+
+		const second = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, second, metadata);
+
+		const committed = await commitUpload(token, first.uploadId);
+
+		expect(committed.status).toBe('committed');
+
+		const stored = await readStoredNarInfo(metadata.storePathHash);
+		const parsed = NarInfo.parse(stored.body);
+
+		expect(typeof parsed.sig).toBe('string');
+		expect({
+			contentType: stored.contentType,
+			cacheControl: stored.cacheControl,
+			fields: parsed.toFields()
+		}).toStrictEqual({
+			contentType: 'text/x-nix-narinfo; charset=utf-8',
+			cacheControl: 'public, max-age=3600',
+			fields: {
+				storePath: metadata.storePath,
+				url: `nar/${metadata.narHash}.nar.zst`,
+				compression: 'zstd',
+				fileHash: metadata.fileHash,
+				fileSize: metadata.fileSize,
+				narHash: metadata.narHash,
+				narSize: metadata.narSize,
+				references: metadata.references,
+				deriver: undefined,
+				ca: undefined,
+				sig: parsed.sig
+			}
+		});
+
+		const recommit = await commitUpload(token, second.uploadId);
+
+		expect(recommit.status).toBe('already-present');
+
+		const after = await readStoredNarInfo(metadata.storePathHash);
+
+		expect({ body: after.body, etag: after.etag }).toStrictEqual({
+			body: stored.body,
+			etag: stored.etag
 		});
 	});
 
@@ -970,6 +1030,26 @@ async function putNarBytes(r2Key: string): Promise<void> {
 	await env.BLOBS.put(r2Key, narBytes, {
 		sha256: fileHash.digestBytes()
 	});
+}
+
+async function readStoredNarInfo(storePathHash: string): Promise<{
+	readonly body: string;
+	readonly etag: string;
+	readonly contentType: string | undefined;
+	readonly cacheControl: string | undefined;
+}> {
+	const object = await env.BLOBS.get(narInfoObjectKey(storePathHash));
+
+	if (object === null) {
+		throw new Error(`expected a stored narinfo object for ${storePathHash}`);
+	}
+
+	return {
+		body: await object.text(),
+		etag: object.httpEtag,
+		contentType: object.httpMetadata?.contentType,
+		cacheControl: object.httpMetadata?.cacheControl
+	};
 }
 
 function uploadBlobMetadata(metadata: UploadPathMetadataFields) {

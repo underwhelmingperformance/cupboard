@@ -7,8 +7,14 @@ const textHeaders = {
 	'x-content-type-options': 'nosniff'
 };
 
+export const narInfoCacheControl = 'public, max-age=3600';
+
 export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
+}
+
+export function narInfoObjectKey(storePathHash: string): string {
+	return `narinfo/${storePathHash}`;
 }
 
 export function parseNarName(name: string): string | undefined {

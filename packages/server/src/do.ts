@@ -45,7 +45,13 @@ import {
 	UploadedObjectChecksumMissingError,
 	UploadNotPreparedError
 } from './errors.ts';
-import { narObjectKey, TextBody, textResponse } from './http.ts';
+import {
+	narInfoCacheControl,
+	narInfoObjectKey,
+	narObjectKey,
+	TextBody,
+	textResponse
+} from './http.ts';
 import { R2Presigner } from './presign.ts';
 
 type WidenStringBindings<T> = {
@@ -645,21 +651,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			createdAt: now
 		} satisfies typeof schema.narBlobs.$inferInsert;
 		const { narHash: _narHash, ...narBlobUpdate } = narBlobRow;
-		const narInfoRow = {
-			storePathHash: metadata.storePathHash,
-			storePath: metadata.storePath,
-			narHash: metadata.narHash,
-			narSize: metadata.narSize,
-			fileHash: metadata.fileHash,
-			fileSize: metadata.fileSize,
-			compression: metadata.compression,
-			referencesJson: JSON.stringify(metadata.references),
-			deriver: metadata.deriver,
-			ca: metadata.ca,
-			sig,
-			createdAt: now
-		} satisfies typeof schema.narInfos.$inferInsert;
-		const { storePathHash: _storePathHash, ...narInfoUpdate } = narInfoRow;
 
 		this.db
 			.insert(schema.narBlobs)
@@ -670,14 +661,46 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			})
 			.run();
 
-		this.db
+		const inserted = this.db
 			.insert(schema.narInfos)
-			.values(narInfoRow)
-			.onConflictDoUpdate({
-				target: schema.narInfos.storePathHash,
-				set: narInfoUpdate
-			})
-			.run();
+			.values({
+				storePathHash: metadata.storePathHash,
+				storePath: metadata.storePath,
+				narHash: metadata.narHash,
+				narSize: metadata.narSize,
+				fileHash: metadata.fileHash,
+				fileSize: metadata.fileSize,
+				compression: metadata.compression,
+				referencesJson: JSON.stringify(metadata.references),
+				deriver: metadata.deriver,
+				ca: metadata.ca,
+				sig,
+				createdAt: now
+			} satisfies typeof schema.narInfos.$inferInsert)
+			.onConflictDoNothing()
+			.returning()
+			.all();
+
+		if (inserted.length === 0) {
+			return;
+		}
+
+		await this.materialiseNarInfo(metadata.storePathHash, unsigned, sig);
+	}
+
+	private async materialiseNarInfo(
+		storePathHash: string,
+		unsigned: NarInfo,
+		sig: string
+	): Promise<void> {
+		const signed = NarInfo.fromFields({ ...unsigned.toFields(), sig });
+
+		await this.env.BLOBS.put(narInfoObjectKey(storePathHash), signed.render(), {
+			httpMetadata: {
+				contentType: 'text/x-nix-narinfo; charset=utf-8',
+				cacheControl: narInfoCacheControl
+			}
+		});
 	}
 
 	private clearPendingUpload(uploadId: string): void {

@@ -346,12 +346,12 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
 
 ### narinfo from R2 and the edge
 
-- [ ] On a genuine first commit, render and sign the narinfo (the signature is
+- [x] On a genuine first commit, render and sign the narinfo (the signature is
       already computed for the DB row) and `BLOBS.put` it at
       `narinfo/<storePathHash>` with `text/x-nix-narinfo` and a `Cache-Control`
       max-age. The NAR blob is already present at commit, so a served narinfo
       never points at a missing NAR.
-- [ ] Enforce immutability as structure, not comment: a commit for a
+- [x] Enforce immutability as structure, not comment: a commit for a
       `storePathHash` that already has a row returns `already-present` and
       rewrites neither the DB row nor the R2 object. `handleCommit` already
       short-circuits here, so make `commitMetadata`'s narinfo write
@@ -386,7 +386,7 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
   - [ ] Integration: commit writes the R2 object; the Worker serves it and the
         signature verifies against the published pubkey; 404 before commit;
         conditional GETs return 304.
-  - [ ] Integration: when the R2 object already exists, a second commit for an
+  - [x] Integration: when the R2 object already exists, a second commit for an
         existing `storePathHash` returns `already-present` and leaves both the
         DB row and the R2 object byte-for-byte unchanged. The missing-object
         case is covered by the failure-recovery test below.
