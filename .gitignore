@@ -3,6 +3,7 @@ node_modules
 pnpm-lock.yaml.*
 
 .wrangler
+.tmp-*
 dist
 build
 
@@ -16,3 +17,4 @@ Thumbs.db
 
 *.tsbuildinfo
 .vitest-attachments
+packages/server/src/build-info.generated.ts

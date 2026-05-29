@@ -14,12 +14,12 @@ A Cloudflare Workers substituter for Nix.
 
 - Target Nix 2.34 (latest at time of writing). Older clients are not a v1
   concern; revisit if real users turn up on earlier versions.
-- The CLI orchestrates the v1 write path. It shells out to `nix-store --dump`
-  and `nix path-info` to serialise store paths and read their metadata, then
-  uses cupboard-native upload negotiation to push missing blobs and commit
-  metadata. The Worker owns authentication, R2 presigned URL generation, and
-  metadata commit. The CLI does not reimplement NAR or narinfo serialisation,
-  and never receives R2 credentials.
+- The CLI orchestrates the v1 write path. Pure TypeScript code serialises NARs,
+  computes hashes, compresses blobs, and speaks the cupboard upload protocol.
+  The only local Nix dependency is a daemon client used to query valid path
+  metadata and closure membership. The Worker owns authentication, R2 presigned
+  URL generation, signing, and metadata commit. The CLI never receives R2
+  credentials.
 - Signing uses the standard Ed25519 narinfo format so any Nix client with the
   public key in `trusted-public-keys` can verify substitutions.
 
@@ -43,10 +43,12 @@ successfully substitute that path from the Worker.
       simple HTTP access.
 - [ ] Tests:
   - [ ] Unit: `nix-cache-info` serialiser; narinfo serialiser and parser
-        round-trip; fingerprint construction; property tests with `fast-check`
-        for narinfo parser permissiveness.
+        round-trip; fingerprint construction; generated valid narinfo
+        round-trips with `fast-check`.
+  - [ ] Unit: `fast-check` parser permissiveness properties for field order,
+        optional fields, and blank lines.
   - [ ] Integration: GET each route returns the expected body and headers; HEAD
-        returns the same headers with no body; unknown hash returns 404; a
+        returns the same headers with no body. Unknown hash returns 404 and a
         signed narinfo verifies against the published pubkey.
 
 ### Write path
@@ -59,7 +61,7 @@ successfully substitute that path from the Worker.
       token.
 - [ ] Validate uploaded NAR metadata:
   - [ ] required: store path hash, NAR hash, NAR size, references
-  - [ ] optional: signatures, CA fields
+  - [ ] optional: deriver and CA fields
 - [ ] Upload large NARs directly to R2 via Worker-generated R2 S3 presigned PUT
       URLs. Streaming bodies through the Worker request is not an option given
       Workers' body-size and CPU limits; this is a hard requirement, not a
@@ -67,27 +69,29 @@ successfully substitute that path from the Worker.
 - [ ] Provide deterministic, resumable-ish upload behaviour:
   - [ ] client computes the uncompressed NAR hash and size
   - [ ] server tells the client which blobs are missing
-  - [ ] client uploads missing content directly to R2
+  - [ ] client uploads missing content directly to R2 with an R2-validated
+        SHA-256 checksum header
   - [ ] server commits metadata once R2 confirms the blob is present
 - [ ] Tests:
   - [ ] Unit: NAR metadata validation (hash, size, references); rejecting
         narinfos missing required fields; recording compressed-blob metadata
         alongside uncompressed.
   - [ ] Integration: full upload flow (negotiate, presigned PUT, commit)
-        produces a fetchable narinfo; an invalid NAR is rejected at commit;
-        re-uploading an already-present path is a no-op; the pending row is
-        created on negotiate and cleared on commit.
+        produces a fetchable narinfo; re-uploading an already-present path is a
+        no-op; the pending row is created on negotiate and cleared on commit;
+        commit rejects missing or mismatched R2 SHA-256 checksums.
 
 ### Client
 
 - [ ] Configure against a personal Worker URL and write token.
-- [ ] Compute NAR hash and size locally.
+- [ ] Compute NAR hash and size locally while streaming the same NAR into zstd,
+      so each path is read once.
 - [ ] Upload only missing blobs.
 - [ ] Show progress through a `Reporter` abstraction with two renderers,
       auto-selected from `stderr.isTTY`:
   - [ ] Terminal: `ora` spinners, `picocolors` for ANSI, `cli-table3` for result
-        blocks. One phase per logical step (resolve closure, compute hashes,
-        negotiate, upload, commit), each collapsing to one line on completion
+        blocks. One phase per logical step (resolve closure, negotiate, prepare
+        missing NARs, upload, commit), each collapsing to one line on completion
         with inline facts.
   - [ ] JSON: line-delimited events for CI logs and piping to `jq`. Event types
         are `phase`, `result`, `warn`, and `info`; phase events carry `status`,
@@ -99,9 +103,9 @@ successfully substitute that path from the Worker.
 - [ ] Tests:
   - [ ] Unit: locally-computed NAR hash and size match what `nix-store --dump`
         produces (run against fixture paths); substituter config rendering.
-  - [ ] E2E: push a fixture, configure a clean tmp Nix store with the printed
-        config, substitute the path back, assert the signature verifies. This is
-        the Tier 3 golden-path scenario.
+  - [ ] E2E: push a fixture, configure a clean tmp Nix store with the
+        substituter URL and public key, substitute the path back, assert the
+        signature verifies. This is the Tier 3 golden-path scenario.
 
 ### Storage
 
@@ -111,9 +115,9 @@ successfully substitute that path from the Worker.
       `nar/<narHash>.zst`).
 - [ ] One cache, served at the Worker root; named caches are a V2 concern.
 - [ ] Tests:
-  - [ ] Integration: schema initialises on first request; concurrent writes
-        serialise correctly; metadata-to-blob mapping survives DO eviction and
-        restart.
+  - [ ] Integration: schema initialises on first request; metadata-to-blob
+        mapping survives committed reads and blob reuse. Concurrent writes and
+        explicit DO eviction coverage are V2 hardening.
 
 ### Signing
 
@@ -122,22 +126,26 @@ successfully substitute that path from the Worker.
 - [ ] Expose the public key via the admin command and an unauthenticated
       `GET /pubkey` route.
 - [ ] Tests:
-  - [ ] Unit: signature matches the standard Nix fingerprint; verification
-        round-trip against a known fixture; key generation produces a valid
+  - [ ] Unit: signature verification round-trip; key generation produces a valid
         Ed25519 keypair.
+  - [ ] Unit: signature matches a known fixture for a fixed key and standard Nix
+        fingerprint.
   - [ ] Integration: `GET /pubkey` returns the active key; first-request key
-        generation persists across DO restart.
+        generation persists across repeated requests. Explicit DO eviction
+        coverage is V2 hardening.
 
 ### Garbage collection
 
 - [ ] Use Cron Triggers for the GC pass. DO alarms are reserved for per-cache
       work that needs the DO's state mid-run.
 - [ ] Clean abandoned pending uploads after a grace window.
-- [ ] Delete unreferenced blobs that have no committed narinfo rows.
+- [ ] Delete abandoned pending-upload blobs that have no committed narinfo rows.
 - [ ] Tests:
-  - [ ] Integration: GC removes a `nar_blob` row when its refcount hits zero;
-        `pending_upload` rows past the grace window are cleared; the cron
-        trigger invokes the scheduled handler with the correct env.
+  - [ ] Integration: `pending_upload` rows past the grace window are cleared;
+        orphaned R2 blobs for expired pending uploads are deleted; committed
+        blobs are retained.
+  - [ ] Integration: the cron trigger invokes the scheduled handler with the
+        correct env. Committed blob deletion waits for retention roots.
 
 ### Admin
 
@@ -160,10 +168,10 @@ successfully substitute that path from the Worker.
 - [ ] `fast-check` added as a dev dependency for property tests.
 - [ ] Fixture generation script that runs `nix-store --dump` against a small set
       of synthetic store paths; outputs committed under `tests/fixtures/`.
-- [ ] E2E harness under `tests/e2e/`: clean-env `wrangler dev` spawner (never
-      `--remote`), scoped `nix` invocation builder, and the
-      `cupboardTestUrl(port)` localhost allowlist. Enforces the Isolation
-      invariants documented in the Testing section.
+- [ ] E2E harness under `tests/e2e/`: clean-env Miniflare Worker runner, local
+      HTTP server for Nix, scoped `nix` invocation builder, and localhost URL
+      validation. Enforces the Isolation invariants documented in the Testing
+      section.
 - [ ] `pnpm test:e2e` script wired at the root.
 
 ## Infrastructure
@@ -188,31 +196,34 @@ One DO SQLite database per deployment.
 
 - `narinfo` — one row per store path.
   - `store_path_hash` (PK), `store_path`, `nar_hash`, `nar_size`, `file_hash`,
-    `file_size`, `compression`, `references`, `deriver`, `ca`, `sig`,
+    `file_size`, `compression`, `references_json`, `deriver`, `ca`, `sig`,
     `created_at`.
 - `nar_blob` — one row per stored compressed blob.
-  - `nar_hash` (PK), `r2_key`, `compression`, `file_size`, `refcount`,
+  - `nar_hash` (PK), `r2_key`, `compression`, `file_hash`, `file_size`,
     `created_at`.
 - `pending_upload` — in-flight uploads not yet committed.
-  - `id` (PK), `nar_hash`, `r2_key`, `expected_size`, `created_at`,
-    `expires_at`.
+  - `id` (PK), `nar_hash`, `r2_key`, `expected_size`, `metadata_json`,
+    `created_at`, `expires_at`.
+- `orphan_blob_deletion` — durable queue for deleting abandoned R2 objects.
+  - `r2_key` (PK), `created_at`.
 - `token` — write and admin tokens.
   - `id` (PK), `hash`, `scope`, `created_at`.
 
 ## Routes
 
-| Method    | Path                  | Auth   | Notes                               |
-| --------- | --------------------- | ------ | ----------------------------------- |
-| GET, HEAD | `/nix-cache-info`     | public | `text/x-nix-cache-info`.            |
-| GET, HEAD | `/<hash>.narinfo`     | public | `text/x-nix-narinfo`.               |
-| GET, HEAD | `/nar/<hash>.nar.zst` | public | NAR blob; may redirect to R2.       |
-| GET       | `/pubkey`             | public | Active public key.                  |
-| POST      | `/upload/negotiate`   | write  | Returns missing blobs and PUT URLs. |
-| PUT       | (presigned R2 URL)    | URL    | Client uploads blob directly to R2. |
-| POST      | `/upload/<id>/commit` | write  | Server writes the narinfo.          |
-| GET       | `/_health`            | public | Liveness.                           |
-| GET       | `/_version`           | public | Build SHA and version.              |
-| GET       | `/_stats`             | admin  | Cache size and object count.        |
+| Method    | Path                   | Auth   | Notes                                   |
+| --------- | ---------------------- | ------ | --------------------------------------- |
+| GET, HEAD | `/nix-cache-info`      | public | `text/x-nix-cache-info`.                |
+| GET, HEAD | `/<hash>.narinfo`      | public | `text/x-nix-narinfo`.                   |
+| GET, HEAD | `/nar/<hash>.nar.zst`  | public | Compressed NAR blob.                    |
+| GET       | `/pubkey`              | public | Active public key.                      |
+| POST      | `/upload/negotiate`    | write  | Returns skip, commit, or upload plans.  |
+| POST      | `/upload/<id>/prepare` | write  | Returns R2 PUT URL and headers.         |
+| PUT       | (presigned R2 URL)     | URL    | Client uploads blob directly to R2.     |
+| POST      | `/upload/<id>/commit`  | write  | Server writes the narinfo.              |
+| GET       | `/_health`             | public | Liveness.                               |
+| GET       | `/_version`            | public | Git SHA, with `+dirty` when applicable. |
+| GET       | `/_stats`              | admin  | Cache size and object count.            |
 
 ## Testing
 
@@ -233,10 +244,11 @@ so the unit run does not pick them up.
 
 ### Tier 3: end-to-end with a real `nix` client
 
-Spawns `wrangler dev` and a real `nix` against fixture store paths. Catches
-protocol drift (wrong header, fingerprint typo, missing `Compression` field)
-that internal contract tests cannot catch. Lives under `tests/e2e/`, invoked via
-`pnpm test:e2e`. Runs in CI; the CI image installs Nix.
+Runs the Worker in Miniflare behind a local HTTP server and drives a real `nix`
+against fixture store paths. Catches protocol drift (wrong header, fingerprint
+typo, missing `Compression` field) that internal contract tests cannot catch.
+Lives under `tests/e2e/`, invoked via `pnpm test:e2e`. Runs in CI; the CI image
+installs Nix.
 
 #### Isolation
 
@@ -244,24 +256,23 @@ E2E tests must be incapable of touching a deployed cupboard or the developer's
 local `/nix/store`, even if the surrounding shell has production credentials or
 Nix configuration. Enforced by the harness, not by convention.
 
-- [ ] All child processes (`wrangler dev`, `nix`) spawn with an explicitly
-      constructed env containing only `PATH`, a per-test temporary `HOME`, and
-      variables the test sets deliberately. The parent `process.env` is not
-      inherited.
-- [ ] `wrangler dev` is invoked through a helper that never accepts a remote
-      flag. There is no code path from a test to a real deployment.
+- [ ] All child processes (`nix`, `nix-store`, and fixture helpers) spawn with
+      an explicitly constructed env containing only `PATH`, a per-test temporary
+      `HOME`, and variables the test sets deliberately. The parent `process.env`
+      is not inherited.
+- [ ] The Worker runs in local Miniflare, fronted by a test-owned HTTP server.
+      There is no code path from a test to a real deployment.
 - [ ] `nix` invocations get `--store local?root=<tmpdir>`,
       `NIX_USER_CONF_FILES=/dev/null`, and `NIX_CONF_DIR=<tmpdir>/etc` so they
       cannot read or write the developer's `/nix/store` or pick up their
       substituter config.
-- [ ] Cupboard URLs are built by a `cupboardTestUrl(port)` helper that rejects
-      any host other than `127.0.0.1` or `localhost`.
+- [ ] Cupboard URLs are produced by the local test server and rejected unless
+      the host is `127.0.0.1` or `localhost`.
 
 ### Fixtures
 
-- [ ] Generate a handful of small synthetic store paths once with
-      `nix-store --dump`. Commit them as binary fixtures under
-      `tests/fixtures/`.
+- [ ] Generate a small synthetic store path once with `nix-store --dump`. Commit
+      it as a binary fixture under `tests/fixtures/`.
 - [ ] Unit tests parse them; integration and E2E tests push and re-fetch them.
 
 ### Principles

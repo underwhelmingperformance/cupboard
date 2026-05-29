@@ -31,3 +31,8 @@ it.
   actionable.
 - `pnpm fix` applies the auto-fixable parts (`syncpack format`,
   `prettier --write`, `eslint --fix`).
+
+## Coding Standards
+
+- Do not put program logic in `index.ts` files; keep them to module entrypoints
+  and re-exports.
