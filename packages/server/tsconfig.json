@@ -1,8 +1,15 @@
 {
 	"extends": "../../tsconfig.base.json",
 	"compilerOptions": {
+		"allowJs": true,
 		"lib": ["ES2023"],
-		"types": ["./worker-configuration", "@cloudflare/vitest-pool-workers"]
+		"types": ["./worker-configuration", "@cloudflare/vitest-pool-workers/types"]
 	},
-	"include": ["src/**/*.ts", "vitest.config.ts", "worker-configuration.d.ts"]
+	"include": [
+		"drizzle.config.ts",
+		"drizzle/**/*.js",
+		"src/**/*.ts",
+		"vitest.config.ts",
+		"worker-configuration.d.ts"
+	]
 }

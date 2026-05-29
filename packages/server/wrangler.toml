@@ -11,6 +11,13 @@ class_name = "CupboardServer"
 binding = "BLOBS"
 bucket_name = "cupboard-blobs"
 
+[vars]
+CUPBOARD_BOOTSTRAP_TOKEN = ""
+R2_ACCOUNT_ID = ""
+R2_ACCESS_KEY_ID = ""
+R2_BUCKET_NAME = "cupboard-blobs"
+R2_SECRET_ACCESS_KEY = ""
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["CupboardServer"]

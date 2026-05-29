@@ -5,3 +5,7 @@
 
 # Bearer token required for write and admin routes.
 CUPBOARD_WRITE_TOKEN=replace-me
+CUPBOARD_BOOTSTRAP_TOKEN=
+R2_ACCOUNT_ID=
+R2_ACCESS_KEY_ID=
+R2_SECRET_ACCESS_KEY=

@@ -31,23 +31,23 @@ successfully substitute that path from the Worker.
 
 ### Read path
 
-- [ ] Serve a valid Nix binary cache:
-  - [ ] `/nix-cache-info`, carrying `StoreDir: /nix/store`, `WantMassQuery: 1`,
+- [x] Serve a valid Nix binary cache:
+  - [x] `/nix-cache-info`, carrying `StoreDir: /nix/store`, `WantMassQuery: 1`,
         and a `Priority`.
-  - [ ] `/<hash>.narinfo` with an Ed25519 signature over the standard
+  - [x] `/<hash>.narinfo` with an Ed25519 signature over the standard
         fingerprint `1;StorePath;NarHash;NarSize;Refs...`.
-  - [ ] `/nar/<narHash>.nar.zst` for the compressed NAR blob.
-- [ ] Support `GET` and `HEAD` for cache-info, narinfo, and NAR blob routes.
-- [ ] Emit `References:` as space-separated basenames, not full store paths.
-- [ ] Allow public unauthenticated reads, since Nix substituters usually need
+  - [x] `/nar/<narHash>.nar.zst` for the compressed NAR blob.
+- [x] Support `GET` and `HEAD` for cache-info, narinfo, and NAR blob routes.
+- [x] Emit `References:` as space-separated basenames, not full store paths.
+- [x] Allow public unauthenticated reads, since Nix substituters usually need
       simple HTTP access.
-- [ ] Tests:
+- [x] Tests:
   - [x] Unit: `nix-cache-info` serialiser; narinfo serialiser and parser
         round-trip; fingerprint construction; generated valid narinfo
         round-trips with `fast-check`.
   - [x] Unit: `fast-check` parser permissiveness properties for field order,
         optional fields, and blank lines.
-  - [ ] Integration: GET each route returns the expected body and headers; HEAD
+  - [x] Integration: GET each route returns the expected body and headers; HEAD
         returns the same headers with no body. Unknown hash returns 404 and a
         signed narinfo verifies against the published pubkey.
 
@@ -57,26 +57,26 @@ successfully substitute that path from the Worker.
 - [x] Compress NARs with zstd by default at upload time, and record
       `Compression`, `FileHash`, and `FileSize` for the compressed blob
       alongside the uncompressed `NarHash` and `NarSize`.
-- [ ] Authenticate write and admin operations with one deploy-time secret or
+- [x] Authenticate write and admin operations with one deploy-time secret or
       token.
 - [x] Validate uploaded NAR metadata:
   - [x] required: store path hash, NAR hash, NAR size, references
   - [x] optional: deriver and CA fields
-- [ ] Upload large NARs directly to R2 via Worker-generated R2 S3 presigned PUT
+- [x] Upload large NARs directly to R2 via Worker-generated R2 S3 presigned PUT
       URLs. Streaming bodies through the Worker request is not an option given
       Workers' body-size and CPU limits; this is a hard requirement, not a
       "where possible".
-- [ ] Provide deterministic, resumable-ish upload behaviour:
-  - [ ] client computes the uncompressed NAR hash and size
-  - [ ] server tells the client which blobs are missing
+- [x] Provide deterministic, resumable-ish upload behaviour:
+  - [x] client computes the uncompressed NAR hash and size
+  - [x] server tells the client which blobs are missing
   - [x] client uploads missing content directly to R2 with an R2-validated
         SHA-256 checksum header
-  - [ ] server commits metadata once R2 confirms the blob is present
-- [ ] Tests:
+  - [x] server commits metadata once R2 confirms the blob is present
+- [x] Tests:
   - [x] Unit: NAR metadata validation (hash, size, references); rejecting
         narinfos missing required fields; recording compressed-blob metadata
         alongside uncompressed.
-  - [ ] Integration: full upload flow (negotiate, presigned PUT, commit)
+  - [x] Integration: full upload flow (negotiate, presigned PUT, commit)
         produces a fetchable narinfo; re-uploading an already-present path is a
         no-op; the pending row is created on negotiate and cleared on commit;
         commit rejects missing or mismatched R2 SHA-256 checksums.
@@ -109,42 +109,42 @@ successfully substitute that path from the Worker.
 
 ### Storage
 
-- [ ] Store metadata in one Durable Object SQLite database.
-- [ ] Store binary content in R2, keyed by the uncompressed NAR hash. A metadata
+- [x] Store metadata in one Durable Object SQLite database.
+- [x] Store binary content in R2, keyed by the uncompressed NAR hash. A metadata
       row maps `narHash` to the actual stored blob path (for example
       `nar/<narHash>.zst`).
-- [ ] One cache, served at the Worker root; named caches are a V2 concern.
-- [ ] Tests:
-  - [ ] Integration: schema initialises on first request; metadata-to-blob
+- [x] One cache, served at the Worker root; named caches are a V2 concern.
+- [x] Tests:
+  - [x] Integration: schema initialises on first request; metadata-to-blob
         mapping survives committed reads and blob reuse. Concurrent writes and
         explicit DO eviction coverage are V2 hardening.
 
 ### Signing
 
-- [ ] Generate the Ed25519 signing keypair during initialisation and persist the
+- [x] Generate the Ed25519 signing keypair during initialisation and persist the
       private key in a DO row, not a Workers secret, so it survives redeploys.
-- [ ] Expose the public key via the admin command and an unauthenticated
+- [x] Expose the public key via the admin command and an unauthenticated
       `GET /pubkey` route.
-- [ ] Tests:
-  - [ ] Unit: signature verification round-trip; key generation produces a valid
+- [x] Tests:
+  - [x] Unit: signature verification round-trip; key generation produces a valid
         Ed25519 keypair.
-  - [ ] Unit: signature matches a known fixture for a fixed key and standard Nix
+  - [x] Unit: signature matches a known fixture for a fixed key and standard Nix
         fingerprint.
-  - [ ] Integration: `GET /pubkey` returns the active key; first-request key
+  - [x] Integration: `GET /pubkey` returns the active key; first-request key
         generation persists across repeated requests. Explicit DO eviction
         coverage is V2 hardening.
 
 ### Garbage collection
 
-- [ ] Use Cron Triggers for the GC pass. DO alarms are reserved for per-cache
+- [x] Use Cron Triggers for the GC pass. DO alarms are reserved for per-cache
       work that needs the DO's state mid-run.
-- [ ] Clean abandoned pending uploads after a grace window.
-- [ ] Delete abandoned pending-upload blobs that have no committed narinfo rows.
-- [ ] Tests:
-  - [ ] Integration: `pending_upload` rows past the grace window are cleared;
+- [x] Clean abandoned pending uploads after a grace window.
+- [x] Delete abandoned pending-upload blobs that have no committed narinfo rows.
+- [x] Tests:
+  - [x] Integration: `pending_upload` rows past the grace window are cleared;
         orphaned R2 blobs for expired pending uploads are deleted; committed
         blobs are retained.
-  - [ ] Integration: the cron trigger invokes the scheduled handler with the
+  - [x] Integration: the cron trigger invokes the scheduled handler with the
         correct env. Committed blob deletion waits for retention roots.
 
 ### Admin
@@ -156,13 +156,13 @@ successfully substitute that path from the Worker.
 - [ ] Tests:
   - [ ] Unit: substituter config command renders a correct `nix.conf` snippet
         for a given Worker URL and pubkey.
-  - [ ] Integration: init mints exactly one write token and one signing key,
+  - [x] Integration: init mints exactly one write token and one signing key,
         idempotently; stats returns accurate row counts.
 
 ### Test harness
 
 - [ ] Shared Vitest setup at workspace root for Tier 1.
-- [ ] `@cloudflare/vitest-pool-workers` configured in `packages/server` for Tier
+- [x] `@cloudflare/vitest-pool-workers` configured in `packages/server` for Tier
       2, picking up `*.workers.test.ts` only so the unit run is not slowed by
       Worker boot.
 - [x] `fast-check` added as a dev dependency for property tests.
@@ -179,14 +179,14 @@ successfully substitute that path from the Worker.
 Cross-cutting concerns not tied to a single V1 sub-section. Bindings, cron, and
 operational endpoints live with the features that use them.
 
-- [ ] Wrangler-based deployment.
-- [ ] Cache-friendly read responses:
-  - [ ] stable URLs
-  - [ ] ETag
-  - [ ] `Cache-Control`
-  - [ ] conditional request support if cheap
+- [x] Wrangler-based deployment.
+- [x] Cache-friendly read responses:
+  - [x] stable URLs
+  - [x] ETag
+  - [x] `Cache-Control`
+  - [x] conditional request support if cheap
 - [ ] Tests:
-  - [ ] Integration: `ETag` and `Cache-Control` present on narinfo and NAR
+  - [x] Integration: `ETag` and `Cache-Control` present on narinfo and NAR
         responses; a conditional GET with matching `If-None-Match` returns 304;
         matching `If-Modified-Since` likewise.
 
