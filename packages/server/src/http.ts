@@ -34,6 +34,22 @@ export function parseNarName(name: string): string | undefined {
 	return hash;
 }
 
+export function parseNarInfoName(name: string): string | undefined {
+	const suffix = '.narinfo';
+
+	if (!name.endsWith(suffix)) {
+		return undefined;
+	}
+
+	const storePathHash = name.slice(0, -suffix.length);
+
+	if (!/^[0-9a-df-np-sv-z]{32}$/.test(storePathHash)) {
+		return undefined;
+	}
+
+	return storePathHash;
+}
+
 export function isNotModified(request: Request, headers: Headers): boolean {
 	const etag = headers.get('etag');
 

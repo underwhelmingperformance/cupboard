@@ -211,19 +211,22 @@ One DO SQLite database per deployment.
 
 ## Routes
 
-| Method    | Path                   | Auth   | Notes                                   |
-| --------- | ---------------------- | ------ | --------------------------------------- |
-| GET, HEAD | `/nix-cache-info`      | public | `text/x-nix-cache-info`.                |
-| GET, HEAD | `/<hash>.narinfo`      | public | `text/x-nix-narinfo`.                   |
-| GET, HEAD | `/nar/<hash>.nar.zst`  | public | Compressed NAR blob.                    |
-| GET       | `/pubkey`              | public | Active public key.                      |
-| POST      | `/upload/negotiate`    | write  | Returns skip, commit, or upload plans.  |
-| POST      | `/upload/<id>/prepare` | write  | Returns R2 PUT URL and headers.         |
-| PUT       | (presigned R2 URL)     | URL    | Client uploads blob directly to R2.     |
-| POST      | `/upload/<id>/commit`  | write  | Server writes the narinfo.              |
-| GET       | `/_health`             | public | Liveness.                               |
-| GET       | `/_version`            | public | Git SHA, with `+dirty` when applicable. |
-| GET       | `/_stats`              | admin  | Cache size and object count.            |
+Reads (the first six rows) are served by the Worker from R2 and the Cache API;
+the Durable Object handles only the write, admin, and GC routes.
+
+| Method    | Path                   | Auth   | Notes                                      |
+| --------- | ---------------------- | ------ | ------------------------------------------ |
+| GET, HEAD | `/nix-cache-info`      | public | Worker; `text/x-nix-cache-info`.           |
+| GET, HEAD | `/<hash>.narinfo`      | public | Worker, from the R2 object + edge cache.   |
+| GET, HEAD | `/nar/<hash>.nar.zst`  | public | Worker, from R2 + edge cache.              |
+| GET       | `/pubkey`              | public | Worker, cached from the DO.                |
+| POST      | `/upload/negotiate`    | write  | DO. Returns skip, commit, or upload plans. |
+| POST      | `/upload/<id>/prepare` | write  | DO. Returns R2 PUT URL and headers.        |
+| PUT       | (presigned R2 URL)     | URL    | Client uploads blob directly to R2.        |
+| POST      | `/upload/<id>/commit`  | write  | DO. Writes the narinfo row and R2 object.  |
+| GET       | `/_health`             | public | Worker. Liveness.                          |
+| GET       | `/_version`            | public | Worker. Git SHA, `+dirty` when dirty.      |
+| GET       | `/_stats`              | admin  | DO. Cache size and object count.           |
 
 ## Testing
 
@@ -310,9 +313,9 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
 - [x] Add `packages/server/src/read.ts` owning the read routes. `handler.ts`
       tries it first and forwards everything else to the DO stub. Thread `ctx`
       into the Worker `fetch` so cache writes can use `ctx.waitUntil`.
-- [ ] Move `parseNarName`, `parseNarInfoName`, and the conditional-request
+- [x] Move `parseNarName`, `parseNarInfoName`, and the conditional-request
       helper (`isNotModified`) out of `do.ts` into a place `read.ts` can share.
-- [ ] Remove the `/nar/:narName` and `/:narInfoName` routes, and the
+- [x] Remove the `/nar/:narName` and `/:narInfoName` routes, and the
       `narResponse` and `narInfoResponse` methods, from the DO once the Worker
       owns them.
 - [x] Serve the static read routes (`/nix-cache-info`, `/_health`, `/_version`,
@@ -360,12 +363,12 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
       hash rendering different bytes is impossible by Nix construction
       (different contents mean a different hash), so no byte-comparison is
       needed.
-- [ ] The narinfo DB row is the source of truth; the `narinfo/<storePathHash>`
+- [x] The narinfo DB row is the source of truth; the `narinfo/<storePathHash>`
       R2 object is a materialised, regenerable cache of it. The row carries
       every field including the signature, and rendering is deterministic, so
       re-materialising is byte-identical. Reads serve the object; truth and
       queryability stay in the row.
-- [ ] Never advertise a path as present without a servable object, but do not
+- [x] Never advertise a path as present without a servable object, but do not
       try to make the two writes atomic with a rollback — a crash between the
       row commit and the rollback cannot be covered. Lean on regenerability
       instead: on commit write the row, then materialise the object; if the put
@@ -377,23 +380,24 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
       can advertise an unservable path. An only-if-absent conditional put
       (`onlyIf`, semantics to confirm) is an optional guard, not a correctness
       requirement, since determinism makes any overwrite byte-identical.
-- [ ] Serve `GET` `/<storePathHash>.narinfo` in the Worker from R2 via
+- [x] Serve `GET` `/<storePathHash>.narinfo` in the Worker from R2 via
       `caches.default`, with ETag, last-modified, and 304 driven by the R2
       object; `HEAD` from `BLOBS.head` without caching.
-- [ ] Stop reading the narinfo row on the read path; it remains only for GC and
+- [x] Stop reading the narinfo row on the read path; it remains only for GC and
       stats.
-- [ ] Tests:
-  - [ ] Integration: commit writes the R2 object; the Worker serves it and the
+- [x] Tests:
+  - [x] Integration: commit writes the R2 object; the Worker serves it and the
         signature verifies against the published pubkey; 404 before commit;
         conditional GETs return 304.
   - [x] Integration: when the R2 object already exists, a second commit for an
         existing `storePathHash` returns `already-present` and leaves both the
         DB row and the R2 object byte-for-byte unchanged. The missing-object
         case is covered by the failure-recovery test below.
-  - [ ] Integration: after an R2 narinfo write failure the committed row
-        remains, and a later negotiate or commit retry re-materialises the
-        missing object from the row; concurrent commits for one `storePathHash`
-        do not overwrite an existing narinfo object.
+  - [x] Integration: a narinfo object missing for any reason (a failed write or
+        eviction) is re-materialised from the row on the next negotiate; two
+        concurrent commits for one `storePathHash` return exactly one
+        `committed` and one `already-present`, leaving a single consistent row
+        and object.
 
 ### TTL-ordered garbage collection
 

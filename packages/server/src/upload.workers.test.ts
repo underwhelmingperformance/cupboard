@@ -21,7 +21,7 @@ import { narInfoObjectKey } from './http.ts';
 import type { CupboardServer } from './worker.ts';
 import worker from './worker.ts';
 
-const origin = 'https://cupboard.test';
+let origin = 'https://cupboard.test';
 const bootstrapToken = 'test-bootstrap';
 
 const narBytes = new Uint8Array([40, 41, 42, 43]);
@@ -46,6 +46,7 @@ describe('upload flow', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+		origin = `https://cupboard-${String(nextTestServerId)}.test`;
 		testServer = testServerFor(`test-${String(nextTestServerId)}`);
 		nextTestServerId += 1;
 
@@ -232,15 +233,23 @@ describe('upload flow', () => {
 			ca: undefined,
 			sig: signature
 		});
-		await expectTextResponse(`/${metadata.storePathHash}.narinfo`, {
-			body: narInfo.render(),
-			cacheControl: 'public, max-age=3600',
-			contentType: 'text/x-nix-narinfo; charset=utf-8',
-			method: 'HEAD'
-		});
-		await expectConditionalNotModified(`/${metadata.storePathHash}.narinfo`);
+		await expectTextResponse(
+			`/${metadata.storePathHash}.narinfo`,
+			{
+				body: narInfo.render(),
+				cacheControl: 'public, max-age=3600',
+				contentType: 'text/x-nix-narinfo; charset=utf-8',
+				method: 'HEAD'
+			},
+			readFetch
+		);
+		await expectConditionalNotModified(
+			`/${metadata.storePathHash}.narinfo`,
+			readFetch
+		);
 		await expectDateConditionalNotModified(
-			`/${metadata.storePathHash}.narinfo`
+			`/${metadata.storePathHash}.narinfo`,
+			readFetch
 		);
 
 		const skip = await negotiateUploads(token, [metadata]);
@@ -335,6 +344,109 @@ describe('upload flow', () => {
 			body: stored.body,
 			etag: stored.etag
 		});
+	});
+
+	it('serves a narinfo from the Worker whose signature verifies', async () => {
+		const init = await initialiseRaw();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(init.token, [metadata]),
+			metadata
+		);
+		await prepareUpload(init.token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(init.token, upload.uploadId);
+
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+
+		expect(await verifyNarInfoSignature(narInfo, init.publicKey)).toBe(true);
+	});
+
+	it('returns 404 for a narinfo that has not been committed', async () => {
+		const response = await readFetch(`/${'a'.repeat(32)}.narinfo`);
+
+		expect({
+			status: response.status,
+			body: await response.text()
+		}).toStrictEqual({
+			status: StatusCodes.NOT_FOUND,
+			body: 'Not found\n'
+		});
+	});
+
+	it('re-materialises a missing narinfo object on the next negotiate', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId);
+
+		const original = await readStoredNarInfo(metadata.storePathHash);
+
+		await env.BLOBS.delete(narInfoObjectKey(metadata.storePathHash));
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+
+		const skip = await negotiateUploads(token, [metadata]);
+
+		expect(skip.uploads).toStrictEqual([
+			{
+				action: 'skip',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash
+			}
+		]);
+
+		const healed = await readStoredNarInfo(metadata.storePathHash);
+
+		expect(healed.body).toBe(original.body);
+	});
+
+	it('commits one of two concurrent commits and reports the other as already present', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		const first = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, first, metadata);
+		await putNarBytes(first.r2Key);
+
+		const second = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, second, metadata);
+
+		const [a, b] = await Promise.all([
+			commitUpload(token, first.uploadId),
+			commitUpload(token, second.uploadId)
+		]);
+
+		expect(
+			[a, b].toSorted((left, right) => left.status.localeCompare(right.status))
+		).toStrictEqual([
+			{
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			},
+			{
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'committed'
+			}
+		]);
+
+		const stored = await readStoredNarInfo(metadata.storePathHash);
+
+		expect(NarInfo.parse(stored.body).narHash).toBe(metadata.narHash);
 	});
 
 	it('reuses an existing blob for another store path', async () => {
@@ -877,7 +989,7 @@ async function prepareUpload(
 }
 
 async function fetchNarInfo(storePathHash: string): Promise<NarInfo> {
-	const response = await fetchPath(`/${storePathHash}.narinfo`);
+	const response = await readFetch(`/${storePathHash}.narinfo`);
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -1030,6 +1142,44 @@ async function putNarBytes(r2Key: string): Promise<void> {
 	await env.BLOBS.put(r2Key, narBytes, {
 		sha256: fileHash.digestBytes()
 	});
+}
+
+async function verifyNarInfoSignature(
+	narInfo: NarInfo,
+	publicKey: string
+): Promise<boolean> {
+	if (narInfo.sig === undefined) {
+		return false;
+	}
+
+	const key = parseNamedBytes(publicKey);
+	const signature = parseNamedBytes(narInfo.sig);
+	const imported = await crypto.subtle.importKey(
+		'raw',
+		key.bytes,
+		'Ed25519',
+		false,
+		['verify']
+	);
+
+	return crypto.subtle.verify(
+		'Ed25519',
+		imported,
+		signature.bytes,
+		new TextEncoder().encode(narInfo.fingerprint())
+	);
+}
+
+function parseNamedBytes(value: string): { readonly bytes: Uint8Array } {
+	const encoded = value.slice(value.indexOf(':') + 1);
+	const decoded = atob(encoded);
+
+	return {
+		bytes: Uint8Array.from(
+			decoded,
+			(character) => character.codePointAt(0) ?? 0
+		)
+	};
 }
 
 async function readStoredNarInfo(storePathHash: string): Promise<{

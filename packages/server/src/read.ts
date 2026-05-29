@@ -5,7 +5,9 @@ import { buildVersion } from './build-info.generated.ts';
 import { cupboardServer } from './durable-object.ts';
 import {
 	isNotModified,
+	narInfoObjectKey,
 	narObjectKey,
+	parseNarInfoName,
 	parseNarName,
 	TextBody,
 	textResponse
@@ -30,12 +32,29 @@ export async function handleRead(
 
 	if (pathname.startsWith(narPrefix)) {
 		const narName = safeDecode(pathname.slice(narPrefix.length));
+		const narHash = narName === undefined ? undefined : parseNarName(narName);
 
-		if (narName === undefined) {
+		if (narHash === undefined) {
 			return notFound();
 		}
 
-		return narResponse(request, env, ctx, narName);
+		return serveR2(request, env, ctx, narObjectKey(narHash), narHeaders);
+	}
+
+	if (pathname.endsWith('.narinfo')) {
+		const storePathHash = parseNarInfoName(pathname.slice(1));
+
+		if (storePathHash === undefined) {
+			return notFound();
+		}
+
+		return serveR2(
+			request,
+			env,
+			ctx,
+			narInfoObjectKey(storePathHash),
+			narInfoHeaders
+		);
 	}
 
 	if (pathname === '/nix-cache-info') {
@@ -65,24 +84,25 @@ export async function handleRead(
 	return undefined;
 }
 
-async function narResponse(
+async function serveR2(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext,
-	narName: string
+	key: string,
+	headersFor: (object: R2Object) => Headers
 ): Promise<Response> {
-	const narHash = parseNarName(narName);
-
-	if (narHash === undefined) {
-		return notFound();
-	}
-
-	const key = narObjectKey(narHash);
-
 	if (request.method === 'HEAD') {
 		const object = await env.BLOBS.head(key);
 
-		return object === null ? notFound() : conditionalOrBody(request, object);
+		if (object === null) {
+			return notFound();
+		}
+
+		const headers = headersFor(object);
+
+		return isNotModified(request, headers)
+			? notModified(headers)
+			: new Response(undefined, { headers });
 	}
 
 	const cache = caches.default;
@@ -100,7 +120,7 @@ async function narResponse(
 		return notFound();
 	}
 
-	const headers = narHeaders(object);
+	const headers = headersFor(object);
 
 	if (isNotModified(request, headers)) {
 		return notModified(headers);
@@ -135,16 +155,6 @@ async function pubkeyResponse(
 	return response;
 }
 
-function conditionalOrBody(request: Request, object: R2Object): Response {
-	const headers = narHeaders(object);
-
-	if (isNotModified(request, headers)) {
-		return notModified(headers);
-	}
-
-	return new Response(undefined, { headers });
-}
-
 function narHeaders(object: R2Object): Headers {
 	const headers = new Headers({
 		'cache-control': 'public, max-age=31536000, immutable',
@@ -152,6 +162,16 @@ function narHeaders(object: R2Object): Headers {
 		etag: object.httpEtag,
 		'last-modified': object.uploaded.toUTCString()
 	});
+	headers.set('content-length', String(object.size));
+
+	return headers;
+}
+
+function narInfoHeaders(object: R2Object): Headers {
+	const headers = new Headers();
+	object.writeHttpMetadata(headers);
+	headers.set('etag', object.httpEtag);
+	headers.set('last-modified', object.uploaded.toUTCString());
 	headers.set('content-length', String(object.size));
 
 	return headers;

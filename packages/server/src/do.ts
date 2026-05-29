@@ -105,18 +105,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return context.json(this.stats());
 		});
 
-		this.app.on(['GET', 'HEAD'], '/:narInfoName', (context) => {
-			const storePathHash = parseNarInfoName(context.req.param('narInfoName'));
-
-			if (storePathHash === undefined) {
-				return new Response('Not found\n', {
-					status: StatusCodes.NOT_FOUND
-				});
-			}
-
-			return this.narInfoResponse(context.req.raw, storePathHash);
-		});
-
 		this.app.post('/admin/init', (context) => this.handleInit(context.req.raw));
 		this.app.post('/upload/negotiate', (context) =>
 			serverErrorResponse(this.handleNegotiate(context.req.raw))
@@ -199,10 +187,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 
 				if (object !== null) {
+					await this.ensureNarInfoObject(existingNarInfo);
 					uploads.push({
 						action: 'skip',
 						storePathHash: metadata.storePathHash,
-						narHash: metadata.narHash
+						narHash: existingNarInfo.narHash
 					});
 					continue;
 				}
@@ -494,11 +483,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		if (existingNarInfo !== undefined) {
+			await this.ensureNarInfoObject(existingNarInfo);
 			this.clearPendingUpload(uploadId);
 
 			return Response.json({
 				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
+				narHash: existingNarInfo.narHash,
 				status: 'already-present'
 			} satisfies CommitResponse);
 		}
@@ -519,33 +509,38 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		verifyObjectChecksum(metadata, object);
 
-		await this.commitMetadata(metadata);
+		const committed = await this.commitMetadata(metadata);
 		this.clearPendingUpload(uploadId);
+
+		if (committed) {
+			return Response.json({
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'committed'
+			} satisfies CommitResponse);
+		}
+
+		const winner = this.db
+			.select()
+			.from(schema.narInfos)
+			.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+			.get();
+
+		if (winner !== undefined) {
+			await this.ensureNarInfoObject(winner);
+		}
 
 		return Response.json({
 			storePathHash: metadata.storePathHash,
-			narHash: metadata.narHash,
-			status: 'committed'
+			narHash: winner?.narHash ?? metadata.narHash,
+			status: 'already-present'
 		} satisfies CommitResponse);
 	}
 
-	private async narInfoResponse(
-		request: Request,
-		storePathHash: string
-	): Promise<Response> {
-		const row = this.db
-			.select()
-			.from(schema.narInfos)
-			.where(eq(schema.narInfos.storePathHash, storePathHash))
-			.get();
-
-		if (row === undefined) {
-			return new Response('Not found\n', { status: StatusCodes.NOT_FOUND });
-		}
-
-		const info = new NarInfo(
+	private narInfoFromRow(row: typeof schema.narInfos.$inferSelect): NarInfo {
+		return new NarInfo(
 			row.storePath,
-			`nar/${row.narHash}.nar.zst`,
+			narObjectKey(row.narHash),
 			row.compression,
 			row.fileHash,
 			row.fileSize,
@@ -556,11 +551,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			row.ca ?? undefined,
 			row.sig ?? undefined
 		);
+	}
 
-		return textResponse(request, info.render(), {
-			'content-type': 'text/x-nix-narinfo; charset=utf-8',
-			'last-modified': new Date(row.createdAt).toUTCString()
-		});
+	private async ensureNarInfoObject(
+		row: typeof schema.narInfos.$inferSelect
+	): Promise<void> {
+		const existing = await this.env.BLOBS.head(
+			narInfoObjectKey(row.storePathHash)
+		);
+
+		if (existing !== null) {
+			return;
+		}
+
+		await this.putNarInfoObject(row.storePathHash, this.narInfoFromRow(row));
+	}
+
+	private async putNarInfoObject(
+		storePathHash: string,
+		narInfo: NarInfo
+	): Promise<void> {
+		await this.env.BLOBS.put(
+			narInfoObjectKey(storePathHash),
+			narInfo.render(),
+			{
+				httpMetadata: {
+					contentType: 'text/x-nix-narinfo; charset=utf-8',
+					cacheControl: narInfoCacheControl
+				}
+			}
+		);
 	}
 
 	private stats(): StatsResponse {
@@ -623,7 +643,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async commitMetadata(
 		metadata: UploadPathCommitMetadata
-	): Promise<void> {
+	): Promise<boolean> {
 		const now = new Date().toISOString();
 		const key = await this.signingKey();
 		const unsigned = new NarInfo(
@@ -652,55 +672,50 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} satisfies typeof schema.narBlobs.$inferInsert;
 		const { narHash: _narHash, ...narBlobUpdate } = narBlobRow;
 
-		this.db
-			.insert(schema.narBlobs)
-			.values(narBlobRow)
-			.onConflictDoUpdate({
-				target: schema.narBlobs.narHash,
-				set: narBlobUpdate
-			})
-			.run();
+		const won = this.db.transaction((tx) => {
+			const rows = tx
+				.insert(schema.narInfos)
+				.values({
+					storePathHash: metadata.storePathHash,
+					storePath: metadata.storePath,
+					narHash: metadata.narHash,
+					narSize: metadata.narSize,
+					fileHash: metadata.fileHash,
+					fileSize: metadata.fileSize,
+					compression: metadata.compression,
+					referencesJson: JSON.stringify(metadata.references),
+					deriver: metadata.deriver,
+					ca: metadata.ca,
+					sig,
+					createdAt: now
+				} satisfies typeof schema.narInfos.$inferInsert)
+				.onConflictDoNothing()
+				.returning()
+				.all();
 
-		const inserted = this.db
-			.insert(schema.narInfos)
-			.values({
-				storePathHash: metadata.storePathHash,
-				storePath: metadata.storePath,
-				narHash: metadata.narHash,
-				narSize: metadata.narSize,
-				fileHash: metadata.fileHash,
-				fileSize: metadata.fileSize,
-				compression: metadata.compression,
-				referencesJson: JSON.stringify(metadata.references),
-				deriver: metadata.deriver,
-				ca: metadata.ca,
-				sig,
-				createdAt: now
-			} satisfies typeof schema.narInfos.$inferInsert)
-			.onConflictDoNothing()
-			.returning()
-			.all();
+			if (rows.length === 0) {
+				return false;
+			}
 
-		if (inserted.length === 0) {
-			return;
+			tx.insert(schema.narBlobs)
+				.values(narBlobRow)
+				.onConflictDoUpdate({
+					target: schema.narBlobs.narHash,
+					set: narBlobUpdate
+				})
+				.run();
+
+			return true;
+		});
+
+		if (!won) {
+			return false;
 		}
 
-		await this.materialiseNarInfo(metadata.storePathHash, unsigned, sig);
-	}
-
-	private async materialiseNarInfo(
-		storePathHash: string,
-		unsigned: NarInfo,
-		sig: string
-	): Promise<void> {
 		const signed = NarInfo.fromFields({ ...unsigned.toFields(), sig });
+		await this.putNarInfoObject(metadata.storePathHash, signed);
 
-		await this.env.BLOBS.put(narInfoObjectKey(storePathHash), signed.render(), {
-			httpMetadata: {
-				contentType: 'text/x-nix-narinfo; charset=utf-8',
-				cacheControl: narInfoCacheControl
-			}
-		});
+		return true;
 	}
 
 	private clearPendingUpload(uploadId: string): void {
@@ -995,20 +1010,4 @@ function verifyObjectChecksum(
 		metadata.fileHash,
 		actual
 	);
-}
-
-function parseNarInfoName(name: string): string | undefined {
-	const suffix = '.narinfo';
-
-	if (!name.endsWith(suffix)) {
-		return undefined;
-	}
-
-	const storePathHash = name.slice(0, -suffix.length);
-
-	if (!/^[0-9a-df-np-sv-z]{32}$/.test(storePathHash)) {
-		return undefined;
-	}
-
-	return storePathHash;
 }
