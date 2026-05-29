@@ -1,3 +1,4 @@
+import { NixConfig } from '@cupboard/shared';
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
@@ -9,11 +10,12 @@ export function registerConfigCommand(program: Command): void {
 		.description(
 			"Print Nix substituter configuration suitable for a user's nix.conf."
 		)
-		.action(() => {
+		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<pubkey>', 'Nix trusted-public-keys entry')
+		.action((url: string, publicKey: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			reporter.info('config command not yet implemented');
-			throw new Error('config not yet implemented');
+			reporter.info(new NixConfig(url, publicKey).render().trimEnd());
 		});
 }

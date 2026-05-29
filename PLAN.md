@@ -97,9 +97,9 @@ successfully substitute that path from the Worker.
         are `phase`, `result`, `warn`, and `info`; phase events carry `status`,
         `durationMs`, and a `facts` object.
 - [x] `--colour` / `--no-colour` flags override the TTY auto-detection.
-- [ ] Print Nix configuration:
-  - [ ] `substituters = ...`
-  - [ ] `trusted-public-keys = ...`
+- [x] Print Nix configuration:
+  - [x] `substituters = ...`
+  - [x] `trusted-public-keys = ...`
 - [ ] Tests:
   - [x] Unit: locally-computed NAR hash and size match what `nix-store --dump`
         produces (run against fixture paths); substituter config rendering.
@@ -149,10 +149,10 @@ successfully substitute that path from the Worker.
 
 ### Admin
 
-- [ ] Initialise deployment: mint the write token and generate the signing key.
-- [ ] Print Nix substituter config for the user's `nix.conf`.
-- [ ] Show the public signing key.
-- [ ] Inspect cache stats.
+- [x] Initialise deployment: mint the write token and generate the signing key.
+- [x] Print Nix substituter config for the user's `nix.conf`.
+- [x] Show the public signing key.
+- [x] Inspect cache stats.
 - [ ] Tests:
   - [ ] Unit: substituter config command renders a correct `nix.conf` snippet
         for a given Worker URL and pubkey.

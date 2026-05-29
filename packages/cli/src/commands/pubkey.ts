@@ -1,6 +1,7 @@
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
+import { CupboardClient } from '../client.ts';
 import { createReporter } from '../reporter.ts';
 
 export function registerPubkeyCommand(program: Command): void {
@@ -9,11 +10,16 @@ export function registerPubkeyCommand(program: Command): void {
 		.description(
 			'Print the current public signing key for this cupboard deployment.'
 		)
-		.action(() => {
+		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.action(async (url: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			reporter.info('pubkey command not yet implemented');
-			throw new Error('pubkey not yet implemented');
+			const client = CupboardClient.fromUrl(url);
+			const publicKey = await reporter.phase('Reading public key', () =>
+				client.publicKey()
+			);
+
+			reporter.info(publicKey.trimEnd());
 		});
 }

@@ -2,7 +2,7 @@
 	"name": "@cupboard/cli",
 	"version": "0.0.0",
 	"bin": {
-		"cupboard": "./src/index.ts"
+		"cupboard": "./src/main.ts"
 	},
 	"dependencies": {
 		"@cupboard/shared": "workspace:*",
@@ -23,7 +23,7 @@
 	"private": true,
 	"scripts": {
 		"check:types": "tsc --noEmit",
-		"cli": "node src/index.ts",
+		"cli": "node src/main.ts",
 		"test": "vitest run --passWithNoTests"
 	},
 	"type": "module"
