@@ -113,11 +113,11 @@ successfully substitute that path from the Worker.
 - [x] Store binary content in R2, keyed by the uncompressed NAR hash. A metadata
       row maps `narHash` to the actual stored blob path (for example
       `nar/<narHash>.zst`).
-- [x] One cache, served at the Worker root; named caches are a V2 concern.
+- [x] One cache, served at the Worker root; named caches are a V3 concern.
 - [x] Tests:
   - [x] Integration: schema initialises on first request; metadata-to-blob
         mapping survives committed reads and blob reuse. Concurrent writes and
-        explicit DO eviction coverage are V2 hardening.
+        explicit DO eviction coverage are V3 hardening.
 
 ### Signing
 
@@ -132,7 +132,7 @@ successfully substitute that path from the Worker.
         fingerprint.
   - [x] Integration: `GET /pubkey` returns the active key; first-request key
         generation persists across repeated requests. Explicit DO eviction
-        coverage is V2 hardening.
+        coverage is V3 hardening.
 
 ### Garbage collection
 
@@ -288,7 +288,179 @@ Nix configuration. Enforced by the harness, not by convention.
 
 ## V2
 
-V2 collects improvements that are useful, but not necessary to prove the core
+V1 routes every request through the single `CupboardServer` Durable Object,
+including reads that do no database work. Because there is one DO per
+deployment, every narinfo and NAR fetch is serialised through that instance and
+pays the migration check on entry. R2 and the Cache API scale horizontally and
+serve from the edge, so the read path should not touch the DO at all.
+
+V2 moves all reads onto the Worker, backed by R2 and `caches.default`. The DO
+keeps the write path (negotiate, prepare, commit), admin, and GC. The narinfo
+row stays in DO SQLite because reference-graph GC needs to query it; it just
+stops being read on the hot path. A narinfo is rendered and signed once at
+commit time and written to R2, so reads never re-render or re-sign.
+
+This relies on one invariant: a narinfo for a given store path hash is
+immutable. Nix derives the hash from the path's inputs and contents, so the same
+hash always maps to the same narinfo. Deletion is therefore the only mutation
+the cache has to handle, which is what the TTL-ordered GC below addresses.
+
+### Worker read routing
+
+- [ ] Add `packages/server/src/read.ts` owning the read routes. `handler.ts`
+      tries it first and forwards everything else to the DO stub. Thread `ctx`
+      into the Worker `fetch` so cache writes can use `ctx.waitUntil`.
+- [ ] Move `parseNarName`, `parseNarInfoName`, and the conditional-request
+      helper (`isNotModified`) out of `do.ts` into a place `read.ts` can share.
+- [ ] Remove the `/nar/:narName` and `/:narInfoName` routes, and the
+      `narResponse` and `narInfoResponse` methods, from the DO once the Worker
+      owns them.
+- [ ] Serve the static read routes (`/nix-cache-info`, `/_health`, `/_version`,
+      `/pubkey`) from the Worker. `/pubkey` reads the active key from the DO
+      once and caches it. This assumes a stable signing key; key rotation is a
+      V3 concern, so revisit Worker-side pubkey caching when rotation lands
+      rather than leaving hidden staleness to unwind later.
+- [ ] Only `GET` responses go into `caches.default`. `HEAD` is answered from R2
+      metadata (`BLOBS.head`) with no body and is never cached, since caching
+      HEAD responses invites body and header mismatches.
+
+### NAR blobs from R2 and the edge
+
+- [ ] Serve `GET` `/nar/<narHash>.nar.zst` in the Worker: check
+      `caches.default`, then `BLOBS.get`, building the existing `immutable`
+      response from the R2 object metadata (ETag, uploaded, size). On a miss,
+      populate the cache with `ctx.waitUntil(caches.default.put(...))`. `HEAD`
+      is answered from `BLOBS.head` without touching the cache.
+- [ ] Keep conditional `If-None-Match` and `If-Modified-Since` 304 handling.
+- [ ] NAR objects are content-addressed and immutable, so edge copies never need
+      invalidation; deleting one only frees R2 storage. `/nar/<hash>` stays
+      public and is guessable by anyone who knows the hash, so the safety
+      property GC must preserve is not "narinfo gates access" but the narrower:
+      a stale cached narinfo must not point at a deleted NAR before its TTL
+      expires (see TTL-ordered garbage collection).
+- [ ] Tests:
+  - [ ] Integration: GET and HEAD return the expected bytes and headers through
+        the Worker entrypoint; an unknown hash is 404; conditional GETs
+        return 304. Assert correctness rather than cache hits, since the test
+        pool's Cache API may not surface them.
+
+### narinfo from R2 and the edge
+
+- [ ] On a genuine first commit, render and sign the narinfo (the signature is
+      already computed for the DB row) and `BLOBS.put` it at
+      `narinfo/<storePathHash>` with `text/x-nix-narinfo` and a `Cache-Control`
+      max-age. The NAR blob is already present at commit, so a served narinfo
+      never points at a missing NAR.
+- [ ] Enforce immutability as structure, not comment: a commit for a
+      `storePathHash` that already has a row returns `already-present` and
+      rewrites neither the DB row nor the R2 object. `handleCommit` already
+      short-circuits here, so make `commitMetadata`'s narinfo write
+      `onConflictDoNothing` rather than `onConflictDoUpdate`, and only
+      `BLOBS.put` the narinfo on a genuine first commit. Two commits for one
+      hash rendering different bytes is impossible by Nix construction
+      (different contents mean a different hash), so no byte-comparison is
+      needed.
+- [ ] The narinfo DB row is the source of truth; the `narinfo/<storePathHash>`
+      R2 object is a materialised, regenerable cache of it. The row carries
+      every field including the signature, and rendering is deterministic, so
+      re-materialising is byte-identical. Reads serve the object; truth and
+      queryability stay in the row.
+- [ ] Never advertise a path as present without a servable object, but do not
+      try to make the two writes atomic with a rollback — a crash between the
+      row commit and the rollback cannot be covered. Lean on regenerability
+      instead: on commit write the row, then materialise the object; if the put
+      fails or the DO is evicted, the row persists and the object is re-derived
+      later. Close the window deterministically by re-materialising from the row
+      in both places that can report a path already present: negotiate before it
+      returns `skip`, and commit before it returns `already-present`. Each heads
+      the object and regenerates it from the row when missing, so neither exit
+      can advertise an unservable path. An only-if-absent conditional put
+      (`onlyIf`, semantics to confirm) is an optional guard, not a correctness
+      requirement, since determinism makes any overwrite byte-identical.
+- [ ] Serve `GET` `/<storePathHash>.narinfo` in the Worker from R2 via
+      `caches.default`, with ETag, last-modified, and 304 driven by the R2
+      object; `HEAD` from `BLOBS.head` without caching.
+- [ ] Stop reading the narinfo row on the read path; it remains only for GC and
+      stats.
+- [ ] Tests:
+  - [ ] Integration: commit writes the R2 object; the Worker serves it and the
+        signature verifies against the published pubkey; 404 before commit;
+        conditional GETs return 304.
+  - [ ] Integration: when the R2 object already exists, a second commit for an
+        existing `storePathHash` returns `already-present` and leaves both the
+        DB row and the R2 object byte-for-byte unchanged. The missing-object
+        case is covered by the failure-recovery test below.
+  - [ ] Integration: after an R2 narinfo write failure the committed row
+        remains, and a later negotiate or commit retry re-materialises the
+        missing object from the row; concurrent commits for one `storePathHash`
+        do not overwrite an existing narinfo object.
+
+### TTL-ordered garbage collection
+
+narinfo responses are edge-cached with a max-age, and `caches.default.delete`
+only purges the current colo. A deleted narinfo can therefore still be served
+from a warm edge for up to its TTL. To stop a cached narinfo pointing at a
+deleted NAR, NAR deletion is deferred until any edge-cached narinfo for it has
+expired.
+
+- [ ] Define one narinfo cache TTL constant and derive the GC grace from it
+      (`grace = ttl + margin`). The narinfo `Cache-Control` max-age and the
+      grace come from the same source so they cannot drift apart.
+- [ ] On narinfo removal — the negotiate stale-recovery path at `clearNarInfo`,
+      and future reference-graph GC — delete the DB row first, then the
+      `narinfo/<storePathHash>` R2 object, best-effort `caches.default.delete`
+      in the current colo, and enqueue the NAR blob for deletion no earlier than
+      `now + grace`, only if no other narinfo references that NAR hash.
+      Row-first ordering means an interrupted removal leaves only an orphan
+      object with no row, never a row with no object, mirroring the row-first
+      commit path.
+- [ ] Reconcile orphan narinfo objects. The reconcile is origin-agnostic: it
+      keys off the observable "a `narinfo/<storePathHash>` object exists with no
+      committed row" and deletes the object, whatever produced it. Under
+      row-first commit and row-first removal the one expected source is an
+      interrupted removal; keying off the observable rather than the cause also
+      makes this a backstop if commit ordering is ever violated and an object is
+      left without a row. Because such an object may have been edge-cached while
+      it was live, deleting it enqueues its NAR under the same `now + grace`
+      delayed rule rather than deleting the NAR immediately, unless the
+      interrupted removal already enqueued it. Abandoned-pending GC can trigger
+      this cheaply using the `storePathHash` in the pending row's
+      `metadata_json`; a broader sweep over narinfo objects stays a V3 concern.
+- [ ] Extend the orphan-deletion queue with a `not_before` timestamp. The flush
+      deletes a blob only when `now >= not_before` and the existing committed
+      and live-pending reference checks still pass. Abandoned pending-upload
+      enqueues set `not_before = now` for immediate deletion as today.
+- [ ] `not_before` is monotonic non-decreasing. Because `r2_key` is the primary
+      key, an enqueue that conflicts with an existing row must set
+      `not_before = max(existing, new)`, never earlier. A blob delayed because
+      an edge-cached narinfo may still reference it must not be pulled forward
+      by a later immediate enqueue; neither plain `onConflictDoNothing` nor an
+      overwrite is correct here, so the conflict must take the later timestamp
+      explicitly. This is the part to implement most deliberately.
+- [ ] Generate the Drizzle migration for the schema change.
+- [ ] Selecting which committed paths to delete (retention roots, reachability)
+      stays a V3 concern; this phase provides only the edge-safe deletion
+      mechanism.
+- [ ] Tests:
+  - [ ] Integration: removing a narinfo deletes its R2 object and DB row; its
+        NAR is retained until the grace elapses and then deleted by a later GC
+        pass; a NAR still referenced by another narinfo is never deleted.
+  - [ ] Integration: a delayed (`now + grace`) deletion is not pulled forward by
+        a subsequent immediate enqueue for the same `r2_key`; the later
+        timestamp wins and the blob survives until the grace elapses.
+  - [ ] Integration: an orphan narinfo object with no committed row is deleted
+        by GC, and its NAR is enqueued under the delayed rule rather than
+        removed immediately.
+
+### Data model and routes
+
+- [ ] When this lands, update the Data Model `orphan_blob_deletion` entry for
+      the new `not_before` column, and the Routes table to show narinfo and NAR
+      served by the Worker rather than the DO.
+
+## V3
+
+V3 collects improvements that are useful, but not necessary to prove the core
 cache.
 
 ### Compatibility
