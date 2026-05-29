@@ -93,6 +93,16 @@ export interface StatsResponse {
 	readonly totalFileSize: number;
 }
 
+export interface DeletePathRequestFields {
+	readonly storePathHash: string;
+}
+
+export interface DeletePathResponse {
+	readonly storePathHash: string;
+	readonly deleted: boolean;
+	readonly narScheduledForDeletion: boolean;
+}
+
 export abstract class ProtocolError extends Error {}
 
 export class InvalidNarInfoLineError extends ProtocolError {
@@ -189,6 +199,7 @@ export class InvalidSha256DigestLengthError extends ProtocolError {
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const nixSha256HashPattern = /^sha256:[0-9a-df-np-sv-z]{52}$/;
+const storePathHashPattern = /^[0-9a-df-np-sv-z]{32}$/;
 const base64Alphabet =
 	'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
@@ -293,6 +304,22 @@ interface UploadPathIdentityFields {
 	readonly narHash: string;
 	readonly narSize: number;
 	readonly references: readonly string[];
+}
+
+export class DeletePathRequest {
+	private constructor(public readonly storePathHash: string) {}
+
+	static fromFields(fields: DeletePathRequestFields): DeletePathRequest {
+		if (!storePathHashPattern.test(fields.storePathHash)) {
+			throw new InvalidStorePathHashError(fields.storePathHash);
+		}
+
+		return new DeletePathRequest(fields.storePathHash);
+	}
+
+	toFields(): DeletePathRequestFields {
+		return { storePathHash: this.storePathHash };
+	}
 }
 
 export class UploadPathMetadata {

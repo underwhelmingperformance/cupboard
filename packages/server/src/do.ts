@@ -1,5 +1,8 @@
 import {
 	type CommitResponse,
+	DeletePathRequest,
+	type DeletePathRequestFields,
+	type DeletePathResponse,
 	type InitResponse,
 	NarInfo,
 	NixSha256Hash,
@@ -35,6 +38,7 @@ import {
 } from './crypto.ts';
 import * as schema from './db/schema.ts';
 import {
+	InvalidDeletePathRequestError,
 	InvalidJsonRequestBodyError,
 	InvalidUploadMetadataRequestError,
 	type R2PresignBindingName,
@@ -49,6 +53,7 @@ import {
 	narInfoCacheControl,
 	narInfoObjectKey,
 	narObjectKey,
+	orphanBlobDeletionGraceMs,
 	TextBody,
 	textResponse
 } from './http.ts';
@@ -59,6 +64,14 @@ type WidenStringBindings<T> = {
 };
 
 type RuntimeEnv = WidenStringBindings<Env>;
+
+type SchemaDatabase = DrizzleSqliteDODatabase<typeof schema>;
+
+// Either the DO database or a transaction handle from db.transaction(...); both
+// expose the same query builder, so writes can be parameterised over the handle.
+type SchemaWriter =
+	| SchemaDatabase
+	| Parameters<Parameters<SchemaDatabase['transaction']>[0]>[0];
 
 interface SigningKey {
 	readonly privateJwk: JsonWebKey;
@@ -106,6 +119,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 
 		this.app.post('/admin/init', (context) => this.handleInit(context.req.raw));
+		this.app.post('/admin/delete', (context) =>
+			serverErrorResponse(this.handleDeletePath(context.req.raw))
+		);
 		this.app.post('/upload/negotiate', (context) =>
 			serverErrorResponse(this.handleNegotiate(context.req.raw))
 		);
@@ -163,6 +179,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} satisfies InitResponse);
 	}
 
+	private async handleDeletePath(request: Request): Promise<Response> {
+		if (!(await this.isTokenAuthorised(request))) {
+			return new Response('Unauthorised\n', {
+				status: StatusCodes.UNAUTHORIZED
+			});
+		}
+
+		const requested = parseDeletePathRequest(
+			await parseJsonRequest<DeletePathRequestFields>(request)
+		);
+		const result = await this.deleteStorePath(
+			requested.storePathHash,
+			new URL(request.url).origin
+		);
+
+		return Response.json(result satisfies DeletePathResponse);
+	}
+
 	private async handleNegotiate(request: Request): Promise<Response> {
 		if (!(await this.isTokenAuthorised(request))) {
 			return new Response('Unauthorised\n', {
@@ -187,7 +221,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 
 				if (object !== null) {
-					await this.ensureNarInfoObject(existingNarInfo);
+					await this.ensureNarInfoObject(existingNarInfo.storePathHash);
 					uploads.push({
 						action: 'skip',
 						storePathHash: metadata.storePathHash,
@@ -348,13 +382,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		this.db
+		this.enqueueOrphanBlobDeletion(this.db, r2Key, now, now);
+	}
+
+	private enqueueOrphanBlobDeletion(
+		handle: SchemaWriter,
+		r2Key: string,
+		notBefore: string,
+		now: string
+	): void {
+		// Monotonic: a delayed entry (a deliberate delete records now + grace) must
+		// never be pulled forward by a later immediate enqueue, so take the later
+		// timestamp on conflict. ISO-8601 sorts lexicographically.
+		handle
 			.insert(schema.orphanBlobDeletions)
-			.values({
-				r2Key,
-				createdAt: now
+			.values({ r2Key, notBefore, createdAt: now })
+			.onConflictDoUpdate({
+				target: schema.orphanBlobDeletions.r2Key,
+				set: {
+					notBefore: sql`max(${schema.orphanBlobDeletions.notBefore}, excluded.not_before)`
+				}
 			})
-			.onConflictDoNothing()
 			.run();
 	}
 
@@ -400,6 +448,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		if (queued === undefined) {
+			return false;
+		}
+
+		if (now < queued.notBefore) {
 			return false;
 		}
 
@@ -485,7 +537,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		if (existingNarInfo !== undefined) {
-			await this.ensureNarInfoObject(existingNarInfo);
+			await this.ensureNarInfoObject(existingNarInfo.storePathHash);
 			this.clearPendingUpload(uploadId);
 
 			return Response.json({
@@ -529,7 +581,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		if (winner !== undefined) {
-			await this.ensureNarInfoObject(winner);
+			await this.ensureNarInfoObject(winner.storePathHash);
 		}
 
 		return Response.json({
@@ -555,18 +607,32 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	private async ensureNarInfoObject(
-		row: typeof schema.narInfos.$inferSelect
-	): Promise<void> {
-		const existing = await this.env.BLOBS.head(
-			narInfoObjectKey(row.storePathHash)
-		);
+	private async ensureNarInfoObject(storePathHash: string): Promise<void> {
+		// Runs in a critical section, and against a freshly read row, so it cannot
+		// race a delete: a concurrent delete that removed the row after the caller
+		// read it must not be undone by re-materialising the object from a stale
+		// copy.
+		await this.ctx.blockConcurrencyWhile(async () => {
+			const existing = await this.env.BLOBS.head(
+				narInfoObjectKey(storePathHash)
+			);
 
-		if (existing !== null) {
-			return;
-		}
+			if (existing !== null) {
+				return;
+			}
 
-		await this.putNarInfoObject(row.storePathHash, this.narInfoFromRow(row));
+			const row = this.db
+				.select()
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.get();
+
+			if (row === undefined) {
+				return;
+			}
+
+			await this.putNarInfoObject(storePathHash, this.narInfoFromRow(row));
+		});
 	}
 
 	private async putNarInfoObject(
@@ -738,15 +804,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		row: typeof schema.narInfos.$inferSelect,
 		origin: string
 	): Promise<void> {
-		// Delete the served copies — the R2 object, then this colo's cached
-		// narinfo — before the DB rows. The rows are the only durable record that
-		// can re-trigger recovery, so clearing them last keeps an interrupted
-		// removal recoverable rather than leaving an orphaned, still-served object.
-		await this.env.BLOBS.delete(narInfoObjectKey(row.storePathHash));
-		await this.purgeCachedNarInfo(`${origin}/${row.storePathHash}.narinfo`);
+		// One critical section, as for deleteStorePath: the object/cache delete and
+		// the row clears must be atomic against the heal paths. Object-first within
+		// it, since the rows are the only durable record that can re-trigger
+		// recovery, so clearing them last keeps an interrupted removal recoverable
+		// rather than leaving an orphaned, still-served object.
+		await this.ctx.blockConcurrencyWhile(async () => {
+			await this.env.BLOBS.delete(narInfoObjectKey(row.storePathHash));
+			await this.purgeCachedNarInfo(`${origin}/${row.storePathHash}.narinfo`);
 
-		this.clearNarInfo(row.storePathHash);
-		this.clearNarBlob(row.narHash);
+			this.clearNarInfo(row.storePathHash);
+			this.clearNarBlob(row.narHash);
+		});
 	}
 
 	private async purgeCachedNarInfo(url: string): Promise<void> {
@@ -758,6 +827,74 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} catch {
 			/* edge purge is best-effort */
 		}
+	}
+
+	private deleteStorePath(
+		storePathHash: string,
+		origin: string
+	): Promise<DeletePathResponse> {
+		// One critical section: the object/cache delete and the row transaction
+		// must be atomic against the heal paths, or a concurrent negotiate/commit
+		// could re-materialise the object between them and orphan it.
+		return this.ctx.blockConcurrencyWhile(async () => {
+			const row = this.db
+				.select()
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.get();
+
+			if (row === undefined) {
+				return {
+					storePathHash,
+					deleted: false,
+					narScheduledForDeletion: false
+				};
+			}
+
+			// Object-first: stop serving (R2 object, then this colo's cache) before
+			// touching the DB. A crash leaves the row, so re-running the delete is
+			// idempotent and completes it; the NAR is never scheduled until the row
+			// and blob are atomically gone.
+			await this.env.BLOBS.delete(narInfoObjectKey(storePathHash));
+			await this.purgeCachedNarInfo(`${origin}/${storePathHash}.narinfo`);
+
+			const now = new Date();
+			const nowIso = now.toISOString();
+			const notBefore = new Date(
+				now.getTime() + orphanBlobDeletionGraceMs
+			).toISOString();
+
+			const narScheduledForDeletion = this.db.transaction((tx) => {
+				tx.delete(schema.narInfos)
+					.where(eq(schema.narInfos.storePathHash, storePathHash))
+					.run();
+
+				const stillReferenced =
+					tx
+						.select()
+						.from(schema.narInfos)
+						.where(eq(schema.narInfos.narHash, row.narHash))
+						.get() !== undefined;
+
+				if (stillReferenced) {
+					return false;
+				}
+
+				tx.delete(schema.narBlobs)
+					.where(eq(schema.narBlobs.narHash, row.narHash))
+					.run();
+				this.enqueueOrphanBlobDeletion(
+					tx,
+					narObjectKey(row.narHash),
+					notBefore,
+					nowIso
+				);
+
+				return true;
+			});
+
+			return { storePathHash, deleted: true, narScheduledForDeletion };
+		});
 	}
 
 	private clearNarBlob(narHash: string): void {
@@ -949,6 +1086,20 @@ function parseUploadMetadata(
 	} catch (error) {
 		if (error instanceof ProtocolError) {
 			throw new InvalidUploadMetadataRequestError(error);
+		}
+
+		throw error;
+	}
+}
+
+function parseDeletePathRequest(
+	fields: DeletePathRequestFields
+): DeletePathRequest {
+	try {
+		return DeletePathRequest.fromFields(fields);
+	} catch (error) {
+		if (error instanceof ProtocolError) {
+			throw new InvalidDeletePathRequestError(error);
 		}
 
 		throw error;

@@ -36,6 +36,7 @@ export const pendingUploads = sqliteTable('pending_upload', {
 
 export const orphanBlobDeletions = sqliteTable('orphan_blob_deletion', {
 	r2Key: text('r2_key').primaryKey(),
+	notBefore: text('not_before').notNull().default('1970-01-01T00:00:00.000Z'),
 	createdAt: text('created_at').notNull()
 });
 

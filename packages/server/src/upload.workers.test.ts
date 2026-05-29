@@ -1,6 +1,7 @@
 import {
 	CacheInfo,
 	type CommitResponse,
+	type DeletePathResponse,
 	type InitResponse,
 	NarInfo,
 	NixSha256Hash,
@@ -17,7 +18,11 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildVersion } from './build-info.generated.ts';
-import { narInfoObjectKey, narObjectKey } from './http.ts';
+import {
+	narInfoObjectKey,
+	narObjectKey,
+	orphanBlobDeletionGraceMs
+} from './http.ts';
 import type { CupboardServer } from './worker.ts';
 import worker from './worker.ts';
 
@@ -29,6 +34,7 @@ const narHash = nixSha256Hash('1');
 const fileHash = NixSha256Hash.parse(
 	'sha256:1m5g07jiajz7135sj3ap8h30s0n24nc6a2q3gsraqj3pfi0jw65l'
 );
+const deleteTestBase = new Date('2026-01-01T00:00:00.000Z');
 let nextTestServerId = 0;
 let testServer = testServerFor('initial');
 
@@ -962,7 +968,203 @@ describe('upload flow', () => {
 		});
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 	});
+
+	it('deletes a store path and defers the NAR deletion past the grace', async () => {
+		vi.setSystemTime(deleteTestBase);
+
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, metadata);
+
+		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		expect(served.status).toBe(StatusCodes.OK);
+
+		const deleted = await deletePath(token, metadata.storePathHash);
+
+		expect(deleted).toStrictEqual({
+			storePathHash: metadata.storePathHash,
+			deleted: true,
+			narScheduledForDeletion: true
+		});
+
+		const afterDelete = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		expect(afterDelete.status).toBe(StatusCodes.NOT_FOUND);
+		await expectStats(token, {
+			storePaths: 0,
+			narBlobs: 0,
+			pendingUploads: 0,
+			totalFileSize: 0
+		});
+
+		await runGc();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.not.toBeNull();
+
+		vi.setSystemTime(afterGrace());
+		await runGc();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.toBeNull();
+	});
+
+	it('retains a NAR still referenced by another store path', async () => {
+		vi.setSystemTime(deleteTestBase);
+
+		const token = await initialise();
+		const first = uploadMetadata({ fileSize: narBytes.byteLength });
+		const second = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'second',
+			storePathHash: '22222222222222222222222222222222'
+		});
+		await commitPath(token, first);
+		await commitSharedPath(token, second);
+
+		const deletedFirst = await deletePath(token, first.storePathHash);
+
+		expect(deletedFirst.narScheduledForDeletion).toBe(false);
+
+		const secondServed = await readFetch(`/${second.storePathHash}.narinfo`);
+
+		expect(secondServed.status).toBe(StatusCodes.OK);
+		await expect(
+			env.BLOBS.head(narObjectKey(first.narHash))
+		).resolves.not.toBeNull();
+
+		const deletedSecond = await deletePath(token, second.storePathHash);
+
+		expect(deletedSecond.narScheduledForDeletion).toBe(true);
+
+		vi.setSystemTime(afterGrace());
+		await runGc();
+		await expect(
+			env.BLOBS.head(narObjectKey(second.narHash))
+		).resolves.toBeNull();
+	});
+
+	it('is idempotent when deleting an absent store path', async () => {
+		const token = await initialise();
+		const result = await deletePath(token, '33333333333333333333333333333333');
+
+		expect(result).toStrictEqual({
+			storePathHash: '33333333333333333333333333333333',
+			deleted: false,
+			narScheduledForDeletion: false
+		});
+	});
+
+	it('does not pull a scheduled NAR deletion forward', async () => {
+		vi.setSystemTime(deleteTestBase);
+
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, metadata);
+		await deletePath(token, metadata.storePathHash);
+
+		// A fresh pending upload reuses the same r2Key, then expires, giving an
+		// immediate (not_before = now) deletion trigger for the already-deferred
+		// blob.
+		expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		vi.setSystemTime(new Date(deleteTestBase.getTime() + 16 * 60 * 1000));
+		await runGc();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.not.toBeNull();
+
+		vi.setSystemTime(afterGrace());
+		await runGc();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.toBeNull();
+	});
+
+	it('rejects an unauthenticated delete', async () => {
+		const response = await fetchPath('/admin/delete', {
+			body: JSON.stringify({
+				storePathHash: '11111111111111111111111111111111'
+			}),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
+
+		expect({
+			status: response.status,
+			body: await response.text()
+		}).toStrictEqual({
+			status: StatusCodes.UNAUTHORIZED,
+			body: 'Unauthorised\n'
+		});
+	});
+
+	it('rejects a malformed store path hash', async () => {
+		const token = await initialise();
+		const response = await authorisedFetch('/admin/delete', token, {
+			body: JSON.stringify({ storePathHash: 'not-a-valid-hash' }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		});
+
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+	});
 });
+
+async function commitPath(
+	token: string,
+	metadata: UploadPathMetadataFields
+): Promise<void> {
+	const upload = expectSingleUploadDecision(
+		await negotiateUploads(token, [metadata]),
+		metadata
+	);
+	await prepareUpload(token, upload, metadata);
+	await putNarBytes(upload.r2Key);
+	await commitUpload(token, upload.uploadId);
+}
+
+async function commitSharedPath(
+	token: string,
+	metadata: UploadPathMetadataFields
+): Promise<void> {
+	const decision = expectSingleCommitDecision(
+		await negotiateUploads(token, [metadata]),
+		metadata
+	);
+	await commitUpload(token, decision.uploadId);
+}
+
+async function deletePath(
+	token: string,
+	storePathHash: string
+): Promise<DeletePathResponse> {
+	const response = await authorisedFetch('/admin/delete', token, {
+		body: JSON.stringify({ storePathHash }),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return response.json<DeletePathResponse>();
+}
+
+async function runGc(): Promise<void> {
+	const response = await fetchPath('/_cron/gc', { method: 'POST' });
+
+	expect(response.status).toBe(StatusCodes.OK);
+}
+
+function afterGrace(): Date {
+	return new Date(
+		deleteTestBase.getTime() + orphanBlobDeletionGraceMs + 60_000
+	);
+}
 
 async function initialiseRaw(): Promise<InitResponse> {
 	const response = await fetchPath('/admin/init', {

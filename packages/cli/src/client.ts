@@ -1,5 +1,6 @@
 import type {
 	CommitResponse,
+	DeletePathResponse,
 	InitResponse,
 	StatsResponse,
 	UploadNegotiateRequest,
@@ -43,6 +44,17 @@ export class CupboardClient {
 
 	stats(token: string): Promise<StatsResponse> {
 		return this.requestJson('/_stats', { token });
+	}
+
+	deleteStorePath(
+		token: string,
+		storePathHash: string
+	): Promise<DeletePathResponse> {
+		return this.requestJson('/admin/delete', {
+			method: 'POST',
+			token,
+			body: { storePathHash }
+		});
 	}
 
 	negotiate(

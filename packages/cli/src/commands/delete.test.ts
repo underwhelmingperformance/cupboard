@@ -1,0 +1,111 @@
+import {
+	type DeletePathResponse,
+	InvalidStorePathError
+} from '@cupboard/shared';
+import { describe, expect, it } from 'vitest';
+
+import type { Reporter, ResultRow } from '../reporter.ts';
+
+import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';
+
+describe('describeNarOutcome', () => {
+	it.each([
+		{
+			deleted: true,
+			narScheduledForDeletion: true,
+			expected: 'scheduled for deletion'
+		},
+		{
+			deleted: true,
+			narScheduledForDeletion: false,
+			expected: 'retained (still referenced)'
+		},
+		{ deleted: false, narScheduledForDeletion: false, expected: 'n/a' }
+	])(
+		'describes "$expected"',
+		({ deleted, narScheduledForDeletion, expected }) => {
+			const result: DeletePathResponse = {
+				storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
+				deleted,
+				narScheduledForDeletion
+			};
+
+			expect(describeNarOutcome(result)).toBe(expected);
+		}
+	);
+});
+
+describe('runDelete', () => {
+	it('derives the hash, calls the client with the token, and reports', async () => {
+		const calls: { token: string; storePathHash: string }[] = [];
+		const results: ResultRow[][] = [];
+		const client: DeleteClient = {
+			deleteStorePath(token, storePathHash) {
+				calls.push({ token, storePathHash });
+
+				return Promise.resolve({
+					storePathHash,
+					deleted: true,
+					narScheduledForDeletion: false
+				});
+			}
+		};
+
+		await runDelete(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+			'admin-token',
+			reporter(results),
+			client
+		);
+
+		expect(calls).toStrictEqual([
+			{
+				token: 'admin-token',
+				storePathHash: '0123456789abcdfghijklmnpqrsvwxyz'
+			}
+		]);
+		expect(results).toStrictEqual([
+			[
+				{
+					label: 'Store path hash',
+					value: '0123456789abcdfghijklmnpqrsvwxyz'
+				},
+				{ label: 'Deleted', value: 'yes' },
+				{ label: 'NAR', value: 'retained (still referenced)' }
+			]
+		]);
+	});
+
+	it('rejects an argument that is not a store path', async () => {
+		await expect(
+			runDelete('/tmp/not-a-store-path', 't', reporter([]), {
+				deleteStorePath() {
+					throw new Error('client should not be called');
+				}
+			})
+		).rejects.toThrow(InvalidStorePathError);
+	});
+});
+
+function reporter(results: ResultRow[][]): Reporter {
+	return {
+		phase(_label, body) {
+			return Promise.resolve(
+				body({
+					fact() {
+						return;
+					}
+				})
+			);
+		},
+		result(rows) {
+			results.push([...rows]);
+		},
+		warn() {
+			return;
+		},
+		info() {
+			return;
+		}
+	};
+}

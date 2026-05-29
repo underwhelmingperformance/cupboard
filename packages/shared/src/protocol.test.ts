@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	CacheInfo,
+	DeletePathRequest,
 	InvalidNarInfoIntegerFieldError,
 	InvalidNarInfoLineError,
 	InvalidStorePathError,
@@ -175,6 +176,31 @@ describe('StorePath', () => {
 
 	it('rejects invalid store paths with a typed error', () => {
 		expect(() => new StorePath('/tmp/example')).toThrow(InvalidStorePathError);
+	});
+});
+
+describe('DeletePathRequest', () => {
+	it('accepts a valid store path hash', () => {
+		expect(
+			DeletePathRequest.fromFields({
+				storePathHash: '0123456789abcdfghijklmnpqrsvwxyz'
+			}).toFields()
+		).toStrictEqual({ storePathHash: '0123456789abcdfghijklmnpqrsvwxyz' });
+	});
+
+	it.each([
+		{
+			storePathHash: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
+			why: 'invalid alphabet'
+		},
+		{ storePathHash: '0123456789abcdfghijklmnpqrsvwxy', why: 'too short' },
+		{ storePathHash: '0123456789abcdfghijklmnpqrsvwxyzz', why: 'too long' },
+		{ storePathHash: '0123456789ABCDFGHIJKLMNPQRSVWXYZ', why: 'uppercase' },
+		{ storePathHash: '', why: 'empty' }
+	])('rejects a $why hash with a typed error', ({ storePathHash }) => {
+		expect(() => DeletePathRequest.fromFields({ storePathHash })).toThrow(
+			InvalidStorePathHashError
+		);
 	});
 });
 

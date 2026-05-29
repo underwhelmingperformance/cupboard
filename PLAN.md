@@ -459,31 +459,34 @@ cache.
 
 ### Garbage collection and admin
 
-Retention roots are the gating prerequisite for everything below: without them,
-GC against committed narinfo rows would happily delete anything still reachable
-through substitution, since the cache has no inherent concept of "in use".
+Retention roots are the gating prerequisite for _automatic_ reachability GC:
+without them, GC against committed narinfo rows would happily delete anything
+still reachable through substitution, since the cache has no inherent concept of
+"in use". Explicit single-path deletion (an admin naming an exact path) is not
+gated by retention roots and is implemented first.
 
-- [ ] Define explicit retention roots before deleting committed store paths.
-- [ ] Delete a store path or clear old entries.
+- [ ] Define explicit retention roots before automatic reachability GC.
+- [x] Delete a specific store path (explicit admin `delete`, edge-safe).
+      Clearing old entries automatically is retention-based and stays below.
 - [ ] Optional retention period for cold paths.
 - [ ] Retention policies per cache or name prefix.
 - [ ] Repair/check command to compare metadata against R2.
 - [ ] Queue-based background verification.
-- [ ] Edge-safe deletion mechanism for committed content. narinfo is edge-cached
-      with a max-age, and `caches.default.delete` only purges the current colo,
-      so a deleted narinfo can be served from a warm edge until its TTL expires.
-      Deleting committed content must not leave a cached narinfo pointing at a
-      deleted NAR:
-  - [ ] One narinfo cache TTL constant; derive the GC grace from it
+- Edge-safe deletion mechanism for committed content. narinfo is edge-cached
+  with a max-age, and `caches.default.delete` only purges the current colo, so a
+  deleted narinfo can be served from a warm edge until its TTL expires. Deleting
+  committed content must not leave a cached narinfo pointing at a deleted NAR:
+  - [x] One narinfo cache TTL constant; derive the GC grace from it
         (`grace = ttl + margin`) so the `Cache-Control` max-age and the grace
         cannot drift apart.
-  - [ ] On narinfo removal, delete the DB row first, then the
-        `narinfo/<storePathHash>` R2 object, best-effort `caches.default.delete`
-        in the current colo, and enqueue the NAR for deletion no earlier than
-        `now + grace`, only if no other narinfo references that NAR hash.
-        Row-first ordering means an interrupted removal leaves only an orphan
-        object, never a row without an object.
-  - [ ] Extend `orphan_blob_deletion` with a `not_before` timestamp (Drizzle
+  - [x] On narinfo removal, delete the `narinfo/<storePathHash>` R2 object and
+        best-effort `caches.default.delete` in the current colo first, then the
+        DB rows, and enqueue the NAR for deletion no earlier than `now + grace`,
+        only if no other narinfo references that NAR hash. **Object-first**
+        while there is no durable narinfo-deletion queue: a crash then leaves a
+        row that re-running the delete completes, never an orphaned still-served
+        object. Row-first becomes safe only once the durable queue below exists.
+  - [x] Extend `orphan_blob_deletion` with a `not_before` timestamp (Drizzle
         migration). The flush deletes a blob only when `now >= not_before` and
         the committed and live-pending checks still pass; abandoned pending
         uploads keep `not_before = now`. `not_before` is monotonic
@@ -492,9 +495,9 @@ through substitution, since the cache has no inherent concept of "in use".
         pulled forward by a later immediate enqueue.
   - [ ] Durable narinfo-deletion queue: in one SQLite transaction delete the
         row, enqueue the object deletion, and enqueue the delayed NAR; GC
-        flushes the queue idempotently. This reconciles orphan narinfo objects
-        (an object with no committed row) regardless of cause, deleting the
-        object and enqueueing its NAR under the same delayed rule.
+        flushes the queue idempotently. This makes removal row-first and
+        crash-safe without the re-run requirement, and reconciles orphan narinfo
+        objects (an object with no committed row) regardless of cause.
 
 ### Token model
 

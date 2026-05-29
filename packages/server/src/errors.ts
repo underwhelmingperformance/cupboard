@@ -23,6 +23,15 @@ export class InvalidUploadMetadataRequestError extends ServerHttpError {
 	}
 }
 
+export class InvalidDeletePathRequestError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(public override readonly cause: ProtocolError) {
+		super(`Invalid delete request: ${cause.message}`);
+		this.name = 'InvalidDeletePathRequestError';
+	}
+}
+
 export class StoredUploadMetadataInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

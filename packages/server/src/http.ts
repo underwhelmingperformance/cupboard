@@ -7,7 +7,14 @@ const textHeaders = {
 	'x-content-type-options': 'nosniff'
 };
 
-export const narInfoCacheControl = 'public, max-age=3600';
+export const narInfoCacheTtlSeconds = 3600;
+
+export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}`;
+
+// A deleted narinfo can still be served from a warm edge for up to its TTL, so a
+// NAR it points at must outlive any such cached copy. The grace adds a margin
+// over the TTL for edge propagation and clock skew.
+export const orphanBlobDeletionGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
 export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
