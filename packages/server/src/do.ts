@@ -196,8 +196,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					continue;
 				}
 
-				this.clearNarInfo(existingNarInfo.storePathHash);
-				this.clearNarBlob(existingNarInfo.narHash);
+				await this.removeStaleNarInfo(
+					existingNarInfo,
+					new URL(request.url).origin
+				);
 			}
 
 			await this.flushQueuedBlobDeletion(metadata.r2Key);
@@ -730,6 +732,32 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.delete(schema.narInfos)
 			.where(eq(schema.narInfos.storePathHash, storePathHash))
 			.run();
+	}
+
+	private async removeStaleNarInfo(
+		row: typeof schema.narInfos.$inferSelect,
+		origin: string
+	): Promise<void> {
+		// Delete the served copies — the R2 object, then this colo's cached
+		// narinfo — before the DB rows. The rows are the only durable record that
+		// can re-trigger recovery, so clearing them last keeps an interrupted
+		// removal recoverable rather than leaving an orphaned, still-served object.
+		await this.env.BLOBS.delete(narInfoObjectKey(row.storePathHash));
+		await this.purgeCachedNarInfo(`${origin}/${row.storePathHash}.narinfo`);
+
+		this.clearNarInfo(row.storePathHash);
+		this.clearNarBlob(row.narHash);
+	}
+
+	private async purgeCachedNarInfo(url: string): Promise<void> {
+		// Best-effort and colo-local: recovery correctness rests on the R2 delete
+		// and row cleanup, so a failed edge purge must not abort them. Other colos
+		// serve the stale narinfo until its TTL expires.
+		try {
+			await caches.default.delete(url);
+		} catch {
+			/* edge purge is best-effort */
+		}
 	}
 
 	private clearNarBlob(narHash: string): void {

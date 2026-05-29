@@ -17,7 +17,7 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildVersion } from './build-info.generated.ts';
-import { narInfoObjectKey } from './http.ts';
+import { narInfoObjectKey, narObjectKey } from './http.ts';
 import type { CupboardServer } from './worker.ts';
 import worker from './worker.ts';
 
@@ -447,6 +447,54 @@ describe('upload flow', () => {
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 
 		expect(NarInfo.parse(stored.body).narHash).toBe(metadata.narHash);
+	});
+
+	it('clears the orphaned narinfo object when its NAR blob is gone', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId);
+
+		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+
+		const retry = await negotiateUploads(token, [metadata]);
+
+		expectSingleUploadDecision(retry, metadata);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+	});
+
+	it('purges the cached narinfo when recovering from a missing NAR blob', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId);
+
+		const cacheKey = new URL(
+			`/${metadata.storePathHash}.narinfo`,
+			origin
+		).toString();
+		await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
+			Response
+		);
+
+		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+		await negotiateUploads(token, [metadata]);
+
+		await expect(caches.default.match(cacheKey)).resolves.toBeUndefined();
 	});
 
 	it('reuses an existing blob for another store path', async () => {

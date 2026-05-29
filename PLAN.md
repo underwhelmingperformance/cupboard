@@ -305,8 +305,10 @@ commit time and written to R2, so reads never re-render or re-sign.
 
 This relies on one invariant: a narinfo for a given store path hash is
 immutable. Nix derives the hash from the path's inputs and contents, so the same
-hash always maps to the same narinfo. Deletion is therefore the only mutation
-the cache has to handle, which is what the TTL-ordered GC below addresses.
+hash always maps to the same narinfo. Deliberately deleting committed content is
+the only mutation that needs edge-safe handling, and V2 has no path that does
+so, so that machinery moves to V3 alongside reference-graph GC; V2 only cleans
+up the narinfo object when a path's NAR has already vanished (stale recovery).
 
 ### Worker read routing
 
@@ -399,68 +401,31 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
         `committed` and one `already-present`, leaving a single consistent row
         and object.
 
-### TTL-ordered garbage collection
+### narinfo cleanup on stale recovery
 
-narinfo responses are edge-cached with a max-age, and `caches.default.delete`
-only purges the current colo. A deleted narinfo can therefore still be served
-from a warm edge for up to its TTL. To stop a cached narinfo pointing at a
-deleted NAR, NAR deletion is deferred until any edge-cached narinfo for it has
-expired.
+Serving narinfo from R2 means clearing a narinfo row alone is no longer enough:
+the materialised object must go too, or a stale narinfo keeps being served from
+R2 and the edge.
 
-- [ ] Define one narinfo cache TTL constant and derive the GC grace from it
-      (`grace = ttl + margin`). The narinfo `Cache-Control` max-age and the
-      grace come from the same source so they cannot drift apart.
-- [ ] On narinfo removal — the negotiate stale-recovery path at `clearNarInfo`,
-      and future reference-graph GC — delete the DB row first, then the
-      `narinfo/<storePathHash>` R2 object, best-effort `caches.default.delete`
-      in the current colo, and enqueue the NAR blob for deletion no earlier than
-      `now + grace`, only if no other narinfo references that NAR hash.
-      Row-first ordering means an interrupted removal leaves only an orphan
-      object with no row, never a row with no object, mirroring the row-first
-      commit path.
-- [ ] Reconcile orphan narinfo objects. The reconcile is origin-agnostic: it
-      keys off the observable "a `narinfo/<storePathHash>` object exists with no
-      committed row" and deletes the object, whatever produced it. Under
-      row-first commit and row-first removal the one expected source is an
-      interrupted removal; keying off the observable rather than the cause also
-      makes this a backstop if commit ordering is ever violated and an object is
-      left without a row. Because such an object may have been edge-cached while
-      it was live, deleting it enqueues its NAR under the same `now + grace`
-      delayed rule rather than deleting the NAR immediately, unless the
-      interrupted removal already enqueued it. Abandoned-pending GC can trigger
-      this cheaply using the `storePathHash` in the pending row's
-      `metadata_json`; a broader sweep over narinfo objects stays a V3 concern.
-- [ ] Extend the orphan-deletion queue with a `not_before` timestamp. The flush
-      deletes a blob only when `now >= not_before` and the existing committed
-      and live-pending reference checks still pass. Abandoned pending-upload
-      enqueues set `not_before = now` for immediate deletion as today.
-- [ ] `not_before` is monotonic non-decreasing. Because `r2_key` is the primary
-      key, an enqueue that conflicts with an existing row must set
-      `not_before = max(existing, new)`, never earlier. A blob delayed because
-      an edge-cached narinfo may still reference it must not be pulled forward
-      by a later immediate enqueue; neither plain `onConflictDoNothing` nor an
-      overwrite is correct here, so the conflict must take the later timestamp
-      explicitly. This is the part to implement most deliberately.
-- [ ] Generate the Drizzle migration for the schema change.
-- [ ] Selecting which committed paths to delete (retention roots, reachability)
-      stays a V3 concern; this phase provides only the edge-safe deletion
-      mechanism.
-- [ ] Tests:
-  - [ ] Integration: removing a narinfo deletes its R2 object and DB row; its
-        NAR is retained until the grace elapses and then deleted by a later GC
-        pass; a NAR still referenced by another narinfo is never deleted.
-  - [ ] Integration: a delayed (`now + grace`) deletion is not pulled forward by
-        a subsequent immediate enqueue for the same `r2_key`; the later
-        timestamp wins and the blob survives until the grace elapses.
-  - [ ] Integration: an orphan narinfo object with no committed row is deleted
-        by GC, and its NAR is enqueued under the delayed rule rather than
-        removed immediately.
+- [x] When negotiate takes the stale-recovery path (a committed narinfo whose
+      NAR blob has vanished from R2), delete the `narinfo/<storePathHash>`
+      object alongside the row and blob row, and best-effort purge the cached
+      narinfo from the current colo. The purge is colo-local; other colos serve
+      the stale narinfo until its TTL, and the subsequent re-upload
+      re-materialises a byte-identical object. Durable cross-colo edge-safe
+      deletion is a V3 concern.
+- [x] Update the Routes table so narinfo and NAR show as Worker-served.
+- [x] Tests:
+  - [x] Integration: when a committed path's NAR blob is missing, the next
+        negotiate clears the narinfo object and returns an upload decision, and
+        a previously cached narinfo is purged from the current colo.
 
-### Data model and routes
-
-- [ ] When this lands, update the Data Model `orphan_blob_deletion` entry for
-      the new `not_before` column, and the Routes table to show narinfo and NAR
-      served by the Worker rather than the DO.
+Deliberately deleting committed content — TTL-ordered NAR deletion, a durable
+narinfo-deletion queue, and orphan reconcile — is deferred to V3 (see Garbage
+collection and admin). V2 has no path that deletes a NAR a live narinfo points
+at: abandoned-pending GC only removes never-committed blobs, and stale recovery
+fires only once the NAR is already gone, so the edge-safe deletion machinery has
+no trigger until reference-graph GC exists.
 
 ## V3
 
@@ -504,6 +469,32 @@ through substitution, since the cache has no inherent concept of "in use".
 - [ ] Retention policies per cache or name prefix.
 - [ ] Repair/check command to compare metadata against R2.
 - [ ] Queue-based background verification.
+- [ ] Edge-safe deletion mechanism for committed content. narinfo is edge-cached
+      with a max-age, and `caches.default.delete` only purges the current colo,
+      so a deleted narinfo can be served from a warm edge until its TTL expires.
+      Deleting committed content must not leave a cached narinfo pointing at a
+      deleted NAR:
+  - [ ] One narinfo cache TTL constant; derive the GC grace from it
+        (`grace = ttl + margin`) so the `Cache-Control` max-age and the grace
+        cannot drift apart.
+  - [ ] On narinfo removal, delete the DB row first, then the
+        `narinfo/<storePathHash>` R2 object, best-effort `caches.default.delete`
+        in the current colo, and enqueue the NAR for deletion no earlier than
+        `now + grace`, only if no other narinfo references that NAR hash.
+        Row-first ordering means an interrupted removal leaves only an orphan
+        object, never a row without an object.
+  - [ ] Extend `orphan_blob_deletion` with a `not_before` timestamp (Drizzle
+        migration). The flush deletes a blob only when `now >= not_before` and
+        the committed and live-pending checks still pass; abandoned pending
+        uploads keep `not_before = now`. `not_before` is monotonic
+        non-decreasing — an enqueue conflicting on the `r2_key` primary key
+        takes `max(existing, new)`, never earlier, so a delayed blob is never
+        pulled forward by a later immediate enqueue.
+  - [ ] Durable narinfo-deletion queue: in one SQLite transaction delete the
+        row, enqueue the object deletion, and enqueue the delayed NAR; GC
+        flushes the queue idempotently. This reconciles orphan narinfo objects
+        (an object with no committed row) regardless of cause, deleting the
+        object and enqueueing its NAR under the same delayed rule.
 
 ### Token model
 
