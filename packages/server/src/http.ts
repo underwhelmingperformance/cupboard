@@ -1,3 +1,12 @@
+import { StatusCodes } from 'http-status-codes';
+
+import { sha256HexBytes } from './crypto.ts';
+
+const textHeaders = {
+	'cache-control': 'public, max-age=3600',
+	'x-content-type-options': 'nosniff'
+};
+
 export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
 }
@@ -34,4 +43,56 @@ export function isNotModified(request: Request, headers: Headers): boolean {
 	}
 
 	return Date.parse(ifModifiedSince) >= Date.parse(lastModified);
+}
+
+export async function textResponse(
+	request: Request,
+	body: string | TextBody,
+	headers: Record<string, string>
+): Promise<Response> {
+	const responseHeaders = new Headers({ ...textHeaders, ...headers });
+	const metadata =
+		typeof body === 'string'
+			? await textBodyMetadata(body)
+			: await body.metadata();
+	const text = typeof body === 'string' ? body : body.value;
+	responseHeaders.set('etag', metadata.etag);
+	responseHeaders.set('content-length', metadata.contentLength);
+
+	if (isNotModified(request, responseHeaders)) {
+		return new Response(undefined, {
+			status: StatusCodes.NOT_MODIFIED,
+			headers: responseHeaders
+		});
+	}
+
+	return new Response(request.method === 'HEAD' ? undefined : text, {
+		headers: responseHeaders
+	});
+}
+
+interface TextBodyMetadata {
+	readonly etag: string;
+	readonly contentLength: string;
+}
+
+async function textBodyMetadata(body: string): Promise<TextBodyMetadata> {
+	const bytes = new TextEncoder().encode(body);
+
+	return {
+		etag: `"sha256:${await sha256HexBytes(bytes)}"`,
+		contentLength: String(bytes.byteLength)
+	};
+}
+
+export class TextBody {
+	private metadataPromise: Promise<TextBodyMetadata> | undefined;
+
+	constructor(public readonly value: string) {}
+
+	metadata(): Promise<TextBodyMetadata> {
+		this.metadataPromise ??= textBodyMetadata(this.value);
+
+		return this.metadataPromise;
+	}
 }

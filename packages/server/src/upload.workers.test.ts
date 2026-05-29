@@ -55,31 +55,66 @@ describe('upload flow', () => {
 		vi.useRealTimers();
 	});
 
-	it('serves public cache metadata routes', async () => {
-		await expectTextResponse('/nix-cache-info', {
-			body: CacheInfo.default.render(),
-			cacheControl: 'public, max-age=3600',
-			contentType: 'text/x-nix-cache-info; charset=utf-8',
-			method: 'GET'
-		});
-		await expectTextResponse('/nix-cache-info', {
-			body: CacheInfo.default.render(),
-			cacheControl: 'public, max-age=3600',
-			contentType: 'text/x-nix-cache-info; charset=utf-8',
-			method: 'HEAD'
-		});
-		await expectTextResponse('/_health', {
-			body: 'ok\n',
-			cacheControl: 'no-store',
-			contentType: 'text/plain; charset=utf-8',
-			method: 'GET'
-		});
-		await expectTextResponse('/_version', {
-			body: `${buildVersion}\n`,
-			cacheControl: 'no-store',
-			contentType: 'text/plain; charset=utf-8',
-			method: 'GET'
-		});
+	it('serves public cache metadata routes from the Worker', async () => {
+		await expectTextResponse(
+			'/nix-cache-info',
+			{
+				body: CacheInfo.default.render(),
+				cacheControl: 'public, max-age=3600',
+				contentType: 'text/x-nix-cache-info; charset=utf-8',
+				method: 'GET'
+			},
+			readFetch
+		);
+		await expectTextResponse(
+			'/nix-cache-info',
+			{
+				body: CacheInfo.default.render(),
+				cacheControl: 'public, max-age=3600',
+				contentType: 'text/x-nix-cache-info; charset=utf-8',
+				method: 'HEAD'
+			},
+			readFetch
+		);
+		await expectTextResponse(
+			'/_health',
+			{
+				body: 'ok\n',
+				cacheControl: 'no-store',
+				contentType: 'text/plain; charset=utf-8',
+				method: 'GET'
+			},
+			readFetch
+		);
+		await expectTextResponse(
+			'/_version',
+			{
+				body: `${buildVersion}\n`,
+				cacheControl: 'no-store',
+				contentType: 'text/plain; charset=utf-8',
+				method: 'GET'
+			},
+			readFetch
+		);
+	});
+
+	it('serves the public key from the Worker', async () => {
+		const fromDurableObject = await workerFetch('/pubkey');
+		const body = await fromDurableObject.text();
+		const publicKey = body.trimEnd();
+
+		expect(publicKey).not.toBe('');
+
+		await expectTextResponse(
+			'/pubkey',
+			{
+				body: `${publicKey}\n`,
+				cacheControl: 'public, max-age=3600',
+				contentType: 'text/plain; charset=utf-8',
+				method: 'GET'
+			},
+			readFetch
+		);
 	});
 
 	it('initialises once and keeps the signing key stable', async () => {
@@ -890,9 +925,13 @@ async function expectTextResponse(
 		readonly cacheControl: string;
 		readonly contentType: string;
 		readonly method: 'GET' | 'HEAD';
-	}
+	},
+	fetcher: (
+		pathname: string,
+		init?: RequestInit
+	) => Promise<Response> = fetchPath
 ): Promise<void> {
-	const response = await fetchPath(pathname, { method: expected.method });
+	const response = await fetcher(pathname, { method: expected.method });
 	const body = await response.text();
 
 	expect({

@@ -1,5 +1,4 @@
 import {
-	CacheInfo,
 	type CommitResponse,
 	type InitResponse,
 	NarInfo,
@@ -28,12 +27,10 @@ import { StatusCodes } from 'http-status-codes';
 
 import migrations from '../drizzle/migrations.js';
 
-import { buildVersion } from './build-info.generated.ts';
 import {
 	constantTimeEqual,
 	generateSigningKey,
 	sha256Hex,
-	sha256HexBytes,
 	signNixFingerprint
 } from './crypto.ts';
 import * as schema from './db/schema.ts';
@@ -48,7 +45,7 @@ import {
 	UploadedObjectChecksumMissingError,
 	UploadNotPreparedError
 } from './errors.ts';
-import { isNotModified, narObjectKey } from './http.ts';
+import { narObjectKey, TextBody, textResponse } from './http.ts';
 import { R2Presigner } from './presign.ts';
 
 type WidenStringBindings<T> = {
@@ -62,17 +59,9 @@ interface SigningKey {
 	readonly publicKey: string;
 }
 
-const textHeaders = {
-	'cache-control': 'public, max-age=3600',
-	'x-content-type-options': 'nosniff'
-};
-
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<{ Bindings: RuntimeEnv }>();
 	private readonly db: DrizzleSqliteDODatabase<typeof schema>;
-	private readonly cacheInfoBody = new TextBody(CacheInfo.default.render());
-	private readonly healthBody = new TextBody('ok\n');
-	private readonly versionBody = new TextBody(`${buildVersion}\n`);
 	private migrationPromise: Promise<void> | undefined;
 	private presigner: R2Presigner | undefined;
 	private publicKeyBody: TextBody | undefined;
@@ -92,12 +81,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private routes(): void {
-		this.app.on(['GET', 'HEAD'], '/nix-cache-info', (context) =>
-			textResponse(context.req.raw, this.cacheInfoBody, {
-				'content-type': 'text/x-nix-cache-info; charset=utf-8'
-			})
-		);
-
 		this.app.on(['GET', 'HEAD'], '/pubkey', async (context) => {
 			const key = await this.signingKey();
 
@@ -107,20 +90,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				'content-type': 'text/plain; charset=utf-8'
 			});
 		});
-
-		this.app.on(['GET', 'HEAD'], '/_health', (context) =>
-			textResponse(context.req.raw, this.healthBody, {
-				'content-type': 'text/plain; charset=utf-8',
-				'cache-control': 'no-store'
-			})
-		);
-
-		this.app.on(['GET', 'HEAD'], '/_version', (context) =>
-			textResponse(context.req.raw, this.versionBody, {
-				'content-type': 'text/plain; charset=utf-8',
-				'cache-control': 'no-store'
-			})
-		);
 
 		this.app.get('/_stats', async (context) => {
 			if (!(await this.isTokenAuthorised(context.req.raw))) {
@@ -1019,56 +988,4 @@ function parseNarInfoName(name: string): string | undefined {
 	}
 
 	return storePathHash;
-}
-
-async function textResponse(
-	request: Request,
-	body: string | TextBody,
-	headers: Record<string, string>
-): Promise<Response> {
-	const responseHeaders = new Headers({ ...textHeaders, ...headers });
-	const metadata =
-		typeof body === 'string'
-			? await textBodyMetadata(body)
-			: await body.metadata();
-	const text = typeof body === 'string' ? body : body.value;
-	responseHeaders.set('etag', metadata.etag);
-	responseHeaders.set('content-length', metadata.contentLength);
-
-	if (isNotModified(request, responseHeaders)) {
-		return new Response(undefined, {
-			status: StatusCodes.NOT_MODIFIED,
-			headers: responseHeaders
-		});
-	}
-
-	return new Response(request.method === 'HEAD' ? undefined : text, {
-		headers: responseHeaders
-	});
-}
-
-interface TextBodyMetadata {
-	readonly etag: string;
-	readonly contentLength: string;
-}
-
-async function textBodyMetadata(body: string): Promise<TextBodyMetadata> {
-	const bytes = new TextEncoder().encode(body);
-
-	return {
-		etag: `"sha256:${await sha256HexBytes(bytes)}"`,
-		contentLength: String(bytes.byteLength)
-	};
-}
-
-class TextBody {
-	private metadataPromise: Promise<TextBodyMetadata> | undefined;
-
-	constructor(public readonly value: string) {}
-
-	metadata(): Promise<TextBodyMetadata> {
-		this.metadataPromise ??= textBodyMetadata(this.value);
-
-		return this.metadataPromise;
-	}
 }

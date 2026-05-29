@@ -315,7 +315,7 @@ the cache has to handle, which is what the TTL-ordered GC below addresses.
 - [ ] Remove the `/nar/:narName` and `/:narInfoName` routes, and the
       `narResponse` and `narInfoResponse` methods, from the DO once the Worker
       owns them.
-- [ ] Serve the static read routes (`/nix-cache-info`, `/_health`, `/_version`,
+- [x] Serve the static read routes (`/nix-cache-info`, `/_health`, `/_version`,
       `/pubkey`) from the Worker. `/pubkey` reads the active key from the DO
       once and caches it. This assumes a stable signing key; key rotation is a
       V3 concern, so revisit Worker-side pubkey caching when rotation lands

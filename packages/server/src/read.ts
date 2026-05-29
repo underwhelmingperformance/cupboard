@@ -1,8 +1,21 @@
+import { CacheInfo } from '@cupboard/shared';
 import { StatusCodes } from 'http-status-codes';
 
-import { isNotModified, narObjectKey, parseNarName } from './http.ts';
+import { buildVersion } from './build-info.generated.ts';
+import { cupboardServer } from './durable-object.ts';
+import {
+	isNotModified,
+	narObjectKey,
+	parseNarName,
+	TextBody,
+	textResponse
+} from './http.ts';
 
 const narPrefix = '/nar/';
+
+const cacheInfoBody = new TextBody(CacheInfo.default.render());
+const healthBody = new TextBody('ok\n');
+const versionBody = new TextBody(`${buildVersion}\n`);
 
 export async function handleRead(
 	request: Request,
@@ -25,15 +38,31 @@ export async function handleRead(
 		return narResponse(request, env, ctx, narName);
 	}
 
-	return undefined;
-}
-
-function safeDecode(value: string): string | undefined {
-	try {
-		return decodeURIComponent(value);
-	} catch {
-		return undefined;
+	if (pathname === '/nix-cache-info') {
+		return textResponse(request, cacheInfoBody, {
+			'content-type': 'text/x-nix-cache-info; charset=utf-8'
+		});
 	}
+
+	if (pathname === '/_health') {
+		return textResponse(request, healthBody, {
+			'content-type': 'text/plain; charset=utf-8',
+			'cache-control': 'no-store'
+		});
+	}
+
+	if (pathname === '/_version') {
+		return textResponse(request, versionBody, {
+			'content-type': 'text/plain; charset=utf-8',
+			'cache-control': 'no-store'
+		});
+	}
+
+	if (pathname === '/pubkey') {
+		return pubkeyResponse(request, env, ctx);
+	}
+
+	return undefined;
 }
 
 async function narResponse(
@@ -83,6 +112,29 @@ async function narResponse(
 	return response;
 }
 
+async function pubkeyResponse(
+	request: Request,
+	env: Env,
+	ctx: ExecutionContext
+): Promise<Response> {
+	const cache = caches.default;
+	const cached = await cache.match(request);
+
+	if (cached !== undefined) {
+		return isNotModified(request, cached.headers)
+			? notModified(cached.headers)
+			: cached;
+	}
+
+	const response = await cupboardServer(env).fetch(request);
+
+	if (request.method === 'GET' && response.ok) {
+		ctx.waitUntil(cache.put(request, response.clone()));
+	}
+
+	return response;
+}
+
 function conditionalOrBody(request: Request, object: R2Object): Response {
 	const headers = narHeaders(object);
 
@@ -114,4 +166,12 @@ function notModified(headers: Headers): Response {
 
 function notFound(): Response {
 	return new Response('Not found\n', { status: StatusCodes.NOT_FOUND });
+}
+
+function safeDecode(value: string): string | undefined {
+	try {
+		return decodeURIComponent(value);
+	} catch {
+		return undefined;
+	}
 }

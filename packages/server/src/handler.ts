@@ -1,14 +1,6 @@
-import type { CupboardServer } from './do.ts';
+import { cupboardServer } from './durable-object.ts';
 import { CronGarbageCollectionFailedError } from './errors.ts';
 import { handleRead } from './read.ts';
-
-const durableObjectName = 'v1';
-
-function cupboardServer(env: Env): DurableObjectStub<CupboardServer> {
-	const id = env.CUPBOARD_DO.idFromName(durableObjectName);
-
-	return env.CUPBOARD_DO.get(id);
-}
 
 export default {
 	async fetch(request, env, ctx) {
