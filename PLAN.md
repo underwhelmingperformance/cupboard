@@ -84,7 +84,7 @@ successfully substitute that path from the Worker.
 ### Client
 
 - [ ] Configure against a personal Worker URL and write token.
-- [ ] Compute NAR hash and size locally while streaming the same NAR into zstd,
+- [x] Compute NAR hash and size locally while streaming the same NAR into zstd,
       so each path is read once.
 - [ ] Upload only missing blobs.
 - [ ] Show progress through a `Reporter` abstraction with two renderers,
@@ -101,7 +101,7 @@ successfully substitute that path from the Worker.
   - [ ] `substituters = ...`
   - [ ] `trusted-public-keys = ...`
 - [ ] Tests:
-  - [ ] Unit: locally-computed NAR hash and size match what `nix-store --dump`
+  - [x] Unit: locally-computed NAR hash and size match what `nix-store --dump`
         produces (run against fixture paths); substituter config rendering.
   - [ ] E2E: push a fixture, configure a clean tmp Nix store with the
         substituter URL and public key, substitute the path back, assert the
@@ -166,7 +166,7 @@ successfully substitute that path from the Worker.
       2, picking up `*.workers.test.ts` only so the unit run is not slowed by
       Worker boot.
 - [x] `fast-check` added as a dev dependency for property tests.
-- [ ] Fixture generation script that runs `nix-store --dump` against a small set
+- [x] Fixture generation script that runs `nix-store --dump` against a small set
       of synthetic store paths; outputs committed under `tests/fixtures/`.
 - [ ] E2E harness under `tests/e2e/`: clean-env Miniflare Worker runner, local
       HTTP server for Nix, scoped `nix` invocation builder, and localhost URL
@@ -271,7 +271,7 @@ Nix configuration. Enforced by the harness, not by convention.
 
 ### Fixtures
 
-- [ ] Generate a small synthetic store path once with `nix-store --dump`. Commit
+- [x] Generate a small synthetic store path once with `nix-store --dump`. Commit
       it as a binary fixture under `tests/fixtures/`.
 - [ ] Unit tests parse them; integration and E2E tests push and re-fetch them.
 

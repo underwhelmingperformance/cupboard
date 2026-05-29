@@ -35,7 +35,8 @@
 		"fix": "pnpm run '/^fix:.*/'",
 		"fix:deps": "syncpack format",
 		"fix:format": "prettier --write .",
-		"fix:lint": "eslint . --fix"
+		"fix:lint": "eslint . --fix",
+		"fixtures:generate": "node tests/fixtures/generate.ts"
 	},
 	"type": "module"
 }
