@@ -1,4 +1,9 @@
-import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import {
+	integer,
+	primaryKey,
+	sqliteTable,
+	text
+} from 'drizzle-orm/sqlite-core';
 
 export const narInfos = sqliteTable('narinfo', {
 	storePathHash: text('store_path_hash').primaryKey(),
@@ -39,6 +44,17 @@ export const orphanBlobDeletions = sqliteTable('orphan_blob_deletion', {
 	notBefore: text('not_before').notNull().default('1970-01-01T00:00:00.000Z'),
 	createdAt: text('created_at').notNull()
 });
+
+export const narInfoDeletions = sqliteTable(
+	'narinfo_deletion',
+	{
+		storePathHash: text('store_path_hash').notNull(),
+		narHash: text('nar_hash').notNull(),
+		generation: integer('generation').notNull().default(0),
+		createdAt: text('created_at').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.storePathHash, table.generation] })]
+);
 
 export const tokens = sqliteTable('token', {
 	id: text('id').primaryKey(),

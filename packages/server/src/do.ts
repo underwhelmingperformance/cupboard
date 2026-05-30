@@ -466,6 +466,130 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return true;
 	}
 
+	private enqueueNarInfoDeletion(
+		handle: SchemaWriter,
+		storePathHash: string,
+		narHash: string,
+		now: string,
+		generation = 0
+	): void {
+		// The R2 key is deterministic, but each captured narinfo version may own a
+		// distinct reference edge once generations are introduced later in the stack.
+		handle
+			.insert(schema.narInfoDeletions)
+			.values({ storePathHash, narHash, generation, createdAt: now })
+			.onConflictDoNothing()
+			.run();
+	}
+
+	private clearQueuedNarInfoDeletion(
+		storePathHash: string,
+		generation: number
+	): void {
+		this.db
+			.delete(schema.narInfoDeletions)
+			.where(
+				and(
+					eq(schema.narInfoDeletions.storePathHash, storePathHash),
+					eq(schema.narInfoDeletions.generation, generation)
+				)
+			)
+			.run();
+	}
+
+	private narHashUnreferenced(narHash: string): boolean {
+		return (
+			this.db
+				.select()
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.narHash, narHash))
+				.get() === undefined
+		);
+	}
+
+	private async flushQueuedNarInfoDeletions(origin?: string): Promise<number> {
+		const queued = this.db.select().from(schema.narInfoDeletions).all();
+		let deleted = 0;
+
+		for (const entry of queued) {
+			const { objectDeleted } = await this.deleteQueuedNarInfo(
+				entry.storePathHash,
+				entry.generation,
+				origin
+			);
+
+			if (objectDeleted) {
+				deleted += 1;
+			}
+		}
+
+		return deleted;
+	}
+
+	private async deleteQueuedNarInfo(
+		storePathHash: string,
+		generation: number,
+		origin?: string
+	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
+		// Must run inside a DO critical section: the row check, object delete, NAR
+		// scheduling and queue clear span awaits and must not interleave with a
+		// commit or another flush.
+		const queued = this.db
+			.select()
+			.from(schema.narInfoDeletions)
+			.where(
+				and(
+					eq(schema.narInfoDeletions.storePathHash, storePathHash),
+					eq(schema.narInfoDeletions.generation, generation)
+				)
+			)
+			.get();
+
+		if (queued === undefined) {
+			return { objectDeleted: false, narScheduledForDeletion: false };
+		}
+
+		// The row is truth: a re-committed path owns a live object again, so drop
+		// the stale cleanup rather than delete the new object.
+		const reCommitted =
+			this.db
+				.select()
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.get() !== undefined;
+
+		if (reCommitted) {
+			this.clearQueuedNarInfoDeletion(storePathHash, generation);
+			return { objectDeleted: false, narScheduledForDeletion: false };
+		}
+
+		await this.env.BLOBS.delete(narInfoObjectKey(storePathHash));
+
+		if (origin !== undefined) {
+			await this.purgeCachedNarInfo(`${origin}/${storePathHash}.narinfo`);
+		}
+
+		// The object is gone, so the NAR grace can start now. Re-check references:
+		// a path may have committed the same NAR since the row was removed, so only
+		// retire the blob when it is genuinely unreferenced.
+		const narScheduledForDeletion = this.narHashUnreferenced(queued.narHash);
+
+		if (narScheduledForDeletion) {
+			const now = new Date();
+			this.clearNarBlob(queued.narHash);
+			this.enqueueOrphanBlobDeletion(
+				this.db,
+				narObjectKey(queued.narHash),
+				new Date(now.getTime() + orphanBlobDeletionGraceMs).toISOString(),
+				now.toISOString()
+			);
+		}
+
+		this.clearQueuedNarInfoDeletion(storePathHash, generation);
+
+		return { objectDeleted: true, narScheduledForDeletion };
+	}
+
 	private hasCommittedBlob(r2Key: string): boolean {
 		return (
 			this.db
@@ -699,6 +823,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			return {
 				pendingUploadsDeleted: expiredUploads.length,
+				narInfosDeleted: await this.flushQueuedNarInfoDeletions(),
 				blobsDeleted: await this.flushQueuedBlobDeletions(now)
 			};
 		});
@@ -793,28 +918,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.run();
 	}
 
-	private clearNarInfo(storePathHash: string): void {
-		this.db
-			.delete(schema.narInfos)
-			.where(eq(schema.narInfos.storePathHash, storePathHash))
-			.run();
-	}
-
 	private async removeStaleNarInfo(
 		row: typeof schema.narInfos.$inferSelect,
 		origin: string
 	): Promise<void> {
-		// One critical section, as for deleteStorePath: the object/cache delete and
-		// the row clears must be atomic against the heal paths. Object-first within
-		// it, since the rows are the only durable record that can re-trigger
-		// recovery, so clearing them last keeps an interrupted removal recoverable
-		// rather than leaving an orphaned, still-served object.
+		// Row-first, as for deleteStorePath: the transaction removes the row and
+		// queues the narinfo object cleanup, so an interrupted recovery cannot
+		// resurrect the path through a heal. The object delete that follows is
+		// opportunistic and GC finishes anything left in the queue.
 		await this.ctx.blockConcurrencyWhile(async () => {
-			await this.env.BLOBS.delete(narInfoObjectKey(row.storePathHash));
-			await this.purgeCachedNarInfo(`${origin}/${row.storePathHash}.narinfo`);
+			const now = new Date().toISOString();
 
-			this.clearNarInfo(row.storePathHash);
-			this.clearNarBlob(row.narHash);
+			this.db.transaction((tx) => {
+				tx.delete(schema.narInfos)
+					.where(eq(schema.narInfos.storePathHash, row.storePathHash))
+					.run();
+				this.enqueueNarInfoDeletion(tx, row.storePathHash, row.narHash, now);
+			});
+
+			try {
+				await this.deleteQueuedNarInfo(row.storePathHash, 0, origin);
+			} catch {
+				// the durable queue row remains for GC to retry
+			}
 		});
 	}
 
@@ -833,9 +959,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		storePathHash: string,
 		origin: string
 	): Promise<DeletePathResponse> {
-		// One critical section: the object/cache delete and the row transaction
-		// must be atomic against the heal paths, or a concurrent negotiate/commit
-		// could re-materialise the object between them and orphan it.
+		// One critical section so the row transaction and the opportunistic object
+		// cleanup cannot interleave with a heal that would re-materialise the
+		// object.
 		return this.ctx.blockConcurrencyWhile(async () => {
 			const row = this.db
 				.select()
@@ -851,47 +977,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				};
 			}
 
-			// Object-first: stop serving (R2 object, then this colo's cache) before
-			// touching the DB. A crash leaves the row, so re-running the delete is
-			// idempotent and completes it; the NAR is never scheduled until the row
-			// and blob are atomically gone.
-			await this.env.BLOBS.delete(narInfoObjectKey(storePathHash));
-			await this.purgeCachedNarInfo(`${origin}/${storePathHash}.narinfo`);
+			// Row-first: once this transaction commits the path is logically gone.
+			// The narinfo object cleanup, and with it the NAR scheduling, runs
+			// afterwards and is best-effort; the grace clock for the NAR only starts
+			// once the object is actually removed.
+			const now = new Date().toISOString();
 
-			const now = new Date();
-			const nowIso = now.toISOString();
-			const notBefore = new Date(
-				now.getTime() + orphanBlobDeletionGraceMs
-			).toISOString();
-
-			const narScheduledForDeletion = this.db.transaction((tx) => {
+			this.db.transaction((tx) => {
 				tx.delete(schema.narInfos)
 					.where(eq(schema.narInfos.storePathHash, storePathHash))
 					.run();
-
-				const stillReferenced =
-					tx
-						.select()
-						.from(schema.narInfos)
-						.where(eq(schema.narInfos.narHash, row.narHash))
-						.get() !== undefined;
-
-				if (stillReferenced) {
-					return false;
-				}
-
-				tx.delete(schema.narBlobs)
-					.where(eq(schema.narBlobs.narHash, row.narHash))
-					.run();
-				this.enqueueOrphanBlobDeletion(
-					tx,
-					narObjectKey(row.narHash),
-					notBefore,
-					nowIso
-				);
-
-				return true;
+				this.enqueueNarInfoDeletion(tx, storePathHash, row.narHash, now);
 			});
+
+			let narScheduledForDeletion = false;
+
+			try {
+				({ narScheduledForDeletion } = await this.deleteQueuedNarInfo(
+					storePathHash,
+					0,
+					origin
+				));
+			} catch {
+				// the durable queue row remains for GC to retry
+			}
 
 			return { storePathHash, deleted: true, narScheduledForDeletion };
 		});

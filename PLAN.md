@@ -205,7 +205,9 @@ One DO SQLite database per deployment.
   - `id` (PK), `nar_hash`, `r2_key`, `expected_size`, `metadata_json`,
     `created_at`, `expires_at`.
 - `orphan_blob_deletion` — durable queue for deleting abandoned R2 objects.
-  - `r2_key` (PK), `created_at`.
+  - `r2_key` (PK), `not_before`, `created_at`.
+- `narinfo_deletion` — durable queue for finishing interrupted narinfo removals.
+  - `store_path_hash` (PK), `nar_hash`, `created_at`.
 - `token` — write and admin tokens.
   - `id` (PK), `hash`, `scope`, `created_at`.
 
@@ -214,19 +216,20 @@ One DO SQLite database per deployment.
 Reads (the first six rows) are served by the Worker from R2 and the Cache API;
 the Durable Object handles only the write, admin, and GC routes.
 
-| Method    | Path                   | Auth   | Notes                                      |
-| --------- | ---------------------- | ------ | ------------------------------------------ |
-| GET, HEAD | `/nix-cache-info`      | public | Worker; `text/x-nix-cache-info`.           |
-| GET, HEAD | `/<hash>.narinfo`      | public | Worker, from the R2 object + edge cache.   |
-| GET, HEAD | `/nar/<hash>.nar.zst`  | public | Worker, from R2 + edge cache.              |
-| GET       | `/pubkey`              | public | Worker, cached from the DO.                |
-| POST      | `/upload/negotiate`    | write  | DO. Returns skip, commit, or upload plans. |
-| POST      | `/upload/<id>/prepare` | write  | DO. Returns R2 PUT URL and headers.        |
-| PUT       | (presigned R2 URL)     | URL    | Client uploads blob directly to R2.        |
-| POST      | `/upload/<id>/commit`  | write  | DO. Writes the narinfo row and R2 object.  |
-| GET       | `/_health`             | public | Worker. Liveness.                          |
-| GET       | `/_version`            | public | Worker. Git SHA, `+dirty` when dirty.      |
-| GET       | `/_stats`              | admin  | DO. Cache size and object count.           |
+| Method    | Path                   | Auth   | Notes                                       |
+| --------- | ---------------------- | ------ | ------------------------------------------- |
+| GET, HEAD | `/nix-cache-info`      | public | Worker; `text/x-nix-cache-info`.            |
+| GET, HEAD | `/<hash>.narinfo`      | public | Worker, from the R2 object + edge cache.    |
+| GET, HEAD | `/nar/<hash>.nar.zst`  | public | Worker, from R2 + edge cache.               |
+| GET       | `/pubkey`              | public | Worker, cached from the DO.                 |
+| POST      | `/upload/negotiate`    | write  | DO. Returns skip, commit, or upload plans.  |
+| POST      | `/upload/<id>/prepare` | write  | DO. Returns R2 PUT URL and headers.         |
+| PUT       | (presigned R2 URL)     | URL    | Client uploads blob directly to R2.         |
+| POST      | `/upload/<id>/commit`  | write  | DO. Writes the narinfo row and R2 object.   |
+| GET       | `/_health`             | public | Worker. Liveness.                           |
+| GET       | `/_version`            | public | Worker. Git SHA, `+dirty` when dirty.       |
+| GET       | `/_stats`              | admin  | DO. Cache size and object count.            |
+| POST      | `/admin/delete`        | admin  | DO. Deletes one store path; defers its NAR. |
 
 ## Testing
 
@@ -479,13 +482,15 @@ gated by retention roots and is implemented first.
   - [x] One narinfo cache TTL constant; derive the GC grace from it
         (`grace = ttl + margin`) so the `Cache-Control` max-age and the grace
         cannot drift apart.
-  - [x] On narinfo removal, delete the `narinfo/<storePathHash>` R2 object and
-        best-effort `caches.default.delete` in the current colo first, then the
-        DB rows, and enqueue the NAR for deletion no earlier than `now + grace`,
-        only if no other narinfo references that NAR hash. **Object-first**
-        while there is no durable narinfo-deletion queue: a crash then leaves a
-        row that re-running the delete completes, never an orphaned still-served
-        object. Row-first becomes safe only once the durable queue below exists.
+  - [x] On narinfo removal, delete the narinfo row in the transaction that
+        enqueues its object cleanup, then best-effort delete the
+        `narinfo/<storePathHash>` R2 object and `caches.default.delete` in the
+        current colo. Enqueue the NAR for deletion no earlier than
+        `now + grace`, only if no other narinfo references that NAR hash, and
+        only once the narinfo object has actually been removed, so the grace
+        clock starts from object removal. Removal is **row-first**: the narinfo
+        row is the source of truth, so a leftover R2 object can never bring the
+        path back to life.
   - [x] Extend `orphan_blob_deletion` with a `not_before` timestamp (Drizzle
         migration). The flush deletes a blob only when `now >= not_before` and
         the committed and live-pending checks still pass; abandoned pending
@@ -493,11 +498,13 @@ gated by retention roots and is implemented first.
         non-decreasing — an enqueue conflicting on the `r2_key` primary key
         takes `max(existing, new)`, never earlier, so a delayed blob is never
         pulled forward by a later immediate enqueue.
-  - [ ] Durable narinfo-deletion queue: in one SQLite transaction delete the
-        row, enqueue the object deletion, and enqueue the delayed NAR; GC
-        flushes the queue idempotently. This makes removal row-first and
-        crash-safe without the re-run requirement, and reconciles orphan narinfo
-        objects (an object with no committed row) regardless of cause.
+  - [x] Durable narinfo-deletion queue (`narinfo_deletion`, keyed by store path
+        hash): the removal transaction deletes the narinfo row and enqueues the
+        object cleanup. An opportunistic flush deletes the R2 object and, only
+        on success, schedules the now-unreferenced NAR (re-checking references
+        at that point). GC flushes the queue idempotently, finishing any
+        interrupted removal without the re-run requirement. A re-committed row
+        drops its stale queue entry instead of deleting the now-live object.
 
 ### Token model
 

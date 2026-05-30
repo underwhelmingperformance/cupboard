@@ -22,6 +22,13 @@
 			"when": 1780094024085,
 			"tag": "0002_clumsy_glorian",
 			"breakpoints": true
+		},
+		{
+			"idx": 3,
+			"version": "6",
+			"when": 1780139140131,
+			"tag": "0003_living_rhino",
+			"breakpoints": true
 		}
 	]
 }

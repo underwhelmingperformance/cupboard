@@ -828,11 +828,13 @@ describe('upload flow', () => {
 			await response.json<{
 				readonly ok: true;
 				readonly pendingUploadsDeleted: number;
+				readonly narInfosDeleted: number;
 				readonly blobsDeleted: number;
 			}>()
 		).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
+			narInfosDeleted: 0,
 			blobsDeleted: 1
 		});
 
@@ -918,11 +920,13 @@ describe('upload flow', () => {
 			await response.json<{
 				readonly ok: true;
 				readonly pendingUploadsDeleted: number;
+				readonly narInfosDeleted: number;
 				readonly blobsDeleted: number;
 			}>()
 		).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
+			narInfosDeleted: 0,
 			blobsDeleted: 0
 		});
 
@@ -1113,6 +1117,97 @@ describe('upload flow', () => {
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
+
+	it('recovers an interrupted narinfo deletion through GC', async () => {
+		vi.setSystemTime(deleteTestBase);
+
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, metadata);
+
+		const deleteSpy = vi
+			.spyOn(env.BLOBS, 'delete')
+			.mockRejectedValueOnce(new Error('simulated R2 outage'));
+
+		const deleted = await deletePath(token, metadata.storePathHash);
+
+		expect(deleted).toStrictEqual({
+			storePathHash: metadata.storePathHash,
+			deleted: true,
+			narScheduledForDeletion: false
+		});
+
+		deleteSpy.mockRestore();
+
+		// The row is gone, so the path is logically deleted, but the opportunistic
+		// object cleanup failed: the narinfo object and its NAR both survive, and
+		// the NAR is not scheduled yet.
+		await expectStats(token, {
+			storePaths: 0,
+			narBlobs: 1,
+			pendingUploads: 0,
+			totalFileSize: narBytes.byteLength
+		});
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.not.toBeNull();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.not.toBeNull();
+
+		const recovered = await runGcResult();
+
+		// GC flushed the durable queue: the narinfo object is gone and the NAR is
+		// only now scheduled, with the grace starting from this removal.
+		expect(recovered.narInfosDeleted).toBe(1);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.not.toBeNull();
+
+		vi.setSystemTime(afterGrace());
+		await runGc();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.toBeNull();
+	});
+
+	it('retains a re-pushed path left dangling by an interrupted deletion', async () => {
+		vi.setSystemTime(deleteTestBase);
+
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, metadata);
+
+		const deleteSpy = vi
+			.spyOn(env.BLOBS, 'delete')
+			.mockRejectedValueOnce(new Error('simulated R2 outage'));
+		await deletePath(token, metadata.storePathHash);
+		deleteSpy.mockRestore();
+
+		// The path is committed again before GC reaches the dangling queue entry.
+		// Its blob and NAR survived the failed cleanup, so the commit reuses them.
+		await commitSharedPath(token, metadata);
+
+		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		expect(served.status).toBe(StatusCodes.OK);
+
+		const collected = await runGcResult();
+
+		// The re-committed row owns a live object, so the stale entry is dropped
+		// without deleting the object.
+		expect(collected.narInfosDeleted).toBe(0);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.not.toBeNull();
+
+		const stillServed = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		expect(stillServed.status).toBe(StatusCodes.OK);
+	});
 });
 
 async function commitPath(
@@ -1158,6 +1253,21 @@ async function runGc(): Promise<void> {
 	const response = await fetchPath('/_cron/gc', { method: 'POST' });
 
 	expect(response.status).toBe(StatusCodes.OK);
+}
+
+interface GcResult {
+	readonly ok: true;
+	readonly pendingUploadsDeleted: number;
+	readonly narInfosDeleted: number;
+	readonly blobsDeleted: number;
+}
+
+async function runGcResult(): Promise<GcResult> {
+	const response = await fetchPath('/_cron/gc', { method: 'POST' });
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return response.json<GcResult>();
 }
 
 function afterGrace(): Date {
