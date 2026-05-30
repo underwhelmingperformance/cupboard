@@ -4,6 +4,10 @@ import pathModule from 'node:path';
 
 import {
 	type CommitResponse,
+	RootSetRequest,
+	type RootSetRequestFields,
+	type RootSetResponse,
+	type RootSummary,
 	StorePath,
 	type UploadDecision,
 	type UploadNegotiateRequest,
@@ -31,12 +35,20 @@ import {
 	prepareStorePathMetadata,
 	prepareStorePathNegotiation
 } from './nix-store.ts';
-import { formatBytes, formatCount, type Reporter } from './reporter.ts';
+import {
+	formatBytes,
+	formatCount,
+	type PhaseContext,
+	type Reporter,
+	type ResultRow
+} from './reporter.ts';
 
 export interface PushDependencies {
 	readonly nixStore?: NixStoreClient;
 	readonly client: PushClient;
 	readonly token: string;
+	readonly root?: string;
+	readonly ttlSeconds?: number;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
 	readonly readCompressedNar?: ReadCompressedNar;
@@ -56,6 +68,10 @@ export interface PushClient {
 	): Promise<UploadPrepareResponse>;
 	uploadBlob(upload: PushBlobUpload): Promise<void>;
 	commit(token: string, uploadId: string): Promise<CommitResponse>;
+	setRoot(
+		token: string,
+		fields: RootSetRequestFields
+	): Promise<RootSetResponse>;
 }
 
 export type PushNarArchive =
@@ -95,6 +111,13 @@ export async function runPush(
 	reporter: Reporter,
 	dependencies: PushDependencies
 ): Promise<void> {
+	// Validate the retention before any upload work: an invalid root name or
+	// target must fail fast, not after NARs are built and committed.
+	const retention = planRetention(
+		paths,
+		dependencies.root,
+		dependencies.ttlSeconds
+	);
 	const nixStore = dependencies.nixStore ?? new NixDaemonStoreClient();
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
@@ -110,6 +133,7 @@ export async function runPush(
 	try {
 		await runPushWithTemporaryDirectory(paths, reporter, {
 			...dependencies,
+			retention,
 			nixStore,
 			createNarArchive,
 			compressNar,
@@ -125,6 +149,7 @@ interface PushRuntimeDependencies {
 	readonly nixStore: NixStoreClient;
 	readonly client: PushClient;
 	readonly token: string;
+	readonly retention: RetentionPlan;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly readCompressedNar: ReadCompressedNar;
@@ -140,6 +165,7 @@ async function runPushWithTemporaryDirectory(
 		nixStore,
 		client,
 		token,
+		retention,
 		createNarArchive,
 		compressNar,
 		readCompressedNar
@@ -230,6 +256,13 @@ async function runPushWithTemporaryDirectory(
 
 		return responses;
 	});
+	const retentionRows = await reporter.phase(
+		retention.kind === 'pins'
+			? 'Pinning pushed paths'
+			: 'Updating retention root',
+		(ctx) => recordRetention(retention, { client, token }, ctx)
+	);
+
 	const uploadedPaths = negotiation.uploads.filter((decision) =>
 		needsUpload(decision)
 	).length;
@@ -246,8 +279,106 @@ async function runPushWithTemporaryDirectory(
 				negotiation.uploads.filter((decision) => isSkip(decision)).length
 			)
 		},
-		{ label: 'Uploaded', value: formatBytes(uploadedBytes) }
+		{ label: 'Uploaded', value: formatBytes(uploadedBytes) },
+		...retentionRows
 	]);
+}
+
+type RetentionPlan =
+	| {
+			readonly kind: 'root';
+			readonly name: string;
+			readonly request: RootSetRequest;
+	  }
+	| { readonly kind: 'pins'; readonly requests: readonly RootSetRequest[] };
+
+function planRetention(
+	paths: readonly string[],
+	root: string | undefined,
+	ttlSeconds: number | undefined
+): RetentionPlan {
+	const ttlFields = ttlSeconds === undefined ? {} : { ttlSeconds };
+
+	if (root !== undefined) {
+		return {
+			kind: 'root',
+			name: root,
+			request: RootSetRequest.fromFields({
+				name: root,
+				targets: [...paths],
+				...ttlFields
+			})
+		};
+	}
+
+	return {
+		kind: 'pins',
+		requests: paths.map((path) =>
+			RootSetRequest.fromFields({
+				name: `pin:${StorePath.hash(path)}`,
+				targets: [path],
+				...ttlFields
+			})
+		)
+	};
+}
+
+async function recordRetention(
+	retention: RetentionPlan,
+	dependencies: { readonly client: PushClient; readonly token: string },
+	ctx: PhaseContext
+): Promise<readonly ResultRow[]> {
+	const { client, token } = dependencies;
+
+	if (retention.kind === 'root') {
+		const summary = await client.setRoot(token, retention.request.toFields());
+		const expiry = formatExpiry(summary);
+		ctx.fact('root', retention.name);
+		ctx.fact('expiry', expiry);
+
+		return [
+			{ label: 'Root', value: retention.name },
+			{ label: 'Root expiry', value: expiry }
+		];
+	}
+
+	const summaries: RootSummary[] = [];
+
+	for (const request of retention.requests) {
+		summaries.push(await client.setRoot(token, request.toFields()));
+	}
+
+	const expiry = describePinExpiry(summaries);
+	ctx.fact('pins', formatCount(retention.requests.length));
+	ctx.fact('expiry', expiry);
+
+	return [
+		{ label: 'Pinned paths', value: formatCount(retention.requests.length) },
+		{ label: 'Pin expiry', value: expiry }
+	];
+}
+
+function formatExpiry(summary: RootSummary): string {
+	return summary.expiresAt === undefined
+		? 'permanent'
+		: `expires ${summary.expiresAt}`;
+}
+
+function describePinExpiry(summaries: readonly RootSummary[]): string {
+	const expiries = summaries
+		.map((summary) => summary.expiresAt)
+		.filter((expiresAt) => expiresAt !== undefined)
+		.toSorted();
+	const earliest = expiries.at(0);
+	const latest = expiries.at(-1);
+
+	if (earliest === undefined || latest === undefined) {
+		return 'permanent';
+	}
+
+	return earliest === latest
+		? `expires ${earliest}`
+		: `expires ${earliest} to ${latest}`;
 }
 
 interface PreparePushPathDependencies {

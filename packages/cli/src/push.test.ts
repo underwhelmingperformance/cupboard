@@ -1,4 +1,9 @@
-import { StorePath, type UploadNegotiateRequest } from '@cupboard/shared';
+import {
+	type RootSetRequestFields,
+	type RootSetResponse,
+	StorePath,
+	type UploadNegotiateRequest
+} from '@cupboard/shared';
 import { describe, expect, it } from 'vitest';
 
 import { type CompressedAndHashedNarFile, CompressedNarFile } from './blob.ts';
@@ -92,6 +97,11 @@ describe('runPush', () => {
 						narHash: appDigest.narHash.toString(),
 						status: 'committed'
 					});
+				},
+				setRoot(token, fields) {
+					expect(token).toBe('write-token');
+
+					return Promise.resolve(rootSummary(fields));
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -173,7 +183,9 @@ describe('runPush', () => {
 				{ label: 'Uploaded paths', value: '1' },
 				{ label: 'Reused blobs', value: '0' },
 				{ label: 'Skipped', value: '1' },
-				{ label: 'Uploaded', value: '456 B' }
+				{ label: 'Uploaded', value: '456 B' },
+				{ label: 'Pinned paths', value: '1' },
+				{ label: 'Pin expiry', value: 'permanent' }
 			]
 		]);
 	});
@@ -209,6 +221,9 @@ describe('runPush', () => {
 						narHash: appDigest.narHash.toString(),
 						status: 'committed'
 					});
+				},
+				setRoot(_token, fields) {
+					return Promise.resolve(rootSummary(fields));
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -232,7 +247,9 @@ describe('runPush', () => {
 				{ label: 'Uploaded paths', value: '0' },
 				{ label: 'Reused blobs', value: '1' },
 				{ label: 'Skipped', value: '0' },
-				{ label: 'Uploaded', value: '0 B' }
+				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Pinned paths', value: '1' },
+				{ label: 'Pin expiry', value: 'permanent' }
 			]
 		]);
 	});
@@ -272,6 +289,9 @@ describe('runPush', () => {
 						narHash: appDigest.narHash.toString(),
 						status: 'committed'
 					});
+				},
+				setRoot(_token, fields) {
+					return Promise.resolve(rootSummary(fields));
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -324,6 +344,9 @@ describe('runPush', () => {
 					},
 					commit() {
 						throw new UnexpectedPushClientCallError('commit');
+					},
+					setRoot() {
+						throw new UnexpectedPushClientCallError('setRoot');
 					}
 				} satisfies PushClient,
 				token: 'write-token',
@@ -342,6 +365,319 @@ describe('runPush', () => {
 				}
 			})
 		).rejects.toThrow(PushNarMetadataMismatchError);
+	});
+
+	it('sets a named channel to the pushed paths with --root', async () => {
+		const setRoots: SetRootCall[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush([appPath], reporter(results), {
+			client: skipClient(setRoots),
+			token: 'write-token',
+			root: 'main',
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(setRoots).toStrictEqual([
+			{ token: 'write-token', fields: { name: 'main', targets: [appPath] } }
+		]);
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Skipped', value: '1' },
+				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Root', value: 'main' },
+				{ label: 'Root expiry', value: 'permanent' }
+			]
+		]);
+	});
+
+	it('sets an expiring channel with --root and --ttl', async () => {
+		const setRoots: SetRootCall[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush([appPath], reporter(results), {
+			client: skipClient(setRoots),
+			token: 'write-token',
+			root: 'main',
+			ttlSeconds: 1_209_600,
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(setRoots).toStrictEqual([
+			{
+				token: 'write-token',
+				fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 }
+			}
+		]);
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Skipped', value: '1' },
+				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Root', value: 'main' },
+				{ label: 'Root expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
+			]
+		]);
+	});
+
+	it('pins each pushed path when no root is given', async () => {
+		const setRoots: SetRootCall[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush([appPath, runtimePath], reporter(results), {
+			client: skipClient(setRoots),
+			token: 'write-token',
+			nixStore: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(setRoots).toStrictEqual([
+			{
+				token: 'write-token',
+				fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
+			},
+			{
+				token: 'write-token',
+				fields: {
+					name: `pin:${StorePath.hash(runtimePath)}`,
+					targets: [runtimePath]
+				}
+			}
+		]);
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Skipped', value: '2' },
+				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Pinned paths', value: '2' },
+				{ label: 'Pin expiry', value: 'permanent' }
+			]
+		]);
+	});
+
+	it('applies --ttl to implicit pins when no root is given', async () => {
+		const setRoots: SetRootCall[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush([appPath], reporter(results), {
+			client: skipClient(setRoots),
+			token: 'write-token',
+			ttlSeconds: 604_800,
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(setRoots).toStrictEqual([
+			{
+				token: 'write-token',
+				fields: {
+					name: `pin:${StorePath.hash(appPath)}`,
+					targets: [appPath],
+					ttlSeconds: 604_800
+				}
+			}
+		]);
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Skipped', value: '1' },
+				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Pinned paths', value: '1' },
+				{ label: 'Pin expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
+			]
+		]);
+	});
+
+	it('derives a stable pin name when the same path is pushed again', async () => {
+		const setRoots: SetRootCall[] = [];
+		const dependencies = {
+			client: skipClient(setRoots),
+			token: 'write-token',
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		};
+
+		await runPush([appPath], reporter([]), dependencies);
+		await runPush([appPath], reporter([]), dependencies);
+
+		expect(setRoots.map((call) => call.fields.name)).toStrictEqual([
+			`pin:${StorePath.hash(appPath)}`,
+			`pin:${StorePath.hash(appPath)}`
+		]);
+	});
+
+	it('records retention only after committing the uploads', async () => {
+		const events: string[] = [];
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate() {
+					events.push('negotiate');
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				prepareUpload() {
+					events.push('prepareUpload');
+
+					return Promise.resolve({
+						uploadUrl: 'https://upload.example/app',
+						uploadHeaders: {},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					});
+				},
+				uploadBlob() {
+					events.push('uploadBlob');
+
+					return Promise.resolve();
+				},
+				commit() {
+					events.push('commit');
+
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						status: 'committed'
+					});
+				},
+				setRoot(_token, fields) {
+					events.push('setRoot');
+
+					return Promise.resolve(rootSummary(fields));
+				}
+			} satisfies PushClient,
+			token: 'write-token',
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar(nar, path) {
+				return fakeCompressedNar(nar, path, appDigest);
+			},
+			readCompressedNar() {
+				return byteStream([Buffer.from('compressed nar')]);
+			},
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(events).toStrictEqual([
+			'negotiate',
+			'prepareUpload',
+			'uploadBlob',
+			'commit',
+			'setRoot'
+		]);
+	});
+
+	it('reports an expiry range when expiring pins differ', async () => {
+		const expiries = ['2026-01-15T00:00:00.000Z', '2026-01-15T00:00:05.000Z'];
+		let call = 0;
+		const results: ResultRow[][] = [];
+
+		const client: PushClient = {
+			negotiate(_token, body) {
+				return Promise.resolve({
+					uploads: body.paths.map((path) => ({
+						action: 'skip',
+						storePathHash: path.storePathHash,
+						narHash: path.narHash
+					}))
+				});
+			},
+			prepareUpload() {
+				throw new UnexpectedPushClientCallError('prepareUpload');
+			},
+			uploadBlob() {
+				throw new UnexpectedPushClientCallError('uploadBlob');
+			},
+			commit() {
+				throw new UnexpectedPushClientCallError('commit');
+			},
+			setRoot(_token, fields) {
+				const expiresAt = expiries.at(call) ?? expiries.at(-1);
+				call += 1;
+
+				return Promise.resolve(rootSummary(fields, expiresAt));
+			}
+		};
+
+		await runPush([appPath, runtimePath], reporter(results), {
+			client,
+			token: 'write-token',
+			ttlSeconds: 604_800,
+			nixStore: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Skipped', value: '2' },
+				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Pinned paths', value: '2' },
+				{
+					label: 'Pin expiry',
+					value: 'expires 2026-01-15T00:00:00.000Z to 2026-01-15T00:00:05.000Z'
+				}
+			]
+		]);
 	});
 });
 
@@ -466,6 +802,65 @@ function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 			}
 
 			throw new UnexpectedPathInfoRequestError(storePath);
+		}
+	};
+}
+
+function rootSummary(
+	fields: RootSetRequestFields,
+	expiresAtOverride?: string
+): RootSetResponse {
+	const base = {
+		name: fields.name,
+		expired: false,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z',
+		targets: fields.targets.map((storePath) => ({
+			storePathHash: StorePath.hash(storePath),
+			storePath,
+			present: true
+		}))
+	};
+	const expiresAt =
+		expiresAtOverride ??
+		(fields.ttlSeconds === undefined ? undefined : '2026-01-15T00:00:00.000Z');
+
+	if (expiresAt === undefined) {
+		return base;
+	}
+
+	return { ...base, expiresAt };
+}
+
+interface SetRootCall {
+	readonly token: string;
+	readonly fields: RootSetRequestFields;
+}
+
+function skipClient(setRoots: SetRootCall[]): PushClient {
+	return {
+		negotiate(_token, body) {
+			return Promise.resolve({
+				uploads: body.paths.map((path) => ({
+					action: 'skip',
+					storePathHash: path.storePathHash,
+					narHash: path.narHash
+				}))
+			});
+		},
+		prepareUpload() {
+			throw new UnexpectedPushClientCallError('prepareUpload');
+		},
+		uploadBlob() {
+			throw new UnexpectedPushClientCallError('uploadBlob');
+		},
+		commit() {
+			throw new UnexpectedPushClientCallError('commit');
+		},
+		setRoot(token, fields) {
+			setRoots.push({ token, fields });
+
+			return Promise.resolve(rootSummary(fields));
 		}
 	};
 }

@@ -490,9 +490,13 @@ every live channel through `References`. This is built in three increments:
       at least one committed path is reachable, so neither an empty channel set
       nor channels that point only at absent paths can collect the whole cache;
       root expiry happens regardless.
-- [ ] `push --root <name>` plus durable implicit pins for manual pushes: commit
-      the uploads first, then replace the named channel with exactly those
-      top-level paths.
+- [x] `push --root <name> [--ttl <dur>]` sets the named channel to exactly the
+      pushed top-level paths (wholesale, after the uploads commit). A plain
+      `push` instead records a durable implicit pin per top-level path, a root
+      named `pin:<storePathHash>`, so manual pushes are never
+      surprise-collected. `--ttl` governs whichever is created and defaults to
+      permanent when absent, matching `root set`; the push output always reports
+      the resulting expiry.
 - [x] Delete a specific store path (explicit admin `delete`, edge-safe).
       Clearing old entries automatically is retention-based and stays below.
 - [ ] Optional retention period for cold paths.
