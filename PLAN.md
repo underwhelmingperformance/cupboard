@@ -208,6 +208,10 @@ One DO SQLite database per deployment.
   - `r2_key` (PK), `not_before`, `created_at`.
 - `narinfo_deletion` — durable queue for finishing interrupted narinfo removals.
   - `store_path_hash` (PK), `nar_hash`, `created_at`.
+- `retention_root` — a named channel of kept store paths, optionally expiring.
+  - `name` (PK), `expires_at` (nullable), `created_at`, `updated_at`.
+- `retention_root_target` — the store paths a channel currently keeps.
+  - (`root_name`, `store_path_hash`) (PK), `store_path`.
 - `token` — write and admin tokens.
   - `id` (PK), `hash`, `scope`, `created_at`.
 
@@ -230,6 +234,9 @@ the Durable Object handles only the write, admin, and GC routes.
 | GET       | `/_version`            | public | Worker. Git SHA, `+dirty` when dirty.       |
 | GET       | `/_stats`              | admin  | DO. Cache size and object count.            |
 | POST      | `/admin/delete`        | admin  | DO. Deletes one store path; defers its NAR. |
+| POST      | `/admin/roots`         | admin  | DO. Creates or replaces a retention root.   |
+| GET       | `/admin/roots`         | admin  | DO. Lists retention roots.                  |
+| POST      | `/admin/roots/remove`  | admin  | DO. Removes a retention root.               |
 
 ## Testing
 
@@ -462,13 +469,27 @@ cache.
 
 ### Garbage collection and admin
 
-Retention roots are the gating prerequisite for _automatic_ reachability GC:
-without them, GC against committed narinfo rows would happily delete anything
-still reachable through substitution, since the cache has no inherent concept of
-"in use". Explicit single-path deletion (an admin naming an exact path) is not
-gated by retention roots and is implemented first.
+Retention roots are the gating input for _automatic_ reachability GC: without
+them, GC against committed narinfo rows would delete anything still reachable
+through substitution, since the cache has no inherent concept of "in use". Roots
+are modelled as named, moving channels (`github:owner/repo/main`, `.../pr-123`),
+each holding a set of top-level store paths that a `push` replaces wholesale,
+with an optional per-root TTL. Reachability GC marks the transitive closure from
+every live channel through `References`. This is built in three increments:
 
-- [ ] Define explicit retention roots before automatic reachability GC.
+- [x] Retention root model and admin API: a `retention_root` channel keyed by
+      name with an optional `expires_at`, and a `retention_root_target` set of
+      store paths. `cupboard root set/list/remove` (admin) create, replace, and
+      drop channels. A set fully declares the channel (its targets and TTL,
+      reset on each set), reports per-target presence, and is validated against
+      shared name and TTL bounds. Inert until the sweep below consumes it.
+- [ ] Reachability GC: expire channels past their TTL, mark the closure from
+      live channels through `References`, and sweep unreachable committed paths
+      through the row-first delete and durable narinfo queue. A zero-live-roots
+      guard keeps an empty channel set from collecting the whole cache.
+- [ ] `push --root <name>` plus durable implicit pins for manual pushes: commit
+      the uploads first, then replace the named channel with exactly those
+      top-level paths.
 - [x] Delete a specific store path (explicit admin `delete`, edge-safe).
       Clearing old entries automatically is retention-based and stays below.
 - [ ] Optional retention period for cold paths.
@@ -506,13 +527,77 @@ gated by retention roots and is implemented first.
         interrupted removal without the re-run requirement. A re-committed row
         drops its stale queue entry instead of deleting the now-live object.
 
-### Token model
+## V4
 
-- [ ] Add read/write/admin scopes.
-- [ ] Support expiring tokens.
-- [ ] Add token rotation and revocation.
+V4 replaces the V1 opaque bearer-token model with short-lived cupboard-issued
+JWT access tokens and CI identity federation. The goal is to make CI writes work
+without long-lived repository secrets while keeping upload and admin handlers on
+one validation path.
 
-### Later features
+### Authentication and CI federation
+
+Cupboard should avoid long-lived CI secrets. CI systems that can prove where a
+job came from should exchange that proof for a short-lived cupboard access JWT
+instead of storing a write token as a repository secret.
+
+The server should build its own small exchange endpoint rather than adopting a
+full auth framework or OAuth server. The exchange is cupboard-specific: verify
+an upstream identity token, match it against configured trust rules, and mint a
+cupboard access JWT. Use a JOSE/JWT library such as `jose` for signature, JWKS,
+issuer, audience, expiry, and algorithm validation; do not hand-roll JWT
+cryptography.
+
+- [ ] Replace opaque stored bearer tokens on upload/admin handlers with
+      cupboard-issued JWT access tokens. Handlers validate one credential type:
+      `Authorization: Bearer <cupboard-jwt>`.
+- [ ] Sign cupboard access JWTs with a deployment-owned key stored in DO SQLite
+      as `auth_key`. Include `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`,
+      `scope`, and enough origin claims for audit, such as CI provider,
+      repository ID, workflow ref, run ID, run attempt, ref, and SHA.
+- [ ] Keep access JWTs short-lived and stateless. Do not store each issued JWT
+      in the database; rely on expiry and signing-key rotation rather than a
+      token table for normal operation.
+- [ ] Keep long-lived secrets out of normal request handlers. The bootstrap
+      secret is accepted only by `/auth/bootstrap`, which mints a short-lived
+      admin JWT. External CI OIDC tokens are accepted only by
+      `/auth/oidc/exchange`, which mints a short-lived write JWT.
+- [ ] Add `auth_key` rows for active and previous JWT signing keys, with `id`,
+      `private_jwk_json`, `public_jwk_json`, `created_at`, and `retired_at`.
+- [ ] Add `oidc_trust` rows for CI identity rules, with `id`, `issuer`,
+      `jwks_url`, `audience`, `scope`, `claims_json`, `created_at`, and
+      `disabled_at`.
+- [ ] Add `/auth/bootstrap` and `/auth/oidc/exchange` DO routes. Exchange routes
+      are the only routes that accept long-lived bootstrap secrets or external
+      OIDC tokens.
+- [ ] Add GitHub Actions as the first OIDC provider. Verify tokens from
+      `https://token.actions.githubusercontent.com` using its discovery/JWKS
+      metadata, require an audience controlled by cupboard, and match configured
+      claims before minting a write JWT.
+- [ ] Store trust rules in `oidc_trust`. Prefer stable ID claims such as
+      `repository_id` and `repository_owner_id`; keep names like `repository`
+      and `workflow_ref` for readability and optional narrowing. Support
+      claim-exact matches first, with pattern matching only if a concrete use
+      case needs it.
+- [ ] Add CLI support for CI exchange. In GitHub Actions, request an OIDC token
+      with `id-token: write`, pass cupboard's configured audience, exchange it,
+      and use the returned cupboard JWT for the existing push flow.
+- [ ] Add admin commands to list, add, disable, and inspect OIDC trust rules.
+- [ ] Remove the legacy `token` table and V1 opaque-token init flow after the
+      JWT exchange path covers bootstrap, local admin, and CI writes.
+- [ ] Tests:
+  - [ ] Unit: JWT verification rejects wrong issuer, audience, algorithm,
+        expiry, not-before, missing scope, and malformed claims.
+  - [ ] Unit: trust-rule matching accepts only the configured GitHub claim set.
+  - [ ] Integration: `/auth/bootstrap` returns an admin JWT and upload/admin
+        handlers accept only the required scope.
+  - [ ] Integration: `/auth/oidc/exchange` accepts a signed GitHub-like OIDC JWT
+        whose claims match a trust rule and rejects unknown repositories, refs,
+        workflows, and audiences.
+  - [ ] E2E: CI-style push obtains a cupboard JWT by exchange and performs the
+        normal negotiate, prepare, and commit flow without any stored cupboard
+        secret.
+
+## Later features
 
 - [ ] Chunk-level dedupe rather than whole-NAR storage.
 - [ ] Multiple named caches inside one deployment.

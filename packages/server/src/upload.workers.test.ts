@@ -5,6 +5,10 @@ import {
 	type InitResponse,
 	NarInfo,
 	NixSha256Hash,
+	type RootListResponse,
+	type RootRemoveResponse,
+	type RootSetRequestFields,
+	type RootSetResponse,
 	type StatsResponse,
 	type UploadNegotiateResponse,
 	type UploadPathMetadataFields
@@ -1208,6 +1212,172 @@ describe('upload flow', () => {
 
 		expect(stillServed.status).toBe(StatusCodes.OK);
 	});
+
+	describe('retention roots', () => {
+		const absentPath = '/nix/store/22222222222222222222222222222222-absent';
+
+		it('creates a root with TTL expiry and target presence', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, committed);
+
+			const summary = await setRoot(token, {
+				name: 'github:owner/repo/main',
+				targets: [committed.storePath, absentPath],
+				ttlSeconds: 604_800
+			});
+
+			expect(summary).toStrictEqual({
+				name: 'github:owner/repo/main',
+				expiresAt: new Date(
+					deleteTestBase.getTime() + 604_800 * 1000
+				).toISOString(),
+				expired: false,
+				createdAt: deleteTestBase.toISOString(),
+				updatedAt: deleteTestBase.toISOString(),
+				targets: [
+					{
+						storePathHash: committed.storePathHash,
+						storePath: committed.storePath,
+						present: true
+					},
+					{
+						storePathHash: '22222222222222222222222222222222',
+						storePath: absentPath,
+						present: false
+					}
+				]
+			});
+		});
+
+		it('replaces the target set wholesale and resets the expiry', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const first = '/nix/store/11111111111111111111111111111111-a';
+			const second = '/nix/store/22222222222222222222222222222222-b';
+
+			await setRoot(token, {
+				name: 'pr-1',
+				targets: [first],
+				ttlSeconds: 604_800
+			});
+
+			const later = new Date(deleteTestBase.getTime() + 3600 * 1000);
+			vi.setSystemTime(later);
+			const summary = await setRoot(token, { name: 'pr-1', targets: [second] });
+
+			expect(summary).toStrictEqual({
+				name: 'pr-1',
+				expired: false,
+				createdAt: deleteTestBase.toISOString(),
+				updatedAt: later.toISOString(),
+				targets: [
+					{
+						storePathHash: '22222222222222222222222222222222',
+						storePath: second,
+						present: false
+					}
+				]
+			});
+		});
+
+		it('deduplicates repeated targets instead of erroring', async () => {
+			const token = await initialise();
+			const path = '/nix/store/11111111111111111111111111111111-a';
+
+			const summary = await setRoot(token, {
+				name: 'main',
+				targets: [path, path]
+			});
+
+			expect(summary.targets).toStrictEqual([
+				{
+					storePathHash: '11111111111111111111111111111111',
+					storePath: path,
+					present: false
+				}
+			]);
+		});
+
+		it('lists roots sorted by name and flags expired ones', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const path = '/nix/store/11111111111111111111111111111111-a';
+
+			await setRoot(token, { name: 'pr-9', targets: [path], ttlSeconds: 60 });
+			await setRoot(token, { name: 'main', targets: [path] });
+
+			vi.setSystemTime(new Date(deleteTestBase.getTime() + 120 * 1000));
+			const { roots } = await listRoots(token);
+
+			expect(
+				roots.map((root) => ({
+					name: root.name,
+					expired: root.expired,
+					expiresAt: root.expiresAt
+				}))
+			).toStrictEqual([
+				{ name: 'main', expired: false, expiresAt: undefined },
+				{
+					name: 'pr-9',
+					expired: true,
+					expiresAt: new Date(deleteTestBase.getTime() + 60_000).toISOString()
+				}
+			]);
+		});
+
+		it('removes a root and is a no-op for an absent name', async () => {
+			const token = await initialise();
+			const path = '/nix/store/11111111111111111111111111111111-a';
+			await setRoot(token, { name: 'pr-1', targets: [path] });
+
+			const removed = await removeRoot(token, 'pr-1');
+			const absent = await removeRoot(token, 'pr-1');
+			const { roots } = await listRoots(token);
+
+			expect({ removed, absent, roots }).toStrictEqual({
+				removed: { name: 'pr-1', removed: true },
+				absent: { name: 'pr-1', removed: false },
+				roots: []
+			});
+		});
+
+		it('requires admin auth for the root routes', async () => {
+			const target = '/nix/store/11111111111111111111111111111111-a';
+			const set = await fetchPath('/admin/roots', {
+				body: JSON.stringify({ name: 'main', targets: [target] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+			const list = await fetchPath('/admin/roots');
+			const remove = await fetchPath('/admin/roots/remove', {
+				body: JSON.stringify({ name: 'main' }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+
+			expect([set.status, list.status, remove.status]).toStrictEqual([
+				StatusCodes.UNAUTHORIZED,
+				StatusCodes.UNAUTHORIZED,
+				StatusCodes.UNAUTHORIZED
+			]);
+		});
+
+		it('rejects a malformed root request', async () => {
+			const token = await initialise();
+			const response = await authorisedFetch('/admin/roots', token, {
+				body: JSON.stringify({ name: 'main', targets: [] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
+
+			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+		});
+	});
 });
 
 async function commitPath(
@@ -1247,6 +1417,44 @@ async function deletePath(
 	expect(response.status).toBe(StatusCodes.OK);
 
 	return response.json<DeletePathResponse>();
+}
+
+async function setRoot(
+	token: string,
+	fields: RootSetRequestFields
+): Promise<RootSetResponse> {
+	const response = await authorisedFetch('/admin/roots', token, {
+		body: JSON.stringify(fields),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return response.json<RootSetResponse>();
+}
+
+async function listRoots(token: string): Promise<RootListResponse> {
+	const response = await authorisedFetch('/admin/roots', token);
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return response.json<RootListResponse>();
+}
+
+async function removeRoot(
+	token: string,
+	name: string
+): Promise<RootRemoveResponse> {
+	const response = await authorisedFetch('/admin/roots/remove', token, {
+		body: JSON.stringify({ name }),
+		headers: { 'content-type': 'application/json' },
+		method: 'POST'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return response.json<RootRemoveResponse>();
 }
 
 async function runGc(): Promise<void> {

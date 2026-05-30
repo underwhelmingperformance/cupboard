@@ -69,3 +69,20 @@ export const signingKeys = sqliteTable('signing_key', {
 	publicKey: text('public_key').notNull(),
 	createdAt: text('created_at').notNull()
 });
+
+export const retentionRoots = sqliteTable('retention_root', {
+	name: text('name').primaryKey(),
+	expiresAt: text('expires_at'),
+	createdAt: text('created_at').notNull(),
+	updatedAt: text('updated_at').notNull()
+});
+
+export const retentionRootTargets = sqliteTable(
+	'retention_root_target',
+	{
+		rootName: text('root_name').notNull(),
+		storePathHash: text('store_path_hash').notNull(),
+		storePath: text('store_path').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.rootName, table.storePathHash] })]
+);

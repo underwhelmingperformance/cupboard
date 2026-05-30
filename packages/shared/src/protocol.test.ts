@@ -6,6 +6,9 @@ import {
 	DeletePathRequest,
 	InvalidNarInfoIntegerFieldError,
 	InvalidNarInfoLineError,
+	InvalidRootNameError,
+	InvalidRootTargetsError,
+	InvalidRootTtlError,
 	InvalidStorePathError,
 	InvalidStorePathHashError,
 	InvalidStorePathReferenceError,
@@ -17,6 +20,9 @@ import {
 	NarInfo,
 	type NarInfoFields,
 	NixConfig,
+	RootRemoveRequest,
+	RootSetRequest,
+	rootTtlMaxSeconds,
 	StorePath,
 	StorePathHashMismatchError,
 	UnsupportedNarInfoCompressionError,
@@ -200,6 +206,88 @@ describe('DeletePathRequest', () => {
 	])('rejects a $why hash with a typed error', ({ storePathHash }) => {
 		expect(() => DeletePathRequest.fromFields({ storePathHash })).toThrow(
 			InvalidStorePathHashError
+		);
+	});
+});
+
+describe('RootSetRequest', () => {
+	const target = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+
+	it('accepts a name, targets, and ttl, round-tripping fields', () => {
+		expect(
+			RootSetRequest.fromFields({
+				name: 'github:owner/repo/main',
+				targets: [target],
+				ttlSeconds: 604_800
+			}).toFields()
+		).toStrictEqual({
+			name: 'github:owner/repo/main',
+			targets: [target],
+			ttlSeconds: 604_800
+		});
+	});
+
+	it('omits ttlSeconds when none is given', () => {
+		expect(
+			RootSetRequest.fromFields({ name: 'main', targets: [target] }).toFields()
+		).toStrictEqual({ name: 'main', targets: [target] });
+	});
+
+	it('deduplicates targets that resolve to the same hash', () => {
+		expect(
+			RootSetRequest.fromFields({
+				name: 'main',
+				targets: [target, target]
+			}).toFields()
+		).toStrictEqual({ name: 'main', targets: [target] });
+	});
+
+	it.each([
+		{ fields: { name: '', targets: [target] }, error: InvalidRootNameError },
+		{
+			fields: { name: 'a'.repeat(257), targets: [target] },
+			error: InvalidRootNameError
+		},
+		{
+			fields: { name: 'a\tb', targets: [target] },
+			error: InvalidRootNameError
+		},
+		{ fields: { name: 'main', targets: [] }, error: InvalidRootTargetsError },
+		{
+			fields: { name: 'main', targets: ['/tmp/not-a-store-path'] },
+			error: InvalidStorePathError
+		},
+		{
+			fields: { name: 'main', targets: [target], ttlSeconds: 0 },
+			error: InvalidRootTtlError
+		},
+		{
+			fields: { name: 'main', targets: [target], ttlSeconds: 1.5 },
+			error: InvalidRootTtlError
+		},
+		{
+			fields: {
+				name: 'main',
+				targets: [target],
+				ttlSeconds: rootTtlMaxSeconds + 1
+			},
+			error: InvalidRootTtlError
+		}
+	])('rejects invalid fields with $error.name', ({ fields, error }) => {
+		expect(() => RootSetRequest.fromFields(fields)).toThrow(error);
+	});
+});
+
+describe('RootRemoveRequest', () => {
+	it('accepts a valid name', () => {
+		expect(
+			RootRemoveRequest.fromFields({ name: 'pr-123' }).toFields()
+		).toStrictEqual({ name: 'pr-123' });
+	});
+
+	it('rejects an empty name with a typed error', () => {
+		expect(() => RootRemoveRequest.fromFields({ name: '' })).toThrow(
+			InvalidRootNameError
 		);
 	});
 });

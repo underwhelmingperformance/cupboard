@@ -103,6 +103,42 @@ export interface DeletePathResponse {
 	readonly narScheduledForDeletion: boolean;
 }
 
+export interface RootSetRequestFields {
+	readonly name: string;
+	readonly targets: readonly string[];
+	readonly ttlSeconds?: number;
+}
+
+export interface RootTarget {
+	readonly storePathHash: string;
+	readonly storePath: string;
+	readonly present: boolean;
+}
+
+export interface RootSummary {
+	readonly name: string;
+	readonly expiresAt?: string;
+	readonly expired: boolean;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+	readonly targets: readonly RootTarget[];
+}
+
+export type RootSetResponse = RootSummary;
+
+export interface RootListResponse {
+	readonly roots: readonly RootSummary[];
+}
+
+export interface RootRemoveRequestFields {
+	readonly name: string;
+}
+
+export interface RootRemoveResponse {
+	readonly name: string;
+	readonly removed: boolean;
+}
+
 export abstract class ProtocolError extends Error {}
 
 export class InvalidNarInfoLineError extends ProtocolError {
@@ -160,6 +196,27 @@ export class InvalidStorePathHashError extends ProtocolError {
 	constructor(public readonly storePathHash: string) {
 		super(`Invalid store path hash: ${storePathHash}`);
 		this.name = 'InvalidStorePathHashError';
+	}
+}
+
+export class InvalidRootNameError extends ProtocolError {
+	constructor(public readonly rootName: string) {
+		super(`Invalid root name: ${rootName}`);
+		this.name = 'InvalidRootNameError';
+	}
+}
+
+export class InvalidRootTargetsError extends ProtocolError {
+	constructor() {
+		super('A retention root requires at least one target');
+		this.name = 'InvalidRootTargetsError';
+	}
+}
+
+export class InvalidRootTtlError extends ProtocolError {
+	constructor(public readonly ttlSeconds: number) {
+		super(`Invalid root TTL in seconds: ${String(ttlSeconds)}`);
+		this.name = 'InvalidRootTtlError';
 	}
 }
 
@@ -319,6 +376,113 @@ export class DeletePathRequest {
 
 	toFields(): DeletePathRequestFields {
 		return { storePathHash: this.storePathHash };
+	}
+}
+
+export const rootNameMaxLength = 256;
+export const rootTtlMinSeconds = 1;
+export const rootTtlMaxSeconds = 315_360_000;
+
+function hasControlCharacter(value: string): boolean {
+	for (const character of value) {
+		const code = character.codePointAt(0) ?? 0;
+
+		if (code < 0x20 || code === 0x7f) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+function validateRootName(name: string): void {
+	if (
+		name.length === 0 ||
+		name.length > rootNameMaxLength ||
+		hasControlCharacter(name)
+	) {
+		throw new InvalidRootNameError(name);
+	}
+}
+
+function validateRootTtlSeconds(ttlSeconds: number): void {
+	if (
+		!Number.isInteger(ttlSeconds) ||
+		ttlSeconds < rootTtlMinSeconds ||
+		ttlSeconds > rootTtlMaxSeconds
+	) {
+		throw new InvalidRootTtlError(ttlSeconds);
+	}
+}
+
+interface ResolvedRootTarget {
+	readonly storePathHash: string;
+	readonly storePath: string;
+}
+
+export class RootSetRequest {
+	private constructor(
+		public readonly name: string,
+		public readonly targets: readonly ResolvedRootTarget[],
+		public readonly ttlSeconds: number | undefined
+	) {}
+
+	static fromFields(fields: RootSetRequestFields): RootSetRequest {
+		validateRootName(fields.name);
+
+		if (fields.targets.length === 0) {
+			throw new InvalidRootTargetsError();
+		}
+
+		// A root is a set: collapse targets that resolve to the same store path
+		// hash, keeping the first, so a repeated path is idempotent rather than a
+		// primary-key violation downstream.
+		const targets: ResolvedRootTarget[] = [];
+		const seen = new Set<string>();
+
+		for (const storePath of fields.targets) {
+			const storePathHash = StorePath.hash(storePath);
+
+			if (seen.has(storePathHash)) {
+				continue;
+			}
+
+			seen.add(storePathHash);
+			targets.push({ storePathHash, storePath });
+		}
+
+		if (fields.ttlSeconds !== undefined) {
+			validateRootTtlSeconds(fields.ttlSeconds);
+		}
+
+		return new RootSetRequest(fields.name, targets, fields.ttlSeconds);
+	}
+
+	toFields(): RootSetRequestFields {
+		const fields = {
+			name: this.name,
+			targets: this.targets.map((target) => target.storePath)
+		};
+
+		if (this.ttlSeconds === undefined) {
+			return fields;
+		}
+
+		return { ...fields, ttlSeconds: this.ttlSeconds };
+	}
+}
+
+export class RootRemoveRequest {
+	private constructor(public readonly name: string) {}
+
+	static fromFields(fields: RootRemoveRequestFields): RootRemoveRequest {
+		validateRootName(fields.name);
+
+		return new RootRemoveRequest(fields.name);
+	}
+
+	toFields(): RootRemoveRequestFields {
+		return { name: this.name };
 	}
 }
 

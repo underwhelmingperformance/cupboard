@@ -7,6 +7,15 @@ import {
 	NarInfo,
 	NixSha256Hash,
 	ProtocolError,
+	type RootListResponse,
+	RootRemoveRequest,
+	type RootRemoveRequestFields,
+	type RootRemoveResponse,
+	RootSetRequest,
+	type RootSetRequestFields,
+	type RootSetResponse,
+	type RootSummary,
+	type RootTarget,
 	type StatsResponse,
 	UploadBlobMetadata,
 	type UploadDecision,
@@ -40,6 +49,7 @@ import * as schema from './db/schema.ts';
 import {
 	InvalidDeletePathRequestError,
 	InvalidJsonRequestBodyError,
+	InvalidRootRequestError,
 	InvalidUploadMetadataRequestError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
@@ -122,6 +132,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.post('/admin/delete', (context) =>
 			serverErrorResponse(this.handleDeletePath(context.req.raw))
 		);
+		this.app.post('/admin/roots', (context) =>
+			serverErrorResponse(this.handleSetRoot(context.req.raw))
+		);
+		this.app.get('/admin/roots', (context) =>
+			serverErrorResponse(this.handleListRoots(context.req.raw))
+		);
+		this.app.post('/admin/roots/remove', (context) =>
+			serverErrorResponse(this.handleRemoveRoot(context.req.raw))
+		);
 		this.app.post('/upload/negotiate', (context) =>
 			serverErrorResponse(this.handleNegotiate(context.req.raw))
 		);
@@ -195,6 +214,181 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 
 		return Response.json(result satisfies DeletePathResponse);
+	}
+
+	private async handleSetRoot(request: Request): Promise<Response> {
+		if (!(await this.isTokenAuthorised(request))) {
+			return new Response('Unauthorised\n', {
+				status: StatusCodes.UNAUTHORIZED
+			});
+		}
+
+		const requested = parseRootSetRequest(
+			await parseJsonRequest<RootSetRequestFields>(request)
+		);
+
+		return Response.json(this.setRoot(requested) satisfies RootSetResponse);
+	}
+
+	private async handleListRoots(request: Request): Promise<Response> {
+		if (!(await this.isTokenAuthorised(request))) {
+			return new Response('Unauthorised\n', {
+				status: StatusCodes.UNAUTHORIZED
+			});
+		}
+
+		return Response.json(this.listRoots() satisfies RootListResponse);
+	}
+
+	private async handleRemoveRoot(request: Request): Promise<Response> {
+		if (!(await this.isTokenAuthorised(request))) {
+			return new Response('Unauthorised\n', {
+				status: StatusCodes.UNAUTHORIZED
+			});
+		}
+
+		const requested = parseRootRemoveRequest(
+			await parseJsonRequest<RootRemoveRequestFields>(request)
+		);
+
+		return Response.json(
+			this.removeRoot(requested.name) satisfies RootRemoveResponse
+		);
+	}
+
+	private setRoot(request: RootSetRequest): RootSetResponse {
+		const now = new Date();
+		const nowIso = now.toISOString();
+		const expiresAt =
+			request.ttlSeconds === undefined
+				? undefined
+				: new Date(now.getTime() + request.ttlSeconds * 1000).toISOString();
+
+		// Replace the root wholesale: a re-set fully declares the channel, so the
+		// old row and target set are dropped and rewritten. The createdAt of an
+		// existing channel is preserved; an absent expiry stores SQL NULL via the
+		// undefined insert value.
+		const createdAt = this.db.transaction((tx) => {
+			const existing = tx
+				.select()
+				.from(schema.retentionRoots)
+				.where(eq(schema.retentionRoots.name, request.name))
+				.get();
+			const created = existing?.createdAt ?? nowIso;
+
+			tx.delete(schema.retentionRootTargets)
+				.where(eq(schema.retentionRootTargets.rootName, request.name))
+				.run();
+			tx.delete(schema.retentionRoots)
+				.where(eq(schema.retentionRoots.name, request.name))
+				.run();
+
+			tx.insert(schema.retentionRoots)
+				.values({
+					name: request.name,
+					expiresAt,
+					createdAt: created,
+					updatedAt: nowIso
+				})
+				.run();
+
+			tx.insert(schema.retentionRootTargets)
+				.values(
+					request.targets.map((target) => ({
+						rootName: request.name,
+						storePathHash: target.storePathHash,
+						storePath: target.storePath
+					}))
+				)
+				.run();
+
+			return created;
+		});
+
+		return this.rootSummary(request.name, expiresAt, createdAt, nowIso, nowIso);
+	}
+
+	private listRoots(): RootListResponse {
+		const now = new Date().toISOString();
+		const roots = this.db.select().from(schema.retentionRoots).all();
+
+		return {
+			roots: roots
+				.map((root) =>
+					this.rootSummary(
+						root.name,
+						root.expiresAt ?? undefined,
+						root.createdAt,
+						root.updatedAt,
+						now
+					)
+				)
+				.toSorted((a, b) => (a.name > b.name ? 1 : -1))
+		};
+	}
+
+	private removeRoot(name: string): RootRemoveResponse {
+		return this.db.transaction((tx) => {
+			const existing = tx
+				.select()
+				.from(schema.retentionRoots)
+				.where(eq(schema.retentionRoots.name, name))
+				.get();
+
+			tx.delete(schema.retentionRootTargets)
+				.where(eq(schema.retentionRootTargets.rootName, name))
+				.run();
+			tx.delete(schema.retentionRoots)
+				.where(eq(schema.retentionRoots.name, name))
+				.run();
+
+			return { name, removed: existing !== undefined };
+		});
+	}
+
+	private rootSummary(
+		name: string,
+		expiresAt: string | undefined,
+		createdAt: string,
+		updatedAt: string,
+		now: string
+	): RootSummary {
+		const targets = this.db
+			.select()
+			.from(schema.retentionRootTargets)
+			.where(eq(schema.retentionRootTargets.rootName, name))
+			.all();
+
+		return {
+			name,
+			...(expiresAt === undefined ? {} : { expiresAt }),
+			expired: expiresAt !== undefined && expiresAt <= now,
+			createdAt,
+			updatedAt,
+			targets: this.rootTargets(targets)
+		};
+	}
+
+	private rootTargets(
+		pairs: readonly { storePathHash: string; storePath: string }[]
+	): RootTarget[] {
+		return pairs
+			.map((pair) => ({
+				storePathHash: pair.storePathHash,
+				storePath: pair.storePath,
+				present: this.hasCommittedNarInfo(pair.storePathHash)
+			}))
+			.toSorted((a, b) => (a.storePathHash > b.storePathHash ? 1 : -1));
+	}
+
+	private hasCommittedNarInfo(storePathHash: string): boolean {
+		return (
+			this.db
+				.select()
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.get() !== undefined
+		);
 	}
 
 	private async handleNegotiate(request: Request): Promise<Response> {
@@ -1209,6 +1403,32 @@ function parseDeletePathRequest(
 	} catch (error) {
 		if (error instanceof ProtocolError) {
 			throw new InvalidDeletePathRequestError(error);
+		}
+
+		throw error;
+	}
+}
+
+function parseRootSetRequest(fields: RootSetRequestFields): RootSetRequest {
+	try {
+		return RootSetRequest.fromFields(fields);
+	} catch (error) {
+		if (error instanceof ProtocolError) {
+			throw new InvalidRootRequestError(error);
+		}
+
+		throw error;
+	}
+}
+
+function parseRootRemoveRequest(
+	fields: RootRemoveRequestFields
+): RootRemoveRequest {
+	try {
+		return RootRemoveRequest.fromFields(fields);
+	} catch (error) {
+		if (error instanceof ProtocolError) {
+			throw new InvalidRootRequestError(error);
 		}
 
 		throw error;

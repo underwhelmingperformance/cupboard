@@ -2,6 +2,10 @@ import type {
 	CommitResponse,
 	DeletePathResponse,
 	InitResponse,
+	RootListResponse,
+	RootRemoveResponse,
+	RootSetRequestFields,
+	RootSetResponse,
 	StatsResponse,
 	UploadNegotiateRequest,
 	UploadNegotiateResponse,
@@ -54,6 +58,29 @@ export class CupboardClient {
 			method: 'POST',
 			token,
 			body: { storePathHash }
+		});
+	}
+
+	setRoot(
+		token: string,
+		fields: RootSetRequestFields
+	): Promise<RootSetResponse> {
+		return this.requestJson('/admin/roots', {
+			method: 'POST',
+			token,
+			body: fields
+		});
+	}
+
+	listRoots(token: string): Promise<RootListResponse> {
+		return this.requestJson('/admin/roots', { token });
+	}
+
+	removeRoot(token: string, name: string): Promise<RootRemoveResponse> {
+		return this.requestJson('/admin/roots/remove', {
+			method: 'POST',
+			token,
+			body: { name }
 		});
 	}
 

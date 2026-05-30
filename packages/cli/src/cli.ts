@@ -5,6 +5,7 @@ import { registerDeleteCommand } from './commands/delete.ts';
 import { registerInitCommand } from './commands/init.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
+import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 
 export interface GlobalOptions {
@@ -28,6 +29,7 @@ export function buildProgram(): Command {
 	registerPubkeyCommand(program);
 	registerStatsCommand(program);
 	registerDeleteCommand(program);
+	registerRootCommands(program);
 
 	return program;
 }
