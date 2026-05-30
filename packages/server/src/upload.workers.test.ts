@@ -832,12 +832,16 @@ describe('upload flow', () => {
 			await response.json<{
 				readonly ok: true;
 				readonly pendingUploadsDeleted: number;
+				readonly rootsExpired: number;
+				readonly pathsSwept: number;
 				readonly narInfosDeleted: number;
 				readonly blobsDeleted: number;
 			}>()
 		).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
+			rootsExpired: 0,
+			pathsSwept: 0,
 			narInfosDeleted: 0,
 			blobsDeleted: 1
 		});
@@ -924,12 +928,16 @@ describe('upload flow', () => {
 			await response.json<{
 				readonly ok: true;
 				readonly pendingUploadsDeleted: number;
+				readonly rootsExpired: number;
+				readonly pathsSwept: number;
 				readonly narInfosDeleted: number;
 				readonly blobsDeleted: number;
 			}>()
 		).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
+			rootsExpired: 0,
+			pathsSwept: 0,
 			narInfosDeleted: 0,
 			blobsDeleted: 0
 		});
@@ -1377,6 +1385,265 @@ describe('upload flow', () => {
 
 			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 		});
+
+		const hashA = '11111111111111111111111111111111';
+		const hashB = '22222222222222222222222222222222';
+		const hashC = '33333333333333333333333333333333';
+
+		it('sweeps unreachable paths and keeps the rooted closure', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const a = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'a',
+				storePathHash: hashA,
+				narHash: nixSha256Hash('a'),
+				references: [`${hashB}-b`]
+			});
+			const b = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'b',
+				storePathHash: hashB,
+				narHash: nixSha256Hash('b'),
+				references: []
+			});
+			const c = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'c',
+				storePathHash: hashC,
+				narHash: nixSha256Hash('c'),
+				references: []
+			});
+			await commitPath(token, a);
+			await commitPath(token, b);
+			await commitPath(token, c);
+			await setRoot(token, { name: 'main', targets: [a.storePath] });
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 1,
+				narInfosDeleted: 1,
+				blobsDeleted: 0
+			});
+
+			await expect(env.BLOBS.head(narInfoObjectKey(hashC))).resolves.toBeNull();
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(hashA))
+			).resolves.not.toBeNull();
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(hashB))
+			).resolves.not.toBeNull();
+		});
+
+		it('skips the sweep when no root is defined', async () => {
+			const token = await initialise();
+			const path = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, path);
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 0,
+				narInfosDeleted: 0,
+				blobsDeleted: 0
+			});
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(path.storePathHash))
+			).resolves.not.toBeNull();
+		});
+
+		it('skips the sweep when roots resolve to nothing committed', async () => {
+			const token = await initialise();
+			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, committed);
+			await setRoot(token, {
+				name: 'ghost',
+				targets: ['/nix/store/99999999999999999999999999999999-absent']
+			});
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 0,
+				narInfosDeleted: 0,
+				blobsDeleted: 0
+			});
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(committed.storePathHash))
+			).resolves.not.toBeNull();
+		});
+
+		it('sweeps a path freed by an expired root while a live root remains', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const a = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'a',
+				storePathHash: hashA,
+				narHash: nixSha256Hash('a'),
+				references: []
+			});
+			const b = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'b',
+				storePathHash: hashB,
+				narHash: nixSha256Hash('b'),
+				references: []
+			});
+			await commitPath(token, a);
+			await commitPath(token, b);
+			await setRoot(token, { name: 'keep', targets: [a.storePath] });
+			await setRoot(token, {
+				name: 'pr',
+				targets: [b.storePath],
+				ttlSeconds: 60
+			});
+
+			vi.setSystemTime(new Date(deleteTestBase.getTime() + 120_000));
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 1,
+				pathsSwept: 1,
+				narInfosDeleted: 1,
+				blobsDeleted: 0
+			});
+
+			const { roots } = await listRoots(token);
+
+			expect(roots.map((root) => root.name)).toStrictEqual(['keep']);
+			await expect(env.BLOBS.head(narInfoObjectKey(hashB))).resolves.toBeNull();
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(hashA))
+			).resolves.not.toBeNull();
+		});
+
+		it('sweeps a path freed by the last expired root', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const b = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, b);
+			await setRoot(token, {
+				name: 'pr',
+				targets: [b.storePath],
+				ttlSeconds: 60
+			});
+
+			vi.setSystemTime(new Date(deleteTestBase.getTime() + 120_000));
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 1,
+				pathsSwept: 1,
+				narInfosDeleted: 1,
+				blobsDeleted: 0
+			});
+
+			const { roots } = await listRoots(token);
+
+			expect(roots).toStrictEqual([]);
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(b.storePathHash))
+			).resolves.toBeNull();
+		});
+
+		it('keeps a NAR shared with a retained path', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const a = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'a',
+				storePathHash: hashA,
+				references: []
+			});
+			const c = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'c',
+				storePathHash: hashC,
+				references: []
+			});
+			await commitPath(token, a);
+			await commitSharedPath(token, c);
+			await setRoot(token, { name: 'main', targets: [a.storePath] });
+
+			vi.setSystemTime(afterGrace());
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 1,
+				narInfosDeleted: 1,
+				blobsDeleted: 0
+			});
+
+			await expect(env.BLOBS.head(narInfoObjectKey(hashC))).resolves.toBeNull();
+			await expect(
+				env.BLOBS.head(narObjectKey(narHash))
+			).resolves.not.toBeNull();
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(hashA))
+			).resolves.not.toBeNull();
+		});
+
+		it('defers a swept path NAR until the grace elapses', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const a = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'a',
+				storePathHash: hashA,
+				narHash: nixSha256Hash('a'),
+				references: []
+			});
+			const c = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'c',
+				storePathHash: hashC,
+				narHash: nixSha256Hash('c'),
+				references: []
+			});
+			await commitPath(token, a);
+			await commitPath(token, c);
+			await setRoot(token, { name: 'main', targets: [a.storePath] });
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 1,
+				narInfosDeleted: 1,
+				blobsDeleted: 0
+			});
+			await expect(
+				env.BLOBS.head(narObjectKey(nixSha256Hash('c')))
+			).resolves.not.toBeNull();
+
+			vi.setSystemTime(afterGrace());
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 0,
+				narInfosDeleted: 0,
+				blobsDeleted: 1
+			});
+			await expect(
+				env.BLOBS.head(narObjectKey(nixSha256Hash('c')))
+			).resolves.toBeNull();
+		});
 	});
 });
 
@@ -1466,6 +1733,8 @@ async function runGc(): Promise<void> {
 interface GcResult {
 	readonly ok: true;
 	readonly pendingUploadsDeleted: number;
+	readonly rootsExpired: number;
+	readonly pathsSwept: number;
 	readonly narInfosDeleted: number;
 	readonly blobsDeleted: number;
 }

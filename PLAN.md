@@ -483,10 +483,13 @@ every live channel through `References`. This is built in three increments:
       drop channels. A set fully declares the channel (its targets and TTL,
       reset on each set), reports per-target presence, and is validated against
       shared name and TTL bounds. Inert until the sweep below consumes it.
-- [ ] Reachability GC: expire channels past their TTL, mark the closure from
-      live channels through `References`, and sweep unreachable committed paths
-      through the row-first delete and durable narinfo queue. A zero-live-roots
-      guard keeps an empty channel set from collecting the whole cache.
+- [x] Reachability GC: the daily pass expires channels past their TTL, marks the
+      closure reachable from the live channels through `References`, and sweeps
+      unreachable committed paths through the row-first delete and durable
+      narinfo queue (so the NAR grace still applies). The sweep runs only when
+      at least one committed path is reachable, so neither an empty channel set
+      nor channels that point only at absent paths can collect the whole cache;
+      root expiry happens regardless.
 - [ ] `push --root <name>` plus durable implicit pins for manual pushes: commit
       the uploads first, then replace the named channel with exactly those
       top-level paths.

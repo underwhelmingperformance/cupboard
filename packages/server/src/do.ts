@@ -28,7 +28,7 @@ import {
 	type UploadPrepareResponse
 } from '@cupboard/shared';
 import { DurableObject } from 'cloudflare:workers';
-import { and, count, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, count, eq, gte, lt, lte, sql } from 'drizzle-orm';
 import {
 	drizzle,
 	type DrizzleSqliteDODatabase
@@ -997,6 +997,117 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
+	private collectUnreachable(now: string): {
+		rootsExpired: number;
+		pathsSwept: number;
+	} {
+		// Expire TTL'd roots first, regardless of whether a sweep follows, so an
+		// expiring channel always lapses. A NULL expiry (permanent) never matches.
+		const expiredRoots = this.db
+			.select({ name: schema.retentionRoots.name })
+			.from(schema.retentionRoots)
+			.where(lte(schema.retentionRoots.expiresAt, now))
+			.all();
+
+		for (const root of expiredRoots) {
+			this.db
+				.delete(schema.retentionRootTargets)
+				.where(eq(schema.retentionRootTargets.rootName, root.name))
+				.run();
+		}
+
+		this.db
+			.delete(schema.retentionRoots)
+			.where(lte(schema.retentionRoots.expiresAt, now))
+			.run();
+
+		// Mark the closure reachable from the live roots. `visited` guards the
+		// traversal; `retainedCommitted` is the keep-set of committed paths that
+		// the sweep spares.
+		const visited = new Set<string>();
+		const retainedCommitted = new Set<string>();
+		const queue: string[] = [];
+
+		for (const target of this.db
+			.select({ storePathHash: schema.retentionRootTargets.storePathHash })
+			.from(schema.retentionRootTargets)
+			.all()) {
+			if (!visited.has(target.storePathHash)) {
+				visited.add(target.storePathHash);
+				queue.push(target.storePathHash);
+			}
+		}
+
+		while (queue.length > 0) {
+			const storePathHash = queue.pop();
+
+			if (storePathHash === undefined) {
+				break;
+			}
+
+			const row = this.db
+				.select({ referencesJson: schema.narInfos.referencesJson })
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.get();
+
+			if (row === undefined) {
+				continue;
+			}
+
+			retainedCommitted.add(storePathHash);
+
+			for (const reference of JSON.parse(
+				row.referencesJson
+			) as readonly string[]) {
+				const separator = reference.indexOf('-');
+
+				if (separator <= 0) {
+					continue;
+				}
+
+				const referenceHash = reference.slice(0, separator);
+
+				if (!visited.has(referenceHash)) {
+					visited.add(referenceHash);
+					queue.push(referenceHash);
+				}
+			}
+		}
+
+			// Guard: nothing committed is reachable and no root expired (no roots, or
+			// roots that only point at absent paths), so collecting would empty the cache
+			// without a retention event. Skip it.
+			if (retainedCommitted.size === 0 && expiredRoots.length === 0) {
+				return { rootsExpired: expiredRoots.length, pathsSwept: 0 };
+			}
+
+		const committed = this.db
+			.select({
+				storePathHash: schema.narInfos.storePathHash,
+				narHash: schema.narInfos.narHash
+			})
+			.from(schema.narInfos)
+			.all();
+		let pathsSwept = 0;
+
+		for (const path of committed) {
+			if (retainedCommitted.has(path.storePathHash)) {
+				continue;
+			}
+
+			this.db.transaction((tx) => {
+				tx.delete(schema.narInfos)
+					.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+					.run();
+				this.enqueueNarInfoDeletion(tx, path.storePathHash, path.narHash, now);
+			});
+			pathsSwept += 1;
+		}
+
+		return { rootsExpired: expiredRoots.length, pathsSwept };
+	}
+
 	private async handleGarbageCollection(): Promise<Response> {
 		const now = new Date().toISOString();
 		const result = await this.ctx.blockConcurrencyWhile(async () => {
@@ -1015,8 +1126,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.where(lt(schema.pendingUploads.expiresAt, now))
 				.run();
 
+			const { rootsExpired, pathsSwept } = this.collectUnreachable(now);
+
 			return {
 				pendingUploadsDeleted: expiredUploads.length,
+				rootsExpired,
+				pathsSwept,
 				narInfosDeleted: await this.flushQueuedNarInfoDeletions(),
 				blobsDeleted: await this.flushQueuedBlobDeletions(now)
 			};
