@@ -1,6 +1,14 @@
 {
 	"name": "@cupboard/shared",
 	"version": "0.0.0",
+	"dependencies": {
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"fast-check": "^4.8.0",
+		"typescript": "^6.0.2",
+		"vitest": "^4.1.6"
+	},
 	"exports": {
 		".": "./src/index.ts"
 	},
@@ -9,10 +17,5 @@
 		"check:types": "tsc --noEmit",
 		"test": "vitest run --passWithNoTests"
 	},
-	"type": "module",
-	"devDependencies": {
-		"fast-check": "^4.8.0",
-		"typescript": "^6.0.2",
-		"vitest": "^4.1.6"
-	}
+	"type": "module"
 }

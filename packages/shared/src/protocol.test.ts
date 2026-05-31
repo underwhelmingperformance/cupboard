@@ -4,8 +4,10 @@ import { describe, expect, it } from 'vitest';
 import {
 	CacheInfo,
 	DeletePathRequest,
+	fromNixBase32,
 	InvalidNarInfoIntegerFieldError,
 	InvalidNarInfoLineError,
+	InvalidNixSha256HashError,
 	InvalidRootNameError,
 	InvalidRootTargetsError,
 	InvalidRootTtlError,
@@ -22,7 +24,6 @@ import {
 	NixConfig,
 	RootRemoveRequest,
 	RootSetRequest,
-	rootTtlMaxSeconds,
 	StorePath,
 	StorePathHashMismatchError,
 	UnsupportedNarInfoCompressionError,
@@ -30,6 +31,7 @@ import {
 	UploadPathCommitMetadata,
 	UploadPathMetadata
 } from './protocol.ts';
+import { rootTtlMaxSeconds } from './scalars.ts';
 
 describe('CacheInfo', () => {
 	it('renders nix-cache-info', () => {
@@ -182,6 +184,17 @@ describe('StorePath', () => {
 
 	it('rejects invalid store paths with a typed error', () => {
 		expect(() => new StorePath('/tmp/example')).toThrow(InvalidStorePathError);
+	});
+});
+
+describe('fromNixBase32', () => {
+	it.each([
+		{ name: 'an out-of-alphabet character', value: 'e'.repeat(52) },
+		{ name: 'an empty string', value: '' },
+		{ name: 'a too-short input', value: '1'.repeat(51) },
+		{ name: 'a too-long input', value: '1'.repeat(53) }
+	])('rejects $name', ({ value }) => {
+		expect(() => fromNixBase32(value)).toThrow(InvalidNixSha256HashError);
 	});
 });
 

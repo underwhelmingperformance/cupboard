@@ -641,10 +641,10 @@ further. The goal is one validation model on every boundary: JSON parsing is
 only the lexical step, Zod schemas own the wire shape and semantics, and a tiny
 pure lexer handles text formats such as narinfo before a schema validates them.
 
-- [ ] Add Zod v4 to `@cupboard/shared`.
+- [x] Add Zod v4 to `@cupboard/shared`.
 - [ ] Split the monolithic shared protocol module into focused modules, with
       `index.ts` remaining re-exports only:
-  - [ ] `scalars.ts` for reusable branded field schemas.
+  - [x] `scalars.ts` for reusable branded field schemas.
   - [ ] `hash.ts` for Nix SHA-256 parsing, base32/base64 conversion, and digest
         length checks.
   - [ ] `store-path.ts` for store path parsing, hashing, basenames, and
@@ -676,7 +676,7 @@ pure lexer handles text formats such as narinfo before a schema validates them.
 - [ ] Parse `References` with whitespace splitting that drops empty elements.
 - [ ] Build narinfo fingerprints from sorted full reference store paths, not a
       caller-side ordering invariant.
-- [ ] Make the Nix base32 decoder reject out-of-alphabet characters explicitly.
+- [x] Make the Nix base32 decoder reject out-of-alphabet characters explicitly.
 - [x] Give `If-None-Match` precedence over `If-Modified-Since`.
 - [x] Support `If-None-Match: *`, comma-separated ETags, and weak ETags.
 - [x] Remove the dead `resolveBearer` refresh branch from the CLI client.

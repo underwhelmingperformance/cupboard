@@ -1,0 +1,237 @@
+import { describe, expect, it } from 'vitest';
+import type { z } from 'zod';
+
+import {
+	compressionSchema,
+	nixSha256HashSchema,
+	positiveIntSchema,
+	referencesSchema,
+	rootNameSchema,
+	storePathBasenameSchema,
+	storePathHashSchema,
+	storePathSchema,
+	ttlSecondsSchema
+} from './scalars.ts';
+
+const nixHash = `sha256:${'1'.repeat(52)}`;
+const storePathHash = '0'.repeat(32);
+const storePath = `/nix/store/${storePathHash}-name`;
+
+const cases: readonly {
+	name: string;
+	schema: z.ZodType;
+	value: unknown;
+	valid: boolean;
+}[] = [
+	{
+		name: 'a valid nix hash',
+		schema: nixSha256HashSchema,
+		value: nixHash,
+		valid: true
+	},
+	{
+		name: 'a too-short nix hash',
+		schema: nixSha256HashSchema,
+		value: 'sha256:short',
+		valid: false
+	},
+	{
+		name: 'a nix hash with an out-of-alphabet character',
+		schema: nixSha256HashSchema,
+		value: `sha256:${'e'.repeat(52)}`,
+		valid: false
+	},
+	{
+		name: 'a nix hash without the prefix',
+		schema: nixSha256HashSchema,
+		value: '1'.repeat(52),
+		valid: false
+	},
+	{
+		name: 'a valid store path hash',
+		schema: storePathHashSchema,
+		value: storePathHash,
+		valid: true
+	},
+	{
+		name: 'a store path hash with bad characters',
+		schema: storePathHashSchema,
+		value: 'e'.repeat(32),
+		valid: false
+	},
+	{
+		name: 'a short store path hash',
+		schema: storePathHashSchema,
+		value: '0'.repeat(31),
+		valid: false
+	},
+	{
+		name: 'a valid store path',
+		schema: storePathSchema,
+		value: storePath,
+		valid: true
+	},
+	{
+		name: 'a store path with an upper-case and punctuation name',
+		schema: storePathSchema,
+		value: `/nix/store/${storePathHash}-Name+._?=`,
+		valid: true
+	},
+	{
+		name: 'a store path with a short hash',
+		schema: storePathSchema,
+		value: '/nix/store/short-name',
+		valid: false
+	},
+	{
+		name: 'a store path with whitespace in the name',
+		schema: storePathSchema,
+		value: `${storePath} with-space`,
+		valid: false
+	},
+	{
+		name: 'a store path with a newline in the name',
+		schema: storePathSchema,
+		value: `${storePath}\nInjected: value`,
+		valid: false
+	},
+	{
+		name: 'a path outside the store',
+		schema: storePathSchema,
+		value: '/etc/passwd',
+		valid: false
+	},
+	{
+		name: 'a nested path under a store path',
+		schema: storePathSchema,
+		value: `${storePath}/child`,
+		valid: false
+	},
+	{
+		name: 'a valid store path basename',
+		schema: storePathBasenameSchema,
+		value: `${storePathHash}-Name+._?=`,
+		valid: true
+	},
+	{
+		name: 'a store path basename with a slash',
+		schema: storePathBasenameSchema,
+		value: `${storePathHash}-name/child`,
+		valid: false
+	},
+	{
+		name: 'a store path basename with a control character',
+		schema: storePathBasenameSchema,
+		value: `${storePathHash}-name\u0007`,
+		valid: false
+	},
+	{
+		name: 'a valid root name',
+		schema: rootNameSchema,
+		value: 'github:owner/repo/main',
+		valid: true
+	},
+	{
+		name: 'an empty root name',
+		schema: rootNameSchema,
+		value: '',
+		valid: false
+	},
+	{
+		name: 'an over-long root name',
+		schema: rootNameSchema,
+		value: 'a'.repeat(257),
+		valid: false
+	},
+	{
+		name: 'a root name with a control character',
+		schema: rootNameSchema,
+		value: 'bad\nname',
+		valid: false
+	},
+	{ name: 'a valid ttl', schema: ttlSecondsSchema, value: 3600, valid: true },
+	{ name: 'a zero ttl', schema: ttlSecondsSchema, value: 0, valid: false },
+	{
+		name: 'a fractional ttl',
+		schema: ttlSecondsSchema,
+		value: 1.5,
+		valid: false
+	},
+	{
+		name: 'an out-of-range ttl',
+		schema: ttlSecondsSchema,
+		value: 315_360_001,
+		valid: false
+	},
+	{
+		name: 'a positive integer',
+		schema: positiveIntSchema,
+		value: 1,
+		valid: true
+	},
+	{ name: 'a zero integer', schema: positiveIntSchema, value: 0, valid: false },
+	{
+		name: 'a negative integer',
+		schema: positiveIntSchema,
+		value: -1,
+		valid: false
+	},
+	{
+		name: 'a fractional number',
+		schema: positiveIntSchema,
+		value: 1.5,
+		valid: false
+	},
+	{
+		name: 'a supported compression',
+		schema: compressionSchema,
+		value: 'zstd',
+		valid: true
+	},
+	{
+		name: 'an unsupported compression',
+		schema: compressionSchema,
+		value: 'gzip',
+		valid: false
+	},
+	{
+		name: 'valid references',
+		schema: referencesSchema,
+		value: [`${storePathHash}-a`, `${'1'.repeat(32)}-B+._?=`],
+		valid: true
+	},
+	{
+		name: 'a reference with a newline',
+		schema: referencesSchema,
+		value: [`${storePathHash}-a\nInjected: value`],
+		valid: false
+	},
+	{
+		name: 'a reference without a store hash',
+		schema: referencesSchema,
+		value: ['name-only'],
+		valid: false
+	}
+];
+
+describe('scalar schemas', () => {
+	it.each(cases)('accepts/rejects $name', ({ schema, value, valid }) => {
+		expect(schema.safeParse(value).success).toBe(valid);
+	});
+
+	it.each([
+		{
+			name: 'basenames',
+			value: [`${storePathHash}-a`, `${'1'.repeat(32)}-b`],
+			valid: true
+		},
+		{ name: 'an empty list', value: [], valid: true },
+		{
+			name: 'a reference containing a slash',
+			value: ['has/slash'],
+			valid: false
+		}
+	])('references: $name', ({ value, valid }) => {
+		expect(referencesSchema.safeParse(value).success).toBe(valid);
+	});
+});

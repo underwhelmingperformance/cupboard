@@ -1,3 +1,12 @@
+import {
+	hasControlCharacter,
+	nixSha256HashPattern,
+	rootNameMaxLength,
+	rootTtlMaxSeconds,
+	rootTtlMinSeconds,
+	storePathHashPattern
+} from './scalars.ts';
+
 export interface CacheInfoFields {
 	readonly storeDirectory: string;
 	readonly wantMassQuery: boolean;
@@ -260,8 +269,6 @@ export class InvalidSha256DigestLengthError extends ProtocolError {
 }
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
-const nixSha256HashPattern = /^sha256:[0-9a-df-np-sv-z]{52}$/;
-const storePathHashPattern = /^[0-9a-df-np-sv-z]{32}$/;
 const base64Alphabet =
 	'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 
@@ -382,22 +389,6 @@ export class DeletePathRequest {
 	toFields(): DeletePathRequestFields {
 		return { storePathHash: this.storePathHash };
 	}
-}
-
-export const rootNameMaxLength = 256;
-export const rootTtlMinSeconds = 1;
-export const rootTtlMaxSeconds = 315_360_000;
-
-function hasControlCharacter(value: string): boolean {
-	for (const character of value) {
-		const code = character.codePointAt(0) ?? 0;
-
-		if (code < 0x20 || code === 0x7f) {
-			return true;
-		}
-	}
-
-	return false;
 }
 
 function validateRootName(name: string): void {
@@ -997,11 +988,25 @@ export function toNixBase32(bytes: Uint8Array): string {
 	return encoded;
 }
 
-function fromNixBase32(value: string): Uint8Array {
+const nixSha256Base32Length = 52;
+
+export function fromNixBase32(value: string): Uint8Array {
+	// A SHA-256 digest is exactly 52 Nix base32 characters; reject anything else
+	// so a short input cannot decode to a zeroed digest nor a long one silently
+	// drop its leading bits.
+	if (value.length !== nixSha256Base32Length) {
+		throw new InvalidNixSha256HashError(value);
+	}
+
 	const bytes = new Uint8Array(32);
 
 	for (let position = 0; position < value.length; position += 1) {
 		const digit = nixBase32Alphabet.indexOf(value.charAt(position));
+
+		if (digit === -1) {
+			throw new InvalidNixSha256HashError(value);
+		}
+
 		const index = value.length - 1 - position;
 
 		for (let bit = 0; bit < 5; bit += 1) {
