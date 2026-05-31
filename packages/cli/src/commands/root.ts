@@ -1,15 +1,16 @@
 import {
 	type RootListResponse,
 	type RootRemoveResponse,
+	type RootSetBody,
 	RootSetRequest,
-	type RootSetRequestFields,
 	type RootSetResponse,
 	type RootSummary
 } from '@cupboard/shared';
 import type { Command } from 'commander';
 
+import { authenticate } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
-import { CupboardClient } from '../client.ts';
+import { type AccessCredential, CupboardClient } from '../client.ts';
 import { parseTtl } from '../duration.ts';
 import { createReporter, type Reporter, type ResultRow } from '../reporter.ts';
 
@@ -24,11 +25,15 @@ interface RootOptions {
 
 export interface RootClient {
 	setRoot(
-		token: string,
-		fields: RootSetRequestFields
+		token: AccessCredential,
+		name: string,
+		body: RootSetBody
 	): Promise<RootSetResponse>;
-	listRoots(token: string): Promise<RootListResponse>;
-	removeRoot(token: string, name: string): Promise<RootRemoveResponse>;
+	listRoots(token: AccessCredential): Promise<RootListResponse>;
+	removeRoot(
+		token: AccessCredential,
+		name: string
+	): Promise<RootRemoveResponse>;
 }
 
 export function registerRootCommands(program: Command): void {
@@ -49,7 +54,7 @@ export function registerRootCommands(program: Command): void {
 			'expire the root after this duration (e.g. 7d, 12h)',
 			parseTtl
 		)
-		.requiredOption('--token <token>', 'admin token')
+		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(
 			async (
 				url: string,
@@ -60,15 +65,10 @@ export function registerRootCommands(program: Command): void {
 				const reporter = createReporter({
 					mode: reporterModeFromGlobals(program)
 				});
+				const client = CupboardClient.fromUrl(url);
+				const token = await authenticate(client, options.token);
 
-				await runRootSet(
-					name,
-					targets,
-					options.ttl,
-					options.token,
-					reporter,
-					CupboardClient.fromUrl(url)
-				);
+				await runRootSet(name, targets, options.ttl, token, reporter, client);
 			}
 		);
 
@@ -76,13 +76,15 @@ export function registerRootCommands(program: Command): void {
 		.command('list')
 		.description('List retention roots.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
-		.requiredOption('--token <token>', 'admin token')
+		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(async (url: string, options: RootOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
+			const client = CupboardClient.fromUrl(url);
+			const token = await authenticate(client, options.token);
 
-			await runRootList(options.token, reporter, CupboardClient.fromUrl(url));
+			await runRootList(token, reporter, client);
 		});
 
 	root
@@ -90,18 +92,15 @@ export function registerRootCommands(program: Command): void {
 		.description('Remove a retention root.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<name>', 'root name to remove')
-		.requiredOption('--token <token>', 'admin token')
+		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(async (url: string, name: string, options: RootOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
+			const client = CupboardClient.fromUrl(url);
+			const token = await authenticate(client, options.token);
 
-			await runRootRemove(
-				name,
-				options.token,
-				reporter,
-				CupboardClient.fromUrl(url)
-			);
+			await runRootRemove(name, token, reporter, client);
 		});
 }
 
@@ -109,18 +108,18 @@ export async function runRootSet(
 	name: string,
 	targets: readonly string[],
 	ttlSeconds: number | undefined,
-	token: string,
+	token: AccessCredential,
 	reporter: Reporter,
 	client: RootClient
 ): Promise<void> {
-	const request = RootSetRequest.fromFields({
+	const { name: validatedName, ...body } = RootSetRequest.fromFields({
 		name,
 		targets,
 		...(ttlSeconds === undefined ? {} : { ttlSeconds })
-	});
+	}).toFields();
 
 	const summary = await reporter.phase('Setting retention root', () =>
-		client.setRoot(token, request.toFields())
+		client.setRoot(token, validatedName, body)
 	);
 
 	reporter.result([
@@ -131,7 +130,7 @@ export async function runRootSet(
 }
 
 export async function runRootList(
-	token: string,
+	token: AccessCredential,
 	reporter: Reporter,
 	client: RootClient
 ): Promise<void> {
@@ -149,7 +148,7 @@ export async function runRootList(
 
 export async function runRootRemove(
 	name: string,
-	token: string,
+	token: AccessCredential,
 	reporter: Reporter,
 	client: RootClient
 ): Promise<void> {

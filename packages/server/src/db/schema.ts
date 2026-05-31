@@ -56,11 +56,12 @@ export const narInfoDeletions = sqliteTable(
 	(table) => [primaryKey({ columns: [table.storePathHash, table.generation] })]
 );
 
-export const tokens = sqliteTable('token', {
+export const authKeys = sqliteTable('auth_key', {
 	id: text('id').primaryKey(),
-	hash: text('hash').notNull(),
-	scope: text('scope', { enum: ['admin'] }).notNull(),
-	createdAt: text('created_at').notNull()
+	privateJwkJson: text('private_jwk_json').notNull(),
+	publicJwkJson: text('public_jwk_json').notNull(),
+	createdAt: text('created_at').notNull(),
+	retiredAt: text('retired_at')
 });
 
 export const signingKeys = sqliteTable('signing_key', {

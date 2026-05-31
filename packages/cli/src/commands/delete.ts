@@ -5,8 +5,9 @@ import {
 } from '@cupboard/shared';
 import type { Command } from 'commander';
 
+import { authenticate } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
-import { CupboardClient } from '../client.ts';
+import { type AccessCredential, CupboardClient } from '../client.ts';
 import { createReporter, type Reporter } from '../reporter.ts';
 
 interface DeleteOptions {
@@ -15,7 +16,7 @@ interface DeleteOptions {
 
 export interface DeleteClient {
 	deleteStorePath(
-		token: string,
+		token: AccessCredential,
 		storePathHash: string
 	): Promise<DeletePathResponse>;
 }
@@ -29,24 +30,21 @@ export function registerDeleteCommand(program: Command): void {
 			'<store-path>',
 			'store path to delete (e.g. /nix/store/<hash>-<name>)'
 		)
-		.requiredOption('--token <token>', 'admin token')
+		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(async (url: string, storePath: string, options: DeleteOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
+			const client = CupboardClient.fromUrl(url);
+			const token = await authenticate(client, options.token);
 
-			await runDelete(
-				storePath,
-				options.token,
-				reporter,
-				CupboardClient.fromUrl(url)
-			);
+			await runDelete(storePath, token, reporter, client);
 		});
 }
 
 export async function runDelete(
 	storePath: string,
-	token: string,
+	token: AccessCredential,
 	reporter: Reporter,
 	client: DeleteClient
 ): Promise<void> {

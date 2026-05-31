@@ -1,5 +1,6 @@
 import type { Command } from 'commander';
 
+import { authenticate } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client.ts';
 import { parseTtl } from '../duration.ts';
@@ -20,7 +21,7 @@ export function registerPushCommand(program: Command): void {
 		)
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<paths...>', 'Nix store paths to push')
-		.requiredOption('--token <token>', 'write token')
+		.requiredOption('--token <token>', 'bootstrap secret')
 		.option(
 			'--root <name>',
 			'retain the pushed paths under this named channel (e.g. github:owner/repo/main)'
@@ -34,10 +35,12 @@ export function registerPushCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
+			const client = CupboardClient.fromUrl(url);
+			const token = await authenticate(client, options.token);
 
 			await runPush(paths, reporter, {
-				client: CupboardClient.fromUrl(url),
-				token: options.token,
+				client,
+				token,
 				...(options.root === undefined ? {} : { root: options.root }),
 				...(options.ttl === undefined ? {} : { ttlSeconds: options.ttl })
 			});

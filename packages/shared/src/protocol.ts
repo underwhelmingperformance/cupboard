@@ -80,10 +80,10 @@ export interface CommitResponse {
 	readonly status: 'committed' | 'already-present';
 }
 
-export interface InitResponse {
+export interface BootstrapResponse {
 	readonly url: string;
-	readonly token: string;
 	readonly publicKey: string;
+	readonly token: string;
 }
 
 export interface StatsResponse {
@@ -105,6 +105,11 @@ export interface DeletePathResponse {
 
 export interface RootSetRequestFields {
 	readonly name: string;
+	readonly targets: readonly string[];
+	readonly ttlSeconds?: number;
+}
+
+export interface RootSetBody {
 	readonly targets: readonly string[];
 	readonly ttlSeconds?: number;
 }

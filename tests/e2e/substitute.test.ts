@@ -145,7 +145,7 @@ function withHarness(
 
 			try {
 				const client = new CupboardClient(server.url, server.uploadFetcher());
-				const init = await client.init(bootstrapToken);
+				const bootstrap = await client.bootstrap(bootstrapToken);
 
 				await body({
 					server,
@@ -155,8 +155,8 @@ function withHarness(
 						path.join(directory, 'target-home')
 					),
 					client,
-					token: init.token,
-					publicKey: init.publicKey,
+					token: bootstrap.token,
+					publicKey: bootstrap.publicKey,
 					directory
 				});
 			} finally {

@@ -11,11 +11,13 @@ interface InitOptions {
 export function registerInitCommand(program: Command): void {
 	program
 		.command('init')
-		.description('Initialise a cupboard Worker and print its write token.')
+		.description(
+			'Initialise a cupboard Worker and print its substituter config.'
+		)
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.requiredOption(
 			'--token <token>',
-			'bootstrap token configured on the Worker'
+			'bootstrap secret configured on the Worker'
 		)
 		.action(async (url: string, options: InitOptions) => {
 			const reporter = createReporter({
@@ -26,16 +28,12 @@ export function registerInitCommand(program: Command): void {
 
 			const result = await reporter.phase('Initialising cupboard', (ctx) => {
 				ctx.fact('url', url);
-				return client.init(token);
+				return client.bootstrap(token);
 			});
-
-			const writeToken =
-				result.token === '' ? '(already initialised)' : result.token;
 
 			reporter.result([
 				{ label: 'Cache URL', value: result.url },
-				{ label: 'Public key', value: result.publicKey },
-				{ label: 'Write token', value: writeToken }
+				{ label: 'Public key', value: result.publicKey }
 			]);
 		});
 }

@@ -4,6 +4,7 @@ import {
 } from '@cupboard/shared';
 import { describe, expect, it } from 'vitest';
 
+import type { AccessCredential } from '../client.ts';
 import type { Reporter, ResultRow } from '../reporter.ts';
 
 import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';
@@ -37,7 +38,7 @@ describe('describeNarOutcome', () => {
 
 describe('runDelete', () => {
 	it('derives the hash, calls the client with the token, and reports', async () => {
-		const calls: { token: string; storePathHash: string }[] = [];
+		const calls: { token: AccessCredential; storePathHash: string }[] = [];
 		const results: ResultRow[][] = [];
 		const client: DeleteClient = {
 			deleteStorePath(token, storePathHash) {

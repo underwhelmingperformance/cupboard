@@ -5,6 +5,24 @@ export abstract class ServerHttpError extends Error {
 	abstract readonly status: number;
 }
 
+export class UnauthenticatedError extends ServerHttpError {
+	readonly status = StatusCodes.UNAUTHORIZED;
+
+	constructor() {
+		super('Unauthorised');
+		this.name = 'UnauthenticatedError';
+	}
+}
+
+export class InsufficientScopeError extends ServerHttpError {
+	readonly status = StatusCodes.FORBIDDEN;
+
+	constructor() {
+		super('Forbidden');
+		this.name = 'InsufficientScopeError';
+	}
+}
+
 export class InvalidJsonRequestBodyError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 

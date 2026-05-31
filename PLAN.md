@@ -83,7 +83,7 @@ successfully substitute that path from the Worker.
 
 ### Client
 
-- [x] Configure against a personal Worker URL and write token.
+- [x] Configure against a personal Worker URL and bootstrap secret.
 - [x] Compute NAR hash and size locally while streaming the same NAR into zstd,
       so each path is read once.
 - [x] Upload only missing blobs.
@@ -149,15 +149,16 @@ successfully substitute that path from the Worker.
 
 ### Admin
 
-- [x] Initialise deployment: mint the write token and generate the signing key.
+- [x] Initialise deployment: ensure the signing key and mint an admin JWT from
+      the bootstrap secret.
 - [x] Print Nix substituter config for the user's `nix.conf`.
 - [x] Show the public signing key.
 - [x] Inspect cache stats.
 - [ ] Tests:
   - [ ] Unit: substituter config command renders a correct `nix.conf` snippet
         for a given Worker URL and pubkey.
-  - [x] Integration: init mints exactly one write token and one signing key,
-        idempotently; stats returns accurate row counts.
+  - [x] Integration: bootstrap mints an admin JWT and keeps the signing key
+        stable across calls; stats returns accurate row counts.
 
 ### Test harness
 
@@ -212,31 +213,47 @@ One DO SQLite database per deployment.
   - `name` (PK), `expires_at` (nullable), `created_at`, `updated_at`.
 - `retention_root_target` — the store paths a channel currently keeps.
   - (`root_name`, `store_path_hash`) (PK), `store_path`.
-- `token` — write and admin tokens.
-  - `id` (PK), `hash`, `scope`, `created_at`.
+- `auth_key` — deployment-owned key material for cupboard access JWTs.
+  - `id` (PK), `private_jwk_json`, `public_jwk_json`, `created_at`,
+    `retired_at`.
+- `oidc_trust` — generic OIDC trust rules for minting write-scoped JWTs (V4
+  increment 2).
+  - `id` (PK), `issuer`, `jwks_url` or discovery URL, `audience`, `scope`,
+    `claims_json`, allowed root names or prefixes, `created_at`, `disabled_at`.
 
 ## Routes
 
-Reads (the first six rows) are served by the Worker from R2 and the Cache API;
-the Durable Object handles only the write, admin, and GC routes.
+Public reads and health/version endpoints are served by the Worker from R2 and
+the Cache API where possible; the Durable Object handles auth, writes, admin,
+and GC routes.
 
-| Method    | Path                   | Auth   | Notes                                       |
-| --------- | ---------------------- | ------ | ------------------------------------------- |
-| GET, HEAD | `/nix-cache-info`      | public | Worker; `text/x-nix-cache-info`.            |
-| GET, HEAD | `/<hash>.narinfo`      | public | Worker, from the R2 object + edge cache.    |
-| GET, HEAD | `/nar/<hash>.nar.zst`  | public | Worker, from R2 + edge cache.               |
-| GET       | `/pubkey`              | public | Worker, cached from the DO.                 |
-| POST      | `/upload/negotiate`    | write  | DO. Returns skip, commit, or upload plans.  |
-| POST      | `/upload/<id>/prepare` | write  | DO. Returns R2 PUT URL and headers.         |
-| PUT       | (presigned R2 URL)     | URL    | Client uploads blob directly to R2.         |
-| POST      | `/upload/<id>/commit`  | write  | DO. Writes the narinfo row and R2 object.   |
-| GET       | `/_health`             | public | Worker. Liveness.                           |
-| GET       | `/_version`            | public | Worker. Git SHA, `+dirty` when dirty.       |
-| GET       | `/_stats`              | admin  | DO. Cache size and object count.            |
-| POST      | `/admin/delete`        | admin  | DO. Deletes one store path; defers its NAR. |
-| POST      | `/admin/roots`         | admin  | DO. Creates or replaces a retention root.   |
-| GET       | `/admin/roots`         | admin  | DO. Lists retention roots.                  |
-| POST      | `/admin/roots/remove`  | admin  | DO. Removes a retention root.               |
+| Method    | Path                    | Auth             | Notes                                          |
+| --------- | ----------------------- | ---------------- | ---------------------------------------------- |
+| GET, HEAD | `/nix-cache-info`       | public           | Worker; `text/x-nix-cache-info`.               |
+| GET, HEAD | `/<hash>.narinfo`       | public           | Worker, from the R2 object + edge cache.       |
+| GET, HEAD | `/nar/<hash>.nar.zst`   | public           | Worker, from R2 + edge cache.                  |
+| GET       | `/pubkey`               | public           | Worker, cached from the DO.                    |
+| GET       | `/_health`              | public           | Worker. Liveness.                              |
+| GET       | `/_version`             | public           | Worker. Git SHA, `+dirty` when dirty.          |
+| POST      | `/auth/bootstrap`       | bootstrap secret | DO. Mints a short-lived admin cupboard JWT.    |
+| GET       | `/stats`                | admin JWT        | DO. Cache size and object count.               |
+| DELETE    | `/paths/<hash>`         | admin JWT        | DO. Deletes one store path; defers its NAR.    |
+| GET       | `/roots`                | admin JWT        | DO. Lists retention roots.                     |
+| PUT       | `/roots/<encoded-name>` | write JWT        | DO. Creates or replaces a retention root.      |
+| DELETE    | `/roots/<encoded-name>` | admin JWT        | DO. Removes a retention root.                  |
+| POST      | `/uploads`              | write JWT        | DO. Returns skip, commit, or upload plans.     |
+| PUT       | `/uploads/<id>`         | write JWT        | DO. Returns R2 PUT URL and headers.            |
+| PUT       | (presigned R2 URL)      | URL              | Client uploads blob directly to R2.            |
+| POST      | `/uploads/<id>/commit`  | write JWT        | DO. Writes the narinfo row and R2 object.      |
+| POST      | `/gc`                   | admin JWT        | DO. Runs pending-upload, retention, and R2 GC. |
+| POST      | `/auth/oidc/exchange`   | OIDC token       | DO. V4 increment 2: exchanges CI identity.     |
+
+Root names in `PUT`/`DELETE /roots/<encoded-name>` live only in the path. The
+request body for `PUT` is `{ targets, ttlSeconds? }`; the server combines that
+body with the decoded path segment and validates the full root request. Because
+root names commonly contain `/`, the implementation must first prove the
+encoded-name route shape in Worker/Hono tests and fall back to a body-carried
+name or base64url path segment if `%2F` cannot be captured as one segment.
 
 ## Testing
 
@@ -554,52 +571,65 @@ cupboard access JWT. Use a JOSE/JWT library such as `jose` for signature, JWKS,
 issuer, audience, expiry, and algorithm validation; do not hand-roll JWT
 cryptography.
 
-- [ ] Replace opaque stored bearer tokens on upload/admin handlers with
+- [x] Replace opaque stored bearer tokens on upload/admin handlers with
       cupboard-issued JWT access tokens. Handlers validate one credential type:
       `Authorization: Bearer <cupboard-jwt>`.
-- [ ] Sign cupboard access JWTs with a deployment-owned key stored in DO SQLite
-      as `auth_key`. Include `iss`, `aud`, `sub`, `iat`, `nbf`, `exp`, `jti`,
-      `scope`, and enough origin claims for audit, such as CI provider,
+- [x] Sign cupboard access JWTs with a deployment-owned key stored in DO SQLite
+      as `auth_key`. Bootstrap-admin JWTs include the base claims `iss`, `aud`,
+      `sub`, `iat`, `nbf`, `exp`, `jti`, and `scope`. OIDC-minted write JWTs may
+      additionally include provider-origin audit claims, such as CI provider,
       repository ID, workflow ref, run ID, run attempt, ref, and SHA.
-- [ ] Keep access JWTs short-lived and stateless. Do not store each issued JWT
+- [x] Keep access JWTs short-lived and stateless. Do not store each issued JWT
       in the database; rely on expiry and signing-key rotation rather than a
       token table for normal operation.
 - [ ] Keep long-lived secrets out of normal request handlers. The bootstrap
       secret is accepted only by `/auth/bootstrap`, which mints a short-lived
       admin JWT. External CI OIDC tokens are accepted only by
       `/auth/oidc/exchange`, which mints a short-lived write JWT.
-- [ ] Add `auth_key` rows for active and previous JWT signing keys, with `id`,
-      `private_jwk_json`, `public_jwk_json`, `created_at`, and `retired_at`.
-- [ ] Add `oidc_trust` rows for CI identity rules, with `id`, `issuer`,
-      `jwks_url`, `audience`, `scope`, `claims_json`, `created_at`, and
-      `disabled_at`.
+- [x] Add the `auth_key` table holding the active JWT signing key, with `id`,
+      `private_jwk_json`, `public_jwk_json`, `created_at`, and `retired_at` (the
+      latter reserved for future key rotation).
+- [ ] Add generic `oidc_trust` rows for CI identity rules, with `id`, `issuer`,
+      `jwks_url` or discovery URL, `audience`, `scope`, `claims_json`, allowed
+      root names or prefixes, `created_at`, and `disabled_at`. `issuer` and
+      `audience` are required checks; configured claims are exact-match policy
+      data, so providers are data rather than hardcoded branches.
 - [ ] Add `/auth/bootstrap` and `/auth/oidc/exchange` DO routes. Exchange routes
       are the only routes that accept long-lived bootstrap secrets or external
       OIDC tokens.
-- [ ] Add GitHub Actions as the first OIDC provider. Verify tokens from
-      `https://token.actions.githubusercontent.com` using its discovery/JWKS
-      metadata, require an audience controlled by cupboard, and match configured
-      claims before minting a write JWT.
-- [ ] Store trust rules in `oidc_trust`. Prefer stable ID claims such as
-      `repository_id` and `repository_owner_id`; keep names like `repository`
-      and `workflow_ref` for readability and optional narrowing. Support
-      claim-exact matches first, with pattern matching only if a concrete use
-      case needs it.
+- [ ] Add a generic OIDC exchange backed by `oidc_trust`, with required `issuer`
+      and `audience` checks and configurable exact-match claims. Treat GitHub
+      Actions as the first documented fixture and CLI convenience path, not a
+      hardcoded provider. The same trust-rule evaluator should also fit Cognito,
+      Google Workload Identity Federation, and other OIDC issuers that provide
+      signed tokens with stable claims.
+- [ ] Store trust rules in `oidc_trust`. Prefer stable ID claims when a provider
+      has them, such as GitHub `repository_id` and `repository_owner_id`; keep
+      names like `repository` and `workflow_ref` for readability and optional
+      narrowing. Support claim-exact matches first, with pattern matching only
+      if a concrete use case needs it.
+- [ ] Bind write-scoped JWTs to the roots they may update. A trust rule should
+      produce either an allowed root set or a root-name prefix/namespace, so a
+      CI token for one repository cannot replace another repository's retention
+      root.
 - [ ] Add CLI support for CI exchange. In GitHub Actions, request an OIDC token
       with `id-token: write`, pass cupboard's configured audience, exchange it,
       and use the returned cupboard JWT for the existing push flow.
 - [ ] Add admin commands to list, add, disable, and inspect OIDC trust rules.
-- [ ] Remove the legacy `token` table and V1 opaque-token init flow after the
-      JWT exchange path covers bootstrap, local admin, and CI writes.
+- [x] Remove the legacy `token` table and V1 opaque-token init flow once the
+      bootstrap exchange and admin JWTs cover the write and admin routes.
 - [ ] Tests:
-  - [ ] Unit: JWT verification rejects wrong issuer, audience, algorithm,
+  - [x] Unit: JWT verification rejects wrong issuer, audience, algorithm,
         expiry, not-before, missing scope, and malformed claims.
-  - [ ] Unit: trust-rule matching accepts only the configured GitHub claim set.
-  - [ ] Integration: `/auth/bootstrap` returns an admin JWT and upload/admin
+  - [ ] Unit: trust-rule matching accepts only the configured issuer, audience,
+        and claim set; include GitHub Actions as one fixture, not a special
+        provider branch.
+  - [x] Integration: `/auth/bootstrap` returns an admin JWT and upload/admin
         handlers accept only the required scope.
-  - [ ] Integration: `/auth/oidc/exchange` accepts a signed GitHub-like OIDC JWT
-        whose claims match a trust rule and rejects unknown repositories, refs,
-        workflows, and audiences.
+  - [ ] Integration: `/auth/oidc/exchange` accepts a signed OIDC JWT whose
+        issuer, audience, and claims match a trust rule and rejects unknown or
+        mismatched issuers, audiences, and claims. Include a GitHub-shaped token
+        as one fixture.
   - [ ] E2E: CI-style push obtains a cupboard JWT by exchange and performs the
         normal negotiate, prepare, and commit flow without any stored cupboard
         secret.

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import { type CompressedAndHashedNarFile, CompressedNarFile } from './blob.ts';
 import { byteStream } from './byte-stream.ts';
+import type { AccessCredential } from './client.ts';
 import { PushNarMetadataMismatchError } from './errors.ts';
 import { type NarDigest, NixSha256Hash } from './nar.ts';
 import type { NixStoreClient, NixValidPathInfo } from './nix-store.ts';
@@ -98,10 +99,10 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(token, fields) {
+				setRoot(token, name, body) {
 					expect(token).toBe('write-token');
 
-					return Promise.resolve(rootSummary(fields));
+					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -222,8 +223,8 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(_token, fields) {
-					return Promise.resolve(rootSummary(fields));
+				setRoot(_token, name, body) {
+					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -290,8 +291,8 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(_token, fields) {
-					return Promise.resolve(rootSummary(fields));
+				setRoot(_token, name, body) {
+					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -585,10 +586,10 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(_token, fields) {
+				setRoot(_token, name, body) {
 					events.push('setRoot');
 
-					return Promise.resolve(rootSummary(fields));
+					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -641,11 +642,11 @@ describe('runPush', () => {
 			commit() {
 				throw new UnexpectedPushClientCallError('commit');
 			},
-			setRoot(_token, fields) {
+			setRoot(_token, name, body) {
 				const expiresAt = expiries.at(call) ?? expiries.at(-1);
 				call += 1;
 
-				return Promise.resolve(rootSummary(fields, expiresAt));
+				return Promise.resolve(rootSummary({ name, ...body }, expiresAt));
 			}
 		};
 
@@ -833,7 +834,7 @@ function rootSummary(
 }
 
 interface SetRootCall {
-	readonly token: string;
+	readonly token: AccessCredential;
 	readonly fields: RootSetRequestFields;
 }
 
@@ -857,7 +858,8 @@ function skipClient(setRoots: SetRootCall[]): PushClient {
 		commit() {
 			throw new UnexpectedPushClientCallError('commit');
 		},
-		setRoot(token, fields) {
+		setRoot(token, name, body) {
+			const fields = { name, ...body };
 			setRoots.push({ token, fields });
 
 			return Promise.resolve(rootSummary(fields));

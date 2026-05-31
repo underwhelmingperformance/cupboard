@@ -36,6 +36,20 @@
 			"when": 1780143123683,
 			"tag": "0004_pink_overlord",
 			"breakpoints": true
+		},
+		{
+			"idx": 5,
+			"version": "6",
+			"when": 1780154442743,
+			"tag": "0005_add_auth_key",
+			"breakpoints": true
+		},
+		{
+			"idx": 6,
+			"version": "6",
+			"when": 1780154456635,
+			"tag": "0006_drop_token",
+			"breakpoints": true
 		}
 	]
 }

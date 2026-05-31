@@ -4,8 +4,8 @@ import pathModule from 'node:path';
 
 import {
 	type CommitResponse,
+	type RootSetBody,
 	RootSetRequest,
-	type RootSetRequestFields,
 	type RootSetResponse,
 	type RootSummary,
 	StorePath,
@@ -21,6 +21,7 @@ import {
 	type CompressedAndHashedNarFile,
 	type CompressedNarBlob
 } from './blob.ts';
+import type { AccessCredential } from './client.ts';
 import {
 	PushNarMetadataMismatchError,
 	UnexpectedUploadDecisionError
@@ -46,7 +47,7 @@ import {
 export interface PushDependencies {
 	readonly nixStore?: NixStoreClient;
 	readonly client: PushClient;
-	readonly token: string;
+	readonly token: AccessCredential;
 	readonly root?: string;
 	readonly ttlSeconds?: number;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
@@ -58,19 +59,20 @@ export interface PushDependencies {
 
 export interface PushClient {
 	negotiate(
-		token: string,
+		token: AccessCredential,
 		body: UploadNegotiateRequest
 	): Promise<UploadNegotiateResponse>;
 	prepareUpload(
-		token: string,
+		token: AccessCredential,
 		uploadId: string,
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse>;
 	uploadBlob(upload: PushBlobUpload): Promise<void>;
-	commit(token: string, uploadId: string): Promise<CommitResponse>;
+	commit(token: AccessCredential, uploadId: string): Promise<CommitResponse>;
 	setRoot(
-		token: string,
-		fields: RootSetRequestFields
+		token: AccessCredential,
+		name: string,
+		body: RootSetBody
 	): Promise<RootSetResponse>;
 }
 
@@ -148,7 +150,7 @@ export async function runPush(
 interface PushRuntimeDependencies {
 	readonly nixStore: NixStoreClient;
 	readonly client: PushClient;
-	readonly token: string;
+	readonly token: AccessCredential;
 	readonly retention: RetentionPlan;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
@@ -325,13 +327,17 @@ function planRetention(
 
 async function recordRetention(
 	retention: RetentionPlan,
-	dependencies: { readonly client: PushClient; readonly token: string },
+	dependencies: {
+		readonly client: PushClient;
+		readonly token: AccessCredential;
+	},
 	ctx: PhaseContext
 ): Promise<readonly ResultRow[]> {
 	const { client, token } = dependencies;
 
 	if (retention.kind === 'root') {
-		const summary = await client.setRoot(token, retention.request.toFields());
+		const { name, ...body } = retention.request.toFields();
+		const summary = await client.setRoot(token, name, body);
 		const expiry = formatExpiry(summary);
 		ctx.fact('root', retention.name);
 		ctx.fact('expiry', expiry);
@@ -345,7 +351,8 @@ async function recordRetention(
 	const summaries: RootSummary[] = [];
 
 	for (const request of retention.requests) {
-		summaries.push(await client.setRoot(token, request.toFields()));
+		const { name, ...body } = request.toFields();
+		summaries.push(await client.setRoot(token, name, body));
 	}
 
 	const expiry = describePinExpiry(summaries);
@@ -389,7 +396,7 @@ interface PreparePushPathDependencies {
 
 interface PrepareUploadsDependencies extends PreparePushPathDependencies {
 	readonly client: PushClient;
-	readonly token: string;
+	readonly token: AccessCredential;
 }
 
 async function prepareUploads(

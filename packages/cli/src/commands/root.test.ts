@@ -7,6 +7,7 @@ import type {
 } from '@cupboard/shared';
 import { describe, expect, it } from 'vitest';
 
+import type { AccessCredential } from '../client.ts';
 import type { Reporter, ResultRow } from '../reporter.ts';
 
 import {
@@ -37,7 +38,8 @@ describe('describeExpiry', () => {
 
 describe('runRootSet', () => {
 	it('validates, sends the fields with the token, and reports', async () => {
-		const calls: { token: string; fields: RootSetRequestFields }[] = [];
+		const calls: { token: AccessCredential; fields: RootSetRequestFields }[] =
+			[];
 		const results: ResultRow[][] = [];
 		const response: RootSetResponse = summary({
 			name: 'github:owner/repo/main',
@@ -142,7 +144,7 @@ describe('runRootList', () => {
 
 describe('runRootRemove', () => {
 	it('removes the root and reports the outcome', async () => {
-		const calls: { token: string; name: string }[] = [];
+		const calls: { token: AccessCredential; name: string }[] = [];
 		const results: ResultRow[][] = [];
 
 		await runRootRemove(
@@ -183,11 +185,11 @@ function summary(overrides: Partial<RootSummary>): RootSummary {
 
 function setRootClient(
 	response: RootSetResponse,
-	calls: { token: string; fields: RootSetRequestFields }[]
+	calls: { token: AccessCredential; fields: RootSetRequestFields }[]
 ): RootClient {
 	return {
-		setRoot(token, fields) {
-			calls.push({ token, fields });
+		setRoot(token, name, body) {
+			calls.push({ token, fields: { name, ...body } });
 
 			return Promise.resolve(response);
 		},
@@ -216,7 +218,7 @@ function listClient(response: RootListResponse): RootClient {
 
 function removeClient(
 	response: RootRemoveResponse,
-	calls: { token: string; name: string }[]
+	calls: { token: AccessCredential; name: string }[]
 ): RootClient {
 	return {
 		setRoot() {

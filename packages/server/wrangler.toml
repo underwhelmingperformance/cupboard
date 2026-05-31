@@ -13,6 +13,8 @@ bucket_name = "cupboard-blobs"
 
 [vars]
 CUPBOARD_BOOTSTRAP_TOKEN = ""
+CUPBOARD_AUTH_ISSUER = "cupboard"
+CUPBOARD_AUTH_AUDIENCE = "cupboard"
 R2_ACCOUNT_ID = ""
 R2_ACCESS_KEY_ID = ""
 R2_BUCKET_NAME = "cupboard-blobs"

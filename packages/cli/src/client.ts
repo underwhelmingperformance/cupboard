@@ -1,10 +1,10 @@
 import type {
+	BootstrapResponse,
 	CommitResponse,
 	DeletePathResponse,
-	InitResponse,
 	RootListResponse,
 	RootRemoveResponse,
-	RootSetRequestFields,
+	RootSetBody,
 	RootSetResponse,
 	StatsResponse,
 	UploadNegotiateRequest,
@@ -14,6 +14,20 @@ import type {
 } from '@cupboard/shared';
 
 import { CupboardHttpError, CupboardUploadError } from './errors.ts';
+
+/**
+ * Supplies bearer tokens to the client and can refresh them. The CLI exchanges
+ * a bootstrap secret for a short-lived admin JWT; a long push can outlive that
+ * token, so the client refreshes through the provider and retries once on a
+ * 401.
+ */
+export interface TokenProvider {
+	get(): Promise<string>;
+	refresh(): Promise<string>;
+}
+
+/** Either a fixed bearer token or a provider that can refresh one. */
+export type AccessCredential = string | TokenProvider;
 
 export interface CupboardBlobUpload {
 	readonly r2Key: string;
@@ -33,10 +47,10 @@ export class CupboardClient {
 		return new CupboardClient(new URL(value));
 	}
 
-	init(bootstrapToken: string): Promise<InitResponse> {
-		return this.requestJson('/admin/init', {
+	bootstrap(bootstrapSecret: string): Promise<BootstrapResponse> {
+		return this.requestJson('/auth/bootstrap', {
 			method: 'POST',
-			token: bootstrapToken
+			token: bootstrapSecret
 		});
 	}
 
@@ -46,69 +60,71 @@ export class CupboardClient {
 		return response.text();
 	}
 
-	stats(token: string): Promise<StatsResponse> {
-		return this.requestJson('/_stats', { token });
+	stats(token: AccessCredential): Promise<StatsResponse> {
+		return this.requestJson('/stats', { token });
 	}
 
 	deleteStorePath(
-		token: string,
+		token: AccessCredential,
 		storePathHash: string
 	): Promise<DeletePathResponse> {
-		return this.requestJson('/admin/delete', {
-			method: 'POST',
-			token,
-			body: { storePathHash }
+		return this.requestJson(`/paths/${storePathHash}`, {
+			method: 'DELETE',
+			token
 		});
 	}
 
 	setRoot(
-		token: string,
-		fields: RootSetRequestFields
+		token: AccessCredential,
+		name: string,
+		body: RootSetBody
 	): Promise<RootSetResponse> {
-		return this.requestJson('/admin/roots', {
-			method: 'POST',
+		return this.requestJson(`/roots/${encodeURIComponent(name)}`, {
+			method: 'PUT',
 			token,
-			body: fields
+			body
 		});
 	}
 
-	listRoots(token: string): Promise<RootListResponse> {
-		return this.requestJson('/admin/roots', { token });
+	listRoots(token: AccessCredential): Promise<RootListResponse> {
+		return this.requestJson('/roots', { token });
 	}
 
-	removeRoot(token: string, name: string): Promise<RootRemoveResponse> {
-		return this.requestJson('/admin/roots/remove', {
-			method: 'POST',
-			token,
-			body: { name }
+	removeRoot(
+		token: AccessCredential,
+		name: string
+	): Promise<RootRemoveResponse> {
+		return this.requestJson(`/roots/${encodeURIComponent(name)}`, {
+			method: 'DELETE',
+			token
 		});
 	}
 
 	negotiate(
-		token: string,
+		token: AccessCredential,
 		body: UploadNegotiateRequest
 	): Promise<UploadNegotiateResponse> {
-		return this.requestJson('/upload/negotiate', {
+		return this.requestJson('/uploads', {
 			method: 'POST',
 			token,
 			body
 		});
 	}
 
-	commit(token: string, uploadId: string): Promise<CommitResponse> {
-		return this.requestJson(`/upload/${uploadId}/commit`, {
+	commit(token: AccessCredential, uploadId: string): Promise<CommitResponse> {
+		return this.requestJson(`/uploads/${uploadId}/commit`, {
 			method: 'POST',
 			token
 		});
 	}
 
 	prepareUpload(
-		token: string,
+		token: AccessCredential,
 		uploadId: string,
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse> {
-		return this.requestJson(`/upload/${uploadId}/prepare`, {
-			method: 'POST',
+		return this.requestJson(`/uploads/${uploadId}`, {
+			method: 'PUT',
 			token,
 			body
 		});
@@ -149,28 +165,37 @@ export class CupboardClient {
 		path: string,
 		options: ClientRequestOptions = {}
 	): Promise<Response> {
-		const headers = new Headers(options.headers);
+		const method = options.method ?? 'GET';
+		const url = new URL(path, this.baseUrl);
+		const body =
+			options.body === undefined ? undefined : JSON.stringify(options.body);
+		const credential = options.token;
 
-		if (options.token !== undefined) {
-			headers.set('authorization', `Bearer ${options.token}`);
+		let response = await this.send(
+			url,
+			method,
+			options.headers,
+			body,
+			await resolveBearer(credential, false)
+		);
+
+		// A long push can outlive the exchanged JWT; refresh once and retry.
+		if (
+			response.status === unauthorizedStatusCode &&
+			isTokenProvider(credential)
+		) {
+			response = await this.send(
+				url,
+				method,
+				options.headers,
+				body,
+				await credential.refresh()
+			);
 		}
-
-		let body: string | undefined;
-
-		if (options.body !== undefined) {
-			headers.set('content-type', 'application/json');
-			body = JSON.stringify(options.body);
-		}
-
-		const response = await this.fetcher(new URL(path, this.baseUrl), {
-			method: options.method ?? 'GET',
-			headers,
-			body
-		});
 
 		if (!response.ok) {
 			throw new CupboardHttpError(
-				options.method ?? 'GET',
+				method,
 				path,
 				response.status,
 				await response.text()
@@ -179,11 +204,54 @@ export class CupboardClient {
 
 		return response;
 	}
+
+	private send(
+		url: URL,
+		method: string,
+		headers: ConstructorParameters<typeof Headers>[0],
+		body: string | undefined,
+		bearer: string | undefined
+	): Promise<Response> {
+		const requestHeaders = new Headers(headers);
+
+		if (bearer !== undefined) {
+			requestHeaders.set('authorization', `Bearer ${bearer}`);
+		}
+
+		if (body !== undefined) {
+			requestHeaders.set('content-type', 'application/json');
+		}
+
+		return this.fetcher(url, { method, headers: requestHeaders, body });
+	}
+}
+
+const unauthorizedStatusCode = 401;
+
+function isTokenProvider(
+	credential: AccessCredential | undefined
+): credential is TokenProvider {
+	return typeof credential === 'object';
+}
+
+async function resolveBearer(
+	credential: AccessCredential | undefined,
+	refresh: boolean
+): Promise<string | undefined> {
+	if (credential === undefined) {
+		return undefined;
+	}
+
+	if (typeof credential === 'string') {
+		return credential;
+	}
+
+	return refresh ? await credential.refresh() : await credential.get();
 }
 
 interface ClientRequestOptions {
-	readonly method?: 'GET' | 'POST';
-	readonly token?: string;
+	readonly method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
+	readonly token?: AccessCredential;
 	readonly headers?: ConstructorParameters<typeof Headers>[0];
 	readonly body?: unknown;
 }

@@ -1,18 +1,16 @@
 import {
+	type BootstrapResponse,
 	type CommitResponse,
 	DeletePathRequest,
-	type DeletePathRequestFields,
 	type DeletePathResponse,
-	type InitResponse,
 	NarInfo,
 	NixSha256Hash,
 	ProtocolError,
 	type RootListResponse,
 	RootRemoveRequest,
-	type RootRemoveRequestFields,
 	type RootRemoveResponse,
+	type RootSetBody,
 	RootSetRequest,
-	type RootSetRequestFields,
 	type RootSetResponse,
 	type RootSummary,
 	type RootTarget,
@@ -40,6 +38,13 @@ import { StatusCodes } from 'http-status-codes';
 import migrations from '../drizzle/migrations.js';
 
 import {
+	type AccessClaims,
+	type AccessScope,
+	generateAuthKeyPair,
+	mintAccessJwt,
+	verifyAccessJwt
+} from './auth.ts';
+import {
 	constantTimeEqual,
 	generateSigningKey,
 	sha256Hex,
@@ -47,6 +52,7 @@ import {
 } from './crypto.ts';
 import * as schema from './db/schema.ts';
 import {
+	InsufficientScopeError,
 	InvalidDeletePathRequestError,
 	InvalidJsonRequestBodyError,
 	InvalidRootRequestError,
@@ -55,6 +61,7 @@ import {
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	StoredUploadMetadataInvalidError,
+	UnauthenticatedError,
 	UploadedObjectChecksumMismatchError,
 	UploadedObjectChecksumMissingError,
 	UploadNotPreparedError
@@ -83,15 +90,24 @@ type SchemaWriter =
 	| SchemaDatabase
 	| Parameters<Parameters<SchemaDatabase['transaction']>[0]>[0];
 
+const adminJwtTtlSeconds = 10 * 60;
+
 interface SigningKey {
 	readonly privateJwk: JsonWebKey;
 	readonly publicKey: string;
+}
+
+interface AuthKeyPair {
+	readonly privateJwk: JsonWebKey;
+	readonly publicJwk: JsonWebKey;
 }
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<{ Bindings: RuntimeEnv }>();
 	private readonly db: DrizzleSqliteDODatabase<typeof schema>;
 	private migrationPromise: Promise<void> | undefined;
+	private signingKeyPromise: Promise<SigningKey> | undefined;
+	private authKeyPromise: Promise<AuthKeyPair> | undefined;
 	private presigner: R2Presigner | undefined;
 	private publicKeyBody: TextBody | undefined;
 
@@ -120,94 +136,78 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 		});
 
-		this.app.get('/_stats', async (context) => {
-			if (!(await this.isTokenAuthorised(context.req.raw))) {
-				return context.text('Unauthorised\n', StatusCodes.UNAUTHORIZED);
-			}
-
-			return context.json(this.stats());
-		});
-
-		this.app.post('/admin/init', (context) => this.handleInit(context.req.raw));
-		this.app.post('/admin/delete', (context) =>
-			serverErrorResponse(this.handleDeletePath(context.req.raw))
+		this.app.post('/auth/bootstrap', (context) =>
+			serverErrorResponse(this.handleBootstrap(context.req.raw))
 		);
-		this.app.post('/admin/roots', (context) =>
-			serverErrorResponse(this.handleSetRoot(context.req.raw))
+		this.app.get('/stats', (context) =>
+			serverErrorResponse(this.handleStats(context.req.raw))
 		);
-		this.app.get('/admin/roots', (context) =>
+		this.app.delete('/paths/:hash', (context) =>
+			serverErrorResponse(
+				this.handleDeletePath(context.req.raw, context.req.param('hash'))
+			)
+		);
+		this.app.get('/roots', (context) =>
 			serverErrorResponse(this.handleListRoots(context.req.raw))
 		);
-		this.app.post('/admin/roots/remove', (context) =>
-			serverErrorResponse(this.handleRemoveRoot(context.req.raw))
+		this.app.put('/roots/:name', (context) =>
+			serverErrorResponse(
+				this.handleSetRoot(context.req.raw, context.req.param('name'))
+			)
 		);
-		this.app.post('/upload/negotiate', (context) =>
+		this.app.delete('/roots/:name', (context) =>
+			serverErrorResponse(
+				this.handleRemoveRoot(context.req.raw, context.req.param('name'))
+			)
+		);
+		this.app.post('/uploads', (context) =>
 			serverErrorResponse(this.handleNegotiate(context.req.raw))
 		);
-		this.app.post('/upload/:id/prepare', (context) =>
+		this.app.put('/uploads/:id', (context) =>
 			serverErrorResponse(
 				this.handlePrepareUpload(context.req.raw, context.req.param('id'))
 			)
 		);
-		this.app.post('/upload/:id/commit', (context) =>
+		this.app.post('/uploads/:id/commit', (context) =>
 			serverErrorResponse(
 				this.handleCommit(context.req.raw, context.req.param('id'))
 			)
 		);
-		this.app.post('/_cron/gc', () => this.handleGarbageCollection());
+		this.app.post('/gc', (context) =>
+			serverErrorResponse(this.handleGarbageCollection(context.req.raw))
+		);
 	}
 
-	private async handleInit(request: Request): Promise<Response> {
+	private async handleBootstrap(request: Request): Promise<Response> {
 		if (!(await this.isBootstrapAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
+			throw new UnauthenticatedError();
 		}
 
-		const existingToken = this.db
-			.select({ count: count() })
-			.from(schema.tokens)
-			.get();
+		// Ensure both keys exist (narinfo signing + JWT signing), then mint a
+		// short-lived admin access token.
 		const key = await this.signingKey();
-		const url = new URL(request.url).origin;
-
-		if ((existingToken?.count ?? 0) > 0) {
-			return Response.json({
-				url,
-				token: '',
-				publicKey: key.publicKey
-			} satisfies InitResponse);
-		}
-
-		const token = crypto.randomUUID().replaceAll('-', '');
-
-		this.db
-			.insert(schema.tokens)
-			.values({
-				id: 'admin',
-				hash: await sha256Hex(token),
-				scope: 'admin',
-				createdAt: new Date().toISOString()
-			})
-			.run();
+		const token = await this.mintAdminJwt();
 
 		return Response.json({
-			url,
-			token,
-			publicKey: key.publicKey
-		} satisfies InitResponse);
+			url: new URL(request.url).origin,
+			publicKey: key.publicKey,
+			token
+		} satisfies BootstrapResponse);
 	}
 
-	private async handleDeletePath(request: Request): Promise<Response> {
-		if (!(await this.isTokenAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
-		}
+	private async handleStats(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
 
-		const requested = parseDeletePathRequest(
-			await parseJsonRequest<DeletePathRequestFields>(request)
-		);
+		return Response.json(this.stats() satisfies StatsResponse);
+	}
+
+	private async handleDeletePath(
+		request: Request,
+		hash: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const requested = parseDeletePathRequest(hash);
 		const result = await this.deleteStorePath(
 			requested.storePathHash,
 			new URL(request.url).origin
@@ -216,40 +216,31 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return Response.json(result satisfies DeletePathResponse);
 	}
 
-	private async handleSetRoot(request: Request): Promise<Response> {
-		if (!(await this.isTokenAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
-		}
+	private async handleSetRoot(
+		request: Request,
+		name: string
+	): Promise<Response> {
+		await this.requireScope(request, 'write');
 
-		const requested = parseRootSetRequest(
-			await parseJsonRequest<RootSetRequestFields>(request)
-		);
+		const body = await parseJsonRequest<RootSetBody>(request);
+		const requested = parseRootSetRequest(name, body);
 
 		return Response.json(this.setRoot(requested) satisfies RootSetResponse);
 	}
 
 	private async handleListRoots(request: Request): Promise<Response> {
-		if (!(await this.isTokenAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
-		}
+		await this.requireScope(request, 'admin');
 
 		return Response.json(this.listRoots() satisfies RootListResponse);
 	}
 
-	private async handleRemoveRoot(request: Request): Promise<Response> {
-		if (!(await this.isTokenAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
-		}
+	private async handleRemoveRoot(
+		request: Request,
+		name: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
 
-		const requested = parseRootRemoveRequest(
-			await parseJsonRequest<RootRemoveRequestFields>(request)
-		);
+		const requested = parseRootRemoveRequest(name);
 
 		return Response.json(
 			this.removeRoot(requested.name) satisfies RootRemoveResponse
@@ -392,11 +383,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async handleNegotiate(request: Request): Promise<Response> {
-		if (!(await this.isTokenAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
-		}
+		await this.requireScope(request, 'write');
 
 		const body = await parseJsonRequest<UploadNegotiateRequest>(request);
 		const uploads: UploadDecision[] = [];
@@ -487,11 +474,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		request: Request,
 		uploadId: string
 	): Promise<Response> {
-		if (!(await this.isTokenAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
-		}
+		await this.requireScope(request, 'write');
 
 		const pending = this.db
 			.select()
@@ -813,11 +796,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		request: Request,
 		uploadId: string
 	): Promise<Response> {
-		if (!(await this.isTokenAuthorised(request))) {
-			return new Response('Unauthorised\n', {
-				status: StatusCodes.UNAUTHORIZED
-			});
-		}
+		await this.requireScope(request, 'write');
 
 		const pending = this.db
 			.select()
@@ -1108,7 +1087,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return { rootsExpired: expiredRoots.length, pathsSwept };
 	}
 
-	private async handleGarbageCollection(): Promise<Response> {
+	private async handleGarbageCollection(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
 		const now = new Date().toISOString();
 		const result = await this.ctx.blockConcurrencyWhile(async () => {
 			const expiredUploads = this.db
@@ -1329,7 +1310,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.run();
 	}
 
-	private async signingKey(): Promise<SigningKey> {
+	private signingKey(): Promise<SigningKey> {
+		// A shared in-flight promise so concurrent first requests against an
+		// empty DO generate and insert the key exactly once. A failed attempt
+		// clears the cache so a later request can create the key.
+		this.signingKeyPromise ??= this.loadOrCreateSigningKey().catch(
+			(error: unknown) => {
+				this.signingKeyPromise = undefined;
+				throw error;
+			}
+		);
+
+		return this.signingKeyPromise;
+	}
+
+	private async loadOrCreateSigningKey(): Promise<SigningKey> {
 		const existing = this.db
 			.select()
 			.from(schema.signingKeys)
@@ -1375,21 +1370,103 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	private async isTokenAuthorised(request: Request): Promise<boolean> {
+	private authIssuer(): string {
+		return this.env.CUPBOARD_AUTH_ISSUER || 'cupboard';
+	}
+
+	private authAudience(): string {
+		return this.env.CUPBOARD_AUTH_AUDIENCE || 'cupboard';
+	}
+
+	private authKey(): Promise<AuthKeyPair> {
+		// A shared in-flight promise so concurrent first requests against an
+		// empty DO generate and insert the key exactly once. A failed attempt
+		// clears the cache so a later request can create the key.
+		this.authKeyPromise ??= this.loadOrCreateAuthKey().catch(
+			(error: unknown) => {
+				this.authKeyPromise = undefined;
+				throw error;
+			}
+		);
+
+		return this.authKeyPromise;
+	}
+
+	private async loadOrCreateAuthKey(): Promise<AuthKeyPair> {
+		const existing = this.db
+			.select()
+			.from(schema.authKeys)
+			.where(eq(schema.authKeys.id, 'active'))
+			.get();
+
+		if (existing !== undefined) {
+			return {
+				privateJwk: JSON.parse(existing.privateJwkJson) as JsonWebKey,
+				publicJwk: JSON.parse(existing.publicJwkJson) as JsonWebKey
+			};
+		}
+
+		const generated = await generateAuthKeyPair();
+
+		this.db
+			.insert(schema.authKeys)
+			.values({
+				id: 'active',
+				privateJwkJson: JSON.stringify(generated.privateJwk),
+				publicJwkJson: JSON.stringify(generated.publicJwk),
+				createdAt: new Date().toISOString()
+			})
+			.run();
+
+		return generated;
+	}
+
+	private async mintAdminJwt(): Promise<string> {
+		const key = await this.authKey();
+
+		return mintAccessJwt(
+			key.privateJwk,
+			{
+				issuer: this.authIssuer(),
+				audience: this.authAudience(),
+				subject: 'bootstrap',
+				scope: 'admin',
+				ttlSeconds: adminJwtTtlSeconds
+			},
+			new Date()
+		);
+	}
+
+	private async requireScope(
+		request: Request,
+		required: AccessScope
+	): Promise<AccessClaims> {
 		const token = bearerToken(request);
 
 		if (token === undefined) {
-			return false;
+			throw new UnauthenticatedError();
 		}
 
-		const hash = await sha256Hex(token);
-		const matching = this.db
-			.select()
-			.from(schema.tokens)
-			.where(eq(schema.tokens.hash, hash))
-			.get();
+		const key = await this.authKey();
+		let claims: AccessClaims;
 
-		return matching?.scope === 'admin';
+		try {
+			claims = await verifyAccessJwt(
+				key.publicJwk,
+				token,
+				{ issuer: this.authIssuer(), audience: this.authAudience() },
+				new Date()
+			);
+		} catch {
+			throw new UnauthenticatedError();
+		}
+
+		// admin satisfies any write-gated route; write satisfies only write.
+		if (claims.scope !== 'admin' && claims.scope !== required) {
+			throw new InsufficientScopeError();
+		}
+
+		return claims;
 	}
 
 	private async presignedPutUrl(
@@ -1510,11 +1587,9 @@ function parseUploadMetadata(
 	}
 }
 
-function parseDeletePathRequest(
-	fields: DeletePathRequestFields
-): DeletePathRequest {
+function parseDeletePathRequest(storePathHash: string): DeletePathRequest {
 	try {
-		return DeletePathRequest.fromFields(fields);
+		return DeletePathRequest.fromFields({ storePathHash });
 	} catch (error) {
 		if (error instanceof ProtocolError) {
 			throw new InvalidDeletePathRequestError(error);
@@ -1524,9 +1599,13 @@ function parseDeletePathRequest(
 	}
 }
 
-function parseRootSetRequest(fields: RootSetRequestFields): RootSetRequest {
+function parseRootSetRequest(name: string, body: RootSetBody): RootSetRequest {
 	try {
-		return RootSetRequest.fromFields(fields);
+		return RootSetRequest.fromFields({
+			name,
+			targets: body.targets,
+			...(body.ttlSeconds === undefined ? {} : { ttlSeconds: body.ttlSeconds })
+		});
 	} catch (error) {
 		if (error instanceof ProtocolError) {
 			throw new InvalidRootRequestError(error);
@@ -1536,11 +1615,9 @@ function parseRootSetRequest(fields: RootSetRequestFields): RootSetRequest {
 	}
 }
 
-function parseRootRemoveRequest(
-	fields: RootRemoveRequestFields
-): RootRemoveRequest {
+function parseRootRemoveRequest(name: string): RootRemoveRequest {
 	try {
-		return RootRemoveRequest.fromFields(fields);
+		return RootRemoveRequest.fromFields({ name });
 	} catch (error) {
 		if (error instanceof ProtocolError) {
 			throw new InvalidRootRequestError(error);

@@ -1,64 +1,65 @@
-import {
-	CacheInfo,
-	type CommitResponse,
-	type DeletePathResponse,
-	type InitResponse,
-	NarInfo,
-	NixSha256Hash,
-	type RootListResponse,
-	type RootRemoveResponse,
-	type RootSetRequestFields,
-	type RootSetResponse,
-	type StatsResponse,
-	type UploadNegotiateResponse,
-	type UploadPathMetadataFields
-} from '@cupboard/shared';
-import {
-	createExecutionContext,
-	waitOnExecutionContext
-} from 'cloudflare:test';
+import { CacheInfo, NarInfo } from '@cupboard/shared';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
+import { generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildVersion } from './build-info.generated.ts';
+import { narInfoObjectKey, narObjectKey } from './http.ts';
 import {
-	narInfoObjectKey,
-	narObjectKey,
-	orphanBlobDeletionGraceMs
-} from './http.ts';
-import type { CupboardServer } from './worker.ts';
+	afterGrace,
+	authorisedFetch,
+	bootstrap,
+	clearBlobStorage,
+	commitPath,
+	commitSharedPath,
+	commitUpload,
+	currentOrigin,
+	deletePath,
+	deleteTestBase,
+	expectConditionalNotModified,
+	expectDateConditionalNotModified,
+	expectNarResponse,
+	expectSingleCommitDecision,
+	expectSingleUploadDecision,
+	expectStats,
+	expectStatsViaWorker,
+	expectTextResponse,
+	fetchNarInfo,
+	fetchPath,
+	initialise,
+	initialiseViaWorker,
+	listRoots,
+	mintServerSignedToken,
+	narBytes,
+	narHash,
+	negotiateUploads,
+	negotiateViaWorker,
+	nixSha256Hash,
+	prepareUpload,
+	prepareUploadViaWorker,
+	putNarBytes,
+	readFetch,
+	readStoredNarInfo,
+	removeRoot,
+	resetTestServer,
+	runGc,
+	runGcResult,
+	scheduledController,
+	setRoot,
+	uploadBlobMetadata,
+	uploadMetadata,
+	useTestServer,
+	verifyNarInfoSignature,
+	workerFetch
+} from './test-support.ts';
 import worker from './worker.ts';
-
-let origin = 'https://cupboard.test';
-const bootstrapToken = 'test-bootstrap';
-
-const narBytes = new Uint8Array([40, 41, 42, 43]);
-const narHash = nixSha256Hash('1');
-const fileHash = NixSha256Hash.parse(
-	'sha256:1m5g07jiajz7135sj3ap8h30s0n24nc6a2q3gsraqj3pfi0jw65l'
-);
-const deleteTestBase = new Date('2026-01-01T00:00:00.000Z');
-let nextTestServerId = 0;
-let testServer = testServerFor('initial');
-
-type UploadDecision = UploadNegotiateResponse['uploads'][number];
-type UploadActionDecision = Extract<
-	UploadDecision,
-	{ readonly action: 'upload' }
->;
-type CommitActionDecision = Extract<
-	UploadDecision,
-	{ readonly action: 'commit' }
->;
 
 describe('upload flow', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
-		origin = `https://cupboard-${String(nextTestServerId)}.test`;
-		testServer = testServerFor(`test-${String(nextTestServerId)}`);
-		nextTestServerId += 1;
+		resetTestServer();
 
 		await clearBlobStorage();
 	});
@@ -129,23 +130,24 @@ describe('upload flow', () => {
 		);
 	});
 
-	it('initialises once and keeps the signing key stable', async () => {
-		const first = await initialiseRaw();
-		const second = await initialiseRaw();
+	it('bootstraps an admin token and keeps the signing key stable', async () => {
+		const first = await bootstrap();
+		const second = await bootstrap();
 
 		expect(typeof first.token).toBe('string');
 		expect(first.token).not.toBe('');
 		expect(typeof first.publicKey).toBe('string');
 		expect(first.publicKey).not.toBe('');
 
-		expect(first).toStrictEqual({
-			url: origin,
-			token: first.token,
+		expect({ url: first.url, publicKey: first.publicKey }).toStrictEqual({
+			url: currentOrigin(),
 			publicKey: first.publicKey
 		});
-		expect(second).toStrictEqual({
-			url: origin,
-			token: '',
+
+		// A re-bootstrap mints a fresh token but never rotates the signing key.
+		expect(second.token).not.toBe('');
+		expect({ url: second.url, publicKey: second.publicKey }).toStrictEqual({
+			url: currentOrigin(),
 			publicKey: first.publicKey
 		});
 
@@ -157,16 +159,32 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('rejects unauthorised admin requests', async () => {
-		const stats = await fetchPath('/_stats');
-		const negotiate = await fetchPath('/upload/negotiate', {
+	it('rejects a bootstrap with the wrong or absent secret', async () => {
+		const wrong = await fetchPath('/auth/bootstrap', {
+			headers: { authorization: 'Bearer not-the-secret' },
+			method: 'POST'
+		});
+		const missing = await fetchPath('/auth/bootstrap', { method: 'POST' });
+
+		expect({
+			wrong: { status: wrong.status, body: await wrong.text() },
+			missing: { status: missing.status, body: await missing.text() }
+		}).toStrictEqual({
+			wrong: { status: StatusCodes.UNAUTHORIZED, body: 'Unauthorised\n' },
+			missing: { status: StatusCodes.UNAUTHORIZED, body: 'Unauthorised\n' }
+		});
+	});
+
+	it('rejects unauthenticated management requests', async () => {
+		const stats = await fetchPath('/stats');
+		const negotiate = await fetchPath('/uploads', {
 			body: JSON.stringify({ paths: [] }),
 			headers: {
 				'content-type': 'application/json'
 			},
 			method: 'POST'
 		});
-		const commit = await fetchPath('/upload/not-real/commit', {
+		const commit = await fetchPath('/uploads/not-real/commit', {
 			method: 'POST'
 		});
 
@@ -357,7 +375,7 @@ describe('upload flow', () => {
 	});
 
 	it('serves a narinfo from the Worker whose signature verifies', async () => {
-		const init = await initialiseRaw();
+		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
 			await negotiateUploads(init.token, [metadata]),
@@ -493,7 +511,7 @@ describe('upload flow', () => {
 
 		const cacheKey = new URL(
 			`/${metadata.storePathHash}.narinfo`,
-			origin
+			currentOrigin()
 		).toString();
 		await readFetch(`/${metadata.storePathHash}.narinfo`);
 
@@ -553,7 +571,7 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 
 		const response = await authorisedFetch(
-			`/upload/${upload.uploadId}/commit`,
+			`/uploads/${upload.uploadId}/commit`,
 			token,
 			{ method: 'POST' }
 		);
@@ -574,8 +592,7 @@ describe('upload flow', () => {
 	it('requires R2 presign configuration for upload decisions', async () => {
 		const previousSecret = env.R2_SECRET_ACCESS_KEY;
 		Object.assign(env, { R2_SECRET_ACCESS_KEY: '' });
-		testServer = testServerFor(`r2-config-${String(nextTestServerId)}`);
-		nextTestServerId += 1;
+		useTestServer('r2-config');
 
 		try {
 			const token = await initialise();
@@ -585,14 +602,14 @@ describe('upload flow', () => {
 			const negotiate = await negotiateUploads(token, [metadata]);
 			const upload = expectSingleUploadDecision(negotiate, metadata);
 			const response = await authorisedFetch(
-				`/upload/${upload.uploadId}/prepare`,
+				`/uploads/${upload.uploadId}`,
 				token,
 				{
 					body: JSON.stringify(uploadBlobMetadata(metadata)),
 					headers: {
 						'content-type': 'application/json'
 					},
-					method: 'POST'
+					method: 'PUT'
 				}
 			);
 
@@ -620,7 +637,7 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 
 		const response = await authorisedFetch(
-			`/upload/${upload.uploadId}/commit`,
+			`/uploads/${upload.uploadId}/commit`,
 			token,
 			{ method: 'POST' }
 		);
@@ -652,7 +669,7 @@ describe('upload flow', () => {
 		await env.BLOBS.put(upload.r2Key, narBytes);
 
 		const response = await authorisedFetch(
-			`/upload/${upload.uploadId}/commit`,
+			`/uploads/${upload.uploadId}/commit`,
 			token,
 			{ method: 'POST' }
 		);
@@ -695,7 +712,7 @@ describe('upload flow', () => {
 			...fields
 		});
 
-		const response = await authorisedFetch('/upload/negotiate', token, {
+		const response = await authorisedFetch('/uploads', token, {
 			body: JSON.stringify({ paths: [metadata] }),
 			headers: {
 				'content-type': 'application/json'
@@ -746,7 +763,7 @@ describe('upload flow', () => {
 				metadata
 			);
 			const response = await authorisedFetch(
-				`/upload/${upload.uploadId}/prepare`,
+				`/uploads/${upload.uploadId}`,
 				token,
 				{
 					body: JSON.stringify({
@@ -756,7 +773,7 @@ describe('upload flow', () => {
 					headers: {
 						'content-type': 'application/json'
 					},
-					method: 'POST'
+					method: 'PUT'
 				}
 			);
 
@@ -779,7 +796,7 @@ describe('upload flow', () => {
 
 	it('rejects malformed JSON upload requests', async () => {
 		const token = await initialise();
-		const response = await authorisedFetch('/upload/negotiate', token, {
+		const response = await authorisedFetch('/uploads', token, {
 			body: '{',
 			headers: {
 				'content-type': 'application/json'
@@ -823,21 +840,7 @@ describe('upload flow', () => {
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 
-		const response = await fetchPath('/_cron/gc', {
-			method: 'POST'
-		});
-
-		expect(response.status).toBe(StatusCodes.OK);
-		expect(
-			await response.json<{
-				readonly ok: true;
-				readonly pendingUploadsDeleted: number;
-				readonly rootsExpired: number;
-				readonly pathsSwept: number;
-				readonly narInfosDeleted: number;
-				readonly blobsDeleted: number;
-			}>()
-		).toStrictEqual({
+		expect(await runGcResult()).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
 			rootsExpired: 0,
@@ -846,7 +849,7 @@ describe('upload flow', () => {
 			blobsDeleted: 1
 		});
 
-		await expectStats(token, {
+		await expectStats(await initialise(), {
 			storePaths: 0,
 			narBlobs: 0,
 			pendingUploads: 0,
@@ -919,21 +922,7 @@ describe('upload flow', () => {
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 
-		const response = await fetchPath('/_cron/gc', {
-			method: 'POST'
-		});
-
-		expect(response.status).toBe(StatusCodes.OK);
-		expect(
-			await response.json<{
-				readonly ok: true;
-				readonly pendingUploadsDeleted: number;
-				readonly rootsExpired: number;
-				readonly pathsSwept: number;
-				readonly narInfosDeleted: number;
-				readonly blobsDeleted: number;
-			}>()
-		).toStrictEqual({
+		expect(await runGcResult()).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
 			rootsExpired: 0,
@@ -942,7 +931,7 @@ describe('upload flow', () => {
 			blobsDeleted: 0
 		});
 
-		await expectStats(token, {
+		await expectStats(await initialise(), {
 			storePaths: 1,
 			narBlobs: 1,
 			pendingUploads: 0,
@@ -976,7 +965,7 @@ describe('upload flow', () => {
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await worker.scheduled(scheduledController(), env);
 
-		await expectStatsViaWorker(token, {
+		await expectStatsViaWorker(await initialiseViaWorker(), {
 			storePaths: 0,
 			narBlobs: 0,
 			pendingUploads: 0,
@@ -1102,13 +1091,12 @@ describe('upload flow', () => {
 	});
 
 	it('rejects an unauthenticated delete', async () => {
-		const response = await fetchPath('/admin/delete', {
-			body: JSON.stringify({
-				storePathHash: '11111111111111111111111111111111'
-			}),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
-		});
+		const response = await fetchPath(
+			'/paths/11111111111111111111111111111111',
+			{
+				method: 'DELETE'
+			}
+		);
 
 		expect({
 			status: response.status,
@@ -1121,10 +1109,8 @@ describe('upload flow', () => {
 
 	it('rejects a malformed store path hash', async () => {
 		const token = await initialise();
-		const response = await authorisedFetch('/admin/delete', token, {
-			body: JSON.stringify({ storePathHash: 'not-a-valid-hash' }),
-			headers: { 'content-type': 'application/json' },
-			method: 'POST'
+		const response = await authorisedFetch('/paths/not-a-valid-hash', token, {
+			method: 'DELETE'
 		});
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
@@ -1275,7 +1261,10 @@ describe('upload flow', () => {
 
 			const later = new Date(deleteTestBase.getTime() + 3600 * 1000);
 			vi.setSystemTime(later);
-			const summary = await setRoot(token, { name: 'pr-1', targets: [second] });
+			const summary = await setRoot(await initialise(), {
+				name: 'pr-1',
+				targets: [second]
+			});
 
 			expect(summary).toStrictEqual({
 				name: 'pr-1',
@@ -1354,19 +1343,15 @@ describe('upload flow', () => {
 			});
 		});
 
-		it('requires admin auth for the root routes', async () => {
+		it('requires auth for the root routes', async () => {
 			const target = '/nix/store/11111111111111111111111111111111-a';
-			const set = await fetchPath('/admin/roots', {
-				body: JSON.stringify({ name: 'main', targets: [target] }),
+			const set = await fetchPath('/roots/main', {
+				body: JSON.stringify({ targets: [target] }),
 				headers: { 'content-type': 'application/json' },
-				method: 'POST'
+				method: 'PUT'
 			});
-			const list = await fetchPath('/admin/roots');
-			const remove = await fetchPath('/admin/roots/remove', {
-				body: JSON.stringify({ name: 'main' }),
-				headers: { 'content-type': 'application/json' },
-				method: 'POST'
-			});
+			const list = await fetchPath('/roots');
+			const remove = await fetchPath('/roots/main', { method: 'DELETE' });
 
 			expect([set.status, list.status, remove.status]).toStrictEqual([
 				StatusCodes.UNAUTHORIZED,
@@ -1377,10 +1362,10 @@ describe('upload flow', () => {
 
 		it('rejects a malformed root request', async () => {
 			const token = await initialise();
-			const response = await authorisedFetch('/admin/roots', token, {
-				body: JSON.stringify({ name: 'main', targets: [] }),
+			const response = await authorisedFetch('/roots/main', token, {
+				body: JSON.stringify({ targets: [] }),
 				headers: { 'content-type': 'application/json' },
-				method: 'POST'
+				method: 'PUT'
 			});
 
 			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
@@ -1645,670 +1630,109 @@ describe('upload flow', () => {
 			).resolves.toBeNull();
 		});
 	});
+
+	describe('authentication', () => {
+		it('accepts a bootstrap-minted admin token on each scope of route', async () => {
+			const token = await initialise();
+			const stats = await authorisedFetch('/stats', token);
+			const setRootResponse = await authorisedFetch('/roots/main', token, {
+				body: JSON.stringify({
+					targets: ['/nix/store/11111111111111111111111111111111-a']
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			});
+
+			expect([stats.status, setRootResponse.status]).toStrictEqual([
+				StatusCodes.OK,
+				StatusCodes.OK
+			]);
+		});
+
+		it('refuses a write token on admin routes but accepts it on write routes', async () => {
+			await initialise();
+			const writeToken = await mintServerSignedToken('write');
+			const target = '/nix/store/11111111111111111111111111111111-a';
+
+			const setRoot = await authorisedFetch('/roots/main', writeToken, {
+				body: JSON.stringify({ targets: [target] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			});
+			const stats = await authorisedFetch('/stats', writeToken);
+			const removed = await authorisedFetch(
+				'/paths/11111111111111111111111111111111',
+				writeToken,
+				{ method: 'DELETE' }
+			);
+			const gc = await authorisedFetch('/gc', writeToken, { method: 'POST' });
+
+			expect({
+				setRoot: setRoot.status,
+				stats: { status: stats.status, body: await stats.text() },
+				deletePath: removed.status,
+				gc: gc.status
+			}).toStrictEqual({
+				setRoot: StatusCodes.OK,
+				stats: { status: StatusCodes.FORBIDDEN, body: 'Forbidden\n' },
+				deletePath: StatusCodes.FORBIDDEN,
+				gc: StatusCodes.FORBIDDEN
+			});
+		});
+
+		it.each([
+			{
+				name: 'a syntactically invalid token',
+				token: () => Promise.resolve('not-a-jwt')
+			},
+			{
+				name: 'a token signed by a foreign key',
+				token: () => foreignKeyToken('admin')
+			}
+		])('rejects $name with 401', async ({ token }) => {
+			const response = await authorisedFetch('/stats', await token());
+
+			expect({
+				status: response.status,
+				body: await response.text()
+			}).toStrictEqual({
+				status: StatusCodes.UNAUTHORIZED,
+				body: 'Unauthorised\n'
+			});
+		});
+
+		it.each(['github:owner/repo/main', 'pr/123', 'a%b'])(
+			'round-trips the root name %j through encode, route and decode',
+			async (name) => {
+				const token = await initialise();
+				const target = '/nix/store/11111111111111111111111111111111-a';
+				const set = await setRoot(token, { name, targets: [target] });
+
+				expect(set.name).toBe(name);
+
+				const { roots } = await listRoots(token);
+
+				expect(roots.map((root) => root.name)).toStrictEqual([name]);
+
+				const removed = await removeRoot(token, name);
+
+				expect(removed).toStrictEqual({ name, removed: true });
+			}
+		);
+	});
 });
 
-async function commitPath(
-	token: string,
-	metadata: UploadPathMetadataFields
-): Promise<void> {
-	const upload = expectSingleUploadDecision(
-		await negotiateUploads(token, [metadata]),
-		metadata
-	);
-	await prepareUpload(token, upload, metadata);
-	await putNarBytes(upload.r2Key);
-	await commitUpload(token, upload.uploadId);
-}
-
-async function commitSharedPath(
-	token: string,
-	metadata: UploadPathMetadataFields
-): Promise<void> {
-	const decision = expectSingleCommitDecision(
-		await negotiateUploads(token, [metadata]),
-		metadata
-	);
-	await commitUpload(token, decision.uploadId);
-}
-
-async function deletePath(
-	token: string,
-	storePathHash: string
-): Promise<DeletePathResponse> {
-	const response = await authorisedFetch('/admin/delete', token, {
-		body: JSON.stringify({ storePathHash }),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<DeletePathResponse>();
-}
-
-async function setRoot(
-	token: string,
-	fields: RootSetRequestFields
-): Promise<RootSetResponse> {
-	const response = await authorisedFetch('/admin/roots', token, {
-		body: JSON.stringify(fields),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<RootSetResponse>();
-}
-
-async function listRoots(token: string): Promise<RootListResponse> {
-	const response = await authorisedFetch('/admin/roots', token);
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<RootListResponse>();
-}
-
-async function removeRoot(
-	token: string,
-	name: string
-): Promise<RootRemoveResponse> {
-	const response = await authorisedFetch('/admin/roots/remove', token, {
-		body: JSON.stringify({ name }),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<RootRemoveResponse>();
-}
-
-async function runGc(): Promise<void> {
-	const response = await fetchPath('/_cron/gc', { method: 'POST' });
-
-	expect(response.status).toBe(StatusCodes.OK);
-}
-
-interface GcResult {
-	readonly ok: true;
-	readonly pendingUploadsDeleted: number;
-	readonly rootsExpired: number;
-	readonly pathsSwept: number;
-	readonly narInfosDeleted: number;
-	readonly blobsDeleted: number;
-}
-
-async function runGcResult(): Promise<GcResult> {
-	const response = await fetchPath('/_cron/gc', { method: 'POST' });
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<GcResult>();
-}
-
-function afterGrace(): Date {
-	return new Date(
-		deleteTestBase.getTime() + orphanBlobDeletionGraceMs + 60_000
-	);
-}
-
-async function initialiseRaw(): Promise<InitResponse> {
-	const response = await fetchPath('/admin/init', {
-		headers: {
-			authorization: `Bearer ${bootstrapToken}`
-		},
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<InitResponse>();
-}
-
-async function initialise(): Promise<string> {
-	const body = await initialiseRaw();
-	expect(body.token).toEqual(expect.any(String));
-	expect(body.token).not.toBe('');
-
-	return body.token;
-}
-
-async function negotiateUploads(
-	token: string,
-	paths: readonly UploadPathMetadataFields[]
-): Promise<UploadNegotiateResponse> {
-	const response = await authorisedFetch('/upload/negotiate', token, {
-		body: JSON.stringify({ paths }),
-		headers: {
-			'content-type': 'application/json'
-		},
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<UploadNegotiateResponse>();
-}
-
-async function commitUpload(
-	token: string,
-	uploadId: string
-): Promise<CommitResponse> {
-	const response = await authorisedFetch(`/upload/${uploadId}/commit`, token, {
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<CommitResponse>();
-}
-
-async function prepareUpload(
-	token: string,
-	decision: UploadActionDecision,
-	metadata: UploadPathMetadataFields
-): Promise<void> {
-	const expectedExpiresAt = uploadExpiryFromNow();
-	const response = await authorisedFetch(
-		`/upload/${decision.uploadId}/prepare`,
-		token,
-		{
-			body: JSON.stringify(uploadBlobMetadata(metadata)),
-			headers: {
-				'content-type': 'application/json'
-			},
-			method: 'POST'
-		}
-	);
-
-	await expectPrepareUploadResponse(response, metadata, expectedExpiresAt);
-}
-
-async function fetchNarInfo(storePathHash: string): Promise<NarInfo> {
-	const response = await readFetch(`/${storePathHash}.narinfo`);
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return NarInfo.parse(await response.text());
-}
-
-async function expectNarResponse(
-	hash: string,
-	method: 'GET' | 'HEAD'
-): Promise<void> {
-	const response = await readFetch(`/nar/${hash}.nar.zst`, { method });
-	const etag = response.headers.get('etag');
-
-	expect({
-		status: response.status,
-		cacheControl: response.headers.get('cache-control'),
-		contentLength: response.headers.get('content-length'),
-		contentType: response.headers.get('content-type'),
-		etag: typeof etag,
-		lastModified: typeof response.headers.get('last-modified')
-	}).toStrictEqual({
-		status: StatusCodes.OK,
-		cacheControl: 'public, max-age=31536000, immutable',
-		contentLength: String(narBytes.length),
-		contentType: 'application/zstd',
-		etag: 'string',
-		lastModified: 'string'
-	});
-
-	const body = new Uint8Array(await response.arrayBuffer());
-
-	expect([...body]).toStrictEqual(method === 'HEAD' ? [] : [...narBytes]);
-}
-
-async function expectConditionalNotModified(
-	pathname: string,
-	fetcher: (
-		pathname: string,
-		init?: RequestInit
-	) => Promise<Response> = fetchPath
-): Promise<void> {
-	const fresh = await fetcher(pathname);
-	const etag = fresh.headers.get('etag');
-
-	expect(typeof etag).toBe('string');
-
-	const response = await fetcher(pathname, {
-		headers: {
-			'if-none-match': etag ?? ''
-		}
-	});
-
-	expect({
-		status: response.status,
-		body: await response.text(),
-		cacheControl: response.headers.get('cache-control'),
-		contentLength: response.headers.get('content-length'),
-		etag: response.headers.get('etag')
-	}).toStrictEqual({
-		status: StatusCodes.NOT_MODIFIED,
-		body: '',
-		cacheControl: fresh.headers.get('cache-control'),
-		contentLength: fresh.headers.get('content-length'),
-		etag
-	});
-}
-
-async function expectDateConditionalNotModified(
-	pathname: string,
-	fetcher: (
-		pathname: string,
-		init?: RequestInit
-	) => Promise<Response> = fetchPath
-): Promise<void> {
-	const fresh = await fetcher(pathname);
-	const lastModified = fresh.headers.get('last-modified');
-
-	expect(typeof lastModified).toBe('string');
-
-	const response = await fetcher(pathname, {
-		headers: {
-			'if-modified-since': lastModified ?? ''
-		}
-	});
-
-	expect({
-		status: response.status,
-		body: await response.text(),
-		cacheControl: response.headers.get('cache-control'),
-		contentLength: response.headers.get('content-length'),
-		lastModified: response.headers.get('last-modified')
-	}).toStrictEqual({
-		status: StatusCodes.NOT_MODIFIED,
-		body: '',
-		cacheControl: fresh.headers.get('cache-control'),
-		contentLength: fresh.headers.get('content-length'),
-		lastModified
-	});
-}
-
-async function expectTextResponse(
-	pathname: string,
-	expected: {
-		readonly body: string;
-		readonly cacheControl: string;
-		readonly contentType: string;
-		readonly method: 'GET' | 'HEAD';
-	},
-	fetcher: (
-		pathname: string,
-		init?: RequestInit
-	) => Promise<Response> = fetchPath
-): Promise<void> {
-	const response = await fetcher(pathname, { method: expected.method });
-	const body = await response.text();
-
-	expect({
-		status: response.status,
-		body,
-		cacheControl: response.headers.get('cache-control'),
-		contentLength: response.headers.get('content-length'),
-		contentType: response.headers.get('content-type'),
-		etag: typeof response.headers.get('etag'),
-		lastModified:
-			response.headers.get('last-modified') === null
-				? undefined
-				: typeof response.headers.get('last-modified')
-	}).toStrictEqual({
-		status: StatusCodes.OK,
-		body: expected.method === 'HEAD' ? '' : expected.body,
-		cacheControl: expected.cacheControl,
-		contentLength: String(new TextEncoder().encode(expected.body).length),
-		contentType: expected.contentType,
-		etag: 'string',
-		lastModified: pathname.endsWith('.narinfo') ? 'string' : undefined
-	});
-}
-
-async function expectStats(
-	token: string,
-	expected: StatsResponse
-): Promise<void> {
-	const response = await authorisedFetch('/_stats', token);
-
-	expect(response.status).toBe(StatusCodes.OK);
-	expect(await response.json()).toStrictEqual(expected);
-}
-
-async function putNarBytes(r2Key: string): Promise<void> {
-	await env.BLOBS.put(r2Key, narBytes, {
-		sha256: fileHash.digestBytes()
-	});
-}
-
-async function verifyNarInfoSignature(
-	narInfo: NarInfo,
-	publicKey: string
-): Promise<boolean> {
-	if (narInfo.sig === undefined) {
-		return false;
-	}
-
-	const key = parseNamedBytes(publicKey);
-	const signature = parseNamedBytes(narInfo.sig);
-	const imported = await crypto.subtle.importKey(
-		'raw',
-		key.bytes,
-		'Ed25519',
-		false,
-		['verify']
-	);
-
-	return crypto.subtle.verify(
-		'Ed25519',
-		imported,
-		signature.bytes,
-		new TextEncoder().encode(narInfo.fingerprint())
-	);
-}
-
-function parseNamedBytes(value: string): { readonly bytes: Uint8Array } {
-	const encoded = value.slice(value.indexOf(':') + 1);
-	const decoded = atob(encoded);
-
-	return {
-		bytes: Uint8Array.from(
-			decoded,
-			(character) => character.codePointAt(0) ?? 0
-		)
-	};
-}
-
-async function readStoredNarInfo(storePathHash: string): Promise<{
-	readonly body: string;
-	readonly etag: string;
-	readonly contentType: string | undefined;
-	readonly cacheControl: string | undefined;
-}> {
-	const object = await env.BLOBS.get(narInfoObjectKey(storePathHash));
-
-	if (object === null) {
-		throw new Error(`expected a stored narinfo object for ${storePathHash}`);
-	}
-
-	return {
-		body: await object.text(),
-		etag: object.httpEtag,
-		contentType: object.httpMetadata?.contentType,
-		cacheControl: object.httpMetadata?.cacheControl
-	};
-}
-
-function uploadBlobMetadata(metadata: UploadPathMetadataFields) {
-	return {
-		fileHash: metadata.fileHash,
-		fileSize: metadata.fileSize,
-		compression: metadata.compression
-	};
-}
-
-async function authorisedFetch(
-	pathname: string,
-	token: string,
-	init: RequestInit = {}
-): Promise<Response> {
-	const headers = new Headers(init.headers);
-	headers.set('authorization', `Bearer ${token}`);
-
-	return fetchPath(pathname, {
-		...init,
-		headers
-	});
-}
-
-function fetchPath(pathname: string, init?: RequestInit): Promise<Response> {
-	return testServer.fetch(new URL(pathname, origin), init);
-}
-
-function workerFetch(pathname: string, init?: RequestInit): Promise<Response> {
-	return defaultWorkerServer().fetch(new URL(pathname, origin), init);
-}
-
-async function readFetch(
-	pathname: string,
-	init?: RequestInit
-): Promise<Response> {
-	const ctx = createExecutionContext();
-	const request = new Request<unknown, IncomingRequestCfProperties>(
-		new URL(pathname, origin),
-		init as RequestInit<IncomingRequestCfProperties>
-	);
-	const response = await worker.fetch(request, env, ctx);
-	await waitOnExecutionContext(ctx);
-
-	return response;
-}
-
-async function clearBlobStorage(): Promise<void> {
-	const listed = await env.BLOBS.list();
-	const keys = listed.objects.map((object) => object.key);
-
-	await env.BLOBS.delete(keys);
-}
-
-function expectSingleUploadDecision(
-	response: UploadNegotiateResponse,
-	metadata: UploadPathMetadataFields
-): UploadActionDecision {
-	const decision = singleDecision(response) as UploadActionDecision;
-	const expiresAt = uploadExpiryFromNow();
-
-	expect(typeof decision.uploadId).toBe('string');
-
-	expect(response.uploads).toStrictEqual([
-		{
-			action: 'upload',
-			storePathHash: metadata.storePathHash,
-			narHash: metadata.narHash,
-			uploadId: decision.uploadId,
-			r2Key: `nar/${metadata.narHash}.nar.zst`,
-			expiresAt
-		}
-	]);
-
-	return decision;
-}
-
-async function expectPrepareUploadResponse(
-	response: Response,
-	metadata: UploadPathMetadataFields,
-	expiresAt: string
-): Promise<void> {
-	expect(response.status).toBe(StatusCodes.OK);
-
-	const body = await response.json<{
-		readonly uploadUrl: string;
-		readonly uploadHeaders: Readonly<Record<string, string>>;
-		readonly expiresAt: string;
-	}>();
-	const uploadUrl = new URL(body.uploadUrl);
-
-	expect({
-		protocol: uploadUrl.protocol,
-		hostname: uploadUrl.hostname,
-		path: uploadUrl.pathname
-			.split('/')
-			.map((segment) => decodeURIComponent(segment)),
-		hasSignature: uploadUrl.searchParams.has('X-Amz-Signature'),
-		uploadHeaders: body.uploadHeaders,
-		expiresAt: body.expiresAt
-	}).toStrictEqual({
-		protocol: 'https:',
-		hostname: 'test-account-id.r2.cloudflarestorage.com',
-		path: ['', 'cupboard-blobs', 'nar', `${metadata.narHash}.nar.zst`],
-		hasSignature: true,
-		uploadHeaders: {
-			'x-amz-checksum-sha256': NixSha256Hash.parse(
-				metadata.fileHash
-			).digestBase64()
-		},
-		expiresAt
-	});
-}
-
-async function initialiseViaWorker(): Promise<string> {
-	const response = await workerFetch('/admin/init', {
-		headers: {
-			authorization: `Bearer ${bootstrapToken}`
-		},
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	const body = await response.json<InitResponse>();
-	expect(body.token).toEqual(expect.any(String));
-	expect(body.token).not.toBe('');
-
-	return body.token;
-}
-
-async function negotiateViaWorker(
-	token: string,
-	paths: readonly UploadPathMetadataFields[]
-): Promise<UploadNegotiateResponse> {
-	const response = await authorisedWorkerFetch('/upload/negotiate', token, {
-		body: JSON.stringify({ paths }),
-		headers: {
-			'content-type': 'application/json'
-		},
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<UploadNegotiateResponse>();
-}
-
-async function prepareUploadViaWorker(
-	token: string,
-	decision: UploadActionDecision,
-	metadata: UploadPathMetadataFields
-): Promise<void> {
-	const expectedExpiresAt = uploadExpiryFromNow();
-	const response = await authorisedWorkerFetch(
-		`/upload/${decision.uploadId}/prepare`,
-		token,
-		{
-			body: JSON.stringify(uploadBlobMetadata(metadata)),
-			headers: {
-				'content-type': 'application/json'
-			},
-			method: 'POST'
-		}
-	);
-
-	await expectPrepareUploadResponse(response, metadata, expectedExpiresAt);
-}
-
-function uploadExpiryFromNow(): string {
-	return new Date(Date.now() + 15 * 60 * 1000).toISOString();
-}
-
-async function expectStatsViaWorker(
-	token: string,
-	expected: StatsResponse
-): Promise<void> {
-	const response = await authorisedWorkerFetch('/_stats', token);
-
-	expect(response.status).toBe(StatusCodes.OK);
-	expect(await response.json()).toStrictEqual(expected);
-}
-
-async function authorisedWorkerFetch(
-	pathname: string,
-	token: string,
-	init: RequestInit = {}
-): Promise<Response> {
-	const headers = new Headers(init.headers);
-	headers.set('authorization', `Bearer ${token}`);
-
-	return workerFetch(pathname, {
-		...init,
-		headers
-	});
-}
-
-function scheduledController(): ScheduledController {
-	return {
-		cron: '0 4 * * *',
-		noRetry() {
-			return;
-		},
-		scheduledTime: Date.now()
-	};
-}
-
-function defaultWorkerServer(): DurableObjectStub<CupboardServer> {
-	const id = env.CUPBOARD_DO.idFromName('v1');
-
-	return env.CUPBOARD_DO.get(id);
-}
-
-function expectSingleCommitDecision(
-	response: UploadNegotiateResponse,
-	metadata: UploadPathMetadataFields
-): CommitActionDecision {
-	const decision = singleDecision(response) as CommitActionDecision;
-
-	expect(typeof decision.uploadId).toBe('string');
-
-	expect(response.uploads).toStrictEqual([
-		{
-			action: 'commit',
-			storePathHash: metadata.storePathHash,
-			narHash: metadata.narHash,
-			uploadId: decision.uploadId
-		}
-	]);
-
-	return decision;
-}
-
-function singleDecision(response: UploadNegotiateResponse): UploadDecision {
-	expect(response.uploads).toHaveLength(1);
-
-	const [decision] = response.uploads as readonly [UploadDecision];
-
-	return decision;
-}
-
-function uploadMetadata(
-	fields: Partial<UploadPathMetadataFields> & {
-		readonly fileSize: number;
-		readonly name?: string;
-		readonly storePathHash?: string;
-	}
-): UploadPathMetadataFields {
-	const storePathHash =
-		fields.storePathHash ?? '11111111111111111111111111111111';
-	const name = fields.name ?? 'first';
-
-	return {
-		storePathHash,
-		storePath: `/nix/store/${storePathHash}-${name}`,
-		narHash: fields.narHash ?? narHash,
-		narSize: fields.narSize ?? 1234,
-		fileHash: fields.fileHash ?? fileHash.toString(),
-		fileSize: fields.fileSize,
-		compression: 'zstd',
-		references: fields.references ?? [`${storePathHash}-${name}`],
-		deriver: fields.deriver,
-		ca: fields.ca
-	};
-}
-
-function nixSha256Hash(character: string): string {
-	return `sha256:${character.repeat(52)}`;
-}
-
-function testServerFor(name: string): DurableObjectStub<CupboardServer> {
-	const id = env.CUPBOARD_DO.idFromName(name);
-
-	return env.CUPBOARD_DO.get(id);
+async function foreignKeyToken(scope: 'write' | 'admin'): Promise<string> {
+	const { privateKey } = await generateKeyPair('EdDSA', { extractable: true });
+	const issuedAt = Math.floor(Date.now() / 1000);
+
+	return new SignJWT({ scope })
+		.setProtectedHeader({ alg: 'EdDSA' })
+		.setIssuer('cupboard')
+		.setAudience('cupboard')
+		.setSubject('attacker')
+		.setIssuedAt(issuedAt)
+		.setNotBefore(issuedAt)
+		.setExpirationTime(issuedAt + 600)
+		.sign(privateKey);
 }
