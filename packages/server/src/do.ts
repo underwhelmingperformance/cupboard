@@ -67,6 +67,7 @@ import {
 	UploadNotPreparedError
 } from './errors.ts';
 import {
+	internalOrigin,
 	narInfoCacheControl,
 	narInfoObjectKey,
 	narObjectKey,
@@ -549,7 +550,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return existingBlob;
 		}
 
-		this.clearNarBlob(existingBlob.narHash);
+		// The object is missing. Only drop the accounting row when nothing
+		// committed still references this NAR, so a transient head miss cannot
+		// undercount a blob that live narinfos depend on.
+		if (this.narHashUnreferenced(existingBlob.narHash)) {
+			this.clearNarBlob(existingBlob.narHash);
+		}
 
 		return undefined;
 	}
@@ -988,17 +994,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.where(lte(schema.retentionRoots.expiresAt, now))
 			.all();
 
-		for (const root of expiredRoots) {
-			this.db
-				.delete(schema.retentionRootTargets)
-				.where(eq(schema.retentionRootTargets.rootName, root.name))
-				.run();
-		}
+		this.db.transaction((tx) => {
+			for (const root of expiredRoots) {
+				tx.delete(schema.retentionRootTargets)
+					.where(eq(schema.retentionRootTargets.rootName, root.name))
+					.run();
+			}
 
-		this.db
-			.delete(schema.retentionRoots)
-			.where(lte(schema.retentionRoots.expiresAt, now))
-			.run();
+			tx.delete(schema.retentionRoots)
+				.where(lte(schema.retentionRoots.expiresAt, now))
+				.run();
+		});
 
 		// Mark the closure reachable from the live roots. `visited` guards the
 		// traversal; `retainedCommitted` is the keep-set of committed paths that
@@ -1091,6 +1097,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requireScope(request, 'admin');
 
 		const now = new Date().toISOString();
+		// Interactive GC purges this colo's edge cache via the caller's public
+		// origin. The cron sweep arrives on the internal origin and cannot know
+		// the public URL, so it skips purging and relies on the narinfo TTL and
+		// the orphan-blob grace window instead.
+		const requestOrigin = new URL(request.url).origin;
+		const purgeOrigin =
+			requestOrigin === internalOrigin ? undefined : requestOrigin;
 		const result = await this.ctx.blockConcurrencyWhile(async () => {
 			const expiredUploads = this.db
 				.select()
@@ -1113,7 +1126,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				pendingUploadsDeleted: expiredUploads.length,
 				rootsExpired,
 				pathsSwept,
-				narInfosDeleted: await this.flushQueuedNarInfoDeletions(),
+				narInfosDeleted: await this.flushQueuedNarInfoDeletions(purgeOrigin),
 				blobsDeleted: await this.flushQueuedBlobDeletions(now)
 			};
 		});

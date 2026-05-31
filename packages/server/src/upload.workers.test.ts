@@ -44,6 +44,7 @@ import {
 	removeRoot,
 	resetTestServer,
 	runGc,
+	runGcFromInternalOrigin,
 	runGcResult,
 	scheduledController,
 	setRoot,
@@ -558,6 +559,114 @@ describe('upload flow', () => {
 			pendingUploads: 0,
 			totalFileSize: narBytes.byteLength
 		});
+	});
+
+	it('keeps the shared blob accounting when an R2 head miss races a referencing path', async () => {
+		const token = await initialise();
+		const first = uploadMetadata({ fileSize: narBytes.byteLength });
+		const second = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'second',
+			storePathHash: '22222222222222222222222222222222'
+		});
+		const third = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'third',
+			storePathHash: '33333333333333333333333333333333'
+		});
+
+		await commitPath(token, first);
+		await commitSharedPath(token, second);
+
+		// The blob object disappears, but two committed paths still reference it.
+		await env.BLOBS.delete(narObjectKey(first.narHash));
+
+		expectSingleUploadDecision(await negotiateUploads(token, [third]), third);
+
+		await expectStats(token, {
+			storePaths: 2,
+			narBlobs: 1,
+			pendingUploads: 1,
+			totalFileSize: narBytes.byteLength
+		});
+	});
+
+	it('purges a swept narinfo from the edge cache during GC', async () => {
+		const token = await initialise();
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'kept'
+		});
+		const swept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'swept',
+			storePathHash: '22222222222222222222222222222222',
+			narHash: nixSha256Hash('2')
+		});
+
+		await commitPath(token, kept);
+		await commitPath(token, swept);
+		await setRoot(token, { name: 'main', targets: [kept.storePath] });
+
+		const cacheKey = new URL(
+			`/${swept.storePathHash}.narinfo`,
+			currentOrigin()
+		).toString();
+		await readFetch(`/${swept.storePathHash}.narinfo`);
+
+		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
+			Response
+		);
+
+		expect(await runGcResult()).toStrictEqual({
+			ok: true,
+			pendingUploadsDeleted: 0,
+			rootsExpired: 0,
+			pathsSwept: 1,
+			narInfosDeleted: 1,
+			blobsDeleted: 0
+		});
+
+		await expect(caches.default.match(cacheKey)).resolves.toBeUndefined();
+	});
+
+	it('does not purge the edge cache when GC runs from the internal cron origin', async () => {
+		const token = await initialise();
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'kept'
+		});
+		const swept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'swept',
+			storePathHash: '22222222222222222222222222222222',
+			narHash: nixSha256Hash('2')
+		});
+
+		await commitPath(token, kept);
+		await commitPath(token, swept);
+		await setRoot(token, { name: 'main', targets: [kept.storePath] });
+
+		const cacheKey = new URL(
+			`/${swept.storePathHash}.narinfo`,
+			currentOrigin()
+		).toString();
+		await readFetch(`/${swept.storePathHash}.narinfo`);
+
+		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
+			Response
+		);
+
+		await runGcFromInternalOrigin();
+
+		// The sweep removed the narinfo object, but a cron-origin GC cannot purge
+		// the public edge cache, so the cached copy remains until its TTL lapses.
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(swept.storePathHash))
+		).resolves.toBeNull();
+		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
+			Response
+		);
 	});
 
 	it('keeps an upload pending when the object size does not match metadata', async () => {

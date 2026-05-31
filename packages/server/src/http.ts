@@ -7,6 +7,11 @@ const textHeaders = {
 	'x-content-type-options': 'nosniff'
 };
 
+// The origin the scheduled (cron) handler uses to reach the Durable Object. It
+// is internal, so GC triggered through it cannot know the public URL clients
+// cached under and must not attempt to purge the edge cache.
+export const internalOrigin = 'https://cupboard.local';
+
 export const narInfoCacheTtlSeconds = 3600;
 
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}`;

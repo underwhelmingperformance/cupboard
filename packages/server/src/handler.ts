@@ -2,6 +2,7 @@ import type { BootstrapResponse } from '@cupboard/shared';
 
 import { cupboardServer } from './durable-object.ts';
 import { CronGarbageCollectionFailedError } from './errors.ts';
+import { internalOrigin } from './http.ts';
 import { handleRead } from './read.ts';
 
 export default {
@@ -21,13 +22,10 @@ export default {
 		// The cron has no external credential, so it exchanges the deploy-time
 		// bootstrap secret for a short-lived admin JWT and uses that for the
 		// admin-scoped GC route.
-		const bootstrap = await server.fetch(
-			'https://cupboard.local/auth/bootstrap',
-			{
-				method: 'POST',
-				headers: { authorization: `Bearer ${env.CUPBOARD_BOOTSTRAP_TOKEN}` }
-			}
-		);
+		const bootstrap = await server.fetch(`${internalOrigin}/auth/bootstrap`, {
+			method: 'POST',
+			headers: { authorization: `Bearer ${env.CUPBOARD_BOOTSTRAP_TOKEN}` }
+		});
 
 		if (!bootstrap.ok) {
 			throw new CronGarbageCollectionFailedError(
@@ -38,7 +36,7 @@ export default {
 
 		const { token } = await bootstrap.json<BootstrapResponse>();
 
-		const response = await server.fetch('https://cupboard.local/gc', {
+		const response = await server.fetch(`${internalOrigin}/gc`, {
 			method: 'POST',
 			headers: { authorization: `Bearer ${token}` }
 		});

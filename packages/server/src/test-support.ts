@@ -25,7 +25,11 @@ import { expect } from 'vitest';
 
 import { type AccessScope, mintAccessJwt } from './auth.ts';
 import { authKeys } from './db/schema.ts';
-import { narInfoObjectKey, orphanBlobDeletionGraceMs } from './http.ts';
+import {
+	internalOrigin,
+	narInfoObjectKey,
+	orphanBlobDeletionGraceMs
+} from './http.ts';
 import type { CupboardServer } from './worker.ts';
 import worker from './worker.ts';
 
@@ -433,6 +437,17 @@ export async function runGcResult(): Promise<GcResult> {
 	expect(response.status).toBe(StatusCodes.OK);
 
 	return response.json<GcResult>();
+}
+
+/** Runs GC the way the cron does: through the internal origin, which cannot purge the edge cache. */
+export async function runGcFromInternalOrigin(): Promise<void> {
+	const token = await initialise();
+	const response = await server.fetch(new URL('/gc', internalOrigin), {
+		headers: { authorization: `Bearer ${token}` },
+		method: 'POST'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
 }
 
 export function afterGrace(): Date {
