@@ -57,8 +57,8 @@ successfully substitute that path from the Worker.
 - [x] Compress NARs with zstd by default at upload time, and record
       `Compression`, `FileHash`, and `FileSize` for the compressed blob
       alongside the uncompressed `NarHash` and `NarSize`.
-- [x] Authenticate write and admin operations with one deploy-time secret or
-      token.
+- [x] Authenticate write and admin operations with short-lived cupboard JWTs.
+      The deploy-time bootstrap secret is accepted only by `/auth/bootstrap`.
 - [x] Validate uploaded NAR metadata:
   - [x] required: store path hash, NAR hash, NAR size, references
   - [x] optional: deriver and CA fields
@@ -250,10 +250,9 @@ and GC routes.
 
 Root names in `PUT`/`DELETE /roots/<encoded-name>` live only in the path. The
 request body for `PUT` is `{ targets, ttlSeconds? }`; the server combines that
-body with the decoded path segment and validates the full root request. Because
-root names commonly contain `/`, the implementation must first prove the
-encoded-name route shape in Worker/Hono tests and fall back to a body-carried
-name or base64url path segment if `%2F` cannot be captured as one segment.
+body with the decoded path segment and validates the full root request. Worker
+integration tests cover names containing `/` and `%`, so callers must URL-encode
+the name as one path segment.
 
 ## Testing
 
@@ -594,9 +593,10 @@ cryptography.
       root names or prefixes, `created_at`, and `disabled_at`. `issuer` and
       `audience` are required checks; configured claims are exact-match policy
       data, so providers are data rather than hardcoded branches.
-- [ ] Add `/auth/bootstrap` and `/auth/oidc/exchange` DO routes. Exchange routes
-      are the only routes that accept long-lived bootstrap secrets or external
-      OIDC tokens.
+- [x] Add the `/auth/bootstrap` DO route. It is the only route that accepts the
+      long-lived bootstrap secret.
+- [ ] Add the `/auth/oidc/exchange` DO route. It is the only route that accepts
+      external OIDC tokens.
 - [ ] Add a generic OIDC exchange backed by `oidc_trust`, with required `issuer`
       and `audience` checks and configurable exact-match claims. Treat GitHub
       Actions as the first documented fixture and CLI convenience path, not a
@@ -633,6 +633,82 @@ cryptography.
   - [ ] E2E: CI-style push obtains a cupboard JWT by exchange and performs the
         normal negotiate, prepare, and commit flow without any stored cupboard
         secret.
+
+## Correctness and hygiene pass
+
+This pass tightens the protocol and boundary model before extending auth
+further. The goal is one validation model on every boundary: JSON parsing is
+only the lexical step, Zod schemas own the wire shape and semantics, and a tiny
+pure lexer handles text formats such as narinfo before a schema validates them.
+
+- [ ] Add Zod v4 to `@cupboard/shared`.
+- [ ] Split the monolithic shared protocol module into focused modules, with
+      `index.ts` remaining re-exports only:
+  - [ ] `scalars.ts` for reusable branded field schemas.
+  - [ ] `hash.ts` for Nix SHA-256 parsing, base32/base64 conversion, and digest
+        length checks.
+  - [ ] `store-path.ts` for store path parsing, hashing, basenames, and
+        reference basename conversion.
+  - [ ] `messages.ts` for strict request and response schemas. Unknown JSON keys
+        are rejected; upload decisions use a discriminated union; transformed
+        schemas provide their output types.
+  - [ ] `narinfo.ts` for a pure field lexer, narinfo schema, rendering,
+        fingerprinting, and multi-signature support.
+  - [ ] `cache-info.ts` and `nix-config.ts` for the remaining text renderers.
+  - [ ] `errors.ts` for the small set of typed protocol errors still thrown by
+        free functions.
+- [ ] Retire the hand-written wire interfaces, validator classes, and duplicate
+      `fromFields` model layer once the schemas own those contracts.
+- [ ] Validate every JSON boundary:
+  - [ ] server request bodies return typed 400s on malformed or structurally
+        invalid JSON;
+  - [ ] CLI server responses are schema-checked before use;
+  - [ ] scheduled-GC bootstrap responses are schema-checked;
+  - [ ] server reads of DB-stored JSON fail as typed server errors when corrupt.
+- [ ] Support multiple narinfo `Sig:` lines. Rendering emits one line per
+      signature; verification accepts any trusted matching signature.
+
+### Correctness fixes
+
+- [ ] Reject narinfo integers with trailing junk (`123abc`, `1e9`, empty
+      string).
+- [ ] Trim CRLF line endings in the narinfo lexer.
+- [ ] Parse `References` with whitespace splitting that drops empty elements.
+- [ ] Build narinfo fingerprints from sorted full reference store paths, not a
+      caller-side ordering invariant.
+- [ ] Make the Nix base32 decoder reject out-of-alphabet characters explicitly.
+- [x] Give `If-None-Match` precedence over `If-Modified-Since`.
+- [x] Support `If-None-Match: *`, comma-separated ETags, and weak ETags.
+- [x] Remove the dead `resolveBearer` refresh branch from the CLI client.
+- [x] Guard reusable-blob row cleanup with a committed-reference check when R2
+      reports the blob missing.
+- [x] Purge swept narinfos from the edge cache on interactive GC via the
+      caller's public origin; the cron sweep arrives on the internal origin and
+      cannot know the public URL, so it relies on the narinfo TTL and the
+      orphan-blob grace window instead.
+- [x] Build NAR file entries from one opened file handle so size, contents, and
+      padding cannot diverge if a file changes mid-read.
+- [x] Keep `HEAD` as a direct R2 metadata check rather than consulting the edge
+      cache; the Cache API is GET-oriented, so reusing a cached GET for HEAD
+      would risk header divergence for no meaningful saving.
+- [x] Fix zstd write-side backpressure so completion waits for the write
+      callback and for the transform to drain.
+- [x] Delete expired-root target rows and the root row in one transaction.
+
+### Correctness Tests
+
+- [ ] Parameterised schema tests cover missing keys, wrong types, bad hashes,
+      store path hash mismatches, empty root targets, TTL bounds, unknown keys,
+      malformed narinfo lines, multi-signature narinfo round-trips, and integer
+      coercion guards.
+- [x] HTTP conditional-request tests cover ETag precedence, wildcard ETags,
+      comma-separated ETags, and weak ETags.
+- [ ] Worker integration tests cover malformed request bodies returning 400,
+      corrupt stored metadata returning 500, reusable-blob cleanup protection,
+      and GC purging swept narinfo objects from the current colo.
+- [ ] CLI tests cover schema validation of server responses.
+- [ ] The e2e substitute flow still passes with the new narinfo renderer and
+      multi-signature verification path.
 
 ## Later features
 
