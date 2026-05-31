@@ -906,7 +906,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			JSON.parse(row.referencesJson) as readonly string[],
 			row.deriver ?? undefined,
 			row.ca ?? undefined,
-			row.sig ?? undefined
+			row.sig ? [row.sig] : []
 		);
 	}
 
@@ -1208,8 +1208,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return false;
 		}
 
-		const signed = NarInfo.fromFields({ ...unsigned.toFields(), sig });
-		await this.putNarInfoObject(metadata.storePathHash, signed);
+		await this.putNarInfoObject(
+			metadata.storePathHash,
+			unsigned.withSignature(sig)
+		);
 
 		return true;
 	}

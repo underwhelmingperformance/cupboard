@@ -1,0 +1,244 @@
+import { z } from 'zod';
+
+import { MalformedNarInfoLineError } from './errors.ts';
+import {
+	compressionSchema,
+	hasControlCharacter,
+	nixSha256HashSchema,
+	referencesSchema,
+	storePathSchema
+} from './scalars.ts';
+
+export interface NarInfoFields {
+	readonly storePath: string;
+	readonly url: string;
+	readonly compression: 'zstd';
+	readonly fileHash: string;
+	readonly fileSize: number;
+	readonly narHash: string;
+	readonly narSize: number;
+	readonly references: readonly string[];
+	readonly deriver?: string;
+	readonly ca?: string;
+	readonly sigs: readonly string[];
+}
+
+// A narinfo is a sequence of `Key: value` lines. Most keys appear once; `Sig`
+// may repeat. The lexer collects raw values per key, splitting on either line
+// ending, and a malformed line (no separator) is the only failure it owns —
+// every other rule belongs to the schema.
+export function parseFields(source: string): Record<string, string[]> {
+	const fields: Record<string, string[]> = {};
+
+	for (const line of source.split(/\r?\n/)) {
+		if (line.trim() === '') {
+			continue;
+		}
+
+		const separator = line.indexOf(':');
+
+		if (separator === -1) {
+			throw new MalformedNarInfoLineError(line);
+		}
+
+		const key = line.slice(0, separator);
+		const value = line.slice(separator + 1).trim();
+
+		(fields[key] ??= []).push(value);
+	}
+
+	return fields;
+}
+
+function single<S extends z.ZodType>(value: S) {
+	return z.tuple([value]).transform(([parsed]) => parsed);
+}
+
+const narInfoInteger = z
+	.tuple([z.string().regex(/^\d+$/)])
+	.transform(([digits]) => Number.parseInt(digits, 10))
+	.refine(Number.isSafeInteger);
+
+const references = z
+	.tuple([z.string()])
+	.transform(([value]) => value.split(/\s+/).filter((entry) => entry !== ''))
+	.pipe(referencesSchema);
+
+const lineScalar = z.string().refine((value) => !hasControlCharacter(value));
+
+const optionalText = z
+	.tuple([lineScalar])
+	.transform(([value]) => (value === '' ? undefined : value))
+	.optional();
+
+const narInfoFieldsSchema = z.object({
+	storePath: storePathSchema,
+	url: lineScalar,
+	compression: compressionSchema,
+	fileHash: nixSha256HashSchema,
+	fileSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+	narHash: nixSha256HashSchema,
+	narSize: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+	references: referencesSchema,
+	deriver: lineScalar.optional(),
+	ca: lineScalar.optional(),
+	sigs: z.array(lineScalar)
+});
+
+export const narInfoSchema = z
+	.object({
+		StorePath: single(storePathSchema),
+		URL: single(lineScalar),
+		Compression: single(compressionSchema),
+		FileHash: single(nixSha256HashSchema),
+		FileSize: narInfoInteger,
+		NarHash: single(nixSha256HashSchema),
+		NarSize: narInfoInteger,
+		References: references,
+		Deriver: optionalText,
+		CA: optionalText,
+		Sig: z.array(lineScalar).default([])
+	})
+	.transform(
+		(fields): NarInfoFields => ({
+			storePath: fields.StorePath,
+			url: fields.URL,
+			compression: fields.Compression,
+			fileHash: fields.FileHash,
+			fileSize: fields.FileSize,
+			narHash: fields.NarHash,
+			narSize: fields.NarSize,
+			references: fields.References,
+			deriver: fields.Deriver,
+			ca: fields.CA,
+			sigs: fields.Sig
+		})
+	);
+
+export function parseNarInfo(source: string): NarInfo {
+	return NarInfo.fromFields(narInfoSchema.parse(parseFields(source)));
+}
+
+export class NarInfo {
+	constructor(
+		public readonly storePath: string,
+		public readonly url: string,
+		public readonly compression: 'zstd',
+		public readonly fileHash: string,
+		public readonly fileSize: number,
+		public readonly narHash: string,
+		public readonly narSize: number,
+		public readonly references: readonly string[],
+		public readonly deriver?: string,
+		public readonly ca?: string,
+		public readonly sigs: readonly string[] = []
+	) {}
+
+	static fromFields(fields: NarInfoFields): NarInfo {
+		const parsed = narInfoFieldsSchema.parse(fields);
+
+		return new NarInfo(
+			parsed.storePath,
+			parsed.url,
+			parsed.compression,
+			parsed.fileHash,
+			parsed.fileSize,
+			parsed.narHash,
+			parsed.narSize,
+			parsed.references,
+			parsed.deriver,
+			parsed.ca,
+			parsed.sigs
+		);
+	}
+
+	static parse(source: string): NarInfo {
+		return parseNarInfo(source);
+	}
+
+	withSignature(signature: string): NarInfo {
+		return new NarInfo(
+			this.storePath,
+			this.url,
+			this.compression,
+			this.fileHash,
+			this.fileSize,
+			this.narHash,
+			this.narSize,
+			this.references,
+			this.deriver,
+			this.ca,
+			[...this.sigs, signature]
+		);
+	}
+
+	fingerprint(): string {
+		return [
+			'1',
+			this.storePath,
+			this.narHash,
+			String(this.narSize),
+			this.referenceStorePaths().join(',')
+		].join(';');
+	}
+
+	private referenceStorePaths(): readonly string[] {
+		const separator = this.storePath.lastIndexOf('/');
+		const storeDirectory =
+			separator === -1 ? undefined : this.storePath.slice(0, separator);
+
+		// Nix's canonical fingerprint sorts the full reference store paths, so the
+		// signature must not depend on the order the references arrive in.
+		return this.references
+			.map((reference) =>
+				storeDirectory === undefined
+					? reference
+					: `${storeDirectory}/${reference}`
+			)
+			.toSorted();
+	}
+
+	render(): string {
+		const fields = narInfoFieldsSchema.parse(this.toFields());
+		const lines = [
+			`StorePath: ${fields.storePath}`,
+			`URL: ${fields.url}`,
+			`Compression: ${fields.compression}`,
+			`FileHash: ${fields.fileHash}`,
+			`FileSize: ${String(fields.fileSize)}`,
+			`NarHash: ${fields.narHash}`,
+			`NarSize: ${String(fields.narSize)}`,
+			`References: ${fields.references.join(' ')}`
+		];
+
+		if (fields.deriver !== undefined && fields.deriver !== '') {
+			lines.push(`Deriver: ${fields.deriver}`);
+		}
+
+		if (fields.ca !== undefined && fields.ca !== '') {
+			lines.push(`CA: ${fields.ca}`);
+		}
+
+		for (const signature of fields.sigs) {
+			lines.push(`Sig: ${signature}`);
+		}
+
+		return `${lines.join('\n')}\n`;
+	}
+
+	toFields(): NarInfoFields {
+		return {
+			storePath: this.storePath,
+			url: this.url,
+			compression: this.compression,
+			fileHash: this.fileHash,
+			fileSize: this.fileSize,
+			narHash: this.narHash,
+			narSize: this.narSize,
+			references: this.references,
+			deriver: this.deriver,
+			ca: this.ca,
+			sigs: this.sigs
+		};
+	}
+}

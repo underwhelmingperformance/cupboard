@@ -626,12 +626,11 @@ export async function verifyNarInfoSignature(
 	narInfo: NarInfo,
 	publicKey: string
 ): Promise<boolean> {
-	if (narInfo.sig === undefined) {
+	if (narInfo.sigs.length === 0) {
 		return false;
 	}
 
 	const key = parseNamedBytes(publicKey);
-	const signature = parseNamedBytes(narInfo.sig);
 	const imported = await crypto.subtle.importKey(
 		'raw',
 		key.bytes,
@@ -639,13 +638,20 @@ export async function verifyNarInfoSignature(
 		false,
 		['verify']
 	);
+	const fingerprint = new TextEncoder().encode(narInfo.fingerprint());
 
-	return crypto.subtle.verify(
-		'Ed25519',
-		imported,
-		signature.bytes,
-		new TextEncoder().encode(narInfo.fingerprint())
+	const verifications = await Promise.all(
+		narInfo.sigs.map((signature) =>
+			crypto.subtle.verify(
+				'Ed25519',
+				imported,
+				parseNamedBytes(signature).bytes,
+				fingerprint
+			)
+		)
 	);
+
+	return verifications.some(Boolean);
 }
 
 function parseNamedBytes(value: string): { readonly bytes: Uint8Array } {

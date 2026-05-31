@@ -245,9 +245,6 @@ describe('upload flow', () => {
 		});
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		const signature = narInfo.sig;
-
-		expect(typeof signature).toBe('string');
 
 		expect(narInfo.toFields()).toStrictEqual({
 			storePath: metadata.storePath,
@@ -260,7 +257,7 @@ describe('upload flow', () => {
 			references: metadata.references,
 			deriver: undefined,
 			ca: undefined,
-			sig: signature
+			sigs: [expect.any(String)]
 		});
 		await expectTextResponse(
 			`/${metadata.storePathHash}.narinfo`,
@@ -340,7 +337,6 @@ describe('upload flow', () => {
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 		const parsed = NarInfo.parse(stored.body);
 
-		expect(typeof parsed.sig).toBe('string');
 		expect({
 			contentType: stored.contentType,
 			cacheControl: stored.cacheControl,
@@ -359,7 +355,7 @@ describe('upload flow', () => {
 				references: metadata.references,
 				deriver: undefined,
 				ca: undefined,
-				sig: parsed.sig
+				sigs: [expect.any(String)]
 			}
 		});
 

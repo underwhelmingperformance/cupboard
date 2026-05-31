@@ -1,3 +1,4 @@
+import { ProtocolError } from './errors.ts';
 import {
 	hasControlCharacter,
 	nixSha256HashPattern,
@@ -12,20 +13,6 @@ export interface CacheInfoFields {
 	readonly storeDirectory: string;
 	readonly wantMassQuery: boolean;
 	readonly priority: number;
-}
-
-export interface NarInfoFields {
-	readonly storePath: string;
-	readonly url: string;
-	readonly compression: 'zstd';
-	readonly fileHash: string;
-	readonly fileSize: number;
-	readonly narHash: string;
-	readonly narSize: number;
-	readonly references: readonly string[];
-	readonly deriver?: string;
-	readonly ca?: string;
-	readonly sig?: string;
 }
 
 export interface UploadPathNegotiationFields {
@@ -154,42 +141,10 @@ export interface RootRemoveResponse {
 	readonly removed: boolean;
 }
 
-export abstract class ProtocolError extends Error {}
-
-export class InvalidNarInfoLineError extends ProtocolError {
-	constructor(public readonly line: string) {
-		super(`Invalid narinfo line: ${line}`);
-		this.name = 'InvalidNarInfoLineError';
-	}
-}
-
-export class UnsupportedNarInfoCompressionError extends ProtocolError {
-	constructor(public readonly compression: string) {
-		super(`Unsupported narinfo compression: ${compression}`);
-		this.name = 'UnsupportedNarInfoCompressionError';
-	}
-}
-
 export class UnsupportedUploadBlobCompressionError extends ProtocolError {
 	constructor(public readonly compression: unknown) {
 		super(`Unsupported upload blob compression: ${String(compression)}`);
 		this.name = 'UnsupportedUploadBlobCompressionError';
-	}
-}
-
-export class MissingNarInfoFieldError extends ProtocolError {
-	constructor(public readonly field: string) {
-		super(`Missing narinfo field: ${field}`);
-		this.name = 'MissingNarInfoFieldError';
-	}
-}
-
-type NarInfoIntegerField = 'FileSize' | 'NarSize';
-
-export class InvalidNarInfoIntegerFieldError extends ProtocolError {
-	constructor(public readonly field: NarInfoIntegerField) {
-		super(`Invalid integer narinfo field: ${field}`);
-		this.name = 'InvalidNarInfoIntegerFieldError';
 	}
 }
 
@@ -590,147 +545,6 @@ export class CacheInfo {
 	}
 }
 
-export class NarInfo {
-	constructor(
-		public readonly storePath: string,
-		public readonly url: string,
-		public readonly compression: 'zstd',
-		public readonly fileHash: string,
-		public readonly fileSize: number,
-		public readonly narHash: string,
-		public readonly narSize: number,
-		public readonly references: readonly string[],
-		public readonly deriver?: string,
-		public readonly ca?: string,
-		public readonly sig?: string
-	) {}
-
-	static fromFields(fields: NarInfoFields): NarInfo {
-		return new NarInfo(
-			fields.storePath,
-			fields.url,
-			fields.compression,
-			fields.fileHash,
-			fields.fileSize,
-			fields.narHash,
-			fields.narSize,
-			fields.references,
-			fields.deriver,
-			fields.ca,
-			fields.sig
-		);
-	}
-
-	static parse(source: string): NarInfo {
-		const fields = new Map<string, string>();
-
-		for (const line of source.split(/\r?\n/)) {
-			if (line.trim() === '') {
-				continue;
-			}
-
-			const separator = line.indexOf(':');
-
-			if (separator === -1) {
-				throw new InvalidNarInfoLineError(line);
-			}
-
-			const key = line.slice(0, separator);
-			const value = line.slice(separator + 1).trimStart();
-			fields.set(key, value);
-		}
-
-		const compression = required(fields, 'Compression');
-
-		if (compression !== 'zstd') {
-			throw new UnsupportedNarInfoCompressionError(compression);
-		}
-
-		return new NarInfo(
-			required(fields, 'StorePath'),
-			required(fields, 'URL'),
-			compression,
-			required(fields, 'FileHash'),
-			parseRequiredNarInfoInteger(fields, 'FileSize'),
-			required(fields, 'NarHash'),
-			parseRequiredNarInfoInteger(fields, 'NarSize'),
-			parseReferences(required(fields, 'References')),
-			optional(fields, 'Deriver'),
-			optional(fields, 'CA'),
-			optional(fields, 'Sig')
-		);
-	}
-
-	fingerprint(): string {
-		return [
-			'1',
-			this.storePath,
-			this.narHash,
-			String(this.narSize),
-			this.referenceStorePaths().join(',')
-		].join(';');
-	}
-
-	private referenceStorePaths(): readonly string[] {
-		const separator = this.storePath.lastIndexOf('/');
-		const storeDirectory =
-			separator === -1 ? undefined : this.storePath.slice(0, separator);
-
-		// Nix's canonical fingerprint sorts the full reference store paths, so
-		// the signature must not depend on the order the references arrive in.
-		return this.references
-			.map((reference) =>
-				storeDirectory === undefined
-					? reference
-					: `${storeDirectory}/${reference}`
-			)
-			.toSorted();
-	}
-
-	render(): string {
-		const lines = [
-			`StorePath: ${this.storePath}`,
-			`URL: ${this.url}`,
-			`Compression: ${this.compression}`,
-			`FileHash: ${this.fileHash}`,
-			`FileSize: ${String(this.fileSize)}`,
-			`NarHash: ${this.narHash}`,
-			`NarSize: ${String(this.narSize)}`,
-			`References: ${this.references.join(' ')}`
-		];
-
-		if (this.deriver !== undefined && this.deriver !== '') {
-			lines.push(`Deriver: ${this.deriver}`);
-		}
-
-		if (this.ca !== undefined && this.ca !== '') {
-			lines.push(`CA: ${this.ca}`);
-		}
-
-		if (this.sig !== undefined && this.sig !== '') {
-			lines.push(`Sig: ${this.sig}`);
-		}
-
-		return `${lines.join('\n')}\n`;
-	}
-
-	toFields(): NarInfoFields {
-		return {
-			storePath: this.storePath,
-			url: this.url,
-			compression: this.compression,
-			fileHash: this.fileHash,
-			fileSize: this.fileSize,
-			narHash: this.narHash,
-			narSize: this.narSize,
-			references: this.references,
-			deriver: this.deriver,
-			ca: this.ca,
-			sig: this.sig
-		};
-	}
-}
-
 export class StorePath {
 	constructor(public readonly value: string) {
 		if (!value.startsWith('/nix/store/')) {
@@ -866,50 +680,6 @@ export class NixConfig {
 			''
 		].join('\n');
 	}
-}
-
-function parseReferences(value: string): readonly string[] {
-	return value.split(/\s+/).filter((reference) => reference !== '');
-}
-
-function required(fields: ReadonlyMap<string, string>, key: string): string {
-	const value = fields.get(key);
-
-	if (value === undefined) {
-		throw new MissingNarInfoFieldError(key);
-	}
-
-	return value;
-}
-
-function optional(
-	fields: ReadonlyMap<string, string>,
-	key: string
-): string | undefined {
-	const value = fields.get(key);
-
-	return value === undefined || value === '' ? undefined : value;
-}
-
-function parseRequiredNarInfoInteger(
-	fields: ReadonlyMap<string, string>,
-	key: NarInfoIntegerField
-): number {
-	const raw = required(fields, key);
-
-	// Only a run of digits — `Number.parseInt` would otherwise accept trailing
-	// junk ("123abc" -> 123, "1e9" -> 1).
-	if (!/^\d+$/.test(raw)) {
-		throw new InvalidNarInfoIntegerFieldError(key);
-	}
-
-	const value = Number.parseInt(raw, 10);
-
-	if (!Number.isSafeInteger(value)) {
-		throw new InvalidNarInfoIntegerFieldError(key);
-	}
-
-	return value;
 }
 
 function validateUploadPathNarHash(value: string): void {

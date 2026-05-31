@@ -652,7 +652,7 @@ pure lexer handles text formats such as narinfo before a schema validates them.
   - [x] `messages.ts` for strict request and response schemas. Unknown JSON keys
         are rejected; upload decisions use a discriminated union; transformed
         schemas provide their output types.
-  - [ ] `narinfo.ts` for a pure field lexer, narinfo schema, rendering,
+  - [x] `narinfo.ts` for a pure field lexer, narinfo schema, rendering,
         fingerprinting, and multi-signature support.
   - [ ] `cache-info.ts` and `nix-config.ts` for the remaining text renderers.
   - [ ] `errors.ts` for the small set of typed protocol errors still thrown by
@@ -669,16 +669,16 @@ pure lexer handles text formats such as narinfo before a schema validates them.
   - [ ] CLI server responses are schema-checked before use;
   - [ ] scheduled-GC bootstrap responses are schema-checked;
   - [ ] server reads of DB-stored JSON fail as typed server errors when corrupt.
-- [ ] Support multiple narinfo `Sig:` lines. Rendering emits one line per
+- [x] Support multiple narinfo `Sig:` lines. Rendering emits one line per
       signature; verification accepts any trusted matching signature.
 
 ### Correctness fixes
 
-- [ ] Reject narinfo integers with trailing junk (`123abc`, `1e9`, empty
+- [x] Reject narinfo integers with trailing junk (`123abc`, `1e9`, empty
       string).
-- [ ] Trim CRLF line endings in the narinfo lexer.
-- [ ] Parse `References` with whitespace splitting that drops empty elements.
-- [ ] Build narinfo fingerprints from sorted full reference store paths, not a
+- [x] Trim CRLF line endings in the narinfo lexer.
+- [x] Parse `References` with whitespace splitting that drops empty elements.
+- [x] Build narinfo fingerprints from sorted full reference store paths, not a
       caller-side ordering invariant.
 - [x] Make the Nix base32 decoder reject out-of-alphabet characters explicitly.
 - [x] Give `If-None-Match` precedence over `If-Modified-Since`.
@@ -701,7 +701,7 @@ pure lexer handles text formats such as narinfo before a schema validates them.
 
 ### Correctness Tests
 
-- [ ] Parameterised schema tests cover missing keys, wrong types, bad hashes,
+- [x] Parameterised schema tests cover missing keys, wrong types, bad hashes,
       store path hash mismatches, empty root targets, TTL bounds, unknown keys,
       malformed narinfo lines, multi-signature narinfo round-trips, and integer
       coercion guards.
@@ -711,7 +711,7 @@ pure lexer handles text formats such as narinfo before a schema validates them.
       corrupt stored metadata returning 500, reusable-blob cleanup protection,
       and GC purging swept narinfo objects from the current colo.
 - [ ] CLI tests cover schema validation of server responses.
-- [ ] The e2e substitute flow still passes with the new narinfo renderer and
+- [x] The e2e substitute flow still passes with the new narinfo renderer and
       multi-signature verification path.
 
 ## Later features

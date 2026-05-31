@@ -5,7 +5,8 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
-import { NarInfo, StorePath } from '../../packages/shared/src/protocol.ts';
+import { NarInfo } from '../../packages/shared/src/narinfo.ts';
+import { StorePath } from '../../packages/shared/src/protocol.ts';
 import {
 	bootstrapToken,
 	CupboardTestServer
@@ -75,10 +76,10 @@ describe('Nix substitution', () => {
 
 			expect({
 				references: narInfo.references,
-				hasSignature: narInfo.sig !== undefined
+				signatures: narInfo.sigs
 			}).toStrictEqual({
 				references: [StorePath.basename(dependency)],
-				hasSignature: true
+				signatures: [expect.any(String)]
 			});
 
 			await harness.target.realise(
