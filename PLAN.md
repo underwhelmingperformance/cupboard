@@ -4,11 +4,29 @@ A Cloudflare Workers substituter for Nix.
 
 ## Non-Goals
 
-- Multi-tenant hosting. One personal deployment per Worker; named caches inside
-  it are for organisation only.
 - Federation, mirroring, or peer-to-peer between deployments.
 - Replacing Hydra, Cachix, or Attic at organisational scale.
 - Acting as a general HTTP file host. Only Nix store paths and their metadata.
+
+## Tenancy
+
+Single-tenant for now — one owner per deployment. This is a deliberate current
+scope, not a permanent exclusion.
+
+It is single-tenant structurally, not just by intent: one Durable Object per
+deployment holds all metadata, roots, and keys; one deployment-wide signing key;
+NAR blobs are shared (content-addressed) across caches; and one
+bootstrap-derived admin governs the whole deployment. None of these is a tenant
+boundary. Named caches and V4 per-repository write scopes are organisation
+_within_ one owner's trust domain — shared key, blobs, and admin — not isolation
+between owners.
+
+Adding multi-tenancy later would mean a Durable Object per tenant (isolated
+metadata and roots), a per-tenant signing key (so a cache carries the tenant's
+trust identity), per-tenant admin and OIDC trust rules, and per-tenant storage
+accounting. That is a materially larger product, near the "not Cachix/Attic at
+organisational scale" line, so it waits for a real need rather than being
+designed in speculatively.
 
 ## Compatibility
 
