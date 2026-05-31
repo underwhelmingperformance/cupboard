@@ -624,7 +624,7 @@ export class NarInfo {
 	static parse(source: string): NarInfo {
 		const fields = new Map<string, string>();
 
-		for (const line of source.split('\n')) {
+		for (const line of source.split(/\r?\n/)) {
 			if (line.trim() === '') {
 				continue;
 			}
@@ -673,14 +673,18 @@ export class NarInfo {
 
 	private referenceStorePaths(): readonly string[] {
 		const separator = this.storePath.lastIndexOf('/');
+		const storeDirectory =
+			separator === -1 ? undefined : this.storePath.slice(0, separator);
 
-		if (separator === -1) {
-			return this.references;
-		}
-
-		const storeDirectory = this.storePath.slice(0, separator);
-
-		return this.references.map((reference) => `${storeDirectory}/${reference}`);
+		// Nix's canonical fingerprint sorts the full reference store paths, so
+		// the signature must not depend on the order the references arrive in.
+		return this.references
+			.map((reference) =>
+				storeDirectory === undefined
+					? reference
+					: `${storeDirectory}/${reference}`
+			)
+			.toSorted();
 	}
 
 	render(): string {
@@ -865,11 +869,7 @@ export class NixConfig {
 }
 
 function parseReferences(value: string): readonly string[] {
-	if (value === '') {
-		return [];
-	}
-
-	return value.split(' ');
+	return value.split(/\s+/).filter((reference) => reference !== '');
 }
 
 function required(fields: ReadonlyMap<string, string>, key: string): string {
@@ -895,9 +895,17 @@ function parseRequiredNarInfoInteger(
 	fields: ReadonlyMap<string, string>,
 	key: NarInfoIntegerField
 ): number {
-	const value = Number.parseInt(required(fields, key), 10);
+	const raw = required(fields, key);
 
-	if (!Number.isSafeInteger(value) || value < 0) {
+	// Only a run of digits — `Number.parseInt` would otherwise accept trailing
+	// junk ("123abc" -> 123, "1e9" -> 1).
+	if (!/^\d+$/.test(raw)) {
+		throw new InvalidNarInfoIntegerFieldError(key);
+	}
+
+	const value = Number.parseInt(raw, 10);
+
+	if (!Number.isSafeInteger(value)) {
 		throw new InvalidNarInfoIntegerFieldError(key);
 	}
 

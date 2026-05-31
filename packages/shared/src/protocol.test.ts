@@ -33,6 +33,37 @@ import {
 } from './protocol.ts';
 import { rootTtlMaxSeconds } from './scalars.ts';
 
+const exampleStorePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example';
+
+function fingerprintWithReferences(references: readonly string[]): string {
+	return new NarInfo(
+		exampleStorePath,
+		'nar/sha256:0123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk.nar.zst',
+		'zstd',
+		'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		123,
+		'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		456,
+		references
+	).fingerprint();
+}
+
+function narinfoLines(
+	overrides: { readonly fileSize?: string; readonly references?: string } = {}
+): string[] {
+	return [
+		`StorePath: ${exampleStorePath}`,
+		'URL: nar/example.nar.zst',
+		'Compression: zstd',
+		'FileHash: sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		`FileSize: ${overrides.fileSize ?? '123'}`,
+		'NarHash: sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		'NarSize: 456',
+		`References: ${overrides.references ?? ''}`,
+		''
+	];
+}
+
 describe('CacheInfo', () => {
 	it('renders nix-cache-info', () => {
 		expect(CacheInfo.default.render()).toBe(
@@ -84,6 +115,20 @@ describe('NarInfo', () => {
 		);
 	});
 
+	it('sorts references in the fingerprint regardless of input order', () => {
+		expect(
+			fingerprintWithReferences([
+				'1123456789abcdfghijklmnpqrsvwxyz-second',
+				'0123456789abcdfghijklmnpqrsvwxyz-first'
+			])
+		).toBe(
+			fingerprintWithReferences([
+				'0123456789abcdfghijklmnpqrsvwxyz-first',
+				'1123456789abcdfghijklmnpqrsvwxyz-second'
+			])
+		);
+	});
+
 	it('rejects malformed narinfo lines with a typed error', () => {
 		expect(() => NarInfo.parse('StorePath /nix/store/example\n')).toThrow(
 			InvalidNarInfoLineError
@@ -114,22 +159,35 @@ describe('NarInfo', () => {
 		).toThrow(UnsupportedNarInfoCompressionError);
 	});
 
-	it('rejects invalid narinfo integer fields with a typed error', () => {
-		expect(() =>
-			NarInfo.parse(
-				[
-					'StorePath: /nix/store/0123456789abcdfghijklmnpqrsvwxyz-example',
-					'URL: nar/example.nar.zst',
-					'Compression: zstd',
-					'FileHash: sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-					'FileSize: nope',
-					'NarHash: sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-					'NarSize: 456',
-					'References: ',
-					''
-				].join('\n')
-			)
-		).toThrow(InvalidNarInfoIntegerFieldError);
+	it.each(['nope', '123abc', '1e9', '+5', '0x1f', ''])(
+		'rejects the non-integer file size %j with a typed error',
+		(fileSize) => {
+			expect(() =>
+				NarInfo.parse(narinfoLines({ fileSize }).join('\n'))
+			).toThrow(InvalidNarInfoIntegerFieldError);
+		}
+	);
+
+	it('parses CRLF line endings without a trailing carriage return', () => {
+		const info = NarInfo.parse(narinfoLines().join('\r\n'));
+
+		expect(info.storePath).toBe(
+			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example'
+		);
+	});
+
+	it('collapses runs of whitespace between references', () => {
+		const info = NarInfo.parse(
+			narinfoLines({
+				references:
+					'0123456789abcdfghijklmnpqrsvwxyz-a   1123456789abcdfghijklmnpqrsvwxyz-b'
+			}).join('\n')
+		);
+
+		expect(info.references).toStrictEqual([
+			'0123456789abcdfghijklmnpqrsvwxyz-a',
+			'1123456789abcdfghijklmnpqrsvwxyz-b'
+		]);
 	});
 
 	it('round-trips generated valid narinfos through the text format', () => {
