@@ -6,6 +6,7 @@ import {
 	rootTtlMinSeconds,
 	storePathHashPattern
 } from './scalars.ts';
+import { storePathBasename, storePathHashOf } from './store-path.ts';
 
 export interface CacheInfoFields {
 	readonly storeDirectory: string;
@@ -748,9 +749,9 @@ export class StorePath {
 	}
 
 	get basename(): string {
-		const basename = this.value.split('/').at(-1);
+		const basename = storePathBasename(this.value);
 
-		if (basename === undefined || basename === '') {
+		if (basename === undefined) {
 			throw new InvalidStorePathError(this.value);
 		}
 
@@ -758,13 +759,13 @@ export class StorePath {
 	}
 
 	get hash(): string {
-		const separator = this.basename.indexOf('-');
+		const hash = storePathHashOf(this.value);
 
-		if (separator === -1) {
+		if (hash === undefined) {
 			throw new InvalidStorePathBasenameError(this.basename);
 		}
 
-		return this.basename.slice(0, separator);
+		return hash;
 	}
 }
 

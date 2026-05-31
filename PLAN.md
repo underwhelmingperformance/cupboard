@@ -647,9 +647,9 @@ pure lexer handles text formats such as narinfo before a schema validates them.
   - [x] `scalars.ts` for reusable branded field schemas.
   - [ ] `hash.ts` for Nix SHA-256 parsing, base32/base64 conversion, and digest
         length checks.
-  - [ ] `store-path.ts` for store path parsing, hashing, basenames, and
+  - [x] `store-path.ts` for store path parsing, hashing, basenames, and
         reference basename conversion.
-  - [ ] `messages.ts` for strict request and response schemas. Unknown JSON keys
+  - [x] `messages.ts` for strict request and response schemas. Unknown JSON keys
         are rejected; upload decisions use a discriminated union; transformed
         schemas provide their output types.
   - [ ] `narinfo.ts` for a pure field lexer, narinfo schema, rendering,
