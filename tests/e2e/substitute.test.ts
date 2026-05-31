@@ -6,7 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { CupboardClient } from '../../packages/cli/src/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
 import { NarInfo } from '../../packages/shared/src/narinfo.ts';
-import { StorePath } from '../../packages/shared/src/protocol.ts';
+import { StorePath } from '../../packages/shared/src/store-path.ts';
 import {
 	bootstrapToken,
 	CupboardTestServer

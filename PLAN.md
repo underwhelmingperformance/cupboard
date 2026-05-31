@@ -642,10 +642,10 @@ only the lexical step, Zod schemas own the wire shape and semantics, and a tiny
 pure lexer handles text formats such as narinfo before a schema validates them.
 
 - [x] Add Zod v4 to `@cupboard/shared`.
-- [ ] Split the monolithic shared protocol module into focused modules, with
+- [x] Split the monolithic shared protocol module into focused modules, with
       `index.ts` remaining re-exports only:
   - [x] `scalars.ts` for reusable branded field schemas.
-  - [ ] `hash.ts` for Nix SHA-256 parsing, base32/base64 conversion, and digest
+  - [x] `hash.ts` for Nix SHA-256 parsing, base32/base64 conversion, and digest
         length checks.
   - [x] `store-path.ts` for store path parsing, hashing, basenames, and
         reference basename conversion.
@@ -654,8 +654,8 @@ pure lexer handles text formats such as narinfo before a schema validates them.
         schemas provide their output types.
   - [x] `narinfo.ts` for a pure field lexer, narinfo schema, rendering,
         fingerprinting, and multi-signature support.
-  - [ ] `cache-info.ts` and `nix-config.ts` for the remaining text renderers.
-  - [ ] `errors.ts` for the small set of typed protocol errors still thrown by
+  - [x] `cache-info.ts` and `nix-config.ts` for the remaining text renderers.
+  - [x] `errors.ts` for the small set of typed protocol errors still thrown by
         free functions.
 - [x] Retire the hand-written wire interfaces, validator classes, and duplicate
       `fromFields` model layer once the schemas own those contracts.

@@ -8,7 +8,7 @@ import {
 	type UploadPathMetadataFields,
 	type UploadPathNegotiationFields
 } from '../../packages/shared/src/messages.ts';
-import { StorePath } from '../../packages/shared/src/protocol.ts';
+import { StorePath } from '../../packages/shared/src/store-path.ts';
 
 import { NixStore } from './nix.ts';
 

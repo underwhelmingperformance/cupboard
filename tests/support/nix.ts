@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { NixSha256Hash } from '../../packages/shared/src/protocol.ts';
+import { NixSha256Hash } from '../../packages/shared/src/hash.ts';
 
 import { temporaryRoot, withTemporaryDirectory } from './filesystem.ts';
 import { runCommand } from './process.ts';

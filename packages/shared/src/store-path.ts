@@ -1,3 +1,8 @@
+import {
+	InvalidStorePathBasenameError,
+	InvalidStorePathError
+} from './errors.ts';
+
 // Pure store-path derivations, kept dependency-free so both the wire schemas
 // and the `StorePath` value object share one implementation. These return
 // `undefined` rather than throwing; callers that want a hard failure layer
@@ -50,4 +55,46 @@ export function resolveRootTargets(
 	}
 
 	return resolved;
+}
+
+export class StorePath {
+	constructor(public readonly value: string) {
+		if (!value.startsWith('/nix/store/')) {
+			throw new InvalidStorePathError(value);
+		}
+	}
+
+	static basename(value: string): string {
+		return new StorePath(value).basename;
+	}
+
+	static hash(value: string): string {
+		return new StorePath(value).hash;
+	}
+
+	static referenceBasenames(references: readonly string[]): string[] {
+		return references
+			.map((reference) => StorePath.basename(reference))
+			.toSorted();
+	}
+
+	get basename(): string {
+		const basename = storePathBasename(this.value);
+
+		if (basename === undefined) {
+			throw new InvalidStorePathError(this.value);
+		}
+
+		return basename;
+	}
+
+	get hash(): string {
+		const hash = storePathHashOf(this.value);
+
+		if (hash === undefined) {
+			throw new InvalidStorePathBasenameError(this.basename);
+		}
+
+		return hash;
+	}
 }

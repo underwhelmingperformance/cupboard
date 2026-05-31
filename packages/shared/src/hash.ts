@@ -1,38 +1,13 @@
-import { ProtocolError } from './errors.ts';
+import {
+	InvalidNixSha256HashError,
+	InvalidSha256DigestLengthError
+} from './errors.ts';
 import { nixSha256HashPattern } from './scalars.ts';
-import { storePathBasename, storePathHashOf } from './store-path.ts';
-
-export class InvalidStorePathError extends ProtocolError {
-	constructor(public readonly storePath: string) {
-		super(`Invalid store path: ${storePath}`);
-		this.name = 'InvalidStorePathError';
-	}
-}
-
-export class InvalidStorePathBasenameError extends ProtocolError {
-	constructor(public readonly basename: string) {
-		super(`Invalid store path basename: ${basename}`);
-		this.name = 'InvalidStorePathBasenameError';
-	}
-}
-
-export class InvalidNixSha256HashError extends ProtocolError {
-	constructor(public readonly value: string) {
-		super(`Invalid Nix SHA-256 hash: ${value}`);
-		this.name = 'InvalidNixSha256HashError';
-	}
-}
-
-export class InvalidSha256DigestLengthError extends ProtocolError {
-	constructor(public readonly length: number) {
-		super(`Invalid SHA-256 digest length: ${String(length)}`);
-		this.name = 'InvalidSha256DigestLengthError';
-	}
-}
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const base64Alphabet =
 	'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const nixSha256Base32Length = 52;
 
 export class NixSha256Hash {
 	private constructor(
@@ -74,82 +49,6 @@ export class NixSha256Hash {
 	}
 }
 
-export class StorePath {
-	constructor(public readonly value: string) {
-		if (!value.startsWith('/nix/store/')) {
-			throw new InvalidStorePathError(value);
-		}
-	}
-
-	static basename(value: string): string {
-		return new StorePath(value).basename;
-	}
-
-	static hash(value: string): string {
-		return new StorePath(value).hash;
-	}
-
-	static referenceBasenames(references: readonly string[]): string[] {
-		return references
-			.map((reference) => StorePath.basename(reference))
-			.toSorted();
-	}
-
-	get basename(): string {
-		const basename = storePathBasename(this.value);
-
-		if (basename === undefined) {
-			throw new InvalidStorePathError(this.value);
-		}
-
-		return basename;
-	}
-
-	get hash(): string {
-		const hash = storePathHashOf(this.value);
-
-		if (hash === undefined) {
-			throw new InvalidStorePathBasenameError(this.basename);
-		}
-
-		return hash;
-	}
-}
-
-export class CacheInfo {
-	static readonly default = new CacheInfo('/nix/store', true, 40);
-
-	constructor(
-		public readonly storeDirectory: string,
-		public readonly wantMassQuery: boolean,
-		public readonly priority: number
-	) {}
-
-	render(): string {
-		return [
-			`StoreDir: ${this.storeDirectory}`,
-			`WantMassQuery: ${this.wantMassQuery ? '1' : '0'}`,
-			`Priority: ${String(this.priority)}`,
-			''
-		].join('\n');
-	}
-}
-
-export class NixConfig {
-	constructor(
-		public readonly url: string,
-		public readonly publicKey: string
-	) {}
-
-	render(): string {
-		return [
-			`substituters = ${this.url}`,
-			`trusted-public-keys = ${this.publicKey}`,
-			''
-		].join('\n');
-	}
-}
-
 export function toNixSha256(bytes: Uint8Array): NixSha256Hash {
 	return NixSha256Hash.fromDigest(bytes);
 }
@@ -175,8 +74,6 @@ export function toNixBase32(bytes: Uint8Array): string {
 
 	return encoded;
 }
-
-const nixSha256Base32Length = 52;
 
 export function fromNixBase32(value: string): Uint8Array {
 	// A SHA-256 digest is exactly 52 Nix base32 characters; reject anything else
