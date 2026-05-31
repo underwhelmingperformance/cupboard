@@ -1,8 +1,4 @@
-import {
-	DeletePathRequest,
-	type DeletePathResponse,
-	StorePath
-} from '@cupboard/shared';
+import { type DeletePathResponse, StorePath } from '@cupboard/shared';
 import type { Command } from 'commander';
 
 import { authenticate } from '../auth.ts';
@@ -48,14 +44,10 @@ export async function runDelete(
 	reporter: Reporter,
 	client: DeleteClient
 ): Promise<void> {
-	// fromFields validates the hash alphabet and length; StorePath.hash only
-	// splits the basename on the first dash.
-	const request = DeletePathRequest.fromFields({
-		storePathHash: StorePath.hash(storePath)
-	});
+	const storePathHash = StorePath.hash(storePath);
 
 	const result = await reporter.phase('Deleting from cupboard', () =>
-		client.deleteStorePath(token, request.storePathHash)
+		client.deleteStorePath(token, storePathHash)
 	);
 
 	reporter.result([

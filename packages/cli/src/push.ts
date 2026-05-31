@@ -5,7 +5,6 @@ import pathModule from 'node:path';
 import {
 	type CommitResponse,
 	type RootSetBody,
-	RootSetRequest,
 	type RootSetResponse,
 	type RootSummary,
 	StorePath,
@@ -286,13 +285,18 @@ async function runPushWithTemporaryDirectory(
 	]);
 }
 
+interface RootRequest {
+	readonly name: string;
+	readonly body: RootSetBody;
+}
+
 type RetentionPlan =
 	| {
 			readonly kind: 'root';
 			readonly name: string;
-			readonly request: RootSetRequest;
+			readonly request: RootRequest;
 	  }
-	| { readonly kind: 'pins'; readonly requests: readonly RootSetRequest[] };
+	| { readonly kind: 'pins'; readonly requests: readonly RootRequest[] };
 
 function planRetention(
 	paths: readonly string[],
@@ -305,23 +309,16 @@ function planRetention(
 		return {
 			kind: 'root',
 			name: root,
-			request: RootSetRequest.fromFields({
-				name: root,
-				targets: [...paths],
-				...ttlFields
-			})
+			request: { name: root, body: { targets: [...paths], ...ttlFields } }
 		};
 	}
 
 	return {
 		kind: 'pins',
-		requests: paths.map((path) =>
-			RootSetRequest.fromFields({
-				name: `pin:${StorePath.hash(path)}`,
-				targets: [path],
-				...ttlFields
-			})
-		)
+		requests: paths.map((path) => ({
+			name: `pin:${StorePath.hash(path)}`,
+			body: { targets: [path], ...ttlFields }
+		}))
 	};
 }
 
@@ -336,7 +333,7 @@ async function recordRetention(
 	const { client, token } = dependencies;
 
 	if (retention.kind === 'root') {
-		const { name, ...body } = retention.request.toFields();
+		const { name, body } = retention.request;
 		const summary = await client.setRoot(token, name, body);
 		const expiry = formatExpiry(summary);
 		ctx.fact('root', retention.name);
@@ -350,8 +347,7 @@ async function recordRetention(
 
 	const summaries: RootSummary[] = [];
 
-	for (const request of retention.requests) {
-		const { name, ...body } = request.toFields();
+	for (const { name, body } of retention.requests) {
 		summaries.push(await client.setRoot(token, name, body));
 	}
 

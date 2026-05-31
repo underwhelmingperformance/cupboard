@@ -1,5 +1,5 @@
 import {
-	type RootSetRequestFields,
+	type RootSetBody,
 	type RootSetResponse,
 	StorePath,
 	type UploadNegotiateRequest
@@ -808,7 +808,7 @@ function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 }
 
 function rootSummary(
-	fields: RootSetRequestFields,
+	fields: SetRootFields,
 	expiresAtOverride?: string
 ): RootSetResponse {
 	const base = {
@@ -833,9 +833,11 @@ function rootSummary(
 	return { ...base, expiresAt };
 }
 
+type SetRootFields = { readonly name: string } & RootSetBody;
+
 interface SetRootCall {
 	readonly token: AccessCredential;
-	readonly fields: RootSetRequestFields;
+	readonly fields: SetRootFields;
 }
 
 function skipClient(setRoots: SetRootCall[]): PushClient {

@@ -135,11 +135,6 @@ export const statsResponseSchema = z.strictObject({
 });
 export type ParsedStatsResponse = z.output<typeof statsResponseSchema>;
 
-export const deletePathRequestSchema = z.strictObject({
-	storePathHash: storePathHashSchema
-});
-export type ParsedDeletePathRequest = z.output<typeof deletePathRequestSchema>;
-
 export const deletePathResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	deleted: z.boolean(),
@@ -154,13 +149,6 @@ export const rootSetBodySchema = z.strictObject({
 	ttlSeconds: ttlSecondsSchema.optional()
 });
 export type ParsedRootSetBody = z.output<typeof rootSetBodySchema>;
-
-export const rootSetRequestSchema = z.strictObject({
-	name: rootNameSchema,
-	targets: z.array(storePathSchema).min(1),
-	ttlSeconds: ttlSecondsSchema.optional()
-});
-export type ParsedRootSetRequest = z.output<typeof rootSetRequestSchema>;
 
 export const rootTargetSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
@@ -188,11 +176,6 @@ export const rootListResponseSchema = z.strictObject({
 });
 export type ParsedRootListResponse = z.output<typeof rootListResponseSchema>;
 
-export const rootRemoveRequestSchema = z.strictObject({
-	name: rootNameSchema
-});
-export type ParsedRootRemoveRequest = z.output<typeof rootRemoveRequestSchema>;
-
 export const rootRemoveResponseSchema = z.strictObject({
 	name: rootNameSchema,
 	removed: z.boolean()
@@ -200,3 +183,31 @@ export const rootRemoveResponseSchema = z.strictObject({
 export type ParsedRootRemoveResponse = z.output<
 	typeof rootRemoveResponseSchema
 >;
+
+// Buildable wire shapes: schema inputs are unbranded, so callers construct
+// request bodies and the server builds response bodies without minting brands.
+// The `Parsed…` outputs above are the branded results of a successful parse.
+export type UploadPathNegotiationFields = z.input<
+	typeof uploadPathNegotiationSchema
+>;
+export type UploadBlobMetadataFields = z.input<typeof uploadBlobMetadataSchema>;
+export type UploadPathMetadataFields = z.input<typeof uploadPathMetadataSchema>;
+export type UploadNegotiateRequest = z.input<
+	typeof uploadNegotiateRequestSchema
+>;
+export type UploadPrepareRequest = z.input<typeof uploadPrepareRequestSchema>;
+export type UploadPrepareResponse = z.input<typeof uploadPrepareResponseSchema>;
+export type UploadDecision = z.input<typeof uploadDecisionSchema>;
+export type UploadNegotiateResponse = z.input<
+	typeof uploadNegotiateResponseSchema
+>;
+export type CommitResponse = z.input<typeof commitResponseSchema>;
+export type BootstrapResponse = z.input<typeof bootstrapResponseSchema>;
+export type StatsResponse = z.input<typeof statsResponseSchema>;
+export type DeletePathResponse = z.input<typeof deletePathResponseSchema>;
+export type RootSetBody = z.input<typeof rootSetBodySchema>;
+export type RootTarget = z.input<typeof rootTargetSchema>;
+export type RootSummary = z.input<typeof rootSummarySchema>;
+export type RootSetResponse = z.input<typeof rootSetResponseSchema>;
+export type RootListResponse = z.input<typeof rootListResponseSchema>;
+export type RootRemoveResponse = z.input<typeof rootRemoveResponseSchema>;

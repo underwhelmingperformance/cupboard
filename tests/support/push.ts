@@ -5,10 +5,10 @@ import type { CupboardClient } from '../../packages/cli/src/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
 import { NarArchive } from '../../packages/cli/src/nar.ts';
 import {
-	StorePath,
 	type UploadPathMetadataFields,
 	type UploadPathNegotiationFields
-} from '../../packages/shared/src/protocol.ts';
+} from '../../packages/shared/src/messages.ts';
+import { StorePath } from '../../packages/shared/src/protocol.ts';
 
 import { NixStore } from './nix.ts';
 

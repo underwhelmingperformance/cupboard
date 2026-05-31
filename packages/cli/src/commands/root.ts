@@ -2,7 +2,6 @@ import {
 	type RootListResponse,
 	type RootRemoveResponse,
 	type RootSetBody,
-	RootSetRequest,
 	type RootSetResponse,
 	type RootSummary
 } from '@cupboard/shared';
@@ -112,14 +111,13 @@ export async function runRootSet(
 	reporter: Reporter,
 	client: RootClient
 ): Promise<void> {
-	const { name: validatedName, ...body } = RootSetRequest.fromFields({
-		name,
-		targets,
+	const body: RootSetBody = {
+		targets: [...targets],
 		...(ttlSeconds === undefined ? {} : { ttlSeconds })
-	}).toFields();
+	};
 
 	const summary = await reporter.phase('Setting retention root', () =>
-		client.setRoot(token, validatedName, body)
+		client.setRoot(token, name, body)
 	);
 
 	reporter.result([

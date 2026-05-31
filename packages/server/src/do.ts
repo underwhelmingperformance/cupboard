@@ -5,24 +5,24 @@ import {
 	NarInfo,
 	NixSha256Hash,
 	referencesSchema,
+	type ResolvedRootTarget,
+	resolveRootTargets,
 	type RootListResponse,
 	rootNameSchema,
-	RootRemoveRequest,
 	type RootRemoveResponse,
 	rootSetBodySchema,
-	RootSetRequest,
 	type RootSetResponse,
 	type RootSummary,
 	type RootTarget,
 	type StatsResponse,
 	storePathHashSchema,
-	UploadBlobMetadata,
+	type UploadBlobMetadataFields,
 	type UploadDecision,
 	uploadNegotiateRequestSchema,
 	type UploadNegotiateResponse,
-	UploadPathCommitMetadata,
-	UploadPathMetadata,
+	type UploadPathMetadataFields,
 	uploadPathMetadataSchema,
+	type UploadPathNegotiationFields,
 	uploadPathNegotiationSchema,
 	uploadPrepareRequestSchema,
 	type UploadPrepareResponse
@@ -106,6 +106,12 @@ interface SigningKey {
 interface AuthKeyPair {
 	readonly privateJwk: JsonWebKey;
 	readonly publicJwk: JsonWebKey;
+}
+
+interface RootSetCommand {
+	readonly name: string;
+	readonly targets: readonly ResolvedRootTarget[];
+	readonly ttlSeconds: number | undefined;
 }
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
@@ -229,11 +235,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requireScope(request, 'write');
 
 		const body = await parseRequestBody(rootSetBodySchema, request);
-		const requested = RootSetRequest.fromFields({
+		const requested: RootSetCommand = {
 			name: parseRequestValue(rootNameSchema, name),
-			targets: body.targets,
-			...(body.ttlSeconds === undefined ? {} : { ttlSeconds: body.ttlSeconds })
-		});
+			targets: resolveRootTargets(body.targets),
+			ttlSeconds: body.ttlSeconds
+		};
 
 		return Response.json(this.setRoot(requested) satisfies RootSetResponse);
 	}
@@ -250,16 +256,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		const requested = RootRemoveRequest.fromFields({
-			name: parseRequestValue(rootNameSchema, name)
-		});
+		const rootName = parseRequestValue(rootNameSchema, name);
 
 		return Response.json(
-			this.removeRoot(requested.name) satisfies RootRemoveResponse
+			this.removeRoot(rootName) satisfies RootRemoveResponse
 		);
 	}
 
-	private setRoot(request: RootSetRequest): RootSetResponse {
+	private setRoot(request: RootSetCommand): RootSetResponse {
 		const now = new Date();
 		const nowIso = now.toISOString();
 		const expiresAt =
@@ -400,8 +404,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const body = await parseRequestBody(uploadNegotiateRequestSchema, request);
 		const uploads: UploadDecision[] = [];
 
-		for (const fields of body.paths) {
-			const metadata = UploadPathMetadata.fromFields(fields);
+		for (const metadata of body.paths) {
 			const existingNarInfo = this.db
 				.select()
 				.from(schema.narInfos)
@@ -429,31 +432,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 			}
 
-			await this.flushQueuedBlobDeletion(metadata.r2Key);
+			await this.flushQueuedBlobDeletion(narObjectKey(metadata.narHash));
 
 			const existingBlob = await this.findReusableBlob(metadata.narHash);
 			const uploadId = crypto.randomUUID();
 			const now = new Date();
 			const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
-			const pendingMetadata =
+			const pendingMetadata:
+				| UploadPathNegotiationFields
+				| UploadPathMetadataFields =
 				existingBlob === undefined
 					? metadata
-					: UploadPathCommitMetadata.fromPathAndBlob(
-							metadata,
-							UploadBlobMetadata.fromFields(existingBlob)
-						);
+					: commitMetadataFromPathAndBlob(metadata, existingBlob);
 
 			this.db
 				.insert(schema.pendingUploads)
 				.values({
 					id: uploadId,
 					narHash: metadata.narHash,
-					r2Key: metadata.r2Key,
+					r2Key: narObjectKey(metadata.narHash),
 					expectedSize:
-						pendingMetadata instanceof UploadPathCommitMetadata
-							? pendingMetadata.fileSize
-							: 0,
-					metadataJson: JSON.stringify(pendingMetadata.toFields()),
+						'fileHash' in pendingMetadata ? pendingMetadata.fileSize : 0,
+					metadataJson: JSON.stringify(pendingMetadata),
 					createdAt: now.toISOString(),
 					expiresAt: expiresAt.toISOString()
 				})
@@ -474,7 +474,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				storePathHash: metadata.storePathHash,
 				narHash: metadata.narHash,
 				uploadId,
-				r2Key: metadata.r2Key,
+				r2Key: narObjectKey(metadata.narHash),
 				expiresAt: expiresAt.toISOString()
 			});
 		}
@@ -512,20 +512,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			uploadId,
 			pending.metadataJson
 		);
-		const blobMetadata = UploadBlobMetadata.fromFields(
-			await parseRequestBody(uploadPrepareRequestSchema, request)
+		const blobMetadata = await parseRequestBody(
+			uploadPrepareRequestSchema,
+			request
 		);
-		const metadata = UploadPathCommitMetadata.fromPathAndBlob(
-			pathMetadata,
-			blobMetadata
-		);
+		const metadata = commitMetadataFromPathAndBlob(pathMetadata, blobMetadata);
 		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
 		this.db
 			.update(schema.pendingUploads)
 			.set({
 				expectedSize: metadata.fileSize,
-				metadataJson: JSON.stringify(metadata.toFields()),
+				metadataJson: JSON.stringify(metadata),
 				expiresAt: expiresAt.toISOString()
 			})
 			.where(eq(schema.pendingUploads.id, uploadId))
@@ -533,7 +531,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		return Response.json({
 			uploadUrl: await this.presignedPutUrl(
-				metadata.r2Key,
+				narObjectKey(metadata.narHash),
 				metadata.fileHash,
 				expiresAt
 			),
@@ -1157,7 +1155,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async commitMetadata(
-		metadata: UploadPathCommitMetadata
+		metadata: UploadPathMetadataFields
 	): Promise<boolean> {
 		const now = new Date().toISOString();
 		const key = await this.signingKey();
@@ -1179,7 +1177,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		const narBlobRow = {
 			narHash: metadata.narHash,
-			r2Key: metadata.r2Key,
+			r2Key: narObjectKey(metadata.narHash),
 			compression: metadata.compression,
 			fileHash: metadata.fileHash,
 			fileSize: metadata.fileSize,
@@ -1595,17 +1593,29 @@ async function serverErrorResponse(
 	}
 }
 
+function commitMetadataFromPathAndBlob(
+	path: UploadPathNegotiationFields,
+	blob: UploadBlobMetadataFields
+): UploadPathMetadataFields {
+	return {
+		...path,
+		fileHash: blob.fileHash,
+		fileSize: blob.fileSize,
+		compression: blob.compression
+	};
+}
+
 function parseStoredUploadMetadata(
 	uploadId: string,
 	source: string
-): UploadPathCommitMetadata {
+): UploadPathMetadataFields {
 	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>
 		new StoredUploadMetadataInvalidError(uploadId, cause);
 	const json = parseStoredJson(source, onInvalid);
 	const prepared = uploadPathMetadataSchema.safeParse(json);
 
 	if (prepared.success) {
-		return UploadPathCommitMetadata.fromFields(prepared.data);
+		return prepared.data;
 	}
 
 	// Negotiation stores the path metadata alone until the upload is prepared
@@ -1621,18 +1631,16 @@ function parseStoredUploadMetadata(
 function parseStoredUploadPathMetadata(
 	uploadId: string,
 	source: string
-): UploadPathMetadata {
-	const fields = parseStored(
+): UploadPathNegotiationFields {
+	return parseStored(
 		uploadPathNegotiationSchema,
 		source,
 		(cause) => new StoredUploadMetadataInvalidError(uploadId, cause)
 	);
-
-	return UploadPathMetadata.fromFields(fields);
 }
 
 function uploadHeadersFor(
-	metadata: UploadPathCommitMetadata
+	metadata: UploadPathMetadataFields
 ): Readonly<Record<string, string>> {
 	return {
 		'x-amz-checksum-sha256': NixSha256Hash.parse(
@@ -1642,13 +1650,15 @@ function uploadHeadersFor(
 }
 
 function verifyObjectChecksum(
-	metadata: UploadPathCommitMetadata,
+	metadata: UploadPathMetadataFields,
 	object: R2Object
 ): void {
 	const checksum = object.checksums.sha256;
 
 	if (checksum === undefined) {
-		throw new UploadedObjectChecksumMissingError(metadata.r2Key);
+		throw new UploadedObjectChecksumMissingError(
+			narObjectKey(metadata.narHash)
+		);
 	}
 
 	const actual = NixSha256Hash.fromDigest(new Uint8Array(checksum)).toString();
@@ -1658,7 +1668,7 @@ function verifyObjectChecksum(
 	}
 
 	throw new UploadedObjectChecksumMismatchError(
-		metadata.r2Key,
+		narObjectKey(metadata.narHash),
 		metadata.fileHash,
 		actual
 	);

@@ -20,3 +20,34 @@ export function storePathHashOf(path: string): string | undefined {
 
 	return separator === -1 ? undefined : basename.slice(0, separator);
 }
+
+export interface ResolvedRootTarget {
+	readonly storePathHash: string;
+	readonly storePath: string;
+}
+
+/**
+ * A retention root is a set: collapses targets sharing a store-path hash to the
+ * first occurrence, so a repeated path is idempotent rather than a primary-key
+ * clash downstream. Targets are expected to be validated store paths; any whose
+ * hash cannot be derived are dropped.
+ */
+export function resolveRootTargets(
+	targets: readonly string[]
+): readonly ResolvedRootTarget[] {
+	const resolved: ResolvedRootTarget[] = [];
+	const seen = new Set<string>();
+
+	for (const storePath of targets) {
+		const storePathHash = storePathHashOf(storePath);
+
+		if (storePathHash === undefined || seen.has(storePathHash)) {
+			continue;
+		}
+
+		seen.add(storePathHash);
+		resolved.push({ storePathHash, storePath });
+	}
+
+	return resolved;
+}

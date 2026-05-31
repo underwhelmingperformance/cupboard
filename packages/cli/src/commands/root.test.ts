@@ -1,7 +1,7 @@
 import type {
 	RootListResponse,
 	RootRemoveResponse,
-	RootSetRequestFields,
+	RootSetBody,
 	RootSetResponse,
 	RootSummary
 } from '@cupboard/shared';
@@ -17,6 +17,8 @@ import {
 	runRootRemove,
 	runRootSet
 } from './root.ts';
+
+type SetRootFields = { readonly name: string } & RootSetBody;
 
 const target = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 
@@ -38,8 +40,7 @@ describe('describeExpiry', () => {
 
 describe('runRootSet', () => {
 	it('validates, sends the fields with the token, and reports', async () => {
-		const calls: { token: AccessCredential; fields: RootSetRequestFields }[] =
-			[];
+		const calls: { token: AccessCredential; fields: SetRootFields }[] = [];
 		const results: ResultRow[][] = [];
 		const response: RootSetResponse = summary({
 			name: 'github:owner/repo/main',
@@ -185,7 +186,7 @@ function summary(overrides: Partial<RootSummary>): RootSummary {
 
 function setRootClient(
 	response: RootSetResponse,
-	calls: { token: AccessCredential; fields: RootSetRequestFields }[]
+	calls: { token: AccessCredential; fields: SetRootFields }[]
 ): RootClient {
 	return {
 		setRoot(token, name, body) {

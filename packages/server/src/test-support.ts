@@ -6,7 +6,7 @@ import {
 	NixSha256Hash,
 	type RootListResponse,
 	type RootRemoveResponse,
-	type RootSetRequestFields,
+	type RootSetBody,
 	type RootSetResponse,
 	type StatsResponse,
 	type UploadNegotiateResponse,
@@ -384,7 +384,7 @@ export async function deletePath(
 
 export async function setRoot(
 	token: string,
-	fields: RootSetRequestFields
+	fields: { readonly name: string } & RootSetBody
 ): Promise<RootSetResponse> {
 	const { name, ...body } = fields;
 	const response = await authorisedFetch(
@@ -787,7 +787,11 @@ export function singleDecision(
 ): UploadDecision {
 	expect(response.uploads).toHaveLength(1);
 
-	const [decision] = response.uploads as readonly [UploadDecision];
+	const [decision] = response.uploads;
+
+	if (decision === undefined) {
+		throw new Error('expected exactly one upload decision');
+	}
 
 	return decision;
 }
