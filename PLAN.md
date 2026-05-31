@@ -154,15 +154,17 @@ successfully substitute that path from the Worker.
 - [x] Print Nix substituter config for the user's `nix.conf`.
 - [x] Show the public signing key.
 - [x] Inspect cache stats.
-- [ ] Tests:
-  - [ ] Unit: substituter config command renders a correct `nix.conf` snippet
+- [x] Tests:
+  - [x] Unit: substituter config command renders a correct `nix.conf` snippet
         for a given Worker URL and pubkey.
   - [x] Integration: bootstrap mints an admin JWT and keeps the signing key
         stable across calls; stats returns accurate row counts.
 
 ### Test harness
 
-- [ ] Shared Vitest setup at workspace root for Tier 1.
+- [x] Tier 1 runs on per-package Vitest defaults (`*.test.ts` alongside the
+      code); only `packages/server` needs its own config, for the Tier 2 Worker
+      pool. No separate workspace-root setup is required.
 - [x] `@cloudflare/vitest-pool-workers` configured in `packages/server` for Tier
       2, picking up `*.workers.test.ts` only so the unit run is not slowed by
       Worker boot.
@@ -186,7 +188,7 @@ operational endpoints live with the features that use them.
   - [x] ETag
   - [x] `Cache-Control`
   - [x] conditional request support if cheap
-- [ ] Tests:
+- [x] Tests:
   - [x] Integration: `ETag` and `Cache-Control` present on narinfo and NAR
         responses; a conditional GET with matching `If-None-Match` returns 304;
         matching `If-Modified-Since` likewise.

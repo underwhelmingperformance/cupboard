@@ -2,7 +2,15 @@ import { NixConfig } from '@cupboard/shared';
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
-import { createReporter } from '../reporter.ts';
+import { createReporter, type Reporter } from '../reporter.ts';
+
+export function runConfig(
+	url: string,
+	publicKey: string,
+	reporter: Reporter
+): void {
+	reporter.info(new NixConfig(url, publicKey).render().trimEnd());
+}
 
 export function registerConfigCommand(program: Command): void {
 	program
@@ -16,6 +24,6 @@ export function registerConfigCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			reporter.info(new NixConfig(url, publicKey).render().trimEnd());
+			runConfig(url, publicKey, reporter);
 		});
 }
