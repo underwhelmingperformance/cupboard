@@ -35,7 +35,6 @@ import {
 } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
-import { StatusCodes } from 'http-status-codes';
 
 import migrations from '../drizzle/migrations.js';
 
@@ -61,8 +60,8 @@ import {
 	StoredReferencesInvalidError,
 	StoredUploadMetadataInvalidError,
 	UnauthenticatedError,
-	UploadedObjectChecksumMismatchError,
-	UploadedObjectChecksumMissingError,
+	UploadExpiredError,
+	UploadNotFoundError,
 	UploadNotPreparedError
 } from './errors.ts';
 import {
@@ -81,6 +80,7 @@ import {
 	parseStoredJson
 } from './parse.ts';
 import { R2Presigner } from './presign.ts';
+import { verifyUploadedObject } from './upload-verification.ts';
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
@@ -495,17 +495,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		if (pending === undefined) {
-			return new Response('Upload not found\n', {
-				status: StatusCodes.NOT_FOUND
-			});
+			throw new UploadNotFoundError(uploadId);
 		}
 
 		if (pending.expiresAt < new Date().toISOString()) {
 			this.clearPendingUpload(uploadId);
 
-			return new Response('Upload expired\n', {
-				status: StatusCodes.NOT_FOUND
-			});
+			throw new UploadExpiredError(uploadId);
 		}
 
 		const pathMetadata = parseStoredUploadPathMetadata(
@@ -820,17 +816,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		if (pending === undefined) {
-			return new Response('Upload not found\n', {
-				status: StatusCodes.NOT_FOUND
-			});
+			throw new UploadNotFoundError(uploadId);
 		}
 
 		if (pending.expiresAt < new Date().toISOString()) {
 			this.clearPendingUpload(uploadId);
 
-			return new Response('Upload expired\n', {
-				status: StatusCodes.NOT_FOUND
-			});
+			throw new UploadExpiredError(uploadId);
 		}
 
 		this.db
@@ -859,21 +851,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			} satisfies CommitResponse);
 		}
 
-		const object = await this.env.BLOBS.head(pending.r2Key);
+		const object = (await this.env.BLOBS.head(pending.r2Key)) ?? undefined;
 
-		if (object === null) {
-			return new Response('Uploaded object not found\n', {
-				status: StatusCodes.BAD_REQUEST
-			});
-		}
-
-		if (object.size !== pending.expectedSize) {
-			return new Response('Uploaded object size does not match metadata\n', {
-				status: StatusCodes.BAD_REQUEST
-			});
-		}
-
-		verifyObjectChecksum(metadata, object);
+		verifyUploadedObject(object, pending.expectedSize, metadata);
 
 		const committed = await this.commitMetadata(metadata);
 		this.clearPendingUpload(uploadId);
@@ -1647,29 +1627,4 @@ function uploadHeadersFor(
 			metadata.fileHash
 		).digestBase64()
 	};
-}
-
-function verifyObjectChecksum(
-	metadata: UploadPathMetadataFields,
-	object: R2Object
-): void {
-	const checksum = object.checksums.sha256;
-
-	if (checksum === undefined) {
-		throw new UploadedObjectChecksumMissingError(
-			narObjectKey(metadata.narHash)
-		);
-	}
-
-	const actual = NixSha256Hash.fromDigest(new Uint8Array(checksum)).toString();
-
-	if (actual === metadata.fileHash) {
-		return;
-	}
-
-	throw new UploadedObjectChecksumMismatchError(
-		narObjectKey(metadata.narHash),
-		metadata.fileHash,
-		actual
-	);
 }

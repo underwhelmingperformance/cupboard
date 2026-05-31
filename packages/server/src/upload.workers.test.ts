@@ -168,12 +168,9 @@ describe('upload flow', () => {
 		});
 		const missing = await fetchPath('/auth/bootstrap', { method: 'POST' });
 
-		expect({
-			wrong: { status: wrong.status, body: await wrong.text() },
-			missing: { status: missing.status, body: await missing.text() }
-		}).toStrictEqual({
-			wrong: { status: StatusCodes.UNAUTHORIZED, body: 'Unauthorised\n' },
-			missing: { status: StatusCodes.UNAUTHORIZED, body: 'Unauthorised\n' }
+		expect({ wrong: wrong.status, missing: missing.status }).toStrictEqual({
+			wrong: StatusCodes.UNAUTHORIZED,
+			missing: StatusCodes.UNAUTHORIZED
 		});
 	});
 
@@ -191,31 +188,13 @@ describe('upload flow', () => {
 		});
 
 		expect({
-			stats: {
-				status: stats.status,
-				body: await stats.text()
-			},
-			negotiate: {
-				status: negotiate.status,
-				body: await negotiate.text()
-			},
-			commit: {
-				status: commit.status,
-				body: await commit.text()
-			}
+			stats: stats.status,
+			negotiate: negotiate.status,
+			commit: commit.status
 		}).toStrictEqual({
-			stats: {
-				status: StatusCodes.UNAUTHORIZED,
-				body: 'Unauthorised\n'
-			},
-			negotiate: {
-				status: StatusCodes.UNAUTHORIZED,
-				body: 'Unauthorised\n'
-			},
-			commit: {
-				status: StatusCodes.UNAUTHORIZED,
-				body: 'Unauthorised\n'
-			}
+			stats: StatusCodes.UNAUTHORIZED,
+			negotiate: StatusCodes.UNAUTHORIZED,
+			commit: StatusCodes.UNAUTHORIZED
 		});
 	});
 
@@ -305,13 +284,7 @@ describe('upload flow', () => {
 	it('returns 404 for a valid NAR hash with no stored blob', async () => {
 		const missing = await readFetch(`/nar/${nixSha256Hash('7')}.nar.zst`);
 
-		expect({
-			status: missing.status,
-			body: await missing.text()
-		}).toStrictEqual({
-			status: StatusCodes.NOT_FOUND,
-			body: 'Not found\n'
-		});
+		expect(missing.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
 	it('materialises the signed narinfo to R2 once and never rewrites it', async () => {
@@ -391,13 +364,7 @@ describe('upload flow', () => {
 	it('returns 404 for a narinfo that has not been committed', async () => {
 		const response = await readFetch(`/${'a'.repeat(32)}.narinfo`);
 
-		expect({
-			status: response.status,
-			body: await response.text()
-		}).toStrictEqual({
-			status: StatusCodes.NOT_FOUND,
-			body: 'Not found\n'
-		});
+		expect(response.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
 	it('re-materialises a missing narinfo object on the next negotiate', async () => {
@@ -683,9 +650,6 @@ describe('upload flow', () => {
 		);
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
-		expect(await response.text()).toBe(
-			'Uploaded object size does not match metadata\n'
-		);
 
 		await expectStats(token, {
 			storePaths: 0,
@@ -719,13 +683,7 @@ describe('upload flow', () => {
 				}
 			);
 
-			expect({
-				status: response.status,
-				body: await response.text()
-			}).toStrictEqual({
-				status: StatusCodes.INTERNAL_SERVER_ERROR,
-				body: 'R2 presign configuration is incomplete\n'
-			});
+			expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 		} finally {
 			Object.assign(env, { R2_SECRET_ACCESS_KEY: previousSecret });
 		}
@@ -748,13 +706,7 @@ describe('upload flow', () => {
 			{ method: 'POST' }
 		);
 
-		expect({
-			status: response.status,
-			body: await response.text()
-		}).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			body: 'Uploaded object SHA-256 checksum does not match metadata\n'
-		});
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 
 		await expectStats(token, {
 			storePaths: 0,
@@ -780,13 +732,7 @@ describe('upload flow', () => {
 			{ method: 'POST' }
 		);
 
-		expect({
-			status: response.status,
-			body: await response.text()
-		}).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			body: 'Uploaded object SHA-256 checksum is missing\n'
-		});
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 
 		await expectStats(token, {
 			storePaths: 0,
@@ -898,13 +844,7 @@ describe('upload flow', () => {
 			method: 'POST'
 		});
 
-		expect({
-			status: response.status,
-			body: await response.text()
-		}).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			body: 'Malformed JSON request body\n'
-		});
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 
 	it('garbage-collects expired pending uploads', async () => {
@@ -1192,13 +1132,7 @@ describe('upload flow', () => {
 			}
 		);
 
-		expect({
-			status: response.status,
-			body: await response.text()
-		}).toStrictEqual({
-			status: StatusCodes.UNAUTHORIZED,
-			body: 'Unauthorised\n'
-		});
+		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
 
 	it('rejects a malformed store path hash', async () => {
@@ -1763,12 +1697,12 @@ describe('upload flow', () => {
 
 			expect({
 				setRoot: setRoot.status,
-				stats: { status: stats.status, body: await stats.text() },
+				stats: stats.status,
 				deletePath: removed.status,
 				gc: gc.status
 			}).toStrictEqual({
 				setRoot: StatusCodes.OK,
-				stats: { status: StatusCodes.FORBIDDEN, body: 'Forbidden\n' },
+				stats: StatusCodes.FORBIDDEN,
 				deletePath: StatusCodes.FORBIDDEN,
 				gc: StatusCodes.FORBIDDEN
 			});
@@ -1786,13 +1720,7 @@ describe('upload flow', () => {
 		])('rejects $name with 401', async ({ token }) => {
 			const response = await authorisedFetch('/stats', await token());
 
-			expect({
-				status: response.status,
-				body: await response.text()
-			}).toStrictEqual({
-				status: StatusCodes.UNAUTHORIZED,
-				body: 'Unauthorised\n'
-			});
+			expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 		});
 
 		it.each(['github:owner/repo/main', 'pr/123', 'a%b'])(

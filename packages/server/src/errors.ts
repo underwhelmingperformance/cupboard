@@ -101,6 +101,46 @@ export class CronGarbageCollectionFailedError extends Error {
 	}
 }
 
+export class UploadNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly uploadId: string) {
+		super('Upload not found');
+		this.name = 'UploadNotFoundError';
+	}
+}
+
+export class UploadExpiredError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly uploadId: string) {
+		super('Upload expired');
+		this.name = 'UploadExpiredError';
+	}
+}
+
+export class UploadedObjectNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(public readonly r2Key: string) {
+		super('Uploaded object not found');
+		this.name = 'UploadedObjectNotFoundError';
+	}
+}
+
+export class UploadedObjectSizeMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(
+		public readonly r2Key: string,
+		public readonly expectedSize: number,
+		public readonly actualSize: number
+	) {
+		super('Uploaded object size does not match metadata');
+		this.name = 'UploadedObjectSizeMismatchError';
+	}
+}
+
 export class UploadedObjectChecksumMissingError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 
