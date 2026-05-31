@@ -1,4 +1,4 @@
-import type { BootstrapResponse } from '@cupboard/shared';
+import { bootstrapResponseSchema } from '@cupboard/shared';
 
 import { cupboardServer } from './durable-object.ts';
 import { CronGarbageCollectionFailedError } from './errors.ts';
@@ -34,7 +34,7 @@ export default {
 			);
 		}
 
-		const { token } = await bootstrap.json<BootstrapResponse>();
+		const { token } = bootstrapResponseSchema.parse(await bootstrap.json());
 
 		const response = await server.fetch(`${internalOrigin}/gc`, {
 			method: 'POST',

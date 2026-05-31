@@ -257,7 +257,9 @@ export async function negotiateUploads(
 	paths: readonly UploadPathMetadataFields[]
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedFetch('/uploads', token, {
-		body: JSON.stringify({ paths }),
+		body: JSON.stringify({
+			paths: paths.map((path) => uploadPathNegotiation(path))
+		}),
 		headers: {
 			'content-type': 'application/json'
 		},
@@ -274,7 +276,9 @@ export async function negotiateViaWorker(
 	paths: readonly UploadPathMetadataFields[]
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedWorkerFetch('/uploads', token, {
-		body: JSON.stringify({ paths }),
+		body: JSON.stringify({
+			paths: paths.map((path) => uploadPathNegotiation(path))
+		}),
 		headers: {
 			'content-type': 'application/json'
 		},
@@ -691,6 +695,18 @@ export function uploadBlobMetadata(metadata: UploadPathMetadataFields) {
 		fileHash: metadata.fileHash,
 		fileSize: metadata.fileSize,
 		compression: metadata.compression
+	};
+}
+
+export function uploadPathNegotiation(metadata: UploadPathMetadataFields) {
+	return {
+		storePathHash: metadata.storePathHash,
+		storePath: metadata.storePath,
+		narHash: metadata.narHash,
+		narSize: metadata.narSize,
+		references: metadata.references,
+		deriver: metadata.deriver,
+		ca: metadata.ca
 	};
 }
 

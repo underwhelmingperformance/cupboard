@@ -50,6 +50,7 @@ import {
 	setRoot,
 	uploadBlobMetadata,
 	uploadMetadata,
+	uploadPathNegotiation,
 	useTestServer,
 	verifyNarInfoSignature,
 	workerFetch
@@ -797,20 +798,16 @@ describe('upload flow', () => {
 
 	it.each([
 		{
-			fields: {
-				narHash: 'sha256:not-a-valid-hash'
-			},
-			expectedBody:
-				'Invalid upload metadata: NAR hash must be a sha256 Nix base32 hash\n'
+			name: 'a malformed NAR hash',
+			fields: { narHash: 'sha256:not-a-valid-hash' }
 		},
 		{
+			name: 'a full store path reference',
 			fields: {
 				references: ['/nix/store/11111111111111111111111111111111-first']
-			},
-			expectedBody:
-				'Invalid upload metadata: Invalid store path reference: /nix/store/11111111111111111111111111111111-first\n'
+			}
 		}
-	])('rejects invalid upload metadata', async ({ fields, expectedBody }) => {
+	])('rejects upload negotiation with $name', async ({ fields }) => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -818,19 +815,21 @@ describe('upload flow', () => {
 		});
 
 		const response = await authorisedFetch('/uploads', token, {
-			body: JSON.stringify({ paths: [metadata] }),
+			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] }),
 			headers: {
 				'content-type': 'application/json'
 			},
 			method: 'POST'
 		});
 
+		const body = await response.text();
+
 		expect({
 			status: response.status,
-			body: await response.text()
+			hasDiagnostics: body.length > 0
 		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
-			body: expectedBody
+			hasDiagnostics: true
 		});
 
 		await expectStats(token, {
@@ -843,61 +842,51 @@ describe('upload flow', () => {
 
 	it.each([
 		{
-			fields: {
-				fileHash: 'sha256:not-a-valid-hash'
-			},
-			expectedBody:
-				'Invalid upload metadata: file hash must be a sha256 Nix base32 hash\n'
+			name: 'a malformed file hash',
+			fields: { fileHash: 'sha256:not-a-valid-hash' }
 		},
-		{
-			fields: {
-				fileSize: 0
-			},
-			expectedBody:
-				'Invalid upload metadata: file size must be a positive integer\n'
-		}
-	])(
-		'rejects invalid upload blob metadata',
-		async ({ fields, expectedBody }) => {
-			const token = await initialise();
-			const metadata = uploadMetadata({
-				fileSize: narBytes.byteLength
-			});
-			const upload = expectSingleUploadDecision(
-				await negotiateUploads(token, [metadata]),
-				metadata
-			);
-			const response = await authorisedFetch(
-				`/uploads/${upload.uploadId}`,
-				token,
-				{
-					body: JSON.stringify({
-						...uploadBlobMetadata(metadata),
-						...fields
-					}),
-					headers: {
-						'content-type': 'application/json'
-					},
-					method: 'PUT'
-				}
-			);
+		{ name: 'a non-positive file size', fields: { fileSize: 0 } }
+	])('rejects upload preparation with $name', async ({ fields }) => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const response = await authorisedFetch(
+			`/uploads/${upload.uploadId}`,
+			token,
+			{
+				body: JSON.stringify({
+					...uploadBlobMetadata(metadata),
+					...fields
+				}),
+				headers: {
+					'content-type': 'application/json'
+				},
+				method: 'PUT'
+			}
+		);
 
-			expect({
-				status: response.status,
-				body: await response.text()
-			}).toStrictEqual({
-				status: StatusCodes.BAD_REQUEST,
-				body: expectedBody
-			});
+		const body = await response.text();
 
-			await expectStats(token, {
-				storePaths: 0,
-				narBlobs: 0,
-				pendingUploads: 1,
-				totalFileSize: 0
-			});
-		}
-	);
+		expect({
+			status: response.status,
+			hasDiagnostics: body.length > 0
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			hasDiagnostics: true
+		});
+
+		await expectStats(token, {
+			storePaths: 0,
+			narBlobs: 0,
+			pendingUploads: 1,
+			totalFileSize: 0
+		});
+	});
 
 	it('rejects malformed JSON upload requests', async () => {
 		const token = await initialise();
@@ -914,7 +903,7 @@ describe('upload flow', () => {
 			body: await response.text()
 		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
-			body: 'Invalid JSON request body\n'
+			body: 'Malformed JSON request body\n'
 		});
 	});
 

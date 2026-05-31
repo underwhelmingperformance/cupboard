@@ -9,6 +9,10 @@ import type {
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient, type TokenProvider } from './client.ts';
+import {
+	MalformedResponseError,
+	ResponseSchemaMismatchError
+} from './errors.ts';
 
 interface CapturedRequest {
 	readonly url: string;
@@ -166,6 +170,38 @@ describe('CupboardClient.removeRoot', () => {
 			contentType: undefined,
 			body: undefined
 		});
+	});
+});
+
+describe('CupboardClient response validation', () => {
+	it('rejects a response that does not match the schema', async () => {
+		const { client } = capturingClient({
+			storePathHash: 'not-a-valid-hash',
+			deleted: true,
+			narScheduledForDeletion: true
+		});
+
+		await expect(
+			client.deleteStorePath('admin-token', '0123456789abcdfghijklmnpqrsvwxyz')
+		).rejects.toThrow(ResponseSchemaMismatchError);
+	});
+
+	it('rejects a response missing a required field', async () => {
+		const { client } = capturingClient({ roots: [{ name: 'pr-1' }] });
+
+		await expect(client.listRoots('admin-token')).rejects.toThrow(
+			ResponseSchemaMismatchError
+		);
+	});
+
+	it('rejects a 200 response whose body is not valid JSON', async () => {
+		const client = new CupboardClient(new URL('https://cupboard.test'), () =>
+			Promise.resolve(new Response('{ not json', { status: 200 }))
+		);
+
+		await expect(client.listRoots('admin-token')).rejects.toThrow(
+			MalformedResponseError
+		);
 	});
 });
 

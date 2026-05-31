@@ -10,7 +10,8 @@
 		"commander": "^14.0.3",
 		"ora": "^9.3.0",
 		"picocolors": "^1.1.1",
-		"pretty-bytes": "^7.1.0"
+		"pretty-bytes": "^7.1.0",
+		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@types/node": "^25.5.0",

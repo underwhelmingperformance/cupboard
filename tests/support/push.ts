@@ -6,7 +6,8 @@ import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
 import { NarArchive } from '../../packages/cli/src/nar.ts';
 import {
 	StorePath,
-	type UploadPathMetadataFields
+	type UploadPathMetadataFields,
+	type UploadPathNegotiationFields
 } from '../../packages/shared/src/protocol.ts';
 
 import { NixStore } from './nix.ts';
@@ -41,7 +42,7 @@ export async function pushStorePaths(
 	);
 
 	const { uploads } = await context.client.negotiate(context.token, {
-		paths: prepared.map((entry) => entry.metadata)
+		paths: prepared.map((entry) => negotiationFields(entry.metadata))
 	});
 
 	for (const decision of uploads) {
@@ -81,6 +82,20 @@ export async function pushStorePaths(
 	);
 }
 
+function negotiationFields(
+	metadata: UploadPathMetadataFields
+): UploadPathNegotiationFields {
+	return {
+		storePathHash: metadata.storePathHash,
+		storePath: metadata.storePath,
+		narHash: metadata.narHash,
+		narSize: metadata.narSize,
+		references: metadata.references,
+		deriver: metadata.deriver,
+		ca: metadata.ca
+	};
+}
+
 export interface NegotiatedUpload {
 	readonly r2Key: string;
 	readonly uploadUrl: string;
@@ -100,7 +115,7 @@ export async function negotiateUpload(
 ): Promise<NegotiatedUpload> {
 	const entry = await preparePath(context, storePath);
 	const { uploads } = await context.client.negotiate(context.token, {
-		paths: [entry.metadata]
+		paths: [negotiationFields(entry.metadata)]
 	});
 	const [decision] = uploads;
 

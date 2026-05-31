@@ -1,8 +1,26 @@
-import { ProtocolError } from '@cupboard/shared';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 export abstract class ServerHttpError extends Error {
 	abstract readonly status: number;
+}
+
+export abstract class InvalidRequestBodyError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+}
+
+export class MalformedRequestBodyError extends InvalidRequestBodyError {
+	constructor(public override readonly cause: SyntaxError) {
+		super('Malformed JSON request body');
+		this.name = 'MalformedRequestBodyError';
+	}
+}
+
+export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
+	constructor(public override readonly cause: z.ZodError) {
+		super(z.prettifyError(cause));
+		this.name = 'RequestBodySchemaMismatchError';
+	}
 }
 
 export class UnauthenticatedError extends ServerHttpError {
@@ -23,42 +41,6 @@ export class InsufficientScopeError extends ServerHttpError {
 	}
 }
 
-export class InvalidJsonRequestBodyError extends ServerHttpError {
-	readonly status = StatusCodes.BAD_REQUEST;
-
-	constructor(public override readonly cause: SyntaxError) {
-		super('Invalid JSON request body');
-		this.name = 'InvalidJsonRequestBodyError';
-	}
-}
-
-export class InvalidUploadMetadataRequestError extends ServerHttpError {
-	readonly status = StatusCodes.BAD_REQUEST;
-
-	constructor(public override readonly cause: ProtocolError) {
-		super(`Invalid upload metadata: ${cause.message}`);
-		this.name = 'InvalidUploadMetadataRequestError';
-	}
-}
-
-export class InvalidDeletePathRequestError extends ServerHttpError {
-	readonly status = StatusCodes.BAD_REQUEST;
-
-	constructor(public override readonly cause: ProtocolError) {
-		super(`Invalid delete request: ${cause.message}`);
-		this.name = 'InvalidDeletePathRequestError';
-	}
-}
-
-export class InvalidRootRequestError extends ServerHttpError {
-	readonly status = StatusCodes.BAD_REQUEST;
-
-	constructor(public override readonly cause: ProtocolError) {
-		super(`Invalid root request: ${cause.message}`);
-		this.name = 'InvalidRootRequestError';
-	}
-}
-
 export class StoredUploadMetadataInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
@@ -68,6 +50,18 @@ export class StoredUploadMetadataInvalidError extends ServerHttpError {
 	) {
 		super('Stored upload metadata is invalid');
 		this.name = 'StoredUploadMetadataInvalidError';
+	}
+}
+
+export class StoredReferencesInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly storePathHash: string,
+		public override readonly cause: Error
+	) {
+		super('Stored narinfo references are invalid');
+		this.name = 'StoredReferencesInvalidError';
 	}
 }
 

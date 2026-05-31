@@ -1,19 +1,34 @@
-import type {
-	BootstrapResponse,
-	CommitResponse,
-	DeletePathResponse,
-	RootListResponse,
-	RootRemoveResponse,
-	RootSetBody,
-	RootSetResponse,
-	StatsResponse,
-	UploadNegotiateRequest,
-	UploadNegotiateResponse,
-	UploadPrepareRequest,
-	UploadPrepareResponse
+import {
+	type BootstrapResponse,
+	bootstrapResponseSchema,
+	type CommitResponse,
+	commitResponseSchema,
+	type DeletePathResponse,
+	deletePathResponseSchema,
+	type RootListResponse,
+	rootListResponseSchema,
+	type RootRemoveResponse,
+	rootRemoveResponseSchema,
+	type RootSetBody,
+	type RootSetResponse,
+	rootSetResponseSchema,
+	type StatsResponse,
+	statsResponseSchema,
+	type UploadNegotiateRequest,
+	type UploadNegotiateResponse,
+	uploadNegotiateResponseSchema,
+	type UploadPrepareRequest,
+	type UploadPrepareResponse,
+	uploadPrepareResponseSchema
 } from '@cupboard/shared';
+import { z } from 'zod';
 
-import { CupboardHttpError, CupboardUploadError } from './errors.ts';
+import {
+	CupboardHttpError,
+	CupboardUploadError,
+	MalformedResponseError,
+	ResponseSchemaMismatchError
+} from './errors.ts';
 
 /**
  * Supplies bearer tokens to the client and can refresh them. The CLI exchanges
@@ -48,7 +63,7 @@ export class CupboardClient {
 	}
 
 	bootstrap(bootstrapSecret: string): Promise<BootstrapResponse> {
-		return this.requestJson('/auth/bootstrap', {
+		return this.requestJson('/auth/bootstrap', bootstrapResponseSchema, {
 			method: 'POST',
 			token: bootstrapSecret
 		});
@@ -61,17 +76,21 @@ export class CupboardClient {
 	}
 
 	stats(token: AccessCredential): Promise<StatsResponse> {
-		return this.requestJson('/stats', { token });
+		return this.requestJson('/stats', statsResponseSchema, { token });
 	}
 
 	deleteStorePath(
 		token: AccessCredential,
 		storePathHash: string
 	): Promise<DeletePathResponse> {
-		return this.requestJson(`/paths/${storePathHash}`, {
-			method: 'DELETE',
-			token
-		});
+		return this.requestJson(
+			`/paths/${storePathHash}`,
+			deletePathResponseSchema,
+			{
+				method: 'DELETE',
+				token
+			}
+		);
 	}
 
 	setRoot(
@@ -79,32 +98,40 @@ export class CupboardClient {
 		name: string,
 		body: RootSetBody
 	): Promise<RootSetResponse> {
-		return this.requestJson(`/roots/${encodeURIComponent(name)}`, {
-			method: 'PUT',
-			token,
-			body
-		});
+		return this.requestJson(
+			`/roots/${encodeURIComponent(name)}`,
+			rootSetResponseSchema,
+			{
+				method: 'PUT',
+				token,
+				body
+			}
+		);
 	}
 
 	listRoots(token: AccessCredential): Promise<RootListResponse> {
-		return this.requestJson('/roots', { token });
+		return this.requestJson('/roots', rootListResponseSchema, { token });
 	}
 
 	removeRoot(
 		token: AccessCredential,
 		name: string
 	): Promise<RootRemoveResponse> {
-		return this.requestJson(`/roots/${encodeURIComponent(name)}`, {
-			method: 'DELETE',
-			token
-		});
+		return this.requestJson(
+			`/roots/${encodeURIComponent(name)}`,
+			rootRemoveResponseSchema,
+			{
+				method: 'DELETE',
+				token
+			}
+		);
 	}
 
 	negotiate(
 		token: AccessCredential,
 		body: UploadNegotiateRequest
 	): Promise<UploadNegotiateResponse> {
-		return this.requestJson('/uploads', {
+		return this.requestJson('/uploads', uploadNegotiateResponseSchema, {
 			method: 'POST',
 			token,
 			body
@@ -112,10 +139,14 @@ export class CupboardClient {
 	}
 
 	commit(token: AccessCredential, uploadId: string): Promise<CommitResponse> {
-		return this.requestJson(`/uploads/${uploadId}/commit`, {
-			method: 'POST',
-			token
-		});
+		return this.requestJson(
+			`/uploads/${uploadId}/commit`,
+			commitResponseSchema,
+			{
+				method: 'POST',
+				token
+			}
+		);
 	}
 
 	prepareUpload(
@@ -123,11 +154,15 @@ export class CupboardClient {
 		uploadId: string,
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse> {
-		return this.requestJson(`/uploads/${uploadId}`, {
-			method: 'PUT',
-			token,
-			body
-		});
+		return this.requestJson(
+			`/uploads/${uploadId}`,
+			uploadPrepareResponseSchema,
+			{
+				method: 'PUT',
+				token,
+				body
+			}
+		);
 	}
 
 	async uploadBlob(upload: CupboardBlobUpload): Promise<void> {
@@ -152,13 +187,34 @@ export class CupboardClient {
 		);
 	}
 
-	private async requestJson<T>(
+	private async requestJson<S extends z.ZodType>(
 		path: string,
+		schema: S,
 		options: ClientRequestOptions = {}
-	): Promise<T> {
+	): Promise<z.output<S>> {
 		const response = await this.request(path, options);
+		let payload: unknown;
 
-		return (await response.json()) as T;
+		try {
+			payload = await response.json();
+		} catch (error) {
+			if (error instanceof SyntaxError) {
+				throw new MalformedResponseError(path, error);
+			}
+
+			throw error;
+		}
+
+		const result = schema.safeParse(payload);
+
+		if (!result.success) {
+			throw new ResponseSchemaMismatchError(
+				path,
+				z.prettifyError(result.error)
+			);
+		}
+
+		return result.data;
 	}
 
 	private async request(

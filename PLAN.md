@@ -707,10 +707,10 @@ pure lexer handles text formats such as narinfo before a schema validates them.
       coercion guards.
 - [x] HTTP conditional-request tests cover ETag precedence, wildcard ETags,
       comma-separated ETags, and weak ETags.
-- [ ] Worker integration tests cover malformed request bodies returning 400,
+- [x] Worker integration tests cover malformed request bodies returning 400,
       corrupt stored metadata returning 500, reusable-blob cleanup protection,
       and GC purging swept narinfo objects from the current colo.
-- [ ] CLI tests cover schema validation of server responses.
+- [x] CLI tests cover schema validation of server responses.
 - [x] The e2e substitute flow still passes with the new narinfo renderer and
       multi-signature verification path.
 

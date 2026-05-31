@@ -38,6 +38,38 @@ export class PushNarMetadataMismatchError extends CliError {
 	}
 }
 
+export abstract class CupboardResponseError extends CliError {
+	protected constructor(
+		public readonly path: string,
+		message: string
+	) {
+		super(message);
+	}
+}
+
+export class MalformedResponseError extends CupboardResponseError {
+	constructor(
+		path: string,
+		public override readonly cause: SyntaxError
+	) {
+		super(path, `Response from ${path} was not valid JSON`);
+		this.name = 'MalformedResponseError';
+	}
+}
+
+export class ResponseSchemaMismatchError extends CupboardResponseError {
+	constructor(
+		path: string,
+		public readonly issues: string
+	) {
+		super(
+			path,
+			`Response from ${path} did not match the expected schema:\n${issues}`
+		);
+		this.name = 'ResponseSchemaMismatchError';
+	}
+}
+
 export class UnexpectedUploadDecisionError extends CliError {
 	constructor(
 		public readonly storePathHash: string,

@@ -1,28 +1,30 @@
 import {
 	type BootstrapResponse,
 	type CommitResponse,
-	DeletePathRequest,
 	type DeletePathResponse,
 	NarInfo,
 	NixSha256Hash,
-	ProtocolError,
+	referencesSchema,
 	type RootListResponse,
+	rootNameSchema,
 	RootRemoveRequest,
 	type RootRemoveResponse,
-	type RootSetBody,
+	rootSetBodySchema,
 	RootSetRequest,
 	type RootSetResponse,
 	type RootSummary,
 	type RootTarget,
 	type StatsResponse,
+	storePathHashSchema,
 	UploadBlobMetadata,
 	type UploadDecision,
-	type UploadNegotiateRequest,
+	uploadNegotiateRequestSchema,
 	type UploadNegotiateResponse,
 	UploadPathCommitMetadata,
 	UploadPathMetadata,
-	type UploadPathMetadataFields,
-	type UploadPrepareRequest,
+	uploadPathMetadataSchema,
+	uploadPathNegotiationSchema,
+	uploadPrepareRequestSchema,
 	type UploadPrepareResponse
 } from '@cupboard/shared';
 import { DurableObject } from 'cloudflare:workers';
@@ -53,13 +55,10 @@ import {
 import * as schema from './db/schema.ts';
 import {
 	InsufficientScopeError,
-	InvalidDeletePathRequestError,
-	InvalidJsonRequestBodyError,
-	InvalidRootRequestError,
-	InvalidUploadMetadataRequestError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
+	StoredReferencesInvalidError,
 	StoredUploadMetadataInvalidError,
 	UnauthenticatedError,
 	UploadedObjectChecksumMismatchError,
@@ -75,6 +74,12 @@ import {
 	TextBody,
 	textResponse
 } from './http.ts';
+import {
+	parseRequestBody,
+	parseRequestValue,
+	parseStored,
+	parseStoredJson
+} from './parse.ts';
 import { R2Presigner } from './presign.ts';
 
 type WidenStringBindings<T> = {
@@ -208,9 +213,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		const requested = parseDeletePathRequest(hash);
+		const storePathHash = parseRequestValue(storePathHashSchema, hash);
 		const result = await this.deleteStorePath(
-			requested.storePathHash,
+			storePathHash,
 			new URL(request.url).origin
 		);
 
@@ -223,8 +228,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<Response> {
 		await this.requireScope(request, 'write');
 
-		const body = await parseJsonRequest<RootSetBody>(request);
-		const requested = parseRootSetRequest(name, body);
+		const body = await parseRequestBody(rootSetBodySchema, request);
+		const requested = RootSetRequest.fromFields({
+			name: parseRequestValue(rootNameSchema, name),
+			targets: body.targets,
+			...(body.ttlSeconds === undefined ? {} : { ttlSeconds: body.ttlSeconds })
+		});
 
 		return Response.json(this.setRoot(requested) satisfies RootSetResponse);
 	}
@@ -241,7 +250,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		const requested = parseRootRemoveRequest(name);
+		const requested = RootRemoveRequest.fromFields({
+			name: parseRequestValue(rootNameSchema, name)
+		});
 
 		return Response.json(
 			this.removeRoot(requested.name) satisfies RootRemoveResponse
@@ -386,11 +397,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async handleNegotiate(request: Request): Promise<Response> {
 		await this.requireScope(request, 'write');
 
-		const body = await parseJsonRequest<UploadNegotiateRequest>(request);
+		const body = await parseRequestBody(uploadNegotiateRequestSchema, request);
 		const uploads: UploadDecision[] = [];
 
 		for (const fields of body.paths) {
-			const metadata = parseUploadMetadata(fields);
+			const metadata = UploadPathMetadata.fromFields(fields);
 			const existingNarInfo = this.db
 				.select()
 				.from(schema.narInfos)
@@ -501,8 +512,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			uploadId,
 			pending.metadataJson
 		);
-		const blobMetadata = parseUploadBlobMetadata(
-			await parseJsonRequest<UploadPrepareRequest>(request)
+		const blobMetadata = UploadBlobMetadata.fromFields(
+			await parseRequestBody(uploadPrepareRequestSchema, request)
 		);
 		const metadata = UploadPathCommitMetadata.fromPathAndBlob(
 			pathMetadata,
@@ -903,7 +914,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			row.fileSize,
 			row.narHash,
 			row.narSize,
-			JSON.parse(row.referencesJson) as readonly string[],
+			parseStored(
+				referencesSchema,
+				row.referencesJson,
+				(cause) => new StoredReferencesInvalidError(row.storePathHash, cause)
+			),
 			row.deriver ?? undefined,
 			row.ca ?? undefined,
 			row.sig ? [row.sig] : []
@@ -1042,9 +1057,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			retainedCommitted.add(storePathHash);
 
-			for (const reference of JSON.parse(
-				row.referencesJson
-			) as readonly string[]) {
+			const references = parseStored(
+				referencesSchema,
+				row.referencesJson,
+				(cause) => new StoredReferencesInvalidError(storePathHash, cause)
+			);
+
+			for (const reference of references) {
 				const separator = reference.indexOf('-');
 
 				if (separator <= 0) {
@@ -1576,122 +1595,40 @@ async function serverErrorResponse(
 	}
 }
 
-async function parseJsonRequest<T>(request: Request): Promise<T> {
-	try {
-		return await request.json<T>();
-	} catch (error) {
-		if (error instanceof SyntaxError) {
-			throw new InvalidJsonRequestBodyError(error);
-		}
-
-		throw error;
-	}
-}
-
-function parseUploadMetadata(
-	fields: UploadNegotiateRequest['paths'][number]
-): UploadPathMetadata {
-	try {
-		return UploadPathMetadata.fromFields(fields);
-	} catch (error) {
-		if (error instanceof ProtocolError) {
-			throw new InvalidUploadMetadataRequestError(error);
-		}
-
-		throw error;
-	}
-}
-
-function parseDeletePathRequest(storePathHash: string): DeletePathRequest {
-	try {
-		return DeletePathRequest.fromFields({ storePathHash });
-	} catch (error) {
-		if (error instanceof ProtocolError) {
-			throw new InvalidDeletePathRequestError(error);
-		}
-
-		throw error;
-	}
-}
-
-function parseRootSetRequest(name: string, body: RootSetBody): RootSetRequest {
-	try {
-		return RootSetRequest.fromFields({
-			name,
-			targets: body.targets,
-			...(body.ttlSeconds === undefined ? {} : { ttlSeconds: body.ttlSeconds })
-		});
-	} catch (error) {
-		if (error instanceof ProtocolError) {
-			throw new InvalidRootRequestError(error);
-		}
-
-		throw error;
-	}
-}
-
-function parseRootRemoveRequest(name: string): RootRemoveRequest {
-	try {
-		return RootRemoveRequest.fromFields({ name });
-	} catch (error) {
-		if (error instanceof ProtocolError) {
-			throw new InvalidRootRequestError(error);
-		}
-
-		throw error;
-	}
-}
-
-function parseUploadBlobMetadata(
-	fields: UploadPrepareRequest
-): UploadBlobMetadata {
-	try {
-		return UploadBlobMetadata.fromFields(fields);
-	} catch (error) {
-		if (error instanceof ProtocolError) {
-			throw new InvalidUploadMetadataRequestError(error);
-		}
-
-		throw error;
-	}
-}
-
 function parseStoredUploadMetadata(
 	uploadId: string,
 	source: string
 ): UploadPathCommitMetadata {
-	try {
-		return UploadPathCommitMetadata.fromFields(
-			JSON.parse(source) as UploadPathMetadataFields
-		);
-	} catch (error) {
-		if (error instanceof ProtocolError) {
-			throw new UploadNotPreparedError(uploadId);
-		}
+	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>
+		new StoredUploadMetadataInvalidError(uploadId, cause);
+	const json = parseStoredJson(source, onInvalid);
+	const prepared = uploadPathMetadataSchema.safeParse(json);
 
-		if (error instanceof Error) {
-			throw new StoredUploadMetadataInvalidError(uploadId, error);
-		}
-
-		throw error;
+	if (prepared.success) {
+		return UploadPathCommitMetadata.fromFields(prepared.data);
 	}
+
+	// Negotiation stores the path metadata alone until the upload is prepared
+	// with its blob details. A well-formed path-only record means the client
+	// committed before preparing, not that the stored state is corrupt.
+	if (uploadPathNegotiationSchema.safeParse(json).success) {
+		throw new UploadNotPreparedError(uploadId);
+	}
+
+	throw onInvalid(prepared.error);
 }
 
 function parseStoredUploadPathMetadata(
 	uploadId: string,
 	source: string
 ): UploadPathMetadata {
-	try {
-		return UploadPathMetadata.fromFields(
-			JSON.parse(source) as UploadNegotiateRequest['paths'][number]
-		);
-	} catch (error) {
-		if (error instanceof Error) {
-			throw new StoredUploadMetadataInvalidError(uploadId, error);
-		}
+	const fields = parseStored(
+		uploadPathNegotiationSchema,
+		source,
+		(cause) => new StoredUploadMetadataInvalidError(uploadId, cause)
+	);
 
-		throw error;
-	}
+	return UploadPathMetadata.fromFields(fields);
 }
 
 function uploadHeadersFor(
