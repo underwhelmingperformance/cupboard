@@ -12,8 +12,14 @@ A Cloudflare Workers substituter for Nix.
 
 ## Compatibility
 
-- Target Nix 2.34 (latest at time of writing). Older clients are not a v1
-  concern; revisit if real users turn up on earlier versions.
+- Develop and test against the current Nix the e2e suite is run with (2.33, via
+  Determinate Nix, at the time of writing); that is the only version cupboard is
+  verified against, and there is no compatibility guarantee for older releases.
+  Supporting older clients is an explicit non-goal. zstd-compressed NARs are the
+  obvious hard cliff — Nix only gained zstd substitution in 2.4 (November 2021),
+  so anything older could not substitute at all — but the point is broader: we
+  do not certify a minimum version, and adding fallback NAR compression for old
+  clients is not worth it for a personal cache.
 - The CLI orchestrates the v1 write path. Pure TypeScript code serialises NARs,
   computes hashes, compresses blobs, and speaks the cupboard upload protocol.
   The only local Nix dependency is a daemon client used to query valid path
@@ -279,7 +285,8 @@ Runs the Worker in Miniflare behind a local HTTP server and drives a real `nix`
 against fixture store paths. Catches protocol drift (wrong header, fingerprint
 typo, missing `Compression` field) that internal contract tests cannot catch.
 Lives under `tests/e2e/`, invoked via `pnpm test:e2e`. Runs in CI; the CI image
-installs Nix.
+installs Nix, pinned to a specific version so the gate matches the version named
+in Compatibility rather than drifting with whatever the runner ships.
 
 #### Isolation
 
@@ -462,28 +469,103 @@ cache.
 
 ### Compatibility
 
-- [ ] Investigate whether any useful `nix copy --to https://...` compatibility
-      can be supported. Keep the native CLI upload flow as the reliable path
-      unless Nix exposes an HTTP write protocol that fits Workers and R2.
-- [ ] Revisit support for older Nix clients if real users need it.
+- [x] Investigated `nix copy --to https://...` compatibility: Nix has no HTTP
+      write protocol. `https://` binary caches are read-only for substitution,
+      and `nix copy --to` writes only through `s3://`, `file://`, or
+      `ssh(-ng)://`. Matching `nix copy --to` would mean fronting an
+      S3-compatible write API (which overlaps the Later-features S3 tooling and
+      re-implements presign/commit semantics Nix expects), so the native CLI
+      upload flow stays the write path. Revisit only if Nix gains a first-class
+      HTTP write protocol.
+- [x] Decided: older Nix clients are out of scope (see Compatibility). cupboard
+      is verified only against the current Nix it is tested with, with no
+      guarantee for older releases; zstd substitution (Nix 2.4+) is a hard cliff
+      regardless. Adding fallback NAR compression for old clients is a non-goal.
 
 ### Read path
 
 - [ ] Support private-read mode via HTTP basic auth, consumed by Nix through
       `~/.config/nix/netrc`.
+
+  Design:
+  - A deployment-level private toggle plus a read credential
+    (`CUPBOARD_READ_USER`/`CUPBOARD_READ_PASSWORD` secrets). When set, `read.ts`
+    requires HTTP Basic auth on the narinfo, NAR, and `nix-cache-info` routes,
+    compared in constant time.
+  - `/pubkey` stays public: it is not secret, users need it to populate
+    `trusted-public-keys`, and gating it complicates first-time config for no
+    real gain.
+  - Nix consumes it via netrc: clients add
+    `machine <host> login <user> password <pass>` to a `netrc-file`. The
+    `config` command emits the netrc snippet alongside the substituter line when
+    a credential is configured.
+  - Cached read responses key on the URL only, so in private mode `read.ts`
+    skips `caches.default` entirely rather than putting authenticated bodies
+    under a shared key. Keying cache entries by credential is deferred unless a
+    later measured need justifies it.
+  - Per-cache private mode is deferred; this is a global toggle first.
+
 - [ ] Support one or more named cache paths for organisation:
-  - [ ] `/:cache/nix-cache-info`
-  - [ ] `/:cache/<hash>.narinfo`
-  - [ ] `/:cache/nar/<hash>.<ext>`
-  - [ ] `/:cache/pubkey`
+  - [ ] `/cache/:cacheName/nix-cache-info`
+  - [ ] `/cache/:cacheName/<hash>.narinfo`
+  - [ ] `/cache/:cacheName/nar/<hash>.<ext>`
+  - [ ] `/cache/:cacheName/pubkey`
+
+  Design:
+  - Routing: named caches are served under a `/cache/:cacheName/...` prefix;
+    `read.ts` matches the literal `cache` segment plus a cache name, and the
+    bare root keeps serving the default (unnamed) cache, so existing deployments
+    are unchanged.
+  - Cache names are a single URL path segment, so they get their own
+    `cacheNameSchema` rather than reusing `rootNameSchema` (root names allow `/`
+    and other characters that do not belong in a path segment). Proposed
+    pattern: `[a-z0-9][a-z0-9._-]{0,62}` — lowercase, no slashes, no
+    percent-encoding.
+  - Storage: add a `cache` column to `narInfos` and the retention tables,
+    defaulting to the empty default cache. NAR blobs stay content-addressed by
+    `narHash` and are **shared across caches** (identical bytes), so only
+    narinfo membership and retention are per-cache; the narinfo R2 object is
+    namespaced `narinfo/<cache>/<storePathHash>`.
+  - Registry: caches are implicit — a `cache` row (name, priority) is created on
+    first push or root with `--cache <name>`. The default cache is the empty
+    name with the current priority.
+  - Reachability GC and retention roots are scoped per cache.
+  - CLI: `--cache <name>` on `push`, `config`, `root`, and `delete`.
+  - One deployment-wide signing key, shared by all caches (each
+    `/cache/:cacheName/pubkey` returns it). Per-cache keys would add rotation
+    and config complexity with no clear personal-cache benefit.
 
 ### Signing
 
 - [ ] Support rotation: generate a new keypair, keep old narinfos verifiable,
       and make the migration path explicit for users with pinned
       `trusted-public-keys`.
-- [ ] Support multiple active signatures during a rotation window if Nix client
-      behaviour requires it.
+  - [ ] Invalidate the Worker-side `/pubkey` cache when the key rotates.
+        `read.ts` caches the active key assuming it is stable (see V2 Worker
+        read routing), so rotation must clear or version that cache rather than
+        leave stale key bytes served from the edge.
+
+  Design:
+  - Generalise the single signing-key row to a `signing_key` set (id,
+    `private_jwk_json`, `public_key`, `signing`, `published`, `created_at`).
+    Outside a rotation, exactly one key is both signing and published. During a
+    window both the outgoing and incoming keys are signing and published.
+  - Old narinfos are never re-signed: they stay verifiable as long as clients
+    keep the old key in `trusted-public-keys`. `/pubkey` returns every published
+    key (newline-separated) during a window so clients can add the new key
+    before the old is retired.
+  - `cupboard key rotate` (admin) adds the new key as signing+published and
+    prints the migration steps; `key retire <id>` later drops the old key from
+    signing and then from publication once clients have updated.
+
+- [ ] Multi-signing during a rotation window is **mandatory**, not conditional.
+      A client that still trusts only the old key must be able to verify a newly
+      committed narinfo, so while both keys are published every new narinfo is
+      signed by both the outgoing and incoming keys (the `sigs` array already
+      supports this; verification accepts any trusted match). Migration order:
+      rotate (new key joins signing + publication) → clients add the new key to
+      `trusted-public-keys` → retire the old key from signing → then from
+      publication. Outside a window, sign with the single active key only.
 
 ### Garbage collection and admin
 
@@ -517,10 +599,34 @@ every live channel through `References`. This is built in three increments:
       the resulting expiry.
 - [x] Delete a specific store path (explicit admin `delete`, edge-safe).
       Clearing old entries automatically is retention-based and stays below.
-- [ ] Optional retention period for cold paths.
-- [ ] Retention policies per cache or name prefix.
-- [ ] Repair/check command to compare metadata against R2.
-- [ ] Queue-based background verification.
+- [ ] Optional retention period for cold paths. Design: "cold" = a path held
+      only by an implicit `pin:<storePathHash>` root (a plain push), never named
+      by an explicit root. Implicit pins are permanent today; add an optional
+      deployment default TTL applied to newly created implicit pins, so casually
+      pushed paths expire if not refreshed or explicitly rooted. Unset keeps the
+      current permanent behaviour; explicit roots are unaffected (they carry
+      their own TTL). This is the simplest case of the policies below.
+- [ ] Retention policies per cache or name prefix. Design: a `retention_policy`
+      set (scope `cache` or `root-name prefix`, a glob/pattern, a default TTL).
+      When a root is created without an explicit TTL, the most specific matching
+      policy supplies one (e.g. `pr-*` → 14 days). The per-prefix half works on
+      roots today; the per-cache half depends on named caches (Read path). Admin
+      commands list/add/remove policies.
+- [ ] Repair/check command to compare metadata against R2. Design: an
+      admin-scoped `GET /check` route and `cupboard check` CLI command scan the
+      committed `narInfos`/`narBlobs`, confirm each referenced R2 object exists
+      and (with `--deep`) that its SHA-256 matches the recorded `fileHash`, and
+      report discrepancies. Check-only first; repair actions (clear rows whose
+      blob vanished, re-materialise a missing narinfo object) reuse the
+      removal/ensure paths and land as a follow-up. This is the on-demand
+      counterpart to the background verification below.
+- [ ] Queue-based background verification. Design: the scheduled counterpart to
+      repair/check — periodically reconcile committed metadata against R2 and
+      perform the "orphan reconcile" deferred from V2 (re-materialise a missing
+      narinfo object; schedule deletion for a row whose NAR has vanished, via
+      the existing durable queue and grace). Start cron-driven with a bounded
+      cursor in DO SQLite scanning a fixed batch per run (no new binding); move
+      to Cloudflare Queues only if the scan cannot stay within cron/DO limits.
 - Edge-safe deletion mechanism for committed content. narinfo is edge-cached
   with a max-age, and `caches.default.delete` only purges the current colo, so a
   deleted narinfo can be served from a warm edge until its TTL expires. Deleting
@@ -551,6 +657,19 @@ every live channel through `References`. This is built in three increments:
         at that point). GC flushes the queue idempotently, finishing any
         interrupted removal without the re-run requirement. A re-committed row
         drops its stale queue entry instead of deleting the now-live object.
+
+### Hardening
+
+Coverage deferred from V1 once the core cache was proven; tracked here so it is
+not lost.
+
+- [ ] Concurrent-write coverage: racing commits and negotiations on the same
+      store path hash and NAR hash resolve to one committed row and consistent
+      blob accounting (deferred from V1 Storage).
+- [ ] Durable Object eviction and durability coverage: DO SQLite state — the
+      signing key and committed metadata — survives eviction and
+      re-instantiation, not just repeated in-process requests (deferred from V1
+      Storage and Signing).
 
 ## V4
 
@@ -719,7 +838,6 @@ pure lexer handles text formats such as narinfo before a schema validates them.
 ## Later features
 
 - [ ] Chunk-level dedupe rather than whole-NAR storage.
-- [ ] Multiple named caches inside one deployment.
 - [ ] Import from an existing binary cache.
 - [ ] Web dashboard.
 - [ ] S3-compatible migration/export tooling.
