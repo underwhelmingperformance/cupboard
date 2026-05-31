@@ -659,6 +659,10 @@ pure lexer handles text formats such as narinfo before a schema validates them.
         free functions.
 - [ ] Retire the hand-written wire interfaces, validator classes, and duplicate
       `fromFields` model layer once the schemas own those contracts.
+- [ ] After schema parsing has replaced the DTO layer, revisit message output
+      types. Prefer branded parsed or domain types at trusted boundaries, while
+      keeping buildable wire input types unbranded unless construction can be
+      made brand-safe without casts.
 - [ ] Validate every JSON boundary:
   - [ ] server request bodies return typed 400s on malformed or structurally
         invalid JSON;
