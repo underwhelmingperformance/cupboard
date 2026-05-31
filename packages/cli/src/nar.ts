@@ -1,12 +1,17 @@
 import { createHash } from 'node:crypto';
-import { lstat, readdir, readlink } from 'node:fs/promises';
+import {
+	type FileHandle,
+	lstat,
+	open,
+	readdir,
+	readlink
+} from 'node:fs/promises';
 import pathModule from 'node:path';
 
 import type { NixSha256Hash } from '@cupboard/shared';
 import { toNixSha256 } from '@cupboard/shared';
 
 import { byteStream } from './byte-stream.ts';
-import { readFileByteStream } from './file-stream.ts';
 
 export {
 	InvalidNixSha256HashError,
@@ -38,6 +43,21 @@ export class InvalidNarStringLengthError extends NarError {
 		this.name = 'InvalidNarStringLengthError';
 	}
 }
+
+export class NarFileShrankError extends NarError {
+	constructor(
+		public readonly path: string,
+		public readonly expected: number,
+		public readonly actual: number
+	) {
+		super(
+			`File shrank while building NAR for ${path}: expected ${String(expected)} bytes, read ${String(actual)}`
+		);
+		this.name = 'NarFileShrankError';
+	}
+}
+
+const fileChunkSize = 64 * 1024;
 
 export class NarArchive implements AsyncIterable<Uint8Array> {
 	constructor(public readonly path: string) {}
@@ -89,7 +109,7 @@ async function* narNode(path: string): AsyncIterable<Uint8Array> {
 	}
 
 	if (stats.isFile()) {
-		yield* narFile(path, stats.mode, stats.size);
+		yield* narFile(path, stats.mode);
 	}
 
 	if (stats.isSymbolicLink()) {
@@ -116,11 +136,7 @@ async function* narDirectory(path: string): AsyncIterable<Uint8Array> {
 	}
 }
 
-async function* narFile(
-	path: string,
-	mode: number,
-	size: number
-): AsyncIterable<Uint8Array> {
+async function* narFile(path: string, mode: number): AsyncIterable<Uint8Array> {
 	yield* narString('type');
 	yield* narString('regular');
 
@@ -130,13 +146,45 @@ async function* narFile(
 	}
 
 	yield* narString('contents');
-	yield createLengthPrefix(size);
 
-	for await (const chunk of readFileByteStream(path)) {
-		yield chunk;
+	// One handle for the size and the bytes, so the length prefix and padding
+	// always describe the content that follows even if the file changes on disk
+	// between framing and reading.
+	const file = await open(path, 'r');
+
+	try {
+		const { size } = await file.stat();
+		yield createLengthPrefix(size);
+		yield* readFileContents(file, path, size);
+		yield* narPadding(size);
+	} finally {
+		await file.close();
 	}
+}
 
-	yield* narPadding(size);
+async function* readFileContents(
+	file: FileHandle,
+	path: string,
+	size: number
+): AsyncIterable<Uint8Array> {
+	let position = 0;
+
+	while (position < size) {
+		const buffer = Buffer.allocUnsafe(Math.min(fileChunkSize, size - position));
+		const { bytesRead } = await file.read(
+			buffer,
+			0,
+			buffer.byteLength,
+			position
+		);
+
+		if (bytesRead === 0) {
+			throw new NarFileShrankError(path, size, position);
+		}
+
+		position += bytesRead;
+		yield buffer.subarray(0, bytesRead);
+	}
 }
 
 async function* narSymlink(path: string): AsyncIterable<Uint8Array> {

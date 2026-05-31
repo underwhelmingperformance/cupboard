@@ -99,13 +99,37 @@ function zstdTransformStream(createTransform: ZstdFactory): ByteTransformPair {
 
 function writeChunk(stream: Transform, chunk: Uint8Array): Promise<void> {
 	return new Promise((resolve, reject) => {
-		stream.write(chunk, (error?: Error | null) => {
+		let written = false;
+		let ready = false;
+
+		// Resolve only once the write has completed AND the transform can take
+		// more. Waiting for the callback means a late write error is still
+		// reported; waiting for `drain` when the buffer is full honours write-side
+		// backpressure.
+		const settle = (): void => {
+			if (written && ready) {
+				resolve();
+			}
+		};
+
+		ready = stream.write(chunk, (error?: Error | null) => {
 			if (error !== undefined && error !== null) {
 				reject(error);
 				return;
 			}
 
-			resolve();
+			written = true;
+			settle();
+		});
+
+		if (ready) {
+			settle();
+			return;
+		}
+
+		stream.once('drain', () => {
+			ready = true;
+			settle();
 		});
 	});
 }

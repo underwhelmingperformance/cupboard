@@ -176,7 +176,7 @@ export class CupboardClient {
 			method,
 			options.headers,
 			body,
-			await resolveBearer(credential, false)
+			await resolveBearer(credential)
 		);
 
 		// A long push can outlive the exchanged JWT; refresh once and retry.
@@ -235,18 +235,15 @@ function isTokenProvider(
 }
 
 async function resolveBearer(
-	credential: AccessCredential | undefined,
-	refresh: boolean
+	credential: AccessCredential | undefined
 ): Promise<string | undefined> {
-	if (credential === undefined) {
-		return undefined;
-	}
-
-	if (typeof credential === 'string') {
+	if (credential === undefined || typeof credential === 'string') {
 		return credential;
 	}
 
-	return refresh ? await credential.refresh() : await credential.get();
+	const token = await credential.get();
+
+	return token;
 }
 
 interface ClientRequestOptions {
