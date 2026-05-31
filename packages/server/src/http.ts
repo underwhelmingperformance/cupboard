@@ -63,10 +63,12 @@ export function parseNarInfoName(name: string): string | undefined {
 }
 
 export function isNotModified(request: Request, headers: Headers): boolean {
-	const etag = headers.get('etag');
+	const ifNoneMatch = request.headers.get('if-none-match');
 
-	if (etag !== null && request.headers.get('if-none-match') === etag) {
-		return true;
+	// RFC 7232: when If-None-Match is present it alone decides the result;
+	// If-Modified-Since is only consulted in its absence.
+	if (ifNoneMatch !== null) {
+		return ifNoneMatchSatisfied(ifNoneMatch, headers.get('etag'));
 	}
 
 	const lastModified = headers.get('last-modified');
@@ -77,6 +79,35 @@ export function isNotModified(request: Request, headers: Headers): boolean {
 	}
 
 	return Date.parse(ifModifiedSince) >= Date.parse(lastModified);
+}
+
+function ifNoneMatchSatisfied(
+	ifNoneMatch: string,
+	etag: string | null
+): boolean {
+	const candidates = ifNoneMatch.split(',').map((value) => value.trim());
+
+	// `*` matches whenever a representation exists, which it always does where
+	// this is evaluated.
+	if (candidates.includes('*')) {
+		return true;
+	}
+
+	if (etag === null) {
+		return false;
+	}
+
+	// If-None-Match uses weak comparison: a `W/` prefix on either side is
+	// ignored, only the opaque tag is compared.
+	const target = withoutWeakPrefix(etag);
+
+	return candidates.some(
+		(candidate) => withoutWeakPrefix(candidate) === target
+	);
+}
+
+function withoutWeakPrefix(etag: string): string {
+	return etag.startsWith('W/') ? etag.slice(2) : etag;
 }
 
 export async function textResponse(
