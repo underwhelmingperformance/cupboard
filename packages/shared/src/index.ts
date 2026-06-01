@@ -4,5 +4,6 @@ export * from './hash.ts';
 export * from './messages.ts';
 export * from './narinfo.ts';
 export * from './nix-config.ts';
+export * from './retention.ts';
 export * from './scalars.ts';
 export * from './store-path.ts';

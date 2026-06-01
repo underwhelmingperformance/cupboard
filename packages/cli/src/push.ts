@@ -4,6 +4,7 @@ import pathModule from 'node:path';
 
 import {
 	type CommitResponse,
+	implicitPinName,
 	type RootSetBody,
 	type RootSetResponse,
 	type RootSummary,
@@ -316,7 +317,7 @@ function planRetention(
 	return {
 		kind: 'pins',
 		requests: paths.map((path) => ({
-			name: `pin:${StorePath.hash(path)}`,
+			name: implicitPinName(StorePath.hash(path)),
 			body: { targets: [path], ...ttlFields }
 		}))
 	};
