@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+	InvalidRequestError,
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
 	type ServerHttpError
@@ -28,6 +29,27 @@ export async function parseRequestBody<S extends z.ZodType>(
 	}
 
 	return parseRequestValue(schema, json);
+}
+
+/**
+ * Validates an `application/x-www-form-urlencoded` request body against a
+ * schema, returning the parsed (branded) value. Repeated keys collapse to their
+ * last value. A body the schema rejects becomes an OAuth `invalid_request`
+ * carrying the schema's diagnostics, so the `/token` endpoint reports it in the
+ * RFC 6749 §5.2 envelope.
+ */
+export async function parseFormBody<S extends z.ZodType>(
+	schema: S,
+	request: Request
+): Promise<z.output<S>> {
+	const parameters = new URLSearchParams(await request.text());
+	const result = schema.safeParse(Object.fromEntries(parameters));
+
+	if (!result.success) {
+		throw new InvalidRequestError(z.prettifyError(result.error));
+	}
+
+	return result.data;
 }
 
 /** Validates a value taken from the request path or query string. */

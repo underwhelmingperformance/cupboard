@@ -2,16 +2,30 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	InvalidRequestError,
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
 	StoredUploadMetadataInvalidError
 } from './errors.ts';
-import { parseRequestBody, parseRequestValue, parseStored } from './parse.ts';
+import {
+	parseFormBody,
+	parseRequestBody,
+	parseRequestValue,
+	parseStored
+} from './parse.ts';
 
 const schema = z.strictObject({ name: z.string() });
 
 function jsonRequest(body: string): Request {
 	return new Request('https://cupboard.test', { method: 'POST', body });
+}
+
+function formRequest(body: string): Request {
+	return new Request('https://cupboard.test', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+		body
+	});
 }
 
 function storedFault(cause: Error): StoredUploadMetadataInvalidError {
@@ -52,6 +66,49 @@ describe('parseRequestBody', () => {
 	])('rejects $name with RequestBodySchemaMismatchError', async ({ body }) => {
 		await expect(parseRequestBody(schema, jsonRequest(body))).rejects.toThrow(
 			RequestBodySchemaMismatchError
+		);
+	});
+});
+
+describe('parseFormBody', () => {
+	const grant = z.strictObject({
+		grant_type: z.string(),
+		subject_token: z.string()
+	});
+
+	it('parses a well-formed urlencoded body', async () => {
+		const parsed = await parseFormBody(
+			grant,
+			formRequest('grant_type=token-exchange&subject_token=abc')
+		);
+
+		expect(parsed).toStrictEqual({
+			grant_type: 'token-exchange',
+			subject_token: 'abc'
+		});
+	});
+
+	it('collapses a repeated key to its last value', async () => {
+		const parsed = await parseFormBody(
+			grant,
+			formRequest('grant_type=first&grant_type=second&subject_token=abc')
+		);
+
+		expect(parsed).toStrictEqual({
+			grant_type: 'second',
+			subject_token: 'abc'
+		});
+	});
+
+	it.each([
+		{ name: 'a missing field', body: 'grant_type=token-exchange' },
+		{
+			name: 'an unknown field',
+			body: 'grant_type=t&subject_token=a&extra=x'
+		}
+	])('rejects $name with InvalidRequestError', async ({ body }) => {
+		await expect(parseFormBody(grant, formRequest(body))).rejects.toThrow(
+			InvalidRequestError
 		);
 	});
 });

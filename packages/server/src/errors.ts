@@ -68,6 +68,47 @@ export class InsufficientScopeError extends ServerHttpError {
 	}
 }
 
+export type OAuthErrorCode =
+	| 'invalid_request'
+	| 'invalid_grant'
+	| 'unsupported_grant_type';
+
+// An OAuth 2.0 error (RFC 6749 §5.2): the `error` code and the message become
+// the `error`/`error_description` of a JSON envelope sent with `no-store`.
+export abstract class OAuthError extends ServerHttpError {
+	abstract readonly error: OAuthErrorCode;
+}
+
+export class InvalidRequestError extends OAuthError {
+	readonly status = StatusCodes.BAD_REQUEST;
+	readonly error = 'invalid_request';
+
+	constructor(description: string) {
+		super(description);
+		this.name = 'InvalidRequestError';
+	}
+}
+
+export class InvalidGrantError extends OAuthError {
+	readonly status = StatusCodes.BAD_REQUEST;
+	readonly error = 'invalid_grant';
+
+	constructor(description: string) {
+		super(description);
+		this.name = 'InvalidGrantError';
+	}
+}
+
+export class UnsupportedGrantTypeError extends OAuthError {
+	readonly status = StatusCodes.BAD_REQUEST;
+	readonly error = 'unsupported_grant_type';
+
+	constructor(public readonly grantType: string) {
+		super(`Unsupported grant type: ${grantType}`);
+		this.name = 'UnsupportedGrantTypeError';
+	}
+}
+
 export class StoredUploadMetadataInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
