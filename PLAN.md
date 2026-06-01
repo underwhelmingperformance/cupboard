@@ -798,12 +798,22 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
       algorithm allowlist (RS256/PS256/ES256/EdDSA), never the token's own
       header and never `alg: none` or a symmetric algorithm. Verification has
       its own path, so an inbound OIDC token is rejected on resource routes.
-- [ ] Discover each issuer's `jwks_uri` and accepted signing algorithms from its
+- [x] Discover each issuer's `jwks_uri` and accepted signing algorithms from its
       OIDC metadata (`<issuer>/.well-known/openid-configuration`), cached with a
       cooldown. A trust rule stores only the issuer, so `jwks_uri` is never
       hand-typed; the discovered `id_token_signing_alg_values_supported`,
       intersected with cupboard's asymmetric allowlist, narrows the accepted
       algorithms per issuer (RS256 fallback when the issuer omits the field).
+- [x] Bound the SSRF surface of the issuer and `jwks_uri` fetches. Both are
+      restricted to https (loopback excepted for local development) with no
+      query or fragment, and neither the discovery fetch nor jose's JWKS fetch
+      follows redirects, so a hijacked metadata endpoint cannot pivot to another
+      host. Reaching private, loopback or link-local (cloud-metadata) addresses
+      is prevented by the Workers runtime: `globalOutbound` permits only
+      publicly-routable addresses and filters them after DNS resolution, so the
+      connect-time IP checks that self-hosted verifiers hand-roll are neither
+      expressible through `fetch()` nor needed here. A self-hosted workerd must
+      keep the default `allow = ["public"]` for this to hold.
 - [x] `GET /.well-known/jwks.json` publishes the auth public keys, DO-served and
       Worker-proxied like `/pubkey`;
       `GET /.well-known/oauth-authorization-server` is RFC 8414 metadata built
@@ -832,13 +842,13 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
 
 ### Owner interactive login
 
-- [ ] `cupboard login` obtains an owner `id_token` from the configured generic
+- [x] `cupboard login` obtains an owner `id_token` from the configured generic
       OIDC provider (a registered public client; PKCE, no client secret) and
       exchanges it at `/token` for an admin JWT. The default flow is PKCE with a
       127.0.0.1 loopback redirect; `--headless` falls back to the RFC 8628
       device flow. The owner rule pins `aud` to the client id, blocking
       cross-app `id_token` replay.
-- [ ] Cache the admin JWT at `~/.config/cupboard/token` (mode 0600) and reuse it
+- [x] Cache the admin JWT at `~/.config/cupboard/token` (mode 0600) and reuse it
       across invocations; a 401 prompts re-login. `init` and the admin commands
       take the cached token through the existing `TokenProvider` contract. A
       `refresh_token` grant is deferred.
@@ -862,7 +872,7 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
 
 ### Removing the bootstrap secret
 
-- [ ] Once the cron (RPC) and the CLI (login / `--github-oidc`) no longer use
+- [x] Once the cron (RPC) and the CLI (login / `--github-oidc`) no longer use
       it, delete `/auth/bootstrap`, `CUPBOARD_BOOTSTRAP_TOKEN`, and the
       bootstrap response schema. Break-glass becomes a redeploy with fresh owner
       config.
@@ -883,7 +893,7 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
 - [x] Integration: a write token may set only its permitted roots; auth-key
       rotation keeps old tokens verifying until the key is retired; the cron RPC
       runs GC and verify with no secret.
-- [ ] E2E: owner login against a stubbed OIDC issuer yields an admin JWT and a
+- [x] E2E: owner login against a stubbed OIDC issuer yields an admin JWT and a
       non-owner subject is refused; a CI-style GitHub Actions token is exchanged
       for a write JWT and performs the normal push, while a mismatched
       issuer/audience/claim is rejected; `CUPBOARD_BOOTSTRAP_TOKEN` exists
