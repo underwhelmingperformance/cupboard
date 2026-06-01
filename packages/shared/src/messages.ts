@@ -352,6 +352,59 @@ export const verifyReportSchema = z.strictObject({
 });
 export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
 
+// The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
+// access token is the cupboard JWT; `issued_token_type` is present for the
+// token-exchange grant. Field names are the OAuth wire spelling.
+export const tokenResponseSchema = z.strictObject({
+	access_token: z.string(),
+	token_type: z.literal('Bearer'),
+	expires_in: positiveIntSchema,
+	scope: z.string().optional(),
+	issued_token_type: z.string().optional()
+});
+export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
+
+// A trust rule federates an external OIDC identity into a cupboard scope. The
+// owner's `admin` rule is seeded from deploy config; `write` rules (CI) are
+// managed through the admin API and bind the minted token to `allowedRoots`.
+export const oidcTrustScopeSchema = z.enum(['write', 'admin']);
+export type OidcTrustScope = z.infer<typeof oidcTrustScopeSchema>;
+
+export const oidcTrustAddBodySchema = z.strictObject({
+	issuer: z.url(),
+	jwksUrl: z.url(),
+	audience: z.string().min(1),
+	claims: z.record(z.string().min(1), z.string()),
+	allowedRoots: z.array(z.string().min(1))
+});
+export type ParsedOidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;
+
+export const oidcTrustSummarySchema = z.strictObject({
+	id: z.string(),
+	issuer: z.string(),
+	audience: z.string(),
+	scope: oidcTrustScopeSchema,
+	claims: z.record(z.string(), z.string()),
+	allowedRoots: z.array(z.string()),
+	disabled: z.boolean()
+});
+export type ParsedOidcTrustSummary = z.output<typeof oidcTrustSummarySchema>;
+
+export const oidcTrustListResponseSchema = z.strictObject({
+	rules: z.array(oidcTrustSummarySchema)
+});
+export type ParsedOidcTrustListResponse = z.output<
+	typeof oidcTrustListResponseSchema
+>;
+
+export const oidcTrustRemoveResponseSchema = z.strictObject({
+	id: z.string(),
+	removed: z.boolean()
+});
+export type ParsedOidcTrustRemoveResponse = z.output<
+	typeof oidcTrustRemoveResponseSchema
+>;
+
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
 // request bodies and the server builds response bodies without minting brands.
 // The `Parsed…` outputs above are the branded results of a successful parse.
@@ -403,3 +456,10 @@ export type RetentionPolicyRemoveResponse = z.input<
 export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
 export type CheckReport = z.input<typeof checkReportSchema>;
 export type VerifyReport = z.input<typeof verifyReportSchema>;
+export type TokenResponse = z.input<typeof tokenResponseSchema>;
+export type OidcTrustAddBody = z.input<typeof oidcTrustAddBodySchema>;
+export type OidcTrustSummary = z.input<typeof oidcTrustSummarySchema>;
+export type OidcTrustListResponse = z.input<typeof oidcTrustListResponseSchema>;
+export type OidcTrustRemoveResponse = z.input<
+	typeof oidcTrustRemoveResponseSchema
+>;

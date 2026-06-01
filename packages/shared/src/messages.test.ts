@@ -11,12 +11,17 @@ import {
 	keyListResponseSchema,
 	keyRetireResponseSchema,
 	keyRotateResponseSchema,
+	oidcTrustAddBodySchema,
+	oidcTrustListResponseSchema,
+	oidcTrustRemoveResponseSchema,
+	oidcTrustSummarySchema,
 	retentionPolicyAddBodySchema,
 	retentionPolicyListResponseSchema,
 	retentionPolicyRemoveResponseSchema,
 	rootSetBodySchema,
 	signingKeySummarySchema,
 	statsResponseSchema,
+	tokenResponseSchema,
 	uploadDecisionSchema,
 	uploadNegotiateRequestSchema,
 	usageResponseSchema,
@@ -482,5 +487,106 @@ describe('verifyReportSchema', () => {
 		}
 	])('$name', ({ value, valid }) => {
 		expect(verifyReportSchema.safeParse(value).success).toBe(valid);
+	});
+});
+
+describe('tokenResponseSchema', () => {
+	const clientResponse = {
+		access_token: 'jwt',
+		token_type: 'Bearer',
+		expires_in: 600,
+		scope: 'admin'
+	};
+
+	it.each([
+		{ name: 'a token-exchange response', value: clientResponse, valid: true },
+		{
+			name: 'a response carrying issued_token_type',
+			value: {
+				...clientResponse,
+				scope: 'write',
+				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+			},
+			valid: true
+		},
+		{
+			name: 'a non-Bearer token type',
+			value: { ...clientResponse, token_type: 'mac' },
+			valid: false
+		},
+		{
+			name: 'a non-positive expires_in',
+			value: { ...clientResponse, expires_in: 0 },
+			valid: false
+		},
+		{
+			name: 'an unknown key',
+			value: { ...clientResponse, surprise: true },
+			valid: false
+		}
+	])('$name', ({ value, valid }) => {
+		expect(tokenResponseSchema.safeParse(value).success).toBe(valid);
+	});
+});
+
+describe('oidc trust schemas', () => {
+	const addBody = {
+		issuer: 'https://token.actions.githubusercontent.com',
+		jwksUrl: 'https://token.actions.githubusercontent.com/.well-known/jwks',
+		audience: 'https://cache.example.workers.dev',
+		claims: { repository_id: '1234', repository_owner_id: '5678' },
+		allowedRoots: ['github:owner/repo/']
+	};
+	const summary = {
+		id: 'r1',
+		issuer: addBody.issuer,
+		audience: addBody.audience,
+		scope: 'write',
+		claims: addBody.claims,
+		allowedRoots: addBody.allowedRoots,
+		disabled: false
+	};
+
+	it.each([
+		{ name: 'a well-formed add body', value: addBody, valid: true },
+		{
+			name: 'an add body with no claims',
+			value: { ...addBody, claims: {} },
+			valid: true
+		},
+		{
+			name: 'a non-URL issuer',
+			value: { ...addBody, issuer: 'not-a-url' },
+			valid: false
+		},
+		{
+			name: 'an empty audience',
+			value: { ...addBody, audience: '' },
+			valid: false
+		},
+		{
+			name: 'an unknown key',
+			value: { ...addBody, surprise: true },
+			valid: false
+		}
+	])('add body: $name', ({ value, valid }) => {
+		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(valid);
+	});
+
+	it('accepts the summary, list and remove responses', () => {
+		expect({
+			summary: oidcTrustSummarySchema.safeParse(summary).success,
+			list: oidcTrustListResponseSchema.safeParse({ rules: [summary] }).success,
+			remove: oidcTrustRemoveResponseSchema.safeParse({
+				id: 'r1',
+				removed: true
+			}).success
+		}).toStrictEqual({ summary: true, list: true, remove: true });
+	});
+
+	it('rejects a summary with an unknown scope', () => {
+		expect(
+			oidcTrustSummarySchema.safeParse({ ...summary, scope: 'root' }).success
+		).toBe(false);
 	});
 });
