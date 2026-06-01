@@ -14,19 +14,19 @@ interface ReadModeEnv {
 
 /**
  * The configured read credential when private-read mode is on, or `undefined`
- * when the cache is public. Both variables must be non-empty: a half-configured
- * deployment stays public rather than locking everyone out with a blank
- * password.
+ * when the cache is public. Both variables must be set and non-empty: a missing
+ * or half-configured deployment stays public rather than locking everyone out
+ * with a blank or absent password.
  */
 export function readCredential(env: ReadModeEnv): ReadCredential | undefined {
-	if (env.CUPBOARD_READ_USER === '' || env.CUPBOARD_READ_PASSWORD === '') {
+	const user = env.CUPBOARD_READ_USER;
+	const password = env.CUPBOARD_READ_PASSWORD;
+
+	if (!user || !password) {
 		return undefined;
 	}
 
-	return {
-		user: env.CUPBOARD_READ_USER,
-		password: env.CUPBOARD_READ_PASSWORD
-	};
+	return { user, password };
 }
 
 /**

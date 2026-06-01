@@ -12,6 +12,12 @@ import {
 	TextBody,
 	textResponse
 } from './http.ts';
+import {
+	authoriseRead,
+	type ReadCredential,
+	readCredential,
+	unauthorisedResponse
+} from './read-auth.ts';
 
 const narPrefix = '/nar/';
 
@@ -30,6 +36,10 @@ export async function handleRead(
 
 	const { pathname } = new URL(request.url);
 
+	// A configured read credential turns the cache private: narinfo, NAR and
+	// nix-cache-info require Basic auth and never touch the shared edge cache.
+	const credential = readCredential(env);
+
 	if (pathname.startsWith(narPrefix)) {
 		const narName = safeDecode(pathname.slice(narPrefix.length));
 		const narHash = narName === undefined ? undefined : parseNarName(narName);
@@ -38,7 +48,17 @@ export async function handleRead(
 			return notFound();
 		}
 
-		return serveR2(request, env, ctx, narObjectKey(narHash), narHeaders);
+		return (
+			guardRead(request, credential) ??
+			serveR2(
+				request,
+				env,
+				ctx,
+				narObjectKey(narHash),
+				narHeaders,
+				credential === undefined
+			)
+		);
 	}
 
 	if (pathname.endsWith('.narinfo')) {
@@ -48,19 +68,27 @@ export async function handleRead(
 			return notFound();
 		}
 
-		return serveR2(
-			request,
-			env,
-			ctx,
-			narInfoObjectKey(storePathHash),
-			narInfoHeaders
+		return (
+			guardRead(request, credential) ??
+			serveR2(
+				request,
+				env,
+				ctx,
+				narInfoObjectKey(storePathHash),
+				narInfoHeaders,
+				credential === undefined
+			)
 		);
 	}
 
 	if (pathname === '/nix-cache-info') {
-		return textResponse(request, cacheInfoBody, {
-			'content-type': 'text/x-nix-cache-info; charset=utf-8'
-		});
+		return (
+			guardRead(request, credential) ??
+			textResponse(request, cacheInfoBody, {
+				'content-type': 'text/x-nix-cache-info; charset=utf-8',
+				...(credential === undefined ? {} : { 'cache-control': 'no-store' })
+			})
+		);
 	}
 
 	if (pathname === '/_health') {
@@ -86,12 +114,30 @@ export async function handleRead(
 	return undefined;
 }
 
+// Returns a 401 when private-read mode is on and the request is unauthorised,
+// or `undefined` to let the read proceed (public, or authorised).
+function guardRead(
+	request: Request,
+	credential: ReadCredential | undefined
+): Response | undefined {
+	if (credential === undefined) {
+		return undefined;
+	}
+
+	if (authoriseRead(request, credential)) {
+		return undefined;
+	}
+
+	return unauthorisedResponse();
+}
+
 async function serveR2(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext,
 	key: string,
-	headersFor: (object: R2Object) => Headers
+	headersFor: (object: R2Object) => Headers,
+	usePublicCache: boolean
 ): Promise<Response> {
 	if (request.method === 'HEAD') {
 		const object = await env.BLOBS.head(key);
@@ -108,12 +154,15 @@ async function serveR2(
 	}
 
 	const cache = caches.default;
-	const cached = await cache.match(request);
 
-	if (cached !== undefined) {
-		return isNotModified(request, cached.headers)
-			? notModified(cached.headers)
-			: cached;
+	if (usePublicCache) {
+		const cached = await cache.match(request);
+
+		if (cached !== undefined) {
+			return isNotModified(request, cached.headers)
+				? notModified(cached.headers)
+				: cached;
+		}
 	}
 
 	const object = await env.BLOBS.get(key);
@@ -129,7 +178,10 @@ async function serveR2(
 	}
 
 	const response = new Response(object.body, { headers });
-	ctx.waitUntil(cache.put(request, response.clone()));
+
+	if (usePublicCache) {
+		ctx.waitUntil(cache.put(request, response.clone()));
+	}
 
 	return response;
 }
