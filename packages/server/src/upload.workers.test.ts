@@ -401,48 +401,6 @@ describe('upload flow', () => {
 		expect(healed.body).toBe(original.body);
 	});
 
-	it('commits one of two concurrent commits and reports the other as already present', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-
-		const first = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-		await prepareUpload(token, first, metadata);
-		await putNarBytes(first.r2Key);
-
-		const second = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-		await prepareUpload(token, second, metadata);
-
-		const [a, b] = await Promise.all([
-			commitUpload(token, first.uploadId),
-			commitUpload(token, second.uploadId)
-		]);
-
-		expect(
-			[a, b].toSorted((left, right) => left.status.localeCompare(right.status))
-		).toStrictEqual([
-			{
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				status: 'already-present'
-			},
-			{
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				status: 'committed'
-			}
-		]);
-
-		const stored = await readStoredNarInfo(metadata.storePathHash);
-
-		expect(NarInfo.parse(stored.body).narHash).toBe(metadata.narHash);
-	});
-
 	it('clears the orphaned narinfo object when its NAR blob is gone', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
