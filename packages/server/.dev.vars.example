@@ -9,3 +9,8 @@ CUPBOARD_BOOTSTRAP_TOKEN=
 R2_ACCOUNT_ID=
 R2_ACCESS_KEY_ID=
 R2_SECRET_ACCESS_KEY=
+
+# Private-read mode: set both to require HTTP Basic auth on cache reads
+# (narinfo, NAR, nix-cache-info). Leave both empty for a public cache.
+CUPBOARD_READ_USER=
+CUPBOARD_READ_PASSWORD=
