@@ -17,6 +17,10 @@ import {
 	type KeyRotateResponse,
 	NarInfo,
 	NixSha256Hash,
+	oidcTrustAddBodySchema,
+	type OidcTrustListResponse,
+	type OidcTrustRemoveResponse,
+	type OidcTrustSummary,
 	referencesSchema,
 	type ResolvedRootTarget,
 	resolveRootTargets,
@@ -101,6 +105,7 @@ import {
 	InvalidGrantError,
 	LastSigningKeyError,
 	OAuthError,
+	OwnerRuleImmutableError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
 	RootNotPermittedError,
@@ -324,6 +329,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.delete('/policies/:id', (context) =>
 			serverErrorResponse(
 				this.handleRemovePolicy(context.req.raw, context.req.param('id'))
+			)
+		);
+
+		// The owner manages CI write-trust rules here; the owner's own admin rule
+		// is seeded from deploy config and is not editable through this API.
+		this.app.get('/oidc-trust', (context) =>
+			serverErrorResponse(this.handleListOidcTrust(context.req.raw))
+		);
+		this.app.post('/oidc-trust', (context) =>
+			serverErrorResponse(this.handleAddOidcTrust(context.req.raw))
+		);
+		this.app.delete('/oidc-trust/:id', (context) =>
+			serverErrorResponse(
+				this.handleRemoveOidcTrust(context.req.raw, context.req.param('id'))
 			)
 		);
 
@@ -690,6 +709,83 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			id,
 			removed: existing !== undefined
 		} satisfies RetentionPolicyRemoveResponse);
+	}
+
+	private async handleListOidcTrust(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const rules = this.db
+			.select()
+			.from(schema.oidcTrust)
+			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
+			.all()
+			.map((row) => oidcTrustSummaryFromRow(row));
+
+		return Response.json({ rules } satisfies OidcTrustListResponse);
+	}
+
+	private async handleAddOidcTrust(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const body = await parseRequestBody(oidcTrustAddBodySchema, request);
+		const id = crypto.randomUUID();
+
+		// Rules added through the API are always `write`; the only `admin` rule is
+		// the owner, seeded from deploy config.
+		this.db
+			.insert(schema.oidcTrust)
+			.values({
+				id,
+				issuer: body.issuer,
+				jwksUrl: body.jwksUrl,
+				audience: body.audience,
+				scope: 'write',
+				claimsJson: JSON.stringify(body.claims),
+				allowedRootsJson: JSON.stringify(body.allowedRoots),
+				createdAt: new Date().toISOString()
+			})
+			.run();
+
+		return Response.json({
+			id,
+			issuer: body.issuer,
+			audience: body.audience,
+			scope: 'write',
+			claims: body.claims,
+			allowedRoots: body.allowedRoots,
+			disabled: false
+		} satisfies OidcTrustSummary);
+	}
+
+	private async handleRemoveOidcTrust(
+		request: Request,
+		id: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const existing = this.db
+			.select()
+			.from(schema.oidcTrust)
+			.where(eq(schema.oidcTrust.id, id))
+			.get();
+
+		if (existing?.scope === 'admin') {
+			throw new OwnerRuleImmutableError(id);
+		}
+
+		// Soft-disable so the audit row survives; `removed` reports whether this
+		// call is what disabled an enabled rule.
+		const removed = existing !== undefined && !existing.disabledAt;
+
+		if (removed) {
+			this.db
+				.update(schema.oidcTrust)
+				.set({ disabledAt: new Date().toISOString() })
+				.where(eq(schema.oidcTrust.id, id))
+				.run();
+		}
+
+		return Response.json({ id, removed } satisfies OidcTrustRemoveResponse);
 	}
 
 	private resolvePolicyTtl(cache: string, name: string): number | undefined {
@@ -2980,6 +3076,24 @@ function oidcTrustRuleFromRow(
 			row.allowedRootsJson,
 			fault
 		)
+	};
+}
+
+// The admin-facing view of a rule. It omits `jwks_url`, so the listing says who
+// is trusted without restating where their keys are fetched from.
+function oidcTrustSummaryFromRow(
+	row: typeof schema.oidcTrust.$inferSelect
+): OidcTrustSummary {
+	const rule = oidcTrustRuleFromRow(row);
+
+	return {
+		id: rule.id,
+		issuer: rule.issuer,
+		audience: rule.audience,
+		scope: rule.scope,
+		claims: { ...rule.claims },
+		allowedRoots: [...rule.allowedRoots],
+		disabled: Boolean(row.disabledAt)
 	};
 }
 

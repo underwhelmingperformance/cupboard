@@ -50,6 +50,15 @@ export class LastSigningKeyError extends ServerHttpError {
 	}
 }
 
+export class OwnerRuleImmutableError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: string) {
+		super('Cannot change the owner rule; update deploy config instead');
+		this.name = 'OwnerRuleImmutableError';
+	}
+}
+
 export class UnauthenticatedError extends ServerHttpError {
 	readonly status = StatusCodes.UNAUTHORIZED;
 
