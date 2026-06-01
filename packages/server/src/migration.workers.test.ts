@@ -2,7 +2,7 @@ import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
-import { retentionPolicies } from './db/schema.ts';
+import { retentionPolicies, verificationCursor } from './db/schema.ts';
 import {
 	bootstrap,
 	latestMigrationIndex,
@@ -112,5 +112,29 @@ describe('migrations', () => {
 		);
 
 		expect(rows).toStrictEqual([policy]);
+	});
+
+	it('migrates and round-trips the verification cursor', async () => {
+		const cursor = {
+			id: 'active',
+			lastStorePathHash: 'a'.repeat(32),
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		};
+
+		const rows = await runInDurableObject(
+			testServerFor('migration-verification-cursor'),
+			async (_instance, state) => {
+				await migrateThrough(state, latestMigrationIndex);
+
+				const database = drizzle(state.storage, {
+					schema: { verificationCursor }
+				});
+				database.insert(verificationCursor).values(cursor).run();
+
+				return database.select().from(verificationCursor).all();
+			}
+		);
+
+		expect(rows).toStrictEqual([cursor]);
 	});
 });
