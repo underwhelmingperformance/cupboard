@@ -2,7 +2,11 @@ import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
-import { retentionPolicies, verificationCursor } from './db/schema.ts';
+import {
+	oidcTrust,
+	retentionPolicies,
+	verificationCursor
+} from './db/schema.ts';
 import {
 	bootstrap,
 	latestMigrationIndex,
@@ -137,5 +141,33 @@ describe('migrations', () => {
 		);
 
 		expect(rows).toStrictEqual([cursor]);
+	});
+
+	it('migrates and round-trips an OIDC trust rule', async () => {
+		const rule = {
+			id: 'r1',
+			issuer: 'https://token.actions.githubusercontent.com',
+			jwksUrl: 'https://token.actions.githubusercontent.com/.well-known/jwks',
+			audience: 'https://cache.example.workers.dev',
+			scope: 'write' as const,
+			claimsJson: JSON.stringify({ repository_id: '1234' }),
+			allowedRootsJson: JSON.stringify(['github:owner/repo/']),
+			createdAt: '2026-01-01T00:00:00.000Z',
+			disabledAt: '2026-01-02T00:00:00.000Z'
+		};
+
+		const rows = await runInDurableObject(
+			testServerFor('migration-oidc-trust'),
+			async (_instance, state) => {
+				await migrateThrough(state, latestMigrationIndex);
+
+				const database = drizzle(state.storage, { schema: { oidcTrust } });
+				database.insert(oidcTrust).values(rule).run();
+
+				return database.select().from(oidcTrust).all();
+			}
+		);
+
+		expect(rows).toStrictEqual([rule]);
 	});
 });

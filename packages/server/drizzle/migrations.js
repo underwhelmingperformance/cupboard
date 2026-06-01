@@ -12,6 +12,7 @@ import m0009 from './0009_narinfo_deletion_cache.sql';
 import m0010 from './0010_retention_policy.sql';
 import m0011 from './0011_verification_cursor.sql';
 import m0012 from './0012_pending_upload_cache.sql';
+import m0013 from './0013_oidc_trust.sql';
 
 export default {
 	journal,
@@ -28,6 +29,7 @@ export default {
 		m0009,
 		m0010,
 		m0011,
-		m0012
+		m0012,
+		m0013
 	}
 };

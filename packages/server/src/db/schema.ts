@@ -69,6 +69,9 @@ export const narInfoDeletions = sqliteTable(
 
 export const authKeys = sqliteTable('auth_key', {
 	id: text('id').primaryKey(),
+	// The JWKS key id carried in each minted token's header so a verifier can
+	// pick the right key across a rotation. Always populated on key creation.
+	kid: text('kid').notNull().default(''),
 	privateJwkJson: text('private_jwk_json').notNull(),
 	publicJwkJson: text('public_jwk_json').notNull(),
 	createdAt: text('created_at').notNull(),
@@ -134,4 +137,21 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 	cache: text('cache').notNull().default(''),
 	lastStorePathHash: text('last_store_path_hash'),
 	updatedAt: text('updated_at').notNull()
+});
+
+// An OIDC trust rule federates an external identity into a cupboard scope: an
+// inbound token verified against `issuer`'s JWKS, with `audience` and every
+// `claims_json` entry matched exactly, grants `scope`. A `write` rule binds the
+// minted token to `allowed_roots_json`; the owner's `admin` rule is seeded from
+// deploy config. `disabled_at` soft-disables a rule without losing the audit row.
+export const oidcTrust = sqliteTable('oidc_trust', {
+	id: text('id').primaryKey(),
+	issuer: text('issuer').notNull(),
+	jwksUrl: text('jwks_url').notNull(),
+	audience: text('audience').notNull(),
+	scope: text('scope', { enum: ['write', 'admin'] }).notNull(),
+	claimsJson: text('claims_json').notNull().default('{}'),
+	allowedRootsJson: text('allowed_roots_json').notNull().default('[]'),
+	createdAt: text('created_at').notNull(),
+	disabledAt: text('disabled_at')
 });
