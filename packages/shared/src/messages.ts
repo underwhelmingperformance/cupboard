@@ -5,6 +5,8 @@ import {
 	cachePrioritySchema,
 	compressionSchema,
 	DEFAULT_CACHE,
+	isAllowedIssuerUrl,
+	IssuerUrl,
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
@@ -431,10 +433,20 @@ export const oidcTrustScopeSchema = z.enum(['write', 'admin']);
 export type OidcTrustScope = z.infer<typeof oidcTrustScopeSchema>;
 
 export const oidcTrustAddBodySchema = z.strictObject({
-	issuer: z.url(),
-	jwksUrl: z.url(),
+	issuer: z
+		.url()
+		.refine(
+			isAllowedIssuerUrl,
+			'issuer must be an https URL (http only for loopback)'
+		)
+		.transform((value) => IssuerUrl.parse(value)?.value ?? value),
 	audience: z.string().min(1),
-	claims: z.record(z.string().min(1), z.string()),
+	claims: z
+		.record(z.string().min(1), z.string())
+		.refine(
+			(value) => Object.keys(value).length > 0,
+			'at least one claim is required to bind the rule'
+		),
 	allowedRoots: z.array(z.string().min(1))
 });
 export type ParsedOidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;

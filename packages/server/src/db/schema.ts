@@ -140,14 +140,15 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 });
 
 // An OIDC trust rule federates an external identity into a cupboard scope: an
-// inbound token verified against `issuer`'s JWKS, with `audience` and every
-// `claims_json` entry matched exactly, grants `scope`. A `write` rule binds the
-// minted token to `allowed_roots_json`; the owner's `admin` rule is seeded from
-// deploy config. `disabled_at` soft-disables a rule without losing the audit row.
+// inbound token verified against `issuer`'s discovered JWKS, with `audience` and
+// every `claims_json` entry matched exactly, grants `scope`. The issuer's
+// `jwks_uri` and signing algorithms come from its OIDC metadata, not this row. A
+// `write` rule binds the minted token to `allowed_roots_json`; the owner's
+// `admin` rule is seeded from deploy config. `disabled_at` soft-disables a rule
+// without losing the audit row.
 export const oidcTrust = sqliteTable('oidc_trust', {
 	id: text('id').primaryKey(),
 	issuer: text('issuer').notNull(),
-	jwksUrl: text('jwks_url').notNull(),
 	audience: text('audience').notNull(),
 	scope: text('scope', { enum: ['write', 'admin'] }).notNull(),
 	claimsJson: text('claims_json').notNull().default('{}'),

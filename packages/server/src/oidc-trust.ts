@@ -6,7 +6,6 @@ import { IssuerUrl, type OidcTrustScope } from '@cupboard/shared';
 export interface OidcTrustRule {
 	readonly id: string;
 	readonly issuer: string;
-	readonly jwksUrl: string;
 	readonly audience: string;
 	readonly scope: OidcTrustScope;
 	readonly claims: Readonly<Record<string, string>>;

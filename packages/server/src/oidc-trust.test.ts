@@ -8,7 +8,6 @@ const audience = 'https://cache.example.workers.dev';
 const ownerRule: OidcTrustRule = {
 	id: 'owner',
 	issuer: 'https://accounts.google.com',
-	jwksUrl: 'https://www.googleapis.com/oauth2/v3/certs',
 	audience: 'client-id.apps.googleusercontent.com',
 	scope: 'admin',
 	claims: { sub: 'owner-subject' },
@@ -17,7 +16,6 @@ const ownerRule: OidcTrustRule = {
 const repoRule: OidcTrustRule = {
 	id: 'repo',
 	issuer: github,
-	jwksUrl: `${github}/.well-known/jwks`,
 	audience,
 	scope: 'write',
 	claims: { repository_owner_id: '5678' },
@@ -26,7 +24,6 @@ const repoRule: OidcTrustRule = {
 const exactRepoRule: OidcTrustRule = {
 	id: 'exact-repo',
 	issuer: github,
-	jwksUrl: `${github}/.well-known/jwks`,
 	audience,
 	scope: 'write',
 	claims: { repository_owner_id: '5678', repository_id: '1234' },

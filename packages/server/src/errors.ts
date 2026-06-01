@@ -32,6 +32,15 @@ export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
 	}
 }
 
+export class OwnerConfigurationInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly issuer: string) {
+		super('CUPBOARD_OWNER_ISSUER is not a valid https issuer URL');
+		this.name = 'OwnerConfigurationInvalidError';
+	}
+}
+
 export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
@@ -133,6 +142,25 @@ export class UnsupportedGrantTypeError extends OAuthError {
 	constructor(public readonly grantType: string) {
 		super(`Unsupported grant type: ${grantType}`);
 		this.name = 'UnsupportedGrantTypeError';
+	}
+}
+
+// Discovery (or the JWKS behind it) for the subject token's issuer could not be
+// reached. This is an upstream/transient condition, not a bad token, so it is a
+// 503 the caller can retry — never an `invalid_grant` the caller treats as
+// permanent.
+export class IssuerUnavailableError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+
+	constructor(
+		public readonly issuer: string,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`Could not reach issuer ${issuer} to verify the subject token`,
+			options
+		);
+		this.name = 'IssuerUnavailableError';
 	}
 }
 

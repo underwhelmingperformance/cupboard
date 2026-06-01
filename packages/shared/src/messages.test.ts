@@ -567,7 +567,6 @@ describe('tokenResponseSchema', () => {
 describe('oidc trust schemas', () => {
 	const addBody = {
 		issuer: 'https://token.actions.githubusercontent.com',
-		jwksUrl: 'https://token.actions.githubusercontent.com/.well-known/jwks',
 		audience: 'https://cache.example.workers.dev',
 		claims: { repository_id: '1234', repository_owner_id: '5678' },
 		allowedRoots: ['github:owner/repo/']
@@ -585,13 +584,26 @@ describe('oidc trust schemas', () => {
 	it.each([
 		{ name: 'a well-formed add body', value: addBody, valid: true },
 		{
+			name: 'an add body bound to a loopback issuer over http',
+			value: { ...addBody, issuer: 'http://127.0.0.1:8788' },
+			valid: true
+		},
+		{
 			name: 'an add body with no claims',
 			value: { ...addBody, claims: {} },
-			valid: true
+			valid: false
 		},
 		{
 			name: 'a non-URL issuer',
 			value: { ...addBody, issuer: 'not-a-url' },
+			valid: false
+		},
+		{
+			name: 'a non-loopback issuer over plain http',
+			value: {
+				...addBody,
+				issuer: 'http://token.actions.githubusercontent.com'
+			},
 			valid: false
 		},
 		{
@@ -606,6 +618,15 @@ describe('oidc trust schemas', () => {
 		}
 	])('add body: $name', ({ value, valid }) => {
 		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(valid);
+	});
+
+	it('normalises a trailing slash off the issuer', () => {
+		const parsed = oidcTrustAddBodySchema.parse({
+			...addBody,
+			issuer: 'https://token.actions.githubusercontent.com/'
+		});
+
+		expect(parsed.issuer).toBe('https://token.actions.githubusercontent.com');
 	});
 
 	it('accepts the summary, list and remove responses', () => {

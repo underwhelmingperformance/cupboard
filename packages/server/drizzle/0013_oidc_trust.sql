@@ -1,7 +1,6 @@
 CREATE TABLE `oidc_trust` (
 	`id` text PRIMARY KEY NOT NULL,
 	`issuer` text NOT NULL,
-	`jwks_url` text NOT NULL,
 	`audience` text NOT NULL,
 	`scope` text NOT NULL,
 	`claims_json` text DEFAULT '{}' NOT NULL,

@@ -26,7 +26,6 @@ const ownerSummary: OidcTrustSummary = {
 
 const addBody: OidcTrustAddBody = {
 	issuer: 'https://token.actions.githubusercontent.com',
-	jwksUrl: 'https://token.actions.githubusercontent.com/.well-known/jwks',
 	audience: 'https://cache.example.workers.dev',
 	claims: { repository_owner_id: '5678' },
 	allowedRoots: ['github:owner/']
@@ -150,5 +149,22 @@ describe('oidc-trust admin API', () => {
 		const response = await listRules(token);
 
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
+	});
+
+	it.each([
+		{
+			name: 'a rule with no claims to bind it',
+			body: { ...addBody, claims: {} }
+		},
+		{
+			name: 'a rule whose issuer is not https',
+			body: { ...addBody, issuer: 'http://token.actions.githubusercontent.com' }
+		}
+	])('refuses $name', async ({ body }) => {
+		const token = await adminToken();
+
+		const response = await addRule(token, body);
+
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 });

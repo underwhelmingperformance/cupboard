@@ -22,8 +22,6 @@ export default defineConfig({
 								CUPBOARD_BOOTSTRAP_TOKEN: 'test-bootstrap',
 								CUPBOARD_OWNER_ISSUER: 'https://accounts.google.com',
 								CUPBOARD_OWNER_SUBJECT: 'owner-subject',
-								CUPBOARD_OWNER_JWKS_URL:
-									'https://www.googleapis.com/oauth2/v3/certs',
 								CUPBOARD_OWNER_AUDIENCE: 'client-id.apps.googleusercontent.com',
 								R2_ACCESS_KEY_ID: 'test-access-key-id',
 								R2_ACCOUNT_ID: 'test-account-id',

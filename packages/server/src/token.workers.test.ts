@@ -10,10 +10,13 @@ import { generateKeyPair, SignJWT } from 'jose';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { oidcTrust } from './db/schema.ts';
+import { OidcDiscoveryStore } from './oidc.ts';
 import {
 	currentOrigin,
 	currentServer,
 	fetchPath,
+	latestMigrationIndex,
+	migrateThrough,
 	readFetch,
 	resetTestServer
 } from './test-support.ts';
@@ -126,6 +129,45 @@ describe('POST /token', () => {
 			error: 'invalid_request'
 		});
 	});
+
+	it('reports 503, not invalid_grant, when the issuer cannot be reached', async () => {
+		const idp = await generateKeyPair('RS256', { extractable: true });
+		const subjectToken = await new SignJWT({ sub: 'ci' })
+			.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
+			.setIssuer('https://idp.test')
+			.setAudience('cupboard-aud')
+			.setIssuedAt()
+			.setExpirationTime('5m')
+			.sign(idp.privateKey);
+
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			await migrateThrough(state, latestMigrationIndex);
+			drizzle(state.storage, { schema: { oidcTrust } })
+				.insert(oidcTrust)
+				.values({
+					id: 'ci-rule',
+					issuer: 'https://idp.test',
+					audience: 'cupboard-aud',
+					scope: 'write',
+					claimsJson: JSON.stringify({ sub: 'ci' }),
+					allowedRootsJson: '[]',
+					createdAt: '2026-01-01T00:00:00.000Z'
+				})
+				.run();
+			(instance as unknown as { discovery: OidcDiscoveryStore }).discovery =
+				new OidcDiscoveryStore({
+					fetcher: () => Promise.reject(new Error('issuer is down'))
+				});
+		});
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+
+		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+	});
 });
 
 describe('owner rule seeding', () => {
@@ -151,7 +193,6 @@ describe('owner rule seeding', () => {
 		expect(stable).toStrictEqual({
 			id: 'owner',
 			issuer: 'https://accounts.google.com',
-			jwksUrl: 'https://www.googleapis.com/oauth2/v3/certs',
 			audience: 'client-id.apps.googleusercontent.com',
 			scope: 'admin',
 			claimsJson: JSON.stringify({ sub: 'owner-subject' }),
@@ -185,6 +226,26 @@ describe('owner rule seeding', () => {
 		);
 
 		expect(remaining).toStrictEqual([]);
+	});
+
+	it('refuses to seed when the owner issuer is malformed', async () => {
+		const outcome = await runInDurableObject(currentServer(), (instance) => {
+			const internal = instance as unknown as {
+				env: Record<string, string>;
+				seedOwnerRule(): void;
+			};
+			internal.env = { ...internal.env, CUPBOARD_OWNER_ISSUER: 'not-a-url' };
+
+			try {
+				internal.seedOwnerRule();
+
+				return 'did not throw';
+			} catch (error) {
+				return error instanceof Error ? error.name : 'unknown';
+			}
+		});
+
+		expect(outcome).toBe('OwnerConfigurationInvalidError');
 	});
 });
 

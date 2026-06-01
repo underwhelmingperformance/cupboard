@@ -147,7 +147,6 @@ describe('migrations', () => {
 		const rule = {
 			id: 'r1',
 			issuer: 'https://token.actions.githubusercontent.com',
-			jwksUrl: 'https://token.actions.githubusercontent.com/.well-known/jwks',
 			audience: 'https://cache.example.workers.dev',
 			scope: 'write' as const,
 			claimsJson: JSON.stringify({ repository_id: '1234' }),

@@ -14,8 +14,11 @@ import {
 	type CheckReport,
 	type CommitResponse,
 	DEFAULT_CACHE,
+	defaultAuthAudience,
+	defaultAuthIssuer,
 	type DeletePathResponse,
 	issuedAccessTokenType,
+	IssuerUrl,
 	type KeyListResponse,
 	type KeyRetireResponse,
 	type KeyRotateResponse,
@@ -111,9 +114,11 @@ import {
 	InsufficientScopeError,
 	InvalidGrantError,
 	InvalidRequestError,
+	IssuerUnavailableError,
 	LastAuthKeyError,
 	LastSigningKeyError,
 	OAuthError,
+	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
@@ -147,7 +152,8 @@ import {
 } from './http.ts';
 import {
 	decodeInboundClaims,
-	RemoteJwksStore,
+	OidcDiscoveryStore,
+	OidcKeysUnreachableError,
 	verifyInboundOidcToken
 } from './oidc.ts';
 import {
@@ -212,7 +218,6 @@ const storedAllowedRootsSchema = z.array(z.string());
 interface OwnerConfig {
 	readonly issuer: string;
 	readonly subject: string;
-	readonly jwksUrl: string;
 	readonly audience: string;
 }
 
@@ -261,7 +266,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private authKeysPromise: Promise<readonly AuthKey[]> | undefined;
 	private presigner: R2Presigner | undefined;
 	private publicKeyBody: TextBody | undefined;
-	private readonly jwks = new RemoteJwksStore();
+	private readonly discovery = new OidcDiscoveryStore();
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
@@ -799,7 +804,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.values({
 				id,
 				issuer: body.issuer,
-				jwksUrl: body.jwksUrl,
 				audience: body.audience,
 				scope: 'write',
 				claimsJson: JSON.stringify(body.claims),
@@ -2802,11 +2806,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private authIssuer(): string {
-		return this.env.CUPBOARD_AUTH_ISSUER || 'cupboard';
+		return this.env.CUPBOARD_AUTH_ISSUER || defaultAuthIssuer;
 	}
 
 	private authAudience(): string {
-		return this.env.CUPBOARD_AUTH_AUDIENCE || 'cupboard';
+		return this.env.CUPBOARD_AUTH_AUDIENCE || defaultAuthAudience;
 	}
 
 	private authKeys(): Promise<readonly AuthKey[]> {
@@ -3008,14 +3012,35 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		rule: OidcTrustRule,
 		token: string
 	): Promise<JWTPayload> {
+		// Discovery resolves the issuer's JWKS and its accepted algorithms. Failing
+		// to reach the issuer is an upstream condition, not a bad token, so it is a
+		// retryable 503 rather than a permanent `invalid_grant`.
+		const issuer = await this.discovery
+			.resolve(rule.issuer)
+			.catch((error: unknown) => {
+				throw new IssuerUnavailableError(rule.issuer, { cause: error });
+			});
+
 		try {
+			// The signature is checked against the discovered keys, with issuer and
+			// audience pinned.
 			return await verifyInboundOidcToken(
-				this.jwks.resolver(rule.jwksUrl),
+				issuer.resolver,
 				token,
-				{ issuer: rule.issuer, audience: rule.audience },
+				{
+					issuer: rule.issuer,
+					audience: rule.audience,
+					algorithms: issuer.algorithms
+				},
 				new Date()
 			);
-		} catch {
+		} catch (error) {
+			// A JWKS fetch that fails (rather than the token failing verification)
+			// is the same transient upstream condition as a discovery failure.
+			if (error instanceof OidcKeysUnreachableError) {
+				throw new IssuerUnavailableError(rule.issuer, { cause: error });
+			}
+
 			throw new InvalidGrantError('Subject token failed verification');
 		}
 	}
@@ -3069,16 +3094,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private ownerConfig(): OwnerConfig | undefined {
 		const issuer = this.env.CUPBOARD_OWNER_ISSUER;
 		const subject = this.env.CUPBOARD_OWNER_SUBJECT;
-		const jwksUrl = this.env.CUPBOARD_OWNER_JWKS_URL;
 		const audience = this.env.CUPBOARD_OWNER_AUDIENCE;
 
 		// A binding may be absent or empty when no owner is configured (e.g. in
 		// local development); either way there is no rule to seed.
-		if (!issuer || !subject || !jwksUrl || !audience) {
+		if (!issuer || !subject || !audience) {
 			return undefined;
 		}
 
-		return { issuer, subject, jwksUrl, audience };
+		// A configured-but-malformed issuer is a deploy error: surface it now
+		// rather than seeding a rule that can never match (a silent admin lockout).
+		const issuerUrl = IssuerUrl.parse(issuer);
+
+		if (issuerUrl === undefined) {
+			throw new OwnerConfigurationInvalidError(issuer);
+		}
+
+		return { issuer: issuerUrl.value, subject, audience };
 	}
 
 	private seedOwnerRule(): void {
@@ -3094,12 +3126,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		// Redeploying with new owner config updates the rule in place, so the
-		// owner identity always tracks deploy config; the rule is enabled on
-		// creation by leaving `disabledAt` unset.
+		// Redeploying with new owner config updates the rule in place, so the owner
+		// identity always tracks deploy config. Clearing `disabledAt` on conflict
+		// re-enables it, so the owner is restored even if the rule was ever
+		// disabled out of band. `ownerConfig` has already normalised the issuer.
 		const fields = {
 			issuer: owner.issuer,
-			jwksUrl: owner.jwksUrl,
 			audience: owner.audience,
 			claimsJson: JSON.stringify({ sub: owner.subject })
 		};
@@ -3113,7 +3145,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				createdAt: new Date().toISOString(),
 				...fields
 			})
-			.onConflictDoUpdate({ target: schema.oidcTrust.id, set: fields })
+			.onConflictDoUpdate({
+				target: schema.oidcTrust.id,
+				set: { ...fields, disabledAt: sql`null` }
+			})
 			.run();
 	}
 
@@ -3275,7 +3310,6 @@ function oidcTrustRuleFromRow(
 	return {
 		id: row.id,
 		issuer: row.issuer,
-		jwksUrl: row.jwksUrl,
 		audience: row.audience,
 		scope: row.scope,
 		claims: parseStored(storedClaimsSchema, row.claimsJson, fault),
