@@ -19,7 +19,6 @@ export default defineConfig({
 						main: './src/worker.ts',
 						miniflare: {
 							bindings: {
-								CUPBOARD_BOOTSTRAP_TOKEN: 'test-bootstrap',
 								CUPBOARD_OWNER_ISSUER: 'https://accounts.google.com',
 								CUPBOARD_OWNER_SUBJECT: 'owner-subject',
 								CUPBOARD_OWNER_AUDIENCE: 'client-id.apps.googleusercontent.com',

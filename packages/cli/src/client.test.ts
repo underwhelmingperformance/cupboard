@@ -1,5 +1,4 @@
 import type {
-	BootstrapResponse,
 	CacheRemoveResponse,
 	CacheSummary,
 	CheckReport,
@@ -63,28 +62,6 @@ function capturingClient(
 
 	return { client, captured: () => captured };
 }
-
-describe('CupboardClient.bootstrap', () => {
-	it('posts to /auth/bootstrap with the bootstrap secret', async () => {
-		const response: BootstrapResponse = {
-			url: 'https://cupboard.test',
-			publicKey: 'cupboard:abc',
-			token: 'admin-jwt'
-		};
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.bootstrap('bootstrap-secret');
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/auth/bootstrap',
-			method: 'POST',
-			authorization: 'Bearer bootstrap-secret',
-			contentType: undefined,
-			body: undefined
-		});
-	});
-});
 
 describe('CupboardClient.tokenExchange', () => {
 	it('posts a urlencoded token-exchange request and returns the parsed token', async () => {
@@ -449,15 +426,15 @@ describe('CupboardClient cache prefix', () => {
 		expect(captured()?.url).toBe('https://cupboard.test/stats');
 	});
 
-	it('does not prefix the deployment-wide bootstrap', async () => {
+	it('does not prefix a deployment-wide route', async () => {
 		const { client, captured } = capturingClient(
-			{ url: 'https://cupboard.test', publicKey: 'cupboard-1:k', token: 'jwt' },
+			'cupboard-1:k\n',
 			'/cache/builds'
 		);
 
-		await client.bootstrap('secret');
+		await client.publicKey();
 
-		expect(captured()?.url).toBe('https://cupboard.test/auth/bootstrap');
+		expect(captured()?.url).toBe('https://cupboard.test/pubkey');
 	});
 
 	it('leaves usage deployment-scoped under a cache prefix', async () => {

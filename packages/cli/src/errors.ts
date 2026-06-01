@@ -30,13 +30,6 @@ export class InvalidClaimError extends CliError {
 	}
 }
 
-export class AuthSelectionError extends CliError {
-	constructor(message: string) {
-		super(message);
-		this.name = 'AuthSelectionError';
-	}
-}
-
 export class OwnerLoginRequiredError extends CliError {
 	constructor() {
 		super('No cupboard session, or it has expired. Run `cupboard login`.');

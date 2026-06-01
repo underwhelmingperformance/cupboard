@@ -5,8 +5,6 @@ import {
 	authKeyRetireResponseSchema,
 	type AuthKeyRotateResponse,
 	authKeyRotateResponseSchema,
-	type BootstrapResponse,
-	bootstrapResponseSchema,
 	type CacheListResponse,
 	cacheListResponseSchema,
 	cacheNameSchema,
@@ -73,10 +71,10 @@ import {
 } from './errors.ts';
 
 /**
- * Supplies bearer tokens to the client and can refresh them. The CLI exchanges
- * a bootstrap secret for a short-lived admin JWT; a long push can outlive that
- * token, so the client refreshes through the provider and retries once on a
- * 401.
+ * Supplies bearer tokens to the client and can refresh them. The CLI obtains a
+ * short-lived access token by OIDC token-exchange and caches it; a long push can
+ * outlive that token, so the client refreshes through the provider and retries
+ * once on a 401.
  */
 export interface TokenProvider {
 	get(): Promise<string>;
@@ -106,13 +104,6 @@ export class CupboardClient {
 
 	static fromUrl(value: string, cache: string = DEFAULT_CACHE): CupboardClient {
 		return new CupboardClient(new URL(value), fetch, cachePrefixFor(cache));
-	}
-
-	bootstrap(bootstrapSecret: string): Promise<BootstrapResponse> {
-		return this.requestJson('/auth/bootstrap', bootstrapResponseSchema, {
-			method: 'POST',
-			token: bootstrapSecret
-		});
 	}
 
 	async publicKey(): Promise<string> {

@@ -1,7 +1,7 @@
 import { type DeletePathResponse, StorePath } from '@cupboard/shared';
 import type { Command } from 'commander';
 
-import { authenticate } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client.ts';
 import { createReporter, type Reporter } from '../reporter.ts';
@@ -27,7 +27,6 @@ export function registerDeleteCommand(program: Command): void {
 			'<store-path>',
 			'store path to delete (e.g. /nix/store/<hash>-<name>)'
 		)
-		.requiredOption('--token <token>', 'bootstrap secret')
 		.option(
 			'--cache <name>',
 			'delete from a named cache rather than the default'
@@ -37,7 +36,7 @@ export function registerDeleteCommand(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runDelete(storePath, token, reporter, client);
 		});

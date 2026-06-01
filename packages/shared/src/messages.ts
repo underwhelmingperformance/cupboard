@@ -126,13 +126,6 @@ export const commitResponseSchema = z.strictObject({
 });
 export type ParsedCommitResponse = z.output<typeof commitResponseSchema>;
 
-export const bootstrapResponseSchema = z.strictObject({
-	url: z.string(),
-	publicKey: z.string(),
-	token: z.string()
-});
-export type ParsedBootstrapResponse = z.output<typeof bootstrapResponseSchema>;
-
 export const statsResponseSchema = z.strictObject({
 	storePaths: countSchema,
 	narBlobs: countSchema,
@@ -495,7 +488,6 @@ export type UploadNegotiateResponse = z.input<
 	typeof uploadNegotiateResponseSchema
 >;
 export type CommitResponse = z.input<typeof commitResponseSchema>;
-export type BootstrapResponse = z.input<typeof bootstrapResponseSchema>;
 export type StatsResponse = z.input<typeof statsResponseSchema>;
 export type UsageResponse = z.input<typeof usageResponseSchema>;
 export type DeletePathResponse = z.input<typeof deletePathResponseSchema>;

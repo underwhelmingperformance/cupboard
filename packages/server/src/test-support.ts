@@ -1,5 +1,4 @@
 import {
-	type BootstrapResponse,
 	type CommitResponse,
 	DEFAULT_CACHE,
 	type DeletePathResponse,
@@ -37,8 +36,6 @@ import {
 } from './http.ts';
 import type { CupboardServer } from './worker.ts';
 import worker from './worker.ts';
-
-export const bootstrapSecret = 'test-bootstrap';
 
 export const narBytes = new Uint8Array([40, 41, 42, 43]);
 export const narHash = nixSha256Hash('1');
@@ -106,42 +103,33 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
 	return server;
 }
 
-export async function bootstrap(): Promise<BootstrapResponse> {
-	const response = await fetchPath('/auth/bootstrap', {
-		headers: {
-			authorization: `Bearer ${bootstrapSecret}`
-		},
-		method: 'POST'
-	});
-
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<BootstrapResponse>();
+export interface InitialisedServer {
+	readonly url: string;
+	readonly publicKey: string;
+	readonly token: string;
 }
 
-export async function initialise(): Promise<string> {
-	const body = await bootstrap();
-	expect(body.token).toEqual(expect.any(String));
-	expect(body.token).not.toBe('');
+/**
+ * Brings a server up the way a deployment is: it mints an owner-equivalent admin
+ * token from the active auth key and reads the published signing key, standing
+ * in for what the old bootstrap exchange returned.
+ */
+export async function bootstrap(): Promise<InitialisedServer> {
+	const token = await mintServerSignedToken('admin');
+	const response = await fetchPath('/pubkey');
+	const body = await response.text();
 
-	return body.token;
+	return { url: origin, publicKey: body.trim(), token };
 }
 
-export async function initialiseViaWorker(): Promise<string> {
-	const response = await workerFetch('/auth/bootstrap', {
-		headers: {
-			authorization: `Bearer ${bootstrapSecret}`
-		},
-		method: 'POST'
-	});
+/** An admin token against the current per-test server. */
+export function initialise(): Promise<string> {
+	return mintServerSignedToken('admin');
+}
 
-	expect(response.status).toBe(StatusCodes.OK);
-
-	const body = await response.json<BootstrapResponse>();
-	expect(body.token).toEqual(expect.any(String));
-	expect(body.token).not.toBe('');
-
-	return body.token;
+/** An admin token against the shared `v1` server the Worker routes to. */
+export function initialiseViaWorker(): Promise<string> {
+	return mintServerSignedTokenFor(defaultWorkerServer(), 'admin');
 }
 
 /**
@@ -150,12 +138,25 @@ export async function initialiseViaWorker(): Promise<string> {
  * an admin route). The active key is the newest one still in service, matching
  * what the server mints with, so a token stays valid across a rotation.
  */
-export async function mintServerSignedToken(
+export function mintServerSignedToken(
 	scope: AccessScope,
 	subject = 'scope-test',
 	callbackRoots?: readonly string[]
 ): Promise<string> {
-	const key = await runInDurableObject(server, (_instance, state) => {
+	return mintServerSignedTokenFor(server, scope, subject, callbackRoots);
+}
+
+async function mintServerSignedTokenFor(
+	stub: DurableObjectStub<CupboardServer>,
+	scope: AccessScope,
+	subject = 'scope-test',
+	callbackRoots?: readonly string[]
+): Promise<string> {
+	// The auth key is created on first use; a JWKS request creates it without
+	// minting anything, so reading it straight after always finds a key.
+	await stub.fetch(new URL('/.well-known/jwks.json', origin));
+
+	const key = await runInDurableObject(stub, (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { authKeys } });
 		const row = database
 			.select()

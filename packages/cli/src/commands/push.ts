@@ -8,7 +8,6 @@ import { runPush } from '../push.ts';
 import { createReporter } from '../reporter.ts';
 
 interface PushOptions {
-	readonly token?: string;
 	readonly githubOidc?: boolean;
 	readonly audience?: string;
 	readonly root?: string;
@@ -24,10 +23,9 @@ export function registerPushCommand(program: Command): void {
 		)
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<paths...>', 'Nix store paths to push')
-		.option('--token <token>', 'bootstrap secret')
 		.option(
 			'--github-oidc',
-			'authenticate with a GitHub Actions OIDC token rather than a bootstrap secret'
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
 		)
 		.option(
 			'--audience <audience>',
@@ -49,7 +47,6 @@ export function registerPushCommand(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
 			const token = await authenticateForPush(client, {
-				token: options.token,
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? url
 			});

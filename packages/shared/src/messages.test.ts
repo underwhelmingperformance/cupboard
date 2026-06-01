@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-	bootstrapResponseSchema,
 	cacheListResponseSchema,
 	cachePutBodySchema,
 	cacheRemoveResponseSchema,
@@ -139,14 +138,9 @@ describe('rootSetBodySchema', () => {
 });
 
 describe('response schemas', () => {
-	it('accepts a well-formed bootstrap and stats response', () => {
-		expect({
-			bootstrap: bootstrapResponseSchema.safeParse({
-				url: 'https://cupboard.test',
-				publicKey: 'cupboard:key',
-				token: 'jwt'
-			}).success,
-			stats: statsResponseSchema.safeParse({
+	it('accepts a well-formed stats response', () => {
+		expect(
+			statsResponseSchema.safeParse({
 				storePaths: 1,
 				narBlobs: 1,
 				narFileSize: 1000,
@@ -155,7 +149,7 @@ describe('response schemas', () => {
 				pendingUploads: 0,
 				totalFileSize: 1234
 			}).success
-		}).toStrictEqual({ bootstrap: true, stats: true });
+		).toBe(true);
 	});
 
 	it('rejects a stats response with a negative count', () => {

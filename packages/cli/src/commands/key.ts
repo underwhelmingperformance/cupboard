@@ -7,14 +7,10 @@ import type {
 } from '@cupboard/shared';
 import type { Command } from 'commander';
 
-import { authenticate } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client.ts';
 import { createReporter, type Reporter, type ResultRow } from '../reporter.ts';
-
-interface KeyOptions {
-	readonly token: string;
-}
 
 export interface KeyClient {
 	listKeys(token: AccessCredential): Promise<KeyListResponse>;
@@ -31,13 +27,12 @@ export function registerKeyCommands(program: Command): void {
 		.command('list')
 		.description('List the signing key set.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, options: KeyOptions) => {
+		.action(async (url: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runKeyList(token, reporter, client);
 		});
@@ -46,13 +41,12 @@ export function registerKeyCommands(program: Command): void {
 		.command('rotate')
 		.description('Add a new signing key, opening a rotation window.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, options: KeyOptions) => {
+		.action(async (url: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runKeyRotate(token, reporter, client);
 		});
@@ -62,13 +56,12 @@ export function registerKeyCommands(program: Command): void {
 		.description('Retire a signing key one stage at a time.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<id>', "key id: a rotated key's UUID, or 'active'")
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, id: string, options: KeyOptions) => {
+		.action(async (url: string, id: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runKeyRetire(id, token, reporter, client);
 		});

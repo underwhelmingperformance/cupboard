@@ -3,7 +3,6 @@ import {
 	type AuthKeyRetireResponse,
 	type AuthKeyRotateResponse,
 	type AuthKeySummary,
-	type BootstrapResponse,
 	CacheInfo,
 	type CacheListResponse,
 	cacheNameSchema,
@@ -102,12 +101,7 @@ import {
 	writeJwtTtlSeconds
 } from './auth.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
-import {
-	constantTimeEqual,
-	generateSigningKey,
-	sha256Hex,
-	signNixFingerprint
-} from './crypto.ts';
+import { generateSigningKey, signNixFingerprint } from './crypto.ts';
 import * as schema from './db/schema.ts';
 import {
 	CacheNotEmptyError,
@@ -323,10 +317,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 		);
 
-		this.app.post('/auth/bootstrap', (context) =>
-			serverErrorResponse(this.handleBootstrap(context.req.raw))
-		);
-
 		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
 		// the tokens it mints. `/token` is unauthenticated: the subject token is
 		// itself the credential. The Worker proxies `/.well-known/jwks.json` here.
@@ -537,23 +527,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return serverErrorResponse(
 			(async () => handler(parseRequestValue(cacheNameSchema, cacheName)))()
 		);
-	}
-
-	private async handleBootstrap(request: Request): Promise<Response> {
-		if (!(await this.isBootstrapAuthorised(request))) {
-			throw new UnauthenticatedError();
-		}
-
-		// Ensure both keys exist (narinfo signing + JWT signing), then mint a
-		// short-lived admin access token.
-		const publicKey = await this.publishedKeysText();
-		const token = await this.mintAdminJwt();
-
-		return Response.json({
-			url: new URL(request.url).origin,
-			publicKey,
-			token
-		} satisfies BootstrapResponse);
 	}
 
 	private async handleToken(request: Request): Promise<Response> {
@@ -2788,23 +2761,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return keys.map((key) => key.publicKey).join('\n');
 	}
 
-	private async isBootstrapAuthorised(request: Request): Promise<boolean> {
-		if (this.env.CUPBOARD_BOOTSTRAP_TOKEN === '') {
-			return false;
-		}
-
-		const token = bearerToken(request);
-
-		if (token === undefined) {
-			return false;
-		}
-
-		return constantTimeEqual(
-			await sha256Hex(token),
-			await sha256Hex(this.env.CUPBOARD_BOOTSTRAP_TOKEN)
-		);
-	}
-
 	private authIssuer(): string {
 		return this.env.CUPBOARD_AUTH_ISSUER || defaultAuthIssuer;
 	}
@@ -2981,23 +2937,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		return { kid, retired: outcome.retired };
-	}
-
-	private async mintAdminJwt(): Promise<string> {
-		const key = await this.activeAuthKey();
-
-		return mintAccessJwt(
-			key.privateJwk,
-			{
-				issuer: this.authIssuer(),
-				audience: this.authAudience(),
-				subject: 'bootstrap',
-				scope: 'admin',
-				kid: key.kid,
-				ttlSeconds: adminJwtTtlSeconds
-			},
-			new Date()
-		);
 	}
 
 	private decodeInbound(token: string): OidcClaims {

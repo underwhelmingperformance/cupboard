@@ -12,7 +12,6 @@ binding = "BLOBS"
 bucket_name = "cupboard-blobs"
 
 [vars]
-CUPBOARD_BOOTSTRAP_TOKEN = ""
 CUPBOARD_AUTH_ISSUER = "cupboard"
 CUPBOARD_AUTH_AUDIENCE = "cupboard"
 CUPBOARD_OWNER_ISSUER = ""

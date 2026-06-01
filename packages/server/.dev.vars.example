@@ -1,14 +1,23 @@
-# Local secrets for `wrangler dev`. Copy to `.dev.vars` and fill in.
-# `.dev.vars` is gitignored; this template is committed.
+# Local secrets and overrides for `wrangler dev`. Copy to `.dev.vars` and fill
+# in. `.dev.vars` is gitignored; this template is committed.
 #
 # Production secrets are set with `wrangler secret put <NAME>`.
 
-# Bearer token required for write and admin routes.
-CUPBOARD_WRITE_TOKEN=replace-me
-CUPBOARD_BOOTSTRAP_TOKEN=
+# R2 credentials for the presigned NAR uploads.
 R2_ACCOUNT_ID=
 R2_ACCESS_KEY_ID=
 R2_SECRET_ACCESS_KEY=
+
+# Owner identity: the OIDC issuer, subject and audience whose id_token is
+# exchanged for the admin token. Leave empty for a deployment with no owner.
+CUPBOARD_OWNER_ISSUER=
+CUPBOARD_OWNER_SUBJECT=
+CUPBOARD_OWNER_AUDIENCE=
+
+# The issuer and audience cupboard stamps into its own access tokens. Both
+# default to `cupboard` in wrangler.toml; set them here to override locally.
+CUPBOARD_AUTH_ISSUER=
+CUPBOARD_AUTH_AUDIENCE=
 
 # Private-read mode: set both to require HTTP Basic auth on cache reads
 # (narinfo, NAR, nix-cache-info). Leave both empty for a public cache.

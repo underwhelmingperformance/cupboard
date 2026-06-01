@@ -1,7 +1,7 @@
 import type { CheckDiscrepancy, CheckReport } from '@cupboard/shared';
 import type { Command } from 'commander';
 
-import { authenticate } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client.ts';
 import { createReporter, formatCount, type Reporter } from '../reporter.ts';
@@ -24,13 +24,12 @@ export function registerCheckCommand(program: Command): void {
 		.description('Check stored objects against committed metadata.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.option('--deep', 'recompute and compare each stored NAR file hash')
-		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(async (url: string, options: CheckOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runCheck(options.deep ?? false, token, reporter, client);
 		});

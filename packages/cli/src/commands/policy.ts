@@ -8,7 +8,7 @@ import {
 } from '@cupboard/shared';
 import type { Command } from 'commander';
 
-import { authenticate } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client.ts';
 import { parseTtl } from '../duration.ts';
@@ -20,12 +20,7 @@ import {
 	type ResultRow
 } from '../reporter.ts';
 
-interface PolicyOptions {
-	readonly token: string;
-}
-
 interface PolicyAddOptions {
-	readonly token: string;
 	readonly ttl: number;
 }
 
@@ -60,13 +55,12 @@ export function registerPolicyCommands(program: Command): void {
 		.command('list')
 		.description('List retention policies.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, options: PolicyOptions) => {
+		.action(async (url: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runPolicyList(token, reporter, client);
 		});
@@ -82,7 +76,6 @@ export function registerPolicyCommands(program: Command): void {
 			'default TTL for matching roots (e.g. 14d, 12h)',
 			parseTtl
 		)
-		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(
 			async (
 				url: string,
@@ -94,7 +87,7 @@ export function registerPolicyCommands(program: Command): void {
 					mode: reporterModeFromGlobals(program)
 				});
 				const client = CupboardClient.fromUrl(url);
-				const token = await authenticate(client, options.token);
+				const token = cachedOwnerProvider();
 
 				await runPolicyAdd(
 					parseScope(scope),
@@ -112,13 +105,12 @@ export function registerPolicyCommands(program: Command): void {
 		.description('Remove a retention policy by id.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<id>', 'policy id')
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, id: string, options: PolicyOptions) => {
+		.action(async (url: string, id: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runPolicyRemove(id, token, reporter, client);
 		});

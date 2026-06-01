@@ -2,17 +2,16 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { BootstrapResponse, TokenResponse } from '@cupboard/shared';
+import type { TokenResponse } from '@cupboard/shared';
 import { describe, expect, it } from 'vitest';
 
 import {
-	authenticate,
 	authenticateForPush,
 	authenticateGithubOidc,
 	cachedOwnerProvider
 } from './auth.ts';
 import { CupboardClient } from './client.ts';
-import { AuthSelectionError, OwnerLoginRequiredError } from './errors.ts';
+import { OwnerLoginRequiredError } from './errors.ts';
 import type { GithubOidcEnvironment } from './github-oidc.ts';
 import { writeCachedToken } from './token-store.ts';
 
@@ -52,41 +51,12 @@ function federatingClient(): CupboardClient {
 	});
 }
 
-describe('authenticate', () => {
-	it('exchanges the bootstrap secret eagerly, caches the token, and re-exchanges on refresh', async () => {
-		const authorisations: (string | undefined)[] = [];
-		let issued = 0;
-		const client = new CupboardClient(
-			new URL('https://cupboard.test'),
-			(_input, init) => {
-				authorisations.push(
-					new Headers(init?.headers).get('authorization') ?? undefined
-				);
-				issued += 1;
-
-				return Promise.resolve(
-					Response.json({
-						url: 'https://cupboard.test',
-						publicKey: 'cupboard:key',
-						token: `jwt-${String(issued)}`
-					} satisfies BootstrapResponse)
-				);
-			}
-		);
-
-		const provider = await authenticate(client, 'bootstrap-secret');
-		const eager = await provider.get();
-		const refreshed = await provider.refresh();
-		const afterRefresh = await provider.get();
-
-		expect({ eager, refreshed, afterRefresh, authorisations }).toStrictEqual({
-			eager: 'jwt-1',
-			refreshed: 'jwt-2',
-			afterRefresh: 'jwt-2',
-			authorisations: ['Bearer bootstrap-secret', 'Bearer bootstrap-secret']
-		});
-	});
-});
+async function cachePath(): Promise<string> {
+	return path.join(
+		await mkdtemp(path.join(tmpdir(), 'cupboard-auth-')),
+		'token'
+	);
+}
 
 describe('authenticateGithubOidc', () => {
 	it('federates a subject token into a write token, caching and refreshing it', async () => {
@@ -109,26 +79,7 @@ describe('authenticateGithubOidc', () => {
 });
 
 describe('authenticateForPush', () => {
-	const client = new CupboardClient(new URL('https://cupboard.test'), () =>
-		Promise.resolve(
-			Response.json({
-				url: 'https://cupboard.test',
-				publicKey: 'cupboard:key',
-				token: 'jwt'
-			} satisfies BootstrapResponse)
-		)
-	);
-
-	it('uses the bootstrap secret when only a token is given', async () => {
-		const provider = await authenticateForPush(client, {
-			token: 'secret',
-			audience: 'https://cupboard.test'
-		});
-
-		expect(await provider.get()).toBe('jwt');
-	});
-
-	it('federates via GitHub OIDC when only --github-oidc is given', async () => {
+	it('federates via GitHub OIDC when --github-oidc is given', async () => {
 		const provider = await authenticateForPush(federatingClient(), {
 			githubOidc: true,
 			audience: 'https://cache.example.workers.dev',
@@ -138,30 +89,20 @@ describe('authenticateForPush', () => {
 		expect(await provider.get()).toBe('write-1');
 	});
 
-	it.each([
-		{
-			name: 'both a token and --github-oidc',
-			token: 'secret',
-			githubOidc: true
-		},
-		{ name: 'neither a token nor --github-oidc', githubOidc: false }
-	])('rejects $name', async ({ token, githubOidc }) => {
-		await expect(
-			authenticateForPush(client, {
-				...(token === undefined ? {} : { token }),
-				githubOidc,
-				audience: 'https://cupboard.test'
-			})
-		).rejects.toBeInstanceOf(AuthSelectionError);
+	it('otherwise uses the cached owner token, prompting a login when absent', async () => {
+		const provider = await authenticateForPush(federatingClient(), {
+			audience: 'https://cache.example.workers.dev'
+		});
+
+		await expect(provider.get()).rejects.toBeInstanceOf(
+			OwnerLoginRequiredError
+		);
 	});
 });
 
 describe('cachedOwnerProvider', () => {
 	it('returns the cached token and refuses to refresh it', async () => {
-		const target = path.join(
-			await mkdtemp(path.join(tmpdir(), 'cupboard-auth-')),
-			'token'
-		);
+		const target = await cachePath();
 		await writeCachedToken('cached.admin.jwt', target);
 		const provider = cachedOwnerProvider(target);
 
@@ -172,11 +113,7 @@ describe('cachedOwnerProvider', () => {
 	});
 
 	it('prompts a login when no token is cached', async () => {
-		const target = path.join(
-			await mkdtemp(path.join(tmpdir(), 'cupboard-auth-')),
-			'absent'
-		);
-		const provider = cachedOwnerProvider(target);
+		const provider = cachedOwnerProvider(await cachePath());
 
 		await expect(provider.get()).rejects.toBeInstanceOf(
 			OwnerLoginRequiredError

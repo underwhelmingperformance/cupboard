@@ -6,7 +6,7 @@ import {
 } from '@cupboard/shared';
 import type { Command } from 'commander';
 
-import { authenticate } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
@@ -16,10 +16,6 @@ import {
 	type Reporter,
 	type ResultRow
 } from '../reporter.ts';
-
-interface CacheOptions {
-	readonly token: string;
-}
 
 interface CacheCreateOptions {
 	readonly token: string;
@@ -64,13 +60,12 @@ export function registerCacheCommands(program: Command): void {
 		.command('list')
 		.description('List the caches and their priority and size.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, options: CacheOptions) => {
+		.action(async (url: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runCacheList(token, reporter, client);
 		});
@@ -85,13 +80,12 @@ export function registerCacheCommands(program: Command): void {
 			'Nix substituter priority (lower is preferred)',
 			parsePriority
 		)
-		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(async (url: string, name: string, options: CacheCreateOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runCacheCreate(
 				name,
@@ -108,13 +102,12 @@ export function registerCacheCommands(program: Command): void {
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<name>', 'cache name')
 		.option('--force', 'tear down even when the cache still holds store paths')
-		.requiredOption('--token <token>', 'bootstrap secret')
 		.action(async (url: string, name: string, options: CacheRemoveOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runCacheRemove(
 				name,
@@ -130,13 +123,12 @@ export function registerCacheCommands(program: Command): void {
 		.description("Show one cache's priority and size.")
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<name>', 'cache name')
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, name: string, options: CacheOptions) => {
+		.action(async (url: string, name: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider();
 
 			await runCacheInspect(name, token, reporter, client);
 		});

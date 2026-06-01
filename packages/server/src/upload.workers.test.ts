@@ -162,19 +162,6 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('rejects a bootstrap with the wrong or absent secret', async () => {
-		const wrong = await fetchPath('/auth/bootstrap', {
-			headers: { authorization: 'Bearer not-the-secret' },
-			method: 'POST'
-		});
-		const missing = await fetchPath('/auth/bootstrap', { method: 'POST' });
-
-		expect({ wrong: wrong.status, missing: missing.status }).toStrictEqual({
-			wrong: StatusCodes.UNAUTHORIZED,
-			missing: StatusCodes.UNAUTHORIZED
-		});
-	});
-
 	it('rejects unauthenticated management requests', async () => {
 		const stats = await fetchPath('/stats');
 		const negotiate = await fetchPath('/uploads', {

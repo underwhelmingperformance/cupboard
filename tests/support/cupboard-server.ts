@@ -20,8 +20,6 @@ import { presigningFetcher } from './r2-presign.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 
-export const bootstrapToken = 'e2e-bootstrap-token';
-
 // The owner identity the stub issuer asserts and the worker is configured to
 // trust; the audience stands in for the CLI's registered OAuth client id.
 export const ownerSubject = 'e2e-owner';
@@ -61,7 +59,6 @@ export class CupboardTestServer {
 		const issuer = await StubOidcIssuer.start();
 		const worker = new Miniflare({
 			bindings: {
-				CUPBOARD_BOOTSTRAP_TOKEN: bootstrapToken,
 				CUPBOARD_OWNER_ISSUER: issuer.issuer,
 				CUPBOARD_OWNER_SUBJECT: ownerSubject,
 				CUPBOARD_OWNER_AUDIENCE: ownerAudience,
