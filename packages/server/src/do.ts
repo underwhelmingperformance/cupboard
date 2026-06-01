@@ -1,7 +1,11 @@
 import {
 	type BootstrapResponse,
 	CacheInfo,
+	type CacheListResponse,
 	cacheNameSchema,
+	cachePutBodySchema,
+	type CacheRemoveResponse,
+	type CacheSummary,
 	type CommitResponse,
 	DEFAULT_CACHE,
 	type DeletePathResponse,
@@ -63,6 +67,7 @@ import {
 } from './crypto.ts';
 import * as schema from './db/schema.ts';
 import {
+	CacheNotEmptyError,
 	InsufficientScopeError,
 	LastSigningKeyError,
 	type R2PresignBindingName,
@@ -185,6 +190,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.post('/keys/retire/:id', (context) =>
 			serverErrorResponse(
 				this.handleKeyRetire(context.req.raw, context.req.param('id'))
+			)
+		);
+
+		// The cache registry is deployment-wide, so it lives at `/caches` rather
+		// than under a per-cache prefix.
+		this.app.get('/caches', (context) =>
+			serverErrorResponse(this.handleListCaches(context.req.raw))
+		);
+		this.app.put('/caches/:cacheName', (context) =>
+			serverErrorResponse(
+				this.handlePutCache(context.req.raw, context.req.param('cacheName'))
+			)
+		);
+		this.app.delete('/caches/:cacheName', (context) =>
+			serverErrorResponse(
+				this.handleRemoveCache(context.req.raw, context.req.param('cacheName'))
 			)
 		);
 
@@ -324,6 +345,142 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requireScope(request, 'admin');
 
 		return Response.json(this.stats(cache) satisfies StatsResponse);
+	}
+
+	private async handleListCaches(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const registered = this.db.select().from(schema.caches).all();
+		const caches = registered
+			.map((row) => this.cacheSummary(row.name, row.priority))
+			.toSorted((left, right) => (left.name > right.name ? 1 : -1));
+
+		return Response.json({ caches } satisfies CacheListResponse);
+	}
+
+	private async handlePutCache(
+		request: Request,
+		cacheName: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const cache = parseRequestValue(cacheNameSchema, cacheName);
+		const body = await parseRequestBody(cachePutBodySchema, request);
+
+		this.db
+			.insert(schema.caches)
+			.values({
+				name: cache,
+				priority: body.priority,
+				createdAt: new Date().toISOString()
+			})
+			.onConflictDoUpdate({
+				target: schema.caches.name,
+				set: { priority: body.priority }
+			})
+			.run();
+
+		return Response.json(
+			this.cacheSummary(cache, body.priority) satisfies CacheSummary
+		);
+	}
+
+	private async handleRemoveCache(
+		request: Request,
+		cacheName: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const cache = parseRequestValue(cacheNameSchema, cacheName);
+		const url = new URL(request.url);
+		const force = url.searchParams.get('force') === 'true';
+		const committedCount = this.cacheStorePathCount(cache);
+		const registered =
+			this.db
+				.select()
+				.from(schema.caches)
+				.where(eq(schema.caches.name, cache))
+				.get() !== undefined;
+
+		if (committedCount > 0 && !force) {
+			throw new CacheNotEmptyError(cache);
+		}
+
+		const storePathsRemoved = await this.tearDownCache(cache, url.origin);
+
+		return Response.json({
+			name: cache,
+			removed: registered || committedCount > 0,
+			storePathsRemoved
+		} satisfies CacheRemoveResponse);
+	}
+
+	private cacheStorePathCount(cache: string): number {
+		const result = this.db
+			.select({ count: count() })
+			.from(schema.narInfos)
+			.where(eq(schema.narInfos.cache, cache))
+			.get();
+
+		return result?.count ?? 0;
+	}
+
+	private cacheSummary(cache: string, priority: number): CacheSummary {
+		return {
+			name: cache,
+			priority,
+			storePaths: this.cacheStorePathCount(cache)
+		};
+	}
+
+	// Drops a named cache: removes its narinfo rows (row-first, queuing the
+	// object and shared-NAR cleanup), its roots, and the registry entry, then
+	// flushes the durable queues. Returns the number of store paths removed.
+	private tearDownCache(cache: string, origin: string): Promise<number> {
+		return this.ctx.blockConcurrencyWhile(async () => {
+			const now = new Date().toISOString();
+			const committed = this.db
+				.select({
+					storePathHash: schema.narInfos.storePathHash,
+					narHash: schema.narInfos.narHash
+				})
+				.from(schema.narInfos)
+				.where(eq(schema.narInfos.cache, cache))
+				.all();
+
+			this.db.transaction((tx) => {
+				for (const path of committed) {
+					tx.delete(schema.narInfos)
+						.where(
+							and(
+								eq(schema.narInfos.cache, cache),
+								eq(schema.narInfos.storePathHash, path.storePathHash)
+							)
+						)
+						.run();
+					this.enqueueNarInfoDeletion(
+						tx,
+						cache,
+						path.storePathHash,
+						path.narHash,
+						now
+					);
+				}
+
+				tx.delete(schema.retentionRootTargets)
+					.where(eq(schema.retentionRootTargets.cache, cache))
+					.run();
+				tx.delete(schema.retentionRoots)
+					.where(eq(schema.retentionRoots.cache, cache))
+					.run();
+				tx.delete(schema.caches).where(eq(schema.caches.name, cache)).run();
+			});
+
+			await this.flushQueuedNarInfoDeletions(origin);
+			await this.flushQueuedBlobDeletions(now);
+
+			return committed.length;
+		});
 	}
 
 	private async handleKeyList(request: Request): Promise<Response> {

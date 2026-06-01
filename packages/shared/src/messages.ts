@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import {
+	cachePrioritySchema,
 	compressionSchema,
 	nixSha256HashSchema,
 	positiveIntSchema,
@@ -219,6 +220,34 @@ export const keyRetireResponseSchema = z.strictObject({
 });
 export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
 
+// A cache summary names a cache (the empty string is the default), its Nix
+// priority and how many store paths it holds.
+export const cacheSummarySchema = z.strictObject({
+	name: z.string(),
+	priority: cachePrioritySchema,
+	storePaths: countSchema
+});
+export type ParsedCacheSummary = z.output<typeof cacheSummarySchema>;
+
+export const cacheListResponseSchema = z.strictObject({
+	caches: z.array(cacheSummarySchema)
+});
+export type ParsedCacheListResponse = z.output<typeof cacheListResponseSchema>;
+
+export const cachePutBodySchema = z.strictObject({
+	priority: cachePrioritySchema
+});
+export type ParsedCachePutBody = z.output<typeof cachePutBodySchema>;
+
+export const cacheRemoveResponseSchema = z.strictObject({
+	name: z.string(),
+	removed: z.boolean(),
+	storePathsRemoved: countSchema
+});
+export type ParsedCacheRemoveResponse = z.output<
+	typeof cacheRemoveResponseSchema
+>;
+
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
 // request bodies and the server builds response bodies without minting brands.
 // The `Parsed…` outputs above are the branded results of a successful parse.
@@ -250,3 +279,7 @@ export type SigningKeySummary = z.input<typeof signingKeySummarySchema>;
 export type KeyListResponse = z.input<typeof keyListResponseSchema>;
 export type KeyRotateResponse = z.input<typeof keyRotateResponseSchema>;
 export type KeyRetireResponse = z.input<typeof keyRetireResponseSchema>;
+export type CacheSummary = z.input<typeof cacheSummarySchema>;
+export type CacheListResponse = z.input<typeof cacheListResponseSchema>;
+export type CachePutBody = z.input<typeof cachePutBodySchema>;
+export type CacheRemoveResponse = z.input<typeof cacheRemoveResponseSchema>;

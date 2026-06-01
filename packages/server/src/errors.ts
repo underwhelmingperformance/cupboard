@@ -23,6 +23,15 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
+export class CacheNotEmptyError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly cache: string) {
+		super('Cache is not empty; pass force to tear it down');
+		this.name = 'CacheNotEmptyError';
+	}
+}
+
 export class LastSigningKeyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
