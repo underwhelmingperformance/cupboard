@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isNotModified } from './http.ts';
+import { isNotModified, narInfoObjectKey } from './http.ts';
 
 const etag = '"abc"';
 const lastModified = 'Thu, 01 Jan 2026 00:00:00 GMT';
@@ -70,5 +70,19 @@ describe('isNotModified', () => {
 		});
 
 		expect(isNotModified(requestWith(headers), responseHeaders)).toBe(expected);
+	});
+});
+
+describe('narInfoObjectKey', () => {
+	const hash = '0123456789abcdfghijklmnpqrsvwxyz';
+
+	it('keeps the default cache key bare and namespaces a named cache', () => {
+		expect({
+			default: narInfoObjectKey(hash),
+			named: narInfoObjectKey(hash, 'builds')
+		}).toStrictEqual({
+			default: `narinfo/${hash}`,
+			named: `narinfo/builds/${hash}`
+		});
 	});
 });

@@ -1,3 +1,4 @@
+import { DEFAULT_CACHE } from '@cupboard/shared';
 import { StatusCodes } from 'http-status-codes';
 
 import { sha256HexBytes } from './crypto.ts';
@@ -25,8 +26,17 @@ export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
 }
 
-export function narInfoObjectKey(storePathHash: string): string {
-	return `narinfo/${storePathHash}`;
+// The sole narinfo-key constructor: never inline the prefix elsewhere. The
+// default cache keeps the bare `narinfo/<hash>` key so existing objects are not
+// rematerialised; a named cache namespaces under its own segment. Store path
+// hashes never contain a slash, so the two shapes cannot collide.
+export function narInfoObjectKey(
+	storePathHash: string,
+	cache: string = DEFAULT_CACHE
+): string {
+	return cache === DEFAULT_CACHE
+		? `narinfo/${storePathHash}`
+		: `narinfo/${cache}/${storePathHash}`;
 }
 
 export function parseNarName(name: string): string | undefined {
