@@ -250,13 +250,19 @@ One DO SQLite database per deployment.
   - `id` (PK, single `active` row), `cache`, `last_store_path_hash` (nullable),
     `updated_at`. Holds a composite `(cache, store_path_hash)` position; empty
     restarts the scan at the first cache's lowest hash.
-- `auth_key` — deployment-owned key material for cupboard access JWTs.
-  - `id` (PK), `private_jwk_json`, `public_jwk_json`, `created_at`,
-    `retired_at`.
-- `oidc_trust` — generic OIDC trust rules for minting write-scoped JWTs (V4
-  increment 2).
-  - `id` (PK), `issuer`, `jwks_url` or discovery URL, `audience`, `scope`,
-    `claims_json`, allowed root names or prefixes, `created_at`, `disabled_at`.
+- `auth_key` — deployment-owned signing keys for cupboard access JWTs, a
+  rotatable set.
+  - `id` (PK), `kid`, `private_jwk_json`, `public_jwk_json`, `created_at`,
+    `retired_at` (nullable). The newest non-retired key mints; every non-retired
+    key verifies, and the JWKS publishes each one by its `kid`.
+- `oidc_trust` — OIDC trust rules that federate an external identity into a
+  cupboard scope.
+  - `id` (PK), `issuer`, `audience`, `scope` (`write` or `admin`), `claims_json`
+    (exact-match policy), `allowed_roots_json` (write rules), `created_at`,
+    `disabled_at` (nullable). The issuer's `jwks_uri` and accepted signing
+    algorithms are discovered from its OIDC metadata, not stored. The owner's
+    `admin` rule is seeded from deploy config; `write` rules are managed through
+    the admin API.
 
 ## Routes
 
@@ -264,47 +270,54 @@ Public reads and health/version endpoints are served by the Worker from R2 and
 the Cache API where possible; the Durable Object handles auth, writes, admin,
 and GC routes.
 
-| Method    | Path                    | Auth             | Notes                                           |
-| --------- | ----------------------- | ---------------- | ----------------------------------------------- |
-| GET, HEAD | `/nix-cache-info`       | public           | Worker; `text/x-nix-cache-info`.                |
-| GET, HEAD | `/<hash>.narinfo`       | public           | Worker, from the R2 object + edge cache.        |
-| GET, HEAD | `/nar/<hash>.nar.zst`   | public           | Worker, from R2 + edge cache.                   |
-| GET       | `/pubkey`               | public           | Worker, cached from the DO.                     |
-| GET       | `/_health`              | public           | Worker. Liveness.                               |
-| GET       | `/_version`             | public           | Worker. Git SHA, `+dirty` when dirty.           |
-| POST      | `/auth/bootstrap`       | bootstrap secret | DO. Mints a short-lived admin cupboard JWT.     |
-| GET       | `/stats`                | admin JWT        | DO. Cache size and object count.                |
-| GET       | `/keys`                 | admin JWT        | DO. Lists the signing key set.                  |
-| POST      | `/keys/rotate`          | admin JWT        | DO. Adds a signing+published key.               |
-| POST      | `/keys/retire/<id>`     | admin JWT        | DO. Demotes a key, then drops it.               |
-| DELETE    | `/paths/<hash>`         | admin JWT        | DO. Deletes one store path; defers its NAR.     |
-| GET       | `/roots`                | admin JWT        | DO. Lists retention roots.                      |
-| PUT       | `/roots/<encoded-name>` | write JWT        | DO. Creates or replaces a retention root.       |
-| DELETE    | `/roots/<encoded-name>` | admin JWT        | DO. Removes a retention root.                   |
-| POST      | `/uploads`              | write JWT        | DO. Returns skip, commit, or upload plans.      |
-| PUT       | `/uploads/<id>`         | write JWT        | DO. Returns R2 PUT URL and headers.             |
-| PUT       | (presigned R2 URL)      | URL              | Client uploads blob directly to R2.             |
-| POST      | `/uploads/<id>/commit`  | write JWT        | DO. Writes the narinfo row and R2 object.       |
-| POST      | `/gc`                   | admin JWT        | DO. Runs pending-upload, retention, and R2 GC.  |
-| GET       | `/caches`               | admin JWT        | DO. Lists the cache registry with counts.       |
-| PUT       | `/caches/<name>`        | admin JWT        | DO. Upserts a named cache's priority.           |
-| DELETE    | `/caches/<name>`        | admin JWT        | DO. Tears a cache down (`?force` if non-empty). |
-| GET       | `/policies`             | admin JWT        | DO. Lists retention policies.                   |
-| POST      | `/policies`             | admin JWT        | DO. Adds a retention policy.                    |
-| DELETE    | `/policies/<id>`        | admin JWT        | DO. Removes a retention policy.                 |
-| GET       | `/check`                | admin JWT        | DO. Read-only storage check (`?deep`).          |
-| POST      | `/verify`               | admin JWT        | DO. One reconciling pass (`?limit`).            |
-| POST      | `/auth/oidc/exchange`   | OIDC token       | DO. V4 increment 2: exchanges CI identity.      |
+| Method    | Path                                      | Auth               | Notes                                           |
+| --------- | ----------------------------------------- | ------------------ | ----------------------------------------------- |
+| GET, HEAD | `/nix-cache-info`                         | public             | Worker; `text/x-nix-cache-info`.                |
+| GET, HEAD | `/<hash>.narinfo`                         | public             | Worker, from the R2 object + edge cache.        |
+| GET, HEAD | `/nar/<hash>.nar.zst`                     | public             | Worker, from R2 + edge cache.                   |
+| GET       | `/pubkey`                                 | public             | Worker, cached from the DO.                     |
+| GET, HEAD | `/.well-known/jwks.json`                  | public             | Worker, from the DO. Auth public keys (`kid`).  |
+| GET       | `/.well-known/oauth-authorization-server` | public             | Worker. RFC 8414 metadata.                      |
+| GET       | `/_health`                                | public             | Worker. Liveness.                               |
+| GET       | `/_version`                               | public             | Worker. Git SHA, `+dirty` when dirty.           |
+| POST      | `/token`                                  | OIDC subject token | DO. RFC 8693 exchange; mints a write/admin JWT. |
+| GET       | `/stats`                                  | admin JWT          | DO. Cache size and object count.                |
+| GET       | `/keys`                                   | admin JWT          | DO. Lists the narinfo signing key set.          |
+| POST      | `/keys/rotate`                            | admin JWT          | DO. Adds a signing+published key.               |
+| POST      | `/keys/retire/<id>`                       | admin JWT          | DO. Demotes a key, then drops it.               |
+| GET       | `/keys/auth`                              | admin JWT          | DO. Lists the auth signing-key set.             |
+| POST      | `/keys/auth/rotate`                       | admin JWT          | DO. Adds a new active auth key.                 |
+| POST      | `/keys/auth/retire/<kid>`                 | admin JWT          | DO. Retires an auth key by `kid`.               |
+| DELETE    | `/paths/<hash>`                           | admin JWT          | DO. Deletes one store path; defers its NAR.     |
+| GET       | `/roots`                                  | admin JWT          | DO. Lists retention roots.                      |
+| PUT       | `/roots/<encoded-name>`                   | write JWT          | DO. Creates or replaces a retention root.       |
+| DELETE    | `/roots/<encoded-name>`                   | admin JWT          | DO. Removes a retention root.                   |
+| POST      | `/uploads`                                | write JWT          | DO. Returns skip, commit, or upload plans.      |
+| PUT       | `/uploads/<id>`                           | write JWT          | DO. Returns R2 PUT URL and headers.             |
+| PUT       | (presigned R2 URL)                        | URL                | Client uploads blob directly to R2.             |
+| POST      | `/uploads/<id>/commit`                    | write JWT          | DO. Writes the narinfo row and R2 object.       |
+| POST      | `/gc`                                     | admin JWT          | DO. Runs pending-upload, retention, and R2 GC.  |
+| GET       | `/caches`                                 | admin JWT          | DO. Lists the cache registry with counts.       |
+| PUT       | `/caches/<name>`                          | admin JWT          | DO. Upserts a named cache's priority.           |
+| DELETE    | `/caches/<name>`                          | admin JWT          | DO. Tears a cache down (`?force` if non-empty). |
+| GET       | `/policies`                               | admin JWT          | DO. Lists retention policies.                   |
+| POST      | `/policies`                               | admin JWT          | DO. Adds a retention policy.                    |
+| DELETE    | `/policies/<id>`                          | admin JWT          | DO. Removes a retention policy.                 |
+| GET       | `/oidc-trust`                             | admin JWT          | DO. Lists OIDC trust rules.                     |
+| POST      | `/oidc-trust`                             | admin JWT          | DO. Adds a write trust rule.                    |
+| DELETE    | `/oidc-trust/<id>`                        | admin JWT          | DO. Soft-disables a trust rule.                 |
+| GET       | `/check`                                  | admin JWT          | DO. Read-only storage check (`?deep`).          |
+| POST      | `/verify`                                 | admin JWT          | DO. One reconciling pass (`?limit`).            |
 
 Every path-scoped read and write route also has a `/cache/<name>/` form
 selecting a named cache, with the same auth as its bare twin: the narinfo, NAR,
 nix-cache-info and pubkey reads and the `stats`, `paths`, `roots`, `uploads` and
 `gc` routes. The bare routes serve the empty default cache. A named cache's
 nix-cache-info is rendered by the DO from its registered priority; its narinfo
-objects are namespaced in R2, while NAR blobs stay shared. The `/caches`
-registry, `/policies`, `/check` and `/verify` routes are deployment-wide and
-take no prefix; `/check` and `/verify` span every cache, since NAR blobs are
-shared.
+objects are namespaced in R2, while NAR blobs stay shared. The `/token`,
+`/.well-known/*`, `/caches` registry, `/policies`, `/oidc-trust`, `/keys/auth`,
+`/check` and `/verify` routes are deployment-wide and take no prefix; `/check`
+and `/verify` span every cache, since NAR blobs are shared.
 
 Root names in `PUT`/`DELETE /roots/<encoded-name>` live only in the path. The
 request body for `PUT` is `{ targets, ttlSeconds? }`; the server combines that
@@ -757,87 +770,124 @@ not lost.
 
 ## V4
 
-V4 replaces the V1 opaque bearer-token model with short-lived cupboard-issued
-JWT access tokens and CI identity federation. The goal is to make CI writes work
-without long-lived repository secrets while keeping upload and admin handlers on
-one validation path.
+V4 replaces the V1 opaque bearer-token model with short-lived, cupboard-issued
+JWT access tokens, and federates both CI and the owner without any long-lived
+secret. Authentication runs through a conventional OAuth 2.0 token-exchange
+endpoint built with `jose`: CI proves where a job ran, and the owner logs in
+interactively, each presenting an external OIDC token that cupboard exchanges
+for a short-lived cupboard JWT. Upload and admin handlers stay on one validation
+path: `Authorization: Bearer <cupboard-jwt>`.
 
-### Authentication and CI federation
+### The token endpoint
 
-Cupboard should avoid long-lived CI secrets. CI systems that can prove where a
-job came from should exchange that proof for a short-lived cupboard access JWT
-instead of storing a write token as a repository secret.
+A single endpoint serves both callers, differing only by which trust rule the
+subject token matches. Verification is uniform; `jose` does the cryptography.
 
-The server should build its own small exchange endpoint rather than adopting a
-full auth framework or OAuth server. The exchange is cupboard-specific: verify
-an upstream identity token, match it against configured trust rules, and mint a
-cupboard access JWT. Use a JOSE/JWT library such as `jose` for signature, JWKS,
-issuer, audience, expiry, and algorithm validation; do not hand-roll JWT
-cryptography.
+- [x] `POST /token` — one RFC 8693 token-exchange grant. The `subject_token` is
+      an external OIDC token (the owner's `id_token` or a CI GitHub Actions
+      token); cupboard verifies it against the matching rule's issuer and mints
+      a cupboard access JWT — owner login yields `admin`, CI yields `write`.
+      Success and error bodies follow RFC 6749 §5.1/§5.2;
+      `Cache-Control:     no-store`.
+- [x] Sign cupboard access JWTs with a deployment-owned key (`auth_key`) in the
+      RFC 9068 shape: `typ: at+jwt`, a `scope` claim, and the signing key's
+      `kid` in the header. Write tokens carry a `cb_roots` claim; admin tokens
+      are unconstrained. Tokens are short-lived and stateless — no issued-token
+      table; expiry and key rotation cover revocation.
+- [x] Verify inbound tokens with issuer and audience pinned and an asymmetric
+      algorithm allowlist (RS256/PS256/ES256/EdDSA), never the token's own
+      header and never `alg: none` or a symmetric algorithm. Verification has
+      its own path, so an inbound OIDC token is rejected on resource routes.
+- [ ] Discover each issuer's `jwks_uri` and accepted signing algorithms from its
+      OIDC metadata (`<issuer>/.well-known/openid-configuration`), cached with a
+      cooldown. A trust rule stores only the issuer, so `jwks_uri` is never
+      hand-typed; the discovered `id_token_signing_alg_values_supported`,
+      intersected with cupboard's asymmetric allowlist, narrows the accepted
+      algorithms per issuer (RS256 fallback when the issuer omits the field).
+- [x] `GET /.well-known/jwks.json` publishes the auth public keys, DO-served and
+      Worker-proxied like `/pubkey`;
+      `GET /.well-known/oauth-authorization-server` is RFC 8414 metadata built
+      at the edge from the deployment origin.
 
-- [x] Replace opaque stored bearer tokens on upload/admin handlers with
-      cupboard-issued JWT access tokens. Handlers validate one credential type:
-      `Authorization: Bearer <cupboard-jwt>`.
-- [x] Sign cupboard access JWTs with a deployment-owned key stored in DO SQLite
-      as `auth_key`. Bootstrap-admin JWTs include the base claims `iss`, `aud`,
-      `sub`, `iat`, `nbf`, `exp`, `jti`, and `scope`. OIDC-minted write JWTs may
-      additionally include provider-origin audit claims, such as CI provider,
-      repository ID, workflow ref, run ID, run attempt, ref, and SHA.
-- [x] Keep access JWTs short-lived and stateless. Do not store each issued JWT
-      in the database; rely on expiry and signing-key rotation rather than a
-      token table for normal operation.
-- [ ] Keep long-lived secrets out of normal request handlers. The bootstrap
-      secret is accepted only by `/auth/bootstrap`, which mints a short-lived
-      admin JWT. External CI OIDC tokens are accepted only by
-      `/auth/oidc/exchange`, which mints a short-lived write JWT.
-- [x] Add the `auth_key` table holding the active JWT signing key, with `id`,
-      `private_jwk_json`, `public_jwk_json`, `created_at`, and `retired_at` (the
-      latter reserved for future key rotation).
-- [ ] Add generic `oidc_trust` rows for CI identity rules, with `id`, `issuer`,
-      `jwks_url` or discovery URL, `audience`, `scope`, `claims_json`, allowed
-      root names or prefixes, `created_at`, and `disabled_at`. `issuer` and
-      `audience` are required checks; configured claims are exact-match policy
-      data, so providers are data rather than hardcoded branches.
-- [x] Add the `/auth/bootstrap` DO route. It is the only route that accepts the
-      long-lived bootstrap secret.
-- [ ] Add the `/auth/oidc/exchange` DO route. It is the only route that accepts
-      external OIDC tokens.
-- [ ] Add a generic OIDC exchange backed by `oidc_trust`, with required `issuer`
-      and `audience` checks and configurable exact-match claims. Treat GitHub
-      Actions as the first documented fixture and CLI convenience path, not a
-      hardcoded provider. The same trust-rule evaluator should also fit Cognito,
-      Google Workload Identity Federation, and other OIDC issuers that provide
-      signed tokens with stable claims.
-- [ ] Store trust rules in `oidc_trust`. Prefer stable ID claims when a provider
-      has them, such as GitHub `repository_id` and `repository_owner_id`; keep
-      names like `repository` and `workflow_ref` for readability and optional
-      narrowing. Support claim-exact matches first, with pattern matching only
-      if a concrete use case needs it.
-- [ ] Bind write-scoped JWTs to the roots they may update. A trust rule should
-      produce either an allowed root set or a root-name prefix/namespace, so a
-      CI token for one repository cannot replace another repository's retention
-      root.
-- [ ] Add CLI support for CI exchange. In GitHub Actions, request an OIDC token
-      with `id-token: write`, pass cupboard's configured audience, exchange it,
-      and use the returned cupboard JWT for the existing push flow.
-- [ ] Add admin commands to list, add, disable, and inspect OIDC trust rules.
-- [x] Remove the legacy `token` table and V1 opaque-token init flow once the
-      bootstrap exchange and admin JWTs cover the write and admin routes.
-- [ ] Tests:
-  - [x] Unit: JWT verification rejects wrong issuer, audience, algorithm,
-        expiry, not-before, missing scope, and malformed claims.
-  - [ ] Unit: trust-rule matching accepts only the configured issuer, audience,
-        and claim set; include GitHub Actions as one fixture, not a special
-        provider branch.
-  - [x] Integration: `/auth/bootstrap` returns an admin JWT and upload/admin
-        handlers accept only the required scope.
-  - [ ] Integration: `/auth/oidc/exchange` accepts a signed OIDC JWT whose
-        issuer, audience, and claims match a trust rule and rejects unknown or
-        mismatched issuers, audiences, and claims. Include a GitHub-shaped token
-        as one fixture.
-  - [ ] E2E: CI-style push obtains a cupboard JWT by exchange and performs the
-        normal negotiate, prepare, and commit flow without any stored cupboard
-        secret.
+### Trust rules and the owner
+
+- [x] `oidc_trust` rules federate an external identity into a scope: filter by
+      issuer, exact-match every configured claim, most-specific match wins.
+      Prefer stable ID claims (GitHub `repository_id`, `repository_owner_id`).
+      Providers are data, not hardcoded branches — the same evaluator fits
+      Google, Entra, Auth0, Okta, and GitHub Actions.
+- [x] The owner is an `admin` rule seeded on DO init from deploy config
+      (`CUPBOARD_OWNER_*`), pinned on issuer, subject, and audience. Break-glass
+      is a redeploy with updated config. CI rules are `write`-scoped, added
+      through the admin API, and bind the minted token to `allowed_roots` via
+      `cb_roots`, enforced at `PUT /roots/<name>` so a CI token for one
+      repository cannot replace another's root. A `cb_roots` entry matches a
+      root by exact name, or — when it ends with `/` — any root beneath that
+      prefix. The claim scopes retention roots only; NAR uploads stay
+      deployment-wide, shared within the owner's single trust domain (see
+      Tenancy).
+- [x] Admin `oidc-trust` CRUD: list (with a `disabled` flag, no `jwks` detail),
+      add a write rule, and soft-disable. The owner rule is not editable through
+      the API.
+
+### Owner interactive login
+
+- [ ] `cupboard login` obtains an owner `id_token` from the configured generic
+      OIDC provider (a registered public client; PKCE, no client secret) and
+      exchanges it at `/token` for an admin JWT. The default flow is PKCE with a
+      127.0.0.1 loopback redirect; `--headless` falls back to the RFC 8628
+      device flow. The owner rule pins `aud` to the client id, blocking
+      cross-app `id_token` replay.
+- [ ] Cache the admin JWT at `~/.config/cupboard/token` (mode 0600) and reuse it
+      across invocations; a 401 prompts re-login. `init` and the admin commands
+      take the cached token through the existing `TokenProvider` contract. A
+      `refresh_token` grant is deferred.
+
+### CI federation
+
+- [x] `cupboard push --github-oidc [--audience <aud>]` requests a GitHub Actions
+      OIDC token (`id-token: write`) for cupboard's audience and exchanges it
+      for a root-scoped write JWT, with no stored cupboard secret. `--audience`
+      defaults to the Worker URL.
+
+### Key rotation and maintenance
+
+- [x] Auth-key rotation as a key set: the newest non-retired key mints, every
+      non-retired key verifies, and the JWKS publishes each.
+      `POST     /keys/auth/rotate` adds a key; `POST /keys/auth/retire/<kid>`
+      retires one and refuses the last.
+- [x] The cron drives garbage collection and verification through direct Durable
+      Object RPC (`runGarbageCollection`/`runVerification`), authorised by the
+      service binding, so no secret is exchanged on the maintenance path.
+
+### Removing the bootstrap secret
+
+- [ ] Once the cron (RPC) and the CLI (login / `--github-oidc`) no longer use
+      it, delete `/auth/bootstrap`, `CUPBOARD_BOOTSTRAP_TOKEN`, and the
+      bootstrap response schema. Break-glass becomes a redeploy with fresh owner
+      config.
+- [x] Remove the legacy `token` table and V1 opaque-token init flow.
+
+### Tests
+
+- [x] Unit: cupboard-JWT verification rejects a wrong issuer, audience,
+      algorithm, expiry, not-before, missing scope, unknown `kid`, missing
+      `typ`, and a malformed `cb_roots` claim; inbound OIDC verification against
+      a local JWKS covers RS256/ES256/EdDSA and rejects a symmetric algorithm.
+- [x] Unit: trust-rule matching accepts only the configured issuer, audience and
+      claim set, with GitHub Actions and an owner rule as fixtures.
+- [x] Integration: `/token` returns the right OAuth error for an unsupported
+      grant, a non-JWT subject token, and a subject token matching no rule; the
+      owner rule is seeded on init; JWKS and AS metadata have the expected
+      shape.
+- [x] Integration: a write token may set only its permitted roots; auth-key
+      rotation keeps old tokens verifying until the key is retired; the cron RPC
+      runs GC and verify with no secret.
+- [ ] E2E: owner login against a stubbed OIDC issuer yields an admin JWT and a
+      non-owner subject is refused; a CI-style GitHub Actions token is exchanged
+      for a write JWT and performs the normal push, while a mismatched
+      issuer/audience/claim is rejected; `CUPBOARD_BOOTSTRAP_TOKEN` exists
+      nowhere.
 
 ## Correctness and hygiene pass
 
