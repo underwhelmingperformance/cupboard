@@ -1,6 +1,8 @@
 import {
 	type BootstrapResponse,
+	CacheInfo,
 	type CommitResponse,
+	DEFAULT_CACHE,
 	type DeletePathResponse,
 	type KeyListResponse,
 	type KeyRetireResponse,
@@ -1689,9 +1691,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private initialise(): Promise<void> {
-		this.migrationPromise ??= migrate(this.db, migrations);
+		this.migrationPromise ??= this.migrateAndSeed();
 
 		return this.migrationPromise;
+	}
+
+	private async migrateAndSeed(): Promise<void> {
+		await migrate(this.db, migrations);
+
+		// The default cache always exists in the registry so its priority is
+		// resolved the same way as a named cache's. Idempotent across restarts.
+		this.db
+			.insert(schema.caches)
+			.values({
+				name: DEFAULT_CACHE,
+				priority: CacheInfo.default.priority,
+				createdAt: new Date().toISOString()
+			})
+			.onConflictDoNothing()
+			.run();
 	}
 }
 

@@ -57,6 +57,13 @@
 			"when": 1780285031703,
 			"tag": "0007_signing_key_set",
 			"breakpoints": true
+		},
+		{
+			"idx": 8,
+			"version": "6",
+			"when": 1780289527950,
+			"tag": "0008_named_caches",
+			"breakpoints": true
 		}
 	]
 }
