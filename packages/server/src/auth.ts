@@ -2,9 +2,28 @@ import { importJWK, jwtVerify, SignJWT } from 'jose';
 
 export type AccessScope = 'write' | 'admin';
 
+// Admin tokens (owner) are unconstrained; a write token (CI) may carry
+// `cbRoots`, the retention roots — exact names or `<prefix>` patterns — it is
+// permitted to mutate.
 export interface AccessClaims {
 	readonly scope: AccessScope;
 	readonly subject: string;
+	readonly cbRoots?: readonly string[];
+}
+
+// The minted-token type per RFC 9068, set in the header and verified on the way
+// back in.
+const accessTokenType = 'at+jwt';
+const callbackRootsClaim = 'cb_roots';
+
+export const adminJwtTtlSeconds = 10 * 60;
+export const writeJwtTtlSeconds = 15 * 60;
+
+// A public key in the verification set, addressed by its `kid` so a rotated key
+// set can hold several at once.
+export interface AuthPublicKey {
+	readonly kid: string;
+	readonly publicJwk: JsonWebKey;
 }
 
 export interface MintAccessJwtOptions {
@@ -12,7 +31,10 @@ export interface MintAccessJwtOptions {
 	readonly audience: string;
 	readonly subject: string;
 	readonly scope: AccessScope;
+	readonly kid: string;
 	readonly ttlSeconds: number;
+	readonly cbRoots?: readonly string[];
+	readonly auditClaims?: Readonly<Record<string, unknown>>;
 }
 
 export interface VerifyAccessJwtOptions {
@@ -52,6 +74,13 @@ export class MissingSubjectError extends AccessTokenError {
 	}
 }
 
+export class InvalidRootConstraintError extends AccessTokenError {
+	constructor() {
+		super('Access token cb_roots claim is not an array of strings');
+		this.name = 'InvalidRootConstraintError';
+	}
+}
+
 const jwtAlgorithm = 'EdDSA';
 const clockToleranceSeconds = 30;
 
@@ -84,8 +113,21 @@ export async function mintAccessJwt(
 	const key = await importJWK(privateJwk, jwtAlgorithm);
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
-	return new SignJWT({ scope: options.scope })
-		.setProtectedHeader({ alg: jwtAlgorithm })
+	// Audit claims are spread first so the registered claims and scope/cb_roots
+	// below always win; the registered claims set via the builder cannot be
+	// clobbered by them either.
+	return new SignJWT({
+		...options.auditClaims,
+		scope: options.scope,
+		...(options.cbRoots === undefined
+			? {}
+			: { [callbackRootsClaim]: options.cbRoots })
+	})
+		.setProtectedHeader({
+			alg: jwtAlgorithm,
+			typ: accessTokenType,
+			kid: options.kid
+		})
 		.setIssuer(options.issuer)
 		.setAudience(options.audience)
 		.setSubject(options.subject)
@@ -97,20 +139,32 @@ export async function mintAccessJwt(
 }
 
 export async function verifyAccessJwt(
-	publicJwk: JsonWebKey,
+	keys: readonly AuthPublicKey[],
 	token: string,
 	options: VerifyAccessJwtOptions,
 	now: Date
 ): Promise<AccessClaims> {
-	const key = await importJWK(publicJwk, jwtAlgorithm);
+	const verified = await jwtVerify(
+		token,
+		async (header) => {
+			const match = keys.find((entry) => entry.kid === header.kid);
 
-	const verified = await jwtVerify(token, key, {
-		issuer: options.issuer,
-		audience: options.audience,
-		algorithms: [jwtAlgorithm],
-		clockTolerance: clockToleranceSeconds,
-		currentDate: now
-	}).catch((error: unknown) => {
+			if (match === undefined) {
+				throw new Error('no verification key for the token key id');
+			}
+
+			return importJWK(match.publicJwk, jwtAlgorithm);
+		},
+		{
+			issuer: options.issuer,
+			audience: options.audience,
+			algorithms: [jwtAlgorithm],
+			typ: accessTokenType,
+			requiredClaims: ['exp', 'nbf'],
+			clockTolerance: clockToleranceSeconds,
+			currentDate: now
+		}
+	).catch((error: unknown) => {
 		throw new AccessTokenVerificationError({ cause: error });
 	});
 
@@ -130,5 +184,24 @@ export async function verifyAccessJwt(
 		throw new MissingSubjectError();
 	}
 
-	return { scope, subject };
+	return {
+		scope,
+		subject,
+		...parseCallbackRoots(verified.payload[callbackRootsClaim])
+	};
+}
+
+function parseCallbackRoots(value: unknown): { cbRoots?: readonly string[] } {
+	if (value === undefined) {
+		return {};
+	}
+
+	if (
+		!Array.isArray(value) ||
+		!value.every((entry) => typeof entry === 'string')
+	) {
+		throw new InvalidRootConstraintError();
+	}
+
+	return { cbRoots: value };
 }

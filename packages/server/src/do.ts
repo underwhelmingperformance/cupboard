@@ -63,6 +63,7 @@ import migrations from '../drizzle/migrations.js';
 import {
 	type AccessClaims,
 	type AccessScope,
+	adminJwtTtlSeconds,
 	generateAuthKeyPair,
 	mintAccessJwt,
 	verifyAccessJwt
@@ -133,8 +134,6 @@ type SchemaWriter =
 	| SchemaDatabase
 	| Parameters<Parameters<SchemaDatabase['transaction']>[0]>[0];
 
-const adminJwtTtlSeconds = 10 * 60;
-
 const storedSignaturesSchema = z.array(z.string());
 
 // An optional `?limit` on `POST /verify`: a positive integer, clamped to
@@ -155,6 +154,7 @@ interface SigningKey {
 const bootstrapKeyName = 'cupboard-1';
 
 interface AuthKeyPair {
+	readonly kid: string;
 	readonly privateJwk: JsonWebKey;
 	readonly publicJwk: JsonWebKey;
 }
@@ -2499,25 +2499,43 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		if (existing !== undefined) {
+			const kid =
+				existing.kid === '' ? this.backfillAuthKeyKid() : existing.kid;
+
 			return {
+				kid,
 				privateJwk: JSON.parse(existing.privateJwkJson) as JsonWebKey,
 				publicJwk: JSON.parse(existing.publicJwkJson) as JsonWebKey
 			};
 		}
 
 		const generated = await generateAuthKeyPair();
+		const kid = crypto.randomUUID();
 
 		this.db
 			.insert(schema.authKeys)
 			.values({
 				id: 'active',
+				kid,
 				privateJwkJson: JSON.stringify(generated.privateJwk),
 				publicJwkJson: JSON.stringify(generated.publicJwk),
 				createdAt: new Date().toISOString()
 			})
 			.run();
 
-		return generated;
+		return { kid, ...generated };
+	}
+
+	private backfillAuthKeyKid(): string {
+		const kid = crypto.randomUUID();
+
+		this.db
+			.update(schema.authKeys)
+			.set({ kid })
+			.where(eq(schema.authKeys.id, 'active'))
+			.run();
+
+		return kid;
 	}
 
 	private async mintAdminJwt(): Promise<string> {
@@ -2530,6 +2548,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				audience: this.authAudience(),
 				subject: 'bootstrap',
 				scope: 'admin',
+				kid: key.kid,
 				ttlSeconds: adminJwtTtlSeconds
 			},
 			new Date()
@@ -2551,7 +2570,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		try {
 			claims = await verifyAccessJwt(
-				key.publicJwk,
+				[{ kid: key.kid, publicJwk: key.publicJwk }],
 				token,
 				{ issuer: this.authIssuer(), audience: this.authAudience() },
 				new Date()

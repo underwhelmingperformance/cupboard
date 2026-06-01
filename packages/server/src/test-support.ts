@@ -149,7 +149,7 @@ export async function mintServerSignedToken(
 	scope: AccessScope,
 	subject = 'scope-test'
 ): Promise<string> {
-	const privateJwk = await runInDurableObject(server, (_instance, state) => {
+	const key = await runInDurableObject(server, (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { authKeys } });
 		const row = database
 			.select()
@@ -161,16 +161,20 @@ export async function mintServerSignedToken(
 			throw new Error('expected an active auth key to mint a scoped token');
 		}
 
-		return JSON.parse(row.privateJwkJson) as JsonWebKey;
+		return {
+			kid: row.kid,
+			privateJwk: JSON.parse(row.privateJwkJson) as JsonWebKey
+		};
 	});
 
 	return mintAccessJwt(
-		privateJwk,
+		key.privateJwk,
 		{
 			issuer: 'cupboard',
 			audience: 'cupboard',
 			subject,
 			scope,
+			kid: key.kid,
 			ttlSeconds: 600
 		},
 		new Date()
