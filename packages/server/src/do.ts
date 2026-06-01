@@ -1,6 +1,7 @@
 import {
 	type BootstrapResponse,
 	CacheInfo,
+	cacheNameSchema,
 	type CommitResponse,
 	DEFAULT_CACHE,
 	type DeletePathResponse,
@@ -175,9 +176,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.post('/auth/bootstrap', (context) =>
 			serverErrorResponse(this.handleBootstrap(context.req.raw))
 		);
-		this.app.get('/stats', (context) =>
-			serverErrorResponse(this.handleStats(context.req.raw))
-		);
 		this.app.get('/keys', (context) =>
 			serverErrorResponse(this.handleKeyList(context.req.raw))
 		);
@@ -189,39 +187,116 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.handleKeyRetire(context.req.raw, context.req.param('id'))
 			)
 		);
+
+		// Each path-scoped route has a bare form (the default cache) and a
+		// `/cache/:cacheName/` form. The per-route scope is identical between the
+		// two; the cache-scoped form validates the name inside the error boundary.
+		this.app.get('/stats', (context) =>
+			serverErrorResponse(this.handleStats(context.req.raw, DEFAULT_CACHE))
+		);
+		this.app.get('/cache/:cacheName/stats', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleStats(context.req.raw, cache)
+			)
+		);
 		this.app.delete('/paths/:hash', (context) =>
 			serverErrorResponse(
-				this.handleDeletePath(context.req.raw, context.req.param('hash'))
+				this.handleDeletePath(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('hash')
+				)
+			)
+		);
+		this.app.delete('/cache/:cacheName/paths/:hash', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleDeletePath(context.req.raw, cache, context.req.param('hash'))
 			)
 		);
 		this.app.get('/roots', (context) =>
-			serverErrorResponse(this.handleListRoots(context.req.raw))
+			serverErrorResponse(this.handleListRoots(context.req.raw, DEFAULT_CACHE))
+		);
+		this.app.get('/cache/:cacheName/roots', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleListRoots(context.req.raw, cache)
+			)
 		);
 		this.app.put('/roots/:name', (context) =>
 			serverErrorResponse(
-				this.handleSetRoot(context.req.raw, context.req.param('name'))
+				this.handleSetRoot(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('name')
+				)
+			)
+		);
+		this.app.put('/cache/:cacheName/roots/:name', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleSetRoot(context.req.raw, cache, context.req.param('name'))
 			)
 		);
 		this.app.delete('/roots/:name', (context) =>
 			serverErrorResponse(
-				this.handleRemoveRoot(context.req.raw, context.req.param('name'))
+				this.handleRemoveRoot(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('name')
+				)
+			)
+		);
+		this.app.delete('/cache/:cacheName/roots/:name', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleRemoveRoot(context.req.raw, cache, context.req.param('name'))
 			)
 		);
 		this.app.post('/uploads', (context) =>
-			serverErrorResponse(this.handleNegotiate(context.req.raw))
+			serverErrorResponse(this.handleNegotiate(context.req.raw, DEFAULT_CACHE))
+		);
+		this.app.post('/cache/:cacheName/uploads', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleNegotiate(context.req.raw, cache)
+			)
 		);
 		this.app.put('/uploads/:id', (context) =>
 			serverErrorResponse(
 				this.handlePrepareUpload(context.req.raw, context.req.param('id'))
 			)
 		);
+		this.app.put('/cache/:cacheName/uploads/:id', (context) =>
+			this.withCache(context.req.param('cacheName'), () =>
+				this.handlePrepareUpload(context.req.raw, context.req.param('id'))
+			)
+		);
 		this.app.post('/uploads/:id/commit', (context) =>
 			serverErrorResponse(
-				this.handleCommit(context.req.raw, context.req.param('id'))
+				this.handleCommit(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('id')
+				)
+			)
+		);
+		this.app.post('/cache/:cacheName/uploads/:id/commit', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleCommit(context.req.raw, cache, context.req.param('id'))
 			)
 		);
 		this.app.post('/gc', (context) =>
 			serverErrorResponse(this.handleGarbageCollection(context.req.raw))
+		);
+		this.app.post('/cache/:cacheName/gc', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handleGarbageCollection(context.req.raw, cache)
+			)
+		);
+	}
+
+	private withCache(
+		cacheName: string | undefined,
+		handler: (cache: string) => Promise<Response>
+	): Promise<Response> {
+		return serverErrorResponse(
+			(async () => handler(parseRequestValue(cacheNameSchema, cacheName)))()
 		);
 	}
 
@@ -242,10 +317,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} satisfies BootstrapResponse);
 	}
 
-	private async handleStats(request: Request): Promise<Response> {
+	private async handleStats(
+		request: Request,
+		cache: string
+	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		return Response.json(this.stats() satisfies StatsResponse);
+		return Response.json(this.stats(cache) satisfies StatsResponse);
 	}
 
 	private async handleKeyList(request: Request): Promise<Response> {
@@ -275,12 +353,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async handleDeletePath(
 		request: Request,
+		cache: string,
 		hash: string
 	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
 		const storePathHash = parseRequestValue(storePathHashSchema, hash);
 		const result = await this.deleteStorePath(
+			cache,
 			storePathHash,
 			new URL(request.url).origin
 		);
@@ -290,6 +370,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async handleSetRoot(
 		request: Request,
+		cache: string,
 		name: string
 	): Promise<Response> {
 		await this.requireScope(request, 'write');
@@ -301,17 +382,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			ttlSeconds: body.ttlSeconds
 		};
 
-		return Response.json(this.setRoot(requested) satisfies RootSetResponse);
+		return Response.json(
+			this.setRoot(cache, requested) satisfies RootSetResponse
+		);
 	}
 
-	private async handleListRoots(request: Request): Promise<Response> {
+	private async handleListRoots(
+		request: Request,
+		cache: string
+	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		return Response.json(this.listRoots() satisfies RootListResponse);
+		return Response.json(this.listRoots(cache) satisfies RootListResponse);
 	}
 
 	private async handleRemoveRoot(
 		request: Request,
+		cache: string,
 		name: string
 	): Promise<Response> {
 		await this.requireScope(request, 'admin');
@@ -319,17 +406,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const rootName = parseRequestValue(rootNameSchema, name);
 
 		return Response.json(
-			this.removeRoot(rootName) satisfies RootRemoveResponse
+			this.removeRoot(cache, rootName) satisfies RootRemoveResponse
 		);
 	}
 
-	private setRoot(request: RootSetCommand): RootSetResponse {
+	private loadOrCreateCache(cache: string): void {
+		// The default cache is seeded at init; a named cache is registered with
+		// the default priority on first write and adjusted later via PUT /caches.
+		if (cache === DEFAULT_CACHE) {
+			return;
+		}
+
+		this.db
+			.insert(schema.caches)
+			.values({
+				name: cache,
+				priority: CacheInfo.default.priority,
+				createdAt: new Date().toISOString()
+			})
+			.onConflictDoNothing()
+			.run();
+	}
+
+	private setRoot(cache: string, request: RootSetCommand): RootSetResponse {
 		const now = new Date();
 		const nowIso = now.toISOString();
 		const expiresAt =
 			request.ttlSeconds === undefined
 				? undefined
 				: new Date(now.getTime() + request.ttlSeconds * 1000).toISOString();
+
+		this.loadOrCreateCache(cache);
 
 		// Replace the root wholesale: a re-set fully declares the channel, so the
 		// old row and target set are dropped and rewritten. The createdAt of an
@@ -339,19 +446,35 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const existing = tx
 				.select()
 				.from(schema.retentionRoots)
-				.where(eq(schema.retentionRoots.name, request.name))
+				.where(
+					and(
+						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.name, request.name)
+					)
+				)
 				.get();
 			const created = existing?.createdAt ?? nowIso;
 
 			tx.delete(schema.retentionRootTargets)
-				.where(eq(schema.retentionRootTargets.rootName, request.name))
+				.where(
+					and(
+						eq(schema.retentionRootTargets.cache, cache),
+						eq(schema.retentionRootTargets.rootName, request.name)
+					)
+				)
 				.run();
 			tx.delete(schema.retentionRoots)
-				.where(eq(schema.retentionRoots.name, request.name))
+				.where(
+					and(
+						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.name, request.name)
+					)
+				)
 				.run();
 
 			tx.insert(schema.retentionRoots)
 				.values({
+					cache,
 					name: request.name,
 					expiresAt,
 					createdAt: created,
@@ -362,6 +485,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			tx.insert(schema.retentionRootTargets)
 				.values(
 					request.targets.map((target) => ({
+						cache,
 						rootName: request.name,
 						storePathHash: target.storePathHash,
 						storePath: target.storePath
@@ -372,17 +496,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return created;
 		});
 
-		return this.rootSummary(request.name, expiresAt, createdAt, nowIso, nowIso);
+		return this.rootSummary(
+			cache,
+			request.name,
+			expiresAt,
+			createdAt,
+			nowIso,
+			nowIso
+		);
 	}
 
-	private listRoots(): RootListResponse {
+	private listRoots(cache: string): RootListResponse {
 		const now = new Date().toISOString();
-		const roots = this.db.select().from(schema.retentionRoots).all();
+		const roots = this.db
+			.select()
+			.from(schema.retentionRoots)
+			.where(eq(schema.retentionRoots.cache, cache))
+			.all();
 
 		return {
 			roots: roots
 				.map((root) =>
 					this.rootSummary(
+						cache,
 						root.name,
 						root.expiresAt ?? undefined,
 						root.createdAt,
@@ -394,19 +530,34 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
-	private removeRoot(name: string): RootRemoveResponse {
+	private removeRoot(cache: string, name: string): RootRemoveResponse {
 		return this.db.transaction((tx) => {
 			const existing = tx
 				.select()
 				.from(schema.retentionRoots)
-				.where(eq(schema.retentionRoots.name, name))
+				.where(
+					and(
+						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.name, name)
+					)
+				)
 				.get();
 
 			tx.delete(schema.retentionRootTargets)
-				.where(eq(schema.retentionRootTargets.rootName, name))
+				.where(
+					and(
+						eq(schema.retentionRootTargets.cache, cache),
+						eq(schema.retentionRootTargets.rootName, name)
+					)
+				)
 				.run();
 			tx.delete(schema.retentionRoots)
-				.where(eq(schema.retentionRoots.name, name))
+				.where(
+					and(
+						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.name, name)
+					)
+				)
 				.run();
 
 			return { name, removed: existing !== undefined };
@@ -414,6 +565,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private rootSummary(
+		cache: string,
 		name: string,
 		expiresAt: string | undefined,
 		createdAt: string,
@@ -423,7 +575,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const targets = this.db
 			.select()
 			.from(schema.retentionRootTargets)
-			.where(eq(schema.retentionRootTargets.rootName, name))
+			.where(
+				and(
+					eq(schema.retentionRootTargets.cache, cache),
+					eq(schema.retentionRootTargets.rootName, name)
+				)
+			)
 			.all();
 
 		return {
@@ -432,33 +589,42 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			expired: expiresAt !== undefined && expiresAt <= now,
 			createdAt,
 			updatedAt,
-			targets: this.rootTargets(targets)
+			targets: this.rootTargets(cache, targets)
 		};
 	}
 
 	private rootTargets(
+		cache: string,
 		pairs: readonly { storePathHash: string; storePath: string }[]
 	): RootTarget[] {
 		return pairs
 			.map((pair) => ({
 				storePathHash: pair.storePathHash,
 				storePath: pair.storePath,
-				present: this.hasCommittedNarInfo(pair.storePathHash)
+				present: this.hasCommittedNarInfo(cache, pair.storePathHash)
 			}))
 			.toSorted((a, b) => (a.storePathHash > b.storePathHash ? 1 : -1));
 	}
 
-	private hasCommittedNarInfo(storePathHash: string): boolean {
+	private hasCommittedNarInfo(cache: string, storePathHash: string): boolean {
 		return (
 			this.db
 				.select()
 				.from(schema.narInfos)
-				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, storePathHash)
+					)
+				)
 				.get() !== undefined
 		);
 	}
 
-	private async handleNegotiate(request: Request): Promise<Response> {
+	private async handleNegotiate(
+		request: Request,
+		cache: string
+	): Promise<Response> {
 		await this.requireScope(request, 'write');
 
 		const body = await parseRequestBody(uploadNegotiateRequestSchema, request);
@@ -468,7 +634,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const existingNarInfo = this.db
 				.select()
 				.from(schema.narInfos)
-				.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, metadata.storePathHash)
+					)
+				)
 				.get();
 
 			if (existingNarInfo !== undefined) {
@@ -477,7 +648,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 
 				if (object !== null) {
-					await this.ensureNarInfoObject(existingNarInfo.storePathHash);
+					await this.ensureNarInfoObject(cache, existingNarInfo.storePathHash);
 					uploads.push({
 						action: 'skip',
 						storePathHash: metadata.storePathHash,
@@ -878,6 +1049,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async handleCommit(
 		request: Request,
+		cache: string,
 		uploadId: string
 	): Promise<Response> {
 		await this.requireScope(request, 'write');
@@ -910,11 +1082,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const existingNarInfo = this.db
 			.select()
 			.from(schema.narInfos)
-			.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, metadata.storePathHash)
+				)
+			)
 			.get();
 
 		if (existingNarInfo !== undefined) {
-			await this.ensureNarInfoObject(existingNarInfo.storePathHash);
+			await this.ensureNarInfoObject(cache, existingNarInfo.storePathHash);
 			this.clearPendingUpload(uploadId);
 
 			return Response.json({
@@ -928,7 +1105,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		verifyUploadedObject(object, pending.expectedSize, metadata);
 
-		const committed = await this.commitMetadata(metadata);
+		const committed = await this.commitMetadata(cache, metadata);
 		this.clearPendingUpload(uploadId);
 
 		if (committed) {
@@ -942,11 +1119,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const winner = this.db
 			.select()
 			.from(schema.narInfos)
-			.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, metadata.storePathHash)
+				)
+			)
 			.get();
 
 		if (winner !== undefined) {
-			await this.ensureNarInfoObject(winner.storePathHash);
+			await this.ensureNarInfoObject(cache, winner.storePathHash);
 		}
 
 		return Response.json({
@@ -980,14 +1162,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	private async ensureNarInfoObject(storePathHash: string): Promise<void> {
+	private async ensureNarInfoObject(
+		cache: string,
+		storePathHash: string
+	): Promise<void> {
 		// Runs in a critical section, and against a freshly read row, so it cannot
 		// race a delete: a concurrent delete that removed the row after the caller
 		// read it must not be undone by re-materialising the object from a stale
 		// copy.
 		await this.ctx.blockConcurrencyWhile(async () => {
 			const existing = await this.env.BLOBS.head(
-				narInfoObjectKey(storePathHash)
+				narInfoObjectKey(storePathHash, cache)
 			);
 
 			if (existing !== null) {
@@ -997,23 +1182,33 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const row = this.db
 				.select()
 				.from(schema.narInfos)
-				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, storePathHash)
+					)
+				)
 				.get();
 
 			if (row === undefined) {
 				return;
 			}
 
-			await this.putNarInfoObject(storePathHash, this.narInfoFromRow(row));
+			await this.putNarInfoObject(
+				cache,
+				storePathHash,
+				this.narInfoFromRow(row)
+			);
 		});
 	}
 
 	private async putNarInfoObject(
+		cache: string,
 		storePathHash: string,
 		narInfo: NarInfo
 	): Promise<void> {
 		await this.env.BLOBS.put(
-			narInfoObjectKey(storePathHash),
+			narInfoObjectKey(storePathHash, cache),
 			narInfo.render(),
 			{
 				httpMetadata: {
@@ -1024,10 +1219,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	private stats(): StatsResponse {
+	private stats(cache: string): StatsResponse {
+		// Store paths are per-cache; blobs are content-addressed and shared, so
+		// their count, total size and the in-flight uploads stay deployment-global.
 		const storePaths = this.db
 			.select({ count: count() })
 			.from(schema.narInfos)
+			.where(eq(schema.narInfos.cache, cache))
 			.get();
 		const blobs = this.db
 			.select({ count: count() })
@@ -1052,7 +1250,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
-	private collectUnreachable(now: string): {
+	private collectUnreachable(
+		cache: string,
+		now: string
+	): {
 		rootsExpired: number;
 		pathsSwept: number;
 	} {
@@ -1061,24 +1262,39 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const expiredRoots = this.db
 			.select({ name: schema.retentionRoots.name })
 			.from(schema.retentionRoots)
-			.where(lte(schema.retentionRoots.expiresAt, now))
+			.where(
+				and(
+					eq(schema.retentionRoots.cache, cache),
+					lte(schema.retentionRoots.expiresAt, now)
+				)
+			)
 			.all();
 
 		this.db.transaction((tx) => {
 			for (const root of expiredRoots) {
 				tx.delete(schema.retentionRootTargets)
-					.where(eq(schema.retentionRootTargets.rootName, root.name))
+					.where(
+						and(
+							eq(schema.retentionRootTargets.cache, cache),
+							eq(schema.retentionRootTargets.rootName, root.name)
+						)
+					)
 					.run();
 			}
 
 			tx.delete(schema.retentionRoots)
-				.where(lte(schema.retentionRoots.expiresAt, now))
+				.where(
+					and(
+						eq(schema.retentionRoots.cache, cache),
+						lte(schema.retentionRoots.expiresAt, now)
+					)
+				)
 				.run();
 		});
 
-		// Mark the closure reachable from the live roots. `visited` guards the
-		// traversal; `retainedCommitted` is the keep-set of committed paths that
-		// the sweep spares.
+		// Mark the closure reachable from the live roots within this cache.
+		// `visited` guards the traversal; `retainedCommitted` is the keep-set of
+		// committed paths that the sweep spares.
 		const visited = new Set<string>();
 		const retainedCommitted = new Set<string>();
 		const queue: string[] = [];
@@ -1086,6 +1302,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		for (const target of this.db
 			.select({ storePathHash: schema.retentionRootTargets.storePathHash })
 			.from(schema.retentionRootTargets)
+			.where(eq(schema.retentionRootTargets.cache, cache))
 			.all()) {
 			if (!visited.has(target.storePathHash)) {
 				visited.add(target.storePathHash);
@@ -1103,7 +1320,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const row = this.db
 				.select({ referencesJson: schema.narInfos.referencesJson })
 				.from(schema.narInfos)
-				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, storePathHash)
+					)
+				)
 				.get();
 
 			if (row === undefined) {
@@ -1134,20 +1356,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 		}
 
-			// Guard: nothing committed is reachable and no root expired (no roots, or
-			// roots that only point at absent paths), so collecting would empty the cache
-			// without a retention event. Skip it.
-			if (retainedCommitted.size === 0 && expiredRoots.length === 0) {
-				return { rootsExpired: expiredRoots.length, pathsSwept: 0 };
-			}
+		// Guard: nothing committed is reachable in this cache and no root expired
+		// (no roots, or roots that only point at absent paths), so collecting would
+		// empty it without a retention event. Skip.
+		if (retainedCommitted.size === 0 && expiredRoots.length === 0) {
+			return { rootsExpired: expiredRoots.length, pathsSwept: 0 };
+		}
 
 		const committed = this.db
 			.select({
-				cache: schema.narInfos.cache,
 				storePathHash: schema.narInfos.storePathHash,
 				narHash: schema.narInfos.narHash
 			})
 			.from(schema.narInfos)
+			.where(eq(schema.narInfos.cache, cache))
 			.all();
 		let pathsSwept = 0;
 
@@ -1160,14 +1382,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				tx.delete(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, path.cache),
+							eq(schema.narInfos.cache, cache),
 							eq(schema.narInfos.storePathHash, path.storePathHash)
 						)
 					)
 					.run();
 				this.enqueueNarInfoDeletion(
 					tx,
-					path.cache,
+					cache,
 					path.storePathHash,
 					path.narHash,
 					now
@@ -1179,7 +1401,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return { rootsExpired: expiredRoots.length, pathsSwept };
 	}
 
-	private async handleGarbageCollection(request: Request): Promise<Response> {
+	private async handleGarbageCollection(
+		request: Request,
+		cache?: string
+	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
 		const now = new Date().toISOString();
@@ -1206,7 +1431,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.where(lt(schema.pendingUploads.expiresAt, now))
 				.run();
 
-			const { rootsExpired, pathsSwept } = this.collectUnreachable(now);
+			// Reachability GC is per-cache: each registered cache keeps its own
+			// closure. A bare /gc sweeps every cache; /cache/:name/gc sweeps one.
+			// Shared NAR blobs are retired only once globally unreferenced.
+			const sweepCaches =
+				cache === undefined
+					? this.db
+							.select({ name: schema.caches.name })
+							.from(schema.caches)
+							.all()
+							.map((row) => row.name)
+					: [cache];
+			let rootsExpired = 0;
+			let pathsSwept = 0;
+
+			for (const name of sweepCaches) {
+				const swept = this.collectUnreachable(name, now);
+				rootsExpired += swept.rootsExpired;
+				pathsSwept += swept.pathsSwept;
+			}
 
 			return {
 				pendingUploadsDeleted: expiredUploads.length,
@@ -1224,9 +1467,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async commitMetadata(
+		cache: string,
 		metadata: UploadPathMetadataFields
 	): Promise<boolean> {
 		const now = new Date().toISOString();
+		this.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeys();
 		const unsigned = new NarInfo(
 			metadata.storePath,
@@ -1260,6 +1505,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const rows = tx
 				.insert(schema.narInfos)
 				.values({
+					cache,
 					storePathHash: metadata.storePathHash,
 					storePath: metadata.storePath,
 					narHash: metadata.narHash,
@@ -1302,7 +1548,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			signed = signed.withSignature(sig);
 		}
 
-		await this.putNarInfoObject(metadata.storePathHash, signed);
+		await this.putNarInfoObject(cache, metadata.storePathHash, signed);
 
 		return true;
 	}
@@ -1363,6 +1609,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private deleteStorePath(
+		cache: string,
 		storePathHash: string,
 		origin: string
 	): Promise<DeletePathResponse> {
@@ -1373,7 +1620,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const row = this.db
 				.select()
 				.from(schema.narInfos)
-				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, storePathHash)
+					)
+				)
 				.get();
 
 			if (row === undefined) {

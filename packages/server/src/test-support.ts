@@ -1,6 +1,7 @@
 import {
 	type BootstrapResponse,
 	type CommitResponse,
+	DEFAULT_CACHE,
 	type DeletePathResponse,
 	NarInfo,
 	NixSha256Hash,
@@ -263,19 +264,29 @@ export function defaultWorkerServer(): DurableObjectStub<CupboardServer> {
 	return env.CUPBOARD_DO.get(id);
 }
 
+/** Prepends `/cache/<name>` to a path-scoped route for a named cache. */
+export function cacheScopedPath(cache: string, suffix: string): string {
+	return cache === DEFAULT_CACHE ? suffix : `/cache/${cache}${suffix}`;
+}
+
 export async function negotiateUploads(
 	token: string,
-	paths: readonly UploadPathMetadataFields[]
+	paths: readonly UploadPathMetadataFields[],
+	cache: string = DEFAULT_CACHE
 ): Promise<UploadNegotiateResponse> {
-	const response = await authorisedFetch('/uploads', token, {
-		body: JSON.stringify({
-			paths: paths.map((path) => uploadPathNegotiation(path))
-		}),
-		headers: {
-			'content-type': 'application/json'
-		},
-		method: 'POST'
-	});
+	const response = await authorisedFetch(
+		cacheScopedPath(cache, '/uploads'),
+		token,
+		{
+			body: JSON.stringify({
+				paths: paths.map((path) => uploadPathNegotiation(path))
+			}),
+			headers: {
+				'content-type': 'application/json'
+			},
+			method: 'POST'
+		}
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -308,9 +319,12 @@ export async function negotiateViaWorker(
  */
 export async function pushPath(
 	token: string,
-	metadata: UploadPathMetadataFields
+	metadata: UploadPathMetadataFields,
+	cache: string = DEFAULT_CACHE
 ): Promise<void> {
-	const decision = singleDecision(await negotiateUploads(token, [metadata]));
+	const decision = singleDecision(
+		await negotiateUploads(token, [metadata], cache)
+	);
 
 	if (decision.action === 'skip') {
 		return;
@@ -318,7 +332,7 @@ export async function pushPath(
 
 	if (decision.action === 'upload') {
 		const prepared = await authorisedFetch(
-			`/uploads/${decision.uploadId}`,
+			cacheScopedPath(cache, `/uploads/${decision.uploadId}`),
 			token,
 			{
 				body: JSON.stringify(uploadBlobMetadata(metadata)),
@@ -331,16 +345,19 @@ export async function pushPath(
 		await putNarBytes(decision.r2Key);
 	}
 
-	await commitUpload(token, decision.uploadId);
+	await commitUpload(token, decision.uploadId, cache);
 }
 
 export async function commitUpload(
 	token: string,
-	uploadId: string
+	uploadId: string,
+	cache: string = DEFAULT_CACHE
 ): Promise<CommitResponse> {
-	const response = await authorisedFetch(`/uploads/${uploadId}/commit`, token, {
-		method: 'POST'
-	});
+	const response = await authorisedFetch(
+		cacheScopedPath(cache, `/uploads/${uploadId}/commit`),
+		token,
+		{ method: 'POST' }
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 
