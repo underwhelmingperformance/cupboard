@@ -103,9 +103,15 @@ const adminJwtTtlSeconds = 10 * 60;
 const storedSignaturesSchema = z.array(z.string());
 
 interface SigningKey {
+	readonly id: string;
+	readonly name: string;
 	readonly privateJwk: JsonWebKey;
 	readonly publicKey: string;
+	readonly signing: boolean;
+	readonly published: boolean;
 }
+
+const bootstrapKeyName = 'cupboard-1';
 
 interface AuthKeyPair {
 	readonly privateJwk: JsonWebKey;
@@ -122,7 +128,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<{ Bindings: RuntimeEnv }>();
 	private readonly db: DrizzleSqliteDODatabase<typeof schema>;
 	private migrationPromise: Promise<void> | undefined;
-	private signingKeyPromise: Promise<SigningKey> | undefined;
+	private keysPromise: Promise<readonly SigningKey[]> | undefined;
 	private authKeyPromise: Promise<AuthKeyPair> | undefined;
 	private presigner: R2Presigner | undefined;
 	private publicKeyBody: TextBody | undefined;
@@ -143,9 +149,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private routes(): void {
 		this.app.on(['GET', 'HEAD'], '/pubkey', async (context) => {
-			const key = await this.signingKey();
-
-			this.publicKeyBody ??= new TextBody(`${key.publicKey}\n`);
+			this.publicKeyBody ??= new TextBody(
+				`${await this.publishedKeysText()}\n`
+			);
 
 			return textResponse(context.req.raw, this.publicKeyBody, {
 				'content-type': 'text/plain; charset=utf-8'
@@ -201,12 +207,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// Ensure both keys exist (narinfo signing + JWT signing), then mint a
 		// short-lived admin access token.
-		const key = await this.signingKey();
+		const publicKey = await this.publishedKeysText();
 		const token = await this.mintAdminJwt();
 
 		return Response.json({
 			url: new URL(request.url).origin,
-			publicKey: key.publicKey,
+			publicKey,
 			token
 		} satisfies BootstrapResponse);
 	}
@@ -1146,7 +1152,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		metadata: UploadPathMetadataFields
 	): Promise<boolean> {
 		const now = new Date().toISOString();
-		const key = await this.signingKey();
+		const signingKeys = await this.signingKeys();
 		const unsigned = new NarInfo(
 			metadata.storePath,
 			narObjectKey(metadata.narHash),
@@ -1159,9 +1165,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			metadata.deriver,
 			metadata.ca
 		);
-		const sig = await signNixFingerprint(
-			key.privateJwk,
-			unsigned.fingerprint()
+		const fingerprint = unsigned.fingerprint();
+		const sigs = await Promise.all(
+			signingKeys.map((key) =>
+				signNixFingerprint(key.privateJwk, fingerprint, key.name)
+			)
 		);
 		const narBlobRow = {
 			narHash: metadata.narHash,
@@ -1187,7 +1195,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					referencesJson: JSON.stringify(metadata.references),
 					deriver: metadata.deriver,
 					ca: metadata.ca,
-					sigsJson: JSON.stringify([sig]),
+					sigsJson: JSON.stringify(sigs),
 					createdAt: now
 				} satisfies typeof schema.narInfos.$inferInsert)
 				.onConflictDoNothing()
@@ -1213,10 +1221,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return false;
 		}
 
-		await this.putNarInfoObject(
-			metadata.storePathHash,
-			unsigned.withSignature(sig)
-		);
+		let signed = unsigned;
+
+		for (const sig of sigs) {
+			signed = signed.withSignature(sig);
+		}
+
+		await this.putNarInfoObject(metadata.storePathHash, signed);
 
 		return true;
 	}
@@ -1330,35 +1341,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.run();
 	}
 
-	private signingKey(): Promise<SigningKey> {
+	private loadedKeys(): Promise<readonly SigningKey[]> {
 		// A shared in-flight promise so concurrent first requests against an
-		// empty DO generate and insert the key exactly once. A failed attempt
-		// clears the cache so a later request can create the key.
-		this.signingKeyPromise ??= this.loadOrCreateSigningKey().catch(
-			(error: unknown) => {
-				this.signingKeyPromise = undefined;
-				throw error;
-			}
-		);
+		// empty DO generate and insert the bootstrap key exactly once. A failed
+		// attempt clears the cache so a later request can create it.
+		this.keysPromise ??= this.loadOrCreateKeys().catch((error: unknown) => {
+			this.keysPromise = undefined;
+			throw error;
+		});
 
-		return this.signingKeyPromise;
+		return this.keysPromise;
 	}
 
-	private async loadOrCreateSigningKey(): Promise<SigningKey> {
-		const existing = this.db
-			.select()
-			.from(schema.signingKeys)
-			.where(eq(schema.signingKeys.id, 'active'))
-			.get();
+	private async loadOrCreateKeys(): Promise<readonly SigningKey[]> {
+		const rows = this.db.select().from(schema.signingKeys).all();
 
-		if (existing !== undefined) {
-			return {
-				privateJwk: JSON.parse(existing.privateJwkJson) as JsonWebKey,
-				publicKey: existing.publicKey
-			};
+		if (rows.length > 0) {
+			return rows.map((row) => signingKeyFromRow(row)).toSorted(byPublicKey);
 		}
 
-		const generated = await generateSigningKey();
+		const generated = await generateSigningKey(bootstrapKeyName);
 
 		this.db
 			.insert(schema.signingKeys)
@@ -1366,11 +1368,40 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				id: 'active',
 				privateJwkJson: JSON.stringify(generated.privateJwk),
 				publicKey: generated.publicKey,
+				signing: true,
+				published: true,
 				createdAt: new Date().toISOString()
 			})
 			.run();
 
-		return generated;
+		return [
+			{
+				id: 'active',
+				name: bootstrapKeyName,
+				privateJwk: generated.privateJwk,
+				publicKey: generated.publicKey,
+				signing: true,
+				published: true
+			}
+		];
+	}
+
+	private async signingKeys(): Promise<readonly SigningKey[]> {
+		const keys = await this.loadedKeys();
+
+		return keys.filter((key) => key.signing);
+	}
+
+	private async publishedKeys(): Promise<readonly SigningKey[]> {
+		const keys = await this.loadedKeys();
+
+		return keys.filter((key) => key.published);
+	}
+
+	private async publishedKeysText(): Promise<string> {
+		const keys = await this.publishedKeys();
+
+		return keys.map((key) => key.publicKey).join('\n');
 	}
 
 	private async isBootstrapAuthorised(request: Request): Promise<boolean> {
@@ -1579,6 +1610,25 @@ async function serverErrorResponse(
 
 		throw error;
 	}
+}
+
+function signingKeyFromRow(
+	row: typeof schema.signingKeys.$inferSelect
+): SigningKey {
+	return {
+		id: row.id,
+		name: row.publicKey.slice(0, row.publicKey.indexOf(':')),
+		privateJwk: JSON.parse(row.privateJwkJson) as JsonWebKey,
+		publicKey: row.publicKey,
+		signing: row.signing,
+		published: row.published
+	};
+}
+
+// A stable order keeps the rendered `/pubkey` body and the narinfo `Sig:`
+// lines deterministic, so a re-materialised narinfo hashes identically.
+function byPublicKey(left: SigningKey, right: SigningKey): number {
+	return left.publicKey > right.publicKey ? 1 : -1;
 }
 
 function commitMetadataFromPathAndBlob(

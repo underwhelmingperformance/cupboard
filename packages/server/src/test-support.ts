@@ -27,7 +27,8 @@ import { expect } from 'vitest';
 import migrations from '../drizzle/migrations.js';
 
 import { type AccessScope, mintAccessJwt } from './auth.ts';
-import { authKeys } from './db/schema.ts';
+import { generateSigningKey } from './crypto.ts';
+import { authKeys, signingKeys } from './db/schema.ts';
 import {
 	internalOrigin,
 	narInfoObjectKey,
@@ -879,4 +880,58 @@ export async function migrateThrough(
 	throughIndex: number
 ): Promise<void> {
 	await migrate(drizzle(state.storage), migrationsThrough(throughIndex));
+}
+
+export interface SigningKeySeed {
+	readonly id: string;
+	readonly name: string;
+	readonly signing: boolean;
+	readonly published: boolean;
+}
+
+export interface SeededSigningKey {
+	readonly id: string;
+	readonly name: string;
+	readonly publicKey: string;
+}
+
+/**
+ * Plants signing keys directly in the current Durable Object's storage so a
+ * test can exercise multi-key signing without going through key rotation. Run
+ * it before the DO first loads its keys — the load is cached for the DO's
+ * lifetime — i.e. before the first bootstrap or read.
+ */
+export async function seedSigningKeys(
+	seeds: readonly SigningKeySeed[]
+): Promise<SeededSigningKey[]> {
+	return runInDurableObject(server, async (_instance, state) => {
+		await migrateThrough(state, latestMigrationIndex);
+
+		const database = drizzle(state.storage, { schema: { signingKeys } });
+		const seeded: SeededSigningKey[] = [];
+
+		for (const seed of seeds) {
+			const generated = await generateSigningKey(seed.name);
+
+			database
+				.insert(signingKeys)
+				.values({
+					id: seed.id,
+					privateJwkJson: JSON.stringify(generated.privateJwk),
+					publicKey: generated.publicKey,
+					signing: seed.signing,
+					published: seed.published,
+					createdAt: new Date().toISOString()
+				})
+				.run();
+
+			seeded.push({
+				id: seed.id,
+				name: seed.name,
+				publicKey: generated.publicKey
+			});
+		}
+
+		return seeded;
+	});
 }

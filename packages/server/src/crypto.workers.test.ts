@@ -22,14 +22,20 @@ describe('crypto', () => {
 			kty: 'OKP'
 		} satisfies JsonWebKey;
 
-		expect(await signNixFingerprint(privateJwk, fingerprint)).toBe(
+		expect(
+			await signNixFingerprint(privateJwk, fingerprint, 'cupboard-1')
+		).toBe(
 			'cupboard-1:7waROGMw+BXcaUyvBHxzYXL7VpQ982Qew5tP9YPUm9SIlqhnXXWQCXEc/BI9et/d06vL731Lv2krDHrHf85hBQ=='
 		);
 	});
 
 	it('generates an Ed25519 keypair and signs a Nix fingerprint', async () => {
-		const key = await generateSigningKey();
-		const signature = await signNixFingerprint(key.privateJwk, fingerprint);
+		const key = await generateSigningKey('cupboard-1');
+		const signature = await signNixFingerprint(
+			key.privateJwk,
+			fingerprint,
+			'cupboard-1'
+		);
 		const publicKey = parseNamedBytes(key.publicKey);
 		const signatureBytes = parseNamedBytes(signature);
 		const importedPublicKey = await crypto.subtle.importKey(

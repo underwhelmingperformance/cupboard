@@ -23,7 +23,7 @@ export function constantTimeEqual(left: string, right: string): boolean {
 	return difference === 0;
 }
 
-export async function generateSigningKey(): Promise<{
+export async function generateSigningKey(name: string): Promise<{
 	readonly privateJwk: JsonWebKey;
 	readonly publicKey: string;
 }> {
@@ -42,13 +42,14 @@ export async function generateSigningKey(): Promise<{
 
 	return {
 		privateJwk,
-		publicKey: `cupboard-1:${base64(new Uint8Array(publicRaw))}`
+		publicKey: `${name}:${base64(new Uint8Array(publicRaw))}`
 	};
 }
 
 export async function signNixFingerprint(
 	privateJwk: JsonWebKey,
-	fingerprint: string
+	fingerprint: string,
+	name: string
 ): Promise<string> {
 	const privateKey = await crypto.subtle.importKey(
 		'jwk',
@@ -63,7 +64,7 @@ export async function signNixFingerprint(
 		textEncoder.encode(fingerprint)
 	);
 
-	return `cupboard-1:${base64(new Uint8Array(signature))}`;
+	return `${name}:${base64(new Uint8Array(signature))}`;
 }
 
 function base64(bytes: Uint8Array): string {
