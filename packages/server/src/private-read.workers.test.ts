@@ -67,8 +67,10 @@ describe('private-read mode', () => {
 			unauthorisedStatus: unauthorised.status,
 			wwwAuthenticate: unauthorised.headers.get('www-authenticate'),
 			narinfoStatus: narinfo.status,
+			narinfoControl: narinfo.headers.get('cache-control'),
 			narUnauthorisedStatus: narUnauthorised.status,
 			narStatus: nar.status,
+			narControl: nar.headers.get('cache-control'),
 			cacheInfoUnauthorisedStatus: cacheInfoUnauthorised.status,
 			cacheInfoStatus: cacheInfo.status,
 			cacheInfoControl: cacheInfo.headers.get('cache-control')
@@ -76,12 +78,31 @@ describe('private-read mode', () => {
 			unauthorisedStatus: StatusCodes.UNAUTHORIZED,
 			wwwAuthenticate: 'Basic realm="cupboard"',
 			narinfoStatus: StatusCodes.OK,
+			narinfoControl: 'no-store',
 			narUnauthorisedStatus: StatusCodes.UNAUTHORIZED,
 			narStatus: StatusCodes.OK,
+			narControl: 'no-store',
 			cacheInfoUnauthorisedStatus: StatusCodes.UNAUTHORIZED,
 			cacheInfoStatus: StatusCodes.OK,
 			cacheInfoControl: 'no-store'
 		});
+	});
+
+	it('forces no-store on an authorised named-cache nix-cache-info', async () => {
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPath(init.token, metadata, 'builds');
+
+		const cacheInfo = await readFetch(
+			'/cache/builds/nix-cache-info',
+			authorised(),
+			privateEnv
+		);
+
+		expect({
+			status: cacheInfo.status,
+			control: cacheInfo.headers.get('cache-control')
+		}).toStrictEqual({ status: StatusCodes.OK, control: 'no-store' });
 	});
 
 	it('leaves the public routes ungated in private mode', async () => {

@@ -178,6 +178,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 		});
 
+		// A named cache's nix-cache-info is rendered from its registry priority;
+		// the Worker forwards it here (the default cache's is rendered at the edge).
+		this.app.on(
+			['GET', 'HEAD'],
+			'/cache/:cacheName/nix-cache-info',
+			(context) =>
+				serverErrorResponse(
+					this.handleCacheInfo(context.req.raw, context.req.param('cacheName'))
+				)
+		);
+
 		this.app.post('/auth/bootstrap', (context) =>
 			serverErrorResponse(this.handleBootstrap(context.req.raw))
 		);
@@ -345,6 +356,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requireScope(request, 'admin');
 
 		return Response.json(this.stats(cache) satisfies StatsResponse);
+	}
+
+	private async handleCacheInfo(
+		request: Request,
+		cacheName: string
+	): Promise<Response> {
+		const cache = parseRequestValue(cacheNameSchema, cacheName);
+		const row = this.db
+			.select({ priority: schema.caches.priority })
+			.from(schema.caches)
+			.where(eq(schema.caches.name, cache))
+			.get();
+		const info = new CacheInfo(
+			CacheInfo.default.storeDirectory,
+			CacheInfo.default.wantMassQuery,
+			row?.priority ?? CacheInfo.default.priority
+		);
+
+		return textResponse(request, info.render(), {
+			'content-type': 'text/x-nix-cache-info; charset=utf-8'
+		});
 	}
 
 	private async handleListCaches(request: Request): Promise<Response> {
