@@ -101,6 +101,11 @@ export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
 	return env.CUPBOARD_DO.get(id);
 }
 
+/** The Durable Object stub the harness is currently targeting. */
+export function currentServer(): DurableObjectStub<CupboardServer> {
+	return server;
+}
+
 export async function bootstrap(): Promise<BootstrapResponse> {
 	const response = await fetchPath('/auth/bootstrap', {
 		headers: {

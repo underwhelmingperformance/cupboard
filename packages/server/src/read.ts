@@ -1,4 +1,10 @@
-import { CacheInfo, cacheNameSchema, DEFAULT_CACHE } from '@cupboard/shared';
+import {
+	CacheInfo,
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	defaultAuthIssuer,
+	tokenExchangeGrantType
+} from '@cupboard/shared';
 import { StatusCodes } from 'http-status-codes';
 
 import { buildVersion } from './build-info.generated.ts';
@@ -53,6 +59,19 @@ export async function handleRead(
 			'content-type': 'text/plain; charset=utf-8',
 			'cache-control': 'no-store'
 		});
+	}
+
+	// OAuth discovery (RFC 8414), built at the edge. The endpoints are the
+	// deployment origin; the issuer mirrors the one cupboard stamps into its
+	// tokens so a client sees a single consistent identity.
+	if (pathname === '/.well-known/oauth-authorization-server') {
+		return authorizationServerMetadata(request, env);
+	}
+
+	// cupboard's auth public keys, served uncached from the DO so a rotation is
+	// visible immediately. The DO owns the key set, so the read proxies to it.
+	if (pathname === '/.well-known/jwks.json') {
+		return cupboardServer(env).fetch(request);
 	}
 
 	// A read may carry a `/cache/<name>/` prefix selecting a named cache; the
@@ -124,6 +143,24 @@ export async function handleRead(
 	}
 
 	return undefined;
+}
+
+function authorizationServerMetadata(request: Request, env: Env): Response {
+	const { origin } = new URL(request.url);
+	// Typegen narrows the binding to its configured literal; a deployment may
+	// still set it empty, so widen to `string` and fall back to the same default
+	// the Durable Object stamps into its tokens, keeping the advertised issuer and
+	// the token `iss` identical.
+	const configuredIssuer: string = env.CUPBOARD_AUTH_ISSUER;
+
+	return Response.json({
+		issuer: configuredIssuer || defaultAuthIssuer,
+		token_endpoint: `${origin}/token`,
+		jwks_uri: `${origin}/.well-known/jwks.json`,
+		grant_types_supported: [tokenExchangeGrantType],
+		scopes_supported: ['write', 'admin'],
+		token_endpoint_auth_methods_supported: ['none']
+	});
 }
 
 // Splits an optional `/cache/<name>/` prefix off the path. Returns the default

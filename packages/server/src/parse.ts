@@ -42,7 +42,11 @@ export async function parseFormBody<S extends z.ZodType>(
 	schema: S,
 	request: Request
 ): Promise<z.output<S>> {
-	const parameters = new URLSearchParams(await request.text());
+	// Decode the raw bytes rather than `request.text()`: the runtime warns when
+	// `.text()` is called on a body whose type is not `text/*`, and a urlencoded
+	// body parses identically from its UTF-8 bytes.
+	const body = new TextDecoder().decode(await request.arrayBuffer());
+	const parameters = new URLSearchParams(body);
 	const result = schema.safeParse(Object.fromEntries(parameters));
 
 	if (!result.success) {

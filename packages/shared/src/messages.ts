@@ -352,6 +352,27 @@ export const verifyReportSchema = z.strictObject({
 });
 export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
 
+// RFC 8693 token-exchange is the only grant the token endpoint accepts. The
+// subject token is an external OIDC JWT — the owner's `id_token` or a CI GitHub
+// Actions token — and `subject_token_type` is informational: verification is
+// uniform across both. The issued cupboard token is reported as an access token.
+export const tokenExchangeGrantType =
+	'urn:ietf:params:oauth:grant-type:token-exchange';
+export const issuedAccessTokenType =
+	'urn:ietf:params:oauth:token-type:access_token';
+
+// The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
+// accepted and ignored: the matched trust rule alone fixes the issued scope and
+// audience, so a non-strict object strips them rather than rejecting the request.
+export const tokenExchangeRequestSchema = z.object({
+	grant_type: z.string().min(1),
+	subject_token: z.string().min(1),
+	subject_token_type: z.string().min(1)
+});
+export type ParsedTokenExchangeRequest = z.output<
+	typeof tokenExchangeRequestSchema
+>;
+
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the cupboard JWT; `issued_token_type` is present for the
 // token-exchange grant. Field names are the OAuth wire spelling.
@@ -456,6 +477,7 @@ export type RetentionPolicyRemoveResponse = z.input<
 export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
 export type CheckReport = z.input<typeof checkReportSchema>;
 export type VerifyReport = z.input<typeof verifyReportSchema>;
+export type TokenExchangeRequest = z.input<typeof tokenExchangeRequestSchema>;
 export type TokenResponse = z.input<typeof tokenResponseSchema>;
 export type OidcTrustAddBody = z.input<typeof oidcTrustAddBodySchema>;
 export type OidcTrustSummary = z.input<typeof oidcTrustSummarySchema>;

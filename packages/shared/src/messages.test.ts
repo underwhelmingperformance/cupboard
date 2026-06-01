@@ -21,6 +21,7 @@ import {
 	rootSetBodySchema,
 	signingKeySummarySchema,
 	statsResponseSchema,
+	tokenExchangeRequestSchema,
 	tokenResponseSchema,
 	uploadDecisionSchema,
 	uploadNegotiateRequestSchema,
@@ -487,6 +488,40 @@ describe('verifyReportSchema', () => {
 		}
 	])('$name', ({ value, valid }) => {
 		expect(verifyReportSchema.safeParse(value).success).toBe(valid);
+	});
+});
+
+describe('tokenExchangeRequestSchema', () => {
+	const request = {
+		grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+		subject_token: 'inbound.jwt.value',
+		subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'
+	};
+
+	it.each([
+		{ name: 'a well-formed exchange request', value: request, valid: true },
+		{
+			name: 'a missing subject token',
+			value: { ...request, subject_token: undefined },
+			valid: false
+		},
+		{
+			name: 'an empty grant type',
+			value: { ...request, grant_type: '' },
+			valid: false
+		}
+	])('$name', ({ value, valid }) => {
+		expect(tokenExchangeRequestSchema.safeParse(value).success).toBe(valid);
+	});
+
+	it('ignores the optional fields RFC 8693 permits', () => {
+		const parsed = tokenExchangeRequestSchema.parse({
+			...request,
+			audience: 'https://cache.example.workers.dev',
+			scope: 'write'
+		});
+
+		expect(parsed).toStrictEqual(request);
 	});
 });
 

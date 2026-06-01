@@ -81,7 +81,10 @@ export class InvalidRootConstraintError extends AccessTokenError {
 	}
 }
 
-const jwtAlgorithm = 'EdDSA';
+// cupboard signs its own access tokens with EdDSA; the same value labels the
+// public key published in the JWKS.
+export const authJwtAlgorithm = 'EdDSA';
+const jwtAlgorithm = authJwtAlgorithm;
 const clockToleranceSeconds = 30;
 
 export async function generateAuthKeyPair(): Promise<{

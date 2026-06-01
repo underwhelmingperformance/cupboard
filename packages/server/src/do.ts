@@ -11,6 +11,7 @@ import {
 	type CommitResponse,
 	DEFAULT_CACHE,
 	type DeletePathResponse,
+	issuedAccessTokenType,
 	type KeyListResponse,
 	type KeyRetireResponse,
 	type KeyRotateResponse,
@@ -36,6 +37,9 @@ import {
 	type StatsResponse,
 	storePathHashSchema,
 	type UsageResponse,
+	tokenExchangeGrantType,
+	tokenExchangeRequestSchema,
+	type TokenResponse,
 	type UploadBlobMetadataFields,
 	type UploadDecision,
 	uploadNegotiateRequestSchema,
@@ -49,13 +53,26 @@ import {
 	type VerifyReport
 } from '@cupboard/shared';
 import { DurableObject } from 'cloudflare:workers';
-import { and, asc, count, eq, gt, gte, lt, lte, or, sql } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	count,
+	eq,
+	gt,
+	gte,
+	isNull,
+	lt,
+	lte,
+	or,
+	sql
+} from 'drizzle-orm';
 import {
 	drizzle,
 	type DrizzleSqliteDODatabase
 } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
+import type { JWTPayload } from 'jose';
 import { z } from 'zod';
 
 import migrations from '../drizzle/migrations.js';
@@ -64,9 +81,11 @@ import {
 	type AccessClaims,
 	type AccessScope,
 	adminJwtTtlSeconds,
+	authJwtAlgorithm,
 	generateAuthKeyPair,
 	mintAccessJwt,
-	verifyAccessJwt
+	verifyAccessJwt,
+	writeJwtTtlSeconds
 } from './auth.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
 import {
@@ -79,15 +98,18 @@ import * as schema from './db/schema.ts';
 import {
 	CacheNotEmptyError,
 	InsufficientScopeError,
+	InvalidGrantError,
 	LastSigningKeyError,
 	OAuthError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
+	StoredOidcTrustInvalidError,
 	StoredReferencesInvalidError,
 	StoredSignaturesInvalidError,
 	StoredUploadMetadataInvalidError,
 	UnauthenticatedError,
+	UnsupportedGrantTypeError,
 	UploadCacheMismatchError,
 	UploadedObjectChecksumMismatchError,
 	UploadedObjectChecksumMissingError,
@@ -109,6 +131,17 @@ import {
 	verificationBatchSize
 } from './http.ts';
 import {
+	decodeInboundClaims,
+	RemoteJwksStore,
+	verifyInboundOidcToken
+} from './oidc.ts';
+import {
+	matchOidcTrust,
+	type OidcClaims,
+	type OidcTrustRule
+} from './oidc-trust.ts';
+import {
+	parseFormBody,
 	parseRequestBody,
 	parseRequestValue,
 	parseStored,
@@ -154,6 +187,20 @@ interface SigningKey {
 
 const bootstrapKeyName = 'cupboard-1';
 
+// The owner's admin trust rule is seeded under a fixed id from deploy config;
+// the admin CRUD uses generated ids, so it never collides with this one.
+const ownerRuleId = 'owner';
+
+const storedClaimsSchema = z.record(z.string(), z.string());
+const storedAllowedRootsSchema = z.array(z.string());
+
+interface OwnerConfig {
+	readonly issuer: string;
+	readonly subject: string;
+	readonly jwksUrl: string;
+	readonly audience: string;
+}
+
 interface AuthKeyPair {
 	readonly kid: string;
 	readonly privateJwk: JsonWebKey;
@@ -174,6 +221,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private authKeyPromise: Promise<AuthKeyPair> | undefined;
 	private presigner: R2Presigner | undefined;
 	private publicKeyBody: TextBody | undefined;
+	private readonly jwks = new RemoteJwksStore();
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
@@ -216,6 +264,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.app.post('/auth/bootstrap', (context) =>
 			serverErrorResponse(this.handleBootstrap(context.req.raw))
+		);
+
+		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
+		// the tokens it mints. `/token` is unauthenticated: the subject token is
+		// itself the credential. The Worker proxies `/.well-known/jwks.json` here.
+		this.app.post('/token', (context) =>
+			serverErrorResponse(this.handleToken(context.req.raw))
+		);
+		this.app.on(['GET', 'HEAD'], '/.well-known/jwks.json', (context) =>
+			serverErrorResponse(this.handleJwks(context.req.raw))
 		);
 		this.app.get('/keys', (context) =>
 			serverErrorResponse(this.handleKeyList(context.req.raw))
@@ -406,6 +464,54 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			publicKey,
 			token
 		} satisfies BootstrapResponse);
+	}
+
+	private async handleToken(request: Request): Promise<Response> {
+		const body = await parseFormBody(tokenExchangeRequestSchema, request);
+
+		if (body.grant_type !== tokenExchangeGrantType) {
+			throw new UnsupportedGrantTypeError(body.grant_type);
+		}
+
+		// Matching routes the token to a rule on its unverified claims; the
+		// signature is then checked against that rule's issuer JWKS before any
+		// cupboard token is minted, so a forged claim cannot earn a scope.
+		const claims = this.decodeInbound(body.subject_token);
+		const rule = matchOidcTrust(this.enabledOidcTrustRules(), claims);
+
+		if (rule === undefined) {
+			throw new InvalidGrantError('No trust rule matches the subject token');
+		}
+
+		const verified = await this.verifyInbound(rule, body.subject_token);
+		const subject =
+			typeof verified.sub === 'string' && verified.sub !== ''
+				? verified.sub
+				: rule.id;
+		const ttlSeconds =
+			rule.scope === 'admin' ? adminJwtTtlSeconds : writeJwtTtlSeconds;
+		const accessToken = await this.mintRuleToken(rule, subject, ttlSeconds);
+
+		return Response.json(
+			{
+				access_token: accessToken,
+				token_type: 'Bearer',
+				expires_in: ttlSeconds,
+				scope: rule.scope,
+				issued_token_type: issuedAccessTokenType
+			} satisfies TokenResponse,
+			{ headers: { 'cache-control': 'no-store' } }
+		);
+	}
+
+	private async handleJwks(_request: Request): Promise<Response> {
+		const keys = await this.authPublicJwks();
+
+		// Served uncached so a key rotation is visible across colos at once.
+		return Response.json(
+			{ keys },
+			{ headers: { 'cache-control': 'no-cache' } }
+		);
 	}
 
 	private async handleStats(
@@ -2556,6 +2662,124 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	private decodeInbound(token: string): OidcClaims {
+		try {
+			return decodeInboundClaims(token);
+		} catch {
+			throw new InvalidGrantError('Subject token is not a JWT');
+		}
+	}
+
+	private async verifyInbound(
+		rule: OidcTrustRule,
+		token: string
+	): Promise<JWTPayload> {
+		try {
+			return await verifyInboundOidcToken(
+				this.jwks.resolver(rule.jwksUrl),
+				token,
+				{ issuer: rule.issuer, audience: rule.audience },
+				new Date()
+			);
+		} catch {
+			throw new InvalidGrantError('Subject token failed verification');
+		}
+	}
+
+	private async mintRuleToken(
+		rule: OidcTrustRule,
+		subject: string,
+		ttlSeconds: number
+	): Promise<string> {
+		const key = await this.authKey();
+
+		// A write token is pinned to the rule's roots via `cb_roots`; an admin
+		// token is unconstrained. The rule id rides along as an audit breadcrumb.
+		return mintAccessJwt(
+			key.privateJwk,
+			{
+				issuer: this.authIssuer(),
+				audience: this.authAudience(),
+				subject,
+				scope: rule.scope,
+				kid: key.kid,
+				ttlSeconds,
+				cbRoots: rule.scope === 'write' ? rule.allowedRoots : undefined,
+				auditClaims: { cb_rule: rule.id }
+			},
+			new Date()
+		);
+	}
+
+	private async authPublicJwks(): Promise<JsonWebKeyWithKid[]> {
+		const key = await this.authKey();
+
+		return [
+			{ ...key.publicJwk, kid: key.kid, alg: authJwtAlgorithm, use: 'sig' }
+		];
+	}
+
+	private enabledOidcTrustRules(): OidcTrustRule[] {
+		return this.db
+			.select()
+			.from(schema.oidcTrust)
+			.where(isNull(schema.oidcTrust.disabledAt))
+			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
+			.all()
+			.map((row) => oidcTrustRuleFromRow(row));
+	}
+
+	private ownerConfig(): OwnerConfig | undefined {
+		const issuer = this.env.CUPBOARD_OWNER_ISSUER;
+		const subject = this.env.CUPBOARD_OWNER_SUBJECT;
+		const jwksUrl = this.env.CUPBOARD_OWNER_JWKS_URL;
+		const audience = this.env.CUPBOARD_OWNER_AUDIENCE;
+
+		// A binding may be absent or empty when no owner is configured (e.g. in
+		// local development); either way there is no rule to seed.
+		if (!issuer || !subject || !jwksUrl || !audience) {
+			return undefined;
+		}
+
+		return { issuer, subject, jwksUrl, audience };
+	}
+
+	private seedOwnerRule(): void {
+		const owner = this.ownerConfig();
+
+		if (owner === undefined) {
+			// A deployment that clears its owner config revokes the owner's admin
+			// rule, so no standing owner identity outlives the config that named it.
+			this.db
+				.delete(schema.oidcTrust)
+				.where(eq(schema.oidcTrust.id, ownerRuleId))
+				.run();
+			return;
+		}
+
+		// Redeploying with new owner config updates the rule in place, so the
+		// owner identity always tracks deploy config; the rule is enabled on
+		// creation by leaving `disabledAt` unset.
+		const fields = {
+			issuer: owner.issuer,
+			jwksUrl: owner.jwksUrl,
+			audience: owner.audience,
+			claimsJson: JSON.stringify({ sub: owner.subject })
+		};
+
+		this.db
+			.insert(schema.oidcTrust)
+			.values({
+				id: ownerRuleId,
+				scope: 'admin',
+				allowedRootsJson: '[]',
+				createdAt: new Date().toISOString(),
+				...fields
+			})
+			.onConflictDoUpdate({ target: schema.oidcTrust.id, set: fields })
+			.run();
+	}
+
 	private async requireScope(
 		request: Request,
 		required: AccessScope
@@ -2629,6 +2853,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			})
 			.onConflictDoNothing()
 			.run();
+
+		this.seedOwnerRule();
 	}
 }
 
@@ -2701,6 +2927,27 @@ async function serverErrorResponse(
 
 		throw error;
 	}
+}
+
+function oidcTrustRuleFromRow(
+	row: typeof schema.oidcTrust.$inferSelect
+): OidcTrustRule {
+	const fault = (cause: Error): StoredOidcTrustInvalidError =>
+		new StoredOidcTrustInvalidError(row.id, cause);
+
+	return {
+		id: row.id,
+		issuer: row.issuer,
+		jwksUrl: row.jwksUrl,
+		audience: row.audience,
+		scope: row.scope,
+		claims: parseStored(storedClaimsSchema, row.claimsJson, fault),
+		allowedRoots: parseStored(
+			storedAllowedRootsSchema,
+			row.allowedRootsJson,
+			fault
+		)
+	};
 }
 
 function policySummaryFromRow(

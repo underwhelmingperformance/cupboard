@@ -121,6 +121,18 @@ export class StoredUploadMetadataInvalidError extends ServerHttpError {
 	}
 }
 
+export class StoredOidcTrustInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly id: string,
+		public override readonly cause: Error
+	) {
+		super('Stored OIDC trust rule is invalid');
+		this.name = 'StoredOidcTrustInvalidError';
+	}
+}
+
 export class StoredReferencesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
