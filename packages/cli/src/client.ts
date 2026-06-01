@@ -1,7 +1,13 @@
 import {
 	type BootstrapResponse,
 	bootstrapResponseSchema,
+	type CacheListResponse,
+	cacheListResponseSchema,
 	cacheNameSchema,
+	type CacheRemoveResponse,
+	cacheRemoveResponseSchema,
+	type CacheSummary,
+	cacheSummarySchema,
 	type CommitResponse,
 	commitResponseSchema,
 	DEFAULT_CACHE,
@@ -121,6 +127,43 @@ export class CupboardClient {
 			keyRetireResponseSchema,
 			{
 				method: 'POST',
+				token
+			}
+		);
+	}
+
+	listCaches(token: AccessCredential): Promise<CacheListResponse> {
+		return this.requestJson('/caches', cacheListResponseSchema, { token });
+	}
+
+	putCache(
+		token: AccessCredential,
+		name: string,
+		priority: number
+	): Promise<CacheSummary> {
+		return this.requestJson(
+			`/caches/${encodeURIComponent(name)}`,
+			cacheSummarySchema,
+			{
+				method: 'PUT',
+				token,
+				body: { priority }
+			}
+		);
+	}
+
+	removeCache(
+		token: AccessCredential,
+		name: string,
+		force: boolean
+	): Promise<CacheRemoveResponse> {
+		const query = force ? '?force=true' : '';
+
+		return this.requestJson(
+			`/caches/${encodeURIComponent(name)}${query}`,
+			cacheRemoveResponseSchema,
+			{
+				method: 'DELETE',
 				token
 			}
 		);

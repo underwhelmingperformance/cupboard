@@ -7,6 +7,13 @@ export class InvalidCacheNameError extends CliError {
 	}
 }
 
+export class InvalidCachePriorityError extends CliError {
+	constructor(public readonly value: string) {
+		super(`Invalid cache priority (expected a non-negative integer): ${value}`);
+		this.name = 'InvalidCachePriorityError';
+	}
+}
+
 export class CupboardHttpError extends CliError {
 	constructor(
 		public readonly method: string,

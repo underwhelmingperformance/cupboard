@@ -1,5 +1,7 @@
 import type {
 	BootstrapResponse,
+	CacheRemoveResponse,
+	CacheSummary,
 	DeletePathResponse,
 	KeyRetireResponse,
 	KeyRotateResponse,
@@ -234,6 +236,56 @@ describe('CupboardClient.retireKey', () => {
 		const { client } = capturingClient({ id: 'active', stage: 'gone' });
 
 		await expect(client.retireKey('admin-token', 'active')).rejects.toThrow(
+			ResponseSchemaMismatchError
+		);
+	});
+});
+
+describe('CupboardClient cache registry', () => {
+	it('puts a cache priority to /caches/<name>', async () => {
+		const response: CacheSummary = {
+			name: 'builds',
+			priority: 30,
+			storePaths: 0
+		};
+		const { client, captured } = capturingClient(response);
+
+		const result = await client.putCache('admin-token', 'builds', 30);
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/caches/builds',
+			method: 'PUT',
+			authorization: 'Bearer admin-token',
+			contentType: 'application/json',
+			body: JSON.stringify({ priority: 30 })
+		});
+	});
+
+	it('force-deletes a cache with a query flag and no prefix', async () => {
+		const response: CacheRemoveResponse = {
+			name: 'builds',
+			removed: true,
+			storePathsRemoved: 2
+		};
+		const { client, captured } = capturingClient(response, '/cache/builds');
+
+		const result = await client.removeCache('admin-token', 'builds', true);
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/caches/builds?force=true',
+			method: 'DELETE',
+			authorization: 'Bearer admin-token',
+			contentType: undefined,
+			body: undefined
+		});
+	});
+
+	it('rejects a cache list response that does not match the schema', async () => {
+		const { client } = capturingClient({ caches: [{ name: 'builds' }] });
+
+		await expect(client.listCaches('admin-token')).rejects.toThrow(
 			ResponseSchemaMismatchError
 		);
 	});
