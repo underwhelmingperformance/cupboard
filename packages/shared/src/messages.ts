@@ -311,6 +311,32 @@ export type ParsedRetentionPolicyRemoveResponse = z.output<
 	typeof retentionPolicyRemoveResponseSchema
 >;
 
+// A storage check reconciles committed metadata against R2: a NAR blob is
+// missing, a narinfo R2 object is missing, or a deep file-hash recompute does
+// not match the recorded hash.
+export const checkDiscrepancyKindSchema = z.enum([
+	'missing-nar',
+	'missing-narinfo-object',
+	'file-hash-mismatch'
+]);
+export type CheckDiscrepancyKind = z.infer<typeof checkDiscrepancyKindSchema>;
+
+export const checkDiscrepancySchema = z.strictObject({
+	kind: checkDiscrepancyKindSchema,
+	cache: z.string(),
+	storePathHash: z.string(),
+	narHash: z.string()
+});
+export type ParsedCheckDiscrepancy = z.output<typeof checkDiscrepancySchema>;
+
+export const checkReportSchema = z.strictObject({
+	narInfosChecked: countSchema,
+	narBlobsChecked: countSchema,
+	complete: z.boolean(),
+	discrepancies: z.array(checkDiscrepancySchema)
+});
+export type ParsedCheckReport = z.output<typeof checkReportSchema>;
+
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
 // request bodies and the server builds response bodies without minting brands.
 // The `Parsed…` outputs above are the branded results of a successful parse.
@@ -359,3 +385,5 @@ export type RetentionPolicyListResponse = z.input<
 export type RetentionPolicyRemoveResponse = z.input<
 	typeof retentionPolicyRemoveResponseSchema
 >;
+export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
+export type CheckReport = z.input<typeof checkReportSchema>;
