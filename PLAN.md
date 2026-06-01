@@ -504,8 +504,14 @@ cache.
 
 ### Read path
 
-- [ ] Support private-read mode via HTTP basic auth, consumed by Nix through
+- [x] Support private-read mode via HTTP basic auth, consumed by Nix through
       `~/.config/nix/netrc`.
+
+  To enable: set both `CUPBOARD_READ_USER` and `CUPBOARD_READ_PASSWORD`
+  (`wrangler secret put`). Reads then require Basic auth; `/pubkey`, `/_health`
+  and `/_version` stay public. `cupboard config` with `--read-user` and
+  `--read-password` (or those variables in the environment) prints the matching
+  `netrc` line, keyed on the substituter host.
 
   Design:
   - A deployment-level private toggle plus a read credential

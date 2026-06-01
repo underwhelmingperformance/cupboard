@@ -19,6 +19,7 @@ export interface RealiseOptions {
 	readonly substituter: string;
 	readonly trustedPublicKeys: readonly string[];
 	readonly requireSigs: boolean;
+	readonly netrcFile?: string;
 }
 
 /**
@@ -62,7 +63,12 @@ export class NixStore {
 			'--no-out-link',
 			'--option',
 			'sandbox',
-			'false'
+			'false',
+			// Build locally; the test derivations have no store inputs, so inheriting
+			// the host's substituters only risks a flake against an external cache.
+			'--option',
+			'substituters',
+			''
 		]);
 
 		return stdout.trim();
@@ -96,7 +102,10 @@ export class NixStore {
 			options.trustedPublicKeys.join(' '),
 			'--option',
 			'require-sigs',
-			options.requireSigs ? 'true' : 'false'
+			options.requireSigs ? 'true' : 'false',
+			...(options.netrcFile === undefined
+				? []
+				: ['--option', 'netrc-file', options.netrcFile])
 		]);
 	}
 
