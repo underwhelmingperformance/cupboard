@@ -115,3 +115,11 @@ export const caches = sqliteTable('cache', {
 	priority: integer('priority').notNull(),
 	createdAt: text('created_at').notNull()
 });
+
+export const retentionPolicies = sqliteTable('retention_policy', {
+	id: text('id').primaryKey(),
+	scope: text('scope', { enum: ['cache', 'root-name-prefix'] }).notNull(),
+	pattern: text('pattern').notNull(),
+	defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
+	createdAt: text('created_at').notNull()
+});

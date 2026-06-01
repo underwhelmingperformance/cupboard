@@ -1,6 +1,8 @@
 import { runInDurableObject } from 'cloudflare:test';
+import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
+import { retentionPolicies } from './db/schema.ts';
 import {
 	bootstrap,
 	latestMigrationIndex,
@@ -84,5 +86,31 @@ describe('migrations', () => {
 		);
 
 		expect(caches).toStrictEqual([{ name: '', priority: 40 }]);
+	});
+
+	it('migrates and round-trips a retention policy', async () => {
+		const policy = {
+			id: 'p1',
+			scope: 'root-name-prefix' as const,
+			pattern: 'pr-',
+			defaultTtlSeconds: 1_209_600,
+			createdAt: '2026-01-01T00:00:00.000Z'
+		};
+
+		const rows = await runInDurableObject(
+			testServerFor('migration-retention-policy'),
+			async (_instance, state) => {
+				await migrateThrough(state, latestMigrationIndex);
+
+				const database = drizzle(state.storage, {
+					schema: { retentionPolicies }
+				});
+				database.insert(retentionPolicies).values(policy).run();
+
+				return database.select().from(retentionPolicies).all();
+			}
+		);
+
+		expect(rows).toStrictEqual([policy]);
 	});
 });

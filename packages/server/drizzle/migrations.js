@@ -9,6 +9,7 @@ import m0006 from './0006_drop_token.sql';
 import m0007 from './0007_signing_key_set.sql';
 import m0008 from './0008_named_caches.sql';
 import m0009 from './0009_narinfo_deletion_cache.sql';
+import m0010 from './0010_retention_policy.sql';
 
 export default {
 	journal,
@@ -22,6 +23,7 @@ export default {
 		m0006,
 		m0007,
 		m0008,
-		m0009
+		m0009,
+		m0010
 	}
 };
