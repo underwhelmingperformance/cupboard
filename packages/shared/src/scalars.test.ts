@@ -7,6 +7,7 @@ import {
 	positiveIntSchema,
 	referencesSchema,
 	rootNameSchema,
+	signingKeyIdSchema,
 	storePathBasenameSchema,
 	storePathHashSchema,
 	storePathSchema,
@@ -16,6 +17,7 @@ import {
 const nixHash = `sha256:${'1'.repeat(52)}`;
 const storePathHash = '0'.repeat(32);
 const storePath = `/nix/store/${storePathHash}-name`;
+const uuid = '123e4567-e89b-12d3-a456-426614174000';
 
 const cases: readonly {
 	name: string;
@@ -210,6 +212,30 @@ const cases: readonly {
 		name: 'a reference without a store hash',
 		schema: referencesSchema,
 		value: ['name-only'],
+		valid: false
+	},
+	{
+		name: 'the active signing key id',
+		schema: signingKeyIdSchema,
+		value: 'active',
+		valid: true
+	},
+	{
+		name: 'a uuid signing key id',
+		schema: signingKeyIdSchema,
+		value: uuid,
+		valid: true
+	},
+	{
+		name: 'a signing key id that is neither active nor a uuid',
+		schema: signingKeyIdSchema,
+		value: 'rotated',
+		valid: false
+	},
+	{
+		name: 'a mis-cased active signing key id',
+		schema: signingKeyIdSchema,
+		value: 'Active',
 		valid: false
 	}
 ];

@@ -6,6 +6,7 @@ import {
 	positiveIntSchema,
 	referencesSchema,
 	rootNameSchema,
+	signingKeyIdSchema,
 	storePathHashSchema,
 	storePathSchema,
 	ttlSecondsSchema
@@ -184,6 +185,40 @@ export type ParsedRootRemoveResponse = z.output<
 	typeof rootRemoveResponseSchema
 >;
 
+// A key signs new narinfos (`signing`), is advertised from `/pubkey` while
+// clients may still trust it (`publication`), or has been dropped (`absent`).
+export const signingKeyStageSchema = z.enum([
+	'signing',
+	'publication',
+	'absent'
+]);
+export type SigningKeyStage = z.infer<typeof signingKeyStageSchema>;
+
+export const signingKeySummarySchema = z.strictObject({
+	id: signingKeyIdSchema,
+	publicKey: z.string(),
+	stage: signingKeyStageSchema,
+	createdAt: z.string()
+});
+export type ParsedSigningKeySummary = z.output<typeof signingKeySummarySchema>;
+
+export const keyListResponseSchema = z.strictObject({
+	keys: z.array(signingKeySummarySchema)
+});
+export type ParsedKeyListResponse = z.output<typeof keyListResponseSchema>;
+
+export const keyRotateResponseSchema = z.strictObject({
+	rotated: signingKeySummarySchema,
+	keys: z.array(signingKeySummarySchema)
+});
+export type ParsedKeyRotateResponse = z.output<typeof keyRotateResponseSchema>;
+
+export const keyRetireResponseSchema = z.strictObject({
+	id: signingKeyIdSchema,
+	stage: signingKeyStageSchema
+});
+export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
+
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
 // request bodies and the server builds response bodies without minting brands.
 // The `Parsed…` outputs above are the branded results of a successful parse.
@@ -211,3 +246,7 @@ export type RootSummary = z.input<typeof rootSummarySchema>;
 export type RootSetResponse = z.input<typeof rootSetResponseSchema>;
 export type RootListResponse = z.input<typeof rootListResponseSchema>;
 export type RootRemoveResponse = z.input<typeof rootRemoveResponseSchema>;
+export type SigningKeySummary = z.input<typeof signingKeySummarySchema>;
+export type KeyListResponse = z.input<typeof keyListResponseSchema>;
+export type KeyRotateResponse = z.input<typeof keyRotateResponseSchema>;
+export type KeyRetireResponse = z.input<typeof keyRetireResponseSchema>;

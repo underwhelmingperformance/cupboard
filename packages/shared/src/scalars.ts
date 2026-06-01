@@ -64,6 +64,13 @@ export const ttlSecondsSchema = z
 	.brand('TtlSeconds');
 export type TtlSeconds = z.infer<typeof ttlSecondsSchema>;
 
+// The bootstrap signing key keeps the fixed id `active`; rotated keys are
+// minted with a random UUID.
+export const signingKeyIdSchema = z
+	.union([z.literal('active'), z.uuid()])
+	.brand('SigningKeyId');
+export type SigningKeyId = z.infer<typeof signingKeyIdSchema>;
+
 export const positiveIntSchema = z
 	.number()
 	.int()
