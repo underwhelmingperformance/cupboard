@@ -567,7 +567,7 @@ cache.
 
 ### Signing
 
-- [ ] Support rotation: generate a new keypair, keep old narinfos verifiable,
+- [x] Support rotation: generate a new keypair, keep old narinfos verifiable,
       and make the migration path explicit for users with pinned
       `trusted-public-keys`.
   - [x] Invalidate the Worker-side `/pubkey` cache when the key rotates.

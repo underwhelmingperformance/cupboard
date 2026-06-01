@@ -5,6 +5,12 @@ import {
 	commitResponseSchema,
 	type DeletePathResponse,
 	deletePathResponseSchema,
+	type KeyListResponse,
+	keyListResponseSchema,
+	type KeyRetireResponse,
+	keyRetireResponseSchema,
+	type KeyRotateResponse,
+	keyRotateResponseSchema,
 	type RootListResponse,
 	rootListResponseSchema,
 	type RootRemoveResponse,
@@ -77,6 +83,28 @@ export class CupboardClient {
 
 	stats(token: AccessCredential): Promise<StatsResponse> {
 		return this.requestJson('/stats', statsResponseSchema, { token });
+	}
+
+	listKeys(token: AccessCredential): Promise<KeyListResponse> {
+		return this.requestJson('/keys', keyListResponseSchema, { token });
+	}
+
+	rotateKey(token: AccessCredential): Promise<KeyRotateResponse> {
+		return this.requestJson('/keys/rotate', keyRotateResponseSchema, {
+			method: 'POST',
+			token
+		});
+	}
+
+	retireKey(token: AccessCredential, id: string): Promise<KeyRetireResponse> {
+		return this.requestJson(
+			`/keys/retire/${encodeURIComponent(id)}`,
+			keyRetireResponseSchema,
+			{
+				method: 'POST',
+				token
+			}
+		);
 	}
 
 	deleteStorePath(

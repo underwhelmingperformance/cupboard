@@ -3,6 +3,7 @@ import { Command } from 'commander';
 import { registerConfigCommand } from './commands/config.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerInitCommand } from './commands/init.ts';
+import { registerKeyCommands } from './commands/key.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
@@ -30,6 +31,7 @@ export function buildProgram(): Command {
 	registerStatsCommand(program);
 	registerDeleteCommand(program);
 	registerRootCommands(program);
+	registerKeyCommands(program);
 
 	return program;
 }
