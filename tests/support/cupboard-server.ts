@@ -51,6 +51,7 @@ export class CupboardTestServer {
 				CUPBOARD_BOOTSTRAP_TOKEN: bootstrapToken,
 				CUPBOARD_READ_USER: '',
 				CUPBOARD_READ_PASSWORD: '',
+				CUPBOARD_COLD_PATH_TTL_SECONDS: '',
 				R2_ACCESS_KEY_ID: r2Credentials.accessKeyId,
 				R2_ACCOUNT_ID: r2Credentials.accountId,
 				R2_BUCKET_NAME: r2Credentials.bucketName,

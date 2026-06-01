@@ -60,6 +60,7 @@ import {
 	mintAccessJwt,
 	verifyAccessJwt
 } from './auth.ts';
+import { coldPathTtlSeconds, resolveColdPathExpiry } from './cold-path.ts';
 import {
 	constantTimeEqual,
 	generateSigningKey,
@@ -630,10 +631,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private setRoot(cache: string, request: RootSetCommand): RootSetResponse {
 		const now = new Date();
 		const nowIso = now.toISOString();
-		const expiresAt =
-			request.ttlSeconds === undefined
-				? undefined
-				: new Date(now.getTime() + request.ttlSeconds * 1000).toISOString();
+		// An explicit TTL wins; otherwise an implicit pin inherits the cold-path
+		// default when one is configured, and a named channel stays permanent.
+		const expiresAt = resolveColdPathExpiry({
+			explicitTtlSeconds: request.ttlSeconds,
+			name: request.name,
+			coldPathTtlSeconds: coldPathTtlSeconds(this.env),
+			now
+		});
 
 		this.loadOrCreateCache(cache);
 

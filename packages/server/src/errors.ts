@@ -23,6 +23,15 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
+export class ColdPathTtlConfigurationInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly value: string) {
+		super('CUPBOARD_COLD_PATH_TTL_SECONDS is not a valid TTL');
+		this.name = 'ColdPathTtlConfigurationInvalidError';
+	}
+}
+
 export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
