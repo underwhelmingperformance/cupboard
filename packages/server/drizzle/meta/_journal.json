@@ -64,6 +64,13 @@
 			"when": 1780289527950,
 			"tag": "0008_named_caches",
 			"breakpoints": true
+		},
+		{
+			"idx": 9,
+			"version": "6",
+			"when": 1780290074934,
+			"tag": "0009_narinfo_deletion_cache",
+			"breakpoints": true
 		}
 	]
 }

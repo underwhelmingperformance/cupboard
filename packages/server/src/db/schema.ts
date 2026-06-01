@@ -53,12 +53,17 @@ export const orphanBlobDeletions = sqliteTable('orphan_blob_deletion', {
 export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{
+		cache: text('cache').notNull().default(''),
 		storePathHash: text('store_path_hash').notNull(),
 		narHash: text('nar_hash').notNull(),
 		generation: integer('generation').notNull().default(0),
 		createdAt: text('created_at').notNull()
 	},
-	(table) => [primaryKey({ columns: [table.storePathHash, table.generation] })]
+	(table) => [
+		primaryKey({
+			columns: [table.cache, table.storePathHash, table.generation]
+		})
+	]
 );
 
 export const authKeys = sqliteTable('auth_key', {

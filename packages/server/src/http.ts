@@ -26,6 +26,18 @@ export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
 }
 
+// The request path a narinfo is served and edge-cached under: bare for the
+// default cache, namespaced under `/cache/<cache>/` for a named one. Used to
+// purge the colo-local edge copy when a narinfo is deleted.
+export function narInfoCachePath(
+	storePathHash: string,
+	cache: string = DEFAULT_CACHE
+): string {
+	return cache === DEFAULT_CACHE
+		? `/${storePathHash}.narinfo`
+		: `/cache/${cache}/${storePathHash}.narinfo`;
+}
+
 // The sole narinfo-key constructor: never inline the prefix elsewhere. The
 // default cache keeps the bare `narinfo/<hash>` key so existing objects are not
 // rematerialised; a named cache namespaces under its own segment. Store path

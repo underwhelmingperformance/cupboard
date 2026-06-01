@@ -78,6 +78,7 @@ import {
 import {
 	internalOrigin,
 	narInfoCacheControl,
+	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
 	orphanBlobDeletionGraceMs,
@@ -715,6 +716,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private enqueueNarInfoDeletion(
 		handle: SchemaWriter,
+		cache: string,
 		storePathHash: string,
 		narHash: string,
 		now: string,
@@ -724,12 +726,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// distinct reference edge once generations are introduced later in the stack.
 		handle
 			.insert(schema.narInfoDeletions)
-			.values({ storePathHash, narHash, generation, createdAt: now })
+			.values({ cache, storePathHash, narHash, generation, createdAt: now })
 			.onConflictDoNothing()
 			.run();
 	}
 
 	private clearQueuedNarInfoDeletion(
+		cache: string,
 		storePathHash: string,
 		generation: number
 	): void {
@@ -737,6 +740,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.delete(schema.narInfoDeletions)
 			.where(
 				and(
+					eq(schema.narInfoDeletions.cache, cache),
 					eq(schema.narInfoDeletions.storePathHash, storePathHash),
 					eq(schema.narInfoDeletions.generation, generation)
 				)
@@ -760,6 +764,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		for (const entry of queued) {
 			const { objectDeleted } = await this.deleteQueuedNarInfo(
+				entry.cache,
 				entry.storePathHash,
 				entry.generation,
 				origin
@@ -774,6 +779,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async deleteQueuedNarInfo(
+		cache: string,
 		storePathHash: string,
 		generation: number,
 		origin?: string
@@ -786,6 +792,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.from(schema.narInfoDeletions)
 			.where(
 				and(
+					eq(schema.narInfoDeletions.cache, cache),
 					eq(schema.narInfoDeletions.storePathHash, storePathHash),
 					eq(schema.narInfoDeletions.generation, generation)
 				)
@@ -802,18 +809,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.db
 				.select()
 				.from(schema.narInfos)
-				.where(eq(schema.narInfos.storePathHash, storePathHash))
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, storePathHash)
+					)
+				)
 				.get() !== undefined;
 
 		if (reCommitted) {
-			this.clearQueuedNarInfoDeletion(storePathHash, generation);
+			this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
 			return { objectDeleted: false, narScheduledForDeletion: false };
 		}
 
-		await this.env.BLOBS.delete(narInfoObjectKey(storePathHash));
+		await this.env.BLOBS.delete(narInfoObjectKey(storePathHash, cache));
 
 		if (origin !== undefined) {
-			await this.purgeCachedNarInfo(`${origin}/${storePathHash}.narinfo`);
+			await this.purgeCachedNarInfo(
+				`${origin}${narInfoCachePath(storePathHash, cache)}`
+			);
 		}
 
 		// The object is gone, so the NAR grace can start now. Re-check references:
@@ -832,7 +846,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 		}
 
-		this.clearQueuedNarInfoDeletion(storePathHash, generation);
+		this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
 
 		return { objectDeleted: true, narScheduledForDeletion };
 	}
@@ -1129,6 +1143,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		const committed = this.db
 			.select({
+				cache: schema.narInfos.cache,
 				storePathHash: schema.narInfos.storePathHash,
 				narHash: schema.narInfos.narHash
 			})
@@ -1143,9 +1158,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			this.db.transaction((tx) => {
 				tx.delete(schema.narInfos)
-					.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+					.where(
+						and(
+							eq(schema.narInfos.cache, path.cache),
+							eq(schema.narInfos.storePathHash, path.storePathHash)
+						)
+					)
 					.run();
-				this.enqueueNarInfoDeletion(tx, path.storePathHash, path.narHash, now);
+				this.enqueueNarInfoDeletion(
+					tx,
+					path.cache,
+					path.storePathHash,
+					path.narHash,
+					now
+				);
 			});
 			pathsSwept += 1;
 		}
@@ -1301,13 +1327,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			this.db.transaction((tx) => {
 				tx.delete(schema.narInfos)
-					.where(eq(schema.narInfos.storePathHash, row.storePathHash))
+					.where(
+						and(
+							eq(schema.narInfos.cache, row.cache),
+							eq(schema.narInfos.storePathHash, row.storePathHash)
+						)
+					)
 					.run();
-				this.enqueueNarInfoDeletion(tx, row.storePathHash, row.narHash, now);
+				this.enqueueNarInfoDeletion(
+					tx,
+					row.cache,
+					row.storePathHash,
+					row.narHash,
+					now
+				);
 			});
 
 			try {
-				await this.deleteQueuedNarInfo(row.storePathHash, 0, origin);
+				await this.deleteQueuedNarInfo(row.cache, row.storePathHash, 0, origin);
 			} catch {
 				// the durable queue row remains for GC to retry
 			}
@@ -1355,15 +1392,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			this.db.transaction((tx) => {
 				tx.delete(schema.narInfos)
-					.where(eq(schema.narInfos.storePathHash, storePathHash))
+					.where(
+						and(
+							eq(schema.narInfos.cache, row.cache),
+							eq(schema.narInfos.storePathHash, storePathHash)
+						)
+					)
 					.run();
-				this.enqueueNarInfoDeletion(tx, storePathHash, row.narHash, now);
+				this.enqueueNarInfoDeletion(
+					tx,
+					row.cache,
+					storePathHash,
+					row.narHash,
+					now
+				);
 			});
 
 			let narScheduledForDeletion = false;
 
 			try {
 				({ narScheduledForDeletion } = await this.deleteQueuedNarInfo(
+					row.cache,
 					storePathHash,
 					0,
 					origin
