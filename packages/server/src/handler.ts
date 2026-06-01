@@ -4,6 +4,7 @@ import { cupboardServer } from './durable-object.ts';
 import { CronGarbageCollectionFailedError } from './errors.ts';
 import { internalOrigin } from './http.ts';
 import { handleRead } from './read.ts';
+import { runScheduledMaintenance } from './scheduled.ts';
 
 export default {
 	async fetch(request, env, ctx) {
@@ -35,19 +36,13 @@ export default {
 		}
 
 		const { token } = bootstrapResponseSchema.parse(await bootstrap.json());
+		const authorization = `Bearer ${token}`;
 
-		const response = await server.fetch(`${internalOrigin}/gc`, {
-			method: 'POST',
-			headers: { authorization: `Bearer ${token}` }
-		});
-
-		if (response.ok) {
-			return;
-		}
-
-		throw new CronGarbageCollectionFailedError(
-			response.status,
-			await response.text()
+		await runScheduledMaintenance((path) =>
+			server.fetch(`${internalOrigin}${path}`, {
+				method: 'POST',
+				headers: { authorization }
+			})
 		);
 	}
 } satisfies ExportedHandler<Env>;

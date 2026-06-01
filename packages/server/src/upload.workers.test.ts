@@ -9,6 +9,7 @@ import { narInfoObjectKey, narObjectKey } from './http.ts';
 import {
 	afterGrace,
 	authorisedFetch,
+	authorisedWorkerFetch,
 	bootstrap,
 	clearBlobStorage,
 	commitPath,
@@ -1006,6 +1007,65 @@ describe('upload flow', () => {
 			totalFileSize: 0
 		});
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
+	});
+
+	it('runs both garbage collection and verification from the scheduled handler', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
+		const token = await initialiseViaWorker();
+
+		// A committed path whose narinfo object we then lose out of band:
+		// verification must re-materialise it from the row.
+		const committed = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'committed',
+			storePathHash: '11111111111111111111111111111111'
+		});
+		const committedNegotiation = await negotiateViaWorker(token, [committed]);
+		const committedUpload = expectSingleUploadDecision(
+			committedNegotiation,
+			committed
+		);
+		await prepareUploadViaWorker(token, committedUpload, committed);
+		await putNarBytes(committedUpload.r2Key);
+		const commit = await authorisedWorkerFetch(
+			`/uploads/${committedUpload.uploadId}/commit`,
+			token,
+			{ method: 'POST' }
+		);
+		expect(commit.status).toBe(StatusCodes.OK);
+		await env.BLOBS.delete(narInfoObjectKey(committed.storePathHash));
+
+		// A distinct pending upload left to expire: GC must sweep it.
+		const stale = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'stale',
+			storePathHash: '22222222222222222222222222222222',
+			narHash: nixSha256Hash('2')
+		});
+		const staleNegotiation = await negotiateViaWorker(token, [stale]);
+		const staleUpload = expectSingleUploadDecision(staleNegotiation, stale);
+		await prepareUploadViaWorker(token, staleUpload, stale);
+
+		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
+		await worker.scheduled(scheduledController(), env);
+
+		const restored = await env.BLOBS.head(
+			narInfoObjectKey(committed.storePathHash)
+		);
+		const staleObject = await env.BLOBS.head(staleUpload.r2Key);
+
+		expect({
+			restored: restored !== null,
+			staleGone: staleObject === null
+		}).toStrictEqual({ restored: true, staleGone: true });
+		await expectStatsViaWorker(await initialiseViaWorker(), {
+			storePaths: 1,
+			narBlobs: 1,
+			pendingUploads: 0,
+			totalFileSize: narBytes.byteLength
+		});
 	});
 
 	it('deletes a store path and defers the NAR deletion past the grace', async () => {
