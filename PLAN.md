@@ -240,8 +240,15 @@ One DO SQLite database per deployment.
   - (`cache`, `name`) (PK), `expires_at` (nullable), `created_at`, `updated_at`.
 - `retention_root_target` — the store paths a channel currently keeps.
   - (`cache`, `root_name`, `store_path_hash`) (PK), `store_path`.
+- `retention_policy` — default TTLs supplied to roots created without one.
+  - `id` (PK), `scope` (`cache` or `root-name-prefix`), `pattern`,
+    `default_ttl_seconds`, `created_at`. The most specific match wins.
 - `cache` — the named-cache registry; the empty name is the default cache.
   - `name` (PK), `priority`, `created_at`.
+- `verification_cursor` — where the background verify pass last stopped.
+  - `id` (PK, single `active` row), `cache`, `last_store_path_hash` (nullable),
+    `updated_at`. Holds a composite `(cache, store_path_hash)` position; empty
+    restarts the scan at the first cache's lowest hash.
 - `auth_key` — deployment-owned key material for cupboard access JWTs.
   - `id` (PK), `private_jwk_json`, `public_jwk_json`, `created_at`,
     `retired_at`.
@@ -281,6 +288,11 @@ and GC routes.
 | GET       | `/caches`               | admin JWT        | DO. Lists the cache registry with counts.       |
 | PUT       | `/caches/<name>`        | admin JWT        | DO. Upserts a named cache's priority.           |
 | DELETE    | `/caches/<name>`        | admin JWT        | DO. Tears a cache down (`?force` if non-empty). |
+| GET       | `/policies`             | admin JWT        | DO. Lists retention policies.                   |
+| POST      | `/policies`             | admin JWT        | DO. Adds a retention policy.                    |
+| DELETE    | `/policies/<id>`        | admin JWT        | DO. Removes a retention policy.                 |
+| GET       | `/check`                | admin JWT        | DO. Read-only storage check (`?deep`).          |
+| POST      | `/verify`               | admin JWT        | DO. One reconciling pass (`?limit`).            |
 | POST      | `/auth/oidc/exchange`   | OIDC token       | DO. V4 increment 2: exchanges CI identity.      |
 
 Every path-scoped read and write route also has a `/cache/<name>/` form
@@ -289,7 +301,9 @@ nix-cache-info and pubkey reads and the `stats`, `paths`, `roots`, `uploads` and
 `gc` routes. The bare routes serve the empty default cache. A named cache's
 nix-cache-info is rendered by the DO from its registered priority; its narinfo
 objects are namespaced in R2, while NAR blobs stay shared. The `/caches`
-registry routes are deployment-wide and take no prefix.
+registry, `/policies`, `/check` and `/verify` routes are deployment-wide and
+take no prefix; `/check` and `/verify` span every cache, since NAR blobs are
+shared.
 
 Root names in `PUT`/`DELETE /roots/<encoded-name>` live only in the path. The
 request body for `PUT` is `{ targets, ttlSeconds? }`; the server combines that
@@ -584,9 +598,9 @@ cache.
   - One deployment-wide signing key, shared by all caches (each
     `/cache/:cacheName/pubkey` returns it). Per-cache keys would add rotation
     and config complexity with no clear personal-cache benefit.
-  - Deferred: the cron verifier (see Garbage collection and admin) does not yet
-    background-reconcile named-cache narinfo objects; force-delete teardown and
-    on-demand checks still cover them.
+  - The cron verifier (see Garbage collection and admin) background-reconciles
+    every cache, named ones included; force-delete teardown and on-demand checks
+    cover them too.
 
 ### Signing
 
@@ -652,34 +666,44 @@ every live channel through `References`. This is built in three increments:
       the resulting expiry.
 - [x] Delete a specific store path (explicit admin `delete`, edge-safe).
       Clearing old entries automatically is retention-based and stays below.
-- [ ] Optional retention period for cold paths. Design: "cold" = a path held
-      only by an implicit `pin:<storePathHash>` root (a plain push), never named
-      by an explicit root. Implicit pins are permanent today; add an optional
-      deployment default TTL applied to newly created implicit pins, so casually
-      pushed paths expire if not refreshed or explicitly rooted. Unset keeps the
-      current permanent behaviour; explicit roots are unaffected (they carry
-      their own TTL). This is the simplest case of the policies below.
-- [ ] Retention policies per cache or name prefix. Design: a `retention_policy`
-      set (scope `cache` or `root-name prefix`, a glob/pattern, a default TTL).
-      When a root is created without an explicit TTL, the most specific matching
-      policy supplies one (e.g. `pr-*` → 14 days). The per-prefix half works on
-      roots today; the per-cache half depends on named caches (Read path). Admin
-      commands list/add/remove policies.
-- [ ] Repair/check command to compare metadata against R2. Design: an
-      admin-scoped `GET /check` route and `cupboard check` CLI command scan the
-      committed `narInfos`/`narBlobs`, confirm each referenced R2 object exists
-      and (with `--deep`) that its SHA-256 matches the recorded `fileHash`, and
-      report discrepancies. Check-only first; repair actions (clear rows whose
-      blob vanished, re-materialise a missing narinfo object) reuse the
-      removal/ensure paths and land as a follow-up. This is the on-demand
-      counterpart to the background verification below.
-- [ ] Queue-based background verification. Design: the scheduled counterpart to
-      repair/check — periodically reconcile committed metadata against R2 and
-      perform the "orphan reconcile" deferred from V2 (re-materialise a missing
-      narinfo object; schedule deletion for a row whose NAR has vanished, via
-      the existing durable queue and grace). Start cron-driven with a bounded
-      cursor in DO SQLite scanning a fixed batch per run (no new binding); move
-      to Cloudflare Queues only if the scan cannot stay within cron/DO limits.
+- [x] Optional retention period for cold paths. "Cold" = a path held only by an
+      implicit `pin:<storePathHash>` root (a plain push), never named by an
+      explicit root. `CUPBOARD_COLD_PATH_TTL_SECONDS` sets a deployment default
+      TTL applied to newly created implicit pins, so casually pushed paths
+      expire if not refreshed or explicitly rooted. Unset keeps the permanent
+      default; explicit roots and pins carrying their own TTL are unaffected. A
+      pure resolver decides the expiry and a thin env boundary reads the var, so
+      the precedence (explicit TTL > matching policy > cold-path default >
+      permanent) is unit-tested directly and the env wiring through an e2e.
+- [x] Retention policies per cache or name prefix. A `retention_policy` set
+      (scope `cache` or `root-name-prefix`, a pattern, a default TTL). When a
+      root is created without an explicit TTL, the most specific matching policy
+      supplies one (e.g. `pr-` → 14 days): a prefix match beats a cache match,
+      and a longer prefix wins. `cupboard policy list/add/remove` and the
+      `/policies` routes manage them. Both scopes are live now that named caches
+      have landed.
+- [x] Repair/check command to compare metadata against R2. The admin
+      `GET /check` route and `cupboard check [--deep]` scan the committed
+      narinfo rows (bounded, the report flagging an incomplete scan), confirm
+      each narinfo's R2 object and the NAR it depends on, and with `--deep`
+      re-run the upload-time checksum verification against the stored bytes. NAR
+      blobs are shared, so each is checked once but a fault is attributed to
+      every narinfo depending on it. Check-only: it never mutates state. The
+      repair actions it pointed at are delivered by the background verification
+      below.
+- [x] Cron-driven background verification. `POST /verify` is the scheduled
+      counterpart to the check: a bounded pass that re-materialises a missing
+      narinfo object and reconciles a narinfo whose NAR has vanished (row-first
+      removal + the durable queue and grace, gated by the global
+      unreferenced-NAR check). It keeps its own route, separate from `/gc`, so
+      each can run and be asserted independently, and the cron tick runs both
+      every pass regardless of the other's outcome. Progress is a single-row
+      `verification_cursor` holding a composite `(cache, store_path_hash)`
+      position, advanced one fixed batch per run and wrapped at the end;
+      `?limit` bounds a manual run. The pass spans every cache, walking the
+      `(cache, store_path_hash)` space in order, so named-cache objects are
+      reconciled in the background alongside the default cache. Cloudflare
+      Queues remain a fallback only if a scan cannot stay within cron/DO limits.
 - Edge-safe deletion mechanism for committed content. narinfo is edge-cached
   with a max-age, and `caches.default.delete` only purges the current colo, so a
   deleted narinfo can be served from a warm edge until its TTL expires. Deleting
