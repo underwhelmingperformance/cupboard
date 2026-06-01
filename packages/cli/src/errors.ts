@@ -30,6 +30,13 @@ export class AuthSelectionError extends CliError {
 	}
 }
 
+export class OwnerLoginRequiredError extends CliError {
+	constructor() {
+		super('No cupboard session, or it has expired. Run `cupboard login`.');
+		this.name = 'OwnerLoginRequiredError';
+	}
+}
+
 export class CupboardHttpError extends CliError {
 	constructor(
 		public readonly method: string,

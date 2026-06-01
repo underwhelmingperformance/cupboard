@@ -6,6 +6,7 @@ import { registerConfigCommand } from './commands/config.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerInitCommand } from './commands/init.ts';
 import { registerKeyCommands } from './commands/key.ts';
+import { registerLoginCommand } from './commands/login.ts';
 import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
@@ -28,6 +29,7 @@ export function buildProgram(): Command {
 		.showHelpAfterError();
 
 	registerInitCommand(program);
+	registerLoginCommand(program);
 	registerPushCommand(program);
 	registerConfigCommand(program);
 	registerPubkeyCommand(program);

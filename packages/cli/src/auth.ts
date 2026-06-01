@@ -1,11 +1,34 @@
 import { subjectTokenTypeIdToken } from '@cupboard/shared';
 
 import type { CupboardClient, TokenProvider } from './client.ts';
-import { AuthSelectionError } from './errors.ts';
+import { AuthSelectionError, OwnerLoginRequiredError } from './errors.ts';
 import {
 	fetchGithubOidcToken,
 	type GithubOidcEnvironment
 } from './github-oidc.ts';
+import { readCachedToken } from './token-store.ts';
+
+/**
+ * Supplies the cached owner admin token to the admin commands. A cached token
+ * cannot be silently refreshed — there is no refresh grant yet — so an absent
+ * cache or a 401 surfaces as a prompt to run `cupboard login` again.
+ */
+export function cachedOwnerProvider(path?: string): TokenProvider {
+	return {
+		async get(): Promise<string> {
+			const token = await readCachedToken(path);
+
+			if (token === undefined) {
+				throw new OwnerLoginRequiredError();
+			}
+
+			return token;
+		},
+		refresh(): Promise<string> {
+			return Promise.reject(new OwnerLoginRequiredError());
+		}
+	};
+}
 
 /**
  * Exchanges the deployment bootstrap secret for a short-lived admin access JWT

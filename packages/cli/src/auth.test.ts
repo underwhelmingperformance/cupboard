@@ -1,14 +1,20 @@
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 import type { BootstrapResponse, TokenResponse } from '@cupboard/shared';
 import { describe, expect, it } from 'vitest';
 
 import {
 	authenticate,
 	authenticateForPush,
-	authenticateGithubOidc
+	authenticateGithubOidc,
+	cachedOwnerProvider
 } from './auth.ts';
 import { CupboardClient } from './client.ts';
-import { AuthSelectionError } from './errors.ts';
+import { AuthSelectionError, OwnerLoginRequiredError } from './errors.ts';
 import type { GithubOidcEnvironment } from './github-oidc.ts';
+import { writeCachedToken } from './token-store.ts';
 
 const githubEnvironment: GithubOidcEnvironment = {
 	requestUrl: 'https://actions.example.com/token',
@@ -147,5 +153,33 @@ describe('authenticateForPush', () => {
 				audience: 'https://cupboard.test'
 			})
 		).rejects.toBeInstanceOf(AuthSelectionError);
+	});
+});
+
+describe('cachedOwnerProvider', () => {
+	it('returns the cached token and refuses to refresh it', async () => {
+		const target = path.join(
+			await mkdtemp(path.join(tmpdir(), 'cupboard-auth-')),
+			'token'
+		);
+		await writeCachedToken('cached.admin.jwt', target);
+		const provider = cachedOwnerProvider(target);
+
+		expect(await provider.get()).toBe('cached.admin.jwt');
+		await expect(provider.refresh()).rejects.toBeInstanceOf(
+			OwnerLoginRequiredError
+		);
+	});
+
+	it('prompts a login when no token is cached', async () => {
+		const target = path.join(
+			await mkdtemp(path.join(tmpdir(), 'cupboard-auth-')),
+			'absent'
+		);
+		const provider = cachedOwnerProvider(target);
+
+		await expect(provider.get()).rejects.toBeInstanceOf(
+			OwnerLoginRequiredError
+		);
 	});
 });
