@@ -1,8 +1,4 @@
-import { bootstrapResponseSchema } from '@cupboard/shared';
-
 import { cupboardServer } from './durable-object.ts';
-import { CronGarbageCollectionFailedError } from './errors.ts';
-import { internalOrigin } from './http.ts';
 import { handleRead } from './read.ts';
 import { runScheduledMaintenance } from './scheduled.ts';
 
@@ -18,31 +14,13 @@ export default {
 	},
 
 	async scheduled(_controller, env) {
+		// The service binding authorises these calls, so the cron drives
+		// maintenance through direct Durable Object RPC with no token to exchange.
 		const server = cupboardServer(env);
 
-		// The cron has no external credential, so it exchanges the deploy-time
-		// bootstrap secret for a short-lived admin JWT and uses that for the
-		// admin-scoped GC route.
-		const bootstrap = await server.fetch(`${internalOrigin}/auth/bootstrap`, {
-			method: 'POST',
-			headers: { authorization: `Bearer ${env.CUPBOARD_BOOTSTRAP_TOKEN}` }
-		});
-
-		if (!bootstrap.ok) {
-			throw new CronGarbageCollectionFailedError(
-				bootstrap.status,
-				await bootstrap.text()
-			);
-		}
-
-		const { token } = bootstrapResponseSchema.parse(await bootstrap.json());
-		const authorization = `Bearer ${token}`;
-
-		await runScheduledMaintenance((path) =>
-			server.fetch(`${internalOrigin}${path}`, {
-				method: 'POST',
-				headers: { authorization }
-			})
+		await runScheduledMaintenance(
+			() => server.runGarbageCollection(),
+			() => server.runVerification()
 		);
 	}
 } satisfies ExportedHandler<Env>;

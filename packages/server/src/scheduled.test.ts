@@ -1,85 +1,74 @@
 import { describe, expect, it } from 'vitest';
 
-import {
-	CronGarbageCollectionFailedError,
-	CronVerificationFailedError
-} from './errors.ts';
 import { runScheduledMaintenance } from './scheduled.ts';
 
-interface Outcome {
-	readonly status: number;
-	readonly body: string;
-}
+const gcError = new Error('gc boom');
+const verifyError = new Error('verify boom');
 
-const ok: Outcome = { status: 200, body: 'ok' };
-
-function recordingPoster(outcomes: Record<string, Outcome>): {
-	readonly post: (path: string) => Promise<Response>;
+function recorder(): {
 	readonly calls: string[];
+	pass: (label: string) => () => Promise<void>;
+	fail: (label: string, error: Error) => () => Promise<void>;
 } {
 	const calls: string[] = [];
 
 	return {
 		calls,
-		post(path) {
-			calls.push(path);
-			const outcome = outcomes[path] ?? ok;
+		pass: (label) => () => {
+			calls.push(label);
 
-			return Promise.resolve(
-				new Response(outcome.body, { status: outcome.status })
-			);
+			return Promise.resolve();
+		},
+		fail: (label, error) => () => {
+			calls.push(label);
+
+			return Promise.reject(error);
 		}
 	};
 }
 
 describe('runScheduledMaintenance', () => {
-	it('runs the sweep then the verify when both succeed', async () => {
-		const { post, calls } = recordingPoster({});
+	it('runs both passes when each succeeds', async () => {
+		const { calls, pass } = recorder();
 
-		await runScheduledMaintenance(post);
+		await runScheduledMaintenance(pass('gc'), pass('verify'));
 
-		expect(calls).toStrictEqual(['/gc', '/verify']);
+		expect(calls).toStrictEqual(['gc', 'verify']);
 	});
 
-	it('still runs the verify, then reports the failure, when the sweep fails', async () => {
-		const { post, calls } = recordingPoster({
-			'/gc': { status: 500, body: 'gc boom' }
-		});
+	it('runs the verify and then reports the failure when the sweep fails', async () => {
+		const { calls, pass, fail } = recorder();
 
-		await expect(runScheduledMaintenance(post)).rejects.toBeInstanceOf(
-			CronGarbageCollectionFailedError
-		);
-		expect(calls).toStrictEqual(['/gc', '/verify']);
+		const error = await runScheduledMaintenance(
+			fail('gc', gcError),
+			pass('verify')
+		).catch((error_: unknown) => error_);
+
+		expect({ error, calls }).toStrictEqual({
+			error: gcError,
+			calls: ['gc', 'verify']
+		});
 	});
 
 	it('does not mask the sweep when the verify fails', async () => {
-		const { post, calls } = recordingPoster({
-			'/verify': { status: 500, body: 'verify boom' }
-		});
+		const { calls, pass, fail } = recorder();
 
-		const error = await runScheduledMaintenance(post).catch(
-			(error_: unknown) => error_
-		);
+		const error = await runScheduledMaintenance(
+			pass('gc'),
+			fail('verify', verifyError)
+		).catch((error_: unknown) => error_);
 
-		expect({
-			error: error instanceof CronVerificationFailedError,
-			status: (error as CronVerificationFailedError).status,
-			calls
-		}).toStrictEqual({
-			error: true,
-			status: 500,
-			calls: ['/gc', '/verify']
+		expect({ error, calls }).toStrictEqual({
+			error: verifyError,
+			calls: ['gc', 'verify']
 		});
 	});
 
 	it('surfaces the sweep failure first when both fail', async () => {
-		const { post } = recordingPoster({
-			'/gc': { status: 500, body: 'gc boom' },
-			'/verify': { status: 503, body: 'verify boom' }
-		});
+		const { fail } = recorder();
 
-		await expect(runScheduledMaintenance(post)).rejects.toBeInstanceOf(
-			CronGarbageCollectionFailedError
-		);
+		await expect(
+			runScheduledMaintenance(fail('gc', gcError), fail('verify', verifyError))
+		).rejects.toBe(gcError);
 	});
 });

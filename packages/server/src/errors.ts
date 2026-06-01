@@ -210,26 +210,6 @@ export class R2PresignConfigurationMissingError extends ServerHttpError {
 	}
 }
 
-export class CronGarbageCollectionFailedError extends Error {
-	constructor(
-		public readonly status: number,
-		public readonly body: string
-	) {
-		super(`Cron garbage collection failed with HTTP ${String(status)}`);
-		this.name = 'CronGarbageCollectionFailedError';
-	}
-}
-
-export class CronVerificationFailedError extends Error {
-	constructor(
-		public readonly status: number,
-		public readonly body: string
-	) {
-		super(`Cron verification failed with HTTP ${String(status)}`);
-		this.name = 'CronVerificationFailedError';
-	}
-}
-
 export class UploadNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 

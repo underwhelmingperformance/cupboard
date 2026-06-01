@@ -213,6 +213,14 @@ interface OwnerConfig {
 	readonly audience: string;
 }
 
+interface GarbageCollectionOutcome {
+	readonly pendingUploadsDeleted: number;
+	readonly rootsExpired: number;
+	readonly pathsSwept: number;
+	readonly narInfosDeleted: number;
+	readonly blobsDeleted: number;
+}
+
 // A key in the auth signing set. The newest non-retired key mints; every
 // non-retired key verifies and is published in the JWKS. Retiring sets
 // `retired`, dropping the key from minting, verification and the JWKS at once.
@@ -264,6 +272,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 
 		return this.app.fetch(request, this.env);
+	}
+
+	// The cron drives maintenance through these RPC methods rather than the HTTP
+	// admin routes: the service binding authorises the call, so no token is
+	// minted or exchanged. The same cores back `/gc` and `/verify` for manual
+	// use. Both sweep every cache and skip the edge-cache purge, exactly as an
+	// internal-origin HTTP sweep did, relying on the narinfo TTL and the
+	// orphan-blob grace window.
+	async runGarbageCollection(): Promise<void> {
+		await this.initialise();
+		await this.collectGarbage();
+	}
+
+	async runVerification(): Promise<void> {
+		await this.initialise();
+		await this.verifyBatch(undefined, verificationBatchSize);
 	}
 
 	private routes(): void {
@@ -957,10 +981,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						verificationBatchSize
 					);
 
-		return Response.json(await this.runVerification(purgeOrigin, limit));
+		return Response.json(await this.verifyBatch(purgeOrigin, limit));
 	}
 
-	private runVerification(
+	private verifyBatch(
 		origin: string | undefined,
 		limit: number
 	): Promise<VerifyReport> {
@@ -2285,7 +2309,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		const now = new Date().toISOString();
 		// Interactive GC purges this colo's edge cache via the caller's public
 		// origin. The cron sweep arrives on the internal origin and cannot know
 		// the public URL, so it skips purging and relies on the narinfo TTL and
@@ -2293,7 +2316,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const requestOrigin = new URL(request.url).origin;
 		const purgeOrigin =
 			requestOrigin === internalOrigin ? undefined : requestOrigin;
-		const result = await this.ctx.blockConcurrencyWhile(async () => {
+
+		return Response.json({
+			ok: true,
+			...(await this.collectGarbage(cache, purgeOrigin))
+		});
+	}
+
+	private collectGarbage(
+		cache?: string,
+		purgeOrigin?: string
+	): Promise<GarbageCollectionOutcome> {
+		const now = new Date().toISOString();
+
+		return this.ctx.blockConcurrencyWhile(async () => {
 			const expiredUploads = this.db
 				.select()
 				.from(schema.pendingUploads)
@@ -2336,11 +2372,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				narInfosDeleted: await this.flushQueuedNarInfoDeletions(purgeOrigin),
 				blobsDeleted: await this.flushQueuedBlobDeletions(now)
 			};
-		});
-
-		return Response.json({
-			ok: true,
-			...result
 		});
 	}
 
