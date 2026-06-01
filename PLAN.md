@@ -544,11 +544,21 @@ cache.
     `narHash` and are **shared across caches** (identical bytes), so only
     narinfo membership and retention are per-cache; the narinfo R2 object is
     namespaced `narinfo/<cache>/<storePathHash>`.
-  - Registry: caches are implicit — a `cache` row (name, priority) is created on
-    first push or root with `--cache <name>`. The default cache is the empty
-    name with the current priority.
+  - Registry: a `cache` row (name, priority, created_at). Created implicitly on
+    the first push or root with `--cache <name>` (default priority), or
+    explicitly with `cupboard cache create <name> [--priority N]`. The default
+    cache is the empty name with the standard priority.
+  - Per-cache priority is honoured: `/cache/:cacheName/nix-cache-info` renders
+    the cache's registered priority (the bare/default cache keeps the standard
+    `CacheInfo.default` priority).
+  - Management surface: `cupboard cache list` / `create [--priority]` /
+    `inspect` / `remove [--force]`, backed by admin routes `GET /caches`,
+    `PUT /caches/:cacheName` (upsert priority), and `DELETE /caches/:cacheName`
+    (teardown — refuses the default cache and a non-empty cache without
+    `--force`, which sweeps the cache's paths through the durable removal
+    queue).
   - Reachability GC and retention roots are scoped per cache.
-  - CLI: `--cache <name>` on `push`, `config`, `root`, and `delete`.
+  - CLI: `--cache <name>` on `push`, `config`, `stats`, `root`, and `delete`.
   - One deployment-wide signing key, shared by all caches (each
     `/cache/:cacheName/pubkey` returns it). Per-cache keys would add rotation
     and config complexity with no clear personal-cache benefit.
