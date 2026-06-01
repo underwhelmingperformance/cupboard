@@ -20,8 +20,11 @@ import {
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
+import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { StatusCodes } from 'http-status-codes';
 import { expect } from 'vitest';
+
+import migrations from '../drizzle/migrations.js';
 
 import { type AccessScope, mintAccessJwt } from './auth.ts';
 import { authKeys } from './db/schema.ts';
@@ -842,4 +845,38 @@ export async function expectPrepareUploadResponse(
 
 export function uploadExpiryFromNow(): string {
 	return new Date(Date.now() + 15 * 60 * 1000).toISOString();
+}
+
+/** The highest migration index registered in `drizzle/migrations.js`. */
+export const latestMigrationIndex = Math.max(
+	...migrations.journal.entries.map((entry) => entry.idx)
+);
+
+function migrationsThrough(throughIndex: number) {
+	return {
+		journal: {
+			...migrations.journal,
+			entries: migrations.journal.entries.filter(
+				(entry) => entry.idx <= throughIndex
+			)
+		},
+		migrations: Object.fromEntries(
+			Object.entries(migrations.migrations).filter(
+				([key]) => Number.parseInt(key.slice(1), 10) <= throughIndex
+			)
+		)
+	};
+}
+
+/**
+ * Applies the registered migrations up to and including `throughIndex` against
+ * a Durable Object's raw storage. Calling it twice with seeding in between lets
+ * a test plant rows in an older table shape and then assert how a later
+ * migration backfills them; the migrator skips migrations already applied.
+ */
+export async function migrateThrough(
+	state: DurableObjectState,
+	throughIndex: number
+): Promise<void> {
+	await migrate(drizzle(state.storage), migrationsThrough(throughIndex));
 }

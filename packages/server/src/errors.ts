@@ -65,6 +65,18 @@ export class StoredReferencesInvalidError extends ServerHttpError {
 	}
 }
 
+export class StoredSignaturesInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly storePathHash: string,
+		public override readonly cause: Error
+	) {
+		super('Stored narinfo signatures are invalid');
+		this.name = 'StoredSignaturesInvalidError';
+	}
+}
+
 export class UploadNotPreparedError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 

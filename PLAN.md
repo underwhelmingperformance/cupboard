@@ -223,7 +223,7 @@ One DO SQLite database per deployment.
 
 - `narinfo` — one row per store path.
   - `store_path_hash` (PK), `store_path`, `nar_hash`, `nar_size`, `file_hash`,
-    `file_size`, `compression`, `references_json`, `deriver`, `ca`, `sig`,
+    `file_size`, `compression`, `references_json`, `deriver`, `ca`, `sigs_json`,
     `created_at`.
 - `nar_blob` — one row per stored compressed blob.
   - `nar_hash` (PK), `r2_key`, `compression`, `file_hash`, `file_size`,

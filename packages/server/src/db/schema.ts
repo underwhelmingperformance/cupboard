@@ -16,7 +16,7 @@ export const narInfos = sqliteTable('narinfo', {
 	referencesJson: text('references_json').notNull(),
 	deriver: text('deriver'),
 	ca: text('ca'),
-	sig: text('sig'),
+	sigsJson: text('sigs_json').notNull().default('[]'),
 	createdAt: text('created_at').notNull()
 });
 
@@ -68,6 +68,8 @@ export const signingKeys = sqliteTable('signing_key', {
 	id: text('id').primaryKey(),
 	privateJwkJson: text('private_jwk_json').notNull(),
 	publicKey: text('public_key').notNull(),
+	signing: integer('signing', { mode: 'boolean' }).notNull().default(true),
+	published: integer('published', { mode: 'boolean' }).notNull().default(true),
 	createdAt: text('created_at').notNull()
 });
 

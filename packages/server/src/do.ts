@@ -35,6 +35,7 @@ import {
 } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
+import { z } from 'zod';
 
 import migrations from '../drizzle/migrations.js';
 
@@ -58,6 +59,7 @@ import {
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	StoredReferencesInvalidError,
+	StoredSignaturesInvalidError,
 	StoredUploadMetadataInvalidError,
 	UnauthenticatedError,
 	UploadExpiredError,
@@ -97,6 +99,8 @@ type SchemaWriter =
 	| Parameters<Parameters<SchemaDatabase['transaction']>[0]>[0];
 
 const adminJwtTtlSeconds = 10 * 60;
+
+const storedSignaturesSchema = z.array(z.string());
 
 interface SigningKey {
 	readonly privateJwk: JsonWebKey;
@@ -899,7 +903,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			),
 			row.deriver ?? undefined,
 			row.ca ?? undefined,
-			row.sig ? [row.sig] : []
+			parseStored(
+				storedSignaturesSchema,
+				row.sigsJson,
+				(cause) => new StoredSignaturesInvalidError(row.storePathHash, cause)
+			)
 		);
 	}
 
@@ -1179,7 +1187,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					referencesJson: JSON.stringify(metadata.references),
 					deriver: metadata.deriver,
 					ca: metadata.ca,
-					sig,
+					sigsJson: JSON.stringify([sig]),
 					createdAt: now
 				} satisfies typeof schema.narInfos.$inferInsert)
 				.onConflictDoNothing()
