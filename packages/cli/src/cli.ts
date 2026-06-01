@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 
 import { registerCacheCommands } from './commands/cache.ts';
+import { registerCheckCommand } from './commands/check.ts';
 import { registerConfigCommand } from './commands/config.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerInitCommand } from './commands/init.ts';
@@ -36,6 +37,7 @@ export function buildProgram(): Command {
 	registerKeyCommands(program);
 	registerCacheCommands(program);
 	registerPolicyCommands(program);
+	registerCheckCommand(program);
 
 	return program;
 }

@@ -8,6 +8,8 @@ import {
 	cacheRemoveResponseSchema,
 	type CacheSummary,
 	cacheSummarySchema,
+	type CheckReport,
+	checkReportSchema,
 	type CommitResponse,
 	commitResponseSchema,
 	DEFAULT_CACHE,
@@ -164,14 +166,13 @@ export class CupboardClient {
 		name: string,
 		force: boolean
 	): Promise<CacheRemoveResponse> {
-		const query = force ? '?force=true' : '';
-
 		return this.requestJson(
-			`/caches/${encodeURIComponent(name)}${query}`,
+			`/caches/${encodeURIComponent(name)}`,
 			cacheRemoveResponseSchema,
 			{
 				method: 'DELETE',
-				token
+				token,
+				query: force ? { force: 'true' } : undefined
 			}
 		);
 	}
@@ -205,6 +206,16 @@ export class CupboardClient {
 				token
 			}
 		);
+	}
+
+	check(
+		token: AccessCredential,
+		options: { readonly deep: boolean }
+	): Promise<CheckReport> {
+		return this.requestJson('/check', checkReportSchema, {
+			token,
+			query: options.deep ? { deep: 'true' } : undefined
+		});
 	}
 
 	deleteStorePath(
@@ -357,6 +368,11 @@ export class CupboardClient {
 	): Promise<Response> {
 		const method = options.method ?? 'GET';
 		const url = new URL(path, this.baseUrl);
+
+		for (const [key, value] of Object.entries(options.query ?? {})) {
+			url.searchParams.set(key, value);
+		}
+
 		const body =
 			options.body === undefined ? undefined : JSON.stringify(options.body);
 		const credential = options.token;
@@ -453,6 +469,7 @@ interface ClientRequestOptions {
 	readonly token?: AccessCredential;
 	readonly headers?: ConstructorParameters<typeof Headers>[0];
 	readonly body?: unknown;
+	readonly query?: Readonly<Record<string, string>>;
 }
 
 interface StreamingRequestInit extends RequestInit {

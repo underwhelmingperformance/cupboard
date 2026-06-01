@@ -2,6 +2,7 @@ import type {
 	BootstrapResponse,
 	CacheRemoveResponse,
 	CacheSummary,
+	CheckReport,
 	DeletePathResponse,
 	KeyRetireResponse,
 	KeyRotateResponse,
@@ -343,6 +344,41 @@ describe('CupboardClient retention policies', () => {
 		const { client } = capturingClient({ policies: [{ id: 'p1' }] });
 
 		await expect(client.listPolicies('admin-token')).rejects.toThrow(
+			ResponseSchemaMismatchError
+		);
+	});
+});
+
+describe('CupboardClient check', () => {
+	const report: CheckReport = {
+		narInfosChecked: 1,
+		narBlobsChecked: 1,
+		complete: true,
+		discrepancies: []
+	};
+
+	it.each([
+		{ deep: false, url: 'https://cupboard.test/check' },
+		{ deep: true, url: 'https://cupboard.test/check?deep=true' }
+	])('requests /check with deep=$deep', async ({ deep, url }) => {
+		const { client, captured } = capturingClient(report);
+
+		const result = await client.check('admin-token', { deep });
+
+		expect(result).toStrictEqual(report);
+		expect(captured()).toStrictEqual({
+			url,
+			method: 'GET',
+			authorization: 'Bearer admin-token',
+			contentType: undefined,
+			body: undefined
+		});
+	});
+
+	it('rejects a check response that does not match the schema', async () => {
+		const { client } = capturingClient({ narInfosChecked: -1 });
+
+		await expect(client.check('admin-token', { deep: false })).rejects.toThrow(
 			ResponseSchemaMismatchError
 		);
 	});
