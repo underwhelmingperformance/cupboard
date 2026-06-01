@@ -44,10 +44,12 @@ import {
 	type SigningKeySummary,
 	type StatsResponse,
 	storePathHashSchema,
-	type UsageResponse,
+	subjectTokenTypeIdToken,
+	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
 	tokenExchangeRequestSchema,
 	type TokenResponse,
+	type UsageResponse,
 	type UploadBlobMetadataFields,
 	type UploadDecision,
 	uploadNegotiateRequestSchema,
@@ -108,6 +110,7 @@ import {
 	CacheNotEmptyError,
 	InsufficientScopeError,
 	InvalidGrantError,
+	InvalidRequestError,
 	LastAuthKeyError,
 	LastSigningKeyError,
 	OAuthError,
@@ -553,6 +556,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		if (body.grant_type !== tokenExchangeGrantType) {
 			throw new UnsupportedGrantTypeError(body.grant_type);
+		}
+
+		if (
+			body.subject_token_type !== subjectTokenTypeIdToken &&
+			body.subject_token_type !== subjectTokenTypeJwt
+		) {
+			throw new InvalidRequestError(
+				`Unsupported subject_token_type: ${body.subject_token_type}`
+			);
 		}
 
 		// Matching routes the token to a rule on its unverified claims; the

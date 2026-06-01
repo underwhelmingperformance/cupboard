@@ -21,6 +21,7 @@ import {
 	keyRetireResponseSchema,
 	type KeyRotateResponse,
 	keyRotateResponseSchema,
+	type ParsedTokenResponse,
 	type RetentionPolicyAddBody,
 	type RetentionPolicyListResponse,
 	retentionPolicyListResponseSchema,
@@ -37,6 +38,8 @@ import {
 	rootSetResponseSchema,
 	type StatsResponse,
 	statsResponseSchema,
+	tokenExchangeGrantType,
+	tokenResponseSchema,
 	type UsageResponse,
 	usageResponseSchema,
 	type UploadNegotiateRequest,
@@ -332,12 +335,55 @@ export class CupboardClient {
 		);
 	}
 
+	/**
+	 * Exchanges an external OIDC subject token for a cupboard access token at the
+	 * OAuth `POST /token` endpoint. The endpoint is unauthenticated — the subject
+	 * token is the credential — and takes a urlencoded body, so it bypasses the
+	 * JSON request path the rest of the client uses.
+	 */
+	async tokenExchange(
+		subjectToken: string,
+		subjectTokenType: string
+	): Promise<ParsedTokenResponse> {
+		const url = new URL('/token', this.baseUrl);
+		const body = new URLSearchParams({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenType
+		});
+		const response = await this.fetcher(url, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: body.toString()
+		});
+
+		if (!response.ok) {
+			throw new CupboardHttpError(
+				'POST',
+				'/token',
+				response.status,
+				await response.text()
+			);
+		}
+
+		return this.parseJson('/token', tokenResponseSchema, response);
+	}
+
 	private async requestJson<S extends z.ZodType>(
 		path: string,
 		schema: S,
 		options: ClientRequestOptions = {}
 	): Promise<z.output<S>> {
 		const response = await this.request(path, options);
+
+		return this.parseJson(path, schema, response);
+	}
+
+	private async parseJson<S extends z.ZodType>(
+		path: string,
+		schema: S,
+		response: Response
+	): Promise<z.output<S>> {
 		let payload: unknown;
 
 		try {

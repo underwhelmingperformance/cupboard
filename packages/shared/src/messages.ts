@@ -386,12 +386,19 @@ export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
 
 // RFC 8693 token-exchange is the only grant the token endpoint accepts. The
 // subject token is an external OIDC JWT — the owner's `id_token` or a CI GitHub
-// Actions token — and `subject_token_type` is informational: verification is
-// uniform across both. The issued cupboard token is reported as an access token.
+// Actions token. The issued cupboard token is reported as an access token.
 export const tokenExchangeGrantType =
 	'urn:ietf:params:oauth:grant-type:token-exchange';
 export const issuedAccessTokenType =
 	'urn:ietf:params:oauth:token-type:access_token';
+
+// The subject token is a JWT either way. cupboard accepts only these two RFC 8693
+// type identifiers and verifies both the same way, rejecting any other type. Its
+// callers present an `id_token`; `jwt` is accepted for clients that label a plain
+// OIDC JWT with the generic type.
+export const subjectTokenTypeIdToken =
+	'urn:ietf:params:oauth:token-type:id_token';
+export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 
 // The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
 // accepted and ignored: the matched trust rule alone fixes the issued scope and

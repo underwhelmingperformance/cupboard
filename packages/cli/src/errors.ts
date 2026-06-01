@@ -23,6 +23,13 @@ export class InvalidPolicyScopeError extends CliError {
 	}
 }
 
+export class AuthSelectionError extends CliError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'AuthSelectionError';
+	}
+}
+
 export class CupboardHttpError extends CliError {
 	constructor(
 		public readonly method: string,

@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 
-import { authenticate } from '../auth.ts';
+import { authenticateForPush } from '../auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client.ts';
 import { parseTtl } from '../duration.ts';
@@ -8,7 +8,9 @@ import { runPush } from '../push.ts';
 import { createReporter } from '../reporter.ts';
 
 interface PushOptions {
-	readonly token: string;
+	readonly token?: string;
+	readonly githubOidc?: boolean;
+	readonly audience?: string;
 	readonly root?: string;
 	readonly ttl?: number;
 	readonly cache?: string;
@@ -22,7 +24,15 @@ export function registerPushCommand(program: Command): void {
 		)
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<paths...>', 'Nix store paths to push')
-		.requiredOption('--token <token>', 'bootstrap secret')
+		.option('--token <token>', 'bootstrap secret')
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token rather than a bootstrap secret'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the Worker URL)'
+		)
 		.option(
 			'--root <name>',
 			'retain the pushed paths under this named channel (e.g. github:owner/repo/main)'
@@ -38,7 +48,11 @@ export function registerPushCommand(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
-			const token = await authenticate(client, options.token);
+			const token = await authenticateForPush(client, {
+				token: options.token,
+				githubOidc: options.githubOidc,
+				audience: options.audience ?? url
+			});
 
 			await runPush(paths, reporter, {
 				client,

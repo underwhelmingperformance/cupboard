@@ -11,7 +11,8 @@ import type {
 	RootListResponse,
 	RootRemoveResponse,
 	RootSetBody,
-	RootSetResponse
+	RootSetResponse,
+	TokenResponse
 } from '@cupboard/shared';
 import { describe, expect, it } from 'vitest';
 
@@ -81,6 +82,33 @@ describe('CupboardClient.bootstrap', () => {
 			authorization: 'Bearer bootstrap-secret',
 			contentType: undefined,
 			body: undefined
+		});
+	});
+});
+
+describe('CupboardClient.tokenExchange', () => {
+	it('posts a urlencoded token-exchange request and returns the parsed token', async () => {
+		const response: TokenResponse = {
+			access_token: 'write-jwt',
+			token_type: 'Bearer',
+			expires_in: 900,
+			scope: 'write',
+			issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+		};
+		const { client, captured } = capturingClient(response);
+
+		const result = await client.tokenExchange(
+			'subject.jwt',
+			'urn:ietf:params:oauth:token-type:id_token'
+		);
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/token',
+			method: 'POST',
+			authorization: undefined,
+			contentType: 'application/x-www-form-urlencoded',
+			body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=subject.jwt&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token'
 		});
 	});
 });

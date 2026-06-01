@@ -1,4 +1,8 @@
-import { tokenExchangeGrantType } from '@cupboard/shared';
+import {
+	subjectTokenTypeIdToken,
+	subjectTokenTypeJwt,
+	tokenExchangeGrantType
+} from '@cupboard/shared';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
@@ -53,10 +57,22 @@ describe('POST /token', () => {
 				Promise.resolve({
 					grant_type: 'authorization_code',
 					subject_token: 'x',
-					subject_token_type: 'jwt'
+					subject_token_type: subjectTokenTypeIdToken
 				}),
 			error: 'unsupported_grant_type',
 			error_description: 'Unsupported grant type: authorization_code'
+		},
+		{
+			name: 'an unsupported subject token type',
+			form: () =>
+				Promise.resolve({
+					grant_type: tokenExchangeGrantType,
+					subject_token: 'x',
+					subject_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+				}),
+			error: 'invalid_request',
+			error_description:
+				'Unsupported subject_token_type: urn:ietf:params:oauth:token-type:access_token'
 		},
 		{
 			name: 'a subject token that is not a JWT',
@@ -64,7 +80,7 @@ describe('POST /token', () => {
 				Promise.resolve({
 					grant_type: tokenExchangeGrantType,
 					subject_token: 'not-a-jwt',
-					subject_token_type: 'jwt'
+					subject_token_type: subjectTokenTypeIdToken
 				}),
 			error: 'invalid_grant',
 			error_description: 'Subject token is not a JWT'
@@ -74,7 +90,7 @@ describe('POST /token', () => {
 			form: async () => ({
 				grant_type: tokenExchangeGrantType,
 				subject_token: await untrustedToken(),
-				subject_token_type: 'jwt'
+				subject_token_type: subjectTokenTypeJwt
 			}),
 			error: 'invalid_grant',
 			error_description: 'No trust rule matches the subject token'
