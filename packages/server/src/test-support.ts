@@ -188,14 +188,21 @@ export function workerFetch(
 
 export async function readFetch(
 	pathname: string,
-	init?: RequestInit
+	init?: RequestInit,
+	envOverride: Readonly<Record<string, string>> = {}
 ): Promise<Response> {
 	const ctx = createExecutionContext();
 	const request = new Request<unknown, IncomingRequestCfProperties>(
 		new URL(pathname, origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
-	const response = await worker.fetch(request, env, ctx);
+	// Inject a per-call env copy so a test can vary deployment vars (e.g. the
+	// private-read credential) without mutating the shared workers-pool `env`.
+	const response = await worker.fetch(
+		request,
+		Object.assign({}, env, envOverride),
+		ctx
+	);
 	await waitOnExecutionContext(ctx);
 
 	return response;
