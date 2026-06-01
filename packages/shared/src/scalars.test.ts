@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 import type { z } from 'zod';
 
 import {
+	cacheNameSchema,
+	cachePrioritySchema,
 	compressionSchema,
+	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
@@ -237,12 +240,88 @@ const cases: readonly {
 		schema: signingKeyIdSchema,
 		value: 'Active',
 		valid: false
+	},
+	{
+		name: 'a simple cache name',
+		schema: cacheNameSchema,
+		value: 'builds',
+		valid: true
+	},
+	{
+		name: 'a cache name with the allowed punctuation',
+		schema: cacheNameSchema,
+		value: '0a.b-c_d',
+		valid: true
+	},
+	{
+		name: 'a 63-character cache name',
+		schema: cacheNameSchema,
+		value: 'a'.repeat(63),
+		valid: true
+	},
+	{
+		name: 'an empty cache name',
+		schema: cacheNameSchema,
+		value: '',
+		valid: false
+	},
+	{
+		name: 'a cache name starting with punctuation',
+		schema: cacheNameSchema,
+		value: '-builds',
+		valid: false
+	},
+	{
+		name: 'an upper-case cache name',
+		schema: cacheNameSchema,
+		value: 'Builds',
+		valid: false
+	},
+	{
+		name: 'a cache name with a slash',
+		schema: cacheNameSchema,
+		value: 'a/b',
+		valid: false
+	},
+	{
+		name: 'a 64-character cache name',
+		schema: cacheNameSchema,
+		value: 'a'.repeat(64),
+		valid: false
+	},
+	{
+		name: 'a zero cache priority',
+		schema: cachePrioritySchema,
+		value: 0,
+		valid: true
+	},
+	{
+		name: 'a positive cache priority',
+		schema: cachePrioritySchema,
+		value: 40,
+		valid: true
+	},
+	{
+		name: 'a negative cache priority',
+		schema: cachePrioritySchema,
+		value: -1,
+		valid: false
+	},
+	{
+		name: 'a fractional cache priority',
+		schema: cachePrioritySchema,
+		value: 1.5,
+		valid: false
 	}
 ];
 
 describe('scalar schemas', () => {
 	it.each(cases)('accepts/rejects $name', ({ schema, value, valid }) => {
 		expect(schema.safeParse(value).success).toBe(valid);
+	});
+
+	it('represents the default cache as the empty string', () => {
+		expect(DEFAULT_CACHE).toBe('');
 	});
 
 	it.each([

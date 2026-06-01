@@ -77,6 +77,28 @@ export const positiveIntSchema = z
 	.positive()
 	.max(Number.MAX_SAFE_INTEGER);
 
+export const cacheNamePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
+
+// The default (unnamed) cache served at the bare root. Named caches carry a
+// non-empty name matching `cacheNamePattern`; the empty string is reserved for
+// the default and is deliberately not a valid cache name.
+export const DEFAULT_CACHE = '';
+
+export const cacheNameSchema = z
+	.string()
+	.regex(cacheNamePattern)
+	.brand('CacheName');
+export type CacheName = z.infer<typeof cacheNameSchema>;
+
+// A Nix substituter priority: a non-negative integer where lower is preferred.
+export const cachePrioritySchema = z
+	.number()
+	.int()
+	.min(0)
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('CachePriority');
+export type CachePriority = z.infer<typeof cachePrioritySchema>;
+
 export const compressionSchema = z.literal('zstd');
 
 export const referencesSchema = z.array(storePathBasenameSchema);
