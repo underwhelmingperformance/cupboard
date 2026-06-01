@@ -8,6 +8,7 @@ import { createReporter, type Reporter } from '../reporter.ts';
 
 interface DeleteOptions {
 	readonly token: string;
+	readonly cache?: string;
 }
 
 export interface DeleteClient {
@@ -27,11 +28,15 @@ export function registerDeleteCommand(program: Command): void {
 			'store path to delete (e.g. /nix/store/<hash>-<name>)'
 		)
 		.requiredOption('--token <token>', 'bootstrap secret')
+		.option(
+			'--cache <name>',
+			'delete from a named cache rather than the default'
+		)
 		.action(async (url: string, storePath: string, options: DeleteOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, options.cache);
 			const token = await authenticate(client, options.token);
 
 			await runDelete(storePath, token, reporter, client);

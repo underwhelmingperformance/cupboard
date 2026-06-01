@@ -132,10 +132,24 @@ export type ParsedBootstrapResponse = z.output<typeof bootstrapResponseSchema>;
 export const statsResponseSchema = z.strictObject({
 	storePaths: countSchema,
 	narBlobs: countSchema,
+	narFileSize: countSchema,
+	casObjects: countSchema,
+	casFileSize: countSchema,
 	pendingUploads: countSchema,
 	totalFileSize: countSchema
 });
 export type ParsedStatsResponse = z.output<typeof statsResponseSchema>;
+
+export const usageResponseSchema = z.strictObject({
+	narBlobs: countSchema,
+	narFileSize: countSchema,
+	casObjects: countSchema,
+	casFileSize: countSchema,
+	totalFileSize: countSchema,
+	quotaBytes: countSchema.optional(),
+	remainingQuotaBytes: countSchema.optional()
+});
+export type ParsedUsageResponse = z.output<typeof usageResponseSchema>;
 
 export const deletePathResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
@@ -268,6 +282,7 @@ export type UploadNegotiateResponse = z.input<
 export type CommitResponse = z.input<typeof commitResponseSchema>;
 export type BootstrapResponse = z.input<typeof bootstrapResponseSchema>;
 export type StatsResponse = z.input<typeof statsResponseSchema>;
+export type UsageResponse = z.input<typeof usageResponseSchema>;
 export type DeletePathResponse = z.input<typeof deletePathResponseSchema>;
 export type RootSetBody = z.input<typeof rootSetBodySchema>;
 export type RootTarget = z.input<typeof rootTargetSchema>;

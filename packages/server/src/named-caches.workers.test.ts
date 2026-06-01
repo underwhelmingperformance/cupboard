@@ -1,4 +1,4 @@
-import type { StatsResponse } from '@cupboard/shared';
+import type { StatsResponse, UsageResponse } from '@cupboard/shared';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { count } from 'drizzle-orm';
@@ -41,14 +41,24 @@ async function putRoot(
 	expect(response.status).toBe(StatusCodes.OK);
 }
 
-async function storePathCount(token: string, cache: string): Promise<number> {
+async function statsForCache(
+	token: string,
+	cache: string
+): Promise<StatsResponse> {
 	const response = await authorisedFetch(
 		cacheScopedPath(cache, '/stats'),
 		token
 	);
-	const body = await response.json<StatsResponse>();
 
-	return body.storePaths;
+	expect(response.status).toBe(StatusCodes.OK);
+	return response.json<StatsResponse>();
+}
+
+async function usageForTenant(token: string): Promise<UsageResponse> {
+	const response = await authorisedFetch('/usage', token);
+
+	expect(response.status).toBe(StatusCodes.OK);
+	return response.json<UsageResponse>();
 }
 
 describe('named caches', () => {
@@ -82,8 +92,9 @@ describe('named caches', () => {
 				};
 			}
 		);
-		const defaultStorePaths = await storePathCount(init.token, '');
-		const buildsStorePaths = await storePathCount(init.token, 'builds');
+		const defaultStats = await statsForCache(init.token, '');
+		const buildsStats = await statsForCache(init.token, 'builds');
+		const usage = await usageForTenant(init.token);
 		const defaultObject = await env.BLOBS.head(
 			narInfoObjectKey(metadata.storePathHash)
 		);
@@ -94,15 +105,39 @@ describe('named caches', () => {
 		expect({
 			narinfoCaches: rows.narinfoCaches,
 			blobCount: rows.blobCount,
-			defaultStorePaths,
-			buildsStorePaths,
+			defaultStats,
+			buildsStats,
+			usage,
 			defaultObjectExists: defaultObject !== null,
 			buildsObjectExists: buildsObject !== null
 		}).toStrictEqual({
 			narinfoCaches: ['', 'builds'],
 			blobCount: 1,
-			defaultStorePaths: 1,
-			buildsStorePaths: 1,
+			defaultStats: {
+				storePaths: 1,
+				narBlobs: 1,
+				narFileSize: narBytes.byteLength,
+				casObjects: 0,
+				casFileSize: 0,
+				pendingUploads: 0,
+				totalFileSize: narBytes.byteLength
+			},
+			buildsStats: {
+				storePaths: 1,
+				narBlobs: 1,
+				narFileSize: narBytes.byteLength,
+				casObjects: 0,
+				casFileSize: 0,
+				pendingUploads: 0,
+				totalFileSize: narBytes.byteLength
+			},
+			usage: {
+				narBlobs: 1,
+				narFileSize: narBytes.byteLength,
+				casObjects: 0,
+				casFileSize: 0,
+				totalFileSize: narBytes.byteLength
+			},
 			defaultObjectExists: true,
 			buildsObjectExists: true
 		});

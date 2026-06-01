@@ -12,6 +12,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient, type TokenProvider } from './client.ts';
 import {
+	InvalidCacheNameError,
 	MalformedResponseError,
 	ResponseSchemaMismatchError
 } from './errors.ts';
@@ -24,7 +25,10 @@ interface CapturedRequest {
 	readonly body: unknown;
 }
 
-function capturingClient(response: unknown): {
+function capturingClient(
+	response: unknown,
+	cachePrefix = ''
+): {
 	readonly client: CupboardClient;
 	readonly captured: () => CapturedRequest | undefined;
 } {
@@ -47,7 +51,8 @@ function capturingClient(response: unknown): {
 			};
 
 			return Promise.resolve(Response.json(response));
-		}
+		},
+		cachePrefix
 	);
 
 	return { client, captured: () => captured };
@@ -231,6 +236,72 @@ describe('CupboardClient.retireKey', () => {
 		await expect(client.retireKey('admin-token', 'active')).rejects.toThrow(
 			ResponseSchemaMismatchError
 		);
+	});
+});
+
+describe('CupboardClient cache prefix', () => {
+	const statsResponse = {
+		storePaths: 0,
+		narBlobs: 0,
+		narFileSize: 0,
+		casObjects: 0,
+		casFileSize: 0,
+		pendingUploads: 0,
+		totalFileSize: 0
+	};
+	const usageResponse = {
+		narBlobs: 0,
+		narFileSize: 0,
+		casObjects: 0,
+		casFileSize: 0,
+		totalFileSize: 0
+	};
+
+	it('prepends the cache prefix to a path-scoped route', async () => {
+		const { client, captured } = capturingClient(
+			statsResponse,
+			'/cache/builds'
+		);
+
+		await client.stats('admin-token');
+
+		expect(captured()?.url).toBe('https://cupboard.test/cache/builds/stats');
+	});
+
+	it('leaves a path-scoped route bare for the default cache', async () => {
+		const { client, captured } = capturingClient(statsResponse);
+
+		await client.stats('admin-token');
+
+		expect(captured()?.url).toBe('https://cupboard.test/stats');
+	});
+
+	it('does not prefix the deployment-wide bootstrap', async () => {
+		const { client, captured } = capturingClient(
+			{ url: 'https://cupboard.test', publicKey: 'cupboard-1:k', token: 'jwt' },
+			'/cache/builds'
+		);
+
+		await client.bootstrap('secret');
+
+		expect(captured()?.url).toBe('https://cupboard.test/auth/bootstrap');
+	});
+
+	it('leaves usage deployment-scoped under a cache prefix', async () => {
+		const { client, captured } = capturingClient(
+			usageResponse,
+			'/cache/builds'
+		);
+
+		await client.usage('admin-token');
+
+		expect(captured()?.url).toBe('https://cupboard.test/usage');
+	});
+
+	it('rejects an invalid cache name when building a scoped client', () => {
+		expect(() =>
+			CupboardClient.fromUrl('https://cupboard.test', 'Bad!')
+		).toThrow(InvalidCacheNameError);
 	});
 });
 

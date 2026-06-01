@@ -13,7 +13,8 @@ import {
 	signingKeySummarySchema,
 	statsResponseSchema,
 	uploadDecisionSchema,
-	uploadNegotiateRequestSchema
+	uploadNegotiateRequestSchema,
+	usageResponseSchema
 } from './messages.ts';
 
 const storePathHash = '0'.repeat(32);
@@ -136,6 +137,9 @@ describe('response schemas', () => {
 			stats: statsResponseSchema.safeParse({
 				storePaths: 1,
 				narBlobs: 1,
+				narFileSize: 1000,
+				casObjects: 1,
+				casFileSize: 234,
 				pendingUploads: 0,
 				totalFileSize: 1234
 			}).success
@@ -147,10 +151,27 @@ describe('response schemas', () => {
 			statsResponseSchema.safeParse({
 				storePaths: -1,
 				narBlobs: 0,
+				narFileSize: 0,
+				casObjects: 0,
+				casFileSize: 0,
 				pendingUploads: 0,
 				totalFileSize: 0
 			}).success
 		).toBe(false);
+	});
+
+	it('accepts a well-formed tenant usage response', () => {
+		expect(
+			usageResponseSchema.safeParse({
+				narBlobs: 1,
+				narFileSize: 1000,
+				casObjects: 1,
+				casFileSize: 234,
+				totalFileSize: 1234,
+				quotaBytes: 2000,
+				remainingQuotaBytes: 766
+			}).success
+		).toBe(true);
 	});
 });
 

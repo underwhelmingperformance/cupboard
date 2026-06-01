@@ -1,5 +1,12 @@
 export abstract class CliError extends Error {}
 
+export class InvalidCacheNameError extends CliError {
+	constructor(public readonly cache: string) {
+		super(`Invalid cache name: ${cache}`);
+		this.name = 'InvalidCacheNameError';
+	}
+}
+
 export class CupboardHttpError extends CliError {
 	constructor(
 		public readonly method: string,

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
+import { InvalidCacheNameError } from '../errors.ts';
 import type { Reporter } from '../reporter.ts';
 
-import { runConfig } from './config.ts';
+import { cacheSubstituterUrl, runConfig } from './config.ts';
 
 function capturingReporter(infos: string[]): Reporter {
 	return {
@@ -89,5 +90,36 @@ describe('runConfig', () => {
 				'machine localhost login alice password secret'
 			].join('\n')
 		]);
+	});
+});
+
+describe('cacheSubstituterUrl', () => {
+	it.each([
+		{
+			name: 'the default cache returns the bare URL',
+			cache: undefined,
+			url: 'https://cupboard.example.workers.dev',
+			expected: 'https://cupboard.example.workers.dev'
+		},
+		{
+			name: 'a named cache appends the cache path to a bare host',
+			cache: 'builds',
+			url: 'https://cupboard.example.workers.dev',
+			expected: 'https://cupboard.example.workers.dev/cache/builds'
+		},
+		{
+			name: 'a named cache preserves a tenant path prefix',
+			cache: 'builds',
+			url: 'https://cupboard.example.workers.dev/t/acme',
+			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
+		}
+	])('$name', ({ cache, expected, url }) => {
+		expect(cacheSubstituterUrl(url, cache)).toBe(expected);
+	});
+
+	it('rejects an invalid cache name', () => {
+		expect(() =>
+			cacheSubstituterUrl('https://cupboard.example.workers.dev', 'Bad!')
+		).toThrow(InvalidCacheNameError);
 	});
 });

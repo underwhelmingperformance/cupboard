@@ -16,10 +16,12 @@ import { createReporter, type Reporter, type ResultRow } from '../reporter.ts';
 interface RootSetOptions {
 	readonly token: string;
 	readonly ttl?: number;
+	readonly cache?: string;
 }
 
 interface RootOptions {
 	readonly token: string;
+	readonly cache?: string;
 }
 
 export interface RootClient {
@@ -54,6 +56,7 @@ export function registerRootCommands(program: Command): void {
 			parseTtl
 		)
 		.requiredOption('--token <token>', 'bootstrap secret')
+		.option('--cache <name>', 'target a named cache rather than the default')
 		.action(
 			async (
 				url: string,
@@ -64,7 +67,7 @@ export function registerRootCommands(program: Command): void {
 				const reporter = createReporter({
 					mode: reporterModeFromGlobals(program)
 				});
-				const client = CupboardClient.fromUrl(url);
+				const client = CupboardClient.fromUrl(url, options.cache);
 				const token = await authenticate(client, options.token);
 
 				await runRootSet(name, targets, options.ttl, token, reporter, client);
@@ -76,11 +79,12 @@ export function registerRootCommands(program: Command): void {
 		.description('List retention roots.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.requiredOption('--token <token>', 'bootstrap secret')
+		.option('--cache <name>', 'target a named cache rather than the default')
 		.action(async (url: string, options: RootOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, options.cache);
 			const token = await authenticate(client, options.token);
 
 			await runRootList(token, reporter, client);
@@ -92,11 +96,12 @@ export function registerRootCommands(program: Command): void {
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<name>', 'root name to remove')
 		.requiredOption('--token <token>', 'bootstrap secret')
+		.option('--cache <name>', 'target a named cache rather than the default')
 		.action(async (url: string, name: string, options: RootOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, options.cache);
 			const token = await authenticate(client, options.token);
 
 			await runRootRemove(name, token, reporter, client);

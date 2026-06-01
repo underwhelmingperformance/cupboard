@@ -29,6 +29,7 @@ import {
 	type SigningKeySummary,
 	type StatsResponse,
 	storePathHashSchema,
+	type UsageResponse,
 	type UploadBlobMetadataFields,
 	type UploadDecision,
 	uploadNegotiateRequestSchema,
@@ -226,6 +227,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.get('/stats', (context) =>
 			serverErrorResponse(this.handleStats(context.req.raw, DEFAULT_CACHE))
 		);
+		this.app.get('/usage', (context) =>
+			serverErrorResponse(this.handleUsage(context.req.raw))
+		);
 		this.app.get('/cache/:cacheName/stats', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
 				this.handleStats(context.req.raw, cache)
@@ -356,6 +360,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requireScope(request, 'admin');
 
 		return Response.json(this.stats(cache) satisfies StatsResponse);
+	}
+
+	private async handleUsage(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		return Response.json(this.usage() satisfies UsageResponse);
 	}
 
 	private async handleCacheInfo(
@@ -1409,20 +1419,38 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private stats(cache: string): StatsResponse {
-		// Store paths are per-cache; blobs are content-addressed and shared, so
-		// their count, total size and the in-flight uploads stay deployment-global.
-		const storePaths = this.db
-			.select({ count: count() })
+		const storePathRows = this.db
+			.select({
+				narHash: schema.narInfos.narHash,
+				fileSize: schema.narInfos.fileSize
+			})
 			.from(schema.narInfos)
 			.where(eq(schema.narInfos.cache, cache))
-			.get();
-		const blobs = this.db
-			.select({ count: count() })
-			.from(schema.narBlobs)
-			.get();
+			.all();
 		const pending = this.db
 			.select({ count: count() })
 			.from(schema.pendingUploads)
+			.get();
+		const narSizes = uniqueSizes(
+			storePathRows.map((row) => ({ key: row.narHash, size: row.fileSize }))
+		);
+		const narFileSize = sum(narSizes);
+
+		return {
+			storePaths: storePathRows.length,
+			narBlobs: narSizes.length,
+			narFileSize,
+			casObjects: 0,
+			casFileSize: 0,
+			pendingUploads: pending?.count ?? 0,
+			totalFileSize: narFileSize
+		};
+	}
+
+	private usage(): UsageResponse {
+		const blobs = this.db
+			.select({ count: count() })
+			.from(schema.narBlobs)
 			.get();
 		const total = this.db
 			.select({
@@ -1430,12 +1458,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			})
 			.from(schema.narBlobs)
 			.get();
+		const narFileSize = total?.total ?? 0;
 
 		return {
-			storePaths: storePaths?.count ?? 0,
 			narBlobs: blobs?.count ?? 0,
-			pendingUploads: pending?.count ?? 0,
-			totalFileSize: total?.total ?? 0
+			narFileSize,
+			casObjects: 0,
+			casFileSize: 0,
+			totalFileSize: narFileSize
 		};
 	}
 
@@ -2364,6 +2394,16 @@ function parseStoredUploadPathMetadata(
 		source,
 		(cause) => new StoredUploadMetadataInvalidError(uploadId, cause)
 	);
+}
+
+function uniqueSizes(
+	rows: readonly { readonly key: string; readonly size: number }[]
+): number[] {
+	return [...new Map(rows.map((row) => [row.key, row.size])).values()];
+}
+
+function sum(values: readonly number[]): number {
+	return values.reduce((total, value) => total + value, 0);
 }
 
 function uploadHeadersFor(

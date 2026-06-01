@@ -1,8 +1,10 @@
 import {
 	type BootstrapResponse,
 	bootstrapResponseSchema,
+	cacheNameSchema,
 	type CommitResponse,
 	commitResponseSchema,
+	DEFAULT_CACHE,
 	type DeletePathResponse,
 	deletePathResponseSchema,
 	type KeyListResponse,
@@ -20,6 +22,8 @@ import {
 	rootSetResponseSchema,
 	type StatsResponse,
 	statsResponseSchema,
+	type UsageResponse,
+	usageResponseSchema,
 	type UploadNegotiateRequest,
 	type UploadNegotiateResponse,
 	uploadNegotiateResponseSchema,
@@ -32,6 +36,7 @@ import { z } from 'zod';
 import {
 	CupboardHttpError,
 	CupboardUploadError,
+	InvalidCacheNameError,
 	MalformedResponseError,
 	ResponseSchemaMismatchError
 } from './errors.ts';
@@ -61,11 +66,15 @@ export interface CupboardBlobUpload {
 export class CupboardClient {
 	constructor(
 		public readonly baseUrl: URL,
-		public readonly fetcher: typeof fetch = fetch
+		public readonly fetcher: typeof fetch = fetch,
+		// Prepended to path-scoped routes for a named cache (e.g. `/cache/builds`);
+		// empty for the default cache. Not baked into `baseUrl`, so resolving an
+		// absolute path against the base never discards it.
+		public readonly cachePrefix = ''
 	) {}
 
-	static fromUrl(value: string): CupboardClient {
-		return new CupboardClient(new URL(value));
+	static fromUrl(value: string, cache: string = DEFAULT_CACHE): CupboardClient {
+		return new CupboardClient(new URL(value), fetch, cachePrefixFor(cache));
 	}
 
 	bootstrap(bootstrapSecret: string): Promise<BootstrapResponse> {
@@ -81,8 +90,18 @@ export class CupboardClient {
 		return response.text();
 	}
 
+	private scoped(path: string): string {
+		return `${this.cachePrefix}${path}`;
+	}
+
 	stats(token: AccessCredential): Promise<StatsResponse> {
-		return this.requestJson('/stats', statsResponseSchema, { token });
+		return this.requestJson(this.scoped('/stats'), statsResponseSchema, {
+			token
+		});
+	}
+
+	usage(token: AccessCredential): Promise<UsageResponse> {
+		return this.requestJson('/usage', usageResponseSchema, { token });
 	}
 
 	listKeys(token: AccessCredential): Promise<KeyListResponse> {
@@ -112,7 +131,7 @@ export class CupboardClient {
 		storePathHash: string
 	): Promise<DeletePathResponse> {
 		return this.requestJson(
-			`/paths/${storePathHash}`,
+			this.scoped(`/paths/${storePathHash}`),
 			deletePathResponseSchema,
 			{
 				method: 'DELETE',
@@ -127,7 +146,7 @@ export class CupboardClient {
 		body: RootSetBody
 	): Promise<RootSetResponse> {
 		return this.requestJson(
-			`/roots/${encodeURIComponent(name)}`,
+			this.scoped(`/roots/${encodeURIComponent(name)}`),
 			rootSetResponseSchema,
 			{
 				method: 'PUT',
@@ -138,7 +157,9 @@ export class CupboardClient {
 	}
 
 	listRoots(token: AccessCredential): Promise<RootListResponse> {
-		return this.requestJson('/roots', rootListResponseSchema, { token });
+		return this.requestJson(this.scoped('/roots'), rootListResponseSchema, {
+			token
+		});
 	}
 
 	removeRoot(
@@ -146,7 +167,7 @@ export class CupboardClient {
 		name: string
 	): Promise<RootRemoveResponse> {
 		return this.requestJson(
-			`/roots/${encodeURIComponent(name)}`,
+			this.scoped(`/roots/${encodeURIComponent(name)}`),
 			rootRemoveResponseSchema,
 			{
 				method: 'DELETE',
@@ -159,16 +180,20 @@ export class CupboardClient {
 		token: AccessCredential,
 		body: UploadNegotiateRequest
 	): Promise<UploadNegotiateResponse> {
-		return this.requestJson('/uploads', uploadNegotiateResponseSchema, {
-			method: 'POST',
-			token,
-			body
-		});
+		return this.requestJson(
+			this.scoped('/uploads'),
+			uploadNegotiateResponseSchema,
+			{
+				method: 'POST',
+				token,
+				body
+			}
+		);
 	}
 
 	commit(token: AccessCredential, uploadId: string): Promise<CommitResponse> {
 		return this.requestJson(
-			`/uploads/${uploadId}/commit`,
+			this.scoped(`/uploads/${uploadId}/commit`),
 			commitResponseSchema,
 			{
 				method: 'POST',
@@ -183,7 +208,7 @@ export class CupboardClient {
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse> {
 		return this.requestJson(
-			`/uploads/${uploadId}`,
+			this.scoped(`/uploads/${uploadId}`),
 			uploadPrepareResponseSchema,
 			{
 				method: 'PUT',
@@ -311,6 +336,18 @@ export class CupboardClient {
 }
 
 const unauthorizedStatusCode = 401;
+
+function cachePrefixFor(cache: string): string {
+	if (cache === DEFAULT_CACHE) {
+		return '';
+	}
+
+	if (!cacheNameSchema.safeParse(cache).success) {
+		throw new InvalidCacheNameError(cache);
+	}
+
+	return `/cache/${cache}`;
+}
 
 function isTokenProvider(
 	credential: AccessCredential | undefined

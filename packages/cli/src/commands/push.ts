@@ -11,6 +11,7 @@ interface PushOptions {
 	readonly token: string;
 	readonly root?: string;
 	readonly ttl?: number;
+	readonly cache?: string;
 }
 
 export function registerPushCommand(program: Command): void {
@@ -31,11 +32,12 @@ export function registerPushCommand(program: Command): void {
 			'expire the retained paths after this duration (e.g. 7d, 12h); default permanent',
 			parseTtl
 		)
+		.option('--cache <name>', 'push to a named cache rather than the default')
 		.action(async (url: string, paths: string[], options: PushOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, options.cache);
 			const token = await authenticate(client, options.token);
 
 			await runPush(paths, reporter, {

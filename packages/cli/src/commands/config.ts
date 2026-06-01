@@ -1,9 +1,15 @@
 import { env } from 'node:process';
 
-import { NixConfig, renderNetrc } from '@cupboard/shared';
+import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	NixConfig,
+	renderNetrc
+} from '@cupboard/shared';
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
+import { InvalidCacheNameError } from '../errors.ts';
 import { createReporter, type Reporter } from '../reporter.ts';
 
 export interface ConfigCredential {
@@ -14,6 +20,30 @@ export interface ConfigCredential {
 interface ConfigOptions {
 	readonly readUser?: string;
 	readonly readPassword?: string;
+	readonly cache?: string;
+}
+
+/**
+ * The substituter URL for a cache: the bare URL for the default cache, or the
+ * URL with a `/cache/<name>` path for a named one. The cache name is validated.
+ */
+export function cacheSubstituterUrl(
+	url: string,
+	cache: string | undefined
+): string {
+	if (cache === undefined || cache === DEFAULT_CACHE) {
+		return url;
+	}
+
+	if (!cacheNameSchema.safeParse(cache).success) {
+		throw new InvalidCacheNameError(cache);
+	}
+
+	const substituter = new URL(url);
+	const basePath = substituter.pathname.replace(/\/+$/, '');
+	substituter.pathname = `${basePath}/cache/${cache}`;
+
+	return substituter.toString();
 }
 
 export function runConfig(
@@ -55,6 +85,7 @@ export function registerConfigCommand(program: Command): void {
 			'--read-password <password>',
 			'private-read password (or CUPBOARD_READ_PASSWORD)'
 		)
+		.option('--cache <name>', 'configure a named cache rather than the default')
 		.action((url: string, publicKey: string, options: ConfigOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
@@ -63,6 +94,11 @@ export function registerConfigCommand(program: Command): void {
 			const password = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
 			const credential = user && password ? { user, password } : undefined;
 
-			runConfig(url, publicKey, reporter, credential);
+			runConfig(
+				cacheSubstituterUrl(url, options.cache),
+				publicKey,
+				reporter,
+				credential
+			);
 		});
 }
