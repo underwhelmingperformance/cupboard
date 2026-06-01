@@ -1,4 +1,8 @@
 import {
+	type AuthKeyListResponse,
+	type AuthKeyRetireResponse,
+	type AuthKeyRotateResponse,
+	type AuthKeySummary,
 	type BootstrapResponse,
 	CacheInfo,
 	type CacheListResponse,
@@ -86,6 +90,7 @@ import {
 	type AccessScope,
 	adminJwtTtlSeconds,
 	authJwtAlgorithm,
+	type AuthPublicKey,
 	generateAuthKeyPair,
 	mintAccessJwt,
 	verifyAccessJwt,
@@ -103,6 +108,7 @@ import {
 	CacheNotEmptyError,
 	InsufficientScopeError,
 	InvalidGrantError,
+	LastAuthKeyError,
 	LastSigningKeyError,
 	OAuthError,
 	OwnerRuleImmutableError,
@@ -207,10 +213,15 @@ interface OwnerConfig {
 	readonly audience: string;
 }
 
-interface AuthKeyPair {
+// A key in the auth signing set. The newest non-retired key mints; every
+// non-retired key verifies and is published in the JWKS. Retiring sets
+// `retired`, dropping the key from minting, verification and the JWKS at once.
+interface AuthKey {
 	readonly kid: string;
 	readonly privateJwk: JsonWebKey;
 	readonly publicJwk: JsonWebKey;
+	readonly createdAt: string;
+	readonly retired: boolean;
 }
 
 interface RootSetCommand {
@@ -236,7 +247,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly db: DrizzleSqliteDODatabase<typeof schema>;
 	private migrationPromise: Promise<void> | undefined;
 	private keysPromise: Promise<readonly SigningKey[]> | undefined;
-	private authKeyPromise: Promise<AuthKeyPair> | undefined;
+	private authKeysPromise: Promise<readonly AuthKey[]> | undefined;
 	private presigner: R2Presigner | undefined;
 	private publicKeyBody: TextBody | undefined;
 	private readonly jwks = new RemoteJwksStore();
@@ -302,6 +313,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.post('/keys/retire/:id', (context) =>
 			serverErrorResponse(
 				this.handleKeyRetire(context.req.raw, context.req.param('id'))
+			)
+		);
+
+		// The auth-token signing key set, rotated independently of the narinfo
+		// keys above; tokens carry the active key's `kid` and verify against any
+		// key still in the set.
+		this.app.get('/keys/auth', (context) =>
+			serverErrorResponse(this.handleAuthKeyList(context.req.raw))
+		);
+		this.app.post('/keys/auth/rotate', (context) =>
+			serverErrorResponse(this.handleAuthKeyRotate(context.req.raw))
+		);
+		this.app.post('/keys/auth/retire/:kid', (context) =>
+			serverErrorResponse(
+				this.handleAuthKeyRetire(context.req.raw, context.req.param('kid'))
 			)
 		);
 
@@ -1116,6 +1142,33 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		return Response.json(
 			(await this.retireKey(keyId)) satisfies KeyRetireResponse
+		);
+	}
+
+	private async handleAuthKeyList(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		return Response.json({
+			keys: await this.authKeySummaries()
+		} satisfies AuthKeyListResponse);
+	}
+
+	private async handleAuthKeyRotate(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		return Response.json(
+			(await this.rotateAuthKey()) satisfies AuthKeyRotateResponse
+		);
+	}
+
+	private async handleAuthKeyRetire(
+		request: Request,
+		kid: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		return Response.json(
+			(await this.retireAuthKey(kid)) satisfies AuthKeyRetireResponse
 		);
 	}
 
@@ -2713,40 +2766,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.env.CUPBOARD_AUTH_AUDIENCE || 'cupboard';
 	}
 
-	private authKey(): Promise<AuthKeyPair> {
+	private authKeys(): Promise<readonly AuthKey[]> {
 		// A shared in-flight promise so concurrent first requests against an
-		// empty DO generate and insert the key exactly once. A failed attempt
-		// clears the cache so a later request can create the key.
-		this.authKeyPromise ??= this.loadOrCreateAuthKey().catch(
+		// empty DO generate and insert the bootstrap key exactly once. A failed
+		// attempt clears the cache so a later request can create it.
+		this.authKeysPromise ??= this.loadOrCreateAuthKeys().catch(
 			(error: unknown) => {
-				this.authKeyPromise = undefined;
+				this.authKeysPromise = undefined;
 				throw error;
 			}
 		);
 
-		return this.authKeyPromise;
+		return this.authKeysPromise;
 	}
 
-	private async loadOrCreateAuthKey(): Promise<AuthKeyPair> {
-		const existing = this.db
+	private async loadOrCreateAuthKeys(): Promise<readonly AuthKey[]> {
+		// Insertion order (rowid) decides which key is active, so a rotation always
+		// supersedes the previous key regardless of timestamp resolution.
+		const rows = this.db
 			.select()
 			.from(schema.authKeys)
-			.where(eq(schema.authKeys.id, 'active'))
-			.get();
+			.orderBy(sql`rowid`)
+			.all();
 
-		if (existing !== undefined) {
-			const kid =
-				existing.kid === '' ? this.backfillAuthKeyKid() : existing.kid;
-
-			return {
-				kid,
-				privateJwk: JSON.parse(existing.privateJwkJson) as JsonWebKey,
-				publicJwk: JSON.parse(existing.publicJwkJson) as JsonWebKey
-			};
+		if (rows.length > 0) {
+			return rows.map((row) => this.authKeyFromRow(row));
 		}
 
 		const generated = await generateAuthKeyPair();
 		const kid = crypto.randomUUID();
+		const createdAt = new Date().toISOString();
 
 		this.db
 			.insert(schema.authKeys)
@@ -2755,27 +2804,140 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				kid,
 				privateJwkJson: JSON.stringify(generated.privateJwk),
 				publicJwkJson: JSON.stringify(generated.publicJwk),
-				createdAt: new Date().toISOString()
+				createdAt
 			})
 			.run();
 
-		return { kid, ...generated };
+		return [{ kid, ...generated, createdAt, retired: false }];
 	}
 
-	private backfillAuthKeyKid(): string {
+	private authKeyFromRow(row: typeof schema.authKeys.$inferSelect): AuthKey {
+		// A pre-rotation row predates `kid`; give it one on first load so every
+		// key the verifier and JWKS see is addressable.
+		const kid = row.kid === '' ? this.backfillAuthKeyKid(row.id) : row.kid;
+
+		return {
+			kid,
+			privateJwk: JSON.parse(row.privateJwkJson) as JsonWebKey,
+			publicJwk: JSON.parse(row.publicJwkJson) as JsonWebKey,
+			createdAt: row.createdAt,
+			retired: Boolean(row.retiredAt)
+		};
+	}
+
+	private backfillAuthKeyKid(id: string): string {
 		const kid = crypto.randomUUID();
 
 		this.db
 			.update(schema.authKeys)
 			.set({ kid })
-			.where(eq(schema.authKeys.id, 'active'))
+			.where(eq(schema.authKeys.id, id))
 			.run();
 
 		return kid;
 	}
 
+	private resetAuthKeyCache(): void {
+		this.authKeysPromise = undefined;
+	}
+
+	// The minting key: the last key inserted that is still in service, so a fresh
+	// rotation takes over minting at once.
+	private async activeAuthKey(): Promise<AuthKey> {
+		const keys = await this.authKeys();
+		const active = keys.findLast((key) => !key.retired);
+
+		if (active === undefined) {
+			throw new Error('no active auth key in the key set');
+		}
+
+		return active;
+	}
+
+	private async authVerificationKeys(): Promise<readonly AuthPublicKey[]> {
+		const keys = await this.authKeys();
+
+		return keys
+			.filter((key) => !key.retired)
+			.map((key) => ({ kid: key.kid, publicJwk: key.publicJwk }));
+	}
+
+	private async authKeySummaries(): Promise<AuthKeySummary[]> {
+		const active = await this.activeAuthKey();
+		const keys = await this.authKeys();
+
+		// Listed in insertion order, the same order that decides the active key.
+		return keys
+			.filter((key) => !key.retired)
+			.map((key) => ({
+				kid: key.kid,
+				createdAt: key.createdAt,
+				active: key.kid === active.kid
+			}));
+	}
+
+	private rotateAuthKey(): Promise<AuthKeyRotateResponse> {
+		// One critical section: the insert and cache reset must not interleave
+		// with a concurrent rotation or a verification reading the key set.
+		return this.ctx.blockConcurrencyWhile(async () => {
+			const generated = await generateAuthKeyPair();
+			const kid = crypto.randomUUID();
+
+			this.db
+				.insert(schema.authKeys)
+				.values({
+					id: crypto.randomUUID(),
+					kid,
+					privateJwkJson: JSON.stringify(generated.privateJwk),
+					publicJwkJson: JSON.stringify(generated.publicJwk),
+					createdAt: new Date().toISOString()
+				})
+				.run();
+			this.resetAuthKeyCache();
+
+			return { rotated: kid, keys: await this.authKeySummaries() };
+		});
+	}
+
+	private async retireAuthKey(kid: string): Promise<AuthKeyRetireResponse> {
+		// The last-key check and the retirement share one critical section so two
+		// concurrent retirements cannot both see themselves as safe. A refused
+		// retirement is returned as an outcome and thrown afterwards: throwing
+		// inside blockConcurrencyWhile would break the input gate.
+		const outcome = await this.ctx.blockConcurrencyWhile(
+			async (): Promise<{ retired: boolean } | { refused: true }> => {
+				const keys = await this.authKeys();
+				const live = keys.filter((key) => !key.retired);
+				const target = live.find((key) => key.kid === kid);
+
+				if (target === undefined) {
+					return { retired: false };
+				}
+
+				if (live.length <= 1) {
+					return { refused: true };
+				}
+
+				this.db
+					.update(schema.authKeys)
+					.set({ retiredAt: new Date().toISOString() })
+					.where(eq(schema.authKeys.kid, kid))
+					.run();
+				this.resetAuthKeyCache();
+
+				return { retired: true };
+			}
+		);
+
+		if ('refused' in outcome) {
+			throw new LastAuthKeyError(kid);
+		}
+
+		return { kid, retired: outcome.retired };
+	}
+
 	private async mintAdminJwt(): Promise<string> {
-		const key = await this.authKey();
+		const key = await this.activeAuthKey();
 
 		return mintAccessJwt(
 			key.privateJwk,
@@ -2820,7 +2982,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		subject: string,
 		ttlSeconds: number
 	): Promise<string> {
-		const key = await this.authKey();
+		const key = await this.activeAuthKey();
 
 		// A write token is pinned to the rule's roots via `cb_roots`; an admin
 		// token is unconstrained. The rule id rides along as an audit breadcrumb.
@@ -2841,11 +3003,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async authPublicJwks(): Promise<JsonWebKeyWithKid[]> {
-		const key = await this.authKey();
+		const keys = await this.authVerificationKeys();
 
-		return [
-			{ ...key.publicJwk, kid: key.kid, alg: authJwtAlgorithm, use: 'sig' }
-		];
+		return keys.map((key) => ({
+			...key.publicJwk,
+			kid: key.kid,
+			alg: authJwtAlgorithm,
+			use: 'sig'
+		}));
 	}
 
 	private enabledOidcTrustRules(): OidcTrustRule[] {
@@ -2919,12 +3084,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			throw new UnauthenticatedError();
 		}
 
-		const key = await this.authKey();
+		const keys = await this.authVerificationKeys();
 		let claims: AccessClaims;
 
 		try {
 			claims = await verifyAccessJwt(
-				[{ kid: key.kid, publicJwk: key.publicJwk }],
+				keys,
 				token,
 				{ issuer: this.authIssuer(), audience: this.authAudience() },
 				new Date()

@@ -19,7 +19,7 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { isNull, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { StatusCodes } from 'http-status-codes';
@@ -147,8 +147,8 @@ export async function initialiseViaWorker(): Promise<string> {
 /**
  * Mints an access token signed by the active server key for an arbitrary
  * scope, so tests can prove scope enforcement (e.g. a write token refused by
- * an admin route). The bootstrap exchange only ever mints admin tokens, so the
- * private key is read straight from the DO's SQLite.
+ * an admin route). The active key is the newest one still in service, matching
+ * what the server mints with, so a token stays valid across a rotation.
  */
 export async function mintServerSignedToken(
 	scope: AccessScope,
@@ -160,8 +160,10 @@ export async function mintServerSignedToken(
 		const row = database
 			.select()
 			.from(authKeys)
-			.where(eq(authKeys.id, 'active'))
-			.get();
+			.where(isNull(authKeys.retiredAt))
+			.orderBy(sql`rowid`)
+			.all()
+			.at(-1);
 
 		if (row === undefined) {
 			throw new Error('expected an active auth key to mint a scoped token');

@@ -236,6 +236,38 @@ export const keyRetireResponseSchema = z.strictObject({
 });
 export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
 
+// The auth-token signing keys. `active` marks the key that currently mints;
+// every listed key still verifies and is published in the JWKS.
+export const authKeySummarySchema = z.strictObject({
+	kid: z.string(),
+	createdAt: z.string(),
+	active: z.boolean()
+});
+export type ParsedAuthKeySummary = z.output<typeof authKeySummarySchema>;
+
+export const authKeyListResponseSchema = z.strictObject({
+	keys: z.array(authKeySummarySchema)
+});
+export type ParsedAuthKeyListResponse = z.output<
+	typeof authKeyListResponseSchema
+>;
+
+export const authKeyRotateResponseSchema = z.strictObject({
+	rotated: z.string(),
+	keys: z.array(authKeySummarySchema)
+});
+export type ParsedAuthKeyRotateResponse = z.output<
+	typeof authKeyRotateResponseSchema
+>;
+
+export const authKeyRetireResponseSchema = z.strictObject({
+	kid: z.string(),
+	retired: z.boolean()
+});
+export type ParsedAuthKeyRetireResponse = z.output<
+	typeof authKeyRetireResponseSchema
+>;
+
 // A cache summary names a cache (the empty string is the default), its Nix
 // priority and how many store paths it holds.
 export const cacheSummarySchema = z.strictObject({
@@ -458,6 +490,10 @@ export type SigningKeySummary = z.input<typeof signingKeySummarySchema>;
 export type KeyListResponse = z.input<typeof keyListResponseSchema>;
 export type KeyRotateResponse = z.input<typeof keyRotateResponseSchema>;
 export type KeyRetireResponse = z.input<typeof keyRetireResponseSchema>;
+export type AuthKeySummary = z.input<typeof authKeySummarySchema>;
+export type AuthKeyListResponse = z.input<typeof authKeyListResponseSchema>;
+export type AuthKeyRotateResponse = z.input<typeof authKeyRotateResponseSchema>;
+export type AuthKeyRetireResponse = z.input<typeof authKeyRetireResponseSchema>;
 export type CacheSummary = z.input<typeof cacheSummarySchema>;
 export type CacheListResponse = z.input<typeof cacheListResponseSchema>;
 export type CachePutBody = z.input<typeof cachePutBodySchema>;

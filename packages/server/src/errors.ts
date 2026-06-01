@@ -50,6 +50,15 @@ export class LastSigningKeyError extends ServerHttpError {
 	}
 }
 
+export class LastAuthKeyError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly kid: string) {
+		super('Cannot retire the last auth key');
+		this.name = 'LastAuthKeyError';
+	}
+}
+
 export class OwnerRuleImmutableError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
