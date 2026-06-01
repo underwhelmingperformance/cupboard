@@ -13,6 +13,10 @@ const textHeaders = {
 // cached under and must not attempt to purge the edge cache.
 export const internalOrigin = 'https://cupboard.local';
 
+// The most committed narinfo rows a single `GET /check` examines. The check is
+// a bounded one-shot scan; its report flags when the cache held more than this.
+export const checkBatchSize = 1000;
+
 export const narInfoCacheTtlSeconds = 3600;
 
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}`;

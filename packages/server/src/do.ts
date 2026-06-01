@@ -6,6 +6,8 @@ import {
 	cachePutBodySchema,
 	type CacheRemoveResponse,
 	type CacheSummary,
+	type CheckDiscrepancy,
+	type CheckReport,
 	type CommitResponse,
 	DEFAULT_CACHE,
 	type DeletePathResponse,
@@ -46,7 +48,7 @@ import {
 	type UploadPrepareResponse
 } from '@cupboard/shared';
 import { DurableObject } from 'cloudflare:workers';
-import { and, count, eq, gte, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gte, lt, lte, sql } from 'drizzle-orm';
 import {
 	drizzle,
 	type DrizzleSqliteDODatabase
@@ -83,11 +85,15 @@ import {
 	StoredSignaturesInvalidError,
 	StoredUploadMetadataInvalidError,
 	UnauthenticatedError,
+	UploadedObjectChecksumMismatchError,
+	UploadedObjectChecksumMissingError,
+	UploadedObjectSizeMismatchError,
 	UploadExpiredError,
 	UploadNotFoundError,
 	UploadNotPreparedError
 } from './errors.ts';
 import {
+	checkBatchSize,
 	internalOrigin,
 	narInfoCacheControl,
 	narInfoCachePath,
@@ -105,7 +111,10 @@ import {
 } from './parse.ts';
 import { mostSpecificPolicy } from './policy-match.ts';
 import { R2Presigner } from './presign.ts';
-import { verifyUploadedObject } from './upload-verification.ts';
+import {
+	verifyStoredBlob,
+	verifyUploadedObject
+} from './upload-verification.ts';
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
@@ -236,6 +245,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			serverErrorResponse(
 				this.handleRemovePolicy(context.req.raw, context.req.param('id'))
 			)
+		);
+
+		// A read-only storage check across every cache. Blobs are shared, so it is
+		// deployment-wide: one bare `/check` covering all caches.
+		this.app.get('/check', (context) =>
+			serverErrorResponse(this.handleCheck(context.req.raw))
 		);
 
 		// Each path-scoped route has a bare form (the default cache) and a
@@ -557,6 +572,107 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.get();
 
 		return result?.count ?? 0;
+	}
+
+	private async handleCheck(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const deep = new URL(request.url).searchParams.get('deep') === 'true';
+
+		const total =
+			this.db.select({ count: count() }).from(schema.narInfos).get()?.count ??
+			0;
+		const rows = this.db
+			.select()
+			.from(schema.narInfos)
+			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
+			.limit(checkBatchSize)
+			.all();
+
+		const discrepancies: CheckDiscrepancy[] = [];
+
+		// NAR blobs are content-addressed and shared, so check each distinct hash
+		// once but attribute a fault to every narinfo that depends on it: the
+		// operator sees each affected store path.
+		const blobVerdicts = new Map<
+			string,
+			CheckDiscrepancy['kind'] | undefined
+		>();
+		let narBlobsChecked = 0;
+
+		for (const row of rows) {
+			const narInfoObject = await this.env.BLOBS.head(
+				narInfoObjectKey(row.storePathHash, row.cache)
+			);
+
+			if (narInfoObject === null) {
+				discrepancies.push({
+					kind: 'missing-narinfo-object',
+					cache: row.cache,
+					storePathHash: row.storePathHash,
+					narHash: row.narHash
+				});
+			}
+
+			if (!blobVerdicts.has(row.narHash)) {
+				blobVerdicts.set(row.narHash, await this.checkNarBlob(row, deep));
+				narBlobsChecked += 1;
+			}
+
+			const blobVerdict = blobVerdicts.get(row.narHash);
+
+			if (blobVerdict !== undefined) {
+				discrepancies.push({
+					kind: blobVerdict,
+					cache: row.cache,
+					storePathHash: row.storePathHash,
+					narHash: row.narHash
+				});
+			}
+		}
+
+		return Response.json({
+			narInfosChecked: rows.length,
+			narBlobsChecked,
+			complete: rows.length === total,
+			discrepancies
+		} satisfies CheckReport);
+	}
+
+	private async checkNarBlob(
+		row: typeof schema.narInfos.$inferSelect,
+		deep: boolean
+	): Promise<CheckDiscrepancy['kind'] | undefined> {
+		const object =
+			(await this.env.BLOBS.head(narObjectKey(row.narHash))) ?? undefined;
+
+		if (object === undefined) {
+			return 'missing-nar';
+		}
+
+		if (!deep) {
+			return undefined;
+		}
+
+		try {
+			verifyStoredBlob(object, {
+				narHash: row.narHash,
+				fileHash: row.fileHash,
+				fileSize: row.fileSize
+			});
+
+			return undefined;
+		} catch (error) {
+			if (
+				error instanceof UploadedObjectSizeMismatchError ||
+				error instanceof UploadedObjectChecksumMissingError ||
+				error instanceof UploadedObjectChecksumMismatchError
+			) {
+				return 'file-hash-mismatch';
+			}
+
+			throw error;
+		}
 	}
 
 	private cacheSummary(cache: string, priority: number): CacheSummary {

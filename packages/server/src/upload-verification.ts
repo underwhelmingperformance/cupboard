@@ -15,24 +15,37 @@ export interface UploadedObject {
 	readonly checksums: { readonly sha256?: ArrayBuffer };
 }
 
+// What a stored NAR blob must satisfy: it exists, its size is exact, and its
+// SHA-256 equals the recorded file hash.
+export interface ExpectedNarBlob {
+	readonly narHash: string;
+	readonly fileHash: string;
+	readonly fileSize: number;
+}
+
 /**
- * Confirms a freshly uploaded object matches the metadata the client
- * negotiated: it exists, its size is exact, and its SHA-256 is the promised NAR
- * file hash. Each failure raises a typed error carrying the offending values.
+ * Confirms a stored R2 object matches the NAR blob it is meant to hold: it
+ * exists, its size is exact, and its SHA-256 is the recorded file hash. Each
+ * failure raises a typed error carrying the offending values. The commit step
+ * verifies a freshly uploaded object; the storage check re-verifies a committed
+ * one.
  */
-export function verifyUploadedObject(
+export function verifyStoredBlob(
 	object: UploadedObject | undefined,
-	expectedSize: number,
-	metadata: UploadPathMetadataFields
+	expected: ExpectedNarBlob
 ): void {
-	const r2Key = narObjectKey(metadata.narHash);
+	const r2Key = narObjectKey(expected.narHash);
 
 	if (object === undefined) {
 		throw new UploadedObjectNotFoundError(r2Key);
 	}
 
-	if (object.size !== expectedSize) {
-		throw new UploadedObjectSizeMismatchError(r2Key, expectedSize, object.size);
+	if (object.size !== expected.fileSize) {
+		throw new UploadedObjectSizeMismatchError(
+			r2Key,
+			expected.fileSize,
+			object.size
+		);
 	}
 
 	const checksum = object.checksums.sha256;
@@ -43,13 +56,29 @@ export function verifyUploadedObject(
 
 	const actual = NixSha256Hash.fromDigest(new Uint8Array(checksum)).toString();
 
-	if (actual === metadata.fileHash) {
+	if (actual === expected.fileHash) {
 		return;
 	}
 
 	throw new UploadedObjectChecksumMismatchError(
 		r2Key,
-		metadata.fileHash,
+		expected.fileHash,
 		actual
 	);
+}
+
+/**
+ * Confirms a freshly uploaded object matches the metadata the client
+ * negotiated.
+ */
+export function verifyUploadedObject(
+	object: UploadedObject | undefined,
+	expectedSize: number,
+	metadata: UploadPathMetadataFields
+): void {
+	verifyStoredBlob(object, {
+		narHash: metadata.narHash,
+		fileHash: metadata.fileHash,
+		fileSize: expectedSize
+	});
 }
