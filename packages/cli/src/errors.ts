@@ -14,6 +14,15 @@ export class InvalidCachePriorityError extends CliError {
 	}
 }
 
+export class InvalidPolicyScopeError extends CliError {
+	constructor(public readonly value: string) {
+		super(
+			`Invalid policy scope (expected cache or root-name-prefix): ${value}`
+		);
+		this.name = 'InvalidPolicyScopeError';
+	}
+}
+
 export class CupboardHttpError extends CliError {
 	constructor(
 		public readonly method: string,

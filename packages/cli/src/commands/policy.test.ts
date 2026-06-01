@@ -1,0 +1,170 @@
+import type {
+	RetentionPolicyAddBody,
+	RetentionPolicyListResponse,
+	RetentionPolicyRemoveResponse,
+	RetentionPolicySummary
+} from '@cupboard/shared';
+import { describe, expect, it } from 'vitest';
+
+import type { AccessCredential } from '../client.ts';
+import type { Reporter, ResultRow } from '../reporter.ts';
+
+import {
+	type PolicyClient,
+	runPolicyAdd,
+	runPolicyList,
+	runPolicyRemove
+} from './policy.ts';
+
+function reporter(results: ResultRow[][], infos: string[] = []): Reporter {
+	return {
+		phase(_label, body) {
+			return Promise.resolve(
+				body({
+					fact() {
+						return;
+					}
+				})
+			);
+		},
+		result(rows) {
+			results.push([...rows]);
+		},
+		warn() {
+			return;
+		},
+		info(message) {
+			infos.push(message);
+		}
+	};
+}
+
+function uncalledClient(): never {
+	throw new Error('client should not be called');
+}
+
+function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
+	return {
+		listPolicies: uncalledClient,
+		addPolicy: uncalledClient,
+		removePolicy: uncalledClient,
+		...overrides
+	};
+}
+
+describe('runPolicyList', () => {
+	it('reports a row per policy', async () => {
+		const results: ResultRow[][] = [];
+		const response: RetentionPolicyListResponse = {
+			policies: [
+				{
+					id: 'p1',
+					scope: 'root-name-prefix',
+					pattern: 'pr-',
+					ttlSeconds: 604_800
+				}
+			]
+		};
+
+		await runPolicyList(
+			'admin-token',
+			reporter(results),
+			policyClient({ listPolicies: () => Promise.resolve(response) })
+		);
+
+		expect(results).toStrictEqual([
+			[{ label: 'p1', value: 'root-name-prefix pr-; 604,800s' }]
+		]);
+	});
+
+	it('reports an info line when there are no policies', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+
+		await runPolicyList(
+			'admin-token',
+			reporter(results, infos),
+			policyClient({ listPolicies: () => Promise.resolve({ policies: [] }) })
+		);
+
+		expect({ results, infos }).toStrictEqual({
+			results: [],
+			infos: ['No retention policies.']
+		});
+	});
+});
+
+describe('runPolicyAdd', () => {
+	it('builds a cache-scoped body and reports the policy', async () => {
+		const calls: { token: AccessCredential; body: RetentionPolicyAddBody }[] =
+			[];
+		const results: ResultRow[][] = [];
+		const summary: RetentionPolicySummary = {
+			id: 'p1',
+			scope: 'cache',
+			pattern: 'builds',
+			ttlSeconds: 1_209_600
+		};
+
+		await runPolicyAdd(
+			'cache',
+			'builds',
+			1_209_600,
+			'admin-token',
+			reporter(results),
+			policyClient({
+				addPolicy(token, body) {
+					calls.push({ token, body });
+					return Promise.resolve(summary);
+				}
+			})
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [
+				{
+					token: 'admin-token',
+					body: { scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 }
+				}
+			],
+			results: [
+				[
+					{ label: 'Policy', value: 'p1' },
+					{ label: 'Scope', value: 'cache' },
+					{ label: 'Pattern', value: 'builds' },
+					{ label: 'TTL (seconds)', value: '1,209,600' }
+				]
+			]
+		});
+	});
+});
+
+describe('runPolicyRemove', () => {
+	it('removes a policy and reports the outcome', async () => {
+		const calls: { token: AccessCredential; id: string }[] = [];
+		const results: ResultRow[][] = [];
+		const response: RetentionPolicyRemoveResponse = { id: 'p1', removed: true };
+
+		await runPolicyRemove(
+			'p1',
+			'admin-token',
+			reporter(results),
+			policyClient({
+				removePolicy(token, id) {
+					calls.push({ token, id });
+					return Promise.resolve(response);
+				}
+			})
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [{ token: 'admin-token', id: 'p1' }],
+			results: [
+				[
+					{ label: 'Policy', value: 'p1' },
+					{ label: 'Removed', value: 'yes' }
+				]
+			]
+		});
+	});
+});

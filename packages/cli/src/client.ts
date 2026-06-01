@@ -19,6 +19,13 @@ import {
 	keyRetireResponseSchema,
 	type KeyRotateResponse,
 	keyRotateResponseSchema,
+	type RetentionPolicyAddBody,
+	type RetentionPolicyListResponse,
+	retentionPolicyListResponseSchema,
+	type RetentionPolicyRemoveResponse,
+	retentionPolicyRemoveResponseSchema,
+	type RetentionPolicySummary,
+	retentionPolicySummarySchema,
 	type RootListResponse,
 	rootListResponseSchema,
 	type RootRemoveResponse,
@@ -162,6 +169,37 @@ export class CupboardClient {
 		return this.requestJson(
 			`/caches/${encodeURIComponent(name)}${query}`,
 			cacheRemoveResponseSchema,
+			{
+				method: 'DELETE',
+				token
+			}
+		);
+	}
+
+	listPolicies(token: AccessCredential): Promise<RetentionPolicyListResponse> {
+		return this.requestJson('/policies', retentionPolicyListResponseSchema, {
+			token
+		});
+	}
+
+	addPolicy(
+		token: AccessCredential,
+		body: RetentionPolicyAddBody
+	): Promise<RetentionPolicySummary> {
+		return this.requestJson('/policies', retentionPolicySummarySchema, {
+			method: 'POST',
+			token,
+			body
+		});
+	}
+
+	removePolicy(
+		token: AccessCredential,
+		id: string
+	): Promise<RetentionPolicyRemoveResponse> {
+		return this.requestJson(
+			`/policies/${encodeURIComponent(id)}`,
+			retentionPolicyRemoveResponseSchema,
 			{
 				method: 'DELETE',
 				token

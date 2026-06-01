@@ -5,6 +5,7 @@ import { registerConfigCommand } from './commands/config.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerInitCommand } from './commands/init.ts';
 import { registerKeyCommands } from './commands/key.ts';
+import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
@@ -34,6 +35,7 @@ export function buildProgram(): Command {
 	registerRootCommands(program);
 	registerKeyCommands(program);
 	registerCacheCommands(program);
+	registerPolicyCommands(program);
 
 	return program;
 }
