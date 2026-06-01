@@ -5,10 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client.ts';
 import { renderNetrc } from '../../packages/shared/src/nix-config.ts';
-import {
-	bootstrapToken,
-	CupboardTestServer
-} from '../support/cupboard-server.ts';
+import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore, type RealiseOptions } from '../support/nix.ts';
 import { pushStorePaths } from '../support/push.ts';
@@ -39,7 +36,8 @@ describe('Nix substitution from a private-read cache', () => {
 
 				try {
 					const client = new CupboardClient(server.url, server.uploadFetcher());
-					const bootstrap = await client.bootstrap(bootstrapToken);
+					const token = await server.ownerAdminToken();
+					const publicKey = await client.publicKey();
 					const source = await NixStore.host(
 						path.join(directory, 'source-home')
 					);
@@ -47,7 +45,7 @@ describe('Nix substitution from a private-read cache', () => {
 					await pushStorePaths(
 						{
 							client,
-							token: bootstrap.token,
+							token,
 							store: source,
 							workDirectory: directory
 						},
@@ -62,7 +60,7 @@ describe('Nix substitution from a private-read cache', () => {
 
 					const base: RealiseOptions = {
 						substituter: server.url.origin,
-						trustedPublicKeys: [bootstrap.publicKey],
+						trustedPublicKeys: [publicKey],
 						requireSigs: true
 					};
 

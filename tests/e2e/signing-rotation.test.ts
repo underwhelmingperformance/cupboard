@@ -6,10 +6,7 @@ import { describe, expect, it } from 'vitest';
 import { CupboardClient } from '../../packages/cli/src/client.ts';
 import { NarInfo } from '../../packages/shared/src/narinfo.ts';
 import { StorePath } from '../../packages/shared/src/store-path.ts';
-import {
-	bootstrapToken,
-	CupboardTestServer
-} from '../support/cupboard-server.ts';
+import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore, type RealiseOptions } from '../support/nix.ts';
 import { pushStorePaths } from '../support/push.ts';
@@ -37,8 +34,8 @@ describe('Nix substitution through a signing-key rotation', () => {
 
 				try {
 					const client = new CupboardClient(server.url, server.uploadFetcher());
-					const bootstrap = await client.bootstrap(bootstrapToken);
-					const oldKey = bootstrap.publicKey;
+					const token = await server.ownerAdminToken();
+					const oldKey = await client.publicKey();
 					const source = await NixStore.host(
 						path.join(directory, 'source-home')
 					);
@@ -46,7 +43,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 						pushStorePaths(
 							{
 								client,
-								token: bootstrap.token,
+								token: token,
 								store: source,
 								workDirectory: directory
 							},
@@ -68,14 +65,14 @@ describe('Nix substitution through a signing-key rotation', () => {
 					);
 
 					// Single-key golden path: a path pushed before any rotation carries
-					// one signature and substitutes under the bootstrap key.
+					// one signature and substitutes under the original key.
 					const before = await source.build(rotationDerivation('before'));
 					await push(before);
 					const beforeInfo = await fetchNarInfo(server, before);
 					await targetOld.realise(before, trusting([oldKey]));
 
 					// Open the window. A path pushed now is signed by both keys.
-					const { rotated, keys } = await client.rotateKey(bootstrap.token);
+					const { rotated, keys } = await client.rotateKey(token);
 					const newKey = rotated.publicKey;
 
 					const windowPath = await source.build(rotationDerivation('window'));
@@ -90,8 +87,8 @@ describe('Nix substitution through a signing-key rotation', () => {
 
 					// Retire the old key fully; a path pushed afterwards is signed by the
 					// new key only and still substitutes under it.
-					await client.retireKey(bootstrap.token, 'active');
-					await client.retireKey(bootstrap.token, 'active');
+					await client.retireKey(token, 'active');
+					await client.retireKey(token, 'active');
 					const publishedAfterRetire = await publishedKeys(server);
 
 					const postPath = await source.build(rotationDerivation('post'));

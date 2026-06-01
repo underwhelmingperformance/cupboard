@@ -5,10 +5,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client.ts';
 import { CacheInfo } from '../../packages/shared/src/cache-info.ts';
-import {
-	bootstrapToken,
-	CupboardTestServer
-} from '../support/cupboard-server.ts';
+import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
 import { type PushContext, pushStorePaths } from '../support/push.ts';
@@ -31,7 +28,8 @@ describe('Nix substitution from a named cache', () => {
 
 				try {
 					const client = new CupboardClient(server.url, server.uploadFetcher());
-					const bootstrap = await client.bootstrap(bootstrapToken);
+					const token = await server.ownerAdminToken();
+					const publicKey = await client.publicKey();
 					const source = await NixStore.host(
 						path.join(directory, 'source-home')
 					);
@@ -42,12 +40,12 @@ describe('Nix substitution from a named cache', () => {
 							server.uploadFetcher(),
 							cache === '' ? '' : `/cache/${cache}`
 						),
-						token: bootstrap.token,
+						token: token,
 						store: source,
 						workDirectory: directory
 					});
 
-					await client.putCache(bootstrap.token, 'builds', 30);
+					await client.putCache(token, 'builds', 30);
 
 					// Push the same path to the named and default caches: the NAR blob is
 					// shared, so only one is stored.
@@ -60,7 +58,7 @@ describe('Nix substitution from a named cache', () => {
 					);
 					await target.realise(storePath, {
 						substituter: `${server.url.origin}/cache/builds`,
-						trustedPublicKeys: [bootstrap.publicKey],
+						trustedPublicKeys: [publicKey],
 						requireSigs: true
 					});
 
@@ -68,11 +66,11 @@ describe('Nix substitution from a named cache', () => {
 						new URL('/cache/builds/nix-cache-info', server.url)
 					);
 					const cacheInfoBody = await cacheInfo.text();
-					const stats = await client.stats(bootstrap.token);
-					const listed = await client.listCaches(bootstrap.token);
+					const stats = await client.stats(token);
+					const listed = await client.listCaches(token);
 
-					await client.removeCache(bootstrap.token, 'builds', true);
-					const afterRemoval = await client.listCaches(bootstrap.token);
+					await client.removeCache(token, 'builds', true);
+					const afterRemoval = await client.listCaches(token);
 
 					expect({
 						substituted: await readFile(target.physicalPath(storePath), 'utf8'),

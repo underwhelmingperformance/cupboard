@@ -7,10 +7,7 @@ import { CupboardClient } from '../../packages/cli/src/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
 import { NarInfo } from '../../packages/shared/src/narinfo.ts';
 import { StorePath } from '../../packages/shared/src/store-path.ts';
-import {
-	bootstrapToken,
-	CupboardTestServer
-} from '../support/cupboard-server.ts';
+import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import {
 	generatePublicKey,
@@ -146,7 +143,8 @@ function withHarness(
 
 			try {
 				const client = new CupboardClient(server.url, server.uploadFetcher());
-				const bootstrap = await client.bootstrap(bootstrapToken);
+				const token = await server.ownerAdminToken();
+				const publicKey = await client.publicKey();
 
 				await body({
 					server,
@@ -156,8 +154,8 @@ function withHarness(
 						path.join(directory, 'target-home')
 					),
 					client,
-					token: bootstrap.token,
-					publicKey: bootstrap.publicKey,
+					token,
+					publicKey,
 					directory
 				});
 			} finally {

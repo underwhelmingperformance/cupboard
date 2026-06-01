@@ -10,11 +10,22 @@ import path from 'node:path';
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 
+import {
+	subjectTokenTypeIdToken,
+	tokenExchangeGrantType
+} from '../../packages/shared/src/messages.ts';
+
+import { StubOidcIssuer } from './oidc-issuer.ts';
 import { presigningFetcher } from './r2-presign.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 
 export const bootstrapToken = 'e2e-bootstrap-token';
+
+// The owner identity the stub issuer asserts and the worker is configured to
+// trust; the audience stands in for the CLI's registered OAuth client id.
+export const ownerSubject = 'e2e-owner';
+export const ownerAudience = 'cupboard-owner-client';
 
 export const r2Credentials = {
 	accountId: 'test-account-id',
@@ -36,6 +47,7 @@ type MiniflareRequestInit = NonNullable<
 export class CupboardTestServer {
 	private constructor(
 		readonly url: URL,
+		readonly issuer: StubOidcIssuer,
 		private readonly worker: Miniflare,
 		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
 		private readonly server: Server
@@ -46,9 +58,13 @@ export class CupboardTestServer {
 		options: { readonly bindings?: Readonly<Record<string, string>> } = {}
 	): Promise<CupboardTestServer> {
 		const bundle = await bundleWorker(directory);
+		const issuer = await StubOidcIssuer.start();
 		const worker = new Miniflare({
 			bindings: {
 				CUPBOARD_BOOTSTRAP_TOKEN: bootstrapToken,
+				CUPBOARD_OWNER_ISSUER: issuer.issuer,
+				CUPBOARD_OWNER_SUBJECT: ownerSubject,
+				CUPBOARD_OWNER_AUDIENCE: ownerAudience,
 				CUPBOARD_READ_USER: '',
 				CUPBOARD_READ_PASSWORD: '',
 				CUPBOARD_COLD_PATH_TTL_SECONDS: '',
@@ -80,7 +96,7 @@ export class CupboardTestServer {
 		});
 		const url = await listen(server);
 
-		return new CupboardTestServer(url, worker, bucket, server);
+		return new CupboardTestServer(url, issuer, worker, bucket, server);
 	}
 
 	/**
@@ -95,8 +111,56 @@ export class CupboardTestServer {
 		});
 	}
 
+	/** An owner admin token, obtained the real way: an owner id_token exchanged at `/token`. */
+	ownerAdminToken(): Promise<string> {
+		return this.exchangeIdToken(
+			this.issuer.sign({ aud: ownerAudience, sub: ownerSubject })
+		);
+	}
+
+	/** Exchanges an issuer-signed id_token for a cupboard access token via `/token`. */
+	async exchangeIdToken(idToken: string): Promise<string> {
+		const body = new URLSearchParams({
+			grant_type: tokenExchangeGrantType,
+			subject_token: idToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		const response = await fetch(new URL('/token', this.url), {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: body.toString()
+		});
+
+		if (!response.ok) {
+			throw new TokenExchangeFailedError(
+				response.status,
+				await response.text()
+			);
+		}
+
+		const payload = (await response.json()) as {
+			readonly access_token: string;
+		};
+
+		return payload.access_token;
+	}
+
 	async stop(): Promise<void> {
-		await Promise.all([closeServer(this.server), this.worker.dispose()]);
+		await Promise.all([
+			closeServer(this.server),
+			this.worker.dispose(),
+			this.issuer.stop()
+		]);
+	}
+}
+
+export class TokenExchangeFailedError extends Error {
+	constructor(
+		public readonly status: number,
+		public readonly body: string
+	) {
+		super(`Token exchange failed with ${String(status)}: ${body}`);
+		this.name = 'TokenExchangeFailedError';
 	}
 }
 

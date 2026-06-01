@@ -117,8 +117,11 @@ export class CupboardClient {
 
 	async publicKey(): Promise<string> {
 		const response = await this.request('/pubkey');
+		const body = await response.text();
 
-		return response.text();
+		// The route renders the key set with a trailing newline; the keys
+		// themselves carry none, so return them without it.
+		return body.trimEnd();
 	}
 
 	private scoped(path: string): string {
