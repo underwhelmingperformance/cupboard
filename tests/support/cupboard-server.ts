@@ -41,7 +41,10 @@ export class CupboardTestServer {
 		private readonly server: Server
 	) {}
 
-	static async start(directory: string): Promise<CupboardTestServer> {
+	static async start(
+		directory: string,
+		options: { readonly bindings?: Readonly<Record<string, string>> } = {}
+	): Promise<CupboardTestServer> {
 		const bundle = await bundleWorker(directory);
 		const worker = new Miniflare({
 			bindings: {
@@ -49,7 +52,8 @@ export class CupboardTestServer {
 				R2_ACCESS_KEY_ID: r2Credentials.accessKeyId,
 				R2_ACCOUNT_ID: r2Credentials.accountId,
 				R2_BUCKET_NAME: r2Credentials.bucketName,
-				R2_SECRET_ACCESS_KEY: r2Credentials.secretAccessKey
+				R2_SECRET_ACCESS_KEY: r2Credentials.secretAccessKey,
+				...options.bindings
 			},
 			compatibilityDate: '2026-05-15',
 			compatibilityFlags: ['nodejs_compat'],
