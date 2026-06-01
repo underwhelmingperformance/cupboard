@@ -11,10 +11,13 @@ import { narInfoObjectKey } from './http.ts';
 import {
 	authorisedFetch,
 	bootstrap,
+	cacheScopedPath,
 	mintServerSignedToken,
 	narBytes,
+	negotiateUploads,
 	pushPath,
 	resetTestServer,
+	singleDecision,
 	uploadMetadata,
 	useTestServer
 } from './test-support.ts';
@@ -124,6 +127,36 @@ describe('cache registry admin', () => {
 			list: StatusCodes.FORBIDDEN,
 			put: StatusCodes.FORBIDDEN,
 			remove: StatusCodes.FORBIDDEN
+		});
+	});
+
+	it('clears in-flight uploads negotiated under a cache it tears down', async () => {
+		useTestServer('cache-admin-teardown-pending');
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const decision = singleDecision(
+			await negotiateUploads(init.token, [metadata], 'builds')
+		);
+
+		if (decision.action !== 'upload') {
+			throw new Error('expected an upload decision');
+		}
+
+		const removed = await authorisedFetch('/caches/builds', init.token, {
+			method: 'DELETE'
+		});
+
+		// The pending upload is gone with the cache, so a late commit cannot
+		// resurrect it.
+		const commit = await authorisedFetch(
+			cacheScopedPath('builds', `/uploads/${decision.uploadId}/commit`),
+			init.token,
+			{ method: 'POST' }
+		);
+
+		expect({ removed: removed.status, commit: commit.status }).toStrictEqual({
+			removed: StatusCodes.OK,
+			commit: StatusCodes.NOT_FOUND
 		});
 	});
 });

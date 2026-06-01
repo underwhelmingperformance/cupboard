@@ -230,8 +230,9 @@ One DO SQLite database per deployment.
   - `nar_hash` (PK), `r2_key`, `compression`, `file_hash`, `file_size`,
     `created_at`.
 - `pending_upload` — in-flight uploads not yet committed.
-  - `id` (PK), `nar_hash`, `r2_key`, `expected_size`, `metadata_json`,
-    `created_at`, `expires_at`.
+  - `id` (PK), `cache`, `nar_hash`, `r2_key`, `expected_size`, `metadata_json`,
+    `created_at`, `expires_at`. The `cache` binds the upload to the cache it was
+    negotiated under, so a prepare or commit cannot redirect it.
 - `orphan_blob_deletion` — durable queue for deleting abandoned R2 objects.
   - `r2_key` (PK), `not_before`, `created_at`.
 - `narinfo_deletion` — durable queue for finishing interrupted narinfo removals.

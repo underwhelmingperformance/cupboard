@@ -36,6 +36,7 @@ export const narBlobs = sqliteTable('nar_blob', {
 
 export const pendingUploads = sqliteTable('pending_upload', {
 	id: text('id').primaryKey(),
+	cache: text('cache').notNull().default(''),
 	narHash: text('nar_hash').notNull(),
 	r2Key: text('r2_key').notNull(),
 	expectedSize: integer('expected_size').notNull(),

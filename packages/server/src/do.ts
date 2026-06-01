@@ -86,6 +86,7 @@ import {
 	StoredSignaturesInvalidError,
 	StoredUploadMetadataInvalidError,
 	UnauthenticatedError,
+	UploadCacheMismatchError,
 	UploadedObjectChecksumMismatchError,
 	UploadedObjectChecksumMissingError,
 	UploadedObjectSizeMismatchError,
@@ -340,12 +341,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.app.put('/uploads/:id', (context) =>
 			serverErrorResponse(
-				this.handlePrepareUpload(context.req.raw, context.req.param('id'))
+				this.handlePrepareUpload(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('id')
+				)
 			)
 		);
 		this.app.put('/cache/:cacheName/uploads/:id', (context) =>
-			this.withCache(context.req.param('cacheName'), () =>
-				this.handlePrepareUpload(context.req.raw, context.req.param('id'))
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.handlePrepareUpload(
+					context.req.raw,
+					cache,
+					context.req.param('id')
+				)
 			)
 		);
 		this.app.post('/uploads/:id/commit', (context) =>
@@ -855,6 +864,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					.where(eq(schema.retentionRoots.cache, cache))
 					.run();
 				tx.delete(schema.caches).where(eq(schema.caches.name, cache)).run();
+				// Drop in-flight uploads negotiated under this cache so a pending
+				// commit cannot resurrect it after teardown.
+				tx.delete(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.cache, cache))
+					.run();
 			});
 
 			await this.flushQueuedNarInfoDeletions(origin);
@@ -1223,6 +1237,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.insert(schema.pendingUploads)
 				.values({
 					id: uploadId,
+					// Bind the upload to its cache so a prepare or commit cannot
+					// redirect it to a different one.
+					cache,
 					narHash: metadata.narHash,
 					r2Key: narObjectKey(metadata.narHash),
 					expectedSize:
@@ -1258,6 +1275,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async handlePrepareUpload(
 		request: Request,
+		cache: string,
 		uploadId: string
 	): Promise<Response> {
 		await this.requireScope(request, 'write');
@@ -1270,6 +1288,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		if (pending === undefined) {
 			throw new UploadNotFoundError(uploadId);
+		}
+
+		if (pending.cache !== cache) {
+			throw new UploadCacheMismatchError(uploadId, pending.cache, cache);
 		}
 
 		if (pending.expiresAt < new Date().toISOString()) {
@@ -1605,6 +1627,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		if (pending === undefined) {
 			throw new UploadNotFoundError(uploadId);
+		}
+
+		if (pending.cache !== cache) {
+			throw new UploadCacheMismatchError(uploadId, pending.cache, cache);
 		}
 
 		if (pending.expiresAt < new Date().toISOString()) {

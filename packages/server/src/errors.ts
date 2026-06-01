@@ -168,6 +168,19 @@ export class UploadExpiredError extends ServerHttpError {
 	}
 }
 
+export class UploadCacheMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(
+		public readonly uploadId: string,
+		public readonly negotiatedCache: string,
+		public readonly requestedCache: string
+	) {
+		super('Upload prepared or committed under a different cache');
+		this.name = 'UploadCacheMismatchError';
+	}
+}
+
 export class UploadedObjectNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 

@@ -12,12 +12,17 @@ import {
 	authorisedFetch,
 	bootstrap,
 	cacheScopedPath,
+	commitUpload,
 	mintServerSignedToken,
 	narBytes,
 	narHash,
+	negotiateUploads,
 	pushPath,
+	putNarBytes,
 	resetTestServer,
+	singleDecision,
 	testServerFor,
+	uploadBlobMetadata,
 	uploadMetadata,
 	useTestServer
 } from './test-support.ts';
@@ -240,5 +245,77 @@ describe('named caches', () => {
 		);
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+	});
+
+	it('refuses to commit an upload under a different cache than negotiated', async () => {
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const decision = singleDecision(
+			await negotiateUploads(init.token, [metadata], 'builds')
+		);
+
+		if (decision.action !== 'upload') {
+			throw new Error('expected an upload decision');
+		}
+
+		// Commit through the default cache: the pending row is bound to `builds`.
+		const crossCommit = await authorisedFetch(
+			`/uploads/${decision.uploadId}/commit`,
+			init.token,
+			{ method: 'POST' }
+		);
+
+		// The same upload still completes through the cache it was negotiated under.
+		await authorisedFetch(
+			cacheScopedPath('builds', `/uploads/${decision.uploadId}`),
+			init.token,
+			{
+				body: JSON.stringify(uploadBlobMetadata(metadata)),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
+		await putNarBytes(decision.r2Key);
+		const committed = await commitUpload(
+			init.token,
+			decision.uploadId,
+			'builds'
+		);
+
+		expect({
+			crossCommit: crossCommit.status,
+			committed: committed.status,
+			defaultPaths: await storePathCount(init.token, ''),
+			buildsPaths: await storePathCount(init.token, 'builds')
+		}).toStrictEqual({
+			crossCommit: StatusCodes.BAD_REQUEST,
+			committed: 'committed',
+			defaultPaths: 0,
+			buildsPaths: 1
+		});
+	});
+
+	it('refuses to prepare an upload under a different cache than negotiated', async () => {
+		const init = await bootstrap();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const decision = singleDecision(
+			await negotiateUploads(init.token, [metadata], 'builds')
+		);
+
+		if (decision.action !== 'upload') {
+			throw new Error('expected an upload decision');
+		}
+
+		const prepare = await authorisedFetch(
+			`/uploads/${decision.uploadId}`,
+			init.token,
+			{
+				body: JSON.stringify(uploadBlobMetadata(metadata)),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
+
+		expect(prepare.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 });
