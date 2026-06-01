@@ -45,10 +45,11 @@ import {
 	type UploadPathNegotiationFields,
 	uploadPathNegotiationSchema,
 	uploadPrepareRequestSchema,
-	type UploadPrepareResponse
+	type UploadPrepareResponse,
+	type VerifyReport
 } from '@cupboard/shared';
 import { DurableObject } from 'cloudflare:workers';
-import { and, asc, count, eq, gte, lt, lte, sql } from 'drizzle-orm';
+import { and, asc, count, eq, gt, gte, lt, lte, or, sql } from 'drizzle-orm';
 import {
 	drizzle,
 	type DrizzleSqliteDODatabase
@@ -101,7 +102,8 @@ import {
 	narObjectKey,
 	orphanBlobDeletionGraceMs,
 	TextBody,
-	textResponse
+	textResponse,
+	verificationBatchSize
 } from './http.ts';
 import {
 	parseRequestBody,
@@ -133,6 +135,11 @@ type SchemaWriter =
 const adminJwtTtlSeconds = 10 * 60;
 
 const storedSignaturesSchema = z.array(z.string());
+
+// An optional `?limit` on `POST /verify`: a positive integer, clamped to
+// `verificationBatchSize` so a manual run cannot scan an unbounded batch in one
+// critical section.
+const verificationLimitSchema = z.coerce.number().int().min(1);
 
 interface SigningKey {
 	readonly id: string;
@@ -251,6 +258,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// deployment-wide: one bare `/check` covering all caches.
 		this.app.get('/check', (context) =>
 			serverErrorResponse(this.handleCheck(context.req.raw))
+		);
+
+		// A bounded reconciling pass driven by the cron tick. Its own route, kept
+		// separate from `/gc`, so each can run and be asserted independently.
+		this.app.post('/verify', (context) =>
+			serverErrorResponse(this.handleVerify(context.req.raw))
 		);
 
 		// Each path-scoped route has a bare form (the default cache) and a
@@ -673,6 +686,124 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			throw error;
 		}
+	}
+
+	private async handleVerify(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		// Interactive verify purges this colo's edge cache via the caller's public
+		// origin; the cron sweep arrives on the internal origin, cannot know the
+		// public URL, and relies on the narinfo TTL and the orphan-blob grace
+		// window instead, exactly as GC does.
+		const url = new URL(request.url);
+		const purgeOrigin = url.origin === internalOrigin ? undefined : url.origin;
+		const requested = url.searchParams.get('limit');
+		const limit =
+			requested === null
+				? verificationBatchSize
+				: Math.min(
+						parseRequestValue(verificationLimitSchema, requested),
+						verificationBatchSize
+					);
+
+		return Response.json(await this.runVerification(purgeOrigin, limit));
+	}
+
+	private runVerification(
+		origin: string | undefined,
+		limit: number
+	): Promise<VerifyReport> {
+		// The whole batch runs in one critical section: the cursor read, the
+		// per-row re-materialise/reconcile, and the cursor advance must not
+		// interleave with a commit or a delete.
+		return this.ctx.blockConcurrencyWhile(async () => {
+			const cursor = this.db
+				.select()
+				.from(schema.verificationCursor)
+				.where(eq(schema.verificationCursor.id, 'active'))
+				.get();
+			// An empty cursor starts (or restarts) at the lowest (cache, hash): the
+			// empty string sorts before every cache name and every 32-character hash.
+			const fromCache = cursor?.cache ?? '';
+			const fromHash = cursor?.lastStorePathHash ?? '';
+
+			// Verification spans every cache, walking the (cache, store_path_hash)
+			// space in order and resuming after the composite cursor. drizzle has no
+			// tuple form of `gt`, so the row-value comparison is spelt out.
+			const rows = this.db
+				.select()
+				.from(schema.narInfos)
+				.where(
+					or(
+						gt(schema.narInfos.cache, fromCache),
+						and(
+							eq(schema.narInfos.cache, fromCache),
+							gt(schema.narInfos.storePathHash, fromHash)
+						)
+					)
+				)
+				.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
+				.limit(limit)
+				.all();
+
+			let narInfoObjectsRestored = 0;
+			let danglingNarInfosRemoved = 0;
+
+			for (const row of rows) {
+				const narPresent =
+					(await this.env.BLOBS.head(narObjectKey(row.narHash))) !== null;
+
+				if (!narPresent) {
+					await this.reconcileMissingNar(row, origin);
+					danglingNarInfosRemoved += 1;
+					continue;
+				}
+
+				const narInfoObject = await this.env.BLOBS.head(
+					narInfoObjectKey(row.storePathHash, row.cache)
+				);
+
+				if (narInfoObject === null) {
+					await this.putNarInfoObject(
+						row.cache,
+						row.storePathHash,
+						this.narInfoFromRow(row)
+					);
+					narInfoObjectsRestored += 1;
+				}
+			}
+
+			// A short batch means the scan reached the end; clear the cursor so the
+			// next pass starts again from the first cache's lowest hash.
+			const wrapped = rows.length < limit;
+			const last = rows.at(-1);
+			const nextCache = wrapped || last === undefined ? '' : last.cache;
+			const nextHash = wrapped || last === undefined ? '' : last.storePathHash;
+			const now = new Date().toISOString();
+
+			this.db
+				.insert(schema.verificationCursor)
+				.values({
+					id: 'active',
+					cache: nextCache,
+					lastStorePathHash: nextHash,
+					updatedAt: now
+				})
+				.onConflictDoUpdate({
+					target: schema.verificationCursor.id,
+					set: { cache: nextCache, lastStorePathHash: nextHash, updatedAt: now }
+				})
+				.run();
+
+			return {
+				scanned: rows.length,
+				narInfoObjectsRestored,
+				danglingNarInfosRemoved,
+				cursor: nextHash,
+				cursorCache: nextCache,
+				wrapped
+			} satisfies VerifyReport;
+		});
 	}
 
 	private cacheSummary(cache: string, priority: number): CacheSummary {
@@ -1996,37 +2127,46 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		row: typeof schema.narInfos.$inferSelect,
 		origin: string
 	): Promise<void> {
-		// Row-first, as for deleteStorePath: the transaction removes the row and
-		// queues the narinfo object cleanup, so an interrupted recovery cannot
-		// resurrect the path through a heal. The object delete that follows is
-		// opportunistic and GC finishes anything left in the queue.
-		await this.ctx.blockConcurrencyWhile(async () => {
-			const now = new Date().toISOString();
+		await this.ctx.blockConcurrencyWhile(() =>
+			this.reconcileMissingNar(row, origin)
+		);
+	}
 
-			this.db.transaction((tx) => {
-				tx.delete(schema.narInfos)
-					.where(
-						and(
-							eq(schema.narInfos.cache, row.cache),
-							eq(schema.narInfos.storePathHash, row.storePathHash)
-						)
+	// Removes a narinfo whose NAR is gone, row-first, as for deleteStorePath: the
+	// transaction removes the row and queues the narinfo object cleanup, so an
+	// interrupted recovery cannot resurrect the path through a heal. The object
+	// delete that follows is opportunistic and GC finishes anything left in the
+	// queue. The caller owns the critical section so verification can reconcile a
+	// whole batch in one without nesting `blockConcurrencyWhile`.
+	private async reconcileMissingNar(
+		row: typeof schema.narInfos.$inferSelect,
+		origin?: string
+	): Promise<void> {
+		const now = new Date().toISOString();
+
+		this.db.transaction((tx) => {
+			tx.delete(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, row.cache),
+						eq(schema.narInfos.storePathHash, row.storePathHash)
 					)
-					.run();
-				this.enqueueNarInfoDeletion(
-					tx,
-					row.cache,
-					row.storePathHash,
-					row.narHash,
-					now
-				);
-			});
-
-			try {
-				await this.deleteQueuedNarInfo(row.cache, row.storePathHash, 0, origin);
-			} catch {
-				// the durable queue row remains for GC to retry
-			}
+				)
+				.run();
+			this.enqueueNarInfoDeletion(
+				tx,
+				row.cache,
+				row.storePathHash,
+				row.narHash,
+				now
+			);
 		});
+
+		try {
+			await this.deleteQueuedNarInfo(row.cache, row.storePathHash, 0, origin);
+		} catch {
+			// the durable queue row remains for GC to retry
+		}
 	}
 
 	private async purgeCachedNarInfo(url: string): Promise<void> {

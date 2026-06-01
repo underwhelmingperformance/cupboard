@@ -19,7 +19,8 @@ import {
 	statsResponseSchema,
 	uploadDecisionSchema,
 	uploadNegotiateRequestSchema,
-	usageResponseSchema
+	usageResponseSchema,
+	verifyReportSchema
 } from './messages.ts';
 
 const storePathHash = '0'.repeat(32);
@@ -402,5 +403,84 @@ describe('check report schemas', () => {
 				discrepancies: []
 			}).success
 		).toBe(false);
+	});
+});
+
+describe('verifyReportSchema', () => {
+	it.each([
+		{
+			name: 'an in-progress pass with a composite cursor',
+			value: {
+				scanned: 100,
+				narInfoObjectsRestored: 2,
+				danglingNarInfosRemoved: 1,
+				cursor: 'a'.repeat(32),
+				cursorCache: 'builds',
+				wrapped: false
+			},
+			valid: true
+		},
+		{
+			name: 'a wrapped pass with an empty cursor',
+			value: {
+				scanned: 0,
+				narInfoObjectsRestored: 0,
+				danglingNarInfosRemoved: 0,
+				cursor: '',
+				cursorCache: '',
+				wrapped: true
+			},
+			valid: true
+		},
+		{
+			name: 'a negative count',
+			value: {
+				scanned: -1,
+				narInfoObjectsRestored: 0,
+				danglingNarInfosRemoved: 0,
+				cursor: '',
+				cursorCache: '',
+				wrapped: true
+			},
+			valid: false
+		},
+		{
+			name: 'a missing cursor cache',
+			value: {
+				scanned: 0,
+				narInfoObjectsRestored: 0,
+				danglingNarInfosRemoved: 0,
+				cursor: '',
+				wrapped: true
+			},
+			valid: false
+		},
+		{
+			name: 'a non-string cursor',
+			value: {
+				scanned: 0,
+				narInfoObjectsRestored: 0,
+				danglingNarInfosRemoved: 0,
+				cursor: 1,
+				cursorCache: '',
+				wrapped: true
+			},
+			valid: false
+		},
+		{
+			name: 'an unknown key',
+			value: {
+				scanned: 0,
+				narInfoObjectsRestored: 0,
+				danglingNarInfosRemoved: 0,
+				cursor: '',
+				cursorCache: '',
+				wrapped: true,
+				surprise: true
+			},
+			valid: false
+		}
+	])('$name', ({ value, valid }) => {
+		expect(verifyReportSchema.safeParse(value).success).toBe(valid);
 	});
 });

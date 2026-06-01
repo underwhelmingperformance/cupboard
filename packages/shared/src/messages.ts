@@ -337,6 +337,21 @@ export const checkReportSchema = z.strictObject({
 });
 export type ParsedCheckReport = z.output<typeof checkReportSchema>;
 
+// One bounded pass of background verification: how many narinfo rows it scanned,
+// how many missing narinfo objects it re-materialised, how many dangling
+// narinfos (their NAR gone) it removed, and the resume position as a composite
+// (cursorCache, cursor) — both empty once the scan has wrapped, so the next pass
+// starts at the first cache's lowest store path hash.
+export const verifyReportSchema = z.strictObject({
+	scanned: countSchema,
+	narInfoObjectsRestored: countSchema,
+	danglingNarInfosRemoved: countSchema,
+	cursor: z.string(),
+	cursorCache: z.string(),
+	wrapped: z.boolean()
+});
+export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
+
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
 // request bodies and the server builds response bodies without minting brands.
 // The `Parsed…` outputs above are the branded results of a successful parse.
@@ -387,3 +402,4 @@ export type RetentionPolicyRemoveResponse = z.input<
 >;
 export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
 export type CheckReport = z.input<typeof checkReportSchema>;
+export type VerifyReport = z.input<typeof verifyReportSchema>;

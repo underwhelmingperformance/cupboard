@@ -117,6 +117,7 @@ describe('migrations', () => {
 	it('migrates and round-trips the verification cursor', async () => {
 		const cursor = {
 			id: 'active',
+			cache: 'builds',
 			lastStorePathHash: 'a'.repeat(32),
 			updatedAt: '2026-01-01T00:00:00.000Z'
 		};

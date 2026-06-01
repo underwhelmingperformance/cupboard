@@ -124,11 +124,13 @@ export const retentionPolicies = sqliteTable('retention_policy', {
 	createdAt: text('created_at').notNull()
 });
 
-// Where the last background verification pass stopped, so the next resumes
-// rather than re-scanning from the start. A single `id = 'active'` row; a null
-// position means start (or wrap) at the lowest store path hash.
+// Where the last background verification pass stopped, so the next pass resumes
+// from that point. A single `id = 'active'` row holding a composite
+// `(cache, store_path_hash)` position; an empty position starts (or wraps) at
+// the lowest hash of the first cache.
 export const verificationCursor = sqliteTable('verification_cursor', {
 	id: text('id').primaryKey(),
+	cache: text('cache').notNull().default(''),
 	lastStorePathHash: text('last_store_path_hash'),
 	updatedAt: text('updated_at').notNull()
 });

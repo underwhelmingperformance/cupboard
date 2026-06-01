@@ -17,6 +17,10 @@ export const internalOrigin = 'https://cupboard.local';
 // a bounded one-shot scan; its report flags when the cache held more than this.
 export const checkBatchSize = 1000;
 
+// The most committed narinfo rows a single `POST /verify` pass reconciles. The
+// cron tick advances a cursor by one batch per run, wrapping at the end.
+export const verificationBatchSize = 500;
+
 export const narInfoCacheTtlSeconds = 3600;
 
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}`;
