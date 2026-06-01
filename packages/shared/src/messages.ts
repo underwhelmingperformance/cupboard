@@ -1,8 +1,10 @@
 import { z } from 'zod';
 
 import {
+	cacheNameSchema,
 	cachePrioritySchema,
 	compressionSchema,
+	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
@@ -262,6 +264,53 @@ export type ParsedCacheRemoveResponse = z.output<
 	typeof cacheRemoveResponseSchema
 >;
 
+// A retention policy applies a default TTL to roots by cache (the pattern is a
+// cache name, or the empty string for the default cache) or by root-name prefix
+// (the pattern is a literal prefix).
+export const retentionPolicyScopeSchema = z.enum(['cache', 'root-name-prefix']);
+export type RetentionPolicyScope = z.infer<typeof retentionPolicyScopeSchema>;
+
+export const retentionPolicyAddBodySchema = z.discriminatedUnion('scope', [
+	z.strictObject({
+		scope: z.literal('cache'),
+		pattern: z.union([z.literal(DEFAULT_CACHE), cacheNameSchema]),
+		ttlSeconds: ttlSecondsSchema
+	}),
+	z.strictObject({
+		scope: z.literal('root-name-prefix'),
+		pattern: z.string().min(1),
+		ttlSeconds: ttlSecondsSchema
+	})
+]);
+export type ParsedRetentionPolicyAddBody = z.output<
+	typeof retentionPolicyAddBodySchema
+>;
+
+export const retentionPolicySummarySchema = z.strictObject({
+	id: z.string(),
+	scope: retentionPolicyScopeSchema,
+	pattern: z.string(),
+	ttlSeconds: ttlSecondsSchema
+});
+export type ParsedRetentionPolicySummary = z.output<
+	typeof retentionPolicySummarySchema
+>;
+
+export const retentionPolicyListResponseSchema = z.strictObject({
+	policies: z.array(retentionPolicySummarySchema)
+});
+export type ParsedRetentionPolicyListResponse = z.output<
+	typeof retentionPolicyListResponseSchema
+>;
+
+export const retentionPolicyRemoveResponseSchema = z.strictObject({
+	id: z.string(),
+	removed: z.boolean()
+});
+export type ParsedRetentionPolicyRemoveResponse = z.output<
+	typeof retentionPolicyRemoveResponseSchema
+>;
+
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
 // request bodies and the server builds response bodies without minting brands.
 // The `Parsed…` outputs above are the branded results of a successful parse.
@@ -298,3 +347,15 @@ export type CacheSummary = z.input<typeof cacheSummarySchema>;
 export type CacheListResponse = z.input<typeof cacheListResponseSchema>;
 export type CachePutBody = z.input<typeof cachePutBodySchema>;
 export type CacheRemoveResponse = z.input<typeof cacheRemoveResponseSchema>;
+export type RetentionPolicyAddBody = z.input<
+	typeof retentionPolicyAddBodySchema
+>;
+export type RetentionPolicySummary = z.input<
+	typeof retentionPolicySummarySchema
+>;
+export type RetentionPolicyListResponse = z.input<
+	typeof retentionPolicyListResponseSchema
+>;
+export type RetentionPolicyRemoveResponse = z.input<
+	typeof retentionPolicyRemoveResponseSchema
+>;
