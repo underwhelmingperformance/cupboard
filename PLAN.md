@@ -740,13 +740,19 @@ every live channel through `References`. This is built in three increments:
 Coverage deferred from V1 once the core cache was proven; tracked here so it is
 not lost.
 
-- [ ] Concurrent-write coverage: racing commits and negotiations on the same
+- [x] Concurrent-write coverage: racing commits and negotiations on the same
       store path hash and NAR hash resolve to one committed row and consistent
       blob accounting (deferred from V1 Storage).
-- [ ] Durable Object eviction and durability coverage: DO SQLite state — the
-      signing key and committed metadata — survives eviction and
-      re-instantiation, not just repeated in-process requests (deferred from V1
-      Storage and Signing).
+      `concurrent-write.workers.test.ts` covers a two-way commit race, four
+      concurrent pushes of one path settling to a single row, and two distinct
+      paths sharing one NAR.
+- [x] Durable Object durability coverage: DO SQLite state — the signing key set
+      and committed metadata — persists in its final shape and stays consistent
+      across a fresh stub for the same DO name (deferred from V1 Storage and
+      Signing). `durability.workers.test.ts` reads the persisted rows from
+      `state.storage` and re-derives `/pubkey`, a working token, and a verifying
+      narinfo. The harness exposes no forced-eviction API, so durability is
+      asserted through storage and a fresh stub rather than a real restart.
 
 ## V4
 
