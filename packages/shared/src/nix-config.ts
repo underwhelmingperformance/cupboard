@@ -5,10 +5,27 @@ export class NixConfig {
 	) {}
 
 	render(): string {
+		// During a key rotation `/pubkey` returns several keys, newline-separated,
+		// but `trusted-public-keys` is a single space-separated line. Collapse any
+		// whitespace so every published key lands in the setting.
+		const trustedPublicKeys = this.publicKey.split(/\s+/).filter(Boolean);
+
 		return [
 			`substituters = ${this.url}`,
-			`trusted-public-keys = ${this.publicKey}`,
+			`trusted-public-keys = ${trustedPublicKeys.join(' ')}`,
 			''
 		].join('\n');
 	}
+}
+
+/**
+ * The netrc line Nix needs to read a private cache. netrc keys on the host
+ * alone, so the caller passes the substituter host with any path stripped.
+ */
+export function renderNetrc(
+	host: string,
+	user: string,
+	password: string
+): string {
+	return `machine ${host} login ${user} password ${password}\n`;
 }
