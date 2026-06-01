@@ -23,6 +23,15 @@ export class RequestBodySchemaMismatchError extends InvalidRequestBodyError {
 	}
 }
 
+export class LastSigningKeyError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: string) {
+		super('Cannot retire the last signing key');
+		this.name = 'LastSigningKeyError';
+	}
+}
+
 export class UnauthenticatedError extends ServerHttpError {
 	readonly status = StatusCodes.UNAUTHORIZED;
 

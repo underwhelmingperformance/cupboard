@@ -2,6 +2,9 @@ import {
 	type BootstrapResponse,
 	type CommitResponse,
 	type DeletePathResponse,
+	type KeyListResponse,
+	type KeyRetireResponse,
+	type KeyRotateResponse,
 	NarInfo,
 	NixSha256Hash,
 	referencesSchema,
@@ -14,6 +17,9 @@ import {
 	type RootSetResponse,
 	type RootSummary,
 	type RootTarget,
+	signingKeyIdSchema,
+	type SigningKeyStage,
+	type SigningKeySummary,
 	type StatsResponse,
 	storePathHashSchema,
 	type UploadBlobMetadataFields,
@@ -55,6 +61,7 @@ import {
 import * as schema from './db/schema.ts';
 import {
 	InsufficientScopeError,
+	LastSigningKeyError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
@@ -109,6 +116,7 @@ interface SigningKey {
 	readonly publicKey: string;
 	readonly signing: boolean;
 	readonly published: boolean;
+	readonly createdAt: string;
 }
 
 const bootstrapKeyName = 'cupboard-1';
@@ -163,6 +171,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.app.get('/stats', (context) =>
 			serverErrorResponse(this.handleStats(context.req.raw))
+		);
+		this.app.get('/keys', (context) =>
+			serverErrorResponse(this.handleKeyList(context.req.raw))
+		);
+		this.app.post('/keys/rotate', (context) =>
+			serverErrorResponse(this.handleKeyRotate(context.req.raw))
+		);
+		this.app.post('/keys/retire/:id', (context) =>
+			serverErrorResponse(
+				this.handleKeyRetire(context.req.raw, context.req.param('id'))
+			)
 		);
 		this.app.delete('/paths/:hash', (context) =>
 			serverErrorResponse(
@@ -221,6 +240,31 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.requireScope(request, 'admin');
 
 		return Response.json(this.stats() satisfies StatsResponse);
+	}
+
+	private async handleKeyList(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		return Response.json((await this.keyList()) satisfies KeyListResponse);
+	}
+
+	private async handleKeyRotate(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		return Response.json((await this.rotateKey()) satisfies KeyRotateResponse);
+	}
+
+	private async handleKeyRetire(
+		request: Request,
+		id: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const keyId = parseRequestValue(signingKeyIdSchema, id);
+
+		return Response.json(
+			(await this.retireKey(keyId)) satisfies KeyRetireResponse
+		);
 	}
 
 	private async handleDeletePath(
@@ -1361,6 +1405,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		const generated = await generateSigningKey(bootstrapKeyName);
+		const createdAt = new Date().toISOString();
 
 		this.db
 			.insert(schema.signingKeys)
@@ -1370,7 +1415,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				publicKey: generated.publicKey,
 				signing: true,
 				published: true,
-				createdAt: new Date().toISOString()
+				createdAt
 			})
 			.run();
 
@@ -1381,9 +1426,108 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				privateJwk: generated.privateJwk,
 				publicKey: generated.publicKey,
 				signing: true,
-				published: true
+				published: true,
+				createdAt
 			}
 		];
+	}
+
+	private resetKeyCaches(): void {
+		this.keysPromise = undefined;
+		this.publicKeyBody = undefined;
+	}
+
+	private rotateKey(): Promise<KeyRotateResponse> {
+		// One critical section: the read of the existing names, the insert, and
+		// the cache reset must not interleave with a concurrent rotation or a
+		// commit reading the key set.
+		return this.ctx.blockConcurrencyWhile(async () => {
+			const existing = await this.loadedKeys();
+			const generated = await generateSigningKey(nextKeyName(existing));
+			const id = crypto.randomUUID();
+
+			this.db
+				.insert(schema.signingKeys)
+				.values({
+					id,
+					privateJwkJson: JSON.stringify(generated.privateJwk),
+					publicKey: generated.publicKey,
+					signing: true,
+					published: true,
+					createdAt: new Date().toISOString()
+				})
+				.run();
+
+			this.resetKeyCaches();
+
+			const keys = await this.loadedKeys();
+			const rotated = keys.find((key) => key.id === id);
+
+			if (rotated === undefined) {
+				throw new Error('rotated key vanished immediately after insert');
+			}
+
+			return {
+				rotated: keySummary(rotated),
+				keys: keys.map((key) => keySummary(key))
+			};
+		});
+	}
+
+	private async retireKey(id: string): Promise<KeyRetireResponse> {
+		// The last-signing-key check and the demotion share one critical section
+		// so two concurrent retirements cannot both see themselves as safe. A
+		// refused retirement is reported as an outcome and thrown afterwards:
+		// throwing inside blockConcurrencyWhile would break the input gate.
+		const outcome = await this.ctx.blockConcurrencyWhile(
+			async (): Promise<{ stage: SigningKeyStage } | { refused: true }> => {
+				const keys = await this.loadedKeys();
+				const key = keys.find((candidate) => candidate.id === id);
+
+				if (key === undefined) {
+					return { stage: 'absent' };
+				}
+
+				if (key.signing) {
+					const signingCount = keys.filter(
+						(candidate) => candidate.signing
+					).length;
+
+					if (signingCount <= 1) {
+						return { refused: true };
+					}
+
+					this.db
+						.update(schema.signingKeys)
+						.set({ signing: false })
+						.where(eq(schema.signingKeys.id, id))
+						.run();
+					this.resetKeyCaches();
+
+					return { stage: 'publication' };
+				}
+
+				this.db
+					.delete(schema.signingKeys)
+					.where(eq(schema.signingKeys.id, id))
+					.run();
+				this.resetKeyCaches();
+
+				return { stage: 'absent' };
+			}
+		);
+
+		if ('refused' in outcome) {
+			throw new LastSigningKeyError(id);
+		}
+
+		return { id, stage: outcome.stage };
+	}
+
+	private async keyList(): Promise<KeyListResponse> {
+		const keys = await this.loadedKeys();
+
+		return { keys: keys.map((key) => keySummary(key)) };
 	}
 
 	private async signingKeys(): Promise<readonly SigningKey[]> {
@@ -1621,7 +1765,8 @@ function signingKeyFromRow(
 		privateJwk: JSON.parse(row.privateJwkJson) as JsonWebKey,
 		publicKey: row.publicKey,
 		signing: row.signing,
-		published: row.published
+		published: row.published,
+		createdAt: row.createdAt
 	};
 }
 
@@ -1629,6 +1774,39 @@ function signingKeyFromRow(
 // lines deterministic, so a re-materialised narinfo hashes identically.
 function byPublicKey(left: SigningKey, right: SigningKey): number {
 	return left.publicKey > right.publicKey ? 1 : -1;
+}
+
+function keyStage(key: SigningKey): SigningKeyStage {
+	if (key.signing) {
+		return 'signing';
+	}
+
+	return key.published ? 'publication' : 'absent';
+}
+
+function keySummary(key: SigningKey): SigningKeySummary {
+	return {
+		id: key.id,
+		publicKey: key.publicKey,
+		stage: keyStage(key),
+		createdAt: key.createdAt
+	};
+}
+
+const keyNamePattern = /^cupboard-(\d+)$/;
+
+// Each key needs a distinct Nix key name so old and new keys can coexist in a
+// client's trusted set during a rotation. Names follow `cupboard-<n>`; the next
+// rotation takes the highest existing index plus one.
+function nextKeyName(keys: readonly SigningKey[]): string {
+	const indices = keys.flatMap((key) => {
+		const match = keyNamePattern.exec(key.name);
+
+		return match === null ? [] : [Number.parseInt(match[1] ?? '0', 10)];
+	});
+	const next = indices.length === 0 ? 1 : Math.max(...indices) + 1;
+
+	return `cupboard-${String(next)}`;
 }
 
 function commitMetadataFromPathAndBlob(

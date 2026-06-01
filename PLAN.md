@@ -263,6 +263,9 @@ and GC routes.
 | GET       | `/_version`             | public           | Worker. Git SHA, `+dirty` when dirty.          |
 | POST      | `/auth/bootstrap`       | bootstrap secret | DO. Mints a short-lived admin cupboard JWT.    |
 | GET       | `/stats`                | admin JWT        | DO. Cache size and object count.               |
+| GET       | `/keys`                 | admin JWT        | DO. Lists the signing key set.                 |
+| POST      | `/keys/rotate`          | admin JWT        | DO. Adds a signing+published key.              |
+| POST      | `/keys/retire/<id>`     | admin JWT        | DO. Demotes a key, then drops it.              |
 | DELETE    | `/paths/<hash>`         | admin JWT        | DO. Deletes one store path; defers its NAR.    |
 | GET       | `/roots`                | admin JWT        | DO. Lists retention roots.                     |
 | PUT       | `/roots/<encoded-name>` | write JWT        | DO. Creates or replaces a retention root.      |

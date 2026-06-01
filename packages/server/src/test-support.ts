@@ -301,6 +301,39 @@ export async function negotiateViaWorker(
 	return response.json<UploadNegotiateResponse>();
 }
 
+/**
+ * Runs a store path through negotiate, prepare, upload and commit. Unlike the
+ * step helpers it asserts nothing time-dependent, so a test can push several
+ * paths in sequence without tripping over the upload-expiry comparison.
+ */
+export async function pushPath(
+	token: string,
+	metadata: UploadPathMetadataFields
+): Promise<void> {
+	const decision = singleDecision(await negotiateUploads(token, [metadata]));
+
+	if (decision.action === 'skip') {
+		return;
+	}
+
+	if (decision.action === 'upload') {
+		const prepared = await authorisedFetch(
+			`/uploads/${decision.uploadId}`,
+			token,
+			{
+				body: JSON.stringify(uploadBlobMetadata(metadata)),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
+		expect(prepared.status).toBe(StatusCodes.OK);
+
+		await putNarBytes(decision.r2Key);
+	}
+
+	await commitUpload(token, decision.uploadId);
+}
+
 export async function commitUpload(
 	token: string,
 	uploadId: string
