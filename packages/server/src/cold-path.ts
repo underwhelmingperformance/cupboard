@@ -27,8 +27,9 @@ export function coldPathTtlSeconds(env: ColdPathEnv): number | undefined {
 	return result.data;
 }
 
-interface ColdPathExpiryInput {
+interface RootExpiryInput {
 	readonly explicitTtlSeconds: number | undefined;
+	readonly policyTtlSeconds: number | undefined;
 	readonly name: string;
 	readonly coldPathTtlSeconds: number | undefined;
 	readonly now: Date;
@@ -36,14 +37,13 @@ interface ColdPathExpiryInput {
 
 /**
  * The expiry a root takes, as an ISO timestamp, or `undefined` for permanent.
- * An explicit TTL always wins; otherwise an implicit pin inherits the cold-path
- * default when one is configured, and everything else stays permanent.
+ * Precedence: an explicit TTL wins, then a matching retention policy, then the
+ * cold-path default for an implicit pin, and otherwise the root is permanent.
  */
-export function resolveColdPathExpiry(
-	input: ColdPathExpiryInput
-): string | undefined {
+export function resolveRootExpiry(input: RootExpiryInput): string | undefined {
 	const ttl =
 		input.explicitTtlSeconds ??
+		input.policyTtlSeconds ??
 		(isImplicitPinName(input.name) ? input.coldPathTtlSeconds : undefined);
 
 	if (ttl === undefined) {

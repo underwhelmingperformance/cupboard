@@ -17,6 +17,10 @@ import {
 	referencesSchema,
 	type ResolvedRootTarget,
 	resolveRootTargets,
+	retentionPolicyAddBodySchema,
+	type RetentionPolicyListResponse,
+	type RetentionPolicyRemoveResponse,
+	type RetentionPolicySummary,
 	type RootListResponse,
 	rootNameSchema,
 	type RootRemoveResponse,
@@ -60,7 +64,7 @@ import {
 	mintAccessJwt,
 	verifyAccessJwt
 } from './auth.ts';
-import { coldPathTtlSeconds, resolveColdPathExpiry } from './cold-path.ts';
+import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
 import {
 	constantTimeEqual,
 	generateSigningKey,
@@ -99,6 +103,7 @@ import {
 	parseStored,
 	parseStoredJson
 } from './parse.ts';
+import { mostSpecificPolicy } from './policy-match.ts';
 import { R2Presigner } from './presign.ts';
 import { verifyUploadedObject } from './upload-verification.ts';
 
@@ -219,6 +224,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.delete('/caches/:cacheName', (context) =>
 			serverErrorResponse(
 				this.handleRemoveCache(context.req.raw, context.req.param('cacheName'))
+			)
+		);
+		this.app.get('/policies', (context) =>
+			serverErrorResponse(this.handleListPolicies(context.req.raw))
+		);
+		this.app.post('/policies', (context) =>
+			serverErrorResponse(this.handleAddPolicy(context.req.raw))
+		);
+		this.app.delete('/policies/:id', (context) =>
+			serverErrorResponse(
+				this.handleRemovePolicy(context.req.raw, context.req.param('id'))
 			)
 		);
 
@@ -458,6 +474,81 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} satisfies CacheRemoveResponse);
 	}
 
+	private async handleListPolicies(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const policies = this.db
+			.select()
+			.from(schema.retentionPolicies)
+			.all()
+			.map((row) => policySummaryFromRow(row))
+			.toSorted((left, right) => (left.id > right.id ? 1 : -1));
+
+		return Response.json({ policies } satisfies RetentionPolicyListResponse);
+	}
+
+	private async handleAddPolicy(request: Request): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const body = await parseRequestBody(retentionPolicyAddBodySchema, request);
+		const id = crypto.randomUUID();
+
+		this.db
+			.insert(schema.retentionPolicies)
+			.values({
+				id,
+				scope: body.scope,
+				pattern: body.pattern,
+				defaultTtlSeconds: body.ttlSeconds,
+				createdAt: new Date().toISOString()
+			})
+			.run();
+
+		return Response.json({
+			id,
+			scope: body.scope,
+			pattern: body.pattern,
+			ttlSeconds: body.ttlSeconds
+		} satisfies RetentionPolicySummary);
+	}
+
+	private async handleRemovePolicy(
+		request: Request,
+		id: string
+	): Promise<Response> {
+		await this.requireScope(request, 'admin');
+
+		const existing = this.db
+			.select()
+			.from(schema.retentionPolicies)
+			.where(eq(schema.retentionPolicies.id, id))
+			.get();
+
+		this.db
+			.delete(schema.retentionPolicies)
+			.where(eq(schema.retentionPolicies.id, id))
+			.run();
+
+		return Response.json({
+			id,
+			removed: existing !== undefined
+		} satisfies RetentionPolicyRemoveResponse);
+	}
+
+	private resolvePolicyTtl(cache: string, name: string): number | undefined {
+		const policies = this.db
+			.select()
+			.from(schema.retentionPolicies)
+			.all()
+			.map((row) => ({
+				scope: row.scope,
+				pattern: row.pattern,
+				ttlSeconds: row.defaultTtlSeconds
+			}));
+
+		return mostSpecificPolicy(policies, { cache, name })?.ttlSeconds;
+	}
+
 	private cacheStorePathCount(cache: string): number {
 		const result = this.db
 			.select({ count: count() })
@@ -631,10 +722,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private setRoot(cache: string, request: RootSetCommand): RootSetResponse {
 		const now = new Date();
 		const nowIso = now.toISOString();
-		// An explicit TTL wins; otherwise an implicit pin inherits the cold-path
-		// default when one is configured, and a named channel stays permanent.
-		const expiresAt = resolveColdPathExpiry({
+		// Precedence: an explicit TTL, then a matching retention policy, then the
+		// cold-path default for an implicit pin, otherwise permanent.
+		const expiresAt = resolveRootExpiry({
 			explicitTtlSeconds: request.ttlSeconds,
+			policyTtlSeconds: this.resolvePolicyTtl(cache, request.name),
 			name: request.name,
 			coldPathTtlSeconds: coldPathTtlSeconds(this.env),
 			now
@@ -2300,6 +2392,17 @@ async function serverErrorResponse(
 
 		throw error;
 	}
+}
+
+function policySummaryFromRow(
+	row: typeof schema.retentionPolicies.$inferSelect
+): RetentionPolicySummary {
+	return {
+		id: row.id,
+		scope: row.scope,
+		pattern: row.pattern,
+		ttlSeconds: row.defaultTtlSeconds
+	};
 }
 
 function signingKeyFromRow(
