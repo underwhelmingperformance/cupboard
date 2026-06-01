@@ -221,10 +221,11 @@ operational endpoints live with the features that use them.
 
 One DO SQLite database per deployment.
 
-- `narinfo` — one row per store path.
-  - `store_path_hash` (PK), `store_path`, `nar_hash`, `nar_size`, `file_hash`,
-    `file_size`, `compression`, `references_json`, `deriver`, `ca`, `sigs_json`,
-    `created_at`.
+- `narinfo` — one row per store path per cache.
+  - (`cache`, `store_path_hash`) (PK), `store_path`, `nar_hash`, `nar_size`,
+    `file_hash`, `file_size`, `compression`, `references_json`, `deriver`, `ca`,
+    `sigs_json`, `created_at`. The `cache` is the empty default cache or a named
+    one; the narinfo R2 object is namespaced under the cache.
 - `nar_blob` — one row per stored compressed blob.
   - `nar_hash` (PK), `r2_key`, `compression`, `file_hash`, `file_size`,
     `created_at`.
@@ -234,11 +235,13 @@ One DO SQLite database per deployment.
 - `orphan_blob_deletion` — durable queue for deleting abandoned R2 objects.
   - `r2_key` (PK), `not_before`, `created_at`.
 - `narinfo_deletion` — durable queue for finishing interrupted narinfo removals.
-  - `store_path_hash` (PK), `nar_hash`, `created_at`.
+  - (`cache`, `store_path_hash`) (PK), `nar_hash`, `created_at`.
 - `retention_root` — a named channel of kept store paths, optionally expiring.
-  - `name` (PK), `expires_at` (nullable), `created_at`, `updated_at`.
+  - (`cache`, `name`) (PK), `expires_at` (nullable), `created_at`, `updated_at`.
 - `retention_root_target` — the store paths a channel currently keeps.
-  - (`root_name`, `store_path_hash`) (PK), `store_path`.
+  - (`cache`, `root_name`, `store_path_hash`) (PK), `store_path`.
+- `cache` — the named-cache registry; the empty name is the default cache.
+  - `name` (PK), `priority`, `created_at`.
 - `auth_key` — deployment-owned key material for cupboard access JWTs.
   - `id` (PK), `private_jwk_json`, `public_jwk_json`, `created_at`,
     `retired_at`.
@@ -253,29 +256,40 @@ Public reads and health/version endpoints are served by the Worker from R2 and
 the Cache API where possible; the Durable Object handles auth, writes, admin,
 and GC routes.
 
-| Method    | Path                    | Auth             | Notes                                          |
-| --------- | ----------------------- | ---------------- | ---------------------------------------------- |
-| GET, HEAD | `/nix-cache-info`       | public           | Worker; `text/x-nix-cache-info`.               |
-| GET, HEAD | `/<hash>.narinfo`       | public           | Worker, from the R2 object + edge cache.       |
-| GET, HEAD | `/nar/<hash>.nar.zst`   | public           | Worker, from R2 + edge cache.                  |
-| GET       | `/pubkey`               | public           | Worker, cached from the DO.                    |
-| GET       | `/_health`              | public           | Worker. Liveness.                              |
-| GET       | `/_version`             | public           | Worker. Git SHA, `+dirty` when dirty.          |
-| POST      | `/auth/bootstrap`       | bootstrap secret | DO. Mints a short-lived admin cupboard JWT.    |
-| GET       | `/stats`                | admin JWT        | DO. Cache size and object count.               |
-| GET       | `/keys`                 | admin JWT        | DO. Lists the signing key set.                 |
-| POST      | `/keys/rotate`          | admin JWT        | DO. Adds a signing+published key.              |
-| POST      | `/keys/retire/<id>`     | admin JWT        | DO. Demotes a key, then drops it.              |
-| DELETE    | `/paths/<hash>`         | admin JWT        | DO. Deletes one store path; defers its NAR.    |
-| GET       | `/roots`                | admin JWT        | DO. Lists retention roots.                     |
-| PUT       | `/roots/<encoded-name>` | write JWT        | DO. Creates or replaces a retention root.      |
-| DELETE    | `/roots/<encoded-name>` | admin JWT        | DO. Removes a retention root.                  |
-| POST      | `/uploads`              | write JWT        | DO. Returns skip, commit, or upload plans.     |
-| PUT       | `/uploads/<id>`         | write JWT        | DO. Returns R2 PUT URL and headers.            |
-| PUT       | (presigned R2 URL)      | URL              | Client uploads blob directly to R2.            |
-| POST      | `/uploads/<id>/commit`  | write JWT        | DO. Writes the narinfo row and R2 object.      |
-| POST      | `/gc`                   | admin JWT        | DO. Runs pending-upload, retention, and R2 GC. |
-| POST      | `/auth/oidc/exchange`   | OIDC token       | DO. V4 increment 2: exchanges CI identity.     |
+| Method    | Path                    | Auth             | Notes                                           |
+| --------- | ----------------------- | ---------------- | ----------------------------------------------- |
+| GET, HEAD | `/nix-cache-info`       | public           | Worker; `text/x-nix-cache-info`.                |
+| GET, HEAD | `/<hash>.narinfo`       | public           | Worker, from the R2 object + edge cache.        |
+| GET, HEAD | `/nar/<hash>.nar.zst`   | public           | Worker, from R2 + edge cache.                   |
+| GET       | `/pubkey`               | public           | Worker, cached from the DO.                     |
+| GET       | `/_health`              | public           | Worker. Liveness.                               |
+| GET       | `/_version`             | public           | Worker. Git SHA, `+dirty` when dirty.           |
+| POST      | `/auth/bootstrap`       | bootstrap secret | DO. Mints a short-lived admin cupboard JWT.     |
+| GET       | `/stats`                | admin JWT        | DO. Cache size and object count.                |
+| GET       | `/keys`                 | admin JWT        | DO. Lists the signing key set.                  |
+| POST      | `/keys/rotate`          | admin JWT        | DO. Adds a signing+published key.               |
+| POST      | `/keys/retire/<id>`     | admin JWT        | DO. Demotes a key, then drops it.               |
+| DELETE    | `/paths/<hash>`         | admin JWT        | DO. Deletes one store path; defers its NAR.     |
+| GET       | `/roots`                | admin JWT        | DO. Lists retention roots.                      |
+| PUT       | `/roots/<encoded-name>` | write JWT        | DO. Creates or replaces a retention root.       |
+| DELETE    | `/roots/<encoded-name>` | admin JWT        | DO. Removes a retention root.                   |
+| POST      | `/uploads`              | write JWT        | DO. Returns skip, commit, or upload plans.      |
+| PUT       | `/uploads/<id>`         | write JWT        | DO. Returns R2 PUT URL and headers.             |
+| PUT       | (presigned R2 URL)      | URL              | Client uploads blob directly to R2.             |
+| POST      | `/uploads/<id>/commit`  | write JWT        | DO. Writes the narinfo row and R2 object.       |
+| POST      | `/gc`                   | admin JWT        | DO. Runs pending-upload, retention, and R2 GC.  |
+| GET       | `/caches`               | admin JWT        | DO. Lists the cache registry with counts.       |
+| PUT       | `/caches/<name>`        | admin JWT        | DO. Upserts a named cache's priority.           |
+| DELETE    | `/caches/<name>`        | admin JWT        | DO. Tears a cache down (`?force` if non-empty). |
+| POST      | `/auth/oidc/exchange`   | OIDC token       | DO. V4 increment 2: exchanges CI identity.      |
+
+Every path-scoped read and write route also has a `/cache/<name>/` form
+selecting a named cache, with the same auth as its bare twin: the narinfo, NAR,
+nix-cache-info and pubkey reads and the `stats`, `paths`, `roots`, `uploads` and
+`gc` routes. The bare routes serve the empty default cache. A named cache's
+nix-cache-info is rendered by the DO from its registered priority; its narinfo
+objects are namespaced in R2, while NAR blobs stay shared. The `/caches`
+registry routes are deployment-wide and take no prefix.
 
 Root names in `PUT`/`DELETE /roots/<encoded-name>` live only in the path. The
 request body for `PUT` is `{ targets, ttlSeconds? }`; the server combines that
@@ -531,11 +545,11 @@ cache.
     later measured need justifies it.
   - Per-cache private mode is deferred; this is a global toggle first.
 
-- [ ] Support one or more named cache paths for organisation:
-  - [ ] `/cache/:cacheName/nix-cache-info`
-  - [ ] `/cache/:cacheName/<hash>.narinfo`
-  - [ ] `/cache/:cacheName/nar/<hash>.<ext>`
-  - [ ] `/cache/:cacheName/pubkey`
+- [x] Support one or more named cache paths for organisation:
+  - [x] `/cache/:cacheName/nix-cache-info`
+  - [x] `/cache/:cacheName/<hash>.narinfo`
+  - [x] `/cache/:cacheName/nar/<hash>.<ext>`
+  - [x] `/cache/:cacheName/pubkey`
 
   Design:
   - Routing: named caches are served under a `/cache/:cacheName/...` prefix;
@@ -570,6 +584,9 @@ cache.
   - One deployment-wide signing key, shared by all caches (each
     `/cache/:cacheName/pubkey` returns it). Per-cache keys would add rotation
     and config complexity with no clear personal-cache benefit.
+  - Deferred: the cron verifier (see Garbage collection and admin) does not yet
+    background-reconcile named-cache narinfo objects; force-delete teardown and
+    on-demand checks still cover them.
 
 ### Signing
 
