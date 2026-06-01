@@ -68,6 +68,15 @@ export class InsufficientScopeError extends ServerHttpError {
 	}
 }
 
+export class RootNotPermittedError extends ServerHttpError {
+	readonly status = StatusCodes.FORBIDDEN;
+
+	constructor(public readonly rootName: string) {
+		super('Token is not permitted to set this root');
+		this.name = 'RootNotPermittedError';
+	}
+}
+
 export type OAuthErrorCode =
 	| 'invalid_request'
 	| 'invalid_grant'

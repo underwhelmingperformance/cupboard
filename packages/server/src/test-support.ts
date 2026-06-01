@@ -152,7 +152,8 @@ export async function initialiseViaWorker(): Promise<string> {
  */
 export async function mintServerSignedToken(
 	scope: AccessScope,
-	subject = 'scope-test'
+	subject = 'scope-test',
+	callbackRoots?: readonly string[]
 ): Promise<string> {
 	const key = await runInDurableObject(server, (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { authKeys } });
@@ -180,7 +181,8 @@ export async function mintServerSignedToken(
 			subject,
 			scope,
 			kid: key.kid,
-			ttlSeconds: 600
+			ttlSeconds: 600,
+			cbRoots: callbackRoots
 		},
 		new Date()
 	);

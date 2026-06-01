@@ -1697,7 +1697,7 @@ describe('upload flow', () => {
 
 		it('refuses a write token on admin routes but accepts it on write routes', async () => {
 			await initialise();
-			const writeToken = await mintServerSignedToken('write');
+			const writeToken = await mintServerSignedToken('write', 'ci', ['main']);
 			const target = '/nix/store/11111111111111111111111111111111-a';
 
 			const setRoot = await authorisedFetch('/roots/main', writeToken, {

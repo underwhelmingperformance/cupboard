@@ -2,9 +2,10 @@ import { importJWK, jwtVerify, SignJWT } from 'jose';
 
 export type AccessScope = 'write' | 'admin';
 
-// Admin tokens (owner) are unconstrained; a write token (CI) may carry
-// `cbRoots`, the retention roots — exact names or `<prefix>` patterns — it is
-// permitted to mutate.
+// Admin tokens (owner) are unconstrained. A write token (CI) carries `cbRoots`,
+// the retention roots it may mutate: each entry matches a root by exact name,
+// or — when it ends with `/` — any root beneath that prefix. A write token with
+// no entries may mutate nothing.
 export interface AccessClaims {
 	readonly scope: AccessScope;
 	readonly subject: string;

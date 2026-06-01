@@ -103,6 +103,7 @@ import {
 	OAuthError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
+	RootNotPermittedError,
 	ServerHttpError,
 	StoredOidcTrustInvalidError,
 	StoredReferencesInvalidError,
@@ -211,6 +212,18 @@ interface RootSetCommand {
 	readonly name: string;
 	readonly targets: readonly ResolvedRootTarget[];
 	readonly ttlSeconds: number | undefined;
+}
+
+// A `cb_roots` entry permits a root by exact name, or — when the entry ends with
+// `/` — any root beneath that prefix. The trailing slash is the boundary, so
+// `github:owner/` permits `github:owner/repo` while `github:owner` permits only
+// itself, never the sibling `github:owner-evil/repo`.
+function rootWithinConstraint(rootName: string, entry: string): boolean {
+	if (rootName === entry) {
+		return true;
+	}
+
+	return entry.endsWith('/') && rootName.startsWith(entry);
 }
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
@@ -1032,11 +1045,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: string,
 		name: string
 	): Promise<Response> {
-		await this.requireScope(request, 'write');
+		const claims = await this.requireScope(request, 'write');
+		const rootName = parseRequestValue(rootNameSchema, name);
+
+		this.enforceRootConstraint(claims, rootName);
 
 		const body = await parseRequestBody(rootSetBodySchema, request);
 		const requested: RootSetCommand = {
-			name: parseRequestValue(rootNameSchema, name),
+			name: rootName,
 			targets: resolveRootTargets(body.targets),
 			ttlSeconds: body.ttlSeconds
 		};
@@ -1044,6 +1060,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return Response.json(
 			this.setRoot(cache, requested) satisfies RootSetResponse
 		);
+	}
+
+	private enforceRootConstraint(claims: AccessClaims, rootName: string): void {
+		// An admin token (owner) may set any root. A write token (CI) may set only
+		// the roots its `cb_roots` permits; carrying none — absent or empty — it
+		// may set nothing.
+		if (claims.scope === 'admin') {
+			return;
+		}
+
+		const permitted = claims.cbRoots ?? [];
+
+		if (permitted.some((entry) => rootWithinConstraint(rootName, entry))) {
+			return;
+		}
+
+		throw new RootNotPermittedError(rootName);
 	}
 
 	private async handleListRoots(

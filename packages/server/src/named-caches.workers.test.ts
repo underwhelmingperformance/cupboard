@@ -201,7 +201,7 @@ describe('named caches', () => {
 	it('mirrors the per-route scope under a cache prefix', async () => {
 		useTestServer('named-cache-scope');
 		await bootstrap();
-		const writeToken = await mintServerSignedToken('write');
+		const writeToken = await mintServerSignedToken('write', 'ci', ['channel']);
 
 		const rootPut = await authorisedFetch(
 			'/cache/builds/roots/channel',
