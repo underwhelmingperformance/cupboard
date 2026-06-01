@@ -377,10 +377,9 @@ up the narinfo object when a path's NAR has already vanished (stale recovery).
       `narResponse` and `narInfoResponse` methods, from the DO once the Worker
       owns them.
 - [x] Serve the static read routes (`/nix-cache-info`, `/_health`, `/_version`,
-      `/pubkey`) from the Worker. `/pubkey` reads the active key from the DO
-      once and caches it. This assumes a stable signing key; key rotation is a
-      V3 concern, so revisit Worker-side pubkey caching when rotation lands
-      rather than leaving hidden staleness to unwind later.
+      `/pubkey`) from the Worker. `/pubkey` is forwarded to the DO uncached so a
+      key rotation is visible immediately; the DO sets `no-cache` with a strong
+      ETag so Nix still revalidates conditionally (see Signing, below).
 - [x] Only `GET` responses go into `caches.default`. `HEAD` is answered from R2
       metadata (`BLOBS.head`) with no body and is never cached, since caching
       HEAD responses invites body and header mismatches.
@@ -571,10 +570,10 @@ cache.
 - [ ] Support rotation: generate a new keypair, keep old narinfos verifiable,
       and make the migration path explicit for users with pinned
       `trusted-public-keys`.
-  - [ ] Invalidate the Worker-side `/pubkey` cache when the key rotates.
-        `read.ts` caches the active key assuming it is stable (see V2 Worker
-        read routing), so rotation must clear or version that cache rather than
-        leave stale key bytes served from the edge.
+  - [x] Invalidate the Worker-side `/pubkey` cache when the key rotates.
+        `/pubkey` is forwarded to the DO uncached and served `no-cache` with a
+        strong ETag, so a rotation is visible immediately while Nix still
+        revalidates conditionally.
 
   Design:
   - Generalise the single signing-key row to a `signing_key` set (id,
@@ -589,7 +588,7 @@ cache.
     prints the migration steps; `key retire <id>` later drops the old key from
     signing and then from publication once clients have updated.
 
-- [ ] Multi-signing during a rotation window is **mandatory**, not conditional.
+- [x] Multi-signing during a rotation window is **mandatory**, not conditional.
       A client that still trusts only the old key must be able to verify a newly
       committed narinfo, so while both keys are published every new narinfo is
       signed by both the outgoing and incoming keys (the `sigs` array already

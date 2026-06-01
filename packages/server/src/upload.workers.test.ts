@@ -124,7 +124,7 @@ describe('upload flow', () => {
 			'/pubkey',
 			{
 				body: `${publicKey}\n`,
-				cacheControl: 'public, max-age=3600',
+				cacheControl: 'no-cache',
 				contentType: 'text/plain; charset=utf-8',
 				method: 'GET'
 			},
@@ -155,7 +155,7 @@ describe('upload flow', () => {
 
 		await expectTextResponse('/pubkey', {
 			body: `${first.publicKey}\n`,
-			cacheControl: 'public, max-age=3600',
+			cacheControl: 'no-cache',
 			contentType: 'text/plain; charset=utf-8',
 			method: 'GET'
 		});

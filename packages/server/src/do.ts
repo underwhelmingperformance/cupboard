@@ -161,8 +161,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				`${await this.publishedKeysText()}\n`
 			);
 
+			// Served uncached so a rotation is visible across colos at once; the
+			// strong ETag still lets Nix revalidate conditionally.
 			return textResponse(context.req.raw, this.publicKeyBody, {
-				'content-type': 'text/plain; charset=utf-8'
+				'content-type': 'text/plain; charset=utf-8',
+				'cache-control': 'no-cache'
 			});
 		});
 

@@ -78,7 +78,9 @@ export async function handleRead(
 	}
 
 	if (pathname === '/pubkey') {
-		return pubkeyResponse(request, env, ctx);
+		// Forwarded to the DO uncached: it sets `no-cache` so a key rotation is
+		// visible immediately rather than masked by a warm edge copy.
+		return cupboardServer(env).fetch(request);
 	}
 
 	return undefined;
@@ -128,29 +130,6 @@ async function serveR2(
 
 	const response = new Response(object.body, { headers });
 	ctx.waitUntil(cache.put(request, response.clone()));
-
-	return response;
-}
-
-async function pubkeyResponse(
-	request: Request,
-	env: Env,
-	ctx: ExecutionContext
-): Promise<Response> {
-	const cache = caches.default;
-	const cached = await cache.match(request);
-
-	if (cached !== undefined) {
-		return isNotModified(request, cached.headers)
-			? notModified(cached.headers)
-			: cached;
-	}
-
-	const response = await cupboardServer(env).fetch(request);
-
-	if (request.method === 'GET' && response.ok) {
-		ctx.waitUntil(cache.put(request, response.clone()));
-	}
 
 	return response;
 }
