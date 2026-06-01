@@ -1,4 +1,10 @@
 import {
+	type AuthKeyListResponse,
+	authKeyListResponseSchema,
+	type AuthKeyRetireResponse,
+	authKeyRetireResponseSchema,
+	type AuthKeyRotateResponse,
+	authKeyRotateResponseSchema,
 	type BootstrapResponse,
 	bootstrapResponseSchema,
 	type CacheListResponse,
@@ -21,6 +27,13 @@ import {
 	keyRetireResponseSchema,
 	type KeyRotateResponse,
 	keyRotateResponseSchema,
+	type OidcTrustAddBody,
+	type OidcTrustListResponse,
+	oidcTrustListResponseSchema,
+	type OidcTrustRemoveResponse,
+	oidcTrustRemoveResponseSchema,
+	type OidcTrustSummary,
+	oidcTrustSummarySchema,
 	type ParsedTokenResponse,
 	type RetentionPolicyAddBody,
 	type RetentionPolicyListResponse,
@@ -206,6 +219,62 @@ export class CupboardClient {
 			retentionPolicyRemoveResponseSchema,
 			{
 				method: 'DELETE',
+				token
+			}
+		);
+	}
+
+	listOidcTrust(token: AccessCredential): Promise<OidcTrustListResponse> {
+		return this.requestJson('/oidc-trust', oidcTrustListResponseSchema, {
+			token
+		});
+	}
+
+	addOidcTrust(
+		token: AccessCredential,
+		body: OidcTrustAddBody
+	): Promise<OidcTrustSummary> {
+		return this.requestJson('/oidc-trust', oidcTrustSummarySchema, {
+			method: 'POST',
+			token,
+			body
+		});
+	}
+
+	removeOidcTrust(
+		token: AccessCredential,
+		id: string
+	): Promise<OidcTrustRemoveResponse> {
+		return this.requestJson(
+			`/oidc-trust/${encodeURIComponent(id)}`,
+			oidcTrustRemoveResponseSchema,
+			{
+				method: 'DELETE',
+				token
+			}
+		);
+	}
+
+	listAuthKeys(token: AccessCredential): Promise<AuthKeyListResponse> {
+		return this.requestJson('/keys/auth', authKeyListResponseSchema, { token });
+	}
+
+	rotateAuthKey(token: AccessCredential): Promise<AuthKeyRotateResponse> {
+		return this.requestJson('/keys/auth/rotate', authKeyRotateResponseSchema, {
+			method: 'POST',
+			token
+		});
+	}
+
+	retireAuthKey(
+		token: AccessCredential,
+		kid: string
+	): Promise<AuthKeyRetireResponse> {
+		return this.requestJson(
+			`/keys/auth/retire/${encodeURIComponent(kid)}`,
+			authKeyRetireResponseSchema,
+			{
+				method: 'POST',
 				token
 			}
 		);

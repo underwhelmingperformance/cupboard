@@ -23,6 +23,13 @@ export class InvalidPolicyScopeError extends CliError {
 	}
 }
 
+export class InvalidClaimError extends CliError {
+	constructor(public readonly value: string) {
+		super(`Invalid --claim (expected key=value): ${value}`);
+		this.name = 'InvalidClaimError';
+	}
+}
+
 export class AuthSelectionError extends CliError {
 	constructor(message: string) {
 		super(message);
