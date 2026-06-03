@@ -34,3 +34,14 @@ export class InvalidSha256DigestLengthError extends ProtocolError {
 		this.name = 'InvalidSha256DigestLengthError';
 	}
 }
+
+// Raised when a zstd stream cannot be decoded because its bytes are not a valid
+// frame — distinct from an error reading the underlying source. The server treats
+// this as a definitive verification failure (the bytes can never decode to the
+// claimed hash), not a transient fault to retry.
+export class ZstdDecodeError extends Error {
+	constructor(options?: { readonly cause?: unknown }) {
+		super('Failed to decode zstd stream', options);
+		this.name = 'ZstdDecodeError';
+	}
+}

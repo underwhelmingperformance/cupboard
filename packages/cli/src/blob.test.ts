@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pathModule from 'node:path';
 
+import { zstdDecompressionStream } from '@cupboard/shared';
 import { describe, expect, it } from 'vitest';
 
 import { withTemporaryDirectory } from '../../../tests/support/filesystem.ts';
@@ -13,7 +14,6 @@ import {
 } from './blob.ts';
 import { byteStream } from './byte-stream.ts';
 import { NixSha256Hash } from './nar.ts';
-import { zstdDecompressionStream } from './zstd.ts';
 
 describe('compressNarToFile', () => {
 	it('writes zstd data and records compressed blob metadata', async () => {

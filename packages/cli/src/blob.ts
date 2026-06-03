@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 
+import { zstdCompressionStream } from '@cupboard/shared';
+
 import { type ByteSource, byteStream } from './byte-stream.ts';
 import { writeFileByteStream } from './file-stream.ts';
 import type { NarDigest } from './nar.ts';
 import { NixSha256Hash } from './nar.ts';
-import { zstdCompressionStream } from './zstd.ts';
 
 export type NarCompression = 'zstd';
 

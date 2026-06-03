@@ -144,6 +144,16 @@ export default defineConfig(
 		}
 	},
 	{
+		// `node:zlib` is the only zstd implementation available on workerd —
+		// Compression Streams offer no zstd — so this one audited module is the
+		// sanctioned Node boundary for the server-side NAR verifier. The ban on
+		// `node:*` in server and shared code stays in force everywhere else.
+		files: ['packages/shared/src/zstd.ts'],
+		rules: {
+			'no-restricted-imports': 'off'
+		}
+	},
+	{
 		files: ['**/*.d.ts'],
 		rules: {
 			'unicorn/require-module-specifiers': 'off',

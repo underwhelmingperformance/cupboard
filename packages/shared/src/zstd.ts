@@ -1,7 +1,9 @@
 import type { Transform } from 'node:stream';
 import { createZstdCompress, createZstdDecompress } from 'node:zlib';
 
-interface ByteTransformPair {
+import { ZstdDecodeError } from './errors.ts';
+
+export interface ByteTransformPair {
 	readonly readable: ReadableStream<Uint8Array>;
 	readonly writable: WritableStream<Uint8Array>;
 }
@@ -15,15 +17,19 @@ export function zstdCompressionStream(): ByteTransformPair {
 }
 
 export function zstdDecompressionStream(): ByteTransformPair {
-	return zstdTransformStream(createZstdDecompress);
+	return zstdTransformStream(createZstdDecompress, true);
 }
 
-function zstdTransformStream(createTransform: ZstdFactory): ByteTransformPair {
+function zstdTransformStream(
+	createTransform: ZstdFactory,
+	tagDecodeErrors = false
+): ByteTransformPair {
 	const zstd = createTransform();
 	const queue: Uint8Array[] = [];
 	let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
 	let closed = false;
 	let failed: unknown;
+	let destroyedExternally = false;
 
 	const readable = new ReadableStream<Uint8Array>({
 		start(readableController) {
@@ -37,7 +43,14 @@ function zstdTransformStream(createTransform: ZstdFactory): ByteTransformPair {
 				drain();
 			});
 			zstd.once('error', (error) => {
-				failed = error;
+				// A transform error with no external destroy is a genuine decode
+				// failure (the bytes are not a valid frame); an abort or cancel routes
+				// through destroyZstd carrying the source's own error, which must stay
+				// untagged so the caller can treat it as a transient read fault.
+				failed =
+					tagDecodeErrors && !destroyedExternally
+						? new ZstdDecodeError({ cause: error })
+						: error;
 				drain();
 			});
 		},
@@ -45,6 +58,7 @@ function zstdTransformStream(createTransform: ZstdFactory): ByteTransformPair {
 			drain();
 		},
 		cancel(reason) {
+			destroyedExternally = true;
 			destroyZstd(zstd, reason);
 		}
 	});
@@ -57,6 +71,7 @@ function zstdTransformStream(createTransform: ZstdFactory): ByteTransformPair {
 			zstd.end();
 		},
 		abort(reason) {
+			destroyedExternally = true;
 			destroyZstd(zstd, reason);
 		}
 	});
