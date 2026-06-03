@@ -21,12 +21,11 @@ boundary. Named caches and V4 per-repository write scopes are organisation
 _within_ one owner's trust domain — shared key, blobs, and admin — not isolation
 between owners.
 
-Adding multi-tenancy later would mean a Durable Object per tenant (isolated
-metadata and roots), a per-tenant signing key (so a cache carries the tenant's
-trust identity), per-tenant admin and OIDC trust rules, and per-tenant storage
-accounting. That is a materially larger product, near the "not Cachix/Attic at
-organisational scale" line, so it waits for a real need rather than being
-designed in speculatively.
+V5 is the point where this changes. Multi-tenancy is a clean-slate hosted mode:
+one Durable Object per tenant, per-tenant signing keys, per-tenant admin and
+OIDC trust rules, per-tenant storage accounting, and a shared content-verified
+CAS beneath those tenant boundaries. Existing single-tenant deployments stay on
+the V4 line unless an operator re-pushes content into V5.
 
 ## Compatibility
 
@@ -979,10 +978,530 @@ pure lexer handles text formats such as narinfo before a schema validates them.
 - [x] The e2e substitute flow still passes with the new narinfo renderer and
       multi-signature verification path.
 
+## V5
+
+V5 turns cupboard into a hosted, multi-tenant service. One operator runs the
+instance and onboards independent, mutually-distrusting tenants. Each tenant has
+its own owner, signing keys, OIDC trust rules, retention roots, narinfo
+metadata, and storage accounting. NAR bytes sit underneath that in a shared,
+content-verified CAS.
+
+This is a **clean-slate** multi-tenant system, not a migration of the existing
+single-tenant cache. There is no legacy path and no compatibility carve-out: V5
+serves only blobs that entered through the new server-side verification path and
+reached `available`. An existing single-tenant deployment stays on the V4 line,
+or the operator re-pushes content into V5.
+
+Settled decisions:
+
+- No privileged "primary" tenant. Every cache lives under `/t/<tenant>/`; the
+  bare host is the control surface.
+- Bootstrap is by first signup, but through a gated claim. The first
+  authenticated principal is promoted to global admin only when they satisfy the
+  configured claim gate.
+- The Worker is a first-class Hono coordinator. There is no singleton
+  control-plane Durable Object; global state lives in D1 with a KV read-cache
+  for admission.
+- The shared CAS is content-verified. Cross-tenant references live in D1, but
+  tenant trust identity lives in per-tenant narinfo signatures.
+- V5 is strict verify-before-serve. No narinfo is servable until the shared blob
+  is verified and `blob_state` exists.
+
+### Invariants
+
+- **Servability coherence.** A tenant serves a narinfo only when all of these
+  hold: its registry row is active; its per-narinfo reference edge exists; the
+  blob's global `blob_state` is `available`; the shared R2 object exists. There
+  is no legacy or unverified carve-out.
+- **Per-narinfo identity and replay safety.** There is no atomic transaction
+  across DO SQLite, D1, and R2. Every cross-store mutation is keyed by
+  per-narinfo identity `(tenant, cache, storePathHash, generation)`, never by an
+  aggregate counter. Replayed increments and decrements are idempotent by
+  primary key, cross-store steps are ordered to fail safe, and durable phase
+  markers drive repair.
+- **Control-plane separation.** The control plane is its own OAuth issuer with
+  its own signing-key lifecycle, separate from every tenant issuer.
+
+### Tenancy model
+
+A tenant is addressed by a slug in the URL path:
+`https://<host>/t/<tenant>/...`. The slug is a new shared scalar
+(`tenantIdSchema`, using the `cacheNameSchema` shape). Tenancy is the outer
+boundary and named caches nest within it:
+`/t/<tenant>/cache/<name>/<hash>.narinfo`.
+
+The bare host serves only the control surface: health/version, control-plane
+auth, admin/signup routes, and the global-admin bootstrap. It serves no cache
+content. Each tenant is one `CupboardServer` DO addressed by
+`idFromName(<tenant>)`. Per-tenant signing and auth keys live in that DO's
+SQLite database. A tenant's DO is the single writer for that tenant's D1 rows,
+serialising its accounting transitions.
+
+### Control plane
+
+The Worker owns tenant resolution and admission, read serving, dispatch to
+tenant DOs, the control-plane auth and admin surface, cron fan-out, and the
+global blob reaper.
+
+Global state lives in a new D1 database (`CUPBOARD_DB`). D1 is transactional,
+enumerable, readable by the Worker and DOs, and not on the public read hot path.
+It holds the tenant registry, per-narinfo reference edges, the available blob
+set, control-plane signing keys, the global-admin record, and per-tenant
+usage/quota.
+
+Admission resolves `/t/<slug>/` against a cached, versioned manifest in KV
+(`TENANT_CACHE`), revalidated against a tiny `tenant-manifest:version` key at
+most once per short interval. A slug absent from the manifest is rejected before
+any DO is instantiated; otherwise varying the slug could create unbounded,
+unprovisioned DOs. Unauthenticated control routes return 404 to avoid a control
+surface tenant-existence oracle. Public cache reads can still reveal a slug once
+content is known, which is acceptable.
+
+Suspension and offboarding semantics are: immediate write stop, eventual read
+stop. Write and admin paths re-check status authoritatively in D1 or the DO, so
+suspension halts writes at once. Reads stop after the KV manifest TTL. Immediate
+read-stop for a tenant means invalidating or short-TTLing its manifest entry at
+a hot-path consistency cost; the default accepts eventual read-stop.
+
+### Control-plane authentication
+
+The bare-host control surface has its own auth. Per-tenant `auth_key` rows live
+in tenant DO SQLite and cannot sign global-admin tokens. The Worker is
+stateless, so control-plane keys live in D1:
+
+- `control_auth_key(id, kid, private_jwk, public_jwk, created_at, retired_at)`
+  is the rotatable control key set. V5 stores the private JWK in D1, treating
+  the D1 database as the control-plane secret store, matching tenant-key
+  storage. Envelope wrapping can be a later hardening phase.
+- The control issuer is the bare host origin; the control audience is the
+  control client id. Bare `/.well-known/jwks.json` publishes the control public
+  keys. `/t/<tenant>/.well-known/jwks.json` publishes that tenant's keys.
+- Rotation is an admin operation that inserts a new `control_auth_key`; retiring
+  the last key is refused.
+
+Login mirrors the tenant model: claim-based federation, not a hardcoded
+provider. Bare-host `POST /token` is an RFC 8693 token exchange. The caller
+presents an external OIDC subject token; the Worker verifies it against the
+control trust policy, checking `iss`, `aud`, `sub`, and an optional exact-match
+claim map, exactly like a tenant `oidc_trust` rule. It then mints a
+control-plane admin access token signed with the current `control_auth_key`.
+
+The CLI obtains the external token through the existing interactive flows: PKCE
+loopback by default, and `--headless` device flow when needed. Control-plane
+tokens authorise control operations such as tenant CRUD, suspension, and
+offboarding. Tenant tokens authorise tenant operations.
+
+### Bootstrap
+
+A fresh deployment has no global admin and no control trust policy. The
+deployment is configured with the OIDC provider to trust for control-plane
+login: issuer and public client id. The first principal to authenticate and call
+the claim endpoint is promoted to global admin by a first-writer-wins insert
+into D1 (`global_admin` singleton, unique constraint). The claim also seeds the
+control trust policy, pinning that principal's `iss`, `sub`, and `aud`, after
+which `/token` works as above.
+
+The claim gate is required in hosted mode. The claimant must satisfy either a
+single-use claim secret or a pinned `(issuer, subject)`. With neither
+configured, claims are refused. An explicit local-dev flag relaxes this only for
+local development.
+
+### Shared CAS
+
+The shared CAS has two layers:
+
+- **Shared verified blob layer.** NAR blobs live at `nar/<narHash>.nar.zst`,
+  shared across tenants. A blob is promoted into this namespace only after
+  cupboard verifies that its bytes decompress to its key. The shared namespace
+  therefore contains only confirmed content.
+- **Per-tenant narinfo layer.** `(cache, storePathHash) -> narHash + signature`
+  lives in the tenant DO SQLite database. The materialised R2 object is
+  tenant-namespaced at `t/<tenant>/narinfo/[<cache>/]<storePathHash>`. The
+  signature uses the tenant's own key, so a substituter trusts a tenant only via
+  that tenant's key.
+
+Cross-tenant dedupe is safe because tenant B never resolves tenant A's narinfos
+and never trusts tenant A's signing key. A write token for A can write only A's
+narinfos and namespace; it can only reference shared bytes after those bytes are
+verified by the server.
+
+### References, accounting, and GC
+
+References are rows, not aggregate counters:
+
+- `blob_ref(...)` is one row per narinfo version:
+
+  ```text
+  blob_ref(
+    tenant,
+    cache,
+    store_path_hash,
+    generation,
+    nar_hash,
+    PK(tenant, cache, store_path_hash, generation)
+  )
+  ```
+
+  The `generation` comes from the narinfo row and is bumped on every recommit.
+  The edge identifies the exact narinfo version that created it, never "the
+  current edge for this store path". Commit uses `INSERT OR IGNORE`; deletion
+  targets the captured generation only, so stale deletion replay cannot remove a
+  newer recommitted edge, even if it has the same `nar_hash`.
+
+- `tenant_blob(tenant, nar_hash, file_size, PK(tenant, nar_hash))` is the
+  derived fact that a tenant references a blob via at least one live narinfo
+  version. The tenant DO maintains the 0-to-1 and 1-to-0 transitions.
+- `blob_state(...)` is the set of available shared blobs:
+
+  ```text
+  blob_state(
+    nar_hash PK,
+    file_hash,
+    file_size,
+    compression,
+    nar_size,
+    verified_at,
+    delete_after?
+  )
+  ```
+
+  It records positive shared facts only and carries the canonical compressed
+  metadata of the single shared object.
+
+A servable narinfo takes `FileHash`, `FileSize`, and `Compression` from
+`blob_state`, not from the tenant's own staging upload. Tenants may upload
+different zstd encodings of the same NAR, but the shared CAS stores one
+canonical compressed encoding per `narHash`. The signed fingerprint uses the
+uncompressed `NarHash` and `NarSize`, so it is independent of the compressed
+encoding.
+
+Mismatch, quarantine, and too-large verdicts are recorded on the per-tenant
+staging upload, not in global `blob_state`. A bad upload claiming `narHash = X`
+proves that upload is bad; it must not poison hash `X` globally.
+
+Counts and usage are derived from edges:
+
+- narinfos: `COUNT(blob_ref)` for a tenant;
+- unique blobs: `COUNT(tenant_blob)` for a tenant;
+- bytes: `SUM(tenant_blob.file_size)`.
+
+Quota is charged once per tenant per unique `nar_hash`, using stored compressed
+bytes (`file_size`), not uncompressed `nar_size`. A user comparing quota with
+Nix's uncompressed NAR size will see a difference. The charge happens on the
+`tenant_blob` 0-to-1 transition.
+
+A bare `UPDATE ... WHERE bytes + :file_size <= quota_bytes` does not self-abort:
+an update matching zero rows is not an error in D1. The quota path uses a
+reserve-then-commit shape in typed application code. The tenant DO is the single
+writer for that tenant, so it runs the reservation update
+(`SET bytes = bytes + :file_size WHERE tenant = :t AND bytes + :file_size <= quota_bytes`),
+inspects rows affected, and writes the `blob_ref`/`tenant_blob` edge only if it
+reserved. A zero-row reservation rejects the commit. This keeps the quota
+decision visible and testable rather than hidden in a database trigger.
+`tenant_usage` is the authoritative quota counter; cron roll-up is
+reconciliation and audit.
+
+Per-tenant reachability GC stays in each DO. Sweeping a narinfo deletes the
+matching `blob_ref` row and, on the tenant's last live reference to a `narHash`,
+its `tenant_blob` row and quota charge. The global reaper deletes a shared blob
+only when no `blob_ref` row anywhere references its `narHash` and
+`now >= delete_after`, with a grace window at least as long as the maximum
+narinfo TTL plus margin. The reaper re-checks in the deleting transaction; a
+recommit within the window clears `delete_after`.
+
+### Cross-store ordering
+
+Commit is edge-first and servable-last. It fails safe toward a leaked edge,
+never a servable narinfo without its blob:
+
+1. The client uploads the compressed blob to a per-tenant staging key; R2
+   verifies the compressed `fileHash` checksum.
+2. The DO picks the next generation for the store path and runs the D1
+   reservation first: insert `blob_ref`, upsert `tenant_blob`, and reserve
+   quota. If quota aborts, commit is rejected before any DO narinfo row exists.
+3. On reservation success, the DO writes the narinfo row at that generation as
+   not servable. A crash between the edge and the row leaks an edge, which is
+   the safe direction and is swept by repair.
+4. The server verifies the staging object, inline for small blobs and in the
+   background for large blobs.
+5. On a hash match, the server ensures the shared R2 object exists, promotes the
+   staging object if needed, and inserts the `blob_state` row.
+6. Only then does it flip the narinfo servable and materialise the tenant
+   narinfo object.
+
+A recommit of an existing store path uses a new generation: reserve the new
+edge, write/verify/flip the new narinfo, then retire the old-generation edge
+through the deletion machinery. A stale deletion for the old generation can only
+remove the old edge.
+
+Delete is row-first and edge-last. `narinfo_deletion` carries phase markers
+(`row_deleted_at`, `blob_ref_decremented_at`, `object_deleted_at`) keyed by
+`(tenant, cache, storePathHash)` plus the captured `nar_hash` and generation.
+Replay is compare-and-delete: it deletes the narinfo row and edge only while the
+live row still matches the captured `(nar_hash, generation)`. Delete removes the
+narinfo row and R2 narinfo object first, then deletes the captured-generation
+`blob_ref` edge and updates `tenant_blob`/quota when this was the tenant's last
+live reference.
+
+If the canonical shared object disappears while `blob_state` says `available`,
+there is no staging copy to heal from. The background verify pass demotes the
+blob by removing `blob_state`, which makes every referencing narinfo
+non-servable until a tenant re-uploads and re-promotes the bytes. Any tenant's
+correct re-upload can heal it.
+
+### Existence-oracle defence
+
+Negotiate gates skip/upload only on the asking tenant's own edges, never on
+global blob existence. A tenant that does not already reference a blob is told
+to upload even when the bytes already exist globally. The server dedupes at rest
+after upload and verification. Deduplication is storage-only, never a wire-level
+existence oracle.
+
+There remains a weaker servability-latency signal: after a tenant has uploaded
+the bytes, a blob already present in the shared CAS may become available faster
+than a genuinely new blob. V5 documents that residual and does not add
+artificial delay. A strict uniform-pending privacy mode is a future extension.
+
+### Server-side NAR verification
+
+The V4 server signs the client-asserted uncompressed `NarHash` after checking
+only the compressed `fileHash`. V5 verifies the uncompressed NAR server-side.
+
+- Commit binds `(storePathHash, narHash, narSize, fileHash)` into the
+  write-JWT-authenticated request.
+- The server streams the staging `.nar.zst` through `node:zlib`
+  `createZstdDecompress()`, a byte counter, and
+  `crypto.DigestStream('SHA-256')`, comparing the digest to `narHash` and the
+  count to `narSize`. `crypto.subtle.digest` is one-shot and unsuitable for this
+  path.
+- The Web-stream/R2 to Node-stream/zlib to Web-stream/DigestStream bridge must
+  be backpressure-safe. Tests prove that a multi-hundred-MB stream does not
+  buffer the whole output.
+- The runtime spike sets two named config defaults: `inlineVerifyMaxBytes` and
+  `verifiableMaxBytes`. The benchmark search starts around a 10-20 GiB
+  verifiable cap, but the implementation uses the measured values from the real
+  Workers runtime and Miniflare.
+- Blobs at or below `inlineVerifyMaxBytes` verify synchronously at commit and
+  become immediately servable. Larger blobs go pending and verify in the
+  background pass. Blobs above `verifiableMaxBytes` are recorded as
+  `unverifiable-too-large` on the upload record and are not served by default.
+- A mismatch quarantines only the per-tenant staging upload and deletes the
+  staging object. It never writes a negative verdict to global `blob_state`.
+- DO init calls `createZstdDecompress` once and fails loudly if the runtime
+  lacks native zstd.
+
+Strict verify-before-serve is the V5 baseline. There is no warn-only mode in V5.
+
+The push contract changes accordingly. `cupboard push` waits by default for its
+uploaded blobs to reach `available`, reporting progress through the existing
+`Reporter`. A successful push means clients can substitute. `--no-wait` returns
+with pending blobs for CI that does not need to block. A root update activates
+only once all its target narinfos are available, so a root never advertises an
+unservable path.
+
+### Tenant auth and issuer
+
+Each tenant's issuer is its path-based URL: `https://<host>/t/<tenant>`. Tokens
+minted by a tenant DO pin that issuer and audience, so cross-tenant replay is
+rejected at the JWT layer.
+
+The DO learns its identity through a `configure` RPC that the Worker calls at
+provision time and on config-version bumps. The DO persists the identity in a
+single-row `tenant_identity` table and re-seeds its owner rule on version
+changes. A request header is not the identity source; if one is ever used as a
+hint, the Worker strips any client value and overwrites it. AS metadata and JWKS
+are tenant-scoped.
+
+### Tenant lifecycle
+
+Tenant creation requires an explicit `readMode: public | private`; private is
+the hosted default. Private-read enforcement lands in the same phase that turns
+on tenant routing, so a private tenant rejects unauthenticated reads from the
+moment it can be created.
+
+Suspension stops writes immediately and reads eventually, as described in the
+admission model.
+
+Offboarding is primarily a batched delete cursor. The cron/Worker enumerates the
+tenant's `t/<tenant>/...` prefixes and deletes in bounded batches across ticks,
+removing the tenant's `blob_ref` and `tenant_blob` rows so the global reaper
+collects now-unreferenced shared blobs. R2 prefix object-lifecycle rules are a
+small-fleet optimisation only, because R2 caps lifecycle rules at 1000 per
+bucket; rules are reaped after use.
+
+### Cron fan-out
+
+`scheduled()` enumerates active tenants from D1 and fans out
+`runGarbageCollection()` and `runVerification()` per tenant DO with
+`Promise.allSettled`, spread across hourly buckets by slug hash. After fan-out,
+the Worker runs the global blob reaper over D1. Past one-tick scale, a D1 cursor
+shards tenants across ticks; Queues remain the fallback.
+
+### Data model
+
+New D1 database `CUPBOARD_DB`:
+
+- `tenant(...)`:
+
+  ```text
+  tenant(
+    id PK,
+    status,
+    read_mode,
+    owner_issuer,
+    owner_subject,
+    owner_audience,
+    config_version,
+    created_at
+  )
+  ```
+
+- `tenant_usage(tenant PK, bytes, narinfos, blobs, quota_bytes, updated_at)`
+- `global_admin(id PK 'singleton', issuer, subject, claimed_at)`
+- `control_trust(...)` for the control-plane trust policy (`iss`, `aud`, `sub`,
+  and exact-match claim map), seeded by the gated claim
+- `control_auth_key(id PK, kid, private_jwk, public_jwk, created_at, retired_at)`
+- `blob_ref(...)`:
+
+  ```text
+  blob_ref(
+    tenant,
+    cache,
+    store_path_hash,
+    generation,
+    nar_hash,
+    PK(tenant, cache, store_path_hash, generation)
+  )
+  ```
+
+- `tenant_blob(tenant, nar_hash, file_size, PK(tenant, nar_hash))`
+- `blob_state(...)`:
+
+  ```text
+  blob_state(
+    nar_hash PK,
+    file_hash,
+    file_size,
+    compression,
+    nar_size,
+    verified_at,
+    delete_after?
+  )
+  ```
+
+- `cron_cursor(id PK 'singleton', ...)`
+
+Per-tenant DO SQLite changes:
+
+- Add `tenant_identity` with slug, issuer, owner triple, and config version.
+- Add `generation` to `narInfos`, bumped on each recommit.
+- Track servability per narinfo.
+- Extend `pending_upload` with per-upload verification verdicts: `pending`,
+  `mismatch`, and `too-large`.
+- Move blob lifecycle to D1: `nar_blob` and `orphan_blob_deletion` are
+  superseded by `blob_ref`, `tenant_blob`, `blob_state`, and the global reaper.
+- Extend `narinfo_deletion` with phase markers and captured generation.
+
+R2 keys:
+
+- `nar/<narHash>.nar.zst` for the shared verified CAS.
+- A per-tenant staging key for unverified uploads.
+- `t/<tenant>/narinfo/[<cache>/]<hash>` for per-tenant narinfo objects.
+
+`internalOrigin` purge-skip and `narInfoCachePath` helpers gain the tenant
+segment.
+
+### Platform gate
+
+Native `node:zlib` zstd is present in workerd source and has production reports,
+but Cloudflare's public zlib docs do not list zstd. No shared-CAS work depends
+on unmeasured zstd behaviour.
+
+The first V5 step is a runtime spike on the real account runtime and under
+Miniflare/`vitest-pool-workers`. It must confirm:
+
+- `createZstdDecompress` exists and streams;
+- the DO honours `limits.cpu_ms = 300_000`;
+- native zstd plus SHA-256 throughput on a multi-hundred-MB fixture;
+- bounded peak memory under backpressure through the Web/Node/Web stream bridge.
+
+If the spike fails, the fallback is a streaming WASM decoder at higher CPU, with
+the size cap re-evaluated from those measurements.
+
+### Implementation sequence
+
+Each step leaves a working cache. Control-plane auth lands before provisioning;
+routing lands only once tenants exist; the push contract lands in server and CLI
+together.
+
+1. **Runtime spike + single-tenant verify-before-serve.** Prove zstd, CPU,
+   throughput, memory, and Miniflare facts. Add `verifyDecompressedNar`, the
+   backpressure-safe bridge, no-whole-buffer test, zstd init self-test, inline
+   and background verification, strict verify-before-serve, per-upload verdicts,
+   `CheckDiscrepancyKind` extensions, measured `inlineVerifyMaxBytes` and
+   `verifiableMaxBytes`, and `limits.cpu_ms = 300_000`. Still single-tenant.
+2. **D1 substrate + per-narinfo edges + shared-CAS.** Add `blob_ref`,
+   `tenant_blob`, and `blob_state`; stage, verify, and promote into `nar/`; add
+   edge-first/servable-last commit and row-first/edge-last delete; add the
+   global reaper and derived counts. Still single-tenant data on the new model.
+3. **Control-plane auth.** Add `control_auth_key`; bare `/token` RFC 8693
+   exchange with claim-based control-trust checks; control issuer/audience; bare
+   `/.well-known/jwks.json`; PKCE-loopback and device login against the control
+   issuer; key rotation and last-key refusal.
+4. **Registry + gated bootstrap + provisioning + admission.** Add `tenant`,
+   `global_admin`, and `control_trust`; implement the gated first signup claim;
+   add operator admin API and `cupboard tenant create/list/suspend/delete`; add
+   the KV admission manifest and version gate. Provisioning works here; cache
+   routing/serving lands in step 5.
+5. **Tenant routing + DO identity + per-tenant auth + private reads.** Add
+   `/t/<tenant>/` resolution via the manifest, `configure` RPC,
+   `tenant_identity`, per-tenant issuer/AS metadata/JWKS, owner seeding,
+   `readMode`, and private-read enforcement from creation.
+6. **Multi-tenant upload path + push contract.** Add existence-oracle-safe
+   negotiate, per-tenant-per-`narHash` quota, usage, server wait/no-wait/root
+   activation states, CLI wait/no-wait behaviour, per-origin-and-tenant token
+   cache with decoded `iss` checked against the target, and tenant-prefix client
+   awareness.
+7. **Cron fan-out + global reaper + offboarding.** Add `allSettled` fan-out,
+   hourly bucketing, the batched delete cursor, and lifecycle-rule optimisation
+   for small fleets.
+
+### Verification
+
+- `pnpm check` green per commit; `pnpm test:e2e` green. Every D1 and DO schema
+  change has a real migration.
+- Stream verification tests cover bounded memory on a multi-hundred-MB stream,
+  match, mismatch, too-large, and the `node:zlib` self-test.
+- Per-narinfo identity and accounting tests cover replayed commit not
+  double-charging or double-referencing; two narinfos in one tenant sharing a
+  `narHash`; decrement replay; over-quota commit aborting before any DO narinfo
+  row exists; delete-then-recommit with the same `narHash`; quota races; and
+  bytes charged once per tenant per unique `narHash`.
+- Negative-verdict isolation tests show that a bad upload is quarantined on its
+  staging upload and does not write global `blob_state`, while a correct upload
+  of the same `narHash` still verifies and becomes available.
+- Cross-store crash tests cover edge/no-row, row/no-edge, available/no-object,
+  object/no-state, delete-then-recommit within grace, and canonical
+  `FileHash`/`FileSize` served from `blob_state`.
+- Control-plane auth tests cover control issuer distinct from tenant issuers,
+  disjoint bare vs tenant JWKS, `/token` claim checks, rotation, last-key
+  refusal, and gated claim refusal for wrong principals.
+- Tenancy tests cover A's token rejected at B, A's narinfo invisible at B,
+  admission never instantiating a DO for an unprovisioned slug, client-supplied
+  identity headers ignored, suspension stopping writes immediately, and private
+  tenants rejecting unauthenticated reads from creation.
+- Push UX tests cover push waiting until substitution succeeds, `--no-wait`
+  returning pending, and roots activating only when targets are available.
+- Runtime validation records CPU limit, throughput, bounded memory, and
+  Miniflare zstd availability before setting the size thresholds.
+
 ## Later features
 
 - [ ] Chunk-level dedupe rather than whole-NAR storage.
 - [ ] Import from an existing binary cache.
+- [ ] Strict uniform-pending privacy mode for high-sensitivity multi-tenant
+      deployments, making new references wait through the same visible pending
+      state even when the shared CAS already has the blob.
 - [ ] Web dashboard.
 - [ ] S3-compatible migration/export tooling.
 - [ ] `watch-store` mode in the CLI.
