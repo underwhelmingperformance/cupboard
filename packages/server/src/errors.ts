@@ -221,6 +221,15 @@ export class UploadNotPreparedError extends ServerHttpError {
 	}
 }
 
+export class ReusableUploadNotPreparableError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly uploadId: string) {
+		super('Upload reuses an existing blob and must be committed, not prepared');
+		this.name = 'ReusableUploadNotPreparableError';
+	}
+}
+
 export type R2PresignBindingName =
 	| 'R2_ACCOUNT_ID'
 	| 'R2_ACCESS_KEY_ID'
@@ -310,5 +319,50 @@ export class UploadedObjectChecksumMismatchError extends ServerHttpError {
 	) {
 		super('Uploaded object SHA-256 checksum does not match metadata');
 		this.name = 'UploadedObjectChecksumMismatchError';
+	}
+}
+
+// The uploaded blob's compressed bytes match their checksum, but decompressing
+// them does not reproduce the NAR hash or size the narinfo would commit to and
+// sign. The bytes are rejected so the server never signs an unverified mapping.
+export class NarVerificationFailedError extends ServerHttpError {
+	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
+
+	constructor(
+		public readonly r2Key: string,
+		public readonly reason:
+			| 'nar-hash-mismatch'
+			| 'nar-size-mismatch'
+			| 'undecodable'
+	) {
+		super('Uploaded NAR does not match its declared hash or size');
+		this.name = 'NarVerificationFailedError';
+	}
+}
+
+// The declared uncompressed NAR is larger than the server will decompress to
+// verify within its CPU budget, so it could never be served safely. Rejected at
+// commit rather than stored as an unservable path.
+export class NarTooLargeError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(
+		public readonly narSize: number,
+		public readonly maxNarSize: number
+	) {
+		super('NAR is too large to verify and cannot be served');
+		this.name = 'NarTooLargeError';
+	}
+}
+
+// The runtime does not provide native zstd decompression, so the server cannot
+// verify NAR contents. Raised loudly at Durable Object initialisation rather
+// than as an opaque stream error at the first verified commit.
+export class ZstdUnavailableError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(options: { readonly cause?: unknown } = {}) {
+		super('Native zstd decompression is unavailable on this runtime', options);
+		this.name = 'ZstdUnavailableError';
 	}
 }

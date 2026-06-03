@@ -1175,9 +1175,13 @@ canonical compressed encoding per `narHash`. The signed fingerprint uses the
 uncompressed `NarHash` and `NarSize`, so it is independent of the compressed
 encoding.
 
-Mismatch, quarantine, and too-large verdicts are recorded on the per-tenant
-staging upload, not in global `blob_state`. A bad upload claiming `narHash = X`
-proves that upload is bad; it must not poison hash `X` globally.
+Verification failures stay on the per-tenant staging upload, never in global
+`blob_state`: a bad upload claiming `narHash = X` proves that upload is bad and
+must not poison hash `X` globally. A synchronous inline failure rejects the
+commit and clears the upload at once — a mismatch is `422`, an over-budget blob
+`413` — so it needs no stored verdict. An asynchronous background failure
+instead records a durable `mismatch` verdict on the upload, so `push --wait` or
+a status endpoint can observe why a deferred path never became servable.
 
 Counts and usage are derived from edges:
 
@@ -1279,14 +1283,17 @@ only the compressed `fileHash`. V5 verifies the uncompressed NAR server-side.
   buffer the whole output.
 - The runtime spike sets two named config defaults: `inlineVerifyMaxBytes` and
   `verifiableMaxBytes`. The benchmark search starts around a 10-20 GiB
-  verifiable cap, but the implementation uses the measured values from the real
-  Workers runtime and Miniflare.
+  verifiable cap. Until the spike runs on the operator's account these ship
+  PROVISIONAL (the mechanism is correct at any values); the spike then replaces
+  them with the measured values from the real Workers runtime.
 - Blobs at or below `inlineVerifyMaxBytes` verify synchronously at commit and
   become immediately servable. Larger blobs go pending and verify in the
-  background pass. Blobs above `verifiableMaxBytes` are recorded as
-  `unverifiable-too-large` on the upload record and are not served by default.
-- A mismatch quarantines only the per-tenant staging upload and deletes the
-  staging object. It never writes a negative verdict to global `blob_state`.
+  background pass. A blob whose declared NAR size exceeds `verifiableMaxBytes`
+  is rejected synchronously at commit with `413`; it could never be served.
+- An inline mismatch is rejected synchronously with `422` and its staging object
+  deleted. A background-pass failure deletes the staging object and records a
+  durable `mismatch` verdict on the upload. Neither writes a negative verdict to
+  global `blob_state`.
 - DO init calls `createZstdDecompress` once and fails loudly if the runtime
   lacks native zstd.
 
@@ -1396,8 +1403,11 @@ Per-tenant DO SQLite changes:
 - Add `tenant_identity` with slug, issuer, owner triple, and config version.
 - Add `generation` to `narInfos`, bumped on each recommit.
 - Track servability per narinfo.
-- Extend `pending_upload` with per-upload verification verdicts: `pending`,
-  `mismatch`, and `too-large`.
+- Extend `pending_upload` with async verification verdicts: `pending` while a
+  deferred blob awaits the background pass, and `mismatch` once that pass fails
+  (a durable status for `push --wait`). Synchronous inline failures reject and
+  clear the upload, so they carry no stored verdict; an over-budget blob is
+  rejected at commit, never deferred.
 - Move blob lifecycle to D1: `nar_blob` and `orphan_blob_deletion` are
   superseded by `blob_ref`, `tenant_blob`, `blob_state`, and the global reaper.
 - Extend `narinfo_deletion` with phase markers and captured generation.
@@ -1434,12 +1444,18 @@ Each step leaves a working cache. Control-plane auth lands before provisioning;
 routing lands only once tenants exist; the push contract lands in server and CLI
 together.
 
-1. **Runtime spike + single-tenant verify-before-serve.** Prove zstd, CPU,
-   throughput, memory, and Miniflare facts. Add `verifyDecompressedNar`, the
-   backpressure-safe bridge, no-whole-buffer test, zstd init self-test, inline
-   and background verification, strict verify-before-serve, per-upload verdicts,
-   `CheckDiscrepancyKind` extensions, measured `inlineVerifyMaxBytes` and
-   `verifiableMaxBytes`, and `limits.cpu_ms = 300_000`. Still single-tenant.
+1. **Single-tenant verify-before-serve (runtime spike deferred).** Add
+   `verifyDecompressedNar`, the backpressure-safe bridge, the zstd init
+   self-test, inline and background verification, strict verify-before-serve,
+   per-upload async verdicts, `CheckDiscrepancyKind` extensions, and
+   `limits.cpu_ms = 300_000`. Still single-tenant. The spike itself — measuring
+   real workerd zstd+SHA-256 throughput, confirming the DO honours
+   `cpu_ms = 300_000`, and proving bounded peak memory on a multi-hundred-MB
+   fixture — needs a deploy to the operator's account, so it is deferred:
+   `inlineVerifyMaxBytes` and `verifiableMaxBytes` ship PROVISIONAL (the
+   mechanism is correct at any values) until the spike replaces them with the
+   measured values, alongside the multi-hundred-MB bounded-memory and
+   `node:zlib` self-test-failure tests.
 2. **D1 substrate + per-narinfo edges + shared-CAS.** Add `blob_ref`,
    `tenant_blob`, and `blob_state`; stage, verify, and promote into `nar/`; add
    edge-first/servable-last commit and row-first/edge-last delete; add the
@@ -1470,8 +1486,10 @@ together.
 
 - `pnpm check` green per commit; `pnpm test:e2e` green. Every D1 and DO schema
   change has a real migration.
-- Stream verification tests cover bounded memory on a multi-hundred-MB stream,
-  match, mismatch, too-large, and the `node:zlib` self-test.
+- Stream verification tests cover match, mismatch, the oversize (`413`)
+  rejection, and the streaming size-overrun (zstd-bomb) early abort. The
+  multi-hundred-MB bounded-memory (no-whole-buffer) proof and the `node:zlib`
+  self-test-failure test land with the deferred runtime spike (step 1).
 - Per-narinfo identity and accounting tests cover replayed commit not
   double-charging or double-referencing; two narinfos in one tenant sharing a
   `narHash`; decrement replay; over-quota commit aborting before any DO narinfo

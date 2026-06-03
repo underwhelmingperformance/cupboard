@@ -16,7 +16,9 @@ const digest = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const otherDigest = Uint8Array.from({ length: 32 }, (_, index) => index + 100);
 const fileHash = NixSha256Hash.fromDigest(digest).toString();
 const narHash = `sha256:${'1'.repeat(52)}`;
-const r2Key = `nar/${narHash}.nar.zst`;
+// A staging key, distinct from the canonical nar/<hash> key, to prove the error
+// reports the object actually inspected rather than the canonical default.
+const r2Key = 'staging/upload-1.nar.zst';
 
 const metadata: UploadPathMetadataFields = {
 	storePathHash: '0'.repeat(32),
@@ -53,13 +55,13 @@ function rejection<E extends Error>(
 describe('verifyUploadedObject', () => {
 	it('accepts an object that matches the metadata', () => {
 		expect(() => {
-			verifyUploadedObject(uploadedObject(), 4, metadata);
+			verifyUploadedObject(uploadedObject(), 4, metadata, r2Key);
 		}).not.toThrow();
 	});
 
 	it('rejects a missing object with its key', () => {
 		const error = rejection(() => {
-			verifyUploadedObject(undefined, 4, metadata);
+			verifyUploadedObject(undefined, 4, metadata, r2Key);
 		}, UploadedObjectNotFoundError);
 
 		expect(error.r2Key).toBe(r2Key);
@@ -67,7 +69,7 @@ describe('verifyUploadedObject', () => {
 
 	it('rejects a size mismatch with the expected and actual sizes', () => {
 		const error = rejection(() => {
-			verifyUploadedObject(uploadedObject({ size: 9 }), 4, metadata);
+			verifyUploadedObject(uploadedObject({ size: 9 }), 4, metadata, r2Key);
 		}, UploadedObjectSizeMismatchError);
 
 		expect({
@@ -79,7 +81,12 @@ describe('verifyUploadedObject', () => {
 
 	it('rejects an object with no checksum', () => {
 		const error = rejection(() => {
-			verifyUploadedObject(uploadedObject({ checksums: {} }), 4, metadata);
+			verifyUploadedObject(
+				uploadedObject({ checksums: {} }),
+				4,
+				metadata,
+				r2Key
+			);
 		}, UploadedObjectChecksumMissingError);
 
 		expect(error.r2Key).toBe(r2Key);
@@ -90,7 +97,8 @@ describe('verifyUploadedObject', () => {
 			verifyUploadedObject(
 				uploadedObject({ checksums: { sha256: otherDigest.buffer } }),
 				4,
-				metadata
+				metadata,
+				r2Key
 			);
 		}, UploadedObjectChecksumMismatchError);
 

@@ -51,6 +51,7 @@ describe('concurrent writes', () => {
 		await prepare(token, first.uploadId, metadata);
 		await putNarBytes(first.r2Key);
 		await prepare(token, second.uploadId, metadata);
+		await putNarBytes(second.r2Key);
 
 		const [a, b] = await Promise.all([
 			commitUpload(token, first.uploadId),

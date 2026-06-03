@@ -31,6 +31,10 @@ export const narBlobs = sqliteTable('nar_blob', {
 	compression: text('compression', { enum: ['zstd'] }).notNull(),
 	fileHash: text('file_hash').notNull(),
 	fileSize: integer('file_size').notNull(),
+	// The verified uncompressed NAR size, the canonical source a reuse commit signs
+	// rather than trusting the client's declared value. Step 2's `blob_state` carries
+	// this once the shared-CAS lifecycle moves to D1.
+	narSize: integer('nar_size').notNull(),
 	createdAt: text('created_at').notNull()
 });
 
@@ -42,7 +46,14 @@ export const pendingUploads = sqliteTable('pending_upload', {
 	expectedSize: integer('expected_size').notNull(),
 	metadataJson: text('metadata_json').notNull(),
 	createdAt: text('created_at').notNull(),
-	expiresAt: text('expires_at').notNull()
+	expiresAt: text('expires_at').notNull(),
+	// The async verification status. `pending` once a blob above the inline-verify
+	// budget is uploaded, awaiting the background NAR-hash check; `mismatch` once
+	// that check fails, a durable status a later reader (`push --wait` or a status
+	// endpoint) can observe; null while a row still awaits its bytes. The verdict is
+	// per-upload and never written globally by nar_hash, so a bad upload leaves no
+	// global trace. Synchronous inline failures reject and clear the row instead.
+	verdict: text('verdict', { enum: ['pending', 'mismatch'] })
 });
 
 export const orphanBlobDeletions = sqliteTable('orphan_blob_deletion', {

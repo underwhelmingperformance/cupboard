@@ -179,7 +179,10 @@ async function bundleWorker(directory: string): Promise<WorkerBundle> {
 			minify: false,
 			outDir: outputDirectory,
 			rolldownOptions: {
-				external: ['cloudflare:workers'],
+				// Leave `node:*` to workerd's `nodejs_compat` runtime, as
+				// `wrangler deploy` does, rather than bundling a polyfill. The
+				// polyfilled `node:zlib` lacks the native zstd the verifier needs.
+				external: ['cloudflare:workers', /^node:/],
 				output: {
 					entryFileNames: 'worker.mjs'
 				}

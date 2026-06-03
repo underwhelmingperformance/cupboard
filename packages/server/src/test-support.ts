@@ -10,7 +10,8 @@ import {
 	type RootSetResponse,
 	type StatsResponse,
 	type UploadNegotiateResponse,
-	type UploadPathMetadataFields
+	type UploadPathMetadataFields,
+	zstdCompressionStream
 } from '@cupboard/shared';
 import {
 	createExecutionContext,
@@ -18,7 +19,7 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { isNull, sql } from 'drizzle-orm';
+import { eq, isNull, sql } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { StatusCodes } from 'http-status-codes';
@@ -28,19 +29,47 @@ import migrations from '../drizzle/migrations.js';
 
 import { type AccessScope, mintAccessJwt } from './auth.ts';
 import { generateSigningKey } from './crypto.ts';
-import { authKeys, signingKeys } from './db/schema.ts';
+import {
+	authKeys,
+	narInfos,
+	pendingUploads,
+	signingKeys
+} from './db/schema.ts';
 import {
 	internalOrigin,
 	narInfoObjectKey,
-	orphanBlobDeletionGraceMs
+	orphanBlobDeletionGraceMs,
+	stagingObjectKey
 } from './http.ts';
 import type { CupboardServer } from './worker.ts';
 import worker from './worker.ts';
 
-export const narBytes = new Uint8Array([40, 41, 42, 43]);
-export const narHash = nixSha256Hash('1');
+// A real zstd frame: it decompresses to a 1234-byte payload (the bytes
+// `i % 256`), so the server's verify-before-serve decompress-and-rehash accepts
+// it. `narHash`/`fileHash` are that payload's and this frame's Nix SHA-256s.
+export const narBytes = new Uint8Array([
+	40, 181, 47, 253, 96, 210, 3, 85, 8, 0, 4, 16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+	10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28,
+	29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+	48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66,
+	67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85,
+	86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
+	104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118,
+	119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133,
+	134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148,
+	149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163,
+	164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178,
+	179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193,
+	194, 195, 196, 197, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208,
+	209, 210, 211, 212, 213, 214, 215, 216, 217, 218, 219, 220, 221, 222, 223,
+	224, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 235, 236, 237, 238,
+	239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253,
+	254, 255, 1, 0, 0, 207, 7, 170, 53, 5
+]);
+export const narHash =
+	'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347';
 export const fileHash = NixSha256Hash.parse(
-	'sha256:1m5g07jiajz7135sj3ap8h30s0n24nc6a2q3gsraqj3pfi0jw65l'
+	'sha256:0wzw5pz9bciz84825admrb4b848maxa2fh1isbsw4547mvra9czv'
 );
 export const deleteTestBase = new Date('2026-01-01T00:00:00.000Z');
 
@@ -334,7 +363,8 @@ export async function negotiateViaWorker(
 export async function pushPath(
 	token: string,
 	metadata: UploadPathMetadataFields,
-	cache: string = DEFAULT_CACHE
+	cache: string = DEFAULT_CACHE,
+	nar?: VerifiableNar
 ): Promise<void> {
 	const decision = singleDecision(
 		await negotiateUploads(token, [metadata], cache)
@@ -356,7 +386,7 @@ export async function pushPath(
 		);
 		expect(prepared.status).toBe(StatusCodes.OK);
 
-		await putNarBytes(decision.r2Key);
+		await putNarBytes(decision.r2Key, nar);
 	}
 
 	await commitUpload(token, decision.uploadId, cache);
@@ -396,7 +426,12 @@ export async function prepareUpload(
 		}
 	);
 
-	await expectPrepareUploadResponse(response, metadata, expectedExpiresAt);
+	await expectPrepareUploadResponse(
+		response,
+		metadata,
+		expectedExpiresAt,
+		decision.uploadId
+	);
 }
 
 export async function prepareUploadViaWorker(
@@ -417,19 +452,25 @@ export async function prepareUploadViaWorker(
 		}
 	);
 
-	await expectPrepareUploadResponse(response, metadata, expectedExpiresAt);
+	await expectPrepareUploadResponse(
+		response,
+		metadata,
+		expectedExpiresAt,
+		decision.uploadId
+	);
 }
 
 export async function commitPath(
 	token: string,
-	metadata: UploadPathMetadataFields
+	metadata: UploadPathMetadataFields,
+	nar?: VerifiableNar
 ): Promise<void> {
 	const upload = expectSingleUploadDecision(
 		await negotiateUploads(token, [metadata]),
 		metadata
 	);
 	await prepareUpload(token, upload, metadata);
-	await putNarBytes(upload.r2Key);
+	await putNarBytes(upload.r2Key, nar);
 	await commitUpload(token, upload.uploadId);
 }
 
@@ -695,9 +736,212 @@ export async function expectStatsViaWorker(
 	expect(await response.json()).toStrictEqual(expected);
 }
 
-export async function putNarBytes(r2Key: string): Promise<void> {
-	await env.BLOBS.put(r2Key, narBytes, {
-		sha256: fileHash.digestBytes()
+export interface VerifiableNar {
+	readonly narBytes: Uint8Array;
+	readonly narHash: string;
+	readonly narSize: number;
+	readonly fileHash: string;
+}
+
+const defaultNar: VerifiableNar = {
+	narBytes,
+	narHash,
+	narSize: 1234,
+	fileHash: fileHash.toString()
+};
+
+export async function putNarBytes(
+	r2Key: string,
+	nar: VerifiableNar = defaultNar
+): Promise<void> {
+	await env.BLOBS.put(r2Key, nar.narBytes, {
+		sha256: NixSha256Hash.parse(nar.fileHash).digestBytes()
+	});
+}
+
+function singleChunkStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
+	return new ReadableStream<Uint8Array>({
+		start(controller) {
+			controller.enqueue(bytes);
+			controller.close();
+		}
+	});
+}
+
+/**
+ * A distinct, self-consistent NAR for a seed: real zstd bytes whose decompressed
+ * payload hashes to `narHash`, so the server's verify-before-serve accepts it.
+ * Tests that need several distinct blobs (reference graphs, per-blob GC) build one
+ * per path with this rather than fabricating unrelated hashes.
+ */
+export async function verifiableNar(seed: string): Promise<VerifiableNar> {
+	const uncompressed = new TextEncoder().encode(
+		`cupboard-nar:${seed}\n`.repeat(64)
+	);
+	const compressed = new Uint8Array(
+		await new Response(
+			singleChunkStream(uncompressed).pipeThrough(zstdCompressionStream())
+		).arrayBuffer()
+	);
+	const narHashValue = NixSha256Hash.fromDigest(
+		new Uint8Array(await crypto.subtle.digest('SHA-256', uncompressed))
+	).toString();
+	const fileHashValue = NixSha256Hash.fromDigest(
+		new Uint8Array(await crypto.subtle.digest('SHA-256', compressed))
+	).toString();
+
+	return {
+		narBytes: compressed,
+		narHash: narHashValue,
+		narSize: uncompressed.byteLength,
+		fileHash: fileHashValue
+	};
+}
+
+// Wraps `payload` in a single uncompressed-block ("stored") zstd frame. It
+// decompresses to `payload` unchanged, so it shares its NAR hash with a normally
+// compressed frame of the same bytes, but its compressed bytes differ. Valid for a
+// payload of 257..65791 bytes (the 2-byte frame-content-size encoding).
+function storedZstdFrame(payload: Uint8Array): Uint8Array {
+	const size = payload.byteLength;
+	const contentSize = size - 256; // 2-byte Frame_Content_Size stores value − 256
+	const blockHeader = (size << 3) | 0b001; // last block, Raw_Block, `size` bytes
+
+	return new Uint8Array([
+		0x28,
+		0xb5,
+		0x2f,
+		0xfd, // magic
+		0x60, // header descriptor: 2-byte FCS, single segment
+		contentSize & 0xff,
+		(contentSize >> 8) & 0xff,
+		blockHeader & 0xff,
+		(blockHeader >> 8) & 0xff,
+		(blockHeader >> 16) & 0xff,
+		...payload
+	]);
+}
+
+/**
+ * The same NAR payload as {@link verifiableNar} for a seed, but encoded as an
+ * uncompressed "stored" zstd frame. It decompresses to the same bytes — so it
+ * shares the seed's `narHash` — yet its compressed bytes (and thus `fileHash`)
+ * differ, modelling a client that compressed the same NAR with other zstd settings.
+ */
+export async function verifiableNarStored(
+	seed: string
+): Promise<VerifiableNar> {
+	const uncompressed = new TextEncoder().encode(
+		`cupboard-nar:${seed}\n`.repeat(64)
+	);
+	const frame = storedZstdFrame(uncompressed);
+
+	return {
+		narBytes: frame,
+		narHash: NixSha256Hash.fromDigest(
+			new Uint8Array(await crypto.subtle.digest('SHA-256', uncompressed))
+		).toString(),
+		narSize: uncompressed.byteLength,
+		fileHash: NixSha256Hash.fromDigest(
+			new Uint8Array(await crypto.subtle.digest('SHA-256', frame))
+		).toString()
+	};
+}
+
+/**
+ * Reads a pending upload's verification verdict: `undefined` if the row is gone,
+ * otherwise the stored verdict (`null`, `'pending'`, or `'mismatch'`).
+ */
+export async function pendingUploadVerdict(
+	uploadId: string
+): Promise<string | null | undefined> {
+	return runInDurableObject(currentServer(), (_instance, state) => {
+		const row = drizzle(state.storage, { schema: { pendingUploads } })
+			.select({ verdict: pendingUploads.verdict })
+			.from(pendingUploads)
+			.where(eq(pendingUploads.id, uploadId))
+			.get();
+
+		return row === undefined ? undefined : row.verdict;
+	});
+}
+
+export async function verifiablePath(
+	seed: string,
+	fields: {
+		readonly name?: string;
+		readonly storePathHash?: string;
+		readonly references?: string[];
+	}
+): Promise<{ metadata: UploadPathMetadataFields; nar: VerifiableNar }> {
+	const nar = await verifiableNar(seed);
+	const metadata = uploadMetadata({
+		name: fields.name,
+		storePathHash: fields.storePathHash,
+		references: fields.references,
+		narHash: nar.narHash,
+		narSize: nar.narSize,
+		fileHash: nar.fileHash,
+		fileSize: nar.narBytes.byteLength
+	});
+
+	return { metadata, nar };
+}
+
+/**
+ * Negotiates, uploads and commits a path backed by a distinct verifiable NAR for
+ * the seed, returning its metadata. Use for the second and later paths in a test:
+ * each needs its own NAR hash so negotiate returns an `upload` rather than reusing
+ * an earlier blob.
+ */
+export async function commitVerifiablePath(
+	token: string,
+	seed: string,
+	fields: {
+		readonly name?: string;
+		readonly storePathHash?: string;
+		readonly references?: string[];
+	}
+): Promise<UploadPathMetadataFields> {
+	const { metadata, nar } = await verifiablePath(seed, fields);
+	await commitPath(token, metadata, nar);
+
+	return metadata;
+}
+
+/**
+ * Marks a negotiated upload `pending` background verification, the verdict a
+ * commit records for a blob above the inline-verify budget. Lets a test exercise
+ * the background verify-and-commit pass without a multi-megabyte fixture.
+ */
+export async function markUploadPendingVerification(
+	uploadId: string
+): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		drizzle(state.storage, { schema: { pendingUploads } })
+			.update(pendingUploads)
+			.set({ verdict: 'pending' })
+			.where(eq(pendingUploads.id, uploadId))
+			.run();
+	});
+}
+
+/**
+ * Rewrites fields on a committed narinfo row directly, to plant a stored blob
+ * that disagrees with the hash or size its narinfo signed — a state a normal
+ * verified commit cannot produce, so that the deep storage check's NAR
+ * re-derivation can be exercised.
+ */
+export async function corruptCommittedNarInfo(
+	storePathHash: string,
+	fields: Partial<{ narHash: string; narSize: number }>
+): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		drizzle(state.storage, { schema: { narInfos } })
+			.update(narInfos)
+			.set(fields)
+			.where(eq(narInfos.storePathHash, storePathHash))
+			.run();
 	});
 }
 
@@ -829,7 +1073,7 @@ export function expectSingleUploadDecision(
 			storePathHash: metadata.storePathHash,
 			narHash: metadata.narHash,
 			uploadId: decision.uploadId,
-			r2Key: `nar/${metadata.narHash}.nar.zst`,
+			r2Key: stagingObjectKey(decision.uploadId),
 			expiresAt
 		}
 	]);
@@ -874,7 +1118,8 @@ export function singleDecision(
 export async function expectPrepareUploadResponse(
 	response: Response,
 	metadata: UploadPathMetadataFields,
-	expiresAt: string
+	expiresAt: string,
+	uploadId: string
 ): Promise<void> {
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -897,7 +1142,7 @@ export async function expectPrepareUploadResponse(
 	}).toStrictEqual({
 		protocol: 'https:',
 		hostname: 'test-account-id.r2.cloudflarestorage.com',
-		path: ['', 'cupboard-blobs', 'nar', `${metadata.narHash}.nar.zst`],
+		path: ['', 'cupboard-blobs', 'staging', `${uploadId}.nar.zst`],
 		hasSignature: true,
 		uploadHeaders: {
 			'x-amz-checksum-sha256': NixSha256Hash.parse(

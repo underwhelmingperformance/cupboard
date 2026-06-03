@@ -1,11 +1,16 @@
-import { CacheInfo, NarInfo } from '@cupboard/shared';
+import { CacheInfo, NarInfo, NixSha256Hash } from '@cupboard/shared';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildVersion } from './build-info.generated.ts';
-import { narInfoObjectKey, narObjectKey } from './http.ts';
+import {
+	inlineVerifyMaxBytes,
+	narInfoObjectKey,
+	narObjectKey,
+	verifiableMaxBytes
+} from './http.ts';
 import {
 	afterGrace,
 	authorisedFetch,
@@ -15,7 +20,9 @@ import {
 	commitPath,
 	commitSharedPath,
 	commitUpload,
+	commitVerifiablePath,
 	currentOrigin,
+	currentServer,
 	deletePath,
 	deleteTestBase,
 	expectConditionalNotModified,
@@ -28,15 +35,18 @@ import {
 	expectTextResponse,
 	fetchNarInfo,
 	fetchPath,
+	fileHash,
 	initialise,
 	initialiseViaWorker,
 	listRoots,
+	markUploadPendingVerification,
 	mintServerSignedToken,
 	narBytes,
 	narHash,
 	negotiateUploads,
 	negotiateViaWorker,
 	nixSha256Hash,
+	pendingUploadVerdict,
 	prepareUpload,
 	prepareUploadViaWorker,
 	putNarBytes,
@@ -53,6 +63,9 @@ import {
 	uploadMetadata,
 	uploadPathNegotiation,
 	useTestServer,
+	verifiableNar,
+	verifiableNarStored,
+	verifiablePath,
 	verifyNarInfoSignature,
 	workerFetch
 } from './test-support.ts';
@@ -267,6 +280,665 @@ describe('upload flow', () => {
 			`/nar/${metadata.narHash}.nar.zst`,
 			readFetch
 		);
+	});
+
+	it('rejects an upload whose bytes do not match the declared NAR hash', async () => {
+		const token = await initialise();
+		// The declared narHash is not what the stored bytes decompress to, but the
+		// compressed fileHash does match, so only the server-side decompress-verify
+		// can catch it. Verify-before-serve must reject it and leave nothing servable.
+		const metadata = uploadMetadata({
+			name: 'tampered',
+			storePathHash: '99999999999999999999999999999999',
+			narHash: nixSha256Hash('9'),
+			fileHash: fileHash.toString(),
+			fileSize: narBytes.byteLength
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		const commit = await authorisedFetch(
+			`/uploads/${upload.uploadId}/commit`,
+			token,
+			{ method: 'POST' }
+		);
+
+		expect(commit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
+	});
+
+	it('rejects an inline upload of corrupt, undecompressable bytes as a 422', async () => {
+		const token = await initialise();
+		// Bytes that are not a valid zstd frame but whose declared compressed hash
+		// matches, so only the decompress step can reject them. The error it raises
+		// must surface as a clean 422, not a 500, and must reclaim the staging blob.
+		const garbage = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]);
+		const garbageFileHash = NixSha256Hash.fromDigest(
+			new Uint8Array(await crypto.subtle.digest('SHA-256', garbage))
+		).toString();
+		const metadata = uploadMetadata({
+			name: 'corrupt',
+			storePathHash: 'f'.repeat(32),
+			narHash: nixSha256Hash('1'),
+			fileHash: garbageFileHash,
+			fileSize: garbage.byteLength,
+			narSize: 100
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key, {
+			narBytes: garbage,
+			narHash: metadata.narHash,
+			narSize: 100,
+			fileHash: garbageFileHash
+		});
+
+		const commit = await authorisedFetch(
+			`/uploads/${upload.uploadId}/commit`,
+			token,
+			{ method: 'POST' }
+		);
+
+		expect(commit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
+	});
+
+	it('still accepts a correct upload of a narHash a bad upload was rejected for', async () => {
+		const token = await initialise();
+		const good = await verifiableNar('isolation-good');
+		const wrong = await verifiableNar('isolation-wrong');
+
+		// A bad upload claims `good`'s narHash but stages `wrong`'s bytes — whose own
+		// compressed hash matches, so only the decompress-verify catches it.
+		const badMetadata = uploadMetadata({
+			name: 'bad',
+			storePathHash: 'a'.repeat(32),
+			narHash: good.narHash,
+			fileHash: wrong.fileHash,
+			fileSize: wrong.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		const bad = expectSingleUploadDecision(
+			await negotiateUploads(token, [badMetadata]),
+			badMetadata
+		);
+		await prepareUpload(token, bad, badMetadata);
+		await putNarBytes(bad.r2Key, wrong);
+
+		const badCommit = await authorisedFetch(
+			`/uploads/${bad.uploadId}/commit`,
+			token,
+			{ method: 'POST' }
+		);
+
+		expect(badCommit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
+
+		// The hash is not poisoned: a correct upload of `good` for another store path
+		// still negotiates as an upload, verifies, commits, and is served.
+		const goodMetadata = uploadMetadata({
+			name: 'good',
+			storePathHash: 'b'.repeat(32),
+			narHash: good.narHash,
+			fileHash: good.fileHash,
+			fileSize: good.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		const goodUpload = expectSingleUploadDecision(
+			await negotiateUploads(token, [goodMetadata]),
+			goodMetadata
+		);
+		await prepareUpload(token, goodUpload, goodMetadata);
+		await putNarBytes(goodUpload.r2Key, good);
+
+		const goodCommit = await commitUpload(token, goodUpload.uploadId);
+		const served = await readFetch(`/${goodMetadata.storePathHash}.narinfo`);
+
+		expect(goodCommit.status).toBe('committed');
+		expect(served.status).toBe(StatusCodes.OK);
+		await expect(
+			env.BLOBS.head(narObjectKey(good.narHash))
+		).resolves.not.toBeNull();
+	});
+
+	it('makes two encodings of one NAR advertise the canonical stored object', async () => {
+		const token = await initialise();
+		const compressed = await verifiableNar('shared-encoding');
+		const stored = await verifiableNarStored('shared-encoding');
+
+		// Same NAR content, two distinct compressed encodings (so different fileHash).
+		expect(compressed.narHash).toBe(stored.narHash);
+		expect(compressed.fileHash).not.toBe(stored.fileHash);
+
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'a'.repeat(32),
+			narHash: compressed.narHash,
+			fileHash: compressed.fileHash,
+			fileSize: compressed.narBytes.byteLength,
+			narSize: compressed.narSize
+		});
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: 'b'.repeat(32),
+			narHash: stored.narHash,
+			fileHash: stored.fileHash,
+			fileSize: stored.narBytes.byteLength,
+			narSize: stored.narSize
+		});
+
+		// Both negotiate as fresh uploads before either commits — the only window in
+		// which two distinct encodings of one hash race.
+		const firstUpload = expectSingleUploadDecision(
+			await negotiateUploads(token, [first]),
+			first
+		);
+		const secondUpload = expectSingleUploadDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+
+		await prepareUpload(token, firstUpload, first);
+		await putNarBytes(firstUpload.r2Key, compressed);
+		await prepareUpload(token, secondUpload, second);
+		await putNarBytes(secondUpload.r2Key, stored);
+
+		await commitUpload(token, firstUpload.uploadId);
+		await commitUpload(token, secondUpload.uploadId);
+
+		// Both narinfos advertise the canonical object's fileHash — the one promoted
+		// first — so a substituter fetching either downloads bytes whose hash matches.
+		const firstInfo = await fetchNarInfo(first.storePathHash);
+		const secondInfo = await fetchNarInfo(second.storePathHash);
+		const canonical = await env.BLOBS.head(narObjectKey(compressed.narHash));
+
+		if (canonical?.checksums.sha256 === undefined) {
+			throw new Error('expected a canonical object with a checksum');
+		}
+
+		const canonicalFileHash = NixSha256Hash.fromDigest(
+			new Uint8Array(canonical.checksums.sha256)
+		).toString();
+
+		expect(firstInfo.toFields().fileHash).toBe(compressed.fileHash);
+		expect(secondInfo.toFields().fileHash).toBe(compressed.fileHash);
+		expect(canonicalFileHash).toBe(compressed.fileHash);
+	});
+
+	it('records a durable mismatch verdict when background verification fails', async () => {
+		const token = await initialise();
+		const good = await verifiableNar('bg-good');
+		const wrong = await verifiableNar('bg-wrong');
+		const metadata = uploadMetadata({
+			name: 'bg-fail',
+			storePathHash: 'c'.repeat(32),
+			narHash: good.narHash,
+			fileHash: wrong.fileHash,
+			fileSize: wrong.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key, wrong);
+		await markUploadPendingVerification(upload.uploadId);
+
+		await currentServer().runVerification();
+
+		// Background verification failed: it deleted the bad staging bytes but kept a
+		// durable `mismatch` verdict (readable later by `push --wait`), committing
+		// nothing servable.
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+
+		// The terminal row is reaped once its observation window has passed.
+		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
+		await currentServer().runGarbageCollection();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+	});
+
+	it('signs the canonical narSize on reuse, not a forged client value', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reuse-narsize');
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, first, nar);
+
+		// A second store path declares the same narHash but a forged, larger narSize.
+		// The blob is reused (no re-upload), so the server must sign the verified
+		// canonical narSize, not the unchecked declared one.
+		const forged = uploadMetadata({
+			name: 'forged',
+			storePathHash: 'b'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize + 999_999
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [forged]),
+			forged
+		);
+		const commit = await commitUpload(token, reuse.uploadId);
+
+		expect(commit.status).toBe('committed');
+
+		const served = await fetchNarInfo(forged.storePathHash);
+
+		expect(served.toFields().narSize).toBe(nar.narSize);
+	});
+
+	it('rejects preparing a reuse upload and leaves the canonical object untouched', async () => {
+		const token = await initialise();
+		const first = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		await commitPath(token, first);
+
+		// A second store path negotiates a reuse decision for the same narHash.
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: '22222222222222222222222222222222',
+			narHash: first.narHash,
+			fileHash: first.fileHash,
+			fileSize: narBytes.byteLength
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+
+		// Preparing a reuse upload must be rejected outright: its r2Key is the shared
+		// canonical key, so presigning it would hand out a direct write to the CAS
+		// object that the reuse commit does not re-verify.
+		const prepare = await authorisedFetch(`/uploads/${reuse.uploadId}`, token, {
+			body: JSON.stringify(uploadBlobMetadata(second)),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		});
+
+		expect(prepare.status).toBe(StatusCodes.CONFLICT);
+		await expect(
+			env.BLOBS.head(narObjectKey(first.narHash))
+		).resolves.not.toBeNull();
+	});
+
+	it('verifies and commits a deferred pending upload in the background pass', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		// A blob too large to verify inline commits as `pending`: stored, but not
+		// servable until the background pass confirms its bytes. Simulate that
+		// verdict without a multi-megabyte fixture.
+		await markUploadPendingVerification(upload.uploadId);
+
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+
+		// Past the 15-minute upload expiry: GC must not reap a pending upload, and
+		// the background verify pass must then confirm and commit it.
+		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
+		await currentServer().runGarbageCollection();
+		await currentServer().runVerification();
+
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+
+		expect(narInfo.narHash).toBe(metadata.narHash);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.not.toBeNull();
+	});
+
+	it('keeps a deferred upload pending on a transient verify error, then commits on retry', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await markUploadPendingVerification(upload.uploadId);
+
+		// A transient read failure during the background verify must not fail the
+		// upload terminally: the row stays `pending` and its staging bytes survive.
+		const getSpy = vi
+			.spyOn(env.BLOBS, 'get')
+			.mockRejectedValueOnce(new Error('transient R2 read'));
+
+		await currentServer().runVerification();
+		getSpy.mockRestore();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
+
+		// The next pass reads cleanly, commits, and clears the pending row.
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		expect(narInfo.narHash).toBe(metadata.narHash);
+	});
+
+	it('clears the pending row with the commit so a later delete is not undone', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await markUploadPendingVerification(upload.uploadId);
+
+		await currentServer().runVerification();
+
+		// The background commit cleared the pending row in the same transaction, so
+		// no `pending` row survives the committed narinfo.
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.not.toBeNull();
+
+		// Deleting the committed path is not undone by a later verify pass: there is
+		// no stale pending row to re-promote and re-commit it.
+		await deletePath(token, metadata.storePathHash);
+		await currentServer().runVerification();
+
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+	});
+
+	it('records a durable mismatch for an undecodable deferred blob, not a pending zombie', async () => {
+		const token = await initialise();
+		// Bytes that are not a valid zstd frame, but whose declared compressed hash
+		// matches (so R2 and verifyUploadedObject accept them); only decompression
+		// fails. A decode failure is terminal, never an endlessly-retried `pending`.
+		const garbage = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+		const garbageFileHash = NixSha256Hash.fromDigest(
+			new Uint8Array(await crypto.subtle.digest('SHA-256', garbage))
+		).toString();
+		const metadata = uploadMetadata({
+			name: 'undecodable',
+			storePathHash: 'f'.repeat(32),
+			narHash: nixSha256Hash('1'),
+			fileHash: garbageFileHash,
+			fileSize: garbage.byteLength,
+			narSize: 4242
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key, {
+			narBytes: garbage,
+			narHash: metadata.narHash,
+			narSize: 4242,
+			fileHash: garbageFileHash
+		});
+		await markUploadPendingVerification(upload.uploadId);
+
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+	});
+
+	it('reaps a canonical blob orphaned by losing the commit race at a different narHash', async () => {
+		const token = await initialise();
+		const narX = await verifiableNar('race-x');
+		const narY = await verifiableNar('race-y');
+		const storePathHash = 'a'.repeat(32);
+
+		// Defer an upload of path P at narHash X (awaiting background verification).
+		const x = uploadMetadata({
+			name: 'p',
+			storePathHash,
+			narHash: narX.narHash,
+			fileHash: narX.fileHash,
+			fileSize: narX.narBytes.byteLength,
+			narSize: narX.narSize
+		});
+		const xUpload = expectSingleUploadDecision(
+			await negotiateUploads(token, [x]),
+			x
+		);
+		await prepareUpload(token, xUpload, x);
+		await putNarBytes(xUpload.r2Key, narX);
+		await markUploadPendingVerification(xUpload.uploadId);
+
+		// Commit the SAME path P at a different narHash Y — the winner.
+		const y = uploadMetadata({
+			name: 'p',
+			storePathHash,
+			narHash: narY.narHash,
+			fileHash: narY.fileHash,
+			fileSize: narY.narBytes.byteLength,
+			narSize: narY.narSize
+		});
+		await commitPath(token, y, narY);
+
+		// X's deferred verify loses the narinfo race; the nar/X it promoted is now
+		// orphaned and must be enqueued for orphan deletion and reaped, while the
+		// winner Y survives and P serves Y.
+		await currentServer().runVerification();
+		await currentServer().runGarbageCollection();
+
+		const served = await fetchNarInfo(storePathHash);
+
+		expect(served.narHash).toBe(narY.narHash);
+		await expect(
+			env.BLOBS.head(narObjectKey(narX.narHash))
+		).resolves.toBeNull();
+		await expect(
+			env.BLOBS.head(narObjectKey(narY.narHash))
+		).resolves.not.toBeNull();
+	});
+
+	it('terminally fails a deferred upload whose staging object has vanished', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await markUploadPendingVerification(upload.uploadId);
+
+		// The staging object is gone for good (R2 loss / external delete). The
+		// background pass must terminally fail it, not retry forever as a `pending`
+		// zombie that re-reads an absent object every cron tick.
+		await env.BLOBS.delete(upload.r2Key);
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+	});
+
+	it('keeps a mismatch verdict observable past the original upload TTL', async () => {
+		const token = await initialise();
+		const good = await verifiableNar('ttl-good');
+		const wrong = await verifiableNar('ttl-wrong');
+		const metadata = uploadMetadata({
+			name: 'ttl',
+			storePathHash: 'a'.repeat(32),
+			narHash: good.narHash,
+			fileHash: wrong.fileHash,
+			fileSize: wrong.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key, wrong);
+		await markUploadPendingVerification(upload.uploadId);
+
+		// The verify pass runs after the original 15-minute upload TTL; the recorded
+		// mismatch refreshes the window, so a GC pass right after does not reap it.
+		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+
+		await currentServer().runGarbageCollection();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+	});
+
+	it('rejects an upload whose declared NAR size exceeds the verifiable budget', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			name: 'huge',
+			storePathHash: '88888888888888888888888888888888',
+			narSize: verifiableMaxBytes + 1,
+			fileSize: narBytes.byteLength
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		const commit = await authorisedFetch(
+			`/uploads/${upload.uploadId}/commit`,
+			token,
+			{ method: 'POST' }
+		);
+
+		expect(commit.status).toBe(StatusCodes.REQUEST_TOO_LONG);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
+	});
+
+	it('defers a blob above the inline budget to background verification', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			name: 'large',
+			storePathHash: '77777777777777777777777777777777',
+			narSize: inlineVerifyMaxBytes + 1,
+			fileSize: narBytes.byteLength
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		const commit = await commitUpload(token, upload.uploadId);
+
+		expect(commit.status).toBe('pending');
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+	});
+
+	it('reclaims the staging object when a fresh upload commits as already-present', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		const first = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const second = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, first, metadata);
+		await putNarBytes(first.r2Key);
+		await prepareUpload(token, second, metadata);
+		await putNarBytes(second.r2Key);
+
+		const firstCommit = await commitUpload(token, first.uploadId);
+		const secondCommit = await commitUpload(token, second.uploadId);
+
+		expect(firstCommit.status).toBe('committed');
+		expect(secondCommit.status).toBe('already-present');
+
+		// Both private staging objects are reclaimed — the winner's on commit and
+		// the loser's on the already-present path — leaving only the canonical blob.
+		// GC never has a handle to a staging key once its upload is cleared.
+		await expect(env.BLOBS.head(first.r2Key)).resolves.toBeNull();
+		await expect(env.BLOBS.head(second.r2Key)).resolves.toBeNull();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.not.toBeNull();
+	});
+
+	it('finalises and reclaims staging when the canonical blob was already promoted', async () => {
+		// Simulates recovery after a crash that promoted the blob but had not yet
+		// committed: the canonical object exists, the upload is still staged, and a
+		// retried commit must finalise from it without failing or re-copying.
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await putNarBytes(narObjectKey(metadata.narHash));
+
+		const commit = await commitUpload(token, upload.uploadId);
+
+		expect(commit.status).toBe('committed');
+
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
+		await expect(
+			env.BLOBS.head(narObjectKey(metadata.narHash))
+		).resolves.not.toBeNull();
+		await expectNarResponse(metadata.narHash, 'GET');
 	});
 
 	it('returns 404 for a valid NAR hash with no stored blob', async () => {
@@ -507,15 +1179,12 @@ describe('upload flow', () => {
 			fileSize: narBytes.byteLength,
 			name: 'kept'
 		});
-		const swept = uploadMetadata({
-			fileSize: narBytes.byteLength,
+		const swept = await commitVerifiablePath(token, 'swept', {
 			name: 'swept',
-			storePathHash: '22222222222222222222222222222222',
-			narHash: nixSha256Hash('2')
+			storePathHash: '22222222222222222222222222222222'
 		});
 
 		await commitPath(token, kept);
-		await commitPath(token, swept);
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
 		const cacheKey = new URL(
@@ -546,15 +1215,12 @@ describe('upload flow', () => {
 			fileSize: narBytes.byteLength,
 			name: 'kept'
 		});
-		const swept = uploadMetadata({
-			fileSize: narBytes.byteLength,
+		const swept = await commitVerifiablePath(token, 'swept', {
 			name: 'swept',
-			storePathHash: '22222222222222222222222222222222',
-			narHash: nixSha256Hash('2')
+			storePathHash: '22222222222222222222222222222222'
 		});
 
 		await commitPath(token, kept);
-		await commitPath(token, swept);
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
 		const cacheKey = new URL(
@@ -850,14 +1516,13 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId);
-		await env.BLOBS.delete(upload.r2Key);
+		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
-		const retry = expectSingleUploadDecision(
+		expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
 
-		expect(retry.r2Key).toBe(upload.r2Key);
 		await expectStats(token, {
 			storePaths: 0,
 			narBlobs: 0,
@@ -1412,30 +2077,21 @@ describe('upload flow', () => {
 			vi.setSystemTime(deleteTestBase);
 
 			const token = await initialise();
-			const a = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			const a = await commitVerifiablePath(token, 'a', {
 				name: 'a',
 				storePathHash: hashA,
-				narHash: nixSha256Hash('a'),
 				references: [`${hashB}-b`]
 			});
-			const b = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			await commitVerifiablePath(token, 'b', {
 				name: 'b',
 				storePathHash: hashB,
-				narHash: nixSha256Hash('b'),
 				references: []
 			});
-			const c = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			await commitVerifiablePath(token, 'c', {
 				name: 'c',
 				storePathHash: hashC,
-				narHash: nixSha256Hash('c'),
 				references: []
 			});
-			await commitPath(token, a);
-			await commitPath(token, b);
-			await commitPath(token, c);
 			await setRoot(token, { name: 'main', targets: [a.storePath] });
 
 			expect(await runGcResult()).toStrictEqual({
@@ -1500,22 +2156,16 @@ describe('upload flow', () => {
 			vi.setSystemTime(deleteTestBase);
 
 			const token = await initialise();
-			const a = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			const a = await commitVerifiablePath(token, 'a', {
 				name: 'a',
 				storePathHash: hashA,
-				narHash: nixSha256Hash('a'),
 				references: []
 			});
-			const b = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			const b = await commitVerifiablePath(token, 'b', {
 				name: 'b',
 				storePathHash: hashB,
-				narHash: nixSha256Hash('b'),
 				references: []
 			});
-			await commitPath(token, a);
-			await commitPath(token, b);
 			await setRoot(token, { name: 'keep', targets: [a.storePath] });
 			await setRoot(token, {
 				name: 'pr',
@@ -1622,18 +2272,15 @@ describe('upload flow', () => {
 				fileSize: narBytes.byteLength,
 				name: 'a',
 				storePathHash: hashA,
-				narHash: nixSha256Hash('a'),
 				references: []
 			});
-			const c = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			const { metadata: c, nar: cNar } = await verifiablePath('c', {
 				name: 'c',
 				storePathHash: hashC,
-				narHash: nixSha256Hash('c'),
 				references: []
 			});
 			await commitPath(token, a);
-			await commitPath(token, c);
+			await commitPath(token, c, cNar);
 			await setRoot(token, { name: 'main', targets: [a.storePath] });
 
 			expect(await runGcResult()).toStrictEqual({
@@ -1645,7 +2292,7 @@ describe('upload flow', () => {
 				blobsDeleted: 0
 			});
 			await expect(
-				env.BLOBS.head(narObjectKey(nixSha256Hash('c')))
+				env.BLOBS.head(narObjectKey(cNar.narHash))
 			).resolves.not.toBeNull();
 
 			vi.setSystemTime(afterGrace());
@@ -1659,7 +2306,7 @@ describe('upload flow', () => {
 				blobsDeleted: 1
 			});
 			await expect(
-				env.BLOBS.head(narObjectKey(nixSha256Hash('c')))
+				env.BLOBS.head(narObjectKey(cNar.narHash))
 			).resolves.toBeNull();
 		});
 	});

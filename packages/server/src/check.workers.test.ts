@@ -1,4 +1,4 @@
-import type { CheckReport } from '@cupboard/shared';
+import { type CheckReport, DEFAULT_CACHE } from '@cupboard/shared';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -6,14 +6,16 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { narInfoObjectKey, narObjectKey } from './http.ts';
 import {
 	authorisedFetch,
+	corruptCommittedNarInfo,
 	initialise,
 	mintServerSignedToken,
 	narBytes,
 	narHash,
-	nixSha256Hash,
 	pushPath,
 	resetTestServer,
-	uploadMetadata
+	uploadMetadata,
+	verifiableNar,
+	verifiablePath
 } from './test-support.ts';
 
 async function runCheck(token: string, deep = false): Promise<CheckReport> {
@@ -34,21 +36,17 @@ describe('storage check', () => {
 		'reports no discrepancies for a healthy cache (deep: $deep)',
 		async ({ deep }) => {
 			const token = await initialise();
-			const alpha = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			const { metadata: alpha, nar: alphaNar } = await verifiablePath('alpha', {
 				storePathHash: 'a'.repeat(32),
-				name: 'alpha',
-				narHash: nixSha256Hash('a')
+				name: 'alpha'
 			});
-			const beta = uploadMetadata({
-				fileSize: narBytes.byteLength,
+			const { metadata: beta, nar: betaNar } = await verifiablePath('beta', {
 				storePathHash: 'b'.repeat(32),
-				name: 'beta',
-				narHash: nixSha256Hash('b')
+				name: 'beta'
 			});
 
-			await pushPath(token, alpha);
-			await pushPath(token, beta);
+			await pushPath(token, alpha, DEFAULT_CACHE, alphaNar);
+			await pushPath(token, beta, DEFAULT_CACHE, betaNar);
 
 			expect(await runCheck(token, deep)).toStrictEqual({
 				narInfosChecked: 2,
@@ -119,7 +117,7 @@ describe('storage check', () => {
 		});
 	});
 
-	it('catches a stored NAR whose hash no longer matches only on a deep check', async () => {
+	it('catches a corrupted NAR blob via its compressed hash only on a deep check', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -154,6 +152,62 @@ describe('storage check', () => {
 				]
 			}
 		});
+	});
+
+	it('catches a stored NAR that decompresses to a different hash on a deep check', async () => {
+		const token = await initialise();
+		const claimed = await verifiableNar('claimed-but-not-stored');
+		const { metadata, nar } = await verifiablePath('stored', {
+			storePathHash: 'c'.repeat(32),
+			name: 'stored'
+		});
+
+		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+
+		// Place the genuine bytes under the claimed hash's key — their compressed
+		// metadata still matches the narinfo, but they decompress to `nar`, not
+		// `claimed` — and repoint the narinfo at that key.
+		await env.BLOBS.put(narObjectKey(claimed.narHash), nar.narBytes, {
+			sha256: await crypto.subtle.digest('SHA-256', nar.narBytes)
+		});
+		await corruptCommittedNarInfo(metadata.storePathHash, {
+			narHash: claimed.narHash
+		});
+
+		const report = await runCheck(token, true);
+
+		expect(report.discrepancies).toStrictEqual([
+			{
+				kind: 'nar-hash-mismatch',
+				cache: '',
+				storePathHash: metadata.storePathHash,
+				narHash: claimed.narHash
+			}
+		]);
+	});
+
+	it('catches a stored NAR that decompresses to a different size on a deep check', async () => {
+		const token = await initialise();
+		const { metadata, nar } = await verifiablePath('sized', {
+			storePathHash: 'd'.repeat(32),
+			name: 'sized'
+		});
+
+		await pushPath(token, metadata, DEFAULT_CACHE, nar);
+		await corruptCommittedNarInfo(metadata.storePathHash, {
+			narSize: nar.narSize + 4096
+		});
+
+		const report = await runCheck(token, true);
+
+		expect(report.discrepancies).toStrictEqual([
+			{
+				kind: 'nar-size-mismatch',
+				cache: '',
+				storePathHash: metadata.storePathHash,
+				narHash: nar.narHash
+			}
+		]);
 	});
 
 	it('requires admin scope', async () => {

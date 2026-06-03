@@ -191,6 +191,75 @@ describe('runPush', () => {
 		]);
 	});
 
+	it('warns when a commit is left pending server-side verification', async () => {
+		const results: ResultRow[][] = [];
+		const warnings: { label: string; value?: string }[] = [];
+
+		await runPush([appPath], reporter(results, warnings), {
+			client: {
+				negotiate() {
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				prepareUpload() {
+					return Promise.resolve({
+						uploadUrl: 'https://upload.example/app',
+						uploadHeaders: {
+							'x-amz-checksum-sha256': fileHash.digestBase64()
+						},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					});
+				},
+				uploadBlob() {
+					return Promise.resolve();
+				},
+				commit() {
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						status: 'pending'
+					});
+				},
+				setRoot(token, name, body) {
+					return Promise.resolve(rootSummary({ name, ...body }));
+				}
+			} satisfies PushClient,
+			token: 'write-token',
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar(nar, path) {
+				return fakeCompressedNar(nar, path, digestForNar(nar));
+			},
+			readCompressedNar() {
+				return byteStream([Buffer.from('compressed nar')]);
+			},
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(warnings).toStrictEqual([
+			{
+				label: 'pending verification',
+				value:
+					'1 path(s) await server-side verification before they can be substituted'
+			}
+		]);
+	});
+
 	it('reports reused blobs separately from freshly uploaded paths', async () => {
 		const results: ResultRow[][] = [];
 
@@ -869,7 +938,10 @@ function skipClient(setRoots: SetRootCall[]): PushClient {
 	};
 }
 
-function reporter(results: ResultRow[][]): Reporter {
+function reporter(
+	results: ResultRow[][],
+	warnings: { label: string; value?: string }[] = []
+): Reporter {
 	return {
 		phase(_label, body) {
 			return Promise.resolve(
@@ -885,8 +957,7 @@ function reporter(results: ResultRow[][]): Reporter {
 			results.push([...rows]);
 		},
 		warn(label, value) {
-			void label;
-			void value;
+			warnings.push({ label, value });
 		},
 		info(message) {
 			void message;

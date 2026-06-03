@@ -32,10 +32,9 @@ export interface ExpectedNarBlob {
  */
 export function verifyStoredBlob(
 	object: UploadedObject | undefined,
-	expected: ExpectedNarBlob
+	expected: ExpectedNarBlob,
+	r2Key: string = narObjectKey(expected.narHash)
 ): void {
-	const r2Key = narObjectKey(expected.narHash);
-
 	if (object === undefined) {
 		throw new UploadedObjectNotFoundError(r2Key);
 	}
@@ -74,11 +73,16 @@ export function verifyStoredBlob(
 export function verifyUploadedObject(
 	object: UploadedObject | undefined,
 	expectedSize: number,
-	metadata: UploadPathMetadataFields
+	metadata: UploadPathMetadataFields,
+	r2Key: string
 ): void {
-	verifyStoredBlob(object, {
-		narHash: metadata.narHash,
-		fileHash: metadata.fileHash,
-		fileSize: expectedSize
-	});
+	verifyStoredBlob(
+		object,
+		{
+			narHash: metadata.narHash,
+			fileHash: metadata.fileHash,
+			fileSize: expectedSize
+		},
+		r2Key
+	);
 }

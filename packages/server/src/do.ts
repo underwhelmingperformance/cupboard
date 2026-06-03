@@ -62,7 +62,8 @@ import {
 	uploadPathNegotiationSchema,
 	uploadPrepareRequestSchema,
 	type UploadPrepareResponse,
-	type VerifyReport
+	type VerifyReport,
+	zstdDecompressionStream
 } from '@cupboard/shared';
 import { DurableObject } from 'cloudflare:workers';
 import {
@@ -75,6 +76,7 @@ import {
 	isNull,
 	lt,
 	lte,
+	ne,
 	or,
 	sql
 } from 'drizzle-orm';
@@ -111,11 +113,14 @@ import {
 	IssuerUnavailableError,
 	LastAuthKeyError,
 	LastSigningKeyError,
+	NarTooLargeError,
+	NarVerificationFailedError,
 	OAuthError,
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
+	ReusableUploadNotPreparableError,
 	RootNotPermittedError,
 	ServerHttpError,
 	StoredOidcTrustInvalidError,
@@ -127,23 +132,29 @@ import {
 	UploadCacheMismatchError,
 	UploadedObjectChecksumMismatchError,
 	UploadedObjectChecksumMissingError,
+	UploadedObjectNotFoundError,
 	UploadedObjectSizeMismatchError,
 	UploadExpiredError,
 	UploadNotFoundError,
-	UploadNotPreparedError
+	UploadNotPreparedError,
+	ZstdUnavailableError
 } from './errors.ts';
 import {
 	checkBatchSize,
+	inlineVerifyMaxBytes,
 	internalOrigin,
 	narInfoCacheControl,
 	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
 	orphanBlobDeletionGraceMs,
+	stagingObjectKey,
 	TextBody,
 	textResponse,
+	verifiableMaxBytes,
 	verificationBatchSize
 } from './http.ts';
+import { type NarVerification, verifyDecompressedNar } from './nar-verify.ts';
 import {
 	decodeInboundClaims,
 	OidcDiscoveryStore,
@@ -289,6 +300,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	async runVerification(): Promise<void> {
 		await this.initialise();
+		await this.verifyPendingUploads(verificationBatchSize);
 		await this.verifyBatch(undefined, verificationBatchSize);
 	}
 
@@ -937,8 +949,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				fileHash: row.fileHash,
 				fileSize: row.fileSize
 			});
-
-			return undefined;
 		} catch (error) {
 			if (
 				error instanceof UploadedObjectSizeMismatchError ||
@@ -950,6 +960,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			throw error;
 		}
+
+		// A deep check also re-derives the uncompressed NAR hash, catching a stored
+		// blob whose bytes no longer match the hash its narinfo signed.
+		const blob = await this.env.BLOBS.get(narObjectKey(row.narHash));
+
+		if (blob === null) {
+			return 'missing-nar';
+		}
+
+		const verification = await verifyDecompressedNar(
+			blob.body as ReadableStream<Uint8Array>,
+			{ narHash: row.narHash, narSize: row.narSize }
+		);
+
+		if (!verification.ok) {
+			return verification.reason;
+		}
+
+		return undefined;
 	}
 
 	private async handleVerify(request: Request): Promise<Response> {
@@ -969,6 +998,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						parseRequestValue(verificationLimitSchema, requested),
 						verificationBatchSize
 					);
+
+		await this.verifyPendingUploads(limit);
 
 		return Response.json(await this.verifyBatch(purgeOrigin, limit));
 	}
@@ -1533,7 +1564,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				| UploadPathMetadataFields =
 				existingBlob === undefined
 					? metadata
-					: commitMetadataFromPathAndBlob(metadata, existingBlob);
+					: {
+							...commitMetadataFromPathAndBlob(metadata, existingBlob),
+							// Sign the blob's verified narSize, never the client's declared
+							// one: a reuse skips re-verification, so an unchecked size must
+							// not reach the signed narinfo.
+							narSize: existingBlob.narSize
+						};
+			// A fresh upload stages its bytes under a private, per-upload key; a reuse
+			// commits against the canonical blob it already found. Keeping uploads off
+			// the shared key means no client write can ever race or overwrite it.
+			const r2Key =
+				existingBlob === undefined
+					? stagingObjectKey(uploadId)
+					: narObjectKey(metadata.narHash);
 
 			this.db
 				.insert(schema.pendingUploads)
@@ -1543,7 +1587,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					// redirect it to a different one.
 					cache,
 					narHash: metadata.narHash,
-					r2Key: narObjectKey(metadata.narHash),
+					r2Key,
 					expectedSize:
 						'fileHash' in pendingMetadata ? pendingMetadata.fileSize : 0,
 					metadataJson: JSON.stringify(pendingMetadata),
@@ -1567,7 +1611,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				storePathHash: metadata.storePathHash,
 				narHash: metadata.narHash,
 				uploadId,
-				r2Key: narObjectKey(metadata.narHash),
+				r2Key,
 				expiresAt: expiresAt.toISOString()
 			});
 		}
@@ -1597,9 +1641,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		if (pending.expiresAt < new Date().toISOString()) {
-			this.clearPendingUpload(uploadId);
+			await this.clearPendingUploadAndStaging(
+				uploadId,
+				pending.r2Key,
+				pending.narHash
+			);
 
 			throw new UploadExpiredError(uploadId);
+		}
+
+		// A reuse upload's r2Key is the shared canonical key. It needs no upload, so
+		// it is never prepared; reject it explicitly rather than presign a write
+		// straight onto the shared CAS object (which the reuse commit would not
+		// re-verify). The client should commit a reuse decision directly.
+		if (pending.r2Key === narObjectKey(pending.narHash)) {
+			throw new ReusableUploadNotPreparableError(uploadId);
 		}
 
 		const pathMetadata = parseStoredUploadPathMetadata(
@@ -1625,7 +1681,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		return Response.json({
 			uploadUrl: await this.presignedPutUrl(
-				narObjectKey(metadata.narHash),
+				pending.r2Key,
 				metadata.fileHash,
 				expiresAt
 			),
@@ -1907,7 +1963,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.where(
 					and(
 						eq(schema.pendingUploads.r2Key, r2Key),
-						gte(schema.pendingUploads.expiresAt, now)
+						or(
+							gte(schema.pendingUploads.expiresAt, now),
+							eq(schema.pendingUploads.verdict, 'pending')
+						)
 					)
 				)
 				.get() !== undefined
@@ -1936,7 +1995,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		if (pending.expiresAt < new Date().toISOString()) {
-			this.clearPendingUpload(uploadId);
+			await this.clearPendingUploadAndStaging(
+				uploadId,
+				pending.r2Key,
+				pending.narHash
+			);
 
 			throw new UploadExpiredError(uploadId);
 		}
@@ -1963,7 +2026,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		if (existingNarInfo !== undefined) {
 			await this.ensureNarInfoObject(cache, existingNarInfo.storePathHash);
-			this.clearPendingUpload(uploadId);
+			await this.clearPendingUploadAndStaging(
+				uploadId,
+				pending.r2Key,
+				metadata.narHash
+			);
 
 			return Response.json({
 				storePathHash: metadata.storePathHash,
@@ -1974,10 +2041,96 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		const object = (await this.env.BLOBS.head(pending.r2Key)) ?? undefined;
 
-		verifyUploadedObject(object, pending.expectedSize, metadata);
+		verifyUploadedObject(object, pending.expectedSize, metadata, pending.r2Key);
 
-		const committed = await this.commitMetadata(cache, metadata);
-		this.clearPendingUpload(uploadId);
+		const canonicalKey = narObjectKey(metadata.narHash);
+
+		// A reuse binds a new narinfo to a blob already in the verified CAS. It
+		// passed verify-before-serve when it was first promoted, so bind it without
+		// re-verifying its bytes.
+		if (pending.r2Key === canonicalKey) {
+			return this.finaliseCommit(cache, uploadId, metadata, pending.r2Key, {
+				fileHash: metadata.fileHash,
+				fileSize: metadata.fileSize
+			});
+		}
+
+		// Verify-before-serve for a fresh upload staged under a private key: confirm
+		// the bytes decompress to the narHash about to be signed, then promote them
+		// into the shared CAS so the canonical object only ever holds confirmed
+		// content. A blob within the inline budget is verified and promoted now, so
+		// it is immediately servable; a larger one is marked `pending` for the
+		// background pass; one too large to verify within the CPU budget is rejected,
+		// since it could never be served. A failure deletes the private staging
+		// object and leaves no global trace.
+		if (metadata.narSize > verifiableMaxBytes) {
+			await this.clearPendingUploadAndStaging(
+				uploadId,
+				pending.r2Key,
+				metadata.narHash
+			);
+
+			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
+		}
+
+		if (metadata.narSize > inlineVerifyMaxBytes) {
+			this.markUploadPending(uploadId);
+
+			return Response.json({
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'pending'
+			} satisfies CommitResponse);
+		}
+
+		// A returned `{ok:false}` is a definitive content failure (a mismatch or
+		// undecodable bytes whose compressed checksum still matched): reject 422 and
+		// reclaim the staging object. A thrown error (a transient R2 read) propagates
+		// as a 5xx the client can retry, never deleting the just-uploaded bytes.
+		const verification = await this.verifyPendingNar(pending.r2Key, metadata);
+
+		if (!verification.ok) {
+			await this.clearPendingUploadAndStaging(
+				uploadId,
+				pending.r2Key,
+				metadata.narHash
+			);
+
+			throw new NarVerificationFailedError(pending.r2Key, verification.reason);
+		}
+
+		const canonical = await this.promoteStagingBlob(pending.r2Key, metadata);
+
+		return this.finaliseCommit(
+			cache,
+			uploadId,
+			metadata,
+			pending.r2Key,
+			canonical
+		);
+	}
+
+	// Binds the narinfo for a blob already promoted into the shared CAS and answers
+	// the commit, reporting whether this caller won the row or a concurrent commit
+	// did.
+	private async finaliseCommit(
+		cache: string,
+		uploadId: string,
+		metadata: UploadPathMetadataFields,
+		r2Key: string,
+		canonical: CanonicalBlob
+	): Promise<Response> {
+		const committed = await this.commitMetadata(
+			cache,
+			metadata,
+			canonical,
+			uploadId
+		);
+		// commitMetadata cleared the pending row in its transaction; reclaim the
+		// private staging object (a reuse's r2Key is the canonical key, kept).
+		if (r2Key !== narObjectKey(metadata.narHash)) {
+			await this.env.BLOBS.delete(r2Key);
+		}
 
 		if (committed) {
 			return Response.json({
@@ -1986,6 +2139,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				status: 'committed'
 			} satisfies CommitResponse);
 		}
+
+		// Lost the narinfo to a concurrent commit, possibly at a different narHash:
+		// the canonical object this upload just promoted may now be referenced by
+		// nothing. Enqueue it for orphan deletion — the enqueue self-guards, so it
+		// no-ops when another narinfo legitimately references the blob (e.g. a reuse).
+		this.queueOrphanBlobDeletion(
+			narObjectKey(metadata.narHash),
+			new Date().toISOString()
+		);
 
 		const winner = this.db
 			.select()
@@ -2007,6 +2169,69 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			narHash: winner?.narHash ?? metadata.narHash,
 			status: 'already-present'
 		} satisfies CommitResponse);
+	}
+
+	// Promotes verified staging bytes into the shared, content-addressed CAS and
+	// returns the canonical object's compressed metadata. The canonical key is
+	// write-once: a conditional put means the first promotion of a hash fixes the
+	// stored encoding, and any later or concurrent upload of the same hash adopts
+	// that encoding instead of overwriting it — so every narinfo for the hash
+	// advertises the one object that is actually served, even when tenants upload
+	// different zstd encodings of the same NAR. The staging object is left in place;
+	// its caller deletes it only once the commit is durable, so a crash between
+	// promotion and commit recovers from the surviving staging copy.
+	private async promoteStagingBlob(
+		stagingKey: string,
+		metadata: UploadPathMetadataFields
+	): Promise<CanonicalBlob> {
+		const canonicalKey = narObjectKey(metadata.narHash);
+		const existing = await this.env.BLOBS.head(canonicalKey);
+
+		if (existing !== null) {
+			return canonicalBlobOf(canonicalKey, existing);
+		}
+
+		const staged = await this.env.BLOBS.get(stagingKey);
+
+		if (staged === null) {
+			throw new UploadedObjectNotFoundError(stagingKey);
+		}
+
+		const written = await this.env.BLOBS.put(canonicalKey, staged.body, {
+			sha256: NixSha256Hash.parse(metadata.fileHash).digestBytes(),
+			onlyIf: { etagDoesNotMatch: '*' }
+		});
+
+		if (written !== null) {
+			return { fileHash: metadata.fileHash, fileSize: metadata.fileSize };
+		}
+
+		// A concurrent promotion won between the head and the conditional put: adopt
+		// the stored encoding so this narinfo matches the object that is served.
+		const winner = await this.env.BLOBS.head(canonicalKey);
+
+		if (winner === null) {
+			throw new UploadedObjectNotFoundError(canonicalKey);
+		}
+
+		return canonicalBlobOf(canonicalKey, winner);
+	}
+
+	// Clears an abandoned pending upload's record, deleting its private staging
+	// object first so the durable handle to that object is never dropped before the
+	// object itself. A reuse upload's r2Key is the shared canonical key, which must
+	// survive; only a per-upload staging key is removed. It awaits R2 I/O, so it is
+	// called outside any critical section.
+	private async clearPendingUploadAndStaging(
+		uploadId: string,
+		r2Key: string,
+		narHash: string
+	): Promise<void> {
+		if (r2Key !== narObjectKey(narHash)) {
+			await this.env.BLOBS.delete(r2Key);
+		}
+
+		this.clearPendingUpload(uploadId);
 	}
 
 	private narInfoFromRow(row: typeof schema.narInfos.$inferSelect): NarInfo {
@@ -2319,20 +2544,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const now = new Date().toISOString();
 
 		return this.ctx.blockConcurrencyWhile(async () => {
+			// A `pending` upload is awaiting background verification, not abandoned,
+			// so it and its blob must survive the sweep until the verify pass resolves
+			// it. Every other expired upload is reaped: a null-verdict row still
+			// awaiting its bytes, or a terminal `mismatch` row whose observation window
+			// has passed (its staging bytes are already gone).
+			const reapable = and(
+				lt(schema.pendingUploads.expiresAt, now),
+				or(
+					isNull(schema.pendingUploads.verdict),
+					ne(schema.pendingUploads.verdict, 'pending')
+				)
+			);
+
 			const expiredUploads = this.db
 				.select()
 				.from(schema.pendingUploads)
-				.where(lt(schema.pendingUploads.expiresAt, now))
+				.where(reapable)
 				.all();
 
 			for (const upload of expiredUploads) {
 				this.queueOrphanBlobDeletion(upload.r2Key, now);
 			}
 
-			this.db
-				.delete(schema.pendingUploads)
-				.where(lt(schema.pendingUploads.expiresAt, now))
-				.run();
+			this.db.delete(schema.pendingUploads).where(reapable).run();
 
 			// Reachability GC is per-cache: each registered cache keeps its own
 			// closure. A bare /gc sweeps every cache; /cache/:name/gc sweeps one.
@@ -2366,17 +2601,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async commitMetadata(
 		cache: string,
-		metadata: UploadPathMetadataFields
+		metadata: UploadPathMetadataFields,
+		canonical: CanonicalBlob,
+		uploadId?: string
 	): Promise<boolean> {
 		const now = new Date().toISOString();
 		this.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeys();
+		// Sign and store the canonical object's `FileHash`/`FileSize`, never this
+		// upload's own, so the narinfo always matches the bytes served at its URL.
 		const unsigned = new NarInfo(
 			metadata.storePath,
 			narObjectKey(metadata.narHash),
 			metadata.compression,
-			metadata.fileHash,
-			metadata.fileSize,
+			canonical.fileHash,
+			canonical.fileSize,
 			metadata.narHash,
 			metadata.narSize,
 			metadata.references,
@@ -2393,11 +2632,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			narHash: metadata.narHash,
 			r2Key: narObjectKey(metadata.narHash),
 			compression: metadata.compression,
-			fileHash: metadata.fileHash,
-			fileSize: metadata.fileSize,
+			fileHash: canonical.fileHash,
+			fileSize: canonical.fileSize,
+			narSize: metadata.narSize,
 			createdAt: now
 		} satisfies typeof schema.narBlobs.$inferInsert;
-		const { narHash: _narHash, ...narBlobUpdate } = narBlobRow;
 
 		const won = this.db.transaction((tx) => {
 			const rows = tx
@@ -2408,8 +2647,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					storePath: metadata.storePath,
 					narHash: metadata.narHash,
 					narSize: metadata.narSize,
-					fileHash: metadata.fileHash,
-					fileSize: metadata.fileSize,
+					fileHash: canonical.fileHash,
+					fileSize: canonical.fileSize,
 					compression: metadata.compression,
 					referencesJson: JSON.stringify(metadata.references),
 					deriver: metadata.deriver,
@@ -2420,20 +2659,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.onConflictDoNothing()
 				.returning()
 				.all();
+			const committed = rows.length > 0;
 
-			if (rows.length === 0) {
-				return false;
+			if (committed) {
+				// First writer fixes the canonical blob row; later commits of the
+				// same hash carry the same canonical metadata, so nothing to update.
+				tx.insert(schema.narBlobs)
+					.values(narBlobRow)
+					.onConflictDoNothing()
+					.run();
 			}
 
-			tx.insert(schema.narBlobs)
-				.values(narBlobRow)
-				.onConflictDoUpdate({
-					target: schema.narBlobs.narHash,
-					set: narBlobUpdate
-				})
-				.run();
+			// Clear the originating pending upload in the same transaction as the
+			// commit, so a crash can never leave a `pending` row whose narinfo is
+			// already committed — a later verify pass would re-promote and re-commit
+			// it, resurrecting a path the client may have since deleted.
+			if (uploadId !== undefined) {
+				tx.delete(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, uploadId))
+					.run();
+			}
 
-			return true;
+			return committed;
 		});
 
 		if (!won) {
@@ -2456,6 +2703,163 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.delete(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
+	}
+
+	private markUploadPending(uploadId: string): void {
+		this.db
+			.update(schema.pendingUploads)
+			.set({ verdict: 'pending' })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	}
+
+	// Records a durable `mismatch` verdict for a background verification failure and
+	// deletes the bad staging bytes, keeping the upload row so a later status reader
+	// (`push --wait` or a status endpoint) can observe why the path never became
+	// servable. Synchronous inline failures reject immediately and need no verdict.
+	private async markUploadFailed(
+		uploadId: string,
+		r2Key: string,
+		narHash: string
+	): Promise<void> {
+		if (r2Key !== narObjectKey(narHash)) {
+			await this.env.BLOBS.delete(r2Key);
+		}
+
+		// Refresh the observation window so the terminal verdict reliably outlives
+		// the verify pass that recorded it (the pass may run at or past the original
+		// upload TTL); GC reaps it once this window passes.
+		this.db
+			.update(schema.pendingUploads)
+			.set({
+				verdict: 'mismatch',
+				expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+			})
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	}
+
+	private async verifyPendingNar(
+		r2Key: string,
+		metadata: UploadPathMetadataFields
+	): Promise<NarVerification> {
+		const object = await this.env.BLOBS.get(r2Key);
+
+		if (object === null) {
+			throw new UploadedObjectNotFoundError(r2Key);
+		}
+
+		// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed only
+		// as `ReadableStream`; narrow it to the byte stream the verifier expects.
+		const body = object.body as ReadableStream<Uint8Array>;
+
+		return verifyDecompressedNar(body, {
+			narHash: metadata.narHash,
+			narSize: metadata.narSize
+		});
+	}
+
+	// Background verify-and-commit of uploads deferred at commit because their blob
+	// exceeded the inline budget. Each staging blob is decompressed and hash-verified
+	// outside the critical section, then promoted and committed (on a match) or its
+	// staging object deleted (on a failure) inside one, so a `pending` path becomes
+	// servable only once its bytes are confirmed. Bounded per pass; the cron drives
+	// it.
+	private async verifyPendingUploads(limit: number): Promise<void> {
+		const pendings = this.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.verdict, 'pending'))
+			.orderBy(asc(schema.pendingUploads.id))
+			.limit(limit)
+			.all();
+
+		for (const pending of pendings) {
+			try {
+				await this.verifyAndCommitPending(pending);
+			} catch {
+				// One upload's failure (a transient promote or commit error) must not
+				// starve the rest of the pass; leave it `pending` for the next pass.
+				continue;
+			}
+		}
+	}
+
+	private async verifyAndCommitPending(
+		pending: typeof schema.pendingUploads.$inferSelect
+	): Promise<void> {
+		const metadata = parseStoredUploadMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+
+		// A returned `{ok:false}` (a hash/size mismatch or an undecodable frame) is a
+		// definitive content failure. A thrown error splits two ways: a definitively
+		// absent staging object cannot reappear, so it fails terminally; any other
+		// thrown error is a transient read fault that propagates to the per-iteration
+		// guard, leaving the row `pending` for retry so a blip cannot destroy a valid
+		// deferred upload.
+		let verification: NarVerification;
+
+		try {
+			verification = await this.verifyPendingNar(pending.r2Key, metadata);
+		} catch (error) {
+			if (error instanceof UploadedObjectNotFoundError) {
+				await this.markUploadFailed(
+					pending.id,
+					pending.r2Key,
+					metadata.narHash
+				);
+				return;
+			}
+
+			throw error;
+		}
+
+		if (!verification.ok) {
+			await this.markUploadFailed(pending.id, pending.r2Key, metadata.narHash);
+			return;
+		}
+
+		// Promote outside the critical section: streaming the staging bytes into the
+		// shared CAS must not run under `blockConcurrencyWhile`. It is idempotent and
+		// content-addressed, so a redundant promotion is harmless.
+		const canonical = await this.promoteStagingBlob(pending.r2Key, metadata);
+
+		await this.ctx.blockConcurrencyWhile(async () => {
+			const current = this.db
+				.select()
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, pending.id))
+				.get();
+
+			if (current?.verdict !== 'pending') {
+				return;
+			}
+
+			// commitMetadata clears the pending row in the same transaction as the
+			// commit, so a crash cannot leave a committed narinfo behind a live
+			// `pending` row.
+			const committed = await this.commitMetadata(
+				pending.cache,
+				metadata,
+				canonical,
+				pending.id
+			);
+
+			// Lost the narinfo to a concurrent commit at a different narHash: the
+			// canonical object just promoted is now unreferenced. Enqueue it for
+			// orphan deletion (self-guarded, so a true concurrent winner that does
+			// reference the blob is left untouched).
+			if (!committed) {
+				this.queueOrphanBlobDeletion(
+					narObjectKey(metadata.narHash),
+					new Date().toISOString()
+				);
+			}
+
+			await this.env.BLOBS.delete(pending.r2Key);
+		});
 	}
 
 	private async removeStaleNarInfo(
@@ -3150,8 +3554,38 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.migrationPromise;
 	}
 
+	// Fail loudly at initialisation if the runtime lacks native zstd, rather than
+	// as an opaque per-request stream error at the first verified commit.
+	private async assertZstdAvailable(): Promise<void> {
+		const frame = new Uint8Array([
+			40, 181, 47, 253, 32, 8, 65, 0, 0, 42, 7, 42, 7, 42, 7, 42, 7
+		]);
+		const expected = new Uint8Array([42, 7, 42, 7, 42, 7, 42, 7]);
+
+		let restored: Uint8Array;
+
+		try {
+			restored = new Uint8Array(
+				await new Response(
+					new Response(frame).body?.pipeThrough(zstdDecompressionStream())
+				).arrayBuffer()
+			);
+		} catch (error) {
+			throw new ZstdUnavailableError({ cause: error });
+		}
+
+		const matches =
+			restored.length === expected.length &&
+			expected.every((byte, index) => restored[index] === byte);
+
+		if (!matches) {
+			throw new ZstdUnavailableError();
+		}
+	}
+
 	private async migrateAndSeed(): Promise<void> {
 		await migrate(this.db, migrations);
+		await this.assertZstdAvailable();
 
 		// The default cache always exists in the registry so its priority is
 		// resolved the same way as a named cache's. Idempotent across restarts.
@@ -3351,6 +3785,27 @@ function commitMetadataFromPathAndBlob(
 		fileHash: blob.fileHash,
 		fileSize: blob.fileSize,
 		compression: blob.compression
+	};
+}
+
+// The compressed metadata of the one canonical object served for a NAR hash.
+// Read from the object itself so a committed narinfo always advertises the
+// encoding actually stored, regardless of which upload promoted it.
+interface CanonicalBlob {
+	readonly fileHash: string;
+	readonly fileSize: number;
+}
+
+function canonicalBlobOf(key: string, object: R2Object): CanonicalBlob {
+	const sha256 = object.checksums.sha256;
+
+	if (sha256 === undefined) {
+		throw new UploadedObjectChecksumMissingError(key);
+	}
+
+	return {
+		fileHash: NixSha256Hash.fromDigest(new Uint8Array(sha256)).toString(),
+		fileSize: object.size
 	};
 }
 

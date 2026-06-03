@@ -1,4 +1,10 @@
-import { NixSha256Hash, zstdDecompressionStream } from '@cupboard/shared';
+import {
+	NixSha256Hash,
+	ZstdDecodeError,
+	zstdDecompressionStream
+} from '@cupboard/shared';
+
+import { verifiableMaxBytes } from './http.ts';
 
 // What a stored NAR blob's bytes must satisfy: decompressed, they hash to the
 // `narHash` the narinfo commits to and signs, and their length is `narSize`.
@@ -18,7 +24,8 @@ export type NarVerification =
 			readonly ok: false;
 			readonly reason: 'nar-size-mismatch';
 			readonly actualNarSize: number;
-	  };
+	  }
+	| { readonly ok: false; readonly reason: 'undecodable' };
 
 /**
  * Streams a stored `.nar.zst` body through native zstd decompression and a
@@ -32,22 +39,62 @@ export async function verifyDecompressedNar(
 	body: ReadableStream<Uint8Array>,
 	expected: ExpectedNar
 ): Promise<NarVerification> {
+	// Decompression stops once it exceeds the declared size or the server's hard
+	// cap, whichever is smaller — so a frame that expands far beyond its declared
+	// `narSize` (a zstd bomb) cannot burn the CPU budget, and the bound is never
+	// larger than what the server is willing to verify regardless of what the
+	// client declared.
+	const limit = Math.min(expected.narSize, verifiableMaxBytes);
+	const reader = body.pipeThrough(zstdDecompressionStream()).getReader();
 	const digestStream = new crypto.DigestStream('SHA-256');
+	const digestComplete = digestStream.digest;
+	const writer = digestStream.getWriter();
 	let narSize = 0;
 
-	const counter = new TransformStream<Uint8Array, Uint8Array>({
-		transform(chunk, controller) {
-			narSize += chunk.byteLength;
-			controller.enqueue(chunk);
+	// Cancel both ends and discard the (now-rejecting) digest so an early exit
+	// never leaves an unhandled rejection or a dangling decompression.
+	const teardown = async (): Promise<void> => {
+		await Promise.allSettled([reader.cancel(), writer.abort(), digestComplete]);
+	};
+
+	try {
+		for (;;) {
+			const result = await reader.read();
+
+			if (result.done) {
+				break;
+			}
+
+			narSize += result.value.byteLength;
+
+			if (narSize > limit) {
+				await teardown();
+
+				return {
+					ok: false,
+					reason: 'nar-size-mismatch',
+					actualNarSize: narSize
+				};
+			}
+
+			await writer.write(result.value);
 		}
-	});
 
-	await body
-		.pipeThrough(zstdDecompressionStream())
-		.pipeThrough(counter)
-		.pipeTo(digestStream);
+		await writer.close();
+	} catch (error) {
+		await teardown();
 
-	const digest = new Uint8Array(await digestStream.digest);
+		// Bytes that are not a valid zstd frame can never decode to the claimed
+		// hash, so this is a definitive verification failure. Any other error (a
+		// source read fault) propagates for the caller to treat as transient.
+		if (error instanceof ZstdDecodeError) {
+			return { ok: false, reason: 'undecodable' };
+		}
+
+		throw error;
+	}
+
+	const digest = new Uint8Array(await digestComplete);
 	const actualNarHash = NixSha256Hash.fromDigest(digest).toString();
 
 	if (actualNarHash !== expected.narHash) {

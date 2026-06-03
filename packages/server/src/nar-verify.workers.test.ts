@@ -69,4 +69,25 @@ describe('verifyDecompressedNar', () => {
 			actualNarSize: nar.byteLength
 		});
 	});
+
+	it('aborts decompression mid-stream once the declared size is exceeded', async () => {
+		const narHash = await nixNarHash(nar);
+		const declaredNarSize = 1024;
+
+		// Declaring a size far below the ~3 MB payload trips the overrun guard after
+		// the first over-limit chunk, so the read loop bails without draining the
+		// stream — the zstd-bomb defence. A reported size past the limit but well
+		// short of the full payload proves it stopped mid-stream.
+		const result = await verifyDecompressedNar(compressedStream(nar), {
+			narHash,
+			narSize: declaredNarSize
+		});
+
+		if (result.ok || result.reason !== 'nar-size-mismatch') {
+			throw new Error('expected a nar-size-mismatch rejection');
+		}
+
+		expect(result.actualNarSize).toBeGreaterThan(declaredNarSize);
+		expect(result.actualNarSize).toBeLessThan(nar.byteLength);
+	});
 });

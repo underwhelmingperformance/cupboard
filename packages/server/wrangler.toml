@@ -29,6 +29,9 @@ R2_SECRET_ACCESS_KEY = ""
 tag = "v1"
 new_sqlite_classes = ["CupboardServer"]
 
+[limits]
+cpu_ms = 300000
+
 [observability]
 enabled = true
 

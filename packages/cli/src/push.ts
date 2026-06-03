@@ -245,19 +245,40 @@ async function runPushWithTemporaryDirectory(
 		}
 	);
 
-	await reporter.phase('Committing metadata', async (ctx) => {
-		const decisions = negotiation.uploads.filter((decision) =>
-			needsCommit(decision)
-		);
-		const responses: CommitResponse[] = [];
+	const commitResponses = await reporter.phase(
+		'Committing metadata',
+		async (ctx) => {
+			const decisions = negotiation.uploads.filter((decision) =>
+				needsCommit(decision)
+			);
+			const responses: CommitResponse[] = [];
 
-		for (const decision of decisions) {
-			responses.push(await client.commit(token, decision.uploadId));
-			ctx.fact('committed', formatCount(responses.length));
+			for (const decision of decisions) {
+				responses.push(await client.commit(token, decision.uploadId));
+			}
+
+			ctx.fact(
+				'committed',
+				formatCount(responses.filter((row) => row.status !== 'pending').length)
+			);
+
+			return responses;
 		}
+	);
 
-		return responses;
-	});
+	// A path whose blob exceeds the server's inline-verify budget commits as
+	// `pending`: it is stored but not substitutable until the server's background
+	// pass verifies it. Surface that distinctly rather than reporting success.
+	const pendingCount = commitResponses.filter(
+		(row) => row.status === 'pending'
+	).length;
+
+	if (pendingCount > 0) {
+		reporter.warn(
+			'pending verification',
+			`${formatCount(pendingCount)} path(s) await server-side verification before they can be substituted`
+		);
+	}
 	const retentionRows = await reporter.phase(
 		retention.kind === 'pins'
 			? 'Pinning pushed paths'

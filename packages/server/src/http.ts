@@ -21,6 +21,20 @@ export const checkBatchSize = 1000;
 // cron tick advances a cursor by one batch per run, wrapping at the end.
 export const verificationBatchSize = 500;
 
+// Verify-before-serve size bounds, keyed on the uncompressed NAR size (`narSize`,
+// the cost of decompress-and-hash), not the compressed `fileSize`. At or below
+// `inlineVerifyMaxBytes` a blob is decompressed and hash-verified synchronously at
+// commit, so it is immediately servable; a larger one is verified in the
+// background pass and is not servable until then. Above `verifiableMaxBytes` a
+// blob cannot be decompressed within the worker CPU budget and the commit is
+// rejected — it could never be served.
+//
+// PROVISIONAL: these await the step-1 runtime benchmark (real workerd throughput
+// and whether the Durable Object honours `cpu_ms = 300000`); see PLAN.md V5 step
+// 1. The mechanism is correct at any values; only the thresholds are unmeasured.
+export const inlineVerifyMaxBytes = 8 * 1024 * 1024;
+export const verifiableMaxBytes = 4 * 1024 * 1024 * 1024;
+
 export const narInfoCacheTtlSeconds = 3600;
 
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}`;
@@ -32,6 +46,14 @@ export const orphanBlobDeletionGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 
 export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
+}
+
+// Where a client uploads unverified bytes, private to one upload. The server
+// verifies them here, then promotes them into the shared `nar/<narHash>` key, so
+// the canonical object only ever holds confirmed content and no client ever
+// writes it directly.
+export function stagingObjectKey(uploadId: string): string {
+	return `staging/${uploadId}.nar.zst`;
 }
 
 // The request path a narinfo is served and edge-cached under: bare for the

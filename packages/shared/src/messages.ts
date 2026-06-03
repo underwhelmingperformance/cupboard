@@ -122,7 +122,7 @@ export type ParsedUploadNegotiateResponse = z.output<
 export const commitResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
-	status: z.enum(['committed', 'already-present'])
+	status: z.enum(['committed', 'already-present', 'pending'])
 });
 export type ParsedCommitResponse = z.output<typeof commitResponseSchema>;
 
@@ -344,7 +344,10 @@ export type ParsedRetentionPolicyRemoveResponse = z.output<
 export const checkDiscrepancyKindSchema = z.enum([
 	'missing-nar',
 	'missing-narinfo-object',
-	'file-hash-mismatch'
+	'file-hash-mismatch',
+	'nar-hash-mismatch',
+	'nar-size-mismatch',
+	'undecodable'
 ]);
 export type CheckDiscrepancyKind = z.infer<typeof checkDiscrepancyKindSchema>;
 
