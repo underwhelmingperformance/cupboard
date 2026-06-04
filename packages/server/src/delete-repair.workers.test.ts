@@ -7,13 +7,14 @@ import {
 	blobStateNarHashes,
 	clearBlobStorage,
 	commitPath,
-	currentServer,
+	commitSharedPath,
 	deleteBlobReferenceEdge,
 	deleteNarInfoRow,
 	deletePath,
 	initialise,
 	narInfoDeletionRows,
 	narInfoGeneration,
+	reapBlobsPastGrace,
 	resetTestServer,
 	seedNarInfoDeletion,
 	tenantBlobRows,
@@ -58,7 +59,7 @@ describe('delete-saga crash replay', () => {
 			generation: 0
 		});
 
-		await currentServer().runGarbageCollection();
+		await reapBlobsPastGrace();
 
 		expect({
 			markers: await narInfoDeletionRows(),
@@ -99,7 +100,7 @@ describe('delete-saga crash replay', () => {
 			generation: 0
 		});
 
-		await currentServer().runGarbageCollection();
+		await reapBlobsPastGrace();
 
 		expect({
 			markers: await narInfoDeletionRows(),
@@ -141,7 +142,7 @@ describe('delete-saga crash replay', () => {
 			generation: 0
 		});
 
-		await currentServer().runGarbageCollection();
+		await reapBlobsPastGrace();
 
 		expect({
 			markers: await narInfoDeletionRows(),
@@ -163,10 +164,10 @@ describe('delete-saga crash replay', () => {
 
 		// Commit, delete, recommit the same NAR hash: the live edge and object are now
 		// at generation 1, while a stale marker from the first delete captured
-		// generation 0.
+		// generation 0. The recommit reuses the shared blob still in its reaper grace.
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
-		await commitPath(token, metadata, nar);
+		await commitSharedPath(token, metadata);
 		await seedNarInfoDeletion({
 			storePathHash: metadata.storePathHash,
 			narHash: nar.narHash,
@@ -176,7 +177,7 @@ describe('delete-saga crash replay', () => {
 		// Replaying the stale generation-0 deletion retires no edge (only generation 1
 		// exists) and, finding the path live, clears itself without touching the
 		// servable generation-1 narinfo or its blob.
-		await currentServer().runGarbageCollection();
+		await reapBlobsPastGrace();
 
 		expect({
 			markers: await narInfoDeletionRows(),

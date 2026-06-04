@@ -1688,13 +1688,15 @@ describe('upload flow', () => {
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 
+		// The abandoned upload's private staging object is reclaimed directly when the
+		// upload is reaped; it has no `blob_state` row, so the reaper collects nothing.
 		expect(await runGcResult()).toStrictEqual({
 			ok: true,
 			pendingUploadsDeleted: 1,
 			rootsExpired: 0,
 			pathsSwept: 0,
 			narInfosDeleted: 0,
-			blobsDeleted: 1
+			blobsDeleted: 0
 		});
 
 		await expectStats(await initialise(), {
@@ -1725,11 +1727,13 @@ describe('upload flow', () => {
 			metadata
 		);
 
+		// Re-negotiating removed the stale narinfo whose NAR object had vanished; its
+		// now-unreferenced shared fact lingers until the reaper collects it.
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 0,
+			narBlobs: 1,
 			pendingUploads: 1,
-			totalFileSize: 0
+			totalFileSize: narBytes.byteLength
 		});
 	});
 
@@ -1902,13 +1906,16 @@ describe('upload flow', () => {
 		const afterDelete = await readFetch(`/${metadata.storePathHash}.narinfo`);
 
 		expect(afterDelete.status).toBe(StatusCodes.NOT_FOUND);
+		// The narinfo is gone immediately; the now-unreferenced shared fact persists
+		// until the reaper collects it past the grace.
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 0,
+			narBlobs: 1,
 			pendingUploads: 0,
-			totalFileSize: 0
+			totalFileSize: narBytes.byteLength
 		});
 
+		// The first pass arms the unreferenced blob but does not collect it.
 		await runGc();
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
@@ -1949,6 +1956,9 @@ describe('upload flow', () => {
 
 		expect(deletedSecond.narScheduledForDeletion).toBe(true);
 
+		// The first pass arms the now-unreferenced blob; the pass past the grace
+		// collects it.
+		await runGc();
 		vi.setSystemTime(afterGrace());
 		await runGc();
 		await expect(
@@ -1967,7 +1977,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('does not pull a scheduled NAR deletion forward', async () => {
+	it('does not collect an armed NAR before its grace elapses', async () => {
 		vi.setSystemTime(deleteTestBase);
 
 		const token = await initialise();
@@ -1975,14 +1985,10 @@ describe('upload flow', () => {
 		await commitPath(token, metadata);
 		await deletePath(token, metadata.storePathHash);
 
-		// A fresh pending upload reuses the same r2Key, then expires, giving an
-		// immediate (not_before = now) deletion trigger for the already-deferred
-		// blob.
-		expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
+		// Arm the now-unreferenced blob, fixing its grace window.
+		await runGc();
 
+		// A later reaper pass before the grace elapses must not collect it.
 		vi.setSystemTime(new Date(deleteTestBase.getTime() + 16 * 60 * 1000));
 		await runGc();
 		await expect(

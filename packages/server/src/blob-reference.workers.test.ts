@@ -10,6 +10,7 @@ import {
 	initialise,
 	narInfoGeneration,
 	queueUnflushedNarInfoDeletion,
+	reapBlobsPastGrace,
 	resetTestServer,
 	runGcResult,
 	tenantBlobRows,
@@ -82,6 +83,10 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
 
+		// The delete retires the edge and per-tenant presence at once; the now-
+		// unreferenced shared fact is reclaimed by the reaper after its grace.
+		await reapBlobsPastGrace();
+
 		expect({
 			edges: await blobReferenceRows(),
 			tenantBlobs: await tenantBlobRows(),
@@ -102,7 +107,9 @@ describe('blob_ref / tenant_blob reference edges', () => {
 
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
-		await commitPath(token, metadata, nar);
+		// The shared blob survives the delete during its reaper grace, so the
+		// recommit binds to it through the reuse path; the generation still advances.
+		await commitSharedPath(token, metadata);
 
 		// The replayed old-generation deletion can only have removed the old edge:
 		// the recommit lands a strictly higher generation, so only it survives.

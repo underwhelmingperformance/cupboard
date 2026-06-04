@@ -5,16 +5,11 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narInfos, orphanBlobDeletions } from './db/schema.ts';
-import {
-	narInfoObjectKey,
-	narObjectKey,
-	orphanBlobDeletionGraceMs
-} from './http.ts';
+import { narInfos } from './db/schema.ts';
+import { narInfoObjectKey, narObjectKey } from './http.ts';
 import {
 	authorisedFetch,
 	blobStateCount,
-	deleteTestBase,
 	initialise,
 	mintServerSignedToken,
 	narBytes,
@@ -98,9 +93,7 @@ describe('background verification', () => {
 		});
 	});
 
-	it('reconciles a dangling narinfo and schedules its NAR after the grace window', async () => {
-		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+	it('reconciles a dangling narinfo whose NAR object is gone, leaving the blob for the reaper', async () => {
 		useTestServer('verify-reconcile');
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -109,22 +102,16 @@ describe('background verification', () => {
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
 		const report = await runVerify(token);
-		const orphans = await runInDurableObject(
-			testServerFor('verify-reconcile'),
-			(_instance, state) =>
-				drizzle(state.storage, { schema: { orphanBlobDeletions } })
-					.select()
-					.from(orphanBlobDeletions)
-					.all()
-		);
 		const narInfoObject = await env.BLOBS.head(
 			narInfoObjectKey(metadata.storePathHash)
 		);
 
+		// Verify removes the dangling narinfo and retires its edge; the now-
+		// unreferenced shared fact is left for the reaper to collect, not deleted here.
 		expect({
 			report,
-			orphans,
-			narInfoObjectGone: narInfoObject === null
+			narInfoObjectGone: narInfoObject === null,
+			blobs: await blobStateCount()
 		}).toStrictEqual({
 			report: {
 				scanned: 1,
@@ -134,16 +121,8 @@ describe('background verification', () => {
 				cursorCache: '',
 				wrapped: true
 			},
-			orphans: [
-				{
-					r2Key: narObjectKey(metadata.narHash),
-					notBefore: new Date(
-						deleteTestBase.getTime() + orphanBlobDeletionGraceMs
-					).toISOString(),
-					createdAt: deleteTestBase.toISOString()
-				}
-			],
-			narInfoObjectGone: true
+			narInfoObjectGone: true,
+			blobs: 1
 		});
 	});
 
@@ -219,7 +198,7 @@ describe('background verification', () => {
 		});
 	});
 
-	it('reconciles dangling narinfos across caches and schedules the shared NAR once', async () => {
+	it('reconciles dangling narinfos for one NAR across caches, retiring both edges', async () => {
 		useTestServer('verify-cross-cache');
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -229,23 +208,17 @@ describe('background verification', () => {
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
 		const report = await runVerify(token);
-		const persisted = await runInDurableObject(
+		const narInfoCount = await runInDurableObject(
 			testServerFor('verify-cross-cache'),
-			(_instance, storage) => {
-				const database = drizzle(storage.storage, {
-					schema: { narInfos, orphanBlobDeletions }
-				});
-
-				return {
-					orphans: database.select().from(orphanBlobDeletions).all().length,
-					narInfos: database.select().from(narInfos).all().length
-				};
-			}
+			(_instance, storage) =>
+				drizzle(storage.storage, { schema: { narInfos } })
+					.select()
+					.from(narInfos)
+					.all().length
 		);
 		const state = {
-			orphans: persisted.orphans,
 			blobs: await blobStateCount(),
-			narInfos: persisted.narInfos
+			narInfos: narInfoCount
 		};
 
 		expect({ report, state }).toStrictEqual({
@@ -257,9 +230,9 @@ describe('background verification', () => {
 				cursorCache: '',
 				wrapped: true
 			},
-			// The global unreferenced-NAR gate holds the blob until the last
-			// referencing narinfo is removed, so it is scheduled exactly once.
-			state: { orphans: 1, blobs: 0, narInfos: 0 }
+			// Both narinfos are removed and their edges retired; the single shared fact
+			// is left, now unreferenced, for the reaper to collect once.
+			state: { blobs: 1, narInfos: 0 }
 		});
 	});
 

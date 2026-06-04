@@ -40,26 +40,16 @@ export const narInfoCacheTtlSeconds = 3600;
 export const narInfoCacheControl = `public, max-age=${String(narInfoCacheTtlSeconds)}`;
 
 // A deleted narinfo can still be served from a warm edge for up to its TTL, so a
-// NAR it points at must outlive any such cached copy. The grace adds a margin
-// over the TTL for edge propagation and clock skew.
-export const orphanBlobDeletionGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
+// NAR it points at must outlive any such cached copy. The reaper arms an
+// unreferenced blob for this long before collecting it, adding a margin over the
+// TTL for edge propagation and clock skew.
+export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
+
+// The most blobs the reaper arms or collects in a single bounded pass.
+export const blobReaperBatchSize = 500;
 
 export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
-}
-
-// The inverse of {@link narObjectKey}: the NAR hash a canonical object key
-// addresses, or undefined for any other key (a staging key, say). Lets a caller
-// holding an R2 key look the blob up in the hash-keyed shared-blob facts.
-export function narHashFromObjectKey(r2Key: string): string | undefined {
-	const prefix = 'nar/';
-	const suffix = '.nar.zst';
-
-	if (!r2Key.startsWith(prefix) || !r2Key.endsWith(suffix)) {
-		return undefined;
-	}
-
-	return r2Key.slice(prefix.length, -suffix.length);
 }
 
 // Where a client uploads unverified bytes, private to one upload. The server

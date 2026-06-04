@@ -892,11 +892,11 @@ export async function seedNarInfoDeletion(fields: {
 				cache: DEFAULT_CACHE,
 				storePathHash: fields.storePathHash,
 				narHash: fields.narHash,
-					generation: fields.generation,
-					createdAt: new Date().toISOString()
-				})
-				.onConflictDoNothing()
-				.run();
+				generation: fields.generation,
+				createdAt: new Date().toISOString()
+			})
+			.onConflictDoNothing()
+			.run();
 	});
 }
 

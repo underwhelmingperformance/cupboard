@@ -72,10 +72,12 @@ import {
 	count,
 	eq,
 	gt,
-	gte,
+	inArray,
+	isNotNull,
 	isNull,
 	lt,
 	lte,
+	notInArray,
 	or,
 	sql
 } from 'drizzle-orm';
@@ -141,15 +143,15 @@ import {
 	ZstdUnavailableError
 } from './errors.ts';
 import {
+	blobReaperBatchSize,
+	blobReaperGraceMs,
 	checkBatchSize,
 	inlineVerifyMaxBytes,
 	internalOrigin,
-	narHashFromObjectKey,
 	narInfoCacheControl,
 	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
-	orphanBlobDeletionGraceMs,
 	stagingObjectKey,
 	TextBody,
 	textResponse,
@@ -1134,9 +1136,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
-	// Drops a named cache: removes its narinfo rows (row-first, queuing the
-	// object and shared-NAR cleanup), its roots, and the registry entry, then
-	// flushes the durable queues. Returns the number of store paths removed.
+	// Drops a named cache: removes its narinfo rows (row-first, queuing each for
+	// edge retirement), its roots, and the registry entry, then flushes the deletion
+	// queue to retire the edges. The reaper later collects the now-unreferenced
+	// shared blobs. Returns the number of store paths removed.
 	private tearDownCache(cache: string, origin: string): Promise<number> {
 		return this.ctx.blockConcurrencyWhile(async () => {
 			const now = new Date().toISOString();
@@ -1185,7 +1188,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 
 			await this.flushQueuedNarInfoDeletions(origin);
-			await this.flushQueuedBlobDeletions(now);
 
 			return committed.length;
 		});
@@ -1638,8 +1640,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				}
 			}
 
-			await this.flushQueuedBlobDeletion(narObjectKey(metadata.narHash));
-
 			const existingBlob = await this.findReusableBlob(metadata.narHash);
 			const uploadId = crypto.randomUUID();
 			const now = new Date();
@@ -1790,137 +1790,125 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		const object = await this.env.BLOBS.head(narObjectKey(narHash));
 
-		if (object !== null) {
-			return existingBlob;
+		// The object is gone: do not reuse, and leave the stale `blob_state` row for
+		// the reaper to collect. A correct re-upload of the hash heals it.
+		if (object === null) {
+			return undefined;
 		}
 
-		// The object is missing. Only drop the shared fact when nothing committed
-		// still references this NAR, so a transient head miss cannot undercount a
-		// blob that live narinfos depend on.
-		if (this.narHashUnreferenced(narHash)) {
-			await this.clearBlobState(narHash);
+		// Reusing is a fresh reference, so cancel any reaper grace timer before the
+		// commit binds a new edge to the hash.
+		if (existingBlob.deleteAfter !== null) {
+			await this.d1
+				.update(d1Schema.blobState)
+				.set({ deleteAfter: sql`null` })
+				.where(eq(d1Schema.blobState.narHash, narHash))
+				.run();
 		}
 
-		return undefined;
+		return existingBlob;
 	}
 
-	private queueOrphanBlobDeletion(r2Key: string, now: string): void {
-		if (this.shouldKeepBlob(r2Key, now)) {
+	// The global blob reaper, driven by the maintenance pass. It works the shared
+	// `blob_state` facts in two bounded passes: arm every blob no live `blob_ref`
+	// references with a grace timer, then collect those whose grace has elapsed and
+	// that are still unreferenced. Returns how many shared blobs it collected.
+	private async reapBlobs(now: Date, limit: number): Promise<number> {
+		await this.armUnreferencedBlobs(now, limit);
+
+		return this.collectExpiredBlobs(now, limit);
+	}
+
+	// Arms unreferenced shared blobs with a grace timer. The cross-tenant
+	// "referenced anywhere" probe is on `blob_ref.nar_hash` (its dedicated index),
+	// not any one tenant's narinfos. Bounded: only a batch is armed per pass, and a
+	// commit that re-references a hash clears the timer it set.
+	private async armUnreferencedBlobs(now: Date, limit: number): Promise<void> {
+		const deleteAfter = new Date(
+			now.getTime() + blobReaperGraceMs
+		).toISOString();
+		const candidates = await this.d1
+			.select({ narHash: d1Schema.blobState.narHash })
+			.from(d1Schema.blobState)
+			.where(
+				and(
+					isNull(d1Schema.blobState.deleteAfter),
+					notInArray(
+						d1Schema.blobState.narHash,
+						this.d1
+							.select({ narHash: d1Schema.blobReference.narHash })
+							.from(d1Schema.blobReference)
+					)
+				)
+			)
+			.limit(limit)
+			.all();
+
+		if (candidates.length === 0) {
 			return;
 		}
 
-		this.enqueueOrphanBlobDeletion(this.db, r2Key, now, now);
-	}
-
-	// Whether an R2 object must not be reaped: a live pending upload still targets
-	// it, or — for a canonical `nar/<narHash>` object — a committed narinfo still
-	// references its hash. A shared blob exists in R2 the moment it is promoted,
-	// before any commit wins, so presence alone never keeps it; only a live
-	// reference does. A staging key is never referenced, so only a live upload
-	// holds it.
-	private shouldKeepBlob(r2Key: string, now: string): boolean {
-		if (this.hasLivePendingUpload(r2Key, now)) {
-			return true;
-		}
-
-		const narHash = narHashFromObjectKey(r2Key);
-
-		if (narHash === undefined) {
-			return false;
-		}
-
-		return !this.narHashUnreferenced(narHash);
-	}
-
-	private enqueueOrphanBlobDeletion(
-		handle: SchemaWriter,
-		r2Key: string,
-		notBefore: string,
-		now: string
-	): void {
-		// Monotonic: a delayed entry (a deliberate delete records now + grace) must
-		// never be pulled forward by a later immediate enqueue, so take the later
-		// timestamp on conflict. ISO-8601 sorts lexicographically.
-		handle
-			.insert(schema.orphanBlobDeletions)
-			.values({ r2Key, notBefore, createdAt: now })
-			.onConflictDoUpdate({
-				target: schema.orphanBlobDeletions.r2Key,
-				set: {
-					notBefore: sql`max(${schema.orphanBlobDeletions.notBefore}, excluded.not_before)`
-				}
-			})
+		await this.d1
+			.update(d1Schema.blobState)
+			.set({ deleteAfter })
+			.where(
+				and(
+					inArray(
+						d1Schema.blobState.narHash,
+						candidates.map((candidate) => candidate.narHash)
+					),
+					isNull(d1Schema.blobState.deleteAfter)
+				)
+			)
 			.run();
 	}
 
-	private async flushQueuedBlobDeletion(r2Key: string): Promise<boolean> {
-		const queued = this.db
-			.select()
-			.from(schema.orphanBlobDeletions)
-			.where(eq(schema.orphanBlobDeletions.r2Key, r2Key))
-			.get();
+	// Collects armed shared blobs whose grace has elapsed. Each is removed by a
+	// single compare-and-delete that re-checks armed, elapsed and unreferenced
+	// atomically, so a blob re-referenced or re-armed since the scan is never taken;
+	// the D1 fact is deleted before the R2 object (D1-first/R2-last), so a crash
+	// between them leaves only a harmless orphan object the next promote adopts.
+	private async collectExpiredBlobs(now: Date, limit: number): Promise<number> {
+		const nowIso = now.toISOString();
+		const expired = await this.d1
+			.select({ narHash: d1Schema.blobState.narHash })
+			.from(d1Schema.blobState)
+			.where(
+				and(
+					isNotNull(d1Schema.blobState.deleteAfter),
+					lte(d1Schema.blobState.deleteAfter, nowIso)
+				)
+			)
+			.limit(limit)
+			.all();
+		let collected = 0;
 
-		if (queued === undefined) {
-			return false;
-		}
+		for (const blob of expired) {
+			const removed = await this.d1
+				.delete(d1Schema.blobState)
+				.where(
+					and(
+						eq(d1Schema.blobState.narHash, blob.narHash),
+						isNotNull(d1Schema.blobState.deleteAfter),
+						lte(d1Schema.blobState.deleteAfter, nowIso),
+						notInArray(
+							d1Schema.blobState.narHash,
+							this.d1
+								.select({ narHash: d1Schema.blobReference.narHash })
+								.from(d1Schema.blobReference)
+						)
+					)
+				)
+				.returning({ narHash: d1Schema.blobState.narHash })
+				.all();
 
-		const now = new Date().toISOString();
-
-		return this.ctx.blockConcurrencyWhile(() =>
-			this.deleteQueuedOrphanBlob(r2Key, now)
-		);
-	}
-
-	private async flushQueuedBlobDeletions(now: string): Promise<number> {
-		const queued = this.db.select().from(schema.orphanBlobDeletions).all();
-		let deleted = 0;
-
-		for (const deletion of queued) {
-			if (await this.deleteQueuedOrphanBlob(deletion.r2Key, now)) {
-				deleted += 1;
+			if (removed.length > 0) {
+				await this.env.BLOBS.delete(narObjectKey(blob.narHash));
+				collected += 1;
 			}
 		}
 
-		return deleted;
-	}
-
-	private async deleteQueuedOrphanBlob(
-		r2Key: string,
-		now: string
-	): Promise<boolean> {
-		const queued = this.db
-			.select()
-			.from(schema.orphanBlobDeletions)
-			.where(eq(schema.orphanBlobDeletions.r2Key, r2Key))
-			.get();
-
-		if (queued === undefined) {
-			return false;
-		}
-
-		if (now < queued.notBefore) {
-			return false;
-		}
-
-		if (this.shouldKeepBlob(r2Key, now)) {
-			this.clearQueuedBlobDeletion(r2Key);
-			return false;
-		}
-
-		await this.env.BLOBS.delete(r2Key);
-
-		// Drop the shared fact alongside the canonical object, so `blob_state`
-		// never outlives the bytes it describes. A lost-race orphan recorded its
-		// fact at promotion without a referencing narinfo; this is where it goes.
-		const narHash = narHashFromObjectKey(r2Key);
-
-		if (narHash !== undefined) {
-			await this.clearBlobState(narHash);
-		}
-
-		this.clearQueuedBlobDeletion(r2Key);
-
-		return true;
+		return collected;
 	}
 
 	private enqueueNarInfoDeletion(
@@ -1991,24 +1979,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
-	// Schedules the shared blob for grace-delayed deletion when nothing committed
-	// references its hash any more, clearing the shared `blob_state` fact at the
-	// same time. Returns whether it scheduled.
-	private async scheduleBlobIfUnreferenced(narHash: string): Promise<boolean> {
-		if (!this.narHashUnreferenced(narHash)) {
-			return false;
-		}
+	// Whether no committed narinfo, in any tenant, still references this NAR hash —
+	// the "safe to reclaim" probe, on `blob_ref` (its indexed `nar_hash`) rather than
+	// any one tenant's narinfos. The reaper does the actual reclamation against
+	// `blob_state.delete_after`; a delete only reports this so a client learns its
+	// NAR became unreferenced.
+	private async blobHashUnreferenced(narHash: string): Promise<boolean> {
+		const referenced = await this.d1
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference)
+			.where(eq(d1Schema.blobReference.narHash, narHash))
+			.get();
 
-		const now = new Date();
-		await this.clearBlobState(narHash);
-		this.enqueueOrphanBlobDeletion(
-			this.db,
-			narObjectKey(narHash),
-			new Date(now.getTime() + orphanBlobDeletionGraceMs).toISOString(),
-			now.toISOString()
-		);
-
-		return true;
+		return referenced === undefined;
 	}
 
 	private clearQueuedNarInfoDeletion(
@@ -2026,16 +2009,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 			.run();
-	}
-
-	private narHashUnreferenced(narHash: string): boolean {
-		return (
-			this.db
-				.select()
-				.from(schema.narInfos)
-				.where(eq(schema.narInfos.narHash, narHash))
-				.get() === undefined
-		);
 	}
 
 	private async flushQueuedNarInfoDeletions(origin?: string): Promise<number> {
@@ -2110,7 +2083,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.get() !== undefined;
 
 		if (reCommitted) {
-			const narScheduledForDeletion = await this.scheduleBlobIfUnreferenced(
+			const narScheduledForDeletion = await this.blobHashUnreferenced(
 				queued.narHash
 			);
 			this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
@@ -2125,34 +2098,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 		}
 
-		// The object is gone, so the NAR grace can start now. Re-check references:
-		// a path may have committed the same NAR since the row was removed, so only
-		// retire the blob when it is genuinely unreferenced.
-		const narScheduledForDeletion = await this.scheduleBlobIfUnreferenced(
+		// Report whether the NAR is now unreferenced (the reaper will reclaim it).
+		// Re-check against the live edges: a path may have committed the same NAR
+		// since the row was removed.
+		const narScheduledForDeletion = await this.blobHashUnreferenced(
 			queued.narHash
 		);
 
 		this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
 
 		return { objectDeleted: true, narScheduledForDeletion };
-	}
-
-	private hasLivePendingUpload(r2Key: string, now: string): boolean {
-		return (
-			this.db
-				.select()
-				.from(schema.pendingUploads)
-				.where(
-					and(
-						eq(schema.pendingUploads.r2Key, r2Key),
-						or(
-							gte(schema.pendingUploads.expiresAt, now),
-							eq(schema.pendingUploads.verdict, 'pending')
-						)
-					)
-				)
-				.get() !== undefined
-		);
 	}
 
 	private async handleCommit(
@@ -2305,7 +2260,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
 
 		if (reserved.kind !== 'reserved') {
-			return this.concedeToWinner(cache, uploadId, metadata, stagingKey, false);
+			return this.concedeToWinner(cache, uploadId, metadata, stagingKey);
 		}
 
 		// A returned `{ok:false}` is a definitive content failure (a mismatch or
@@ -2340,7 +2295,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 
 		if (outcome !== 'materialised') {
-			return this.concedeToWinner(cache, uploadId, metadata, stagingKey, true);
+			return this.concedeToWinner(cache, uploadId, metadata, stagingKey);
 		}
 
 		await this.env.BLOBS.delete(stagingKey);
@@ -2367,13 +2322,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
 
 		if (reserved.kind !== 'reserved') {
-			return this.concedeToWinner(
-				cache,
-				uploadId,
-				metadata,
-				canonicalKey,
-				false
-			);
+			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
 
 		const outcome = await this.ctx.blockConcurrencyWhile(() =>
@@ -2389,13 +2338,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 
 		if (outcome === 'superseded') {
-			return this.concedeToWinner(
-				cache,
-				uploadId,
-				metadata,
-				canonicalKey,
-				false
-			);
+			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
 
 		await this.ctx.blockConcurrencyWhile(() =>
@@ -2411,25 +2354,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		throw new UploadedObjectNotFoundError(canonicalKey);
 	}
 
-	// Answers a commit that lost its narinfo to a concurrent winner. Optionally
-	// queues the blob this upload promoted for orphan deletion (self-guarded, so a
-	// blob the winner legitimately references is left alone), ensures the winner's
-	// object is materialised, reclaims the staging object, and reports already-present
-	// with the winner's narHash.
+	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
+	// winner's object is materialised, reclaims this upload's staging object, and
+	// reports already-present with the winner's narHash. Any blob this upload
+	// promoted but no edge now references is left for the reaper to collect.
 	private async concedeToWinner(
 		cache: string,
 		uploadId: string,
 		metadata: UploadPathMetadataFields,
-		stagingKey: string,
-		promoted: boolean
+		stagingKey: string
 	): Promise<Response> {
-		if (promoted) {
-			this.queueOrphanBlobDeletion(
-				narObjectKey(metadata.narHash),
-				new Date().toISOString()
-			);
-		}
-
 		const winner = await this.committedNarInfoRow(
 			cache,
 			metadata.storePathHash
@@ -2469,7 +2403,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// Record the shared fact together with the object, so `blob_state` exists
 		// exactly when the canonical R2 object does. The first writer for a hash
-		// fixes the metadata; a concurrent or repeated promotion keeps it.
+		// fixes the metadata; a concurrent or repeated promotion keeps it, but clears
+		// any reaper grace timer, since promoting is a fresh reference to the hash.
 		await this.d1
 			.insert(d1Schema.blobState)
 			.values({
@@ -2480,7 +2415,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				narSize: metadata.narSize,
 				verifiedAt: new Date().toISOString()
 			})
-			.onConflictDoNothing()
+			.onConflictDoUpdate({
+				target: d1Schema.blobState.narHash,
+				set: { deleteAfter: sql`null` }
+			})
 			.run();
 
 		return canonical;
@@ -2900,8 +2838,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.where(reapable)
 				.all();
 
+			// An abandoned upload's private staging object is reclaimed directly; a
+			// reuse upload's r2Key is the shared canonical key, which the reaper owns,
+			// so it is left alone.
 			for (const upload of expiredUploads) {
-				this.queueOrphanBlobDeletion(upload.r2Key, now);
+				if (upload.r2Key !== narObjectKey(upload.narHash)) {
+					await this.env.BLOBS.delete(upload.r2Key);
+				}
 			}
 
 			this.db.delete(schema.pendingUploads).where(reapable).run();
@@ -2931,7 +2874,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				rootsExpired,
 				pathsSwept,
 				narInfosDeleted: await this.flushQueuedNarInfoDeletions(purgeOrigin),
-				blobsDeleted: await this.flushQueuedBlobDeletions(now)
+				blobsDeleted: await this.reapBlobs(new Date(now), blobReaperBatchSize)
 			};
 		});
 	}
@@ -3125,6 +3068,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				fileSize: blob.fileSize
 			})
 			.onConflictDoNothing()
+			.run();
+
+		// Clear any reaper grace timer: writing the edge is a fresh reference, so a
+		// reuse commit (which does not promote) and any commit racing the reaper both
+		// keep the shared blob alive.
+		await this.d1
+			.update(d1Schema.blobState)
+			.set({ deleteAfter: sql`null` })
+			.where(eq(d1Schema.blobState.narHash, metadata.narHash))
 			.run();
 
 		await this.putNarInfoObject(cache, metadata.storePathHash, narInfo);
@@ -3358,15 +3310,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				pending.id
 			);
 
-			// A concurrent recommit took the path or the blob vanished: the canonical
-			// object just promoted may now be unreferenced, and this upload lost.
-			// Enqueue the blob for orphan deletion (self-guarded, so a blob a live
-			// narinfo references is untouched) and clear the marker.
+			// A concurrent recommit took the path or the blob vanished, so this upload
+			// lost: clear its marker. Any blob it promoted that no edge now references
+			// is left for the reaper to collect.
 			if (outcome !== 'materialised') {
-				this.queueOrphanBlobDeletion(
-					narObjectKey(metadata.narHash),
-					new Date().toISOString()
-				);
 				this.clearPendingUpload(pending.id);
 			}
 
@@ -3524,20 +3471,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			return { storePathHash, deleted: true, narScheduledForDeletion };
 		});
-	}
-
-	private async clearBlobState(narHash: string): Promise<void> {
-		await this.d1
-			.delete(d1Schema.blobState)
-			.where(eq(d1Schema.blobState.narHash, narHash))
-			.run();
-	}
-
-	private clearQueuedBlobDeletion(r2Key: string): void {
-		this.db
-			.delete(schema.orphanBlobDeletions)
-			.where(eq(schema.orphanBlobDeletions.r2Key, r2Key))
-			.run();
 	}
 
 	private loadedKeys(): Promise<readonly SigningKey[]> {
