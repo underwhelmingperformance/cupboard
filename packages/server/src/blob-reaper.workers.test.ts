@@ -4,10 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { narObjectKey } from './http.ts';
 import {
 	afterGrace,
+	blobReferenceRows,
 	blobStateNarHashes,
 	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
+	deleteBlobState,
 	deletePath,
 	deleteTestBase,
 	fetchNarInfo,
@@ -103,6 +105,57 @@ describe('blob reaper', () => {
 		vi.setSystemTime(afterGrace());
 		await runGc();
 
+		const served = await fetchNarInfo(second.storePathHash);
+
+		expect({
+			narHash: served.narHash,
+			blobState: await blobStateNarHashes(),
+			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
+		}).toStrictEqual({
+			narHash: nar.narHash,
+			blobState: [{ narHash: nar.narHash }],
+			blobPresent: true
+		});
+	});
+
+	it('re-promotes onto an orphan object whose blob_state was reaped mid-collection', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reaper-adopt');
+		const first = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			name: 'first',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const second = uploadMetadata({
+			storePathHash: 'b'.repeat(32),
+			name: 'second',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		await commitPath(token, first, nar);
+		await deletePath(token, first.storePathHash);
+
+		// The residue of a reaper that deleted the `blob_state` fact (D1-first) but
+		// crashed before the R2 delete: an orphan object, no fact, no edge.
+		await deleteBlobState(nar.narHash);
+
+		expect({
+			edges: await blobReferenceRows(),
+			blobState: await blobStateNarHashes(),
+			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
+		}).toStrictEqual({ edges: [], blobState: [], blobPresent: true });
+
+		// A fresh commit of the same hash re-promotes, adopting the orphan object and
+		// re-recording its fact, so the path serves.
+		await commitPath(token, second, nar);
 		const served = await fetchNarInfo(second.storePathHash);
 
 		expect({
