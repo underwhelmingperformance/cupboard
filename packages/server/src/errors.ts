@@ -59,6 +59,24 @@ export class LastSigningKeyError extends ServerHttpError {
 	}
 }
 
+export class ControlWrappingKeyInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly byteLength: number) {
+		super('Control key-wrapping secret is not a 32-byte base64 key');
+		this.name = 'ControlWrappingKeyInvalidError';
+	}
+}
+
+export class ControlWrappedKeyMalformedError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('Stored control signing key could not be unwrapped');
+		this.name = 'ControlWrappedKeyMalformedError';
+	}
+}
+
 export class LastAuthKeyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
