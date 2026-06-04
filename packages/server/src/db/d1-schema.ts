@@ -59,6 +59,21 @@ export const blobReference = sqliteTable(
 	]
 );
 
+// The control-plane signing key set, held in D1 so the stateless Worker can mint
+// and rotate control tokens (which authorise global-admin operations). Only the
+// public metadata and the *wrapped* private JWK live here; the wrapping secret is
+// Worker-only (see control-key.ts), so a tenant Durable Object that can read this
+// table — D1 is database-wide — still cannot recover a key. `retired_at` is NULL
+// while a key still verifies; the newest non-retired key is the one that mints.
+export const controlAuthKey = sqliteTable('control_auth_key', {
+	id: text('id').primaryKey(),
+	kid: text('kid').notNull(),
+	publicJwkJson: text('public_jwk_json').notNull(),
+	wrappedPrivateJwk: text('wrapped_private_jwk').notNull(),
+	createdAt: text('created_at').notNull(),
+	retiredAt: text('retired_at')
+});
+
 // Per-tenant unique-blob presence: a tenant references this NAR hash via at least
 // one live narinfo version. Maintained by the tenant's DO on the 0↔1 edge
 // transition; `file_size` is the tenant's verified stored bytes, the basis for

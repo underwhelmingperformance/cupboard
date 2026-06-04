@@ -59,6 +59,24 @@ export class LastSigningKeyError extends ServerHttpError {
 	}
 }
 
+export class LastControlKeyError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly kid: string) {
+		super('Cannot retire the last control signing key');
+		this.name = 'LastControlKeyError';
+	}
+}
+
+export class ControlKeyMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('No control signing key is available');
+		this.name = 'ControlKeyMissingError';
+	}
+}
+
 export class ControlWrappingKeyInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

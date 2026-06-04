@@ -3,7 +3,12 @@ import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/d1';
 import { beforeEach } from 'vitest';
 
-import { blobReference, blobState, tenantBlob } from './db/d1-schema.ts';
+import {
+	blobReference,
+	blobState,
+	controlAuthKey,
+	tenantBlob
+} from './db/d1-schema.ts';
 
 // `TEST_MIGRATIONS` is typed in test-env.d.ts; vitest.config.ts supplies its
 // value, and production applies the same files with `wrangler d1 migrations apply`.
@@ -22,4 +27,5 @@ beforeEach(async () => {
 	await database.delete(blobReference).run();
 	await database.delete(tenantBlob).run();
 	await database.delete(blobState).run();
+	await database.delete(controlAuthKey).run();
 });
