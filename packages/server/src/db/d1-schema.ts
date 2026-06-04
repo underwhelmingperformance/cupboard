@@ -12,14 +12,24 @@ import {
 // the canonical compressed metadata a servable narinfo advertises. Only positive
 // facts are recorded — a mismatch is kept on the per-upload record, never here —
 // so one tenant's bad upload can never poison a hash for everyone.
-export const blobState = sqliteTable('blob_state', {
-	narHash: text('nar_hash').primaryKey(),
-	fileHash: text('file_hash').notNull(),
-	fileSize: integer('file_size').notNull(),
-	compression: text('compression', { enum: ['zstd'] }).notNull(),
-	narSize: integer('nar_size').notNull(),
-	verifiedAt: text('verified_at').notNull()
-});
+export const blobState = sqliteTable(
+	'blob_state',
+	{
+		narHash: text('nar_hash').primaryKey(),
+		fileHash: text('file_hash').notNull(),
+		fileSize: integer('file_size').notNull(),
+		compression: text('compression', { enum: ['zstd'] }).notNull(),
+		narSize: integer('nar_size').notNull(),
+		verifiedAt: text('verified_at').notNull(),
+		// The reaper's grace timer. The arm pass sets it to `now + grace` once no
+		// `blob_ref` references this hash; a commit that re-references the hash
+		// (promote or reuse) clears it back to NULL; the collect pass deletes the row
+		// and the shared object once it has elapsed and the hash is still
+		// unreferenced. NULL means live, or not yet armed.
+		deleteAfter: text('delete_after')
+	},
+	(table) => [index('blob_state_delete_after_idx').on(table.deleteAfter)]
+);
 
 // One row per narinfo version: the source-of-truth reference edge from a tenant's
 // committed narinfo to the shared NAR hash it points at. `generation` is part of

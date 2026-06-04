@@ -15,6 +15,13 @@
 			"when": 1780574294155,
 			"tag": "0001_blob_ref_tenant_blob",
 			"breakpoints": true
+		},
+		{
+			"idx": 2,
+			"version": "6",
+			"when": 1780591590411,
+			"tag": "0002_blob_state_delete_after",
+			"breakpoints": true
 		}
 	]
 }
