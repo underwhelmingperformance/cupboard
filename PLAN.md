@@ -1009,16 +1009,25 @@ Settled decisions:
 
 ### Invariants
 
-- **Servability coherence.** A tenant serves a narinfo only when all of these
-  hold: its registry row is active; its per-narinfo reference edge exists; the
-  blob's global `blob_state` is `available`; the shared R2 object exists. There
-  is no legacy or unverified carve-out.
+- **Servability coherence, in two layers.** The serve-time gate is exactly what
+  the read path checks: the materialised tenant narinfo R2 object exists (plus
+  admission and `readMode` auth at the edge). Reads run Worker to R2 and the
+  Cache API and never consult D1 or the DO, so this gate is eventually
+  consistent with control state, bounded by the narinfo TTL and edge cache. The
+  commit-time/maintenance invariant is that a narinfo R2 object is materialised
+  only after the registry row is active, the per-narinfo edge exists,
+  `blob_state` is `available`, and the shared R2 object exists — and is
+  de-materialised (object deleted, cache purged) by the owning DO when any of
+  those ceases. No legacy or unverified carve-out.
 - **Per-narinfo identity and replay safety.** There is no atomic transaction
   across DO SQLite, D1, and R2. Every cross-store mutation is keyed by
   per-narinfo identity `(tenant, cache, storePathHash, generation)`, never by an
-  aggregate counter. Replayed increments and decrements are idempotent by
-  primary key, cross-store steps are ordered to fail safe, and durable phase
-  markers drive repair.
+  aggregate counter, with `generation` from a durable per-store-path counter
+  that survives deletion. Replayed increments and decrements are idempotent by
+  primary key, commit and delete are both ordered row-first/edge-last to fail
+  safe, and a named, bounded, DO-owned repair pass drives every half-finished
+  saga from its durable phase markers to a terminal state. There is no
+  leaked-edge-forever direction.
 - **Control-plane separation.** The control plane is its own OAuth issuer with
   its own signing-key lifecycle, separate from every tenant issuer.
 
@@ -1034,8 +1043,15 @@ The bare host serves only the control surface: health/version, control-plane
 auth, admin/signup routes, and the global-admin bootstrap. It serves no cache
 content. Each tenant is one `CupboardServer` DO addressed by
 `idFromName(<tenant>)`. Per-tenant signing and auth keys live in that DO's
-SQLite database. A tenant's DO is the single writer for that tenant's D1 rows,
-serialising its accounting transitions.
+SQLite database. A tenant's DO is the single writer for that tenant's
+`blob_ref`/`tenant_blob` rows, serialising its accounting transitions (including
+offboarding, which deletes those rows through the DO, not from the Worker). This
+is per-table, not blanket: `blob_state` is shared and multi-writer (any tenant
+DO at promote, the Worker reaper for `delete_after` and collection); the tenant
+DO writes its own `tenant_usage` counters (`bytes`/`narinfos`/`blobs`, where it
+charges and credits quota) while the Worker writes only that row's quota
+configuration (`quota_bytes`) — disjoint columns, no write conflict; and the
+Worker owns `tenant`, `control_*`, and `global_admin`.
 
 ### Control plane
 
@@ -1046,33 +1062,58 @@ global blob reaper.
 Global state lives in a new D1 database (`CUPBOARD_DB`). D1 is transactional,
 enumerable, readable by the Worker and DOs, and not on the public read hot path.
 It holds the tenant registry, per-narinfo reference edges, the available blob
-set, control-plane signing keys, the global-admin record, and per-tenant
-usage/quota.
+set, control-plane public key metadata (the private control key lives in a
+Worker-only store), the global-admin record, and per-tenant usage/quota.
 
 Admission resolves `/t/<slug>/` against a cached, versioned manifest in KV
 (`TENANT_CACHE`), revalidated against a tiny `tenant-manifest:version` key at
 most once per short interval. A slug absent from the manifest is rejected before
 any DO is instantiated; otherwise varying the slug could create unbounded,
-unprovisioned DOs. Unauthenticated control routes return 404 to avoid a control
-surface tenant-existence oracle. Public cache reads can still reveal a slug once
-content is known, which is acceptable.
+unprovisioned DOs. Each manifest record carries
+`{ status, readMode, configVersion }` and, for private tenants, a per-tenant
+read verifier (a hashed credential, never a DO signing key — plaintext secrets
+stay out of KV). The manifest is therefore the single read-path authority for
+tenancy state: `handleRead` enforces `readMode` from the already-loaded entry
+with no D1 or DO read on the GET path. Unauthenticated control routes return 404
+to avoid a control surface tenant-existence oracle. Public cache reads can still
+reveal a slug once content is known, which is acceptable.
+
+Manifest publication is an ordered D1-then-KV saga (no shared transaction):
+provisioning writes the authoritative D1 `tenant` row first, then the full
+manifest body under a version-suffixed immutable key (`manifest:<version>`),
+then bumps `tenant-manifest:version` last as the commit point. Reading version N
+fetches either the complete body for N or a KV miss, never a stale body
+mislabelled N; a colo falls back to last-known-good. KV cross-colo propagation
+bounds provisioning visibility.
 
 Suspension and offboarding semantics are: immediate write stop, eventual read
-stop. Write and admin paths re-check status authoritatively in D1 or the DO, so
-suspension halts writes at once. Reads stop after the KV manifest TTL. Immediate
-read-stop for a tenant means invalidating or short-TTLing its manifest entry at
-a hot-path consistency cost; the default accepts eventual read-stop.
+stop. The Worker performs an authoritative D1 `tenant.status` read before
+dispatching any write or admin RPC (writes are not the hot path, so the read is
+affordable); the KV manifest governs only read routing. "Immediate" means no new
+write/admin request is admitted once suspension is durable in D1; a request
+already in flight to a warm DO may still complete (a bounded TOCTOU). Reads stop
+after the KV manifest TTL. Immediate read-stop means invalidating or
+short-TTLing the manifest entry at a hot-path consistency cost, which the
+default declines.
 
 ### Control-plane authentication
 
 The bare-host control surface has its own auth. Per-tenant `auth_key` rows live
 in tenant DO SQLite and cannot sign global-admin tokens. The Worker is
-stateless, so control-plane keys live in D1:
+stateless, so control-plane key material is persisted outside it — but its
+**private** part must be reachable only by the Worker, never by a tenant DO:
 
-- `control_auth_key(id, kid, private_jwk, public_jwk, created_at, retired_at)`
-  is the rotatable control key set. V5 stores the private JWK in D1, treating
-  the D1 database as the control-plane secret store, matching tenant-key
-  storage. Envelope wrapping can be a later hardening phase.
+- `control_auth_key` is the rotatable control key set. Only its **public** key
+  metadata (`id`, `kid`, `public_jwk`, `created_at`, `retired_at`) lives in
+  `CUPBOARD_DB`, so the Worker can publish the control JWKS. The **private JWK
+  lives in a Worker-only store** (a separate binding or a Workers secret), never
+  in `CUPBOARD_DB`: the Worker mints control tokens, so the DO never needs it,
+  yet every `CupboardServer` DO binds `CUPBOARD_DB`. A `D1Database` binding is
+  database-wide and DO code can issue arbitrary SQL regardless of its Drizzle
+  schema object, so "omit the table from the DO's schema" is security theatre.
+  Use a separate binding or a Workers secret bound only to the Worker
+  (strongest), or envelope-wrap the private JWK with a Worker-only key —
+  established in step 3, not deferred.
 - The control issuer is the bare host origin; the control audience is the
   control client id. Bare `/.well-known/jwks.json` publishes the control public
   keys. `/t/<tenant>/.well-known/jwks.json` publishes that tenant's keys.
@@ -1099,7 +1140,18 @@ login: issuer and public client id. The first principal to authenticate and call
 the claim endpoint is promoted to global admin by a first-writer-wins insert
 into D1 (`global_admin` singleton, unique constraint). The claim also seeds the
 control trust policy, pinning that principal's `iss`, `sub`, and `aud`, after
-which `/token` works as above.
+which `/token` works as above. The Worker verifies the deploy-configured gate
+(the single-use claim secret or the pinned `(issuer, subject)`) first; then the
+`global_admin` insert, the `control_trust` seed, and recording claim consumption
+are one atomic D1 batch. Single-use is enforced by a D1 record, not by mutating
+an env secret (an env secret cannot be "consumed"): the first-writer-wins
+`global_admin` row is the consumption marker. A second claim by a **different**
+principal is **refused** (the row already exists); a re-claim by the **same**
+principal is idempotent and returns the existing claim state. The atomicity
+matters because otherwise a crash between the writes leaves `global_admin`
+claimed but `control_trust` empty (no rule matches, so `/token` can never mint
+an admin token) — a permanently un-administerable deployment. This is the only
+irreversible bootstrap transition.
 
 The claim gate is required in hosted mode. The claimant must satisfy either a
 single-use claim secret or a pinned `(issuer, subject)`. With neither
@@ -1142,11 +1194,24 @@ References are rows, not aggregate counters:
   )
   ```
 
-  The `generation` comes from the narinfo row and is bumped on every recommit.
   The edge identifies the exact narinfo version that created it, never "the
   current edge for this store path". Commit uses `INSERT OR IGNORE`; deletion
   targets the captured generation only, so stale deletion replay cannot remove a
-  newer recommitted edge, even if it has the same `nar_hash`.
+  newer recommitted edge, even if it has the same `nar_hash`. `blob_ref` carries
+  a **secondary index on `nar_hash`** (mandatory): the reaper's reference probe
+  is on `nar_hash`, a non-key column, so without it the probe is a full-fleet
+  table scan that stalls the reaper and leaks blobs at scale.
+
+- `generation` has a **durable, strictly-increasing source per
+  `(cache, store_path_hash)` that survives deletion** — a
+  `generation_seq(cache, store_path_hash, next_generation)` row in DO SQLite,
+  advanced at commit and never reset by delete or offboarding. Sourcing it from
+  the narinfo row (which delete removes) or `max(blob_ref.generation)` (which
+  delete drains) resets to 1 and lets a stale deletion match a
+  freshly-recommitted same-`nar_hash` edge, silently reaping a servable
+  narinfo's blob — and reproducible builds make same-`nar_hash` recommit the
+  norm. Lifetime-monotonicity is what makes both compare-and-delete and
+  `INSERT OR IGNORE` idempotency hold.
 
 - `tenant_blob(tenant, nar_hash, file_size, PK(tenant, nar_hash))` is the
   derived fact that a tenant references a blob via at least one live narinfo
@@ -1189,54 +1254,111 @@ Counts and usage are derived from edges:
 - unique blobs: `COUNT(tenant_blob)` for a tenant;
 - bytes: `SUM(tenant_blob.file_size)`.
 
-Quota is charged once per tenant per unique `nar_hash`, using stored compressed
-bytes (`file_size`), not uncompressed `nar_size`. A user comparing quota with
-Nix's uncompressed NAR size will see a difference. The charge happens on the
-`tenant_blob` 0-to-1 transition.
+Quota (which lands in step 6; step 2 builds the edge/presence machinery without
+the charge) is charged once per tenant per unique `nar_hash` on the tenant's own
+verified staged `file_size`, so `SUM(tenant_blob.file_size)` equals
+`tenant_usage` exactly. Two tenants may be charged different sizes for the same
+hash when their encodings differ — a benign dedup-at-rest property; each pays
+for the bytes it transmitted. A user comparing quota with Nix's uncompressed NAR
+size will see a difference (the charge is the compressed `file_size`, not
+`nar_size`).
 
-A bare `UPDATE ... WHERE bytes + :file_size <= quota_bytes` does not self-abort:
-an update matching zero rows is not an error in D1. The quota path uses a
-reserve-then-commit shape in typed application code. The tenant DO is the single
-writer for that tenant, so it runs the reservation update
-(`SET bytes = bytes + :file_size WHERE tenant = :t AND bytes + :file_size <= quota_bytes`),
-inspects rows affected, and writes the `blob_ref`/`tenant_blob` edge only if it
-reserved. A zero-row reservation rejects the commit. This keeps the quota
-decision visible and testable rather than hidden in a database trigger.
-`tenant_usage` is the authoritative quota counter; cron roll-up is
-reconciliation and audit.
+The charge is idempotent because it is gated on the `tenant_blob` 0-to-1
+`INSERT OR IGNORE` actually inserting (`changes()`-derived), not on a standalone
+increment update, so a replayed reservation cannot double-charge. The
+reservation, the `blob_ref`/`tenant_blob` edges, and the charge are one atomic
+D1 batch: an over-quota reservation makes the whole batch reject, so no edge and
+no charge are ever stranded. Credit is symmetric on the 1-to-0 transition,
+driven by the DO. `tenant_usage` is the authoritative quota counter; cron
+roll-up is reconciliation and audit.
+
+The "single writer per tenant's D1 rows" rule is per-table. `blob_ref` and
+`tenant_blob`: the owning tenant DO only. `blob_state`: multi-writer — any
+tenant DO inserts/clears it at promote, and the Worker reaper arms
+`delete_after` and collects; the DO-versus-reaper conflict is resolved at the
+D1-row level (the `delete_after IS NOT NULL` guard makes promote/reuse clears
+and reaper deletes mutually exclusive). `tenant_usage` is split by column: the
+tenant DO writes the usage counters (`bytes`/`narinfos`/`blobs`), the Worker
+writes only `quota_bytes` (admin config) — disjoint, so no conflict. Offboarding
+deletes a tenant's edge rows through that tenant's DO, never directly from the
+Worker.
 
 Per-tenant reachability GC stays in each DO. Sweeping a narinfo deletes the
 matching `blob_ref` row and, on the tenant's last live reference to a `narHash`,
-its `tenant_blob` row and quota charge. The global reaper deletes a shared blob
-only when no `blob_ref` row anywhere references its `narHash` and
-`now >= delete_after`, with a grace window at least as long as the maximum
-narinfo TTL plus margin. The reaper re-checks in the deleting transaction; a
-recommit within the window clears `delete_after`.
+its `tenant_blob` row and quota charge. The global reaper (Worker cron) is the
+only actor that sees all tenants' edges, so it alone arms and acts on
+`delete_after`, in two cursored, bounded passes over `blob_state` (its own
+persisted cursor, distinct from the cron fan-out cursor):
+
+1. **Arm**: set `delete_after = now + grace` where
+   `delete_after IS NULL AND NOT EXISTS(blob_ref ... nar_hash)` (the indexed
+   probe). Nothing else sets `delete_after`; as previously written (no setter,
+   `now >= NULL` falsy) the reaper could never fire and every blob leaked.
+2. **Collect** (after grace): for each candidate, one conditional D1 delete
+   re-checking
+   `NOT EXISTS(blob_ref ...) AND delete_after IS NOT NULL AND now >= delete_after`;
+   then delete the R2 object after the D1 `blob_state` delete commits (D1-first,
+   R2-last), so crash residue is a harmless orphan object the next promote
+   adopts, never an "available but no object" stranding.
+
+`delete_after` is cleared to NULL by both paths that re-reference a hash:
+promote (`ON CONFLICT DO UPDATE SET delete_after = NULL`) and reuse-commit (an
+explicit update in the same batch as its edge insert — reuse does no promote, so
+this is mandatory). The grace is the single deployment-wide
+`narinfo TTL + margin` (one TTL constant, preserved from V3). The reaper also
+runs a demote pass — it, not the per-DO verify pass, is the only actor that can
+scan global `blob_state` — walking `blob_state` by cursor, heading the canonical
+object, and on confirmed absence (same in-transaction re-check) deleting the
+`blob_state` row. `findReusableBlob`'s reference check queries `blob_ref` across
+tenants, not the local DO's `narInfos`.
 
 ### Cross-store ordering
 
-Commit is edge-first and servable-last. It fails safe toward a leaked edge,
-never a servable narinfo without its blob:
+Every commit and delete is a saga ordered so a crash leaves a convergent state a
+bounded repair pass drives to completion — never a servable narinfo without its
+blob, and never a permanently leaked blob or quota charge.
+
+Commit is row-first and edge-last. (The earlier edge-first sketch was unsafe: an
+edge written before the row is, to the reaper, a live reference, so a crash
+before the row pinned the blob and its quota charge forever with nothing to
+sweep it.) Servability is the materialised R2 narinfo object — there is **no
+`servable` flag, in any step**. "Not yet servable" is encoded by the narinfo row
+existing without its R2 object, and in-flight/failed status lives in
+`pending_upload.verdict`; a stored flag is never needed. (Recorded deviation
+from the original "track servability per narinfo".) The ordering below is
+uniform across step 2 and step 6 — step 6 only adds the quota check and charge
+at the points marked, never a flag or a pre-verify reservation:
 
 1. The client uploads the compressed blob to a per-tenant staging key; R2
    verifies the compressed `fileHash` checksum.
-2. The DO picks the next generation for the store path and runs the D1
-   reservation first: insert `blob_ref`, upsert `tenant_blob`, and reserve
-   quota. If quota aborts, commit is rejected before any DO narinfo row exists.
-3. On reservation success, the DO writes the narinfo row at that generation as
-   not servable. A crash between the edge and the row leaks an edge, which is
-   the safe direction and is swept by repair.
-4. The server verifies the staging object, inline for small blobs and in the
+2. (Step 6, first: a cheap **read-only pre-verify quota check** runs **before
+   any write** — if the tenant is clearly over quota the commit is rejected here
+   having written nothing, no row and no `generation_seq` advance, and the
+   staging object is reclaimed; it is advisory, not the authority.) The DO then
+   advances `generation_seq` and writes the narinfo row at that generation, not
+   yet servable (no R2 object materialised).
+3. The server verifies the staging object, inline for small blobs and in the
    background for large blobs.
-5. On a hash match, the server ensures the shared R2 object exists, promotes the
-   staging object if needed, and inserts the `blob_state` row.
-6. Only then does it flip the narinfo servable and materialise the tenant
-   narinfo object.
+4. On a hash match, the server ensures the shared R2 object exists, promotes the
+   staging object if needed, and upserts the `blob_state` row (clearing any
+   `delete_after`).
+5. The DO reserves in one atomic D1 batch: `blob_ref` (`INSERT OR IGNORE`),
+   `tenant_blob` upsert, and (step 6) the **authoritative** conditional quota
+   charge gated on the `tenant_blob` 0-to-1 insert (idempotent). An over-quota
+   batch rejects; the narinfo row is reclaimed (it has no R2 object yet) and the
+   staging is reclaimed.
+6. Only then does it materialise the tenant narinfo object (servable).
 
-A recommit of an existing store path uses a new generation: reserve the new
-edge, write/verify/flip the new narinfo, then retire the old-generation edge
-through the deletion machinery. A stale deletion for the old generation can only
-remove the old edge.
+A crash before step 6 leaves a not-servable narinfo row (and, before step 5, no
+D1 footprint at all) that the per-DO sweep reclaims; the reaper never sees an
+edge without a row. A recommit is an explicit read-then-transition: read the
+live narinfo; an identical-content re-push is idempotent and does not bump
+`generation_seq`; differing content advances `generation_seq`, updates +
+re-signs + re-materialises the narinfo in one DO critical section, reserves the
+new-generation edge, then retires the old-generation edge through the deletion
+machinery — so a stale deletion of the old generation can only remove the old
+edge. (Today's `handleCommit` short-circuits an existing row to
+`already-present`; recommit replaces that with this content-keyed transition.)
 
 Delete is row-first and edge-last. `narinfo_deletion` carries phase markers
 (`row_deleted_at`, `blob_ref_decremented_at`, `object_deleted_at`) keyed by
@@ -1247,11 +1369,46 @@ narinfo row and R2 narinfo object first, then deletes the captured-generation
 `blob_ref` edge and updates `tenant_blob`/quota when this was the tenant's last
 live reference.
 
+Repair is the saga driver, owned by the tenant DO (the single writer of both its
+`narinfo_deletion` markers and its D1 edges) and driven by the existing
+`runGarbageCollection`/`runVerification` pass, bounded by the verification
+cursor: it enumerates `narinfo_deletion` rows whose phase markers are not all
+set and advances the remaining phases (decrement the captured-generation edge,
+reverse `tenant_blob`/credit on the last reference, delete the marker),
+idempotent because each step is compare-and-delete on the captured
+`(nar_hash, generation)`. A `blob_ref` edge whose narinfo row is absent is
+reconciled only by the owning DO's re-drive; the reaper never deletes edges.
+With row-first commit there is no commit-side rollback saga: a crashed commit is
+just a not-servable narinfo the sweep removes.
+
+Because there is no `servable` flag in any step, "not-servable" is not a stored
+bit — the final serve predicate is simply that the materialised R2 narinfo
+object exists (plus admission/`readMode` at the edge). The sweep classifies a
+narinfo row by its R2 object, edge, and `blob_state`. A row whose R2 narinfo
+object is missing is in-flight or stranded and is resolved by the rest of the
+saga state: (a) no live edge, no `blob_state`, and no live `pending_upload`
+means a crashed pre-reservation commit — reclaim the row; (b) a live edge plus
+`available` `blob_state` but no R2 object means a crashed pre-materialise commit
+or a demote heal — re-materialise the object (servable); (c) a live
+`pending_upload` (`verdict = 'pending'`) means it is still verifying — leave it
+for the verify pass. A row whose R2 object exists is already servable.
+Servability is thus a derivable predicate, not prose.
+
+A reuse commit (no staging to re-promote) re-heads the canonical object at
+commit and returns a clean, attributable error if it is gone, before writing the
+narinfo or the edge — so a reaper that collected the object in the
+negotiate-to-commit window forces a re-negotiate-and-upload, never a dangling
+narinfo. After inserting its edge and clearing `delete_after`, the reuse path
+re-reads `blob_state` and fails (forcing re-upload) if the row was concurrently
+reaped.
+
 If the canonical shared object disappears while `blob_state` says `available`,
-there is no staging copy to heal from. The background verify pass demotes the
-blob by removing `blob_state`, which makes every referencing narinfo
-non-servable until a tenant re-uploads and re-promotes the bytes. Any tenant's
-correct re-upload can heal it.
+the global reaper's demote pass (not the per-DO verify pass, which cannot scan
+global `blob_state`) removes the `blob_state` row. Because the read path serves
+from the materialised narinfo R2 object and never from `blob_state`, demotion
+also removes or short-TTLs the referencing narinfos' R2 objects and purges the
+edge cache, routed through each owning tenant DO's repair queue; removing
+`blob_state` alone stops no read. Any tenant's correct re-upload heals it.
 
 ### Existence-oracle defence
 
@@ -1284,8 +1441,14 @@ only the compressed `fileHash`. V5 verifies the uncompressed NAR server-side.
 - The runtime spike sets two named config defaults: `inlineVerifyMaxBytes` and
   `verifiableMaxBytes`. The benchmark search starts around a 10-20 GiB
   verifiable cap. Until the spike runs on the operator's account these ship
-  PROVISIONAL (the mechanism is correct at any values); the spike then replaces
-  them with the measured values from the real Workers runtime.
+  PROVISIONAL but conservative and fail-safe — not "correct at any value", since
+  a too-large inline threshold can still blow the CPU or memory budget. The
+  provisional `inlineVerifyMaxBytes` is small (a few MiB, within budget) and
+  `verifiableMaxBytes` is set so large/background verification is effectively
+  disabled: blobs above the conservative inline bound are rejected at commit
+  rather than accepted unverified or deferred to an unmeasured background pass.
+  The spike then replaces both with measured values from the real Workers
+  runtime.
 - Blobs at or below `inlineVerifyMaxBytes` verify synchronously at commit and
   become immediately servable. Larger blobs go pending and verify in the
   background pass. A blob whose declared NAR size exceeds `verifiableMaxBytes`
@@ -1306,43 +1469,111 @@ with pending blobs for CI that does not need to block. A root update activates
 only once all its target narinfos are available, so a root never advertises an
 unservable path.
 
+`push --wait` polls an explicit status query keyed by `uploadId` (which the
+client already holds, avoiding a path-to-upload mapping); root-activation asks
+the tenant DO, by `(cache, storePathHash)`, for the **same availability
+predicate as serving** — the materialised tenant narinfo R2 object exists (which
+the DO's classifier confirms only when the edge exists, `blob_state` is
+`available`, and the shared R2 blob is present, repairing if needed). It must
+**not** activate on narinfo-row + `blob_state` alone: a root would then
+advertise a path whose tenant narinfo object is not yet materialised — an
+unservable path. Root-activation and `push --wait` thus share one
+classifier/repair path. The `uploadId` query needs a durable status record that
+outlives the commit for any upload the client may poll — every deferred
+(`pending`) upload. So a `pending` upload's `pending_upload` row is not deleted
+when the background pass commits it; it transitions `pending` to `servable` (or
+to `mismatch` on failure) and is reaped only after a status-observation window,
+retaining the `uploadId` to `(cache, storePathHash, nar_hash)` mapping for the
+poll. The anti-resurrection guarantee no longer rests on deleting the row: the
+verify pass only re-drives `verdict = 'pending'`, so a terminal row is never
+re-promoted (this replaces step 1's "clear the pending row in the commit
+transaction" with "set it terminal" for the deferred path). Synchronous outcomes
+return at commit and need no poll: inline success returns servable; inline
+mismatch/too-large return `422`/`413` and clear the row (step 1's behaviour).
+The query returns `servable`, `pending`, `mismatch`, or `absent`; `push --wait`
+backs off and terminates on `servable`, on `mismatch` as a hard error (it must
+not hang on a failed deferred blob), or on timeout.
+
 ### Tenant auth and issuer
 
 Each tenant's issuer is its path-based URL: `https://<host>/t/<tenant>`. Tokens
 minted by a tenant DO pin that issuer and audience, so cross-tenant replay is
 rejected at the JWT layer.
 
+`tenant_identity` is the sole identity source for a tenant DO; there is no
+env/default fallback. A cold-started DO whose `tenant_identity` row is absent
+returns `503 not configured` for every tenant route rather than defaulting
+issuer and audience to the literal `cupboard` and seeding the owner rule from
+operator env — otherwise an un-configured DO could mint a token cross-verifiable
+at any other un-configured DO (collapsing per-tenant issuer isolation) or take
+over the owner rule. `cupboard`/`cupboard` is not a valid mintable or verifiable
+tenant identity. This 503 is scoped to tenant DOs (`idFromName(tenant)`), not
+the bare-host control surface or local-dev.
+
 The DO learns its identity through a `configure` RPC that the Worker calls at
-provision time and on config-version bumps. The DO persists the identity in a
-single-row `tenant_identity` table and re-seeds its owner rule on version
-changes. A request header is not the identity source; if one is ever used as a
-hint, the Worker strips any client value and overwrites it. AS metadata and JWKS
-are tenant-scoped.
+provision time and on config-version bumps; it persists the identity in a
+single-row `tenant_identity` table. `config_version` is a monotonic fence
+carried on every dispatch: `configure` is compare-and-set (ignore version at or
+below the applied one; apply and re-seed for a greater one); on a dispatch
+carrying a greater version the DO self-configures before serving; on a lesser
+version it serves under its current DO-authoritative identity, never an older
+one. The owner re-seed runs in one `blockConcurrencyWhile` section (only the
+clear-owner path has an absence window). A request header is never the identity
+source; the Worker strips any client value. `/t/<tenant>/.well-known/*` (AS
+metadata and JWKS) and `/t/<tenant>/pubkey` (the Nix narinfo signing key,
+distinct from the OAuth JWKS) route to that tenant's DO; bare `/.well-known/*`
+and `/pubkey` serve the control plane only; `authIssuer()` sources the issuer
+from `tenant_identity` so a minted token's `iss` equals the advertised tenant
+issuer.
 
 ### Tenant lifecycle
 
 Tenant creation requires an explicit `readMode: public | private`; private is
-the hosted default. Private-read enforcement lands in the same phase that turns
-on tenant routing, so a private tenant rejects unauthenticated reads from the
-moment it can be created.
+the hosted default. Enforcement reads `readMode` (and the per-tenant read
+verifier) from the KV admission manifest on the read path, so a private tenant
+rejects unauthenticated reads from the moment it can be created — no window
+where the default mode lacks a data source.
 
-Suspension stops writes immediately and reads eventually, as described in the
-admission model.
+Suspension stops writes immediately (the Worker's authoritative D1 status read
+before write dispatch) and reads eventually, as described in the admission
+model.
 
-Offboarding is primarily a batched delete cursor. The cron/Worker enumerates the
-tenant's `t/<tenant>/...` prefixes and deletes in bounded batches across ticks,
-removing the tenant's `blob_ref` and `tenant_blob` rows so the global reaper
-collects now-unreferenced shared blobs. R2 prefix object-lifecycle rules are a
-small-fleet optimisation only, because R2 caps lifecycle rules at 1000 per
-bucket; rules are reaped after use.
+Offboarding is a state machine, not a bare Worker delete cursor. The tenant is
+marked `offboarding` in the registry (admission rejects new writes; the cron
+stops dispatching ordinary GC for it); the DO halts its own
+verify/promote/deletion queues so the drain does not chase newly-created edges;
+in-flight commits settle; then a `runOffboard`/`drainEdges` RPC on the tenant's
+DO deletes a bounded batch of its `blob_ref`/`tenant_blob` rows per tick inside
+`blockConcurrencyWhile` — preserving the per-tenant single-writer rule (the
+Worker must not delete a tenant's edge rows directly; a stray in-flight commit
+could otherwise resurrect a row the reaper then treats as live, a permanent
+invisible leak). The Worker may delete the tenant's `t/<tenant>/...` R2 objects
+directly (content-addressed, idempotent). Ordinary maintenance and offboarding
+are mutually exclusive per tenant: the fan-out enumerates only
+maintenance-eligible tenants, and verify restore (`ensureNarInfoObject`) no-ops
+for an offboarding tenant so it cannot resurrect objects the drain just deleted.
+R2 prefix object-lifecycle rules are a small-fleet optimisation only, because R2
+caps lifecycle rules at 1000 per bucket; rules are reaped after use.
 
 ### Cron fan-out
 
-`scheduled()` enumerates active tenants from D1 and fans out
-`runGarbageCollection()` and `runVerification()` per tenant DO with
-`Promise.allSettled`, spread across hourly buckets by slug hash. After fan-out,
-the Worker runs the global blob reaper over D1. Past one-tick scale, a D1 cursor
-shards tenants across ticks; Queues remain the fallback.
+`scheduled()` enumerates maintenance-eligible tenants from D1 (excluding
+suspended and offboarding) and fans out `runGarbageCollection()` and
+`runVerification()` per tenant DO. A single Worker invocation caps subrequests
+(~1000 on paid), so one RPC-pair per tenant exhausts the budget at ~500 tenants:
+sharding is part of this step, not a later optimisation. The per-tick tenant
+batch is bounded by a measured constant well under the budget, advancing a
+persisted `cron_cursor` over slug order so a full sweep completes within a day.
+The cron fires hourly (not daily) so the bucketing is meaningful and the latency
+bound holds; `wrangler.toml` `crons` is updated to match. The fan-out records
+per-tenant failures (count and last error) rather than swallowing them with bare
+`allSettled`. The global reaper gets its own reserved budget after fan-out, or
+its own cron tick, so a long fan-out cannot starve it; it advances its own
+`blob_state` cursor. Reaper reclamation latency has a stated upper bound — grace
+plus at most one reaper interval plus cursor-coverage time — for physical R2
+reclamation; quota credit, by contrast, is released immediately on the DO-side
+1-to-0 edge removal, independent of the reaper. Queues remain the fallback past
+cursor-sharding scale.
 
 ### Data model
 
@@ -1367,7 +1598,12 @@ New D1 database `CUPBOARD_DB`:
 - `global_admin(id PK 'singleton', issuer, subject, claimed_at)`
 - `control_trust(...)` for the control-plane trust policy (`iss`, `aud`, `sub`,
   and exact-match claim map), seeded by the gated claim
-- `control_auth_key(id PK, kid, private_jwk, public_jwk, created_at, retired_at)`
+- `control_auth_key(id PK, kid, public_jwk, created_at, retired_at)` — public
+  key metadata only. The **private JWK lives in a Worker-only store** (a
+  separate binding or a Workers secret the tenant DOs have no handle to), **not
+  in `CUPBOARD_DB`**, since every tenant DO binds `CUPBOARD_DB` and could
+  otherwise read it. The Worker mints with the private key and publishes the
+  public set.
 - `blob_ref(...)`:
 
   ```text
@@ -1380,6 +1616,9 @@ New D1 database `CUPBOARD_DB`:
     PK(tenant, cache, store_path_hash, generation)
   )
   ```
+
+  `blob_ref` carries a secondary index on `nar_hash` (the reaper's reference
+  probe, a non-key column).
 
 - `tenant_blob(tenant, nar_hash, file_size, PK(tenant, nar_hash))`
 - `blob_state(...)`:
@@ -1396,21 +1635,47 @@ New D1 database `CUPBOARD_DB`:
   )
   ```
 
-- `cron_cursor(id PK 'singleton', ...)`
+  `delete_after` is armed only by the reaper and cleared by promote and
+  reuse-commit; an index on `delete_after` backs the reaper's candidate scan.
+
+- `cron_cursor(id PK 'singleton', ...)` for fan-out tenant sharding, and a
+  separate reaper cursor over `blob_state` so the reaper's scan does not share
+  state with the fan-out.
+
+`tenant.status` is one of `active`, `suspended`, `offboarding`; `read_mode` and
+the per-tenant read verifier are projected into the KV manifest, not read from
+D1 on the GET path.
 
 Per-tenant DO SQLite changes:
 
 - Add `tenant_identity` with slug, issuer, owner triple, and config version.
-- Add `generation` to `narInfos`, bumped on each recommit.
-- Track servability per narinfo.
-- Extend `pending_upload` with async verification verdicts: `pending` while a
-  deferred blob awaits the background pass, and `mismatch` once that pass fails
-  (a durable status for `push --wait`). Synchronous inline failures reject and
-  clear the upload, so they carry no stored verdict; an over-budget blob is
-  rejected at commit, never deferred.
-- Move blob lifecycle to D1: `nar_blob` and `orphan_blob_deletion` are
-  superseded by `blob_ref`, `tenant_blob`, `blob_state`, and the global reaper.
-- Extend `narinfo_deletion` with phase markers and captured generation.
+- Add `generation_seq(cache, store_path_hash, next_generation)`, the durable,
+  never-reset per-store-path generation counter (advanced at commit; survives
+  delete and offboarding). It has no `tenant` column — the DO is tenant-scoped,
+  so this per-tenant table must not gain one. Add a `generation` column to
+  `narInfos` recording the live row's generation, sourced from `generation_seq`,
+  for compare-and-delete.
+- No `servable` flag, in any step: servability is the materialised narinfo R2
+  object (the row already exists before verify, so "not servable" is encoded by
+  row-without-object), and in-flight/failed status lives in
+  `pending_upload.verdict`. Step 6 adds quota without a flag: a cheap read-only
+  pre-verify check early-rejects a clearly over-quota upload (saving verify CPU,
+  advisory), and the authoritative idempotent charge stays in the existing
+  post-verify atomic batch gated on the `tenant_blob` 0→1 insert. (Recorded
+  deviation from the original "track servability per narinfo".)
+- `pending_upload` keeps its async verification verdicts from step 1: `pending`
+  while a deferred blob awaits the background pass, and `mismatch` once that
+  pass fails. A deferred upload's row is retained through its terminal
+  `servable`/`mismatch` state (reaped after a status-observation window) as the
+  durable `uploadId`-keyed record `push --wait` polls — not deleted on commit.
+  Synchronous inline failures reject and clear the upload; an over-budget blob
+  is rejected at commit, never deferred.
+- Move blob lifecycle to D1: `nar_blob` (already removed) and
+  `orphan_blob_deletion` (removed in 2c) are superseded by `blob_ref`,
+  `tenant_blob`, `blob_state`, and the global reaper.
+- Extend `narinfo_deletion` with phase markers and captured
+  `(nar_hash, generation)`; its stuck-marker re-drive is the DO-owned repair
+  pass.
 
 R2 keys:
 
@@ -1452,18 +1717,32 @@ together.
    real workerd zstd+SHA-256 throughput, confirming the DO honours
    `cpu_ms = 300_000`, and proving bounded peak memory on a multi-hundred-MB
    fixture — needs a deploy to the operator's account, so it is deferred:
-   `inlineVerifyMaxBytes` and `verifiableMaxBytes` ship PROVISIONAL (the
-   mechanism is correct at any values) until the spike replaces them with the
-   measured values, alongside the multi-hundred-MB bounded-memory and
-   `node:zlib` self-test-failure tests.
-2. **D1 substrate + per-narinfo edges + shared-CAS.** Add `blob_ref`,
-   `tenant_blob`, and `blob_state`; stage, verify, and promote into `nar/`; add
-   edge-first/servable-last commit and row-first/edge-last delete; add the
-   global reaper and derived counts. Still single-tenant data on the new model.
-3. **Control-plane auth.** Add `control_auth_key`; bare `/token` RFC 8693
-   exchange with claim-based control-trust checks; control issuer/audience; bare
-   `/.well-known/jwks.json`; PKCE-loopback and device login against the control
-   issuer; key rotation and last-key refusal.
+   `inlineVerifyMaxBytes` and `verifiableMaxBytes` ship PROVISIONAL but
+   conservative and fail-safe — a small inline bound with large/background
+   verification disabled (oversize blobs rejected at commit, never accepted
+   unverified) — until the spike replaces them with measured values, alongside
+   the multi-hundred-MB bounded-memory and `node:zlib` self-test-failure tests.
+2. **D1 substrate + per-narinfo edges + shared-CAS.** Sub-commits: **2a**
+   `blob_state` replaces `nar_blob` (done); **2b** `blob_ref` (with its
+   `nar_hash` index) + `tenant_blob` + the durable `generation_seq` counter,
+   row-first/edge-last commit (no `servable` flag — servability is the
+   materialised R2 object), and row-first/edge-last delete with
+   `narinfo_deletion` phase markers + the DO-owned bounded repair pass that
+   re-drives stuck markers, reference checks moving from local `narInfos` to
+   `blob_ref`, derived counts; **2c** the two-pass arm-then-collect global
+   reaper over `blob_state` (own cursor, `delete_after` index, D1-first/R2-last,
+   plus the demote pass), `delete_after` cleared on promote and reuse-commit,
+   retiring `orphan_blob_deletion`; **2d** the crash matrix. The crash tests are
+   planted-state plus repair-convergence (the harness cannot evict a DO or
+   interrupt mid-body): run the real path to the named step, assert the actual
+   intermediate D1 + DO + R2 state, then run repair/reaper and assert
+   convergence; inject genuinely-between-stores faults at the R2/D1 call
+   boundary. Still single-tenant data on the new model.
+3. **Control-plane auth.** Add `control_auth_key` (public metadata in D1,
+   private JWK in a Worker-only store the tenant DOs cannot read); bare `/token`
+   RFC 8693 exchange with claim-based control-trust checks; control
+   issuer/audience; bare `/.well-known/jwks.json`; PKCE-loopback and device
+   login against the control issuer; key rotation and last-key refusal.
 4. **Registry + gated bootstrap + provisioning + admission.** Add `tenant`,
    `global_admin`, and `control_trust`; implement the gated first signup claim;
    add operator admin API and `cupboard tenant create/list/suspend/delete`; add
@@ -1474,13 +1753,24 @@ together.
    `tenant_identity`, per-tenant issuer/AS metadata/JWKS, owner seeding,
    `readMode`, and private-read enforcement from creation.
 6. **Multi-tenant upload path + push contract.** Add existence-oracle-safe
-   negotiate, per-tenant-per-`narHash` quota, usage, server wait/no-wait/root
-   activation states, CLI wait/no-wait behaviour, per-origin-and-tenant token
-   cache with decoded `iss` checked against the target, and tenant-prefix client
-   awareness.
-7. **Cron fan-out + global reaper + offboarding.** Add `allSettled` fan-out,
-   hourly bucketing, the batched delete cursor, and lifecycle-rule optimisation
-   for small fleets.
+   negotiate gating on the asking tenant's own `tenant_blob`/`blob_ref` (this
+   reworks 2b's single-tenant reuse lookup, which consults global `blob_state` —
+   a known, accepted cost); per-tenant-per-`narHash` quota — a read-only
+   pre-verify check (early-reject to save verify CPU) plus the authoritative
+   post-verify charge gated on the `tenant_blob` 0-to-1 insert, no `servable`
+   flag needed; usage; the per-upload status query the push contract polls;
+   server wait/no-wait/root-activation states and the CLI behaviour; the token
+   cache keyed on the full tenant base URL (origin plus `/t/<slug>`), with
+   decoded `iss` checked against the full path-based tenant issuer URL and `aud`
+   against the target (the CLI token-store gains a per-target dimension).
+7. **Cron fan-out + global reaper + offboarding.** Hourly cron; per-tick tenant
+   batch bounded under the subrequest budget advancing `cron_cursor` (sharding
+   required here, not optional); per-tenant failures recorded, not swallowed;
+   the reaper on a reserved budget or its own tick with a stated
+   reclamation-latency bound; the quiesce-then-drain offboarding state machine
+   with edge-row deletion through the tenant DO (the Worker deletes only R2
+   objects), mutually exclusive with ordinary maintenance; lifecycle rules a
+   small-fleet optimisation.
 
 ### Verification
 
@@ -1491,25 +1781,50 @@ together.
   multi-hundred-MB bounded-memory (no-whole-buffer) proof and the `node:zlib`
   self-test-failure test land with the deferred runtime spike (step 1).
 - Per-narinfo identity and accounting tests cover replayed commit not
-  double-charging or double-referencing; two narinfos in one tenant sharing a
-  `narHash`; decrement replay; over-quota commit aborting before any DO narinfo
-  row exists; delete-then-recommit with the same `narHash`; quota races; and
-  bytes charged once per tenant per unique `narHash`.
+  double-charging or double-referencing (the charge gated on the `tenant_blob`
+  0-to-1 insert); two narinfos in one tenant sharing a `narHash`; decrement
+  replay; over-quota commit rejecting the atomic batch and leaving no edge and
+  no charge; a full delete at generation N then a recommit reproducing the same
+  `narHash` picking generation greater than N so the replayed N-deletion no-ops
+  (asserting `generation_seq` survives the delete and offboarding); quota races;
+  and bytes charged once per tenant per unique `narHash`.
 - Negative-verdict isolation tests show that a bad upload is quarantined on its
   staging upload and does not write global `blob_state`, while a correct upload
   of the same `narHash` still verifies and becomes available.
-- Cross-store crash tests cover edge/no-row, row/no-edge, available/no-object,
-  object/no-state, delete-then-recommit within grace, and canonical
+- Cross-store crash tests are planted-state plus repair-convergence (the harness
+  cannot evict a DO or interrupt mid-body): run the real path to the named step,
+  assert the actual intermediate state, then run repair/reaper and assert
+  convergence. They cover edge/no-row not occurring under row-first commit;
+  row/no-edge converging with no permanent blob or quota pin;
+  available/no-object demoting `blob_state` and removing the referencing
+  narinfos' R2 objects (for a blob referenced by a different tenant than the
+  pass that runs); object/no-state healing on re-promote; a reaper crash between
+  the `blob_state` delete and the R2 delete leaving an adopted orphan object; a
+  delete crashed mid-markers driven to completion by the next GC tick; a
+  recommit of a just-reaped `narHash` starting with `delete_after` NULL; same-DO
+  commit/commit and commit/delete interleavings; and canonical
   `FileHash`/`FileSize` served from `blob_state`.
 - Control-plane auth tests cover control issuer distinct from tenant issuers,
   disjoint bare vs tenant JWKS, `/token` claim checks, rotation, last-key
-  refusal, and gated claim refusal for wrong principals.
+  refusal, gated claim refusal for wrong principals, the claim as one atomic
+  batch (a crash cannot leave an un-administerable deployment), and the control
+  private key being unreachable by a tenant DO.
 - Tenancy tests cover A's token rejected at B, A's narinfo invisible at B,
-  admission never instantiating a DO for an unprovisioned slug, client-supplied
-  identity headers ignored, suspension stopping writes immediately, and private
-  tenants rejecting unauthenticated reads from creation.
+  admission never instantiating a DO for an unprovisioned slug, an un-configured
+  cold-started tenant DO returning 503 rather than minting or serving under a
+  default identity (and tokens from two un-configured DOs not cross-verifying),
+  `config_version` as a monotonic fence, client-supplied identity headers
+  ignored, suspension stopping writes immediately via the Worker's authoritative
+  D1 status read, private tenants rejecting unauthenticated reads from creation
+  enforced from the KV manifest, `/t/<tenant>/pubkey` verifying that tenant's
+  narinfo signature with the advertised issuer equal to a minted token's `iss`,
+  a token cached for tenant A never sent to tenant B on the same origin, and
+  offboarding draining edge rows through the DO without ordinary GC resurrecting
+  a draining tenant's objects.
 - Push UX tests cover push waiting until substitution succeeds, `--no-wait`
-  returning pending, and roots activating only when targets are available.
+  returning pending, roots activating only when targets are available, and a
+  background mismatch terminating `push --wait` with a hard error (not hanging)
+  via the per-upload status query.
 - Runtime validation records CPU limit, throughput, bounded memory, and
   Miniflare zstd availability before setting the size thresholds.
 
