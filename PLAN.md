@@ -1513,6 +1513,216 @@ together.
 - Runtime validation records CPU limit, throughput, bounded memory, and
   Miniflare zstd availability before setting the size thresholds.
 
+## V6
+
+V6 carries per-path provenance as builder-signed Sigstore bundles, stored in the
+shared CAS and discovered through a per-path list of descriptors. Build
+provenance is the only predicate type populated initially; SBOMs and other
+predicate types attach through the same path with no structural change.
+Provenance is additive: it never participates in Nix substitution, and the
+cache-content trust path — the tenant-signed narinfo and Nix's own NAR re-hash —
+is unchanged.
+
+V6 depends on the V5 shared CAS, reaper, D1 substrate, tenant routing, and the
+push contract.
+
+Settled decisions:
+
+- Bundles are builder-signed against the builder's own CI provider Sigstore
+  instance. cupboard stores them opaquely; it runs no Sigstore instance, mints
+  no provenance, and holds no provenance trust root.
+- The public/private distinction is the builder's, carried by the instance it
+  signs against: the public good instance with the Rekor log for public
+  artifacts, the CI provider's private instance with no public log otherwise.
+  cupboard stores whichever bundle it receives, and `readMode` governs read
+  access to the stored objects only.
+- Bundles live in the shared CAS, content-addressed by their own digest and
+  deduplicated across tenants. A per-path list of descriptors maps a store path
+  to its bundles.
+- The token exchange is unchanged and authorises uploads only. It sits on no
+  consumer trust path.
+
+### Invariants
+
+- **Off the substitution path.** Nix never fetches or verifies an attestation.
+  Substitution trust stays the tenant-signed narinfo and Nix's own NAR re-hash.
+  Attestation is a separate provenance plane, consumed out of band by a policy
+  gate.
+- **cupboard outside the provenance trust path.** A consumer verifies a bundle
+  with stock tooling against the trust root the bundle declares, and requires
+  the bundle's in-toto subject digest to equal the path's `narHash`. cupboard's
+  role is to store, bind on filing, and serve.
+- **Presence never gates servability; verification fails closed.** A narinfo is
+  servable under its own rules whether or not an attestation accompanies it. A
+  consumer policy requiring an attestation of a predicate type rejects when the
+  list omits it or a referenced bundle is absent, so omission and loss produce a
+  refused promotion, never a silent acceptance.
+
+### Discovery
+
+A bundle is a content-addressed object in the shared CAS at `cas/<sha256>`,
+deduplicated across tenants like a NAR blob — the same path pushed to several
+tenants references one stored bundle. The CAS key is the bundle's own digest, so
+a bundle's location is not derivable from the store path hash. Each store path
+therefore carries a list: the tenant-namespaced, materialised R2 object
+`t/<tenant>/attestations/[<cache>/]<storePathHash>` holding descriptors
+`{ digest, predicateType, size }` that point into the CAS.
+
+`predicateType` is a descriptor field — the in-toto predicate type — so the
+namespace is open and a new predicate type attaches with no change to keys or
+server code. The list admits several descriptors of one `predicateType`, so
+multiple attestations of a type for a path are expressible.
+
+Discovery is two reads, mirroring the OCI referrers-then-blob shape: fetch the
+list, then fetch the chosen bundles from the CAS. Both reads sit behind the
+tenant's `readMode`, and absent and unauthorised return the same response, so
+the list opens no existence oracle and needs no bucket enumeration.
+
+The consumer's verification chain anchors trust at the `narHash`, not at the
+list:
+
+1. From `storePathHash`, fetch and verify the tenant-signed narinfo, learning
+   `narHash`.
+2. Fetch the list and select descriptors by `predicateType`.
+3. Fetch each bundle from the CAS and verify it with Sigstore tooling against
+   the trust root the bundle declares.
+4. Require the bundle's in-toto subject digest to equal `narHash`, and the
+   predicate to satisfy policy.
+
+Trust rides the bundle signature and the subject-to-`narHash` equality
+cross-checked against the signed narinfo, so the list itself carries no trust. A
+tampered or injected descriptor points at a bundle that fails subject equality
+or signature verification; a stripped descriptor fails closed. A non-omission
+guarantee, if wanted later, anchors the list digest in the signed narinfo, which
+already re-materialises and bumps `generation` on every recommit.
+
+### Storage, accounting, and GC
+
+Attestation storage reuses the V5 reference-and-reaper pattern. The NAR-specific
+`blob_state` is not widened — its invariant (a row exists iff a verified shared
+NAR object exists, carrying the canonical compressed metadata and the
+decompress-to-key check) stays strict. Bundles get sibling tables:
+
+- `cas_object(digest PK, size, verified_at, delete_after?)` is the set of
+  available shared bundles, positive facts only. A row exists iff a verified
+  shared bundle object exists.
+- `attestation_ref(...)` is one row per (narinfo version, predicate type,
+  bundle):
+
+  ```text
+  attestation_ref(
+    tenant,
+    cache,
+    store_path_hash,
+    generation,
+    predicate_type,
+    digest,
+    PK(tenant, cache, store_path_hash, generation, predicate_type, digest)
+  )
+  ```
+
+  The `generation` matches the narinfo row, so a recommit re-references the
+  path's bundles at the new generation and a stale-generation deletion removes
+  only old-generation edges, mirroring `blob_ref`.
+
+- `tenant_cas_blob(tenant, digest, size, PK(tenant, digest))` is the derived
+  fact that a tenant references a bundle via at least one live edge, maintained
+  across the 0-to-1 and 1-to-0 transitions and driving
+  once-per-tenant-per-bundle charging.
+
+A bundle uploads to a per-tenant staging key; the server computes its SHA-256,
+which is its CAS key, so verification is self-addressing with no decompression
+step. At attach the server performs a filing-correctness guard — the bundle is a
+well-formed DSSE/Sigstore envelope and its in-toto subject digest equals the
+committed `narHash` — binding the attestation to the right path and rejecting
+garbage. This is not signature verification, which stays the consumer's.
+
+The tenant DO, the single writer of its tenant's D1 rows, promotes the bundle
+into the shared CAS (idempotent, content-addressed), inserts the edge, charges
+the bundle once per tenant per unique digest through the same
+reserve-then-commit quota shape as NAR blobs, and re-materialises the list
+object from the tenant's edges for that store path. Negotiation skips an
+already-referenced bundle only on the asking tenant's own edges, never on global
+existence; deduplication happens at rest after upload.
+
+Ordering follows the V5 cross-store discipline: bundle-to-CAS first, then edge,
+then list, failing safe toward a leaked CAS object and never a list entry
+without its bundle; removal is list-and-edge first with the reaper collecting
+the orphaned bundle, recovered from durable phase markers. The global reaper
+collects a bundle when no `attestation_ref` row anywhere references its digest
+and `now >= delete_after`, sharing the NAR reaper's structure.
+
+### Push and verify contract
+
+The builder produces the bundle in CI, where its OIDC identity lives — for
+example `actions/attest-build-provenance`, or `cosign attest-blob` against the
+instance the builder trusts. `cupboard push` attaches the builder-produced
+bundle to its uploaded paths; `--no-attest` omits it. Attachment does not gate
+root activation, consistent with the presence invariant.
+
+A consumer verifies at a policy gate (CD or admission), enumerating a closure's
+store path hashes, fetching and verifying each required attestation against the
+bundle-declared trust root, and refusing promotion on absence or failure.
+
+### Data model
+
+D1 (`CUPBOARD_DB`), siblings to the V5 NAR blob tables: `cas_object`,
+`attestation_ref`, and `tenant_cas_blob` as above.
+
+R2 keys:
+
+- `cas/<sha256>` for the shared bundle store, beside `nar/<narHash>.nar.zst`.
+- A per-tenant staging key for an unverified bundle upload.
+- `t/<tenant>/attestations/[<cache>/]<storePathHash>` for the materialised
+  per-path descriptor list.
+
+### Implementation sequence
+
+Each step leaves a working cache.
+
+1. **CAS generalisation and bundle lifecycle.** Add `cas_object`,
+   `attestation_ref`, and `tenant_cas_blob`; stage, digest, and promote bundles
+   into `cas/`; reference, charge, and reap them through the V5 machinery;
+   crash-point tests for bundle/no-edge, edge/no-list, dedupe-across-tenants
+   charging each tenant once, and decrement replay.
+2. **Attach and list materialisation.** Add the authenticated attach endpoint,
+   the filing-correctness guard (well-formed bundle, subject equals committed
+   `narHash`), list materialisation from edges, `readMode` on list and bundle
+   reads with absent/unauthorised parity, and the existence-oracle-safe
+   own-edges negotiate for bundles.
+3. **CLI attach and verify guidance.** Add `cupboard push` bundle attachment and
+   `--no-attest`; document consumer verification against the bundle-declared
+   trust root and the subject-to-`narHash` check, with example policy gates for
+   the public good and a CI provider's private instance.
+
+### Verification
+
+- Bundles dedupe across tenants — one `cas_object`, charged once per tenant —
+  and the list materialises correct descriptors, including several of one
+  `predicateType`.
+- Discovery is two reads under `readMode`; absent and unauthorised are
+  indistinguishable.
+- The attach guard rejects a bundle whose subject does not equal the committed
+  `narHash`; a consumer rejects a bundle whose subject mismatches or whose
+  signature fails.
+- A narinfo serves with no attestation; a required-but-absent attestation fails
+  a gate closed; a lost CAS bundle does not affect narinfo servability.
+- Sweeping a narinfo removes its `attestation_ref` rows; the reaper collects a
+  bundle once unreferenced; a delete-then-recommit removes only old-generation
+  edges.
+- A public-good-signed bundle verifies against public roots and a
+  private-instance-signed bundle against that instance's root, with cupboard
+  unchanged in both.
+
+### Out of scope
+
+cupboard never runs a Sigstore instance, mints provenance, or holds a provenance
+trust root. Nix substitution is untouched. Only build provenance is populated;
+SBOMs (SPDX or CycloneDX predicate types) attach later through the same store
+and list. Enumerating a path's attestations is reading the list, already
+present, so a separate index is unnecessary. A non-omission guarantee for the
+list, anchoring its digest in the signed narinfo, is a later hardening.
+
 ## Later features
 
 - [ ] Chunk-level dedupe rather than whole-NAR storage.
