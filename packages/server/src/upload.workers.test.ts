@@ -39,6 +39,7 @@ import {
 	initialise,
 	initialiseViaWorker,
 	listRoots,
+	markUploadCommitting,
 	markUploadPendingVerification,
 	mintServerSignedToken,
 	narBytes,
@@ -58,6 +59,7 @@ import {
 	runGcFromInternalOrigin,
 	runGcResult,
 	scheduledController,
+	seedReservedNarInfo,
 	setRoot,
 	uploadBlobMetadata,
 	uploadMetadata,
@@ -620,6 +622,206 @@ describe('upload flow', () => {
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
 		).resolves.not.toBeNull();
+	});
+
+	it('re-drives an inline commit crashed mid-saga from its committing marker', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		// An inline commit that crashed after marking itself in progress but before
+		// reserving the row: the staging bytes are present, the upload carries the
+		// `committing` marker, and nothing is servable yet.
+		await markUploadCommitting(upload.uploadId);
+
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+
+		// The verify pass re-drives it through the same reserve→verify→promote→
+		// materialise path a deferred upload takes, then clears the marker.
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		expect(narInfo.narHash).toBe(metadata.narHash);
+	});
+
+	it('does not reap a committing saga row past its upload TTL before the verify pass runs', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await markUploadCommitting(upload.uploadId);
+
+		// Past the 15-minute upload expiry, GC runs before verification (their cron
+		// ordering is not guaranteed). A `committing` upload is a live saga, not an
+		// abandoned upload, so GC must leave it and its staged bytes alone.
+		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
+		await currentServer().runGarbageCollection();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('committing');
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
+
+		// The verify pass then still re-drives it to servable.
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		expect(narInfo.narHash).toBe(metadata.narHash);
+	});
+
+	it('does not strand a reserved row when an in-flight commit is retried', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		// The state a crashed inline commit leaves: the row reserved at generation 0,
+		// the upload marked committing, the staged bytes still present, and nothing
+		// servable.
+		await seedReservedNarInfo(metadata);
+		await markUploadCommitting(upload.uploadId);
+
+		// A client retry must not concede `already-present` for the not-yet-servable
+		// row, nor delete the staged bytes the re-drive needs: it reports the saga in
+		// progress and leaves the marker and bytes intact.
+		const retry = await commitUpload(token, upload.uploadId);
+
+		expect(retry.status).toBe('pending');
+		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))
+		).resolves.toBeNull();
+
+		// The verify pass re-drives the preserved saga to servable.
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		expect(narInfo.narHash).toBe(metadata.narHash);
+	});
+
+	it('verifies staged bytes on commit even when the shared blob already exists', async () => {
+		const token = await initialise();
+		const good = await verifiableNar('reuse-verify-good');
+		const wrong = await verifiableNar('reuse-verify-wrong');
+
+		// Stage a second upload for a different path that claims `good`'s narHash but
+		// holds `wrong`'s bytes (whose own compressed hash matches). Negotiate while
+		// no shared blob exists, so it is an upload decision, not a reuse.
+		const liar = uploadMetadata({
+			name: 'liar',
+			storePathHash: 'a'.repeat(32),
+			narHash: good.narHash,
+			fileHash: wrong.fileHash,
+			fileSize: wrong.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		const liarUpload = expectSingleUploadDecision(
+			await negotiateUploads(token, [liar]),
+			liar
+		);
+		await prepareUpload(token, liarUpload, liar);
+		await putNarBytes(liarUpload.r2Key, wrong);
+
+		// A correct upload of `good` for another path commits first, so `blob_state`
+		// now holds `good`'s narHash and the canonical object exists.
+		const honest = uploadMetadata({
+			name: 'honest',
+			storePathHash: 'b'.repeat(32),
+			narHash: good.narHash,
+			fileHash: good.fileHash,
+			fileSize: good.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		await commitPath(token, honest, good);
+
+		// The liar's deferred verify must re-derive its own staged bytes, not bind to
+		// the shared blob because `blob_state` already holds the hash: its bytes are
+		// `wrong`, so it fails terminally and never becomes servable.
+		await markUploadPendingVerification(liarUpload.uploadId);
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(liarUpload.uploadId)).toBe('mismatch');
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(liar.storePathHash))
+		).resolves.toBeNull();
+
+		// The honest path is unaffected and still serves.
+		const served = await fetchNarInfo(honest.storePathHash);
+		expect(served.narHash).toBe(good.narHash);
+	});
+
+	it('does not serve a reserved row just because its blob already exists', async () => {
+		const token = await initialise();
+		const good = await verifiableNar('reserved-row-good');
+		const wrong = await verifiableNar('reserved-row-wrong');
+		const reserved = uploadMetadata({
+			name: 'reserved',
+			storePathHash: 'c'.repeat(32),
+			narHash: good.narHash,
+			fileHash: wrong.fileHash,
+			fileSize: wrong.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		const reservedUpload = expectSingleUploadDecision(
+			await negotiateUploads(token, [reserved]),
+			reserved
+		);
+		await prepareUpload(token, reservedUpload, reserved);
+		await putNarBytes(reservedUpload.r2Key, wrong);
+
+		const honest = uploadMetadata({
+			name: 'reserved-honest',
+			storePathHash: 'd'.repeat(32),
+			narHash: good.narHash,
+			fileHash: good.fileHash,
+			fileSize: good.narBytes.byteLength,
+			narSize: good.narSize
+		});
+		await commitPath(token, honest, good);
+
+		await seedReservedNarInfo(reserved);
+		await markUploadCommitting(reservedUpload.uploadId);
+
+		const retry = expectSingleCommitDecision(
+			await negotiateUploads(token, [reserved]),
+			reserved
+		);
+
+		expect({ ...retry, uploadId: typeof retry.uploadId }).toStrictEqual({
+			action: 'commit',
+			storePathHash: reserved.storePathHash,
+			narHash: reserved.narHash,
+			uploadId: 'string'
+		});
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(reserved.storePathHash))
+		).resolves.toBeNull();
+
+		await env.BLOBS.put(narInfoObjectKey(reserved.storePathHash), 'accidental');
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(reservedUpload.uploadId)).toBe(
+			'mismatch'
+		);
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(reserved.storePathHash))
+		).resolves.toBeNull();
 	});
 
 	it('keeps a deferred upload pending on a transient verify error, then commits on retry', async () => {

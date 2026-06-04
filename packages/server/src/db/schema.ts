@@ -50,13 +50,15 @@ export const pendingUploads = sqliteTable('pending_upload', {
 	metadataJson: text('metadata_json').notNull(),
 	createdAt: text('created_at').notNull(),
 	expiresAt: text('expires_at').notNull(),
-	// The async verification status. `pending` once a blob above the inline-verify
-	// budget is uploaded, awaiting the background NAR-hash check; `mismatch` once
-	// that check fails, a durable status a later reader (`push --wait` or a status
-	// endpoint) can observe; null while a row still awaits its bytes. The verdict is
-	// per-upload and never written globally by nar_hash, so a bad upload leaves no
-	// global trace. Synchronous inline failures reject and clear the row instead.
-	verdict: text('verdict', { enum: ['pending', 'mismatch'] })
+	// The commit-saga status of an accepted upload, the durable marker a crashed
+	// commit is re-driven from. `committing` once an inline commit starts, before it
+	// reserves the narinfo row; `pending` once a blob above the inline-verify budget
+	// is accepted, awaiting the background NAR-hash check; `mismatch` once that check
+	// fails, a durable status a later reader (`push --wait` or a status endpoint) can
+	// observe; null while a row still awaits its bytes. The verdict is per-upload and
+	// never written globally by nar_hash, so a bad upload leaves no global trace. The
+	// background verify pass re-drives both `committing` and `pending` rows.
+	verdict: text('verdict', { enum: ['committing', 'pending', 'mismatch'] })
 });
 
 export const orphanBlobDeletions = sqliteTable('orphan_blob_deletion', {
