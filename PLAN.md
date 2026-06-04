@@ -1739,14 +1739,20 @@ together.
    timestamp phase columns) + the DO-owned bounded repair pass that re-drives
    surviving markers (correct by captured-identity idempotency), reference
    checks moving from local `narInfos` to `blob_ref`, derived counts; **2c** the
-   two-pass arm-then-collect global reaper over `blob_state` (own cursor,
-   `delete_after` index, D1-first/R2-last, plus the demote pass), `delete_after`
-   cleared on promote and reuse-commit, retiring `orphan_blob_deletion`; **2d**
-   the crash matrix. The crash tests are planted-state plus repair-convergence
-   (the harness cannot evict a DO or interrupt mid-body): run the real path to
-   the named step, assert the actual intermediate D1 + DO + R2 state, then run
-   repair/reaper and assert convergence; inject genuinely-between-stores faults
-   at the R2/D1 call boundary. Still single-tenant data on the new model.
+   two-pass arm-then-collect reaper over `blob_state` (`delete_after` index,
+   D1-first/R2-last), `delete_after` cleared on promote and reuse-commit,
+   retiring `orphan_blob_deletion`. In this single-tenant step the reaper runs
+   in the DO's maintenance pass as a bounded batch that drains over ticks, and
+   "available but no object" is handled by the per-narinfo verify reconciliation
+   retiring the edge so the reaper then collects the fact; the reaper's own
+   persisted cursor and the dedicated global demote scan land with the
+   Worker-level reaper in step 7, where the reaper must see every tenant's
+   references. **2d** the crash matrix. The crash tests are planted-state plus
+   repair-convergence (the harness cannot evict a DO or interrupt mid-body): run
+   the real path to the named step, assert the actual intermediate D1 + DO + R2
+   state, then run repair/reaper and assert convergence; inject
+   genuinely-between-stores faults at the R2/D1 call boundary. Still
+   single-tenant data on the new model.
 3. **Control-plane auth.** Add `control_auth_key` (public metadata in D1,
    private JWK in a Worker-only store the tenant DOs cannot read); bare `/token`
    RFC 8693 exchange with claim-based control-trust checks; control
