@@ -892,11 +892,11 @@ export async function seedNarInfoDeletion(fields: {
 				cache: DEFAULT_CACHE,
 				storePathHash: fields.storePathHash,
 				narHash: fields.narHash,
-				generation: fields.generation,
-				createdAt: new Date().toISOString()
-			})
-			.onConflictDoNothing()
-			.run();
+					generation: fields.generation,
+					createdAt: new Date().toISOString()
+				})
+				.onConflictDoNothing()
+				.run();
 	});
 }
 
@@ -1823,63 +1823,6 @@ export async function markUploadPendingVerification(
 			.where(eq(pendingUploads.id, uploadId))
 			.run();
 		return new MaintenanceEligibilityService(instance.context).reconcile();
-	});
-}
-
-// Plants the `committing` saga marker on a staged upload, the state an inline
-// commit leaves if it crashes after marking commit-in-progress but before it
-// finishes: the verify pass must re-drive it to servable.
-export async function markUploadCommitting(uploadId: string): Promise<void> {
-	await runInDurableObject(currentServer(), (_instance, state) => {
-		drizzle(state.storage, { schema: { pendingUploads } })
-			.update(pendingUploads)
-			.set({ verdict: 'committing' })
-			.where(eq(pendingUploads.id, uploadId))
-			.run();
-	});
-}
-
-// Plants a reserved-but-unmaterialised narinfo row, the state a crashed inline
-// commit leaves between reserving the row and materialising it: the row exists at
-// its generation with no D1 edge, no shared fact, and no R2 object. Signatures are
-// a placeholder, since this row only ever exists mid-saga.
-export async function seedReservedNarInfo(
-	metadata: UploadPathMetadataFields,
-	generation = 0
-): Promise<void> {
-	await runInDurableObject(currentServer(), (_instance, state) => {
-		const database = drizzle(state.storage, {
-			schema: { generationSeq, narInfos }
-		});
-
-		database
-			.insert(narInfos)
-			.values({
-				cache: '',
-				storePathHash: metadata.storePathHash,
-				storePath: metadata.storePath,
-				narHash: metadata.narHash,
-				narSize: metadata.narSize,
-				referencesJson: JSON.stringify(metadata.references),
-				deriver: metadata.deriver,
-				ca: metadata.ca,
-				sigsJson: '[]',
-				generation,
-				createdAt: '2026-01-01T00:00:00.000Z'
-			})
-			.run();
-		database
-			.insert(generationSeq)
-			.values({
-				cache: '',
-				storePathHash: metadata.storePathHash,
-				nextGeneration: generation + 1
-			})
-			.onConflictDoUpdate({
-				target: [generationSeq.cache, generationSeq.storePathHash],
-				set: { nextGeneration: generation + 1 }
-			})
-			.run();
 	});
 }
 
