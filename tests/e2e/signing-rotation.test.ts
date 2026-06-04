@@ -33,7 +33,10 @@ describe('Nix substitution through a signing-key rotation', () => {
 				const server = await CupboardTestServer.start(directory);
 
 				try {
-					const client = new CupboardClient(server.url, server.uploadFetcher());
+					const client = new CupboardClient(
+						server.tenantUrl,
+						server.uploadFetcher()
+					);
 					const token = await server.ownerAdminToken();
 					const oldKey = await client.publicKey();
 					const source = await NixStore.host(
@@ -50,7 +53,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 							[storePath]
 						);
 					const trusting = (keys: readonly string[]): RealiseOptions => ({
-						substituter: server.url.origin,
+						substituter: server.tenantUrl.toString(),
 						trustedPublicKeys: keys,
 						requireSigs: true
 					});
@@ -141,14 +144,14 @@ async function fetchNarInfo(
 	storePath: string
 ): Promise<NarInfo> {
 	const response = await fetch(
-		new URL(`/${StorePath.hash(storePath)}.narinfo`, server.url)
+		server.tenantPath(`/${StorePath.hash(storePath)}.narinfo`)
 	);
 
 	return NarInfo.parse(await response.text());
 }
 
 async function publishedKeys(server: CupboardTestServer): Promise<string[]> {
-	const response = await fetch(new URL('/pubkey', server.url));
+	const response = await fetch(server.tenantPath('/pubkey'));
 	const body = await response.text();
 
 	return body.trim().split('\n').toSorted();

@@ -293,8 +293,9 @@ describe('auth discovery endpoints', () => {
 				// Mirrors CUPBOARD_AUTH_ISSUER (set in wrangler.toml), the issuer
 				// cupboard stamps into its own tokens.
 				issuer: 'cupboard',
-				token_endpoint: `${origin}/token`,
-				jwks_uri: `${origin}/.well-known/jwks.json`,
+				// The endpoints carry this tenant's `/t/<tenant>/` prefix.
+				token_endpoint: `${origin}/t/v1/token`,
+				jwks_uri: `${origin}/t/v1/.well-known/jwks.json`,
 				grant_types_supported: [tokenExchangeGrantType],
 				scopes_supported: ['write', 'admin'],
 				token_endpoint_auth_methods_supported: ['none']

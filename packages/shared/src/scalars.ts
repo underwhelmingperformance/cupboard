@@ -165,6 +165,15 @@ export const cacheNameSchema = z
 	.brand('CacheName');
 export type CacheName = z.infer<typeof cacheNameSchema>;
 
+// A tenant slug: the outer addressing boundary, one isolated namespace per tenant
+// at `/t/<tenant>/`. It shares the cache-name shape but is its own branded type;
+// named caches nest within a tenant at `/t/<tenant>/cache/<name>/`.
+export const tenantIdSchema = z
+	.string()
+	.regex(cacheNamePattern)
+	.brand('TenantId');
+export type TenantId = z.infer<typeof tenantIdSchema>;
+
 // A Nix substituter priority: a non-negative integer where lower is preferred.
 export const cachePrioritySchema = z
 	.number()

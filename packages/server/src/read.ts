@@ -7,8 +7,7 @@ import {
 } from '@cupboard/shared';
 import { StatusCodes } from 'http-status-codes';
 
-import { buildVersion } from './build-info.generated.ts';
-import { cupboardServer } from './durable-object.ts';
+import { tenantServer } from './durable-object.ts';
 import {
 	isNotModified,
 	narInfoObjectKey,
@@ -28,13 +27,12 @@ import {
 const narPrefix = '/nar/';
 
 const cacheInfoBody = new TextBody(CacheInfo.default.render());
-const healthBody = new TextBody('ok\n');
-const versionBody = new TextBody(`${buildVersion}\n`);
 
 export async function handleRead(
 	request: Request,
 	env: Env,
-	ctx: ExecutionContext
+	ctx: ExecutionContext,
+	tenant: string
 ): Promise<Response | undefined> {
 	if (request.method !== 'GET' && request.method !== 'HEAD') {
 		return undefined;
@@ -46,32 +44,17 @@ export async function handleRead(
 	// nix-cache-info require Basic auth and never touch the shared edge cache.
 	const credential = readCredential(env);
 
-	// Health and version are deployment-level and never carry a cache prefix.
-	if (pathname === '/_health') {
-		return textResponse(request, healthBody, {
-			'content-type': 'text/plain; charset=utf-8',
-			'cache-control': 'no-store'
-		});
-	}
-
-	if (pathname === '/_version') {
-		return textResponse(request, versionBody, {
-			'content-type': 'text/plain; charset=utf-8',
-			'cache-control': 'no-store'
-		});
-	}
-
-	// OAuth discovery (RFC 8414), built at the edge. The endpoints are the
-	// deployment origin; the issuer mirrors the one cupboard stamps into its
-	// tokens so a client sees a single consistent identity.
+	// OAuth discovery (RFC 8414) for this tenant, built at the edge. The issuer and
+	// endpoints carry the tenant prefix so a client sees one consistent identity.
 	if (pathname === '/.well-known/oauth-authorization-server') {
-		return authorizationServerMetadata(request, env);
+		return authorizationServerMetadata(request, env, tenant);
 	}
 
-	// cupboard's auth public keys, served uncached from the DO so a rotation is
-	// visible immediately. The DO owns the key set, so the read proxies to it.
+	// This tenant's auth public keys, served uncached from its Durable Object so a
+	// rotation is visible immediately. The DO owns the key set, so the read proxies
+	// to it.
 	if (pathname === '/.well-known/jwks.json') {
-		return cupboardServer(env).fetch(request);
+		return tenantServer(env, tenant).fetch(request);
 	}
 
 	// A read may carry a `/cache/<name>/` prefix selecting a named cache; the
@@ -129,24 +112,29 @@ export async function handleRead(
 	if (rest === '/nix-cache-info') {
 		return (
 			guardRead(request, credential) ??
-			cacheInfoResponse(request, env, cache, credential)
+			cacheInfoResponse(request, env, tenant, cache, credential)
 		);
 	}
 
 	if (rest === '/pubkey') {
-		// `/pubkey` and `/cache/<name>/pubkey` return the same deployment key set,
-		// served uncached from the DO so a rotation is visible immediately.
+		// This tenant's narinfo signing key set, served uncached from its Durable
+		// Object so a rotation is visible immediately.
 		const pubkeyUrl = new URL(request.url);
 		pubkeyUrl.pathname = '/pubkey';
 
-		return cupboardServer(env).fetch(new Request(pubkeyUrl, request));
+		return tenantServer(env, tenant).fetch(new Request(pubkeyUrl, request));
 	}
 
 	return undefined;
 }
 
-function authorizationServerMetadata(request: Request, env: Env): Response {
+function authorizationServerMetadata(
+	request: Request,
+	env: Env,
+	tenant: string
+): Response {
 	const { origin } = new URL(request.url);
+	const base = `${origin}/t/${tenant}`;
 	// Typegen narrows the binding to its configured literal; a deployment may
 	// still set it empty, so widen to `string` and fall back to the same default
 	// the Durable Object stamps into its tokens, keeping the advertised issuer and
@@ -155,8 +143,8 @@ function authorizationServerMetadata(request: Request, env: Env): Response {
 
 	return Response.json({
 		issuer: configuredIssuer || defaultAuthIssuer,
-		token_endpoint: `${origin}/token`,
-		jwks_uri: `${origin}/.well-known/jwks.json`,
+		token_endpoint: `${base}/token`,
+		jwks_uri: `${base}/.well-known/jwks.json`,
 		grant_types_supported: [tokenExchangeGrantType],
 		scopes_supported: ['write', 'admin'],
 		token_endpoint_auth_methods_supported: ['none']
@@ -194,6 +182,7 @@ function cacheScope(
 async function cacheInfoResponse(
 	request: Request,
 	env: Env,
+	tenant: string,
 	cache: string,
 	credential: ReadCredential | undefined
 ): Promise<Response> {
@@ -204,7 +193,7 @@ async function cacheInfoResponse(
 			? await textResponse(request, cacheInfoBody, {
 					'content-type': 'text/x-nix-cache-info; charset=utf-8'
 				})
-			: await cupboardServer(env).fetch(request);
+			: await tenantServer(env, tenant).fetch(request);
 
 	if (credential === undefined) {
 		return response;

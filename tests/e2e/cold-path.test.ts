@@ -14,7 +14,10 @@ describe('cold-path retention TTL', () => {
 			});
 
 			try {
-				const client = new CupboardClient(server.url, server.uploadFetcher());
+				const client = new CupboardClient(
+					server.tenantUrl,
+					server.uploadFetcher()
+				);
 				const token = await server.ownerAdminToken();
 				const storePath = `/nix/store/${'0'.repeat(32)}-app`;
 

@@ -27,7 +27,10 @@ describe('Nix substitution from a named cache', () => {
 				const server = await CupboardTestServer.start(directory);
 
 				try {
-					const client = new CupboardClient(server.url, server.uploadFetcher());
+					const client = new CupboardClient(
+						server.tenantUrl,
+						server.uploadFetcher()
+					);
 					const token = await server.ownerAdminToken();
 					const publicKey = await client.publicKey();
 					const source = await NixStore.host(
@@ -36,7 +39,7 @@ describe('Nix substitution from a named cache', () => {
 					const storePath = await source.build(namedCacheDerivation);
 					const pushContext = (cache: string): PushContext => ({
 						client: new CupboardClient(
-							server.url,
+							server.tenantUrl,
 							server.uploadFetcher(),
 							cache === '' ? '' : `/cache/${cache}`
 						),
@@ -57,13 +60,13 @@ describe('Nix substitution from a named cache', () => {
 						path.join(directory, 'target-home')
 					);
 					await target.realise(storePath, {
-						substituter: `${server.url.origin}/cache/builds`,
+						substituter: `${server.tenantUrl.toString()}/cache/builds`,
 						trustedPublicKeys: [publicKey],
 						requireSigs: true
 					});
 
 					const cacheInfo = await fetch(
-						new URL('/cache/builds/nix-cache-info', server.url)
+						server.tenantPath('/cache/builds/nix-cache-info')
 					);
 					const cacheInfoBody = await cacheInfo.text();
 					const stats = await client.stats(token);

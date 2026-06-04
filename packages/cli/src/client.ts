@@ -119,6 +119,16 @@ export class CupboardClient {
 		return `${this.cachePrefix}${path}`;
 	}
 
+	// Resolves a route under the base URL's full path, so a tenant base like
+	// `https://host/t/<tenant>` keeps its prefix. A plain `new URL('/path', base)`
+	// would discard the base path, because an absolute path replaces it.
+	private resolve(path: string): URL {
+		const url = new URL(this.baseUrl);
+		url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
+
+		return url;
+	}
+
 	stats(token: AccessCredential): Promise<StatsResponse> {
 		return this.requestJson(this.scoped('/stats'), statsResponseSchema, {
 			token
@@ -408,7 +418,7 @@ export class CupboardClient {
 		subjectToken: string,
 		subjectTokenType: string
 	): Promise<ParsedTokenResponse> {
-		const url = new URL('/token', this.baseUrl);
+		const url = this.resolve('/token');
 		const body = new URLSearchParams({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
@@ -476,7 +486,7 @@ export class CupboardClient {
 		options: ClientRequestOptions = {}
 	): Promise<Response> {
 		const method = options.method ?? 'GET';
-		const url = new URL(path, this.baseUrl);
+		const url = this.resolve(path);
 
 		for (const [key, value] of Object.entries(options.query ?? {})) {
 			url.searchParams.set(key, value);

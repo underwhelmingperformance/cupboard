@@ -35,7 +35,10 @@ describe('Nix substitution from a private-read cache', () => {
 				});
 
 				try {
-					const client = new CupboardClient(server.url, server.uploadFetcher());
+					const client = new CupboardClient(
+						server.tenantUrl,
+						server.uploadFetcher()
+					);
 					const token = await server.ownerAdminToken();
 					const publicKey = await client.publicKey();
 					const source = await NixStore.host(
@@ -59,7 +62,7 @@ describe('Nix substitution from a private-read cache', () => {
 					);
 
 					const base: RealiseOptions = {
-						substituter: server.url.origin,
+						substituter: server.tenantUrl.toString(),
 						trustedPublicKeys: [publicKey],
 						requireSigs: true
 					};

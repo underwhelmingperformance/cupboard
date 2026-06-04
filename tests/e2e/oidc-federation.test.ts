@@ -26,7 +26,7 @@ function withFederation(
 		try {
 			await body({
 				server,
-				client: new CupboardClient(server.url)
+				client: new CupboardClient(server.tenantUrl)
 			});
 		} finally {
 			await server.stop();

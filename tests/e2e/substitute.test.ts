@@ -142,7 +142,10 @@ function withHarness(
 			const server = await CupboardTestServer.start(directory);
 
 			try {
-				const client = new CupboardClient(server.url, server.uploadFetcher());
+				const client = new CupboardClient(
+					server.tenantUrl,
+					server.uploadFetcher()
+				);
 				const token = await server.ownerAdminToken();
 				const publicKey = await client.publicKey();
 
@@ -177,7 +180,7 @@ function pushContext(harness: Harness): PushContext {
 
 function signedBy(harness: Harness, trustedPublicKey: string): RealiseOptions {
 	return {
-		substituter: harness.server.url.origin,
+		substituter: harness.server.tenantUrl.toString(),
 		trustedPublicKeys: [trustedPublicKey],
 		requireSigs: true
 	};
@@ -188,7 +191,7 @@ async function fetchNarInfo(
 	storePath: string
 ): Promise<NarInfo> {
 	const response = await fetch(
-		new URL(`/${StorePath.hash(storePath)}.narinfo`, server.url)
+		server.tenantPath(`/${StorePath.hash(storePath)}.narinfo`)
 	);
 
 	return NarInfo.parse(await response.text());

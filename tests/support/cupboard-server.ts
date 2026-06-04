@@ -11,6 +11,7 @@ import path from 'node:path';
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 
+import { defaultTenant } from '../../packages/server/src/tenant-routing.ts';
 import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType
@@ -51,6 +52,23 @@ export class CupboardTestServer {
 		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
 		private readonly server: Server
 	) {}
+
+	/**
+	 * The default tenant's base URL — the `/t/<tenant>/` prefix every tenant route
+	 * (token exchange, uploads, narinfo and NAR reads) lives under. The bare
+	 * {@link url} is the deployment/control surface.
+	 */
+	get tenantUrl(): URL {
+		return new URL(`/t/${defaultTenant}`, this.url);
+	}
+
+	/** Resolves a tenant-relative path (e.g. `/x.narinfo`) under {@link tenantUrl}. */
+	tenantPath(path: string): URL {
+		const url = this.tenantUrl;
+		url.pathname = `${url.pathname}${path}`;
+
+		return url;
+	}
 
 	static async start(
 		directory: string,
@@ -127,11 +145,14 @@ export class CupboardTestServer {
 			subject_token: idToken,
 			subject_token_type: subjectTokenTypeIdToken
 		});
-		const response = await fetch(new URL('/token', this.url), {
-			method: 'POST',
-			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: body.toString()
-		});
+		const response = await fetch(
+			new URL(`/t/${defaultTenant}/token`, this.url),
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: body.toString()
+			}
+		);
 
 		if (!response.ok) {
 			throw new TokenExchangeFailedError(

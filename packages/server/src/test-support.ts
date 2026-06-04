@@ -530,6 +530,14 @@ function tenantReadPath(pathname: string): string {
 		: `/t/${defaultTenant}${pathname}`;
 }
 
+// Deployment endpoints stay at the bare host; everything else a read addresses is
+// tenant content, served under the default tenant's prefix the Worker routes by.
+function tenantReadPath(pathname: string): string {
+	return pathname.startsWith('/_')
+		? pathname
+		: `/t/${defaultTenant}${pathname}`;
+}
+
 export function fetchPath(
 	pathname: string,
 	init?: RequestInit
@@ -577,7 +585,7 @@ export async function controlFetch(
 ): Promise<Response> {
 	const ctx = createExecutionContext();
 	const request = new Request<unknown, IncomingRequestCfProperties>(
-		new URL(pathname, origin),
+		new URL(tenantReadPath(pathname), origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
 	const response = await worker.fetch(
