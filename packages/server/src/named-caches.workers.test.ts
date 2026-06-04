@@ -1,15 +1,15 @@
 import type { StatsResponse, UsageResponse } from '@cupboard/shared';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { count } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { narBlobs, narInfos } from './db/schema.ts';
+import { narInfos } from './db/schema.ts';
 import { narInfoObjectKey, narObjectKey } from './http.ts';
 import {
 	authorisedFetch,
+	blobStateCount,
 	bootstrap,
 	cacheScopedPath,
 	commitUpload,
@@ -77,26 +77,17 @@ describe('named caches', () => {
 		await pushPath(init.token, metadata);
 		await pushPath(init.token, metadata, 'builds');
 
-		const rows = await runInDurableObject(
+		const narinfoCaches = await runInDurableObject(
 			testServerFor('named-cache-share'),
-			(_instance, state) => {
-				const database = drizzle(state.storage, {
-					schema: { narBlobs, narInfos }
-				});
-
-				return {
-					narinfoCaches: database
-						.select({ cache: narInfos.cache })
-						.from(narInfos)
-						.orderBy(narInfos.cache)
-						.all()
-						.map((row) => row.cache),
-					blobCount:
-						database.select({ count: count() }).from(narBlobs).all()[0]
-							?.count ?? 0
-				};
-			}
+			(_instance, state) =>
+				drizzle(state.storage, { schema: { narInfos } })
+					.select({ cache: narInfos.cache })
+					.from(narInfos)
+					.orderBy(narInfos.cache)
+					.all()
+					.map((row) => row.cache)
 		);
+		const rows = { narinfoCaches, blobCount: await blobStateCount() };
 		const defaultStats = await statsForCache(init.token, '');
 		const buildsStats = await statsForCache(init.token, 'builds');
 		const usage = await usageForTenant(init.token);
@@ -281,12 +272,14 @@ describe('named caches', () => {
 			decision.uploadId,
 			'builds'
 		);
+		const defaultStats = await statsForCache(init.token, '');
+		const buildsStats = await statsForCache(init.token, 'builds');
 
 		expect({
 			crossCommit: crossCommit.status,
 			committed: committed.status,
-			defaultPaths: await storePathCount(init.token, ''),
-			buildsPaths: await storePathCount(init.token, 'builds')
+			defaultPaths: defaultStats.storePaths,
+			buildsPaths: buildsStats.storePaths
 		}).toStrictEqual({
 			crossCommit: StatusCodes.BAD_REQUEST,
 			committed: 'committed',

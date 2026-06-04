@@ -1,12 +1,3 @@
-CREATE TABLE `nar_blob` (
-	`nar_hash` text PRIMARY KEY NOT NULL,
-	`r2_key` text NOT NULL,
-	`compression` text NOT NULL,
-	`file_hash` text NOT NULL,
-	`file_size` integer NOT NULL,
-	`created_at` text NOT NULL
-);
---> statement-breakpoint
 CREATE TABLE `narinfo` (
 	`store_path_hash` text PRIMARY KEY NOT NULL,
 	`store_path` text NOT NULL,

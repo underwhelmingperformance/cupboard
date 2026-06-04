@@ -19,7 +19,8 @@ import {
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq, isNull, sql } from 'drizzle-orm';
+import { count, eq, isNull, sql } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { StatusCodes } from 'http-status-codes';
@@ -29,6 +30,7 @@ import migrations from '../drizzle/migrations.js';
 
 import { type AccessScope, mintAccessJwt } from './auth.ts';
 import { generateSigningKey } from './crypto.ts';
+import { blobState } from './db/d1-schema.ts';
 import {
 	authKeys,
 	narInfos,
@@ -289,6 +291,28 @@ export async function clearBlobStorage(): Promise<void> {
 	const keys = listed.objects.map((object) => object.key);
 
 	await env.BLOBS.delete(keys);
+}
+
+/** The shared `blob_state` rows in D1, sorted by NAR hash for deterministic assertions. */
+export async function blobStateNarHashes(): Promise<{ narHash: string }[]> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
+		.select({ narHash: blobState.narHash })
+		.from(blobState)
+		.all();
+
+	return rows.toSorted((left, right) =>
+		left.narHash > right.narHash ? 1 : -1
+	);
+}
+
+/** How many shared blobs D1 records as available. */
+export async function blobStateCount(): Promise<number> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
+		.select({ count: count() })
+		.from(blobState)
+		.get();
+
+	return row?.count ?? 0;
 }
 
 export function scheduledController(): ScheduledController {

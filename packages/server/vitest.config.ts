@@ -1,43 +1,62 @@
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import {
+	cloudflareTest,
+	readD1Migrations
+} from '@cloudflare/vitest-pool-workers';
 import { defineConfig } from 'vitest/config';
 
-export default defineConfig({
-	test: {
-		fileParallelism: false,
-		testTimeout: 30_000,
-		projects: [
-			{
-				test: {
-					name: 'node',
-					include: ['src/**/*.test.ts'],
-					exclude: ['src/**/*.workers.test.ts']
-				}
-			},
-			{
-				plugins: [
-					cloudflareTest({
-						main: './src/worker.ts',
-						miniflare: {
-							bindings: {
-								CUPBOARD_OWNER_ISSUER: 'https://accounts.google.com',
-								CUPBOARD_OWNER_SUBJECT: 'owner-subject',
-								CUPBOARD_OWNER_AUDIENCE: 'client-id.apps.googleusercontent.com',
-								R2_ACCESS_KEY_ID: 'test-access-key-id',
-								R2_ACCOUNT_ID: 'test-account-id',
-								R2_SECRET_ACCESS_KEY: 'test-secret-access-key'
+export default defineConfig(async () => {
+	// The D1 migrations production applies through `wrangler d1 migrations apply`,
+	// handed to the workers pool as a binding the setup file replays into D1.
+	const here = path.dirname(fileURLToPath(import.meta.url));
+	const migrations = await readD1Migrations(path.join(here, 'drizzle-d1'));
+
+	return {
+		test: {
+			testTimeout: 30_000,
+			projects: [
+				{
+					test: {
+						name: 'node',
+						sequence: { groupOrder: 0 },
+						include: ['src/**/*.test.ts'],
+						exclude: ['src/**/*.workers.test.ts']
+					}
+				},
+				{
+					plugins: [
+						cloudflareTest({
+							main: './src/worker.ts',
+							miniflare: {
+								bindings: {
+									CUPBOARD_OWNER_ISSUER: 'https://accounts.google.com',
+									CUPBOARD_OWNER_SUBJECT: 'owner-subject',
+									CUPBOARD_OWNER_AUDIENCE:
+										'client-id.apps.googleusercontent.com',
+									R2_ACCESS_KEY_ID: 'test-access-key-id',
+									R2_ACCOUNT_ID: 'test-account-id',
+									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
+									TEST_MIGRATIONS: migrations
+								},
+								compatibilityDate: '2026-04-28'
 							},
-							compatibilityDate: '2026-04-28'
-						},
-						wrangler: {
-							configPath: './wrangler.toml'
-						}
-					})
-				],
-				test: {
-					name: 'workers',
-					include: ['src/**/*.workers.test.ts']
+							wrangler: {
+								configPath: './wrangler.toml'
+							}
+						})
+					],
+					test: {
+						name: 'workers',
+						fileParallelism: true,
+						maxWorkers: 4,
+						sequence: { groupOrder: 1 },
+						include: ['src/**/*.workers.test.ts'],
+						setupFiles: ['./src/d1-test-setup.ts']
+					}
 				}
-			}
-		]
-	}
+			]
+		}
+	};
 });

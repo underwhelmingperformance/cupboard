@@ -25,19 +25,6 @@ export const narInfos = sqliteTable(
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
 );
 
-export const narBlobs = sqliteTable('nar_blob', {
-	narHash: text('nar_hash').primaryKey(),
-	r2Key: text('r2_key').notNull(),
-	compression: text('compression', { enum: ['zstd'] }).notNull(),
-	fileHash: text('file_hash').notNull(),
-	fileSize: integer('file_size').notNull(),
-	// The verified uncompressed NAR size, the canonical source a reuse commit signs
-	// rather than trusting the client's declared value. Step 2's `blob_state` carries
-	// this once the shared-CAS lifecycle moves to D1.
-	narSize: integer('nar_size').notNull(),
-	createdAt: text('created_at').notNull()
-});
-
 export const pendingUploads = sqliteTable('pending_upload', {
 	id: text('id').primaryKey(),
 	cache: text('cache').notNull().default(''),

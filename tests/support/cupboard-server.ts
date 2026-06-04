@@ -1,3 +1,4 @@
+import { readdirSync, readFileSync } from 'node:fs';
 import {
 	createServer,
 	type IncomingMessage,
@@ -80,6 +81,9 @@ export class CupboardTestServer {
 				}
 			},
 			modules: true,
+			d1Databases: {
+				CUPBOARD_DB: 'cupboard-e2e'
+			},
 			r2Buckets: {
 				BLOBS: r2Credentials.bucketName
 			},
@@ -87,6 +91,7 @@ export class CupboardTestServer {
 			rootPath: bundle.directory,
 			scriptPath: bundle.entrypoint
 		});
+		await applyD1Migrations(await worker.getD1Database('CUPBOARD_DB'));
 		const bucket = await worker.getR2Bucket('BLOBS');
 		const server = createServer((request, response) => {
 			void forwardToWorker(worker, request, response);
@@ -158,6 +163,31 @@ export class TokenExchangeFailedError extends Error {
 	) {
 		super(`Token exchange failed with ${String(status)}: ${body}`);
 		this.name = 'TokenExchangeFailedError';
+	}
+}
+
+// Applies the D1 migrations the way `wrangler d1 migrations apply` would for a
+// deployment, so the e2e worker starts with the shared-blob schema in place.
+// drizzle names migrations with a zero-padded numeric prefix, so filename order
+// is apply order; statements within a file are split on its breakpoint marker.
+async function applyD1Migrations(
+	d1: Awaited<ReturnType<Miniflare['getD1Database']>>
+): Promise<void> {
+	const directory = path.join(root, 'packages/server/drizzle-d1');
+	const files = readdirSync(directory)
+		.filter((name) => name.endsWith('.sql'))
+		.toSorted();
+
+	for (const file of files) {
+		const sql = readFileSync(path.join(directory, file), 'utf8');
+		const statements = sql
+			.split('--> statement-breakpoint')
+			.map((statement) => statement.trim())
+			.filter((statement) => statement.length > 0);
+
+		for (const statement of statements) {
+			await d1.prepare(statement).run();
+		}
 	}
 }
 

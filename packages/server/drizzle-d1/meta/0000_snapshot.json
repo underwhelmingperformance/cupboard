@@ -1,0 +1,70 @@
+{
+	"version": "6",
+	"dialect": "sqlite",
+	"id": "b2723b4d-d8da-457f-8a04-41113c0aab48",
+	"prevId": "00000000-0000-0000-0000-000000000000",
+	"tables": {
+		"blob_state": {
+			"name": "blob_state",
+			"columns": {
+				"nar_hash": {
+					"name": "nar_hash",
+					"type": "text",
+					"primaryKey": true,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"file_hash": {
+					"name": "file_hash",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"file_size": {
+					"name": "file_size",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"compression": {
+					"name": "compression",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"nar_size": {
+					"name": "nar_size",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				},
+				"verified_at": {
+					"name": "verified_at",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false
+				}
+			},
+			"indexes": {},
+			"foreignKeys": {},
+			"compositePrimaryKeys": {},
+			"uniqueConstraints": {},
+			"checkConstraints": {}
+		}
+	},
+	"views": {},
+	"enums": {},
+	"_meta": {
+		"schemas": {},
+		"tables": {},
+		"columns": {}
+	},
+	"internal": {
+		"indexes": {}
+	}
+}

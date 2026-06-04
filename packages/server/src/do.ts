@@ -80,6 +80,7 @@ import {
 	or,
 	sql
 } from 'drizzle-orm';
+import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
 	type DrizzleSqliteDODatabase
@@ -104,6 +105,7 @@ import {
 } from './auth.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
 import { generateSigningKey, signNixFingerprint } from './crypto.ts';
+import * as d1Schema from './db/d1-schema.ts';
 import * as schema from './db/schema.ts';
 import {
 	CacheNotEmptyError,
@@ -143,6 +145,7 @@ import {
 	checkBatchSize,
 	inlineVerifyMaxBytes,
 	internalOrigin,
+	narHashFromObjectKey,
 	narInfoCacheControl,
 	narInfoCachePath,
 	narInfoObjectKey,
@@ -266,6 +269,9 @@ function rootWithinConstraint(rootName: string, entry: string): boolean {
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<{ Bindings: RuntimeEnv }>();
 	private readonly db: DrizzleSqliteDODatabase<typeof schema>;
+	// The global shared-blob facts live in D1, readable and writable by every
+	// tenant DO and the Worker, rather than in this DO's own SQLite.
+	private readonly d1: DrizzleD1Database<typeof d1Schema>;
 	private migrationPromise: Promise<void> | undefined;
 	private keysPromise: Promise<readonly SigningKey[]> | undefined;
 	private authKeysPromise: Promise<readonly AuthKey[]> | undefined;
@@ -278,6 +284,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.db = drizzle(ctx.storage, {
 			schema
 		});
+		this.d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 		this.routes();
 	}
 
@@ -604,13 +611,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		return Response.json(this.stats(cache) satisfies StatsResponse);
+		return Response.json((await this.stats(cache)) satisfies StatsResponse);
 	}
 
 	private async handleUsage(request: Request): Promise<Response> {
 		await this.requireScope(request, 'admin');
 
-		return Response.json(this.usage() satisfies UsageResponse);
+		return Response.json((await this.usage()) satisfies UsageResponse);
 	}
 
 	private async handleCacheInfo(
@@ -1692,39 +1699,59 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private async findReusableBlob(
 		narHash: string
-	): Promise<typeof schema.narBlobs.$inferSelect | undefined> {
-		const existingBlob = this.db
+	): Promise<typeof d1Schema.blobState.$inferSelect | undefined> {
+		const existingBlob = await this.d1
 			.select()
-			.from(schema.narBlobs)
-			.where(eq(schema.narBlobs.narHash, narHash))
+			.from(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, narHash))
 			.get();
 
 		if (existingBlob === undefined) {
 			return undefined;
 		}
 
-		const object = await this.env.BLOBS.head(existingBlob.r2Key);
+		const object = await this.env.BLOBS.head(narObjectKey(narHash));
 
 		if (object !== null) {
 			return existingBlob;
 		}
 
-		// The object is missing. Only drop the accounting row when nothing
-		// committed still references this NAR, so a transient head miss cannot
-		// undercount a blob that live narinfos depend on.
-		if (this.narHashUnreferenced(existingBlob.narHash)) {
-			this.clearNarBlob(existingBlob.narHash);
+		// The object is missing. Only drop the shared fact when nothing committed
+		// still references this NAR, so a transient head miss cannot undercount a
+		// blob that live narinfos depend on.
+		if (this.narHashUnreferenced(narHash)) {
+			await this.clearBlobState(narHash);
 		}
 
 		return undefined;
 	}
 
 	private queueOrphanBlobDeletion(r2Key: string, now: string): void {
-		if (this.hasCommittedBlob(r2Key) || this.hasLivePendingUpload(r2Key, now)) {
+		if (this.shouldKeepBlob(r2Key, now)) {
 			return;
 		}
 
 		this.enqueueOrphanBlobDeletion(this.db, r2Key, now, now);
+	}
+
+	// Whether an R2 object must not be reaped: a live pending upload still targets
+	// it, or — for a canonical `nar/<narHash>` object — a committed narinfo still
+	// references its hash. A shared blob exists in R2 the moment it is promoted,
+	// before any commit wins, so presence alone never keeps it; only a live
+	// reference does. A staging key is never referenced, so only a live upload
+	// holds it.
+	private shouldKeepBlob(r2Key: string, now: string): boolean {
+		if (this.hasLivePendingUpload(r2Key, now)) {
+			return true;
+		}
+
+		const narHash = narHashFromObjectKey(r2Key);
+
+		if (narHash === undefined) {
+			return false;
+		}
+
+		return !this.narHashUnreferenced(narHash);
 	}
 
 	private enqueueOrphanBlobDeletion(
@@ -1797,12 +1824,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return false;
 		}
 
-		if (this.hasCommittedBlob(r2Key) || this.hasLivePendingUpload(r2Key, now)) {
+		if (this.shouldKeepBlob(r2Key, now)) {
 			this.clearQueuedBlobDeletion(r2Key);
 			return false;
 		}
 
 		await this.env.BLOBS.delete(r2Key);
+
+		// Drop the shared fact alongside the canonical object, so `blob_state`
+		// never outlives the bytes it describes. A lost-race orphan recorded its
+		// fact at promotion without a referencing narinfo; this is where it goes.
+		const narHash = narHashFromObjectKey(r2Key);
+
+		if (narHash !== undefined) {
+			await this.clearBlobState(narHash);
+		}
+
 		this.clearQueuedBlobDeletion(r2Key);
 
 		return true;
@@ -1931,7 +1968,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		if (narScheduledForDeletion) {
 			const now = new Date();
-			this.clearNarBlob(queued.narHash);
+			await this.clearBlobState(queued.narHash);
 			this.enqueueOrphanBlobDeletion(
 				this.db,
 				narObjectKey(queued.narHash),
@@ -1943,16 +1980,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
 
 		return { objectDeleted: true, narScheduledForDeletion };
-	}
-
-	private hasCommittedBlob(r2Key: string): boolean {
-		return (
-			this.db
-				.select()
-				.from(schema.narBlobs)
-				.where(eq(schema.narBlobs.r2Key, r2Key))
-				.get() !== undefined
-		);
 	}
 
 	private hasLivePendingUpload(r2Key: string, now: string): boolean {
@@ -2184,6 +2211,31 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		stagingKey: string,
 		metadata: UploadPathMetadataFields
 	): Promise<CanonicalBlob> {
+		const canonical = await this.ensureCanonicalObject(stagingKey, metadata);
+
+		// Record the shared fact together with the object, so `blob_state` exists
+		// exactly when the canonical R2 object does. The first writer for a hash
+		// fixes the metadata; a concurrent or repeated promotion keeps it.
+		await this.d1
+			.insert(d1Schema.blobState)
+			.values({
+				narHash: metadata.narHash,
+				fileHash: canonical.fileHash,
+				fileSize: canonical.fileSize,
+				compression: metadata.compression,
+				narSize: metadata.narSize,
+				verifiedAt: new Date().toISOString()
+			})
+			.onConflictDoNothing()
+			.run();
+
+		return canonical;
+	}
+
+	private async ensureCanonicalObject(
+		stagingKey: string,
+		metadata: UploadPathMetadataFields
+	): Promise<CanonicalBlob> {
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const existing = await this.env.BLOBS.head(canonicalKey);
 
@@ -2315,7 +2367,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	private stats(cache: string): StatsResponse {
+	private async stats(cache: string): Promise<StatsResponse> {
 		const storePathRows = this.db
 			.select({
 				narHash: schema.narInfos.narHash,
@@ -2344,18 +2396,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
-	private usage(): UsageResponse {
-		const blobs = this.db
-			.select({ count: count() })
-			.from(schema.narBlobs)
-			.get();
-		const total = this.db
+	private async usage(): Promise<UsageResponse> {
+		const blobs = await this.d1
 			.select({
-				total: sql<number>`coalesce(sum(${schema.narBlobs.fileSize}), 0)`
+				count: count(),
+				total: sql<number>`coalesce(sum(${d1Schema.blobState.fileSize}), 0)`
 			})
-			.from(schema.narBlobs)
+			.from(d1Schema.blobState)
 			.get();
-		const narFileSize = total?.total ?? 0;
+		const narFileSize = blobs?.total ?? 0;
 
 		return {
 			narBlobs: blobs?.count ?? 0,
@@ -2628,15 +2677,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				signNixFingerprint(key.privateJwk, fingerprint, key.name)
 			)
 		);
-		const narBlobRow = {
-			narHash: metadata.narHash,
-			r2Key: narObjectKey(metadata.narHash),
-			compression: metadata.compression,
-			fileHash: canonical.fileHash,
-			fileSize: canonical.fileSize,
-			narSize: metadata.narSize,
-			createdAt: now
-		} satisfies typeof schema.narBlobs.$inferInsert;
 
 		const won = this.db.transaction((tx) => {
 			const rows = tx
@@ -2660,15 +2700,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.returning()
 				.all();
 			const committed = rows.length > 0;
-
-			if (committed) {
-				// First writer fixes the canonical blob row; later commits of the
-				// same hash carry the same canonical metadata, so nothing to update.
-				tx.insert(schema.narBlobs)
-					.values(narBlobRow)
-					.onConflictDoNothing()
-					.run();
-			}
 
 			// Clear the originating pending upload in the same transaction as the
 			// commit, so a crash can never leave a `pending` row whose narinfo is
@@ -2988,10 +3019,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	private clearNarBlob(narHash: string): void {
-		this.db
-			.delete(schema.narBlobs)
-			.where(eq(schema.narBlobs.narHash, narHash))
+	private async clearBlobState(narHash: string): Promise<void> {
+		await this.d1
+			.delete(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, narHash))
 			.run();
 	}
 

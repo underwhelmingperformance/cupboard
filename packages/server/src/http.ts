@@ -48,6 +48,20 @@ export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
 }
 
+// The inverse of {@link narObjectKey}: the NAR hash a canonical object key
+// addresses, or undefined for any other key (a staging key, say). Lets a caller
+// holding an R2 key look the blob up in the hash-keyed shared-blob facts.
+export function narHashFromObjectKey(r2Key: string): string | undefined {
+	const prefix = 'nar/';
+	const suffix = '.nar.zst';
+
+	if (!r2Key.startsWith(prefix) || !r2Key.endsWith(suffix)) {
+		return undefined;
+	}
+
+	return r2Key.slice(prefix.length, -suffix.length);
+}
+
 // Where a client uploads unverified bytes, private to one upload. The server
 // verifies them here, then promotes them into the shared `nar/<narHash>` key, so
 // the canonical object only ever holds confirmed content and no client ever

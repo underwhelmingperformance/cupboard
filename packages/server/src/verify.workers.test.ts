@@ -5,7 +5,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narBlobs, narInfos, orphanBlobDeletions } from './db/schema.ts';
+import { narInfos, orphanBlobDeletions } from './db/schema.ts';
 import {
 	narInfoObjectKey,
 	narObjectKey,
@@ -13,6 +13,7 @@ import {
 } from './http.ts';
 import {
 	authorisedFetch,
+	blobStateCount,
 	deleteTestBase,
 	initialise,
 	mintServerSignedToken,
@@ -228,20 +229,24 @@ describe('background verification', () => {
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
 		const report = await runVerify(token);
-		const state = await runInDurableObject(
+		const persisted = await runInDurableObject(
 			testServerFor('verify-cross-cache'),
 			(_instance, storage) => {
 				const database = drizzle(storage.storage, {
-					schema: { narBlobs, narInfos, orphanBlobDeletions }
+					schema: { narInfos, orphanBlobDeletions }
 				});
 
 				return {
 					orphans: database.select().from(orphanBlobDeletions).all().length,
-					blobs: database.select().from(narBlobs).all().length,
 					narInfos: database.select().from(narInfos).all().length
 				};
 			}
 		);
+		const state = {
+			orphans: persisted.orphans,
+			blobs: await blobStateCount(),
+			narInfos: persisted.narInfos
+		};
 
 		expect({ report, state }).toStrictEqual({
 			report: {

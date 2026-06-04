@@ -14,7 +14,6 @@ import m0011 from './0011_verification_cursor.sql';
 import m0012 from './0012_pending_upload_cache.sql';
 import m0013 from './0013_oidc_trust.sql';
 import m0014 from './0014_pending_upload_verdict.sql';
-import m0015 from './0015_nar_blob_nar_size.sql';
 
 export default {
 	journal,
@@ -33,7 +32,6 @@ export default {
 		m0011,
 		m0012,
 		m0013,
-		m0014,
-		m0015
+		m0014
 	}
 };

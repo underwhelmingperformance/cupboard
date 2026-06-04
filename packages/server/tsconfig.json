@@ -7,6 +7,7 @@
 	},
 	"include": [
 		"drizzle.config.ts",
+		"drizzle.config.d1.ts",
 		"drizzle/**/*.js",
 		"src/**/*.ts",
 		"vitest.config.ts",

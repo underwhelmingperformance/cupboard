@@ -3,9 +3,10 @@ import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { narBlobs, narInfos, signingKeys } from './db/schema.ts';
+import { narInfos, signingKeys } from './db/schema.ts';
 import {
 	authorisedFetch,
+	blobStateNarHashes,
 	bootstrap,
 	currentOrigin,
 	narBytes,
@@ -19,9 +20,10 @@ import {
 } from './test-support.ts';
 
 // The vitest-pool-workers harness exposes no API to force a Durable Object to be
-// evicted and re-instantiated, so durability is asserted two ways: the rows are
-// read straight from the persisted SQLite (`state.storage`), and a fresh stub
-// for the same DO name re-derives `/pubkey` from that storage.
+// evicted and re-instantiated, so durability is asserted two ways: the per-DO
+// rows are read straight from the persisted SQLite (`state.storage`), the shared
+// blob facts from D1, and a fresh stub for the same DO name re-derives `/pubkey`
+// from that storage.
 
 describe('durable object state', () => {
 	beforeEach(resetTestServer);
@@ -37,7 +39,7 @@ describe('durable object state', () => {
 			testServerFor('durability-rows'),
 			(_instance, state) => {
 				const database = drizzle(state.storage, {
-					schema: { narBlobs, narInfos, signingKeys }
+					schema: { narInfos, signingKeys }
 				});
 
 				return {
@@ -55,10 +57,6 @@ describe('durable object state', () => {
 							sigsJson: narInfos.sigsJson
 						})
 						.from(narInfos)
-						.all(),
-					narBlobs: database
-						.select({ narHash: narBlobs.narHash })
-						.from(narBlobs)
 						.all()
 				};
 			}
@@ -73,13 +71,13 @@ describe('durable object state', () => {
 		expect({
 			signingKeys: persisted.signingKeys,
 			narInfoRows,
-			narBlobs: persisted.narBlobs
+			blobState: await blobStateNarHashes()
 		}).toStrictEqual({
 			signingKeys: [{ signing: true, published: true }],
 			narInfoRows: [
 				{ cache: '', storePathHash: metadata.storePathHash, sigCount: 1 }
 			],
-			narBlobs: [{ narHash: metadata.narHash }]
+			blobState: [{ narHash: metadata.narHash }]
 		});
 	});
 
