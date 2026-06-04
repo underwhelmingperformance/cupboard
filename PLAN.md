@@ -1026,8 +1026,8 @@ Settled decisions:
   that survives deletion. Replayed increments and decrements are idempotent by
   primary key, commit and delete are both ordered row-first/edge-last to fail
   safe, and a named, bounded, DO-owned repair pass drives every half-finished
-  saga from its durable phase markers to a terminal state. There is no
-  leaked-edge-forever direction.
+  saga from its durable marker to a terminal state, idempotently under the
+  captured per-version identity. There is no leaked-edge-forever direction.
 - **Control-plane separation.** The control plane is its own OAuth issuer with
   its own signing-key lifecycle, separate from every tenant issuer.
 
@@ -1360,26 +1360,33 @@ machinery — so a stale deletion of the old generation can only remove the old
 edge. (Today's `handleCommit` short-circuits an existing row to
 `already-present`; recommit replaces that with this content-keyed transition.)
 
-Delete is row-first and edge-last. `narinfo_deletion` carries phase markers
-(`row_deleted_at`, `blob_ref_decremented_at`, `object_deleted_at`) keyed by
-`(tenant, cache, storePathHash)` plus the captured `nar_hash` and generation.
-Replay is compare-and-delete: it deletes the narinfo row and edge only while the
-live row still matches the captured `(nar_hash, generation)`. Delete removes the
-narinfo row and R2 narinfo object first, then deletes the captured-generation
-`blob_ref` edge and updates `tenant_blob`/quota when this was the tenant's last
-live reference.
+Delete is row-first and edge-last. The durable saga marker is the
+`narinfo_deletion` row itself, keyed by `(tenant, cache, storePathHash)` and
+carrying the captured `nar_hash` and generation: its existence records that a
+delete is in flight, and its removal is the single terminal step — there are no
+timestamp phase columns. Delete deletes the narinfo row and queues the marker in
+one DO transaction (instantly non-servable), then removes the R2 narinfo object,
+deletes the captured-generation `blob_ref` edge, updates `tenant_blob`/quota
+when this was the tenant's last live reference, and clears the marker last.
 
 Repair is the saga driver, owned by the tenant DO (the single writer of both its
 `narinfo_deletion` markers and its D1 edges) and driven by the existing
-`runGarbageCollection`/`runVerification` pass, bounded by the verification
-cursor: it enumerates `narinfo_deletion` rows whose phase markers are not all
-set and advances the remaining phases (decrement the captured-generation edge,
-reverse `tenant_blob`/credit on the last reference, delete the marker),
-idempotent because each step is compare-and-delete on the captured
-`(nar_hash, generation)`. A `blob_ref` edge whose narinfo row is absent is
-reconciled only by the owning DO's re-drive; the reaper never deletes edges.
-With row-first commit there is no commit-side rollback saga: a crashed commit is
-just a not-servable narinfo the sweep removes.
+`runGarbageCollection`/`runVerification` pass. It re-runs that sequence for any
+surviving marker, and the replay is correct because every step is idempotent
+under the captured per-version identity: the edge retirement targets the exact
+captured generation, so a stale or replayed deletion can only ever remove that
+generation's edge and never a newer recommitted one; `tenant_blob`/credit
+re-checks references; the R2 narinfo delete is idempotent; and the marker is
+cleared last. Fine-grained phase-marker columns are deliberately not used: under
+captured-identity idempotency they close no correctness gap, and would only let
+replay skip a few no-op steps at the cost of a migration and extra state that
+can drift. The re-drive must be a bounded batch (a `limit`/cursor, like the
+verify pass); an unbounded flush of every queued deletion is acceptable only as
+an interim single-tenant shape and must become bounded for the hosted fleet. A
+`blob_ref` edge whose narinfo row is absent is reconciled only by the owning
+DO's re-drive; the reaper never deletes edges. With row-first commit there is no
+commit-side rollback saga: a crashed commit is just a not-servable narinfo the
+sweep removes.
 
 Because there is no `servable` flag in any step, "not-servable" is not a stored
 bit — the final serve predicate is simply that the materialised R2 narinfo
@@ -1673,9 +1680,10 @@ Per-tenant DO SQLite changes:
 - Move blob lifecycle to D1: `nar_blob` (already removed) and
   `orphan_blob_deletion` (removed in 2c) are superseded by `blob_ref`,
   `tenant_blob`, `blob_state`, and the global reaper.
-- Extend `narinfo_deletion` with phase markers and captured
-  `(nar_hash, generation)`; its stuck-marker re-drive is the DO-owned repair
-  pass.
+- Extend `narinfo_deletion` with the captured `(nar_hash, generation)`; the row
+  itself is the durable delete-saga marker (no timestamp phase columns), and its
+  surviving-marker re-drive — a bounded batch — is the DO-owned repair pass,
+  correct by captured-identity idempotency.
 
 R2 keys:
 
@@ -1726,18 +1734,19 @@ together.
    `blob_state` replaces `nar_blob` (done); **2b** `blob_ref` (with its
    `nar_hash` index) + `tenant_blob` + the durable `generation_seq` counter,
    row-first/edge-last commit (no `servable` flag — servability is the
-   materialised R2 object), and row-first/edge-last delete with
-   `narinfo_deletion` phase markers + the DO-owned bounded repair pass that
-   re-drives stuck markers, reference checks moving from local `narInfos` to
-   `blob_ref`, derived counts; **2c** the two-pass arm-then-collect global
-   reaper over `blob_state` (own cursor, `delete_after` index, D1-first/R2-last,
-   plus the demote pass), `delete_after` cleared on promote and reuse-commit,
-   retiring `orphan_blob_deletion`; **2d** the crash matrix. The crash tests are
-   planted-state plus repair-convergence (the harness cannot evict a DO or
-   interrupt mid-body): run the real path to the named step, assert the actual
-   intermediate D1 + DO + R2 state, then run repair/reaper and assert
-   convergence; inject genuinely-between-stores faults at the R2/D1 call
-   boundary. Still single-tenant data on the new model.
+   materialised R2 object), and row-first/edge-last delete whose durable saga
+   marker is the `narinfo_deletion` row (captured `(nar_hash, generation)`, no
+   timestamp phase columns) + the DO-owned bounded repair pass that re-drives
+   surviving markers (correct by captured-identity idempotency), reference
+   checks moving from local `narInfos` to `blob_ref`, derived counts; **2c** the
+   two-pass arm-then-collect global reaper over `blob_state` (own cursor,
+   `delete_after` index, D1-first/R2-last, plus the demote pass), `delete_after`
+   cleared on promote and reuse-commit, retiring `orphan_blob_deletion`; **2d**
+   the crash matrix. The crash tests are planted-state plus repair-convergence
+   (the harness cannot evict a DO or interrupt mid-body): run the real path to
+   the named step, assert the actual intermediate D1 + DO + R2 state, then run
+   repair/reaper and assert convergence; inject genuinely-between-stores faults
+   at the R2/D1 call boundary. Still single-tenant data on the new model.
 3. **Control-plane auth.** Add `control_auth_key` (public metadata in D1,
    private JWK in a Worker-only store the tenant DOs cannot read); bare `/token`
    RFC 8693 exchange with claim-based control-trust checks; control
@@ -1963,9 +1972,10 @@ existence; deduplication happens at rest after upload.
 Ordering follows the V5 cross-store discipline: bundle-to-CAS first, then edge,
 then list, failing safe toward a leaked CAS object and never a list entry
 without its bundle; removal is list-and-edge first with the reaper collecting
-the orphaned bundle, recovered from durable phase markers. The global reaper
-collects a bundle when no `attestation_ref` row anywhere references its digest
-and `now >= delete_after`, sharing the NAR reaper's structure.
+the orphaned bundle, recovered from the durable deletion marker as the NAR
+delete saga is. The global reaper collects a bundle when no `attestation_ref`
+row anywhere references its digest and `now >= delete_after`, sharing the NAR
+reaper's structure.
 
 ### Push and verify contract
 
