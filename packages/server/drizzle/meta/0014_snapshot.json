@@ -113,6 +113,14 @@
 					"notNull": true,
 					"autoincrement": false
 				},
+				"generation": {
+					"name": "generation",
+					"type": "integer",
+					"primaryKey": false,
+					"notNull": true,
+					"autoincrement": false,
+					"default": 0
+				},
 				"created_at": {
 					"name": "created_at",
 					"type": "text",
@@ -124,9 +132,13 @@
 			"indexes": {},
 			"foreignKeys": {},
 			"compositePrimaryKeys": {
-				"narinfo_deletion_cache_store_path_hash_pk": {
-					"columns": ["cache", "store_path_hash"],
-					"name": "narinfo_deletion_cache_store_path_hash_pk"
+				"narinfo_deletion_cache_store_path_hash_generation_pk": {
+					"columns": [
+						"cache",
+						"store_path_hash",
+						"generation"
+					],
+					"name": "narinfo_deletion_cache_store_path_hash_generation_pk"
 				}
 			},
 			"uniqueConstraints": {},
@@ -233,7 +245,10 @@
 			"foreignKeys": {},
 			"compositePrimaryKeys": {
 				"narinfo_cache_store_path_hash_pk": {
-					"columns": ["cache", "store_path_hash"],
+					"columns": [
+						"cache",
+						"store_path_hash"
+					],
 					"name": "narinfo_cache_store_path_hash_pk"
 				}
 			},
@@ -496,7 +511,11 @@
 			"foreignKeys": {},
 			"compositePrimaryKeys": {
 				"retention_root_target_cache_root_name_store_path_hash_pk": {
-					"columns": ["cache", "root_name", "store_path_hash"],
+					"columns": [
+						"cache",
+						"root_name",
+						"store_path_hash"
+					],
 					"name": "retention_root_target_cache_root_name_store_path_hash_pk"
 				}
 			},
@@ -547,7 +566,10 @@
 			"foreignKeys": {},
 			"compositePrimaryKeys": {
 				"retention_root_cache_name_pk": {
-					"columns": ["cache", "name"],
+					"columns": [
+						"cache",
+						"name"
+					],
 					"name": "retention_root_cache_name_pk"
 				}
 			},

@@ -216,6 +216,10 @@ interface SigningKey {
 
 const bootstrapKeyName = 'cupboard-1';
 
+// The tenant this DO's D1 reference edges belong to. Single-tenant for now; step 5
+// replaces this constant with the slug the Worker supplies via the configure RPC.
+const singleTenant = 'v1';
+
 // The owner's admin trust rule is seeded under a fixed id from deploy config;
 // the admin CRUD uses generated ids, so it never collides with this one.
 const ownerRuleId = 'owner';
@@ -1125,7 +1129,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const committed = this.db
 				.select({
 					storePathHash: schema.narInfos.storePathHash,
-					narHash: schema.narInfos.narHash
+					narHash: schema.narInfos.narHash,
+					generation: schema.narInfos.generation
 				})
 				.from(schema.narInfos)
 				.where(eq(schema.narInfos.cache, cache))
@@ -1146,6 +1151,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						cache,
 						path.storePathHash,
 						path.narHash,
+						path.generation,
 						now
 					);
 				}
@@ -1850,16 +1856,87 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: string,
 		storePathHash: string,
 		narHash: string,
-		now: string,
-		generation = 0
+		generation: number,
+		now: string
 	): void {
-		// The R2 key is deterministic, but each captured narinfo version may own a
-		// distinct reference edge once generations are introduced later in the stack.
 		handle
 			.insert(schema.narInfoDeletions)
 			.values({ cache, storePathHash, narHash, generation, createdAt: now })
-			.onConflictDoNothing()
+			.onConflictDoUpdate({
+				target: [
+					schema.narInfoDeletions.cache,
+					schema.narInfoDeletions.storePathHash,
+					schema.narInfoDeletions.generation
+				],
+				set: { narHash, createdAt: now }
+			})
 			.run();
+	}
+
+	// Retires the D1 reference edge for one captured narinfo version, then drops the
+	// tenant's `tenant_blob` presence once it holds no more edges for the hash. The
+	// edge delete targets the exact `(tenant, cache, store_path_hash, generation)`,
+	// so a newer recommitted edge is never touched.
+	private async retireBlobRefEdge(
+		cache: string,
+		storePathHash: string,
+		generation: number,
+		narHash: string
+	): Promise<void> {
+		await this.d1
+			.delete(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, singleTenant),
+					eq(d1Schema.blobReference.cache, cache),
+					eq(d1Schema.blobReference.storePathHash, storePathHash),
+					eq(d1Schema.blobReference.generation, generation)
+				)
+			)
+			.run();
+
+		const stillReferenced = await this.d1
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference)
+			.where(
+				and(
+					eq(d1Schema.blobReference.tenant, singleTenant),
+					eq(d1Schema.blobReference.narHash, narHash)
+				)
+			)
+			.get();
+
+		if (stillReferenced === undefined) {
+			await this.d1
+				.delete(d1Schema.tenantBlob)
+				.where(
+					and(
+						eq(d1Schema.tenantBlob.tenant, singleTenant),
+						eq(d1Schema.tenantBlob.narHash, narHash)
+					)
+				)
+				.run();
+		}
+	}
+
+	// Schedules the shared blob for grace-delayed deletion when nothing committed
+	// references its hash any more, clearing the shared `blob_state` fact at the
+	// same time. Returns whether it scheduled.
+	private async scheduleBlobIfUnreferenced(narHash: string): Promise<boolean> {
+		if (!this.narHashUnreferenced(narHash)) {
+			return false;
+		}
+
+		const now = new Date();
+		await this.clearBlobState(narHash);
+		this.enqueueOrphanBlobDeletion(
+			this.db,
+			narObjectKey(narHash),
+			new Date(now.getTime() + orphanBlobDeletionGraceMs).toISOString(),
+			now.toISOString()
+		);
+
+		return true;
 	}
 
 	private clearQueuedNarInfoDeletion(
@@ -1934,8 +2011,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return { objectDeleted: false, narScheduledForDeletion: false };
 		}
 
+		// Retire this captured narinfo version's edge first (compare-and-delete by
+		// generation): it is stale whether or not the path has since recommitted at
+		// a newer generation, and dropping it is what lets the shared blob be
+		// reclaimed once nothing references the hash.
+		await this.retireBlobRefEdge(
+			cache,
+			storePathHash,
+			queued.generation,
+			queued.narHash
+		);
+
 		// The row is truth: a re-committed path owns a live object again, so drop
-		// the stale cleanup rather than delete the new object.
+		// the stale cleanup rather than delete the new object. Its old NAR may still
+		// be unreferenced now (a recommit at a different hash), so still consider it.
 		const reCommitted =
 			this.db
 				.select()
@@ -1949,8 +2038,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				.get() !== undefined;
 
 		if (reCommitted) {
+			const narScheduledForDeletion = await this.scheduleBlobIfUnreferenced(
+				queued.narHash
+			);
 			this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
-			return { objectDeleted: false, narScheduledForDeletion: false };
+			return { objectDeleted: false, narScheduledForDeletion };
 		}
 
 		await this.env.BLOBS.delete(narInfoObjectKey(storePathHash, cache));
@@ -1964,18 +2056,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// The object is gone, so the NAR grace can start now. Re-check references:
 		// a path may have committed the same NAR since the row was removed, so only
 		// retire the blob when it is genuinely unreferenced.
-		const narScheduledForDeletion = this.narHashUnreferenced(queued.narHash);
-
-		if (narScheduledForDeletion) {
-			const now = new Date();
-			await this.clearBlobState(queued.narHash);
-			this.enqueueOrphanBlobDeletion(
-				this.db,
-				narObjectKey(queued.narHash),
-				new Date(now.getTime() + orphanBlobDeletionGraceMs).toISOString(),
-				now.toISOString()
-			);
-		}
+		const narScheduledForDeletion = await this.scheduleBlobIfUnreferenced(
+			queued.narHash
+		);
 
 		this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
 
@@ -2531,7 +2614,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const committed = this.db
 			.select({
 				storePathHash: schema.narInfos.storePathHash,
-				narHash: schema.narInfos.narHash
+				narHash: schema.narInfos.narHash,
+				generation: schema.narInfos.generation
 			})
 			.from(schema.narInfos)
 			.where(eq(schema.narInfos.cache, cache))
@@ -2557,6 +2641,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					cache,
 					path.storePathHash,
 					path.narHash,
+					path.generation,
 					now
 				);
 			});
@@ -2678,7 +2763,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		const won = this.db.transaction((tx) => {
+		// Source the generation inside the same transaction as the insert and the
+		// counter advance, so a winning commit reads, stamps and bumps atomically;
+		// the counter survives deletes, so a recommit always lands a higher one.
+		const outcome = this.db.transaction((tx) => {
+			const seq = tx
+				.select({ next: schema.generationSeq.nextGeneration })
+				.from(schema.generationSeq)
+				.where(
+					and(
+						eq(schema.generationSeq.cache, cache),
+						eq(schema.generationSeq.storePathHash, metadata.storePathHash)
+					)
+				)
+				.get();
+			const generation = seq?.next ?? 0;
 			const rows = tx
 				.insert(schema.narInfos)
 				.values({
@@ -2694,12 +2793,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					deriver: metadata.deriver,
 					ca: metadata.ca,
 					sigsJson: JSON.stringify(sigs),
+					generation,
 					createdAt: now
 				} satisfies typeof schema.narInfos.$inferInsert)
 				.onConflictDoNothing()
 				.returning()
 				.all();
 			const committed = rows.length > 0;
+
+			if (committed) {
+				tx.insert(schema.generationSeq)
+					.values({
+						cache,
+						storePathHash: metadata.storePathHash,
+						nextGeneration: generation + 1
+					})
+					.onConflictDoUpdate({
+						target: [
+							schema.generationSeq.cache,
+							schema.generationSeq.storePathHash
+						],
+						set: { nextGeneration: generation + 1 }
+					})
+					.run();
+			}
 
 			// Clear the originating pending upload in the same transaction as the
 			// commit, so a crash can never leave a `pending` row whose narinfo is
@@ -2711,12 +2828,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					.run();
 			}
 
-			return committed;
+			return { committed, generation };
 		});
 
-		if (!won) {
+		if (!outcome.committed) {
 			return false;
 		}
+
+		// Edge-last: write the D1 reference edge and the per-tenant blob presence
+		// after the narinfo row, so the reaper never sees an edge without a row. The
+		// edge names this exact narinfo version; `tenant_blob` is the 0→1 presence
+		// for the tenant's first reference to the hash.
+		await this.d1
+			.insert(d1Schema.blobReference)
+			.values({
+				tenant: singleTenant,
+				cache,
+				storePathHash: metadata.storePathHash,
+				generation: outcome.generation,
+				narHash: metadata.narHash
+			})
+			.onConflictDoNothing()
+			.run();
+		await this.d1
+			.insert(d1Schema.tenantBlob)
+			.values({
+				tenant: singleTenant,
+				narHash: metadata.narHash,
+				fileSize: canonical.fileSize
+			})
+			.onConflictDoNothing()
+			.run();
 
 		let signed = unsigned;
 
@@ -2928,12 +3070,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				row.cache,
 				row.storePathHash,
 				row.narHash,
+				row.generation,
 				now
 			);
 		});
 
 		try {
-			await this.deleteQueuedNarInfo(row.cache, row.storePathHash, 0, origin);
+			await this.deleteQueuedNarInfo(
+				row.cache,
+				row.storePathHash,
+				row.generation,
+				origin
+			);
 		} catch {
 			// the durable queue row remains for GC to retry
 		}
@@ -2998,6 +3146,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					row.cache,
 					storePathHash,
 					row.narHash,
+					row.generation,
 					now
 				);
 			});
@@ -3008,7 +3157,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				({ narScheduledForDeletion } = await this.deleteQueuedNarInfo(
 					row.cache,
 					storePathHash,
-					0,
+					row.generation,
 					origin
 				));
 			} catch {

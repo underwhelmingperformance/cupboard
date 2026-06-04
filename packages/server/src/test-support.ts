@@ -1,50 +1,87 @@
-import {
-	type CommitResponse,
-	DEFAULT_CACHE,
-	type DeletePathResponse,
-	NarInfo,
-	NixSha256Hash,
-	type RootListResponse,
-	type RootRemoveResponse,
-	type RootSetBody,
-	type RootSetResponse,
-	type StatsResponse,
-	type UploadNegotiateResponse,
-	type UploadPathMetadataFields,
-	zstdCompressionStream
-} from '@cupboard/shared';
+import { NixSha256Hash } from '@cupboard/nix/hash';
+import { NarInfo } from '@cupboard/nix/narinfo';
+import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { zstdCompressionStream } from '@cupboard/nix/zstd';
+import type {
+	RootListResponse,
+	RootRemoveResponse,
+	RootSetBody,
+	RootSetResponse
+} from '@cupboard/protocol/retention';
+import type {
+	CommitResponse,
+	DeletePathResponse,
+	StatsResponse,
+	UploadNegotiateResponse,
+	UploadPathMetadataFields,
+	UploadStatusResponse
+} from '@cupboard/protocol/upload';
 import {
 	createExecutionContext,
 	runInDurableObject,
 	waitOnExecutionContext
 } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { count, eq, isNull, sql } from 'drizzle-orm';
+import { and, count, eq, isNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { StatusCodes } from 'http-status-codes';
-import { expect } from 'vitest';
+import { expect, vi } from 'vitest';
 
 import migrations from '../drizzle/migrations.js';
 
-import { type AccessScope, mintAccessJwt } from './auth.ts';
-import { generateSigningKey } from './crypto.ts';
-import { blobState } from './db/d1-schema.ts';
+import { type AccessScope, mintAccessJwt } from './auth/auth.ts';
+import {
+	activeControlKey,
+	ensureControlKey
+} from './control/control-key-store.ts';
+import { publishTenantManifest } from './control/tenant-manifest.ts';
+import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
+import * as d1Schema from './db/d1-schema.ts';
+import {
+	blobReference,
+	blobState,
+	controlTrust,
+	tenantBlob
+} from './db/d1-schema.ts';
 import {
 	authKeys,
+	generationSeq,
+	narInfoDeletions,
 	narInfos,
 	pendingUploads,
 	signingKeys
 } from './db/schema.ts';
+import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
+import type { CupboardServer } from './do/server.ts';
 import {
+	blobReaperGraceMs,
 	internalOrigin,
 	narInfoObjectKey,
-	orphanBlobDeletionGraceMs,
+	narObjectKey,
 	stagingObjectKey
-} from './http.ts';
-import type { CupboardServer } from './worker.ts';
+} from './http/http.ts';
+import { hashReadPassword } from './read/read-auth.ts';
+import { tenantServer } from './routing/durable-object.ts';
+import { runBlobReaper } from './routing/scheduled.ts';
+import { defaultTenant } from './routing/tenant-routing.ts';
 import worker from './worker.ts';
+
+// The control-plane bindings live only on the public `cupboard` Worker in
+// production, never on the `cupboard-tenant` script the Durable Object runs in. The
+// test harness mirrors that: these are absent from the Durable Object's env (the
+// pool binds the tenant config) and are supplied only to the control handler when
+// a test drives a bare-host control route.
+const testControlEnv = {
+	CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
+	CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
+	// The signup issuer points at a host that is never reachable in the workers
+	// pool, so a signup test exercises everything up to the JWKS fetch; the positive
+	// claim is covered end to end against the stub issuer in the e2e suite.
+	CUPBOARD_SIGNUP_ISSUER: 'https://signup.example.test',
+	CUPBOARD_SIGNUP_AUDIENCE: 'cupboard-control-client'
+} as const;
 
 // A real zstd frame: it decompresses to a 1234-byte payload (the bytes
 // `i % 256`), so the server's verify-before-serve decompress-and-rehash accepts
@@ -78,6 +115,7 @@ export const deleteTestBase = new Date('2026-01-01T00:00:00.000Z');
 let origin = 'https://cupboard.test';
 let server = testServerFor('initial');
 let nextTestServerId = 0;
+let nextProvisionConfigVersion = 1;
 
 export type UploadDecision = UploadNegotiateResponse['uploads'][number];
 export type UploadActionDecision = Extract<
@@ -95,18 +133,229 @@ export interface GcResult {
 	readonly rootsExpired: number;
 	readonly pathsSwept: number;
 	readonly narInfosDeleted: number;
-	readonly blobsDeleted: number;
 }
 
 /**
  * Points the harness at a fresh, isolated Durable Object so each test starts
- * from empty state. The origin and the DO name share the same counter so the
- * URL and the stub agree.
+ * from empty state, and configures it as the default tenant. The origin and the
+ * DO name share the same counter so the URL and the stub agree.
  */
-export function resetTestServer(): void {
+export async function resetTestServer(): Promise<void> {
 	origin = `https://cupboard-${String(nextTestServerId)}.test`;
 	server = testServerFor(`test-${String(nextTestServerId)}`);
 	nextTestServerId += 1;
+
+	await configureDefaultTenant(server);
+	await configureDefaultTenant(defaultWorkerServer());
+	await provisionDefaultTenant();
+}
+
+/**
+ * Writes the default tenant's D1 registry row and publishes the admission
+ * manifest, the way provisioning would, so a Worker-routed read or write is
+ * admitted. A `read` credential makes the cache private; omitting it leaves it
+ * public. The row is upserted so a test can switch a public default tenant to
+ * private mid-test.
+ */
+export async function provisionDefaultTenant(
+	options: {
+		readonly readMode?: 'public' | 'private';
+		readonly read?: { readonly user: string; readonly password: string };
+		readonly quotaBytes?: number;
+	} = {}
+): Promise<void> {
+	const readMode = options.readMode ?? 'public';
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const readUser = options.read?.user;
+	const readPasswordHash =
+		options.read === undefined
+			? undefined
+			: await hashReadPassword(options.read.password);
+	const now = deleteTestBase.toISOString();
+
+	await database
+		.insert(d1Schema.tenant)
+		.values({
+			id: defaultTenant,
+			status: 'active',
+			readMode,
+			ownerIssuer: env.CUPBOARD_OWNER_ISSUER,
+			ownerSubject: env.CUPBOARD_OWNER_SUBJECT,
+			ownerAudience: env.CUPBOARD_OWNER_AUDIENCE,
+			configVersion: 1,
+			createdAt: now,
+			readUser,
+			readPasswordHash
+		})
+		.onConflictDoUpdate({
+			target: d1Schema.tenant.id,
+			set: { readMode, readUser, readPasswordHash }
+		})
+		.run();
+
+	// The usage row is created with the tenant; a later call (e.g. switching read
+	// mode) updates only the quota, leaving the accumulated counters intact.
+	await database
+		.insert(d1Schema.tenantUsage)
+		.values({
+			tenant: defaultTenant,
+			bytes: 0,
+			narinfos: 0,
+			blobs: 0,
+			quotaBytes: options.quotaBytes,
+			updatedAt: now
+		})
+		.onConflictDoUpdate({
+			target: d1Schema.tenantUsage.tenant,
+			set: { quotaBytes: options.quotaBytes, updatedAt: now }
+		})
+		.run();
+
+	await publishTenantManifest(database, env.TENANT_CACHE);
+}
+
+/**
+ * Provisions a non-default tenant for a route-level test: writes its D1 row,
+ * optionally configures its Durable Object with its path-based issuer, and
+ * publishes the admission manifest. Returns the tenant's issuer URL. Pass
+ * `configure: false` to admit a slug whose Durable Object stays unconfigured, so a
+ * test can prove that route 503s rather than serving under a default identity.
+ */
+export async function provisionNamedTenant(
+	id: string,
+	options: {
+		readonly readMode?: 'public' | 'private';
+		configure?: boolean;
+	} = {}
+): Promise<string> {
+	const readMode = options.readMode ?? 'public';
+	const issuer = `${origin}/t/${id}`;
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	// The workers pool keeps a Durable Object warm across tests, so a fixed-name
+	// tenant carries its previous identity. A monotonic config version clears the
+	// `configure` fence so each test reconfigures the object for its own origin.
+	nextProvisionConfigVersion += 1;
+	const configVersion = nextProvisionConfigVersion;
+
+	await database
+		.insert(d1Schema.tenant)
+		.values({
+			id,
+			status: 'active',
+			readMode,
+			ownerIssuer: '',
+			ownerSubject: '',
+			ownerAudience: '',
+			configVersion,
+			createdAt: deleteTestBase.toISOString()
+		})
+		.onConflictDoUpdate({
+			target: d1Schema.tenant.id,
+			set: { status: 'active', readMode, configVersion }
+		})
+		.run();
+
+	await database
+		.insert(d1Schema.tenantUsage)
+		.values({
+			tenant: id,
+			bytes: 0,
+			narinfos: 0,
+			blobs: 0,
+			updatedAt: deleteTestBase.toISOString()
+		})
+		.onConflictDoNothing()
+		.run();
+
+	if (options.configure !== false) {
+		await tenantServer(env, id).configure({
+			tenant: id,
+			issuer,
+			audience: issuer,
+			ownerIssuer: '',
+			ownerSubject: '',
+			ownerAudience: '',
+			configVersion
+		});
+	}
+
+	await publishTenantManifest(database, env.TENANT_CACHE);
+
+	return issuer;
+}
+
+/**
+ * Marks a provisioned tenant suspended, the way the control plane does: it updates
+ * the authoritative D1 status (which the write gate reads) and republishes the
+ * admission manifest (which the read path reads), so both gates see the change.
+ */
+export async function suspendTenant(id: string): Promise<void> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	await database
+		.update(d1Schema.tenant)
+		.set({ status: 'suspended' })
+		.where(eq(d1Schema.tenant.id, id))
+		.run();
+	await publishTenantManifest(database, env.TENANT_CACHE);
+}
+
+/**
+ * Begins offboarding a provisioned tenant the way the control plane does: it updates
+ * the authoritative D1 status, republishes the admission manifest, and tells the
+ * Durable Object to stop re-materialising its objects, so the cron's offboard drain
+ * can run.
+ */
+export async function offboardTenant(id: string): Promise<void> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	await database
+		.update(d1Schema.tenant)
+		.set({ status: 'offboarding' })
+		.where(eq(d1Schema.tenant.id, id))
+		.run();
+	await publishTenantManifest(database, env.TENANT_CACHE);
+	await tenantServer(env, id).beginOffboard();
+}
+
+/** A tenant's registry row, for asserting the offboarding lifecycle. */
+export async function tenantRow(id: string): Promise<
+	| {
+			status: string;
+			readUser: string | undefined;
+			readPasswordHash: string | undefined;
+	  }
+	| undefined
+> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			status: d1Schema.tenant.status,
+			readUser: d1Schema.tenant.readUser,
+			readPasswordHash: d1Schema.tenant.readPasswordHash
+		})
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, id))
+		.get();
+
+	if (row === undefined) {
+		return undefined;
+	}
+
+	// A cleared credential reads as undefined, so a test asserts the scrub without a
+	// null literal.
+	return {
+		status: row.status,
+		readUser: row.readUser ?? undefined,
+		readPasswordHash: row.readPasswordHash ?? undefined
+	};
+}
+
+/** The R2 object keys under a tenant's namespace, sorted, for drain assertions. */
+export async function tenantObjectKeys(id: string): Promise<string[]> {
+	const listed = await env.BLOBS.list({ prefix: `t/${id}/` });
+
+	return listed.objects.map((object) => object.key).toSorted();
 }
 
 /** The origin the harness is currently targeting. */
@@ -114,19 +363,45 @@ export function currentOrigin(): string {
 	return origin;
 }
 
+// The issuer and audience the Durable Object is configured with and mints under in
+// low-level tests. A fixed value, independent of the per-test origin, so a token
+// stays valid when a test switches origin via useTestServer. Route-level behaviour
+// (a provisioned tenant's path-based issuer) is proved separately.
+const tenantTestIssuer = 'cupboard';
+
+// Configures a Durable Object as the default tenant, the way provisioning would,
+// with the fixed legacy issuer for low-level token round-trips; the owner triple
+// comes from the deploy env the pool binds.
+async function configureDefaultTenant(
+	stub: DurableObjectStub<CupboardServer>
+): Promise<void> {
+	const issuer = tenantTestIssuer;
+
+	await stub.configure({
+		tenant: defaultTenant,
+		issuer,
+		audience: issuer,
+		ownerIssuer: env.CUPBOARD_OWNER_ISSUER,
+		ownerSubject: env.CUPBOARD_OWNER_SUBJECT,
+		ownerAudience: env.CUPBOARD_OWNER_AUDIENCE,
+		configVersion: 1
+	});
+}
+
 /**
  * Redirects the harness at a named server, e.g. for a test that needs a
- * distinct DO from the one {@link resetTestServer} assigned.
+ * distinct DO from the one {@link resetTestServer} assigned, configuring it.
  */
-export function useTestServer(name: string): void {
+export async function useTestServer(name: string): Promise<void> {
 	origin = `https://cupboard-${name}.test`;
 	server = testServerFor(name);
+
+	await configureDefaultTenant(server);
+	await provisionDefaultTenant();
 }
 
 export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
-	const id = env.CUPBOARD_DO.idFromName(name);
-
-	return env.CUPBOARD_DO.get(id);
+	return tenantServer(env, name);
 }
 
 /** The Durable Object stub the harness is currently targeting. */
@@ -183,11 +458,53 @@ async function mintServerSignedTokenFor(
 	subject = 'scope-test',
 	callbackRoots?: readonly string[]
 ): Promise<string> {
+	const key = await activeAuthKeyFor(stub);
+
+	return mintAccessJwt(
+		key.privateJwk,
+		{
+			issuer: tenantTestIssuer,
+			audience: tenantTestIssuer,
+			subject,
+			scope,
+			kid: key.kid,
+			ttlSeconds: 600,
+			cbRoots: callbackRoots
+		},
+		new Date()
+	);
+}
+
+/**
+ * Mints a token signed by a Durable Object's active auth key but pinned to an
+ * explicit issuer and audience, so a route-level test can prove a tenant mints
+ * under its own path-based issuer rather than the fixed low-level one.
+ */
+export async function mintTokenForTenant(
+	stub: DurableObjectStub<CupboardServer>,
+	issuer: string,
+	scope: AccessScope,
+	subject = 'route-test'
+): Promise<string> {
+	const key = await activeAuthKeyFor(stub);
+
+	return mintAccessJwt(
+		key.privateJwk,
+		{ issuer, audience: issuer, subject, scope, kid: key.kid, ttlSeconds: 600 },
+		new Date()
+	);
+}
+
+async function activeAuthKeyFor(
+	stub: DurableObjectStub<CupboardServer>
+): Promise<{ kid: string; privateJwk: JsonWebKey }> {
 	// The auth key is created on first use; a JWKS request creates it without
 	// minting anything, so reading it straight after always finds a key.
-	await stub.fetch(new URL('/.well-known/jwks.json', origin));
+	const jwks = await stub.fetch(new URL('/.well-known/jwks.json', origin));
+	expect(jwks.status).toBe(StatusCodes.OK);
+	await jwks.text();
 
-	const key = await runInDurableObject(stub, (_instance, state) => {
+	return runInDurableObject(stub, (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { authKeys } });
 		const row = database
 			.select()
@@ -201,25 +518,16 @@ async function mintServerSignedTokenFor(
 			throw new Error('expected an active auth key to mint a scoped token');
 		}
 
-		return {
-			kid: row.kid,
-			privateJwk: JSON.parse(row.privateJwkJson) as JsonWebKey
-		};
+		return { kid: row.kid, privateJwk: parseJwk(row.privateJwkJson) };
 	});
+}
 
-	return mintAccessJwt(
-		key.privateJwk,
-		{
-			issuer: 'cupboard',
-			audience: 'cupboard',
-			subject,
-			scope,
-			kid: key.kid,
-			ttlSeconds: 600,
-			cbRoots: callbackRoots
-		},
-		new Date()
-	);
+// Deployment endpoints stay at the bare host; everything else a read addresses is
+// tenant content, served under the default tenant's prefix the Worker routes by.
+function tenantReadPath(pathname: string): string {
+	return pathname.startsWith('/_')
+		? pathname
+		: `/t/${defaultTenant}${pathname}`;
 }
 
 export function fetchPath(
@@ -236,7 +544,33 @@ export function workerFetch(
 	return defaultWorkerServer().fetch(new URL(pathname, origin), init);
 }
 
-export async function readFetch(
+export function readFetch(
+	pathname: string,
+	init?: RequestInit
+): Promise<Response> {
+	return handlerFetch(tenantReadPath(pathname), init);
+}
+
+// Drives the real Worker handler for an exact path (no tenant prefix added), so a
+// test can exercise routing, admission and dispatch for any `/t/<slug>/…` path.
+export async function handlerFetch(
+	pathname: string,
+	init?: RequestInit
+): Promise<Response> {
+	const ctx = createExecutionContext();
+	const request = new Request<unknown, IncomingRequestCfProperties>(
+		new URL(pathname, origin),
+		init as RequestInit<IncomingRequestCfProperties>
+	);
+	const response = await worker.fetch(request, env, ctx);
+	await waitOnExecutionContext(ctx);
+
+	return response;
+}
+
+// Fetches a bare-host path through the real Worker — the control surface, with no
+// tenant prefix. A per-call env copy lets a test vary the control configuration.
+export async function controlFetch(
 	pathname: string,
 	init?: RequestInit,
 	envOverride: Readonly<Record<string, string>> = {}
@@ -246,16 +580,58 @@ export async function readFetch(
 		new URL(pathname, origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
-	// Inject a per-call env copy so a test can vary deployment vars (e.g. the
-	// private-read credential) without mutating the shared workers-pool `env`.
 	const response = await worker.fetch(
 		request,
-		Object.assign({}, env, envOverride),
+		Object.assign({}, env, testControlEnv, envOverride),
 		ctx
 	);
 	await waitOnExecutionContext(ctx);
 
 	return response;
+}
+
+// A control admin token, minted the way the control plane does: signed by the
+// active control key for the control issuer (the current origin) and audience.
+export async function mintControlAdminToken(
+	subject = 'global-admin'
+): Promise<string> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const wrappingSecret = testControlEnv.CONTROL_KEY_WRAP_SECRET;
+
+	await ensureControlKey(database, wrappingSecret, new Date().toISOString());
+	const active = await activeControlKey(database, wrappingSecret);
+
+	return mintAccessJwt(
+		active.privateJwk,
+		{
+			issuer: new URL(origin).origin,
+			audience: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
+			subject,
+			scope: 'admin',
+			kid: active.kid,
+			ttlSeconds: 600
+		},
+		new Date()
+	);
+}
+
+// Seeds a control trust rule directly, standing in for the gated first-signup
+// claim that will seed it. A pinned `sub` goes in `claims`, matched exactly.
+export async function seedControlTrust(fields: {
+	readonly issuer: string;
+	readonly audience: string;
+	readonly claims?: Readonly<Record<string, string>>;
+}): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: { controlTrust } })
+		.insert(controlTrust)
+		.values({
+			id: crypto.randomUUID(),
+			issuer: fields.issuer,
+			audience: fields.audience,
+			claimsJson: JSON.stringify(fields.claims ?? {}),
+			createdAt: new Date().toISOString()
+		})
+		.run();
 }
 
 export async function authorisedFetch(
@@ -315,6 +691,295 @@ export async function blobStateCount(): Promise<number> {
 	return row?.count ?? 0;
 }
 
+/**
+ * Whether the cron has stamped a tenant as maintained, for asserting which tenants a
+ * sweep picked up: the maintenance sweep orders active tenants by `last_maintained_at`
+ * (oldest first, NULL first) and stamps the batch it processes.
+ */
+export async function tenantMaintained(id: string): Promise<boolean> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ lastMaintainedAt: d1Schema.tenant.lastMaintainedAt })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, id))
+		.get();
+
+	return (row?.lastMaintainedAt ?? undefined) !== undefined;
+}
+
+/** The durable cron pass record for one tenant/pass pair. */
+export async function tenantMaintenanceFailureRow(
+	id: string,
+	pass: typeof d1Schema.tenantMaintenanceFailure.$inferSelect.pass
+): Promise<
+	| {
+			consecutiveFailures: number;
+			lastError: string | undefined;
+			lastFailedAt: string | undefined;
+			lastSuccessAt: string | undefined;
+	  }
+	| undefined
+> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			consecutiveFailures:
+				d1Schema.tenantMaintenanceFailure.consecutiveFailures,
+			lastError: d1Schema.tenantMaintenanceFailure.lastError,
+			lastFailedAt: d1Schema.tenantMaintenanceFailure.lastFailedAt,
+			lastSuccessAt: d1Schema.tenantMaintenanceFailure.lastSuccessAt
+		})
+		.from(d1Schema.tenantMaintenanceFailure)
+		.where(
+			and(
+				eq(d1Schema.tenantMaintenanceFailure.tenant, id),
+				eq(d1Schema.tenantMaintenanceFailure.pass, pass)
+			)
+		)
+		.get();
+
+	if (row === undefined) {
+		return undefined;
+	}
+
+	return {
+		consecutiveFailures: row.consecutiveFailures,
+		lastError: row.lastError ?? undefined,
+		lastFailedAt: row.lastFailedAt ?? undefined,
+		lastSuccessAt: row.lastSuccessAt ?? undefined
+	};
+}
+
+/** The D1 reference edges, sorted for deterministic assertions. */
+export async function blobReferenceRows(): Promise<
+	{
+		tenant: string;
+		cache: string;
+		storePathHash: string;
+		generation: number;
+		narHash: string;
+	}[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
+		.select()
+		.from(blobReference)
+		.all();
+
+	return rows.toSorted((left, right) =>
+		`${left.storePathHash}:${String(left.generation)}` >
+		`${right.storePathHash}:${String(right.generation)}`
+			? 1
+			: -1
+	);
+}
+
+/** The per-tenant blob-presence rows, sorted by NAR hash. */
+export async function tenantBlobRows(): Promise<
+	{ tenant: string; narHash: string; fileSize: number }[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { tenantBlob } })
+		.select()
+		.from(tenantBlob)
+		.all();
+
+	return rows.toSorted((left, right) =>
+		left.narHash > right.narHash ? 1 : -1
+	);
+}
+
+/** The default tenant's usage counters and quota, for asserting charge and credit. */
+export async function tenantUsageRow(): Promise<
+	| {
+			bytes: number;
+			narinfos: number;
+			blobs: number;
+			quotaBytes: number | undefined;
+	  }
+	| undefined
+> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			bytes: d1Schema.tenantUsage.bytes,
+			narinfos: d1Schema.tenantUsage.narinfos,
+			blobs: d1Schema.tenantUsage.blobs,
+			quotaBytes: d1Schema.tenantUsage.quotaBytes
+		})
+		.from(d1Schema.tenantUsage)
+		.where(eq(d1Schema.tenantUsage.tenant, defaultTenant))
+		.get();
+
+	if (row === undefined) {
+		return undefined;
+	}
+
+	// An unset quota reads as undefined, so a test asserts it without a null literal.
+	return { ...row, quotaBytes: row.quotaBytes ?? undefined };
+}
+
+/** Whether a tenant still has a usage row, for asserting offboard finalisation. */
+export async function tenantUsagePresent(id: string): Promise<boolean> {
+	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({ tenant: d1Schema.tenantUsage.tenant })
+		.from(d1Schema.tenantUsage)
+		.where(eq(d1Schema.tenantUsage.tenant, id))
+		.get();
+
+	return row !== undefined;
+}
+
+/**
+ * Models a delete whose row-first transaction committed but whose queued cleanup
+ * did not reach D1, leaving the captured reference edge behind.
+ */
+export async function queueUnflushedNarInfoDeletion(fields: {
+	readonly storePathHash: string;
+}): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const database = drizzle(state.storage, {
+			schema: { narInfoDeletions, narInfos }
+		});
+
+		database.transaction((tx) => {
+			const row = tx
+				.select({
+					cache: narInfos.cache,
+					storePathHash: narInfos.storePathHash,
+					narHash: narInfos.narHash,
+					generation: narInfos.generation
+				})
+				.from(narInfos)
+				.where(
+					and(
+						eq(narInfos.cache, DEFAULT_CACHE),
+						eq(narInfos.storePathHash, fields.storePathHash)
+					)
+				)
+				.get();
+
+			if (row === undefined) {
+				throw new Error('expected a committed narinfo to queue for deletion');
+			}
+
+			tx.delete(narInfos)
+				.where(
+					and(
+						eq(narInfos.cache, row.cache),
+						eq(narInfos.storePathHash, row.storePathHash)
+					)
+				)
+				.run();
+			tx.insert(narInfoDeletions)
+				.values({
+					cache: row.cache,
+					storePathHash: row.storePathHash,
+					narHash: row.narHash,
+					generation: row.generation,
+					createdAt: new Date().toISOString()
+				})
+				.onConflictDoNothing()
+				.run();
+		});
+	});
+}
+
+export async function seedNarInfoDeletion(fields: {
+	readonly storePathHash: string;
+	readonly narHash: string;
+	readonly generation: number;
+}): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		drizzle(state.storage, { schema: { narInfoDeletions } })
+			.insert(narInfoDeletions)
+			.values({
+				cache: DEFAULT_CACHE,
+				storePathHash: fields.storePathHash,
+				narHash: fields.narHash,
+				generation: fields.generation,
+				createdAt: new Date().toISOString()
+			})
+			.onConflictDoNothing()
+			.run();
+	});
+}
+
+// The queued narinfo-deletion markers, sorted by store-path hash. A surviving
+// marker is the durable record of an in-flight delete the repair pass re-drives.
+export async function narInfoDeletionRows(): Promise<
+	{
+		cache: string;
+		storePathHash: string;
+		narHash: string;
+		generation: number;
+	}[]
+> {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		drizzle(state.storage, { schema: { narInfoDeletions } })
+			.select({
+				cache: narInfoDeletions.cache,
+				storePathHash: narInfoDeletions.storePathHash,
+				narHash: narInfoDeletions.narHash,
+				generation: narInfoDeletions.generation
+			})
+			.from(narInfoDeletions)
+			.all()
+			.toSorted((left, right) =>
+				left.storePathHash > right.storePathHash ? 1 : -1
+			)
+	);
+}
+
+// Deletes a committed narinfo row directly, leaving its D1 edge, shared fact and
+// R2 object behind — the cross-store state a delete leaves after its row
+// transaction but before the repair retires the edge and object.
+export async function deleteNarInfoRow(storePathHash: string): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		drizzle(state.storage, { schema: { narInfos } })
+			.delete(narInfos)
+			.where(eq(narInfos.storePathHash, storePathHash))
+			.run();
+	});
+}
+
+// Deletes a shared blob's `blob_state` fact directly while leaving its R2 object,
+// standing in for the residue a reaper crash leaves between the D1 delete and the
+// R2 delete: an orphan object with no fact, which the next promote must adopt.
+export async function deleteBlobState(narHash: string): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
+		.delete(blobState)
+		.where(eq(blobState.narHash, narHash))
+		.run();
+}
+
+// Retires a D1 reference edge directly, standing in for a delete that retired the
+// edge but crashed before deleting the narinfo object or clearing its marker.
+export async function deleteBlobReferenceEdge(
+	storePathHash: string,
+	generation: number
+): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
+		.delete(blobReference)
+		.where(
+			and(
+				eq(blobReference.storePathHash, storePathHash),
+				eq(blobReference.generation, generation)
+			)
+		)
+		.run();
+}
+
+/** The generation stamped on a committed narinfo, or undefined if absent. */
+export async function narInfoGeneration(
+	storePathHash: string
+): Promise<number | undefined> {
+	return runInDurableObject(currentServer(), (_instance, state) => {
+		const row = drizzle(state.storage, { schema: { narInfos } })
+			.select({ generation: narInfos.generation })
+			.from(narInfos)
+			.where(eq(narInfos.storePathHash, storePathHash))
+			.get();
+
+		return row?.generation;
+	});
+}
+
 export function scheduledController(): ScheduledController {
 	return {
 		cron: '0 4 * * *',
@@ -326,9 +991,7 @@ export function scheduledController(): ScheduledController {
 }
 
 export function defaultWorkerServer(): DurableObjectStub<CupboardServer> {
-	const id = env.CUPBOARD_DO.idFromName('v1');
-
-	return env.CUPBOARD_DO.get(id);
+	return tenantServer(env, defaultTenant);
 }
 
 /** Prepends `/cache/<name>` to a path-scoped route for a named cache. */
@@ -414,6 +1077,150 @@ export async function pushPath(
 	}
 
 	await commitUpload(token, decision.uploadId, cache);
+}
+
+// Drives a full negotiate, prepare, upload and commit for a path through the Worker
+// under a named tenant's `/t/<tenant>/` prefix, the multi-tenant write path. The
+// token must be a write token minted by that tenant's Durable Object.
+export async function pushPathToTenant(
+	tenant: string,
+	token: string,
+	metadata: UploadPathMetadataFields,
+	nar?: VerifiableNar
+): Promise<void> {
+	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+	});
+
+	expect(negotiated.status).toBe(StatusCodes.OK);
+	const decision = expectSingleUploadDecision(
+		await negotiated.json<UploadNegotiateResponse>(),
+		metadata
+	);
+
+	const prepared = await tenantWorkerFetch(
+		tenant,
+		`/uploads/${decision.uploadId}`,
+		token,
+		{
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(uploadBlobMetadata(metadata))
+		}
+	);
+
+	expect(prepared.status).toBe(StatusCodes.OK);
+	await putNarBytes(decision.r2Key, nar);
+
+	const committed = await tenantWorkerFetch(
+		tenant,
+		`/uploads/${decision.uploadId}/commit`,
+		token,
+		{ method: 'POST' }
+	);
+
+	expect(committed.status).toBe(StatusCodes.OK);
+}
+
+/**
+ * Negotiates, uploads and commits a tenant path through the Worker, returning the
+ * commit response status without asserting success, so a test can assert a commit
+ * that the Durable Object refuses (for example one settling after offboarding began).
+ */
+export async function attemptPushToTenant(
+	tenant: string,
+	token: string,
+	metadata: UploadPathMetadataFields,
+	nar?: VerifiableNar
+): Promise<number> {
+	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+	});
+
+	expect(negotiated.status).toBe(StatusCodes.OK);
+	const decision = expectSingleUploadDecision(
+		await negotiated.json<UploadNegotiateResponse>(),
+		metadata
+	);
+
+	const prepared = await tenantWorkerFetch(
+		tenant,
+		`/uploads/${decision.uploadId}`,
+		token,
+		{
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(uploadBlobMetadata(metadata))
+		}
+	);
+
+	expect(prepared.status).toBe(StatusCodes.OK);
+	await putNarBytes(decision.r2Key, nar);
+
+	const committed = await tenantWorkerFetch(
+		tenant,
+		`/uploads/${decision.uploadId}/commit`,
+		token,
+		{ method: 'POST' }
+	);
+
+	return committed.status;
+}
+
+// Stages a deferred upload for a named tenant through the Worker (negotiate, prepare,
+// upload) and marks it pending on that tenant's object without committing, returning
+// its uploadId. Lets a test assert the cron fan-out drives a non-default tenant's
+// background verify pass.
+export async function stageDeferredForTenant(
+	tenant: string,
+	token: string,
+	metadata: UploadPathMetadataFields,
+	nar?: VerifiableNar
+): Promise<string> {
+	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+	});
+
+	expect(negotiated.status).toBe(StatusCodes.OK);
+	const decision = expectSingleUploadDecision(
+		await negotiated.json<UploadNegotiateResponse>(),
+		metadata
+	);
+
+	const prepared = await tenantWorkerFetch(
+		tenant,
+		`/uploads/${decision.uploadId}`,
+		token,
+		{
+			method: 'PUT',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify(uploadBlobMetadata(metadata))
+		}
+	);
+
+	expect(prepared.status).toBe(StatusCodes.OK);
+	await putNarBytes(decision.r2Key, nar);
+	await markUploadPendingVerification(decision.uploadId, testServerFor(tenant));
+
+	return decision.uploadId;
+}
+
+function tenantWorkerFetch(
+	tenant: string,
+	path: string,
+	token: string,
+	init: RequestInit
+): Promise<Response> {
+	const headers = new Headers(init.headers);
+	headers.set('authorization', `Bearer ${token}`);
+
+	return handlerFetch(`/t/${tenant}${path}`, { ...init, headers });
 }
 
 export async function commitUpload(
@@ -567,13 +1374,6 @@ export async function removeRoot(
 	return response.json<RootRemoveResponse>();
 }
 
-export async function runGc(): Promise<void> {
-	const token = await initialise();
-	const response = await authorisedFetch('/gc', token, { method: 'POST' });
-
-	expect(response.status).toBe(StatusCodes.OK);
-}
-
 export async function runGcResult(): Promise<GcResult> {
 	const token = await initialise();
 	const response = await authorisedFetch('/gc', token, { method: 'POST' });
@@ -592,12 +1392,25 @@ export async function runGcFromInternalOrigin(): Promise<void> {
 	});
 
 	expect(response.status).toBe(StatusCodes.OK);
+	await response.text();
 }
 
 export function afterGrace(): Date {
-	return new Date(
-		deleteTestBase.getTime() + orphanBlobDeletionGraceMs + 60_000
-	);
+	return new Date(deleteTestBase.getTime() + blobReaperGraceMs + 60_000);
+}
+
+// Runs the reaper to completion against the current server: a first GC pass arms
+// the unreferenced shared blobs, then time advances past the grace and a second
+// pass collects them. Tests anchored at `deleteTestBase` use this to assert blob
+// reclamation under the two-pass grace model. Requires fake timers.
+export async function reapBlobsPastGrace(): Promise<void> {
+	// Repair pass first: the owning Durable Object flushes any delete markers and
+	// retires edges. Then the Worker reaper arms the now-unreferenced blobs and,
+	// past the grace, collects them.
+	await currentServer().runGarbageCollection();
+	await runBlobReaper(env);
+	vi.setSystemTime(afterGrace());
+	await runBlobReaper(env);
 }
 
 export async function fetchNarInfo(storePathHash: string): Promise<NarInfo> {
@@ -783,6 +1596,29 @@ export async function putNarBytes(
 	});
 }
 
+/**
+ * Seeds an already-available shared blob: writes its canonical object and the
+ * `blob_state` row recording its compressed size, so a later upload of a different
+ * encoding of the same NAR adopts this canonical size at promote. Lets a test set up
+ * the canonical-versus-staged size divergence the quota charge must use the canonical
+ * side of.
+ */
+export async function seedCanonicalBlob(nar: VerifiableNar): Promise<void> {
+	await putNarBytes(narObjectKey(nar.narHash), nar);
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.blobState)
+		.values({
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			compression: 'zstd',
+			narSize: nar.narSize,
+			verifiedAt: deleteTestBase.toISOString()
+		})
+		.onConflictDoNothing()
+		.run();
+}
+
 function singleChunkStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
 	return new ReadableStream<Uint8Array>({
 		start(controller) {
@@ -874,7 +1710,8 @@ export async function verifiableNarStored(
 
 /**
  * Reads a pending upload's verification verdict: `undefined` if the row is gone,
- * otherwise the stored verdict (`null`, `'pending'`, or `'mismatch'`).
+ * otherwise the stored verdict (`null`, `'committing'`, `'pending'`, `'servable'`,
+ * `'mismatch'`, or `'over-quota'`).
  */
 export async function pendingUploadVerdict(
 	uploadId: string
@@ -888,6 +1725,43 @@ export async function pendingUploadVerdict(
 
 		return row === undefined ? undefined : row.verdict;
 	});
+}
+
+/** Polls a deferred upload's status the way `push --wait` does, by its uploadId. */
+export async function uploadStatus(
+	uploadId: string
+): Promise<UploadStatusResponse['status']> {
+	const token = await initialise();
+	const response = await authorisedFetch(`/uploads/${uploadId}/status`, token, {
+		method: 'GET'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	const body = await response.json<UploadStatusResponse>();
+
+	return body.status;
+}
+
+// The status a named tenant's `push --wait` would read, queried through the Worker
+// under that tenant's prefix with its own write token.
+export async function tenantUploadStatus(
+	tenant: string,
+	token: string,
+	uploadId: string
+): Promise<UploadStatusResponse['status']> {
+	const response = await tenantWorkerFetch(
+		tenant,
+		`/uploads/${uploadId}/status`,
+		token,
+		{ method: 'GET' }
+	);
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	const body = await response.json<UploadStatusResponse>();
+
+	return body.status;
 }
 
 export async function verifiablePath(
@@ -939,13 +1813,72 @@ export async function commitVerifiablePath(
  * the background verify-and-commit pass without a multi-megabyte fixture.
  */
 export async function markUploadPendingVerification(
-	uploadId: string
+	uploadId: string,
+	stub: DurableObjectStub<CupboardServer> = currentServer()
 ): Promise<void> {
-	await runInDurableObject(currentServer(), (_instance, state) => {
+	await runInDurableObject(stub, (instance, state) => {
 		drizzle(state.storage, { schema: { pendingUploads } })
 			.update(pendingUploads)
 			.set({ verdict: 'pending' })
 			.where(eq(pendingUploads.id, uploadId))
+			.run();
+		return new MaintenanceEligibilityService(instance.context).reconcile();
+	});
+}
+
+// Plants the `committing` saga marker on a staged upload, the state an inline
+// commit leaves if it crashes after marking commit-in-progress but before it
+// finishes: the verify pass must re-drive it to servable.
+export async function markUploadCommitting(uploadId: string): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		drizzle(state.storage, { schema: { pendingUploads } })
+			.update(pendingUploads)
+			.set({ verdict: 'committing' })
+			.where(eq(pendingUploads.id, uploadId))
+			.run();
+	});
+}
+
+// Plants a reserved-but-unmaterialised narinfo row, the state a crashed inline
+// commit leaves between reserving the row and materialising it: the row exists at
+// its generation with no D1 edge, no shared fact, and no R2 object. Signatures are
+// a placeholder, since this row only ever exists mid-saga.
+export async function seedReservedNarInfo(
+	metadata: UploadPathMetadataFields,
+	generation = 0
+): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const database = drizzle(state.storage, {
+			schema: { generationSeq, narInfos }
+		});
+
+		database
+			.insert(narInfos)
+			.values({
+				cache: '',
+				storePathHash: metadata.storePathHash,
+				storePath: metadata.storePath,
+				narHash: metadata.narHash,
+				narSize: metadata.narSize,
+				referencesJson: JSON.stringify(metadata.references),
+				deriver: metadata.deriver,
+				ca: metadata.ca,
+				sigsJson: '[]',
+				generation,
+				createdAt: '2026-01-01T00:00:00.000Z'
+			})
+			.run();
+		database
+			.insert(generationSeq)
+			.values({
+				cache: '',
+				storePathHash: metadata.storePathHash,
+				nextGeneration: generation + 1
+			})
+			.onConflictDoUpdate({
+				target: [generationSeq.cache, generationSeq.storePathHash],
+				set: { nextGeneration: generation + 1 }
+			})
 			.run();
 	});
 }
@@ -1019,7 +1952,9 @@ export async function readStoredNarInfo(storePathHash: string): Promise<{
 	readonly contentType: string | undefined;
 	readonly cacheControl: string | undefined;
 }> {
-	const object = await env.BLOBS.get(narInfoObjectKey(storePathHash));
+	const object = await env.BLOBS.get(
+		narInfoObjectKey(defaultTenant, storePathHash)
+	);
 
 	if (object === null) {
 		throw new Error(`expected a stored narinfo object for ${storePathHash}`);

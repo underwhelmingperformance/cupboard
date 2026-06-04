@@ -8,6 +8,13 @@
 			"when": 1780556914857,
 			"tag": "0000_blob_state",
 			"breakpoints": true
+		},
+		{
+			"idx": 1,
+			"version": "6",
+			"when": 1780574294155,
+			"tag": "0001_blob_ref_tenant_blob",
+			"breakpoints": true
 		}
 	]
 }

@@ -20,7 +20,26 @@ export const narInfos = sqliteTable(
 		deriver: text('deriver'),
 		ca: text('ca'),
 		sigsJson: text('sigs_json').notNull().default('[]'),
+		// The narinfo version, sourced from `generation_seq` on each (re)commit and
+		// captured by the D1 reference edge, so a stale deletion compares against it
+		// and can never remove a newer recommitted edge.
+		generation: integer('generation').notNull().default(0),
 		createdAt: text('created_at').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
+);
+
+// The durable, strictly-increasing generation counter per store path. It is
+// advanced on every (re)commit and is never reset by a delete or offboarding, so
+// a delete-then-recommit (even one reproducing the same NAR hash) always lands a
+// higher generation than any captured deletion. It is per-tenant by virtue of
+// living in the tenant's own DO SQLite, so it carries no `tenant` column.
+export const generationSeq = sqliteTable(
+	'generation_seq',
+	{
+		cache: text('cache').notNull().default(''),
+		storePathHash: text('store_path_hash').notNull(),
+		nextGeneration: integer('next_generation').notNull().default(0)
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
 );
@@ -55,6 +74,9 @@ export const narInfoDeletions = sqliteTable(
 		cache: text('cache').notNull().default(''),
 		storePathHash: text('store_path_hash').notNull(),
 		narHash: text('nar_hash').notNull(),
+		// The generation of the narinfo version this deletion captured, so the D1
+		// reference edge it retires is targeted by exact `(…, generation)` and a
+		// replayed deletion compares against the live row before acting.
 		generation: integer('generation').notNull().default(0),
 		createdAt: text('created_at').notNull()
 	},

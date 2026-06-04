@@ -3,7 +3,7 @@ import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/d1';
 import { beforeEach } from 'vitest';
 
-import { blobState } from './db/d1-schema.ts';
+import { blobReference, blobState, tenantBlob } from './db/d1-schema.ts';
 
 // `TEST_MIGRATIONS` is typed in test-env.d.ts; vitest.config.ts supplies its
 // value, and production applies the same files with `wrangler d1 migrations apply`.
@@ -18,5 +18,8 @@ await applyD1Migrations(env.CUPBOARD_DB, env.TEST_MIGRATIONS);
 // test gives every test the empty shared store it expects. Every D1 table must
 // be cleared here; add new ones as the schema grows.
 beforeEach(async () => {
-	await drizzle(env.CUPBOARD_DB).delete(blobState).run();
+	const database = drizzle(env.CUPBOARD_DB);
+	await database.delete(blobReference).run();
+	await database.delete(tenantBlob).run();
+	await database.delete(blobState).run();
 });
