@@ -954,22 +954,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return undefined;
 		}
 
-		try {
-			verifyStoredBlob(object, {
-				narHash: row.narHash,
-				fileHash: row.fileHash,
-				fileSize: row.fileSize
-			});
-		} catch (error) {
-			if (
-				error instanceof UploadedObjectSizeMismatchError ||
-				error instanceof UploadedObjectChecksumMissingError ||
-				error instanceof UploadedObjectChecksumMismatchError
-			) {
-				return 'file-hash-mismatch';
-			}
+		// The compressed checksum to verify against is the canonical fact in
+		// `blob_state`, not a field on the narinfo row. When it is present, check the
+		// stored object's `fileHash`/`fileSize`; the uncompressed re-derivation below
+		// runs regardless, since it needs only the row's `narHash`/`narSize`.
+		const blobFact = await this.d1
+			.select({
+				fileHash: d1Schema.blobState.fileHash,
+				fileSize: d1Schema.blobState.fileSize
+			})
+			.from(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, row.narHash))
+			.get();
 
-			throw error;
+		if (blobFact !== undefined) {
+			try {
+				verifyStoredBlob(object, {
+					narHash: row.narHash,
+					fileHash: blobFact.fileHash,
+					fileSize: blobFact.fileSize
+				});
+			} catch (error) {
+				if (
+					error instanceof UploadedObjectSizeMismatchError ||
+					error instanceof UploadedObjectChecksumMissingError ||
+					error instanceof UploadedObjectChecksumMismatchError
+				) {
+					return 'file-hash-mismatch';
+				}
+
+				throw error;
+			}
 		}
 
 		// A deep check also re-derives the uncompressed NAR hash, catching a stored
@@ -1070,12 +1085,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 
 				if (narInfoObject === null) {
-					await this.putNarInfoObject(
-						row.cache,
-						row.storePathHash,
-						this.narInfoFromRow(row)
-					);
-					narInfoObjectsRestored += 1;
+					const narInfo = await this.narInfoFromRow(row);
+
+					if (narInfo !== undefined) {
+						await this.putNarInfoObject(row.cache, row.storePathHash, narInfo);
+						narInfoObjectsRestored += 1;
+					}
 				}
 			}
 
@@ -2369,13 +2384,34 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.clearPendingUpload(uploadId);
 	}
 
-	private narInfoFromRow(row: typeof schema.narInfos.$inferSelect): NarInfo {
+	// Renders a narinfo by joining the tenant row (identity, uncompressed NarHash/
+	// NarSize, references, signature) with the canonical compressed metadata in
+	// `blob_state` — the narinfo row holds no compressed fields of its own. Returns
+	// undefined when the shared fact is gone (a demoted blob), so the caller leaves
+	// the path non-servable until a re-upload heals it.
+	private async narInfoFromRow(
+		row: typeof schema.narInfos.$inferSelect
+	): Promise<NarInfo | undefined> {
+		const blob = await this.d1
+			.select({
+				fileHash: d1Schema.blobState.fileHash,
+				fileSize: d1Schema.blobState.fileSize,
+				compression: d1Schema.blobState.compression
+			})
+			.from(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, row.narHash))
+			.get();
+
+		if (blob === undefined) {
+			return undefined;
+		}
+
 		return new NarInfo(
 			row.storePath,
 			narObjectKey(row.narHash),
-			row.compression,
-			row.fileHash,
-			row.fileSize,
+			blob.compression,
+			blob.fileHash,
+			blob.fileSize,
 			row.narHash,
 			row.narSize,
 			parseStored(
@@ -2425,11 +2461,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				return;
 			}
 
-			await this.putNarInfoObject(
-				cache,
-				storePathHash,
-				this.narInfoFromRow(row)
-			);
+			const narInfo = await this.narInfoFromRow(row);
+
+			// No shared fact means the blob was demoted; leave the path non-servable
+			// until a re-upload re-promotes it rather than render an unbacked object.
+			if (narInfo === undefined) {
+				return;
+			}
+
+			await this.putNarInfoObject(cache, storePathHash, narInfo);
 		});
 	}
 
@@ -2742,9 +2782,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const now = new Date().toISOString();
 		this.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeys();
-		// Sign and store the canonical object's `FileHash`/`FileSize`, never this
-		// upload's own, so the narinfo always matches the bytes served at its URL.
-		const unsigned = new NarInfo(
+		// The signed fingerprint is over the uncompressed `NarHash`/`NarSize` and the
+		// references only, so it is independent of which compressed encoding is
+		// canonical; the narinfo row stores no compressed metadata, which the served
+		// object takes from `blob_state` at render time.
+		const fingerprint = new NarInfo(
 			metadata.storePath,
 			narObjectKey(metadata.narHash),
 			metadata.compression,
@@ -2755,8 +2797,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			metadata.references,
 			metadata.deriver,
 			metadata.ca
-		);
-		const fingerprint = unsigned.fingerprint();
+		).fingerprint();
 		const sigs = await Promise.all(
 			signingKeys.map((key) =>
 				signNixFingerprint(key.privateJwk, fingerprint, key.name)
@@ -2786,9 +2827,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					storePath: metadata.storePath,
 					narHash: metadata.narHash,
 					narSize: metadata.narSize,
-					fileHash: canonical.fileHash,
-					fileSize: canonical.fileSize,
-					compression: metadata.compression,
 					referencesJson: JSON.stringify(metadata.references),
 					deriver: metadata.deriver,
 					ca: metadata.ca,
@@ -2860,7 +2898,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.onConflictDoNothing()
 			.run();
 
-		let signed = unsigned;
+		// Render the served object from the canonical compressed metadata (the same
+		// values just written to `blob_state`), so it advertises the bytes actually
+		// stored even when a concurrent upload's encoding won promotion.
+		let signed = new NarInfo(
+			metadata.storePath,
+			narObjectKey(metadata.narHash),
+			metadata.compression,
+			canonical.fileHash,
+			canonical.fileSize,
+			metadata.narHash,
+			metadata.narSize,
+			metadata.references,
+			metadata.deriver,
+			metadata.ca
+		);
 
 		for (const sig of sigs) {
 			signed = signed.withSignature(sig);
