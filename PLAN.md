@@ -1062,8 +1062,9 @@ global blob reaper.
 Global state lives in a new D1 database (`CUPBOARD_DB`). D1 is transactional,
 enumerable, readable by the Worker and DOs, and not on the public read hot path.
 It holds the tenant registry, per-narinfo reference edges, the available blob
-set, control-plane public key metadata (the private control key lives in a
-Worker-only store), the global-admin record, and per-tenant usage/quota.
+set, the control-plane signing-key set (public metadata and the envelope-wrapped
+private JWK, whose wrapping secret is bound only on the control-plane Worker),
+the global-admin record, and per-tenant usage/quota.
 
 Admission resolves `/t/<slug>/` against a cached, versioned manifest in KV
 (`TENANT_CACHE`), revalidated against a tiny `tenant-manifest:version` key at
@@ -1103,17 +1104,28 @@ in tenant DO SQLite and cannot sign global-admin tokens. The Worker is
 stateless, so control-plane key material is persisted outside it — but its
 **private** part must be reachable only by the Worker, never by a tenant DO:
 
-- `control_auth_key` is the rotatable control key set. Only its **public** key
-  metadata (`id`, `kid`, `public_jwk`, `created_at`, `retired_at`) lives in
-  `CUPBOARD_DB`, so the Worker can publish the control JWKS. The **private JWK
-  lives in a Worker-only store** (a separate binding or a Workers secret), never
-  in `CUPBOARD_DB`: the Worker mints control tokens, so the DO never needs it,
-  yet every `CupboardServer` DO binds `CUPBOARD_DB`. A `D1Database` binding is
-  database-wide and DO code can issue arbitrary SQL regardless of its Drizzle
-  schema object, so "omit the table from the DO's schema" is security theatre.
-  Use a separate binding or a Workers secret bound only to the Worker
-  (strongest), or envelope-wrap the private JWK with a Worker-only key —
-  established in step 3, not deferred.
+- `control_auth_key` is the rotatable control key set. Its public key metadata
+  (`id`, `kid`, `public_jwk`, `created_at`, `retired_at`) and the
+  envelope-wrapped private JWK both live in `CUPBOARD_DB`, so the stateless
+  Worker can publish the control JWKS and mint and rotate control tokens. The
+  private JWK is wrapped with AES-256-GCM under `CONTROL_KEY_WRAP_SECRET`, and
+  that secret is the real boundary: it is bound only on the control-plane
+  Worker.
+
+  Binding a secret "only on the Worker" is meaningful only because the tenant
+  Durable Object runs in a **separate Worker script**. Within one script every
+  binding (a Workers secret included) is shared between the default handler and
+  the Durable Object classes that script defines, and a `D1Database` binding is
+  database-wide, so a single-script deployment could not withhold the wrapping
+  secret from the DO and the envelope wrapping would protect nothing against it.
+  The `CupboardServer` Durable Object therefore lives in its own
+  `cupboard-tenant` Worker script, which binds `CUPBOARD_DB` and the R2 bucket
+  but never `CONTROL_KEY_WRAP_SECRET`; the control-plane Worker reaches every
+  tenant through an external Durable Object binding
+  (`script_name = "cupboard-tenant"`). A tenant DO can read the wrapped key from
+  D1 but has no binding to the secret that unwraps it, so it cannot recover the
+  control signing key. This split is established in step 3, not deferred.
+
 - The control issuer is the bare host origin; the control audience is the
   control client id. Bare `/.well-known/jwks.json` publishes the control public
   keys. `/t/<tenant>/.well-known/jwks.json` publishes that tenant's keys.
@@ -1605,11 +1617,13 @@ New D1 database `CUPBOARD_DB`:
 - `global_admin(id PK 'singleton', issuer, subject, claimed_at)`
 - `control_trust(...)` for the control-plane trust policy (`iss`, `aud`, `sub`,
   and exact-match claim map), seeded by the gated claim
-- `control_auth_key(id PK, kid, public_jwk, created_at, retired_at)` — public
-  key metadata only. The **private JWK lives in a Worker-only store** (a
-  separate binding or a Workers secret the tenant DOs have no handle to), **not
-  in `CUPBOARD_DB`**, since every tenant DO binds `CUPBOARD_DB` and could
-  otherwise read it. The Worker mints with the private key and publishes the
+- `control_auth_key(id PK, kid, public_jwk, wrapped_private_jwk, created_at, retired_at)`.
+  The private JWK is stored AES-256-GCM-wrapped under `CONTROL_KEY_WRAP_SECRET`,
+  which is **bound only on the control-plane Worker**. The `CupboardServer`
+  Durable Object runs in a **separate `cupboard-tenant` Worker script** that
+  never binds that secret, so although every tenant DO binds `CUPBOARD_DB` and
+  can read this row, it has no handle to the wrapping secret and cannot recover
+  the key. The Worker mints with the unwrapped private key and publishes the
   public set.
 - `blob_ref(...)`:
 
@@ -1753,11 +1767,15 @@ together.
    state, then run repair/reaper and assert convergence; inject
    genuinely-between-stores faults at the R2/D1 call boundary. Still
    single-tenant data on the new model.
-3. **Control-plane auth.** Add `control_auth_key` (public metadata in D1,
-   private JWK in a Worker-only store the tenant DOs cannot read); bare `/token`
-   RFC 8693 exchange with claim-based control-trust checks; control
-   issuer/audience; bare `/.well-known/jwks.json`; PKCE-loopback and device
-   login against the control issuer; key rotation and last-key refusal.
+3. **Control-plane auth.** Add `control_auth_key` (public metadata and the
+   wrapped private JWK in D1); move the `CupboardServer` Durable Object into its
+   own `cupboard-tenant` Worker script that never binds
+   `CONTROL_KEY_WRAP_SECRET`, so the wrapping secret is reachable only by the
+   control-plane Worker, which reaches the DO through an external binding
+   (`script_name`); bare `/token` RFC 8693 exchange with claim-based
+   control-trust checks; control issuer/audience; bare `/.well-known/jwks.json`;
+   PKCE-loopback and device login against the control issuer; key rotation and
+   last-key refusal.
 4. **Registry + gated bootstrap + provisioning + admission.** Add `tenant`,
    `global_admin`, and `control_trust`; implement the gated first signup claim;
    add operator admin API and `cupboard tenant create/list/suspend/delete`; add
