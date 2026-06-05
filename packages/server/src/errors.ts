@@ -59,6 +59,27 @@ export class LastSigningKeyError extends ServerHttpError {
 	}
 }
 
+export class StoredControlTrustInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(
+		public readonly id: string,
+		public override readonly cause: Error
+	) {
+		super('Stored control trust rule is invalid');
+		this.name = 'StoredControlTrustInvalidError';
+	}
+}
+
+export class ControlNotConfiguredError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+
+	constructor() {
+		super('The control plane is not configured');
+		this.name = 'ControlNotConfiguredError';
+	}
+}
+
 export class LastControlKeyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 

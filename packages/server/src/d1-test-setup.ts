@@ -7,6 +7,7 @@ import {
 	blobReference,
 	blobState,
 	controlAuthKey,
+	controlTrust,
 	tenantBlob
 } from './db/d1-schema.ts';
 
@@ -28,4 +29,5 @@ beforeEach(async () => {
 	await database.delete(tenantBlob).run();
 	await database.delete(blobState).run();
 	await database.delete(controlAuthKey).run();
+	await database.delete(controlTrust).run();
 });

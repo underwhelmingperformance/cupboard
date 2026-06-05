@@ -81,6 +81,8 @@ export class CupboardTestServer {
 				CUPBOARD_OWNER_ISSUER: issuer.issuer,
 				CUPBOARD_OWNER_SUBJECT: ownerSubject,
 				CUPBOARD_OWNER_AUDIENCE: ownerAudience,
+				CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
+				CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
 				CUPBOARD_READ_USER: '',
 				CUPBOARD_READ_PASSWORD: '',
 				CUPBOARD_COLD_PATH_TTL_SECONDS: '',
@@ -166,6 +168,31 @@ export class CupboardTestServer {
 		};
 
 		return payload.access_token;
+	}
+
+	/**
+	 * Seeds a control trust rule directly in D1, standing in for the gated
+	 * first-signup claim that will seed it. A pinned `sub` goes in `claims`.
+	 */
+	async seedControlTrust(rule: {
+		readonly issuer: string;
+		readonly audience: string;
+		readonly claims?: Readonly<Record<string, string>>;
+	}): Promise<void> {
+		const d1 = await this.worker.getD1Database('CUPBOARD_DB');
+
+		await d1
+			.prepare(
+				'INSERT INTO control_trust (id, issuer, audience, claims_json, created_at) VALUES (?, ?, ?, ?, ?)'
+			)
+			.bind(
+				crypto.randomUUID(),
+				rule.issuer,
+				rule.audience,
+				JSON.stringify(rule.claims ?? {}),
+				new Date().toISOString()
+			)
+			.run();
 	}
 
 	async stop(): Promise<void> {

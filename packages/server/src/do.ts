@@ -108,6 +108,7 @@ import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
 import { generateSigningKey, signNixFingerprint } from './crypto.ts';
 import * as d1Schema from './db/d1-schema.ts';
 import * as schema from './db/schema.ts';
+import { serverErrorResponse } from './error-response.ts';
 import {
 	CacheNotEmptyError,
 	InsufficientScopeError,
@@ -118,14 +119,12 @@ import {
 	LastSigningKeyError,
 	NarTooLargeError,
 	NarVerificationFailedError,
-	OAuthError,
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
 	type R2PresignBindingName,
 	R2PresignConfigurationMissingError,
 	ReusableUploadNotPreparableError,
 	RootNotPermittedError,
-	ServerHttpError,
 	StoredOidcTrustInvalidError,
 	StoredReferencesInvalidError,
 	StoredSignaturesInvalidError,
@@ -4120,29 +4119,6 @@ function r2PresignConfiguration(env: RuntimeEnv): R2PresignConfiguration {
 		bucketName: env.R2_BUCKET_NAME,
 		secretAccessKey: env.R2_SECRET_ACCESS_KEY
 	};
-}
-
-async function serverErrorResponse(
-	response: Promise<Response>
-): Promise<Response> {
-	try {
-		return await response;
-	} catch (error) {
-		if (error instanceof OAuthError) {
-			return Response.json(
-				{ error: error.error, error_description: error.message },
-				{ status: error.status, headers: { 'Cache-Control': 'no-store' } }
-			);
-		}
-
-		if (error instanceof ServerHttpError) {
-			return new Response(`${error.message}\n`, {
-				status: error.status
-			});
-		}
-
-		throw error;
-	}
 }
 
 function oidcTrustRuleFromRow(

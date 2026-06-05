@@ -35,6 +35,9 @@ export default defineConfig(async () => {
 									CUPBOARD_OWNER_SUBJECT: 'owner-subject',
 									CUPBOARD_OWNER_AUDIENCE:
 										'client-id.apps.googleusercontent.com',
+									CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
+									CONTROL_KEY_WRAP_SECRET:
+										'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
 									R2_ACCESS_KEY_ID: 'test-access-key-id',
 									R2_ACCOUNT_ID: 'test-account-id',
 									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',

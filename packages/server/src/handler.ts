@@ -1,3 +1,4 @@
+import { handleControl } from './control-plane.ts';
 import { handleDeployment } from './deployment.ts';
 import { cupboardServer, tenantServer } from './durable-object.ts';
 import { handleRead } from './read.ts';
@@ -17,13 +18,17 @@ export default {
 		const url = new URL(request.url);
 		const route = parseTenantPath(url.pathname);
 
-		// The bare host is the control surface; its routes land with the control
-		// plane, so until then a non-tenant path is not found.
+		// The bare host is the control surface: the control plane's own auth.
 		if (route === undefined) {
-			return new Response('Not found\n', {
-				status: 404,
-				headers: { 'content-type': 'text/plain; charset=utf-8' }
-			});
+			const control = await handleControl(request, env);
+
+			return (
+				control ??
+				new Response('Not found\n', {
+					status: 404,
+					headers: { 'content-type': 'text/plain; charset=utf-8' }
+				})
+			);
 		}
 
 		// Strip the `/t/<tenant>/` prefix and serve the tenant-relative request: a

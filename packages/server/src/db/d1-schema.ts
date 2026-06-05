@@ -74,6 +74,20 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 	retiredAt: text('retired_at')
 });
 
+// The control-plane trust policy: which external OIDC identity may exchange a
+// subject token for a control admin token. It mirrors a tenant `oidc_trust` rule
+// but is global and always grants the control admin scope — `iss`/`aud` must
+// match and every `claims_json` entry (a pinned `sub` lives here) must match
+// exactly. Seeded by the gated first-signup claim; the control plane is its own
+// issuer, entirely separate from any tenant's.
+export const controlTrust = sqliteTable('control_trust', {
+	id: text('id').primaryKey(),
+	issuer: text('issuer').notNull(),
+	audience: text('audience').notNull(),
+	claimsJson: text('claims_json').notNull().default('{}'),
+	createdAt: text('created_at').notNull()
+});
+
 // Per-tenant unique-blob presence: a tenant references this NAR hash via at least
 // one live narinfo version. Maintained by the tenant's DO on the 0↔1 edge
 // transition; `file_size` is the tenant's verified stored bytes, the basis for

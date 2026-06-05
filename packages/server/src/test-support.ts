@@ -530,14 +530,6 @@ function tenantReadPath(pathname: string): string {
 		: `/t/${defaultTenant}${pathname}`;
 }
 
-// Deployment endpoints stay at the bare host; everything else a read addresses is
-// tenant content, served under the default tenant's prefix the Worker routes by.
-function tenantReadPath(pathname: string): string {
-	return pathname.startsWith('/_')
-		? pathname
-		: `/t/${defaultTenant}${pathname}`;
-}
-
 export function fetchPath(
 	pathname: string,
 	init?: RequestInit
@@ -585,7 +577,7 @@ export async function controlFetch(
 ): Promise<Response> {
 	const ctx = createExecutionContext();
 	const request = new Request<unknown, IncomingRequestCfProperties>(
-		new URL(tenantReadPath(pathname), origin),
+		new URL(pathname, origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
 	const response = await worker.fetch(
@@ -618,9 +610,9 @@ export async function mintControlAdminToken(
 			scope: 'admin',
 			kid: active.kid,
 			ttlSeconds: 600
-		},
-		new Date()
-	);
+			},
+			new Date()
+		);
 }
 
 // Seeds a control trust rule directly, standing in for the gated first-signup

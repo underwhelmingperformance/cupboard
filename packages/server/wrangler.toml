@@ -20,6 +20,12 @@ migrations_dir = "drizzle-d1"
 [vars]
 CUPBOARD_AUTH_ISSUER = "cupboard"
 CUPBOARD_AUTH_AUDIENCE = "cupboard"
+# The control-plane OAuth audience (the control client id), and the base64 AES-256
+# key wrapping the control signing key. The wrapping key is sensitive: set it in
+# production with `wrangler secret put CONTROL_KEY_WRAP_SECRET`, which overrides
+# this empty default. Tests supply their own via the pool/Miniflare bindings.
+CUPBOARD_CONTROL_AUDIENCE = ""
+CONTROL_KEY_WRAP_SECRET = ""
 CUPBOARD_OWNER_ISSUER = ""
 CUPBOARD_OWNER_SUBJECT = ""
 CUPBOARD_OWNER_AUDIENCE = ""
