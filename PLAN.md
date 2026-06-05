@@ -1794,15 +1794,20 @@ together.
    minting or verifying under the literal `cupboard` default. The per-tenant
    read verifier is a hashed credential carried in the manifest, never the
    global `CUPBOARD_READ_USER`/`PASSWORD` env (those are retired) and never a
-   plaintext secret in KV. Writes to any non-default tenant are refused with 501
-   until step 6 plumbs tenant-scoped storage.
-6. **Multi-tenant upload path + push contract.** **Prerequisite (step-5 carry):
-   the narinfo R2 object key (`narInfoObjectKey`) and the public edge-cache key
-   (the tenant-prefix-stripped request URL) gain a tenant segment.** In step 5
-   both are unscoped, which is harmless only because every non-default write is
-   501-gated, so just `v1` holds narinfo objects; opening multi-tenant writes
-   without scoping these keys would collide two tenants on `narinfo/<hash>` and
-   on the stripped edge-cache key. Add existence-oracle-safe negotiate gating on
+   plaintext secret in KV. Writes to any non-default tenant were refused with 501
+   until step 6 plumbed tenant-scoped storage; that gate is now lifted.
+6. **Multi-tenant upload path + push contract.** The narinfo R2 object key
+   (`narInfoObjectKey`) and the read-path edge-cache key now carry a tenant
+   segment, so distrusting tenants never collide on `narinfo/<hash>` or the edge
+   cache; the negotiate reuse lookup is existence-oracle-safe (gating on the
+   asking tenant's own `tenant_blob`/`blob_ref`, never global `blob_state`); the
+   per-tenant-per-`narHash` quota is charged on the canonical size with a read-only
+   pre-verify early-reject; and the non-default-tenant write gate is lifted, so a
+   tenant writes through the Worker to its own object. **Remaining:** the push
+   contract — the per-upload status query (`servable`/`pending`/`mismatch`/
+   `absent`), `push --wait`/`--no-wait`/root-activation, and the CLI token cache
+   keyed on the full tenant base URL. The earlier gating notes, kept for context:
+   existence-oracle-safe negotiate gating on
    the asking tenant's own `tenant_blob`/`blob_ref` (this reworks 2b's
    single-tenant reuse lookup, which consults global `blob_state` — a known,
    accepted cost); per-tenant-per-`narHash` quota — a read-only pre-verify check
