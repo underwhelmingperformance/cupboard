@@ -36,6 +36,13 @@
 			"when": 1780644245071,
 			"tag": "0004_control_trust",
 			"breakpoints": true
+		},
+		{
+			"idx": 5,
+			"version": "6",
+			"when": 1780669212588,
+			"tag": "0005_tenant_registry",
+			"breakpoints": true
 		}
 	]
 }

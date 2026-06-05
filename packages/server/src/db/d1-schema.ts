@@ -90,6 +90,38 @@ export const controlTrust = sqliteTable('control_trust', {
 	createdAt: text('created_at').notNull()
 });
 
+// The tenant registry: one row per provisioned cache, written only by the Worker.
+// `status` gates admission: `active` serves and accepts writes, `suspended` stops
+// writes at once and reads after the manifest TTL, `offboarding` drains. `read_mode`
+// and the owner OIDC triple are projected into the KV admission manifest and seeded
+// into the tenant Durable Object at provision time. `config_version` is the
+// monotonic fence carried on every dispatch, so a Durable Object applies identity
+// updates in order and never downgrades to an older one.
+export const tenant = sqliteTable('tenant', {
+	id: text('id').primaryKey(),
+	status: text('status', {
+		enum: ['active', 'suspended', 'offboarding']
+	}).notNull(),
+	readMode: text('read_mode', { enum: ['public', 'private'] }).notNull(),
+	ownerIssuer: text('owner_issuer').notNull(),
+	ownerSubject: text('owner_subject').notNull(),
+	ownerAudience: text('owner_audience').notNull(),
+	configVersion: integer('config_version').notNull(),
+	createdAt: text('created_at').notNull()
+});
+
+// The single global administrator, established once by the gated first-signup
+// claim. The fixed `id = 'singleton'` makes the first-writer-wins insert both the
+// irreversible bootstrap and the claim's consumption marker: a later claim by a
+// different principal hits the primary-key conflict and is refused. `issuer` and
+// `subject` identify the principal the claim promoted.
+export const globalAdmin = sqliteTable('global_admin', {
+	id: text('id').primaryKey(),
+	issuer: text('issuer').notNull(),
+	subject: text('subject').notNull(),
+	claimedAt: text('claimed_at').notNull()
+});
+
 // Per-tenant unique-blob presence: a tenant references this NAR hash via at least
 // one live narinfo version. Maintained by the tenant's DO on the 0↔1 edge
 // transition; `file_size` is the tenant's verified stored bytes, the basis for
