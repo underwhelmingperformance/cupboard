@@ -40,6 +40,7 @@ import {
 	verifyInboundOidcToken
 } from '../oidc/oidc.ts';
 import { matchOidcTrust, type OidcTrustRule } from '../oidc/oidc-trust.ts';
+import { tenantServer } from '../routing/durable-object.ts';
 
 import {
 	activeControlKey,
@@ -379,6 +380,21 @@ async function controlTenantCreate(
 		body,
 		new Date().toISOString()
 	);
+
+	// Assign the tenant's Durable Object its identity, so it mints and verifies
+	// tokens under its own path-based issuer and seeds its owner admin rule. The
+	// issuer is this deployment's origin plus the tenant prefix.
+	const issuer = `${new URL(request.url).origin}/t/${summary.id}`;
+
+	await tenantServer(env, summary.id).configure({
+		tenant: summary.id,
+		issuer,
+		audience: issuer,
+		ownerIssuer: summary.ownerIssuer,
+		ownerSubject: summary.ownerSubject,
+		ownerAudience: summary.ownerAudience,
+		configVersion: summary.configVersion
+	});
 
 	return Response.json(summary satisfies TenantSummary, {
 		headers: { 'cache-control': 'no-store' }

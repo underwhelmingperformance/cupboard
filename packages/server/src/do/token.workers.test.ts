@@ -224,6 +224,10 @@ describe('owner rule seeding', () => {
 	});
 
 	it('refuses to seed when the owner issuer is malformed', async () => {
+		// Initialise the Durable Object so its schema (which owner-rule seeding now
+		// consults for a configured identity) is in place before seeding.
+		await fetchPath('/.well-known/jwks.json');
+
 		const outcome = await runInDurableObject(currentServer(), (instance) => {
 			instance.context.env = {
 				...instance.context.env,

@@ -91,6 +91,24 @@ export const authKeys = sqliteTable('auth_key', {
 	retiredAt: text('retired_at')
 });
 
+// The Durable Object's own identity, set by the control plane's `configure` RPC at
+// provision time and on config-version bumps. It is the sole identity source for a
+// configured tenant: the slug it serves, the path-based issuer and audience it pins
+// into minted tokens, and the owner OIDC triple its admin rule is seeded from.
+// `config_version` is a monotonic fence: a `configure` carrying a version no greater
+// than the applied one is ignored, so identity never moves backwards. A single row,
+// keyed `singleton`, since one Durable Object backs one tenant.
+export const tenantIdentity = sqliteTable('tenant_identity', {
+	id: text('id').primaryKey(),
+	tenant: text('tenant').notNull(),
+	issuer: text('issuer').notNull(),
+	audience: text('audience').notNull(),
+	ownerIssuer: text('owner_issuer').notNull(),
+	ownerSubject: text('owner_subject').notNull(),
+	ownerAudience: text('owner_audience').notNull(),
+	configVersion: integer('config_version').notNull()
+});
+
 export const signingKeys = sqliteTable('signing_key', {
 	id: text('id').primaryKey(),
 	privateJwkJson: text('private_jwk_json').notNull(),

@@ -127,6 +127,13 @@
 			"when": 1780593026913,
 			"tag": "0017_drop_orphan_blob_deletion",
 			"breakpoints": true
+		},
+		{
+			"idx": 18,
+			"version": "6",
+			"when": 1780677566434,
+			"tag": "0018_tenant_identity",
+			"breakpoints": true
 		}
 	]
 }

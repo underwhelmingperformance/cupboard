@@ -27,6 +27,10 @@ import { RetentionService } from './retention-service.ts';
 import { RootsService } from './roots-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
+import {
+	type TenantIdentity,
+	TenantIdentityService
+} from './tenant-identity-service.ts';
 import { TokenExchangeService } from './token-exchange-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
@@ -44,6 +48,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly deletionQueue: DeletionQueueService;
 	private readonly signingKeys: SigningKeysService;
 	private readonly stats: StatsService;
+	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
 	private readonly retention: RetentionService;
 	private readonly integrityCheck: IntegrityCheckService;
@@ -66,7 +71,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.deletionQueue = new DeletionQueueService(this.context, this.authKeys);
 		this.signingKeys = new SigningKeysService(this.context, this.authKeys);
 		this.stats = new StatsService(this.context, this.authKeys);
-		this.oidcTrust = new OidcTrustService(this.context, this.authKeys);
+		this.tenantIdentity = new TenantIdentityService(this.context);
+		this.oidcTrust = new OidcTrustService(
+			this.context,
+			this.authKeys,
+			this.tenantIdentity
+		);
 		this.retention = new RetentionService(this.context, this.authKeys);
 		this.integrityCheck = new IntegrityCheckService(
 			this.context,
@@ -158,6 +168,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 		await this.verification.verifyPendingUploads(verificationBatchSize);
 		await this.verification.verifyBatch(undefined, verificationBatchSize);
+	}
+
+	// The control plane assigns this Durable Object its identity at provision time
+	// and on config-version bumps. The compare-and-set on the config version makes a
+	// stale or replayed dispatch a no-op, and the owner admin rule is re-seeded from
+	// the newly applied identity. SQLite access in the Durable Object is synchronous
+	// and the object is single-threaded, so the read-compare-write is atomic.
+	async configure(identity: TenantIdentity): Promise<void> {
+		await this.initialise();
+
+		if (this.tenantIdentity.configure(identity)) {
+			this.oidcTrust.seedOwnerRule();
+		}
 	}
 
 	private routes(): void {

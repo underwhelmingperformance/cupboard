@@ -31,11 +31,13 @@ import {
 	ownerRuleId,
 	type ServerContext
 } from './context.ts';
+import { type TenantIdentityService } from './tenant-identity-service.ts';
 
 export class OidcTrustService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService
+		private readonly authKeys: AuthKeysService,
+		private readonly tenantIdentity: TenantIdentityService
 	) {}
 
 	async handleListOidcTrust(request: Request): Promise<Response> {
@@ -164,10 +166,31 @@ export class OidcTrustService {
 	}
 
 	private ownerConfig(): OwnerConfig | undefined {
-		const issuer = this.context.env.CUPBOARD_OWNER_ISSUER;
-		const subject = this.context.env.CUPBOARD_OWNER_SUBJECT;
-		const audience = this.context.env.CUPBOARD_OWNER_AUDIENCE;
+		// The configured identity is the owner source for a provisioned tenant. An
+		// unconfigured Durable Object falls back to the deploy env owner config; this
+		// transitional fallback is removed once routing provisions every tenant.
+		const identity = this.tenantIdentity.current();
 
+		if (identity !== undefined) {
+			return this.validatedOwner(
+				identity.ownerIssuer,
+				identity.ownerSubject,
+				identity.ownerAudience
+			);
+		}
+
+		return this.validatedOwner(
+			this.context.env.CUPBOARD_OWNER_ISSUER,
+			this.context.env.CUPBOARD_OWNER_SUBJECT,
+			this.context.env.CUPBOARD_OWNER_AUDIENCE
+		);
+	}
+
+	private validatedOwner(
+		issuer: string,
+		subject: string,
+		audience: string
+	): OwnerConfig | undefined {
 		// A binding may be absent or empty when no owner is configured (e.g. in
 		// local development); either way there is no rule to seed.
 		if (!issuer || !subject || !audience) {
