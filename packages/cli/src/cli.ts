@@ -4,6 +4,7 @@ import { registerAuthKeyCommands } from './commands/auth-key.ts';
 import { registerCacheCommands } from './commands/cache.ts';
 import { registerCheckCommand } from './commands/check.ts';
 import { registerConfigCommand } from './commands/config.ts';
+import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerInitCommand } from './commands/init.ts';
 import { registerKeyCommands } from './commands/key.ts';
@@ -40,6 +41,7 @@ export function buildProgram(): Command {
 	registerRootCommands(program);
 	registerKeyCommands(program);
 	registerAuthKeyCommands(program);
+	registerControlKeyCommands(program);
 	registerCacheCommands(program);
 	registerPolicyCommands(program);
 	registerOidcTrustCommands(program);

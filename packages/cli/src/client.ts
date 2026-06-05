@@ -16,6 +16,12 @@ import {
 	checkReportSchema,
 	type CommitResponse,
 	commitResponseSchema,
+	type ControlKeyListResponse,
+	controlKeyListResponseSchema,
+	type ControlKeyRetireResponse,
+	controlKeyRetireResponseSchema,
+	type ControlKeyRotateResponse,
+	controlKeyRotateResponseSchema,
 	DEFAULT_CACHE,
 	type DeletePathResponse,
 	deletePathResponseSchema,
@@ -277,6 +283,39 @@ export class CupboardClient {
 		return this.requestJson(
 			`/keys/auth/retire/${encodeURIComponent(kid)}`,
 			authKeyRetireResponseSchema,
+			{
+				method: 'POST',
+				token
+			}
+		);
+	}
+
+	// The control-plane key routes live at the bare host, not under a tenant
+	// prefix, so this client must be built from the deployment's base URL.
+	listControlKeys(token: AccessCredential): Promise<ControlKeyListResponse> {
+		return this.requestJson('/control/keys', controlKeyListResponseSchema, {
+			token
+		});
+	}
+
+	rotateControlKey(token: AccessCredential): Promise<ControlKeyRotateResponse> {
+		return this.requestJson(
+			'/control/keys/rotate',
+			controlKeyRotateResponseSchema,
+			{
+				method: 'POST',
+				token
+			}
+		);
+	}
+
+	retireControlKey(
+		token: AccessCredential,
+		kid: string
+	): Promise<ControlKeyRetireResponse> {
+		return this.requestJson(
+			`/control/keys/retire/${encodeURIComponent(kid)}`,
+			controlKeyRetireResponseSchema,
 			{
 				method: 'POST',
 				token
