@@ -8,6 +8,12 @@ importers:
 
   .:
     devDependencies:
+      '@cupboard/nix':
+        specifier: workspace:*
+        version: link:packages/nix
+      '@cupboard/protocol':
+        specifier: workspace:*
+        version: link:packages/protocol
       '@eslint/js':
         specifier: ^10.0.1
         version: 10.0.1(eslint@10.4.0(jiti@2.7.0))
@@ -59,9 +65,12 @@ importers:
 
   packages/cli:
     dependencies:
-      '@cupboard/shared':
+      '@cupboard/nix':
         specifier: workspace:*
-        version: link:../shared
+        version: link:../nix
+      '@cupboard/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       cli-table3:
         specifier: ^0.6.5
         version: 0.6.5
@@ -91,6 +100,44 @@ importers:
         specifier: ^4.1.6
         version: 4.1.6(@types/node@25.8.0)(vite@8.0.14(@types/node@25.8.0)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.1)(yaml@2.9.0))
 
+  packages/nix:
+    dependencies:
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^25.5.0
+        version: 25.8.0
+      fast-check:
+        specifier: ^4.8.0
+        version: 4.8.0
+      typescript:
+        specifier: ^6.0.2
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.6
+        version: 4.1.6(@types/node@25.8.0)(vite@8.0.14(@types/node@25.8.0)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.1)(yaml@2.9.0))
+
+  packages/protocol:
+    dependencies:
+      '@cupboard/nix':
+        specifier: workspace:*
+        version: link:../nix
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@types/node':
+        specifier: ^25.5.0
+        version: 25.8.0
+      typescript:
+        specifier: ^6.0.2
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.6
+        version: 4.1.6(@types/node@25.8.0)(vite@8.0.14(@types/node@25.8.0)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.1)(yaml@2.9.0))
+
   packages/server:
     dependencies:
       '@aws-sdk/client-s3':
@@ -99,9 +146,12 @@ importers:
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1048.0
         version: 3.1048.0
-      '@cupboard/shared':
+      '@cupboard/nix':
         specifier: workspace:*
-        version: link:../shared
+        version: link:../nix
+      '@cupboard/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@cloudflare/workers-types@4.20260517.1)
@@ -136,25 +186,6 @@ importers:
       wrangler:
         specifier: ^4.85.0
         version: 4.92.0(@cloudflare/workers-types@4.20260517.1)
-
-  packages/shared:
-    dependencies:
-      zod:
-        specifier: ^4.4.3
-        version: 4.4.3
-    devDependencies:
-      '@types/node':
-        specifier: ^25.5.0
-        version: 25.8.0
-      fast-check:
-        specifier: ^4.8.0
-        version: 4.8.0
-      typescript:
-        specifier: ^6.0.2
-        version: 6.0.3
-      vitest:
-        specifier: ^4.1.6
-        version: 4.1.6(@types/node@25.8.0)(vite@8.0.14(@types/node@25.8.0)(esbuild@0.28.0)(jiti@2.7.0)(tsx@4.22.1)(yaml@2.9.0))
 
 packages:
 

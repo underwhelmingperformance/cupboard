@@ -1,4 +1,5 @@
-import { type DeletePathResponse, StorePath } from '@cupboard/shared';
+import { StorePath } from '@cupboard/nix/store-path';
+import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

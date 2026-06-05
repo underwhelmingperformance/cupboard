@@ -2,7 +2,7 @@ import type {
 	CacheListResponse,
 	CacheRemoveResponse,
 	CacheSummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/caches';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client.ts';

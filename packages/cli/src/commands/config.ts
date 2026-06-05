@@ -1,11 +1,7 @@
 import { env } from 'node:process';
 
-import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	NixConfig,
-	renderNetrc
-} from '@cupboard/shared';
+import { NixConfig, renderNetrc } from '@cupboard/nix/nix-config';
+import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';

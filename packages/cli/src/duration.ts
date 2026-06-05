@@ -1,4 +1,4 @@
-import { rootTtlMaxSeconds, rootTtlMinSeconds } from '@cupboard/shared';
+import { rootTtlMaxSeconds, rootTtlMinSeconds } from '@cupboard/nix/scalars';
 import { InvalidArgumentError } from 'commander';
 
 const unitSeconds = new Map<string, number>([

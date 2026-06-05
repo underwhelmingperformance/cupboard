@@ -1,5 +1,5 @@
-import type { UploadPathMetadataFields } from '@cupboard/shared';
-import { NarInfo } from '@cupboard/shared';
+import { NarInfo } from '@cupboard/nix/narinfo';
+import type { UploadPathMetadataFields } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 

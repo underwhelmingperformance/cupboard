@@ -1,4 +1,4 @@
-import type { CheckReport } from '@cupboard/shared';
+import type { CheckReport } from '@cupboard/protocol/reports';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client.ts';

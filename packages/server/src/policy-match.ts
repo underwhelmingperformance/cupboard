@@ -1,4 +1,4 @@
-import type { RetentionPolicyScope } from '@cupboard/shared';
+import type { RetentionPolicyScope } from '@cupboard/protocol/retention';
 
 export interface RetentionPolicy {
 	readonly scope: RetentionPolicyScope;

@@ -1,8 +1,8 @@
-import {
-	StorePath,
-	type UploadPathMetadataFields,
-	type UploadPathNegotiationFields
-} from '@cupboard/shared';
+import { StorePath } from '@cupboard/nix/store-path';
+import type {
+	UploadPathMetadataFields,
+	UploadPathNegotiationFields
+} from '@cupboard/protocol/upload';
 
 import type { CompressedNarBlob } from './blob.ts';
 import type { NixSha256Hash } from './nar.ts';

@@ -1,4 +1,5 @@
-import { IssuerUrl, type OidcTrustScope } from '@cupboard/shared';
+import type { OidcTrustScope } from '@cupboard/protocol/oidc';
+import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 
 // A trust rule reduced to what matching needs. The DO reads enabled rows from
 // `oidc_trust`, parses `claims_json`/`allowed_roots_json`, and passes them here;

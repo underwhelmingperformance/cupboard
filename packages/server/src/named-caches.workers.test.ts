@@ -1,4 +1,4 @@
-import type { StatsResponse, UsageResponse } from '@cupboard/shared';
+import type { StatsResponse, UsageResponse } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';

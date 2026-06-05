@@ -3,7 +3,7 @@ import type {
 	ControlKeyRetireResponse,
 	ControlKeyRotateResponse,
 	ControlKeySummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/control-keys';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

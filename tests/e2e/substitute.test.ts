@@ -1,12 +1,12 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { NarInfo } from '@cupboard/nix/narinfo';
+import { StorePath } from '@cupboard/nix/store-path';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
-import { NarInfo } from '../../packages/shared/src/narinfo.ts';
-import { StorePath } from '../../packages/shared/src/store-path.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import {

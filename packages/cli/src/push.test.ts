@@ -1,9 +1,9 @@
-import {
-	type RootSetBody,
-	type RootSetResponse,
-	StorePath,
-	type UploadNegotiateRequest
-} from '@cupboard/shared';
+import { StorePath } from '@cupboard/nix/store-path';
+import type {
+	RootSetBody,
+	RootSetResponse
+} from '@cupboard/protocol/retention';
+import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import { type CompressedAndHashedNarFile, CompressedNarFile } from './blob.ts';

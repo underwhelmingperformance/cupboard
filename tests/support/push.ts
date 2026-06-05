@@ -1,14 +1,15 @@
 import path from 'node:path';
 
+import { StorePath } from '@cupboard/nix/store-path';
+import {
+	type UploadPathMetadataFields,
+	type UploadPathNegotiationFields
+} from '@cupboard/protocol/upload';
+
 import { compressAndHashNarToFile } from '../../packages/cli/src/blob.ts';
 import type { CupboardClient } from '../../packages/cli/src/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
 import { NarArchive } from '../../packages/cli/src/nar.ts';
-import {
-	type UploadPathMetadataFields,
-	type UploadPathNegotiationFields
-} from '../../packages/shared/src/messages.ts';
-import { StorePath } from '../../packages/shared/src/store-path.ts';
 
 import { NixStore } from './nix.ts';
 

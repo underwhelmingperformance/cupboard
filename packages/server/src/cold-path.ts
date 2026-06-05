@@ -1,4 +1,5 @@
-import { isImplicitPinName, ttlSecondsSchema } from '@cupboard/shared';
+import { isImplicitPinName } from '@cupboard/nix/retention';
+import { ttlSecondsSchema } from '@cupboard/nix/scalars';
 
 import { ColdPathTtlConfigurationInvalidError } from './errors.ts';
 

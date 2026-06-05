@@ -5,7 +5,7 @@ import {
 	tokenExchangeGrantType,
 	tokenExchangeRequestSchema,
 	type TokenResponse
-} from '@cupboard/shared';
+} from '@cupboard/protocol/oidc';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import type { JWTPayload } from 'jose';
 

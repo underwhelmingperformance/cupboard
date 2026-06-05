@@ -1,4 +1,4 @@
-import { NarInfo } from '@cupboard/shared';
+import { NarInfo } from '@cupboard/nix/narinfo';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';

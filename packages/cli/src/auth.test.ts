@@ -2,7 +2,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { TokenResponse } from '@cupboard/shared';
+import type { TokenResponse } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
 import {

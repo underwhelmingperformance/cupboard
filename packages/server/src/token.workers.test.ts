@@ -2,7 +2,7 @@ import {
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
 	tokenExchangeGrantType
-} from '@cupboard/shared';
+} from '@cupboard/protocol/oidc';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';

@@ -1,0 +1,30 @@
+{
+	"name": "@cupboard/nix",
+	"version": "0.0.0",
+	"dependencies": {
+		"zod": "^4.4.3"
+	},
+	"devDependencies": {
+		"@types/node": "^25.5.0",
+		"fast-check": "^4.8.0",
+		"typescript": "^6.0.2",
+		"vitest": "^4.1.6"
+	},
+	"exports": {
+		"./cache-info": "./src/cache-info.ts",
+		"./errors": "./src/errors.ts",
+		"./hash": "./src/hash.ts",
+		"./narinfo": "./src/narinfo.ts",
+		"./nix-config": "./src/nix-config.ts",
+		"./retention": "./src/retention.ts",
+		"./scalars": "./src/scalars.ts",
+		"./store-path": "./src/store-path.ts",
+		"./zstd": "./src/zstd.ts"
+	},
+	"private": true,
+	"scripts": {
+		"check:types": "tsc --noEmit",
+		"test": "vitest run --passWithNoTests"
+	},
+	"type": "module"
+}

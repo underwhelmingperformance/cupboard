@@ -3,7 +3,7 @@ import type {
 	OidcTrustListResponse,
 	OidcTrustRemoveResponse,
 	OidcTrustSummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 

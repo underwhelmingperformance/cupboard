@@ -3,7 +3,7 @@ import type {
 	OidcTrustListResponse,
 	OidcTrustRemoveResponse,
 	OidcTrustSummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/oidc';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

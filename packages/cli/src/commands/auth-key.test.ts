@@ -2,7 +2,7 @@ import type {
 	AuthKeyListResponse,
 	AuthKeyRotateResponse,
 	AuthKeySummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/keys';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client.ts';

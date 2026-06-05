@@ -1,4 +1,4 @@
-import { tenantIdSchema } from '@cupboard/shared';
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 
 const tenantPrefix = '/t/';
 

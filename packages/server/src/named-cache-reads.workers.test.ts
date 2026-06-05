@@ -1,4 +1,5 @@
-import { CacheInfo, NarInfo } from '@cupboard/shared';
+import { CacheInfo } from '@cupboard/nix/cache-info';
+import { NarInfo } from '@cupboard/nix/narinfo';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 

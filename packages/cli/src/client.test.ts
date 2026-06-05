@@ -1,18 +1,22 @@
 import type {
 	CacheRemoveResponse,
-	CacheSummary,
-	CheckReport,
-	DeletePathResponse,
+	CacheSummary
+} from '@cupboard/protocol/caches';
+import type {
 	KeyRetireResponse,
-	KeyRotateResponse,
+	KeyRotateResponse
+} from '@cupboard/protocol/keys';
+import type { TokenResponse } from '@cupboard/protocol/oidc';
+import type { CheckReport } from '@cupboard/protocol/reports';
+import type {
 	RetentionPolicyRemoveResponse,
 	RetentionPolicySummary,
 	RootListResponse,
 	RootRemoveResponse,
 	RootSetBody,
-	RootSetResponse,
-	TokenResponse
-} from '@cupboard/shared';
+	RootSetResponse
+} from '@cupboard/protocol/retention';
+import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient, type TokenProvider } from './client.ts';

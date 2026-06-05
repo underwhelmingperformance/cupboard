@@ -2,19 +2,21 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import pathModule from 'node:path';
 
-import {
-	type CommitResponse,
-	implicitPinName,
-	type RootSetBody,
-	type RootSetResponse,
-	type RootSummary,
-	StorePath,
-	type UploadDecision,
-	type UploadNegotiateRequest,
-	type UploadNegotiateResponse,
-	type UploadPrepareRequest,
-	type UploadPrepareResponse
-} from '@cupboard/shared';
+import { implicitPinName } from '@cupboard/nix/retention';
+import { StorePath } from '@cupboard/nix/store-path';
+import type {
+	RootSetBody,
+	RootSetResponse,
+	RootSummary
+} from '@cupboard/protocol/retention';
+import type {
+	CommitResponse,
+	UploadDecision,
+	UploadNegotiateRequest,
+	UploadNegotiateResponse,
+	UploadPrepareRequest,
+	UploadPrepareResponse
+} from '@cupboard/protocol/upload';
 
 import {
 	compressAndHashNarToFile,

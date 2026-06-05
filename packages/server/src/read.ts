@@ -1,10 +1,7 @@
-import {
-	CacheInfo,
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	defaultAuthIssuer,
-	tokenExchangeGrantType
-} from '@cupboard/shared';
+import { CacheInfo } from '@cupboard/nix/cache-info';
+import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { tokenExchangeGrantType } from '@cupboard/protocol/oidc';
+import { defaultAuthIssuer } from '@cupboard/protocol/oidc-issuer';
 import { StatusCodes } from 'http-status-codes';
 
 import { tenantServer } from './durable-object.ts';

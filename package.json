@@ -2,6 +2,8 @@
 	"name": "cupboard",
 	"version": "0.0.0",
 	"devDependencies": {
+		"@cupboard/nix": "workspace:*",
+		"@cupboard/protocol": "workspace:*",
 		"@eslint/js": "^10.0.1",
 		"@types/node": "^25.5.0",
 		"eslint": "^10.1.0",

@@ -1,4 +1,5 @@
-import { NixSha256Hash, zstdCompressionStream } from '@cupboard/shared';
+import { NixSha256Hash } from '@cupboard/nix/hash';
+import { zstdCompressionStream } from '@cupboard/nix/zstd';
 import { describe, expect, it } from 'vitest';
 
 import { verifyDecompressedNar } from './nar-verify.ts';

@@ -2,7 +2,7 @@ import type {
 	CacheListResponse,
 	CacheRemoveResponse,
 	CacheSummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/caches';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';

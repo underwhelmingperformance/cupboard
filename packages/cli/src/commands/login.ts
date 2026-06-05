@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { platform } from 'node:process';
 
-import { subjectTokenTypeIdToken } from '@cupboard/shared';
+import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';

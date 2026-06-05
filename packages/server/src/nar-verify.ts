@@ -1,8 +1,6 @@
-import {
-	NixSha256Hash,
-	ZstdDecodeError,
-	zstdDecompressionStream
-} from '@cupboard/shared';
+import { ZstdDecodeError } from '@cupboard/nix/errors';
+import { NixSha256Hash } from '@cupboard/nix/hash';
+import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 
 import { verifiableMaxBytes } from './http.ts';
 

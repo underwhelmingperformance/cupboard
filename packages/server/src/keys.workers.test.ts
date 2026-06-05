@@ -1,4 +1,7 @@
-import type { KeyRetireResponse, KeyRotateResponse } from '@cupboard/shared';
+import type {
+	KeyRetireResponse,
+	KeyRotateResponse
+} from '@cupboard/protocol/keys';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 

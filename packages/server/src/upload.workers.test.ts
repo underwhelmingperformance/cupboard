@@ -1,4 +1,6 @@
-import { CacheInfo, NarInfo, NixSha256Hash } from '@cupboard/shared';
+import { CacheInfo } from '@cupboard/nix/cache-info';
+import { NixSha256Hash } from '@cupboard/nix/hash';
+import { NarInfo } from '@cupboard/nix/narinfo';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';

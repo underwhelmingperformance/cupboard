@@ -4,7 +4,7 @@ import type {
 	RetentionPolicyRemoveResponse,
 	RetentionPolicySummary,
 	RootSetResponse
-} from '@cupboard/shared';
+} from '@cupboard/protocol/retention';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 

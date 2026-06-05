@@ -2,7 +2,7 @@ import type {
 	OidcTrustAddBody,
 	OidcTrustListResponse,
 	OidcTrustSummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client.ts';

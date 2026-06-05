@@ -8,14 +8,14 @@ import {
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 
+import {
+	subjectTokenTypeIdToken,
+	tokenExchangeGrantType
+} from '@cupboard/protocol/oidc';
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 
 import { defaultTenant } from '../../packages/server/src/tenant-routing.ts';
-import {
-	subjectTokenTypeIdToken,
-	tokenExchangeGrantType
-} from '../../packages/shared/src/messages.ts';
 
 import { StubOidcIssuer } from './oidc-issuer.ts';
 import { presigningFetcher } from './r2-presign.ts';

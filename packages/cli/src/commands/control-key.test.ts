@@ -2,7 +2,7 @@ import type {
 	ControlKeyListResponse,
 	ControlKeyRotateResponse,
 	ControlKeySummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/control-keys';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client.ts';

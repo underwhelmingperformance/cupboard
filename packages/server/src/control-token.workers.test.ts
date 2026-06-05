@@ -1,7 +1,7 @@
 import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType
-} from '@cupboard/shared';
+} from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
 import { beforeEach, describe, expect, it } from 'vitest';

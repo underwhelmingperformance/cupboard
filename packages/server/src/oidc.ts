@@ -1,4 +1,4 @@
-import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/shared';
+import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import {
 	createRemoteJWKSet,
 	decodeJwt,

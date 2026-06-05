@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/shared';
+import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { z } from 'zod';
 
 import { CliError } from './errors.ts';

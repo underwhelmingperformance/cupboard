@@ -1,10 +1,10 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import { renderNetrc } from '@cupboard/nix/nix-config';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client.ts';
-import { renderNetrc } from '../../packages/shared/src/nix-config.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore, type RealiseOptions } from '../support/nix.ts';

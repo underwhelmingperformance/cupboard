@@ -1,4 +1,5 @@
-import { NixSha256Hash, type UploadPathMetadataFields } from '@cupboard/shared';
+import { NixSha256Hash } from '@cupboard/nix/hash';
+import type { UploadPathMetadataFields } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import {

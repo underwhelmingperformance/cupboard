@@ -1,11 +1,11 @@
 import { createPublicKey, verify as verifyEd25519 } from 'node:crypto';
 
-import { describe, expect, it } from 'vitest';
-
 import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType
-} from '../../packages/shared/src/messages.ts';
+} from '@cupboard/protocol/oidc';
+import { describe, expect, it } from 'vitest';
+
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 

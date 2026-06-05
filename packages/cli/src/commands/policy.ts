@@ -5,7 +5,7 @@ import {
 	type RetentionPolicyScope,
 	retentionPolicyScopeSchema,
 	type RetentionPolicySummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/retention';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

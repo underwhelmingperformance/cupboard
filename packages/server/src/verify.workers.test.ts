@@ -1,4 +1,4 @@
-import type { VerifyReport } from '@cupboard/shared';
+import type { VerifyReport } from '@cupboard/protocol/reports';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';

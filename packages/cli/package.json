@@ -5,7 +5,8 @@
 		"cupboard": "./src/main.ts"
 	},
 	"dependencies": {
-		"@cupboard/shared": "workspace:*",
+		"@cupboard/nix": "workspace:*",
+		"@cupboard/protocol": "workspace:*",
 		"cli-table3": "^0.6.5",
 		"commander": "^14.0.3",
 		"ora": "^9.3.0",

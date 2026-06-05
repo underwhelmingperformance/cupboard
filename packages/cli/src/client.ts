@@ -1,3 +1,20 @@
+import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import {
+	type CacheListResponse,
+	cacheListResponseSchema,
+	type CacheRemoveResponse,
+	cacheRemoveResponseSchema,
+	type CacheSummary,
+	cacheSummarySchema
+} from '@cupboard/protocol/caches';
+import {
+	type ControlKeyListResponse,
+	controlKeyListResponseSchema,
+	type ControlKeyRetireResponse,
+	controlKeyRetireResponseSchema,
+	type ControlKeyRotateResponse,
+	controlKeyRotateResponseSchema
+} from '@cupboard/protocol/control-keys';
 import {
 	type AuthKeyListResponse,
 	authKeyListResponseSchema,
@@ -5,32 +22,14 @@ import {
 	authKeyRetireResponseSchema,
 	type AuthKeyRotateResponse,
 	authKeyRotateResponseSchema,
-	type CacheListResponse,
-	cacheListResponseSchema,
-	cacheNameSchema,
-	type CacheRemoveResponse,
-	cacheRemoveResponseSchema,
-	type CacheSummary,
-	cacheSummarySchema,
-	type CheckReport,
-	checkReportSchema,
-	type CommitResponse,
-	commitResponseSchema,
-	type ControlKeyListResponse,
-	controlKeyListResponseSchema,
-	type ControlKeyRetireResponse,
-	controlKeyRetireResponseSchema,
-	type ControlKeyRotateResponse,
-	controlKeyRotateResponseSchema,
-	DEFAULT_CACHE,
-	type DeletePathResponse,
-	deletePathResponseSchema,
 	type KeyListResponse,
 	keyListResponseSchema,
 	type KeyRetireResponse,
 	keyRetireResponseSchema,
 	type KeyRotateResponse,
-	keyRotateResponseSchema,
+	keyRotateResponseSchema
+} from '@cupboard/protocol/keys';
+import {
 	type OidcTrustAddBody,
 	type OidcTrustListResponse,
 	oidcTrustListResponseSchema,
@@ -39,6 +38,14 @@ import {
 	type OidcTrustSummary,
 	oidcTrustSummarySchema,
 	type ParsedTokenResponse,
+	tokenExchangeGrantType,
+	tokenResponseSchema
+} from '@cupboard/protocol/oidc';
+import {
+	type CheckReport,
+	checkReportSchema
+} from '@cupboard/protocol/reports';
+import {
 	type RetentionPolicyAddBody,
 	type RetentionPolicyListResponse,
 	retentionPolicyListResponseSchema,
@@ -52,11 +59,15 @@ import {
 	rootRemoveResponseSchema,
 	type RootSetBody,
 	type RootSetResponse,
-	rootSetResponseSchema,
+	rootSetResponseSchema
+} from '@cupboard/protocol/retention';
+import {
+	type CommitResponse,
+	commitResponseSchema,
+	type DeletePathResponse,
+	deletePathResponseSchema,
 	type StatsResponse,
 	statsResponseSchema,
-	tokenExchangeGrantType,
-	tokenResponseSchema,
 	type UsageResponse,
 	usageResponseSchema,
 	type UploadNegotiateRequest,
@@ -65,7 +76,7 @@ import {
 	type UploadPrepareRequest,
 	type UploadPrepareResponse,
 	uploadPrepareResponseSchema
-} from '@cupboard/shared';
+} from '@cupboard/protocol/upload';
 import { z } from 'zod';
 
 import {

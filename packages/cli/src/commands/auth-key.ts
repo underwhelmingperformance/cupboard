@@ -3,7 +3,7 @@ import type {
 	AuthKeyRetireResponse,
 	AuthKeyRotateResponse,
 	AuthKeySummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/keys';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

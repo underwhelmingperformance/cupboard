@@ -1,9 +1,9 @@
-import {
-	CacheInfo,
-	type CacheListResponse,
-	type CacheRemoveResponse,
-	type CacheSummary
-} from '@cupboard/shared';
+import { CacheInfo } from '@cupboard/nix/cache-info';
+import type {
+	CacheListResponse,
+	CacheRemoveResponse,
+	CacheSummary
+} from '@cupboard/protocol/caches';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

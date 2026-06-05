@@ -1,10 +1,10 @@
-import {
-	type RootListResponse,
-	type RootRemoveResponse,
-	type RootSetBody,
-	type RootSetResponse,
-	type RootSummary
-} from '@cupboard/shared';
+import type {
+	RootListResponse,
+	RootRemoveResponse,
+	RootSetBody,
+	RootSetResponse,
+	RootSummary
+} from '@cupboard/protocol/retention';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

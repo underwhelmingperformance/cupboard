@@ -1,4 +1,4 @@
-import type { CheckDiscrepancy, CheckReport } from '@cupboard/shared';
+import type { CheckDiscrepancy, CheckReport } from '@cupboard/protocol/reports';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth.ts';

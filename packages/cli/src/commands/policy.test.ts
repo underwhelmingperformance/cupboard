@@ -3,7 +3,7 @@ import type {
 	RetentionPolicyListResponse,
 	RetentionPolicyRemoveResponse,
 	RetentionPolicySummary
-} from '@cupboard/shared';
+} from '@cupboard/protocol/retention';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client.ts';

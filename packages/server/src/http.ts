@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE } from '@cupboard/shared';
+import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { StatusCodes } from 'http-status-codes';
 
 import { sha256HexBytes } from './crypto.ts';

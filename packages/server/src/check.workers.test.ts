@@ -1,4 +1,5 @@
-import { type CheckReport, DEFAULT_CACHE } from '@cupboard/shared';
+import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import type { CheckReport } from '@cupboard/protocol/reports';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
