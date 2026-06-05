@@ -6,14 +6,18 @@ import type {
 import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
-import { type CompressedAndHashedNarFile, CompressedNarFile } from './blob.ts';
-import { byteStream } from './byte-stream.ts';
-import type { AccessCredential } from './client.ts';
-import { PushNarMetadataMismatchError } from './errors.ts';
-import { type NarDigest, NixSha256Hash } from './nar.ts';
-import type { NixStoreClient, NixValidPathInfo } from './nix-store.ts';
+import type { AccessCredential } from '../client/client.ts';
+import { PushNarMetadataMismatchError } from '../errors.ts';
+import { byteStream } from '../io/byte-stream.ts';
+import {
+	type CompressedAndHashedNarFile,
+	CompressedNarFile
+} from '../nix/blob.ts';
+import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
+import type { NixStoreClient, NixValidPathInfo } from '../nix/nix-store.ts';
+import type { Reporter, ResultRow } from '../reporter.ts';
+
 import { type PushClient, type PushNarArchive, runPush } from './push.ts';
-import type { Reporter, ResultRow } from './reporter.ts';
 
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';

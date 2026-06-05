@@ -1,8 +1,8 @@
 import type { Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
-import { CupboardClient } from '../client.ts';
+import { CupboardClient } from '../client/client.ts';
 import { createReporter, formatBytes, formatCount } from '../reporter.ts';
 
 interface StatsOptions {

@@ -4,15 +4,15 @@ import { platform } from 'node:process';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type { Command } from 'commander';
 
-import { reporterModeFromGlobals } from '../cli.ts';
-import { CupboardClient } from '../client.ts';
 import {
 	deviceLogin,
 	discoverOidcLogin,
 	loopbackLogin
-} from '../oidc-login.ts';
+} from '../auth/oidc-login.ts';
+import { writeCachedToken } from '../auth/token-store.ts';
+import { reporterModeFromGlobals } from '../cli.ts';
+import { CupboardClient } from '../client/client.ts';
 import { createReporter, type Reporter } from '../reporter.ts';
-import { writeCachedToken } from '../token-store.ts';
 
 interface LoginOptions {
 	readonly oidcIssuer: string;

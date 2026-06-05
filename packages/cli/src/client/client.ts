@@ -68,14 +68,16 @@ import {
 	deletePathResponseSchema,
 	type StatsResponse,
 	statsResponseSchema,
-	type UsageResponse,
-	usageResponseSchema,
 	type UploadNegotiateRequest,
 	type UploadNegotiateResponse,
 	uploadNegotiateResponseSchema,
 	type UploadPrepareRequest,
 	type UploadPrepareResponse,
-	uploadPrepareResponseSchema
+	uploadPrepareResponseSchema,
+	type UploadStatusResponse,
+	uploadStatusResponseSchema,
+	type UsageResponse,
+	usageResponseSchema
 } from '@cupboard/protocol/upload';
 import { z } from 'zod';
 
@@ -85,7 +87,7 @@ import {
 	InvalidCacheNameError,
 	MalformedResponseError,
 	ResponseSchemaMismatchError
-} from './errors.ts';
+} from '../errors.ts';
 
 /**
  * Supplies bearer tokens to the client and can refresh them. The CLI obtains a

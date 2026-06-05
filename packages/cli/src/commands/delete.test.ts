@@ -2,7 +2,7 @@ import { InvalidStorePathError } from '@cupboard/nix/errors';
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client.ts';
+import type { AccessCredential } from '../client/client.ts';
 import type { Reporter, ResultRow } from '../reporter.ts';
 
 import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';

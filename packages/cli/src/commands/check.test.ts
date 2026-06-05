@@ -1,7 +1,7 @@
 import type { CheckReport } from '@cupboard/protocol/reports';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client.ts';
+import type { AccessCredential } from '../client/client.ts';
 import type { Reporter, ResultRow } from '../reporter.ts';
 
 import { type CheckClient, runCheck } from './check.ts';

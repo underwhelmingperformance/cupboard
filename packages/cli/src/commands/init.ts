@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
-import { CupboardClient } from '../client.ts';
+import { CupboardClient } from '../client/client.ts';
 import { createReporter } from '../reporter.ts';
 
 export function registerInitCommand(program: Command): void {

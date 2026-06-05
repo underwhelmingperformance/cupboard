@@ -6,9 +6,9 @@ import type {
 } from '@cupboard/protocol/caches';
 import type { Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client.ts';
+import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
 import {
 	createReporter,

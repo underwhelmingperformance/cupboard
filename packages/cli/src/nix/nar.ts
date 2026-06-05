@@ -11,7 +11,7 @@ import pathModule from 'node:path';
 import type { NixSha256Hash } from '@cupboard/nix/hash';
 import { toNixSha256 } from '@cupboard/nix/hash';
 
-import { byteStream } from './byte-stream.ts';
+import { byteStream } from '../io/byte-stream.ts';
 
 export {
 	InvalidNixSha256HashError,

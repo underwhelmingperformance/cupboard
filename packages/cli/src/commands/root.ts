@@ -7,9 +7,9 @@ import type {
 } from '@cupboard/protocol/retention';
 import type { Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth.ts';
+import { cachedOwnerProvider } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client.ts';
+import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
 import { createReporter, type Reporter, type ResultRow } from '../reporter.ts';
 

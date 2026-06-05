@@ -2,7 +2,7 @@ import { implicitPinName } from '@cupboard/nix/retention';
 import { StorePath } from '@cupboard/nix/store-path';
 import { describe, expect, it } from 'vitest';
 
-import { CupboardClient } from '../../packages/cli/src/client.ts';
+import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 

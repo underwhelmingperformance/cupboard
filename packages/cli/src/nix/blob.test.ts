@@ -5,14 +5,14 @@ import pathModule from 'node:path';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import { describe, expect, it } from 'vitest';
 
-import { withTemporaryDirectory } from '../../../tests/support/filesystem.ts';
+import { withTemporaryDirectory } from '../../../../tests/support/filesystem.ts';
+import { byteStream } from '../io/byte-stream.ts';
 
 import {
 	compressAndHashNarToFile,
 	CompressedNarFile,
 	compressNarToFile
 } from './blob.ts';
-import { byteStream } from './byte-stream.ts';
 import { NixSha256Hash } from './nar.ts';
 
 describe('compressNarToFile', () => {

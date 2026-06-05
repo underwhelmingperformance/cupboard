@@ -1,7 +1,8 @@
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 
-import type { CupboardClient, TokenProvider } from './client.ts';
-import { OwnerLoginRequiredError } from './errors.ts';
+import type { CupboardClient, TokenProvider } from '../client/client.ts';
+import { OwnerLoginRequiredError } from '../errors.ts';
+
 import {
 	fetchGithubOidcToken,
 	type GithubOidcEnvironment

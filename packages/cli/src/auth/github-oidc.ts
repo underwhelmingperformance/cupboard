@@ -2,7 +2,7 @@ import { env } from 'node:process';
 
 import { z } from 'zod';
 
-import { CliError } from './errors.ts';
+import { CliError } from '../errors.ts';
 
 // The OIDC token request endpoint and bearer GitHub Actions injects when a
 // workflow grants `id-token: write`. Both are required to mint a token.

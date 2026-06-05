@@ -1,10 +1,10 @@
 import type { Command } from 'commander';
 
-import { authenticateForPush } from '../auth.ts';
+import { authenticateForPush } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
-import { CupboardClient } from '../client.ts';
+import { CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
-import { runPush } from '../push.ts';
+import { runPush } from '../push/push.ts';
 import { createReporter } from '../reporter.ts';
 
 interface PushOptions {

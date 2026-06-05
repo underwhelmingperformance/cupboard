@@ -6,10 +6,10 @@ import {
 	type UploadPathNegotiationFields
 } from '@cupboard/protocol/upload';
 
-import { compressAndHashNarToFile } from '../../packages/cli/src/blob.ts';
-import type { CupboardClient } from '../../packages/cli/src/client.ts';
-import { readFileByteStream } from '../../packages/cli/src/file-stream.ts';
-import { NarArchive } from '../../packages/cli/src/nar.ts';
+import type { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { readFileByteStream } from '../../packages/cli/src/io/file-stream.ts';
+import { compressAndHashNarToFile } from '../../packages/cli/src/nix/blob.ts';
+import { NarArchive } from '../../packages/cli/src/nix/nar.ts';
 
 import { NixStore } from './nix.ts';
 

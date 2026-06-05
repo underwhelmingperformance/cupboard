@@ -5,13 +5,14 @@ import path from 'node:path';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
+import { CupboardClient } from '../client/client.ts';
+import { OwnerLoginRequiredError } from '../errors.ts';
+
 import {
 	authenticateForPush,
 	authenticateGithubOidc,
 	cachedOwnerProvider
 } from './auth.ts';
-import { CupboardClient } from './client.ts';
-import { OwnerLoginRequiredError } from './errors.ts';
 import type { GithubOidcEnvironment } from './github-oidc.ts';
 import { writeCachedToken } from './token-store.ts';
 

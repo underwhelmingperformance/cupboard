@@ -18,33 +18,33 @@ import type {
 	UploadPrepareResponse
 } from '@cupboard/protocol/upload';
 
+import type { AccessCredential } from '../client/client.ts';
+import {
+	PushNarMetadataMismatchError,
+	UnexpectedUploadDecisionError
+} from '../errors.ts';
+import { readFileByteStream } from '../io/file-stream.ts';
 import {
 	compressAndHashNarToFile,
 	type CompressedAndHashedNarFile,
 	type CompressedNarBlob
-} from './blob.ts';
-import type { AccessCredential } from './client.ts';
-import {
-	PushNarMetadataMismatchError,
-	UnexpectedUploadDecisionError
-} from './errors.ts';
-import { readFileByteStream } from './file-stream.ts';
-import { NarArchive, type NarDigest } from './nar.ts';
-import { NixDaemonStoreClient } from './nix-daemon.ts';
+} from '../nix/blob.ts';
+import { NarArchive, type NarDigest } from '../nix/nar.ts';
+import { NixDaemonStoreClient } from '../nix/nix-daemon.ts';
 import {
 	type NixStoreClient,
 	type NixValidPathInfo,
 	type PreparedStorePath,
 	prepareStorePathMetadata,
 	prepareStorePathNegotiation
-} from './nix-store.ts';
+} from '../nix/nix-store.ts';
 import {
 	formatBytes,
 	formatCount,
 	type PhaseContext,
 	type Reporter,
 	type ResultRow
-} from './reporter.ts';
+} from '../reporter.ts';
 
 export interface PushDependencies {
 	readonly nixStore?: NixStoreClient;

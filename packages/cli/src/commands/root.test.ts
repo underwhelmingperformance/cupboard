@@ -7,7 +7,7 @@ import type {
 } from '@cupboard/protocol/retention';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client.ts';
+import type { AccessCredential } from '../client/client.ts';
 import type { Reporter, ResultRow } from '../reporter.ts';
 
 import {

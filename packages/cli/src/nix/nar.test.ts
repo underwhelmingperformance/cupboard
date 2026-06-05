@@ -4,7 +4,7 @@ import pathModule from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { withTemporaryDirectory } from '../../../tests/support/filesystem.ts';
+import { withTemporaryDirectory } from '../../../../tests/support/filesystem.ts';
 
 import {
 	hashNar,
@@ -187,7 +187,7 @@ interface NarFixtureMetadata {
 async function readNarFixture(name: string): Promise<NarFixture> {
 	const fixtureDirectory = pathModule.resolve(
 		import.meta.dirname,
-		'../../../tests/fixtures',
+		'../../../../tests/fixtures',
 		name
 	);
 	const metadata = parseNarFixtureMetadata(

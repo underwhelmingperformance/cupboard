@@ -5,7 +5,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { z } from 'zod';
 
-import { CliError } from './errors.ts';
+import { CliError } from '../errors.ts';
 
 export class OidcLoginError extends CliError {
 	constructor(message: string, options?: { readonly cause: unknown }) {

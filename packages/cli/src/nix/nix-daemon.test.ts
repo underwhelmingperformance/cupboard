@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
+import { ProtocolWriter } from '../../../../tests/support/protocol-writer.ts';
 
 import { NixSha256Hash } from './nar.ts';
 import {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { CupboardClient } from '../../packages/cli/src/client.ts';
+import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import {
 	CupboardTestServer,
 	ownerAudience,

@@ -19,12 +19,13 @@ import type {
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
-import { CupboardClient, type TokenProvider } from './client.ts';
 import {
 	InvalidCacheNameError,
 	MalformedResponseError,
 	ResponseSchemaMismatchError
-} from './errors.ts';
+} from '../errors.ts';
+
+import { CupboardClient, type TokenProvider } from './client.ts';
 
 interface CapturedRequest {
 	readonly url: string;

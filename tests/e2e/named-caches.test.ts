@@ -4,7 +4,7 @@ import path from 'node:path';
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import { describe, expect, it } from 'vitest';
 
-import { CupboardClient } from '../../packages/cli/src/client.ts';
+import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
