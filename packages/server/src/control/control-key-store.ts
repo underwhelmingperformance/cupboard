@@ -2,6 +2,7 @@ import { and, desc, eq, exists, isNull, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { type AuthPublicKey, generateAuthKeyPair } from '../auth/auth.ts';
+import { parseJwk } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { ControlKeyMissingError, LastControlKeyError } from '../errors.ts';
 
@@ -109,7 +110,7 @@ export async function controlVerificationKeys(
 
 	return rows.map((row) => ({
 		kid: row.kid,
-		publicJwk: JSON.parse(row.publicJwkJson) as JsonWebKey
+		publicJwk: parseJwk(row.publicJwkJson)
 	}));
 }
 

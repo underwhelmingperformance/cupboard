@@ -518,7 +518,10 @@ async function activeAuthKeyFor(
 			throw new Error('expected an active auth key to mint a scoped token');
 		}
 
-		return { kid: row.kid, privateJwk: parseJwk(row.privateJwkJson) };
+		return {
+			kid: row.kid,
+			privateJwk: parseJwk(row.privateJwkJson)
+		};
 	});
 }
 

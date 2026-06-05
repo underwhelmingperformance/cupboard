@@ -19,6 +19,7 @@ import {
 	generateAuthKeyPair,
 	verifyAccessJwt
 } from '../auth/auth.ts';
+import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
 	InsufficientScopeError,
@@ -127,8 +128,8 @@ export class AuthKeysService {
 
 		return {
 			kid,
-			privateJwk: JSON.parse(row.privateJwkJson) as JsonWebKey,
-			publicJwk: JSON.parse(row.publicJwkJson) as JsonWebKey,
+			privateJwk: parseJwk(row.privateJwkJson),
+			publicJwk: parseJwk(row.publicJwkJson),
 			createdAt: row.createdAt,
 			retired: Boolean(row.retiredAt)
 		};

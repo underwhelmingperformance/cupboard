@@ -21,6 +21,7 @@ import {
 import { z } from 'zod';
 
 import { R2Presigner } from '../blob/presign.ts';
+import { parseJwk } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -253,7 +254,7 @@ export function signingKeyFromRow(
 	return {
 		id: row.id,
 		name: row.publicKey.slice(0, row.publicKey.indexOf(':')),
-		privateJwk: JSON.parse(row.privateJwkJson) as JsonWebKey,
+		privateJwk: parseJwk(row.privateJwkJson),
 		publicKey: row.publicKey,
 		signing: row.signing,
 		published: row.published,

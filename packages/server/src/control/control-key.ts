@@ -1,3 +1,4 @@
+import { parseJwk } from '../crypto/crypto.ts';
 import {
 	ControlWrappedKeyMalformedError,
 	ControlWrappingKeyInvalidError
@@ -76,7 +77,7 @@ export async function unwrapControlPrivateJwk(
 		throw new ControlWrappedKeyMalformedError();
 	}
 
-	return JSON.parse(textDecoder.decode(plaintext)) as JsonWebKey;
+	return parseJwk(textDecoder.decode(plaintext));
 }
 
 function base64(bytes: Uint8Array): string {

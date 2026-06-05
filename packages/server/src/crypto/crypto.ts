@@ -46,6 +46,29 @@ export async function generateSigningKey(name: string): Promise<{
 	};
 }
 
+// A JWK names its key type in `kty`. That structural check is enough to hand a
+// typed key on; whether the key material is usable is decided when it is
+// imported for signing or verification.
+function isJsonWebKey(value: unknown): value is JsonWebKey {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'kty' in value &&
+		typeof value.kty === 'string'
+	);
+}
+
+// Deserialises a stored JSON Web Key.
+export function parseJwk(json: string): JsonWebKey {
+	const value: unknown = JSON.parse(json);
+
+	if (!isJsonWebKey(value)) {
+		throw new TypeError('Stored JSON Web Key is malformed');
+	}
+
+	return value;
+}
+
 export async function signNixFingerprint(
 	privateJwk: JsonWebKey,
 	fingerprint: string,
