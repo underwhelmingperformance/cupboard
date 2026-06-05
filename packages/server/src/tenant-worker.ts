@@ -8,7 +8,7 @@
 // The default handler exists only so the script is built as a module Worker, the
 // format Durable Objects require; a direct request to the script itself is not
 // part of any flow and is refused.
-export { CupboardServer } from './do.ts';
+export { CupboardServer } from './do/server.ts';
 
 export default {
 	fetch(): Response {

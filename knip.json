@@ -5,7 +5,7 @@
 		"packages/nix": {},
 		"packages/protocol": {},
 		"packages/server": {
-			"entry": ["src/do.ts", "src/tenant-worker.ts"]
+			"entry": ["src/do/server.ts", "src/tenant-worker.ts"]
 		}
 	},
 	"ignoreDependencies": ["cloudflare"],
