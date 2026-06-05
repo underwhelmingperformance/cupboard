@@ -62,9 +62,11 @@ export const blobReference = sqliteTable(
 // The control-plane signing key set, held in D1 so the stateless Worker can mint
 // and rotate control tokens (which authorise global-admin operations). Only the
 // public metadata and the *wrapped* private JWK live here; the wrapping secret is
-// Worker-only (see control-key.ts), so a tenant Durable Object that can read this
-// table — D1 is database-wide — still cannot recover a key. `retired_at` is NULL
-// while a key still verifies; the newest non-retired key is the one that mints.
+// bound only on the control-plane Worker (see control-key.ts), and the tenant
+// Durable Object runs in a separate script that never binds it, so a DO that can
+// read this table (D1 is database-wide) still cannot recover a key. `retired_at`
+// is NULL while a key still verifies; the newest non-retired key is the one that
+// mints.
 export const controlAuthKey = sqliteTable('control_auth_key', {
 	id: text('id').primaryKey(),
 	kid: text('kid').notNull(),

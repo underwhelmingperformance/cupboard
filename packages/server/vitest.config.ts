@@ -28,16 +28,19 @@ export default defineConfig(async () => {
 				{
 					plugins: [
 						cloudflareTest({
-							main: './src/worker.ts',
+							// The Durable Object must live in the `main` worker for
+							// `runInDurableObject` to reach it, so the tenant script is the
+							// worker under test; the control handler is exercised by calling
+							// its exported `fetch` directly (see `controlFetch`). The
+							// control-plane bindings are deliberately not bound here, so the
+							// Durable Object's env lacks them exactly as in production.
+							main: './src/tenant-worker.ts',
 							miniflare: {
 								bindings: {
 									CUPBOARD_OWNER_ISSUER: 'https://accounts.google.com',
 									CUPBOARD_OWNER_SUBJECT: 'owner-subject',
 									CUPBOARD_OWNER_AUDIENCE:
 										'client-id.apps.googleusercontent.com',
-									CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
-									CONTROL_KEY_WRAP_SECRET:
-										'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
 									R2_ACCESS_KEY_ID: 'test-access-key-id',
 									R2_ACCOUNT_ID: 'test-account-id',
 									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
@@ -46,7 +49,7 @@ export default defineConfig(async () => {
 								compatibilityDate: '2026-04-28'
 							},
 							wrangler: {
-								configPath: './wrangler.toml'
+								configPath: './wrangler.tenant.toml'
 							}
 						})
 					],

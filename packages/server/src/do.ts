@@ -188,7 +188,12 @@ type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
 };
 
-type RuntimeEnv = WidenStringBindings<Env>;
+// `TenantEnv` is generated from `wrangler.tenant.toml`, the config for the script
+// this Durable Object actually runs in. It deliberately excludes the control-plane
+// bindings (the signing-key wrapping secret, the control audience): the Durable
+// Object runs in its own script's context and cannot reach them, and this type
+// makes any attempt to read one a compile error.
+type RuntimeEnv = WidenStringBindings<TenantEnv>;
 
 type SchemaDatabase = DrizzleSqliteDODatabase<typeof schema>;
 

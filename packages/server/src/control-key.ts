@@ -5,12 +5,13 @@ import {
 
 // AES-256-GCM envelope wrapping for the control-plane private signing key. The
 // control key mints global-admin tokens, so it must be reachable only by the
-// Worker. A `D1Database` binding is database-wide — a tenant Durable Object can
-// issue arbitrary SQL against `CUPBOARD_DB` regardless of its Drizzle schema — so
-// storing the key in D1 unwrapped, or merely omitting the table from the DO's
-// schema, would be no protection at all. Instead the row holds only the wrapped
-// key; the wrapping secret is a Worker-only secret no DO binds, so a DO that reads
-// the row still cannot recover the key.
+// control-plane Worker. A `D1Database` binding is database-wide: a tenant Durable
+// Object can issue arbitrary SQL against `CUPBOARD_DB` regardless of its Drizzle
+// schema, so storing the key in D1 unwrapped, or merely omitting the table from
+// the DO's schema, would be no protection at all. Instead the row holds only the
+// wrapped key, and the wrapping secret is bound only on the control-plane Worker.
+// The Durable Object runs in a separate script (`cupboard-tenant`) that never
+// binds that secret, so a DO that reads the row still cannot recover the key.
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();

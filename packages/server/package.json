@@ -23,10 +23,12 @@
 	"private": true,
 	"scripts": {
 		"build-info": "node ../../scripts/build-info.ts",
-		"cf:typegen": "pnpm build-info && wrangler types --env-interface Env",
-		"check:types": "pnpm cf:typegen && tsc --noEmit",
-		"deploy": "pnpm cf:typegen && wrangler deploy",
-		"dev": "pnpm cf:typegen && wrangler dev",
+		"cf:typegen": "pnpm build-info && wrangler types --env-interface Env && wrangler types -c wrangler.tenant.toml --env-interface TenantEnv --include-runtime false worker-configuration.tenant.d.ts",
+		"cf:typegen:check": "pnpm build-info && wrangler types --env-interface Env --check worker-configuration.d.ts && wrangler types -c wrangler.tenant.toml --env-interface TenantEnv --include-runtime false --check worker-configuration.tenant.d.ts",
+		"check:types": "pnpm cf:typegen:check && tsc --noEmit",
+		"deploy": "pnpm cf:typegen && pnpm deploy:migrations && wrangler deploy -c wrangler.tenant.toml && wrangler deploy",
+		"deploy:migrations": "wrangler d1 migrations apply CUPBOARD_DB --remote",
+		"dev": "pnpm cf:typegen && wrangler dev -c wrangler.toml -c wrangler.tenant.toml",
 		"test": "pnpm build-info && vitest run --passWithNoTests"
 	},
 	"type": "module"

@@ -1,3 +1,9 @@
+# The public control-plane Worker: the bare-host control surface and the tenant
+# read/dispatch front. It holds the control signing-key wrapping secret and reaches
+# every tenant's `CupboardServer` through an external Durable Object binding into
+# the `cupboard-tenant` script (wrangler.tenant.toml), where the class is defined.
+# That separation is the isolation: the Durable Object runs in its own script and
+# never binds `CONTROL_KEY_WRAP_SECRET`, so it cannot recover the control key.
 name = "cupboard"
 main = "src/worker.ts"
 compatibility_date = "2026-05-15"
@@ -6,6 +12,7 @@ compatibility_flags = ["nodejs_compat"]
 [[durable_objects.bindings]]
 name = "CUPBOARD_DO"
 class_name = "CupboardServer"
+script_name = "cupboard-tenant"
 
 [[r2_buckets]]
 binding = "BLOBS"
@@ -36,10 +43,6 @@ R2_ACCOUNT_ID = ""
 R2_ACCESS_KEY_ID = ""
 R2_BUCKET_NAME = "cupboard-blobs"
 R2_SECRET_ACCESS_KEY = ""
-
-[[migrations]]
-tag = "v1"
-new_sqlite_classes = ["CupboardServer"]
 
 [limits]
 cpu_ms = 300000

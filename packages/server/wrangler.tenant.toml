@@ -1,0 +1,46 @@
+# The tenant Durable Object Worker. `CupboardServer` is defined here and runs in
+# this script's own context, so it only ever sees this script's bindings. The
+# control-plane Worker (wrangler.toml) reaches it through an external Durable
+# Object binding (`script_name = "cupboard-tenant"`); the control signing-key
+# wrapping secret is bound only on that Worker and is unreachable from here, which
+# is what makes the control key Worker-only in fact and not just by convention.
+name = "cupboard-tenant"
+main = "src/tenant-worker.ts"
+compatibility_date = "2026-05-15"
+compatibility_flags = ["nodejs_compat"]
+
+[[durable_objects.bindings]]
+name = "CUPBOARD_DO"
+class_name = "CupboardServer"
+
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "cupboard-blobs"
+
+[[d1_databases]]
+binding = "CUPBOARD_DB"
+database_name = "cupboard"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "drizzle-d1"
+
+[vars]
+CUPBOARD_AUTH_ISSUER = "cupboard"
+CUPBOARD_AUTH_AUDIENCE = "cupboard"
+CUPBOARD_OWNER_ISSUER = ""
+CUPBOARD_OWNER_SUBJECT = ""
+CUPBOARD_OWNER_AUDIENCE = ""
+CUPBOARD_COLD_PATH_TTL_SECONDS = ""
+R2_ACCOUNT_ID = ""
+R2_ACCESS_KEY_ID = ""
+R2_BUCKET_NAME = "cupboard-blobs"
+R2_SECRET_ACCESS_KEY = ""
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["CupboardServer"]
+
+[limits]
+cpu_ms = 300000
+
+[observability]
+enabled = true

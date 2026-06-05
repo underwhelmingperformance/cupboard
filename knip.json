@@ -3,9 +3,9 @@
 	"workspaces": {
 		"packages/cli": {},
 		"packages/server": {
-			"entry": ["src/do.ts"]
+			"entry": ["src/do.ts", "src/tenant-worker.ts"]
 		}
 	},
 	"ignoreDependencies": ["cloudflare"],
-	"ignore": [".wrangler/**", "worker-configuration.d.ts"]
+	"ignore": [".wrangler/**", "worker-configuration*.d.ts"]
 }

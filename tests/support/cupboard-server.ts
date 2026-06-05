@@ -76,43 +76,73 @@ export class CupboardTestServer {
 	): Promise<CupboardTestServer> {
 		const bundle = await bundleWorker(directory);
 		const issuer = await StubOidcIssuer.start();
+
+		// The Durable Object runs in its own `cupboard-tenant` script, so its
+		// bindings exclude the control-plane signing key, exactly as in production.
+		// The control-plane Worker binds the wrapping secret and reaches the Durable
+		// Object across scripts via `scriptName`.
+		const tenantBindings = {
+			CUPBOARD_OWNER_ISSUER: issuer.issuer,
+			CUPBOARD_OWNER_SUBJECT: ownerSubject,
+			CUPBOARD_OWNER_AUDIENCE: ownerAudience,
+			CUPBOARD_COLD_PATH_TTL_SECONDS: '',
+			R2_ACCESS_KEY_ID: r2Credentials.accessKeyId,
+			R2_ACCOUNT_ID: r2Credentials.accountId,
+			R2_BUCKET_NAME: r2Credentials.bucketName,
+			R2_SECRET_ACCESS_KEY: r2Credentials.secretAccessKey,
+			...options.bindings
+		};
+		const controlBindings = {
+			...tenantBindings,
+			CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
+			CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
+			CUPBOARD_READ_USER: '',
+			CUPBOARD_READ_PASSWORD: '',
+			...options.bindings
+		};
 		const worker = new Miniflare({
-			bindings: {
-				CUPBOARD_OWNER_ISSUER: issuer.issuer,
-				CUPBOARD_OWNER_SUBJECT: ownerSubject,
-				CUPBOARD_OWNER_AUDIENCE: ownerAudience,
-				CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
-				CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
-				CUPBOARD_READ_USER: '',
-				CUPBOARD_READ_PASSWORD: '',
-				CUPBOARD_COLD_PATH_TTL_SECONDS: '',
-				R2_ACCESS_KEY_ID: r2Credentials.accessKeyId,
-				R2_ACCOUNT_ID: r2Credentials.accountId,
-				R2_BUCKET_NAME: r2Credentials.bucketName,
-				R2_SECRET_ACCESS_KEY: r2Credentials.secretAccessKey,
-				...options.bindings
-			},
-			compatibilityDate: '2026-05-15',
-			compatibilityFlags: ['nodejs_compat'],
-			durableObjects: {
-				CUPBOARD_DO: {
-					className: 'CupboardServer',
-					useSQLite: true
+			workers: [
+				{
+					name: 'cupboard',
+					compatibilityDate: '2026-05-15',
+					compatibilityFlags: ['nodejs_compat'],
+					modules: true,
+					modulesRoot: bundle.directory,
+					scriptPath: path.join(bundle.directory, bundle.controlEntrypoint),
+					bindings: controlBindings,
+					durableObjects: {
+						CUPBOARD_DO: {
+							className: 'CupboardServer',
+							scriptName: 'cupboard-tenant',
+							useSQLite: true
+						}
+					},
+					d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
+					r2Buckets: { BLOBS: r2Credentials.bucketName }
+				},
+				{
+					name: 'cupboard-tenant',
+					compatibilityDate: '2026-05-15',
+					compatibilityFlags: ['nodejs_compat'],
+					modules: true,
+					modulesRoot: bundle.directory,
+					scriptPath: path.join(bundle.directory, bundle.tenantEntrypoint),
+					bindings: tenantBindings,
+					durableObjects: {
+						CUPBOARD_DO: {
+							className: 'CupboardServer',
+							useSQLite: true
+						}
+					},
+					d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
+					r2Buckets: { BLOBS: r2Credentials.bucketName }
 				}
-			},
-			modules: true,
-			d1Databases: {
-				CUPBOARD_DB: 'cupboard-e2e'
-			},
-			r2Buckets: {
-				BLOBS: r2Credentials.bucketName
-			},
-			modulesRoot: bundle.directory,
-			rootPath: bundle.directory,
-			scriptPath: bundle.entrypoint
+			]
 		});
-		await applyD1Migrations(await worker.getD1Database('CUPBOARD_DB'));
-		const bucket = await worker.getR2Bucket('BLOBS');
+		await applyD1Migrations(
+			await worker.getD1Database('CUPBOARD_DB', 'cupboard')
+		);
+		const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
 		const server = createServer((request, response) => {
 			void forwardToWorker(worker, request, response);
 		});
@@ -179,7 +209,7 @@ export class CupboardTestServer {
 		readonly audience: string;
 		readonly claims?: Readonly<Record<string, string>>;
 	}): Promise<void> {
-		const d1 = await this.worker.getD1Database('CUPBOARD_DB');
+		const d1 = await this.worker.getD1Database('CUPBOARD_DB', 'cupboard');
 
 		await d1
 			.prepare(
@@ -241,17 +271,49 @@ async function applyD1Migrations(
 
 interface WorkerBundle {
 	readonly directory: string;
-	readonly entrypoint: string;
+	readonly controlEntrypoint: string;
+	readonly tenantEntrypoint: string;
 }
 
+// Bundles both Worker scripts into standalone modules: the control-plane Worker
+// (`worker.ts`) and the tenant Durable Object Worker (`tenant-worker.ts`). They are
+// deployed as two Workers, so the e2e harness runs them as two Miniflare workers
+// with a cross-script Durable Object binding, mirroring production.
 async function bundleWorker(directory: string): Promise<WorkerBundle> {
 	const outputDirectory = path.join(directory, 'worker-bundle');
+
+	await bundleEntry(
+		outputDirectory,
+		'packages/server/src/worker.ts',
+		'worker',
+		true
+	);
+	await bundleEntry(
+		outputDirectory,
+		'packages/server/src/tenant-worker.ts',
+		'tenant',
+		false
+	);
+
+	return {
+		directory: outputDirectory,
+		controlEntrypoint: 'worker.mjs',
+		tenantEntrypoint: 'tenant.mjs'
+	};
+}
+
+async function bundleEntry(
+	outputDirectory: string,
+	entry: string,
+	name: string,
+	emptyOutDirectory: boolean
+): Promise<void> {
 	await build({
 		build: {
-			emptyOutDir: true,
+			emptyOutDir: emptyOutDirectory,
 			lib: {
-				entry: path.join(root, 'packages/server/src/worker.ts'),
-				fileName: 'worker',
+				entry: path.join(root, entry),
+				fileName: name,
 				formats: ['es']
 			},
 			minify: false,
@@ -262,7 +324,7 @@ async function bundleWorker(directory: string): Promise<WorkerBundle> {
 				// polyfilled `node:zlib` lacks the native zstd the verifier needs.
 				external: ['cloudflare:workers', /^node:/],
 				output: {
-					entryFileNames: 'worker.mjs'
+					entryFileNames: `${name}.mjs`
 				}
 			},
 			target: 'es2023'
@@ -272,11 +334,6 @@ async function bundleWorker(directory: string): Promise<WorkerBundle> {
 		plugins: [sqlTextPlugin()],
 		root
 	});
-
-	return {
-		directory: outputDirectory,
-		entrypoint: 'worker.mjs'
-	};
 }
 
 function sqlTextPlugin(): Plugin {

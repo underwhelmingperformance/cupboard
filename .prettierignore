@@ -4,4 +4,4 @@ node_modules
 dist
 build
 pnpm-lock.yaml
-worker-configuration.d.ts
+worker-configuration*.d.ts

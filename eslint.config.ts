@@ -168,7 +168,7 @@ export default defineConfig(
 			'**/build/',
 			'**/node_modules/',
 			'**/drizzle/migrations.js',
-			'**/worker-configuration.d.ts'
+			'**/worker-configuration*.d.ts'
 		]
 	}
 );
