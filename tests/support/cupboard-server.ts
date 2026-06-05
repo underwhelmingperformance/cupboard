@@ -27,6 +27,11 @@ const root = path.resolve(import.meta.dirname, '../..');
 export const ownerSubject = 'e2e-owner';
 export const ownerAudience = 'cupboard-owner-client';
 
+// The audience the stub issuer stamps into a control-plane subject token, and the
+// deployment's single-use claim secret gating the first-signup global-admin claim.
+export const signupAudience = 'cupboard-control-client';
+export const signupSecret = 'e2e-signup-secret';
+
 export const r2Credentials = {
 	accountId: 'test-account-id',
 	accessKeyId: 'test-access-key-id',
@@ -96,6 +101,9 @@ export class CupboardTestServer {
 			...tenantBindings,
 			CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
 			CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
+			CUPBOARD_SIGNUP_ISSUER: issuer.issuer,
+			CUPBOARD_SIGNUP_AUDIENCE: signupAudience,
+			CUPBOARD_SIGNUP_SECRET: signupSecret,
 			CUPBOARD_READ_USER: '',
 			CUPBOARD_READ_PASSWORD: '',
 			...options.bindings
