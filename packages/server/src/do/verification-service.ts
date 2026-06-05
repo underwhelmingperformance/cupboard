@@ -111,7 +111,11 @@ export class VerificationService {
 				}
 
 				const narInfoObject = await this.context.env.BLOBS.head(
-					narInfoObjectKey(row.storePathHash, row.cache)
+					narInfoObjectKey(
+						this.context.requireTenant(),
+						row.storePathHash,
+						row.cache
+					)
 				);
 
 				if (narInfoObject === null) {

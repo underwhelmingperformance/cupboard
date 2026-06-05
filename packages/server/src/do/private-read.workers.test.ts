@@ -1,6 +1,8 @@
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { narInfoCachePath } from '../http/http.ts';
+import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	bootstrap,
 	currentOrigin,
@@ -137,11 +139,11 @@ describe('private-read mode', () => {
 		await pushPath(init.token, publicPath);
 
 		const privateKey = new URL(
-			`/${privatePath.storePathHash}.narinfo`,
+			narInfoCachePath(defaultTenant, privatePath.storePathHash),
 			currentOrigin()
 		).toString();
 		const publicKey = new URL(
-			`/${publicPath.storePathHash}.narinfo`,
+			narInfoCachePath(defaultTenant, publicPath.storePathHash),
 			currentOrigin()
 		).toString();
 

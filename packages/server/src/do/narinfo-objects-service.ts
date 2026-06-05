@@ -15,11 +15,7 @@ import {
 } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
-import {
-	type ServerContext,
-	singleTenant,
-	storedSignaturesSchema
-} from './context.ts';
+import { type ServerContext, storedSignaturesSchema } from './context.ts';
 
 export class NarInfoObjectsService {
 	constructor(private readonly context: ServerContext) {}
@@ -96,13 +92,13 @@ export class NarInfoObjectsService {
 
 			if (!(await this.hasCommittedReference(cache, row))) {
 				await this.context.env.BLOBS.delete(
-					narInfoObjectKey(storePathHash, cache)
+					narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
 				);
 				return;
 			}
 
 			const existing = await this.context.env.BLOBS.head(
-				narInfoObjectKey(storePathHash, cache)
+				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
 			);
 
 			if (existing !== null) {
@@ -125,12 +121,13 @@ export class NarInfoObjectsService {
 		cache: string,
 		row: typeof schema.narInfos.$inferSelect
 	): Promise<boolean> {
+		const tenant = this.context.requireTenant();
 		const reference = await this.context.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
 			.from(d1Schema.blobReference)
 			.where(
 				and(
-					eq(d1Schema.blobReference.tenant, singleTenant),
+					eq(d1Schema.blobReference.tenant, tenant),
 					eq(d1Schema.blobReference.cache, cache),
 					eq(d1Schema.blobReference.storePathHash, row.storePathHash),
 					eq(d1Schema.blobReference.generation, row.generation),
@@ -170,7 +167,7 @@ export class NarInfoObjectsService {
 		narInfo: NarInfo
 	): Promise<void> {
 		await this.context.env.BLOBS.put(
-			narInfoObjectKey(storePathHash, cache),
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache),
 			narInfo.render(),
 			{
 				httpMetadata: {

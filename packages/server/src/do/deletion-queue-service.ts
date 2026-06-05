@@ -8,11 +8,7 @@ import { narInfoCachePath, narInfoObjectKey } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
-import {
-	type SchemaWriter,
-	type ServerContext,
-	singleTenant
-} from './context.ts';
+import { type SchemaWriter, type ServerContext } from './context.ts';
 
 export class DeletionQueueService {
 	constructor(
@@ -69,11 +65,13 @@ export class DeletionQueueService {
 		generation: number,
 		narHash: string
 	): Promise<void> {
+		const tenant = this.context.requireTenant();
+
 		await this.context.d1
 			.delete(d1Schema.blobReference)
 			.where(
 				and(
-					eq(d1Schema.blobReference.tenant, singleTenant),
+					eq(d1Schema.blobReference.tenant, tenant),
 					eq(d1Schema.blobReference.cache, cache),
 					eq(d1Schema.blobReference.storePathHash, storePathHash),
 					eq(d1Schema.blobReference.generation, generation)
@@ -86,7 +84,7 @@ export class DeletionQueueService {
 			.from(d1Schema.blobReference)
 			.where(
 				and(
-					eq(d1Schema.blobReference.tenant, singleTenant),
+					eq(d1Schema.blobReference.tenant, tenant),
 					eq(d1Schema.blobReference.narHash, narHash)
 				)
 			)
@@ -97,7 +95,7 @@ export class DeletionQueueService {
 				.delete(d1Schema.tenantBlob)
 				.where(
 					and(
-						eq(d1Schema.tenantBlob.tenant, singleTenant),
+						eq(d1Schema.tenantBlob.tenant, tenant),
 						eq(d1Schema.tenantBlob.narHash, narHash)
 					)
 				)
@@ -214,11 +212,15 @@ export class DeletionQueueService {
 			return { objectDeleted: false, narScheduledForDeletion };
 		}
 
-		await this.context.env.BLOBS.delete(narInfoObjectKey(storePathHash, cache));
+		const tenant = this.context.requireTenant();
+
+		await this.context.env.BLOBS.delete(
+			narInfoObjectKey(tenant, storePathHash, cache)
+		);
 
 		if (origin !== undefined) {
 			await this.purgeCachedNarInfo(
-				`${origin}${narInfoCachePath(storePathHash, cache)}`
+				`${origin}${narInfoCachePath(tenant, storePathHash, cache)}`
 			);
 		}
 

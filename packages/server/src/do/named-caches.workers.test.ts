@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfos } from '../db/schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	authorisedFetch,
 	blobStateCount,
@@ -92,10 +93,10 @@ describe('named caches', () => {
 		const buildsStats = await statsForCache(init.token, 'builds');
 		const usage = await usageForTenant(init.token);
 		const defaultObject = await env.BLOBS.head(
-			narInfoObjectKey(metadata.storePathHash)
+			narInfoObjectKey(defaultTenant, metadata.storePathHash)
 		);
 		const buildsObject = await env.BLOBS.head(
-			narInfoObjectKey(metadata.storePathHash, 'builds')
+			narInfoObjectKey(defaultTenant, metadata.storePathHash, 'builds')
 		);
 
 		expect({
@@ -166,13 +167,13 @@ describe('named caches', () => {
 		expect(gc.status).toBe(StatusCodes.OK);
 
 		const sweptDefault = await env.BLOBS.head(
-			narInfoObjectKey(swept.storePathHash)
+			narInfoObjectKey(defaultTenant, swept.storePathHash)
 		);
 		const keptDefault = await env.BLOBS.head(
-			narInfoObjectKey(kept.storePathHash)
+			narInfoObjectKey(defaultTenant, kept.storePathHash)
 		);
 		const sweptBuilds = await env.BLOBS.head(
-			narInfoObjectKey(swept.storePathHash, 'builds')
+			narInfoObjectKey(defaultTenant, swept.storePathHash, 'builds')
 		);
 		const sharedNar = await env.BLOBS.head(narObjectKey(narHash));
 

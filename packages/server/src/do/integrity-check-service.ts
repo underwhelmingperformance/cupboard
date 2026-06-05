@@ -54,9 +54,11 @@ export class IntegrityCheckService {
 		>();
 		let narBlobsChecked = 0;
 
+		const tenant = this.context.requireTenant();
+
 		for (const row of rows) {
 			const narInfoObject = await this.context.env.BLOBS.head(
-				narInfoObjectKey(row.storePathHash, row.cache)
+				narInfoObjectKey(tenant, row.storePathHash, row.cache)
 			);
 
 			if (narInfoObject === null) {

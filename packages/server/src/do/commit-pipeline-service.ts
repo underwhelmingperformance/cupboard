@@ -32,8 +32,7 @@ import {
 	type MaterialiseOutcome,
 	parseStoredUploadMetadata,
 	type ReserveOutcome,
-	type ServerContext,
-	singleTenant
+	type ServerContext
 } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
@@ -510,10 +509,12 @@ export class CommitPipelineService {
 			return 'blob-gone';
 		}
 
+		const tenant = this.context.requireTenant();
+
 		await this.context.d1
 			.insert(d1Schema.blobReference)
 			.values({
-				tenant: singleTenant,
+				tenant,
 				cache,
 				storePathHash: metadata.storePathHash,
 				generation,
@@ -524,7 +525,7 @@ export class CommitPipelineService {
 		await this.context.d1
 			.insert(d1Schema.tenantBlob)
 			.values({
-				tenant: singleTenant,
+				tenant,
 				narHash: metadata.narHash,
 				fileSize: blob.fileSize
 			})
@@ -564,12 +565,13 @@ export class CommitPipelineService {
 		generation: number,
 		narHash: string
 	): Promise<void> {
+		const tenant = this.context.requireTenant();
 		const materialised = await this.context.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
 			.from(d1Schema.blobReference)
 			.where(
 				and(
-					eq(d1Schema.blobReference.tenant, singleTenant),
+					eq(d1Schema.blobReference.tenant, tenant),
 					eq(d1Schema.blobReference.cache, cache),
 					eq(d1Schema.blobReference.storePathHash, storePathHash),
 					eq(d1Schema.blobReference.generation, generation),
@@ -582,7 +584,9 @@ export class CommitPipelineService {
 			return;
 		}
 
-		await this.context.env.BLOBS.delete(narInfoObjectKey(storePathHash, cache));
+		await this.context.env.BLOBS.delete(
+			narInfoObjectKey(tenant, storePathHash, cache)
+		);
 
 		this.context.db
 			.delete(schema.narInfos)

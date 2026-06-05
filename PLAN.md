@@ -1789,13 +1789,13 @@ together.
    404), enforces `readMode` and the per-tenant read verifier from the manifest
    entry on the GET path (a private cache with no verifier fails closed), and
    for a write does an authoritative D1 `tenant.status` read first — a suspended
-   or offboarding tenant is a 403. `tenant_identity` is the sole identity source:
-   an unconfigured tenant DO returns 503 for every route rather than minting or
-   verifying under the literal `cupboard` default. The per-tenant read verifier
-   is a hashed credential carried in the manifest, never the global
-   `CUPBOARD_READ_USER`/`PASSWORD` env (those are retired) and never a plaintext
-   secret in KV. Writes to any non-default tenant are refused with 501 until
-   step 6 plumbs tenant-scoped storage.
+   or offboarding tenant is a 403. `tenant_identity` is the sole identity
+   source: an unconfigured tenant DO returns 503 for every route rather than
+   minting or verifying under the literal `cupboard` default. The per-tenant
+   read verifier is a hashed credential carried in the manifest, never the
+   global `CUPBOARD_READ_USER`/`PASSWORD` env (those are retired) and never a
+   plaintext secret in KV. Writes to any non-default tenant are refused with 501
+   until step 6 plumbs tenant-scoped storage.
 6. **Multi-tenant upload path + push contract.** **Prerequisite (step-5 carry):
    the narinfo R2 object key (`narInfoObjectKey`) and the public edge-cache key
    (the tenant-prefix-stripped request URL) gain a tenant segment.** In step 5
@@ -1803,16 +1803,16 @@ together.
    501-gated, so just `v1` holds narinfo objects; opening multi-tenant writes
    without scoping these keys would collide two tenants on `narinfo/<hash>` and
    on the stripped edge-cache key. Add existence-oracle-safe negotiate gating on
-   the asking tenant's own `tenant_blob`/`blob_ref` (this
-   reworks 2b's single-tenant reuse lookup, which consults global `blob_state` —
-   a known, accepted cost); per-tenant-per-`narHash` quota — a read-only
-   pre-verify check (early-reject to save verify CPU) plus the authoritative
-   post-verify charge gated on the `tenant_blob` 0-to-1 insert, no `servable`
-   flag needed; usage; the per-upload status query the push contract polls;
-   server wait/no-wait/root-activation states and the CLI behaviour; the token
-   cache keyed on the full tenant base URL (origin plus `/t/<slug>`), with
-   decoded `iss` checked against the full path-based tenant issuer URL and `aud`
-   against the target (the CLI token-store gains a per-target dimension).
+   the asking tenant's own `tenant_blob`/`blob_ref` (this reworks 2b's
+   single-tenant reuse lookup, which consults global `blob_state` — a known,
+   accepted cost); per-tenant-per-`narHash` quota — a read-only pre-verify check
+   (early-reject to save verify CPU) plus the authoritative post-verify charge
+   gated on the `tenant_blob` 0-to-1 insert, no `servable` flag needed; usage;
+   the per-upload status query the push contract polls; server
+   wait/no-wait/root-activation states and the CLI behaviour; the token cache
+   keyed on the full tenant base URL (origin plus `/t/<slug>`), with decoded
+   `iss` checked against the full path-based tenant issuer URL and `aud` against
+   the target (the CLI token-store gains a per-target dimension).
 7. **Cron fan-out + global reaper + offboarding.** Hourly cron; per-tick tenant
    batch bounded under the subrequest budget advancing `cron_cursor` (sharding
    required here, not optional); per-tenant failures recorded, not swallowed;

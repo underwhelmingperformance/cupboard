@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { isNotModified, narInfoObjectKey } from './http.ts';
+import { isNotModified, narInfoCachePath, narInfoObjectKey } from './http.ts';
 
 const etag = '"abc"';
 const lastModified = 'Thu, 01 Jan 2026 00:00:00 GMT';
@@ -76,13 +76,27 @@ describe('isNotModified', () => {
 describe('narInfoObjectKey', () => {
 	const hash = '0123456789abcdfghijklmnpqrsvwxyz';
 
-	it('keeps the default cache key bare and namespaces a named cache', () => {
+	it('namespaces by tenant, bare for the default cache and nested for a named one', () => {
 		expect({
-			default: narInfoObjectKey(hash),
-			named: narInfoObjectKey(hash, 'builds')
+			default: narInfoObjectKey('acme', hash),
+			named: narInfoObjectKey('acme', hash, 'builds')
 		}).toStrictEqual({
-			default: `narinfo/${hash}`,
-			named: `narinfo/builds/${hash}`
+			default: `t/acme/narinfo/${hash}`,
+			named: `t/acme/narinfo/builds/${hash}`
+		});
+	});
+});
+
+describe('narInfoCachePath', () => {
+	const hash = '0123456789abcdfghijklmnpqrsvwxyz';
+
+	it('carries the tenant prefix, bare for the default cache and nested for a named one', () => {
+		expect({
+			default: narInfoCachePath('acme', hash),
+			named: narInfoCachePath('acme', hash, 'builds')
+		}).toStrictEqual({
+			default: `/t/acme/${hash}.narinfo`,
+			named: `/t/acme/cache/builds/${hash}.narinfo`
 		});
 	});
 });

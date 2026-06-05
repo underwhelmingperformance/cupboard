@@ -29,6 +29,7 @@ import {
 	R2PresignConfigurationMissingError,
 	StoredOidcTrustInvalidError,
 	StoredUploadMetadataInvalidError,
+	TenantNotConfiguredError,
 	UploadedObjectChecksumMissingError,
 	UploadNotPreparedError
 } from '../errors.ts';
@@ -68,10 +69,6 @@ export interface SigningKey {
 }
 
 export const bootstrapKeyName = 'cupboard-1';
-
-// The tenant this DO's D1 reference edges belong to. Single-tenant for now; step 5
-// replaces this constant with the slug the Worker supplies via the configure RPC.
-export const singleTenant = 'v1';
 
 // The owner's admin trust rule is seeded under a fixed id from deploy config;
 // the admin CRUD uses generated ids, so it never collides with this one.
@@ -158,6 +155,23 @@ export class ServerContext {
 		this.presigner ??= new R2Presigner(r2PresignConfiguration(this.env));
 
 		return this.presigner;
+	}
+
+	// This Durable Object's tenant slug, the one source for its tenant-scoped D1
+	// reference edges and R2 narinfo keys. It comes from the assigned identity, so a
+	// route that reaches a write has already passed the 503 guard; an absent row
+	// here is a programming error, surfaced rather than defaulted.
+	requireTenant(): string {
+		const row = this.db
+			.select({ tenant: schema.tenantIdentity.tenant })
+			.from(schema.tenantIdentity)
+			.get();
+
+		if (row === undefined) {
+			throw new TenantNotConfiguredError();
+		}
+
+		return row.tenant;
 	}
 }
 

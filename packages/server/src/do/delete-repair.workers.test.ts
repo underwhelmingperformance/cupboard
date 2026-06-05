@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
@@ -67,8 +68,9 @@ describe('delete-saga crash replay', () => {
 			tenantBlobs: await tenantBlobRows(),
 			blobState: await blobStateNarHashes(),
 			objectPresent:
-				(await env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))) !==
-				null
+				(await env.BLOBS.head(
+					narInfoObjectKey(defaultTenant, metadata.storePathHash)
+				)) !== null
 		}).toStrictEqual({
 			markers: [],
 			edges: [],
@@ -108,8 +110,9 @@ describe('delete-saga crash replay', () => {
 			tenantBlobs: await tenantBlobRows(),
 			blobState: await blobStateNarHashes(),
 			objectPresent:
-				(await env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))) !==
-				null
+				(await env.BLOBS.head(
+					narInfoObjectKey(defaultTenant, metadata.storePathHash)
+				)) !== null
 		}).toStrictEqual({
 			markers: [],
 			edges: [],
@@ -135,7 +138,9 @@ describe('delete-saga crash replay', () => {
 		// Every step but the final marker clear ran: row, edge and object are gone.
 		await deleteNarInfoRow(metadata.storePathHash);
 		await deleteBlobReferenceEdge(metadata.storePathHash, 0);
-		await env.BLOBS.delete(narInfoObjectKey(metadata.storePathHash));
+		await env.BLOBS.delete(
+			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+		);
 		await seedNarInfoDeletion({
 			storePathHash: metadata.storePathHash,
 			narHash: nar.narHash,
@@ -186,8 +191,9 @@ describe('delete-saga crash replay', () => {
 			blobState: await blobStateNarHashes(),
 			generation: await narInfoGeneration(metadata.storePathHash),
 			objectPresent:
-				(await env.BLOBS.head(narInfoObjectKey(metadata.storePathHash))) !==
-				null,
+				(await env.BLOBS.head(
+					narInfoObjectKey(defaultTenant, metadata.storePathHash)
+				)) !== null,
 			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({
 			markers: [],

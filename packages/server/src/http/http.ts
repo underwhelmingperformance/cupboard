@@ -60,29 +60,41 @@ export function stagingObjectKey(uploadId: string): string {
 	return `staging/${uploadId}.nar.zst`;
 }
 
-// The request path a narinfo is served and edge-cached under: bare for the
-// default cache, namespaced under `/cache/<cache>/` for a named one. Used to
-// purge the colo-local edge copy when a narinfo is deleted.
+// The request path a narinfo is served and edge-cached under: under the tenant
+// prefix, bare for the default cache and namespaced under `/cache/<cache>/` for a
+// named one. The read path's edge-cache key and the deletion purge both build on
+// this, so a narinfo's cached copy is keyed per tenant and two tenants sharing a
+// host never collide on the same store-path hash.
 export function narInfoCachePath(
+	tenant: string,
 	storePathHash: string,
 	cache: string = DEFAULT_CACHE
 ): string {
-	return cache === DEFAULT_CACHE
-		? `/${storePathHash}.narinfo`
-		: `/cache/${cache}/${storePathHash}.narinfo`;
+	const suffix =
+		cache === DEFAULT_CACHE
+			? `/${storePathHash}.narinfo`
+			: `/cache/${cache}/${storePathHash}.narinfo`;
+
+	return `/t/${tenant}${suffix}`;
 }
 
-// The sole narinfo-key constructor: never inline the prefix elsewhere. The
-// default cache keeps the bare `narinfo/<hash>` key so existing objects are not
-// rematerialised; a named cache namespaces under its own segment. Store path
-// hashes never contain a slash, so the two shapes cannot collide.
+// The sole narinfo-key constructor: never inline the prefix elsewhere. A narinfo's
+// materialised R2 object is tenant-namespaced, so distrusting tenants never share a
+// narinfo object even for the same store-path hash; the NAR bytes it points at stay
+// in the shared, content-addressed `nar/<narHash>` namespace. A named cache nests a
+// further segment. Store path hashes never contain a slash, so the shapes cannot
+// collide.
 export function narInfoObjectKey(
+	tenant: string,
 	storePathHash: string,
 	cache: string = DEFAULT_CACHE
 ): string {
-	return cache === DEFAULT_CACHE
-		? `narinfo/${storePathHash}`
-		: `narinfo/${cache}/${storePathHash}`;
+	const suffix =
+		cache === DEFAULT_CACHE
+			? `narinfo/${storePathHash}`
+			: `narinfo/${cache}/${storePathHash}`;
+
+	return `t/${tenant}/${suffix}`;
 }
 
 export function parseNarName(name: string): string | undefined {

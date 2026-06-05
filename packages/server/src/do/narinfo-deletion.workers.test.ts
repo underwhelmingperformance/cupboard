@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoDeletions } from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
+import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	authorisedFetch,
 	initialise,
@@ -39,8 +40,14 @@ describe('narinfo deletion queue', () => {
 			}
 		);
 
-		await env.BLOBS.put(narInfoObjectKey(hash), 'default narinfo');
-		await env.BLOBS.put(narInfoObjectKey(hash, 'builds'), 'builds narinfo');
+		await env.BLOBS.put(
+			narInfoObjectKey(defaultTenant, hash),
+			'default narinfo'
+		);
+		await env.BLOBS.put(
+			narInfoObjectKey(defaultTenant, hash, 'builds'),
+			'builds narinfo'
+		);
 
 		const response = await authorisedFetch('/gc', token, { method: 'POST' });
 		expect(response.status).toBe(StatusCodes.OK);
@@ -50,8 +57,12 @@ describe('narinfo deletion queue', () => {
 			(_instance, state) => state.storage.sql.exec(selectDeletions).toArray()
 		);
 
-		const defaultObject = await env.BLOBS.head(narInfoObjectKey(hash));
-		const namedObject = await env.BLOBS.head(narInfoObjectKey(hash, 'builds'));
+		const defaultObject = await env.BLOBS.head(
+			narInfoObjectKey(defaultTenant, hash)
+		);
+		const namedObject = await env.BLOBS.head(
+			narInfoObjectKey(defaultTenant, hash, 'builds')
+		);
 
 		expect({
 			defaultObjectGone: defaultObject === null,

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfos } from '../db/schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	authorisedFetch,
 	blobStateCount,
@@ -48,11 +49,13 @@ describe('background verification', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await pushPath(token, metadata);
-		await env.BLOBS.delete(narInfoObjectKey(metadata.storePathHash));
+		await env.BLOBS.delete(
+			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+		);
 
 		const report = await runVerify(token);
 		const restored = await env.BLOBS.head(
-			narInfoObjectKey(metadata.storePathHash)
+			narInfoObjectKey(defaultTenant, metadata.storePathHash)
 		);
 
 		expect({ report, restored: restored !== null }).toStrictEqual({
@@ -73,11 +76,13 @@ describe('background verification', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await pushPath(token, metadata, 'builds');
-		await env.BLOBS.delete(narInfoObjectKey(metadata.storePathHash, 'builds'));
+		await env.BLOBS.delete(
+			narInfoObjectKey(defaultTenant, metadata.storePathHash, 'builds')
+		);
 
 		const report = await runVerify(token);
 		const restored = await env.BLOBS.head(
-			narInfoObjectKey(metadata.storePathHash, 'builds')
+			narInfoObjectKey(defaultTenant, metadata.storePathHash, 'builds')
 		);
 
 		expect({ report, restored: restored !== null }).toStrictEqual({
@@ -103,7 +108,7 @@ describe('background verification', () => {
 
 		const report = await runVerify(token);
 		const narInfoObject = await env.BLOBS.head(
-			narInfoObjectKey(metadata.storePathHash)
+			narInfoObjectKey(defaultTenant, metadata.storePathHash)
 		);
 
 		// Verify removes the dangling narinfo and retires its edge; the now-

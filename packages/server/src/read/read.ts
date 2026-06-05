@@ -5,6 +5,7 @@ import { StatusCodes } from 'http-status-codes';
 import { type ManifestEntry } from '../control/tenant-manifest.ts';
 import {
 	isNotModified,
+	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
 	parseNarInfoName,
@@ -83,10 +84,19 @@ export async function handleRead(
 
 		const denied = await guardRead(request, isPrivate, verifier);
 
-		// NAR blobs are content-addressed and shared across caches.
+		// NAR blobs are content-addressed and shared across all tenants, so the edge
+		// cache key stays global: identical bytes, safely shared.
 		return (
 			denied ??
-			serveR2(request, env, ctx, narObjectKey(narHash), narHeaders, !isPrivate)
+			serveR2(
+				request,
+				env,
+				ctx,
+				narObjectKey(narHash),
+				narCacheKey(narHash),
+				narHeaders,
+				!isPrivate
+			)
 		);
 	}
 
@@ -98,14 +108,18 @@ export async function handleRead(
 		}
 
 		const denied = await guardRead(request, isPrivate, verifier);
+		const { origin } = new URL(request.url);
 
+		// The narinfo edge-cache key carries the tenant prefix, matching the deletion
+		// purge path, so two tenants sharing a host never collide on a store-path hash.
 		return (
 			denied ??
 			serveR2(
 				request,
 				env,
 				ctx,
-				narInfoObjectKey(storePathHash, cache),
+				narInfoObjectKey(tenant, storePathHash, cache),
+				`${origin}${narInfoCachePath(tenant, storePathHash, cache)}`,
 				narInfoHeaders,
 				!isPrivate
 			)
@@ -128,6 +142,13 @@ export async function handleRead(
 	}
 
 	return undefined;
+}
+
+function narCacheKey(narHash: string): string {
+	return new URL(
+		narObjectKey(narHash),
+		'https://cupboard-nar-cache.invalid/'
+	).toString();
 }
 
 // Splits an optional `/cache/<name>/` prefix off the path. Returns the default
@@ -210,6 +231,7 @@ async function serveR2(
 	env: Env,
 	ctx: ExecutionContext,
 	key: string,
+	cacheKey: string,
 	headersFor: (object: R2Object) => Headers,
 	usePublicCache: boolean
 ): Promise<Response> {
@@ -230,7 +252,7 @@ async function serveR2(
 	const cache = caches.default;
 
 	if (usePublicCache) {
-		const cached = await cache.match(request);
+		const cached = await cache.match(cacheKey);
 
 		if (cached !== undefined) {
 			return isNotModified(request, cached.headers)
@@ -254,7 +276,7 @@ async function serveR2(
 	const response = new Response(object.body, { headers });
 
 	if (usePublicCache) {
-		ctx.waitUntil(cache.put(request, response.clone()));
+		ctx.waitUntil(cache.put(cacheKey, response.clone()));
 	}
 
 	return response;

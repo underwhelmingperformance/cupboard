@@ -8,6 +8,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoObjectKey } from '../http/http.ts';
+import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	authorisedFetch,
 	bootstrap,
@@ -87,7 +88,7 @@ describe('cache registry admin', () => {
 		);
 		const removed = await forced.json<CacheRemoveResponse>();
 		const object = await env.BLOBS.head(
-			narInfoObjectKey(metadata.storePathHash, 'builds')
+			narInfoObjectKey(defaultTenant, metadata.storePathHash, 'builds')
 		);
 		const { caches } = await listCaches(init.token);
 

@@ -5,6 +5,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	authorisedFetch,
 	corruptCommittedNarInfo,
@@ -63,7 +64,9 @@ describe('storage check', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		await pushPath(token, metadata);
-		await env.BLOBS.delete(narInfoObjectKey(metadata.storePathHash));
+		await env.BLOBS.delete(
+			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+		);
 
 		expect(await runCheck(token)).toStrictEqual({
 			narInfosChecked: 1,
