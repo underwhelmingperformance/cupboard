@@ -135,12 +135,14 @@ describe('tenant routing', () => {
 		expect(response.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
-	it('refuses a write to a non-default tenant until step 6 plumbs its storage', async () => {
+	it('dispatches a non-default tenant write to its Durable Object to authorise', async () => {
 		await provisionNamedTenant('acme');
 
+		// No token: the write is dispatched to the tenant's object, which rejects it as
+		// unauthorised, rather than the Worker refusing every non-default write.
 		const response = await handlerFetch('/t/acme/uploads', writeRequest());
 
-		expect(response.status).toBe(StatusCodes.NOT_IMPLEMENTED);
+		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
 
 	it('stops writes to a suspended default tenant on the authoritative D1 status', async () => {

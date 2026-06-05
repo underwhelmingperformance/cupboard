@@ -134,17 +134,6 @@ export class TenantNotConfiguredError extends ServerHttpError {
 	}
 }
 
-// Writes are not yet plumbed through per-tenant blob references and R2 keys, so a
-// non-default tenant's mutation paths are refused until that lands.
-export class TenantWritesUnavailableError extends ServerHttpError {
-	readonly status = StatusCodes.NOT_IMPLEMENTED;
-
-	constructor(public readonly tenant: string) {
-		super('Writes for this tenant are not yet available');
-		this.name = 'TenantWritesUnavailableError';
-	}
-}
-
 // A suspended or offboarding tenant stops accepting writes at once: the Worker
 // reads the authoritative status from D1 before dispatching a write, so the stop is
 // effective before the read-path manifest TTL catches up.

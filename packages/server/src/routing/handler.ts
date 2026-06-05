@@ -3,10 +3,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 
 import { handleControl } from '../control/control-plane.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import {
-	TenantWritesStoppedError,
-	TenantWritesUnavailableError
-} from '../errors.ts';
+import { TenantWritesStoppedError } from '../errors.ts';
 import { serverErrorResponse } from '../http/error-response.ts';
 import { handleRead } from '../read/read.ts';
 
@@ -14,7 +11,7 @@ import { admitTenant } from './admission.ts';
 import { handleDeployment } from './deployment.ts';
 import { cupboardServer, tenantServer } from './durable-object.ts';
 import { runScheduledMaintenance } from './scheduled.ts';
-import { defaultTenant, parseTenantPath } from './tenant-routing.ts';
+import { parseTenantPath } from './tenant-routing.ts';
 
 export default {
 	async fetch(request, env, ctx) {
@@ -71,9 +68,10 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 // Dispatches a non-read tenant request to its Durable Object. A write (anything but
-// a read or the auth-plane token exchange) is gated first: writes for a non-default
-// tenant are refused until step 6 plumbs tenant-scoped storage, and writes for a
-// suspended or offboarding tenant are stopped on an authoritative D1 status read.
+// a read or the auth-plane token exchange) is gated first: a write for a suspended or
+// offboarding tenant is stopped on an authoritative D1 status read. The Durable
+// Object then authorises it against that tenant's own keys and writes only that
+// tenant's storage.
 async function dispatchTenant(
 	inner: Request,
 	env: Env,
@@ -81,12 +79,6 @@ async function dispatchTenant(
 ): Promise<Response> {
 	if (!isTenantWrite(inner)) {
 		return tenantServer(env, tenant).fetch(inner);
-	}
-
-	if (tenant !== defaultTenant) {
-		return serverErrorResponse(
-			Promise.reject(new TenantWritesUnavailableError(tenant))
-		);
 	}
 
 	const status = await tenantStatus(env, tenant);
