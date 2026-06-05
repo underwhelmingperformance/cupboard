@@ -53,7 +53,7 @@ describe('runConfig', () => {
 			'https://cupboard.example.workers.dev',
 			'cupboard-1:abc123',
 			capturingReporter(infos),
-			{ user: 'alice', password: 'secret' }
+			{ user: 'alice', password: 'correct-horse-battery-staple' }
 		);
 
 		expect(infos).toStrictEqual([
@@ -64,7 +64,7 @@ describe('runConfig', () => {
 			[
 				'# Private cache: add this line to your Nix netrc-file ' +
 					'(e.g. ~/.config/nix/netrc):',
-				'machine cupboard.example.workers.dev login alice password secret'
+				'machine cupboard.example.workers.dev login alice password correct-horse-battery-staple'
 			].join('\n')
 		]);
 	});
@@ -76,7 +76,7 @@ describe('runConfig', () => {
 			'http://localhost:1234',
 			'cupboard-1:abc123',
 			capturingReporter(infos),
-			{ user: 'alice', password: 'secret' }
+			{ user: 'alice', password: 'correct-horse-battery-staple' }
 		);
 
 		expect(infos).toStrictEqual([
@@ -87,7 +87,7 @@ describe('runConfig', () => {
 			[
 				'# Private cache: add this line to your Nix netrc-file ' +
 					'(e.g. ~/.config/nix/netrc):',
-				'machine localhost login alice password secret'
+				'machine localhost login alice password correct-horse-battery-staple'
 			].join('\n')
 		]);
 	});

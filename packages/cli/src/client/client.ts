@@ -62,6 +62,15 @@ import {
 	rootSetResponseSchema
 } from '@cupboard/protocol/retention';
 import {
+	type TenantCreateBody,
+	type TenantListResponse,
+	tenantListResponseSchema,
+	type TenantMutateResponse,
+	tenantMutateResponseSchema,
+	type TenantSummary,
+	tenantSummarySchema
+} from '@cupboard/protocol/tenants';
+import {
 	type CommitResponse,
 	commitResponseSchema,
 	type DeletePathResponse,
@@ -331,6 +340,53 @@ export class CupboardClient {
 			controlKeyRetireResponseSchema,
 			{
 				method: 'POST',
+				token
+			}
+		);
+	}
+
+	// The tenant registry routes live at the bare host, so this client must be
+	// built from the deployment's base URL with a control-admin token.
+	createTenant(
+		token: AccessCredential,
+		body: TenantCreateBody
+	): Promise<TenantSummary> {
+		return this.requestJson('/control/tenants', tenantSummarySchema, {
+			method: 'POST',
+			token,
+			body
+		});
+	}
+
+	listTenants(token: AccessCredential): Promise<TenantListResponse> {
+		return this.requestJson('/control/tenants', tenantListResponseSchema, {
+			token
+		});
+	}
+
+	suspendTenant(
+		token: AccessCredential,
+		id: string
+	): Promise<TenantMutateResponse> {
+		return this.requestJson(
+			`/control/tenants/${encodeURIComponent(id)}/suspend`,
+			tenantMutateResponseSchema,
+			{
+				method: 'POST',
+				token
+			}
+		);
+	}
+
+	deleteTenant(
+		token: AccessCredential,
+		id: string
+	): Promise<TenantMutateResponse> {
+		return this.requestJson(
+			`/control/tenants/${encodeURIComponent(id)}`,
+			tenantMutateResponseSchema,
+			{
+				method: 'DELETE',
 				token
 			}
 		);

@@ -15,6 +15,7 @@ import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
+import { registerTenantCommands } from './commands/tenant.ts';
 
 export interface GlobalOptions {
 	readonly colour?: boolean;
@@ -42,6 +43,7 @@ export function buildProgram(): Command {
 	registerKeyCommands(program);
 	registerAuthKeyCommands(program);
 	registerControlKeyCommands(program);
+	registerTenantCommands(program);
 	registerCacheCommands(program);
 	registerPolicyCommands(program);
 	registerOidcTrustCommands(program);
