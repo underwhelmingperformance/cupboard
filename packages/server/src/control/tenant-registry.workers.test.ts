@@ -9,12 +9,14 @@ import { describe, expect, it } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAlreadyExistsError, TenantNotFoundError } from '../errors.ts';
 
-import { readTenantManifest } from './tenant-manifest.ts';
 import {
-	createTenant,
+	publishTenantManifest,
+	readTenantManifest
+} from './tenant-manifest.ts';
+import {
+	ensureTenant,
 	listTenants,
-	offboardTenant,
-	suspendTenant
+	setTenantStatus
 } from './tenant-registry.ts';
 
 const now = '2026-01-01T00:00:00.000Z';
@@ -50,14 +52,18 @@ function privateBodyWithRead(id: string): ParsedTenantCreateBody {
 	});
 }
 
+// Mirrors the control plane's provisioning order minus the Durable Object
+// configure: write the row, then publish the admission manifest.
+async function provision(body: ParsedTenantCreateBody): Promise<void> {
+	await ensureTenant(database(), body, now);
+	await publishTenantManifest(database(), env.TENANT_CACHE);
+}
+
 describe('tenant registry', () => {
 	it('creates a tenant, returns its summary, and publishes it to the manifest', async () => {
-		const summary = await createTenant(
-			database(),
-			env.TENANT_CACHE,
-			createBody('acme'),
-			now
-		);
+		const summary = await ensureTenant(database(), createBody('acme'), now);
+
+		await publishTenantManifest(database(), env.TENANT_CACHE);
 		const manifest = await readTenantManifest(env.TENANT_CACHE);
 
 		expect({ summary, entry: manifest?.tenants.acme }).toStrictEqual({
@@ -75,21 +81,23 @@ describe('tenant registry', () => {
 		});
 	});
 
-	it('refuses a duplicate slug', async () => {
-		await createTenant(database(), env.TENANT_CACHE, createBody('acme'), now);
+	it('is idempotent for a matching re-create', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		const again = await ensureTenant(database(), createBody('acme'), now);
+
+		expect(again.id).toBe('acme');
+	});
+
+	it('refuses a conflicting re-create of the same slug', async () => {
+		await ensureTenant(database(), createBody('acme', 'private'), now);
 
 		await expect(
-			createTenant(database(), env.TENANT_CACHE, createBody('acme'), now)
+			ensureTenant(database(), createBody('acme', 'public'), now)
 		).rejects.toThrow(TenantAlreadyExistsError);
 	});
 
 	it('publishes only the hashed private-read verifier', async () => {
-		await createTenant(
-			database(),
-			env.TENANT_CACHE,
-			privateBodyWithRead('acme'),
-			now
-		);
+		await provision(privateBodyWithRead('acme'));
 
 		const manifest = await readTenantManifest(env.TENANT_CACHE);
 		const verifier = manifest?.tenants.acme?.readVerifier;
@@ -108,8 +116,8 @@ describe('tenant registry', () => {
 	});
 
 	it('lists tenants in id order', async () => {
-		await createTenant(database(), env.TENANT_CACHE, createBody('beta'), now);
-		await createTenant(database(), env.TENANT_CACHE, createBody('alpha'), now);
+		await ensureTenant(database(), createBody('beta'), now);
+		await ensureTenant(database(), createBody('alpha'), now);
 
 		const tenants = await listTenants(database());
 		const ids = tenants.map((summary) => summary.id);
@@ -118,26 +126,25 @@ describe('tenant registry', () => {
 	});
 
 	it.each([
-		{ name: 'suspends', act: suspendTenant, status: 'suspended' as const },
-		{ name: 'offboards', act: offboardTenant, status: 'offboarding' as const }
-	])(
-		'$name a tenant and reflects it in the manifest',
-		async ({ act, status }) => {
-			await createTenant(database(), env.TENANT_CACHE, createBody('acme'), now);
+		{ name: 'suspends', status: 'suspended' as const },
+		{ name: 'offboards', status: 'offboarding' as const }
+	])('$name a tenant and reflects it in the manifest', async ({ status }) => {
+		await provision(createBody('acme'));
 
-			const summary = await act(database(), env.TENANT_CACHE, 'acme');
-			const manifest = await readTenantManifest(env.TENANT_CACHE);
+		const summary = await setTenantStatus(database(), 'acme', status);
 
-			expect({
-				returned: summary.status,
-				published: manifest?.tenants.acme?.status
-			}).toStrictEqual({ returned: status, published: status });
-		}
-	);
+		await publishTenantManifest(database(), env.TENANT_CACHE);
+		const manifest = await readTenantManifest(env.TENANT_CACHE);
+
+		expect({
+			returned: summary.status,
+			published: manifest?.tenants.acme?.status
+		}).toStrictEqual({ returned: status, published: status });
+	});
 
 	it('throws not found when mutating an unknown tenant', async () => {
 		await expect(
-			suspendTenant(database(), env.TENANT_CACHE, 'ghost')
+			setTenantStatus(database(), 'ghost', 'suspended')
 		).rejects.toThrow(TenantNotFoundError);
 	});
 });

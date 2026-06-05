@@ -129,7 +129,15 @@ export async function readTenantManifest(
 		return undefined;
 	}
 
-	const parsed = tenantManifestSchema.safeParse(JSON.parse(body));
+	let raw: unknown;
+
+	try {
+		raw = JSON.parse(body);
+	} catch {
+		return undefined;
+	}
+
+	const parsed = tenantManifestSchema.safeParse(raw);
 
 	return parsed.success ? parsed.data : undefined;
 }

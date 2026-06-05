@@ -12,8 +12,6 @@ import {
 	hashReadPassword
 } from '../read/read-auth.ts';
 
-import { publishTenantManifest } from './tenant-manifest.ts';
-
 type Database = DrizzleD1Database<typeof d1Schema>;
 
 type TenantRow = typeof d1Schema.tenant.$inferSelect;
@@ -57,13 +55,24 @@ function toSummary(row: TenantRow): ParsedTenantSummary {
 	};
 }
 
-// Provisions a tenant: writes the authoritative `tenant` row first, then publishes
-// the admission manifest. A slug already in use is refused. The new tenant starts
-// `active` at config version 1; the cache it backs does not serve until step 5
-// wires routing and the Durable Object identity, a deliberate API-only interval.
-export async function createTenant(
+function sameConfig(row: TenantRow, body: ParsedTenantCreateBody): boolean {
+	return (
+		row.readMode === body.readMode &&
+		row.ownerIssuer === body.ownerIssuer &&
+		row.ownerSubject === body.ownerSubject &&
+		row.ownerAudience === body.ownerAudience
+	);
+}
+
+// Writes the authoritative `tenant` row, returning its summary. It is the first
+// step of provisioning; the caller then configures the Durable Object and only
+// then publishes the admission manifest, so a tenant is admitted only once its
+// object is configured. This is idempotent: a retry after a mid-provision failure
+// finds the existing row and, when the request matches it, returns it so the caller
+// can replay the configure and publish. A different config for an existing slug is
+// a genuine conflict.
+export async function ensureTenant(
 	database: Database,
-	kv: KVNamespace,
 	body: ParsedTenantCreateBody,
 	now: string
 ): Promise<ParsedTenantSummary> {
@@ -87,13 +96,21 @@ export async function createTenant(
 		.returning();
 	const row = inserted[0];
 
-	if (row === undefined) {
+	if (row !== undefined) {
+		return toSummary(row);
+	}
+
+	const existing = await database
+		.select()
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, body.id))
+		.get();
+
+	if (existing === undefined || !sameConfig(existing, body)) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
-	await publishTenantManifest(database, kv);
-
-	return toSummary(row);
+	return toSummary(existing);
 }
 
 export async function listTenants(
@@ -108,31 +125,13 @@ export async function listTenants(
 	return rows.map((row) => toSummary(row));
 }
 
-// Suspends a tenant: new writes stop at once (the Worker reads status from D1
-// before dispatching a write), and reads stop after the manifest's edge TTL once
-// the republished manifest propagates.
-export async function suspendTenant(
+// Sets a tenant's status, returning its summary. The caller republishes the
+// admission manifest after this so the change reaches the read path. Suspending
+// stops new writes at once (the Worker reads status from D1 before dispatching a
+// write) and reads after the manifest TTL; offboarding marks the tenant so nothing
+// new is admitted while its bounded drain (the step 7 state machine) runs.
+export async function setTenantStatus(
 	database: Database,
-	kv: KVNamespace,
-	id: string
-): Promise<ParsedTenantSummary> {
-	return setTenantStatus(database, kv, id, 'suspended');
-}
-
-// Begins offboarding a tenant: admission rejects new work for it. The bounded drain
-// of its reference rows and objects is the step 7 state machine; this marks the
-// registry so nothing new is admitted in the meantime.
-export async function offboardTenant(
-	database: Database,
-	kv: KVNamespace,
-	id: string
-): Promise<ParsedTenantSummary> {
-	return setTenantStatus(database, kv, id, 'offboarding');
-}
-
-async function setTenantStatus(
-	database: Database,
-	kv: KVNamespace,
 	id: string,
 	status: 'suspended' | 'offboarding'
 ): Promise<ParsedTenantSummary> {
@@ -146,8 +145,6 @@ async function setTenantStatus(
 	if (row === undefined) {
 		throw new TenantNotFoundError(id);
 	}
-
-	await publishTenantManifest(database, kv);
 
 	return toSummary(row);
 }

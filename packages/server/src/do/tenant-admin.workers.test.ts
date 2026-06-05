@@ -87,15 +87,30 @@ describe('control plane tenant administration', () => {
 		});
 	});
 
-	it('refuses a duplicate slug with 409', async () => {
+	it('re-creates a matching slug idempotently but refuses a conflicting config', async () => {
 		const token = await mintControlAdminToken();
 
-		await controlFetch('/control/tenants', authed(token, 'POST', createBody));
-		const duplicate = await controlFetch(
+		const first = await controlFetch(
 			'/control/tenants',
 			authed(token, 'POST', createBody)
 		);
+		const same = await controlFetch(
+			'/control/tenants',
+			authed(token, 'POST', createBody)
+		);
+		const conflicting = await controlFetch(
+			'/control/tenants',
+			authed(token, 'POST', { ...createBody, readMode: 'public' })
+		);
 
-		expect(duplicate.status).toBe(StatusCodes.CONFLICT);
+		expect({
+			first: first.status,
+			same: same.status,
+			conflicting: conflicting.status
+		}).toStrictEqual({
+			first: StatusCodes.OK,
+			same: StatusCodes.OK,
+			conflicting: StatusCodes.CONFLICT
+		});
 	});
 });

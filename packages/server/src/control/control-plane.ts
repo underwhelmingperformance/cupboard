@@ -52,11 +52,11 @@ import {
 } from './control-key-store.ts';
 import { controlTrustRules } from './control-trust.ts';
 import { handleSignup } from './signup.ts';
+import { publishTenantManifest } from './tenant-manifest.ts';
 import {
-	createTenant,
+	ensureTenant,
 	listTenants,
-	offboardTenant,
-	suspendTenant
+	setTenantStatus
 } from './tenant-registry.ts';
 
 // Issuer discovery cached across requests in this Worker instance, distinct from
@@ -374,16 +374,14 @@ async function controlTenantCreate(
 ): Promise<Response> {
 	await requireControlAdmin(request, env);
 	const body = await parseRequestBody(tenantCreateBodySchema, request);
-	const summary = await createTenant(
-		controlDatabase(env),
-		env.TENANT_CACHE,
-		body,
-		new Date().toISOString()
-	);
+	const database = controlDatabase(env);
 
-	// Assign the tenant's Durable Object its identity, so it mints and verifies
-	// tokens under its own path-based issuer and seeds its owner admin rule. The
-	// issuer is this deployment's origin plus the tenant prefix.
+	// Provision in order: write the authoritative row, configure the Durable Object,
+	// and publish the admission manifest last, so a tenant is admitted only once its
+	// object is configured. Each step is idempotent, so a retry after a mid-provision
+	// failure replays cleanly rather than stranding an admitted-but-unconfigured
+	// tenant.
+	const summary = await ensureTenant(database, body, new Date().toISOString());
 	const issuer = `${new URL(request.url).origin}/t/${summary.id}`;
 
 	await tenantServer(env, summary.id).configure({
@@ -395,6 +393,7 @@ async function controlTenantCreate(
 		ownerAudience: summary.ownerAudience,
 		configVersion: summary.configVersion
 	});
+	await publishTenantManifest(database, env.TENANT_CACHE);
 
 	return Response.json(summary satisfies TenantSummary, {
 		headers: { 'cache-control': 'no-store' }
@@ -407,11 +406,10 @@ async function controlTenantSuspend(
 	id: string
 ): Promise<Response> {
 	await requireControlAdmin(request, env);
-	const summary = await suspendTenant(
-		controlDatabase(env),
-		env.TENANT_CACHE,
-		id
-	);
+	const database = controlDatabase(env);
+	const summary = await setTenantStatus(database, id, 'suspended');
+
+	await publishTenantManifest(database, env.TENANT_CACHE);
 
 	return Response.json(
 		{ id: summary.id, status: summary.status } satisfies TenantMutateResponse,
@@ -425,11 +423,10 @@ async function controlTenantOffboard(
 	id: string
 ): Promise<Response> {
 	await requireControlAdmin(request, env);
-	const summary = await offboardTenant(
-		controlDatabase(env),
-		env.TENANT_CACHE,
-		id
-	);
+	const database = controlDatabase(env);
+	const summary = await setTenantStatus(database, id, 'offboarding');
+
+	await publishTenantManifest(database, env.TENANT_CACHE);
 
 	return Response.json(
 		{ id: summary.id, status: summary.status } satisfies TenantMutateResponse,

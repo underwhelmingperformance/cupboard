@@ -6,7 +6,8 @@ import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
-import { createTenant, suspendTenant } from '../control/tenant-registry.ts';
+import { publishTenantManifest } from '../control/tenant-manifest.ts';
+import { ensureTenant, setTenantStatus } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 
 import { admitTenant } from './admission.ts';
@@ -33,7 +34,8 @@ describe('admitTenant', () => {
 	});
 
 	it('returns the manifest entry for a provisioned slug', async () => {
-		await createTenant(database(), env.TENANT_CACHE, createBody('acme'), now);
+		await ensureTenant(database(), createBody('acme'), now);
+		await publishTenantManifest(database(), env.TENANT_CACHE);
 
 		expect(await admitTenant(env.TENANT_CACHE, 'acme')).toStrictEqual({
 			status: 'active',
@@ -43,8 +45,9 @@ describe('admitTenant', () => {
 	});
 
 	it('still admits a suspended tenant, carrying its status for the caller to gate', async () => {
-		await createTenant(database(), env.TENANT_CACHE, createBody('acme'), now);
-		await suspendTenant(database(), env.TENANT_CACHE, 'acme');
+		await ensureTenant(database(), createBody('acme'), now);
+		await setTenantStatus(database(), 'acme', 'suspended');
+		await publishTenantManifest(database(), env.TENANT_CACHE);
 
 		expect(await admitTenant(env.TENANT_CACHE, 'acme')).toStrictEqual({
 			status: 'suspended',
