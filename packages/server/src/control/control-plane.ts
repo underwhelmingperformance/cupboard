@@ -6,6 +6,12 @@ import {
 	tokenExchangeRequestSchema,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import {
+	tenantCreateBodySchema,
+	type TenantListResponse,
+	type TenantMutateResponse,
+	type TenantSummary
+} from '@cupboard/protocol/tenants';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import type { JWTPayload } from 'jose';
 
@@ -26,7 +32,7 @@ import {
 	UnsupportedGrantTypeError
 } from '../errors.ts';
 import { serverErrorResponse } from '../http/error-response.ts';
-import { parseFormBody } from '../http/parse.ts';
+import { parseFormBody, parseRequestBody } from '../http/parse.ts';
 import {
 	decodeInboundClaims,
 	OidcDiscoveryStore,
@@ -45,6 +51,12 @@ import {
 } from './control-key-store.ts';
 import { controlTrustRules } from './control-trust.ts';
 import { handleSignup } from './signup.ts';
+import {
+	createTenant,
+	listTenants,
+	offboardTenant,
+	suspendTenant
+} from './tenant-registry.ts';
 
 // Issuer discovery cached across requests in this Worker instance, distinct from
 // the per-tenant Durable Object's own store: the control plane verifies inbound
@@ -99,6 +111,33 @@ export async function handleControl(
 		const kid = decodeURIComponent(pathname.slice(retirePrefix.length));
 
 		return serverErrorResponse(controlKeyRetire(request, env, kid));
+	}
+
+	if (read && pathname === '/control/tenants') {
+		return serverErrorResponse(controlTenantList(request, env));
+	}
+
+	if (request.method === 'POST' && pathname === '/control/tenants') {
+		return serverErrorResponse(controlTenantCreate(request, env));
+	}
+
+	const tenantsPrefix = '/control/tenants/';
+
+	if (pathname.startsWith(tenantsPrefix)) {
+		const rest = pathname.slice(tenantsPrefix.length);
+		const suspendSuffix = '/suspend';
+
+		if (request.method === 'POST' && rest.endsWith(suspendSuffix)) {
+			const slug = decodeURIComponent(rest.slice(0, -suspendSuffix.length));
+
+			return serverErrorResponse(controlTenantSuspend(request, env, slug));
+		}
+
+		if (request.method === 'DELETE') {
+			return serverErrorResponse(
+				controlTenantOffboard(request, env, decodeURIComponent(rest))
+			);
+		}
 	}
 
 	return undefined;
@@ -312,6 +351,72 @@ async function controlKeyRetire(
 
 	return Response.json(
 		{ kid, retired },
+		{ headers: { 'cache-control': 'no-store' } }
+	);
+}
+
+async function controlTenantList(
+	request: Request,
+	env: Env
+): Promise<Response> {
+	await requireControlAdmin(request, env);
+	const tenants = await listTenants(controlDatabase(env));
+
+	return Response.json({ tenants } satisfies TenantListResponse, {
+		headers: { 'cache-control': 'no-store' }
+	});
+}
+
+async function controlTenantCreate(
+	request: Request,
+	env: Env
+): Promise<Response> {
+	await requireControlAdmin(request, env);
+	const body = await parseRequestBody(tenantCreateBodySchema, request);
+	const summary = await createTenant(
+		controlDatabase(env),
+		env.TENANT_CACHE,
+		body,
+		new Date().toISOString()
+	);
+
+	return Response.json(summary satisfies TenantSummary, {
+		headers: { 'cache-control': 'no-store' }
+	});
+}
+
+async function controlTenantSuspend(
+	request: Request,
+	env: Env,
+	id: string
+): Promise<Response> {
+	await requireControlAdmin(request, env);
+	const summary = await suspendTenant(
+		controlDatabase(env),
+		env.TENANT_CACHE,
+		id
+	);
+
+	return Response.json(
+		{ id: summary.id, status: summary.status } satisfies TenantMutateResponse,
+		{ headers: { 'cache-control': 'no-store' } }
+	);
+}
+
+async function controlTenantOffboard(
+	request: Request,
+	env: Env,
+	id: string
+): Promise<Response> {
+	await requireControlAdmin(request, env);
+	const summary = await offboardTenant(
+		controlDatabase(env),
+		env.TENANT_CACHE,
+		id
+	);
+
+	return Response.json(
+		{ id: summary.id, status: summary.status } satisfies TenantMutateResponse,
 		{ headers: { 'cache-control': 'no-store' } }
 	);
 }

@@ -107,6 +107,24 @@ export class GlobalAdminAlreadyClaimedError extends ServerHttpError {
 	}
 }
 
+export class TenantAlreadyExistsError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly id: string) {
+		super('A tenant with this id already exists');
+		this.name = 'TenantAlreadyExistsError';
+	}
+}
+
+export class TenantNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly id: string) {
+		super('No such tenant');
+		this.name = 'TenantNotFoundError';
+	}
+}
+
 export class ControlKeyMissingError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

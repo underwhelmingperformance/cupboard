@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	authoriseRead,
+	hashReadPassword,
 	type ReadCredential,
 	readCredential
 } from './read-auth.ts';
@@ -41,6 +42,14 @@ describe('readCredential', () => {
 		}
 	])('$name', ({ env, expected }) => {
 		expect(readCredential(env)).toStrictEqual(expected);
+	});
+});
+
+describe('hashReadPassword', () => {
+	it('frames the salt and password before hashing', async () => {
+		expect(await hashReadPassword('secret', 'salt')).toBe(
+			'a4dc7bedcab51fbe861f6d08e6e609c57138a98980ec526b3b8d9b571b6dbe19'
+		);
 	});
 });
 

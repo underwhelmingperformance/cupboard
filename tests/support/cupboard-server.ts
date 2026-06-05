@@ -118,7 +118,8 @@ export class CupboardTestServer {
 						}
 					},
 					d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
-					r2Buckets: { BLOBS: r2Credentials.bucketName }
+					r2Buckets: { BLOBS: r2Credentials.bucketName },
+					kvNamespaces: { TENANT_CACHE: 'tenant-cache' }
 				},
 				{
 					name: 'cupboard-tenant',

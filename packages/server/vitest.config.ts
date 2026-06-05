@@ -46,6 +46,10 @@ export default defineConfig(async () => {
 									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
 									TEST_MIGRATIONS: migrations
 								},
+								// The admission manifest KV the control handler reads and writes;
+								// it is control-plane state, supplied to the worker under test so
+								// the control handler can be exercised through it.
+								kvNamespaces: { TENANT_CACHE: 'tenant-cache' },
 								compatibilityDate: '2026-04-28'
 							},
 							wrangler: {

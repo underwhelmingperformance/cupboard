@@ -11,7 +11,7 @@ import { NixStore, type RealiseOptions } from '../support/nix.ts';
 import { pushStorePaths } from '../support/push.ts';
 
 const readUser = 'alice';
-const readPassword = 'secret';
+const readPassword = 'correct-horse-battery-staple';
 
 const privateDerivation = [
 	'derivation {',

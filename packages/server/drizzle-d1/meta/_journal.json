@@ -43,6 +43,20 @@
 			"when": 1780669212588,
 			"tag": "0005_tenant_registry",
 			"breakpoints": true
+		},
+		{
+			"idx": 6,
+			"version": "6",
+			"when": 1780671261051,
+			"tag": "0006_manifest_state",
+			"breakpoints": true
+		},
+		{
+			"idx": 7,
+			"version": "6",
+			"when": 1780681974142,
+			"tag": "0007_tenant_read_verifier",
+			"breakpoints": true
 		}
 	]
 }

@@ -62,7 +62,10 @@ import {
 	narObjectKey,
 	stagingObjectKey
 } from './http/http.ts';
-import { hashReadPassword } from './read/read-auth.ts';
+import {
+	generateReadPasswordSalt,
+	hashReadPassword
+} from './read/read-auth.ts';
 import { tenantServer } from './routing/durable-object.ts';
 import { runBlobReaper } from './routing/scheduled.ts';
 import { defaultTenant } from './routing/tenant-routing.ts';
@@ -167,10 +170,16 @@ export async function provisionDefaultTenant(
 	const readMode = options.readMode ?? 'public';
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const readUser = options.read?.user;
-	const readPasswordHash =
-		options.read === undefined
-			? undefined
-			: await hashReadPassword(options.read.password);
+	let readPasswordHash: string | undefined;
+	let readPasswordSalt: string | undefined;
+
+	if (options.read !== undefined) {
+		readPasswordSalt = generateReadPasswordSalt();
+		readPasswordHash = await hashReadPassword(
+			options.read.password,
+			readPasswordSalt
+		);
+	}
 	const now = deleteTestBase.toISOString();
 
 	await database
@@ -185,11 +194,12 @@ export async function provisionDefaultTenant(
 			configVersion: 1,
 			createdAt: now,
 			readUser,
-			readPasswordHash
+			readPasswordHash,
+			readPasswordSalt
 		})
 		.onConflictDoUpdate({
 			target: d1Schema.tenant.id,
-			set: { readMode, readUser, readPasswordHash }
+			set: { readMode, readUser, readPasswordHash, readPasswordSalt }
 		})
 		.run();
 
@@ -325,6 +335,7 @@ export async function tenantRow(id: string): Promise<
 			status: string;
 			readUser: string | undefined;
 			readPasswordHash: string | undefined;
+			readPasswordSalt: string | undefined;
 	  }
 	| undefined
 > {
@@ -332,7 +343,8 @@ export async function tenantRow(id: string): Promise<
 		.select({
 			status: d1Schema.tenant.status,
 			readUser: d1Schema.tenant.readUser,
-			readPasswordHash: d1Schema.tenant.readPasswordHash
+			readPasswordHash: d1Schema.tenant.readPasswordHash,
+			readPasswordSalt: d1Schema.tenant.readPasswordSalt
 		})
 		.from(d1Schema.tenant)
 		.where(eq(d1Schema.tenant.id, id))
@@ -347,7 +359,8 @@ export async function tenantRow(id: string): Promise<
 	return {
 		status: row.status,
 		readUser: row.readUser ?? undefined,
-		readPasswordHash: row.readPasswordHash ?? undefined
+		readPasswordHash: row.readPasswordHash ?? undefined,
+		readPasswordSalt: row.readPasswordSalt ?? undefined
 	};
 }
 

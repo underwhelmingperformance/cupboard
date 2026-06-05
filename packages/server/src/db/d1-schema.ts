@@ -107,7 +107,20 @@ export const tenant = sqliteTable('tenant', {
 	ownerSubject: text('owner_subject').notNull(),
 	ownerAudience: text('owner_audience').notNull(),
 	configVersion: integer('config_version').notNull(),
-	createdAt: text('created_at').notNull()
+	createdAt: text('created_at').notNull(),
+	readUser: text('read_user'),
+	readPasswordHash: text('read_password_hash'),
+	readPasswordSalt: text('read_password_salt')
+});
+
+// The monotonic version of the published admission manifest, a single row the
+// Worker advances every time it republishes. Sourcing the version from D1 (rather
+// than the KV version key) keeps concurrent provisioning operations from minting
+// the same version: each provisioning batch bumps it, writes the manifest body
+// under that version's immutable KV key, then bumps the KV version pointer last.
+export const manifestState = sqliteTable('manifest_state', {
+	id: text('id').primaryKey(),
+	version: integer('version').notNull()
 });
 
 // The single global administrator, established once by the gated first-signup

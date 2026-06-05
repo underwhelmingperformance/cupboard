@@ -19,6 +19,7 @@
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",
 		"./signup": "./src/signup.ts",
+		"./tenants": "./src/tenants.ts",
 		"./upload": "./src/upload.ts"
 	},
 	"private": true,

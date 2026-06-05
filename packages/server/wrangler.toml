@@ -18,6 +18,13 @@ script_name = "cupboard-tenant"
 binding = "BLOBS"
 bucket_name = "cupboard-blobs"
 
+# The admission manifest the read/dispatch front consults to resolve `/t/<slug>/`
+# without a D1 read or a Durable Object round-trip. Bound only on the control
+# Worker; the tenant Durable Object never reads it.
+[[kv_namespaces]]
+binding = "TENANT_CACHE"
+id = "00000000000000000000000000000000"
+
 [[d1_databases]]
 binding = "CUPBOARD_DB"
 database_name = "cupboard"

@@ -1,10 +1,36 @@
 import { StatusCodes } from 'http-status-codes';
 
-import { constantTimeEqual } from '../crypto/crypto.ts';
+import { constantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
+
+const textEncoder = new TextEncoder();
+const readPasswordHashDomain = 'cupboard-read-password-v1';
 
 export interface ReadCredential {
 	readonly user: string;
 	readonly password: string;
+}
+
+export interface ReadVerifier {
+	readonly user: string;
+	readonly passwordHash: string;
+	readonly passwordSalt: string;
+}
+
+/** Hashes a read password the same way the verifier stores it, for comparison. */
+export function hashReadPassword(
+	password: string,
+	salt: string
+): Promise<string> {
+	return sha256HexBytes(
+		textEncoder.encode(`${readPasswordHashDomain}\0${salt}\0${password}`)
+	);
+}
+
+export function generateReadPasswordSalt(): string {
+	const bytes = new Uint8Array(16);
+	crypto.getRandomValues(bytes);
+
+	return base64Url(bytes);
 }
 
 interface ReadModeEnv {
@@ -68,6 +94,15 @@ export function unauthorisedResponse(): Response {
 			'cache-control': 'no-store'
 		}
 	});
+}
+
+function base64Url(bytes: Uint8Array): string {
+	const binary = String.fromCodePoint(...bytes);
+
+	return btoa(binary)
+		.replaceAll('+', '-')
+		.replaceAll('/', '_')
+		.replace(/=+$/, '');
 }
 
 function decodeBasic(value: string): string | undefined {

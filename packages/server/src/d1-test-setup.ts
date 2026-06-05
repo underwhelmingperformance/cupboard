@@ -9,6 +9,7 @@ import {
 	controlAuthKey,
 	controlTrust,
 	globalAdmin,
+	manifestState,
 	tenant,
 	tenantBlob
 } from './db/d1-schema.ts';
@@ -34,4 +35,10 @@ beforeEach(async () => {
 	await database.delete(controlTrust).run();
 	await database.delete(globalAdmin).run();
 	await database.delete(tenant).run();
+	await database.delete(manifestState).run();
+
+	// The admission manifest KV is shared across tests like D1; clear it so a
+	// stale version pointer or body does not leak into the next test.
+	const { keys } = await env.TENANT_CACHE.list();
+	await Promise.all(keys.map((key) => env.TENANT_CACHE.delete(key.name)));
 });
