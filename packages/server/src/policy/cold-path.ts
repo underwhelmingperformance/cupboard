@@ -1,7 +1,7 @@
 import { isImplicitPinName } from '@cupboard/nix/retention';
 import { ttlSecondsSchema } from '@cupboard/nix/scalars';
 
-import { ColdPathTtlConfigurationInvalidError } from './errors.ts';
+import { ColdPathTtlConfigurationInvalidError } from '../errors.ts';
 
 interface ColdPathEnv {
 	readonly CUPBOARD_COLD_PATH_TTL_SECONDS: string;

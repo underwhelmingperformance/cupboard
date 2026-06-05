@@ -1,7 +1,8 @@
-import { handleControl } from './control-plane.ts';
+import { handleControl } from '../control/control-plane.ts';
+import { handleRead } from '../read/read.ts';
+
 import { handleDeployment } from './deployment.ts';
 import { cupboardServer, tenantServer } from './durable-object.ts';
-import { handleRead } from './read.ts';
 import { runScheduledMaintenance } from './scheduled.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 

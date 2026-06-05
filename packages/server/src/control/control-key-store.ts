@@ -1,13 +1,14 @@
 import { and, desc, eq, exists, isNull, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
-import { type AuthPublicKey, generateAuthKeyPair } from './auth.ts';
+import { type AuthPublicKey, generateAuthKeyPair } from '../auth/auth.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import { ControlKeyMissingError, LastControlKeyError } from '../errors.ts';
+
 import {
 	unwrapControlPrivateJwk,
 	wrapControlPrivateJwk
 } from './control-key.ts';
-import * as d1Schema from './db/d1-schema.ts';
-import { ControlKeyMissingError, LastControlKeyError } from './errors.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 

@@ -6,8 +6,8 @@ import {
 	UploadedObjectChecksumMissingError,
 	UploadedObjectNotFoundError,
 	UploadedObjectSizeMismatchError
-} from './errors.ts';
-import { narObjectKey } from './http.ts';
+} from '../errors.ts';
+import { narObjectKey } from '../http/http.ts';
 
 // The subset of an R2 object the commit step verifies before trusting it: its
 // byte length and the SHA-256 the store computed on upload.

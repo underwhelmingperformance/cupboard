@@ -5,7 +5,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoDeletions } from './db/schema.ts';
-import { narInfoObjectKey } from './http.ts';
+import { narInfoObjectKey } from './http/http.ts';
 import {
 	authorisedFetch,
 	initialise,

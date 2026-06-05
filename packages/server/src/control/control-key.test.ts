@@ -1,14 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { generateAuthKeyPair } from './auth.ts';
+import { generateAuthKeyPair } from '../auth/auth.ts';
+import {
+	ControlWrappedKeyMalformedError,
+	ControlWrappingKeyInvalidError
+} from '../errors.ts';
+
 import {
 	unwrapControlPrivateJwk,
 	wrapControlPrivateJwk
 } from './control-key.ts';
-import {
-	ControlWrappedKeyMalformedError,
-	ControlWrappingKeyInvalidError
-} from './errors.ts';
 
 function wrappingKey(): string {
 	return btoa(

@@ -1,4 +1,4 @@
-import { OAuthError, ServerHttpError } from './errors.ts';
+import { OAuthError, ServerHttpError } from '../errors.ts';
 
 // Resolves a handler's response, mapping a thrown error to an HTTP response: an
 // OAuth error to its RFC 6749 JSON body, any other `ServerHttpError` to its

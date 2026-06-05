@@ -10,7 +10,7 @@ import { generateKeyPair, SignJWT } from 'jose';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { oidcTrust } from './db/schema.ts';
-import { OidcDiscoveryStore } from './oidc.ts';
+import { OidcDiscoveryStore } from './oidc/oidc.ts';
 import {
 	currentOrigin,
 	currentServer,

@@ -5,7 +5,7 @@ import {
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
 	type ServerHttpError
-} from './errors.ts';
+} from '../errors.ts';
 
 /**
  * Validates a JSON request body against a schema, returning the parsed

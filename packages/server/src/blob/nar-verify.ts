@@ -2,7 +2,7 @@ import { ZstdDecodeError } from '@cupboard/nix/errors';
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 
-import { verifiableMaxBytes } from './http.ts';
+import { verifiableMaxBytes } from '../http/http.ts';
 
 // What a stored NAR blob's bytes must satisfy: decompressed, they hash to the
 // `narHash` the narinfo commits to and signs, and their length is `narSize`.

@@ -6,7 +6,8 @@ import {
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
 	StoredUploadMetadataInvalidError
-} from './errors.ts';
+} from '../errors.ts';
+
 import {
 	parseFormBody,
 	parseRequestBody,

@@ -120,12 +120,19 @@ import {
 	mintAccessJwt,
 	verifyAccessJwt,
 	writeJwtTtlSeconds
-} from './auth.ts';
-import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
-import { generateSigningKey, signNixFingerprint } from './crypto.ts';
+} from './auth/auth.ts';
+import {
+	type NarVerification,
+	verifyDecompressedNar
+} from './blob/nar-verify.ts';
+import { R2Presigner } from './blob/presign.ts';
+import {
+	verifyStoredBlob,
+	verifyUploadedObject
+} from './blob/upload-verification.ts';
+import { generateSigningKey, signNixFingerprint } from './crypto/crypto.ts';
 import * as d1Schema from './db/d1-schema.ts';
 import * as schema from './db/schema.ts';
-import { serverErrorResponse } from './error-response.ts';
 import {
 	CacheNotEmptyError,
 	InsufficientScopeError,
@@ -158,6 +165,7 @@ import {
 	UploadNotPreparedError,
 	ZstdUnavailableError
 } from './errors.ts';
+import { serverErrorResponse } from './http/error-response.ts';
 import {
 	blobReaperBatchSize,
 	blobReaperGraceMs,
@@ -173,32 +181,27 @@ import {
 	textResponse,
 	verifiableMaxBytes,
 	verificationBatchSize
-} from './http.ts';
-import { type NarVerification, verifyDecompressedNar } from './nar-verify.ts';
-import {
-	decodeInboundClaims,
-	OidcDiscoveryStore,
-	OidcKeysUnreachableError,
-	verifyInboundOidcToken
-} from './oidc.ts';
-import {
-	matchOidcTrust,
-	type OidcClaims,
-	type OidcTrustRule
-} from './oidc-trust.ts';
+} from './http/http.ts';
 import {
 	parseFormBody,
 	parseRequestBody,
 	parseRequestValue,
 	parseStored,
 	parseStoredJson
-} from './parse.ts';
-import { mostSpecificPolicy } from './policy-match.ts';
-import { R2Presigner } from './presign.ts';
+} from './http/parse.ts';
 import {
-	verifyStoredBlob,
-	verifyUploadedObject
-} from './upload-verification.ts';
+	decodeInboundClaims,
+	OidcDiscoveryStore,
+	OidcKeysUnreachableError,
+	verifyInboundOidcToken
+} from './oidc/oidc.ts';
+import {
+	matchOidcTrust,
+	type OidcClaims,
+	type OidcTrustRule
+} from './oidc/oidc-trust.ts';
+import { coldPathTtlSeconds, resolveRootExpiry } from './policy/cold-path.ts';
+import { mostSpecificPolicy } from './policy/policy-match.ts';
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];

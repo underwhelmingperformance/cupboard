@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narObjectKey } from './http.ts';
+import { narObjectKey } from './http/http.ts';
 import {
 	afterGrace,
 	blobReferenceRows,

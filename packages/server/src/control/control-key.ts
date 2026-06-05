@@ -1,7 +1,7 @@
 import {
 	ControlWrappedKeyMalformedError,
 	ControlWrappingKeyInvalidError
-} from './errors.ts';
+} from '../errors.ts';
 
 // AES-256-GCM envelope wrapping for the control-plane private signing key. The
 // control key mints global-admin tokens, so it must be reachable only by the

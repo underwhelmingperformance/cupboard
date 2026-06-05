@@ -1,5 +1,5 @@
-import { buildVersion } from './build-info.generated.ts';
-import { TextBody, textResponse } from './http.ts';
+import { buildVersion } from '../build-info.generated.ts';
+import { TextBody, textResponse } from '../http/http.ts';
 
 const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);

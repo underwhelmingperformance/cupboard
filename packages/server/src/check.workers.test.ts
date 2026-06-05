@@ -4,7 +4,7 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { narInfoObjectKey, narObjectKey } from './http.ts';
+import { narInfoObjectKey, narObjectKey } from './http/http.ts';
 import {
 	authorisedFetch,
 	corruptCommittedNarInfo,

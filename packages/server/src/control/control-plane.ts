@@ -14,7 +14,27 @@ import {
 	bearerToken,
 	mintAccessJwt,
 	verifyAccessJwt
-} from './auth.ts';
+} from '../auth/auth.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import {
+	ControlNotConfiguredError,
+	InsufficientScopeError,
+	InvalidGrantError,
+	InvalidRequestError,
+	IssuerUnavailableError,
+	UnauthenticatedError,
+	UnsupportedGrantTypeError
+} from '../errors.ts';
+import { serverErrorResponse } from '../http/error-response.ts';
+import { parseFormBody } from '../http/parse.ts';
+import {
+	decodeInboundClaims,
+	OidcDiscoveryStore,
+	OidcKeysUnreachableError,
+	verifyInboundOidcToken
+} from '../oidc/oidc.ts';
+import { matchOidcTrust, type OidcTrustRule } from '../oidc/oidc-trust.ts';
+
 import {
 	activeControlKey,
 	controlKeySummaries,
@@ -24,25 +44,6 @@ import {
 	rotateControlKey
 } from './control-key-store.ts';
 import { controlTrustRules } from './control-trust.ts';
-import * as d1Schema from './db/d1-schema.ts';
-import { serverErrorResponse } from './error-response.ts';
-import {
-	ControlNotConfiguredError,
-	InsufficientScopeError,
-	InvalidGrantError,
-	InvalidRequestError,
-	IssuerUnavailableError,
-	UnauthenticatedError,
-	UnsupportedGrantTypeError
-} from './errors.ts';
-import {
-	decodeInboundClaims,
-	OidcDiscoveryStore,
-	OidcKeysUnreachableError,
-	verifyInboundOidcToken
-} from './oidc.ts';
-import { matchOidcTrust, type OidcTrustRule } from './oidc-trust.ts';
-import { parseFormBody } from './parse.ts';
 
 // Issuer discovery cached across requests in this Worker instance, distinct from
 // the per-tenant Durable Object's own store: the control plane verifies inbound

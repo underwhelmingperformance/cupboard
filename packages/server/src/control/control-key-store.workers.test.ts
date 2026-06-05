@@ -2,7 +2,10 @@ import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
-import { mintAccessJwt, verifyAccessJwt } from './auth.ts';
+import { mintAccessJwt, verifyAccessJwt } from '../auth/auth.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import { LastControlKeyError } from '../errors.ts';
+
 import {
 	activeControlKey,
 	controlVerificationKeys,
@@ -10,8 +13,6 @@ import {
 	retireControlKey,
 	rotateControlKey
 } from './control-key-store.ts';
-import * as d1Schema from './db/d1-schema.ts';
-import { LastControlKeyError } from './errors.ts';
 
 const secret = btoa(String.fromCodePoint(...new Uint8Array(32).fill(7)));
 const issuer = 'https://cupboard.test';

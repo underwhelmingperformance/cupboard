@@ -15,7 +15,7 @@ import {
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 
-import { defaultTenant } from '../../packages/server/src/tenant-routing.ts';
+import { defaultTenant } from '../../packages/server/src/routing/tenant-routing.ts';
 
 import { StubOidcIssuer } from './oidc-issuer.ts';
 import { presigningFetcher } from './r2-presign.ts';

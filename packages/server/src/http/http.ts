@@ -1,7 +1,7 @@
 import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { StatusCodes } from 'http-status-codes';
 
-import { sha256HexBytes } from './crypto.ts';
+import { sha256HexBytes } from '../crypto/crypto.ts';
 
 const textHeaders = {
 	'cache-control': 'public, max-age=3600',

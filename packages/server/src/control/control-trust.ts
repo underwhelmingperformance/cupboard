@@ -1,10 +1,10 @@
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
-import * as d1Schema from './db/d1-schema.ts';
-import { StoredControlTrustInvalidError } from './errors.ts';
-import type { OidcTrustRule } from './oidc-trust.ts';
-import { parseStored } from './parse.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import { StoredControlTrustInvalidError } from '../errors.ts';
+import { parseStored } from '../http/parse.ts';
+import type { OidcTrustRule } from '../oidc/oidc-trust.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 

@@ -7,7 +7,8 @@ import {
 	UploadedObjectChecksumMissingError,
 	UploadedObjectNotFoundError,
 	UploadedObjectSizeMismatchError
-} from './errors.ts';
+} from '../errors.ts';
+
 import {
 	type UploadedObject,
 	verifyUploadedObject

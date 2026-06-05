@@ -1,4 +1,5 @@
-import type { CupboardServer } from './do.ts';
+import type { CupboardServer } from '../do.ts';
+
 import { defaultTenant } from './tenant-routing.ts';
 
 // `CupboardServer` is defined in the separate `cupboard-tenant` script, so

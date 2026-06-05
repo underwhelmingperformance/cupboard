@@ -4,7 +4,6 @@ import { tokenExchangeGrantType } from '@cupboard/protocol/oidc';
 import { defaultAuthIssuer } from '@cupboard/protocol/oidc-issuer';
 import { StatusCodes } from 'http-status-codes';
 
-import { tenantServer } from './durable-object.ts';
 import {
 	isNotModified,
 	narInfoObjectKey,
@@ -13,7 +12,9 @@ import {
 	parseNarName,
 	TextBody,
 	textResponse
-} from './http.ts';
+} from '../http/http.ts';
+import { tenantServer } from '../routing/durable-object.ts';
+
 import {
 	authoriseRead,
 	type ReadCredential,

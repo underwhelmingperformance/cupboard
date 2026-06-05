@@ -1,6 +1,6 @@
 import { StatusCodes } from 'http-status-codes';
 
-import { constantTimeEqual } from './crypto.ts';
+import { constantTimeEqual } from '../crypto/crypto.ts';
 
 export interface ReadCredential {
 	readonly user: string;

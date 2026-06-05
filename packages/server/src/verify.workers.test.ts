@@ -6,7 +6,7 @@ import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfos } from './db/schema.ts';
-import { narInfoObjectKey, narObjectKey } from './http.ts';
+import { narInfoObjectKey, narObjectKey } from './http/http.ts';
 import {
 	authorisedFetch,
 	blobStateCount,

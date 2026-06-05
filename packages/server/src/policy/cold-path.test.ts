@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
+import { ColdPathTtlConfigurationInvalidError } from '../errors.ts';
+
 import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
-import { ColdPathTtlConfigurationInvalidError } from './errors.ts';
 
 const now = new Date('2026-01-01T00:00:00.000Z');
 const pinName = `pin:${'0'.repeat(32)}`;

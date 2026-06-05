@@ -12,7 +12,7 @@ import {
 	narInfoObjectKey,
 	narObjectKey,
 	verifiableMaxBytes
-} from './http.ts';
+} from './http/http.ts';
 import {
 	afterGrace,
 	authorisedFetch,

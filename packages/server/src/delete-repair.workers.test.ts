@@ -1,7 +1,7 @@
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narInfoObjectKey, narObjectKey } from './http.ts';
+import { narInfoObjectKey, narObjectKey } from './http/http.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,

@@ -8,7 +8,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { generateAuthKeyPair } from './auth.ts';
+import { generateAuthKeyPair } from './auth/auth.ts';
 import { authKeys } from './db/schema.ts';
 import {
 	authorisedFetch,
