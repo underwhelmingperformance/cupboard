@@ -89,6 +89,24 @@ export class LastControlKeyError extends ServerHttpError {
 	}
 }
 
+export class SignupForbiddenError extends ServerHttpError {
+	readonly status = StatusCodes.FORBIDDEN;
+
+	constructor() {
+		super('The signup claim did not satisfy the deployment gate');
+		this.name = 'SignupForbiddenError';
+	}
+}
+
+export class GlobalAdminAlreadyClaimedError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor() {
+		super('Global admin has already been claimed by another principal');
+		this.name = 'GlobalAdminAlreadyClaimedError';
+	}
+}
+
 export class ControlKeyMissingError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

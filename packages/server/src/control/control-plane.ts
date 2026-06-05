@@ -44,6 +44,7 @@ import {
 	rotateControlKey
 } from './control-key-store.ts';
 import { controlTrustRules } from './control-trust.ts';
+import { handleSignup } from './signup.ts';
 
 // Issuer discovery cached across requests in this Worker instance, distinct from
 // the per-tenant Durable Object's own store: the control plane verifies inbound
@@ -65,6 +66,10 @@ export async function handleControl(
 
 	if (request.method === 'POST' && pathname === '/token') {
 		return serverErrorResponse(controlTokenExchange(request, env));
+	}
+
+	if (request.method === 'POST' && pathname === '/signup') {
+		return serverErrorResponse(handleSignup(request, env));
 	}
 
 	if (read && pathname === '/.well-known/jwks.json') {

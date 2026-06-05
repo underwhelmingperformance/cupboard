@@ -18,6 +18,7 @@
 		"./oidc-issuer": "./src/oidc-issuer.ts",
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",
+		"./signup": "./src/signup.ts",
 		"./upload": "./src/upload.ts"
 	},
 	"private": true,
