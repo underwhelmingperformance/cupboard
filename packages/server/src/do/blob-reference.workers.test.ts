@@ -12,10 +12,12 @@ import {
 	deletePath,
 	initialise,
 	narInfoGeneration,
+	negotiateUploads,
 	queueUnflushedNarInfoDeletion,
 	reapBlobsPastGrace,
 	resetTestServer,
 	runGcResult,
+	singleDecision,
 	tenantBlobRows,
 	uploadMetadata,
 	verifiableNar
@@ -32,6 +34,48 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		await resetTestServer();
 
 		await clearBlobStorage();
+	});
+
+	it('tells a tenant to upload a hash it has no presence edge for, though the shared blob exists', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('oracle-safe');
+		const first = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			name: 'first',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const second = uploadMetadata({
+			storePathHash: 'b'.repeat(32),
+			name: 'second',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		// Commit then delete the first path: its presence edge is gone, but the shared
+		// `blob_state` fact and canonical object survive in the reaper grace. Negotiate
+		// must still tell the tenant to upload the second path, never reuse on the
+		// global fact, so it cannot learn the shared blob exists.
+		await commitPath(token, first, nar);
+		await deletePath(token, first.storePathHash);
+
+		const decision = singleDecision(await negotiateUploads(token, [second]));
+
+		expect({
+			action: decision.action,
+			sharedBlobs: await blobStateNarHashes(),
+			presenceEdges: await tenantBlobRows()
+		}).toStrictEqual({
+			action: 'upload',
+			sharedBlobs: [{ narHash: nar.narHash }],
+			presenceEdges: []
+		});
 	});
 
 	it('writes an edge at generation 0 and a tenant-blob presence row on commit', async () => {
@@ -110,9 +154,10 @@ describe('blob_ref / tenant_blob reference edges', () => {
 
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
-		// The shared blob survives the delete during its reaper grace, so the
-		// recommit binds to it through the reuse path; the generation still advances.
-		await commitSharedPath(token, metadata);
+		// The delete drained this tenant's presence edge, so the recommit re-uploads
+		// (oracle-safe negotiate) rather than reusing; the promote adopts the surviving
+		// canonical object, and the generation advances past the deleted one.
+		await commitPath(token, metadata, nar);
 
 		// The replayed old-generation deletion can only have removed the old edge:
 		// the recommit lands a strictly higher generation, so only it survives.

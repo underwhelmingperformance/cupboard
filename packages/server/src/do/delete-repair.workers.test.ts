@@ -8,7 +8,6 @@ import {
 	blobStateNarHashes,
 	clearBlobStorage,
 	commitPath,
-	commitSharedPath,
 	deleteBlobReferenceEdge,
 	deleteNarInfoRow,
 	deletePath,
@@ -167,12 +166,13 @@ describe('delete-saga crash replay', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// Commit, delete, recommit the same NAR hash: the live edge and object are now
-		// at generation 1, while a stale marker from the first delete captured
-		// generation 0. The recommit reuses the shared blob still in its reaper grace.
+		// Commit, delete, recommit the same NAR hash: the live edge and object reach a
+		// higher generation, while a stale marker from the first delete captured
+		// generation 0. The delete drained the presence edge, so the recommit
+		// re-uploads (oracle-safe) and the promote adopts the surviving canonical blob.
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
-		await commitSharedPath(token, metadata);
+		await commitPath(token, metadata, nar);
 		await seedNarInfoDeletion({
 			storePathHash: metadata.storePathHash,
 			narHash: nar.narHash,

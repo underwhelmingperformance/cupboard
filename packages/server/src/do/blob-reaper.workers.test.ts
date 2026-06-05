@@ -8,7 +8,6 @@ import {
 	blobStateNarHashes,
 	clearBlobStorage,
 	commitPath,
-	commitSharedPath,
 	deleteBlobState,
 	deletePath,
 	deleteTestBase,
@@ -95,10 +94,12 @@ describe('blob reaper', () => {
 		await commitPath(token, first, nar);
 		await deletePath(token, first.storePathHash);
 
-		// Arm the now-unreferenced blob, then bind a new narinfo to it through the
-		// reuse path: that clears the grace timer and re-references the hash.
+		// Arm the now-unreferenced blob, then bind a new narinfo to it. The delete
+		// drained this tenant's presence edge, so negotiate is oracle-safe and tells
+		// it to re-upload; the promote adopts the surviving canonical object and
+		// clears the grace timer, re-referencing the hash.
 		await runGc();
-		await commitSharedPath(token, second);
+		await commitPath(token, second, nar);
 
 		// Past the original grace, the reaper must not collect it: it is referenced
 		// again, and its timer was cleared.

@@ -1,6 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { type UploadPathMetadataFields } from '@cupboard/protocol/upload';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 
 import { R2Presigner } from '../blob/presign.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -89,6 +89,28 @@ export class UploadStateService {
 	async findReusableBlob(
 		narHash: string
 	): Promise<typeof d1Schema.blobState.$inferSelect | undefined> {
+		const tenant = this.context.requireTenant();
+
+		// Existence-oracle-safe negotiate: reuse only when this tenant already holds
+		// its own presence edge for the hash, never on the global `blob_state`. A
+		// tenant that has not itself uploaded the hash is always told to upload, even
+		// when another tenant's identical verified bytes exist; the promote then
+		// dedups at rest. So negotiate never reveals whether another tenant has a blob.
+		const owned = await this.context.d1
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					eq(d1Schema.tenantBlob.narHash, narHash)
+				)
+			)
+			.get();
+
+		if (owned === undefined) {
+			return undefined;
+		}
+
 		const existingBlob = await this.context.d1
 			.select()
 			.from(d1Schema.blobState)
