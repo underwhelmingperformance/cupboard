@@ -109,4 +109,34 @@ describe('control key store', () => {
 			LastControlKeyError
 		);
 	});
+
+	it.each([
+		{ name: 'an already-retired key', target: 'retired' as const },
+		{ name: 'an unknown key', target: 'unknown' as const }
+	])(
+		'treats retiring $name as a no-op, never as the last-key refusal',
+		async ({ target }) => {
+			const database = controlDatabase();
+
+			await ensureControlKey(database, secret, t0);
+			const firstActive = await activeControlKey(database, secret);
+			const firstKid = firstActive.kid;
+			const secondKid = await rotateControlKey(database, secret, t1);
+
+			await retireControlKey(database, firstKid, t2);
+
+			// Only `secondKid` is live now. Retiring the already-retired `firstKid` (or
+			// an unknown key) must resolve quietly: the post-update read finds it not
+			// live, so it is the idempotent branch, not the last-live-key refusal that
+			// would wrongly fire when exactly one key remains.
+			const kid = target === 'retired' ? firstKid : 'nonexistent';
+
+			await expect(retireControlKey(database, kid, t2)).resolves.toBe(false);
+
+			const liveKeys = await controlVerificationKeys(database);
+			const liveKids = liveKeys.map((key) => key.kid);
+
+			expect(liveKids).toStrictEqual([secondKid]);
+		}
+	);
 });

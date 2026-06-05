@@ -1,4 +1,4 @@
-import { and, desc, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, exists, isNull, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
 import { type AuthPublicKey, generateAuthKeyPair } from './auth.ts';
@@ -15,6 +15,12 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 export interface ControlSigningKey {
 	readonly kid: string;
 	readonly privateJwk: JsonWebKey;
+}
+
+// A control key as the admin surface sees it: its kid and whether it is retired.
+export interface ControlKeySummary {
+	readonly kid: string;
+	readonly retired: boolean;
 }
 
 const bootstrapId = 'bootstrap';
@@ -106,6 +112,23 @@ export async function controlVerificationKeys(
 	}));
 }
 
+// Every control key, retired or not, for the admin surface to inspect before
+// rotating or retiring.
+export async function controlKeySummaries(
+	database: Database
+): Promise<ControlKeySummary[]> {
+	const rows = await database
+		.select({
+			kid: d1Schema.controlAuthKey.kid,
+			retiredAt: d1Schema.controlAuthKey.retiredAt
+		})
+		.from(d1Schema.controlAuthKey)
+		.orderBy(d1Schema.controlAuthKey.createdAt, d1Schema.controlAuthKey.id)
+		.all();
+
+	return rows.map((row) => ({ kid: row.kid, retired: row.retiredAt !== null }));
+}
+
 // Adds a new control key that becomes the minting key, leaving the existing keys
 // live so tokens they already signed keep verifying until those keys are retired.
 export async function rotateControlKey(
@@ -133,36 +156,63 @@ export async function rotateControlKey(
 	return kid;
 }
 
-// Retires a control key so it no longer verifies. Retiring a key that is already
-// retired or absent is an idempotent no-op; retiring the last live key is refused,
-// since it would leave no key able to verify outstanding control tokens.
+// Retires a control key so it no longer verifies, returning whether it actually
+// retired one: `false` means the key was already retired or absent (an idempotent
+// no-op). Retiring the last live key is refused, since it would leave no key able
+// to verify outstanding control tokens.
+//
+// The refusal is a single guarded statement rather than a read-then-write: a
+// count-then-update would let two concurrent retirements of different keys each
+// observe two live keys and both proceed, draining the set to zero. The guard
+// requires that *another* live key still exists, evaluated within the statement,
+// and D1 serialises writers, so the second retirement re-reads the reduced set
+// and changes nothing.
 export async function retireControlKey(
 	database: Database,
 	kid: string,
 	now: string
-): Promise<void> {
-	const live = await database
+): Promise<boolean> {
+	const anotherLiveKey = database
 		.select({ kid: d1Schema.controlAuthKey.kid })
 		.from(d1Schema.controlAuthKey)
-		.where(isNull(d1Schema.controlAuthKey.retiredAt))
-		.all();
-
-	if (!live.some((key) => key.kid === kid)) {
-		return;
-	}
-
-	if (live.length <= 1) {
-		throw new LastControlKeyError(kid);
-	}
-
-	await database
+		.where(
+			and(
+				isNull(d1Schema.controlAuthKey.retiredAt),
+				ne(d1Schema.controlAuthKey.kid, kid)
+			)
+		);
+	const result = await database
 		.update(d1Schema.controlAuthKey)
 		.set({ retiredAt: now })
+		.where(
+			and(
+				eq(d1Schema.controlAuthKey.kid, kid),
+				isNull(d1Schema.controlAuthKey.retiredAt),
+				exists(anotherLiveKey)
+			)
+		)
+		.run();
+
+	if (result.meta.changes > 0) {
+		return true;
+	}
+
+	// No row changed: the key was already retired or absent (an idempotent no-op),
+	// or it is the last live key and the guard refused it. A read tells them apart.
+	const stillLive = await database
+		.select({ kid: d1Schema.controlAuthKey.kid })
+		.from(d1Schema.controlAuthKey)
 		.where(
 			and(
 				eq(d1Schema.controlAuthKey.kid, kid),
 				isNull(d1Schema.controlAuthKey.retiredAt)
 			)
 		)
-		.run();
+		.get();
+
+	if (stillLive !== undefined) {
+		throw new LastControlKeyError(kid);
+	}
+
+	return false;
 }

@@ -9,20 +9,30 @@ import {
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import type { JWTPayload } from 'jose';
 
-import { adminJwtTtlSeconds, mintAccessJwt } from './auth.ts';
+import {
+	adminJwtTtlSeconds,
+	bearerToken,
+	mintAccessJwt,
+	verifyAccessJwt
+} from './auth.ts';
 import {
 	activeControlKey,
+	controlKeySummaries,
 	controlVerificationKeys,
-	ensureControlKey
+	ensureControlKey,
+	retireControlKey,
+	rotateControlKey
 } from './control-key-store.ts';
 import { controlTrustRules } from './control-trust.ts';
 import * as d1Schema from './db/d1-schema.ts';
 import { serverErrorResponse } from './error-response.ts';
 import {
 	ControlNotConfiguredError,
+	InsufficientScopeError,
 	InvalidGrantError,
 	InvalidRequestError,
 	IssuerUnavailableError,
+	UnauthenticatedError,
 	UnsupportedGrantTypeError
 } from './errors.ts';
 import {
@@ -67,6 +77,22 @@ export async function handleControl(
 		return serverErrorResponse(
 			Promise.resolve().then(() => controlAsMetadata(request, env))
 		);
+	}
+
+	if (read && pathname === '/control/keys') {
+		return serverErrorResponse(controlKeyList(request, env));
+	}
+
+	if (request.method === 'POST' && pathname === '/control/keys/rotate') {
+		return serverErrorResponse(controlKeyRotate(request, env));
+	}
+
+	const retirePrefix = '/control/keys/retire/';
+
+	if (request.method === 'POST' && pathname.startsWith(retirePrefix)) {
+		const kid = decodeURIComponent(pathname.slice(retirePrefix.length));
+
+		return serverErrorResponse(controlKeyRetire(request, env, kid));
 	}
 
 	return undefined;
@@ -215,6 +241,73 @@ function controlAsMetadata(request: Request, env: Env): Response {
 		scopes_supported: ['admin'],
 		token_endpoint_auth_methods_supported: ['none']
 	});
+}
+
+// Verifies a control admin bearer token: signed by a live control key, carrying
+// the control issuer and audience and the admin scope. Anything else — a missing
+// token, a tenant token, the wrong scope — is rejected, so only a control-minted
+// admin token drives control operations.
+async function requireControlAdmin(request: Request, env: Env): Promise<void> {
+	const token = bearerToken(request);
+
+	if (token === undefined) {
+		throw new UnauthenticatedError();
+	}
+
+	const audience = controlAudience(env);
+	const keys = await controlVerificationKeys(controlDatabase(env));
+	let scope: string;
+
+	try {
+		({ scope } = await verifyAccessJwt(
+			keys,
+			token,
+			{ issuer: controlIssuer(request), audience },
+			new Date()
+		));
+	} catch {
+		throw new UnauthenticatedError();
+	}
+
+	if (scope !== 'admin') {
+		throw new InsufficientScopeError();
+	}
+}
+
+async function controlKeyList(request: Request, env: Env): Promise<Response> {
+	await requireControlAdmin(request, env);
+	const keys = await controlKeySummaries(controlDatabase(env));
+
+	return Response.json({ keys }, { headers: { 'cache-control': 'no-store' } });
+}
+
+async function controlKeyRotate(request: Request, env: Env): Promise<Response> {
+	await requireControlAdmin(request, env);
+	const kid = await rotateControlKey(
+		controlDatabase(env),
+		controlWrappingSecret(env),
+		new Date().toISOString()
+	);
+
+	return Response.json({ kid }, { headers: { 'cache-control': 'no-store' } });
+}
+
+async function controlKeyRetire(
+	request: Request,
+	env: Env,
+	kid: string
+): Promise<Response> {
+	await requireControlAdmin(request, env);
+	const retired = await retireControlKey(
+		controlDatabase(env),
+		kid,
+		new Date().toISOString()
+	);
+
+	return Response.json(
+		{ kid, retired },
+		{ headers: { 'cache-control': 'no-store' } }
+	);
 }
 
 function controlDatabase(env: Env): Database {

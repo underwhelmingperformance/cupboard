@@ -602,14 +602,14 @@ export async function mintControlAdminToken(
 	const active = await activeControlKey(database, wrappingSecret);
 
 	return mintAccessJwt(
-		active.privateJwk,
-		{
-			issuer: new URL(origin).origin,
-			audience: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
-			subject,
-			scope: 'admin',
-			kid: active.kid,
-			ttlSeconds: 600
+			active.privateJwk,
+			{
+				issuer: new URL(origin).origin,
+				audience: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
+				subject,
+				scope: 'admin',
+				kid: active.kid,
+				ttlSeconds: 600
 			},
 			new Date()
 		);

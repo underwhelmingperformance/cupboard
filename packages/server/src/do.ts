@@ -99,6 +99,7 @@ import {
 	adminJwtTtlSeconds,
 	authJwtAlgorithm,
 	type AuthPublicKey,
+	bearerToken,
 	generateAuthKeyPair,
 	mintAccessJwt,
 	verifyAccessJwt,
@@ -4071,16 +4072,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.seedOwnerRule();
 	}
-}
-
-function bearerToken(request: Request): string | undefined {
-	const header = request.headers.get('authorization');
-
-	if (header?.startsWith('Bearer ') !== true) {
-		return undefined;
-	}
-
-	return header.slice('Bearer '.length);
 }
 
 interface R2PresignConfiguration {

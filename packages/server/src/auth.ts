@@ -27,6 +27,18 @@ export interface AuthPublicKey {
 	readonly publicJwk: JsonWebKey;
 }
 
+// The bearer token from an `Authorization: Bearer <token>` header, or undefined
+// when the header is absent or not a bearer credential.
+export function bearerToken(request: Request): string | undefined {
+	const header = request.headers.get('authorization');
+
+	if (header?.startsWith('Bearer ') !== true) {
+		return undefined;
+	}
+
+	return header.slice('Bearer '.length);
+}
+
 export interface MintAccessJwtOptions {
 	readonly issuer: string;
 	readonly audience: string;
