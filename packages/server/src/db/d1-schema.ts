@@ -1,4 +1,6 @@
+import { sql } from 'drizzle-orm';
 import {
+	check,
 	index,
 	integer,
 	primaryKey,
@@ -147,4 +149,32 @@ export const tenantBlob = sqliteTable(
 		fileSize: integer('file_size').notNull()
 	},
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
+);
+
+// The authoritative per-tenant usage and quota counter. `bytes` is the sum of the
+// tenant's verified stored blob sizes (so it equals SUM(tenant_blob.file_size));
+// `narinfos` and `blobs` are its committed-narinfo and unique-blob counts. The
+// counters are maintained incrementally by the owning tenant's Durable Object as it
+// charges on the 0-to-1 blob transition and credits on the 1-to-0, and reconciled by
+// the cron roll-up. `quota_bytes` is the admin-set limit (NULL means unlimited),
+// written only by the Worker. The CHECK makes an over-quota charge fail its D1
+// batch, so the whole reservation rolls back: no edge and no charge are ever
+// stranded over quota.
+export const tenantUsage = sqliteTable(
+	'tenant_usage',
+	{
+		tenant: text('tenant').primaryKey(),
+		bytes: integer('bytes').notNull().default(0),
+		narinfos: integer('narinfos').notNull().default(0),
+		blobs: integer('blobs').notNull().default(0),
+		quotaBytes: integer('quota_bytes'),
+		updatedAt: text('updated_at').notNull()
+	},
+	(table) => [
+		check('tenant_usage_bytes_nonnegative', sql`${table.bytes} >= 0`),
+		check(
+			'tenant_usage_within_quota',
+			sql`${table.quotaBytes} IS NULL OR ${table.bytes} <= ${table.quotaBytes}`
+		)
+	]
 );

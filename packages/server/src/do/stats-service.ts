@@ -2,13 +2,13 @@ import {
 	type StatsResponse,
 	type UsageResponse
 } from '@cupboard/protocol/upload';
-import { and, count, eq, sql } from 'drizzle-orm';
+import { and, count, eq } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
-import { singleTenant, type ServerContext } from './context.ts';
+import { type ServerContext } from './context.ts';
 
 export class StatsService {
 	constructor(
@@ -29,6 +29,7 @@ export class StatsService {
 	}
 
 	private async stats(cache: string): Promise<StatsResponse> {
+		const tenant = this.context.requireTenant();
 		const storePaths = this.context.db
 			.select({ count: count() })
 			.from(schema.narInfos)
@@ -51,7 +52,7 @@ export class StatsService {
 			)
 			.where(
 				and(
-					eq(d1Schema.blobReference.tenant, singleTenant),
+					eq(d1Schema.blobReference.tenant, tenant),
 					eq(d1Schema.blobReference.cache, cache)
 				)
 			)
@@ -73,21 +74,30 @@ export class StatsService {
 	}
 
 	private async usage(): Promise<UsageResponse> {
-		const blobs = await this.context.d1
+		const tenant = this.context.requireTenant();
+		const usage = await this.context.d1
 			.select({
-				count: count(),
-				total: sql<number>`coalesce(sum(${d1Schema.blobState.fileSize}), 0)`
+				blobs: d1Schema.tenantUsage.blobs,
+				bytes: d1Schema.tenantUsage.bytes,
+				quotaBytes: d1Schema.tenantUsage.quotaBytes
 			})
-			.from(d1Schema.blobState)
+			.from(d1Schema.tenantUsage)
+			.where(eq(d1Schema.tenantUsage.tenant, tenant))
 			.get();
-		const narFileSize = blobs?.total ?? 0;
+		const narFileSize = usage?.bytes ?? 0;
+		const quotaBytes = usage?.quotaBytes ?? undefined;
 
 		return {
-			narBlobs: blobs?.count ?? 0,
+			narBlobs: usage?.blobs ?? 0,
 			narFileSize,
 			casObjects: 0,
 			casFileSize: 0,
-			totalFileSize: narFileSize
+			totalFileSize: narFileSize,
+			quotaBytes,
+			remainingQuotaBytes:
+				quotaBytes === undefined
+					? undefined
+					: Math.max(0, quotaBytes - narFileSize)
 		};
 	}
 }

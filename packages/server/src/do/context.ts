@@ -120,8 +120,14 @@ export type ReserveOutcome =
 // The outcome of materialising a reserved narinfo: `materialised` on success;
 // `superseded` when a concurrent recommit replaced the reserved version;
 // `blob-gone` when the shared blob (`blob_state` or the canonical object) is no
-// longer present and the path must be re-uploaded.
-export type MaterialiseOutcome = 'materialised' | 'superseded' | 'blob-gone';
+// longer present and the path must be re-uploaded; `over-quota` when charging the
+// blob's canonical size would exceed the tenant's quota, so the caller reclaims the
+// reserved row rather than charging.
+export type MaterialiseOutcome =
+	| 'materialised'
+	| 'superseded'
+	| 'blob-gone'
+	| 'over-quota';
 
 // The compressed metadata of the one canonical object served for a NAR hash.
 // Read from the object itself so a committed narinfo always advertises the

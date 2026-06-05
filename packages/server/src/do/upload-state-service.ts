@@ -60,14 +60,16 @@ export class UploadStateService {
 			.run();
 	}
 
-	// Records a durable `mismatch` verdict for a background verification failure and
-	// deletes the bad staging bytes, keeping the upload row so a later status reader
-	// (`push --wait` or a status endpoint) can observe why the path never became
-	// servable. Synchronous inline failures reject immediately and need no verdict.
+	// Records a durable terminal verdict for a background failure and deletes the bad
+	// staging bytes, keeping the upload row so a later status reader (`push --wait` or
+	// a status endpoint) can observe why the path never became servable. The verdict
+	// distinguishes a content `mismatch` from an `over-quota` rejection. Synchronous
+	// inline failures reject immediately and need no verdict.
 	async markUploadFailed(
 		uploadId: string,
 		r2Key: string,
-		narHash: string
+		narHash: string,
+		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {
 		if (r2Key !== narObjectKey(narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);
@@ -79,7 +81,7 @@ export class UploadStateService {
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({
-				verdict: 'mismatch',
+				verdict,
 				expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
 			})
 			.where(eq(schema.pendingUploads.id, uploadId))

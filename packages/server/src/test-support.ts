@@ -1586,6 +1586,19 @@ export async function expectStatsViaWorker(
 	expect(await response.json()).toStrictEqual(expected);
 }
 
+export async function expectStatsForTenant(
+	tenant: string,
+	token: string,
+	expected: StatsResponse
+): Promise<void> {
+	const response = await tenantWorkerFetch(tenant, '/stats', token, {
+		method: 'GET'
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+	expect(await response.json()).toStrictEqual(expected);
+}
+
 export interface VerifiableNar {
 	readonly narBytes: Uint8Array;
 	readonly narHash: string;

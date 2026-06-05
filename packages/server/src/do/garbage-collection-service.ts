@@ -209,15 +209,16 @@ export class GarbageCollectionService {
 			// A `pending` or `committing` upload is a live commit saga (awaiting
 			// background verification, or a crashed inline commit the verify pass
 			// re-drives), not abandoned, so it and its staged bytes must survive the
-			// sweep until the verify pass resolves it. Only two states are reapable
-			// once expired: a null-verdict row still awaiting its bytes, and a terminal
-			// `mismatch` row whose observation window has passed (its staging bytes are
-			// already gone).
+			// sweep until the verify pass resolves it. The reapable states once expired
+			// are a null-verdict row still awaiting its bytes and the terminal failures
+			// (`mismatch`, `over-quota`) whose observation window has passed; their
+			// staging bytes are already gone.
 			const reapable = and(
 				lt(schema.pendingUploads.expiresAt, now),
 				or(
 					isNull(schema.pendingUploads.verdict),
-					eq(schema.pendingUploads.verdict, 'mismatch')
+					eq(schema.pendingUploads.verdict, 'mismatch'),
+					eq(schema.pendingUploads.verdict, 'over-quota')
 				)
 			);
 

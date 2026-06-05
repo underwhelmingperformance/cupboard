@@ -160,6 +160,18 @@ export class TenantWritesStoppedError extends ServerHttpError {
 	}
 }
 
+// Committing this blob would take the tenant past its storage quota. The charge is
+// gated on the tenant's 0-to-1 blob transition, so this is raised only when the
+// tenant does not already hold the hash and the new bytes would exceed the limit.
+export class QuotaExceededError extends ServerHttpError {
+	readonly status = StatusCodes.INSUFFICIENT_STORAGE;
+
+	constructor(public readonly tenant: string) {
+		super('This tenant is over its storage quota');
+		this.name = 'QuotaExceededError';
+	}
+}
+
 export class ControlKeyMissingError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

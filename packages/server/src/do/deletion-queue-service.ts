@@ -1,6 +1,6 @@
 import { storePathHashSchema } from '@cupboard/nix/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, exists, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -66,18 +66,39 @@ export class DeletionQueueService {
 		narHash: string
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
+		const now = new Date().toISOString();
 
-		await this.context.d1
-			.delete(d1Schema.blobReference)
-			.where(
-				and(
-					eq(d1Schema.blobReference.tenant, tenant),
-					eq(d1Schema.blobReference.cache, cache),
-					eq(d1Schema.blobReference.storePathHash, storePathHash),
-					eq(d1Schema.blobReference.generation, generation)
-				)
-			)
-			.run();
+		// Retire the captured edge and credit a narinfo back in one atomic batch. The
+		// credit is gated on the edge still existing, so a replayed retirement (the edge
+		// already gone) does not double-credit; it charges before the delete so the gate
+		// sees the pre-delete state.
+		const edgeFilter = and(
+			eq(d1Schema.blobReference.tenant, tenant),
+			eq(d1Schema.blobReference.cache, cache),
+			eq(d1Schema.blobReference.storePathHash, storePathHash),
+			eq(d1Schema.blobReference.generation, generation)
+		);
+
+		await this.context.d1.batch([
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					narinfos: sql`${d1Schema.tenantUsage.narinfos} - 1`,
+					updatedAt: now
+				})
+				.where(
+					and(
+						eq(d1Schema.tenantUsage.tenant, tenant),
+						exists(
+							this.context.d1
+								.select({ one: sql`1` })
+								.from(d1Schema.blobReference)
+								.where(edgeFilter)
+						)
+					)
+				),
+			this.context.d1.delete(d1Schema.blobReference).where(edgeFilter)
+		]);
 
 		const stillReferenced = await this.context.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
@@ -90,17 +111,55 @@ export class DeletionQueueService {
 			)
 			.get();
 
-		if (stillReferenced === undefined) {
-			await this.context.d1
-				.delete(d1Schema.tenantBlob)
+		if (stillReferenced !== undefined) {
+			return;
+		}
+
+		// The tenant's last edge for this hash is gone: read the charged size, then
+		// credit the bytes and the unique-blob count and drop the presence row in one
+		// atomic batch. The credit is gated on the presence still existing, so a replay
+		// does not double-credit.
+		const presence = await this.context.d1
+			.select({ fileSize: d1Schema.tenantBlob.fileSize })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					eq(d1Schema.tenantBlob.narHash, narHash)
+				)
+			)
+			.get();
+
+		if (presence === undefined) {
+			return;
+		}
+
+		const presenceFilter = and(
+			eq(d1Schema.tenantBlob.tenant, tenant),
+			eq(d1Schema.tenantBlob.narHash, narHash)
+		);
+
+		await this.context.d1.batch([
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					bytes: sql`${d1Schema.tenantUsage.bytes} - ${presence.fileSize}`,
+					blobs: sql`${d1Schema.tenantUsage.blobs} - 1`,
+					updatedAt: now
+				})
 				.where(
 					and(
-						eq(d1Schema.tenantBlob.tenant, tenant),
-						eq(d1Schema.tenantBlob.narHash, narHash)
+						eq(d1Schema.tenantUsage.tenant, tenant),
+						exists(
+							this.context.d1
+								.select({ one: sql`1` })
+								.from(d1Schema.tenantBlob)
+								.where(presenceFilter)
+						)
 					)
-				)
-				.run();
-		}
+				),
+			this.context.d1.delete(d1Schema.tenantBlob).where(presenceFilter)
+		]);
 	}
 
 	// Whether no committed narinfo, in any tenant, still references this NAR hash —

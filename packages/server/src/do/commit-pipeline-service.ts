@@ -3,7 +3,7 @@ import {
 	type CommitResponse,
 	type UploadPathMetadataFields
 } from '@cupboard/protocol/upload';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, notExists, sql } from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
@@ -14,6 +14,7 @@ import * as schema from '../db/schema.ts';
 import {
 	NarTooLargeError,
 	NarVerificationFailedError,
+	QuotaExceededError,
 	UploadCacheMismatchError,
 	UploadedObjectNotFoundError,
 	UploadExpiredError,
@@ -152,6 +153,19 @@ export class CommitPipelineService {
 
 		verifyUploadedObject(object, pending.expectedSize, metadata, pending.r2Key);
 
+		// Advisory pre-verify quota check: skip the expensive verify and promote when
+		// charging this hash would clearly exceed quota. It estimates the charge from
+		// the canonical size if the hash already exists (the promote adopts it),
+		// otherwise the staged size; the authoritative decision is made against the
+		// canonical size in materialiseServable, so a concurrent promote that changes
+		// the size cannot let an over-quota commit through.
+		const tenant = this.context.requireTenant();
+		const estimate = await this.chargeSize(metadata.narHash, metadata.fileSize);
+
+		if (await this.overQuota(tenant, metadata.narHash, estimate)) {
+			throw new QuotaExceededError(tenant);
+		}
+
 		const canonicalKey = narObjectKey(metadata.narHash);
 
 		// A reuse binds a new narinfo to a blob already in the verified CAS. It
@@ -240,6 +254,26 @@ export class CommitPipelineService {
 		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
 			this.materialiseServable(cache, metadata, reserved.generation, uploadId)
 		);
+
+		// Over quota on the canonical size: reclaim the reserved row and clear the
+		// upload so a retry is not stranded re-driving forever, then reject cleanly.
+		if (outcome === 'over-quota') {
+			await this.context.ctx.blockConcurrencyWhile(() =>
+				this.reclaimReservedRow(
+					cache,
+					metadata.storePathHash,
+					reserved.generation,
+					metadata.narHash
+				)
+			);
+			await this.uploadState.clearPendingUploadAndStaging(
+				uploadId,
+				stagingKey,
+				metadata.narHash
+			);
+
+			throw new QuotaExceededError(this.context.requireTenant());
+		}
 
 		if (outcome !== 'materialised') {
 			return this.concedeToWinner(cache, uploadId, metadata, stagingKey);
@@ -511,35 +545,15 @@ export class CommitPipelineService {
 
 		const tenant = this.context.requireTenant();
 
-		await this.context.d1
-			.insert(d1Schema.blobReference)
-			.values({
-				tenant,
-				cache,
-				storePathHash: metadata.storePathHash,
-				generation,
-				narHash: metadata.narHash
-			})
-			.onConflictDoNothing()
-			.run();
-		await this.context.d1
-			.insert(d1Schema.tenantBlob)
-			.values({
-				tenant,
-				narHash: metadata.narHash,
-				fileSize: blob.fileSize
-			})
-			.onConflictDoNothing()
-			.run();
+		// Authoritative quota decision against the size that will actually be charged:
+		// the canonical `blob_state` size, which the promote may have adopted from an
+		// existing encoding and so can differ from the staged size the pre-check used.
+		// Returning here lets the caller reclaim the reserved row rather than charging.
+		if (await this.overQuota(tenant, metadata.narHash, blob.fileSize)) {
+			return 'over-quota';
+		}
 
-		// Clear any reaper grace timer: writing the edge is a fresh reference, so a
-		// reuse commit (which does not promote) and any commit racing the reaper both
-		// keep the shared blob alive.
-		await this.context.d1
-			.update(d1Schema.blobState)
-			.set({ deleteAfter: sql`null` })
-			.where(eq(d1Schema.blobState.narHash, metadata.narHash))
-			.run();
+		await this.reserveEdgeAndCharge(tenant, cache, metadata, generation, blob);
 
 		await this.narInfoObjects.putNarInfoObject(
 			cache,
@@ -549,6 +563,149 @@ export class CommitPipelineService {
 		this.uploadState.clearPendingUpload(uploadId);
 
 		return 'materialised';
+	}
+
+	// Writes the reference edge and per-tenant presence and charges usage, all in one
+	// atomic D1 batch. The counters are charged before the inserts and gated on the
+	// rows not yet existing, so a replay (the edge/presence already present) neither
+	// double-charges nor double-references, and an over-quota bytes charge fails the
+	// `tenant_usage` CHECK and rolls the whole batch back: no edge and no charge are
+	// ever stranded over quota. Clearing the reaper grace timer in the same batch
+	// keeps a re-referenced blob alive.
+	private async reserveEdgeAndCharge(
+		tenant: string,
+		cache: string,
+		metadata: UploadPathMetadataFields,
+		generation: number,
+		blob: { readonly fileSize: number }
+	): Promise<void> {
+		const now = new Date().toISOString();
+		const edgeMissing = notExists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.blobReference)
+				.where(
+					and(
+						eq(d1Schema.blobReference.tenant, tenant),
+						eq(d1Schema.blobReference.cache, cache),
+						eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
+						eq(d1Schema.blobReference.generation, generation)
+					)
+				)
+		);
+		const presenceMissing = notExists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantBlob)
+				.where(
+					and(
+						eq(d1Schema.tenantBlob.tenant, tenant),
+						eq(d1Schema.tenantBlob.narHash, metadata.narHash)
+					)
+				)
+		);
+
+		// The `requireQuota` pre-check in the same critical section is the clean
+		// over-quota rejection. The `tenant_usage` CHECK constraint backs it as a
+		// database-level invariant: should a charge ever reach here over quota, the
+		// batch fails and rolls back, so no edge or charge is stranded even though the
+		// pre-check is the expected guard.
+		await this.context.d1.batch([
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1`,
+					updatedAt: now
+				})
+				.where(and(eq(d1Schema.tenantUsage.tenant, tenant), edgeMissing)),
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					bytes: sql`${d1Schema.tenantUsage.bytes} + ${blob.fileSize}`,
+					blobs: sql`${d1Schema.tenantUsage.blobs} + 1`,
+					updatedAt: now
+				})
+				.where(and(eq(d1Schema.tenantUsage.tenant, tenant), presenceMissing)),
+			this.context.d1
+				.insert(d1Schema.blobReference)
+				.values({
+					tenant,
+					cache,
+					storePathHash: metadata.storePathHash,
+					generation,
+					narHash: metadata.narHash
+				})
+				.onConflictDoNothing(),
+			this.context.d1
+				.insert(d1Schema.tenantBlob)
+				.values({ tenant, narHash: metadata.narHash, fileSize: blob.fileSize })
+				.onConflictDoNothing(),
+			this.context.d1
+				.update(d1Schema.blobState)
+				.set({ deleteAfter: sql`null` })
+				.where(eq(d1Schema.blobState.narHash, metadata.narHash))
+		]);
+	}
+
+	// Whether charging this hash would take the tenant over its quota. A hash the
+	// tenant already holds (no charge), an absent usage row, or an unset quota are all
+	// within quota. The caller passes the size that will actually be charged.
+	private async overQuota(
+		tenant: string,
+		narHash: string,
+		fileSize: number
+	): Promise<boolean> {
+		const usage = await this.context.d1
+			.select({
+				bytes: d1Schema.tenantUsage.bytes,
+				quotaBytes: d1Schema.tenantUsage.quotaBytes
+			})
+			.from(d1Schema.tenantUsage)
+			.where(eq(d1Schema.tenantUsage.tenant, tenant))
+			.get();
+
+		if (usage === undefined) {
+			return false;
+		}
+
+		if (usage.quotaBytes === null) {
+			return false;
+		}
+
+		const owned = await this.context.d1
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					eq(d1Schema.tenantBlob.narHash, narHash)
+				)
+			)
+			.get();
+
+		if (owned !== undefined) {
+			return false;
+		}
+
+		return usage.bytes + fileSize > usage.quotaBytes;
+	}
+
+	// The size a commit of this hash will be charged: the canonical compressed size
+	// already recorded for the hash if one exists (the promote adopts that encoding),
+	// otherwise this upload's staged size, which becomes the canonical size. Used by
+	// the advisory pre-check; the authoritative charge reads the canonical size after
+	// the promote.
+	private async chargeSize(
+		narHash: string,
+		stagedSize: number
+	): Promise<number> {
+		const existing = await this.context.d1
+			.select({ fileSize: d1Schema.blobState.fileSize })
+			.from(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, narHash))
+			.get();
+
+		return existing?.fileSize ?? stagedSize;
 	}
 
 	// Removes a reserved narinfo row whose commit failed verification, leaving its

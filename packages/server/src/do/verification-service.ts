@@ -261,7 +261,7 @@ export class VerificationService {
 		// content-addressed, so a redundant promotion is harmless.
 		await this.uploadState.promoteStagingBlob(pending.r2Key, metadata);
 
-		await this.context.ctx.blockConcurrencyWhile(async () => {
+		const outcome = await this.context.ctx.blockConcurrencyWhile(async () => {
 			const current = this.context.db
 				.select()
 				.from(schema.pendingUploads)
@@ -269,34 +269,54 @@ export class VerificationService {
 				.get();
 
 			if (current === undefined) {
-				return;
+				return 'gone' as const;
 			}
 
-			const outcome = await this.commitPipeline.materialiseServable(
+			return this.commitPipeline.materialiseServable(
 				pending.cache,
 				metadata,
 				generation,
 				pending.id
 			);
-
-			// A concurrent recommit took the path or the blob vanished, so this upload
-			// lost: clear its marker. Any blob it promoted that no edge now references
-			// is left for the reaper to collect.
-			if (outcome !== 'materialised') {
-				this.uploadState.clearPendingUpload(pending.id);
-			}
-
-			await this.context.env.BLOBS.delete(pending.r2Key);
 		});
+
+		if (outcome === 'gone') {
+			return;
+		}
+
+		// Over quota on the canonical size: reclaim the reserved row and record a
+		// terminal `over-quota` verdict, the same shape as an inline over-quota commit.
+		// Otherwise a later verify pass, scanning narInfos, would restore its object and
+		// make an unreferenced, uncharged path servable.
+		if (outcome === 'over-quota') {
+			await this.failReservedUpload(
+				pending,
+				metadata,
+				generation,
+				'over-quota'
+			);
+			return;
+		}
+
+		// A concurrent recommit took the path or the blob vanished, so this upload
+		// lost: clear its marker. Any blob it promoted that no edge now references is
+		// left for the reaper to collect.
+		if (outcome !== 'materialised') {
+			this.uploadState.clearPendingUpload(pending.id);
+		}
+
+		await this.context.env.BLOBS.delete(pending.r2Key);
 	}
 
-	// Records a terminal `mismatch` on a deferred upload whose bytes failed
-	// verification and reclaims the reserved row it never made servable, so neither a
-	// stranded row nor a stuck marker survives.
+	// Reclaims the reserved row a deferred upload never made servable and records its
+	// terminal verdict, so neither a stranded row nor a stuck marker survives. The
+	// verdict is `mismatch` for a failed NAR-hash check or `over-quota` for a quota
+	// rejection.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: UploadPathMetadataFields,
-		generation: number
+		generation: number,
+		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {
 		await this.context.ctx.blockConcurrencyWhile(() =>
 			this.commitPipeline.reclaimReservedRow(
@@ -309,7 +329,8 @@ export class VerificationService {
 		await this.uploadState.markUploadFailed(
 			pending.id,
 			pending.r2Key,
-			metadata.narHash
+			metadata.narHash,
+			verdict
 		);
 	}
 }

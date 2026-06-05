@@ -129,20 +129,78 @@ export async function ensureTenant(
 	const row = inserted[0];
 
 	if (row !== undefined) {
+		await ensureUsageRow(database, body, now);
+
 		return toSummary(row);
 	}
 
-	const existing = await database
-		.select()
-		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.id, body.id))
-		.get();
+	// A conflicting slug: validate the existing tenant config before touching the
+	// usage row, so a request that does not match cannot write a wrong-quota usage row
+	// on the way to rejecting and poison a later legitimate retry.
+	const existing = await loadTenant(database, body.id);
 
 	if (existing === undefined || !(await sameConfig(existing, body))) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 
+	// The config matches: ensure the usage row idempotently (recovering a crash that
+	// left only the tenant row), then accept the quota only if it matches the stored
+	// one. `onConflictDoNothing` keeps an existing quota, so a different quota is a
+	// genuine conflict rather than a silent overwrite.
+	await ensureUsageRow(database, body, now);
+	const existingQuota = await loadQuota(database, body.id);
+
+	if (existingQuota !== body.quotaBytes) {
+		throw new TenantAlreadyExistsError(body.id);
+	}
+
 	return toSummary(existing);
+}
+
+// The Durable Object needs a usage row to charge against before the tenant takes
+// any write. Created idempotently, so a fresh provision and a crash-recovery retry
+// both leave exactly one row, keeping any quota already stored.
+async function ensureUsageRow(
+	database: Database,
+	body: ParsedTenantCreateBody,
+	now: string
+): Promise<void> {
+	await database
+		.insert(d1Schema.tenantUsage)
+		.values({
+			tenant: body.id,
+			bytes: 0,
+			narinfos: 0,
+			blobs: 0,
+			quotaBytes: body.quotaBytes,
+			updatedAt: now
+		})
+		.onConflictDoNothing()
+		.run();
+}
+
+async function loadTenant(
+	database: Database,
+	id: string
+): Promise<TenantRow | undefined> {
+	return database
+		.select()
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, id))
+		.get();
+}
+
+async function loadQuota(
+	database: Database,
+	id: string
+): Promise<number | undefined> {
+	const usage = await database
+		.select({ quotaBytes: d1Schema.tenantUsage.quotaBytes })
+		.from(d1Schema.tenantUsage)
+		.where(eq(d1Schema.tenantUsage.tenant, id))
+		.get();
+
+	return usage?.quotaBytes ?? undefined;
 }
 
 export async function listTenants(

@@ -54,11 +54,16 @@ export const pendingUploads = sqliteTable('pending_upload', {
 	// commit is re-driven from. `committing` once an inline commit starts, before it
 	// reserves the narinfo row; `pending` once a blob above the inline-verify budget
 	// is accepted, awaiting the background NAR-hash check; `mismatch` once that check
-	// fails, a durable status a later reader (`push --wait` or a status endpoint) can
-	// observe; null while a row still awaits its bytes. The verdict is per-upload and
-	// never written globally by nar_hash, so a bad upload leaves no global trace. The
-	// background verify pass re-drives both `committing` and `pending` rows.
-	verdict: text('verdict', { enum: ['committing', 'pending', 'mismatch'] })
+	// fails; `over-quota` once the background pass finds the canonical size exceeds the
+	// tenant's quota. `mismatch` and `over-quota` are both terminal failures a later
+	// reader (`push --wait` or a status endpoint) can observe, distinguished so a quota
+	// rejection is not misreported as bad content; null while a row still awaits its
+	// bytes. The verdict is per-upload and never written globally by nar_hash, so a bad
+	// upload leaves no global trace. The background verify pass re-drives both
+	// `committing` and `pending` rows.
+	verdict: text('verdict', {
+		enum: ['committing', 'pending', 'mismatch', 'over-quota']
+	})
 });
 
 export const narInfoDeletions = sqliteTable(

@@ -1767,13 +1767,13 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		// Re-negotiating removed the stale narinfo whose NAR object had vanished; its
-		// now-unreferenced shared fact lingers until the reaper collects it.
+		// Re-negotiating removed the stale narinfo whose NAR object had vanished; the
+		// tenant's presence is gone even though the shared fact lingers for the reaper.
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 1,
+			narBlobs: 0,
 			pendingUploads: 1,
-			totalFileSize: narBytes.byteLength
+			totalFileSize: 0
 		});
 	});
 
@@ -1948,13 +1948,13 @@ describe('upload flow', () => {
 		const afterDelete = await readFetch(`/${metadata.storePathHash}.narinfo`);
 
 		expect(afterDelete.status).toBe(StatusCodes.NOT_FOUND);
-		// The narinfo is gone immediately; the now-unreferenced shared fact persists
-		// until the reaper collects it past the grace.
+		// The narinfo is gone immediately; the tenant's presence is gone even though
+		// the now-unreferenced shared fact persists until the reaper collects it.
 		await expectStats(token, {
 			storePaths: 0,
-			narBlobs: 1,
+			narBlobs: 0,
 			pendingUploads: 0,
-			totalFileSize: narBytes.byteLength
+			totalFileSize: 0
 		});
 
 		// The first pass arms the unreferenced blob but does not collect it.

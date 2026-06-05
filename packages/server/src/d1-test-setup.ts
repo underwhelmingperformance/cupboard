@@ -11,7 +11,8 @@ import {
 	globalAdmin,
 	manifestState,
 	tenant,
-	tenantBlob
+	tenantBlob,
+	tenantUsage
 } from './db/d1-schema.ts';
 
 // `TEST_MIGRATIONS` is typed in test-env.d.ts; vitest.config.ts supplies its
@@ -30,6 +31,7 @@ beforeEach(async () => {
 	const database = drizzle(env.CUPBOARD_DB);
 	await database.delete(blobReference).run();
 	await database.delete(tenantBlob).run();
+	await database.delete(tenantUsage).run();
 	await database.delete(blobState).run();
 	await database.delete(controlAuthKey).run();
 	await database.delete(controlTrust).run();
