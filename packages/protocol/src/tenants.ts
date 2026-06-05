@@ -5,7 +5,8 @@ export const tenantReadModeSchema = z.enum(['public', 'private']);
 export const tenantStatusSchema = z.enum([
 	'active',
 	'suspended',
-	'offboarding'
+	'offboarding',
+	'offboarded'
 ]);
 
 export const readPasswordMinLength = 20;
@@ -29,14 +30,19 @@ export type ParsedTenantReadCredential = z.output<
 
 // Creating a tenant requires an explicit read mode (private is the hosted default,
 // chosen by the caller) and the owner's OIDC identity, which seeds the tenant's
-// admin trust. A strict object rejects unknown fields.
+// admin trust. A private cache may carry the read credential that authorises its
+// reads; without one a private cache fails closed. A strict object rejects unknown
+// fields.
 export const tenantCreateBodySchema = z.strictObject({
 	id: tenantIdSchema,
 	readMode: tenantReadModeSchema,
-	read: tenantReadCredentialSchema.optional(),
 	ownerIssuer: z.string().min(1),
 	ownerSubject: z.string().min(1),
-	ownerAudience: z.string().min(1)
+	ownerAudience: z.string().min(1),
+	read: tenantReadCredentialSchema.optional(),
+	// The storage quota in bytes; omitted means unlimited. Charged once per tenant
+	// per unique NAR hash, so it bounds the tenant's stored compressed bytes.
+	quotaBytes: z.number().int().nonnegative().optional()
 });
 export type ParsedTenantCreateBody = z.output<typeof tenantCreateBodySchema>;
 export type TenantCreateBody = z.input<typeof tenantCreateBodySchema>;

@@ -5,6 +5,7 @@ import {
 	bootstrap,
 	currentOrigin,
 	narBytes,
+	provisionDefaultTenant,
 	pushPath,
 	readFetch,
 	resetTestServer,
@@ -13,10 +14,13 @@ import {
 
 const readUser = 'alice';
 const readPassword = 'secret';
-const privateEnv = {
-	CUPBOARD_READ_USER: readUser,
-	CUPBOARD_READ_PASSWORD: readPassword
-};
+
+function makePrivate(): Promise<void> {
+	return provisionDefaultTenant({
+		readMode: 'private',
+		read: { user: readUser, password: readPassword }
+	});
+}
 
 function authorised(): RequestInit {
 	return {
@@ -45,23 +49,16 @@ describe('private-read mode', () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata);
+		await makePrivate();
 		const narinfoPath = `/${metadata.storePathHash}.narinfo`;
 		const narPath = `/nar/${metadata.narHash}.nar.zst`;
 
-		const unauthorised = await readFetch(narinfoPath, {}, privateEnv);
-		const narinfo = await readFetch(narinfoPath, authorised(), privateEnv);
-		const narUnauthorised = await readFetch(narPath, {}, privateEnv);
-		const nar = await readFetch(narPath, authorised(), privateEnv);
-		const cacheInfoUnauthorised = await readFetch(
-			'/nix-cache-info',
-			{},
-			privateEnv
-		);
-		const cacheInfo = await readFetch(
-			'/nix-cache-info',
-			authorised(),
-			privateEnv
-		);
+		const unauthorised = await readFetch(narinfoPath, {});
+		const narinfo = await readFetch(narinfoPath, authorised());
+		const narUnauthorised = await readFetch(narPath, {});
+		const nar = await readFetch(narPath, authorised());
+		const cacheInfoUnauthorised = await readFetch('/nix-cache-info', {});
+		const cacheInfo = await readFetch('/nix-cache-info', authorised());
 
 		expect({
 			unauthorisedStatus: unauthorised.status,
@@ -92,11 +89,11 @@ describe('private-read mode', () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata, 'builds');
+		await makePrivate();
 
 		const cacheInfo = await readFetch(
 			'/cache/builds/nix-cache-info',
-			authorised(),
-			privateEnv
+			authorised()
 		);
 
 		expect({
@@ -107,10 +104,11 @@ describe('private-read mode', () => {
 
 	it('leaves the public routes ungated in private mode', async () => {
 		await bootstrap();
+		await makePrivate();
 
-		const pubkey = await readFetch('/pubkey', {}, privateEnv);
-		const health = await readFetch('/_health', {}, privateEnv);
-		const version = await readFetch('/_version', {}, privateEnv);
+		const pubkey = await readFetch('/pubkey', {});
+		const health = await readFetch('/_health', {});
+		const version = await readFetch('/_version', {});
 
 		expect({
 			pubkey: pubkey.status,
@@ -147,11 +145,10 @@ describe('private-read mode', () => {
 			currentOrigin()
 		).toString();
 
-		await readFetch(
-			`/${privatePath.storePathHash}.narinfo`,
-			authorised(),
-			privateEnv
-		);
+		await makePrivate();
+		await readFetch(`/${privatePath.storePathHash}.narinfo`, authorised());
+
+		await provisionDefaultTenant();
 		await readFetch(`/${publicPath.storePathHash}.narinfo`);
 
 		expect({

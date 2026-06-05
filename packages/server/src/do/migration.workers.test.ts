@@ -77,7 +77,7 @@ describe('migrations', () => {
 	});
 
 	it('seeds the default cache registry row idempotently on init', async () => {
-		useTestServer('migration-default-cache');
+		await useTestServer('migration-default-cache');
 		await bootstrap();
 		await bootstrap();
 

@@ -94,7 +94,7 @@ describe('background verification', () => {
 	});
 
 	it('reconciles a dangling narinfo whose NAR object is gone, leaving the blob for the reaper', async () => {
-		useTestServer('verify-reconcile');
+		await useTestServer('verify-reconcile');
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -127,7 +127,7 @@ describe('background verification', () => {
 	});
 
 	it('advances the composite cursor across caches and wraps at the end', async () => {
-		useTestServer('verify-advance');
+		await useTestServer('verify-advance');
 		const token = await initialise();
 
 		for (const hash of ['a', 'b']) {
@@ -199,7 +199,7 @@ describe('background verification', () => {
 	});
 
 	it('reconciles dangling narinfos for one NAR across caches, retiring both edges', async () => {
-		useTestServer('verify-cross-cache');
+		await useTestServer('verify-cross-cache');
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 

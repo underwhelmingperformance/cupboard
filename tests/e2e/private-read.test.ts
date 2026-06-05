@@ -28,9 +28,9 @@ describe('Nix substitution from a private-read cache', () => {
 			'cupboard-e2e-private-',
 			async (directory) => {
 				const server = await CupboardTestServer.start(directory, {
-					bindings: {
-						CUPBOARD_READ_USER: readUser,
-						CUPBOARD_READ_PASSWORD: readPassword
+					provision: {
+						readMode: 'private',
+						read: { user: readUser, password: readPassword }
 					}
 				});
 

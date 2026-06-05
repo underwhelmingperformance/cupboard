@@ -7,7 +7,7 @@ import { Hono } from 'hono';
 
 import migrations from '../../drizzle/migrations.js';
 import * as schema from '../db/schema.ts';
-import { ZstdUnavailableError } from '../errors.ts';
+import { TenantNotConfiguredError, ZstdUnavailableError } from '../errors.ts';
 import { serverErrorResponse } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
@@ -64,14 +64,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		super(ctx, env);
 		this.context = new ServerContext(ctx, env);
 
-		this.authKeys = new AuthKeysService(this.context);
+		this.tenantIdentity = new TenantIdentityService(this.context);
+		this.authKeys = new AuthKeysService(this.context, this.tenantIdentity);
 		this.blobReaper = new BlobReaperService(this.context);
 		this.narInfoObjects = new NarInfoObjectsService(this.context);
 		this.uploadState = new UploadStateService(this.context);
 		this.deletionQueue = new DeletionQueueService(this.context, this.authKeys);
 		this.signingKeys = new SigningKeysService(this.context, this.authKeys);
 		this.stats = new StatsService(this.context, this.authKeys);
-		this.tenantIdentity = new TenantIdentityService(this.context);
 		this.oidcTrust = new OidcTrustService(
 			this.context,
 			this.authKeys,
@@ -150,6 +150,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async fetch(request: Request): Promise<Response> {
 		await this.initialise();
 
+		// An unconfigured Durable Object has no identity to mint, verify or advertise
+		// under, so it serves nothing rather than falling back to a default. This is
+		// input-gated: the control plane's `configure` RPC, which assigns the
+		// identity, is a method and so is not gated here.
+		if (this.tenantIdentity.current() === undefined) {
+			return serverErrorResponse(
+				Promise.reject(new TenantNotConfiguredError())
+			);
+		}
+
 		return this.app.fetch(request, this.env);
 	}
 
@@ -219,6 +229,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.app.on(['GET', 'HEAD'], '/.well-known/jwks.json', (context) =>
 			serverErrorResponse(this.authKeys.handleJwks(context.req.raw))
+		);
+		this.app.on(
+			['GET', 'HEAD'],
+			'/.well-known/oauth-authorization-server',
+			(context) =>
+				serverErrorResponse(
+					this.authKeys.handleAuthorizationServerMetadata(context.req.raw)
+				)
 		);
 		this.app.get('/keys', (context) =>
 			serverErrorResponse(this.signingKeys.handleKeyList(context.req.raw))

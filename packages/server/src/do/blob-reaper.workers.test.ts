@@ -29,7 +29,7 @@ describe('blob reaper', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(deleteTestBase);
-		resetTestServer();
+		await resetTestServer();
 
 		await clearBlobStorage();
 	});

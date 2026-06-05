@@ -3,8 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	authoriseRead,
 	hashReadPassword,
-	type ReadCredential,
-	readCredential
+	type ReadVerifier
 } from './read-auth.ts';
 
 function basic(user: string, password: string): string {
@@ -18,44 +17,17 @@ function request(authorization?: string): Request {
 	);
 }
 
-describe('readCredential', () => {
-	it.each([
-		{
-			name: 'both set enables private mode',
-			env: { CUPBOARD_READ_USER: 'alice', CUPBOARD_READ_PASSWORD: 'secret' },
-			expected: { user: 'alice', password: 'secret' }
-		},
-		{
-			name: 'only the user set stays public',
-			env: { CUPBOARD_READ_USER: 'alice', CUPBOARD_READ_PASSWORD: '' },
-			expected: undefined
-		},
-		{
-			name: 'only the password set stays public',
-			env: { CUPBOARD_READ_USER: '', CUPBOARD_READ_PASSWORD: 'secret' },
-			expected: undefined
-		},
-		{
-			name: 'neither set stays public',
-			env: { CUPBOARD_READ_USER: '', CUPBOARD_READ_PASSWORD: '' },
-			expected: undefined
-		}
-	])('$name', ({ env, expected }) => {
-		expect(readCredential(env)).toStrictEqual(expected);
-	});
-});
+async function verifierFor(password: string): Promise<ReadVerifier> {
+	const passwordSalt = 'test-salt';
 
-describe('hashReadPassword', () => {
-	it('frames the salt and password before hashing', async () => {
-		expect(await hashReadPassword('secret', 'salt')).toBe(
-			'a4dc7bedcab51fbe861f6d08e6e609c57138a98980ec526b3b8d9b571b6dbe19'
-		);
-	});
-});
+	return {
+		user: 'alice',
+		passwordHash: await hashReadPassword(password, passwordSalt),
+		passwordSalt
+	};
+}
 
 describe('authoriseRead', () => {
-	const credential: ReadCredential = { user: 'alice', password: 'p:a:ss' };
-
 	it.each([
 		{
 			name: 'matching credentials, password split on the first colon',
@@ -82,11 +54,17 @@ describe('authoriseRead', () => {
 			authorization: 'Basic !!!not-base64',
 			expected: false
 		}
-	])('rejects/accepts $name', ({ authorization, expected }) => {
-		expect(authoriseRead(request(authorization), credential)).toBe(expected);
+	])('rejects/accepts $name', async ({ authorization, expected }) => {
+		const verifier = await verifierFor('p:a:ss');
+
+		expect(await authoriseRead(request(authorization), verifier)).toBe(
+			expected
+		);
 	});
 
-	it('rejects a request with no Authorization header', () => {
-		expect(authoriseRead(request(), credential)).toBe(false);
+	it('rejects a request with no Authorization header', async () => {
+		const verifier = await verifierFor('p:a:ss');
+
+		expect(await authoriseRead(request(), verifier)).toBe(false);
 	});
 });

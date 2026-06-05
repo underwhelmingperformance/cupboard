@@ -20,7 +20,7 @@ describe('narinfo deletion queue', () => {
 	beforeEach(resetTestServer);
 
 	it('flushes independent pending deletions for one hash across caches', async () => {
-		useTestServer('narinfo-deletion-caches');
+		await useTestServer('narinfo-deletion-caches');
 		const token = await initialise();
 		const hash = '0'.repeat(32);
 		const narHash = 'sha256:nar';

@@ -55,12 +55,44 @@ function toSummary(row: TenantRow): ParsedTenantSummary {
 	};
 }
 
-function sameConfig(row: TenantRow, body: ParsedTenantCreateBody): boolean {
+async function sameConfig(
+	row: TenantRow,
+	body: ParsedTenantCreateBody
+): Promise<boolean> {
+	const readMatches = await sameReadVerifier(row, body.read);
+
 	return (
 		row.readMode === body.readMode &&
 		row.ownerIssuer === body.ownerIssuer &&
 		row.ownerSubject === body.ownerSubject &&
-		row.ownerAudience === body.ownerAudience
+		row.ownerAudience === body.ownerAudience &&
+		readMatches
+	);
+}
+
+async function sameReadVerifier(
+	row: TenantRow,
+	read: ParsedTenantCreateBody['read']
+): Promise<boolean> {
+	if (read === undefined) {
+		return (
+			row.readUser === null &&
+			row.readPasswordHash === null &&
+			row.readPasswordSalt === null
+		);
+	}
+
+	if (
+		row.readUser !== read.user ||
+		row.readPasswordHash === null ||
+		row.readPasswordSalt === null
+	) {
+		return false;
+	}
+
+	return (
+		(await hashReadPassword(read.password, row.readPasswordSalt)) ===
+		row.readPasswordHash
 	);
 }
 
@@ -106,7 +138,7 @@ export async function ensureTenant(
 		.where(eq(d1Schema.tenant.id, body.id))
 		.get();
 
-	if (existing === undefined || !sameConfig(existing, body)) {
+	if (existing === undefined || !(await sameConfig(existing, body))) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
 

@@ -52,7 +52,7 @@ describe('cache registry admin', () => {
 	beforeEach(resetTestServer);
 
 	it('lists registered caches with their priority and store-path count', async () => {
-		useTestServer('cache-admin-list');
+		await useTestServer('cache-admin-list');
 		const init = await bootstrap();
 		await putCache(init.token, 'builds', 30);
 		await pushPath(
@@ -70,7 +70,7 @@ describe('cache registry admin', () => {
 	});
 
 	it('refuses to delete a non-empty cache without force, then force-tears it down', async () => {
-		useTestServer('cache-admin-delete');
+		await useTestServer('cache-admin-delete');
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata, 'builds');
@@ -107,7 +107,7 @@ describe('cache registry admin', () => {
 	});
 
 	it('requires admin scope for the registry routes', async () => {
-		useTestServer('cache-admin-scope');
+		await useTestServer('cache-admin-scope');
 		await bootstrap();
 		const writeToken = await mintServerSignedToken('write');
 
@@ -133,7 +133,7 @@ describe('cache registry admin', () => {
 	});
 
 	it('clears in-flight uploads negotiated under a cache it tears down', async () => {
-		useTestServer('cache-admin-teardown-pending');
+		await useTestServer('cache-admin-teardown-pending');
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const decision = singleDecision(

@@ -166,23 +166,18 @@ export class OidcTrustService {
 	}
 
 	private ownerConfig(): OwnerConfig | undefined {
-		// The configured identity is the owner source for a provisioned tenant. An
-		// unconfigured Durable Object falls back to the deploy env owner config; this
-		// transitional fallback is removed once routing provisions every tenant.
+		// The assigned identity is the sole owner source: an unconfigured Durable
+		// Object has no owner rule to seed (and 503s before it serves anyway).
 		const identity = this.tenantIdentity.current();
 
-		if (identity !== undefined) {
-			return this.validatedOwner(
-				identity.ownerIssuer,
-				identity.ownerSubject,
-				identity.ownerAudience
-			);
+		if (identity === undefined) {
+			return undefined;
 		}
 
 		return this.validatedOwner(
-			this.context.env.CUPBOARD_OWNER_ISSUER,
-			this.context.env.CUPBOARD_OWNER_SUBJECT,
-			this.context.env.CUPBOARD_OWNER_AUDIENCE
+			identity.ownerIssuer,
+			identity.ownerSubject,
+			identity.ownerAudience
 		);
 	}
 

@@ -4,10 +4,7 @@ import {
 	type AuthKeyRotateResponse,
 	type AuthKeySummary
 } from '@cupboard/protocol/keys';
-import {
-	defaultAuthAudience,
-	defaultAuthIssuer
-} from '@cupboard/protocol/oidc-issuer';
+import { tokenExchangeGrantType } from '@cupboard/protocol/oidc';
 import { eq, sql } from 'drizzle-orm';
 
 import {
@@ -24,15 +21,23 @@ import * as schema from '../db/schema.ts';
 import {
 	InsufficientScopeError,
 	LastAuthKeyError,
+	TenantNotConfiguredError,
 	UnauthenticatedError
 } from '../errors.ts';
 
 import { type AuthKey, type ServerContext } from './context.ts';
+import {
+	type TenantIdentity,
+	type TenantIdentityService
+} from './tenant-identity-service.ts';
 
 export class AuthKeysService {
 	private authKeysPromise: Promise<readonly AuthKey[]> | undefined;
 
-	constructor(private readonly context: ServerContext) {}
+	constructor(
+		private readonly context: ServerContext,
+		private readonly tenantIdentity: TenantIdentityService
+	) {}
 
 	async handleJwks(_request: Request): Promise<Response> {
 		const keys = await this.authPublicJwks();
@@ -41,6 +46,27 @@ export class AuthKeysService {
 		return Response.json(
 			{ keys },
 			{ headers: { 'cache-control': 'no-cache' } }
+		);
+	}
+
+	// RFC 8414 authorization-server metadata. Served from the Durable Object (not the
+	// edge) so an unconfigured tenant 503s through the fetch guard rather than
+	// advertising an identity it has not been assigned. The endpoints are built from
+	// the request's own path-based URL, which provisioning stamps as the issuer, so
+	// the advertised issuer equals the `iss` of a token this tenant mints.
+	handleAuthorizationServerMetadata(request: Request): Promise<Response> {
+		const { origin } = new URL(request.url);
+		const base = `${origin}/t/${this.context.requireTenant()}`;
+
+		return Promise.resolve(
+			Response.json({
+				issuer: base,
+				token_endpoint: `${base}/token`,
+				jwks_uri: `${base}/.well-known/jwks.json`,
+				grant_types_supported: [tokenExchangeGrantType],
+				scopes_supported: ['write', 'admin'],
+				token_endpoint_auth_methods_supported: ['none']
+			})
 		);
 	}
 
@@ -69,11 +95,24 @@ export class AuthKeysService {
 	}
 
 	authIssuer(): string {
-		return this.context.env.CUPBOARD_AUTH_ISSUER || defaultAuthIssuer;
+		return this.requireIdentity().issuer;
 	}
 
 	authAudience(): string {
-		return this.context.env.CUPBOARD_AUTH_AUDIENCE || defaultAuthAudience;
+		return this.requireIdentity().audience;
+	}
+
+	// Identity is the sole source for the issuer and audience the tenant mints and
+	// verifies under. An unconfigured Durable Object has no identity and cannot mint
+	// or verify, so it fails as not configured rather than falling back to a default.
+	private requireIdentity(): TenantIdentity {
+		const identity = this.tenantIdentity.current();
+
+		if (identity === undefined) {
+			throw new TenantNotConfiguredError();
+		}
+
+		return identity;
 	}
 
 	private authKeys(): Promise<readonly AuthKey[]> {

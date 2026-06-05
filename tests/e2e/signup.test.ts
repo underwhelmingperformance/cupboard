@@ -22,7 +22,11 @@ function postForm(url: URL, form: Record<string, string>): Promise<Response> {
 describe('control plane signup bootstrap', () => {
 	it('claims global admin, then mints an admin token and provisions a tenant', () =>
 		withTemporaryDirectory('cupboard-e2e-signup-', async (directory) => {
-			const server = await CupboardTestServer.start(directory);
+			// This test drives the fresh-deployment bootstrap itself, so the harness
+			// must not pre-provision a tenant or seed the control trust policy.
+			const server = await CupboardTestServer.start(directory, {
+				provision: false
+			});
 
 			try {
 				const signup = await postForm(new URL('/signup', server.url), {

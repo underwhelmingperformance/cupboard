@@ -29,7 +29,7 @@ describe('durable object state', () => {
 	beforeEach(resetTestServer);
 
 	it('persists the signing key set and committed metadata in their final shapes', async () => {
-		useTestServer('durability-rows');
+		await useTestServer('durability-rows');
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -82,7 +82,7 @@ describe('durable object state', () => {
 	});
 
 	it('serves an identical pubkey and a working token after re-instantiation', async () => {
-		useTestServer('durability-reads');
+		await useTestServer('durability-reads');
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 

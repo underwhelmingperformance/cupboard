@@ -79,7 +79,7 @@ describe('upload flow', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
-		resetTestServer();
+		await resetTestServer();
 
 		await clearBlobStorage();
 	});
@@ -1478,7 +1478,7 @@ describe('upload flow', () => {
 	it('requires R2 presign configuration for upload decisions', async () => {
 		const previousSecret = env.R2_SECRET_ACCESS_KEY;
 		Object.assign(env, { R2_SECRET_ACCESS_KEY: '' });
-		useTestServer('r2-config');
+		await useTestServer('r2-config');
 
 		try {
 			const token = await initialise();

@@ -70,7 +70,7 @@ describe('named caches', () => {
 	beforeEach(resetTestServer);
 
 	it('materialises one path in two caches with a single shared blob', async () => {
-		useTestServer('named-cache-share');
+		await useTestServer('named-cache-share');
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -140,7 +140,7 @@ describe('named caches', () => {
 	});
 
 	it('collects each cache independently while a shared NAR survives', async () => {
-		useTestServer('named-cache-gc');
+		await useTestServer('named-cache-gc');
 		const init = await bootstrap();
 		const kept = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -190,7 +190,7 @@ describe('named caches', () => {
 	});
 
 	it('mirrors the per-route scope under a cache prefix', async () => {
-		useTestServer('named-cache-scope');
+		await useTestServer('named-cache-scope');
 		await bootstrap();
 		const writeToken = await mintServerSignedToken('write', 'ci', ['channel']);
 
@@ -226,7 +226,7 @@ describe('named caches', () => {
 	});
 
 	it('rejects an invalid cache name before authorising', async () => {
-		useTestServer('named-cache-invalid');
+		await useTestServer('named-cache-invalid');
 
 		// The name is validated in the routing layer ahead of the scope check, so
 		// a malformed cache name is a 400 regardless of the bearer token.

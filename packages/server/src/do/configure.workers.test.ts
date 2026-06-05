@@ -30,13 +30,14 @@ describe('configure RPC', () => {
 	beforeEach(resetTestServer);
 
 	it('stores the identity and seeds the owner rule from it', async () => {
-		// Initialise so the schema exists, then apply the identity.
+		// Initialise so the schema exists, then apply the identity. The version is
+		// above the one the harness already configured the default tenant with.
 		await fetchPath('/.well-known/jwks.json');
 
 		const result = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
-				await instance.configure(identity(1));
+				await instance.configure(identity(2));
 
 				const stored = drizzle(state.storage, { schema: { tenantIdentity } })
 					.select()
@@ -59,7 +60,7 @@ describe('configure RPC', () => {
 
 		expect(result).toStrictEqual({
 			tenant: 'acme',
-			configVersion: 1,
+			configVersion: 2,
 			ownerIssuer: 'https://idp.test',
 			ownerClaims: JSON.stringify({ sub: 'owner' })
 		});
@@ -71,8 +72,8 @@ describe('configure RPC', () => {
 		const version = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				await instance.configure(identity(3));
 				await instance.configure(identity(2));
-				await instance.configure(identity(1));
 
 				return drizzle(state.storage, { schema: { tenantIdentity } })
 					.select()
@@ -81,6 +82,6 @@ describe('configure RPC', () => {
 			}
 		);
 
-		expect(version).toBe(2);
+		expect(version).toBe(3);
 	});
 });

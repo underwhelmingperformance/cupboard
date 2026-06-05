@@ -1,9 +1,8 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
-import { tokenExchangeGrantType } from '@cupboard/protocol/oidc';
-import { defaultAuthIssuer } from '@cupboard/protocol/oidc-issuer';
 import { StatusCodes } from 'http-status-codes';
 
+import { type ManifestEntry } from '../control/tenant-manifest.ts';
 import {
 	isNotModified,
 	narInfoObjectKey,
@@ -17,8 +16,7 @@ import { tenantServer } from '../routing/durable-object.ts';
 
 import {
 	authoriseRead,
-	type ReadCredential,
-	readCredential,
+	type ReadVerifier,
 	unauthorisedResponse
 } from './read-auth.ts';
 
@@ -30,28 +28,38 @@ export async function handleRead(
 	request: Request,
 	env: Env,
 	ctx: ExecutionContext,
-	tenant: string
+	tenant: string,
+	entry: ManifestEntry
 ): Promise<Response | undefined> {
 	if (request.method !== 'GET' && request.method !== 'HEAD') {
 		return undefined;
 	}
 
-	const { pathname } = new URL(request.url);
-
-	// A configured read credential turns the cache private: narinfo, NAR and
-	// nix-cache-info require Basic auth and never touch the shared edge cache.
-	const credential = readCredential(env);
-
-	// OAuth discovery (RFC 8414) for this tenant, built at the edge. The issuer and
-	// endpoints carry the tenant prefix so a client sees one consistent identity.
-	if (pathname === '/.well-known/oauth-authorization-server') {
-		return authorizationServerMetadata(request, env, tenant);
+	// Suspension and offboarding stop reads, bounded by the manifest TTL: once the
+	// republished manifest marks the tenant non-active, the read path serves nothing
+	// for it. Writes stop at once through the authoritative D1 status read; reads stop
+	// as the manifest entry propagates, the eventual half of the lifecycle contract.
+	if (entry.status !== 'active') {
+		return notFound();
 	}
 
-	// This tenant's auth public keys, served uncached from its Durable Object so a
-	// rotation is visible immediately. The DO owns the key set, so the read proxies
-	// to it.
-	if (pathname === '/.well-known/jwks.json') {
+	const { pathname } = new URL(request.url);
+
+	// A private cache turns narinfo, NAR and nix-cache-info into Basic-auth reads
+	// that never touch the shared edge cache. The verifier comes from the admission
+	// manifest, so the read path consults no D1 row or Durable Object.
+	const isPrivate = entry.readMode === 'private';
+	const verifier = entry.readVerifier;
+
+	// OAuth discovery (RFC 8414) and the auth public keys both proxy to the tenant's
+	// Durable Object, so an admitted but unconfigured tenant returns 503 here rather
+	// than advertising or serving an identity it has not been assigned. The object
+	// builds the metadata from its own request, so the issuer stays the tenant's
+	// path-based URL.
+	if (
+		pathname === '/.well-known/oauth-authorization-server' ||
+		pathname === '/.well-known/jwks.json'
+	) {
 		return tenantServer(env, tenant).fetch(request);
 	}
 
@@ -73,17 +81,12 @@ export async function handleRead(
 			return notFound();
 		}
 
+		const denied = await guardRead(request, isPrivate, verifier);
+
 		// NAR blobs are content-addressed and shared across caches.
 		return (
-			guardRead(request, credential) ??
-			serveR2(
-				request,
-				env,
-				ctx,
-				narObjectKey(narHash),
-				narHeaders,
-				credential === undefined
-			)
+			denied ??
+			serveR2(request, env, ctx, narObjectKey(narHash), narHeaders, !isPrivate)
 		);
 	}
 
@@ -94,24 +97,25 @@ export async function handleRead(
 			return notFound();
 		}
 
+		const denied = await guardRead(request, isPrivate, verifier);
+
 		return (
-			guardRead(request, credential) ??
+			denied ??
 			serveR2(
 				request,
 				env,
 				ctx,
 				narInfoObjectKey(storePathHash, cache),
 				narInfoHeaders,
-				credential === undefined
+				!isPrivate
 			)
 		);
 	}
 
 	if (rest === '/nix-cache-info') {
-		return (
-			guardRead(request, credential) ??
-			cacheInfoResponse(request, env, tenant, cache, credential)
-		);
+		const denied = await guardRead(request, isPrivate, verifier);
+
+		return denied ?? cacheInfoResponse(request, env, tenant, cache, isPrivate);
 	}
 
 	if (rest === '/pubkey') {
@@ -124,29 +128,6 @@ export async function handleRead(
 	}
 
 	return undefined;
-}
-
-function authorizationServerMetadata(
-	request: Request,
-	env: Env,
-	tenant: string
-): Response {
-	const { origin } = new URL(request.url);
-	const base = `${origin}/t/${tenant}`;
-	// Typegen narrows the binding to its configured literal; a deployment may
-	// still set it empty, so widen to `string` and fall back to the same default
-	// the Durable Object stamps into its tokens, keeping the advertised issuer and
-	// the token `iss` identical.
-	const configuredIssuer: string = env.CUPBOARD_AUTH_ISSUER;
-
-	return Response.json({
-		issuer: configuredIssuer || defaultAuthIssuer,
-		token_endpoint: `${base}/token`,
-		jwks_uri: `${base}/.well-known/jwks.json`,
-		grant_types_supported: [tokenExchangeGrantType],
-		scopes_supported: ['write', 'admin'],
-		token_endpoint_auth_methods_supported: ['none']
-	});
 }
 
 // Splits an optional `/cache/<name>/` prefix off the path. Returns the default
@@ -182,7 +163,7 @@ async function cacheInfoResponse(
 	env: Env,
 	tenant: string,
 	cache: string,
-	credential: ReadCredential | undefined
+	isPrivate: boolean
 ): Promise<Response> {
 	// The default cache's info is rendered at the edge; a named cache's priority
 	// lives in the registry, so the DO renders its info.
@@ -193,7 +174,7 @@ async function cacheInfoResponse(
 				})
 			: await tenantServer(env, tenant).fetch(request);
 
-	if (credential === undefined) {
+	if (!isPrivate) {
 		return response;
 	}
 
@@ -205,17 +186,19 @@ async function cacheInfoResponse(
 	return new Response(response.body, { status: response.status, headers });
 }
 
-// Returns a 401 when private-read mode is on and the request is unauthorised,
-// or `undefined` to let the read proceed (public, or authorised).
-function guardRead(
+// Returns a 401 when the cache is private and the request is unauthorised, or
+// `undefined` to let the read proceed (public, or authorised). A private cache with
+// no verifier fails closed: every read is rejected until a credential is set.
+async function guardRead(
 	request: Request,
-	credential: ReadCredential | undefined
-): Response | undefined {
-	if (credential === undefined) {
+	isPrivate: boolean,
+	verifier: ReadVerifier | undefined
+): Promise<Response | undefined> {
+	if (!isPrivate) {
 		return undefined;
 	}
 
-	if (authoriseRead(request, credential)) {
+	if (verifier !== undefined && (await authoriseRead(request, verifier))) {
 		return undefined;
 	}
 

@@ -1,10 +1,20 @@
+import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+
 import { handleControl } from '../control/control-plane.ts';
+import * as d1Schema from '../db/d1-schema.ts';
+import {
+	TenantWritesStoppedError,
+	TenantWritesUnavailableError
+} from '../errors.ts';
+import { serverErrorResponse } from '../http/error-response.ts';
 import { handleRead } from '../read/read.ts';
 
+import { admitTenant } from './admission.ts';
 import { handleDeployment } from './deployment.ts';
 import { cupboardServer, tenantServer } from './durable-object.ts';
 import { runScheduledMaintenance } from './scheduled.ts';
-import { parseTenantPath } from './tenant-routing.ts';
+import { defaultTenant, parseTenantPath } from './tenant-routing.ts';
 
 export default {
 	async fetch(request, env, ctx) {
@@ -23,25 +33,29 @@ export default {
 		if (route === undefined) {
 			const control = await handleControl(request, env);
 
-			return (
-				control ??
-				new Response('Not found\n', {
-					status: 404,
-					headers: { 'content-type': 'text/plain; charset=utf-8' }
-				})
-			);
+			return control ?? notFound();
+		}
+
+		// Admission resolves the slug against the published manifest, reading only
+		// KV. A slug absent from the manifest is rejected here, before any Durable
+		// Object is instantiated, so varying the slug cannot spin up unbounded
+		// unprovisioned objects.
+		const entry = await admitTenant(env.TENANT_CACHE, route.tenant);
+
+		if (entry === undefined) {
+			return notFound();
 		}
 
 		// Strip the `/t/<tenant>/` prefix and serve the tenant-relative request: a
 		// read from R2 and the edge, or otherwise the tenant's Durable Object.
 		const inner = tenantRequest(request, url, route.rest);
-		const read = await handleRead(inner, env, ctx, route.tenant);
+		const read = await handleRead(inner, env, ctx, route.tenant, entry);
 
 		if (read !== undefined) {
 			return read;
 		}
 
-		return tenantServer(env, route.tenant).fetch(inner);
+		return dispatchTenant(inner, env, route.tenant);
 	},
 
 	async scheduled(_controller, env) {
@@ -55,6 +69,70 @@ export default {
 		);
 	}
 } satisfies ExportedHandler<Env>;
+
+// Dispatches a non-read tenant request to its Durable Object. A write (anything but
+// a read or the auth-plane token exchange) is gated first: writes for a non-default
+// tenant are refused until step 6 plumbs tenant-scoped storage, and writes for a
+// suspended or offboarding tenant are stopped on an authoritative D1 status read.
+async function dispatchTenant(
+	inner: Request,
+	env: Env,
+	tenant: string
+): Promise<Response> {
+	if (!isTenantWrite(inner)) {
+		return tenantServer(env, tenant).fetch(inner);
+	}
+
+	if (tenant !== defaultTenant) {
+		return serverErrorResponse(
+			Promise.reject(new TenantWritesUnavailableError(tenant))
+		);
+	}
+
+	const status = await tenantStatus(env, tenant);
+
+	if (status !== 'active') {
+		return serverErrorResponse(
+			Promise.reject(new TenantWritesStoppedError(tenant, status ?? 'unknown'))
+		);
+	}
+
+	return tenantServer(env, tenant).fetch(inner);
+}
+
+// Whether a tenant request mutates state. Reads never do; the token exchange is an
+// auth-plane request available to any configured tenant, so it is not a write.
+function isTenantWrite(inner: Request): boolean {
+	if (inner.method === 'GET' || inner.method === 'HEAD') {
+		return false;
+	}
+
+	return new URL(inner.url).pathname !== '/token';
+}
+
+// The authoritative tenant status, read from D1 rather than the KV manifest, so a
+// write stop takes effect before the manifest TTL catches up. Returns undefined if
+// the row is gone, which the caller treats as not-active and fails closed.
+async function tenantStatus(
+	env: Env,
+	tenant: string
+): Promise<string | undefined> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const row = await database
+		.select({ status: d1Schema.tenant.status })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, tenant))
+		.get();
+
+	return row?.status;
+}
+
+function notFound(): Response {
+	return new Response('Not found\n', {
+		status: 404,
+		headers: { 'content-type': 'text/plain; charset=utf-8' }
+	});
+}
 
 function tenantRequest(request: Request, url: URL, rest: string): Request {
 	const inner = new URL(url);

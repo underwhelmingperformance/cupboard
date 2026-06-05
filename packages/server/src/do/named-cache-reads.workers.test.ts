@@ -8,17 +8,13 @@ import {
 	bootstrap,
 	initialiseViaWorker,
 	narBytes,
+	provisionDefaultTenant,
 	pushPath,
 	readFetch,
 	resetTestServer,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
-
-const privateEnv = {
-	CUPBOARD_READ_USER: 'alice',
-	CUPBOARD_READ_PASSWORD: 'secret'
-};
 
 function authorised(): RequestInit {
 	return { headers: { authorization: `Basic ${btoa('alice:secret')}` } };
@@ -69,7 +65,7 @@ describe('named cache reads', () => {
 	});
 
 	it('renders a named cache nix-cache-info from its registry priority', async () => {
-		useTestServer('named-cache-info');
+		await useTestServer('named-cache-info');
 		const token = await initialiseViaWorker();
 		const put = await authorisedWorkerFetch('/caches/builds', token, {
 			body: JSON.stringify({ priority: 30 }),
@@ -94,14 +90,14 @@ describe('named cache reads', () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata, 'builds');
+		await provisionDefaultTenant({
+			readMode: 'private',
+			read: { user: 'alice', password: 'secret' }
+		});
 		const narinfoPath = `/cache/builds/${metadata.storePathHash}.narinfo`;
 
-		const unauthorised = await readFetch(narinfoPath, {}, privateEnv);
-		const authorisedResponse = await readFetch(
-			narinfoPath,
-			authorised(),
-			privateEnv
-		);
+		const unauthorised = await readFetch(narinfoPath, {});
+		const authorisedResponse = await readFetch(narinfoPath, authorised());
 
 		expect({
 			unauthorised: unauthorised.status,

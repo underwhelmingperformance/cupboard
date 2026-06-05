@@ -32,6 +32,17 @@ export const ownerAudience = 'cupboard-owner-client';
 export const signupAudience = 'cupboard-control-client';
 export const signupSecret = 'e2e-signup-secret';
 
+// The external subject the harness presents to provision the default tenant: it
+// stands in for the operator who would do this through the control plane.
+const harnessAdminSubject = 'harness-admin';
+
+// How the harness provisions the default tenant: its read mode and, for a private
+// cache, the read credential its reads require.
+export interface TenantProvisionSpec {
+	readonly readMode: 'public' | 'private';
+	readonly read?: { readonly user: string; readonly password: string };
+}
+
 export const r2Credentials = {
 	accountId: 'test-account-id',
 	accessKeyId: 'test-access-key-id',
@@ -77,7 +88,10 @@ export class CupboardTestServer {
 
 	static async start(
 		directory: string,
-		options: { readonly bindings?: Readonly<Record<string, string>> } = {}
+		options: {
+			readonly bindings?: Readonly<Record<string, string>>;
+			readonly provision?: false | TenantProvisionSpec;
+		} = {}
 	): Promise<CupboardTestServer> {
 		const bundle = await bundleWorker(directory);
 		const issuer = await StubOidcIssuer.start();
@@ -104,8 +118,6 @@ export class CupboardTestServer {
 			CUPBOARD_SIGNUP_ISSUER: issuer.issuer,
 			CUPBOARD_SIGNUP_AUDIENCE: signupAudience,
 			CUPBOARD_SIGNUP_SECRET: signupSecret,
-			CUPBOARD_READ_USER: '',
-			CUPBOARD_READ_PASSWORD: '',
 			...options.bindings
 		};
 		const worker = new Miniflare({
@@ -152,12 +164,98 @@ export class CupboardTestServer {
 			await worker.getD1Database('CUPBOARD_DB', 'cupboard')
 		);
 		const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
-		const server = createServer((request, response) => {
+		const httpServer = createServer((request, response) => {
 			void forwardToWorker(worker, request, response);
 		});
-		const url = await listen(server);
+		const url = await listen(httpServer);
+		const instance = new CupboardTestServer(
+			url,
+			issuer,
+			worker,
+			bucket,
+			httpServer
+		);
 
-		return new CupboardTestServer(url, issuer, worker, bucket, server);
+		// Mirror a deployment: the default tenant is provisioned through the control
+		// plane before it can serve. A test that exercises a fresh bootstrap (or only
+		// the control surface) opts out with `provision: false`.
+		if (options.provision !== false) {
+			await instance.provisionDefaultTenant(
+				options.provision ?? { readMode: 'public' }
+			);
+		}
+
+		return instance;
+	}
+
+	/**
+	 * Provisions the default tenant the way an operator would: it seeds the control
+	 * trust policy, mints a control admin token, and creates the tenant through the
+	 * control API, which configures its Durable Object and publishes the admission
+	 * manifest. After this the default tenant serves and accepts writes.
+	 */
+	async provisionDefaultTenant(spec: TenantProvisionSpec): Promise<void> {
+		await this.seedControlTrust({
+			issuer: this.issuer.issuer,
+			audience: signupAudience,
+			claims: { sub: harnessAdminSubject }
+		});
+
+		const adminToken = await this.exchangeControlAdminToken();
+		const body = {
+			id: defaultTenant,
+			readMode: spec.readMode,
+			ownerIssuer: this.issuer.issuer,
+			ownerSubject,
+			ownerAudience,
+			...(spec.read === undefined ? {} : { read: spec.read })
+		};
+		const response = await fetch(new URL('/control/tenants', this.url), {
+			method: 'POST',
+			headers: {
+				'content-type': 'application/json',
+				authorization: `Bearer ${adminToken}`
+			},
+			body: JSON.stringify(body)
+		});
+
+		if (!response.ok) {
+			throw new TenantProvisionFailedError(
+				response.status,
+				await response.text()
+			);
+		}
+	}
+
+	// Mints a control admin token at the bare-host `/token`, the control issuer,
+	// exchanging the harness admin's external subject token.
+	private async exchangeControlAdminToken(): Promise<string> {
+		const subjectToken = this.issuer.sign({
+			aud: signupAudience,
+			sub: harnessAdminSubject
+		});
+		const response = await fetch(new URL('/token', this.url), {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: new URLSearchParams({
+				grant_type: tokenExchangeGrantType,
+				subject_token: subjectToken,
+				subject_token_type: subjectTokenTypeIdToken
+			}).toString()
+		});
+
+		if (!response.ok) {
+			throw new TokenExchangeFailedError(
+				response.status,
+				await response.text()
+			);
+		}
+
+		const payload = (await response.json()) as {
+			readonly access_token: string;
+		};
+
+		return payload.access_token;
 	}
 
 	/**
@@ -250,6 +348,16 @@ export class TokenExchangeFailedError extends Error {
 	) {
 		super(`Token exchange failed with ${String(status)}: ${body}`);
 		this.name = 'TokenExchangeFailedError';
+	}
+}
+
+export class TenantProvisionFailedError extends Error {
+	constructor(
+		public readonly status: number,
+		public readonly body: string
+	) {
+		super(`Tenant provisioning failed with ${String(status)}: ${body}`);
+		this.name = 'TenantProvisionFailedError';
 	}
 }
 

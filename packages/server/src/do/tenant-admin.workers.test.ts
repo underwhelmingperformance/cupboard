@@ -81,7 +81,9 @@ describe('control plane tenant administration', () => {
 		}).toStrictEqual({
 			createStatus: StatusCodes.OK,
 			created: { id: 'acme', status: 'active', readMode: 'private' },
-			listedIds: ['acme'],
+			// The harness provisions the default `v1` tenant, so the list carries it
+			// alongside the one this test creates; `listTenants` orders by slug.
+			listedIds: ['acme', 'v1'],
 			suspended: { id: 'acme', status: 'suspended' },
 			offboarded: { id: 'acme', status: 'offboarding' }
 		});

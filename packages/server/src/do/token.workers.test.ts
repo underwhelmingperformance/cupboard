@@ -199,19 +199,21 @@ describe('owner rule seeding', () => {
 		});
 	});
 
-	it('removes the owner rule when owner config is cleared on redeploy', async () => {
+	it('removes the owner rule when reconfigured with no owner', async () => {
 		await fetchPath('/.well-known/jwks.json');
 
 		const remaining = await runInDurableObject(
 			currentServer(),
-			(instance, state) => {
-				instance.context.env = {
-					...instance.context.env,
-					CUPBOARD_OWNER_ISSUER: '',
-					CUPBOARD_OWNER_SUBJECT: '',
-					CUPBOARD_OWNER_AUDIENCE: ''
-				};
-				instance.seedOwnerRule();
+			async (instance, state) => {
+				await instance.configure({
+					tenant: 'v1',
+					issuer: 'cupboard',
+					audience: 'cupboard',
+					ownerIssuer: '',
+					ownerSubject: '',
+					ownerAudience: '',
+					configVersion: 2
+				});
 
 				return drizzle(state.storage, { schema: { oidcTrust } })
 					.select()
@@ -223,25 +225,29 @@ describe('owner rule seeding', () => {
 		expect(remaining).toStrictEqual([]);
 	});
 
-	it('refuses to seed when the owner issuer is malformed', async () => {
-		// Initialise the Durable Object so its schema (which owner-rule seeding now
-		// consults for a configured identity) is in place before seeding.
+	it('refuses to configure with a malformed owner issuer', async () => {
 		await fetchPath('/.well-known/jwks.json');
 
-		const outcome = await runInDurableObject(currentServer(), (instance) => {
-			instance.context.env = {
-				...instance.context.env,
-				CUPBOARD_OWNER_ISSUER: 'not-a-url'
-			};
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				try {
+					await instance.configure({
+						tenant: 'v1',
+						issuer: 'cupboard',
+						audience: 'cupboard',
+						ownerIssuer: 'not-a-url',
+						ownerSubject: 'owner',
+						ownerAudience: 'aud',
+						configVersion: 2
+					});
 
-			try {
-				instance.seedOwnerRule();
-
-				return 'did not throw';
-			} catch (error) {
-				return error instanceof Error ? error.name : 'unknown';
+					return 'did not throw';
+				} catch (error) {
+					return error instanceof Error ? error.name : 'unknown';
+				}
 			}
-		});
+		);
 
 		expect(outcome).toBe('OwnerConfigurationInvalidError');
 	});
@@ -288,9 +294,9 @@ describe('auth discovery endpoints', () => {
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			body: {
-				// Mirrors CUPBOARD_AUTH_ISSUER (set in wrangler.toml), the issuer
-				// cupboard stamps into its own tokens.
-				issuer: 'cupboard',
+				// The tenant's issuer is its own path-based URL, the same value
+				// provisioning stamps into the Durable Object's identity.
+				issuer: `${origin}/t/v1`,
 				// The endpoints carry this tenant's `/t/<tenant>/` prefix.
 				token_endpoint: `${origin}/t/v1/token`,
 				jwks_uri: `${origin}/t/v1/.well-known/jwks.json`,
