@@ -1459,15 +1459,17 @@ only the compressed `fileHash`. V5 verifies the uncompressed NAR server-side.
   buffer the whole output.
 - The runtime spike sets two named config defaults: `inlineVerifyMaxBytes` and
   `verifiableMaxBytes`. The benchmark search starts around a 10-20 GiB
-  verifiable cap. Until the spike runs on the operator's account these ship
-  PROVISIONAL but conservative and fail-safe — not "correct at any value", since
-  a too-large inline threshold can still blow the CPU or memory budget. The
-  provisional `inlineVerifyMaxBytes` is small (a few MiB, within budget) and
-  `verifiableMaxBytes` is set so large/background verification is effectively
-  disabled: blobs above the conservative inline bound are rejected at commit
-  rather than accepted unverified or deferred to an unmeasured background pass.
-  The spike then replaces both with measured values from the real Workers
-  runtime.
+  verifiable cap. The provisional values keep the deferred window open:
+  `inlineVerifyMaxBytes` is 8 MiB (verified inline at commit) and
+  `verifiableMaxBytes` is 4 GiB, so a blob between them is accepted and verified
+  in the background pass. This makes the background verify path and the push-wait
+  contract live now, rather than gating them behind the spike. The spike is
+  therefore a **measurement, not an enabler**: it must confirm the background
+  pass holds its CPU and memory budget on a multi-hundred-MB blob on the real
+  account runtime (and `cpu_ms = 300_000`), and may then lower `verifiableMaxBytes`
+  if the measurements demand it. (An earlier draft made the provisional config
+  reject anything over the inline bound so nothing deferred until the spike; that
+  fail-safe is deliberately not taken — the deferred window stays open.)
 - Blobs at or below `inlineVerifyMaxBytes` verify synchronously at commit and
   become immediately servable. Larger blobs go pending and verify in the
   background pass. A blob whose declared NAR size exceeds `verifiableMaxBytes`
@@ -1685,12 +1687,14 @@ Per-tenant DO SQLite changes:
   post-verify atomic batch gated on the `tenant_blob` 0→1 insert. (Recorded
   deviation from the original "track servability per narinfo".)
 - `pending_upload` keeps its async verification verdicts from step 1: `pending`
-  while a deferred blob awaits the background pass, and `mismatch` once that
-  pass fails. A deferred upload's row is retained through its terminal
-  `servable`/`mismatch` state (reaped after a status-observation window) as the
-  durable `uploadId`-keyed record `push --wait` polls — not deleted on commit.
-  Synchronous inline failures reject and clear the upload; an over-budget blob
-  is rejected at commit, never deferred.
+  while a deferred blob awaits the background pass, then a terminal `mismatch`
+  (the NAR-hash check failed) or `over-quota` (the canonical size exceeds the
+  tenant quota) on failure. A deferred upload's row is retained through its
+  terminal state, or until its narinfo object is servable, as the durable
+  `uploadId`-keyed record `push --wait` polls; it is reaped after a
+  status-observation window, including the terminal `over-quota` rows. Synchronous
+  inline failures reject and clear the upload; an over-budget blob (above
+  `verifiableMaxBytes`) is rejected at commit, never deferred.
 - Move blob lifecycle to D1: `nar_blob` (already removed) and
   `orphan_blob_deletion` (removed in 2c) are superseded by `blob_ref`,
   `tenant_blob`, `blob_state`, and the global reaper.
@@ -1738,12 +1742,14 @@ together.
    `limits.cpu_ms = 300_000`. Still single-tenant. The spike itself — measuring
    real workerd zstd+SHA-256 throughput, confirming the DO honours
    `cpu_ms = 300_000`, and proving bounded peak memory on a multi-hundred-MB
-   fixture — needs a deploy to the operator's account, so it is deferred:
-   `inlineVerifyMaxBytes` and `verifiableMaxBytes` ship PROVISIONAL but
-   conservative and fail-safe — a small inline bound with large/background
-   verification disabled (oversize blobs rejected at commit, never accepted
-   unverified) — until the spike replaces them with measured values, alongside
-   the multi-hundred-MB bounded-memory and `node:zlib` self-test-failure tests.
+   fixture — needs a deploy to the operator's account, so it is deferred. The
+   provisional bounds keep the deferred window open: `inlineVerifyMaxBytes` is
+   8 MiB and `verifiableMaxBytes` is 4 GiB, so blobs between them go to the
+   background pass and the push-wait contract is exercised now. The spike is a
+   measurement, not an enabler: it confirms the background pass holds CPU and
+   memory on the real runtime and may lower `verifiableMaxBytes` from the
+   measurements, alongside the multi-hundred-MB bounded-memory and `node:zlib`
+   self-test-failure tests.
 2. **D1 substrate + per-narinfo edges + shared-CAS.** Sub-commits: **2a**
    `blob_state` replaces `nar_blob` (done); **2b** `blob_ref` (with its
    `nar_hash` index) + `tenant_blob` + the durable `generation_seq` counter,
