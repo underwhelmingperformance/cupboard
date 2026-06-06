@@ -12,6 +12,7 @@ import {
 	manifestState,
 	tenant,
 	tenantBlob,
+	tenantMaintenanceFailure,
 	tenantUsage
 } from './db/d1-schema.ts';
 
@@ -31,6 +32,7 @@ beforeEach(async () => {
 	const database = drizzle(env.CUPBOARD_DB);
 	await database.delete(blobReference).run();
 	await database.delete(tenantBlob).run();
+	await database.delete(tenantMaintenanceFailure).run();
 	await database.delete(tenantUsage).run();
 	await database.delete(blobState).run();
 	await database.delete(controlAuthKey).run();

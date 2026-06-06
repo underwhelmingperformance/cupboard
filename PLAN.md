@@ -1953,38 +1953,38 @@ This is the operational hardening that should land before feature work moves on
 to V6. It is not a change to the substitution protocol; it makes the hosted
 maintenance path observable enough to run.
 
-1. Add durable per-tenant maintenance failure records in D1. Each cron-driven
-   pass records `(tenant, pass)` with `consecutive_failures`, `last_error`,
-   `last_failed_at`, and `last_success_at`. The first useful pass names are
-   `maintenance` and `offboard`; future tenant-routed passes reuse the same
-   table rather than inventing their own failure counters.
-2. A failing tenant still does not block the fleet: the pass continues to use
-   `allSettled`, advances the cursors it already owns, throws an
-   `AggregateError` for logs, and writes the durable failure row for dashboards
-   and API surfaces. A successful pass resets that tenant/pass counter and
-   records `last_success_at`.
-3. Use the authoritative D1 tenant status as the final write gate before a
-   commit materialises a narinfo. The in-memory offboarding flag may remain as a
-   same-instance fast signal, but correctness rests on the row still being
-   `active`; `suspended`, `offboarding`, `offboarded`, or a missing row refuses
-   the materialisation.
-4. Make `offboarded` terminal in the control-plane status mutators. A repeated
-   delete after finalisation is an idempotent terminal result, not a transition
-   back to `offboarding`, and suspend cannot move a retired slug to another
-   admitted state.
+- [x] Add durable per-tenant maintenance failure records in D1. Each cron-driven
+      pass records `(tenant, pass)` with `consecutive_failures`, `last_error`,
+      `last_failed_at`, and `last_success_at`. The first useful pass names are
+      `maintenance` and `offboard`; future tenant-routed passes reuse the same
+      table rather than inventing their own failure counters.
+- [x] A failing tenant still does not block the fleet: the pass continues to use
+      `allSettled`, advances the cursors it already owns, throws an
+      `AggregateError` for logs, and writes the durable failure row for
+      dashboards and API surfaces. A successful pass resets that tenant/pass
+      counter and records `last_success_at`.
+- [x] Use the authoritative D1 tenant status as the final write gate before a
+      commit materialises a narinfo. The in-memory offboarding flag may remain
+      as a same-instance fast signal, but correctness rests on the row still
+      being `active`; `suspended`, `offboarding`, `offboarded`, or a missing row
+      refuses the materialisation.
+- [x] Make `offboarded` terminal in the control-plane status mutators. A
+      repeated delete after finalisation is an idempotent terminal result, not a
+      transition back to `offboarding`, and suspend cannot move a retired slug
+      to another admitted state.
 
 Verification:
 
-- A tenant whose maintenance or offboard pass fails gets a durable failure row,
-  and a later successful pass resets the counter without hiding the last success
-  time.
-- A fleet tick with one failing tenant still maintains later tenants and records
-  the failure durably.
-- A commit that reaches materialisation after the tenant row changes away from
-  `active` publishes no D1 edge and no tenant narinfo object.
-- `offboarded` cannot transition back to `suspended` or `offboarding`, and a
-  repeated delete for an already-offboarded slug does not republish it to the
-  admission manifest.
+- [x] A tenant whose maintenance or offboard pass fails gets a durable failure
+      row, and a later successful pass resets the counter without hiding the
+      last success time.
+- [x] A fleet tick with one failing tenant still maintains later tenants and
+      records the failure durably.
+- [x] A commit that reaches materialisation after the tenant row changes away
+      from `active` publishes no D1 edge and no tenant narinfo object.
+- [x] `offboarded` cannot transition back to `suspended` or `offboarding`, and a
+      repeated delete for an already-offboarded slug does not republish it to
+      the admission manifest.
 
 ## Post-V5 Cost Controls
 

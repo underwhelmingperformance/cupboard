@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import {
@@ -36,7 +36,17 @@ const offboardDrainChunk = 1000;
 const demoteCursorKey = 'reaper:demote-cursor';
 
 type CronDatabase = DrizzleD1Database<typeof d1Schema>;
+type TenantCronPass =
+	typeof d1Schema.tenantMaintenanceFailure.$inferSelect.pass;
 type MaintainTenant = (env: Env, id: string) => Promise<void>;
+type DrainTenant = (
+	env: Env,
+	id: string,
+	drainLimit: number,
+	rounds: number
+) => Promise<void>;
+
+const maxStoredErrorLength = 4096;
 
 /**
  * One hourly cron tick: the bounded tenant maintenance sweep, then the global blob
@@ -148,7 +158,8 @@ export async function runOffboardSweep(
 	env: Env,
 	tenantLimit: number = offboardTenantsPerTick,
 	drainLimit: number = offboardDrainChunk,
-	rounds: number = offboardRoundsPerTick
+	rounds: number = offboardRoundsPerTick,
+	drain: DrainTenant = drainTenant
 ): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const tenants = await database
@@ -160,8 +171,10 @@ export async function runOffboardSweep(
 		.all();
 
 	const results = await Promise.allSettled(
-		tenants.map(({ id }) => drainTenant(env, id, drainLimit, rounds))
+		tenants.map(({ id }) => drain(env, id, drainLimit, rounds))
 	);
+
+	await recordTenantPassOutcomes(database, 'offboard', tenants, results);
 
 	// Republish the manifest if a finalised tenant still lingers in it: finalisation
 	// flips the registry status to `offboarded` (excluded from the manifest) but a
@@ -287,6 +300,7 @@ export async function runCronSweep(
 		({ id }) => maintain(env, id)
 	);
 
+	await recordTenantPassOutcomes(database, 'maintenance', batch, results);
 	await stampMaintained(database, batch);
 
 	const failures = results.flatMap((result): unknown[] =>
@@ -407,4 +421,95 @@ export async function runScheduledMaintenance(
 	if (verify.status === 'rejected') {
 		throw verify.reason;
 	}
+}
+
+async function recordTenantPassOutcomes(
+	database: CronDatabase,
+	pass: TenantCronPass,
+	tenants: readonly { readonly id: string }[],
+	results: readonly PromiseSettledResult<unknown>[]
+): Promise<void> {
+	const now = new Date().toISOString();
+
+	await Promise.all(
+		tenants.map(({ id }, index) => {
+			const result = results[index];
+
+			if (result?.status === 'rejected') {
+				return recordTenantPassFailure(database, id, pass, result.reason, now);
+			}
+
+			return recordTenantPassSuccess(database, id, pass, now);
+		})
+	);
+}
+
+function recordTenantPassSuccess(
+	database: CronDatabase,
+	tenant: string,
+	pass: TenantCronPass,
+	now: string
+): Promise<unknown> {
+	return database
+		.insert(d1Schema.tenantMaintenanceFailure)
+		.values({
+			tenant,
+			pass,
+			consecutiveFailures: 0,
+			lastSuccessAt: now
+		})
+		.onConflictDoUpdate({
+			target: [
+				d1Schema.tenantMaintenanceFailure.tenant,
+				d1Schema.tenantMaintenanceFailure.pass
+			],
+			set: {
+				consecutiveFailures: 0,
+				lastSuccessAt: now
+			}
+		})
+		.run();
+}
+
+function recordTenantPassFailure(
+	database: CronDatabase,
+	tenant: string,
+	pass: TenantCronPass,
+	error: unknown,
+	now: string
+): Promise<unknown> {
+	const lastError = errorSummary(error);
+
+	return database
+		.insert(d1Schema.tenantMaintenanceFailure)
+		.values({
+			tenant,
+			pass,
+			consecutiveFailures: 1,
+			lastError,
+			lastFailedAt: now
+		})
+		.onConflictDoUpdate({
+			target: [
+				d1Schema.tenantMaintenanceFailure.tenant,
+				d1Schema.tenantMaintenanceFailure.pass
+			],
+			set: {
+				consecutiveFailures: sql`${d1Schema.tenantMaintenanceFailure.consecutiveFailures} + 1`,
+				lastError,
+				lastFailedAt: now
+			}
+		})
+		.run();
+}
+
+function errorSummary(error: unknown): string {
+	const summary =
+		error instanceof Error
+			? error.message.length > 0
+				? `${error.name}: ${error.message}`
+				: error.name
+			: String(error);
+
+	return summary.slice(0, maxStoredErrorLength);
 }

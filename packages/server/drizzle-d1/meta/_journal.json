@@ -71,6 +71,13 @@
 			"when": 1780765265071,
 			"tag": "0009_tenant_last_maintained",
 			"breakpoints": true
+		},
+		{
+			"idx": 10,
+			"version": "6",
+			"when": 1780785219475,
+			"tag": "0010_next_pepper_potts",
+			"breakpoints": true
 		}
 	]
 }

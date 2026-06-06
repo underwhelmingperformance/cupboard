@@ -134,6 +134,23 @@ export const tenant = sqliteTable(
 	]
 );
 
+// Durable operational state for tenant-routed cron passes. A row records the latest
+// success and failure facts for one tenant/pass pair, so a failing tenant remains
+// visible after the Worker log line has gone and a later success clears the failure
+// streak without erasing when that pass last ran cleanly.
+export const tenantMaintenanceFailure = sqliteTable(
+	'tenant_maintenance_failure',
+	{
+		tenant: text('tenant').notNull(),
+		pass: text('pass', { enum: ['maintenance', 'offboard'] }).notNull(),
+		consecutiveFailures: integer('consecutive_failures').notNull().default(0),
+		lastError: text('last_error'),
+		lastFailedAt: text('last_failed_at'),
+		lastSuccessAt: text('last_success_at')
+	},
+	(table) => [primaryKey({ columns: [table.tenant, table.pass] })]
+);
+
 // The monotonic version of the published admission manifest, a single row the
 // Worker advances every time it republishes. Sourcing the version from D1 (rather
 // than the KV version key) keeps concurrent provisioning operations from minting
