@@ -170,9 +170,9 @@
 			"indexes": {},
 			"foreignKeys": {},
 			"compositePrimaryKeys": {
-				"narinfo_deletion_cache_store_path_hash_pk": {
-					"columns": ["cache", "store_path_hash"],
-					"name": "narinfo_deletion_cache_store_path_hash_pk"
+				"narinfo_deletion_cache_store_path_hash_generation_pk": {
+					"columns": ["cache", "store_path_hash", "generation"],
+					"name": "narinfo_deletion_cache_store_path_hash_generation_pk"
 				}
 			},
 			"uniqueConstraints": {},
