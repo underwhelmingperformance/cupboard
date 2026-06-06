@@ -2,23 +2,23 @@
 	"name": "@cupboard/server",
 	"version": "0.0.0",
 	"dependencies": {
-		"@aws-sdk/client-s3": "^3.1048.0",
-		"@aws-sdk/s3-request-presigner": "^3.1048.0",
+		"@aws-sdk/client-s3": "^3.1062.0",
+		"@aws-sdk/s3-request-presigner": "^3.1062.0",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
 		"drizzle-orm": "^0.45.2",
-		"hono": "^4.12.19",
+		"hono": "^4.12.23",
 		"http-status-codes": "^2.3.0",
 		"jose": "^6.2.3",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@cloudflare/vitest-pool-workers": "^0.16.13",
-		"@cloudflare/workers-types": "^4.20260101.0",
+		"@cloudflare/workers-types": "^4.20260605.1",
 		"drizzle-kit": "^0.31.10",
-		"typescript": "^6.0.2",
-		"vitest": "^4.1.6",
-		"wrangler": "^4.85.0"
+		"typescript": "^6.0.3",
+		"vitest": "^4.1.8",
+		"wrangler": "^4.98.0"
 	},
 	"main": "src/worker.ts",
 	"private": true,
