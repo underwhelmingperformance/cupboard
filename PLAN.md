@@ -1299,8 +1299,10 @@ Per-tenant reachability GC stays in each DO. Sweeping a narinfo deletes the
 matching `blob_ref` row and, on the tenant's last live reference to a `narHash`,
 its `tenant_blob` row and quota charge. The global reaper (Worker cron) is the
 only actor that sees all tenants' edges, so it alone arms and acts on
-`delete_after`, in two cursored, bounded passes over `blob_state` (its own
-persisted cursor, distinct from the cron fan-out cursor):
+`delete_after`, in two bounded passes over `blob_state`. Both are self-draining
+(arming sets `delete_after`, collecting deletes the row), so they need no stored
+position; only the separate demote pass below, a pure read scan that does not
+consume its rows, keeps a resume position (a single KV value, see below):
 
 1. **Arm**: set `delete_after = now + grace` where
    `delete_after IS NULL AND NOT EXISTS(blob_ref ... nar_hash)` (the indexed
@@ -1319,8 +1321,10 @@ explicit update in the same batch as its edge insert — reuse does no promote, 
 this is mandatory). The grace is the single deployment-wide
 `narinfo TTL + margin` (one TTL constant, preserved from V3). The reaper also
 runs a demote pass — it, not the per-DO verify pass, is the only actor that can
-scan global `blob_state` — walking `blob_state` by cursor, heading the canonical
-object, and on confirmed absence (same in-transaction re-check) deleting the
+scan global `blob_state` — keyset-paginating `blob_state` by `nar_hash` from a
+resume position held in a single KV value (cron bookkeeping, not shared-blob
+data, so it stays out of the relational schema), heading the canonical object,
+and on confirmed absence (same in-transaction re-check) deleting the
 `blob_state` row. `findReusableBlob`'s reference check queries `blob_ref` across
 tenants, not the local DO's `narInfos`.
 
@@ -1585,18 +1589,20 @@ suspended and offboarding) and fans out `runGarbageCollection()` and
 `runVerification()` per tenant DO. A single Worker invocation caps subrequests
 (~1000 on paid), so one RPC-pair per tenant exhausts the budget at ~500 tenants:
 sharding is part of this step, not a later optimisation. The per-tick tenant
-batch is bounded by a measured constant well under the budget, advancing a
-persisted `cron_cursor` over slug order so a full sweep completes within a day.
-The cron fires hourly (not daily) so the bucketing is meaningful and the latency
-bound holds; `wrangler.toml` `crons` is updated to match. The fan-out records
-per-tenant failures (count and last error) rather than swallowing them with bare
-`allSettled`. The global reaper gets its own reserved budget after fan-out, or
-its own cron tick, so a long fan-out cannot starve it; it advances its own
-`blob_state` cursor. Reaper reclamation latency has a stated upper bound — grace
-plus at most one reaper interval plus cursor-coverage time — for physical R2
-reclamation; quota credit, by contrast, is released immediately on the DO-side
-1-to-0 edge removal, independent of the reaper. Queues remain the fallback past
-cursor-sharding scale.
+batch is bounded by a measured constant well under the budget, selecting the
+most-overdue active tenants by a `tenant.last_maintained_at` column and stamping
+them, so the table carries its own round-robin position (no separate cursor) and
+a full sweep completes within a day. The cron fires hourly (not daily) so the
+bucketing is meaningful and the latency bound holds; `wrangler.toml` `crons` is
+updated to match. The fan-out records per-tenant failures (count and last error)
+rather than swallowing them with bare `allSettled`. The global reaper gets its
+own reserved budget after fan-out, or its own cron tick, so a long fan-out
+cannot starve it; its demote scan resumes from its own KV-held position. Reaper
+reclamation latency has a stated upper bound — grace plus at most one reaper
+interval plus scan-coverage time — for physical R2 reclamation; quota credit, by
+contrast, is released immediately on the DO-side 1-to-0 edge removal,
+independent of the reaper. Queues remain the fallback past single-Worker-scan
+scale.
 
 ### Data model
 
@@ -1663,9 +1669,12 @@ New D1 database `CUPBOARD_DB`:
   `delete_after` is armed only by the reaper and cleared by promote and
   reuse-commit; an index on `delete_after` backs the reaper's candidate scan.
 
-- `cron_cursor(id PK 'singleton', ...)` for fan-out tenant sharding, and a
-  separate reaper cursor over `blob_state` so the reaper's scan does not share
-  state with the fan-out.
+- No cursor tables. The maintenance sweep's round-robin position lives on the
+  data it maintains — a `tenant.last_maintained_at` column (with a
+  `(status, last_maintained_at)` index), oldest-first — and the reaper's demote
+  scan keeps its resume position in a single KV value (`CRON_STATE`), cron
+  bookkeeping rather than relational data. The self-draining reaper arm and
+  collect passes need no stored position at all.
 
 `tenant.status` is one of `active`, `suspended`, `offboarding`; `read_mode` and
 the per-tenant read verifier are projected into the KV manifest, not read from
@@ -1767,8 +1776,8 @@ together.
    in the DO's maintenance pass as a bounded batch that drains over ticks, and
    "available but no object" is handled by the per-narinfo verify reconciliation
    retiring the edge so the reaper then collects the fact; the reaper's own
-   persisted cursor and the dedicated global demote scan land with the
-   Worker-level reaper in step 7, where the reaper must see every tenant's
+   resume position (a KV value) and the dedicated global demote scan land with
+   the Worker-level reaper in step 7, where the reaper must see every tenant's
    references. **2d** the crash matrix. The crash tests are planted-state plus
    repair-convergence (the harness cannot evict a DO or interrupt mid-body): run
    the real path to the named step, assert the actual intermediate D1 + DO + R2
@@ -1848,37 +1857,39 @@ together.
 7. **Cron fan-out + global reaper + offboarding.** _(Done.)_ The hourly cron
    tick runs four sequential passes, each isolated so one stalling never holds
    back the next and their failures surface together as an `AggregateError`: the
-   maintenance sweep maintains a bounded batch of active tenants from a
-   persisted `cron_cursor` over slug order (so a full fleet sweep completes over
-   successive ticks within the subrequest budget, sharding required not
-   optional), the offboard drain, and the blob reaper's collect and demote
-   passes on their reserved budget after the fan-out. The reaper runs
+   maintenance sweep maintains a bounded batch of the most-overdue active
+   tenants ordered by a `tenant.last_maintained_at` column, stamping them so the
+   table carries its own round-robin position (no cursor table) and a full fleet
+   sweep completes over successive ticks within the subrequest budget (sharding
+   required not optional), the offboard drain, and the blob reaper's collect and
+   demote passes on their reserved budget after the fan-out. The reaper runs
    Worker-side, the only actor that sees every tenant's edges: it arms and
-   collects unreferenced `blob_state`, and a demote pass walks `blob_state` from
-   its own persisted `reaper_cursor` (distinct from the fan-out cursor), heads
-   each canonical object and, on confirmed absence, de-materialises the
-   referencing narinfos through their owning tenant Durable Objects before
-   deleting the fact last, so the fact re-drives an interrupted demote; the
-   `blob_state` delete is fenced on a `verified_at` the promote now advances, so
-   a concurrent re-promote is left intact. Offboarding is the quiesce-then-drain
-   state machine: the control plane marks the tenant `offboarding` (stopping
-   writes at once and reads after the manifest TTL) and signals the Durable
-   Object so an in-flight commit settling after the flip cannot re-materialise
-   an object the drain removes; the offboard pass, disjoint from the maintenance
-   sweep, drains bounded batches of the tenant's `blob_ref`/`tenant_blob` rows
-   **through its own Durable Object** (the single writer, so a stray commit can
-   never resurrect a drained edge) and deletes its `t/<tenant>/` R2 objects
-   through the Worker, the freed shared blobs collected by the reaper. A fully
-   drained tenant is finalised into a terminal **scrubbed `offboarded`
-   tombstone**: its Durable Object storage (keys, identity, narinfos) is wiped,
-   its registry row scrubbed of its read credential and its usage row dropped,
-   and the manifest republished without it, so admission no longer spins up an
-   object for the slug and `ensureTenant` refuses to re-provision it.
-   Finalisation is purge-first and the drain tolerates an already-purged object,
-   and the sweep reconciles a manifest left stale by an interrupted
-   finalisation, so the lifecycle converges from any crash point.
-   Object-lifecycle rules remain a small-fleet optimisation, unused. **Step 7 is
-   complete; the V5 build sequence is done.**
+   collects unreferenced `blob_state` (self-draining, no stored position), and a
+   demote pass keyset-paginates `blob_state` by `nar_hash` from a resume
+   position held in a single KV value, heads each canonical object and, on
+   confirmed absence, de-materialises the referencing narinfos through their
+   owning tenant Durable Objects before deleting the fact last, so the fact
+   re-drives an interrupted demote; the `blob_state` delete is fenced on a
+   `verified_at` the promote now advances, so a concurrent re-promote is left
+   intact. Offboarding is the quiesce-then-drain state machine: the control
+   plane marks the tenant `offboarding` (stopping writes at once and reads after
+   the manifest TTL) and signals the Durable Object so an in-flight commit
+   settling after the flip cannot re-materialise an object the drain removes;
+   the offboard pass, disjoint from the maintenance sweep, drains bounded
+   batches of the tenant's `blob_ref`/`tenant_blob` rows **through its own
+   Durable Object** (the single writer, so a stray commit can never resurrect a
+   drained edge) and deletes its `t/<tenant>/` R2 objects through the Worker,
+   the freed shared blobs collected by the reaper. A fully drained tenant is
+   finalised into a terminal **scrubbed `offboarded` tombstone**: its Durable
+   Object storage (keys, identity, narinfos) is wiped, its registry row scrubbed
+   of its read credential and its usage row dropped, and the manifest
+   republished without it, so admission no longer spins up an object for the
+   slug and `ensureTenant` refuses to re-provision it. Finalisation is
+   purge-first and the drain tolerates an already-purged object, and the sweep
+   reconciles a manifest left stale by an interrupted finalisation, so the
+   lifecycle converges from any crash point. Object-lifecycle rules remain a
+   small-fleet optimisation, unused. **Step 7 is complete; the V5 build sequence
+   is done.**
 
 ### Verification
 
