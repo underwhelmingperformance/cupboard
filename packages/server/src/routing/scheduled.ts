@@ -2,7 +2,12 @@ import { asc, eq, inArray } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { BlobReaperService } from '../do/blob-reaper-service.ts';
+import {
+	BlobReaperService,
+	type DemoteCursor,
+	type DemoteTarget,
+	type NarInfoDemoter
+} from '../do/blob-reaper-service.ts';
 import { blobReaperBatchSize } from '../http/http.ts';
 
 import { tenantServer } from './durable-object.ts';
@@ -13,28 +18,35 @@ import { tenantServer } from './durable-object.ts';
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
 
+// The KV key holding the demote scan's resume position (see DemoteCursor).
+const demoteCursorKey = 'reaper:demote-cursor';
+
 type CronDatabase = DrizzleD1Database<typeof d1Schema>;
 type MaintainTenant = (env: Env, id: string) => Promise<void>;
 
 /**
  * One hourly cron tick: the bounded tenant maintenance sweep, then the global blob
- * reaper on its reserved budget after the fan-out. Each runs independently of the
- * other's outcome, and their failures are surfaced together so neither a stalled
- * sweep nor a stalled reaper is silently swallowed.
+ * reaper on its reserved budget after the fan-out, in its three passes (arm and
+ * collect unreferenced blobs, then demote those whose object has gone missing). Each
+ * pass runs independently of the others' outcome, and their failures are surfaced
+ * together so neither a stalled sweep nor a stalled reaper is silently swallowed.
  */
 export async function runCronTick(env: Env): Promise<void> {
 	const failures: unknown[] = [];
 
-	try {
-		await runCronSweep(env);
-	} catch (error) {
-		failures.push(error);
-	}
-
-	try {
-		await runBlobReaper(env);
-	} catch (error) {
-		failures.push(error);
+	// Sequential, not concurrent: the reaper runs on its reserved budget after the
+	// fan-out so a long fan-out cannot starve it, and each pass is isolated so one
+	// stalling does not hold back the next.
+	for (const pass of [
+		() => runCronSweep(env),
+		() => runBlobReaper(env),
+		() => runReaperDemote(env)
+	]) {
+		try {
+			await pass();
+		} catch (error) {
+			failures.push(error);
+		}
 	}
 
 	if (failures.length > 0) {
@@ -55,12 +67,57 @@ export function runBlobReaper(
 	env: Env,
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
-	const reaper = new BlobReaperService(
-		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-		env.BLOBS
-	);
+	return blobReaper(env).reapBlobs(new Date(), batchSize);
+}
 
-	return reaper.reapBlobs(new Date(), batchSize);
+/**
+ * The reaper's demote pass: a bounded, cursored scan of `blob_state` for shared
+ * objects that have gone missing, removing the fact and de-materialising the
+ * referencing narinfos through their owning tenant Durable Objects. Run Worker-side
+ * for the same reason as the collect pass: only the Worker can scan every tenant's
+ * facts. Returns how many shared facts it demoted.
+ */
+export function runReaperDemote(
+	env: Env,
+	batchSize: number = blobReaperBatchSize
+): Promise<number> {
+	return blobReaper(env).demoteMissingBlobs(batchSize, demoteCursor(env));
+}
+
+// The demote scan's resume position, held as one KV value: it is cron bookkeeping,
+// not shared-blob data, so it lives outside the relational schema. Absent or empty
+// means start from the beginning.
+function demoteCursor(env: Env): DemoteCursor {
+	return {
+		read: async () => (await env.CRON_STATE.get(demoteCursorKey)) ?? '',
+		advance: (position) => env.CRON_STATE.put(demoteCursorKey, position)
+	};
+}
+
+function blobReaper(env: Env): BlobReaperService {
+	return new BlobReaperService(
+		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		env.BLOBS,
+		new TenantNarInfoDemoter(env)
+	);
+}
+
+// Routes a demote to the owning tenant's Durable Object, the single writer of that
+// tenant's narinfo objects. The service binding authorises the direct RPC, so the
+// reaper never touches a tenant's objects itself.
+class TenantNarInfoDemoter implements NarInfoDemoter {
+	constructor(private readonly env: Env) {}
+
+	demote(
+		tenant: string,
+		narHash: string,
+		targets: readonly DemoteTarget[]
+	): Promise<void> {
+		return tenantServer(this.env, tenant).demoteNarInfoObjects(
+			narHash,
+			targets
+		);
+	}
 }
 
 /**

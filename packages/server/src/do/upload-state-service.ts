@@ -176,7 +176,11 @@ export class UploadStateService {
 			})
 			.onConflictDoUpdate({
 				target: d1Schema.blobState.narHash,
-				set: { deleteAfter: sql`null` }
+				// Advancing `verified_at` on a re-promote (which re-creates an object the
+				// reaper may have collected) makes it the optimistic-concurrency token the
+				// demote pass fences its delete on: a demote that scanned the old row will
+				// not delete the freshly re-promoted one.
+				set: { deleteAfter: sql`null`, verifiedAt: new Date().toISOString() }
 			})
 			.run();
 

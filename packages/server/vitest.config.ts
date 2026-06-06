@@ -49,7 +49,10 @@ export default defineConfig(async () => {
 								// The admission manifest KV the control handler reads and writes;
 								// it is control-plane state, supplied to the worker under test so
 								// the control handler can be exercised through it.
-								kvNamespaces: { TENANT_CACHE: 'tenant-cache' },
+								kvNamespaces: {
+									TENANT_CACHE: 'tenant-cache',
+									CRON_STATE: 'cron-state'
+								},
 								compatibilityDate: '2026-04-28'
 							},
 							wrangler: {

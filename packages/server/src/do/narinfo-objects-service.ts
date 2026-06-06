@@ -193,6 +193,60 @@ export class NarInfoObjectsService {
 		return (await this.hasCommittedReference(cache, row)) ? row : undefined;
 	}
 
+	// De-materialises this tenant's narinfo object for a hash the global reaper found
+	// has lost its shared object, so the read path stops serving a narinfo that points
+	// at a NAR that is gone. It is gated on the live row still naming that hash (a
+	// recommit at a different hash is left alone) and on the object still being absent
+	// (a concurrent re-promote brought it back, so the path is healthy and kept), which
+	// makes it idempotent and collateral-free: the reaper routes it through here, the
+	// single writer of the tenant's objects, and re-drives it until the `blob_state`
+	// row is gone, so a partial run converges.
+	// Opens its own critical section; callers must be outside one.
+	async demoteUnbacked(
+		cache: string,
+		storePathHash: string,
+		narHash: string
+	): Promise<void> {
+		await this.context.ctx.blockConcurrencyWhile(() =>
+			this.demoteUnbackedLocked(cache, storePathHash, narHash)
+		);
+	}
+
+	// {@link demoteUnbacked}'s body, run inside the critical section so the
+	// object-absence check and the delete cannot interleave with a concurrent commit
+	// materialising the path between them, which would otherwise let the demote delete
+	// a freshly re-materialised object.
+	private async demoteUnbackedLocked(
+		cache: string,
+		storePathHash: string,
+		narHash: string
+	): Promise<void> {
+		const row = this.context.db
+			.select({ narHash: schema.narInfos.narHash })
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		if (row?.narHash !== narHash) {
+			return;
+		}
+
+		const blob = await this.context.env.BLOBS.head(narObjectKey(narHash));
+
+		if (blob !== null) {
+			return;
+		}
+
+		await this.context.env.BLOBS.delete(
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+		);
+	}
+
 	async putNarInfoObject(
 		cache: string,
 		storePathHash: string,

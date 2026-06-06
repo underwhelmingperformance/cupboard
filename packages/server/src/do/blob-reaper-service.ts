@@ -1,6 +1,8 @@
 import {
 	and,
+	asc,
 	eq,
+	gt,
 	inArray,
 	isNotNull,
 	isNull,
@@ -11,6 +13,38 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { blobReaperGraceMs, narObjectKey } from '../http/http.ts';
+
+// One narinfo whose object the demote pass must take down: a tenant, the cache it
+// lives in, and its store-path hash. The reaper groups these by tenant and routes
+// them to the owning tenant's Durable Object, the single writer of that tenant's
+// objects.
+export interface DemoteTarget {
+	readonly cache: string;
+	readonly storePathHash: string;
+}
+
+// The port the demote pass reaches a tenant's Durable Object through. The reaper
+// itself never touches a tenant's objects; it asks the owning tenant to
+// de-materialise the narinfos referencing a hash whose shared object is gone, so the
+// per-tenant single-writer rule holds.
+export interface NarInfoDemoter {
+	demote(
+		tenant: string,
+		narHash: string,
+		targets: readonly DemoteTarget[]
+	): Promise<void>;
+}
+
+// The demote scan's resume position across cron ticks. It is the last `nar_hash`
+// reached, an exclusive lower bound for the next keyset page, with '' meaning start
+// from the beginning (and written back to wrap). It is pure cron bookkeeping rather
+// than shared-blob data, so the Worker backs it with a single KV value instead of a
+// relational row; the eventual consistency is harmless because the scan is idempotent
+// and the position only ever resumes a window it would otherwise cover anyway.
+export interface DemoteCursor {
+	read(): Promise<string>;
+	advance(position: string): Promise<void>;
+}
 
 // The global blob reaper. It is the only actor that sees every tenant's reference
 // edges, so it runs Worker-side over the shared D1 facts rather than inside any one
@@ -23,7 +57,8 @@ import { blobReaperGraceMs, narObjectKey } from '../http/http.ts';
 export class BlobReaperService {
 	constructor(
 		private readonly d1: DrizzleD1Database<typeof d1Schema>,
-		private readonly blobs: R2Bucket
+		private readonly blobs: R2Bucket,
+		private readonly demoter: NarInfoDemoter
 	) {}
 
 	// Returns how many shared blobs it collected.
@@ -31,6 +66,45 @@ export class BlobReaperService {
 		await this.armUnreferencedBlobs(now, limit);
 
 		return this.collectExpiredBlobs(now, limit);
+	}
+
+	// Walks a bounded batch of `blob_state` from the persisted cursor, removing the
+	// fact and de-materialising the referencing narinfos of any shared blob whose
+	// canonical object is gone (an "available but no object" gap a crash can leave).
+	// Reads serve from a tenant's narinfo object, never `blob_state`, so clearing the
+	// fact alone would stop no read; the narinfos are de-materialised first, through
+	// each owning tenant's Durable Object, and the `blob_state` row is deleted last so
+	// it stays the durable marker that re-drives an interrupted demote on the next
+	// pass. Returns how many shared facts it demoted.
+	async demoteMissingBlobs(
+		limit: number,
+		cursor: DemoteCursor
+	): Promise<number> {
+		const after = await cursor.read();
+		const batch = await this.demoteBatch(after, limit);
+
+		// A short page means the scan reached the end of the hash order, so wrap to the
+		// start; otherwise resume after the last hash scanned. Advanced before
+		// processing, so a per-blob failure does not wedge the scan.
+		const next = batch.length < limit ? '' : (batch.at(-1)?.narHash ?? '');
+		await cursor.advance(next);
+
+		let demoted = 0;
+
+		for (const blob of batch) {
+			const present =
+				(await this.blobs.head(narObjectKey(blob.narHash))) !== null;
+
+			if (present) {
+				continue;
+			}
+
+			if (await this.demoteBlob(blob.narHash, blob.verifiedAt)) {
+				demoted += 1;
+			}
+		}
+
+		return demoted;
 	}
 
 	// Arms unreferenced shared blobs with a grace timer. The cross-tenant
@@ -123,5 +197,77 @@ export class BlobReaperService {
 		}
 
 		return collected;
+	}
+
+	// De-materialises the referencing narinfos for a hash whose object is gone, then
+	// deletes the `blob_state` row. The narinfos go first (idempotent in each owning
+	// Durable Object), and the fact is deleted last, fenced on the `verified_at`
+	// captured at scan so a row deleted and re-promoted in the window is left intact.
+	// If routing to any tenant fails, the fact is left in place and the next pass
+	// re-drives it. Returns whether the fact was demoted.
+	private async demoteBlob(
+		narHash: string,
+		verifiedAt: string
+	): Promise<boolean> {
+		const targetsByTenant = await this.referencingTargets(narHash);
+
+		for (const [tenant, targets] of targetsByTenant) {
+			await this.demoter.demote(tenant, narHash, targets);
+		}
+
+		const removed = await this.d1
+			.delete(d1Schema.blobState)
+			.where(
+				and(
+					eq(d1Schema.blobState.narHash, narHash),
+					eq(d1Schema.blobState.verifiedAt, verifiedAt)
+				)
+			)
+			.returning({ narHash: d1Schema.blobState.narHash })
+			.all();
+
+		return removed.length > 0;
+	}
+
+	private async referencingTargets(
+		narHash: string
+	): Promise<Map<string, DemoteTarget[]>> {
+		const edges = await this.d1
+			.selectDistinct({
+				tenant: d1Schema.blobReference.tenant,
+				cache: d1Schema.blobReference.cache,
+				storePathHash: d1Schema.blobReference.storePathHash
+			})
+			.from(d1Schema.blobReference)
+			.where(eq(d1Schema.blobReference.narHash, narHash))
+			.all();
+
+		const byTenant = new Map<string, DemoteTarget[]>();
+
+		for (const edge of edges) {
+			const targets = byTenant.get(edge.tenant) ?? [];
+			targets.push({ cache: edge.cache, storePathHash: edge.storePathHash });
+			byTenant.set(edge.tenant, targets);
+		}
+
+		return byTenant;
+	}
+
+	// One keyset page of `blob_state` after the cursor, the Drizzle cursor-pagination
+	// pattern on the `nar_hash` primary key.
+	private demoteBatch(
+		after: string,
+		limit: number
+	): Promise<{ narHash: string; verifiedAt: string }[]> {
+		return this.d1
+			.select({
+				narHash: d1Schema.blobState.narHash,
+				verifiedAt: d1Schema.blobState.verifiedAt
+			})
+			.from(d1Schema.blobState)
+			.where(gt(d1Schema.blobState.narHash, after))
+			.orderBy(asc(d1Schema.blobState.narHash))
+			.limit(limit)
+			.all();
 	}
 }

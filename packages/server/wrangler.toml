@@ -25,6 +25,13 @@ bucket_name = "cupboard-blobs"
 binding = "TENANT_CACHE"
 id = "00000000000000000000000000000000"
 
+# Operational bookkeeping for the Worker cron: small, infrequently-written scalars
+# like the reaper's demote-scan resume position. Not shared-blob data, so it lives in
+# KV rather than the relational schema.
+[[kv_namespaces]]
+binding = "CRON_STATE"
+id = "00000000000000000000000000000001"
+
 [[d1_databases]]
 binding = "CUPBOARD_DB"
 database_name = "cupboard"

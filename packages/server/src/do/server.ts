@@ -14,6 +14,7 @@ import { parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
 import { AuthKeysService } from './auth-keys-service.ts';
+import { type DemoteTarget } from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
@@ -174,6 +175,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 		await this.verification.verifyPendingUploads(verificationBatchSize);
 		await this.verification.verifyBatch(undefined, verificationBatchSize);
+	}
+
+	// The global reaper found a shared object gone and routes the de-materialisation
+	// of this tenant's narinfos for that hash through here, the single writer of the
+	// tenant's objects. Each target is de-materialised only if its live row still
+	// names the hash and the object is still absent, so the call is idempotent and the
+	// reaper can re-drive it until the `blob_state` row is cleared.
+	async demoteNarInfoObjects(
+		narHash: string,
+		targets: readonly DemoteTarget[]
+	): Promise<void> {
+		await this.initialise();
+
+		for (const target of targets) {
+			await this.narInfoObjects.demoteUnbacked(
+				target.cache,
+				target.storePathHash,
+				narHash
+			);
+		}
 	}
 
 	// The control plane assigns this Durable Object its identity at provision time
