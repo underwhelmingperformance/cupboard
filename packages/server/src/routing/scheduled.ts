@@ -2,6 +2,8 @@ import { asc, eq, inArray } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { BlobReaperService } from '../do/blob-reaper-service.ts';
+import { blobReaperBatchSize } from '../http/http.ts';
 
 import { tenantServer } from './durable-object.ts';
 
@@ -13,6 +15,53 @@ const maintenanceConcurrency = 4;
 
 type CronDatabase = DrizzleD1Database<typeof d1Schema>;
 type MaintainTenant = (env: Env, id: string) => Promise<void>;
+
+/**
+ * One hourly cron tick: the bounded tenant maintenance sweep, then the global blob
+ * reaper on its reserved budget after the fan-out. Each runs independently of the
+ * other's outcome, and their failures are surfaced together so neither a stalled
+ * sweep nor a stalled reaper is silently swallowed.
+ */
+export async function runCronTick(env: Env): Promise<void> {
+	const failures: unknown[] = [];
+
+	try {
+		await runCronSweep(env);
+	} catch (error) {
+		failures.push(error);
+	}
+
+	try {
+		await runBlobReaper(env);
+	} catch (error) {
+		failures.push(error);
+	}
+
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures,
+			`cron tick had ${String(failures.length)} failing pass(es)`
+		);
+	}
+}
+
+/**
+ * The global blob reaper, run Worker-side over the shared D1 facts and R2 objects
+ * rather than inside any tenant's Durable Object, so the only actor that sees every
+ * tenant's reference edges does the collecting. Returns how many shared blobs it
+ * collected.
+ */
+export function runBlobReaper(
+	env: Env,
+	batchSize: number = blobReaperBatchSize
+): Promise<number> {
+	const reaper = new BlobReaperService(
+		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		env.BLOBS
+	);
+
+	return reaper.reapBlobs(new Date(), batchSize);
+}
 
 /**
  * Drives one hourly cron tick: maintains the most-overdue active tenants and stamps

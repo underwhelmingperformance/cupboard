@@ -14,7 +14,6 @@ import { parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
 import { AuthKeysService } from './auth-keys-service.ts';
-import { BlobReaperService } from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
@@ -42,7 +41,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private migrationPromise: Promise<void> | undefined;
 
 	private readonly authKeys: AuthKeysService;
-	private readonly blobReaper: BlobReaperService;
 	private readonly narInfoObjects: NarInfoObjectsService;
 	private readonly uploadState: UploadStateService;
 	private readonly deletionQueue: DeletionQueueService;
@@ -66,7 +64,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.tenantIdentity = new TenantIdentityService(this.context);
 		this.authKeys = new AuthKeysService(this.context, this.tenantIdentity);
-		this.blobReaper = new BlobReaperService(this.context);
 		this.narInfoObjects = new NarInfoObjectsService(this.context);
 		this.uploadState = new UploadStateService(this.context);
 		this.deletionQueue = new DeletionQueueService(this.context, this.authKeys);
@@ -90,7 +87,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
 			this.authKeys,
-			this.blobReaper,
 			this.deletionQueue
 		);
 		this.tokenExchange = new TokenExchangeService(

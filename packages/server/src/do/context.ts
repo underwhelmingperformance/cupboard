@@ -88,7 +88,6 @@ export interface GarbageCollectionOutcome {
 	readonly rootsExpired: number;
 	readonly pathsSwept: number;
 	readonly narInfosDeleted: number;
-	readonly blobsDeleted: number;
 }
 
 // A key in the auth signing set. The newest non-retired key mints; every

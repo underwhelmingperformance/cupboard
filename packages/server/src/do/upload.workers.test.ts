@@ -14,6 +14,7 @@ import {
 	narObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
+import { runBlobReaper } from '../routing/scheduled.ts';
 import { defaultTenant } from '../routing/tenant-routing.ts';
 import {
 	afterGrace,
@@ -62,7 +63,6 @@ import {
 	readStoredNarInfo,
 	removeRoot,
 	resetTestServer,
-	runGc,
 	runGcFromInternalOrigin,
 	runGcResult,
 	scheduledController,
@@ -1445,8 +1445,7 @@ describe('upload flow', () => {
 			pendingUploadsDeleted: 0,
 			rootsExpired: 0,
 			pathsSwept: 1,
-			narInfosDeleted: 1,
-			blobsDeleted: 0
+			narInfosDeleted: 1
 		});
 
 		await expect(caches.default.match(cacheKey)).resolves.toBeUndefined();
@@ -1736,8 +1735,7 @@ describe('upload flow', () => {
 			pendingUploadsDeleted: 1,
 			rootsExpired: 0,
 			pathsSwept: 0,
-			narInfosDeleted: 0,
-			blobsDeleted: 0
+			narInfosDeleted: 0
 		});
 
 		await expectStats(await initialise(), {
@@ -1819,8 +1817,7 @@ describe('upload flow', () => {
 			pendingUploadsDeleted: 1,
 			rootsExpired: 0,
 			pathsSwept: 0,
-			narInfosDeleted: 0,
-			blobsDeleted: 0
+			narInfosDeleted: 0
 		});
 
 		await expectStats(await initialise(), {
@@ -1958,14 +1955,14 @@ describe('upload flow', () => {
 			totalFileSize: 0
 		});
 
-		// The first pass arms the unreferenced blob but does not collect it.
-		await runGc();
+		// The first reaper pass arms the unreferenced blob but does not collect it.
+		await runBlobReaper(env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 
 		vi.setSystemTime(afterGrace());
-		await runGc();
+		await runBlobReaper(env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.toBeNull();
@@ -1999,11 +1996,11 @@ describe('upload flow', () => {
 
 		expect(deletedSecond.narScheduledForDeletion).toBe(true);
 
-		// The first pass arms the now-unreferenced blob; the pass past the grace
-		// collects it.
-		await runGc();
+		// The first reaper pass arms the now-unreferenced blob; the pass past the
+		// grace collects it.
+		await runBlobReaper(env);
 		vi.setSystemTime(afterGrace());
-		await runGc();
+		await runBlobReaper(env);
 		await expect(
 			env.BLOBS.head(narObjectKey(second.narHash))
 		).resolves.toBeNull();
@@ -2029,17 +2026,17 @@ describe('upload flow', () => {
 		await deletePath(token, metadata.storePathHash);
 
 		// Arm the now-unreferenced blob, fixing its grace window.
-		await runGc();
+		await runBlobReaper(env);
 
 		// A later reaper pass before the grace elapses must not collect it.
 		vi.setSystemTime(new Date(deleteTestBase.getTime() + 16 * 60 * 1000));
-		await runGc();
+		await runBlobReaper(env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 
 		vi.setSystemTime(afterGrace());
-		await runGc();
+		await runBlobReaper(env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.toBeNull();
@@ -2115,8 +2112,11 @@ describe('upload flow', () => {
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 
+		// The edge is retired, so the blob is now unreferenced; the reaper arms it,
+		// then collects it past the grace.
+		await runBlobReaper(env);
 		vi.setSystemTime(afterGrace());
-		await runGc();
+		await runBlobReaper(env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.toBeNull();
@@ -2393,8 +2393,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1,
-				blobsDeleted: 0
+				narInfosDeleted: 1
 			});
 
 			await expect(
@@ -2418,8 +2417,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 0,
-				narInfosDeleted: 0,
-				blobsDeleted: 0
+				narInfosDeleted: 0
 			});
 			await expect(
 				env.BLOBS.head(narInfoObjectKey(defaultTenant, path.storePathHash))
@@ -2446,8 +2444,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 0,
-				narInfosDeleted: 0,
-				blobsDeleted: 0
+				narInfosDeleted: 0
 			});
 			await expect(
 				env.BLOBS.head(narInfoObjectKey(defaultTenant, committed.storePathHash))
@@ -2482,8 +2479,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				rootsExpired: 1,
 				pathsSwept: 1,
-				narInfosDeleted: 1,
-				blobsDeleted: 0
+				narInfosDeleted: 1
 			});
 
 			const { roots } = await listRoots(token);
@@ -2516,8 +2512,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				rootsExpired: 1,
 				pathsSwept: 1,
-				narInfosDeleted: 1,
-				blobsDeleted: 0
+				narInfosDeleted: 1
 			});
 
 			const { roots } = await listRoots(token);
@@ -2555,8 +2550,7 @@ describe('upload flow', () => {
 				pendingUploadsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1,
-				blobsDeleted: 0
+				narInfosDeleted: 1
 			});
 
 			await expect(
@@ -2589,28 +2583,27 @@ describe('upload flow', () => {
 			await commitPath(token, c, cNar);
 			await setRoot(token, { name: 'main', targets: [a.storePath] });
 
+			// The per-tenant sweep removes the unreachable path c and retires its
+			// edge; the now-unreferenced blob is reaped separately, Worker-side.
 			expect(await runGcResult()).toStrictEqual({
 				ok: true,
 				pendingUploadsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1,
-				blobsDeleted: 0
+				narInfosDeleted: 1
 			});
+
+			// The reaper arms the unreferenced blob; the grace not yet elapsed, the
+			// object stays.
+			expect(await runBlobReaper(env)).toBe(0);
 			await expect(
 				env.BLOBS.head(narObjectKey(cNar.narHash))
 			).resolves.not.toBeNull();
 
 			vi.setSystemTime(afterGrace());
 
-			expect(await runGcResult()).toStrictEqual({
-				ok: true,
-				pendingUploadsDeleted: 0,
-				rootsExpired: 0,
-				pathsSwept: 0,
-				narInfosDeleted: 0,
-				blobsDeleted: 1
-			});
+			// Past the grace the reaper collects the fact and then the object.
+			expect(await runBlobReaper(env)).toBe(1);
 			await expect(
 				env.BLOBS.head(narObjectKey(cNar.narHash))
 			).resolves.toBeNull();

@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narObjectKey } from '../http/http.ts';
+import { runBlobReaper } from '../routing/scheduled.ts';
 import {
 	afterGrace,
 	blobReferenceRows,
@@ -14,7 +15,6 @@ import {
 	fetchNarInfo,
 	initialise,
 	resetTestServer,
-	runGc,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -49,7 +49,7 @@ describe('blob reaper', () => {
 
 		// The first pass arms the now-unreferenced blob but, the grace not yet
 		// elapsed, leaves both the fact and the object in place.
-		await runGc();
+		await runBlobReaper(env);
 
 		expect({
 			blobState: await blobStateNarHashes(),
@@ -61,7 +61,7 @@ describe('blob reaper', () => {
 
 		// Past the grace, the second pass collects the fact and then the object.
 		vi.setSystemTime(afterGrace());
-		await runGc();
+		await runBlobReaper(env);
 
 		expect({
 			blobState: await blobStateNarHashes(),
@@ -98,13 +98,13 @@ describe('blob reaper', () => {
 		// drained this tenant's presence edge, so negotiate is oracle-safe and tells
 		// it to re-upload; the promote adopts the surviving canonical object and
 		// clears the grace timer, re-referencing the hash.
-		await runGc();
+		await runBlobReaper(env);
 		await commitPath(token, second, nar);
 
 		// Past the original grace, the reaper must not collect it: it is referenced
 		// again, and its timer was cleared.
 		vi.setSystemTime(afterGrace());
-		await runGc();
+		await runBlobReaper(env);
 
 		const served = await fetchNarInfo(second.storePathHash);
 

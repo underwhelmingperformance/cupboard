@@ -7,21 +7,26 @@ import {
 	lte,
 	notInArray
 } from 'drizzle-orm';
+import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { blobReaperGraceMs, narObjectKey } from '../http/http.ts';
 
-import { type ServerContext } from './context.ts';
-
+// The global blob reaper. It is the only actor that sees every tenant's reference
+// edges, so it runs Worker-side over the shared D1 facts rather than inside any one
+// tenant's Durable Object, driven by the cron. It works `blob_state` in two
+// bounded passes: arm every blob no live `blob_ref` references with a grace timer,
+// then collect those whose grace has elapsed and that are still unreferenced. Its
+// safety rests on the atomic compare-and-delete that re-checks the predicate, not
+// on a critical section, so it is correct while tenant objects commit and promote
+// concurrently.
 export class BlobReaperService {
-	constructor(private readonly context: ServerContext) {}
+	constructor(
+		private readonly d1: DrizzleD1Database<typeof d1Schema>,
+		private readonly blobs: R2Bucket
+	) {}
 
-	// The global blob reaper, driven by the maintenance pass. It works the shared
-	// `blob_state` facts in two bounded passes: arm every blob no live `blob_ref`
-	// references with a grace timer, then collect those whose grace has elapsed and
-	// that are still unreferenced. Returns how many shared blobs it collected.
-	//
-	// Runs inside the caller's critical section; must not open its own.
+	// Returns how many shared blobs it collected.
 	async reapBlobs(now: Date, limit: number): Promise<number> {
 		await this.armUnreferencedBlobs(now, limit);
 
@@ -36,7 +41,7 @@ export class BlobReaperService {
 		const deleteAfter = new Date(
 			now.getTime() + blobReaperGraceMs
 		).toISOString();
-		const candidates = await this.context.d1
+		const candidates = await this.d1
 			.select({ narHash: d1Schema.blobState.narHash })
 			.from(d1Schema.blobState)
 			.where(
@@ -44,7 +49,7 @@ export class BlobReaperService {
 					isNull(d1Schema.blobState.deleteAfter),
 					notInArray(
 						d1Schema.blobState.narHash,
-						this.context.d1
+						this.d1
 							.select({ narHash: d1Schema.blobReference.narHash })
 							.from(d1Schema.blobReference)
 					)
@@ -57,7 +62,7 @@ export class BlobReaperService {
 			return;
 		}
 
-		await this.context.d1
+		await this.d1
 			.update(d1Schema.blobState)
 			.set({ deleteAfter })
 			.where(
@@ -79,7 +84,7 @@ export class BlobReaperService {
 	// between them leaves only a harmless orphan object the next promote adopts.
 	private async collectExpiredBlobs(now: Date, limit: number): Promise<number> {
 		const nowIso = now.toISOString();
-		const expired = await this.context.d1
+		const expired = await this.d1
 			.select({ narHash: d1Schema.blobState.narHash })
 			.from(d1Schema.blobState)
 			.where(
@@ -93,7 +98,7 @@ export class BlobReaperService {
 		let collected = 0;
 
 		for (const blob of expired) {
-			const removed = await this.context.d1
+			const removed = await this.d1
 				.delete(d1Schema.blobState)
 				.where(
 					and(
@@ -102,7 +107,7 @@ export class BlobReaperService {
 						lte(d1Schema.blobState.deleteAfter, nowIso),
 						notInArray(
 							d1Schema.blobState.narHash,
-							this.context.d1
+							this.d1
 								.select({ narHash: d1Schema.blobReference.narHash })
 								.from(d1Schema.blobReference)
 						)
@@ -112,7 +117,7 @@ export class BlobReaperService {
 				.all();
 
 			if (removed.length > 0) {
-				await this.context.env.BLOBS.delete(narObjectKey(blob.narHash));
+				await this.blobs.delete(narObjectKey(blob.narHash));
 				collected += 1;
 			}
 		}

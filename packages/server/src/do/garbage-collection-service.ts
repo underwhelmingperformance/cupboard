@@ -3,15 +3,10 @@ import { and, eq, isNull, lt, lte, or } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { StoredReferencesInvalidError } from '../errors.ts';
-import {
-	blobReaperBatchSize,
-	internalOrigin,
-	narObjectKey
-} from '../http/http.ts';
+import { internalOrigin, narObjectKey } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
-import { type BlobReaperService } from './blob-reaper-service.ts';
 import {
 	type GarbageCollectionOutcome,
 	type ServerContext
@@ -22,7 +17,6 @@ export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly authKeys: AuthKeysService,
-		private readonly blobReaper: BlobReaperService,
 		private readonly deletionQueue: DeletionQueueService
 	) {}
 
@@ -265,11 +259,7 @@ export class GarbageCollectionService {
 				rootsExpired,
 				pathsSwept,
 				narInfosDeleted:
-					await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin),
-				blobsDeleted: await this.blobReaper.reapBlobs(
-					new Date(now),
-					blobReaperBatchSize
-				)
+					await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin)
 			};
 		});
 	}
