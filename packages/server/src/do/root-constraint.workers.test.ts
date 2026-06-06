@@ -5,11 +5,14 @@ import {
 	authorisedFetch,
 	initialise,
 	mintServerSignedToken,
+	narBytes,
+	pushPath,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
 
-const target = uploadMetadata({ fileSize: 4 }).storePath;
+const targetMetadata = uploadMetadata({ fileSize: narBytes.byteLength });
+const target = targetMetadata.storePath;
 
 function putRoot(token: string, name: string): Promise<Response> {
 	return authorisedFetch(`/roots/${encodeURIComponent(name)}`, token, {
@@ -39,7 +42,9 @@ describe('cb_roots enforcement at PUT /roots', () => {
 			root: 'github:owner/repo'
 		}
 	])('lets a write token set $name', async ({ cbRoots, root }) => {
-		await initialise();
+		const admin = await initialise();
+		// Activation gates on servability, so the target must be committed first.
+		await pushPath(admin, targetMetadata);
 		const token = await mintServerSignedToken('write', 'ci', cbRoots);
 
 		const response = await putRoot(token, root);
@@ -89,7 +94,8 @@ describe('cb_roots enforcement at PUT /roots', () => {
 	});
 
 	it('lets an admin token set any root', async () => {
-		await initialise();
+		const admin = await initialise();
+		await pushPath(admin, targetMetadata);
 		const token = await mintServerSignedToken('admin', 'owner');
 
 		const response = await putRoot(token, 'github:anything/at-all');

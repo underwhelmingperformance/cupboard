@@ -233,6 +233,20 @@ export class RootNotPermittedError extends ServerHttpError {
 	}
 }
 
+export class RootTargetsUnavailableError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(
+		public readonly rootName: string,
+		public readonly targets: readonly string[]
+	) {
+		super(
+			`Cannot activate root: ${String(targets.length)} target(s) are not yet servable`
+		);
+		this.name = 'RootTargetsUnavailableError';
+	}
+}
+
 export type OAuthErrorCode =
 	| 'invalid_request'
 	| 'invalid_grant'

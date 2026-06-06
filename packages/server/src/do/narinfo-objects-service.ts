@@ -70,51 +70,83 @@ export class NarInfoObjectsService {
 		cache: string,
 		storePathHash: string
 	): Promise<void> {
-		// Runs in a critical section, and against a freshly read row, so it cannot
-		// race a delete: a concurrent delete that removed the row after the caller
-		// read it must not be undone by re-materialising the object from a stale
-		// copy.
-		await this.context.ctx.blockConcurrencyWhile(async () => {
-			const row = this.context.db
-				.select()
-				.from(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cache, cache),
-						eq(schema.narInfos.storePathHash, storePathHash)
-					)
+		await this.context.ctx.blockConcurrencyWhile(() =>
+			this.materialiseIfRecoverable(cache, storePathHash)
+		);
+	}
+
+	// Re-materialises a lost narinfo object when the row, the matching reference
+	// edge, and the shared blob are still present. The caller must already hold the
+	// DO critical section: running against a freshly read row inside one is what
+	// stops a concurrent delete from being undone by re-materialising from a stale
+	// copy.
+	private async materialiseIfRecoverable(
+		cache: string,
+		storePathHash: string
+	): Promise<void> {
+		const row = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
 				)
-				.get();
+			)
+			.get();
 
-			if (row === undefined) {
-				return;
-			}
-
-			if (!(await this.hasCommittedReference(cache, row))) {
-				await this.context.env.BLOBS.delete(
-					narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
-				);
-				return;
-			}
-
-			const existing = await this.context.env.BLOBS.head(
+		if (row === undefined || !(await this.hasCommittedReference(cache, row))) {
+			await this.context.env.BLOBS.delete(
 				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
 			);
+			return;
+		}
 
-			if (existing !== null) {
-				return;
-			}
+		const existing = await this.context.env.BLOBS.head(
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+		);
 
-			const narInfo = await this.narInfoFromRow(row);
+		if (existing !== null) {
+			return;
+		}
 
-			// No shared fact means the blob was demoted; leave the path non-servable
-			// until a re-upload re-promotes it rather than render an unbacked object.
-			if (narInfo === undefined) {
-				return;
-			}
+		const narInfo = await this.narInfoFromRow(row);
 
-			await this.putNarInfoObject(cache, storePathHash, narInfo);
-		});
+		// No shared fact means the blob was demoted; leave the path non-servable
+		// until a re-upload re-promotes it rather than render an unbacked object.
+		if (narInfo === undefined) {
+			return;
+		}
+
+		await this.putNarInfoObject(cache, storePathHash, narInfo);
+	}
+
+	// The availability predicate the read path serves on: a materialised tenant
+	// narinfo R2 object exists. A recoverable gap is repaired first, so a path whose
+	// object was lost but whose shared fact is still `available` counts as available
+	// once re-materialised; a pending, demoted, or unknown path stays unavailable.
+	// Serving, root activation, and root summaries share this so they cannot drift.
+	// Opens its own critical section; callers must be outside one.
+	async isServable(cache: string, storePathHash: string): Promise<boolean> {
+		return this.context.ctx.blockConcurrencyWhile(() =>
+			this.isServableLocked(cache, storePathHash)
+		);
+	}
+
+	// {@link isServable} for a caller that already holds the DO critical section, so
+	// it can check the predicate and act on it (e.g. activate a root) atomically
+	// with the check rather than racing a delete across an `await`.
+	async isServableLocked(
+		cache: string,
+		storePathHash: string
+	): Promise<boolean> {
+		await this.materialiseIfRecoverable(cache, storePathHash);
+
+		const object = await this.context.env.BLOBS.head(
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+		);
+
+		return object !== null;
 	}
 
 	async hasCommittedReference(

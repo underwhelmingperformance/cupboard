@@ -12,10 +12,14 @@ import {
 	authorisedFetch,
 	initialise,
 	mintServerSignedToken,
-	resetTestServer
+	narBytes,
+	pushPath,
+	resetTestServer,
+	uploadMetadata
 } from '../test-support.ts';
 
-const storePath = `/nix/store/${'0'.repeat(32)}-app`;
+const storePathHash = '0'.repeat(32);
+const storePath = `/nix/store/${storePathHash}-app`;
 
 async function addPolicy(
 	token: string,
@@ -91,6 +95,15 @@ describe('retention policies', () => {
 
 	it('applies the matching policy to a root with no explicit TTL', async () => {
 		const token = await initialise();
+		// Activation gates on servability, so the root target must be committed first.
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash,
+				name: 'app'
+			})
+		);
 		await addPolicy(token, {
 			scope: 'root-name-prefix',
 			pattern: 'pr-',

@@ -5,14 +5,16 @@ import {
 	type RootRemoveResponse,
 	rootSetBodySchema,
 	type RootSetResponse,
-	type RootSummary,
-	type RootTarget
+	type RootSummary
 } from '@cupboard/protocol/retention';
 import { and, eq } from 'drizzle-orm';
 
 import { type AccessClaims } from '../auth/auth.ts';
 import * as schema from '../db/schema.ts';
-import { RootNotPermittedError } from '../errors.ts';
+import {
+	RootNotPermittedError,
+	RootTargetsUnavailableError
+} from '../errors.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 
@@ -26,13 +28,27 @@ import {
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
+interface StoredRoot {
+	readonly expiresAt: string | undefined;
+	readonly createdAt: string;
+	readonly updatedAt: string;
+}
+
+type RootActivation =
+	| { readonly kind: 'rejected'; readonly unavailable: readonly string[] }
+	| {
+			readonly kind: 'written';
+			readonly stored: StoredRoot;
+			readonly presence: ReadonlyMap<string, boolean>;
+	  };
+
 export class RootsService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly authKeys: AuthKeysService,
 		private readonly cacheAdmin: CacheAdminService,
-		private readonly narInfoObjects: NarInfoObjectsService,
-		private readonly retention: RetentionService
+		private readonly retention: RetentionService,
+		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
 	async handleSetRoot(
@@ -52,8 +68,46 @@ export class RootsService {
 			ttlSeconds: body.ttlSeconds
 		};
 
+		// Activation gates on the serve predicate so a root never advertises a path
+		// that is not yet substitutable. The check (repairing a merely-lost object)
+		// and the write share one critical section, so a concurrent delete cannot
+		// remove a target between them and leave a root over an unservable path; an
+		// unavailable target rejects without writing, leaving the existing root
+		// untouched. The rejection is thrown after the section so a validation error
+		// does not reset the Durable Object.
+		const activation = await this.context.ctx.blockConcurrencyWhile(
+			async (): Promise<RootActivation> => {
+				const presence = await this.presence(cache, requested.targets, (hash) =>
+					this.narInfoObjects.isServableLocked(cache, hash)
+				);
+				const unavailable = requested.targets
+					.filter((target) => presence.get(target.storePathHash) !== true)
+					.map((target) => target.storePath);
+
+				if (unavailable.length > 0) {
+					return { kind: 'rejected', unavailable };
+				}
+
+				return {
+					kind: 'written',
+					stored: this.writeRoot(cache, requested),
+					presence
+				};
+			}
+		);
+
+		if (activation.kind === 'rejected') {
+			throw new RootTargetsUnavailableError(rootName, activation.unavailable);
+		}
+
 		return Response.json(
-			(await this.setRoot(cache, requested)) satisfies RootSetResponse
+			this.rootSummaryFrom(
+				rootName,
+				activation.stored,
+				activation.stored.updatedAt,
+				requested.targets,
+				activation.presence
+			) satisfies RootSetResponse
 		);
 	}
 
@@ -96,10 +150,7 @@ export class RootsService {
 		);
 	}
 
-	private async setRoot(
-		cache: string,
-		request: RootSetCommand
-	): Promise<RootSetResponse> {
+	private writeRoot(cache: string, request: RootSetCommand): StoredRoot {
 		const now = new Date();
 		const nowIso = now.toISOString();
 		// Precedence: an explicit TTL, then a matching retention policy, then the
@@ -172,14 +223,7 @@ export class RootsService {
 			return created;
 		});
 
-		return this.rootSummary(
-			cache,
-			request.name,
-			expiresAt,
-			createdAt,
-			nowIso,
-			nowIso
-		);
+		return { expiresAt, createdAt, updatedAt: nowIso };
 	}
 
 	private async listRoots(cache: string): Promise<RootListResponse> {
@@ -190,22 +234,30 @@ export class RootsService {
 			.where(eq(schema.retentionRoots.cache, cache))
 			.all();
 
-		return {
-			roots: (
-				await Promise.all(
-					roots.map((root) =>
-						this.rootSummary(
-							cache,
-							root.name,
-							root.expiresAt ?? undefined,
-							root.createdAt,
-							root.updatedAt,
-							now
-						)
-					)
+		const summaries: RootSummary[] = [];
+
+		for (const root of roots) {
+			const targets = this.rootTargetRows(cache, root.name);
+			const presence = await this.presence(cache, targets, (hash) =>
+				this.narInfoObjects.isServable(cache, hash)
+			);
+
+			summaries.push(
+				this.rootSummaryFrom(
+					root.name,
+					{
+						expiresAt: root.expiresAt ?? undefined,
+						createdAt: root.createdAt,
+						updatedAt: root.updatedAt
+					},
+					now,
+					targets,
+					presence
 				)
-			).toSorted((a, b) => (a.name > b.name ? 1 : -1))
-		};
+			);
+		}
+
+		return { roots: summaries.toSorted((a, b) => (a.name > b.name ? 1 : -1)) };
 	}
 
 	private removeRoot(cache: string, name: string): RootRemoveResponse {
@@ -242,16 +294,15 @@ export class RootsService {
 		});
 	}
 
-	private async rootSummary(
+	private rootTargetRows(
 		cache: string,
-		name: string,
-		expiresAt: string | undefined,
-		createdAt: string,
-		updatedAt: string,
-		now: string
-	): Promise<RootSummary> {
-		const targets = this.context.db
-			.select()
+		name: string
+	): readonly { storePathHash: string; storePath: string }[] {
+		return this.context.db
+			.select({
+				storePathHash: schema.retentionRootTargets.storePathHash,
+				storePath: schema.retentionRootTargets.storePath
+			})
 			.from(schema.retentionRootTargets)
 			.where(
 				and(
@@ -260,41 +311,53 @@ export class RootsService {
 				)
 			)
 			.all();
+	}
 
+	// The serve predicate for each distinct target hash, repairing a merely-lost
+	// object on the way. The caller supplies the predicate: the activation gate
+	// passes the locked variant so it runs inside the gate's critical section,
+	// while a summary passes the section-opening variant. Both report exactly what
+	// serving would, so the gate and the `present` flag cannot drift.
+	private async presence(
+		cache: string,
+		targets: readonly { storePathHash: string }[],
+		isServable: (storePathHash: string) => Promise<boolean>
+	): Promise<ReadonlyMap<string, boolean>> {
+		const presence = new Map<string, boolean>();
+
+		for (const { storePathHash } of targets) {
+			if (presence.has(storePathHash)) {
+				continue;
+			}
+
+			presence.set(storePathHash, await isServable(storePathHash));
+		}
+
+		return presence;
+	}
+
+	private rootSummaryFrom(
+		name: string,
+		stored: StoredRoot,
+		now: string,
+		targets: readonly { storePathHash: string; storePath: string }[],
+		presence: ReadonlyMap<string, boolean>
+	): RootSummary {
 		return {
 			name,
-			...(expiresAt === undefined ? {} : { expiresAt }),
-			expired: expiresAt !== undefined && expiresAt <= now,
-			createdAt,
-			updatedAt,
-			targets: await this.rootTargets(cache, targets)
+			...(stored.expiresAt === undefined
+				? {}
+				: { expiresAt: stored.expiresAt }),
+			expired: stored.expiresAt !== undefined && stored.expiresAt <= now,
+			createdAt: stored.createdAt,
+			updatedAt: stored.updatedAt,
+			targets: targets
+				.map((target) => ({
+					storePathHash: target.storePathHash,
+					storePath: target.storePath,
+					present: presence.get(target.storePathHash) === true
+				}))
+				.toSorted((a, b) => (a.storePathHash > b.storePathHash ? 1 : -1))
 		};
-	}
-
-	private async rootTargets(
-		cache: string,
-		pairs: readonly { storePathHash: string; storePath: string }[]
-	): Promise<RootTarget[]> {
-		const targets = await Promise.all(
-			pairs.map(async (pair) => ({
-				storePathHash: pair.storePathHash,
-				storePath: pair.storePath,
-				present: await this.hasCommittedNarInfo(cache, pair.storePathHash)
-			}))
-		);
-
-		return targets.toSorted((a, b) =>
-			a.storePathHash > b.storePathHash ? 1 : -1
-		);
-	}
-
-	private async hasCommittedNarInfo(
-		cache: string,
-		storePathHash: string
-	): Promise<boolean> {
-		return (
-			(await this.narInfoObjects.committedNarInfoRow(cache, storePathHash)) !==
-			undefined
-		);
 	}
 }

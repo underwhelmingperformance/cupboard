@@ -193,6 +193,17 @@ describe('named caches', () => {
 	it('mirrors the per-route scope under a cache prefix', async () => {
 		await useTestServer('named-cache-scope');
 		await bootstrap();
+		const admin = await mintServerSignedToken('admin', 'owner');
+		// Activation gates on servability, so the target must be committed first.
+		await pushPath(
+			admin,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: 'a'.repeat(32),
+				name: 'x'
+			}),
+			'builds'
+		);
 		const writeToken = await mintServerSignedToken('write', 'ci', ['channel']);
 
 		const rootPut = await authorisedFetch(

@@ -2161,7 +2161,7 @@ describe('upload flow', () => {
 	describe('retention roots', () => {
 		const absentPath = '/nix/store/22222222222222222222222222222222-absent';
 
-		it('creates a root with TTL expiry and target presence', async () => {
+		it('creates a root with TTL expiry over a servable target', async () => {
 			vi.setSystemTime(deleteTestBase);
 
 			const token = await initialise();
@@ -2170,7 +2170,7 @@ describe('upload flow', () => {
 
 			const summary = await setRoot(token, {
 				name: 'github:owner/repo/main',
-				targets: [committed.storePath, absentPath],
+				targets: [committed.storePath],
 				ttlSeconds: 604_800
 			});
 
@@ -2187,13 +2187,34 @@ describe('upload flow', () => {
 						storePathHash: committed.storePathHash,
 						storePath: committed.storePath,
 						present: true
-					},
-					{
-						storePathHash: '22222222222222222222222222222222',
-						storePath: absentPath,
-						present: false
 					}
 				]
+			});
+		});
+
+		it('refuses to activate a root with an unservable target, leaving any existing root intact', async () => {
+			vi.setSystemTime(deleteTestBase);
+
+			const token = await initialise();
+			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, committed);
+			const original = await setRoot(token, {
+				name: 'main',
+				targets: [committed.storePath]
+			});
+
+			// Re-setting the same root with a not-yet-servable target must be refused
+			// wholesale, so the channel keeps its previous, servable target set.
+			const response = await authorisedFetch('/roots/main', token, {
+				body: JSON.stringify({ targets: [committed.storePath, absentPath] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			});
+			const { roots } = await listRoots(token);
+
+			expect({ status: response.status, roots }).toStrictEqual({
+				status: StatusCodes.CONFLICT,
+				roots: [original]
 			});
 		});
 
@@ -2201,12 +2222,18 @@ describe('upload flow', () => {
 			vi.setSystemTime(deleteTestBase);
 
 			const token = await initialise();
-			const first = '/nix/store/11111111111111111111111111111111-a';
-			const second = '/nix/store/22222222222222222222222222222222-b';
+			const first = await commitVerifiablePath(token, 'replace-a', {
+				name: 'a',
+				storePathHash: hashA
+			});
+			const second = await commitVerifiablePath(token, 'replace-b', {
+				name: 'b',
+				storePathHash: hashB
+			});
 
 			await setRoot(token, {
 				name: 'pr-1',
-				targets: [first],
+				targets: [first.storePath],
 				ttlSeconds: 604_800
 			});
 
@@ -2214,7 +2241,7 @@ describe('upload flow', () => {
 			vi.setSystemTime(later);
 			const summary = await setRoot(await initialise(), {
 				name: 'pr-1',
-				targets: [second]
+				targets: [second.storePath]
 			});
 
 			expect(summary).toStrictEqual({
@@ -2224,9 +2251,9 @@ describe('upload flow', () => {
 				updatedAt: later.toISOString(),
 				targets: [
 					{
-						storePathHash: '22222222222222222222222222222222',
-						storePath: second,
-						present: false
+						storePathHash: hashB,
+						storePath: second.storePath,
+						present: true
 					}
 				]
 			});
@@ -2234,7 +2261,12 @@ describe('upload flow', () => {
 
 		it('deduplicates repeated targets instead of erroring', async () => {
 			const token = await initialise();
-			const path = '/nix/store/11111111111111111111111111111111-a';
+			const committed = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'a'
+			});
+			await commitPath(token, committed);
+			const path = committed.storePath;
 
 			const summary = await setRoot(token, {
 				name: 'main',
@@ -2243,9 +2275,9 @@ describe('upload flow', () => {
 
 			expect(summary.targets).toStrictEqual([
 				{
-					storePathHash: '11111111111111111111111111111111',
+					storePathHash: committed.storePathHash,
 					storePath: path,
-					present: false
+					present: true
 				}
 			]);
 		});
@@ -2254,7 +2286,12 @@ describe('upload flow', () => {
 			vi.setSystemTime(deleteTestBase);
 
 			const token = await initialise();
-			const path = '/nix/store/11111111111111111111111111111111-a';
+			const committed = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'a'
+			});
+			await commitPath(token, committed);
+			const path = committed.storePath;
 
 			await setRoot(token, { name: 'pr-9', targets: [path], ttlSeconds: 60 });
 			await setRoot(token, { name: 'main', targets: [path] });
@@ -2280,8 +2317,12 @@ describe('upload flow', () => {
 
 		it('removes a root and is a no-op for an absent name', async () => {
 			const token = await initialise();
-			const path = '/nix/store/11111111111111111111111111111111-a';
-			await setRoot(token, { name: 'pr-1', targets: [path] });
+			const committed = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				name: 'a'
+			});
+			await commitPath(token, committed);
+			await setRoot(token, { name: 'pr-1', targets: [committed.storePath] });
 
 			const removed = await removeRoot(token, 'pr-1');
 			const absent = await removeRoot(token, 'pr-1');
@@ -2389,10 +2430,16 @@ describe('upload flow', () => {
 			const token = await initialise();
 			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
 			await commitPath(token, committed);
-			await setRoot(token, {
+
+			// Activation only allows a servable target, but that target can later be
+			// deleted, leaving the root resolving to nothing committed. The sweep must
+			// then skip rather than collect the rest of the cache.
+			const ghost = await commitVerifiablePath(token, 'ghost', {
 				name: 'ghost',
-				targets: ['/nix/store/99999999999999999999999999999999-absent']
+				storePathHash: '99999999999999999999999999999999'
 			});
+			await setRoot(token, { name: 'ghost', targets: [ghost.storePath] });
+			await deletePath(token, ghost.storePathHash);
 
 			expect(await runGcResult()).toStrictEqual({
 				ok: true,
@@ -2573,6 +2620,11 @@ describe('upload flow', () => {
 	describe('authentication', () => {
 		it('accepts a bootstrap-minted admin token on each scope of route', async () => {
 			const token = await initialise();
+			// Root activation gates on servability, so commit the target first.
+			await pushPath(
+				token,
+				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
+			);
 			const stats = await authorisedFetch('/stats', token);
 			const setRootResponse = await authorisedFetch('/roots/main', token, {
 				body: JSON.stringify({
@@ -2589,9 +2641,14 @@ describe('upload flow', () => {
 		});
 
 		it('refuses a write token on admin routes but accepts it on write routes', async () => {
-			await initialise();
-			const writeToken = await mintServerSignedToken('write', 'ci', ['main']);
+			const admin = await initialise();
 			const target = '/nix/store/11111111111111111111111111111111-a';
+			// Root activation gates on servability, so commit the target first.
+			await pushPath(
+				admin,
+				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
+			);
+			const writeToken = await mintServerSignedToken('write', 'ci', ['main']);
 
 			const setRoot = await authorisedFetch('/roots/main', writeToken, {
 				body: JSON.stringify({ targets: [target] }),
@@ -2638,7 +2695,12 @@ describe('upload flow', () => {
 			'round-trips the root name %j through encode, route and decode',
 			async (name) => {
 				const token = await initialise();
-				const target = '/nix/store/11111111111111111111111111111111-a';
+				const committed = uploadMetadata({
+					fileSize: narBytes.byteLength,
+					name: 'a'
+				});
+				await commitPath(token, committed);
+				const target = committed.storePath;
 				const set = await setRoot(token, { name, targets: [target] });
 
 				expect(set.name).toBe(name);

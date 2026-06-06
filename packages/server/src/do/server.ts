@@ -125,8 +125,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.context,
 			this.authKeys,
 			this.cacheAdmin,
-			this.narInfoObjects,
-			this.retention
+			this.retention,
+			this.narInfoObjects
 		);
 
 		this.routes();
