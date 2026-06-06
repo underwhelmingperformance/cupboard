@@ -1910,6 +1910,82 @@ together.
 - Runtime validation records CPU limit, throughput, bounded memory, and
   Miniflare zstd availability before setting the size thresholds.
 
+## Post-V5 Cost Controls
+
+This is a follow-up stage after V5 step 7 has landed and produced real
+operational data. It does not block the cron fan-out, global reaper, or
+offboarding work in V5. The goal is to reduce Cloudflare Durable Object duration
+and request charges once the multi-tenant maintenance path is correct.
+
+Settled conclusions:
+
+- The substitution read path should stay HTTP. It already avoids the tenant DO
+  by serving materialised R2 objects from the Worker and edge cache, so
+  WebSockets would not help normal Nix reads.
+- Upload control requests should stay HTTP. They are short request/response
+  operations around direct R2 PUTs; changing them to WebSockets would add
+  protocol state without reducing the cost of verification or repair.
+- WebSocket hibernation is useful only for idle status watchers. A DO cannot
+  hibernate while it is actively verifying a NAR, repairing metadata, or
+  awaiting storage I/O.
+
+Implementation sequence:
+
+1. Add usage instrumentation. Record route-level and maintenance-pass timing for
+   tenant DO calls: upload negotiate/prepare/commit, `runVerification`,
+   `runGarbageCollection`, deletion flush, reaper passes, OIDC token exchange,
+   and `push --wait` status polling. Record enough detail to distinguish CPU
+   work from storage wait where the platform exposes it, and keep the metrics
+   outside the substitution hot path.
+2. Add maintenance eligibility. Create a D1-visible eligibility source so cron
+   can skip tenants with no work instead of waking every active tenant every
+   tick. The minimum useful shape is one row per tenant carrying pending
+   verification count, earliest upload/status expiry, queued narinfo deletion
+   count, and the next reaper/deferred-maintenance deadline. V5 cursors remain
+   the correctness mechanism; this layer is only the admission filter for waking
+   a tenant DO. Eligibility must fail open: a missing, stale, or inconsistent
+   row causes the tenant to be scheduled, and a periodic full reconciliation
+   scan bypasses the hint so a false negative cannot starve verification,
+   deletion, expiry, or reaper work.
+3. Tighten repair queue bounds. V5 step 7 already owns the correctness-critical
+   bounded fan-out and maintenance passes needed to stay within platform limits.
+   This follow-up uses instrumentation to add or refine cursors, limits, and
+   deadlines where real cost data shows long-running repair loops, especially
+   `narinfo_deletion` flushing and verify/reaper repair scans. A pass that
+   reaches its limit records the next cursor/deadline so the eligibility row
+   keeps the tenant scheduled.
+4. Run an external NAR verification spike. If instrumentation shows server-side
+   NAR verification dominates tenant DO duration or CPU, prototype moving the
+   streaming decompress-and-hash work out of the tenant DO. The tenant DO still
+   owns the durable state transition: it claims a pending upload, records the
+   expected immutable facts, and later commits only a trusted verification
+   result keyed to that immutable claim. Before committing, the tenant DO
+   rechecks that the pending upload still matches the claim and has not expired,
+   been superseded, or already reached a terminal verdict. The verifier may be a
+   stateless Worker, Queue consumer, or other Cloudflare primitive, but it must
+   not become a second writer of tenant metadata.
+5. Add an optional hibernating status watch. Use a WebSocket watch only for
+   `push --wait` upload status notifications. The durable upload status row and
+   HTTP status query remain the source of truth and the CLI fallback. On
+   connect, the DO reads the current durable status for each requested
+   `uploadId`; terminal transitions notify subscribed sockets after the status
+   row is written. A missed notification is harmless because the CLI reconnects
+   or polls.
+
+Verification:
+
+- A tenant with no pending verification, expiry, deletion, or reaper work is not
+  called by cron when its eligibility row is current; missing or suspect
+  eligibility fails open and schedules the tenant.
+- Each bounded maintenance pass resumes from its stored cursor and converges
+  across repeated ticks.
+- Moving verification out of the DO, if implemented, preserves
+  verify-before-serve, quota charging, crash recovery, and the single-writer
+  rule for tenant metadata. A verifier result for an old, expired, superseded,
+  or already-terminal upload is rejected by the tenant DO.
+- WebSocket status watches never replace durable status polling; dropping a
+  socket before or after terminal status is recorded cannot lose completion.
+
 ## V6
 
 V6 carries per-path provenance as builder-signed Sigstore bundles, stored in the
@@ -2128,15 +2204,6 @@ list, anchoring its digest in the signed narinfo, is a later hardening.
 - [ ] Strict uniform-pending privacy mode for high-sensitivity multi-tenant
       deployments, making new references wait through the same visible pending
       state even when the shared CAS already has the blob.
-- [ ] Hibernating WebSocket watch for `push --wait`. The durable upload status
-      row remains the source of truth and the CLI keeps polling as the fallback,
-      but a tenant DO can expose a WebSocket watch that sends terminal status
-      changes as they happen. On connect, the DO first reads the current durable
-      status for each requested `uploadId`; on terminal transitions it notifies
-      subscribed sockets. The CLI reconnects and falls back to the status query,
-      so a crash or network drop between recording the terminal row and sending
-      the notification cannot lose completion. This is a cost and latency
-      optimisation over the polling contract, not a replacement for it.
 - [ ] Web dashboard.
 - [ ] S3-compatible migration/export tooling.
 - [ ] `watch-store` mode in the CLI.
