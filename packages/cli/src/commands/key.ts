@@ -32,7 +32,7 @@ export function registerKeyCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runKeyList(token, reporter, client);
 		});
@@ -46,7 +46,7 @@ export function registerKeyCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runKeyRotate(token, reporter, client);
 		});
@@ -61,7 +61,7 @@ export function registerKeyCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runKeyRetire(id, token, reporter, client);
 		});

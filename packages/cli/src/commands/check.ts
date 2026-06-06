@@ -29,7 +29,7 @@ export function registerCheckCommand(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runCheck(options.deep ?? false, token, reporter, client);
 		});

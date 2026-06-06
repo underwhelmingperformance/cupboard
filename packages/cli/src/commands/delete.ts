@@ -37,7 +37,7 @@ export function registerDeleteCommand(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runDelete(storePath, token, reporter, client);
 		});

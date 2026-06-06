@@ -35,7 +35,7 @@ export function registerAuthKeyCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runAuthKeyList(cachedOwnerProvider(), reporter, client);
+			await runAuthKeyList(cachedOwnerProvider(url), reporter, client);
 		});
 
 	authKey
@@ -48,7 +48,7 @@ export function registerAuthKeyCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runAuthKeyRotate(cachedOwnerProvider(), reporter, client);
+			await runAuthKeyRotate(cachedOwnerProvider(url), reporter, client);
 		});
 
 	authKey
@@ -62,7 +62,7 @@ export function registerAuthKeyCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runAuthKeyRetire(kid, cachedOwnerProvider(), reporter, client);
+			await runAuthKeyRetire(kid, cachedOwnerProvider(url), reporter, client);
 		});
 }
 

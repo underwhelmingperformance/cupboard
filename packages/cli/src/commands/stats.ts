@@ -25,7 +25,7 @@ export function registerStatsCommand(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			const stats = await reporter.phase('Querying cupboard', () =>
 				client.stats(token)

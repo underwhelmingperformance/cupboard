@@ -14,10 +14,10 @@ import { readCachedToken } from './token-store.ts';
  * cannot be silently refreshed — there is no refresh grant yet — so an absent
  * cache or a 401 surfaces as a prompt to run `cupboard login` again.
  */
-export function cachedOwnerProvider(path?: string): TokenProvider {
+export function cachedOwnerProvider(target: string): TokenProvider {
 	return {
 		async get(): Promise<string> {
-			const token = await readCachedToken(path);
+			const token = await readCachedToken(target);
 
 			if (token === undefined) {
 				throw new OwnerLoginRequiredError();
@@ -70,7 +70,7 @@ export function authenticateForPush(
 		);
 	}
 
-	return Promise.resolve(cachedOwnerProvider());
+	return Promise.resolve(cachedOwnerProvider(client.baseUrl.href));
 }
 
 class GithubOidcTokenProvider implements TokenProvider {

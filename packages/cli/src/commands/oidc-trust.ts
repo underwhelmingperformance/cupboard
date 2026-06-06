@@ -66,7 +66,7 @@ export function registerOidcTrustCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runOidcTrustList(cachedOwnerProvider(), reporter, client);
+			await runOidcTrustList(cachedOwnerProvider(url), reporter, client);
 		});
 
 	oidcTrust
@@ -99,7 +99,7 @@ export function registerOidcTrustCommands(program: Command): void {
 				allowedRoots: [...options.allowedRoot]
 			};
 
-			await runOidcTrustAdd(body, cachedOwnerProvider(), reporter, client);
+			await runOidcTrustAdd(body, cachedOwnerProvider(url), reporter, client);
 		});
 
 	oidcTrust
@@ -113,7 +113,7 @@ export function registerOidcTrustCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runOidcTrustRemove(id, cachedOwnerProvider(), reporter, client);
+			await runOidcTrustRemove(id, cachedOwnerProvider(url), reporter, client);
 		});
 }
 

@@ -60,7 +60,7 @@ export function registerPolicyCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runPolicyList(token, reporter, client);
 		});
@@ -87,7 +87,7 @@ export function registerPolicyCommands(program: Command): void {
 					mode: reporterModeFromGlobals(program)
 				});
 				const client = CupboardClient.fromUrl(url);
-				const token = cachedOwnerProvider();
+				const token = cachedOwnerProvider(url);
 
 				await runPolicyAdd(
 					parseScope(scope),
@@ -110,7 +110,7 @@ export function registerPolicyCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runPolicyRemove(id, token, reporter, client);
 		});

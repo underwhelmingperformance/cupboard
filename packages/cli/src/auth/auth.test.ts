@@ -1,12 +1,9 @@
-import { mkdtemp } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
-
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../client/client.ts';
 import { OwnerLoginRequiredError } from '../errors.ts';
+import { testWithConfigHome } from '../test-support.ts';
 
 import {
 	authenticateForPush,
@@ -52,11 +49,14 @@ function federatingClient(): CupboardClient {
 	});
 }
 
-async function cachePath(): Promise<string> {
-	return path.join(
-		await mkdtemp(path.join(tmpdir(), 'cupboard-auth-')),
-		'token'
-	);
+const target = 'https://cupboard.test';
+
+function encodeJwtSegment(value: object): string {
+	return Buffer.from(JSON.stringify(value)).toString('base64url');
+}
+
+function jwt(claims: Record<string, unknown>): string {
+	return `${encodeJwtSegment({ alg: 'EdDSA', typ: 'JWT' })}.${encodeJwtSegment(claims)}.signature`;
 }
 
 describe('authenticateGithubOidc', () => {
@@ -90,31 +90,37 @@ describe('authenticateForPush', () => {
 		expect(await provider.get()).toBe('write-1');
 	});
 
-	it('otherwise uses the cached owner token, prompting a login when absent', async () => {
-		const provider = await authenticateForPush(federatingClient(), {
-			audience: 'https://cache.example.workers.dev'
-		});
+	testWithConfigHome(
+		'otherwise uses the cached owner token, prompting a login when absent',
+		async () => {
+			const provider = await authenticateForPush(federatingClient(), {
+				audience: 'https://cache.example.workers.dev'
+			});
 
-		await expect(provider.get()).rejects.toBeInstanceOf(
-			OwnerLoginRequiredError
-		);
-	});
+			await expect(provider.get()).rejects.toBeInstanceOf(
+				OwnerLoginRequiredError
+			);
+		}
+	);
 });
 
 describe('cachedOwnerProvider', () => {
-	it('returns the cached token and refuses to refresh it', async () => {
-		const target = await cachePath();
-		await writeCachedToken('cached.admin.jwt', target);
+	testWithConfigHome(
+		'returns the cached token and refuses to refresh it',
+		async () => {
+			const token = jwt({ iss: target, aud: target });
+			await writeCachedToken(token, target);
+			const provider = cachedOwnerProvider(target);
+
+			expect(await provider.get()).toBe(token);
+			await expect(provider.refresh()).rejects.toBeInstanceOf(
+				OwnerLoginRequiredError
+			);
+		}
+	);
+
+	testWithConfigHome('prompts a login when no token is cached', async () => {
 		const provider = cachedOwnerProvider(target);
-
-		expect(await provider.get()).toBe('cached.admin.jwt');
-		await expect(provider.refresh()).rejects.toBeInstanceOf(
-			OwnerLoginRequiredError
-		);
-	});
-
-	it('prompts a login when no token is cached', async () => {
-		const provider = cachedOwnerProvider(await cachePath());
 
 		await expect(provider.get()).rejects.toBeInstanceOf(
 			OwnerLoginRequiredError

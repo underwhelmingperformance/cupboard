@@ -69,7 +69,7 @@ export function registerLoginCommand(program: Command): void {
 				idToken,
 				subjectTokenTypeIdToken
 			);
-			await writeCachedToken(exchanged.access_token);
+			await writeCachedToken(exchanged.access_token, url);
 
 			reporter.result([
 				{ label: 'Cache URL', value: url },

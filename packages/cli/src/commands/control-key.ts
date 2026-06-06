@@ -38,7 +38,7 @@ export function registerControlKeyCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runControlKeyList(cachedOwnerProvider(), reporter, client);
+			await runControlKeyList(cachedOwnerProvider(url), reporter, client);
 		});
 
 	controlKey
@@ -51,7 +51,7 @@ export function registerControlKeyCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runControlKeyRotate(cachedOwnerProvider(), reporter, client);
+			await runControlKeyRotate(cachedOwnerProvider(url), reporter, client);
 		});
 
 	controlKey
@@ -67,7 +67,12 @@ export function registerControlKeyCommands(program: Command): void {
 			});
 			const client = CupboardClient.fromUrl(url);
 
-			await runControlKeyRetire(kid, cachedOwnerProvider(), reporter, client);
+			await runControlKeyRetire(
+				kid,
+				cachedOwnerProvider(url),
+				reporter,
+				client
+			);
 		});
 }
 

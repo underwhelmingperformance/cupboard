@@ -67,7 +67,7 @@ export function registerRootCommands(program: Command): void {
 					mode: reporterModeFromGlobals(program)
 				});
 				const client = CupboardClient.fromUrl(url, options.cache);
-				const token = cachedOwnerProvider();
+				const token = cachedOwnerProvider(url);
 
 				await runRootSet(name, targets, options.ttl, token, reporter, client);
 			}
@@ -83,7 +83,7 @@ export function registerRootCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runRootList(token, reporter, client);
 		});
@@ -99,7 +99,7 @@ export function registerRootCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runRootRemove(name, token, reporter, client);
 		});

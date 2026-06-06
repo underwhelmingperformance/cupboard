@@ -65,7 +65,7 @@ export function registerCacheCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runCacheList(token, reporter, client);
 		});
@@ -85,7 +85,7 @@ export function registerCacheCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runCacheCreate(
 				name,
@@ -107,7 +107,7 @@ export function registerCacheCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runCacheRemove(
 				name,
@@ -128,7 +128,7 @@ export function registerCacheCommands(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = cachedOwnerProvider();
+			const token = cachedOwnerProvider(url);
 
 			await runCacheInspect(name, token, reporter, client);
 		});
