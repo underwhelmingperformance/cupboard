@@ -151,6 +151,33 @@ export const tenantMaintenanceFailure = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.pass] })]
 );
 
+// A fail-open admission hint for cron-driven tenant maintenance. The tenant DO
+// owns the source tables and rewrites this row after mutations that can create
+// or clear deferred work; cron uses it only to avoid waking tenants whose row is
+// current and has no due work.
+export const tenantMaintenanceEligibility = sqliteTable(
+	'tenant_maintenance_eligibility',
+	{
+		tenant: text('tenant').primaryKey(),
+		pendingVerificationCount: integer('pending_verification_count')
+			.notNull()
+			.default(0),
+		earliestUploadExpiry: text('earliest_upload_expiry'),
+		queuedNarInfoDeletionCount: integer('queued_narinfo_deletion_count')
+			.notNull()
+			.default(0),
+		earliestRootExpiry: text('earliest_root_expiry'),
+		nextMaintenanceAt: text('next_maintenance_at'),
+		reconciledAt: text('reconciled_at').notNull()
+	},
+	(table) => [
+		index('tenant_maintenance_eligibility_due_idx').on(
+			table.nextMaintenanceAt,
+			table.reconciledAt
+		)
+	]
+);
+
 // The monotonic version of the published admission manifest, a single row the
 // Worker advances every time it republishes. Sourcing the version from D1 (rather
 // than the KV version key) keeps concurrent provisioning operations from minting
