@@ -2012,6 +2012,97 @@ Verification:
 - WebSocket status watches never replace durable status polling; dropping a
   socket before or after terminal status is recorded cannot lose completion.
 
+## Scheduled key retirement
+
+`auth-key rotate` and `control-key rotate` add a new minting key and retire
+nothing, so a superseded auth or control signing key stays in the verification
+set until an operator runs `retire` by hand. Nothing acts on key age: a key's
+`created_at` is recorded but never consumed, so a superseded key whose tokens
+have long since expired can linger indefinitely, and if its private JWK is later
+exfiltrated from DO SQLite or D1 it can still forge tokens that verify for as
+long as it remains live. This bounds that window automatically: `rotate`
+schedules the superseded key's retirement for after the longest-lived token it
+could have signed has expired, and a maintenance pass performs the retirement.
+
+The scope is the JWT signing keys only: per-tenant `auth_key` rows and the
+global `control_auth_key`. The narinfo `signing_key` set is excluded. Its keys
+sign long-lived narinfos and are trusted through Nix `trusted-public-keys`
+pinning, which carries no expiry and migrates on the client's own schedule, so
+there is no bounded time after which dropping a narinfo key is safe. Narinfo-key
+retirement stays manual and staged.
+
+This is safe for the auth and control keys because cupboard verifies its own
+access tokens from its own key set, read directly from DO SQLite (auth) or D1
+(control), so a rotated key is usable with no JWKS propagation delay and a
+retired one disappears from verification the moment its row is updated. No
+external party verifies a cupboard access token, so there is no cached JWKS to
+wait on.
+
+### Settled decisions
+
+- The retirement time is a known quantity, not an estimate. A rotated key stops
+  minting the instant its successor is added, so every token it signed expires
+  by
+  `rotate_time + max(adminJwtTtlSeconds, writeJwtTtlSeconds) + clockTolerance`.
+  A safety margin sits on top:
+  `scheduled_retire_at = rotate_time + maxTokenTtl + clockTolerance + margin`.
+- `scheduled_retire_at` is a write-side scheduling marker, never a verification
+  gate. Verification keeps selecting keys by `retired_at IS NULL`, so a key with
+  a future `scheduled_retire_at` still verifies. The sweep is the only actor
+  that bridges the two, reading `scheduled_retire_at` and writing `retired_at`.
+- Among non-retired keys exactly one carries a NULL `scheduled_retire_at`: the
+  live minting key. `rotate` inserts the new key with NULL and stamps the
+  outgoing key (the one that held NULL) with its retirement time, so the NULL
+  baton passes from the outgoing key to the incoming one. A later rotate
+  therefore stamps only the key it supersedes and leaves an older key's schedule
+  untouched. This anchors each key's retirement to the moment it stopped
+  minting; re-stamping a superseded key would push a dead key's retirement later
+  and widen its exposure window.
+- The active minting key is structurally immune from the sweep: its
+  `scheduled_retire_at` is NULL, so the `scheduled_retire_at <= now` predicate
+  cannot select it. The existing last-key refusal stays as a second guard.
+- Manual `retire` is unchanged. It remains the immediate-revocation lever for a
+  suspected compromise, where breaking still-live tokens is the intent.
+
+### Implementation sequence
+
+1. Add a nullable `scheduled_retire_at` column to `auth_key` (DO SQLite) and
+   `control_auth_key` (D1), each with a real migration. Existing keys keep NULL.
+2. `auth-key rotate` and `control-key rotate` capture the current minting key,
+   insert the new key with `scheduled_retire_at = NULL`, and stamp the captured
+   key with `rotate_time + maxTokenTtl + clockTolerance + margin`. The rotate
+   response and CLI output report the scheduled retirement time.
+3. Add the sweep consumers. The per-tenant Durable Object maintenance pass (the
+   cron fan-out's existing per-tenant work) retires due `auth_key` rows; the
+   Worker cron tick retires due `control_auth_key` rows. Each selects rows whose
+   `scheduled_retire_at` is non-null and at or before now while `retired_at` is
+   null, sets `retired_at`, and keeps the last-key refusal. Both writers already
+   own their rows, so no new write boundary is introduced.
+4. `key rotate` (narinfo) is untouched.
+
+### Verification
+
+- `rotate` stamps only the outgoing key and leaves an older superseded key's
+  `scheduled_retire_at` unchanged; two rotations before a sweep leave two keys
+  with distinct schedules and one live minting key with NULL.
+- The sweep retires a key only at or after its `scheduled_retire_at`, never
+  before, so a token minted just before its key was superseded still verifies
+  for its full lifetime.
+- Verification selects keys by `retired_at IS NULL` and ignores
+  `scheduled_retire_at`; a key with a future schedule still verifies.
+- The sweep never retires the minting key and refuses to retire the last live
+  key.
+- The sweep is idempotent: a second run over an already-retired key changes
+  nothing, and the hourly cadence retires late, never early.
+
+### Future extension
+
+This composes with automated periodic rotation: a scheduled pass that calls the
+same `rotate` on a cadence self-schedules each predecessor's retirement through
+the mechanism above, giving the auth and control keys a fully autonomous
+lifecycle. The same propagation-free property makes it safe for these keys and
+keeps it excluded for narinfo keys.
+
 ## V6
 
 V6 carries per-path provenance as builder-signed Sigstore bundles, stored in the
