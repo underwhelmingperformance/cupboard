@@ -1512,9 +1512,10 @@ re-promoted (this replaces step 1's "clear the pending row in the commit
 transaction" with "set it terminal" for the deferred path). Synchronous outcomes
 return at commit and need no poll: inline success returns servable; inline
 mismatch/too-large return `422`/`413` and clear the row (step 1's behaviour).
-The query returns `servable`, `pending`, `mismatch`, or `absent`; `push --wait`
-backs off and terminates on `servable`, on `mismatch` as a hard error (it must
-not hang on a failed deferred blob), or on timeout.
+The query returns `servable`, `pending`, `mismatch`, `over-quota`, or `absent`;
+`push --wait` backs off and terminates on `servable`, on `mismatch` or
+`over-quota` as a hard error (it must not hang on a failed deferred blob), or on
+timeout.
 
 ### Tenant auth and issuer
 
@@ -1809,13 +1810,18 @@ together.
    cache; the negotiate reuse lookup is existence-oracle-safe (gating on the
    asking tenant's own `tenant_blob`/`blob_ref`, never global `blob_state`); the
    per-tenant-per-`narHash` quota is charged on the canonical size with a
-   read-only pre-verify early-reject; and the non-default-tenant write gate is
-   lifted, so a tenant writes through the Worker to its own object.
-   **Remaining:** the push contract — the per-upload status query
-   (`servable`/`pending`/`mismatch`/ `absent`),
-   `push --wait`/`--no-wait`/root-activation, and the CLI token cache keyed on
-   the full tenant base URL. The earlier gating notes, kept for context:
-   existence-oracle-safe negotiate gating on the asking tenant's own
+   read-only pre-verify early-reject; the non-default-tenant write gate is
+   lifted, so a tenant writes through the Worker to its own object; the
+   per-upload status query (`servable`/`pending`/`mismatch`/`over-quota`/
+   `absent`, keyed on `uploadId`, mapping the durable per-upload verdict) is in
+   place, with a deferred (`pending`) upload's row retained through its terminal
+   verdict so the poll outlives its commit; and the cron fans out maintenance to
+   every active tenant, so a non-default tenant's deferred uploads reach the
+   background verify pass (the unsharded fan-out; the cursor, subrequest budget
+   and global reaper are step 7). **Remaining:** the client side of the push
+   contract, namely `push --wait`/`--no-wait`/root-activation, and the CLI token
+   cache keyed on the full tenant base URL. The earlier gating notes, kept for
+   context: existence-oracle-safe negotiate gating on the asking tenant's own
    `tenant_blob`/`blob_ref` (this reworks 2b's single-tenant reuse lookup, which
    consults global `blob_state` — a known, accepted cost);
    per-tenant-per-`narHash` quota — a read-only pre-verify check (early-reject
@@ -2109,6 +2115,15 @@ list, anchoring its digest in the signed narinfo, is a later hardening.
 - [ ] Strict uniform-pending privacy mode for high-sensitivity multi-tenant
       deployments, making new references wait through the same visible pending
       state even when the shared CAS already has the blob.
+- [ ] Hibernating WebSocket watch for `push --wait`. The durable upload status
+      row remains the source of truth and the CLI keeps polling as the fallback,
+      but a tenant DO can expose a WebSocket watch that sends terminal status
+      changes as they happen. On connect, the DO first reads the current durable
+      status for each requested `uploadId`; on terminal transitions it notifies
+      subscribed sockets. The CLI reconnects and falls back to the status query,
+      so a crash or network drop between recording the terminal row and sending
+      the notification cannot lose completion. This is a cost and latency
+      optimisation over the polling contract, not a replacement for it.
 - [ ] Web dashboard.
 - [ ] S3-compatible migration/export tooling.
 - [ ] `watch-store` mode in the CLI.
