@@ -1829,18 +1829,22 @@ together.
    status query, failing fast on `mismatch`/`over-quota`, bounded by
    `--wait-timeout`) before recording retention, so the gated activation is
    admitted; `--no-wait` returns with the paths pending and records no retention
-   over them. **Remaining:** the CLI token cache keyed on the full tenant base
-   URL. The earlier gating notes, kept for context: existence-oracle-safe
-   negotiate gating on the asking tenant's own `tenant_blob`/`blob_ref` (this
-   reworks 2b's single-tenant reuse lookup, which consults global `blob_state` —
-   a known, accepted cost); per-tenant-per-`narHash` quota — a read-only
-   pre-verify check (early-reject to save verify CPU) plus the authoritative
-   post-verify charge gated on the `tenant_blob` 0-to-1 insert, no `servable`
-   flag needed; usage; the per-upload status query the push contract polls;
-   server wait/no-wait/root-activation states and the CLI behaviour; the token
-   cache keyed on the full tenant base URL (origin plus `/t/<slug>`), with
-   decoded `iss` checked against the full path-based tenant issuer URL and `aud`
-   against the target (the CLI token-store gains a per-target dimension).
+   over them. The CLI token cache is keyed per target (origin plus any
+   `/t/<slug>`), one file per target, and binds a cached token to its target
+   before reuse: the signed issuer must equal the target (a tenant mints `iss`
+   equal to its base URL, the control plane equal to the bare host), and the
+   audience must admit it, closing V4 finding C. **Step 6 is complete.** The
+   earlier gating notes, kept for context: existence-oracle-safe negotiate
+   gating on the asking tenant's own `tenant_blob`/`blob_ref` (this reworks 2b's
+   single-tenant reuse lookup, which consults global `blob_state` — a known,
+   accepted cost); per-tenant-per-`narHash` quota — a read-only pre-verify check
+   (early-reject to save verify CPU) plus the authoritative post-verify charge
+   gated on the `tenant_blob` 0-to-1 insert, no `servable` flag needed; usage;
+   the per-upload status query the push contract polls; server
+   wait/no-wait/root-activation states and the CLI behaviour; the token cache
+   keyed on the full tenant base URL (origin plus `/t/<slug>`), with decoded
+   `iss` checked against the full path-based tenant issuer URL and `aud` against
+   the target (the CLI token-store gains a per-target dimension).
 7. **Cron fan-out + global reaper + offboarding.** Hourly cron; per-tick tenant
    batch bounded under the subrequest budget advancing `cron_cursor` (sharding
    required here, not optional); per-tenant failures recorded, not swallowed;
