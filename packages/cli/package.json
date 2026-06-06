@@ -25,7 +25,7 @@
 	"private": true,
 	"scripts": {
 		"check:types": "tsc --noEmit",
-		"cli": "node src/main.ts",
+		"cli": "node --experimental-transform-types --disable-warning=ExperimentalWarning src/main.ts",
 		"test": "vitest run --passWithNoTests"
 	},
 	"type": "module"
