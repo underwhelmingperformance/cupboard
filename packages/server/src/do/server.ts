@@ -462,6 +462,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 		);
+		// `push --wait` polls a deferred upload's status by its uploadId, which is
+		// unique across caches, so a single route serves it regardless of cache.
+		this.app.get('/uploads/:id/status', (context) =>
+			serverErrorResponse(
+				this.uploads.handleUploadStatus(
+					context.req.raw,
+					context.req.param('id')
+				)
+			)
+		);
 		this.app.post('/gc', (context) =>
 			serverErrorResponse(
 				this.garbageCollection.handleGarbageCollection(context.req.raw)

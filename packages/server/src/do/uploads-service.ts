@@ -5,7 +5,8 @@ import {
 	type UploadPathMetadataFields,
 	type UploadPathNegotiationFields,
 	uploadPrepareRequestSchema,
-	type UploadPrepareResponse
+	type UploadPrepareResponse,
+	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
 import { and, eq } from 'drizzle-orm';
 
@@ -30,6 +31,34 @@ import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
+type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
+
+// Maps a polled upload's durable verdict to the status a `push --wait` client reads.
+// An absent row is `absent`; a terminal verdict maps straight across; any in-flight
+// or not-yet-committed verdict (null, `pending`, `committing`) is `pending`.
+function uploadStatusOf(
+	pending: { readonly verdict: PendingVerdict } | undefined
+): UploadStatusResponse['status'] {
+	if (pending === undefined) {
+		return 'absent';
+	}
+
+	switch (pending.verdict) {
+		case 'servable': {
+			return 'servable';
+		}
+		case 'mismatch': {
+			return 'mismatch';
+		}
+		case 'over-quota': {
+			return 'over-quota';
+		}
+		default: {
+			return 'pending';
+		}
+	}
+}
+
 export class UploadsService {
 	constructor(
 		private readonly context: ServerContext,
@@ -38,6 +67,27 @@ export class UploadsService {
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly deletionQueue: DeletionQueueService
 	) {}
+
+	// The status of a deferred upload, polled by `push --wait` on the uploadId it
+	// holds. Derived from the durable per-upload verdict: a row that is gone is
+	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
+	// while it still verifies (a null or in-flight verdict).
+	async handleUploadStatus(
+		request: Request,
+		uploadId: string
+	): Promise<Response> {
+		await this.authKeys.requireScope(request, 'write');
+
+		const pending = this.context.db
+			.select({ verdict: schema.pendingUploads.verdict })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		return Response.json({
+			status: uploadStatusOf(pending)
+		} satisfies UploadStatusResponse);
+	}
 
 	async handleNegotiate(request: Request, cache: string): Promise<Response> {
 		await this.authKeys.requireScope(request, 'write');

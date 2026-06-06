@@ -117,6 +117,25 @@ export const commitResponseSchema = z.strictObject({
 });
 export type ParsedCommitResponse = z.output<typeof commitResponseSchema>;
 
+// The status of a deferred upload, polled by `push --wait` keyed on the uploadId it
+// already holds. `servable` once the background pass committed it, `pending` while it
+// still verifies, the terminal `mismatch`/`over-quota` on failure, and `absent` once
+// the upload is gone (its observation window passed, or it was never deferred).
+export const uploadStatusSchema = z.enum([
+	'servable',
+	'pending',
+	'mismatch',
+	'over-quota',
+	'absent'
+]);
+export const uploadStatusResponseSchema = z.strictObject({
+	status: uploadStatusSchema
+});
+export type ParsedUploadStatusResponse = z.output<
+	typeof uploadStatusResponseSchema
+>;
+export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
+
 export const statsResponseSchema = z.strictObject({
 	storePaths: countSchema,
 	narBlobs: countSchema,

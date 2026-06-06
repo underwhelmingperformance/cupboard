@@ -275,8 +275,7 @@ export class VerificationService {
 			return this.commitPipeline.materialiseServable(
 				pending.cache,
 				metadata,
-				generation,
-				pending.id
+				generation
 			);
 		});
 
@@ -298,13 +297,31 @@ export class VerificationService {
 			return;
 		}
 
+		if (outcome === 'materialised') {
+			// A deferred upload (`pending`) is now servable: record a terminal
+			// `servable` verdict and keep the row for the status-observation window so
+			// `push --wait` sees it become servable rather than vanish. A re-driven
+			// crashed inline commit (`committing`) was never deferred and no client polls
+			// it, so it is cleared as the inline commit would have.
+			if (pending.verdict === 'pending') {
+				await this.uploadState.markUploadTerminal(
+					pending.id,
+					pending.r2Key,
+					metadata.narHash,
+					'servable'
+				);
+				return;
+			}
+
+			this.uploadState.clearPendingUpload(pending.id);
+			await this.context.env.BLOBS.delete(pending.r2Key);
+			return;
+		}
+
 		// A concurrent recommit took the path or the blob vanished, so this upload
 		// lost: clear its marker. Any blob it promoted that no edge now references is
 		// left for the reaper to collect.
-		if (outcome !== 'materialised') {
-			this.uploadState.clearPendingUpload(pending.id);
-		}
-
+		this.uploadState.clearPendingUpload(pending.id);
 		await this.context.env.BLOBS.delete(pending.r2Key);
 	}
 
@@ -326,7 +343,7 @@ export class VerificationService {
 				metadata.narHash
 			)
 		);
-		await this.uploadState.markUploadFailed(
+		await this.uploadState.markUploadTerminal(
 			pending.id,
 			pending.r2Key,
 			metadata.narHash,

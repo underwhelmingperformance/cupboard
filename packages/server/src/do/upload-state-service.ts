@@ -60,16 +60,17 @@ export class UploadStateService {
 			.run();
 	}
 
-	// Records a durable terminal verdict for a background failure and deletes the bad
-	// staging bytes, keeping the upload row so a later status reader (`push --wait` or
-	// a status endpoint) can observe why the path never became servable. The verdict
-	// distinguishes a content `mismatch` from an `over-quota` rejection. Synchronous
-	// inline failures reject immediately and need no verdict.
-	async markUploadFailed(
+	// Records a deferred upload's terminal verdict and deletes its staging bytes,
+	// keeping the upload row so a later status reader (`push --wait` or a status
+	// endpoint) can observe the outcome. `servable` once the background pass commits it,
+	// `mismatch` for a failed NAR-hash check, `over-quota` for a quota rejection;
+	// distinguished so a quota rejection is not misreported as bad content. Synchronous
+	// inline outcomes return at commit and need no retained verdict.
+	async markUploadTerminal(
 		uploadId: string,
 		r2Key: string,
 		narHash: string,
-		verdict: 'mismatch' | 'over-quota' = 'mismatch'
+		verdict: 'servable' | 'mismatch' | 'over-quota'
 	): Promise<void> {
 		if (r2Key !== narObjectKey(narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);

@@ -210,13 +210,14 @@ export class GarbageCollectionService {
 			// background verification, or a crashed inline commit the verify pass
 			// re-drives), not abandoned, so it and its staged bytes must survive the
 			// sweep until the verify pass resolves it. The reapable states once expired
-			// are a null-verdict row still awaiting its bytes and the terminal failures
-			// (`mismatch`, `over-quota`) whose observation window has passed; their
-			// staging bytes are already gone.
+			// are a null-verdict row still awaiting its bytes and the terminal verdicts
+			// (`servable`, `mismatch`, `over-quota`) whose status-observation window has
+			// passed; their staging bytes are already gone.
 			const reapable = and(
 				lt(schema.pendingUploads.expiresAt, now),
 				or(
 					isNull(schema.pendingUploads.verdict),
+					eq(schema.pendingUploads.verdict, 'servable'),
 					eq(schema.pendingUploads.verdict, 'mismatch'),
 					eq(schema.pendingUploads.verdict, 'over-quota')
 				)

@@ -886,15 +886,15 @@ describe('upload flow', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
 
-		// The next pass reads cleanly, commits, and clears the pending row.
+		// The next pass reads cleanly, commits, and marks the upload servable.
 		await currentServer().runVerification();
 
-		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('servable');
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 		expect(narInfo.narHash).toBe(metadata.narHash);
 	});
 
-	it('clears the pending row with the commit so a later delete is not undone', async () => {
+	it('marks a deferred upload servable on commit, and a later delete is not undone', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -908,15 +908,16 @@ describe('upload flow', () => {
 
 		await currentServer().runVerification();
 
-		// The background commit cleared the pending row in the same transaction, so
-		// no `pending` row survives the committed narinfo.
-		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		// The background commit records a terminal `servable` verdict, retained for the
+		// status window rather than re-driven; the verify pass only re-drives
+		// pending/committing rows.
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('servable');
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
 
-		// Deleting the committed path is not undone by a later verify pass: there is
-		// no stale pending row to re-promote and re-commit it.
+		// Deleting the committed path is not undone by a later verify pass: the
+		// `servable` row is terminal and never re-promoted.
 		await deletePath(token, metadata.storePathHash);
 		await currentServer().runVerification();
 

@@ -1462,14 +1462,15 @@ only the compressed `fileHash`. V5 verifies the uncompressed NAR server-side.
   verifiable cap. The provisional values keep the deferred window open:
   `inlineVerifyMaxBytes` is 8 MiB (verified inline at commit) and
   `verifiableMaxBytes` is 4 GiB, so a blob between them is accepted and verified
-  in the background pass. This makes the background verify path and the push-wait
-  contract live now, rather than gating them behind the spike. The spike is
-  therefore a **measurement, not an enabler**: it must confirm the background
-  pass holds its CPU and memory budget on a multi-hundred-MB blob on the real
-  account runtime (and `cpu_ms = 300_000`), and may then lower `verifiableMaxBytes`
-  if the measurements demand it. (An earlier draft made the provisional config
-  reject anything over the inline bound so nothing deferred until the spike; that
-  fail-safe is deliberately not taken — the deferred window stays open.)
+  in the background pass. This makes the background verify path and the
+  push-wait contract live now, rather than gating them behind the spike. The
+  spike is therefore a **measurement, not an enabler**: it must confirm the
+  background pass holds its CPU and memory budget on a multi-hundred-MB blob on
+  the real account runtime (and `cpu_ms = 300_000`), and may then lower
+  `verifiableMaxBytes` if the measurements demand it. (An earlier draft made the
+  provisional config reject anything over the inline bound so nothing deferred
+  until the spike; that fail-safe is deliberately not taken — the deferred
+  window stays open.)
 - Blobs at or below `inlineVerifyMaxBytes` verify synchronously at commit and
   become immediately servable. Larger blobs go pending and verify in the
   background pass. A blob whose declared NAR size exceeds `verifiableMaxBytes`
@@ -1692,9 +1693,9 @@ Per-tenant DO SQLite changes:
   tenant quota) on failure. A deferred upload's row is retained through its
   terminal state, or until its narinfo object is servable, as the durable
   `uploadId`-keyed record `push --wait` polls; it is reaped after a
-  status-observation window, including the terminal `over-quota` rows. Synchronous
-  inline failures reject and clear the upload; an over-budget blob (above
-  `verifiableMaxBytes`) is rejected at commit, never deferred.
+  status-observation window, including the terminal `over-quota` rows.
+  Synchronous inline failures reject and clear the upload; an over-budget blob
+  (above `verifiableMaxBytes`) is rejected at commit, never deferred.
 - Move blob lifecycle to D1: `nar_blob` (already removed) and
   `orphan_blob_deletion` (removed in 2c) are superseded by `blob_ref`,
   `tenant_blob`, `blob_state`, and the global reaper.
@@ -1743,8 +1744,8 @@ together.
    real workerd zstd+SHA-256 throughput, confirming the DO honours
    `cpu_ms = 300_000`, and proving bounded peak memory on a multi-hundred-MB
    fixture — needs a deploy to the operator's account, so it is deferred. The
-   provisional bounds keep the deferred window open: `inlineVerifyMaxBytes` is
-   8 MiB and `verifiableMaxBytes` is 4 GiB, so blobs between them go to the
+   provisional bounds keep the deferred window open: `inlineVerifyMaxBytes` is 8
+   MiB and `verifiableMaxBytes` is 4 GiB, so blobs between them go to the
    background pass and the push-wait contract is exercised now. The spike is a
    measurement, not an enabler: it confirms the background pass holds CPU and
    memory on the real runtime and may lower `verifiableMaxBytes` from the
@@ -1800,30 +1801,31 @@ together.
    minting or verifying under the literal `cupboard` default. The per-tenant
    read verifier is a hashed credential carried in the manifest, never the
    global `CUPBOARD_READ_USER`/`PASSWORD` env (those are retired) and never a
-   plaintext secret in KV. Writes to any non-default tenant were refused with 501
-   until step 6 plumbed tenant-scoped storage; that gate is now lifted.
+   plaintext secret in KV. Writes to any non-default tenant were refused with
+   501 until step 6 plumbed tenant-scoped storage; that gate is now lifted.
 6. **Multi-tenant upload path + push contract.** The narinfo R2 object key
    (`narInfoObjectKey`) and the read-path edge-cache key now carry a tenant
    segment, so distrusting tenants never collide on `narinfo/<hash>` or the edge
    cache; the negotiate reuse lookup is existence-oracle-safe (gating on the
    asking tenant's own `tenant_blob`/`blob_ref`, never global `blob_state`); the
-   per-tenant-per-`narHash` quota is charged on the canonical size with a read-only
-   pre-verify early-reject; and the non-default-tenant write gate is lifted, so a
-   tenant writes through the Worker to its own object. **Remaining:** the push
-   contract — the per-upload status query (`servable`/`pending`/`mismatch`/
-   `absent`), `push --wait`/`--no-wait`/root-activation, and the CLI token cache
-   keyed on the full tenant base URL. The earlier gating notes, kept for context:
-   existence-oracle-safe negotiate gating on
-   the asking tenant's own `tenant_blob`/`blob_ref` (this reworks 2b's
-   single-tenant reuse lookup, which consults global `blob_state` — a known,
-   accepted cost); per-tenant-per-`narHash` quota — a read-only pre-verify check
-   (early-reject to save verify CPU) plus the authoritative post-verify charge
-   gated on the `tenant_blob` 0-to-1 insert, no `servable` flag needed; usage;
-   the per-upload status query the push contract polls; server
-   wait/no-wait/root-activation states and the CLI behaviour; the token cache
-   keyed on the full tenant base URL (origin plus `/t/<slug>`), with decoded
-   `iss` checked against the full path-based tenant issuer URL and `aud` against
-   the target (the CLI token-store gains a per-target dimension).
+   per-tenant-per-`narHash` quota is charged on the canonical size with a
+   read-only pre-verify early-reject; and the non-default-tenant write gate is
+   lifted, so a tenant writes through the Worker to its own object.
+   **Remaining:** the push contract — the per-upload status query
+   (`servable`/`pending`/`mismatch`/ `absent`),
+   `push --wait`/`--no-wait`/root-activation, and the CLI token cache keyed on
+   the full tenant base URL. The earlier gating notes, kept for context:
+   existence-oracle-safe negotiate gating on the asking tenant's own
+   `tenant_blob`/`blob_ref` (this reworks 2b's single-tenant reuse lookup, which
+   consults global `blob_state` — a known, accepted cost);
+   per-tenant-per-`narHash` quota — a read-only pre-verify check (early-reject
+   to save verify CPU) plus the authoritative post-verify charge gated on the
+   `tenant_blob` 0-to-1 insert, no `servable` flag needed; usage; the per-upload
+   status query the push contract polls; server wait/no-wait/root-activation
+   states and the CLI behaviour; the token cache keyed on the full tenant base
+   URL (origin plus `/t/<slug>`), with decoded `iss` checked against the full
+   path-based tenant issuer URL and `aud` against the target (the CLI
+   token-store gains a per-target dimension).
 7. **Cron fan-out + global reaper + offboarding.** Hourly cron; per-tick tenant
    batch bounded under the subrequest budget advancing `cron_cursor` (sharding
    required here, not optional); per-tenant failures recorded, not swallowed;

@@ -1,3 +1,4 @@
+import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -15,11 +16,15 @@ import {
 	pushPath,
 	pushPathToTenant,
 	resetTestServer,
+	scheduledController,
+	stageDeferredForTenant,
 	tenantBlobRows,
+	tenantUploadStatus,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
+import worker from '../worker.ts';
 
 import { defaultTenant } from './tenant-routing.ts';
 
@@ -172,6 +177,39 @@ describe('multi-tenant writes', () => {
 			narBlobs: 1,
 			pendingUploads: 0,
 			totalFileSize: acmeNar.narBytes.byteLength
+		});
+	});
+
+	it('drives a non-default tenant deferred upload to servable from the scheduled handler', async () => {
+		const acmeIssuer = await provisionNamedTenant('acme');
+		const token = await mintTokenForTenant(
+			testServerFor('acme'),
+			acmeIssuer,
+			'write'
+		);
+		const nar = await verifiableNar('acme-deferred');
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		// A deferred upload only becomes servable once the background verify pass runs.
+		// The cron must reach acme's object, not just the default tenant's, or acme's
+		// pending uploads would never commit.
+		const uploadId = await stageDeferredForTenant('acme', token, metadata, nar);
+		const whilePending = await tenantUploadStatus('acme', token, uploadId);
+
+		await worker.scheduled(scheduledController(), env);
+
+		const afterCron = await tenantUploadStatus('acme', token, uploadId);
+
+		expect({ whilePending, afterCron }).toStrictEqual({
+			whilePending: 'pending',
+			afterCron: 'servable'
 		});
 	});
 });

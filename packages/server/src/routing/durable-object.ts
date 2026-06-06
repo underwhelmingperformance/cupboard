@@ -1,7 +1,5 @@
 import type { CupboardServer } from '../do/server.ts';
 
-import { defaultTenant } from './tenant-routing.ts';
-
 // `CupboardServer` is defined in the separate `cupboard-tenant` script, so
 // `wrangler types` cannot see the class across scripts and types this Worker's
 // `CUPBOARD_DO` binding without its methods. The class type is reattached at this
@@ -20,10 +18,4 @@ export function tenantServer(
 	const namespace = tenantNamespace(env);
 
 	return namespace.get(namespace.idFromName(tenant));
-}
-
-// The default tenant's Durable Object, for deployment-level callers that are not
-// routing a tenant request — the cron's maintenance RPCs.
-export function cupboardServer(env: Env): DurableObjectStub<CupboardServer> {
-	return tenantServer(env, defaultTenant);
 }

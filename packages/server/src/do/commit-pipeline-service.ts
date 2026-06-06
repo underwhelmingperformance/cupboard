@@ -252,7 +252,7 @@ export class CommitPipelineService {
 		await this.uploadState.promoteStagingBlob(stagingKey, metadata);
 
 		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
-			this.materialiseServable(cache, metadata, reserved.generation, uploadId)
+			this.materialiseServable(cache, metadata, reserved.generation)
 		);
 
 		// Over quota on the canonical size: reclaim the reserved row and clear the
@@ -279,6 +279,9 @@ export class CommitPipelineService {
 			return this.concedeToWinner(cache, uploadId, metadata, stagingKey);
 		}
 
+		// An inline commit returns servable synchronously, so its upload row is cleared
+		// rather than retained for a status poll.
+		this.uploadState.clearPendingUpload(uploadId);
 		await this.context.env.BLOBS.delete(stagingKey);
 
 		return Response.json({
@@ -307,10 +310,14 @@ export class CommitPipelineService {
 		}
 
 		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
-			this.materialiseServable(cache, metadata, reserved.generation, uploadId)
+			this.materialiseServable(cache, metadata, reserved.generation)
 		);
 
 		if (outcome === 'materialised') {
+			// A reuse commit returns servable synchronously, so its upload row is
+			// cleared rather than retained for a status poll.
+			this.uploadState.clearPendingUpload(uploadId);
+
 			return Response.json({
 				storePathHash: metadata.storePathHash,
 				narHash: metadata.narHash,
@@ -495,16 +502,14 @@ export class CommitPipelineService {
 	// `blob_state` fact and the canonical R2 object — re-reads the live row to
 	// confirm it is still this reserved version, writes the D1 edge and per-tenant
 	// presence, renders the object from the canonical compressed metadata in
-	// `blob_state`, puts it, and clears the pending upload last. Every step is
-	// idempotent, so a crash before the final clear leaves the upload re-drivable
-	// from its durable marker.
+	// `blob_state`, and puts it. Every step is idempotent, so a crash before the
+	// caller resolves the pending upload leaves it re-drivable from its durable marker.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	async materialiseServable(
 		cache: string,
 		metadata: UploadPathMetadataFields,
-		generation: number,
-		uploadId: string
+		generation: number
 	): Promise<MaterialiseOutcome> {
 		const blob = await this.context.d1
 			.select({ fileSize: d1Schema.blobState.fileSize })
@@ -560,8 +565,10 @@ export class CommitPipelineService {
 			metadata.storePathHash,
 			narInfo
 		);
-		this.uploadState.clearPendingUpload(uploadId);
 
+		// The pending upload's lifecycle is the caller's: an inline commit clears the
+		// row (it returns `committed` synchronously), while a deferred commit records a
+		// terminal `servable` verdict for `push --wait` to observe.
 		return 'materialised';
 	}
 
