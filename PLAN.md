@@ -2014,16 +2014,15 @@ Implementation sequence:
    and `push --wait` status polling. Record enough detail to distinguish CPU
    work from storage wait where the platform exposes it, and keep the metrics
    outside the substitution hot path.
-2. Add maintenance eligibility. Create a D1-visible eligibility source so cron
-   can skip tenants with no work instead of waking every active tenant every
-   tick. The minimum useful shape is one row per tenant carrying pending
-   verification count, earliest upload/status expiry, queued narinfo deletion
-   count, and the next reaper/deferred-maintenance deadline. V5 cursors remain
+2. Add maintenance eligibility. _(Done.)_ Cron now uses a D1-visible eligibility
+   source so it can skip active tenants with no work instead of waking every
+   active tenant every tick. One row per tenant carries pending verification
+   count, earliest upload/status expiry, queued narinfo deletion count, earliest
+   root expiry, and the next deferred-maintenance deadline. V5 cursors remain
    the correctness mechanism; this layer is only the admission filter for waking
-   a tenant DO. Eligibility must fail open: a missing, stale, or inconsistent
-   row causes the tenant to be scheduled, and a periodic full reconciliation
-   scan bypasses the hint so a false negative cannot starve verification,
-   deletion, expiry, or reaper work.
+   a tenant DO. Eligibility fails open: a missing or stale row causes the tenant
+   to be scheduled, and the stale cutoff gives periodic full reconciliation so a
+   false negative cannot starve verification, deletion, expiry, or reaper work.
 3. Tighten repair queue bounds. V5 step 7 already owns the correctness-critical
    bounded fan-out and maintenance passes needed to stay within platform limits.
    This follow-up uses instrumentation to add or refine cursors, limits, and
@@ -2054,8 +2053,9 @@ Implementation sequence:
 Verification:
 
 - A tenant with no pending verification, expiry, deletion, or reaper work is not
-  called by cron when its eligibility row is current; missing or suspect
-  eligibility fails open and schedules the tenant.
+  called by cron when its eligibility row is current; missing or stale
+  eligibility fails open and schedules the tenant. _(Done for tenant maintenance
+  eligibility.)_
 - Each bounded maintenance pass resumes from its stored cursor and converges
   across repeated ticks.
 - Moving verification out of the DO, if implemented, preserves

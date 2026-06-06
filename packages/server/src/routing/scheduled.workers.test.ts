@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import {
 	offboardTenant,
 	provisionNamedTenant,
@@ -14,6 +16,96 @@ import { runCronSweep, runOffboardSweep } from './scheduled.ts';
 
 describe('scheduled tenant pass failure records', () => {
 	beforeEach(resetTestServer);
+
+	it('skips active tenants with current idle eligibility', async () => {
+		await provisionNamedTenant('acme');
+		await provisionNamedTenant('beta');
+		await suspendTenant('v1');
+		await writeEligibility('acme', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await writeEligibility('beta', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+
+		const seen: string[] = [];
+		await runWithClock('2026-01-01T00:00:00.000Z', () =>
+			runCronSweep(env, 10, (_env, id) => {
+				seen.push(id);
+
+				return Promise.resolve();
+			})
+		);
+
+		expect(seen).toStrictEqual([]);
+	});
+
+	it('schedules tenants whose eligibility is missing or stale', async () => {
+		await provisionNamedTenant('acme');
+		await provisionNamedTenant('beta');
+		await provisionNamedTenant('current');
+		await suspendTenant('v1');
+		await writeEligibility('beta', {
+			reconciledAt: '2025-12-31T17:59:59.000Z'
+		});
+		await writeEligibility('current', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+
+		const seen: string[] = [];
+		await runWithClock('2026-01-01T00:00:00.000Z', () =>
+			runCronSweep(env, 10, (_env, id) => {
+				seen.push(id);
+
+				return Promise.resolve();
+			})
+		);
+
+		expect(seen).toStrictEqual(['acme', 'beta']);
+	});
+
+	it('schedules tenants with due eligibility signals', async () => {
+		await provisionNamedTenant('delete');
+		await provisionNamedTenant('idle');
+		await provisionNamedTenant('root');
+		await provisionNamedTenant('upload');
+		await provisionNamedTenant('verify');
+		await suspendTenant('v1');
+		await writeEligibility('delete', {
+			queuedNarInfoDeletionCount: 1,
+			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await writeEligibility('idle', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await writeEligibility('root', {
+			earliestRootExpiry: '2026-01-01T00:00:00.000Z',
+			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await writeEligibility('upload', {
+			earliestUploadExpiry: '2026-01-01T00:00:00.000Z',
+			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await writeEligibility('verify', {
+			pendingVerificationCount: 1,
+			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+
+		const seen: string[] = [];
+		await runWithClock('2026-01-01T00:00:00.000Z', () =>
+			runCronSweep(env, 10, (_env, id) => {
+				seen.push(id);
+
+				return Promise.resolve();
+			})
+		);
+
+		expect(seen).toStrictEqual(['delete', 'root', 'upload', 'verify']);
+	});
 
 	it('records maintenance failures durably while maintaining later tenants', async () => {
 		await provisionNamedTenant('acme');
@@ -100,6 +192,7 @@ describe('scheduled tenant pass failure records', () => {
 	it('bounds concurrent tenant maintenance passes', async () => {
 		for (const tenant of ['acme', 'beta', 'gamma', 'delta', 'epsilon']) {
 			await provisionNamedTenant(tenant);
+			await deleteEligibility(tenant);
 		}
 		await suspendTenant('v1');
 
@@ -194,3 +287,37 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 });
+
+async function writeEligibility(
+	tenant: string,
+	fields: Partial<
+		Omit<typeof d1Schema.tenantMaintenanceEligibility.$inferInsert, 'tenant'>
+	>
+): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, {
+		schema: {
+			tenantMaintenanceEligibility: d1Schema.tenantMaintenanceEligibility
+		}
+	})
+		.insert(d1Schema.tenantMaintenanceEligibility)
+		.values({
+			tenant,
+			reconciledAt: '2026-01-01T00:00:00.000Z',
+			...fields
+		})
+		.run();
+}
+
+async function runWithClock<T>(
+	now: string,
+	body: () => Promise<T>
+): Promise<T> {
+	vi.useFakeTimers();
+	vi.setSystemTime(new Date(now));
+
+	try {
+		return await body();
+	} finally {
+		vi.useRealTimers();
+	}
+}

@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import {
@@ -22,6 +22,7 @@ import { tenantServer } from './durable-object.ts';
 // covered over successive ticks. Provisional, pending a fleet-scale measurement.
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
+const maintenanceEligibilityStaleMs = 6 * 60 * 60 * 1000;
 
 // Per cron tick, the offboard drain works at most this many tenants, each for at
 // most this many bounded rounds of this many rows/objects. The product bounds the
@@ -366,10 +367,29 @@ function overdueActiveTenants(
 	database: CronDatabase,
 	batchSize: number
 ): Promise<{ readonly id: string }[]> {
+	const now = new Date();
+	const nowIso = now.toISOString();
+	const staleBefore = new Date(
+		now.getTime() - maintenanceEligibilityStaleMs
+	).toISOString();
+
 	return database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.status, 'active'))
+		.leftJoin(
+			d1Schema.tenantMaintenanceEligibility,
+			eq(d1Schema.tenantMaintenanceEligibility.tenant, d1Schema.tenant.id)
+		)
+		.where(
+			and(
+				eq(d1Schema.tenant.status, 'active'),
+				or(
+					isNull(d1Schema.tenantMaintenanceEligibility.tenant),
+					lte(d1Schema.tenantMaintenanceEligibility.reconciledAt, staleBefore),
+					lte(d1Schema.tenantMaintenanceEligibility.nextMaintenanceAt, nowIso)
+				)
+			)
+		)
 		.orderBy(asc(d1Schema.tenant.lastMaintainedAt), asc(d1Schema.tenant.id))
 		.limit(batchSize)
 		.all();
