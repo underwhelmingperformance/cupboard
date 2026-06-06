@@ -13,6 +13,8 @@ interface PushOptions {
 	readonly root?: string;
 	readonly ttl?: number;
 	readonly cache?: string;
+	readonly wait?: boolean;
+	readonly waitTimeout?: number;
 }
 
 export function registerPushCommand(program: Command): void {
@@ -41,6 +43,15 @@ export function registerPushCommand(program: Command): void {
 			parseTtl
 		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
+		.option(
+			'--no-wait',
+			'return once uploaded without waiting for deferred blobs to become servable (records no retention over still-pending paths)'
+		)
+		.option(
+			'--wait-timeout <duration>',
+			'how long to wait for deferred blobs to become servable (e.g. 10m, 1h); default 10m',
+			parseTtl
+		)
 		.action(async (url: string, paths: string[], options: PushOptions) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
@@ -54,8 +65,12 @@ export function registerPushCommand(program: Command): void {
 			await runPush(paths, reporter, {
 				client,
 				token,
+				wait: options.wait,
 				...(options.root === undefined ? {} : { root: options.root }),
-				...(options.ttl === undefined ? {} : { ttlSeconds: options.ttl })
+				...(options.ttl === undefined ? {} : { ttlSeconds: options.ttl }),
+				...(options.waitTimeout === undefined
+					? {}
+					: { waitTimeoutSeconds: options.waitTimeout })
 			});
 		});
 }

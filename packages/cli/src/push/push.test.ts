@@ -3,11 +3,18 @@ import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
-import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
+import type {
+	UploadNegotiateRequest,
+	UploadStatusResponse
+} from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client/client.ts';
-import { PushNarMetadataMismatchError } from '../errors.ts';
+import {
+	PushNarMetadataMismatchError,
+	UploadVerificationFailedError,
+	UploadWaitTimeoutError
+} from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
 import {
 	type CompressedAndHashedNarFile,
@@ -17,7 +24,12 @@ import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
 import type { NixStoreClient, NixValidPathInfo } from '../nix/nix-store.ts';
 import type { Reporter, ResultRow } from '../reporter.ts';
 
-import { type PushClient, type PushNarArchive, runPush } from './push.ts';
+import {
+	type PushClient,
+	type PushDependencies,
+	type PushNarArchive,
+	runPush
+} from './push.ts';
 
 const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
@@ -107,6 +119,9 @@ describe('runPush', () => {
 					expect(token).toBe('write-token');
 
 					return Promise.resolve(rootSummary({ name, ...body }));
+				},
+				uploadStatus() {
+					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -195,11 +210,12 @@ describe('runPush', () => {
 		]);
 	});
 
-	it('warns when a commit is left pending server-side verification', async () => {
+	it('with --no-wait, returns with pending paths and records no retention', async () => {
 		const results: ResultRow[][] = [];
 		const warnings: { label: string; value?: string }[] = [];
 
 		await runPush([appPath], reporter(results, warnings), {
+			wait: false,
 			client: {
 				negotiate() {
 					return Promise.resolve({
@@ -234,8 +250,11 @@ describe('runPush', () => {
 						status: 'pending'
 					});
 				},
-				setRoot(token, name, body) {
-					return Promise.resolve(rootSummary({ name, ...body }));
+				setRoot() {
+					throw new UnexpectedPushClientCallError('setRoot');
+				},
+				uploadStatus() {
+					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -259,7 +278,7 @@ describe('runPush', () => {
 			{
 				label: 'pending verification',
 				value:
-					'1 path(s) await server-side verification before they can be substituted'
+					'1 path(s) await server-side verification; retention not recorded (omit --no-wait to wait and record it)'
 			}
 		]);
 	});
@@ -298,6 +317,9 @@ describe('runPush', () => {
 				},
 				setRoot(_token, name, body) {
 					return Promise.resolve(rootSummary({ name, ...body }));
+				},
+				uploadStatus() {
+					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -366,6 +388,9 @@ describe('runPush', () => {
 				},
 				setRoot(_token, name, body) {
 					return Promise.resolve(rootSummary({ name, ...body }));
+				},
+				uploadStatus() {
+					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -421,6 +446,9 @@ describe('runPush', () => {
 					},
 					setRoot() {
 						throw new UnexpectedPushClientCallError('setRoot');
+					},
+					uploadStatus() {
+						throw new UnexpectedPushClientCallError('uploadStatus');
 					}
 				} satisfies PushClient,
 				token: 'write-token',
@@ -663,6 +691,9 @@ describe('runPush', () => {
 					events.push('setRoot');
 
 					return Promise.resolve(rootSummary({ name, ...body }));
+				},
+				uploadStatus() {
+					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -720,6 +751,9 @@ describe('runPush', () => {
 				call += 1;
 
 				return Promise.resolve(rootSummary({ name, ...body }, expiresAt));
+			},
+			uploadStatus() {
+				throw new UnexpectedPushClientCallError('uploadStatus');
 			}
 		};
 
@@ -753,7 +787,151 @@ describe('runPush', () => {
 			]
 		]);
 	});
+
+	it('waits for a deferred upload to become servable before recording retention', async () => {
+		const events: string[] = [];
+		const statuses: UploadStatusResponse['status'][] = ['pending', 'servable'];
+		let statusCall = 0;
+
+		await runPush([appPath], reporter([]), {
+			token: 'write-token',
+			wait: true,
+			sleep: () => Promise.resolve(),
+			now: () => 0,
+			client: {
+				...deferredUpload(events),
+				uploadStatus() {
+					events.push('uploadStatus');
+					const status = statuses[statusCall] ?? 'servable';
+					statusCall += 1;
+
+					return Promise.resolve({ status });
+				},
+				setRoot(_token, name, body) {
+					events.push('setRoot');
+
+					return Promise.resolve(rootSummary({ name, ...body }));
+				}
+			} satisfies PushClient,
+			...deferredDeps()
+		});
+
+		expect(events).toStrictEqual([
+			'negotiate',
+			'prepareUpload',
+			'uploadBlob',
+			'commit',
+			'uploadStatus',
+			'uploadStatus',
+			'setRoot'
+		]);
+	});
+
+	it('fails fast when a deferred upload reports mismatch', async () => {
+		await expect(
+			runPush([appPath], reporter([]), {
+				token: 'write-token',
+				sleep: () => Promise.resolve(),
+				now: () => 0,
+				client: {
+					...deferredUpload([]),
+					uploadStatus() {
+						return Promise.resolve({ status: 'mismatch' });
+					},
+					setRoot() {
+						throw new UnexpectedPushClientCallError('setRoot');
+					}
+				} satisfies PushClient,
+				...deferredDeps()
+			})
+		).rejects.toThrow(UploadVerificationFailedError);
+	});
+
+	it('times out when a deferred upload stays pending', async () => {
+		let clock = 0;
+
+		await expect(
+			runPush([appPath], reporter([]), {
+				token: 'write-token',
+				waitTimeoutSeconds: 1,
+				sleep: () => Promise.resolve(),
+				now: () => {
+					clock += 5000;
+
+					return clock;
+				},
+				client: {
+					...deferredUpload([]),
+					uploadStatus() {
+						return Promise.resolve({ status: 'pending' });
+					},
+					setRoot() {
+						throw new UnexpectedPushClientCallError('setRoot');
+					}
+				} satisfies PushClient,
+				...deferredDeps()
+			})
+		).rejects.toThrow(UploadWaitTimeoutError);
+	});
 });
+
+function deferredUpload(
+	events: string[]
+): Pick<PushClient, 'negotiate' | 'prepareUpload' | 'uploadBlob' | 'commit'> {
+	return {
+		negotiate() {
+			events.push('negotiate');
+
+			return Promise.resolve({
+				uploads: [
+					{
+						action: 'upload',
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						uploadId: 'upload-app',
+						r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					}
+				]
+			});
+		},
+		prepareUpload() {
+			events.push('prepareUpload');
+
+			return Promise.resolve({
+				uploadUrl: 'https://upload.example/app',
+				uploadHeaders: {},
+				expiresAt: '2026-05-18T12:00:00.000Z'
+			});
+		},
+		uploadBlob() {
+			events.push('uploadBlob');
+
+			return Promise.resolve();
+		},
+		commit() {
+			events.push('commit');
+
+			return Promise.resolve({
+				storePathHash: StorePath.hash(appPath),
+				narHash: appDigest.narHash.toString(),
+				status: 'pending'
+			});
+		}
+	};
+}
+
+function deferredDeps() {
+	return {
+		nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+		createNarArchive: () => new FakeNarArchive(appDigest),
+		compressNar: (nar: PushNarArchive, path: string) =>
+			fakeCompressedNar(nar, path, appDigest),
+		readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+		createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+		removeTemporaryDirectory: () => Promise.resolve()
+	} satisfies Partial<PushDependencies>;
+}
 
 class FakeNarArchive {
 	iterations = 0;
@@ -938,6 +1116,9 @@ function skipClient(setRoots: SetRootCall[]): PushClient {
 			setRoots.push({ token, fields });
 
 			return Promise.resolve(rootSummary(fields));
+		},
+		uploadStatus() {
+			throw new UnexpectedPushClientCallError('uploadStatus');
 		}
 	};
 }

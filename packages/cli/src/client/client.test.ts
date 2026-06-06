@@ -16,7 +16,10 @@ import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
-import type { DeletePathResponse } from '@cupboard/protocol/upload';
+import type {
+	DeletePathResponse,
+	UploadStatusResponse
+} from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -114,6 +117,40 @@ describe('CupboardClient.deleteStorePath', () => {
 			url: 'https://cupboard.test/paths/0123456789abcdfghijklmnpqrsvwxyz',
 			method: 'DELETE',
 			authorization: 'Bearer admin-token',
+			contentType: undefined,
+			body: undefined
+		});
+	});
+});
+
+describe('CupboardClient.uploadStatus', () => {
+	it('gets the deferred upload status with the write token', async () => {
+		const response: UploadStatusResponse = { status: 'pending' };
+		const { client, captured } = capturingClient(response);
+
+		const result = await client.uploadStatus('write-token', 'upload-app');
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/uploads/upload-app/status',
+			method: 'GET',
+			authorization: 'Bearer write-token',
+			contentType: undefined,
+			body: undefined
+		});
+	});
+
+	it('does not scope the status request through a named cache', async () => {
+		const response: UploadStatusResponse = { status: 'servable' };
+		const { client, captured } = capturingClient(response, '/cache/builds');
+
+		const result = await client.uploadStatus('write-token', 'upload-build');
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/uploads/upload-build/status',
+			method: 'GET',
+			authorization: 'Bearer write-token',
 			contentType: undefined,
 			body: undefined
 		});

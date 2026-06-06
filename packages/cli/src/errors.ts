@@ -118,3 +118,25 @@ export class UnexpectedUploadDecisionError extends CliError {
 		this.name = 'UnexpectedUploadDecisionError';
 	}
 }
+
+export class UploadVerificationFailedError extends CliError {
+	constructor(
+		public readonly uploadId: string,
+		public readonly status: 'mismatch' | 'over-quota' | 'absent'
+	) {
+		super(`Upload ${uploadId} did not become servable: ${status}`);
+		this.name = 'UploadVerificationFailedError';
+	}
+}
+
+export class UploadWaitTimeoutError extends CliError {
+	constructor(
+		public readonly pending: number,
+		public readonly timeoutSeconds: number
+	) {
+		super(
+			`Timed out after ${String(timeoutSeconds)}s waiting for ${String(pending)} upload(s) to become servable`
+		);
+		this.name = 'UploadWaitTimeoutError';
+	}
+}

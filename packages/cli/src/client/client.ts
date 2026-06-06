@@ -478,6 +478,17 @@ export class CupboardClient {
 		);
 	}
 
+	uploadStatus(
+		token: AccessCredential,
+		uploadId: string
+	): Promise<UploadStatusResponse> {
+		return this.requestJson(
+			`/uploads/${uploadId}/status`,
+			uploadStatusResponseSchema,
+			{ token }
+		);
+	}
+
 	prepareUpload(
 		token: AccessCredential,
 		uploadId: string,
