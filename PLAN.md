@@ -1936,12 +1936,52 @@ together.
 - Runtime validation records CPU limit, throughput, bounded memory, and
   Miniflare zstd availability before setting the size thresholds.
 
+## Post-V5 Operations
+
+This is the operational hardening that should land before feature work moves on
+to V6. It is not a change to the substitution protocol; it makes the hosted
+maintenance path observable enough to run.
+
+1. Add durable per-tenant maintenance failure records in D1. Each cron-driven
+   pass records `(tenant, pass)` with `consecutive_failures`, `last_error`,
+   `last_failed_at`, and `last_success_at`. The first useful pass names are
+   `maintenance` and `offboard`; future tenant-routed passes reuse the same
+   table rather than inventing their own failure counters.
+2. A failing tenant still does not block the fleet: the pass continues to use
+   `allSettled`, advances the cursors it already owns, throws an
+   `AggregateError` for logs, and writes the durable failure row for dashboards
+   and API surfaces. A successful pass resets that tenant/pass counter and
+   records `last_success_at`.
+3. Use the authoritative D1 tenant status as the final write gate before a
+   commit materialises a narinfo. The in-memory offboarding flag may remain as a
+   same-instance fast signal, but correctness rests on the row still being
+   `active`; `suspended`, `offboarding`, `offboarded`, or a missing row refuses
+   the materialisation.
+4. Make `offboarded` terminal in the control-plane status mutators. A repeated
+   delete after finalisation is an idempotent terminal result, not a transition
+   back to `offboarding`, and suspend cannot move a retired slug to another
+   admitted state.
+
+Verification:
+
+- A tenant whose maintenance or offboard pass fails gets a durable failure row,
+  and a later successful pass resets the counter without hiding the last success
+  time.
+- A fleet tick with one failing tenant still maintains later tenants and records
+  the failure durably.
+- A commit that reaches materialisation after the tenant row changes away from
+  `active` publishes no D1 edge and no tenant narinfo object.
+- `offboarded` cannot transition back to `suspended` or `offboarding`, and a
+  repeated delete for an already-offboarded slug does not republish it to the
+  admission manifest.
+
 ## Post-V5 Cost Controls
 
 This is a follow-up stage after V5 step 7 has landed and produced real
-operational data. It does not block the cron fan-out, global reaper, or
-offboarding work in V5. The goal is to reduce Cloudflare Durable Object duration
-and request charges once the multi-tenant maintenance path is correct.
+operational data and the Post-V5 Operations hardening above. It does not block
+the cron fan-out, global reaper, or offboarding work in V5. The goal is to
+reduce Cloudflare Durable Object duration and request charges once the
+multi-tenant maintenance path is correct and observable.
 
 Settled conclusions:
 
@@ -1977,7 +2017,9 @@ Implementation sequence:
    bounded fan-out and maintenance passes needed to stay within platform limits.
    This follow-up uses instrumentation to add or refine cursors, limits, and
    deadlines where real cost data shows long-running repair loops, especially
-   `narinfo_deletion` flushing and verify/reaper repair scans. A pass that
+   `narinfo_deletion` flushing, verify/reaper repair scans, and offboard drains
+   for very large tenants. If many tenants offboard at once, add offboard
+   cursoring/fairness so early slugs cannot monopolise the drain. A pass that
    reaches its limit records the next cursor/deadline so the eligibility row
    keeps the tenant scheduled.
 4. Run an external NAR verification spike. If instrumentation shows server-side
@@ -2046,6 +2088,9 @@ wait on.
   `rotate_time + max(adminJwtTtlSeconds, writeJwtTtlSeconds) + clockTolerance`.
   A safety margin sits on top:
   `scheduled_retire_at = rotate_time + maxTokenTtl + clockTolerance + margin`.
+  The implementation sources `adminJwtTtlSeconds`, `writeJwtTtlSeconds`, and the
+  access-JWT clock tolerance from the auth module rather than duplicating magic
+  values in the sweep or key stores.
 - `scheduled_retire_at` is a write-side scheduling marker, never a verification
   gate. Verification keeps selecting keys by `retired_at IS NULL`, so a key with
   a future `scheduled_retire_at` still verifies. The sweep is the only actor
@@ -2070,8 +2115,9 @@ wait on.
    `control_auth_key` (D1), each with a real migration. Existing keys keep NULL.
 2. `auth-key rotate` and `control-key rotate` capture the current minting key,
    insert the new key with `scheduled_retire_at = NULL`, and stamp the captured
-   key with `rotate_time + maxTokenTtl + clockTolerance + margin`. The rotate
-   response and CLI output report the scheduled retirement time.
+   key with the auth module's maximum token lifetime plus clock tolerance and a
+   small explicit margin. The rotate response and CLI output report the
+   scheduled retirement time.
 3. Add the sweep consumers. The per-tenant Durable Object maintenance pass (the
    cron fan-out's existing per-tenant work) retires due `auth_key` rows; the
    Worker cron tick retires due `control_auth_key` rows. Each selects rows whose
