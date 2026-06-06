@@ -293,6 +293,9 @@ export async function finaliseOffboardedTenant(
 			.where(eq(d1Schema.tenant.id, id)),
 		database
 			.delete(d1Schema.tenantUsage)
-			.where(eq(d1Schema.tenantUsage.tenant, id))
+			.where(eq(d1Schema.tenantUsage.tenant, id)),
+		database
+			.delete(d1Schema.tenantMaintenanceEligibility)
+			.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, id))
 	]);
 }

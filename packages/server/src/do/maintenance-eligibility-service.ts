@@ -18,6 +18,18 @@ export interface MaintenanceEligibilitySnapshot {
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
 
+	async invalidate(): Promise<void> {
+		await this.context.d1
+			.delete(d1Schema.tenantMaintenanceEligibility)
+			.where(
+				eq(
+					d1Schema.tenantMaintenanceEligibility.tenant,
+					this.context.requireTenant()
+				)
+			)
+			.run();
+	}
+
 	reconcile(now: Date = new Date()): Promise<MaintenanceEligibilitySnapshot> {
 		const tenant = this.context.requireTenant();
 		const reconciledAt = now.toISOString();

@@ -68,6 +68,66 @@ describe('maintenance eligibility projection', () => {
 		});
 	});
 
+	it('can invalidate an idle projection before deferred work is created', async () => {
+		await runInDurableObject(currentServer(), async (instance) => {
+			await new MaintenanceEligibilityService(instance.context).reconcile(now);
+			const server = instance as unknown as {
+				withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
+			};
+			const result = await server.withMaintenanceEligibility(() => {
+				instance.context.db
+					.insert(schema.pendingUploads)
+					.values(
+						pendingUpload(
+							'verify-after-failed-refresh',
+							now.toISOString(),
+							'pending'
+						)
+					)
+					.run();
+				(instance.context as unknown as { d1: unknown }).d1 = {
+					insert() {
+						throw new Error('D1 projection write failed');
+					}
+				};
+
+				return Promise.resolve('mutated');
+			});
+
+			expect(result).toBe('mutated');
+		});
+
+		expect(await eligibilityRow()).toBeUndefined();
+	});
+
+	it('does not run a mutation when eligibility cannot be invalidated', async () => {
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const server = instance as unknown as {
+					withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
+				};
+				(instance.context as unknown as { d1: unknown }).d1 = {
+					delete() {
+						throw new Error('D1 projection delete failed');
+					}
+				};
+				let mutated = false;
+				const error = await server
+					.withMaintenanceEligibility(() => {
+						mutated = true;
+
+						return Promise.resolve();
+					})
+					.catch((error_: unknown) => error_);
+
+				return { failed: error instanceof Error, mutated };
+			}
+		);
+
+		expect(outcome).toStrictEqual({ failed: true, mutated: false });
+	});
+
 	it('marks verification and deletion work due immediately', async () => {
 		const snapshot = await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db

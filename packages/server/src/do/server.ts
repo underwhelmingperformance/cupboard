@@ -21,6 +21,7 @@ import { type RuntimeEnv, ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
+import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
@@ -60,6 +61,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly verification: VerificationService;
 	private readonly roots: RootsService;
 	private readonly offboarding: OffboardingService;
+	private readonly maintenanceEligibility: MaintenanceEligibilityService;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
@@ -128,6 +130,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.narInfoObjects
 		);
 		this.offboarding = new OffboardingService(this.context);
+		this.maintenanceEligibility = new MaintenanceEligibilityService(
+			this.context
+		);
 
 		this.routes();
 	}
@@ -171,13 +176,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// orphan-blob grace window.
 	async runGarbageCollection(): Promise<void> {
 		await this.initialise();
-		await this.garbageCollection.collectGarbage();
+		await this.withMaintenanceEligibility(() =>
+			this.garbageCollection.collectGarbage()
+		);
 	}
 
 	async runVerification(): Promise<void> {
 		await this.initialise();
-		await this.verification.verifyPendingUploads(verificationBatchSize);
-		await this.verification.verifyBatch(undefined, verificationBatchSize);
+		await this.withMaintenanceEligibility(async () => {
+			await this.verification.verifyPendingUploads(verificationBatchSize);
+			await this.verification.verifyBatch(undefined, verificationBatchSize);
+		});
 	}
 
 	// The global reaper found a shared object gone and routes the de-materialisation
@@ -241,6 +250,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		if (this.tenantIdentity.configure(identity)) {
 			this.oidcTrust.seedOwnerRule();
 		}
+
+		await this.reconcileMaintenanceEligibility();
 	}
 
 	private routes(): void {
@@ -336,9 +347,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.app.delete('/caches/:cacheName', (context) =>
 			serverErrorResponse(
-				this.cacheAdmin.handleRemoveCache(
-					context.req.raw,
-					context.req.param('cacheName')
+				this.withMaintenanceEligibility(() =>
+					this.cacheAdmin.handleRemoveCache(
+						context.req.raw,
+						context.req.param('cacheName')
+					)
 				)
 			)
 		);
@@ -383,7 +396,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// A bounded reconciling pass driven by the cron tick. Its own route, kept
 		// separate from `/gc`, so each can run and be asserted independently.
 		this.app.post('/verify', (context) =>
-			serverErrorResponse(this.verification.handleVerify(context.req.raw))
+			serverErrorResponse(
+				this.withMaintenanceEligibility(() =>
+					this.verification.handleVerify(context.req.raw)
+				)
+			)
 		);
 
 		// Each path-scoped route has a bare form (the default cache) and a
@@ -404,19 +421,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.app.delete('/paths/:hash', (context) =>
 			serverErrorResponse(
-				this.deletionQueue.handleDeletePath(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('hash')
+				this.withMaintenanceEligibility(() =>
+					this.deletionQueue.handleDeletePath(
+						context.req.raw,
+						DEFAULT_CACHE,
+						context.req.param('hash')
+					)
 				)
 			)
 		);
 		this.app.delete('/cache/:cacheName/paths/:hash', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.deletionQueue.handleDeletePath(
-					context.req.raw,
-					cache,
-					context.req.param('hash')
+				this.withMaintenanceEligibility(() =>
+					this.deletionQueue.handleDeletePath(
+						context.req.raw,
+						cache,
+						context.req.param('hash')
+					)
 				)
 			)
 		);
@@ -432,83 +453,103 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.app.put('/roots/:name', (context) =>
 			serverErrorResponse(
-				this.roots.handleSetRoot(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('name')
+				this.withMaintenanceEligibility(() =>
+					this.roots.handleSetRoot(
+						context.req.raw,
+						DEFAULT_CACHE,
+						context.req.param('name')
+					)
 				)
 			)
 		);
 		this.app.put('/cache/:cacheName/roots/:name', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.roots.handleSetRoot(
-					context.req.raw,
-					cache,
-					context.req.param('name')
+				this.withMaintenanceEligibility(() =>
+					this.roots.handleSetRoot(
+						context.req.raw,
+						cache,
+						context.req.param('name')
+					)
 				)
 			)
 		);
 		this.app.delete('/roots/:name', (context) =>
 			serverErrorResponse(
-				this.roots.handleRemoveRoot(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('name')
+				this.withMaintenanceEligibility(() =>
+					this.roots.handleRemoveRoot(
+						context.req.raw,
+						DEFAULT_CACHE,
+						context.req.param('name')
+					)
 				)
 			)
 		);
 		this.app.delete('/cache/:cacheName/roots/:name', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.roots.handleRemoveRoot(
-					context.req.raw,
-					cache,
-					context.req.param('name')
+				this.withMaintenanceEligibility(() =>
+					this.roots.handleRemoveRoot(
+						context.req.raw,
+						cache,
+						context.req.param('name')
+					)
 				)
 			)
 		);
 		this.app.post('/uploads', (context) =>
 			serverErrorResponse(
-				this.uploads.handleNegotiate(context.req.raw, DEFAULT_CACHE)
+				this.withMaintenanceEligibility(() =>
+					this.uploads.handleNegotiate(context.req.raw, DEFAULT_CACHE)
+				)
 			)
 		);
 		this.app.post('/cache/:cacheName/uploads', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.uploads.handleNegotiate(context.req.raw, cache)
+				this.withMaintenanceEligibility(() =>
+					this.uploads.handleNegotiate(context.req.raw, cache)
+				)
 			)
 		);
 		this.app.put('/uploads/:id', (context) =>
 			serverErrorResponse(
-				this.uploads.handlePrepareUpload(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('id')
+				this.withMaintenanceEligibility(() =>
+					this.uploads.handlePrepareUpload(
+						context.req.raw,
+						DEFAULT_CACHE,
+						context.req.param('id')
+					)
 				)
 			)
 		);
 		this.app.put('/cache/:cacheName/uploads/:id', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.uploads.handlePrepareUpload(
-					context.req.raw,
-					cache,
-					context.req.param('id')
+				this.withMaintenanceEligibility(() =>
+					this.uploads.handlePrepareUpload(
+						context.req.raw,
+						cache,
+						context.req.param('id')
+					)
 				)
 			)
 		);
 		this.app.post('/uploads/:id/commit', (context) =>
 			serverErrorResponse(
-				this.commitPipeline.handleCommit(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('id')
+				this.withMaintenanceEligibility(() =>
+					this.commitPipeline.handleCommit(
+						context.req.raw,
+						DEFAULT_CACHE,
+						context.req.param('id')
+					)
 				)
 			)
 		);
 		this.app.post('/cache/:cacheName/uploads/:id/commit', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.commitPipeline.handleCommit(
-					context.req.raw,
-					cache,
-					context.req.param('id')
+				this.withMaintenanceEligibility(() =>
+					this.commitPipeline.handleCommit(
+						context.req.raw,
+						cache,
+						context.req.param('id')
+					)
 				)
 			)
 		);
@@ -524,14 +565,39 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.app.post('/gc', (context) =>
 			serverErrorResponse(
-				this.garbageCollection.handleGarbageCollection(context.req.raw)
+				this.withMaintenanceEligibility(() =>
+					this.garbageCollection.handleGarbageCollection(context.req.raw)
+				)
 			)
 		);
 		this.app.post('/cache/:cacheName/gc', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.garbageCollection.handleGarbageCollection(context.req.raw, cache)
+				this.withMaintenanceEligibility(() =>
+					this.garbageCollection.handleGarbageCollection(context.req.raw, cache)
+				)
 			)
 		);
+	}
+
+	private async withMaintenanceEligibility<T>(
+		body: () => Promise<T>
+	): Promise<T> {
+		await this.maintenanceEligibility.invalidate();
+
+		try {
+			return await body();
+		} finally {
+			await this.reconcileMaintenanceEligibility();
+		}
+	}
+
+	private async reconcileMaintenanceEligibility(): Promise<void> {
+		try {
+			await this.maintenanceEligibility.reconcile();
+		} catch {
+			// Eligibility is an admission hint. If it cannot be refreshed, cron fails
+			// open through a missing or stale row rather than failing the mutation.
+		}
 	}
 
 	private withCache(
