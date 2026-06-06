@@ -31,6 +31,9 @@ it.
   actionable.
 - `pnpm fix` applies the auto-fixable parts (`syncpack format`,
   `prettier --write`, `eslint --fix`).
+- Install pre-commit hooks with `pre-commit install`. The hooks run upstream
+  file hygiene checks plus the workspace dependency, format, lint, Knip, and
+  type gates before commits.
 
 ## Coding Standards
 

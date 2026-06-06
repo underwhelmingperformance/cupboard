@@ -1,0 +1,100 @@
+minimum_pre_commit_version: '3.2.0'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-yaml
+      - id: destroyed-symlinks
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: pnpm-check-deps
+        name: pnpm check:deps
+        entry: pnpm check:deps
+        language: system
+        pass_filenames: false
+        files: &dependency_files >-
+          (?x)^(
+            \.syncpackrc\.ts|
+            package\.json|
+            packages/[^/]+/package\.json|
+            pnpm-lock\.yaml|
+            pnpm-workspace\.yaml
+          )$
+
+      - id: pnpm-check-format
+        name: pnpm check:format
+        entry: pnpm check:format
+        language: system
+        pass_filenames: false
+        files: &format_files >-
+          (?x)^(
+            \.editorconfig|
+            \.markdownlint\.json|
+            \.pre-commit-config\.yaml|
+            \.prettierignore|
+            \.prettierrc|
+            \.syncpackrc\.ts|
+            AGENTS\.md|
+            CLAUDE\.md|
+            PLAN\.md|
+            eslint\.config\.ts|
+            knip\.json|
+            package\.json|
+            packages/.+\.(json|sql|toml|ts|tsx)|
+            pnpm-lock\.yaml|
+            pnpm-workspace\.yaml|
+            scripts/.+\.ts|
+            tests/.+\.(json|ts|tsx)|
+            tsconfig(\.base)?\.json
+          )$
+
+      - id: pnpm-check-lint
+        name: pnpm check:lint
+        entry: pnpm check:lint
+        language: system
+        pass_filenames: false
+        files: &typescript_files >-
+          (?x)^(
+            \.syncpackrc\.ts|
+            eslint\.config\.ts|
+            package\.json|
+            packages/.+\.(json|ts|tsx)|
+            pnpm-lock\.yaml|
+            pnpm-workspace\.yaml|
+            scripts/.+\.ts|
+            tests/.+\.(json|ts|tsx)|
+            tsconfig(\.base)?\.json
+          )$
+
+      - id: pnpm-check-knip
+        name: pnpm check:knip
+        entry: pnpm check:knip
+        language: system
+        pass_filenames: false
+        files: *typescript_files
+
+      - id: pnpm-check-types
+        name: pnpm check:types
+        entry: pnpm check:types
+        language: system
+        pass_filenames: false
+        files: >-
+          (?x)^(
+            packages/.+\.(json|toml|ts|tsx)|
+            pnpm-lock\.yaml|
+            scripts/.+\.ts|
+            tests/.+\.(json|ts|tsx)|
+            tsconfig(\.base)?\.json
+          )$
