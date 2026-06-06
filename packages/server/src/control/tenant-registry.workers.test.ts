@@ -8,7 +8,11 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { TenantAlreadyExistsError, TenantNotFoundError } from '../errors.ts';
+import {
+	TenantAlreadyExistsError,
+	TenantNotFoundError,
+	TenantRetiredError
+} from '../errors.ts';
 
 import {
 	publishTenantManifest,
@@ -16,6 +20,7 @@ import {
 } from './tenant-manifest.ts';
 import {
 	ensureTenant,
+	finaliseOffboardedTenant,
 	listTenants,
 	setTenantStatus
 } from './tenant-registry.ts';
@@ -249,5 +254,110 @@ describe('tenant registry', () => {
 		await expect(
 			setTenantStatus(database(), 'ghost', 'suspended')
 		).rejects.toThrow(TenantNotFoundError);
+	});
+
+	it('treats a repeated offboard as terminal while refusing other status moves', async () => {
+		await provision(createBody('acme'));
+		await setTenantStatus(database(), 'acme', 'offboarding');
+		await finaliseOffboardedTenant(database(), 'acme');
+
+		// A repeated delete after finalisation must not flip the tombstone back to
+		// offboarding (which the caller would then republish into the manifest).
+		const repeated = await setTenantStatus(database(), 'acme', 'offboarding');
+
+		await expect(
+			setTenantStatus(database(), 'acme', 'suspended')
+		).rejects.toThrow(TenantRetiredError);
+
+		const stored = await database()
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, 'acme'))
+			.get();
+
+		expect({
+			repeatedStatus: repeated.status,
+			storedStatus: stored?.status
+		}).toStrictEqual({
+			repeatedStatus: 'offboarded',
+			storedStatus: 'offboarded'
+		});
+	});
+
+	it('refuses to re-provision a slug that has begun offboarding', async () => {
+		await provision(createBody('acme', 'private'));
+		await setTenantStatus(database(), 'acme', 'offboarding');
+
+		await expect(
+			ensureTenant(database(), createBody('acme', 'private'), now)
+		).rejects.toThrow(TenantAlreadyExistsError);
+	});
+
+	it('finalises a drained tenant into a scrubbed tombstone that the manifest drops and re-provisioning refuses', async () => {
+		await provision(
+			createBody('acme', 'private')
+			// A private cache, so the row carries a read verifier to scrub.
+		);
+		await database()
+			.update(d1Schema.tenant)
+			.set({ readUser: 'reader', readPasswordHash: 'hash' })
+			.where(eq(d1Schema.tenant.id, 'acme'))
+			.run();
+		await setTenantStatus(database(), 'acme', 'offboarding');
+
+		await finaliseOffboardedTenant(database(), 'acme');
+		await publishTenantManifest(database(), env.TENANT_CACHE);
+
+		const stored = await database()
+			.select({
+				status: d1Schema.tenant.status,
+				readUser: d1Schema.tenant.readUser,
+				readPasswordHash: d1Schema.tenant.readPasswordHash,
+				ownerIssuer: d1Schema.tenant.ownerIssuer,
+				ownerSubject: d1Schema.tenant.ownerSubject,
+				ownerAudience: d1Schema.tenant.ownerAudience
+			})
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, 'acme'))
+			.get();
+		// A cleared credential reads back as undefined and the owner identity as empty,
+		// so the scrub is asserted without a null literal.
+		const row = {
+			status: stored?.status,
+			readUser: stored?.readUser ?? undefined,
+			readPasswordHash: stored?.readPasswordHash ?? undefined,
+			ownerIssuer: stored?.ownerIssuer,
+			ownerSubject: stored?.ownerSubject,
+			ownerAudience: stored?.ownerAudience
+		};
+		const manifest = await readTenantManifest(env.TENANT_CACHE);
+		const reProvision = await ensureTenant(
+			database(),
+			createBody('acme', 'private'),
+			now
+		).then(
+			() => 'accepted',
+			(error: unknown) =>
+				error instanceof TenantAlreadyExistsError ? 'refused' : 'other'
+		);
+
+		expect({
+			row,
+			usage: await usageRow('acme'),
+			entry: manifest?.tenants.acme,
+			reProvision
+		}).toStrictEqual({
+			row: {
+				status: 'offboarded',
+				readUser: undefined,
+				readPasswordHash: undefined,
+				ownerIssuer: '',
+				ownerSubject: '',
+				ownerAudience: ''
+			},
+			usage: undefined,
+			entry: undefined,
+			reProvision: 'refused'
+		});
 	});
 });

@@ -84,6 +84,12 @@ export class NarInfoObjectsService {
 		cache: string,
 		storePathHash: string
 	): Promise<void> {
+		// A tenant being offboarded must not have its objects re-materialised, or the
+		// drain would chase an object this path recreated behind it.
+		if (this.context.offboarding) {
+			return;
+		}
+
 		const row = this.context.db
 			.select()
 			.from(schema.narInfos)

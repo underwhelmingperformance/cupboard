@@ -428,6 +428,12 @@ async function controlTenantOffboard(
 
 	await publishTenantManifest(database, env.TENANT_CACHE);
 
+	// Tell the Durable Object it is offboarding so an in-flight commit settling after
+	// the status flip cannot re-materialise an object the drain will remove.
+	if (summary.status === 'offboarding') {
+		await tenantServer(env, id).beginOffboard();
+	}
+
 	return Response.json(
 		{ id: summary.id, status: summary.status } satisfies TenantMutateResponse,
 		{ headers: { 'cache-control': 'no-store' } }

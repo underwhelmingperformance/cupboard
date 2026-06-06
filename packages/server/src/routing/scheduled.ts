@@ -1,6 +1,11 @@
-import { asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import {
+	publishTenantManifest,
+	readTenantManifest
+} from '../control/tenant-manifest.ts';
+import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	BlobReaperService,
@@ -17,6 +22,15 @@ import { tenantServer } from './durable-object.ts';
 // covered over successive ticks. Provisional, pending a fleet-scale measurement.
 const maintenanceBatchSize = 100;
 const maintenanceConcurrency = 4;
+
+// Per cron tick, the offboard drain works at most this many tenants, each for at
+// most this many bounded rounds of this many rows/objects. The product bounds the
+// tick's subrequest fan-out; the per-round chunk matches R2's 1000-key delete so a
+// large tenant reclaims many batches per tick rather than one. Provisional, pending
+// a fleet-scale measurement.
+const offboardTenantsPerTick = 10;
+const offboardRoundsPerTick = 10;
+const offboardDrainChunk = 1000;
 
 // The KV key holding the demote scan's resume position (see DemoteCursor).
 const demoteCursorKey = 'reaper:demote-cursor';
@@ -39,6 +53,7 @@ export async function runCronTick(env: Env): Promise<void> {
 	// stalling does not hold back the next.
 	for (const pass of [
 		() => runCronSweep(env),
+		() => runOffboardSweep(env),
 		() => runBlobReaper(env),
 		() => runReaperDemote(env)
 	]) {
@@ -118,6 +133,133 @@ class TenantNarInfoDemoter implements NarInfoDemoter {
 			targets
 		);
 	}
+}
+
+/**
+ * Drives the offboarding drain for a bounded batch of tenants. Each draining tenant
+ * sheds a bounded batch of its reference and presence rows through its own Durable
+ * Object (the single writer of those rows) and a bounded batch of its R2 objects
+ * through the Worker; a tenant whose rows and objects are both gone is finalised into
+ * its terminal scrubbed tombstone. Offboarding tenants are disjoint from the
+ * maintenance sweep (which serves only active tenants), so the two never contend for
+ * one tenant. Per-tenant failures are surfaced together rather than swallowed.
+ */
+export async function runOffboardSweep(
+	env: Env,
+	tenantLimit: number = offboardTenantsPerTick,
+	drainLimit: number = offboardDrainChunk,
+	rounds: number = offboardRoundsPerTick
+): Promise<void> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const tenants = await database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.status, 'offboarding'))
+		.orderBy(asc(d1Schema.tenant.id))
+		.limit(tenantLimit)
+		.all();
+
+	const results = await Promise.allSettled(
+		tenants.map(({ id }) => drainTenant(env, id, drainLimit, rounds))
+	);
+
+	// Republish the manifest if a finalised tenant still lingers in it: finalisation
+	// flips the registry status to `offboarded` (excluded from the manifest) but a
+	// crash before the republish would otherwise strand the slug in it forever, since
+	// the drain selects only `offboarding`. One republish drops every stale tombstone.
+	await reconcileOffboardedManifest(env, database);
+
+	const failures = results.flatMap((result): unknown[] =>
+		result.status === 'rejected' ? [result.reason] : []
+	);
+
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures,
+			`offboard drain failed for ${String(failures.length)} of ${String(tenants.length)} tenant(s)`
+		);
+	}
+}
+
+async function reconcileOffboardedManifest(
+	env: Env,
+	database: CronDatabase
+): Promise<void> {
+	const manifest = await readTenantManifest(env.TENANT_CACHE);
+	const ids = manifest === undefined ? [] : Object.keys(manifest.tenants);
+
+	if (ids.length === 0) {
+		return;
+	}
+
+	const stale = await database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(
+			and(
+				eq(d1Schema.tenant.status, 'offboarded'),
+				inArray(d1Schema.tenant.id, ids)
+			)
+		)
+		.limit(1)
+		.get();
+
+	if (stale !== undefined) {
+		await publishTenantManifest(database, env.TENANT_CACHE);
+	}
+}
+
+// Drains a single tenant for up to a bounded number of rounds this tick, finalising
+// it once its rows and objects are both exhausted. Each round sheds a chunk of edge
+// rows through the Durable Object (the single writer of those rows) and a chunk of R2
+// objects directly (content-addressed and idempotent, so the Worker may delete them);
+// looping lets a large tenant reclaim many chunks per tick while the round cap keeps
+// the tick within its subrequest budget.
+async function drainTenant(
+	env: Env,
+	id: string,
+	drainLimit: number,
+	rounds: number
+): Promise<void> {
+	for (let round = 0; round < rounds; round += 1) {
+		const { drained } = await tenantServer(env, id).runOffboard(drainLimit);
+		const objectsRemain = await deleteTenantObjects(env, id, drainLimit);
+
+		if (drained && !objectsRemain) {
+			await finaliseTenant(env, id);
+			return;
+		}
+	}
+}
+
+// Deletes a bounded batch of a tenant's namespaced R2 objects, returning whether
+// more remain so the drain runs again next tick. Listing from the prefix each tick
+// (the deleted keys gone) makes progress without a persisted cursor.
+async function deleteTenantObjects(
+	env: Env,
+	id: string,
+	limit: number
+): Promise<boolean> {
+	const listed = await env.BLOBS.list({ prefix: `t/${id}/`, limit });
+
+	if (listed.objects.length > 0) {
+		await env.BLOBS.delete(listed.objects.map((object) => object.key));
+	}
+
+	return listed.truncated;
+}
+
+// Finalises a fully drained tenant: wipe its Durable Object storage (keys, identity,
+// narinfos), then scrub its registry row to the terminal `offboarded` tombstone with
+// its usage row dropped. Purging first and tolerating an already-purged object in the
+// drain makes an interrupted finalisation converge on the next tick. The manifest is
+// republished by the sweep's reconciliation, not here, so a crash before it cannot
+// strand the slug in the manifest.
+async function finaliseTenant(env: Env, id: string): Promise<void> {
+	await tenantServer(env, id).purgeStorage();
+
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	await finaliseOffboardedTenant(database, id);
 }
 
 /**

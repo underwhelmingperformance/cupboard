@@ -149,6 +149,18 @@ export class TenantWritesStoppedError extends ServerHttpError {
 	}
 }
 
+// An offboarded tenant is a terminal tombstone: its slug is retired and can never be
+// re-provisioned or moved back to another status, so a status mutation targeting it
+// is refused as Gone rather than silently resurrecting the slug.
+export class TenantRetiredError extends ServerHttpError {
+	readonly status = StatusCodes.GONE;
+
+	constructor(public readonly tenant: string) {
+		super(`Tenant '${tenant}' is offboarded and its slug is retired`);
+		this.name = 'TenantRetiredError';
+	}
+}
+
 // Committing this blob would take the tenant past its storage quota. The charge is
 // gated on the tenant's 0-to-1 blob transition, so this is raised only when the
 // tenant does not already hold the hash and the new bytes would exceed the limit.

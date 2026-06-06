@@ -121,12 +121,15 @@ export type ReserveOutcome =
 // `blob-gone` when the shared blob (`blob_state` or the canonical object) is no
 // longer present and the path must be re-uploaded; `over-quota` when charging the
 // blob's canonical size would exceed the tenant's quota, so the caller reclaims the
-// reserved row rather than charging.
+// reserved row rather than charging; `tenant-inactive` when the tenant is no longer
+// active (suspended, offboarding, offboarded, or gone), so the caller reclaims the
+// reserved row rather than publishing an edge and object the drain would have to chase.
 export type MaterialiseOutcome =
 	| 'materialised'
 	| 'superseded'
 	| 'blob-gone'
-	| 'over-quota';
+	| 'over-quota'
+	| 'tenant-inactive';
 
 // The compressed metadata of the one canonical object served for a NAR hash.
 // Read from the object itself so a committed narinfo always advertises the
@@ -145,6 +148,12 @@ export class ServerContext {
 	env: RuntimeEnv;
 	readonly ctx: DurableObjectState;
 	discovery = new OidcDiscoveryStore();
+	// Set once the control plane begins offboarding this tenant, so the verify-restore
+	// path no-ops rather than re-materialising a narinfo object the drain is removing.
+	// In-memory is sufficient: a new write is already refused by the Worker's status
+	// gate, so the only caller to guard is an in-flight commit settling on this warm
+	// instance, which sees the flag set by the same instance's offboard RPC.
+	offboarding = false;
 	private presigner: R2Presigner | undefined;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {

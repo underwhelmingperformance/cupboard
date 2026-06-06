@@ -22,6 +22,7 @@ import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RootsService } from './roots-service.ts';
@@ -58,6 +59,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly commitPipeline: CommitPipelineService;
 	private readonly verification: VerificationService;
 	private readonly roots: RootsService;
+	private readonly offboarding: OffboardingService;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
@@ -125,6 +127,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.retention,
 			this.narInfoObjects
 		);
+		this.offboarding = new OffboardingService(this.context);
 
 		this.routes();
 	}
@@ -195,6 +198,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				narHash
 			);
 		}
+	}
+
+	// The control plane begins offboarding this tenant. Marking it stops the
+	// verify-restore path re-materialising an object the drain is about to remove, so
+	// an in-flight commit settling on this instance cannot resurrect one.
+	async beginOffboard(): Promise<void> {
+		await this.initialise();
+		this.offboarding.begin();
+	}
+
+	// One bounded drain pass: deletes a batch of this tenant's reference and presence
+	// rows (the rows only this Durable Object may write) and reports whether any
+	// remain, so the Worker drives the drain to completion over successive ticks. The
+	// freed shared blobs are collected by the global reaper.
+	async runOffboard(limit: number): Promise<{ drained: boolean }> {
+		await this.initialise();
+
+		return this.ctx.blockConcurrencyWhile(() => this.offboarding.drain(limit));
+	}
+
+	// Wipes this Durable Object's own storage once its tenant is drained: the signing
+	// and auth keys, the identity, and the narinfo rows. After this the object is
+	// unconfigured and serves nothing, so its tenant retains no secret or data.
+	purgeStorage(): Promise<void> {
+		return this.ctx.blockConcurrencyWhile(async () => {
+			await this.ctx.storage.deleteAll();
+			this.migrationPromise = undefined;
+			this.authKeys.resetAuthKeyCache();
+			this.signingKeys.resetKeyCaches();
+		});
 	}
 
 	// The control plane assigns this Durable Object its identity at provision time

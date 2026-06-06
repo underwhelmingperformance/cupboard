@@ -2,11 +2,15 @@ import type {
 	ParsedTenantCreateBody,
 	ParsedTenantSummary
 } from '@cupboard/protocol/tenants';
-import { eq } from 'drizzle-orm';
+import { and, eq, ne, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { TenantAlreadyExistsError, TenantNotFoundError } from '../errors.ts';
+import {
+	TenantAlreadyExistsError,
+	TenantNotFoundError,
+	TenantRetiredError
+} from '../errors.ts';
 import {
 	generateReadPasswordSalt,
 	hashReadPassword
@@ -139,6 +143,12 @@ export async function ensureTenant(
 	// on the way to rejecting and poison a later legitimate retry.
 	const existing = await loadTenant(database, body.id);
 
+	// A slug that has begun or finished offboarding is retired: never re-provisioned,
+	// so a re-used slug can never resurrect a removed tenant's identity.
+	if (existing?.status === 'offboarding' || existing?.status === 'offboarded') {
+		throw new TenantAlreadyExistsError(body.id);
+	}
+
 	if (existing === undefined || !(await sameConfig(existing, body))) {
 		throw new TenantAlreadyExistsError(body.id);
 	}
@@ -225,16 +235,64 @@ export async function setTenantStatus(
 	id: string,
 	status: 'suspended' | 'offboarding'
 ): Promise<ParsedTenantSummary> {
+	// `offboarded` is terminal: the conditional update never moves a tenant out of it,
+	// so a repeated delete after finalisation cannot flip the slug back to offboarding
+	// (and the caller's manifest republish never re-admits it). An update that matches
+	// no row is either a missing tenant or a retired one; the follow-up read tells them
+	// apart so each gets its own error.
 	const updated = await database
 		.update(d1Schema.tenant)
 		.set({ status })
-		.where(eq(d1Schema.tenant.id, id))
+		.where(
+			and(eq(d1Schema.tenant.id, id), ne(d1Schema.tenant.status, 'offboarded'))
+		)
 		.returning();
 	const row = updated[0];
 
-	if (row === undefined) {
+	if (row !== undefined) {
+		return toSummary(row);
+	}
+
+	const existing = await loadTenant(database, id);
+
+	if (existing === undefined) {
 		throw new TenantNotFoundError(id);
 	}
 
-	return toSummary(row);
+	if (status === 'offboarding' && existing.status === 'offboarded') {
+		return existing;
+	}
+
+	throw new TenantRetiredError(id);
+}
+
+// Finalises a drained tenant into its terminal scrubbed tombstone in one atomic
+// batch: the registry row stays (so the slug is never reused) with its status set to
+// `offboarded`, its read credential cleared, and its owner OIDC identity blanked (the
+// not-null columns cannot be dropped, so they are emptied), and the usage row is
+// dropped. The Durable Object's own storage (signing keys, identity, narinfos) is
+// wiped through its `purgeStorage` RPC by the caller; what remains here is an
+// auditable record that the slug existed and is retired, holding no tenant identity or
+// secret.
+export async function finaliseOffboardedTenant(
+	database: Database,
+	id: string
+): Promise<void> {
+	await database.batch([
+		database
+			.update(d1Schema.tenant)
+			.set({
+				status: 'offboarded',
+				readUser: sql`null`,
+				readPasswordHash: sql`null`,
+				readPasswordSalt: sql`null`,
+				ownerIssuer: '',
+				ownerSubject: '',
+				ownerAudience: ''
+			})
+			.where(eq(d1Schema.tenant.id, id)),
+		database
+			.delete(d1Schema.tenantUsage)
+			.where(eq(d1Schema.tenantUsage.tenant, id))
+	]);
 }

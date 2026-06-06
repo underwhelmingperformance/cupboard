@@ -243,10 +243,11 @@ export async function provisionNamedTenant(
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	// The workers pool keeps a Durable Object warm across tests, so a fixed-name
-	// tenant carries its previous identity. A monotonic config version clears the
-	// `configure` fence so each test reconfigures the object for its own origin.
+	// tenant starts from empty private state before receiving this test's identity.
 	nextProvisionConfigVersion += 1;
 	const configVersion = nextProvisionConfigVersion;
+	const stub = tenantServer(env, id);
+	await stub.purgeStorage();
 
 	await database
 		.insert(d1Schema.tenant)
@@ -279,7 +280,7 @@ export async function provisionNamedTenant(
 		.run();
 
 	if (options.configure !== false) {
-		await tenantServer(env, id).configure({
+		await stub.configure({
 			tenant: id,
 			issuer,
 			audience: issuer,

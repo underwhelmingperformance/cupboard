@@ -15,6 +15,7 @@ import {
 	NarTooLargeError,
 	NarVerificationFailedError,
 	QuotaExceededError,
+	TenantWritesStoppedError,
 	UploadCacheMismatchError,
 	UploadedObjectNotFoundError,
 	UploadExpiredError,
@@ -255,6 +256,30 @@ export class CommitPipelineService {
 			this.materialiseServable(cache, metadata, reserved.generation)
 		);
 
+		// The tenant began offboarding while this commit was in flight: reclaim the
+		// reserved row and clear the upload rather than publishing an edge the drain
+		// would have to chase, then reject as a stopped write.
+		if (outcome === 'tenant-inactive') {
+			await this.context.ctx.blockConcurrencyWhile(() =>
+				this.reclaimReservedRow(
+					cache,
+					metadata.storePathHash,
+					reserved.generation,
+					metadata.narHash
+				)
+			);
+			await this.uploadState.clearPendingUploadAndStaging(
+				uploadId,
+				stagingKey,
+				metadata.narHash
+			);
+
+			throw new TenantWritesStoppedError(
+				this.context.requireTenant(),
+				'inactive'
+			);
+		}
+
 		// Over quota on the canonical size: reclaim the reserved row and clear the
 		// upload so a retry is not stranded re-driving forever, then reject cleanly.
 		if (outcome === 'over-quota') {
@@ -327,6 +352,23 @@ export class CommitPipelineService {
 
 		if (outcome === 'superseded') {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
+		}
+
+		if (outcome === 'tenant-inactive') {
+			await this.context.ctx.blockConcurrencyWhile(() =>
+				this.reclaimReservedRow(
+					cache,
+					metadata.storePathHash,
+					reserved.generation,
+					metadata.narHash
+				)
+			);
+			this.uploadState.clearPendingUpload(uploadId);
+
+			throw new TenantWritesStoppedError(
+				this.context.requireTenant(),
+				'inactive'
+			);
 		}
 
 		await this.context.ctx.blockConcurrencyWhile(() =>
@@ -496,6 +538,20 @@ export class CommitPipelineService {
 		});
 	}
 
+	// The authoritative active check the edge/object publish is gated on: the Worker's
+	// write gate read this status before dispatch, but a commit can settle here after a
+	// suspend or offboard, so it is re-read in the critical section. A missing row reads
+	// as not-active and fails closed.
+	private async tenantActive(): Promise<boolean> {
+		const row = await this.context.d1
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, this.context.requireTenant()))
+			.get();
+
+		return row?.status === 'active';
+	}
+
 	// Makes a reserved narinfo servable, the edge-last half of the saga and the only
 	// place that writes the reference edge and the served object or clears the
 	// pending upload. It requires the shared blob to be present — the `available`
@@ -511,6 +567,19 @@ export class CommitPipelineService {
 		metadata: UploadPathMetadataFields,
 		generation: number
 	): Promise<MaterialiseOutcome> {
+		// A commit that passed the Worker's write gate while the tenant was active can
+		// still be settling here after the tenant was suspended or began offboarding.
+		// Publishing its edge now would re-reference a shared blob the drain is
+		// reclaiming, pinning it forever, so the caller reclaims the reserved row
+		// instead. The in-memory flag is a fast same-instance signal; correctness rests
+		// on the authoritative D1 status, read in the caller's critical section so the
+		// check and the edge write below are one atomic decision. The single rule —
+		// publish only while the tenant is active — covers suspended, offboarding,
+		// offboarded and a missing row alike.
+		if (this.context.offboarding || !(await this.tenantActive())) {
+			return 'tenant-inactive';
+		}
+
 		const blob = await this.context.d1
 			.select({ fileSize: d1Schema.blobState.fileSize })
 			.from(d1Schema.blobState)

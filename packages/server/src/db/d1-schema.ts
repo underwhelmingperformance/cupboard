@@ -94,7 +94,9 @@ export const controlTrust = sqliteTable('control_trust', {
 
 // The tenant registry: one row per provisioned cache, written only by the Worker.
 // `status` gates admission: `active` serves and accepts writes, `suspended` stops
-// writes at once and reads after the manifest TTL, `offboarding` drains. `read_mode`
+// writes at once and reads after the manifest TTL, `offboarding` drains, and
+// `offboarded` is the terminal scrubbed tombstone (kept so the slug is never reused,
+// excluded from the manifest, never maintained). `read_mode`
 // and the owner OIDC triple are projected into the KV admission manifest and seeded
 // into the tenant Durable Object at provision time. `config_version` is the
 // monotonic fence carried on every dispatch, so a Durable Object applies identity
@@ -104,7 +106,7 @@ export const tenant = sqliteTable(
 	{
 		id: text('id').primaryKey(),
 		status: text('status', {
-			enum: ['active', 'suspended', 'offboarding']
+			enum: ['active', 'suspended', 'offboarding', 'offboarded']
 		}).notNull(),
 		readMode: text('read_mode', { enum: ['public', 'private'] }).notNull(),
 		ownerIssuer: text('owner_issuer').notNull(),

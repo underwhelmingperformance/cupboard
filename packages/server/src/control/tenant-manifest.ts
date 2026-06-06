@@ -76,6 +76,13 @@ export async function publishTenantManifest(
 	const tenants: Record<string, ManifestEntry> = {};
 
 	for (const row of rows) {
+		// An offboarded tenant is a terminal scrubbed tombstone: it never appears in
+		// the manifest, so admission rejects its slug before any Durable Object is
+		// touched. The row stays in D1 only to keep the slug retired.
+		if (row.status === 'offboarded') {
+			continue;
+		}
+
 		const entry: ManifestEntry = {
 			status: row.status,
 			readMode: row.readMode,

@@ -1,6 +1,10 @@
+import { env } from 'cloudflare:workers';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import {
 	controlFetch,
 	mintControlAdminToken,
@@ -86,6 +90,40 @@ describe('control plane tenant administration', () => {
 			listedIds: ['acme', 'v1'],
 			suspended: { id: 'acme', status: 'suspended' },
 			offboarded: { id: 'acme', status: 'offboarding' }
+		});
+	});
+
+	it('treats repeated delete of an offboarded tenant as idempotent', async () => {
+		const token = await mintControlAdminToken();
+
+		await controlFetch('/control/tenants', authed(token, 'POST', createBody));
+		await controlFetch('/control/tenants/acme', authed(token, 'DELETE'));
+		await finaliseOffboardedTenant(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			'acme'
+		);
+
+		const repeatedDelete = await controlFetch(
+			'/control/tenants/acme',
+			authed(token, 'DELETE')
+		);
+		const repeatedBody = await repeatedDelete.json<{
+			id: string;
+			status: string;
+		}>();
+		const suspend = await controlFetch(
+			'/control/tenants/acme/suspend',
+			authed(token, 'POST')
+		);
+
+		expect({
+			repeatedDelete: repeatedDelete.status,
+			repeatedBody,
+			suspend: suspend.status
+		}).toStrictEqual({
+			repeatedDelete: StatusCodes.OK,
+			repeatedBody: { id: 'acme', status: 'offboarded' },
+			suspend: StatusCodes.GONE
 		});
 	});
 

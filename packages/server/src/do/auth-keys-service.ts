@@ -186,7 +186,7 @@ export class AuthKeysService {
 		return kid;
 	}
 
-	private resetAuthKeyCache(): void {
+	resetAuthKeyCache(): void {
 		this.authKeysPromise = undefined;
 	}
 

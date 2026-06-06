@@ -102,7 +102,7 @@ export class SigningKeysService {
 		];
 	}
 
-	private resetKeyCaches(): void {
+	resetKeyCaches(): void {
 		this.keysPromise = undefined;
 		this.publicKeyBody = undefined;
 	}
