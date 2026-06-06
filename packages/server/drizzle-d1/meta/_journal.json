@@ -64,6 +64,13 @@
 			"when": 1780694644957,
 			"tag": "0008_tenant_usage",
 			"breakpoints": true
+		},
+		{
+			"idx": 9,
+			"version": "6",
+			"when": 1780765265071,
+			"tag": "0009_tenant_last_maintained",
+			"breakpoints": true
 		}
 	]
 }

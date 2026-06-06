@@ -10,7 +10,7 @@ import { handleRead } from '../read/read.ts';
 import { admitTenant } from './admission.ts';
 import { handleDeployment } from './deployment.ts';
 import { tenantServer } from './durable-object.ts';
-import { runScheduledMaintenance } from './scheduled.ts';
+import { runCronSweep } from './scheduled.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 
 export default {
@@ -56,41 +56,11 @@ export default {
 	},
 
 	async scheduled(_controller, env) {
-		// The cron drives maintenance for every active tenant, not just the default
-		// one: a non-default tenant's deferred uploads also need the background verify
-		// pass to become servable. Tenants are enumerated from the authoritative D1
-		// registry; the service binding authorises the direct Durable Object RPC with
-		// no token.
-		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-		const tenants = await database
-			.select({ id: d1Schema.tenant.id })
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.status, 'active'))
-			.all();
-
-		// Each tenant runs independently so one tenant's failure does not stall the
-		// rest, and any failures are surfaced together rather than swallowed.
-		const results = await Promise.allSettled(
-			tenants.map(({ id }) => {
-				const server = tenantServer(env, id);
-
-				return runScheduledMaintenance(
-					() => server.runGarbageCollection(),
-					() => server.runVerification()
-				);
-			})
-		);
-
-		const failures = results.flatMap((result): unknown[] =>
-			result.status === 'rejected' ? [result.reason] : []
-		);
-
-		if (failures.length > 0) {
-			throw new AggregateError(
-				failures,
-				`cron maintenance failed for ${String(failures.length)} of ${String(tenants.length)} tenant(s)`
-			);
-		}
+		// The cron sweeps a bounded batch of active tenants per tick, advancing a
+		// cursor over slug order so the whole fleet is maintained over successive
+		// ticks without exhausting the subrequest budget. A non-default tenant's
+		// deferred uploads need this background pass to become servable.
+		await runCronSweep(env);
 	}
 } satisfies ExportedHandler<Env>;
 

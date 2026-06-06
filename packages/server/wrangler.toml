@@ -66,4 +66,4 @@ cpu_ms = 300000
 enabled = true
 
 [triggers]
-crons = ["0 4 * * *"]
+crons = ["0 * * * *"]

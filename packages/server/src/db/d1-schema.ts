@@ -99,21 +99,38 @@ export const controlTrust = sqliteTable('control_trust', {
 // into the tenant Durable Object at provision time. `config_version` is the
 // monotonic fence carried on every dispatch, so a Durable Object applies identity
 // updates in order and never downgrades to an older one.
-export const tenant = sqliteTable('tenant', {
-	id: text('id').primaryKey(),
-	status: text('status', {
-		enum: ['active', 'suspended', 'offboarding']
-	}).notNull(),
-	readMode: text('read_mode', { enum: ['public', 'private'] }).notNull(),
-	ownerIssuer: text('owner_issuer').notNull(),
-	ownerSubject: text('owner_subject').notNull(),
-	ownerAudience: text('owner_audience').notNull(),
-	configVersion: integer('config_version').notNull(),
-	createdAt: text('created_at').notNull(),
-	readUser: text('read_user'),
-	readPasswordHash: text('read_password_hash'),
-	readPasswordSalt: text('read_password_salt')
-});
+export const tenant = sqliteTable(
+	'tenant',
+	{
+		id: text('id').primaryKey(),
+		status: text('status', {
+			enum: ['active', 'suspended', 'offboarding']
+		}).notNull(),
+		readMode: text('read_mode', { enum: ['public', 'private'] }).notNull(),
+		ownerIssuer: text('owner_issuer').notNull(),
+		ownerSubject: text('owner_subject').notNull(),
+		ownerAudience: text('owner_audience').notNull(),
+		configVersion: integer('config_version').notNull(),
+		createdAt: text('created_at').notNull(),
+		// The per-tenant read verifier for a private cache: the Basic-auth user and a
+		// hash of its password. Both are NULL for a public cache, or for a private one
+		// with no credential, which then fails closed and rejects every read. Only the
+		// hash, never the plaintext, is projected into the KV manifest the read path
+		// checks, so a read secret never leaves the control plane in the clear.
+		readUser: text('read_user'),
+		readPasswordHash: text('read_password_hash'),
+		readPasswordSalt: text('read_password_salt'),
+		// When the cron last ran maintenance (GC + verify) for this tenant. The sweep
+		// processes the most-overdue active tenants first and stamps this, so the
+		// table carries its own round-robin position rather than a separate cursor;
+		// NULL (a never-maintained tenant) sorts first, so a new tenant is picked up
+		// promptly.
+		lastMaintainedAt: text('last_maintained_at')
+	},
+	(table) => [
+		index('tenant_maintenance_idx').on(table.status, table.lastMaintainedAt)
+	]
+);
 
 // The monotonic version of the published admission manifest, a single row the
 // Worker advances every time it republishes. Sourcing the version from D1 (rather

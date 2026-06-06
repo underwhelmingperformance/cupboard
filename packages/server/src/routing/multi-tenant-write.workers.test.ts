@@ -18,7 +18,9 @@ import {
 	resetTestServer,
 	scheduledController,
 	stageDeferredForTenant,
+	suspendTenant,
 	tenantBlobRows,
+	tenantMaintained,
 	tenantUploadStatus,
 	testServerFor,
 	uploadMetadata,
@@ -26,7 +28,30 @@ import {
 } from '../test-support.ts';
 import worker from '../worker.ts';
 
+import { runCronSweep } from './scheduled.ts';
 import { defaultTenant } from './tenant-routing.ts';
+
+// Stages a deferred upload for a freshly provisioned tenant, returning the write
+// token and the upload id to poll. Used to seed each tenant with work the cron's
+// background verify pass must reach.
+async function stageDeferredForNewTenant(
+	id: string
+): Promise<{ readonly token: string; readonly uploadId: string }> {
+	const issuer = await provisionNamedTenant(id);
+	const token = await mintTokenForTenant(testServerFor(id), issuer, 'write');
+	const nar = await verifiableNar(`sweep-${id}`);
+	const metadata = uploadMetadata({
+		storePathHash: 'a'.repeat(32),
+		references: [],
+		narHash: nar.narHash,
+		narSize: nar.narSize,
+		fileHash: nar.fileHash,
+		fileSize: nar.narBytes.byteLength
+	});
+	const uploadId = await stageDeferredForTenant(id, token, metadata, nar);
+
+	return { token, uploadId };
+}
 
 // With the non-default-tenant write 501 lifted, a tenant writes through the Worker
 // under its own `/t/<tenant>/` prefix. Its narinfo objects, reference edges and
@@ -210,6 +235,51 @@ describe('multi-tenant writes', () => {
 		expect({ whilePending, afterCron }).toStrictEqual({
 			whilePending: 'pending',
 			afterCron: 'servable'
+		});
+	});
+
+	it('maintains the most-overdue tenants first, covering the fleet over ticks', async () => {
+		// Three tenants, all never-maintained (NULL `last_maintained_at`); the default
+		// tenant is suspended so the active fleet is exactly these three.
+		const acme = await stageDeferredForNewTenant('acme');
+		const beta = await stageDeferredForNewTenant('beta');
+		const gamma = await stageDeferredForNewTenant('gamma');
+		await suspendTenant(defaultTenant);
+
+		// A batch of two: the first tick takes the two most-overdue (all NULL, so by
+		// slug tiebreaker acme and beta), maintains and stamps them; gamma is left.
+		await runCronSweep(env, 2);
+		const afterFirst = {
+			acme: await tenantUploadStatus('acme', acme.token, acme.uploadId),
+			beta: await tenantUploadStatus('beta', beta.token, beta.uploadId),
+			gamma: await tenantUploadStatus('gamma', gamma.token, gamma.uploadId),
+			acmeStamped: await tenantMaintained('acme'),
+			gammaStamped: await tenantMaintained('gamma')
+		};
+
+		// The second tick: gamma is now the most overdue (still NULL, while acme and
+		// beta carry a stamp), so it is maintained next.
+		await runCronSweep(env, 2);
+		const gammaAfterSecond = await tenantUploadStatus(
+			'gamma',
+			gamma.token,
+			gamma.uploadId
+		);
+
+		expect({
+			afterFirst,
+			gammaAfterSecond,
+			gammaStampedAfterSecond: await tenantMaintained('gamma')
+		}).toStrictEqual({
+			afterFirst: {
+				acme: 'servable',
+				beta: 'servable',
+				gamma: 'pending',
+				acmeStamped: true,
+				gammaStamped: false
+			},
+			gammaAfterSecond: 'servable',
+			gammaStampedAfterSecond: true
 		});
 	});
 });

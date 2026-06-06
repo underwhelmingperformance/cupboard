@@ -706,7 +706,7 @@ export async function blobStateCount(): Promise<number> {
 
 /**
  * Whether the cron has stamped a tenant as maintained, for asserting which tenants a
- * sweep picked up: the maintenance sweep orders active tenants by `last_maintained_at`
+ * pass picked up: the maintenance pass orders active tenants by `last_maintained_at`
  * (oldest first, NULL first) and stamps the batch it processes.
  */
 export async function tenantMaintained(id: string): Promise<boolean> {

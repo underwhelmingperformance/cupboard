@@ -1,8 +1,147 @@
+import { asc, eq, inArray } from 'drizzle-orm';
+import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
+
+import * as d1Schema from '../db/d1-schema.ts';
+
+import { tenantServer } from './durable-object.ts';
+
+// One cron tick maintains at most this many tenants. The sweep picks the
+// most-overdue active tenants by `last_maintained_at`, so the whole fleet is
+// covered over successive ticks. Provisional, pending a fleet-scale measurement.
+const maintenanceBatchSize = 100;
+const maintenanceConcurrency = 4;
+
+type CronDatabase = DrizzleD1Database<typeof d1Schema>;
+type MaintainTenant = (env: Env, id: string) => Promise<void>;
+
 /**
- * Drives the two maintenance passes from the cron tick. Each runs every tick,
- * independent of the other's outcome: a failing verify never holds back a
- * sweep, nor a failing sweep a verify. A garbage-collection failure is surfaced
- * first, its cleanup being the more time-sensitive of the two.
+ * Drives one hourly cron tick: maintains the most-overdue active tenants and stamps
+ * them, so the table's own `last_maintained_at` carries the round-robin position and
+ * the whole fleet is covered over successive ticks. Per-tenant failures are collected
+ * and surfaced together rather than swallowed, so a fleet-wide stall is observable;
+ * the batch is stamped regardless of per-tenant outcome, so one failing tenant does
+ * not wedge the sweep.
+ */
+export async function runCronSweep(
+	env: Env,
+	batchSize: number = maintenanceBatchSize,
+	maintain: MaintainTenant = maintainTenant
+): Promise<void> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const batch = await overdueActiveTenants(database, batchSize);
+
+	// Each tenant runs independently so one tenant's failure does not stall the
+	// rest, but the fan-out is explicitly capped so the platform does not have to
+	// provide the backpressure policy.
+	const results = await settleWithConcurrency(
+		batch,
+		maintenanceConcurrency,
+		({ id }) => maintain(env, id)
+	);
+
+	await stampMaintained(database, batch);
+
+	const failures = results.flatMap((result): unknown[] =>
+		result.status === 'rejected' ? [result.reason] : []
+	);
+
+	if (failures.length > 0) {
+		throw new AggregateError(
+			failures,
+			`cron maintenance failed for ${String(failures.length)} of ${String(batch.length)} tenant(s)`
+		);
+	}
+}
+
+async function settleWithConcurrency<T>(
+	items: readonly T[],
+	concurrency: number,
+	run: (item: T) => Promise<void>
+): Promise<PromiseSettledResult<void>[]> {
+	const results: PromiseSettledResult<void>[] = [];
+	results.length = items.length;
+	let next = 0;
+
+	async function worker(): Promise<void> {
+		for (;;) {
+			const index = next;
+			next += 1;
+			const item = items[index];
+
+			if (item === undefined) {
+				return;
+			}
+
+			try {
+				await run(item);
+				results[index] = { status: 'fulfilled', value: undefined };
+			} catch (error) {
+				results[index] = { status: 'rejected', reason: error };
+			}
+		}
+	}
+
+	await Promise.all(
+		Array.from({ length: Math.min(concurrency, items.length) }, () => worker())
+	);
+
+	return results;
+}
+
+function maintainTenant(env: Env, id: string): Promise<void> {
+	const server = tenantServer(env, id);
+
+	return runScheduledMaintenance(
+		() => server.runGarbageCollection(),
+		() => server.runVerification()
+	);
+}
+
+// The most-overdue active tenants. NULL `last_maintained_at` (never maintained) sorts
+// first in SQLite ascending order, so a new tenant is picked up promptly; the id is
+// the tiebreaker for a stable batch among equal timestamps.
+function overdueActiveTenants(
+	database: CronDatabase,
+	batchSize: number
+): Promise<{ readonly id: string }[]> {
+	return database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.status, 'active'))
+		.orderBy(asc(d1Schema.tenant.lastMaintainedAt), asc(d1Schema.tenant.id))
+		.limit(batchSize)
+		.all();
+}
+
+// Stamps the maintained batch so the next tick advances to the next-oldest tenants.
+// Stamped after the passes run and regardless of their outcome, so a failing tenant
+// is not retried until the cycle comes round again, while a whole-tick crash before
+// this leaves the batch unstamped and reprocesses it.
+async function stampMaintained(
+	database: CronDatabase,
+	batch: readonly { readonly id: string }[]
+): Promise<void> {
+	if (batch.length === 0) {
+		return;
+	}
+
+	await database
+		.update(d1Schema.tenant)
+		.set({ lastMaintainedAt: new Date().toISOString() })
+		.where(
+			inArray(
+				d1Schema.tenant.id,
+				batch.map((entry) => entry.id)
+			)
+		)
+		.run();
+}
+
+/**
+ * Drives the two maintenance passes for one tenant from the cron tick. Each runs
+ * every tick, independent of the other's outcome: a failing verify never holds
+ * back a sweep, nor a failing sweep a verify. A garbage-collection failure is
+ * surfaced first, its cleanup being the more time-sensitive of the two.
  */
 export async function runScheduledMaintenance(
 	runGarbageCollection: () => Promise<void>,
