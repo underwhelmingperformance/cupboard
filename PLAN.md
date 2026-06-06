@@ -1815,23 +1815,32 @@ together.
    per-upload status query (`servable`/`pending`/`mismatch`/`over-quota`/
    `absent`, keyed on `uploadId`, mapping the durable per-upload verdict) is in
    place, with a deferred (`pending`) upload's row retained through its terminal
-   verdict so the poll outlives its commit; and the cron fans out maintenance to
+   verdict so the poll outlives its commit; the cron fans out maintenance to
    every active tenant, so a non-default tenant's deferred uploads reach the
    background verify pass (the unsharded fan-out; the cursor, subrequest budget
-   and global reaper are step 7). **Remaining:** the client side of the push
-   contract, namely `push --wait`/`--no-wait`/root-activation, and the CLI token
-   cache keyed on the full tenant base URL. The earlier gating notes, kept for
-   context: existence-oracle-safe negotiate gating on the asking tenant's own
-   `tenant_blob`/`blob_ref` (this reworks 2b's single-tenant reuse lookup, which
-   consults global `blob_state` — a known, accepted cost);
-   per-tenant-per-`narHash` quota — a read-only pre-verify check (early-reject
-   to save verify CPU) plus the authoritative post-verify charge gated on the
-   `tenant_blob` 0-to-1 insert, no `servable` flag needed; usage; the per-upload
-   status query the push contract polls; server wait/no-wait/root-activation
-   states and the CLI behaviour; the token cache keyed on the full tenant base
-   URL (origin plus `/t/<slug>`), with decoded `iss` checked against the full
-   path-based tenant issuer URL and `aud` against the target (the CLI
-   token-store gains a per-target dimension).
+   and global reaper are step 7); and the push contract waits. Root activation
+   gates on the serve predicate: `RootsService` reuses one
+   `NarInfoObjectsService.isServable` (the materialised narinfo R2 object
+   exists, repairing a merely-lost object first) for both the activation check
+   and the summary `present` flag, so serving, root activation, and root
+   summaries cannot drift; setting a root over a not-yet-servable target is
+   refused with a typed 409 and leaves the existing root intact. The CLI `push`
+   waits by default for its deferred uploads to become servable (polling the
+   status query, failing fast on `mismatch`/`over-quota`, bounded by
+   `--wait-timeout`) before recording retention, so the gated activation is
+   admitted; `--no-wait` returns with the paths pending and records no retention
+   over them. **Remaining:** the CLI token cache keyed on the full tenant base
+   URL. The earlier gating notes, kept for context: existence-oracle-safe
+   negotiate gating on the asking tenant's own `tenant_blob`/`blob_ref` (this
+   reworks 2b's single-tenant reuse lookup, which consults global `blob_state` —
+   a known, accepted cost); per-tenant-per-`narHash` quota — a read-only
+   pre-verify check (early-reject to save verify CPU) plus the authoritative
+   post-verify charge gated on the `tenant_blob` 0-to-1 insert, no `servable`
+   flag needed; usage; the per-upload status query the push contract polls;
+   server wait/no-wait/root-activation states and the CLI behaviour; the token
+   cache keyed on the full tenant base URL (origin plus `/t/<slug>`), with
+   decoded `iss` checked against the full path-based tenant issuer URL and `aud`
+   against the target (the CLI token-store gains a per-target dimension).
 7. **Cron fan-out + global reaper + offboarding.** Hourly cron; per-tick tenant
    batch bounded under the subrequest budget advancing `cron_cursor` (sharding
    required here, not optional); per-tenant failures recorded, not swallowed;
