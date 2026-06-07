@@ -442,6 +442,55 @@ export class UploadedObjectNotFoundError extends ServerHttpError {
 	}
 }
 
+export class AttestationUploadNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly uploadId: string) {
+		super('Attestation upload not found');
+		this.name = 'AttestationUploadNotFoundError';
+	}
+}
+
+export class AttestationUploadExpiredError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly uploadId: string) {
+		super('Attestation upload expired');
+		this.name = 'AttestationUploadExpiredError';
+	}
+}
+
+export class AttestationUploadCacheMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor(
+		public readonly uploadId: string,
+		public readonly negotiatedCache: string,
+		public readonly requestedCache: string
+	) {
+		super('Attestation upload prepared or attached under a different cache');
+		this.name = 'AttestationUploadCacheMismatchError';
+	}
+}
+
+export class AttestationPathNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly storePathHash: string) {
+		super('Committed store path not found');
+		this.name = 'AttestationPathNotFoundError';
+	}
+}
+
+export class AttestationBundleInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
+
+	constructor(message = 'Attestation bundle is not a supported DSSE bundle') {
+		super(message);
+		this.name = 'AttestationBundleInvalidError';
+	}
+}
+
 export class AttestationBundleTooLargeError extends ServerHttpError {
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
 
@@ -451,6 +500,30 @@ export class AttestationBundleTooLargeError extends ServerHttpError {
 	) {
 		super('Attestation bundle is too large');
 		this.name = 'AttestationBundleTooLargeError';
+	}
+}
+
+export class AttestationSubjectMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
+
+	constructor(
+		public readonly expectedNarHash: string,
+		public readonly subjectDigest: string
+	) {
+		super('Attestation subject digest does not match the committed NAR');
+		this.name = 'AttestationSubjectMismatchError';
+	}
+}
+
+export class AttestationDigestMismatchError extends ServerHttpError {
+	readonly status = StatusCodes.UNPROCESSABLE_ENTITY;
+
+	constructor(
+		public readonly expectedDigest: string,
+		public readonly actualDigest: string
+	) {
+		super('Attestation bundle digest does not match the negotiated digest');
+		this.name = 'AttestationDigestMismatchError';
 	}
 }
 

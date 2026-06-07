@@ -1,4 +1,4 @@
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -124,9 +124,22 @@ export class OffboardingService {
 		limit: number
 	): Promise<void> {
 		const references = await this.context.d1
-			.select({ storePathHash: d1Schema.attestationReference.storePathHash })
+			.select({
+				cache: d1Schema.attestationReference.cache,
+				storePathHash: d1Schema.attestationReference.storePathHash,
+				generation: d1Schema.attestationReference.generation,
+				predicateType: d1Schema.attestationReference.predicateType,
+				digest: d1Schema.attestationReference.digest
+			})
 			.from(d1Schema.attestationReference)
 			.where(eq(d1Schema.attestationReference.tenant, tenant))
+			.orderBy(
+				asc(d1Schema.attestationReference.cache),
+				asc(d1Schema.attestationReference.storePathHash),
+				asc(d1Schema.attestationReference.generation),
+				asc(d1Schema.attestationReference.predicateType),
+				asc(d1Schema.attestationReference.digest)
+			)
 			.limit(limit)
 			.all();
 
@@ -134,18 +147,27 @@ export class OffboardingService {
 			return;
 		}
 
-		await this.context.d1
-			.delete(d1Schema.attestationReference)
-			.where(
-				and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					inArray(
-						d1Schema.attestationReference.storePathHash,
-						references.map((reference) => reference.storePathHash)
+		for (const reference of references) {
+			await this.context.d1
+				.delete(d1Schema.attestationReference)
+				.where(
+					and(
+						eq(d1Schema.attestationReference.tenant, tenant),
+						eq(d1Schema.attestationReference.cache, reference.cache),
+						eq(
+							d1Schema.attestationReference.storePathHash,
+							reference.storePathHash
+						),
+						eq(d1Schema.attestationReference.generation, reference.generation),
+						eq(
+							d1Schema.attestationReference.predicateType,
+							reference.predicateType
+						),
+						eq(d1Schema.attestationReference.digest, reference.digest)
 					)
 				)
-			)
-			.run();
+				.run();
+		}
 	}
 
 	private async deleteCasPresenceBatch(

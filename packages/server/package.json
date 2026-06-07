@@ -6,6 +6,7 @@
 		"@aws-sdk/s3-request-presigner": "^3.1062.0",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
+		"@sigstore/bundle": "^5.0.0",
 		"drizzle-orm": "^0.45.2",
 		"hono": "^4.12.23",
 		"http-status-codes": "^2.3.0",

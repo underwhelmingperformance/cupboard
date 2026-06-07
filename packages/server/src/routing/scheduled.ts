@@ -10,6 +10,7 @@ import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	BlobReaperService,
+	type CasReferenceDemoter,
 	type DemoteCursor,
 	type DemoteTarget,
 	type NarInfoDemoter
@@ -153,7 +154,8 @@ function blobReaper(env: Env): BlobReaperService {
 	return new BlobReaperService(
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 		env.BLOBS,
-		new TenantNarInfoDemoter(env)
+		new TenantNarInfoDemoter(env),
+		new TenantCasReferenceDemoter(env)
 	);
 }
 
@@ -172,6 +174,14 @@ class TenantNarInfoDemoter implements NarInfoDemoter {
 			narHash,
 			targets
 		);
+	}
+}
+
+class TenantCasReferenceDemoter implements CasReferenceDemoter {
+	constructor(private readonly env: Env) {}
+
+	demote(tenant: string, digest: string): Promise<void> {
+		return tenantServer(this.env, tenant).demoteAttestationReferences(digest);
 	}
 }
 

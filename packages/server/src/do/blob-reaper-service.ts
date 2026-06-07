@@ -35,6 +35,10 @@ export interface NarInfoDemoter {
 	): Promise<void>;
 }
 
+export interface CasReferenceDemoter {
+	demote(tenant: string, digest: string): Promise<void>;
+}
+
 // The demote scan's resume position across cron ticks. It is the last `nar_hash`
 // reached, an exclusive lower bound for the next keyset page, with '' meaning start
 // from the beginning (and written back to wrap). It is pure cron bookkeeping rather
@@ -58,7 +62,8 @@ export class BlobReaperService {
 	constructor(
 		private readonly d1: DrizzleD1Database<typeof d1Schema>,
 		private readonly blobs: R2Bucket,
-		private readonly demoter: NarInfoDemoter
+		private readonly demoter: NarInfoDemoter,
+		private readonly casDemoter: CasReferenceDemoter
 	) {}
 
 	// Returns how many shared blobs it collected.
@@ -130,6 +135,12 @@ export class BlobReaperService {
 
 			if (present) {
 				continue;
+			}
+
+			const tenants = await this.casReferencingTenants(object.digest);
+
+			for (const tenant of tenants) {
+				await this.casDemoter.demote(tenant, object.digest);
 			}
 
 			if (await this.demoteCasObject(object.digest, object.storedAt)) {
@@ -425,5 +436,15 @@ export class BlobReaperService {
 			.orderBy(asc(d1Schema.casObject.digest))
 			.limit(limit)
 			.all();
+	}
+
+	private async casReferencingTenants(digest: string): Promise<string[]> {
+		const rows = await this.d1
+			.selectDistinct({ tenant: d1Schema.attestationReference.tenant })
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.digest, digest))
+			.all();
+
+		return rows.map((row) => row.tenant);
 	}
 }

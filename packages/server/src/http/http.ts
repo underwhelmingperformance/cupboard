@@ -57,6 +57,32 @@ export function casObjectKey(digest: string): string {
 	return `cas/${digest}`;
 }
 
+export function attestationListCachePath(
+	tenant: string,
+	storePathHash: string,
+	cache: string = DEFAULT_CACHE
+): string {
+	const suffix =
+		cache === DEFAULT_CACHE
+			? `/attestations/${storePathHash}`
+			: `/cache/${cache}/attestations/${storePathHash}`;
+
+	return `/t/${tenant}${suffix}`;
+}
+
+export function attestationListObjectKey(
+	tenant: string,
+	storePathHash: string,
+	cache: string = DEFAULT_CACHE
+): string {
+	const suffix =
+		cache === DEFAULT_CACHE
+			? `attestations/${storePathHash}`
+			: `attestations/${cache}/${storePathHash}`;
+
+	return `t/${tenant}/${suffix}`;
+}
+
 // Where a client uploads unverified bytes, private to one upload. The server
 // verifies them here, then promotes them into the shared `nar/<narHash>` key, so
 // the canonical object only ever holds confirmed content and no client ever
@@ -137,6 +163,14 @@ export function parseNarInfoName(name: string): string | undefined {
 	}
 
 	return storePathHash;
+}
+
+export function parseAttestationDigestName(name: string): string | undefined {
+	if (!/^[0-9a-f]{64}$/.test(name)) {
+		return undefined;
+	}
+
+	return name;
 }
 
 export function isNotModified(request: Request, headers: Headers): boolean {

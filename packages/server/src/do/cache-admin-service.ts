@@ -170,11 +170,20 @@ export class CacheAdminService {
 				.from(schema.pendingUploads)
 				.where(eq(schema.pendingUploads.cache, cache))
 				.all();
+			const pendingAttestations = this.context.db
+				.select({ r2Key: schema.pendingAttestations.r2Key })
+				.from(schema.pendingAttestations)
+				.where(eq(schema.pendingAttestations.cache, cache))
+				.all();
 
 			for (const upload of pending) {
 				if (upload.r2Key !== narObjectKey(upload.narHash)) {
 					await this.context.env.BLOBS.delete(upload.r2Key);
 				}
+			}
+
+			for (const upload of pendingAttestations) {
+				await this.context.env.BLOBS.delete(upload.r2Key);
 			}
 
 			this.context.db.transaction((tx) => {
@@ -208,6 +217,9 @@ export class CacheAdminService {
 				// commit cannot resurrect it after teardown.
 				tx.delete(schema.pendingUploads)
 					.where(eq(schema.pendingUploads.cache, cache))
+					.run();
+				tx.delete(schema.pendingAttestations)
+					.where(eq(schema.pendingAttestations.cache, cache))
 					.run();
 			});
 

@@ -90,12 +90,22 @@ export class MaintenanceEligibilityService {
 	}
 
 	private earliestUploadExpiry(): string | undefined {
-		return this.context.db
+		const pendingUploadExpiry = this.context.db
 			.select({ expiresAt: schema.pendingUploads.expiresAt })
 			.from(schema.pendingUploads)
 			.orderBy(asc(schema.pendingUploads.expiresAt))
 			.limit(1)
 			.get()?.expiresAt;
+		const pendingAttestationExpiry = this.context.db
+			.select({ expiresAt: schema.pendingAttestations.expiresAt })
+			.from(schema.pendingAttestations)
+			.orderBy(asc(schema.pendingAttestations.expiresAt))
+			.limit(1)
+			.get()?.expiresAt;
+
+		return [pendingUploadExpiry, pendingAttestationExpiry]
+			.filter((value) => value !== undefined)
+			.toSorted()[0];
 	}
 
 	private queuedNarInfoDeletionCount(): number {

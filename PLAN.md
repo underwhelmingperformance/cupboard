@@ -2354,7 +2354,7 @@ Each step leaves a working cache.
       rollback, re-reference after reaper arming, missing-object demotion, and
       decrement replay. This step does not materialise or serve descriptor
       lists.
-- [ ] **Attach and list materialisation.** Add the authenticated attach
+- [x] **Attach and list materialisation.** Add the authenticated attach
       endpoint, the filing-correctness guard (well-formed bundle, subject equals
       committed `narHash`), list materialisation from edges, `readMode` on list
       and bundle reads with absent/unauthorised parity, and the

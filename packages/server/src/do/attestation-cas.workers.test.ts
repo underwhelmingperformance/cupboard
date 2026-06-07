@@ -404,19 +404,21 @@ describe('attestation CAS lifecycle', () => {
 		expect(await runCasReaperDemote(env, 10)).toBe(1);
 		expect({
 			objects: await casObjectRows(),
-			refs: await attestationReferenceRows()
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
 		}).toStrictEqual({
 			objects: [],
-			refs: [
-				{
-					tenant: fixtureTenant,
-					cache: '',
-					storePathHash,
-					generation: 0,
-					predicateType,
-					digest: bundle.digest
-				}
-			]
+			refs: [],
+			presence: [],
+			usage: {
+				bytes: 0,
+				narinfos: 0,
+				blobs: 0,
+				casBytes: 0,
+				casBlobs: 0,
+				quotaBytes: undefined
+			}
 		});
 	});
 
@@ -445,6 +447,67 @@ describe('attestation CAS lifecycle', () => {
 			presence: [],
 			objects: [
 				{ digest: bundle.digest, size: bundle.size, deleteAfter: undefined }
+			]
+		});
+	});
+
+	it('bounds offboarding attestation ref deletion by selected rows', async () => {
+		await provisionNamedTenant('draining');
+		await fileAttestationReference({
+			uploadId: 'offboard-ref-0',
+			bytes: new TextEncoder().encode('offboard-ref-0'),
+			tenant: 'draining',
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+		const second = await fileAttestationReference({
+			uploadId: 'offboard-ref-1',
+			bytes: new TextEncoder().encode('offboard-ref-1'),
+			tenant: 'draining',
+			storePathHash,
+			generation: 1,
+			predicateType
+		});
+		const third = await fileAttestationReference({
+			uploadId: 'offboard-ref-2',
+			bytes: new TextEncoder().encode('offboard-ref-2'),
+			tenant: 'draining',
+			storePathHash,
+			generation: 2,
+			predicateType
+		});
+		await offboardTenant('draining');
+
+		const result = await testServerFor('draining').runOffboard(1);
+		const references = await attestationReferenceRows();
+		const remainingReferences = references
+			.toSorted((left, right) => left.generation - right.generation)
+			.map((reference) => ({
+				tenant: reference.tenant,
+				storePathHash: reference.storePathHash,
+				generation: reference.generation,
+				digest: reference.digest
+			}));
+
+		expect({
+			result,
+			references: remainingReferences
+		}).toStrictEqual({
+			result: { drained: false },
+			references: [
+				{
+					tenant: 'draining',
+					storePathHash,
+					generation: 1,
+					digest: second.digest
+				},
+				{
+					tenant: 'draining',
+					storePathHash,
+					generation: 2,
+					digest: third.digest
+				}
 			]
 		});
 	});

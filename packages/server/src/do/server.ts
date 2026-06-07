@@ -19,6 +19,7 @@ import {
 	type AttestationReferenceOutcome,
 	type MeasuredAttestationBundle
 } from './attestation-cas-service.ts';
+import { AttestationsService } from './attestations-service.ts';
 import { AuthKeysService } from './auth-keys-service.ts';
 import { type DemoteTarget } from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
@@ -51,6 +52,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private readonly authKeys: AuthKeysService;
 	private readonly attestationCas: AttestationCasService;
+	private readonly attestations: AttestationsService;
 	private readonly narInfoObjects: NarInfoObjectsService;
 	private readonly uploadState: UploadStateService;
 	private readonly deletionQueue: DeletionQueueService;
@@ -78,11 +80,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.authKeys = new AuthKeysService(this.context, this.tenantIdentity);
 		this.attestationCas = new AttestationCasService(this.context);
 		this.narInfoObjects = new NarInfoObjectsService(this.context);
+		this.attestations = new AttestationsService(
+			this.context,
+			this.authKeys,
+			this.attestationCas,
+			this.narInfoObjects
+		);
 		this.uploadState = new UploadStateService(this.context);
 		this.deletionQueue = new DeletionQueueService(
 			this.context,
 			this.authKeys,
-			this.attestationCas
+			this.attestationCas,
+			this.attestations
 		);
 		this.signingKeys = new SigningKeysService(this.context, this.authKeys);
 		this.stats = new StatsService(this.context, this.authKeys);
@@ -256,6 +265,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<void> {
 		await this.initialise();
 		return this.attestationCas.removeCapturedReference(reference);
+	}
+
+	async demoteAttestationReferences(digest: string): Promise<void> {
+		await this.initialise();
+		await this.attestations.removeReferencesForDigest(digest);
 	}
 
 	// The control plane begins offboarding this tenant. Marking it stops the
@@ -615,6 +629,106 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.uploads.handleUploadStatus(
 					context.req.raw,
 					context.req.param('id')
+				)
+			)
+		);
+		this.app.on(['GET', 'HEAD'], '/attestations/:hash', (context) =>
+			serverErrorResponse(
+				this.attestations.handleServeList(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('hash')
+				)
+			)
+		);
+		this.app.on(
+			['GET', 'HEAD'],
+			'/cache/:cacheName/attestations/:hash',
+			(context) =>
+				this.withCache(context.req.param('cacheName'), (cache) =>
+					this.attestations.handleServeList(
+						context.req.raw,
+						cache,
+						context.req.param('hash')
+					)
+				)
+		);
+		this.app.on(['GET', 'HEAD'], '/attestation-bundles/:digest', (context) =>
+			serverErrorResponse(
+				this.attestations.handleServeBundle(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('digest')
+				)
+			)
+		);
+		this.app.on(
+			['GET', 'HEAD'],
+			'/cache/:cacheName/attestation-bundles/:digest',
+			(context) =>
+				this.withCache(context.req.param('cacheName'), (cache) =>
+					this.attestations.handleServeBundle(
+						context.req.raw,
+						cache,
+						context.req.param('digest')
+					)
+				)
+		);
+		this.app.post('/attestations', (context) =>
+			serverErrorResponse(
+				this.withMaintenanceEligibility(() =>
+					this.attestations.handleNegotiate(context.req.raw, DEFAULT_CACHE)
+				)
+			)
+		);
+		this.app.post('/cache/:cacheName/attestations', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.withMaintenanceEligibility(() =>
+					this.attestations.handleNegotiate(context.req.raw, cache)
+				)
+			)
+		);
+		this.app.put('/attestations/:id', (context) =>
+			serverErrorResponse(
+				this.withMaintenanceEligibility(() =>
+					this.attestations.handlePrepare(
+						context.req.raw,
+						DEFAULT_CACHE,
+						context.req.param('id')
+					)
+				)
+			)
+		);
+		this.app.put('/cache/:cacheName/attestations/:id', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.withMaintenanceEligibility(() =>
+					this.attestations.handlePrepare(
+						context.req.raw,
+						cache,
+						context.req.param('id')
+					)
+				)
+			)
+		);
+		this.app.post('/attestations/:id/attach', (context) =>
+			serverErrorResponse(
+				this.withMaintenanceEligibility(() =>
+					this.attestations.handleAttach(
+						context.req.raw,
+						DEFAULT_CACHE,
+						context.req.param('id')
+					)
+				)
+			)
+		);
+		this.app.post('/cache/:cacheName/attestations/:id/attach', (context) =>
+			this.withCache(context.req.param('cacheName'), (cache) =>
+				this.withMaintenanceEligibility(() =>
+					this.attestations.handleAttach(
+						context.req.raw,
+						cache,
+						context.req.param('id')
+					)
 				)
 			)
 		);

@@ -11,6 +11,7 @@ import {
 	type AttestationCasService,
 	type AttestationReference
 } from './attestation-cas-service.ts';
+import { type AttestationsService } from './attestations-service.ts';
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 
@@ -18,7 +19,8 @@ export class DeletionQueueService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly authKeys: AuthKeysService,
-		private readonly attestationCas: AttestationCasService
+		private readonly attestationCas: AttestationCasService,
+		private readonly attestations: AttestationsService
 	) {}
 
 	async handleDeletePath(

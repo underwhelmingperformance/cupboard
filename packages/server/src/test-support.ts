@@ -50,6 +50,7 @@ import {
 	generationSeq,
 	narInfoDeletions,
 	narInfos,
+	pendingAttestations,
 	pendingUploads,
 	signingKeys
 } from './db/schema.ts';
@@ -134,6 +135,7 @@ export type CommitActionDecision = Extract<
 export interface GcResult {
 	readonly ok: true;
 	readonly pendingUploadsDeleted: number;
+	readonly pendingAttestationsDeleted: number;
 	readonly rootsExpired: number;
 	readonly pathsSwept: number;
 	readonly narInfosDeleted: number;
@@ -849,6 +851,25 @@ export async function tenantCasBlobRows(): Promise<
 		.all();
 
 	return rows.toSorted((left, right) => (left.digest > right.digest ? 1 : -1));
+}
+
+export async function pendingAttestationRows(): Promise<
+	{ id: string; r2Key: string; expiresAt: string }[]
+> {
+	const rows = await runInDurableObject(
+		fixtureWorkerServer(),
+		(_instance, state) =>
+			drizzle(state.storage, { schema: { pendingAttestations } })
+				.select({
+					id: pendingAttestations.id,
+					r2Key: pendingAttestations.r2Key,
+					expiresAt: pendingAttestations.expiresAt
+				})
+				.from(pendingAttestations)
+				.all()
+	);
+
+	return rows.toSorted((left, right) => (left.id > right.id ? 1 : -1));
 }
 
 export async function stageAttestationBundle(

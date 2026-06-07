@@ -67,6 +67,16 @@ export const pendingUploads = sqliteTable('pending_upload', {
 	})
 });
 
+export const pendingAttestations = sqliteTable('pending_attestation', {
+	id: text('id').primaryKey(),
+	cache: text('cache').notNull().default(''),
+	storePathHash: text('store_path_hash').notNull(),
+	digest: text('digest').notNull(),
+	r2Key: text('r2_key').notNull(),
+	createdAt: text('created_at').notNull(),
+	expiresAt: text('expires_at').notNull()
+});
+
 export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{

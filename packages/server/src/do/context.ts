@@ -85,6 +85,7 @@ export interface OwnerConfig {
 
 export interface GarbageCollectionOutcome {
 	readonly pendingUploadsDeleted: number;
+	readonly pendingAttestationsDeleted: number;
 	readonly rootsExpired: number;
 	readonly pathsSwept: number;
 	readonly narInfosDeleted: number;

@@ -215,6 +215,29 @@ describe('maintenance eligibility projection', () => {
 		});
 	});
 
+	it('uses pending attestation expiry as deferred maintenance work', async () => {
+		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.pendingAttestations)
+				.values(
+					pendingAttestation('attestation-upload', '2026-01-02T00:00:00.000Z')
+				)
+				.run();
+
+			return new MaintenanceEligibilityService(instance.context).reconcile(now);
+		});
+
+		expect(snapshot).toStrictEqual({
+			tenant: fixtureTenant,
+			pendingVerificationCount: 0,
+			earliestUploadExpiry: '2026-01-02T00:00:00.000Z',
+			queuedNarInfoDeletionCount: 0,
+			earliestRootExpiry: undefined,
+			nextMaintenanceAt: '2026-01-02T00:00:00.000Z',
+			reconciledAt: now.toISOString()
+		});
+	});
+
 	it('uses the earliest unretired auth-key retirement as deferred work', async () => {
 		const snapshot = await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
@@ -265,6 +288,21 @@ function pendingUpload(
 		createdAt: '2026-01-01T00:00:00.000Z',
 		expiresAt,
 		verdict
+	};
+}
+
+function pendingAttestation(
+	id: string,
+	expiresAt: string
+): typeof schema.pendingAttestations.$inferInsert {
+	return {
+		id,
+		cache: '',
+		storePathHash: 'a'.repeat(32),
+		digest: 'b'.repeat(64),
+		r2Key: `staging/attestations/${id}`,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		expiresAt
 	};
 }
 

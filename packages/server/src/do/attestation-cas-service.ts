@@ -28,7 +28,10 @@ export interface AttestationReference {
 	readonly digest: Sha256HexDigest;
 }
 
-export type AttestationReferenceOutcome = 'referenced' | 'over-quota';
+export type AttestationReferenceOutcome =
+	| 'referenced'
+	| 'already-present'
+	| 'over-quota';
 
 export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}
@@ -124,6 +127,10 @@ export class AttestationCasService {
 	): Promise<AttestationReferenceOutcome> {
 		const tenant = this.context.requireTenant();
 
+		if (await this.hasReference(tenant, reference)) {
+			return 'already-present';
+		}
+
 		if (await this.overQuota(tenant, reference.digest, size)) {
 			return 'over-quota';
 		}
@@ -160,6 +167,19 @@ export class AttestationCasService {
 		]);
 
 		return 'referenced';
+	}
+
+	async wouldExceedQuota(
+		digest: Sha256HexDigest,
+		size: number
+	): Promise<boolean> {
+		return this.overQuota(this.context.requireTenant(), digest, size);
+	}
+
+	async hasCapturedReference(
+		reference: AttestationReference
+	): Promise<boolean> {
+		return this.hasReference(this.context.requireTenant(), reference);
 	}
 
 	async removeCapturedReference(
@@ -267,6 +287,19 @@ export class AttestationCasService {
 			eq(d1Schema.attestationReference.predicateType, reference.predicateType),
 			eq(d1Schema.attestationReference.digest, reference.digest)
 		);
+	}
+
+	private async hasReference(
+		tenant: string,
+		reference: AttestationReference
+	): Promise<boolean> {
+		const existing = await this.context.d1
+			.select({ digest: d1Schema.attestationReference.digest })
+			.from(d1Schema.attestationReference)
+			.where(this.edgeFilter(tenant, reference))
+			.get();
+
+		return existing !== undefined;
 	}
 
 	private presenceFilter(tenant: string, digest: string) {

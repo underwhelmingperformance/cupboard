@@ -222,6 +222,11 @@ export class GarbageCollectionService {
 				.from(schema.pendingUploads)
 				.where(reapable)
 				.all();
+			const expiredAttestations = this.context.db
+				.select()
+				.from(schema.pendingAttestations)
+				.where(lt(schema.pendingAttestations.expiresAt, now))
+				.all();
 
 			// An abandoned upload's private staging object is reclaimed directly; a
 			// reuse upload's r2Key is the shared canonical key, which the reaper owns,
@@ -232,7 +237,15 @@ export class GarbageCollectionService {
 				}
 			}
 
+			for (const upload of expiredAttestations) {
+				await this.context.env.BLOBS.delete(upload.r2Key);
+			}
+
 			this.context.db.delete(schema.pendingUploads).where(reapable).run();
+			this.context.db
+				.delete(schema.pendingAttestations)
+				.where(lt(schema.pendingAttestations.expiresAt, now))
+				.run();
 
 			// Reachability GC is per-cache: each registered cache keeps its own
 			// closure. A bare /gc sweeps every cache; /cache/:name/gc sweeps one.
@@ -256,6 +269,7 @@ export class GarbageCollectionService {
 
 			return {
 				pendingUploadsDeleted: expiredUploads.length,
+				pendingAttestationsDeleted: expiredAttestations.length,
 				rootsExpired,
 				pathsSwept,
 				narInfosDeleted:

@@ -11,6 +11,7 @@
 		"vitest": "^4.1.8"
 	},
 	"exports": {
+		"./attestations": "./src/attestations.ts",
 		"./caches": "./src/caches.ts",
 		"./control-keys": "./src/control-keys.ts",
 		"./keys": "./src/keys.ts",

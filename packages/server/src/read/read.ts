@@ -8,6 +8,7 @@ import {
 	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
+	parseAttestationDigestName,
 	parseNarInfoName,
 	parseNarName,
 	TextBody,
@@ -73,6 +74,12 @@ export async function handleRead(
 	}
 
 	const { cache, rest } = scope;
+
+	if (isAttestationListPath(rest) || isAttestationBundlePath(rest)) {
+		const denied = await guardRead(request, isPrivate, verifier);
+
+		return denied ?? tenantServer(env, tenant).fetch(request);
+	}
 
 	if (rest.startsWith(narPrefix)) {
 		const narName = safeDecode(rest.slice(narPrefix.length));
@@ -177,6 +184,34 @@ function cacheScope(
 	}
 
 	return { cache: name, rest: remainder.slice(separator) };
+}
+
+function isAttestationListPath(rest: string): boolean {
+	const prefix = '/attestations/';
+
+	if (!rest.startsWith(prefix)) {
+		return false;
+	}
+
+	const hash = safeDecode(rest.slice(prefix.length));
+
+	return (
+		hash !== undefined && parseNarInfoName(`${hash}.narinfo`) !== undefined
+	);
+}
+
+function isAttestationBundlePath(rest: string): boolean {
+	const prefix = '/attestation-bundles/';
+
+	if (!rest.startsWith(prefix)) {
+		return false;
+	}
+
+	const digest = safeDecode(rest.slice(prefix.length));
+
+	return (
+		digest !== undefined && parseAttestationDigestName(digest) !== undefined
+	);
 }
 
 async function cacheInfoResponse(
