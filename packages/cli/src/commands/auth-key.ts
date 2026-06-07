@@ -40,7 +40,9 @@ export function registerAuthKeyCommands(program: Command): void {
 
 	authKey
 		.command('rotate')
-		.description('Add a new active auth key, retiring nothing.')
+		.description(
+			'Add a new active auth key and schedule the previous one for retirement.'
+		)
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
 			const reporter = createReporter({
@@ -83,18 +85,25 @@ export async function runAuthKeyRotate(
 	reporter: Reporter,
 	client: AuthKeyClient
 ): Promise<void> {
-	const { rotated, keys } = await reporter.phase('Rotating auth key', () =>
-		client.rotateAuthKey(token)
+	const { rotated, retiring, keys } = await reporter.phase(
+		'Rotating auth key',
+		() => client.rotateAuthKey(token)
 	);
 
 	reporter.result([
 		{ label: 'New key', value: rotated },
+		...(retiring === undefined
+			? []
+			: [
+					{ label: 'Retiring key', value: retiring.kid },
+					{
+						label: 'Scheduled retirement',
+						value: retiring.scheduledRetireAt
+					}
+				]),
 		{ label: 'Keys in set', value: String(keys.length) }
 	]);
-	reporter.info(
-		'New tokens are signed with this key; existing tokens still verify until ' +
-			'you `cupboard auth-key retire <kid>` the previous key.'
-	);
+	reporter.info('New tokens are signed with this key.');
 }
 
 export async function runAuthKeyRetire(
@@ -114,8 +123,13 @@ export async function runAuthKeyRetire(
 }
 
 function authKeyRow(key: AuthKeySummary): ResultRow {
+	const retirement =
+		key.scheduledRetireAt === undefined
+			? ''
+			: `; retires ${key.scheduledRetireAt}`;
+
 	return {
 		label: key.kid,
-		value: `${key.active ? 'active' : 'retained'}; created ${key.createdAt}`
+		value: `${key.active ? 'active' : 'retained'}; created ${key.createdAt}${retirement}`
 	};
 }

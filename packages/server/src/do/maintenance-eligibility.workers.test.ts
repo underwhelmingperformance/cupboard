@@ -214,6 +214,40 @@ describe('maintenance eligibility projection', () => {
 			reconciledAt: now.toISOString()
 		});
 	});
+
+	it('uses the earliest unretired auth-key retirement as deferred work', async () => {
+		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.authKeys)
+				.values([
+					authKey({
+						id: 'old-retired',
+						kid: 'old-retired',
+						scheduledRetireAt: '2026-01-02T00:00:00.000Z',
+						retiredAt: '2026-01-02T00:01:00.000Z'
+					}),
+					authKey({
+						id: 'old-live',
+						kid: 'old-live',
+						scheduledRetireAt: '2026-01-03T00:00:00.000Z'
+					}),
+					authKey({ id: 'active', kid: 'active' })
+				])
+				.run();
+
+			return new MaintenanceEligibilityService(instance.context).reconcile(now);
+		});
+
+		expect(snapshot).toStrictEqual({
+			tenant: defaultTenant,
+			pendingVerificationCount: 0,
+			earliestUploadExpiry: undefined,
+			queuedNarInfoDeletionCount: 0,
+			earliestRootExpiry: undefined,
+			nextMaintenanceAt: '2026-01-03T00:00:00.000Z',
+			reconciledAt: now.toISOString()
+		});
+	});
 });
 
 function pendingUpload(
@@ -231,5 +265,18 @@ function pendingUpload(
 		createdAt: '2026-01-01T00:00:00.000Z',
 		expiresAt,
 		verdict
+	};
+}
+
+function authKey(
+	overrides: Partial<typeof schema.authKeys.$inferInsert>
+): typeof schema.authKeys.$inferInsert {
+	return {
+		id: 'key',
+		kid: 'key',
+		privateJwkJson: '{}',
+		publicJwkJson: '{}',
+		createdAt: '2026-01-01T00:00:00.000Z',
+		...overrides
 	};
 }

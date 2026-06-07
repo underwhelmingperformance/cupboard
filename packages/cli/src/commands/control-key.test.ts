@@ -62,7 +62,11 @@ describe('runControlKeyList', () => {
 		const results: ResultRow[][] = [];
 		const response: ControlKeyListResponse = {
 			keys: [
-				summary({ kid: 'kid-old', retired: true }),
+				summary({
+					kid: 'kid-old',
+					retired: false,
+					scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+				}),
 				summary({ kid: 'kid-new' })
 			]
 		};
@@ -75,7 +79,7 @@ describe('runControlKeyList', () => {
 
 		expect(results).toStrictEqual([
 			[
-				{ label: 'kid-old', value: 'retired' },
+				{ label: 'kid-old', value: 'live; retires 2026-01-01T00:20:30.000Z' },
 				{ label: 'kid-new', value: 'live' }
 			]
 		]);
@@ -83,11 +87,17 @@ describe('runControlKeyList', () => {
 });
 
 describe('runControlKeyRotate', () => {
-	it('rotates, reports the new key, and prints retirement guidance', async () => {
+	it('rotates and reports the scheduled retirement', async () => {
 		const calls: AccessCredential[] = [];
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
-		const response: ControlKeyRotateResponse = { kid: 'kid-new' };
+		const response: ControlKeyRotateResponse = {
+			kid: 'kid-new',
+			retiring: {
+				kid: 'kid-old',
+				scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+			}
+		};
 
 		await runControlKeyRotate(
 			'admin-token',
@@ -102,7 +112,16 @@ describe('runControlKeyRotate', () => {
 
 		expect({ calls, results, infoCount: infos.length }).toStrictEqual({
 			calls: ['admin-token'],
-			results: [[{ label: 'New key', value: 'kid-new' }]],
+			results: [
+				[
+					{ label: 'New key', value: 'kid-new' },
+					{ label: 'Retiring key', value: 'kid-old' },
+					{
+						label: 'Scheduled retirement',
+						value: '2026-01-01T00:20:30.000Z'
+					}
+				]
+			],
 			infoCount: 1
 		});
 	});

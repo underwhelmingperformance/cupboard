@@ -1,4 +1,4 @@
-import { asc, count, eq, isNotNull, or, sql } from 'drizzle-orm';
+import { and, asc, count, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -37,12 +37,14 @@ export class MaintenanceEligibilityService {
 		const earliestUploadExpiry = this.earliestUploadExpiry();
 		const queuedNarInfoDeletionCount = this.queuedNarInfoDeletionCount();
 		const earliestRootExpiry = this.earliestRootExpiry();
+		const earliestAuthKeyRetirement = this.earliestAuthKeyRetirement();
 		const nextMaintenanceAt = this.nextMaintenanceAt({
 			now: reconciledAt,
 			pendingVerificationCount,
 			earliestUploadExpiry,
 			queuedNarInfoDeletionCount,
-			earliestRootExpiry
+			earliestRootExpiry,
+			earliestAuthKeyRetirement
 		});
 		const snapshot = {
 			tenant,
@@ -117,12 +119,30 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
+	private earliestAuthKeyRetirement(): string | undefined {
+		return (
+			this.context.db
+				.select({ scheduledRetireAt: schema.authKeys.scheduledRetireAt })
+				.from(schema.authKeys)
+				.where(
+					and(
+						isNull(schema.authKeys.retiredAt),
+						isNotNull(schema.authKeys.scheduledRetireAt)
+					)
+				)
+				.orderBy(asc(schema.authKeys.scheduledRetireAt))
+				.limit(1)
+				.get()?.scheduledRetireAt ?? undefined
+		);
+	}
+
 	private nextMaintenanceAt(input: {
 		readonly now: string;
 		readonly pendingVerificationCount: number;
 		readonly earliestUploadExpiry: string | undefined;
 		readonly queuedNarInfoDeletionCount: number;
 		readonly earliestRootExpiry: string | undefined;
+		readonly earliestAuthKeyRetirement: string | undefined;
 	}): string | undefined {
 		if (
 			input.pendingVerificationCount > 0 ||
@@ -131,7 +151,11 @@ export class MaintenanceEligibilityService {
 			return input.now;
 		}
 
-		return [input.earliestUploadExpiry, input.earliestRootExpiry]
+		return [
+			input.earliestUploadExpiry,
+			input.earliestRootExpiry,
+			input.earliestAuthKeyRetirement
+		]
 			.filter((value) => value !== undefined)
 			.toSorted()[0];
 	}

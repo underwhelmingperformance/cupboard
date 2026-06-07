@@ -329,13 +329,13 @@ async function controlKeyList(request: Request, env: Env): Promise<Response> {
 
 async function controlKeyRotate(request: Request, env: Env): Promise<Response> {
 	await requireControlAdmin(request, env);
-	const kid = await rotateControlKey(
+	const rotated = await rotateControlKey(
 		controlDatabase(env),
 		controlWrappingSecret(env),
 		new Date().toISOString()
 	);
 
-	return Response.json({ kid }, { headers: { 'cache-control': 'no-store' } });
+	return Response.json(rotated, { headers: { 'cache-control': 'no-store' } });
 }
 
 async function controlKeyRetire(

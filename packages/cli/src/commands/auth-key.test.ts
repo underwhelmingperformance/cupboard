@@ -65,7 +65,11 @@ describe('runAuthKeyList', () => {
 		const results: ResultRow[][] = [];
 		const response: AuthKeyListResponse = {
 			keys: [
-				summary({ kid: 'kid-old', active: false }),
+				summary({
+					kid: 'kid-old',
+					active: false,
+					scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+				}),
 				summary({ kid: 'kid-new', active: true })
 			]
 		};
@@ -80,7 +84,8 @@ describe('runAuthKeyList', () => {
 			[
 				{
 					label: 'kid-old',
-					value: 'retained; created 2026-01-01T00:00:00.000Z'
+					value:
+						'retained; created 2026-01-01T00:00:00.000Z; retires 2026-01-01T00:20:30.000Z'
 				},
 				{ label: 'kid-new', value: 'active; created 2026-01-01T00:00:00.000Z' }
 			]
@@ -89,14 +94,22 @@ describe('runAuthKeyList', () => {
 });
 
 describe('runAuthKeyRotate', () => {
-	it('rotates, reports the new key, and prints retirement guidance', async () => {
+	it('rotates and reports the scheduled retirement', async () => {
 		const calls: AccessCredential[] = [];
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 		const response: AuthKeyRotateResponse = {
 			rotated: 'kid-new',
+			retiring: {
+				kid: 'kid-old',
+				scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+			},
 			keys: [
-				summary({ kid: 'kid-old', active: false }),
+				summary({
+					kid: 'kid-old',
+					active: false,
+					scheduledRetireAt: '2026-01-01T00:20:30.000Z'
+				}),
 				summary({ kid: 'kid-new' })
 			]
 		};
@@ -117,6 +130,11 @@ describe('runAuthKeyRotate', () => {
 			results: [
 				[
 					{ label: 'New key', value: 'kid-new' },
+					{ label: 'Retiring key', value: 'kid-old' },
+					{
+						label: 'Scheduled retirement',
+						value: '2026-01-01T00:20:30.000Z'
+					},
 					{ label: 'Keys in set', value: '2' }
 				]
 			],

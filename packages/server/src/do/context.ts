@@ -98,6 +98,7 @@ export interface AuthKey {
 	readonly privateJwk: JsonWebKey;
 	readonly publicJwk: JsonWebKey;
 	readonly createdAt: string;
+	readonly scheduledRetireAt?: string;
 	readonly retired: boolean;
 }
 

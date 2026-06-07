@@ -18,6 +18,7 @@ import m0015 from './0015_blob_ref_generation.sql';
 import m0016 from './0016_narinfo_drop_compressed.sql';
 import m0017 from './0017_drop_orphan_blob_deletion.sql';
 import m0018 from './0018_tenant_identity.sql';
+import m0019 from './0019_wet_frank_castle.sql';
 
 export default {
 	journal,
@@ -40,6 +41,7 @@ export default {
 		m0015,
 		m0016,
 		m0017,
-		m0018
+		m0018,
+		m0019
 	}
 };

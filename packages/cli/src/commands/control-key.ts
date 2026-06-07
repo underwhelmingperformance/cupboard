@@ -43,7 +43,9 @@ export function registerControlKeyCommands(program: Command): void {
 
 	controlKey
 		.command('rotate')
-		.description('Add a new active control key, retiring nothing.')
+		.description(
+			'Add a new active control key and schedule the previous one for retirement.'
+		)
 		.argument('<url>', urlArgument)
 		.action(async (url: string) => {
 			const reporter = createReporter({
@@ -93,15 +95,23 @@ export async function runControlKeyRotate(
 	reporter: Reporter,
 	client: ControlKeyClient
 ): Promise<void> {
-	const { kid } = await reporter.phase('Rotating control key', () =>
+	const { kid, retiring } = await reporter.phase('Rotating control key', () =>
 		client.rotateControlKey(token)
 	);
 
-	reporter.result([{ label: 'New key', value: kid }]);
-	reporter.info(
-		'New control tokens are signed with this key; existing tokens still verify ' +
-			'until you `cupboard control-key retire <kid>` the previous key.'
-	);
+	reporter.result([
+		{ label: 'New key', value: kid },
+		...(retiring === undefined
+			? []
+			: [
+					{ label: 'Retiring key', value: retiring.kid },
+					{
+						label: 'Scheduled retirement',
+						value: retiring.scheduledRetireAt
+					}
+				])
+	]);
+	reporter.info('New control tokens are signed with this key.');
 }
 
 export async function runControlKeyRetire(
@@ -121,5 +131,13 @@ export async function runControlKeyRetire(
 }
 
 function controlKeyRow(key: ControlKeySummary): ResultRow {
-	return { label: key.kid, value: key.retired ? 'retired' : 'live' };
+	const retirement =
+		key.scheduledRetireAt === undefined
+			? ''
+			: `; retires ${key.scheduledRetireAt}`;
+
+	return {
+		label: key.kid,
+		value: `${key.retired ? 'retired' : 'live'}${retirement}`
+	};
 }

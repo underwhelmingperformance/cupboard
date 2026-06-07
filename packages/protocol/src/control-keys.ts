@@ -4,7 +4,8 @@ import { z } from 'zod';
 // no longer verify; the rest are the live set, with the newest one minting.
 export const controlKeySummarySchema = z.strictObject({
 	kid: z.string(),
-	retired: z.boolean()
+	retired: z.boolean(),
+	scheduledRetireAt: z.string().optional()
 });
 export type ParsedControlKeySummary = z.output<typeof controlKeySummarySchema>;
 
@@ -16,7 +17,13 @@ export type ParsedControlKeyListResponse = z.output<
 >;
 
 export const controlKeyRotateResponseSchema = z.strictObject({
-	kid: z.string()
+	kid: z.string(),
+	retiring: z
+		.strictObject({
+			kid: z.string(),
+			scheduledRetireAt: z.string()
+		})
+		.optional()
 });
 export type ParsedControlKeyRotateResponse = z.output<
 	typeof controlKeyRotateResponseSchema

@@ -75,6 +75,7 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 	publicJwkJson: text('public_jwk_json').notNull(),
 	wrappedPrivateJwk: text('wrapped_private_jwk').notNull(),
 	createdAt: text('created_at').notNull(),
+	scheduledRetireAt: text('scheduled_retire_at'),
 	retiredAt: text('retired_at')
 });
 

@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 
+import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	publishTenantManifest,
 	readTenantManifest
@@ -66,7 +67,8 @@ export async function runCronTick(env: Env): Promise<void> {
 		() => runCronSweep(env),
 		() => runOffboardSweep(env),
 		() => runBlobReaper(env),
-		() => runReaperDemote(env)
+		() => runReaperDemote(env),
+		() => runControlKeyRetirement(env)
 	]) {
 		try {
 			await pass();
@@ -356,7 +358,8 @@ function maintainTenant(env: Env, id: string): Promise<void> {
 
 	return runScheduledMaintenance(
 		() => server.runGarbageCollection(),
-		() => server.runVerification()
+		() => server.runVerification(),
+		() => server.runAuthKeyRetirement()
 	);
 }
 
@@ -420,19 +423,29 @@ async function stampMaintained(
 }
 
 /**
- * Drives the two maintenance passes for one tenant from the cron tick. Each runs
- * every tick, independent of the other's outcome: a failing verify never holds
- * back a sweep, nor a failing sweep a verify. A garbage-collection failure is
- * surfaced first, its cleanup being the more time-sensitive of the two.
+ * Drives the maintenance passes for one tenant from the cron tick. Each runs
+ * every tick, independent of the others' outcomes: a failing verification pass
+ * never holds back collection or key retirement. A garbage-collection failure
+ * is surfaced first, its cleanup being the more time-sensitive pass.
  */
 export async function runScheduledMaintenance(
 	runGarbageCollection: () => Promise<void>,
-	runVerification: () => Promise<void>
+	runVerification: () => Promise<void>,
+	runAuthKeyRetirement?: () => Promise<void>
 ): Promise<void> {
 	const [gc, verify] = await Promise.allSettled([
 		runGarbageCollection(),
 		runVerification()
 	]);
+	const authKeyRetirement =
+		runAuthKeyRetirement === undefined
+			? ({ status: 'fulfilled', value: undefined } as const)
+			: await Promise.resolve()
+					.then(runAuthKeyRetirement)
+					.then(
+						() => ({ status: 'fulfilled', value: undefined }) as const,
+						(error: unknown) => ({ status: 'rejected', reason: error }) as const
+					);
 
 	if (gc.status === 'rejected') {
 		throw gc.reason;
@@ -441,6 +454,17 @@ export async function runScheduledMaintenance(
 	if (verify.status === 'rejected') {
 		throw verify.reason;
 	}
+
+	if (authKeyRetirement.status === 'rejected') {
+		throw authKeyRetirement.reason;
+	}
+}
+
+function runControlKeyRetirement(env: Env): Promise<number> {
+	return retireScheduledControlKeys(
+		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+		new Date().toISOString()
+	);
 }
 
 async function recordTenantPassOutcomes(

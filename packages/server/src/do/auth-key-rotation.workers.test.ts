@@ -6,7 +6,7 @@ import type {
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { generateAuthKeyPair } from '../auth/auth.ts';
 import { authKeys } from '../db/schema.ts';
@@ -45,8 +45,12 @@ function retire(token: string, kid: string): Promise<Response> {
 	return authorisedFetch(`/keys/auth/retire/${kid}`, token, { method: 'POST' });
 }
 
+const rotateAt = new Date('2026-01-01T00:01:00.000Z');
+const scheduledRetireAt = '2026-01-01T00:21:30.000Z';
+
 describe('auth-key rotation', () => {
 	beforeEach(resetTestServer);
+	afterEach(() => vi.useRealTimers());
 
 	it('starts with one active key', async () => {
 		const token = await adminToken();
@@ -64,6 +68,9 @@ describe('auth-key rotation', () => {
 	});
 
 	it('rotates so the new key mints and both keys still verify', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(rotateAt);
+
 		const token = await adminToken();
 		const before = await listKeys(token);
 		const original = before.keys[0]?.kid;
@@ -79,17 +86,59 @@ describe('auth-key rotation', () => {
 				.filter((key) => key.active)
 				.map((key) => key.kid),
 			count: rotated.keys.length,
+			retiring: rotated.retiring,
 			rotatedIsActive: rotated.keys.some(
 				(key) => key.kid === rotated.rotated && key.active
 			),
-			originalRetained: rotated.keys.some((key) => key.kid === original),
+			originalRetained: rotated.keys.find((key) => key.kid === original),
 			originalStillVerifies: originalStillWorks.status
 		}).toStrictEqual({
 			activeKids: [rotated.rotated],
 			count: 2,
+			retiring: { kid: original, scheduledRetireAt },
 			rotatedIsActive: true,
-			originalRetained: true,
+			originalRetained: {
+				kid: original,
+				createdAt: rotateAt.toISOString(),
+				active: false,
+				scheduledRetireAt
+			},
 			originalStillVerifies: StatusCodes.OK
+		});
+	});
+
+	it('retires scheduled auth keys only when they are due', async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(rotateAt);
+
+		const token = await adminToken();
+		const before = await listKeys(token);
+		const original = before.keys[0]?.kid;
+		const rotated = await rotate(token);
+
+		vi.setSystemTime(new Date('2026-01-01T00:21:29.999Z'));
+		await currentServer().runAuthKeyRetirement();
+		const earlyToken = await mintServerSignedToken('admin');
+		const early = await listKeys(earlyToken);
+
+		vi.setSystemTime(new Date(scheduledRetireAt));
+		await currentServer().runAuthKeyRetirement();
+		const dueToken = await mintServerSignedToken('admin');
+		const due = await listKeys(dueToken);
+
+		await currentServer().runAuthKeyRetirement();
+		const again = await listKeys(dueToken);
+
+		expect({
+			retiring: rotated.retiring,
+			earlyKeys: early.keys.map((key) => key.kid),
+			dueKeys: due.keys.map((key) => key.kid),
+			againKeys: again.keys.map((key) => key.kid)
+		}).toStrictEqual({
+			retiring: { kid: original, scheduledRetireAt },
+			earlyKeys: [original, rotated.rotated],
+			dueKeys: [rotated.rotated],
+			againKeys: [rotated.rotated]
 		});
 	});
 

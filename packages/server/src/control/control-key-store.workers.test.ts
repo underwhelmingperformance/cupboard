@@ -8,9 +8,11 @@ import { LastControlKeyError } from '../errors.ts';
 
 import {
 	activeControlKey,
+	controlKeySummaries,
 	controlVerificationKeys,
 	ensureControlKey,
 	retireControlKey,
+	retireScheduledControlKeys,
 	rotateControlKey
 } from './control-key-store.ts';
 
@@ -20,6 +22,8 @@ const audience = 'cupboard-control';
 const t0 = '2026-01-01T00:00:00.000Z';
 const t1 = '2026-01-01T00:01:00.000Z';
 const t2 = '2026-01-01T00:02:00.000Z';
+const t1RetireAt = '2026-01-01T00:21:30.000Z';
+const t2RetireAt = '2026-01-01T00:22:30.000Z';
 const now = new Date(t0);
 
 function controlDatabase(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
@@ -72,19 +76,72 @@ describe('control key store', () => {
 		await ensureControlKey(database, secret, t0);
 		const firstActive = await activeControlKey(database, secret);
 		const firstKid = firstActive.kid;
-		const secondKid = await rotateControlKey(database, secret, t1);
+		const second = await rotateControlKey(database, secret, t1);
+		const secondKid = second.kid;
 		const active = await activeControlKey(database, secret);
 		const verificationKeys = await controlVerificationKeys(database);
 		const publishedKids = verificationKeys.map((key) => key.kid).toSorted();
+		const summaries = await controlKeySummaries(database);
 
 		expect({
 			activeKid: active.kid,
 			rotated: secondKid !== firstKid,
-			publishedKids
+			publishedKids,
+			retiring: second.retiring,
+			summaries
 		}).toStrictEqual({
 			activeKid: secondKid,
 			rotated: true,
-			publishedKids: [firstKid, secondKid].toSorted()
+			publishedKids: [firstKid, secondKid].toSorted(),
+			retiring: { kid: firstKid, scheduledRetireAt: t1RetireAt },
+			summaries: [
+				{ kid: firstKid, retired: false, scheduledRetireAt: t1RetireAt },
+				{ kid: secondKid, retired: false }
+			]
+		});
+	});
+
+	it('leaves older scheduled keys unchanged across repeated rotations', async () => {
+		const database = controlDatabase();
+
+		await ensureControlKey(database, secret, t0);
+		const first = await activeControlKey(database, secret);
+		const second = await rotateControlKey(database, secret, t1);
+		const third = await rotateControlKey(database, secret, t2);
+
+		const summaries = await controlKeySummaries(database);
+
+		expect(summaries).toStrictEqual([
+			{ kid: first.kid, retired: false, scheduledRetireAt: t1RetireAt },
+			{ kid: second.kid, retired: false, scheduledRetireAt: t2RetireAt },
+			{ kid: third.kid, retired: false }
+		]);
+	});
+
+	it('retires scheduled keys only when they are due', async () => {
+		const database = controlDatabase();
+
+		await ensureControlKey(database, secret, t0);
+		const first = await activeControlKey(database, secret);
+		const second = await rotateControlKey(database, secret, t1);
+
+		const early = await retireScheduledControlKeys(
+			database,
+			'2026-01-01T00:21:29.999Z'
+		);
+		const earlyVerificationKeys = await controlVerificationKeys(database);
+		const earlyKeys = earlyVerificationKeys.map((key) => key.kid);
+		const due = await retireScheduledControlKeys(database, t1RetireAt);
+		const dueVerificationKeys = await controlVerificationKeys(database);
+		const dueKeys = dueVerificationKeys.map((key) => key.kid);
+		const again = await retireScheduledControlKeys(database, t1RetireAt);
+
+		expect({ early, earlyKeys, due, dueKeys, again }).toStrictEqual({
+			early: 0,
+			earlyKeys: [first.kid, second.kid],
+			due: 1,
+			dueKeys: [second.kid],
+			again: 0
 		});
 	});
 
@@ -94,7 +151,8 @@ describe('control key store', () => {
 		await ensureControlKey(database, secret, t0);
 		const firstActive = await activeControlKey(database, secret);
 		const firstKid = firstActive.kid;
-		const secondKid = await rotateControlKey(database, secret, t1);
+		const second = await rotateControlKey(database, secret, t1);
+		const secondKid = second.kid;
 
 		await retireControlKey(database, firstKid, t2);
 
@@ -122,7 +180,8 @@ describe('control key store', () => {
 			await ensureControlKey(database, secret, t0);
 			const firstActive = await activeControlKey(database, secret);
 			const firstKid = firstActive.kid;
-			const secondKid = await rotateControlKey(database, secret, t1);
+			const second = await rotateControlKey(database, secret, t1);
+			const secondKid = second.kid;
 
 			await retireControlKey(database, firstKid, t2);
 

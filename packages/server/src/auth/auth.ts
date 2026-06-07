@@ -19,6 +19,8 @@ const callbackRootsClaim = 'cb_roots';
 
 export const adminJwtTtlSeconds = 10 * 60;
 export const writeJwtTtlSeconds = 15 * 60;
+export const accessJwtClockToleranceSeconds = 30;
+export const accessJwtRetirementMarginSeconds = 5 * 60;
 
 // A public key in the verification set, addressed by its `kid` so a rotated key
 // set can hold several at once.
@@ -98,7 +100,16 @@ export class InvalidRootConstraintError extends AccessTokenError {
 // public key published in the JWKS.
 export const authJwtAlgorithm = 'EdDSA';
 const jwtAlgorithm = authJwtAlgorithm;
-const clockToleranceSeconds = 30;
+const clockToleranceSeconds = accessJwtClockToleranceSeconds;
+
+export function scheduledAccessKeyRetireAt(rotatedAt: Date): string {
+	return new Date(
+		rotatedAt.getTime() +
+			Math.max(adminJwtTtlSeconds, writeJwtTtlSeconds) * 1000 +
+			accessJwtClockToleranceSeconds * 1000 +
+			accessJwtRetirementMarginSeconds * 1000
+	).toISOString();
+}
 
 export async function generateAuthKeyPair(): Promise<{
 	readonly privateJwk: JsonWebKey;

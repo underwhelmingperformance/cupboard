@@ -2101,11 +2101,12 @@ wait on.
   `scheduled_retire_at = rotate_time + maxTokenTtl + clockTolerance + margin`.
   The implementation sources `adminJwtTtlSeconds`, `writeJwtTtlSeconds`, and the
   access-JWT clock tolerance from the auth module rather than duplicating magic
-  values in the sweep or key stores.
+  values in the retirement pass or key stores.
 - `scheduled_retire_at` is a write-side scheduling marker, never a verification
   gate. Verification keeps selecting keys by `retired_at IS NULL`, so a key with
-  a future `scheduled_retire_at` still verifies. The sweep is the only actor
-  that bridges the two, reading `scheduled_retire_at` and writing `retired_at`.
+  a future `scheduled_retire_at` still verifies. The retirement pass is the only
+  actor that bridges the two, reading `scheduled_retire_at` and writing
+  `retired_at`.
 - Among non-retired keys exactly one carries a NULL `scheduled_retire_at`: the
   live minting key. `rotate` inserts the new key with NULL and stamps the
   outgoing key (the one that held NULL) with its retirement time, so the NULL
@@ -2114,7 +2115,7 @@ wait on.
   untouched. This anchors each key's retirement to the moment it stopped
   minting; re-stamping a superseded key would push a dead key's retirement later
   and widen its exposure window.
-- The active minting key is structurally immune from the sweep: its
+- The active minting key is structurally immune from the retirement pass: its
   `scheduled_retire_at` is NULL, so the `scheduled_retire_at <= now` predicate
   cannot select it. The existing last-key refusal stays as a second guard.
 - Manual `retire` is unchanged. It remains the immediate-revocation lever for a
@@ -2122,35 +2123,37 @@ wait on.
 
 ### Implementation sequence
 
-1. Add a nullable `scheduled_retire_at` column to `auth_key` (DO SQLite) and
-   `control_auth_key` (D1), each with a real migration. Existing keys keep NULL.
-2. `auth-key rotate` and `control-key rotate` capture the current minting key,
-   insert the new key with `scheduled_retire_at = NULL`, and stamp the captured
-   key with the auth module's maximum token lifetime plus clock tolerance and a
-   small explicit margin. The rotate response and CLI output report the
-   scheduled retirement time.
-3. Add the sweep consumers. The per-tenant Durable Object maintenance pass (the
-   cron fan-out's existing per-tenant work) retires due `auth_key` rows; the
-   Worker cron tick retires due `control_auth_key` rows. Each selects rows whose
-   `scheduled_retire_at` is non-null and at or before now while `retired_at` is
-   null, sets `retired_at`, and keeps the last-key refusal. Both writers already
-   own their rows, so no new write boundary is introduced.
-4. `key rotate` (narinfo) is untouched.
+1. [x] Add a nullable `scheduled_retire_at` column to `auth_key` (DO SQLite) and
+       `control_auth_key` (D1), each with a real migration. Existing keys keep
+       NULL.
+2. [x] `auth-key rotate` and `control-key rotate` capture the current minting
+       key, insert the new key with `scheduled_retire_at = NULL`, and stamp the
+       captured key with the auth module's maximum token lifetime plus clock
+       tolerance and a small explicit margin. The rotate response and CLI output
+       report the scheduled retirement time.
+3. [x] Add the retirement pass consumers. The per-tenant Durable Object
+       maintenance pass (the cron fan-out's existing per-tenant work) retires
+       due `auth_key` rows; the Worker cron tick retires due `control_auth_key`
+       rows. Each selects rows whose `scheduled_retire_at` is non-null and at or
+       before now while `retired_at` is null, sets `retired_at`, and keeps the
+       last-key refusal. Both writers already own their rows, so no new write
+       boundary is introduced.
+4. [x] `key rotate` (narinfo) is untouched.
 
 ### Verification
 
-- `rotate` stamps only the outgoing key and leaves an older superseded key's
-  `scheduled_retire_at` unchanged; two rotations before a sweep leave two keys
-  with distinct schedules and one live minting key with NULL.
-- The sweep retires a key only at or after its `scheduled_retire_at`, never
-  before, so a token minted just before its key was superseded still verifies
-  for its full lifetime.
-- Verification selects keys by `retired_at IS NULL` and ignores
-  `scheduled_retire_at`; a key with a future schedule still verifies.
-- The sweep never retires the minting key and refuses to retire the last live
-  key.
-- The sweep is idempotent: a second run over an already-retired key changes
-  nothing, and the hourly cadence retires late, never early.
+- [x] `rotate` stamps only the outgoing key and leaves an older superseded key's
+      `scheduled_retire_at` unchanged; two rotations before a retirement pass
+      leave two keys with distinct schedules and one live minting key with NULL.
+- [x] The retirement pass retires a key only at or after its
+      `scheduled_retire_at`, never before, so a token minted just before its key
+      was superseded still verifies for its full lifetime.
+- [x] Verification selects keys by `retired_at IS NULL` and ignores
+      `scheduled_retire_at`; a key with a future schedule still verifies.
+- [x] The retirement pass never retires the minting key and refuses to retire
+      the last live key.
+- [x] The retirement pass is idempotent: a second run over an already-retired
+      key changes nothing, and the hourly cadence retires late, never early.
 
 ### Future extension
 

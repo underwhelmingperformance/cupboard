@@ -5,7 +5,7 @@ import {
 	type AuthKeySummary
 } from '@cupboard/protocol/keys';
 import { tokenExchangeGrantType } from '@cupboard/protocol/oidc';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 
 import {
 	type AccessClaims,
@@ -14,6 +14,7 @@ import {
 	type AuthPublicKey,
 	bearerToken,
 	generateAuthKeyPair,
+	scheduledAccessKeyRetireAt,
 	verifyAccessJwt
 } from '../auth/auth.ts';
 import { parseJwk } from '../crypto/crypto.ts';
@@ -170,6 +171,7 @@ export class AuthKeysService {
 			privateJwk: parseJwk(row.privateJwkJson),
 			publicJwk: parseJwk(row.publicJwkJson),
 			createdAt: row.createdAt,
+			scheduledRetireAt: row.scheduledRetireAt ?? undefined,
 			retired: Boolean(row.retiredAt)
 		};
 	}
@@ -194,7 +196,10 @@ export class AuthKeysService {
 	// rotation takes over minting at once.
 	async activeAuthKey(): Promise<AuthKey> {
 		const keys = await this.authKeys();
-		const active = keys.findLast((key) => !key.retired);
+		const active =
+			keys.findLast(
+				(key) => !key.retired && key.scheduledRetireAt === undefined
+			) ?? keys.findLast((key) => !key.retired);
 
 		if (active === undefined) {
 			throw new Error('no active auth key in the key set');
@@ -221,7 +226,10 @@ export class AuthKeysService {
 			.map((key) => ({
 				kid: key.kid,
 				createdAt: key.createdAt,
-				active: key.kid === active.kid
+				active: key.kid === active.kid,
+				...(key.scheduledRetireAt === undefined
+					? {}
+					: { scheduledRetireAt: key.scheduledRetireAt })
 			}));
 	}
 
@@ -231,7 +239,15 @@ export class AuthKeysService {
 		return this.context.ctx.blockConcurrencyWhile(async () => {
 			const generated = await generateAuthKeyPair();
 			const kid = crypto.randomUUID();
+			const rotatedAt = new Date();
+			const scheduledRetireAt = scheduledAccessKeyRetireAt(rotatedAt);
+			const outgoing = await this.activeAuthKey();
 
+			this.context.db
+				.update(schema.authKeys)
+				.set({ scheduledRetireAt })
+				.where(eq(schema.authKeys.kid, outgoing.kid))
+				.run();
 			this.context.db
 				.insert(schema.authKeys)
 				.values({
@@ -239,12 +255,16 @@ export class AuthKeysService {
 					kid,
 					privateJwkJson: JSON.stringify(generated.privateJwk),
 					publicJwkJson: JSON.stringify(generated.publicJwk),
-					createdAt: new Date().toISOString()
+					createdAt: rotatedAt.toISOString()
 				})
 				.run();
 			this.resetAuthKeyCache();
 
-			return { rotated: kid, keys: await this.authKeySummaries() };
+			return {
+				rotated: kid,
+				retiring: { kid: outgoing.kid, scheduledRetireAt },
+				keys: await this.authKeySummaries()
+			};
 		});
 	}
 
@@ -283,6 +303,50 @@ export class AuthKeysService {
 		}
 
 		return { kid, retired: outcome.retired };
+	}
+
+	async retireScheduledAuthKeys(now: Date = new Date()): Promise<number> {
+		return this.context.ctx.blockConcurrencyWhile(() => {
+			const nowIso = now.toISOString();
+			const due = this.context.db
+				.select({ kid: schema.authKeys.kid })
+				.from(schema.authKeys)
+				.where(
+					and(
+						isNull(schema.authKeys.retiredAt),
+						isNotNull(schema.authKeys.scheduledRetireAt),
+						lte(schema.authKeys.scheduledRetireAt, nowIso)
+					)
+				)
+				.orderBy(schema.authKeys.scheduledRetireAt, schema.authKeys.createdAt)
+				.all();
+			let retired = 0;
+
+			for (const key of due) {
+				const live = this.context.db
+					.select({ kid: schema.authKeys.kid })
+					.from(schema.authKeys)
+					.where(isNull(schema.authKeys.retiredAt))
+					.all();
+
+				if (live.length <= 1) {
+					continue;
+				}
+
+				this.context.db
+					.update(schema.authKeys)
+					.set({ retiredAt: nowIso })
+					.where(eq(schema.authKeys.kid, key.kid))
+					.run();
+				retired += 1;
+			}
+
+			if (retired > 0) {
+				this.resetAuthKeyCache();
+			}
+
+			return Promise.resolve(retired);
+		});
 	}
 
 	async authPublicJwks(): Promise<JsonWebKeyWithKid[]> {

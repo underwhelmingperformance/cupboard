@@ -1,7 +1,11 @@
-import { and, desc, eq, exists, isNull, ne } from 'drizzle-orm';
+import { and, desc, eq, exists, isNotNull, isNull, lte, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
-import { type AuthPublicKey, generateAuthKeyPair } from '../auth/auth.ts';
+import {
+	type AuthPublicKey,
+	generateAuthKeyPair,
+	scheduledAccessKeyRetireAt
+} from '../auth/auth.ts';
 import { parseJwk } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { ControlKeyMissingError, LastControlKeyError } from '../errors.ts';
@@ -23,6 +27,15 @@ export interface ControlSigningKey {
 export interface ControlKeySummary {
 	readonly kid: string;
 	readonly retired: boolean;
+	readonly scheduledRetireAt?: string;
+}
+
+export interface ControlKeyRotation {
+	readonly kid: string;
+	readonly retiring?: {
+		readonly kid: string;
+		readonly scheduledRetireAt: string;
+	};
 }
 
 const bootstrapId = 'bootstrap';
@@ -75,6 +88,7 @@ export async function activeControlKey(
 		.from(d1Schema.controlAuthKey)
 		.where(isNull(d1Schema.controlAuthKey.retiredAt))
 		.orderBy(
+			desc(isNull(d1Schema.controlAuthKey.scheduledRetireAt)),
 			desc(d1Schema.controlAuthKey.createdAt),
 			desc(d1Schema.controlAuthKey.id)
 		)
@@ -122,13 +136,22 @@ export async function controlKeySummaries(
 	const rows = await database
 		.select({
 			kid: d1Schema.controlAuthKey.kid,
-			retiredAt: d1Schema.controlAuthKey.retiredAt
+			retiredAt: d1Schema.controlAuthKey.retiredAt,
+			scheduledRetireAt: d1Schema.controlAuthKey.scheduledRetireAt
 		})
 		.from(d1Schema.controlAuthKey)
 		.orderBy(d1Schema.controlAuthKey.createdAt, d1Schema.controlAuthKey.id)
 		.all();
 
-	return rows.map((row) => ({ kid: row.kid, retired: row.retiredAt !== null }));
+	return rows.map((row) => {
+		const scheduledRetireAt = row.scheduledRetireAt ?? undefined;
+
+		return {
+			kid: row.kid,
+			retired: row.retiredAt !== null,
+			...(scheduledRetireAt === undefined ? {} : { scheduledRetireAt })
+		};
+	});
 }
 
 // Adds a new control key that becomes the minting key, leaving the existing keys
@@ -137,13 +160,18 @@ export async function rotateControlKey(
 	database: Database,
 	wrappingSecret: string,
 	now: string
-): Promise<string> {
+): Promise<ControlKeyRotation> {
+	const outgoing = await activeControlKey(database, wrappingSecret);
 	const { privateJwk, publicJwk } = await generateAuthKeyPair();
 	const kid = crypto.randomUUID();
+	const scheduledRetireAt = scheduledAccessKeyRetireAt(new Date(now));
 
-	await database
-		.insert(d1Schema.controlAuthKey)
-		.values({
+	await database.batch([
+		database
+			.update(d1Schema.controlAuthKey)
+			.set({ scheduledRetireAt })
+			.where(eq(d1Schema.controlAuthKey.kid, outgoing.kid)),
+		database.insert(d1Schema.controlAuthKey).values({
 			id: crypto.randomUUID(),
 			kid,
 			publicJwkJson: JSON.stringify(publicJwk),
@@ -153,9 +181,9 @@ export async function rotateControlKey(
 			),
 			createdAt: now
 		})
-		.run();
+	]);
 
-	return kid;
+	return { kid, retiring: { kid: outgoing.kid, scheduledRetireAt } };
 }
 
 // Retires a control key so it no longer verifies, returning whether it actually
@@ -217,4 +245,42 @@ export async function retireControlKey(
 	}
 
 	return false;
+}
+
+export async function retireScheduledControlKeys(
+	database: Database,
+	now: string
+): Promise<number> {
+	const due = await database
+		.select({ kid: d1Schema.controlAuthKey.kid })
+		.from(d1Schema.controlAuthKey)
+		.where(
+			and(
+				isNull(d1Schema.controlAuthKey.retiredAt),
+				isNotNull(d1Schema.controlAuthKey.scheduledRetireAt),
+				lte(d1Schema.controlAuthKey.scheduledRetireAt, now)
+			)
+		)
+		.orderBy(
+			d1Schema.controlAuthKey.scheduledRetireAt,
+			d1Schema.controlAuthKey.createdAt
+		)
+		.all();
+	let retired = 0;
+
+	for (const key of due) {
+		try {
+			if (await retireControlKey(database, key.kid, now)) {
+				retired += 1;
+			}
+		} catch (error) {
+			if (error instanceof LastControlKeyError) {
+				continue;
+			}
+
+			throw error;
+		}
+	}
+
+	return retired;
 }

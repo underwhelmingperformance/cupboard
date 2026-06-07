@@ -75,6 +75,7 @@ describe('control key administration', () => {
 			`/control/keys/retire/${firstKid}`,
 			authed(token)
 		);
+		const mintedAfterManualRetire = await mintControlAdminToken();
 
 		expect({
 			beforeRotateCount: beforeRotate.length,
@@ -85,7 +86,8 @@ describe('control key administration', () => {
 			listedAllLive: listed.keys.every((key) => !key.retired),
 			retireSecondStatus: retireSecond.status,
 			afterRetire,
-			retireLastStatus: retireLast.status
+			retireLastStatus: retireLast.status,
+			mintedAfterManualRetire: mintedAfterManualRetire.length > 0
 		}).toStrictEqual({
 			beforeRotateCount: 1,
 			rotateStatus: StatusCodes.OK,
@@ -95,7 +97,8 @@ describe('control key administration', () => {
 			listedAllLive: true,
 			retireSecondStatus: StatusCodes.OK,
 			afterRetire: [firstKid],
-			retireLastStatus: StatusCodes.CONFLICT
+			retireLastStatus: StatusCodes.CONFLICT,
+			mintedAfterManualRetire: true
 		});
 	});
 });

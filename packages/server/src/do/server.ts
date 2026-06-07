@@ -189,6 +189,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	async runAuthKeyRetirement(): Promise<void> {
+		await this.initialise();
+		await this.withMaintenanceEligibility(() =>
+			this.authKeys.retireScheduledAuthKeys()
+		);
+	}
+
 	// The global reaper found a shared object gone and routes the de-materialisation
 	// of this tenant's narinfos for that hash through here, the single writer of the
 	// tenant's objects. Each target is de-materialised only if its live row still
@@ -321,13 +328,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			serverErrorResponse(this.authKeys.handleAuthKeyList(context.req.raw))
 		);
 		this.app.post('/keys/auth/rotate', (context) =>
-			serverErrorResponse(this.authKeys.handleAuthKeyRotate(context.req.raw))
+			serverErrorResponse(
+				this.withMaintenanceEligibility(() =>
+					this.authKeys.handleAuthKeyRotate(context.req.raw)
+				)
+			)
 		);
 		this.app.post('/keys/auth/retire/:kid', (context) =>
 			serverErrorResponse(
-				this.authKeys.handleAuthKeyRetire(
-					context.req.raw,
-					context.req.param('kid')
+				this.withMaintenanceEligibility(() =>
+					this.authKeys.handleAuthKeyRetire(
+						context.req.raw,
+						context.req.param('kid')
+					)
 				)
 			)
 		);

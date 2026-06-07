@@ -94,6 +94,7 @@ export const authKeys = sqliteTable('auth_key', {
 	privateJwkJson: text('private_jwk_json').notNull(),
 	publicJwkJson: text('public_jwk_json').notNull(),
 	createdAt: text('created_at').notNull(),
+	scheduledRetireAt: text('scheduled_retire_at'),
 	retiredAt: text('retired_at')
 });
 

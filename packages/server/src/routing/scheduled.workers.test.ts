@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers';
+import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -45,6 +46,7 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('beta');
 		await provisionNamedTenant('current');
 		await suspendTenant('v1');
+		await deleteEligibility('acme');
 		await writeEligibility('beta', {
 			reconciledAt: '2025-12-31T17:59:59.000Z'
 		});
@@ -111,6 +113,8 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
 		await suspendTenant('v1');
+		await deleteEligibility('acme');
+		await deleteEligibility('beta');
 
 		const seen: string[] = [];
 		const firstFailure = new Error('maintenance failed');
@@ -305,6 +309,28 @@ async function writeEligibility(
 			reconciledAt: '2026-01-01T00:00:00.000Z',
 			...fields
 		})
+		.onConflictDoUpdate({
+			target: d1Schema.tenantMaintenanceEligibility.tenant,
+			set: {
+				pendingVerificationCount: fields.pendingVerificationCount ?? 0,
+				earliestUploadExpiry: fields.earliestUploadExpiry ?? sql`null`,
+				queuedNarInfoDeletionCount: fields.queuedNarInfoDeletionCount ?? 0,
+				earliestRootExpiry: fields.earliestRootExpiry ?? sql`null`,
+				nextMaintenanceAt: fields.nextMaintenanceAt ?? sql`null`,
+				reconciledAt: fields.reconciledAt ?? '2026-01-01T00:00:00.000Z'
+			}
+		})
+		.run();
+}
+
+async function deleteEligibility(tenant: string): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, {
+		schema: {
+			tenantMaintenanceEligibility: d1Schema.tenantMaintenanceEligibility
+		}
+	})
+		.delete(d1Schema.tenantMaintenanceEligibility)
+		.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, tenant))
 		.run();
 }
 

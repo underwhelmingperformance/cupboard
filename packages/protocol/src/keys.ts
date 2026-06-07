@@ -40,7 +40,8 @@ export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
 export const authKeySummarySchema = z.strictObject({
 	kid: z.string(),
 	createdAt: z.string(),
-	active: z.boolean()
+	active: z.boolean(),
+	scheduledRetireAt: z.string().optional()
 });
 export type ParsedAuthKeySummary = z.output<typeof authKeySummarySchema>;
 
@@ -53,6 +54,12 @@ export type ParsedAuthKeyListResponse = z.output<
 
 export const authKeyRotateResponseSchema = z.strictObject({
 	rotated: z.string(),
+	retiring: z
+		.strictObject({
+			kid: z.string(),
+			scheduledRetireAt: z.string()
+		})
+		.optional(),
 	keys: z.array(authKeySummarySchema)
 });
 export type ParsedAuthKeyRotateResponse = z.output<
