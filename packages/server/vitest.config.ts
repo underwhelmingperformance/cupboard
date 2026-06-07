@@ -43,6 +43,7 @@ export default defineConfig(async () => {
 										'client-id.apps.googleusercontent.com',
 									R2_ACCESS_KEY_ID: 'test-access-key-id',
 									R2_ACCOUNT_ID: 'test-account-id',
+									R2_BUCKET_NAME: 'cupboard-blobs',
 									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
 									TEST_MIGRATIONS: migrations
 								},

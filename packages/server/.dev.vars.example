@@ -6,6 +6,7 @@
 # R2 credentials for the presigned NAR uploads.
 R2_ACCOUNT_ID=
 R2_ACCESS_KEY_ID=
+R2_BUCKET_NAME=cupboard-blobs
 R2_SECRET_ACCESS_KEY=
 
 # Owner identity: the OIDC issuer, subject and audience whose id_token is
@@ -18,6 +19,20 @@ CUPBOARD_OWNER_AUDIENCE=
 # default to `cupboard` in wrangler.toml; set them here to override locally.
 CUPBOARD_AUTH_ISSUER=
 CUPBOARD_AUTH_AUDIENCE=
+CUPBOARD_COLD_PATH_TTL_SECONDS=
+
+# Control-plane token minting. The wrapping secret is sensitive and should be set
+# as a Worker secret in production.
+CUPBOARD_CONTROL_AUDIENCE=
+CONTROL_KEY_WRAP_SECRET=
+
+# First-signup bootstrap. The signup secret is sensitive and should be set as a
+# Worker secret in production; alternatively pin the subject.
+CUPBOARD_SIGNUP_ISSUER=
+CUPBOARD_SIGNUP_AUDIENCE=
+CUPBOARD_SIGNUP_SECRET=
+CUPBOARD_SIGNUP_SUBJECT=
+CUPBOARD_LOCAL_DEV=
 
 # Private-read mode: set both to require HTTP Basic auth on cache reads
 # (narinfo, NAR, nix-cache-info). Leave both empty for a public cache.

@@ -41,30 +41,24 @@ migrations_dir = "drizzle-d1"
 [vars]
 CUPBOARD_AUTH_ISSUER = "cupboard"
 CUPBOARD_AUTH_AUDIENCE = "cupboard"
-# The control-plane OAuth audience (the control client id), and the base64 AES-256
-# key wrapping the control signing key. The wrapping key is sensitive: set it in
-# production with `wrangler secret put CONTROL_KEY_WRAP_SECRET`, which overrides
-# this empty default. Tests supply their own via the pool/Miniflare bindings.
+# The control-plane OAuth audience (the control client id). The base64 AES-256
+# key wrapping the control signing key is sensitive: set
+# `CONTROL_KEY_WRAP_SECRET` in production with `wrangler secret put`. Tests
+# supply their own via the pool/Miniflare bindings.
 CUPBOARD_CONTROL_AUDIENCE = ""
-CONTROL_KEY_WRAP_SECRET = ""
 # The OIDC issuer and audience (the control client id) trusted for the first-signup
-# claim, and the gate that decides who may claim global admin: a single-use claim
-# secret or a pinned subject. Set the secret in production with
-# `wrangler secret put CUPBOARD_SIGNUP_SECRET`. With neither gate configured the
-# claim is refused unless CUPBOARD_LOCAL_DEV relaxes it for local development.
+# claim, and the non-secret gates that decide who may claim global admin. The
+# single-use claim secret is sensitive: set `CUPBOARD_SIGNUP_SECRET` in
+# production with `wrangler secret put`. With neither gate configured the claim
+# is refused unless CUPBOARD_LOCAL_DEV relaxes it for local development.
 CUPBOARD_SIGNUP_ISSUER = ""
 CUPBOARD_SIGNUP_AUDIENCE = ""
-CUPBOARD_SIGNUP_SECRET = ""
 CUPBOARD_SIGNUP_SUBJECT = ""
 CUPBOARD_LOCAL_DEV = ""
 CUPBOARD_OWNER_ISSUER = ""
 CUPBOARD_OWNER_SUBJECT = ""
 CUPBOARD_OWNER_AUDIENCE = ""
 CUPBOARD_COLD_PATH_TTL_SECONDS = ""
-R2_ACCOUNT_ID = ""
-R2_ACCESS_KEY_ID = ""
-R2_BUCKET_NAME = "cupboard-blobs"
-R2_SECRET_ACCESS_KEY = ""
 
 [limits]
 cpu_ms = 300000
