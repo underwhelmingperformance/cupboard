@@ -2253,9 +2253,11 @@ Attestation storage reuses the V5 reference-and-reaper pattern. The NAR-specific
 NAR object exists, carrying the canonical compressed metadata and the
 decompress-to-key check) stays strict. Bundles get sibling tables:
 
-- `cas_object(digest PK, size, verified_at, delete_after?)` is the set of
-  available shared bundles, positive facts only. A row exists iff a verified
-  shared bundle object exists.
+- `cas_object(digest PK, size, stored_at, delete_after?)` is the set of
+  available shared bundles, positive facts only. A row exists iff a measured
+  shared bundle object exists at `cas/<digest>`; `stored_at` records that
+  content-addressed storage fact, not Sigstore, DSSE, or trust-root
+  verification.
 - `attestation_ref(...)` is one row per (narinfo version, predicate type,
   bundle):
 
@@ -2280,6 +2282,12 @@ decompress-to-key check) stays strict. Bundles get sibling tables:
   across the 0-to-1 and 1-to-0 transitions and driving
   once-per-tenant-per-bundle charging.
 
+Attestation storage is accounted separately from NAR storage. The existing
+`tenant_usage.bytes` and `tenant_usage.blobs` counters remain NAR-specific, so
+`narBlobs` stats continue to report only NAR blobs. New CAS counters record
+attestation bundle bytes and object counts; quota is enforced against the sum of
+NAR bytes and CAS bytes.
+
 A bundle uploads to a per-tenant staging key; the server computes its SHA-256,
 which is its CAS key, so verification is self-addressing with no decompression
 step. At attach the server performs a filing-correctness guard — the bundle is a
@@ -2289,19 +2297,25 @@ garbage. This is not signature verification, which stays the consumer's.
 
 The tenant DO, the single writer of its tenant's D1 rows, promotes the bundle
 into the shared CAS (idempotent, content-addressed), inserts the edge, charges
-the bundle once per tenant per unique digest through the same
-reserve-then-commit quota shape as NAR blobs, and re-materialises the list
-object from the tenant's edges for that store path. Negotiation skips an
-already-referenced bundle only on the asking tenant's own edges, never on global
-existence; deduplication happens at rest after upload.
+the bundle once per tenant per unique digest through separate CAS usage counters
+that participate in the tenant quota, and re-materialises the list object from
+the tenant's edges for that store path. Negotiation skips an already-referenced
+bundle only on the asking tenant's own edges, never on global existence;
+deduplication happens at rest after upload.
 
 Ordering follows the V5 cross-store discipline: bundle-to-CAS first, then edge,
 then list, failing safe toward a leaked CAS object and never a list entry
 without its bundle; removal is list-and-edge first with the reaper collecting
 the orphaned bundle, recovered from the durable deletion marker as the NAR
-delete saga is. The global reaper collects a bundle when no `attestation_ref`
-row anywhere references its digest and `now >= delete_after`, sharing the NAR
-reaper's structure.
+delete saga is. Store-path deletion removes only attestation refs for the
+captured narinfo generation. Recommit does not automatically carry attestations
+forward to the new generation; a later attach or push re-files bundles after the
+filing-correctness guard passes. Offboarding drains attestation refs and
+per-tenant CAS presence through the tenant DO, matching the NAR edge boundary.
+The global reaper collects a bundle when no `attestation_ref` row anywhere
+references its digest and `now >= delete_after`, sharing the NAR reaper's
+compare-and-delete structure. Promotion clears `delete_after`, and a repair pass
+demotes a `cas_object` fact whose R2 object is missing.
 
 ### Push and verify contract
 
@@ -2332,15 +2346,20 @@ R2 keys:
 Each step leaves a working cache.
 
 1. **CAS generalisation and bundle lifecycle.** Add `cas_object`,
-   `attestation_ref`, and `tenant_cas_blob`; stage, digest, and promote bundles
-   into `cas/`; reference, charge, and reap them through the V5 machinery;
-   crash-point tests for bundle/no-edge, edge/no-list, dedupe-across-tenants
-   charging each tenant once, and decrement replay.
+   `attestation_ref`, and `tenant_cas_blob`; stage, measure, and promote bundles
+   into `cas/`; reference, charge through separate CAS usage counters, delete by
+   captured generation, drain during offboarding, and reap them through the V5
+   shared-object pattern; crash-point tests for bundle/no-edge,
+   dedupe-across-tenants charging each tenant once, quota rollback, re-reference
+   after reaper arming, missing-object demotion, and decrement replay. This step
+   does not materialise or serve descriptor lists.
 2. **Attach and list materialisation.** Add the authenticated attach endpoint,
    the filing-correctness guard (well-formed bundle, subject equals committed
    `narHash`), list materialisation from edges, `readMode` on list and bundle
    reads with absent/unauthorised parity, and the existence-oracle-safe
-   own-edges negotiate for bundles.
+   own-edges negotiate for bundles. Add crash-point coverage for an edge whose
+   descriptor list was not materialised yet; recovery re-materialises the list
+   from durable edges.
 3. **CLI attach and verify guidance.** Add `cupboard push` bundle attachment and
    `--no-attest`; document consumer verification against the bundle-declared
    trust root and the subject-to-`narHash` check, with example policy gates for
