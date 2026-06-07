@@ -14,6 +14,7 @@ import {
 	deletePath,
 	deleteTestBase,
 	expectSingleUploadDecision,
+	fileAttestationReference,
 	initialise,
 	markUploadPendingVerification,
 	negotiateUploads,
@@ -93,6 +94,8 @@ describe('per-tenant quota', () => {
 			bytes: nar.narBytes.byteLength,
 			narinfos: 2,
 			blobs: 1,
+			casBytes: 0,
+			casBlobs: 0,
 			quotaBytes: undefined
 		});
 	});
@@ -127,6 +130,8 @@ describe('per-tenant quota', () => {
 			bytes: one.narBytes.byteLength + two.narBytes.byteLength,
 			narinfos: 2,
 			blobs: 2,
+			casBytes: 0,
+			casBlobs: 0,
 			quotaBytes: undefined
 		});
 	});
@@ -168,9 +173,18 @@ describe('per-tenant quota', () => {
 				bytes: nar.narBytes.byteLength,
 				narinfos: 1,
 				blobs: 1,
+				casBytes: 0,
+				casBlobs: 0,
 				quotaBytes: undefined
 			},
-			afterSecond: { bytes: 0, narinfos: 0, blobs: 0, quotaBytes: undefined }
+			afterSecond: {
+				bytes: 0,
+				narinfos: 0,
+				blobs: 0,
+				casBytes: 0,
+				casBlobs: 0,
+				quotaBytes: undefined
+			}
 		});
 	});
 
@@ -213,7 +227,61 @@ describe('per-tenant quota', () => {
 				bytes: 0,
 				narinfos: 0,
 				blobs: 0,
+				casBytes: 0,
+				casBlobs: 0,
 				quotaBytes: nar.narBytes.byteLength - 1
+			}
+		});
+	});
+
+	it('rejects a NAR commit when CAS usage has consumed the quota', async () => {
+		const token = await initialise();
+		const bundle = await fileAttestationReference({
+			uploadId: 'quota-cas-consumed',
+			bytes: new TextEncoder().encode('cas quota use'),
+			storePathHash: 'b'.repeat(32),
+			generation: 0
+		});
+		const nar = await verifiableNar('quota-mixed-cas-nar');
+		const metadata = uploadMetadata({
+			storePathHash: 'c'.repeat(32),
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const quotaBytes = bundle.size + nar.narBytes.byteLength - 1;
+		await provisionFixtureTenant({ quotaBytes });
+
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, decision, metadata);
+		await putNarBytes(decision.r2Key, nar);
+		const response = await authorisedFetch(
+			`/uploads/${decision.uploadId}/commit`,
+			token,
+			{ method: 'POST' }
+		);
+
+		expect({
+			status: response.status,
+			edges: await blobReferenceRows(),
+			presence: await tenantBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			status: StatusCodes.INSUFFICIENT_STORAGE,
+			edges: [],
+			presence: [],
+			usage: {
+				bytes: 0,
+				narinfos: 0,
+				blobs: 0,
+				casBytes: bundle.size,
+				casBlobs: 1,
+				quotaBytes
 			}
 		});
 	});
@@ -243,6 +311,8 @@ describe('per-tenant quota', () => {
 			bytes: small.narBytes.byteLength,
 			narinfos: 1,
 			blobs: 1,
+			casBytes: 0,
+			casBlobs: 0,
 			quotaBytes: small.narBytes.byteLength
 		});
 	});

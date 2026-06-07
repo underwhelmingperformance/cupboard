@@ -8,8 +8,10 @@ import {
 	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	positiveIntSchema,
+	predicateTypeSchema,
 	referencesSchema,
 	rootNameSchema,
+	sha256HexDigestSchema,
 	signingKeyIdSchema,
 	storePathBasenameSchema,
 	storePathHashSchema,
@@ -50,6 +52,30 @@ const cases: readonly {
 		name: 'a nix hash without the prefix',
 		schema: nixSha256HashSchema,
 		value: '1'.repeat(52),
+		valid: false
+	},
+	{
+		name: 'a valid sha256 hex digest',
+		schema: sha256HexDigestSchema,
+		value: 'a'.repeat(64),
+		valid: true
+	},
+	{
+		name: 'a sha256 hex digest with upper-case characters',
+		schema: sha256HexDigestSchema,
+		value: 'A'.repeat(64),
+		valid: false
+	},
+	{
+		name: 'a sha256 hex digest with the nix hash prefix',
+		schema: sha256HexDigestSchema,
+		value: `sha256:${'a'.repeat(64)}`,
+		valid: false
+	},
+	{
+		name: 'a short sha256 hex digest',
+		schema: sha256HexDigestSchema,
+		value: 'a'.repeat(63),
 		valid: false
 	},
 	{
@@ -152,6 +178,30 @@ const cases: readonly {
 		name: 'a root name with a control character',
 		schema: rootNameSchema,
 		value: 'bad\nname',
+		valid: false
+	},
+	{
+		name: 'a valid predicate type',
+		schema: predicateTypeSchema,
+		value: 'https://slsa.dev/provenance/v1',
+		valid: true
+	},
+	{
+		name: 'an empty predicate type',
+		schema: predicateTypeSchema,
+		value: '',
+		valid: false
+	},
+	{
+		name: 'a predicate type with a control character',
+		schema: predicateTypeSchema,
+		value: 'https://example.test/predicate\u007Fbad',
+		valid: false
+	},
+	{
+		name: 'an overlong predicate type',
+		schema: predicateTypeSchema,
+		value: 'a'.repeat(513),
 		valid: false
 	},
 	{ name: 'a valid ttl', schema: ttlSecondsSchema, value: 3600, valid: true },

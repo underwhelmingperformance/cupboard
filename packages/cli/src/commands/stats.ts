@@ -10,10 +10,6 @@ interface StatsOptions {
 	readonly cache?: string;
 }
 
-interface UsageOptions {
-	readonly token: string;
-}
-
 export function registerStatsCommand(program: Command): void {
 	program
 		.command('stats')
@@ -52,13 +48,12 @@ export function registerStatsCommand(program: Command): void {
 		.command('usage')
 		.description('Show tenant-wide charged storage usage.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
-		.requiredOption('--token <token>', 'bootstrap secret')
-		.action(async (url: string, options: UsageOptions) => {
+		.action(async (url: string) => {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url);
-			const token = await authenticate(client, options.token);
+			const token = cachedOwnerProvider(url);
 
 			const usage = await reporter.phase('Querying cupboard', () =>
 				client.usage(token)

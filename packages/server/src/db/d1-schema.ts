@@ -215,15 +215,69 @@ export const tenantBlob = sqliteTable(
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
 );
 
-// The authoritative per-tenant usage and quota counter. `bytes` is the sum of the
-// tenant's verified stored blob sizes (so it equals SUM(tenant_blob.file_size));
-// `narinfos` and `blobs` are its committed-narinfo and unique-blob counts. The
+// A measured, content-addressed attestation bundle in shared R2. `stored_at` means
+// the bytes were measured and stored at `cas/<digest>`; it is not Sigstore, DSSE,
+// or trust-root verification.
+export const casObject = sqliteTable(
+	'cas_object',
+	{
+		digest: text('digest').primaryKey(),
+		size: integer('size').notNull(),
+		storedAt: text('stored_at').notNull(),
+		deleteAfter: text('delete_after')
+	},
+	(table) => [index('cas_object_delete_after_idx').on(table.deleteAfter)]
+);
+
+// One attestation reference for one committed narinfo generation. Like `blob_ref`,
+// generation is part of the key so stale deletion can retire only the captured
+// narinfo version and never a later recommit.
+export const attestationReference = sqliteTable(
+	'attestation_ref',
+	{
+		tenant: text('tenant').notNull(),
+		cache: text('cache').notNull(),
+		storePathHash: text('store_path_hash').notNull(),
+		generation: integer('generation').notNull(),
+		predicateType: text('predicate_type').notNull(),
+		digest: text('digest').notNull()
+	},
+	(table) => [
+		primaryKey({
+			columns: [
+				table.tenant,
+				table.cache,
+				table.storePathHash,
+				table.generation,
+				table.predicateType,
+				table.digest
+			]
+		}),
+		index('attestation_ref_digest_idx').on(table.digest)
+	]
+);
+
+// Per-tenant unique-bundle presence: a tenant references this bundle via at least
+// one live attestation edge. This drives once-per-tenant-per-bundle CAS accounting.
+export const tenantCasBlob = sqliteTable(
+	'tenant_cas_blob',
+	{
+		tenant: text('tenant').notNull(),
+		digest: text('digest').notNull(),
+		size: integer('size').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.tenant, table.digest] })]
+);
+
+// The authoritative per-tenant usage and quota counter. `bytes`/`blobs` are NAR
+// storage only, matching `tenant_blob`; `cas_bytes`/`cas_blobs` are attestation CAS
+// storage only, matching `tenant_cas_blob`. `narinfos` is the committed-narinfo
+// count. The quota applies to total charged bytes (`bytes + cas_bytes`). The
 // counters are maintained incrementally by the owning tenant's Durable Object as it
-// charges on the 0-to-1 blob transition and credits on the 1-to-0, and reconciled by
-// the cron roll-up. `quota_bytes` is the admin-set limit (NULL means unlimited),
-// written only by the Worker. The CHECK makes an over-quota charge fail its D1
-// batch, so the whole reservation rolls back: no edge and no charge are ever
-// stranded over quota.
+// charges on 0-to-1 presence transitions and credits on 1-to-0 transitions, and
+// reconciled by cron roll-ups. `quota_bytes` is the admin-set limit (NULL means
+// unlimited), written only by the Worker. The CHECK makes an over-quota charge fail
+// its D1 batch, so no edge and no charge are ever stranded over quota.
 export const tenantUsage = sqliteTable(
 	'tenant_usage',
 	{
@@ -231,14 +285,17 @@ export const tenantUsage = sqliteTable(
 		bytes: integer('bytes').notNull().default(0),
 		narinfos: integer('narinfos').notNull().default(0),
 		blobs: integer('blobs').notNull().default(0),
+		casBytes: integer('cas_bytes').notNull().default(0),
+		casBlobs: integer('cas_blobs').notNull().default(0),
 		quotaBytes: integer('quota_bytes'),
 		updatedAt: text('updated_at').notNull()
 	},
 	(table) => [
 		check('tenant_usage_bytes_nonnegative', sql`${table.bytes} >= 0`),
+		check('tenant_usage_cas_bytes_nonnegative', sql`${table.casBytes} >= 0`),
 		check(
 			'tenant_usage_within_quota',
-			sql`${table.quotaBytes} IS NULL OR ${table.bytes} <= ${table.quotaBytes}`
+			sql`${table.quotaBytes} IS NULL OR ${table.bytes} + ${table.casBytes} <= ${table.quotaBytes}`
 		)
 	]
 );

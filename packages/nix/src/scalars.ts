@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 export const nixSha256HashPattern = /^sha256:[0-9a-df-np-sv-z]{52}$/;
+export const sha256HexDigestPattern = /^[0-9a-f]{64}$/;
 export const storePathHashPattern = /^[0-9a-df-np-sv-z]{32}$/;
 export const storePathNamePattern = /^[0-9A-Za-z+._?=-]+$/;
 export const storePathBasenamePattern =
@@ -9,6 +10,7 @@ export const storePathPattern =
 	/^\/nix\/store\/[0-9a-df-np-sv-z]{32}-[0-9A-Za-z+._?=-]+$/;
 
 export const rootNameMaxLength = 256;
+export const predicateTypeMaxLength = 512;
 export const rootTtlMinSeconds = 1;
 export const rootTtlMaxSeconds = 315_360_000;
 
@@ -29,6 +31,12 @@ export const nixSha256HashSchema = z
 	.regex(nixSha256HashPattern)
 	.brand('NixSha256Hash');
 export type NixSha256HashString = z.infer<typeof nixSha256HashSchema>;
+
+export const sha256HexDigestSchema = z
+	.string()
+	.regex(sha256HexDigestPattern)
+	.brand('Sha256HexDigest');
+export type Sha256HexDigest = z.infer<typeof sha256HexDigestSchema>;
 
 export const storePathHashSchema = z
 	.string()
@@ -63,6 +71,14 @@ export const ttlSecondsSchema = z
 	.max(rootTtlMaxSeconds)
 	.brand('TtlSeconds');
 export type TtlSeconds = z.infer<typeof ttlSecondsSchema>;
+
+export const predicateTypeSchema = z
+	.string()
+	.min(1)
+	.max(predicateTypeMaxLength)
+	.refine((value) => !hasControlCharacter(value))
+	.brand('PredicateType');
+export type PredicateType = z.infer<typeof predicateTypeSchema>;
 
 // The bootstrap signing key keeps the fixed id `active`; rotated keys are
 // minted with a random UUID.

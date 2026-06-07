@@ -40,6 +40,7 @@ export class StatsService {
 			.from(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.cache, cache))
 			.get();
+
 		const narObjects = await this.context.d1
 			.select({
 				narHash: d1Schema.blobReference.narHash,
@@ -57,19 +58,40 @@ export class StatsService {
 				)
 			)
 			.all();
+		const casObjects = await this.context.d1
+			.select({
+				digest: d1Schema.attestationReference.digest,
+				size: d1Schema.casObject.size
+			})
+			.from(d1Schema.attestationReference)
+			.innerJoin(
+				d1Schema.casObject,
+				eq(d1Schema.attestationReference.digest, d1Schema.casObject.digest)
+			)
+			.where(
+				and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					eq(d1Schema.attestationReference.cache, cache)
+				)
+			)
+			.all();
 		const narSizes = uniqueSizes(
 			narObjects.map((row) => ({ key: row.narHash, size: row.fileSize }))
 		);
+		const casSizes = uniqueSizes(
+			casObjects.map((row) => ({ key: row.digest, size: row.size }))
+		);
 		const narFileSize = sum(narSizes);
+		const casFileSize = sum(casSizes);
 
 		return {
 			storePaths: storePaths?.count ?? 0,
 			narBlobs: narSizes.length,
 			narFileSize,
-			casObjects: 0,
-			casFileSize: 0,
+			casObjects: casSizes.length,
+			casFileSize,
 			pendingUploads: pending?.count ?? 0,
-			totalFileSize: narFileSize
+			totalFileSize: narFileSize + casFileSize
 		};
 	}
 
@@ -79,25 +101,29 @@ export class StatsService {
 			.select({
 				blobs: d1Schema.tenantUsage.blobs,
 				bytes: d1Schema.tenantUsage.bytes,
+				casBlobs: d1Schema.tenantUsage.casBlobs,
+				casBytes: d1Schema.tenantUsage.casBytes,
 				quotaBytes: d1Schema.tenantUsage.quotaBytes
 			})
 			.from(d1Schema.tenantUsage)
 			.where(eq(d1Schema.tenantUsage.tenant, tenant))
 			.get();
 		const narFileSize = usage?.bytes ?? 0;
+		const casFileSize = usage?.casBytes ?? 0;
+		const totalFileSize = narFileSize + casFileSize;
 		const quotaBytes = usage?.quotaBytes ?? undefined;
 
 		return {
 			narBlobs: usage?.blobs ?? 0,
 			narFileSize,
-			casObjects: 0,
-			casFileSize: 0,
-			totalFileSize: narFileSize,
+			casObjects: usage?.casBlobs ?? 0,
+			casFileSize,
+			totalFileSize,
 			quotaBytes,
 			remainingQuotaBytes:
 				quotaBytes === undefined
 					? undefined
-					: Math.max(0, quotaBytes - narFileSize)
+					: Math.max(0, quotaBytes - totalFileSize)
 		};
 	}
 }

@@ -4,14 +4,17 @@ import { drizzle } from 'drizzle-orm/d1';
 import { beforeEach } from 'vitest';
 
 import {
+	attestationReference,
 	blobReference,
 	blobState,
+	casObject,
 	controlAuthKey,
 	controlTrust,
 	globalAdmin,
 	manifestState,
 	tenant,
 	tenantBlob,
+	tenantCasBlob,
 	tenantMaintenanceEligibility,
 	tenantMaintenanceFailure,
 	tenantUsage
@@ -31,11 +34,14 @@ await applyD1Migrations(env.CUPBOARD_DB, env.TEST_MIGRATIONS);
 // be cleared here; add new ones as the schema grows.
 beforeEach(async () => {
 	const database = drizzle(env.CUPBOARD_DB);
+	await database.delete(attestationReference).run();
 	await database.delete(blobReference).run();
+	await database.delete(tenantCasBlob).run();
 	await database.delete(tenantBlob).run();
 	await database.delete(tenantMaintenanceEligibility).run();
 	await database.delete(tenantMaintenanceFailure).run();
 	await database.delete(tenantUsage).run();
+	await database.delete(casObject).run();
 	await database.delete(blobState).run();
 	await database.delete(controlAuthKey).run();
 	await database.delete(controlTrust).run();

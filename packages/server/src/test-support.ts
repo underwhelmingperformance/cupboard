@@ -805,6 +805,8 @@ export async function tenantUsageRow(): Promise<
 			bytes: number;
 			narinfos: number;
 			blobs: number;
+			casBytes: number;
+			casBlobs: number;
 			quotaBytes: number | undefined;
 	  }
 	| undefined
@@ -814,6 +816,8 @@ export async function tenantUsageRow(): Promise<
 			bytes: d1Schema.tenantUsage.bytes,
 			narinfos: d1Schema.tenantUsage.narinfos,
 			blobs: d1Schema.tenantUsage.blobs,
+			casBytes: d1Schema.tenantUsage.casBytes,
+			casBlobs: d1Schema.tenantUsage.casBlobs,
 			quotaBytes: d1Schema.tenantUsage.quotaBytes
 		})
 		.from(d1Schema.tenantUsage)
@@ -1569,35 +1573,59 @@ export async function expectTextResponse(
 
 export async function expectStats(
 	token: string,
-	expected: StatsResponse
+	expected: StatsExpectation
 ): Promise<void> {
 	const response = await authorisedFetch('/stats', token);
 
 	expect(response.status).toBe(StatusCodes.OK);
-	expect(await response.json()).toStrictEqual(expected);
+	expect(await response.json()).toStrictEqual(statsExpectation(expected));
 }
 
 export async function expectStatsViaWorker(
 	token: string,
-	expected: StatsResponse
+	expected: StatsExpectation
 ): Promise<void> {
 	const response = await authorisedWorkerFetch('/stats', token);
 
 	expect(response.status).toBe(StatusCodes.OK);
-	expect(await response.json()).toStrictEqual(expected);
+	expect(await response.json()).toStrictEqual(statsExpectation(expected));
 }
 
 export async function expectStatsForTenant(
 	tenant: string,
 	token: string,
-	expected: StatsResponse
+	expected: StatsExpectation
 ): Promise<void> {
 	const response = await tenantWorkerFetch(tenant, '/stats', token, {
 		method: 'GET'
 	});
 
 	expect(response.status).toBe(StatusCodes.OK);
-	expect(await response.json()).toStrictEqual(expected);
+	expect(await response.json()).toStrictEqual(statsExpectation(expected));
+}
+
+type StatsExpectation = Omit<
+	StatsResponse,
+	'casFileSize' | 'casObjects' | 'narFileSize' | 'totalFileSize'
+> &
+	Partial<
+		Pick<
+			StatsResponse,
+			'casFileSize' | 'casObjects' | 'narFileSize' | 'totalFileSize'
+		>
+	>;
+
+export function statsExpectation(expected: StatsExpectation): StatsResponse {
+	const narFileSize = expected.narFileSize ?? expected.totalFileSize ?? 0;
+	const casFileSize = expected.casFileSize ?? 0;
+
+	return {
+		...expected,
+		narFileSize,
+		casObjects: expected.casObjects ?? 0,
+		casFileSize,
+		totalFileSize: expected.totalFileSize ?? narFileSize + casFileSize
+	};
 }
 
 export interface VerifiableNar {

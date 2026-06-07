@@ -734,6 +734,7 @@ export class CommitPipelineService {
 		const usage = await this.context.d1
 			.select({
 				bytes: d1Schema.tenantUsage.bytes,
+				casBytes: d1Schema.tenantUsage.casBytes,
 				quotaBytes: d1Schema.tenantUsage.quotaBytes
 			})
 			.from(d1Schema.tenantUsage)
@@ -763,7 +764,7 @@ export class CommitPipelineService {
 			return false;
 		}
 
-		return usage.bytes + fileSize > usage.quotaBytes;
+		return usage.bytes + usage.casBytes + fileSize > usage.quotaBytes;
 	}
 
 	// The size a commit of this hash will be charged: the canonical compressed size
