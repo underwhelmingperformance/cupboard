@@ -1,6 +1,7 @@
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import {
 	createRemoteJWKSet,
+	customFetch,
 	decodeJwt,
 	errors as joseErrors,
 	type JWTPayload,
@@ -180,6 +181,7 @@ export async function fetchOidcDiscovery(
 		});
 
 		if (!response.ok) {
+			await response.text();
 			throw new Error(
 				`discovery responded with HTTP ${String(response.status)}`
 			);
@@ -264,7 +266,7 @@ export class OidcDiscoveryStore {
 
 	constructor(options: OidcDiscoveryStoreOptions = {}) {
 		this.now = options.now ?? (() => Date.now());
-		this.fetcher = options.fetcher ?? fetch;
+		this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
 	}
 
 	resolve(issuer: string): Promise<ResolvedIssuer> {
@@ -278,15 +280,19 @@ export class OidcDiscoveryStore {
 			return cached.resolved;
 		}
 
-		const resolved = this.discover(issuer);
+		const resolved = this.discoverCached(issuer);
 		this.issuers.set(issuer, { resolved, fetchedAtMs: nowMs });
 
-		// A rejected discovery must not stay cached, or every later request reuses
-		// the failure for the whole window; drop it so the next call retries.
-		resolved.catch(() => {
+		return resolved;
+	}
+
+	private discoverCached(issuer: string): Promise<ResolvedIssuer> {
+		const resolved = this.discover(issuer).catch((error: unknown) => {
 			if (this.issuers.get(issuer)?.resolved === resolved) {
 				this.issuers.delete(issuer);
 			}
+
+			throw error;
 		});
 
 		return resolved;
@@ -299,6 +305,7 @@ export class OidcDiscoveryStore {
 			resolver: createRemoteJWKSet(new URL(discovery.jwksUri), {
 				cacheMaxAge: jwksCacheMaxAgeMs,
 				cooldownDuration: jwksCooldownMs,
+				[customFetch]: this.fetcher,
 				timeoutDuration: jwksTimeoutMs
 			}),
 			algorithms: intersectAlgorithms(

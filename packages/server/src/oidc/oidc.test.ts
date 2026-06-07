@@ -459,4 +459,31 @@ describe('OidcDiscoveryStore', () => {
 
 		expect(fetches).toBe(1);
 	});
+
+	it('evicts failed discovery so the next resolve retries', async () => {
+		let fetches = 0;
+		const fetcher: typeof fetch = () => {
+			fetches += 1;
+
+			if (fetches === 1) {
+				return Promise.reject(new Error('issuer is unavailable'));
+			}
+
+			return Promise.resolve(
+				Response.json({
+					issuer,
+					jwks_uri: 'https://accounts.example.com/jwks',
+					id_token_signing_alg_values_supported: ['RS256']
+				})
+			);
+		};
+		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
+
+		await expect(store.resolve(issuer)).rejects.toBeInstanceOf(
+			OidcDiscoveryError
+		);
+		await store.resolve(issuer);
+
+		expect(fetches).toBe(2);
+	});
 });

@@ -1,10 +1,14 @@
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { enforceGate } from '../control/signup.ts';
 import { SignupForbiddenError } from '../errors.ts';
-import { controlFetch, resetTestServer } from '../test-support.ts';
+import {
+	controlFetch,
+	currentOrigin,
+	resetTestServer
+} from '../test-support.ts';
 
 interface OAuthError {
 	readonly error: string;
@@ -26,8 +30,9 @@ function postSignup(
 	);
 }
 
-// A well-formed token for a given issuer/audience. Its issuer's JWKS is never
-// reachable in these tests, so verification never confirms the signature.
+// A well-formed token for a given issuer/audience. Issuer discovery or key
+// retrieval is unavailable in these tests, so verification never confirms the
+// signature.
 async function signedToken(options: {
 	issuer: string;
 	audience: string;
@@ -135,6 +140,9 @@ describe('signup gate', () => {
 
 describe('control plane POST /signup', () => {
 	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
 
 	it('rejects a subject token that is not a JWT with invalid_grant', async () => {
 		const response = await postSignup({ subject_token: 'not-a-jwt' });
@@ -151,18 +159,27 @@ describe('control plane POST /signup', () => {
 			{ subject_token: 'x' },
 			{ CUPBOARD_SIGNUP_ISSUER: '' }
 		);
+		await response.text();
 
 		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
 	});
 
-	it('reports 503 when the configured issuer is unreachable', async () => {
+	it('reports 503 when the configured issuer is unavailable', async () => {
+		const issuer = currentOrigin();
 		const subjectToken = await signedToken({
-			issuer: 'https://signup.example.test',
+			issuer,
 			audience: 'cupboard-control-client',
 			subject: 'owner'
 		});
+		vi.stubGlobal('fetch', () =>
+			Promise.reject(new Error('issuer is unavailable'))
+		);
 
-		const response = await postSignup({ subject_token: subjectToken });
+		const response = await postSignup(
+			{ subject_token: subjectToken },
+			{ CUPBOARD_SIGNUP_ISSUER: issuer }
+		);
+		await response.text();
 
 		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
 	});

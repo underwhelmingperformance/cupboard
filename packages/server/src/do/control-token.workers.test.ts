@@ -4,7 +4,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
 	controlFetch,
@@ -34,8 +34,8 @@ function postToken(
 }
 
 // A well-formed token for a given issuer/audience. With no control trust rule it
-// matches nothing; with a rule it routes there but its issuer's JWKS is never
-// reachable in these tests, so the signature is never confirmed.
+// matches nothing; with a rule it routes there but issuer discovery or key
+// retrieval is unavailable in these tests, so the signature is never confirmed.
 async function signedToken(options: {
 	issuer: string;
 	audience: string;
@@ -55,6 +55,9 @@ async function signedToken(options: {
 
 describe('control plane POST /token', () => {
 	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
 
 	it.each([
 		{
@@ -116,8 +119,8 @@ describe('control plane POST /token', () => {
 		});
 	});
 
-	it('reports 503, not invalid_grant, when the matched issuer is unreachable', async () => {
-		const issuer = 'https://unreachable.example.test';
+	it('reports 503, not invalid_grant, when the matched issuer is unavailable', async () => {
+		const issuer = currentOrigin();
 
 		await seedControlTrust({
 			issuer,
@@ -129,12 +132,16 @@ describe('control plane POST /token', () => {
 			audience: 'cupboard-control',
 			subject: 'global-admin'
 		});
+		vi.stubGlobal('fetch', () =>
+			Promise.reject(new Error('issuer is unavailable'))
+		);
 
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
 			subject_token_type: subjectTokenTypeIdToken
 		});
+		await response.text();
 
 		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
 	});
@@ -153,6 +160,7 @@ describe('control plane POST /token', () => {
 				},
 				override
 			);
+			await response.text();
 
 			expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
 		}
@@ -175,6 +183,7 @@ describe('control plane POST /token', () => {
 			subject_token: subjectToken,
 			subject_token_type: subjectTokenTypeIdToken
 		});
+		await response.text();
 
 		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 	});
@@ -185,6 +194,7 @@ describe('control plane POST /token', () => {
 			undefined,
 			{ CUPBOARD_CONTROL_AUDIENCE: '' }
 		);
+		await response.text();
 
 		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
 	});
