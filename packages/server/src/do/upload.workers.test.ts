@@ -15,7 +15,7 @@ import {
 	verifiableMaxBytes
 } from '../http/http.ts';
 import { runBlobReaper } from '../routing/scheduled.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	afterGrace,
 	authorisedFetch,
@@ -346,7 +346,7 @@ describe('upload flow', () => {
 
 		expect(commit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 	});
@@ -388,7 +388,7 @@ describe('upload flow', () => {
 
 		expect(commit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 	});
@@ -543,7 +543,7 @@ describe('upload flow', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
 		// The terminal row is reaped once its observation window has passed.
@@ -642,7 +642,7 @@ describe('upload flow', () => {
 		await markUploadPendingVerification(upload.uploadId);
 
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
 		// Past the 15-minute upload expiry: GC must not reap a pending upload, and
@@ -655,7 +655,7 @@ describe('upload flow', () => {
 
 		expect(narInfo.narHash).toBe(metadata.narHash);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
 	});
 
@@ -675,7 +675,7 @@ describe('upload flow', () => {
 		await markUploadCommitting(upload.uploadId);
 
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
 		// The verify pass re-drives it through the same reserve→verify→promote→
@@ -739,7 +739,7 @@ describe('upload flow', () => {
 		expect(retry.status).toBe('pending');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
 		// The verify pass re-drives the preserved saga to servable.
@@ -793,7 +793,7 @@ describe('upload flow', () => {
 
 		expect(await pendingUploadVerdict(liarUpload.uploadId)).toBe('mismatch');
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, liar.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, liar.storePathHash))
 		).resolves.toBeNull();
 
 		// The honest path is unaffected and still serves.
@@ -845,11 +845,11 @@ describe('upload flow', () => {
 			uploadId: 'string'
 		});
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, reserved.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, reserved.storePathHash))
 		).resolves.toBeNull();
 
 		await env.BLOBS.put(
-			narInfoObjectKey(defaultTenant, reserved.storePathHash),
+			narInfoObjectKey(fixtureTenant, reserved.storePathHash),
 			'accidental'
 		);
 		await currentServer().runVerification();
@@ -858,7 +858,7 @@ describe('upload flow', () => {
 			'mismatch'
 		);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, reserved.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, reserved.storePathHash))
 		).resolves.toBeNull();
 	});
 
@@ -913,7 +913,7 @@ describe('upload flow', () => {
 		// pending/committing rows.
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('servable');
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
 
 		// Deleting the committed path is not undone by a later verify pass: the
@@ -922,7 +922,7 @@ describe('upload flow', () => {
 		await currentServer().runVerification();
 
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 	});
 
@@ -962,7 +962,7 @@ describe('upload flow', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 	});
 
@@ -1094,7 +1094,7 @@ describe('upload flow', () => {
 
 		expect(commit.status).toBe(StatusCodes.REQUEST_TOO_LONG);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 	});
@@ -1118,7 +1118,7 @@ describe('upload flow', () => {
 
 		expect(commit.status).toBe('pending');
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 	});
 
@@ -1282,10 +1282,10 @@ describe('upload flow', () => {
 		const original = await readStoredNarInfo(metadata.storePathHash);
 
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
 		const skip = await negotiateUploads(token, [metadata]);
@@ -1320,7 +1320,7 @@ describe('upload flow', () => {
 
 		expectSingleUploadDecision(retry, metadata);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 	});
 
@@ -1336,7 +1336,7 @@ describe('upload flow', () => {
 		await commitUpload(token, upload.uploadId);
 
 		const cacheKey = new URL(
-			narInfoCachePath(defaultTenant, metadata.storePathHash),
+			narInfoCachePath(fixtureTenant, metadata.storePathHash),
 			currentOrigin()
 		).toString();
 		await readFetch(`/${metadata.storePathHash}.narinfo`);
@@ -1431,7 +1431,7 @@ describe('upload flow', () => {
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
 		const cacheKey = new URL(
-			narInfoCachePath(defaultTenant, swept.storePathHash),
+			narInfoCachePath(fixtureTenant, swept.storePathHash),
 			currentOrigin()
 		).toString();
 		await readFetch(`/${swept.storePathHash}.narinfo`);
@@ -1466,7 +1466,7 @@ describe('upload flow', () => {
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
 		const cacheKey = new URL(
-			narInfoCachePath(defaultTenant, swept.storePathHash),
+			narInfoCachePath(fixtureTenant, swept.storePathHash),
 			currentOrigin()
 		).toString();
 		await readFetch(`/${swept.storePathHash}.narinfo`);
@@ -1480,7 +1480,7 @@ describe('upload flow', () => {
 		// The sweep removed the narinfo object, but a cron-origin GC cannot purge
 		// the public edge cache, so the cached copy remains until its TTL lapses.
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, swept.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, swept.storePathHash))
 		).resolves.toBeNull();
 		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
 			Response
@@ -1890,7 +1890,7 @@ describe('upload flow', () => {
 		);
 		expect(commit.status).toBe(StatusCodes.OK);
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, committed.storePathHash)
+			narInfoObjectKey(fixtureTenant, committed.storePathHash)
 		);
 
 		// A distinct pending upload left to expire: GC must sweep it.
@@ -1908,7 +1908,7 @@ describe('upload flow', () => {
 		await worker.scheduled(scheduledController(), env);
 
 		const restored = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, committed.storePathHash)
+			narInfoObjectKey(fixtureTenant, committed.storePathHash)
 		);
 		const staleObject = await env.BLOBS.head(staleUpload.r2Key);
 
@@ -2094,7 +2094,7 @@ describe('upload flow', () => {
 			totalFileSize: narBytes.byteLength
 		});
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
@@ -2106,7 +2106,7 @@ describe('upload flow', () => {
 		// only now scheduled, with the grace starting from this removal.
 		expect(recovered.narInfosDeleted).toBe(1);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
@@ -2150,7 +2150,7 @@ describe('upload flow', () => {
 		// without deleting the object.
 		expect(collected.narInfosDeleted).toBe(0);
 		await expect(
-			env.BLOBS.head(narInfoObjectKey(defaultTenant, metadata.storePathHash))
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
 
 		const stillServed = await readFetch(`/${metadata.storePathHash}.narinfo`);
@@ -2397,13 +2397,13 @@ describe('upload flow', () => {
 			});
 
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, hashC))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashC))
 			).resolves.toBeNull();
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, hashA))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashA))
 			).resolves.not.toBeNull();
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, hashB))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashB))
 			).resolves.not.toBeNull();
 		});
 
@@ -2420,7 +2420,7 @@ describe('upload flow', () => {
 				narInfosDeleted: 0
 			});
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, path.storePathHash))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, path.storePathHash))
 			).resolves.not.toBeNull();
 		});
 
@@ -2447,7 +2447,7 @@ describe('upload flow', () => {
 				narInfosDeleted: 0
 			});
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, committed.storePathHash))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, committed.storePathHash))
 			).resolves.not.toBeNull();
 		});
 
@@ -2486,10 +2486,10 @@ describe('upload flow', () => {
 
 			expect(roots.map((root) => root.name)).toStrictEqual(['keep']);
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, hashB))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashB))
 			).resolves.toBeNull();
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, hashA))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashA))
 			).resolves.not.toBeNull();
 		});
 
@@ -2519,7 +2519,7 @@ describe('upload flow', () => {
 
 			expect(roots).toStrictEqual([]);
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, b.storePathHash))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, b.storePathHash))
 			).resolves.toBeNull();
 		});
 
@@ -2554,13 +2554,13 @@ describe('upload flow', () => {
 			});
 
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, hashC))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashC))
 			).resolves.toBeNull();
 			await expect(
 				env.BLOBS.head(narObjectKey(narHash))
 			).resolves.not.toBeNull();
 			await expect(
-				env.BLOBS.head(narInfoObjectKey(defaultTenant, hashA))
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashA))
 			).resolves.not.toBeNull();
 		});
 

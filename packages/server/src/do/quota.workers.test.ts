@@ -3,7 +3,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	blobReferenceRows,
@@ -19,7 +19,7 @@ import {
 	negotiateUploads,
 	pendingUploadVerdict,
 	prepareUpload,
-	provisionDefaultTenant,
+	provisionFixtureTenant,
 	putNarBytes,
 	resetTestServer,
 	seedCanonicalBlob,
@@ -186,7 +186,7 @@ describe('per-tenant quota', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 		// A quota one byte short of this blob.
-		await provisionDefaultTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
+		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
 
 		const decision = expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
@@ -225,7 +225,7 @@ describe('per-tenant quota', () => {
 		// The small encoding is already the available canonical blob; the quota fits it
 		// but not the larger encoding this commit stages and would adopt it over.
 		await seedCanonicalBlob(small);
-		await provisionDefaultTenant({ quotaBytes: small.narBytes.byteLength });
+		await provisionFixtureTenant({ quotaBytes: small.narBytes.byteLength });
 
 		const metadata = uploadMetadata({
 			storePathHash: 'a'.repeat(32),
@@ -256,7 +256,7 @@ describe('per-tenant quota', () => {
 		// adopts the larger canonical size, which the authoritative check rejects. The
 		// quota fits the staged size but not the canonical one.
 		await putNarBytes(narObjectKey(large.narHash), large);
-		await provisionDefaultTenant({ quotaBytes: small.narBytes.byteLength });
+		await provisionFixtureTenant({ quotaBytes: small.narBytes.byteLength });
 
 		const metadata = uploadMetadata({
 			storePathHash: 'a'.repeat(32),
@@ -324,7 +324,7 @@ describe('per-tenant quota', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key, nar);
 		await markUploadPendingVerification(upload.uploadId);
-		await provisionDefaultTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
+		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
 
 		await currentServer().runVerification();
 		// A second pass must not restore the reclaimed row's object and make an
@@ -333,7 +333,7 @@ describe('per-tenant quota', () => {
 
 		const usage = await tenantUsageRow();
 		const object = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
 		expect({

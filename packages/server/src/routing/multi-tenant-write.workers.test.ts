@@ -29,7 +29,7 @@ import {
 import worker from '../worker.ts';
 
 import { runCronSweep } from './scheduled.ts';
-import { defaultTenant } from './tenant-routing.ts';
+import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 // Stages a deferred upload for a freshly provisioned tenant, returning the write
 // token and the upload id to poll. Used to seed each tenant with work the cron's
@@ -53,7 +53,7 @@ async function stageDeferredForNewTenant(
 	return { token, uploadId };
 }
 
-// With the non-default-tenant write 501 lifted, a tenant writes through the Worker
+// With the named-tenant write gate lifted, a tenant writes through the Worker
 // under its own `/t/<tenant>/` prefix. Its narinfo objects, reference edges and
 // presence rows are tenant-scoped, while the verified NAR bytes are shared, so the
 // store dedups at rest without leaking one tenant's mapping to another.
@@ -66,7 +66,7 @@ describe('multi-tenant writes', () => {
 		await clearBlobStorage();
 	});
 
-	it('lets a non-default tenant push a path that serves only under its own prefix', async () => {
+	it('lets a named tenant push a path that serves only under its own prefix', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
 		const token = await mintTokenForTenant(
 			testServerFor('acme'),
@@ -88,20 +88,20 @@ describe('multi-tenant writes', () => {
 		const served = await handlerFetch(
 			`/t/acme/${metadata.storePathHash}.narinfo`
 		);
-		// The same store-path hash is unknown under the default tenant: the narinfo
+		// The same store-path hash is unknown under the fixture tenant: the narinfo
 		// object is tenant-scoped, so one tenant's mapping is invisible to another.
-		const atDefault = await handlerFetch(
-			`/t/${defaultTenant}/${metadata.storePathHash}.narinfo`
+		const atFixture = await handlerFetch(
+			`/t/${fixtureTenant}/${metadata.storePathHash}.narinfo`
 		);
 
 		expect({
 			served: served.status,
-			atDefault: atDefault.status,
+			atFixture: atFixture.status,
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows()
 		}).toStrictEqual({
 			served: StatusCodes.OK,
-			atDefault: StatusCodes.NOT_FOUND,
+			atFixture: StatusCodes.NOT_FOUND,
 			edges: [
 				{
 					tenant: 'acme',
@@ -128,7 +128,7 @@ describe('multi-tenant writes', () => {
 			acmeIssuer,
 			'write'
 		);
-		const defaultToken = await initialise();
+		const fixtureToken = await initialise();
 		const nar = await verifiableNar('shared-write');
 		const metadata = uploadMetadata({
 			storePathHash: 'a'.repeat(32),
@@ -139,10 +139,10 @@ describe('multi-tenant writes', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		// The default tenant pushes the NAR, then the other tenant pushes the same NAR.
+		// The fixture tenant pushes the NAR, then the other tenant pushes the same NAR.
 		// Negotiate is existence-oracle-safe, so the second tenant still uploads; the
 		// promote dedups onto the one shared blob.
-		await pushPath(defaultToken, metadata, undefined, nar);
+		await pushPath(fixtureToken, metadata, undefined, nar);
 		await pushPathToTenant('acme', acmeToken, metadata, nar);
 
 		const presence = await tenantBlobRows();
@@ -155,9 +155,9 @@ describe('multi-tenant writes', () => {
 			edgeTenants: edges.map((edge) => edge.tenant).toSorted()
 		}).toStrictEqual({
 			sharedBlobs: [{ narHash: nar.narHash }],
-			presenceTenants: ['acme', defaultTenant],
+			presenceTenants: ['acme', fixtureTenant],
 			presenceSizes: [nar.narBytes.byteLength, nar.narBytes.byteLength],
-			edgeTenants: ['acme', defaultTenant]
+			edgeTenants: ['acme', fixtureTenant]
 		});
 	});
 
@@ -168,16 +168,16 @@ describe('multi-tenant writes', () => {
 			acmeIssuer,
 			'admin'
 		);
-		const defaultToken = await initialise();
-		const defaultNar = await verifiableNar('default-stats');
+		const fixtureToken = await initialise();
+		const fixtureNar = await verifiableNar('fixture-stats');
 		const acmeNar = await verifiableNar('acme-stats');
-		const defaultMetadata = uploadMetadata({
+		const fixtureMetadata = uploadMetadata({
 			storePathHash: 'a'.repeat(32),
 			references: [],
-			narHash: defaultNar.narHash,
-			narSize: defaultNar.narSize,
-			fileHash: defaultNar.fileHash,
-			fileSize: defaultNar.narBytes.byteLength
+			narHash: fixtureNar.narHash,
+			narSize: fixtureNar.narSize,
+			fileHash: fixtureNar.fileHash,
+			fileSize: fixtureNar.narBytes.byteLength
 		});
 		const acmeMetadata = uploadMetadata({
 			storePathHash: 'b'.repeat(32),
@@ -188,14 +188,14 @@ describe('multi-tenant writes', () => {
 			fileSize: acmeNar.narBytes.byteLength
 		});
 
-		await pushPath(defaultToken, defaultMetadata, undefined, defaultNar);
+		await pushPath(fixtureToken, fixtureMetadata, undefined, fixtureNar);
 		await pushPathToTenant('acme', acmeToken, acmeMetadata, acmeNar);
 
-		await expectStats(defaultToken, {
+		await expectStats(fixtureToken, {
 			storePaths: 1,
 			narBlobs: 1,
 			pendingUploads: 0,
-			totalFileSize: defaultNar.narBytes.byteLength
+			totalFileSize: fixtureNar.narBytes.byteLength
 		});
 		await expectStatsForTenant('acme', acmeToken, {
 			storePaths: 1,
@@ -205,7 +205,7 @@ describe('multi-tenant writes', () => {
 		});
 	});
 
-	it('drives a non-default tenant deferred upload to servable from the scheduled handler', async () => {
+	it('drives a named tenant deferred upload to servable from the scheduled handler', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
 		const token = await mintTokenForTenant(
 			testServerFor('acme'),
@@ -223,7 +223,7 @@ describe('multi-tenant writes', () => {
 		});
 
 		// A deferred upload only becomes servable once the background verify pass runs.
-		// The cron must reach acme's object, not just the default tenant's, or acme's
+		// The cron must reach acme's object, not just the fixture tenant's, or acme's
 		// pending uploads would never commit.
 		const uploadId = await stageDeferredForTenant('acme', token, metadata, nar);
 		const whilePending = await tenantUploadStatus('acme', token, uploadId);
@@ -239,12 +239,12 @@ describe('multi-tenant writes', () => {
 	});
 
 	it('maintains the most-overdue tenants first, covering the fleet over ticks', async () => {
-		// Three tenants, all never-maintained (NULL `last_maintained_at`); the default
+		// Three tenants, all never-maintained (NULL `last_maintained_at`); the fixture
 		// tenant is suspended so the active fleet is exactly these three.
 		const acme = await stageDeferredForNewTenant('acme');
 		const beta = await stageDeferredForNewTenant('beta');
 		const gamma = await stageDeferredForNewTenant('gamma');
-		await suspendTenant(defaultTenant);
+		await suspendTenant(fixtureTenant);
 
 		// A batch of two: the first tick takes the two most-overdue (all NULL, so by
 		// slug tiebreaker acme and beta), maintains and stamps them; gamma is left.

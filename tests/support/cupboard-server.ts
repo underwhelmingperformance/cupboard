@@ -15,7 +15,7 @@ import {
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 
-import { defaultTenant } from '../../packages/server/src/routing/tenant-routing.ts';
+import { fixtureTenant } from '../../packages/server/src/routing/tenant-routing.test-support.ts';
 
 import { StubOidcIssuer } from './oidc-issuer.ts';
 import { presigningFetcher } from './r2-presign.ts';
@@ -32,11 +32,11 @@ export const ownerAudience = 'cupboard-owner-client';
 export const signupAudience = 'cupboard-control-client';
 export const signupSecret = 'e2e-signup-secret';
 
-// The external subject the harness presents to provision the default tenant: it
+// The external subject the harness presents to provision the fixture tenant: it
 // stands in for the operator who would do this through the control plane.
 const harnessAdminSubject = 'harness-admin';
 
-// How the harness provisions the default tenant: its read mode and, for a private
+// How the harness provisions the fixture tenant: its read mode and, for a private
 // cache, the read credential its reads require.
 export interface TenantProvisionSpec {
 	readonly readMode: 'public' | 'private';
@@ -70,12 +70,12 @@ export class CupboardTestServer {
 	) {}
 
 	/**
-	 * The default tenant's base URL — the `/t/<tenant>/` prefix every tenant route
+	 * The fixture tenant's base URL — the `/t/<tenant>/` prefix every tenant route
 	 * (token exchange, uploads, narinfo and NAR reads) lives under. The bare
 	 * {@link url} is the deployment/control surface.
 	 */
 	get tenantUrl(): URL {
-		return new URL(`/t/${defaultTenant}`, this.url);
+		return new URL(`/t/${fixtureTenant}`, this.url);
 	}
 
 	/** Resolves a tenant-relative path (e.g. `/x.narinfo`) under {@link tenantUrl}. */
@@ -176,11 +176,11 @@ export class CupboardTestServer {
 			httpServer
 		);
 
-		// Mirror a deployment: the default tenant is provisioned through the control
+		// Mirror a deployment: the fixture tenant is provisioned through the control
 		// plane before it can serve. A test that exercises a fresh bootstrap (or only
 		// the control surface) opts out with `provision: false`.
 		if (options.provision !== false) {
-			await instance.provisionDefaultTenant(
+			await instance.provisionFixtureTenant(
 				options.provision ?? { readMode: 'public' }
 			);
 		}
@@ -189,12 +189,12 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * Provisions the default tenant the way an operator would: it seeds the control
+	 * Provisions the fixture tenant the way an operator would: it seeds the control
 	 * trust policy, mints a control admin token, and creates the tenant through the
 	 * control API, which configures its Durable Object and publishes the admission
-	 * manifest. After this the default tenant serves and accepts writes.
+	 * manifest. After this the fixture tenant serves and accepts writes.
 	 */
-	async provisionDefaultTenant(spec: TenantProvisionSpec): Promise<void> {
+	async provisionFixtureTenant(spec: TenantProvisionSpec): Promise<void> {
 		await this.seedControlTrust({
 			issuer: this.issuer.issuer,
 			audience: signupAudience,
@@ -203,7 +203,7 @@ export class CupboardTestServer {
 
 		const adminToken = await this.exchangeControlAdminToken();
 		const body = {
-			id: defaultTenant,
+			id: fixtureTenant,
 			readMode: spec.readMode,
 			ownerIssuer: this.issuer.issuer,
 			ownerSubject,
@@ -285,7 +285,7 @@ export class CupboardTestServer {
 			subject_token_type: subjectTokenTypeIdToken
 		});
 		const response = await fetch(
-			new URL(`/t/${defaultTenant}/token`, this.url),
+			new URL(`/t/${fixtureTenant}/token`, this.url),
 			{
 				method: 'POST',
 				headers: { 'content-type': 'application/x-www-form-urlencoded' },

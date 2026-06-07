@@ -5,7 +5,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	corruptCommittedNarInfo,
@@ -65,7 +65,7 @@ describe('storage check', () => {
 
 		await pushPath(token, metadata);
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
 		expect(await runCheck(token)).toStrictEqual({

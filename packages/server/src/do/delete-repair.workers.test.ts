@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
@@ -68,7 +68,7 @@ describe('delete-saga crash replay', () => {
 			blobState: await blobStateNarHashes(),
 			objectPresent:
 				(await env.BLOBS.head(
-					narInfoObjectKey(defaultTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 				)) !== null
 		}).toStrictEqual({
 			markers: [],
@@ -110,7 +110,7 @@ describe('delete-saga crash replay', () => {
 			blobState: await blobStateNarHashes(),
 			objectPresent:
 				(await env.BLOBS.head(
-					narInfoObjectKey(defaultTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 				)) !== null
 		}).toStrictEqual({
 			markers: [],
@@ -138,7 +138,7 @@ describe('delete-saga crash replay', () => {
 		await deleteNarInfoRow(metadata.storePathHash);
 		await deleteBlobReferenceEdge(metadata.storePathHash, 0);
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 		await seedNarInfoDeletion({
 			storePathHash: metadata.storePathHash,
@@ -192,7 +192,7 @@ describe('delete-saga crash replay', () => {
 			generation: await narInfoGeneration(metadata.storePathHash),
 			objectPresent:
 				(await env.BLOBS.head(
-					narInfoObjectKey(defaultTenant, metadata.storePathHash)
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 				)) !== null,
 			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({

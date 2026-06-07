@@ -2,12 +2,12 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoCachePath } from '../http/http.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
 	currentOrigin,
 	narBytes,
-	provisionDefaultTenant,
+	provisionFixtureTenant,
 	pushPath,
 	readFetch,
 	resetTestServer,
@@ -18,7 +18,7 @@ const readUser = 'alice';
 const readPassword = 'secret';
 
 function makePrivate(): Promise<void> {
-	return provisionDefaultTenant({
+	return provisionFixtureTenant({
 		readMode: 'private',
 		read: { user: readUser, password: readPassword }
 	});
@@ -139,18 +139,18 @@ describe('private-read mode', () => {
 		await pushPath(init.token, publicPath);
 
 		const privateKey = new URL(
-			narInfoCachePath(defaultTenant, privatePath.storePathHash),
+			narInfoCachePath(fixtureTenant, privatePath.storePathHash),
 			currentOrigin()
 		).toString();
 		const publicKey = new URL(
-			narInfoCachePath(defaultTenant, publicPath.storePathHash),
+			narInfoCachePath(fixtureTenant, publicPath.storePathHash),
 			currentOrigin()
 		).toString();
 
 		await makePrivate();
 		await readFetch(`/${privatePath.storePathHash}.narinfo`, authorised());
 
-		await provisionDefaultTenant();
+		await provisionFixtureTenant();
 		await readFetch(`/${publicPath.storePathHash}.narinfo`);
 
 		expect({

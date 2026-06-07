@@ -68,7 +68,7 @@ import {
 } from './read/read-auth.ts';
 import { tenantServer } from './routing/durable-object.ts';
 import { runBlobReaper } from './routing/scheduled.ts';
-import { defaultTenant } from './routing/tenant-routing.ts';
+import { fixtureTenant } from './routing/tenant-routing.test-support.ts';
 import worker from './worker.ts';
 
 // The control-plane bindings live only on the public `cupboard` Worker in
@@ -140,7 +140,7 @@ export interface GcResult {
 
 /**
  * Points the harness at a fresh, isolated Durable Object so each test starts
- * from empty state, and configures it as the default tenant. The origin and the
+ * from empty state, and configures it as the fixture tenant. The origin and the
  * DO name share the same counter so the URL and the stub agree.
  */
 export async function resetTestServer(): Promise<void> {
@@ -148,19 +148,19 @@ export async function resetTestServer(): Promise<void> {
 	server = testServerFor(`test-${String(nextTestServerId)}`);
 	nextTestServerId += 1;
 
-	await configureDefaultTenant(server);
-	await configureDefaultTenant(defaultWorkerServer());
-	await provisionDefaultTenant();
+	await configureFixtureTenant(server);
+	await configureFixtureTenant(fixtureWorkerServer());
+	await provisionFixtureTenant();
 }
 
 /**
- * Writes the default tenant's D1 registry row and publishes the admission
+ * Writes the fixture tenant's D1 registry row and publishes the admission
  * manifest, the way provisioning would, so a Worker-routed read or write is
  * admitted. A `read` credential makes the cache private; omitting it leaves it
- * public. The row is upserted so a test can switch a public default tenant to
+ * public. The row is upserted so a test can switch a public fixture tenant to
  * private mid-test.
  */
-export async function provisionDefaultTenant(
+export async function provisionFixtureTenant(
 	options: {
 		readonly readMode?: 'public' | 'private';
 		readonly read?: { readonly user: string; readonly password: string };
@@ -185,7 +185,7 @@ export async function provisionDefaultTenant(
 	await database
 		.insert(d1Schema.tenant)
 		.values({
-			id: defaultTenant,
+			id: fixtureTenant,
 			status: 'active',
 			readMode,
 			ownerIssuer: env.CUPBOARD_OWNER_ISSUER,
@@ -208,7 +208,7 @@ export async function provisionDefaultTenant(
 	await database
 		.insert(d1Schema.tenantUsage)
 		.values({
-			tenant: defaultTenant,
+			tenant: fixtureTenant,
 			bytes: 0,
 			narinfos: 0,
 			blobs: 0,
@@ -225,11 +225,11 @@ export async function provisionDefaultTenant(
 }
 
 /**
- * Provisions a non-default tenant for a route-level test: writes its D1 row,
+ * Provisions a named tenant for a route-level test: writes its D1 row,
  * optionally configures its Durable Object with its path-based issuer, and
  * publishes the admission manifest. Returns the tenant's issuer URL. Pass
  * `configure: false` to admit a slug whose Durable Object stays unconfigured, so a
- * test can prove that route 503s rather than serving under a default identity.
+ * test can prove that route 503s rather than serving under a fallback identity.
  */
 export async function provisionNamedTenant(
 	id: string,
@@ -383,16 +383,16 @@ export function currentOrigin(): string {
 // (a provisioned tenant's path-based issuer) is proved separately.
 const tenantTestIssuer = 'cupboard';
 
-// Configures a Durable Object as the default tenant, the way provisioning would,
+// Configures a Durable Object as the fixture tenant, the way provisioning would,
 // with the fixed legacy issuer for low-level token round-trips; the owner triple
 // comes from the deploy env the pool binds.
-async function configureDefaultTenant(
+async function configureFixtureTenant(
 	stub: DurableObjectStub<CupboardServer>
 ): Promise<void> {
 	const issuer = tenantTestIssuer;
 
 	await stub.configure({
-		tenant: defaultTenant,
+		tenant: fixtureTenant,
 		issuer,
 		audience: issuer,
 		ownerIssuer: env.CUPBOARD_OWNER_ISSUER,
@@ -410,8 +410,8 @@ export async function useTestServer(name: string): Promise<void> {
 	origin = `https://cupboard-${name}.test`;
 	server = testServerFor(name);
 
-	await configureDefaultTenant(server);
-	await provisionDefaultTenant();
+	await configureFixtureTenant(server);
+	await provisionFixtureTenant();
 }
 
 export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
@@ -449,7 +449,7 @@ export function initialise(): Promise<string> {
 
 /** An admin token against the shared `v1` server the Worker routes to. */
 export function initialiseViaWorker(): Promise<string> {
-	return mintServerSignedTokenFor(defaultWorkerServer(), 'admin');
+	return mintServerSignedTokenFor(fixtureWorkerServer(), 'admin');
 }
 
 /**
@@ -537,11 +537,11 @@ async function activeAuthKeyFor(
 }
 
 // Deployment endpoints stay at the bare host; everything else a read addresses is
-// tenant content, served under the default tenant's prefix the Worker routes by.
+// tenant content, served under the fixture tenant's prefix the Worker routes by.
 function tenantReadPath(pathname: string): string {
 	return pathname.startsWith('/_')
 		? pathname
-		: `/t/${defaultTenant}${pathname}`;
+		: `/t/${fixtureTenant}${pathname}`;
 }
 
 export function fetchPath(
@@ -555,7 +555,7 @@ export function workerFetch(
 	pathname: string,
 	init?: RequestInit
 ): Promise<Response> {
-	return defaultWorkerServer().fetch(new URL(pathname, origin), init);
+	return fixtureWorkerServer().fetch(new URL(pathname, origin), init);
 }
 
 export function readFetch(
@@ -799,7 +799,7 @@ export async function tenantBlobRows(): Promise<
 	);
 }
 
-/** The default tenant's usage counters and quota, for asserting charge and credit. */
+/** The fixture tenant's usage counters and quota, for asserting charge and credit. */
 export async function tenantUsageRow(): Promise<
 	| {
 			bytes: number;
@@ -817,7 +817,7 @@ export async function tenantUsageRow(): Promise<
 			quotaBytes: d1Schema.tenantUsage.quotaBytes
 		})
 		.from(d1Schema.tenantUsage)
-		.where(eq(d1Schema.tenantUsage.tenant, defaultTenant))
+		.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
 		.get();
 
 	if (row === undefined) {
@@ -1004,8 +1004,8 @@ export function scheduledController(): ScheduledController {
 	};
 }
 
-export function defaultWorkerServer(): DurableObjectStub<CupboardServer> {
-	return tenantServer(env, defaultTenant);
+export function fixtureWorkerServer(): DurableObjectStub<CupboardServer> {
+	return tenantServer(env, fixtureTenant);
 }
 
 /** Prepends `/cache/<name>` to a path-scoped route for a named cache. */
@@ -1187,7 +1187,7 @@ export async function attemptPushToTenant(
 
 // Stages a deferred upload for a named tenant through the Worker (negotiate, prepare,
 // upload) and marks it pending on that tenant's object without committing, returning
-// its uploadId. Lets a test assert the cron fan-out drives a non-default tenant's
+// its uploadId. Lets a test assert the cron fan-out drives a named tenant's
 // background verify pass.
 export async function stageDeferredForTenant(
 	tenant: string,
@@ -1980,7 +1980,7 @@ export async function readStoredNarInfo(storePathHash: string): Promise<{
 	readonly cacheControl: string | undefined;
 }> {
 	const object = await env.BLOBS.get(
-		narInfoObjectKey(defaultTenant, storePathHash)
+		narInfoObjectKey(fixtureTenant, storePathHash)
 	);
 
 	if (object === null) {

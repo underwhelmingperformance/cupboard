@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfoDeletions } from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	initialise,
@@ -41,11 +41,11 @@ describe('narinfo deletion queue', () => {
 		);
 
 		await env.BLOBS.put(
-			narInfoObjectKey(defaultTenant, hash),
+			narInfoObjectKey(fixtureTenant, hash),
 			'default narinfo'
 		);
 		await env.BLOBS.put(
-			narInfoObjectKey(defaultTenant, hash, 'builds'),
+			narInfoObjectKey(fixtureTenant, hash, 'builds'),
 			'builds narinfo'
 		);
 
@@ -58,10 +58,10 @@ describe('narinfo deletion queue', () => {
 		);
 
 		const defaultObject = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, hash)
+			narInfoObjectKey(fixtureTenant, hash)
 		);
 		const namedObject = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, hash, 'builds')
+			narInfoObjectKey(fixtureTenant, hash, 'builds')
 		);
 
 		expect({

@@ -3,7 +3,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfoObjectKey } from '../http/http.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	clearBlobStorage,
@@ -68,7 +68,7 @@ describe('root activation gating', () => {
 		// Lose only the materialised object: the row and the shared blob remain, so
 		// the path is still servable once the object is re-materialised.
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
 		const summary = await setRoot(token, {
@@ -76,7 +76,7 @@ describe('root activation gating', () => {
 			targets: [metadata.storePath]
 		});
 		const repaired = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
 		expect({
@@ -107,7 +107,7 @@ describe('root activation gating', () => {
 		// narinfo row. The row exists, but the path is no longer servable.
 		await deleteBlobState(metadata.narHash);
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 		const { roots } = await listRoots(token);
 

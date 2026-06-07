@@ -6,14 +6,14 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import { currentServer, resetTestServer } from '../test-support.ts';
 
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 
 const now = new Date('2026-01-01T00:00:00.000Z');
 
-function eligibilityRow(tenant: string = defaultTenant) {
+function eligibilityRow(tenant: string = fixtureTenant) {
 	return drizzleD1(env.CUPBOARD_DB, {
 		schema: {
 			tenantMaintenanceEligibility: d1Schema.tenantMaintenanceEligibility
@@ -48,7 +48,7 @@ describe('maintenance eligibility projection', () => {
 
 		expect({ snapshot, row: await eligibilityRow() }).toStrictEqual({
 			snapshot: {
-				tenant: defaultTenant,
+				tenant: fixtureTenant,
 				pendingVerificationCount: 0,
 				earliestUploadExpiry: undefined,
 				queuedNarInfoDeletionCount: 0,
@@ -57,7 +57,7 @@ describe('maintenance eligibility projection', () => {
 				reconciledAt: now.toISOString()
 			},
 			row: {
-				tenant: defaultTenant,
+				tenant: fixtureTenant,
 				pendingVerificationCount: 0,
 				earliestUploadExpiry: undefined,
 				queuedNarInfoDeletionCount: 0,
@@ -164,7 +164,7 @@ describe('maintenance eligibility projection', () => {
 
 		expect({ snapshot, row: await eligibilityRow() }).toStrictEqual({
 			snapshot: {
-				tenant: defaultTenant,
+				tenant: fixtureTenant,
 				pendingVerificationCount: 2,
 				earliestUploadExpiry: '2026-01-02T00:00:00.000Z',
 				queuedNarInfoDeletionCount: 1,
@@ -173,7 +173,7 @@ describe('maintenance eligibility projection', () => {
 				reconciledAt: now.toISOString()
 			},
 			row: {
-				tenant: defaultTenant,
+				tenant: fixtureTenant,
 				pendingVerificationCount: 2,
 				earliestUploadExpiry: '2026-01-02T00:00:00.000Z',
 				queuedNarInfoDeletionCount: 1,
@@ -205,7 +205,7 @@ describe('maintenance eligibility projection', () => {
 		});
 
 		expect(snapshot).toStrictEqual({
-			tenant: defaultTenant,
+			tenant: fixtureTenant,
 			pendingVerificationCount: 0,
 			earliestUploadExpiry: '2026-01-04T00:00:00.000Z',
 			queuedNarInfoDeletionCount: 0,
@@ -239,7 +239,7 @@ describe('maintenance eligibility projection', () => {
 		});
 
 		expect(snapshot).toStrictEqual({
-			tenant: defaultTenant,
+			tenant: fixtureTenant,
 			pendingVerificationCount: 0,
 			earliestUploadExpiry: undefined,
 			queuedNarInfoDeletionCount: 0,

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfos } from '../db/schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
-import { defaultTenant } from '../routing/tenant-routing.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	blobStateCount,
@@ -50,12 +50,12 @@ describe('background verification', () => {
 
 		await pushPath(token, metadata);
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
 		const report = await runVerify(token);
 		const restored = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
 		expect({ report, restored: restored !== null }).toStrictEqual({
@@ -77,12 +77,12 @@ describe('background verification', () => {
 
 		await pushPath(token, metadata, 'builds');
 		await env.BLOBS.delete(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash, 'builds')
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, 'builds')
 		);
 
 		const report = await runVerify(token);
 		const restored = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash, 'builds')
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, 'builds')
 		);
 
 		expect({ report, restored: restored !== null }).toStrictEqual({
@@ -108,7 +108,7 @@ describe('background verification', () => {
 
 		const report = await runVerify(token);
 		const narInfoObject = await env.BLOBS.head(
-			narInfoObjectKey(defaultTenant, metadata.storePathHash)
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 
 		// Verify removes the dangling narinfo and retires its edge; the now-

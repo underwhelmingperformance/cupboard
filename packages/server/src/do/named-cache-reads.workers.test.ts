@@ -8,7 +8,7 @@ import {
 	bootstrap,
 	initialiseViaWorker,
 	narBytes,
-	provisionDefaultTenant,
+	provisionFixtureTenant,
 	pushPath,
 	readFetch,
 	resetTestServer,
@@ -90,7 +90,7 @@ describe('named cache reads', () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await pushPath(init.token, metadata, 'builds');
-		await provisionDefaultTenant({
+		await provisionFixtureTenant({
 			readMode: 'private',
 			read: { user: 'alice', password: 'secret' }
 		});

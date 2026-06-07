@@ -9,7 +9,7 @@ import {
 	markUploadPendingVerification,
 	negotiateUploads,
 	prepareUpload,
-	provisionDefaultTenant,
+	provisionFixtureTenant,
 	putNarBytes,
 	resetTestServer,
 	uploadMetadata,
@@ -93,7 +93,7 @@ describe('deferred upload status', () => {
 	it('reports over-quota when the canonical size exceeds the quota', async () => {
 		const nar = await verifiableNar('status-over');
 		const uploadId = await stageDeferred(nar);
-		await provisionDefaultTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
+		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });
 
 		await currentServer().runVerification();
 

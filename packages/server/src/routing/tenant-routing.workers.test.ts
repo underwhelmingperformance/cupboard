@@ -12,7 +12,7 @@ import {
 	testServerFor
 } from '../test-support.ts';
 
-import { defaultTenant } from './tenant-routing.ts';
+import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 interface TokenClaims {
 	readonly iss?: string;
@@ -109,15 +109,15 @@ describe('tenant routing', () => {
 	});
 
 	it('stops reads to a suspended tenant once the manifest carries the status', async () => {
-		// The harness configures and admits the default tenant active.
+		// The harness configures and admits the fixture tenant active.
 		const active = await handlerFetch(
-			`/t/${defaultTenant}/.well-known/jwks.json`
+			`/t/${fixtureTenant}/.well-known/jwks.json`
 		);
 
-		await suspendTenant(defaultTenant);
+		await suspendTenant(fixtureTenant);
 
 		const suspended = await handlerFetch(
-			`/t/${defaultTenant}/.well-known/jwks.json`
+			`/t/${fixtureTenant}/.well-known/jwks.json`
 		);
 
 		expect({
@@ -135,21 +135,21 @@ describe('tenant routing', () => {
 		expect(response.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
-	it('dispatches a non-default tenant write to its Durable Object to authorise', async () => {
+	it('dispatches a named tenant write to its Durable Object to authorise', async () => {
 		await provisionNamedTenant('acme');
 
 		// No token: the write is dispatched to the tenant's object, which rejects it as
-		// unauthorised, rather than the Worker refusing every non-default write.
+		// unauthorised, rather than the Worker refusing every named write.
 		const response = await handlerFetch('/t/acme/uploads', writeRequest());
 
 		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
 
-	it('stops writes to a suspended default tenant on the authoritative D1 status', async () => {
-		await suspendTenant(defaultTenant);
+	it('stops writes to a suspended fixture tenant on the authoritative D1 status', async () => {
+		await suspendTenant(fixtureTenant);
 
 		const response = await handlerFetch(
-			`/t/${defaultTenant}/uploads`,
+			`/t/${fixtureTenant}/uploads`,
 			writeRequest()
 		);
 

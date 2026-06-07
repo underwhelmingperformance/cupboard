@@ -26,8 +26,8 @@ import {
 //
 // Each test runs against its own freshly named tenant pushed through the real Worker,
 // so the Durable Object the reaper routes to by tenant slug is the one that holds the
-// data: the harness rotates the default tenant's object id per test, so the default
-// slug would route the reaper to an empty object instead.
+// data: the harness rotates the fixture tenant's object id per test, so the
+// fixture slug would route the reaper to an empty object instead.
 
 let nextTenant = 0;
 

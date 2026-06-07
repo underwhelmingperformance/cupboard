@@ -2,10 +2,6 @@ import { tenantIdSchema } from '@cupboard/nix/scalars';
 
 const tenantPrefix = '/t/';
 
-// The default tenant the single V5 deployment serves. Provisioning of further
-// tenants lands later; until then this is the only slug `/t/<slug>/` resolves to.
-export const defaultTenant = 'v1';
-
 // The tenant a path addresses and the tenant-relative remainder of that path.
 export interface TenantRoute {
 	readonly tenant: string;
