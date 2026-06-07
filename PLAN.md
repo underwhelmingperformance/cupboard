@@ -2322,12 +2322,19 @@ demotes a `cas_object` fact whose R2 object is missing.
 The builder produces the bundle in CI, where its OIDC identity lives — for
 example `actions/attest-build-provenance`, or `cosign attest-blob` against the
 instance the builder trusts. `cupboard push` attaches the builder-produced
-bundle to its uploaded paths; `--no-attest` omits it. Attachment does not gate
-root activation, consistent with the presence invariant.
+bundle to the matching path in the pushed closure by comparing the bundle's
+in-toto SHA-256 subject digest with each path's `narHash`; `--no-attest` omits
+attachment. Attachment does not gate root activation, consistent with the
+presence invariant.
 
 A consumer verifies at a policy gate (CD or admission), enumerating a closure's
 store path hashes, fetching and verifying each required attestation against the
 bundle-declared trust root, and refusing promotion on absence or failure.
+Public-good builders use the public Sigstore trust root and require an expected
+builder identity and predicate type. Private CI builders use that CI provider's
+private Sigstore root, Rekor/log policy, and identity constraints. In both cases
+the gate independently checks that the verified in-toto subject digest equals
+the narinfo `narHash`; cupboard only stores and files the bundle.
 
 ### Data model
 
@@ -2361,7 +2368,7 @@ Each step leaves a working cache.
       existence-oracle-safe own-edges negotiate for bundles. Add crash-point
       coverage for an edge whose descriptor list was not materialised yet;
       recovery re-materialises the list from durable edges.
-- [ ] **CLI attach and verify guidance.** Add `cupboard push` bundle attachment
+- [x] **CLI attach and verify guidance.** Add `cupboard push` bundle attachment
       and `--no-attest`; document consumer verification against the
       bundle-declared trust root and the subject-to-`narHash` check, with
       example policy gates for the public good and a CI provider's private

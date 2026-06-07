@@ -1,4 +1,10 @@
+import { createHash } from 'node:crypto';
+
 import { StorePath } from '@cupboard/nix/store-path';
+import type {
+	AttestationNegotiateRequest,
+	AttestationPrepareResponse
+} from '@cupboard/protocol/attestations';
 import type {
 	RootSetBody,
 	RootSetResponse
@@ -11,6 +17,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client/client.ts';
 import {
+	AttestationSubjectNotPushedError,
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError,
 	UploadWaitTimeoutError
@@ -22,7 +29,7 @@ import {
 } from '../nix/blob.ts';
 import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
 import type { NixStoreClient, NixValidPathInfo } from '../nix/nix-store.ts';
-import type { Reporter, ResultRow } from '../reporter.ts';
+import { formatBytes, type Reporter, type ResultRow } from '../reporter.ts';
 
 import {
 	type PushClient,
@@ -348,6 +355,182 @@ describe('runPush', () => {
 				{ label: 'Pin expiry', value: 'permanent' }
 			]
 		]);
+	});
+
+	it('attaches attestation bundles to the matching pushed closure path', async () => {
+		const setRoots: SetRootCall[] = [];
+		const negotiations: AttestationNegotiateRequest[] = [];
+		const uploaded: {
+			readonly r2Key: string;
+			readonly body: Uint8Array;
+			readonly contentLength: number;
+			readonly headers: Readonly<Record<string, string>>;
+		}[] = [];
+		const attached: string[] = [];
+		const results: ResultRow[][] = [];
+		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
+		const bundleDigest = sha256Hex(bundle);
+		const attestationUpload: AttestationPrepareResponse = {
+			uploadUrl: 'https://upload.example/attestation',
+			uploadHeaders: { 'x-amz-checksum-sha256': 'attestation-checksum' },
+			expiresAt: '2026-05-18T12:00:00.000Z'
+		};
+
+		await runPush([appPath], reporter(results), {
+			client: {
+				...skipClient(setRoots),
+				negotiateAttestations(token, body) {
+					expect(token).toBe('write-token');
+					negotiations.push(body);
+
+					return Promise.resolve({
+						bundles: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								digest: bundleDigest,
+								uploadId: 'attestation-app',
+								r2Key: 'staging/attestations/attestation-app',
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				prepareAttestation(token, uploadId) {
+					expect(token).toBe('write-token');
+					expect(uploadId).toBe('attestation-app');
+
+					return Promise.resolve(attestationUpload);
+				},
+				async uploadBlob(upload) {
+					uploaded.push({
+						r2Key: upload.r2Key,
+						body: await collectReadableStream(upload.body),
+						contentLength: upload.contentLength,
+						headers: upload.headers
+					});
+				},
+				attachAttestation(token, uploadId) {
+					expect(token).toBe('write-token');
+					attached.push(uploadId);
+
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						digest: bundleDigest,
+						predicateType: 'https://slsa.dev/provenance/v1',
+						status: 'attached'
+					});
+				}
+			} satisfies PushClient,
+			token: 'write-token',
+			attestations: [{ path: 'app.sigstore.json' }],
+			readAttestationBundle(path) {
+				expect(path).toBe('app.sigstore.json');
+
+				return Promise.resolve(bundle);
+			},
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(negotiations).toStrictEqual([
+			{
+				bundles: [
+					{
+						storePathHash: StorePath.hash(appPath),
+						digest: bundleDigest
+					}
+				]
+			}
+		]);
+		expect(uploaded).toStrictEqual([
+			{
+				r2Key: 'staging/attestations/attestation-app',
+				body: Buffer.from(bundle),
+				contentLength: bundle.byteLength,
+				headers: { 'x-amz-checksum-sha256': 'attestation-checksum' }
+			}
+		]);
+		expect(attached).toStrictEqual(['attestation-app']);
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Skipped', value: '1' },
+				{ label: 'Uploaded', value: '0 B' },
+				{
+					label: 'Attestations',
+					value: '1 attached, 0 reused, 0 deferred'
+				},
+				{
+					label: 'Attestation upload',
+					value: formatBytes(bundle.byteLength)
+				},
+				{ label: 'Pinned paths', value: '1' },
+				{ label: 'Pin expiry', value: 'permanent' }
+			]
+		]);
+	});
+
+	it('skips attestation work when attachment is disabled', async () => {
+		const setRoots: SetRootCall[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush([appPath], reporter(results), {
+			client: skipClient(setRoots),
+			token: 'write-token',
+			attest: false,
+			attestations: [{ path: 'app.sigstore.json' }],
+			readAttestationBundle() {
+				throw new UnexpectedPushClientCallError('readAttestationBundle');
+			},
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Skipped', value: '1' },
+				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Pinned paths', value: '1' },
+				{ label: 'Pin expiry', value: 'permanent' }
+			]
+		]);
+	});
+
+	it('rejects an attestation bundle whose subject is outside the closure', async () => {
+		const otherDigest = digest(9, 999);
+		const bundle = sigstoreBundleBytes(narDigestHex(otherDigest.narHash));
+
+		await expect(
+			runPush([appPath], reporter([]), {
+				client: skipClient([]),
+				token: 'write-token',
+				attestations: [{ path: 'other.sigstore.json' }],
+				readAttestationBundle() {
+					return Promise.resolve(bundle);
+				},
+				nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+				createTemporaryDirectory() {
+					return Promise.resolve('/tmp/cupboard-test');
+				},
+				removeTemporaryDirectory() {
+					return Promise.resolve();
+				}
+			})
+		).rejects.toThrow(AttestationSubjectNotPushedError);
 	});
 
 	it('compresses and hashes uploaded NARs in a single pass', async () => {
@@ -1009,6 +1192,39 @@ function digest(byte: number, narSize: number): NarDigest {
 	};
 }
 
+function sigstoreBundleBytes(subjectDigest: string): Uint8Array {
+	const statement = {
+		_type: 'https://in-toto.io/Statement/v1',
+		subject: [{ name: 'nar', digest: { sha256: subjectDigest } }],
+		predicateType: 'https://slsa.dev/provenance/v1',
+		predicate: { buildDefinition: {}, runDetails: {} }
+	};
+	const bundle = {
+		mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+		verificationMaterial: {
+			publicKey: { hint: 'test-key' },
+			tlogEntries: []
+		},
+		dsseEnvelope: {
+			payload: Buffer.from(JSON.stringify(statement)).toString('base64'),
+			payloadType: 'application/vnd.in-toto+json',
+			signatures: [{ sig: Buffer.from('signature').toString('base64') }]
+		}
+	};
+
+	return new TextEncoder().encode(JSON.stringify(bundle));
+}
+
+function narDigestHex(hash: NixSha256Hash): string {
+	return [...hash.digestBytes()]
+		.map((byte) => byte.toString(16).padStart(2, '0'))
+		.join('');
+}
+
+function sha256Hex(bytes: Uint8Array): string {
+	return createHash('sha256').update(bytes).digest('hex');
+}
+
 function pathInfo(
 	storePath: string,
 	narDigest: NarDigest,
@@ -1158,7 +1374,12 @@ class UnexpectedPathInfoRequestError extends Error {
 }
 
 class UnexpectedPushClientCallError extends Error {
-	constructor(public readonly method: keyof PushClient | 'compressNar') {
+	constructor(
+		public readonly method:
+			| keyof PushClient
+			| 'compressNar'
+			| 'readAttestationBundle'
+	) {
 		super(`Unexpected push client call: ${method}`);
 		this.name = 'UnexpectedPushClientCallError';
 	}

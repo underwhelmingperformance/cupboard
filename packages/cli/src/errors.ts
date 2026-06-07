@@ -140,3 +140,51 @@ export class UploadWaitTimeoutError extends CliError {
 		this.name = 'UploadWaitTimeoutError';
 	}
 }
+
+export class AttestationBundleInvalidError extends CliError {
+	constructor(
+		public readonly path: string,
+		detail = 'expected a Sigstore DSSE bundle with an in-toto statement'
+	) {
+		super(`Invalid attestation bundle ${path}: ${detail}`);
+		this.name = 'AttestationBundleInvalidError';
+	}
+}
+
+export class AttestationSubjectNotPushedError extends CliError {
+	constructor(
+		public readonly path: string,
+		public readonly subjectDigests: readonly string[]
+	) {
+		super(
+			`Attestation bundle ${path} does not describe any path in the pushed closure`
+		);
+		this.name = 'AttestationSubjectNotPushedError';
+	}
+}
+
+export class AttestationUploadUnavailableError extends CliError {
+	constructor(public readonly method: string) {
+		super(`Push client does not support attestation uploads: ${method}`);
+		this.name = 'AttestationUploadUnavailableError';
+	}
+}
+
+export class UnexpectedAttestationDecisionError extends CliError {
+	constructor(
+		public readonly storePathHash: string,
+		public readonly digest: string
+	) {
+		super(
+			`Attestation decision did not match a prepared bundle: ${storePathHash} ${digest}`
+		);
+		this.name = 'UnexpectedAttestationDecisionError';
+	}
+}
+
+export class AttestationsDisabledError extends CliError {
+	constructor() {
+		super('Cannot pass --attestation when attestation attachment is disabled');
+		this.name = 'AttestationsDisabledError';
+	}
+}

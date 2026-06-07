@@ -1,5 +1,14 @@
 import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import {
+	type AttestationAttachResponse,
+	attestationAttachResponseSchema,
+	type AttestationNegotiateRequest,
+	type AttestationNegotiateResponse,
+	attestationNegotiateResponseSchema,
+	type AttestationPrepareResponse,
+	attestationPrepareResponseSchema
+} from '@cupboard/protocol/attestations';
+import {
 	type CacheListResponse,
 	cacheListResponseSchema,
 	type CacheRemoveResponse,
@@ -501,6 +510,49 @@ export class CupboardClient {
 				method: 'PUT',
 				token,
 				body
+			}
+		);
+	}
+
+	negotiateAttestations(
+		token: AccessCredential,
+		body: AttestationNegotiateRequest
+	): Promise<AttestationNegotiateResponse> {
+		return this.requestJson(
+			this.scoped('/attestations'),
+			attestationNegotiateResponseSchema,
+			{
+				method: 'POST',
+				token,
+				body
+			}
+		);
+	}
+
+	prepareAttestation(
+		token: AccessCredential,
+		uploadId: string
+	): Promise<AttestationPrepareResponse> {
+		return this.requestJson(
+			this.scoped(`/attestations/${uploadId}`),
+			attestationPrepareResponseSchema,
+			{
+				method: 'PUT',
+				token
+			}
+		);
+	}
+
+	attachAttestation(
+		token: AccessCredential,
+		uploadId: string
+	): Promise<AttestationAttachResponse> {
+		return this.requestJson(
+			this.scoped(`/attestations/${uploadId}/attach`),
+			attestationAttachResponseSchema,
+			{
+				method: 'POST',
+				token
 			}
 		);
 	}

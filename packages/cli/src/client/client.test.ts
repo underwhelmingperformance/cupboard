@@ -1,4 +1,9 @@
 import type {
+	AttestationAttachResponse,
+	AttestationNegotiateResponse,
+	AttestationPrepareResponse
+} from '@cupboard/protocol/attestations';
+import type {
 	CacheRemoveResponse,
 	CacheSummary
 } from '@cupboard/protocol/caches';
@@ -153,6 +158,112 @@ describe('CupboardClient.uploadStatus', () => {
 			authorization: 'Bearer write-token',
 			contentType: undefined,
 			body: undefined
+		});
+	});
+});
+
+describe('CupboardClient attestation uploads', () => {
+	it('negotiates attestations under the named cache path', async () => {
+		const response: AttestationNegotiateResponse = {
+			bundles: [
+				{
+					action: 'skip',
+					storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
+					digest:
+						'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+				}
+			]
+		};
+		const body = {
+			bundles: [
+				{
+					storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
+					digest:
+						'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+				}
+			]
+		};
+		const { client, captured } = capturingClient(response, '/cache/builds');
+
+		const result = await client.negotiateAttestations('write-token', body);
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/cache/builds/attestations',
+			method: 'POST',
+			authorization: 'Bearer write-token',
+			contentType: 'application/json',
+			body: JSON.stringify(body)
+		});
+	});
+
+	it('prepares and attaches an attestation under the named cache path', async () => {
+		const prepareResponse: AttestationPrepareResponse = {
+			uploadUrl: 'https://upload.example/attestation',
+			uploadHeaders: {},
+			expiresAt: '2026-05-18T12:00:00.000Z'
+		};
+		const attachResponse: AttestationAttachResponse = {
+			storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
+			digest:
+				'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+			predicateType: 'https://slsa.dev/provenance/v1',
+			status: 'attached'
+		};
+		const requests: CapturedRequest[] = [];
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			(input, init) => {
+				if (!(input instanceof URL)) {
+					throw new TypeError('expected the client to request a URL');
+				}
+
+				const headers = new Headers(init?.headers);
+				requests.push({
+					url: input.href,
+					method: init?.method,
+					authorization: headers.get('authorization') ?? undefined,
+					contentType: headers.get('content-type') ?? undefined,
+					body: init?.body
+				});
+
+				return Promise.resolve(
+					Response.json(
+						requests.length === 1 ? prepareResponse : attachResponse
+					)
+				);
+			},
+			'/cache/builds'
+		);
+
+		const prepared = await client.prepareAttestation(
+			'write-token',
+			'attestation-app'
+		);
+		const attached = await client.attachAttestation(
+			'write-token',
+			'attestation-app'
+		);
+
+		expect({ prepared, attached, requests }).toStrictEqual({
+			prepared: prepareResponse,
+			attached: attachResponse,
+			requests: [
+				{
+					url: 'https://cupboard.test/cache/builds/attestations/attestation-app',
+					method: 'PUT',
+					authorization: 'Bearer write-token',
+					contentType: undefined,
+					body: undefined
+				},
+				{
+					url: 'https://cupboard.test/cache/builds/attestations/attestation-app/attach',
+					method: 'POST',
+					authorization: 'Bearer write-token',
+					contentType: undefined,
+					body: undefined
+				}
+			]
 		});
 	});
 });

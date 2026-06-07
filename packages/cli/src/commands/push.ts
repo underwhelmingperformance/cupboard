@@ -4,6 +4,7 @@ import { authenticateForPush } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
+import { AttestationsDisabledError } from '../errors.ts';
 import { runPush } from '../push/push.ts';
 import { createReporter } from '../reporter.ts';
 
@@ -15,6 +16,12 @@ interface PushOptions {
 	readonly cache?: string;
 	readonly wait?: boolean;
 	readonly waitTimeout?: number;
+	readonly attest?: boolean;
+	readonly attestation: readonly string[];
+}
+
+function collect(value: string, previous: readonly string[]): string[] {
+	return [...previous, value];
 }
 
 export function registerPushCommand(program: Command): void {
@@ -44,6 +51,13 @@ export function registerPushCommand(program: Command): void {
 		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
 		.option(
+			'--attestation <bundle>',
+			'attach a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
+			collect,
+			[]
+		)
+		.option('--no-attest', 'skip attestation attachment for this push')
+		.option(
 			'--no-wait',
 			'return once uploaded without waiting for deferred blobs to become servable (records no retention over still-pending paths)'
 		)
@@ -57,6 +71,10 @@ export function registerPushCommand(program: Command): void {
 				mode: reporterModeFromGlobals(program)
 			});
 			const client = CupboardClient.fromUrl(url, options.cache);
+			if (options.attest === false && options.attestation.length > 0) {
+				throw new AttestationsDisabledError();
+			}
+
 			const token = await authenticateForPush(client, {
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? url
@@ -66,6 +84,8 @@ export function registerPushCommand(program: Command): void {
 				client,
 				token,
 				wait: options.wait,
+				attest: options.attest,
+				attestations: options.attestation.map((path) => ({ path })),
 				...(options.root === undefined ? {} : { root: options.root }),
 				...(options.ttl === undefined ? {} : { ttlSeconds: options.ttl }),
 				...(options.waitTimeout === undefined
