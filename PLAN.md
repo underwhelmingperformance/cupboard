@@ -2065,6 +2065,122 @@ Verification:
 - WebSocket status watches never replace durable status polling; dropping a
   socket before or after terminal status is recorded cannot lose completion.
 
+## Future Chunked NAR CAS
+
+This is a future storage-cost project after V5 and the post-V5 cost controls
+have produced real corpus and request data. It is not part of the V5 correctness
+work. The Nix substitution protocol stays unchanged: tenants still serve
+narinfos and clients still fetch one `.nar.zst` URL for a `NarHash`. Chunking is
+only a physical storage strategy beneath that contract.
+
+The design should be measured before it is implemented. Whole-NAR dedupe already
+catches identical `NarHash` values, so the question is whether different NARs in
+the real corpus share enough large byte regions to pay for the extra R2 objects,
+request fan-out, manifest reads, Worker CPU, and maintenance complexity. A rough
+local probe showed useful reuse for large source trees and little reuse for
+compiled binaries at a 1 MiB target chunk size, so the benchmark must report
+reuse by path family rather than one fleet-wide headline number.
+
+Suggested design:
+
+- Keep D1 as the live-NAR root index, not as a per-chunk index. `blob_ref`,
+  `tenant_blob`, and the shared NAR state continue to answer which `narHash`
+  values are live. Do not write one D1 row per chunk on the commit path unless a
+  later measurement proves that maintenance scanning is worse than the D1 write
+  and index cost.
+- Store one compact R2 manifest per `narHash`, for example
+  `nar-manifest/<narHash>`. The manifest is the stored decomposition of the NAR:
+  chunker version and parameters, total `narSize`, ordered chunk descriptors,
+  and enough literal/framing records to reconstruct the exact uncompressed NAR
+  byte stream.
+- Store chunk objects in R2 under a sharded digest key, for example
+  `nar-chunk/<first4>/<chunkDigest>.zst`. The shard is only an object-key
+  layout; the digest remains the authority. Chunk objects are immutable and
+  content-addressed.
+- Prefer NAR-aware segmentation over flat content-defined chunking. Parse the
+  NAR stream enough to distinguish framing, directory metadata, symlinks, and
+  regular file contents. Keep small files and framing packed, but reset the
+  content-defined chunker at large regular-file content boundaries so chunk
+  boundaries depend on reusable file bytes, not on preceding path names or
+  metadata.
+- Treat embedded Nix store path references as volatile spans. When scanning
+  regular-file contents, force boundaries around byte ranges that look like
+  `/nix/store/<32-character-hash>-...`. That keeps changed dependency references
+  from poisoning an otherwise reusable 1 MiB content chunk. The manifest records
+  those spans as literals or small chunks so reconstruction still hashes to the
+  original `NarHash`.
+- Start with a larger target chunk size than `systemd-casync`'s default. R2
+  request costs make 64 KiB chunks unattractive for cupboard. The first spike
+  should compare 256 KiB and 1 MiB targets, with min/max bounds, on actual
+  pushed closures.
+- Preserve the existence-oracle defence. Upload negotiation must not reveal
+  global chunk presence or let a tenant skip chunks merely because another
+  tenant stored them. The first design deduplicates at rest after server-side
+  verification, just like the V5 whole-NAR shared CAS.
+
+The compressed NAR contract is the main risk. A narinfo advertises `FileHash`
+and `FileSize` for the bytes fetched at `nar/<narHash>.nar.zst`, so cupboard
+must have a stable canonical byte stream for that URL. There are two acceptable
+directions:
+
+- Keep a materialised whole `.nar.zst` object as the read-through cache and use
+  chunks as the durable source of truth for cold storage. Expiring the
+  materialised object must also account for tenant narinfo objects and their
+  edge-cache TTLs, because a cached narinfo must not point at a deleted or
+  differently-compressed NAR.
+- Spike whether Nix accepts a `.nar.zst` made from concatenated independently
+  compressed zstd frames. If it does, cupboard can make the canonical compressed
+  NAR be the ordered concatenation of the stored compressed chunk frames.
+  `FileHash` is then the hash of that concatenation and `FileSize` is the sum of
+  compressed chunk sizes, avoiding runtime recompression drift. This still has a
+  cold-read request cost, so hot paths should materialise the whole object
+  opportunistically.
+
+Garbage collection should follow the existing root-first shape. D1 identifies
+unreferenced `narHash` roots. The chunk reaper reads those NAR manifests from R2
+and removes their reference to each chunk in a paced maintenance process, or
+periodically rebuilds a live-chunk mark set by scanning live manifests. The
+normal commit path should not pay per-chunk D1 writes merely to make GC easier.
+
+Implementation sequence:
+
+1. Add a measurement-only chunking spike in the CLI or a local tool. For each
+   candidate NAR, report whole compressed size, manifest size, chunk count,
+   unique compressed chunk bytes, estimated R2 request cost, and reuse grouped
+   by package/path family. Compare flat CDC, NAR-aware file-content CDC, and
+   NAR-aware CDC with store-reference boundary cuts.
+2. Add manifest encoding/decoding and reconstruction tests. Reconstructing the
+   uncompressed stream from the manifest and chunk objects must reproduce the
+   advertised `NarHash` and `NarSize` exactly.
+3. Spike compressed serving. Test concatenated zstd frames against the pinned
+   Nix version and the Worker runtime. If that fails, use whole-NAR
+   materialisation as the only servable compressed representation.
+4. Add chunk storage in measurement or shadow mode behind the existing whole-NAR
+   upload path. The cache still serves `nar/<narHash>.nar.zst` from the current
+   shared object while the server records manifests and chunks for cost
+   comparison.
+5. Promote chunks to the durable source of truth only after the benchmark shows
+   enough reuse and the cold-read/rematerialisation path has clear operational
+   bounds. The read path must remain correct under cached narinfos, missing
+   materialised NAR objects, reaper races, and tenant offboarding.
+
+Verification:
+
+- Corpus reports show chunk reuse, object counts, request-cost estimates, and
+  cold-read/rematerialisation cost for representative source-heavy,
+  binary-heavy, and mixed closures.
+- Manifest reconstruction reproduces the exact uncompressed NAR hash and size,
+  including directory ordering, file padding, executable markers, symlinks, and
+  store-reference literal spans.
+- The compressed serving spike proves either that concatenated zstd frames are
+  accepted by Nix and stable as the advertised `FileHash`, or that cupboard must
+  materialise whole `.nar.zst` objects before serving.
+- Chunk dedupe does not change upload negotiation's privacy boundary: a tenant
+  cannot infer another tenant's chunk or NAR presence before uploading and being
+  verified.
+- GC can remove manifests, chunk objects, and materialised whole-NAR objects
+  without leaving a cached narinfo pointing at unavailable or mismatched bytes.
+
 ## Scheduled key retirement
 
 `auth-key rotate` and `control-key rotate` add a new minting key and retire
@@ -2404,7 +2520,6 @@ list, anchoring its digest in the signed narinfo, is a later hardening.
 
 ## Later features
 
-- [ ] Chunk-level dedupe rather than whole-NAR storage.
 - [ ] Import from an existing binary cache.
 - [ ] Strict uniform-pending privacy mode for high-sensitivity multi-tenant
       deployments, making new references wait through the same visible pending
