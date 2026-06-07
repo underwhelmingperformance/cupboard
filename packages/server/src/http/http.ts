@@ -34,6 +34,7 @@ export const verificationBatchSize = 500;
 // 1. The mechanism is correct at any values; only the thresholds are unmeasured.
 export const inlineVerifyMaxBytes = 8 * 1024 * 1024;
 export const verifiableMaxBytes = 4 * 1024 * 1024 * 1024;
+export const maxAttestationBundleBytes = 1024 * 1024;
 
 export const narInfoCacheTtlSeconds = 3600;
 
@@ -52,12 +53,20 @@ export function narObjectKey(narHash: string): string {
 	return `nar/${narHash}.nar.zst`;
 }
 
+export function casObjectKey(digest: string): string {
+	return `cas/${digest}`;
+}
+
 // Where a client uploads unverified bytes, private to one upload. The server
 // verifies them here, then promotes them into the shared `nar/<narHash>` key, so
 // the canonical object only ever holds confirmed content and no client ever
 // writes it directly.
 export function stagingObjectKey(uploadId: string): string {
 	return `staging/${uploadId}.nar.zst`;
+}
+
+export function attestationStagingObjectKey(uploadId: string): string {
+	return `staging/attestations/${uploadId}`;
 }
 
 // The request path a narinfo is served and edge-cached under: under the tenant

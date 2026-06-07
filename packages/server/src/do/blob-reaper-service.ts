@@ -12,7 +12,7 @@ import {
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { blobReaperGraceMs, narObjectKey } from '../http/http.ts';
+import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
 
 // One narinfo whose object the demote pass must take down: a tenant, the cache it
 // lives in, and its store-path hash. The reaper groups these by tenant and routes
@@ -68,6 +68,12 @@ export class BlobReaperService {
 		return this.collectExpiredBlobs(now, limit);
 	}
 
+	async reapCasObjects(now: Date, limit: number): Promise<number> {
+		await this.armUnreferencedCasObjects(now, limit);
+
+		return this.collectExpiredCasObjects(now, limit);
+	}
+
 	// Walks a bounded batch of `blob_state` from the persisted cursor, removing the
 	// fact and de-materialising the referencing narinfos of any shared blob whose
 	// canonical object is gone (an "available but no object" gap a crash can leave).
@@ -100,6 +106,33 @@ export class BlobReaperService {
 			}
 
 			if (await this.demoteBlob(blob.narHash, blob.verifiedAt)) {
+				demoted += 1;
+			}
+		}
+
+		return demoted;
+	}
+
+	async demoteMissingCasObjects(
+		limit: number,
+		cursor: DemoteCursor
+	): Promise<number> {
+		const after = await cursor.read();
+		const batch = await this.demoteCasBatch(after, limit);
+		const next = batch.length < limit ? '' : (batch.at(-1)?.digest ?? '');
+		await cursor.advance(next);
+
+		let demoted = 0;
+
+		for (const object of batch) {
+			const present =
+				(await this.blobs.head(casObjectKey(object.digest))) !== null;
+
+			if (present) {
+				continue;
+			}
+
+			if (await this.demoteCasObject(object.digest, object.storedAt)) {
 				demoted += 1;
 			}
 		}
@@ -199,6 +232,95 @@ export class BlobReaperService {
 		return collected;
 	}
 
+	private async armUnreferencedCasObjects(
+		now: Date,
+		limit: number
+	): Promise<void> {
+		const deleteAfter = new Date(
+			now.getTime() + blobReaperGraceMs
+		).toISOString();
+		const candidates = await this.d1
+			.select({ digest: d1Schema.casObject.digest })
+			.from(d1Schema.casObject)
+			.where(
+				and(
+					isNull(d1Schema.casObject.deleteAfter),
+					notInArray(
+						d1Schema.casObject.digest,
+						this.d1
+							.select({ digest: d1Schema.attestationReference.digest })
+							.from(d1Schema.attestationReference)
+					)
+				)
+			)
+			.limit(limit)
+			.all();
+
+		if (candidates.length === 0) {
+			return;
+		}
+
+		await this.d1
+			.update(d1Schema.casObject)
+			.set({ deleteAfter })
+			.where(
+				and(
+					inArray(
+						d1Schema.casObject.digest,
+						candidates.map((candidate) => candidate.digest)
+					),
+					isNull(d1Schema.casObject.deleteAfter)
+				)
+			)
+			.run();
+	}
+
+	private async collectExpiredCasObjects(
+		now: Date,
+		limit: number
+	): Promise<number> {
+		const nowIso = now.toISOString();
+		const expired = await this.d1
+			.select({ digest: d1Schema.casObject.digest })
+			.from(d1Schema.casObject)
+			.where(
+				and(
+					isNotNull(d1Schema.casObject.deleteAfter),
+					lte(d1Schema.casObject.deleteAfter, nowIso)
+				)
+			)
+			.limit(limit)
+			.all();
+		let collected = 0;
+
+		for (const object of expired) {
+			const removed = await this.d1
+				.delete(d1Schema.casObject)
+				.where(
+					and(
+						eq(d1Schema.casObject.digest, object.digest),
+						isNotNull(d1Schema.casObject.deleteAfter),
+						lte(d1Schema.casObject.deleteAfter, nowIso),
+						notInArray(
+							d1Schema.casObject.digest,
+							this.d1
+								.select({ digest: d1Schema.attestationReference.digest })
+								.from(d1Schema.attestationReference)
+						)
+					)
+				)
+				.returning({ digest: d1Schema.casObject.digest })
+				.all();
+
+			if (removed.length > 0) {
+				await this.blobs.delete(casObjectKey(object.digest));
+				collected += 1;
+			}
+		}
+
+		return collected;
+	}
+
 	// De-materialises the referencing narinfos for a hash whose object is gone, then
 	// deletes the `blob_state` row. The narinfos go first (idempotent in each owning
 	// Durable Object), and the fact is deleted last, fenced on the `verified_at`
@@ -267,6 +389,40 @@ export class BlobReaperService {
 			.from(d1Schema.blobState)
 			.where(gt(d1Schema.blobState.narHash, after))
 			.orderBy(asc(d1Schema.blobState.narHash))
+			.limit(limit)
+			.all();
+	}
+
+	private async demoteCasObject(
+		digest: string,
+		storedAt: string
+	): Promise<boolean> {
+		const removed = await this.d1
+			.delete(d1Schema.casObject)
+			.where(
+				and(
+					eq(d1Schema.casObject.digest, digest),
+					eq(d1Schema.casObject.storedAt, storedAt)
+				)
+			)
+			.returning({ digest: d1Schema.casObject.digest })
+			.all();
+
+		return removed.length > 0;
+	}
+
+	private demoteCasBatch(
+		after: string,
+		limit: number
+	): Promise<{ digest: string; storedAt: string }[]> {
+		return this.d1
+			.select({
+				digest: d1Schema.casObject.digest,
+				storedAt: d1Schema.casObject.storedAt
+			})
+			.from(d1Schema.casObject)
+			.where(gt(d1Schema.casObject.digest, after))
+			.orderBy(asc(d1Schema.casObject.digest))
 			.limit(limit)
 			.all();
 	}

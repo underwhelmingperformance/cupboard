@@ -442,6 +442,18 @@ export class UploadedObjectNotFoundError extends ServerHttpError {
 	}
 }
 
+export class AttestationBundleTooLargeError extends ServerHttpError {
+	readonly status = StatusCodes.REQUEST_TOO_LONG;
+
+	constructor(
+		public readonly size: number,
+		public readonly maxSize: number
+	) {
+		super('Attestation bundle is too large');
+		this.name = 'AttestationBundleTooLargeError';
+	}
+}
+
 export class UploadedObjectSizeMismatchError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 

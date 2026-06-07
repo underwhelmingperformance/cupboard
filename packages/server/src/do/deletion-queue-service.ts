@@ -7,13 +7,18 @@ import * as schema from '../db/schema.ts';
 import { narInfoCachePath, narInfoObjectKey } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 
+import {
+	type AttestationCasService,
+	type AttestationReference
+} from './attestation-cas-service.ts';
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 
 export class DeletionQueueService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService
+		private readonly authKeys: AuthKeysService,
+		private readonly attestationCas: AttestationCasService
 	) {}
 
 	async handleDeletePath(
@@ -302,6 +307,38 @@ export class DeletionQueueService {
 		this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
 
 		return { objectDeleted: true, narScheduledForDeletion };
+	}
+
+	private async retireAttestationRefs(
+		cache: string,
+		storePathHash: string,
+		generation: number
+	): Promise<void> {
+		const tenant = this.context.requireTenant();
+		const references = await this.context.d1
+			.select({
+				cache: d1Schema.attestationReference.cache,
+				storePathHash: d1Schema.attestationReference.storePathHash,
+				generation: d1Schema.attestationReference.generation,
+				predicateType: d1Schema.attestationReference.predicateType,
+				digest: d1Schema.attestationReference.digest
+			})
+			.from(d1Schema.attestationReference)
+			.where(
+				and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					eq(d1Schema.attestationReference.cache, cache),
+					eq(d1Schema.attestationReference.storePathHash, storePathHash),
+					eq(d1Schema.attestationReference.generation, generation)
+				)
+			)
+			.all();
+
+		for (const reference of references) {
+			await this.attestationCas.removeCapturedReference(
+				reference as AttestationReference
+			);
+		}
 	}
 
 	private async purgeCachedNarInfo(url: string): Promise<void> {

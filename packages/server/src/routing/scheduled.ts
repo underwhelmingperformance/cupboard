@@ -36,6 +36,7 @@ const offboardDrainChunk = 1000;
 
 // The KV key holding the demote scan's resume position (see DemoteCursor).
 const demoteCursorKey = 'reaper:demote-cursor';
+const casDemoteCursorKey = 'reaper:cas-demote-cursor';
 
 type CronDatabase = DrizzleD1Database<typeof d1Schema>;
 type TenantCronPass =
@@ -67,7 +68,9 @@ export async function runCronTick(env: Env): Promise<void> {
 		() => runCronSweep(env),
 		() => runOffboardSweep(env),
 		() => runBlobReaper(env),
+		() => runCasReaper(env),
 		() => runReaperDemote(env),
+		() => runCasReaperDemote(env),
 		() => runControlKeyRetirement(env)
 	]) {
 		try {
@@ -98,6 +101,13 @@ export function runBlobReaper(
 	return blobReaper(env).reapBlobs(new Date(), batchSize);
 }
 
+export function runCasReaper(
+	env: Env,
+	batchSize: number = blobReaperBatchSize
+): Promise<number> {
+	return blobReaper(env).reapCasObjects(new Date(), batchSize);
+}
+
 /**
  * The reaper's demote pass: a bounded, cursored scan of `blob_state` for shared
  * objects that have gone missing, removing the fact and de-materialising the
@@ -112,6 +122,16 @@ export function runReaperDemote(
 	return blobReaper(env).demoteMissingBlobs(batchSize, demoteCursor(env));
 }
 
+export function runCasReaperDemote(
+	env: Env,
+	batchSize: number = blobReaperBatchSize
+): Promise<number> {
+	return blobReaper(env).demoteMissingCasObjects(
+		batchSize,
+		casDemoteCursor(env)
+	);
+}
+
 // The demote scan's resume position, held as one KV value: it is cron bookkeeping,
 // not shared-blob data, so it lives outside the relational schema. Absent or empty
 // means start from the beginning.
@@ -119,6 +139,13 @@ function demoteCursor(env: Env): DemoteCursor {
 	return {
 		read: async () => (await env.CRON_STATE.get(demoteCursorKey)) ?? '',
 		advance: (position) => env.CRON_STATE.put(demoteCursorKey, position)
+	};
+}
+
+function casDemoteCursor(env: Env): DemoteCursor {
+	return {
+		read: async () => (await env.CRON_STATE.get(casDemoteCursorKey)) ?? '',
+		advance: (position) => env.CRON_STATE.put(casDemoteCursorKey, position)
 	};
 }
 

@@ -1,6 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
-import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { DEFAULT_CACHE, type PredicateType } from '@cupboard/nix/scalars';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
 import type {
 	RootListResponse,
@@ -56,6 +56,7 @@ import {
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import type { CupboardServer } from './do/server.ts';
 import {
+	attestationStagingObjectKey,
 	blobReaperGraceMs,
 	internalOrigin,
 	narInfoObjectKey,
@@ -797,6 +798,106 @@ export async function tenantBlobRows(): Promise<
 	return rows.toSorted((left, right) =>
 		left.narHash > right.narHash ? 1 : -1
 	);
+}
+
+export async function casObjectRows(): Promise<
+	{ digest: string; size: number; deleteAfter: string | undefined }[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select({
+			digest: d1Schema.casObject.digest,
+			size: d1Schema.casObject.size,
+			deleteAfter: d1Schema.casObject.deleteAfter
+		})
+		.from(d1Schema.casObject)
+		.all();
+
+	return rows
+		.map((row) => ({ ...row, deleteAfter: row.deleteAfter ?? undefined }))
+		.toSorted((left, right) => (left.digest > right.digest ? 1 : -1));
+}
+
+export async function attestationReferenceRows(): Promise<
+	{
+		tenant: string;
+		cache: string;
+		storePathHash: string;
+		generation: number;
+		predicateType: string;
+		digest: string;
+	}[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select()
+		.from(d1Schema.attestationReference)
+		.all();
+
+	return rows.toSorted((left, right) =>
+		`${left.storePathHash}:${String(left.generation)}:${left.predicateType}` >
+		`${right.storePathHash}:${String(right.generation)}:${right.predicateType}`
+			? 1
+			: -1
+	);
+}
+
+export async function tenantCasBlobRows(): Promise<
+	{ tenant: string; digest: string; size: number }[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.select()
+		.from(d1Schema.tenantCasBlob)
+		.all();
+
+	return rows.toSorted((left, right) => (left.digest > right.digest ? 1 : -1));
+}
+
+export async function stageAttestationBundle(
+	uploadId: string,
+	bytes: Uint8Array
+): Promise<string> {
+	const key = attestationStagingObjectKey(uploadId);
+	await env.BLOBS.put(key, bytes);
+
+	return key;
+}
+
+export async function fileAttestationReference(options: {
+	readonly uploadId: string;
+	readonly bytes: Uint8Array;
+	readonly cache?: string;
+	readonly storePathHash: string;
+	readonly generation: number;
+	readonly predicateType?: string;
+	readonly tenant?: string;
+}): Promise<{ digest: string; size: number; stagingKey: string }> {
+	const stagingKey = await stageAttestationBundle(
+		options.uploadId,
+		options.bytes
+	);
+	const measured = await testServerFor(options.tenant ?? fixtureTenant)
+		.measureAttestationBundle(stagingKey)
+		.then(async (bundle) => {
+			await testServerFor(
+				options.tenant ?? fixtureTenant
+			).promoteAttestationBundle(stagingKey, bundle);
+			return bundle;
+		});
+
+	await testServerFor(
+		options.tenant ?? fixtureTenant
+	).reserveAttestationReference(
+		{
+			cache: options.cache ?? DEFAULT_CACHE,
+			storePathHash: options.storePathHash,
+			generation: options.generation,
+			predicateType: (options.predicateType ??
+				'https://slsa.dev/provenance/v1') as PredicateType,
+			digest: measured.digest
+		},
+		measured.size
+	);
+
+	return { ...measured, stagingKey };
 }
 
 /** The fixture tenant's usage counters and quota, for asserting charge and credit. */

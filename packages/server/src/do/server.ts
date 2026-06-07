@@ -13,6 +13,12 @@ import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
+import {
+	AttestationCasService,
+	type AttestationReference,
+	type AttestationReferenceOutcome,
+	type MeasuredAttestationBundle
+} from './attestation-cas-service.ts';
 import { AuthKeysService } from './auth-keys-service.ts';
 import { type DemoteTarget } from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
@@ -44,6 +50,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private migrationPromise: Promise<void> | undefined;
 
 	private readonly authKeys: AuthKeysService;
+	private readonly attestationCas: AttestationCasService;
 	private readonly narInfoObjects: NarInfoObjectsService;
 	private readonly uploadState: UploadStateService;
 	private readonly deletionQueue: DeletionQueueService;
@@ -69,9 +76,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.tenantIdentity = new TenantIdentityService(this.context);
 		this.authKeys = new AuthKeysService(this.context, this.tenantIdentity);
+		this.attestationCas = new AttestationCasService(this.context);
 		this.narInfoObjects = new NarInfoObjectsService(this.context);
 		this.uploadState = new UploadStateService(this.context);
-		this.deletionQueue = new DeletionQueueService(this.context, this.authKeys);
+		this.deletionQueue = new DeletionQueueService(
+			this.context,
+			this.authKeys,
+			this.attestationCas
+		);
 		this.signingKeys = new SigningKeysService(this.context, this.authKeys);
 		this.stats = new StatsService(this.context, this.authKeys);
 		this.oidcTrust = new OidcTrustService(
@@ -214,6 +226,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				narHash
 			);
 		}
+	}
+
+	async measureAttestationBundle(
+		stagingKey: string
+	): Promise<MeasuredAttestationBundle> {
+		await this.initialise();
+		return this.attestationCas.measureStagedBundle(stagingKey);
+	}
+
+	async promoteAttestationBundle(
+		stagingKey: string,
+		bundle: MeasuredAttestationBundle
+	): Promise<void> {
+		await this.initialise();
+		return this.attestationCas.promoteMeasuredBundle(stagingKey, bundle);
+	}
+
+	async reserveAttestationReference(
+		reference: AttestationReference,
+		size: number
+	): Promise<AttestationReferenceOutcome> {
+		await this.initialise();
+		return this.attestationCas.reserveReferenceAndCharge(reference, size);
+	}
+
+	async removeAttestationReference(
+		reference: AttestationReference
+	): Promise<void> {
+		await this.initialise();
+		return this.attestationCas.removeCapturedReference(reference);
 	}
 
 	// The control plane begins offboarding this tenant. Marking it stops the

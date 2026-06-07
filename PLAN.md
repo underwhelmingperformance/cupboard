@@ -2345,25 +2345,27 @@ R2 keys:
 
 Each step leaves a working cache.
 
-1. **CAS generalisation and bundle lifecycle.** Add `cas_object`,
-   `attestation_ref`, and `tenant_cas_blob`; stage, measure, and promote bundles
-   into `cas/`; reference, charge through separate CAS usage counters, delete by
-   captured generation, drain during offboarding, and reap them through the V5
-   shared-object pattern; crash-point tests for bundle/no-edge,
-   dedupe-across-tenants charging each tenant once, quota rollback, re-reference
-   after reaper arming, missing-object demotion, and decrement replay. This step
-   does not materialise or serve descriptor lists.
-2. **Attach and list materialisation.** Add the authenticated attach endpoint,
-   the filing-correctness guard (well-formed bundle, subject equals committed
-   `narHash`), list materialisation from edges, `readMode` on list and bundle
-   reads with absent/unauthorised parity, and the existence-oracle-safe
-   own-edges negotiate for bundles. Add crash-point coverage for an edge whose
-   descriptor list was not materialised yet; recovery re-materialises the list
-   from durable edges.
-3. **CLI attach and verify guidance.** Add `cupboard push` bundle attachment and
-   `--no-attest`; document consumer verification against the bundle-declared
-   trust root and the subject-to-`narHash` check, with example policy gates for
-   the public good and a CI provider's private instance.
+- [x] **CAS generalisation and bundle lifecycle.** Add `cas_object`,
+      `attestation_ref`, and `tenant_cas_blob`; stage, measure, and promote
+      bundles into `cas/`; reference, charge through separate CAS usage
+      counters, delete by captured generation, drain during offboarding, and
+      reap them through the V5 shared-object pattern; crash-point tests for
+      bundle/no-edge, dedupe-across-tenants charging each tenant once, quota
+      rollback, re-reference after reaper arming, missing-object demotion, and
+      decrement replay. This step does not materialise or serve descriptor
+      lists.
+- [ ] **Attach and list materialisation.** Add the authenticated attach
+      endpoint, the filing-correctness guard (well-formed bundle, subject equals
+      committed `narHash`), list materialisation from edges, `readMode` on list
+      and bundle reads with absent/unauthorised parity, and the
+      existence-oracle-safe own-edges negotiate for bundles. Add crash-point
+      coverage for an edge whose descriptor list was not materialised yet;
+      recovery re-materialises the list from durable edges.
+- [ ] **CLI attach and verify guidance.** Add `cupboard push` bundle attachment
+      and `--no-attest`; document consumer verification against the
+      bundle-declared trust root and the subject-to-`narHash` check, with
+      example policy gates for the public good and a CI provider's private
+      instance.
 
 ### Verification
 

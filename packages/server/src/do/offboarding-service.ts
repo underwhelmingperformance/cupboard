@@ -35,7 +35,9 @@ export class OffboardingService {
 		}
 
 		await this.deleteReferenceBatch(tenant, limit);
+		await this.deleteAttestationReferenceBatch(tenant, limit);
 		await this.deletePresenceBatch(tenant, limit);
+		await this.deleteCasPresenceBatch(tenant, limit);
 
 		return { drained: !(await this.hasResidue(tenant)) };
 	}
@@ -117,6 +119,64 @@ export class OffboardingService {
 			.run();
 	}
 
+	private async deleteAttestationReferenceBatch(
+		tenant: string,
+		limit: number
+	): Promise<void> {
+		const references = await this.context.d1
+			.select({ storePathHash: d1Schema.attestationReference.storePathHash })
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.tenant, tenant))
+			.limit(limit)
+			.all();
+
+		if (references.length === 0) {
+			return;
+		}
+
+		await this.context.d1
+			.delete(d1Schema.attestationReference)
+			.where(
+				and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					inArray(
+						d1Schema.attestationReference.storePathHash,
+						references.map((reference) => reference.storePathHash)
+					)
+				)
+			)
+			.run();
+	}
+
+	private async deleteCasPresenceBatch(
+		tenant: string,
+		limit: number
+	): Promise<void> {
+		const blobs = await this.context.d1
+			.select({ digest: d1Schema.tenantCasBlob.digest })
+			.from(d1Schema.tenantCasBlob)
+			.where(eq(d1Schema.tenantCasBlob.tenant, tenant))
+			.limit(limit)
+			.all();
+
+		if (blobs.length === 0) {
+			return;
+		}
+
+		await this.context.d1
+			.delete(d1Schema.tenantCasBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantCasBlob.tenant, tenant),
+					inArray(
+						d1Schema.tenantCasBlob.digest,
+						blobs.map((blob) => blob.digest)
+					)
+				)
+			)
+			.run();
+	}
+
 	private async hasResidue(tenant: string): Promise<boolean> {
 		const edge = await this.context.d1
 			.select({ tenant: d1Schema.blobReference.tenant })
@@ -136,6 +196,28 @@ export class OffboardingService {
 			.limit(1)
 			.get();
 
-		return presence !== undefined;
+		if (presence !== undefined) {
+			return true;
+		}
+
+		const attestation = await this.context.d1
+			.select({ tenant: d1Schema.attestationReference.tenant })
+			.from(d1Schema.attestationReference)
+			.where(eq(d1Schema.attestationReference.tenant, tenant))
+			.limit(1)
+			.get();
+
+		if (attestation !== undefined) {
+			return true;
+		}
+
+		const casPresence = await this.context.d1
+			.select({ tenant: d1Schema.tenantCasBlob.tenant })
+			.from(d1Schema.tenantCasBlob)
+			.where(eq(d1Schema.tenantCasBlob.tenant, tenant))
+			.limit(1)
+			.get();
+
+		return casPresence !== undefined;
 	}
 }
