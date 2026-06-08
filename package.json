@@ -1,6 +1,7 @@
 {
 	"name": "cupboard",
 	"version": "0.0.0",
+	"license": "AGPL-3.0-or-later",
 	"devDependencies": {
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
