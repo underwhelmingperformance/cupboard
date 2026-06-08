@@ -32,6 +32,18 @@ id = "00000000000000000000000000000000"
 binding = "CRON_STATE"
 id = "00000000000000000000000000000001"
 
+[[queues.producers]]
+binding = "MAINTENANCE_QUEUE"
+queue = "cupboard-maintenance"
+
+[[queues.consumers]]
+queue = "cupboard-maintenance"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+max_concurrency = 4
+dead_letter_queue = "cupboard-maintenance-dlq"
+
 [[d1_databases]]
 binding = "CUPBOARD_DB"
 database_name = "cupboard"

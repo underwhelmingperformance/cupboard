@@ -10,7 +10,7 @@ import { handleRead } from '../read/read.ts';
 import { admitTenant } from './admission.ts';
 import { handleDeployment } from './deployment.ts';
 import { tenantServer } from './durable-object.ts';
-import { runCronTick } from './scheduled.ts';
+import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 
 export default {
@@ -56,11 +56,13 @@ export default {
 	},
 
 	async scheduled(_controller, env) {
-		// The cron tick maintains a bounded batch of active tenants (advancing a
-		// cursor over slug order so the whole fleet is covered over successive ticks
-		// without exhausting the subrequest budget) and then runs the global blob
-		// reaper. Deferred uploads need this background pass to become servable.
-		await runCronTick(env);
+		// Cron plans bounded work; the queue consumer owns execution and outcome
+		// recording so retries are per-message rather than per-tick.
+		await enqueueMaintenanceJobs(env);
+	},
+
+	async queue(batch, env) {
+		await handleMaintenanceQueue(batch, env);
 	}
 } satisfies ExportedHandler<Env>;
 

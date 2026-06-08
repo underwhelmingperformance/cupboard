@@ -1,5 +1,7 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
+import { z } from 'zod';
 
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
@@ -49,8 +51,46 @@ type DrainTenant = (
 	drainLimit: number,
 	rounds: number
 ) => Promise<void>;
+type MaintenanceQueue = Pick<Queue<MaintenanceQueueMessage>, 'sendBatch'>;
+type MaintenanceQueueDecision =
+	| { readonly action: 'ack' }
+	| {
+			readonly action: 'retry';
+			readonly delaySeconds: number;
+			readonly reason: string;
+	  };
+interface ExecuteMaintenanceQueueOptions {
+	readonly maintainTenant?: MaintainTenant;
+	readonly drainTenant?: DrainTenant;
+	readonly runBlobReaper?: (env: Env) => Promise<unknown>;
+	readonly runCasReaper?: (env: Env) => Promise<unknown>;
+	readonly runReaperDemote?: (env: Env) => Promise<unknown>;
+	readonly runCasReaperDemote?: (env: Env) => Promise<unknown>;
+	readonly runControlKeyRetirement?: (env: Env) => Promise<unknown>;
+}
 
 const maxStoredErrorLength = 4096;
+const queueRetryDelaySeconds = 60;
+const queueSendBatchSize = 100;
+
+const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
+	z.object({ kind: z.literal('tenant-maintenance'), tenant: tenantIdSchema }),
+	z.object({ kind: z.literal('offboard'), tenant: tenantIdSchema }),
+	z.object({ kind: z.literal('blob-reaper') }),
+	z.object({ kind: z.literal('cas-reaper') }),
+	z.object({ kind: z.literal('blob-demote') }),
+	z.object({ kind: z.literal('cas-demote') }),
+	z.object({ kind: z.literal('control-key-retirement') })
+]);
+
+export type MaintenanceQueueMessage =
+	| { readonly kind: 'tenant-maintenance'; readonly tenant: string }
+	| { readonly kind: 'offboard'; readonly tenant: string }
+	| { readonly kind: 'blob-reaper' }
+	| { readonly kind: 'cas-reaper' }
+	| { readonly kind: 'blob-demote' }
+	| { readonly kind: 'cas-demote' }
+	| { readonly kind: 'control-key-retirement' };
 
 /**
  * One hourly cron tick: the bounded tenant maintenance sweep, then the global blob
@@ -87,6 +127,172 @@ export async function runCronTick(env: Env): Promise<void> {
 			`cron tick had ${String(failures.length)} failing pass(es)`
 		);
 	}
+}
+
+export async function enqueueMaintenanceJobs(
+	env: Env,
+	queue: MaintenanceQueue = env.MAINTENANCE_QUEUE
+): Promise<MaintenanceQueueMessage[]> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const maintenanceTenants = await overdueActiveTenants(
+		database,
+		maintenanceBatchSize
+	);
+	const offboardTenants = await selectOffboardTenants(
+		database,
+		offboardTenantsPerTick
+	);
+	const messages: MaintenanceQueueMessage[] = [
+		...maintenanceTenants.map(
+			({ id }): MaintenanceQueueMessage => ({
+				kind: 'tenant-maintenance',
+				tenant: id
+			})
+		),
+		...offboardTenants.map(
+			({ id }): MaintenanceQueueMessage => ({ kind: 'offboard', tenant: id })
+		),
+		{ kind: 'blob-reaper' },
+		{ kind: 'cas-reaper' },
+		{ kind: 'blob-demote' },
+		{ kind: 'cas-demote' },
+		{ kind: 'control-key-retirement' }
+	];
+
+	await sendQueueMessages(queue, messages);
+
+	return messages;
+}
+
+async function sendQueueMessages(
+	queue: MaintenanceQueue,
+	messages: readonly MaintenanceQueueMessage[]
+): Promise<void> {
+	for (let offset = 0; offset < messages.length; offset += queueSendBatchSize) {
+		const batch = messages.slice(offset, offset + queueSendBatchSize);
+
+		await queue.sendBatch(batch.map((body) => ({ body })));
+	}
+}
+
+export async function handleMaintenanceQueue(
+	batch: MessageBatch,
+	env: Env
+): Promise<void> {
+	for (const message of batch.messages) {
+		const parsed = maintenanceQueueMessageSchema.safeParse(message.body);
+
+		if (!parsed.success) {
+			logInvalidMaintenanceQueueMessage(batch, message, parsed.error);
+			message.ack();
+			continue;
+		}
+
+		const decision = await executeMaintenanceQueueMessage(env, parsed.data);
+
+		if (decision.action === 'ack') {
+			message.ack();
+			continue;
+		}
+
+		logMaintenanceQueueRetry(batch, message, parsed.data, decision);
+		message.retry({ delaySeconds: decision.delaySeconds });
+	}
+}
+
+export async function executeMaintenanceQueueMessage(
+	env: Env,
+	message: MaintenanceQueueMessage,
+	options: ExecuteMaintenanceQueueOptions = {}
+): Promise<MaintenanceQueueDecision> {
+	try {
+		switch (message.kind) {
+			case 'tenant-maintenance': {
+				return await executeTenantMaintenanceMessage(
+					env,
+					message.tenant,
+					options.maintainTenant ?? maintainTenant
+				);
+			}
+			case 'offboard': {
+				return await executeOffboardMessage(
+					env,
+					message.tenant,
+					options.drainTenant ?? drainTenant
+				);
+			}
+			case 'blob-reaper': {
+				await (options.runBlobReaper ?? runBlobReaper)(env);
+				return { action: 'ack' };
+			}
+			case 'cas-reaper': {
+				await (options.runCasReaper ?? runCasReaper)(env);
+				return { action: 'ack' };
+			}
+			case 'blob-demote': {
+				await (options.runReaperDemote ?? runReaperDemote)(env);
+				return { action: 'ack' };
+			}
+			case 'cas-demote': {
+				await (options.runCasReaperDemote ?? runCasReaperDemote)(env);
+				return { action: 'ack' };
+			}
+			case 'control-key-retirement': {
+				await (options.runControlKeyRetirement ?? runControlKeyRetirement)(env);
+				return { action: 'ack' };
+			}
+		}
+	} catch (error) {
+		return {
+			action: 'retry',
+			delaySeconds: queueRetryDelaySeconds,
+			reason: errorSummary(error)
+		};
+	}
+}
+
+function logInvalidMaintenanceQueueMessage(
+	batch: MessageBatch,
+	message: Message,
+	error: z.ZodError
+): void {
+	console.warn('maintenance queue message rejected', {
+		queue: batch.queue,
+		messageId: message.id,
+		attempts: message.attempts,
+		issues: error.issues.map((issue) => ({
+			code: issue.code,
+			path: issue.path.map(String),
+			message: issue.message
+		}))
+	});
+}
+
+function logMaintenanceQueueRetry(
+	batch: MessageBatch,
+	message: Message,
+	body: MaintenanceQueueMessage,
+	decision: Extract<MaintenanceQueueDecision, { readonly action: 'retry' }>
+): void {
+	console.error('maintenance queue message retrying', {
+		queue: batch.queue,
+		messageId: message.id,
+		attempts: message.attempts,
+		delaySeconds: decision.delaySeconds,
+		reason: decision.reason,
+		...maintenanceQueueMessageLogFields(body)
+	});
+}
+
+function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
+	readonly kind: string;
+	readonly tenant?: string;
+} {
+	if ('tenant' in message) {
+		return { kind: message.kind, tenant: message.tenant };
+	}
+
+	return { kind: message.kind };
 }
 
 /**
@@ -202,13 +408,7 @@ export async function runOffboardSweep(
 	drain: DrainTenant = drainTenant
 ): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	const tenants = await database
-		.select({ id: d1Schema.tenant.id })
-		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.status, 'offboarding'))
-		.orderBy(asc(d1Schema.tenant.id))
-		.limit(tenantLimit)
-		.all();
+	const tenants = await selectOffboardTenants(database, tenantLimit);
 
 	const results = await Promise.allSettled(
 		tenants.map(({ id }) => drain(env, id, drainLimit, rounds))
@@ -232,6 +432,19 @@ export async function runOffboardSweep(
 			`offboard drain failed for ${String(failures.length)} of ${String(tenants.length)} tenant(s)`
 		);
 	}
+}
+
+function selectOffboardTenants(
+	database: CronDatabase,
+	tenantLimit: number
+): Promise<{ readonly id: string }[]> {
+	return database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.status, 'offboarding'))
+		.orderBy(asc(d1Schema.tenant.id))
+		.limit(tenantLimit)
+		.all();
 }
 
 async function reconcileOffboardedManifest(
@@ -400,6 +613,81 @@ function maintainTenant(env: Env, id: string): Promise<void> {
 	);
 }
 
+async function executeTenantMaintenanceMessage(
+	env: Env,
+	tenant: string,
+	maintain: MaintainTenant
+): Promise<MaintenanceQueueDecision> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	if (!(await tenantMaintenanceIsDue(database, tenant))) {
+		return { action: 'ack' };
+	}
+
+	const result = await Promise.resolve()
+		.then(() => maintain(env, tenant))
+		.then(
+			() => ({ status: 'fulfilled', value: undefined }) as const,
+			(error: unknown) => ({ status: 'rejected', reason: error }) as const
+		);
+
+	await recordTenantPassOutcomes(
+		database,
+		'maintenance',
+		[{ id: tenant }],
+		[result]
+	);
+	await stampMaintained(database, [{ id: tenant }]);
+
+	return { action: 'ack' };
+}
+
+async function executeOffboardMessage(
+	env: Env,
+	tenant: string,
+	drain: DrainTenant
+): Promise<MaintenanceQueueDecision> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	const status = await tenantStatus(database, tenant);
+
+	if (status === 'offboarding') {
+		const result = await Promise.resolve()
+			.then(() => drain(env, tenant, offboardDrainChunk, offboardRoundsPerTick))
+			.then(
+				() => ({ status: 'fulfilled', value: undefined }) as const,
+				(error: unknown) => ({ status: 'rejected', reason: error }) as const
+			);
+
+		await recordTenantPassOutcomes(
+			database,
+			'offboard',
+			[{ id: tenant }],
+			[result]
+		);
+		await reconcileOffboardedManifest(env, database);
+
+		return { action: 'ack' };
+	}
+
+	if (status === 'offboarded') {
+		await reconcileOffboardedManifest(env, database);
+	}
+
+	return { action: 'ack' };
+}
+
+function tenantStatus(
+	database: CronDatabase,
+	tenant: string
+): Promise<typeof d1Schema.tenant.$inferSelect.status | undefined> {
+	return database
+		.select({ status: d1Schema.tenant.status })
+		.from(d1Schema.tenant)
+		.where(eq(d1Schema.tenant.id, tenant))
+		.get()
+		.then((row) => row?.status);
+}
+
 // The most-overdue active tenants. NULL `last_maintained_at` (never maintained) sorts
 // first in SQLite ascending order, so a new tenant is picked up promptly; the id is
 // the tiebreaker for a stable batch among equal timestamps.
@@ -407,12 +695,6 @@ function overdueActiveTenants(
 	database: CronDatabase,
 	batchSize: number
 ): Promise<{ readonly id: string }[]> {
-	const now = new Date();
-	const nowIso = now.toISOString();
-	const staleBefore = new Date(
-		now.getTime() - maintenanceEligibilityStaleMs
-	).toISOString();
-
 	return database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
@@ -420,19 +702,44 @@ function overdueActiveTenants(
 			d1Schema.tenantMaintenanceEligibility,
 			eq(d1Schema.tenantMaintenanceEligibility.tenant, d1Schema.tenant.id)
 		)
-		.where(
-			and(
-				eq(d1Schema.tenant.status, 'active'),
-				or(
-					isNull(d1Schema.tenantMaintenanceEligibility.tenant),
-					lte(d1Schema.tenantMaintenanceEligibility.reconciledAt, staleBefore),
-					lte(d1Schema.tenantMaintenanceEligibility.nextMaintenanceAt, nowIso)
-				)
-			)
-		)
+		.where(tenantMaintenanceDueCondition())
 		.orderBy(asc(d1Schema.tenant.lastMaintainedAt), asc(d1Schema.tenant.id))
 		.limit(batchSize)
 		.all();
+}
+
+function tenantMaintenanceIsDue(
+	database: CronDatabase,
+	tenant: string
+): Promise<boolean> {
+	return database
+		.select({ id: d1Schema.tenant.id })
+		.from(d1Schema.tenant)
+		.leftJoin(
+			d1Schema.tenantMaintenanceEligibility,
+			eq(d1Schema.tenantMaintenanceEligibility.tenant, d1Schema.tenant.id)
+		)
+		.where(and(tenantMaintenanceDueCondition(), eq(d1Schema.tenant.id, tenant)))
+		.limit(1)
+		.get()
+		.then((row) => row !== undefined);
+}
+
+function tenantMaintenanceDueCondition() {
+	const now = new Date();
+	const nowIso = now.toISOString();
+	const staleBefore = new Date(
+		now.getTime() - maintenanceEligibilityStaleMs
+	).toISOString();
+
+	return and(
+		eq(d1Schema.tenant.status, 'active'),
+		or(
+			isNull(d1Schema.tenantMaintenanceEligibility.tenant),
+			lte(d1Schema.tenantMaintenanceEligibility.reconciledAt, staleBefore),
+			lte(d1Schema.tenantMaintenanceEligibility.nextMaintenanceAt, nowIso)
+		)
+	);
 }
 
 // Stamps the maintained batch so the next tick advances to the next-oldest tenants.

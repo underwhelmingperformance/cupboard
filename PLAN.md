@@ -2032,9 +2032,9 @@ Implementation sequence:
    cursoring/fairness so early slugs cannot monopolise the drain. A pass that
    reaches its limit records the next cursor/deadline so the eligibility row
    keeps the tenant scheduled.
-4. Add queue-backed maintenance scheduling. Cron becomes a lightweight,
+4. Add queue-backed maintenance scheduling. _(Done.)_ Cron is now a lightweight,
    idempotent planner: it reads the same D1 eligibility, tenant status, and
-   global reaper state it reads today, but enqueues bounded jobs instead of
+   global reaper state it read before, but enqueues bounded jobs instead of
    performing all maintenance inline in the scheduled Worker invocation. Queue
    messages carry only stable task identity and routing facts, such as
    `{ kind: "tenant-maintenance", tenant }`, `{ kind: "offboard", tenant }`,
@@ -2045,14 +2045,12 @@ Implementation sequence:
    bundle of global passes from one message, that bundle is named explicitly so
    outcome records and retries still identify the bounded work attempted.
 
-   The planner also bounds enqueue volume. Duplicate delivery must be safe, but
-   cron should not enqueue the same delayed tenant or global pass every tick
-   while the queue is backed up. Either reserve or mark the due job in D1/KV
-   with an `enqueued_at` and deadline-style guard, or otherwise prove the
-   duplicate enqueue rate is bounded by the chosen batch sizes and cron cadence.
-   The guard is a cost and backpressure control, not correctness state; a stale
-   or missing guard fails open by letting the planner enqueue work whose
-   executor will re-check the authoritative state.
+   The planner also bounds enqueue volume. Duplicate delivery is safe, and the
+   implementation bounds duplicate enqueue rate by the chosen batch sizes and
+   cron cadence rather than adding a D1/KV `enqueued_at` guard. Such a guard
+   would be a cost and backpressure control, not correctness state; a stale or
+   missing guard would fail open by letting the planner enqueue work whose
+   executor re-checks the authoritative state.
 
    The Queue consumer is the executor. It re-checks the authoritative D1 or DO
    state before doing work, calls the same synchronous cores the cron calls

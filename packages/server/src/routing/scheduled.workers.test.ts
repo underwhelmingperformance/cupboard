@@ -3,20 +3,329 @@ import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { readTenantManifest } from '../control/tenant-manifest.ts';
+import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	offboardTenant,
 	provisionNamedTenant,
 	resetTestServer,
+	scheduledController,
 	suspendTenant,
 	tenantMaintained,
 	tenantMaintenanceFailureRow
 } from '../test-support.ts';
+import worker from '../worker.ts';
 
-import { runCronSweep, runOffboardSweep } from './scheduled.ts';
+import {
+	enqueueMaintenanceJobs,
+	executeMaintenanceQueueMessage,
+	type MaintenanceQueueMessage,
+	runCronSweep,
+	runOffboardSweep
+} from './scheduled.ts';
 
 describe('scheduled tenant pass failure records', () => {
 	beforeEach(resetTestServer);
+
+	it('plans bounded queue jobs without recording tenant outcomes', async () => {
+		await provisionNamedTenant('acme');
+		await provisionNamedTenant('beta');
+		await provisionNamedTenant('current');
+		await provisionNamedTenant('retiring');
+		await deleteEligibility('acme');
+		await writeEligibility('beta', {
+			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await writeEligibility('current', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await offboardTenant('retiring');
+
+		const sent: MaintenanceQueueMessage[][] = [];
+		const messages = await runWithClock('2026-01-01T00:00:00.000Z', () =>
+			enqueueMaintenanceJobs(env, {
+				sendBatch: (batch) => {
+					sent.push(Array.from(batch, (entry) => entry.body));
+
+					return Promise.resolve(queueSendBatchResponse());
+				}
+			})
+		);
+
+		expect({
+			messages,
+			sent,
+			acmeOutcome: await tenantMaintenanceFailureRow('acme', 'maintenance'),
+			retiringOutcome: await tenantMaintenanceFailureRow(
+				'retiring',
+				'offboard'
+			),
+			acmeMaintained: await tenantMaintained('acme')
+		}).toStrictEqual({
+			messages: [
+				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{ kind: 'tenant-maintenance', tenant: 'beta' },
+				{ kind: 'offboard', tenant: 'retiring' },
+				{ kind: 'blob-reaper' },
+				{ kind: 'cas-reaper' },
+				{ kind: 'blob-demote' },
+				{ kind: 'cas-demote' },
+				{ kind: 'control-key-retirement' }
+			],
+			sent: [
+				[
+					{ kind: 'tenant-maintenance', tenant: 'acme' },
+					{ kind: 'tenant-maintenance', tenant: 'beta' },
+					{ kind: 'offboard', tenant: 'retiring' },
+					{ kind: 'blob-reaper' },
+					{ kind: 'cas-reaper' },
+					{ kind: 'blob-demote' },
+					{ kind: 'cas-demote' },
+					{ kind: 'control-key-retirement' }
+				]
+			],
+			acmeOutcome: undefined,
+			retiringOutcome: undefined,
+			acmeMaintained: false
+		});
+	});
+
+	it('scheduled entrypoint enqueues bounded maintenance jobs', async () => {
+		await provisionNamedTenant('acme');
+		await provisionNamedTenant('current');
+		await provisionNamedTenant('retiring');
+		await deleteEligibility('acme');
+		await writeEligibility('current', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+		await offboardTenant('retiring');
+
+		const sent: MaintenanceQueueMessage[] = [];
+		await runWithClock('2026-01-01T00:00:00.000Z', () =>
+			worker.scheduled(scheduledController(), {
+				...env,
+				MAINTENANCE_QUEUE: queueCollector(sent)
+			})
+		);
+
+		expect({
+			sent,
+			acmeOutcome: await tenantMaintenanceFailureRow('acme', 'maintenance'),
+			retiringOutcome: await tenantMaintenanceFailureRow('retiring', 'offboard')
+		}).toStrictEqual({
+			sent: [
+				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{ kind: 'offboard', tenant: 'retiring' },
+				{ kind: 'blob-reaper' },
+				{ kind: 'cas-reaper' },
+				{ kind: 'blob-demote' },
+				{ kind: 'cas-demote' },
+				{ kind: 'control-key-retirement' }
+			],
+			acmeOutcome: undefined,
+			retiringOutcome: undefined
+		});
+	});
+
+	it('executes stale tenant maintenance messages as no-ops', async () => {
+		await provisionNamedTenant('acme');
+		await writeEligibility('acme', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+
+		const seen: string[] = [];
+		const decision = await runWithClock('2026-01-01T00:00:00.000Z', () =>
+			executeMaintenanceQueueMessage(
+				env,
+				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{
+					maintainTenant: (_env, id) => {
+						seen.push(id);
+
+						return Promise.resolve();
+					}
+				}
+			)
+		);
+
+		expect({
+			decision,
+			seen,
+			outcome: await tenantMaintenanceFailureRow('acme', 'maintenance'),
+			maintained: await tenantMaintained('acme')
+		}).toStrictEqual({
+			decision: { action: 'ack' },
+			seen: [],
+			outcome: undefined,
+			maintained: false
+		});
+	});
+
+	it('records tenant maintenance queue outcomes after an actual attempt', async () => {
+		await provisionNamedTenant('acme');
+		await deleteEligibility('acme');
+
+		const decision = await executeMaintenanceQueueMessage(
+			env,
+			{ kind: 'tenant-maintenance', tenant: 'acme' },
+			{
+				maintainTenant: () =>
+					Promise.reject(new Error('queue maintenance failed'))
+			}
+		);
+		const outcome = await tenantMaintenanceFailureRow('acme', 'maintenance');
+
+		expect({
+			decision,
+			outcome: {
+				consecutiveFailures: outcome?.consecutiveFailures,
+				lastError: outcome?.lastError,
+				failed: outcome?.lastFailedAt !== undefined,
+				succeeded: outcome?.lastSuccessAt !== undefined
+			},
+			maintained: await tenantMaintained('acme')
+		}).toStrictEqual({
+			decision: { action: 'ack' },
+			outcome: {
+				consecutiveFailures: 1,
+				lastError: 'Error: queue maintenance failed',
+				failed: true,
+				succeeded: false
+			},
+			maintained: true
+		});
+	});
+
+	it('retries global queue work when the bounded pass fails', async () => {
+		const decision = await executeMaintenanceQueueMessage(
+			env,
+			{ kind: 'blob-reaper' },
+			{ runBlobReaper: () => Promise.reject(new Error('r2 unavailable')) }
+		);
+
+		expect(decision).toStrictEqual({
+			action: 'retry',
+			delaySeconds: 60,
+			reason: 'Error: r2 unavailable'
+		});
+	});
+
+	it('reconciles already-offboarded queue messages without recording a fresh outcome', async () => {
+		await provisionNamedTenant('retiring');
+		await finaliseOffboardedTenant(
+			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
+			'retiring'
+		);
+		const beforeManifest = await readTenantManifest(env.TENANT_CACHE);
+
+		const decision = await executeMaintenanceQueueMessage(env, {
+			kind: 'offboard',
+			tenant: 'retiring'
+		});
+		const afterManifest = await readTenantManifest(env.TENANT_CACHE);
+
+		expect({
+			decision,
+			outcome: await tenantMaintenanceFailureRow('retiring', 'offboard'),
+			before: beforeManifest?.tenants.retiring !== undefined,
+			after: afterManifest?.tenants.retiring !== undefined
+		}).toStrictEqual({
+			decision: { action: 'ack' },
+			outcome: undefined,
+			before: true,
+			after: false
+		});
+	});
+
+	it('acks stale offboard messages for tenants that are not offboarding', async () => {
+		await provisionNamedTenant('active');
+		await provisionNamedTenant('suspended');
+		await suspendTenant('suspended');
+
+		const seen: string[] = [];
+		const decisions = await Promise.all(
+			['active', 'suspended', 'absent'].map((tenant) =>
+				executeMaintenanceQueueMessage(
+					env,
+					{ kind: 'offboard', tenant },
+					{
+						drainTenant: (_env, id) => {
+							seen.push(id);
+
+							return Promise.resolve();
+						}
+					}
+				)
+			)
+		);
+
+		expect({
+			decisions,
+			seen,
+			activeOutcome: await tenantMaintenanceFailureRow('active', 'offboard'),
+			suspendedOutcome: await tenantMaintenanceFailureRow(
+				'suspended',
+				'offboard'
+			),
+			absentOutcome: await tenantMaintenanceFailureRow('absent', 'offboard')
+		}).toStrictEqual({
+			decisions: [{ action: 'ack' }, { action: 'ack' }, { action: 'ack' }],
+			seen: [],
+			activeOutcome: undefined,
+			suspendedOutcome: undefined,
+			absentOutcome: undefined
+		});
+	});
+
+	it('queue entrypoint acks, retries, and logs messages independently', async () => {
+		const actions: QueueMessageAction[] = [];
+		const batch = queueBatch([
+			queueMessage('success', { kind: 'control-key-retirement' }, actions),
+			queueMessage('retry', { kind: 'blob-demote' }, actions),
+			queueMessage('invalid', { kind: 'unknown' }, actions)
+		]);
+		const warnings: unknown[][] = [];
+		const errors: unknown[][] = [];
+		const warn = vi
+			.spyOn(console, 'warn')
+			.mockImplementation((...logArguments: unknown[]) => {
+				warnings.push(logArguments);
+			});
+		const error = vi
+			.spyOn(console, 'error')
+			.mockImplementation((...logArguments: unknown[]) => {
+				errors.push(logArguments);
+			});
+
+		try {
+			await worker.queue(batch, {
+				...env,
+				CRON_STATE: {
+					...env.CRON_STATE,
+					get: () => Promise.reject(new Error('kv unavailable'))
+				}
+			});
+		} finally {
+			warn.mockRestore();
+			error.mockRestore();
+		}
+
+		expect({
+			actions,
+			warnings: warnings.length,
+			errors: errors.length
+		}).toStrictEqual({
+			actions: [
+				{ id: 'success', action: 'ack' },
+				{ id: 'retry', action: 'retry', delaySeconds: 60 },
+				{ id: 'invalid', action: 'ack' }
+			],
+			warnings: 1,
+			errors: 1
+		});
+	});
 
 	it('skips active tenants with current idle eligibility', async () => {
 		await provisionNamedTenant('acme');
@@ -346,4 +655,93 @@ async function runWithClock<T>(
 	} finally {
 		vi.useRealTimers();
 	}
+}
+
+interface QueueMessageAction {
+	readonly id: string;
+	readonly action: 'ack' | 'retry';
+	readonly delaySeconds?: number;
+}
+
+function queueBatch(messages: readonly Message[]): MessageBatch {
+	return {
+		messages,
+		queue: 'cupboard-maintenance',
+		metadata: {
+			metrics: {
+				backlogBytes: 0,
+				backlogCount: 0
+			}
+		},
+		ackAll: () => {
+			throw new Error('ackAll was not expected');
+		},
+		retryAll: () => {
+			throw new Error('retryAll was not expected');
+		}
+	};
+}
+
+function queueMessage(
+	id: string,
+	body: unknown,
+	actions: QueueMessageAction[]
+): Message {
+	return {
+		id,
+		timestamp: new Date('2026-01-01T00:00:00.000Z'),
+		attempts: 1,
+		body,
+		ack: () => actions.push({ id, action: 'ack' }),
+		retry: (options) =>
+			actions.push({
+				id,
+				action: 'retry',
+				delaySeconds: options?.delaySeconds
+			})
+	};
+}
+
+function queueSendBatchResponse(): QueueSendBatchResponse {
+	return {
+		metadata: {
+			metrics: {
+				backlogBytes: 0,
+				backlogCount: 0
+			}
+		}
+	};
+}
+
+function queueSendResponse(): QueueSendResponse {
+	return {
+		metadata: {
+			metrics: {
+				backlogBytes: 0,
+				backlogCount: 0
+			}
+		}
+	};
+}
+
+function queueCollector(
+	sent: MaintenanceQueueMessage[]
+): Queue<MaintenanceQueueMessage> {
+	return {
+		metrics: () =>
+			Promise.resolve({
+				backlogBytes: 0,
+				backlogCount: 0
+			}),
+		send: (message) => {
+			sent.push(message);
+
+			return Promise.resolve(queueSendResponse());
+		},
+		sendBatch: (batch) => {
+			sent.push(...Array.from(batch, (entry) => entry.body));
+
+			return Promise.resolve(queueSendBatchResponse());
+		}
+	};
 }

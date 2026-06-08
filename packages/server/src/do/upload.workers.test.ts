@@ -14,7 +14,12 @@ import {
 	narObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
-import { runBlobReaper } from '../routing/scheduled.ts';
+import {
+	enqueueMaintenanceJobs,
+	executeMaintenanceQueueMessage,
+	type MaintenanceQueueMessage,
+	runBlobReaper
+} from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	afterGrace,
@@ -65,7 +70,6 @@ import {
 	resetTestServer,
 	runGcFromInternalOrigin,
 	runGcResult,
-	scheduledController,
 	seedReservedNarInfo,
 	setRoot,
 	uploadBlobMetadata,
@@ -78,7 +82,6 @@ import {
 	verifyNarInfoSignature,
 	workerFetch
 } from '../test-support.ts';
-import worker from '../worker.ts';
 
 describe('upload flow', () => {
 	beforeEach(async () => {
@@ -1855,7 +1858,7 @@ describe('upload flow', () => {
 		});
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
-		await worker.scheduled(scheduledController(), env);
+		await runQueuedMaintenanceTick();
 
 		await expectStatsViaWorker(await initialiseViaWorker(), {
 			storePaths: 0,
@@ -1908,7 +1911,7 @@ describe('upload flow', () => {
 		await prepareUploadViaWorker(token, staleUpload, stale);
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
-		await worker.scheduled(scheduledController(), env);
+		await runQueuedMaintenanceTick();
 
 		const restored = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, committed.storePathHash)
@@ -2733,4 +2736,31 @@ async function foreignKeyToken(scope: 'write' | 'admin'): Promise<string> {
 		.setNotBefore(issuedAt)
 		.setExpirationTime(issuedAt + 600)
 		.sign(privateKey);
+}
+
+async function runQueuedMaintenanceTick(): Promise<void> {
+	const messages = await enqueueMaintenanceJobs(env, queueCollector());
+
+	for (const message of messages) {
+		await executeMaintenanceQueueMessage(env, message);
+	}
+}
+
+function queueCollector(): {
+	readonly sendBatch: (
+		batch: Iterable<{ readonly body: MaintenanceQueueMessage }>
+	) => Promise<QueueSendBatchResponse>;
+} {
+	return { sendBatch: () => Promise.resolve(queueSendBatchResponse()) };
+}
+
+function queueSendBatchResponse(): QueueSendBatchResponse {
+	return {
+		metadata: {
+			metrics: {
+				backlogBytes: 0,
+				backlogCount: 0
+			}
+		}
+	};
 }

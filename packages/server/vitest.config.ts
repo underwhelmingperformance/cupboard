@@ -54,6 +54,9 @@ export default defineConfig(async () => {
 									TENANT_CACHE: 'tenant-cache',
 									CRON_STATE: 'cron-state'
 								},
+								queueProducers: {
+									MAINTENANCE_QUEUE: 'cupboard-maintenance'
+								},
 								compatibilityDate: '2026-04-28'
 							},
 							wrangler: {

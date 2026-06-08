@@ -16,7 +16,6 @@ import {
 	pushPath,
 	pushPathToTenant,
 	resetTestServer,
-	scheduledController,
 	stageDeferredForTenant,
 	suspendTenant,
 	tenantBlobRows,
@@ -26,9 +25,13 @@ import {
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
-import worker from '../worker.ts';
 
-import { runCronSweep } from './scheduled.ts';
+import {
+	enqueueMaintenanceJobs,
+	executeMaintenanceQueueMessage,
+	type MaintenanceQueueMessage,
+	runCronSweep
+} from './scheduled.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 // Stages a deferred upload for a freshly provisioned tenant, returning the write
@@ -228,7 +231,7 @@ describe('multi-tenant writes', () => {
 		const uploadId = await stageDeferredForTenant('acme', token, metadata, nar);
 		const whilePending = await tenantUploadStatus('acme', token, uploadId);
 
-		await worker.scheduled(scheduledController(), env);
+		await runQueuedMaintenanceTick();
 
 		const afterCron = await tenantUploadStatus('acme', token, uploadId);
 
@@ -283,3 +286,30 @@ describe('multi-tenant writes', () => {
 		});
 	});
 });
+
+async function runQueuedMaintenanceTick(): Promise<void> {
+	const messages = await enqueueMaintenanceJobs(env, queueCollector());
+
+	for (const message of messages) {
+		await executeMaintenanceQueueMessage(env, message);
+	}
+}
+
+function queueCollector(): {
+	readonly sendBatch: (
+		batch: Iterable<{ readonly body: MaintenanceQueueMessage }>
+	) => Promise<QueueSendBatchResponse>;
+} {
+	return { sendBatch: () => Promise.resolve(queueSendBatchResponse()) };
+}
+
+function queueSendBatchResponse(): QueueSendBatchResponse {
+	return {
+		metadata: {
+			metrics: {
+				backlogBytes: 0,
+				backlogCount: 0
+			}
+		}
+	};
+}
