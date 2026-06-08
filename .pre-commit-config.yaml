@@ -17,6 +17,20 @@ repos:
         args: [--fix=lf]
       - id: trailing-whitespace
 
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.25.2
+    hooks:
+      - id: zizmor
+        args:
+          - --offline
+          - .github/workflows
+          - actions
+
   - repo: local
     hooks:
       - id: pnpm-check-deps
@@ -46,7 +60,9 @@ repos:
             \.prettierignore|
             \.prettierrc|
             \.syncpackrc\.ts|
+            \.github/workflows/.+\.ya?ml|
             AGENTS\.md|
+            actions/.+\.(json|ts|tsx|ya?ml)|
             CLAUDE\.md|
             PLAN\.md|
             eslint\.config\.ts|
@@ -68,6 +84,7 @@ repos:
         files: &typescript_files >-
           (?x)^(
             \.syncpackrc\.ts|
+            actions/.+\.(json|ts|tsx)|
             eslint\.config\.ts|
             package\.json|
             packages/.+\.(json|ts|tsx)|
@@ -92,6 +109,7 @@ repos:
         pass_filenames: false
         files: >-
           (?x)^(
+            actions/.+\.(json|ts|tsx)|
             packages/.+\.(json|toml|ts|tsx)|
             pnpm-lock\.yaml|
             scripts/.+\.ts|
