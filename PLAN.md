@@ -2032,7 +2032,61 @@ Implementation sequence:
    cursoring/fairness so early slugs cannot monopolise the drain. A pass that
    reaches its limit records the next cursor/deadline so the eligibility row
    keeps the tenant scheduled.
-4. Run an external NAR verification spike. If instrumentation shows server-side
+4. Add queue-backed maintenance scheduling. Cron becomes a lightweight,
+   idempotent planner: it reads the same D1 eligibility, tenant status, and
+   global reaper state it reads today, but enqueues bounded jobs instead of
+   performing all maintenance inline in the scheduled Worker invocation. Queue
+   messages carry only stable task identity and routing facts, such as
+   `{ kind: "tenant-maintenance", tenant }`, `{ kind: "offboard", tenant }`,
+   `{ kind: "blob-reaper" }`, `{ kind: "cas-reaper" }`,
+   `{ kind: "blob-demote" }`, `{ kind: "cas-demote" }`, or
+   `{ kind: "control-key-retirement" }`; the Queue is not the source of truth
+   for whether work is still due. If the executor intentionally runs a fixed
+   bundle of global passes from one message, that bundle is named explicitly so
+   outcome records and retries still identify the bounded work attempted.
+
+   The planner also bounds enqueue volume. Duplicate delivery must be safe, but
+   cron should not enqueue the same delayed tenant or global pass every tick
+   while the queue is backed up. Either reserve or mark the due job in D1/KV
+   with an `enqueued_at` and deadline-style guard, or otherwise prove the
+   duplicate enqueue rate is bounded by the chosen batch sizes and cron cadence.
+   The guard is a cost and backpressure control, not correctness state; a stale
+   or missing guard fails open by letting the planner enqueue work whose
+   executor will re-check the authoritative state.
+
+   The Queue consumer is the executor. It re-checks the authoritative D1 or DO
+   state before doing work, calls the same synchronous cores the cron calls
+   today, and records the outcome because it is the component that actually
+   attempted the pass. Tenant-local work still runs through the tenant Durable
+   Object, so the DO remains the single writer for tenant metadata, delete
+   repair, verification cursors, usage accounting, and offboarding edge cleanup.
+   Global reaper jobs still use D1 compare-and-delete predicates and route
+   tenant de-materialisation through the owning DOs.
+
+   Completion semantics move with execution: the consumer records
+   `tenant_maintenance_failure` success/failure rows for tenant jobs, records
+   global job outcomes in D1 when scheduling or backoff depends on the last
+   attempt, and uses metrics alone only for purely observational outcomes. It
+   stamps `tenant.last_maintained_at` only after a tenant-maintenance job has
+   been attempted, whether it succeeded or failed, with the failure recorded
+   separately, and acknowledges the queue message only after those durable
+   outcome writes succeed. A persistent tenant failure should normally be
+   recorded and acknowledged so the planner controls the next scheduled attempt,
+   but recording that failure must also leave or set a durable next-attempt
+   schedule; acking a failed message must not silence the tenant until unrelated
+   state changes. Explicit queue retry/backoff is reserved for transient
+   platform failures where an immediate delayed retry is useful. A dead letter
+   queue is operational visibility, not correctness state.
+
+   Consumers process Cloudflare Queue batches one message at a time for outcome
+   purposes. A successful message, including a stale message that re-checks
+   state and no-ops, is acknowledged independently. A transient failure retries
+   only that message. One failed message in a delivered batch must not force
+   successful messages in the same batch to replay unnecessarily. Duplicate,
+   stale, or delayed queue deliveries remain safe because every job revalidates
+   its need and leaves the existing durable markers to drive convergence.
+
+5. Run an external NAR verification spike. If instrumentation shows server-side
    NAR verification dominates tenant DO duration or CPU, prototype moving the
    streaming decompress-and-hash work out of the tenant DO. The tenant DO still
    owns the durable state transition: it claims a pending upload, records the
@@ -2042,7 +2096,7 @@ Implementation sequence:
    been superseded, or already reached a terminal verdict. The verifier may be a
    stateless Worker, Queue consumer, or other Cloudflare primitive, but it must
    not become a second writer of tenant metadata.
-5. Add an optional hibernating status watch. Use a WebSocket watch only for
+6. Add an optional hibernating status watch. Use a WebSocket watch only for
    `push --wait` upload status notifications. The durable upload status row and
    HTTP status query remain the source of truth and the CLI fallback. On
    connect, the DO reads the current durable status for each requested
@@ -2058,6 +2112,15 @@ Verification:
   eligibility.)_
 - Each bounded maintenance pass resumes from its stored cursor and converges
   across repeated ticks.
+- Queue-backed maintenance scheduling preserves the existing ownership model:
+  cron enqueues only stable task identity, consumers record pass outcomes and
+  completion stamps, and every duplicate or stale message re-checks durable
+  state before mutating anything.
+- The planner bounds duplicate enqueue volume while work is delayed, and delayed
+  duplicate delivery no-ops after another message has already completed the same
+  work.
+- A consumer crash or transient failure after doing work but before recording
+  the outcome stamp replays safely and converges on the same durable state.
 - Moving verification out of the DO, if implemented, preserves
   verify-before-serve, quota charging, crash recovery, and the single-writer
   rule for tenant metadata. A verifier result for an old, expired, superseded,
