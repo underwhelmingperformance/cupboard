@@ -4,6 +4,7 @@
 		"types": ["node"]
 	},
 	"include": [
+		"actions/**/*.ts",
 		"eslint.config.ts",
 		".syncpackrc.ts",
 		"scripts/**/*.ts",

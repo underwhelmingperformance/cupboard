@@ -17,6 +17,7 @@ import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
+import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {
 	readonly colour?: boolean;
@@ -28,7 +29,7 @@ export function buildProgram(): Command {
 		.description(
 			'Push and configure a personal Nix binary cache hosted on Cloudflare Workers.'
 		)
-		.version('0.0.0')
+		.version(cupboardVersion)
 		.option('--colour', 'force interactive spinner and colour output')
 		.option('--no-colour', 'force plain line-delimited JSON output')
 		.showHelpAfterError();

@@ -6,6 +6,7 @@
 		"@cupboard/protocol": "workspace:*",
 		"@eslint/js": "^10.0.1",
 		"@types/node": "^25.9.1",
+		"esbuild": "^0.28.0",
 		"eslint": "^10.4.1",
 		"eslint-config-prettier": "^10.1.8",
 		"eslint-plugin-simple-import-sort": "^13.0.0",
@@ -14,6 +15,7 @@
 		"jiti": "^2.7.0",
 		"knip": "^6.15.0",
 		"miniflare": "^4.20260603.0",
+		"postject": "^1.0.0-alpha.6",
 		"prettier": "^3.8.3",
 		"syncpack": "^15.3.1",
 		"typescript": "^6.0.3",
@@ -34,12 +36,13 @@
 	"packageManager": "pnpm@11.5.2+sha512.71c631e382066efc25625d5cf029075de07b61b37f6e27350fbd84b1bda5864c8c1967adc280776b45c30a715c0359a3be08fef42d5bb09e2b99029979692916",
 	"private": true,
 	"scripts": {
+		"build:binary": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/build-cupboard-binary.ts",
 		"check": "pnpm run '/^check:.*/'",
 		"check:deps": "syncpack lint",
 		"check:format": "prettier --check .",
 		"check:knip": "knip --include dependencies,unlisted --no-progress",
 		"check:lint": "eslint .",
-		"check:test": "pnpm -r run test",
+		"check:test": "pnpm -r run test && pnpm test:actions",
 		"check:types": "pnpm -r run check:types",
 		"check:types:tests": "tsc -p tests/e2e/tsconfig.json",
 		"cli": "pnpm --filter @cupboard/cli cli",
@@ -50,6 +53,7 @@
 		"fix:format": "prettier --write .",
 		"fix:lint": "eslint . --fix",
 		"fixtures:generate": "node tests/fixtures/generate.ts",
+		"test:actions": "vitest run actions/lib/cupboard-action.test.ts",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts"
 	},
 	"type": "module"

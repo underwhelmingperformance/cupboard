@@ -1,0 +1,84 @@
+name: Push to cupboard
+description: Push Nix store paths to a cupboard cache from GitHub Actions.
+inputs:
+  url:
+    description: cupboard Worker URL.
+    required: true
+  paths:
+    description:
+      Newline-delimited local Nix store paths, derivations, or installables to
+      push.
+    required: true
+  cupboard-version:
+    description:
+      cupboard version to install. Use latest or an exact version such as 1.2.3
+      or v1.2.3.
+    required: false
+    default: latest
+  github-token:
+    description: GitHub token used for release API calls.
+    required: false
+  release-repository:
+    description: Repository that publishes cupboard release assets.
+    required: false
+  install-dir:
+    description: Directory for the downloaded cupboard binary.
+    required: false
+  cache:
+    description: Named cache to push to.
+    required: false
+  audience:
+    description: GitHub OIDC audience. Defaults to url.
+    required: false
+  root:
+    description: Retention root for pushed paths.
+    required: false
+  ttl:
+    description: Retention TTL such as 7d or 12h.
+    required: false
+  wait:
+    description: Wait for deferred blobs to become servable.
+    required: false
+    default: 'true'
+  wait-timeout:
+    description: Wait timeout for deferred blobs.
+    required: false
+    default: 10m
+  attestations:
+    description: Newline-delimited local Sigstore DSSE bundle paths to attach.
+    required: false
+outputs:
+  cupboard-path:
+    description: Path to the installed cupboard binary.
+    value: ${{ steps.push.outputs.cupboard-path }}
+  cupboard-version:
+    description: Resolved cupboard release tag.
+    value: ${{ steps.push.outputs.cupboard-version }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+      with:
+        node-version: 24.16.0
+
+    - name: Push store paths
+      id: push
+      shell: bash
+      env:
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_PATHS: ${{ inputs.paths }}
+        INPUT_CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
+        INPUT_GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
+        INPUT_RELEASE_REPOSITORY:
+          ${{ inputs.release-repository || github.action_repository }}
+        INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
+        INPUT_CACHE: ${{ inputs.cache }}
+        INPUT_AUDIENCE: ${{ inputs.audience }}
+        INPUT_ROOT: ${{ inputs.root }}
+        INPUT_TTL: ${{ inputs.ttl }}
+        INPUT_WAIT: ${{ inputs.wait }}
+        INPUT_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        INPUT_ATTESTATIONS: ${{ inputs.attestations }}
+      run: >
+        node --experimental-strip-types --disable-warning=ExperimentalWarning
+        "$GITHUB_ACTION_PATH/../lib/cupboard-action.ts" push
