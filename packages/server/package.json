@@ -26,12 +26,12 @@
 	"private": true,
 	"scripts": {
 		"build-info": "node ../../scripts/build-info.ts",
-		"cf:typegen": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env && wrangler types -c wrangler.tenant.toml --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false worker-configuration.tenant.d.ts",
-		"cf:typegen:check": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env --check worker-configuration.d.ts && wrangler types -c wrangler.tenant.toml --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false --check worker-configuration.tenant.d.ts",
+		"cf:typegen": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false worker-configuration.tenant.d.ts",
+		"cf:typegen:check": "pnpm build-info && wrangler types --env-file .typegen.vars --strict-vars false --env-interface Env --check worker-configuration.d.ts && wrangler types -c wrangler.tenant.jsonc --env-file .typegen.tenant.vars --strict-vars false --env-interface TenantEnv --include-runtime false --check worker-configuration.tenant.d.ts",
 		"check:types": "pnpm cf:typegen:check && tsc --noEmit",
-		"deploy": "pnpm cf:typegen && pnpm deploy:migrations && wrangler deploy -c wrangler.tenant.toml && wrangler deploy",
+		"deploy": "pnpm cf:typegen && pnpm deploy:migrations && wrangler deploy -c wrangler.tenant.jsonc && wrangler deploy",
 		"deploy:migrations": "wrangler d1 migrations apply CUPBOARD_DB --remote",
-		"dev": "pnpm cf:typegen && wrangler dev -c wrangler.toml -c wrangler.tenant.toml",
+		"dev": "pnpm cf:typegen && wrangler dev -c wrangler.jsonc -c wrangler.tenant.jsonc",
 		"test": "pnpm build-info && vitest run --passWithNoTests"
 	},
 	"type": "module"

@@ -41,7 +41,7 @@ type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
 };
 
-// `TenantEnv` is generated from `wrangler.tenant.toml`, the config for the script
+// `TenantEnv` is generated from `wrangler.tenant.jsonc`, the config for the script
 // this Durable Object actually runs in. It deliberately excludes the control-plane
 // bindings (the signing-key wrapping secret, the control audience): the Durable
 // Object runs in its own script's context and cannot reach them, and this type
