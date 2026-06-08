@@ -2444,13 +2444,16 @@ attachment. Attachment does not gate root activation, consistent with the
 presence invariant.
 
 A consumer verifies at a policy gate (CD or admission), enumerating a closure's
-store path hashes, fetching and verifying each required attestation against the
-bundle-declared trust root, and refusing promotion on absence or failure.
-Public-good builders use the public Sigstore trust root and require an expected
-builder identity and predicate type. Private CI builders use that CI provider's
-private Sigstore root, Rekor/log policy, and identity constraints. In both cases
-the gate independently checks that the verified in-toto subject digest equals
-the narinfo `narHash`; cupboard only stores and files the bundle.
+store path hashes, fetching and verifying each required attestation, and
+refusing promotion on absence or failure. `cupboard attest verify` uses the
+public Sigstore trust root by default, accepts an explicit trusted-root file for
+private Sigstore instances, lets the caller set the Sigstore transparency-log,
+certificate-transparency-log, and timestamp thresholds, and requires an expected
+builder identity, issuer, and predicate type. TUF mirror, cache, and root-update
+policy is not a cupboard CLI surface; private deployments pass a trusted-root
+file produced by their own Sigstore policy. In both cases the gate independently
+checks that the verified in-toto subject digest equals the narinfo `narHash`;
+cupboard only stores and files the bundle.
 
 ### Data model
 
@@ -2485,10 +2488,11 @@ Each step leaves a working cache.
       coverage for an edge whose descriptor list was not materialised yet;
       recovery re-materialises the list from durable edges.
 - [x] **CLI attach and verify guidance.** Add `cupboard push` bundle attachment
-      and `--no-attest`; document consumer verification against the
-      bundle-declared trust root and the subject-to-`narHash` check, with
-      example policy gates for the public good and a CI provider's private
-      instance.
+      and `--no-attest`; add verification with explicit identity, issuer,
+      predicate type, threshold policy, optional private trusted-root file,
+      narinfo signature, store-path hash, and subject-to-`narHash` checks.
+      Sigstore trust remains a client-side policy decision rather than
+      server-side trust enforcement.
 
 ### Verification
 

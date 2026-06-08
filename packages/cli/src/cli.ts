@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 
+import { registerAttestCommands } from './commands/attest.ts';
 import { registerAuthKeyCommands } from './commands/auth-key.ts';
 import { registerCacheCommands } from './commands/cache.ts';
 import { registerCheckCommand } from './commands/check.ts';
@@ -34,6 +35,7 @@ export function buildProgram(): Command {
 
 	registerInitCommand(program);
 	registerLoginCommand(program);
+	registerAttestCommands(program);
 	registerPushCommand(program);
 	registerConfigCommand(program);
 	registerPubkeyCommand(program);

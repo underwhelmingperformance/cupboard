@@ -52,7 +52,7 @@ export function registerPushCommand(program: Command): void {
 		.option('--cache <name>', 'push to a named cache rather than the default')
 		.option(
 			'--attestation <bundle>',
-			'attach a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
+			'file a Sigstore DSSE bundle whose in-toto subject matches a pushed path',
 			collect,
 			[]
 		)
