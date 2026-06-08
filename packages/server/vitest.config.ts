@@ -60,7 +60,7 @@ export default defineConfig(async () => {
 								compatibilityDate: '2026-04-28'
 							},
 							wrangler: {
-								configPath: './wrangler.tenant.toml'
+								configPath: './wrangler.tenant.jsonc'
 							}
 						})
 					],

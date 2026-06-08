@@ -1593,7 +1593,7 @@ batch is bounded by a measured constant well under the budget, selecting the
 most-overdue active tenants by a `tenant.last_maintained_at` column and stamping
 them, so the table carries its own round-robin position (no separate cursor) and
 a full sweep completes within a day. The cron fires hourly (not daily) so the
-bucketing is meaningful and the latency bound holds; `wrangler.toml` `crons` is
+bucketing is meaningful and the latency bound holds; `wrangler.jsonc` `crons` is
 updated to match. The fan-out records per-tenant failures (count and last error)
 rather than swallowing them with bare `allSettled`. The global reaper gets its
 own reserved budget after fan-out, or its own cron tick, so a long fan-out
