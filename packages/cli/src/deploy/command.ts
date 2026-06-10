@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
 
-import { createReporter } from '@cupboard/reporter';
+import { createReporter, type ReporterMode } from '@cupboard/reporter';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
 import { resolveCloudflare } from './auth.ts';
@@ -59,7 +59,7 @@ async function resolveArtifact(
  */
 export async function executeDeploy(
 	cliOptions: DeployCliOptions,
-	reporterMode: 'terminal' | 'json' | undefined
+	reporterMode: ReporterMode | undefined
 ): Promise<void> {
 	const reporter = createReporter({ mode: reporterMode });
 
