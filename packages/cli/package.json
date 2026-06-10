@@ -6,18 +6,24 @@
 		"cupboard": "./src/main.ts"
 	},
 	"dependencies": {
+		"@cloudflare/workers-auth": "^0.1.1",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
+		"@inquirer/prompts": "^8.5.2",
 		"@sigstore/bundle": "^5.0.0",
 		"@sigstore/protobuf-specs": "^0.5.1",
 		"@sigstore/tuf": "^5.0.0",
 		"@sigstore/verify": "^4.0.0",
+		"cloudflare": "^6.3.0",
 		"commander": "^15.0.0",
+		"jsonc-parser": "^3.3.1",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",
+		"esbuild": "^0.28.0",
+		"miniflare": "^4.20260603.0",
 		"typescript": "^6.0.3",
 		"vitest": "^4.1.8"
 	},

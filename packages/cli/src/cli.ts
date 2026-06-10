@@ -7,6 +7,7 @@ import { registerCheckCommand } from './commands/check.ts';
 import { registerConfigCommand } from './commands/config.ts';
 import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
+import { registerDeployCommand } from './commands/deploy.ts';
 import { registerInitCommand } from './commands/init.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
@@ -35,6 +36,7 @@ export function buildProgram(): Command {
 		.showHelpAfterError();
 
 	registerInitCommand(program);
+	registerDeployCommand(program);
 	registerLoginCommand(program);
 	registerAttestCommands(program);
 	registerPushCommand(program);
