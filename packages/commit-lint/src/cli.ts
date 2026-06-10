@@ -3,7 +3,8 @@ import { readFile } from 'node:fs/promises';
 import { stderr } from 'node:process';
 import { promisify } from 'node:util';
 
-import { createReporter } from '@cupboard/reporter';
+import { createReporter, type ReporterMode } from '@cupboard/reporter';
+import { resolveReporterMode } from '@cupboard/shared';
 import { Command, Option } from 'commander';
 import { createGit } from 'just-git';
 import { readHead, revParse } from 'just-git/repo';
@@ -53,7 +54,6 @@ interface CliOptions {
 }
 
 type Options = EditOptions | RangeOptions;
-type ReporterMode = 'json' | 'terminal';
 
 abstract class CommitMessageCliError extends Error {
 	protected constructor(message: string) {
@@ -244,7 +244,7 @@ function parseOptions(): Options {
 	program.parse();
 
 	const parsed = program.opts<CliOptions>();
-	const mode = reporterMode(parsed.colour);
+	const mode = resolveReporterMode(parsed.colour);
 
 	if (parsed.edit !== undefined) {
 		if (parsed.dryRun === true) {
@@ -278,14 +278,6 @@ function parseOptions(): Options {
 	}
 
 	return program.error('error: one of --edit or --from is required');
-}
-
-function reporterMode(colour: boolean | undefined): ReporterMode {
-	if (colour !== undefined) {
-		return colour ? 'terminal' : 'json';
-	}
-
-	return stderr.isTTY ? 'terminal' : 'json';
 }
 
 function emitJsonReport(report: ReturnType<typeof jsonReport>): void {

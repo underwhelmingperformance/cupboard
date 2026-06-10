@@ -23,13 +23,16 @@ export interface Reporter {
 	info(message: string): void;
 }
 
+/** Terminal (spinner) or line-delimited JSON output. */
+export type ReporterMode = 'terminal' | 'json';
+
 export interface ReporterOptions {
 	/**
 	 * Terminal (spinner) or JSON output. When omitted it is chosen from
 	 * `process.stderr.isTTY`, not from an injected `stream`, so an injected
 	 * non-TTY stream should set `mode` explicitly.
 	 */
-	readonly mode?: 'terminal' | 'json';
+	readonly mode?: ReporterMode;
 	/**
 	 * Where output is written, one line at a time; defaults to `process.stderr`.
 	 * Tests can pass an in-memory `node:stream.Writable` to assert on the output.

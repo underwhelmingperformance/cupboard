@@ -11,6 +11,7 @@
 		"@commitlint/load": "^21.0.2",
 		"@cto.af/linewrap": "^4.0.1",
 		"@cto.af/string-width": "^5.0.1",
+		"@cupboard/shared": "workspace:*",
 		"commander": "^15.0.0",
 		"diff": "^9.0.0",
 		"just-git": "^1.7.1",
