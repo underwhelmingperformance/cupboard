@@ -86,6 +86,9 @@ importers:
       '@cupboard/reporter':
         specifier: workspace:*
         version: link:../reporter
+      '@cupboard/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@inquirer/prompts':
         specifier: ^8.5.2
         version: 8.5.2(@types/node@25.9.1)
@@ -147,6 +150,9 @@ importers:
       '@cto.af/string-width':
         specifier: ^5.0.1
         version: 5.0.1
+      '@cupboard/shared':
+        specifier: workspace:*
+        version: link:../shared
       commander:
         specifier: ^15.0.0
         version: 15.0.0
@@ -296,6 +302,22 @@ importers:
       wrangler:
         specifier: ^4.98.0
         version: 4.98.0(@cloudflare/workers-types@4.20260605.1)
+
+  packages/shared:
+    dependencies:
+      '@cupboard/reporter':
+        specifier: workspace:*
+        version: link:../reporter
+    devDependencies:
+      '@types/node':
+        specifier: ^25.9.1
+        version: 25.9.1
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+      vitest:
+        specifier: ^4.1.8
+        version: 4.1.8(@types/node@25.9.1)(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
 packages:
 

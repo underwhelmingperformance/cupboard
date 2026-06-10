@@ -1,3 +1,5 @@
+import type { ReporterMode } from '@cupboard/reporter';
+import { resolveReporterMode } from '@cupboard/shared';
 import { Command } from 'commander';
 
 import { registerAttestCommands } from './commands/attest.ts';
@@ -57,14 +59,6 @@ export function buildProgram(): Command {
 	return program;
 }
 
-export function reporterModeFromGlobals(
-	program: Command
-): 'terminal' | 'json' | undefined {
-	const { colour } = program.opts<GlobalOptions>();
-
-	if (colour === undefined) {
-		return undefined;
-	}
-
-	return colour ? 'terminal' : 'json';
+export function reporterModeFromGlobals(program: Command): ReporterMode {
+	return resolveReporterMode(program.opts<GlobalOptions>().colour);
 }
