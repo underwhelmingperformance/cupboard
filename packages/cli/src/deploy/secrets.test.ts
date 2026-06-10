@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { assembleSecrets } from './secrets.ts';
+import { assembleSecrets, generateWrapSecret } from './secrets.ts';
 
 const fullEnv = {
 	CONTROL_KEY_WRAP_SECRET: 'wrap',
@@ -51,5 +51,15 @@ describe('assembleSecrets', () => {
 			{ name: 'R2_BUCKET_NAME', text: 'cupboard-blobs' },
 			{ name: 'R2_ACCESS_KEY_ID', text: 'akid' }
 		]);
+	});
+});
+
+describe('generateWrapSecret', () => {
+	it('produces a fresh base64 AES-256 key each call', () => {
+		const first = generateWrapSecret();
+		const second = generateWrapSecret();
+
+		expect(Buffer.from(first, 'base64')).toHaveLength(32);
+		expect(first).not.toBe(second);
 	});
 });
