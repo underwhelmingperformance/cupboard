@@ -6,6 +6,10 @@ import { arch, platform } from 'node:process';
 
 import { build } from 'esbuild';
 
+import { buildEmbeddedPayload } from '../packages/cli/src/deploy/artifact.ts';
+import { createEsbuildBundler } from '../packages/cli/src/deploy/bundle.ts';
+import { embeddedAssetKey } from '../packages/cli/src/deploy/embedded.ts';
+
 interface Options {
 	readonly outputDirectory: string;
 	readonly version: string;
@@ -39,6 +43,7 @@ const outputDirectory = path.resolve(options.outputDirectory);
 const workDirectory = path.join(outputDirectory, 'work');
 const blobPath = path.join(workDirectory, 'cupboard.blob');
 const seaConfigPath = path.join(workDirectory, 'sea-config.json');
+const embeddedPayloadPath = path.join(workDirectory, embeddedAssetKey);
 const binaryDirectory = path.join(outputDirectory, 'package');
 const binaryPath = path.join(binaryDirectory, 'cupboard');
 const assetName = `cupboard-${options.version}-${releasePlatform}-${releaseArchitecture}.tar.gz`;
@@ -46,6 +51,14 @@ const assetPath = path.join(outputDirectory, assetName);
 
 await mkdir(workDirectory, { recursive: true });
 await mkdir(binaryDirectory, { recursive: true });
+
+// Bundle both Workers and write the payload the deployed binary serves from
+// embedded mode. Generated once and referenced as a SEA asset by both formats.
+const payload = await buildEmbeddedPayload(
+	process.cwd(),
+	createEsbuildBundler()
+);
+await writeFile(embeddedPayloadPath, JSON.stringify(payload));
 
 await buildAndSmokeSea();
 run('tar', ['-czf', assetPath, '-C', binaryDirectory, 'cupboard']);
@@ -150,6 +163,7 @@ function seaConfig(bundlePath: string, seaFormat: SeaFormat): object {
 		main: bundlePath,
 		...(seaFormat === 'esm' ? { mainFormat: 'module' } : {}),
 		output: blobPath,
+		assets: { [embeddedAssetKey]: embeddedPayloadPath },
 		disableExperimentalSEAWarning: true,
 		useCodeCache: false,
 		useSnapshot: false

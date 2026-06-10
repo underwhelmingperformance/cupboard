@@ -23,6 +23,31 @@ export interface DeploymentArtifact {
 	readonly d1Migrations: readonly D1Migration[];
 }
 
+/**
+ * The serializable form embedded in the released binary: the raw wrangler
+ * sources (re-parsed on load, reusing the same validation as a tree build)
+ * alongside the bundles and migrations. {@link payloadToArtifact} turns it back
+ * into a {@link DeploymentArtifact}.
+ */
+export interface EmbeddedPayload {
+	readonly controlSource: string;
+	readonly tenantSource: string;
+	readonly controlBundle: WorkerBundle;
+	readonly tenantBundle: WorkerBundle;
+	readonly d1Migrations: readonly D1Migration[];
+}
+
+export function payloadToArtifact(
+	payload: EmbeddedPayload
+): DeploymentArtifact {
+	return {
+		config: parseDeploymentConfig(payload.controlSource, payload.tenantSource),
+		controlBundle: payload.controlBundle,
+		tenantBundle: payload.tenantBundle,
+		d1Migrations: payload.d1Migrations
+	};
+}
+
 const serverDirectory = 'packages/server';
 const buildInfoPath = `${serverDirectory}/src/build-info.generated.ts`;
 const migrationsDirectory = `${serverDirectory}/drizzle-d1`;
@@ -76,13 +101,14 @@ async function readMigrations(checkoutRoot: string): Promise<D1Migration[]> {
 }
 
 /**
- * Assemble the deployment artifact from a checkout: parse both wrangler configs,
- * bundle each Worker from live source, and read the D1 migrations.
+ * Read both wrangler sources, bundle each Worker from live source, and read the
+ * D1 migrations from a checkout. This is the serializable payload the release
+ * build embeds; a tree deploy turns it straight into an artifact.
  */
-export async function buildArtifactFromTree(
+export async function buildEmbeddedPayload(
 	checkoutRoot: string,
 	bundler: Bundler
-): Promise<DeploymentArtifact> {
+): Promise<EmbeddedPayload> {
 	await ensureBuildInfo(checkoutRoot);
 
 	const [controlSource, tenantSource] = await Promise.all([
@@ -96,8 +122,6 @@ export async function buildArtifactFromTree(
 		)
 	]);
 
-	const config = parseDeploymentConfig(controlSource, tenantSource);
-
 	const [controlBundle, tenantBundle, d1Migrations] = await Promise.all([
 		bundler.bundle(
 			path.join(checkoutRoot, controlWorker.entryFile),
@@ -110,5 +134,22 @@ export async function buildArtifactFromTree(
 		readMigrations(checkoutRoot)
 	]);
 
-	return { config, controlBundle, tenantBundle, d1Migrations };
+	return {
+		controlSource,
+		tenantSource,
+		controlBundle,
+		tenantBundle,
+		d1Migrations
+	};
+}
+
+/**
+ * Assemble the deployment artifact from a checkout: bundle from live source and
+ * parse both wrangler configs.
+ */
+export async function buildArtifactFromTree(
+	checkoutRoot: string,
+	bundler: Bundler
+): Promise<DeploymentArtifact> {
+	return payloadToArtifact(await buildEmbeddedPayload(checkoutRoot, bundler));
 }
