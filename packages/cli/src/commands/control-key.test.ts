@@ -3,10 +3,10 @@ import type {
 	ControlKeyRotateResponse,
 	ControlKeySummary
 } from '@cupboard/protocol/control-keys';
+import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client/client.ts';
-import type { Reporter, ResultRow } from '../reporter.ts';
 
 import {
 	type ControlKeyClient,

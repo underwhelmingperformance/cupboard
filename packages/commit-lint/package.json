@@ -1,0 +1,42 @@
+{
+	"name": "@cupboard/commit-lint",
+	"version": "0.0.0",
+	"license": "AGPL-3.0-or-later",
+	"bin": {
+		"lint-commit-messages": "./dist/main.js"
+	},
+	"dependencies": {
+		"@commitlint/config-conventional": "^21.0.2",
+		"@commitlint/lint": "^21.0.2",
+		"@commitlint/load": "^21.0.2",
+		"@cto.af/linewrap": "^4.0.1",
+		"@cto.af/string-width": "^5.0.1",
+		"commander": "^15.0.0",
+		"diff": "^9.0.0",
+		"just-git": "^1.7.1",
+		"markdownlint": "^0.40.0",
+		"micromark": "^4.0.2",
+		"micromark-extension-gfm": "^3.0.0"
+	},
+	"devDependencies": {
+		"@cupboard/reporter": "workspace:*",
+		"@types/node": "^25.9.1",
+		"esbuild": "^0.28.0",
+		"typescript": "^6.0.3",
+		"vitest": "^4.1.8"
+	},
+	"engines": {
+		"node": ">=24"
+	},
+	"files": [
+		"dist"
+	],
+	"private": true,
+	"scripts": {
+		"build": "node --experimental-transform-types build.ts && chmod +x dist/main.js",
+		"check:types": "tsc --noEmit",
+		"prepack": "pnpm build",
+		"test": "vitest run"
+	},
+	"type": "module"
+}

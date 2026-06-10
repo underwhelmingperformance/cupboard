@@ -1,4 +1,7 @@
 minimum_pre_commit_version: '3.2.0'
+default_install_hook_types:
+  - pre-commit
+  - commit-msg
 
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
@@ -116,3 +119,11 @@ repos:
             tests/.+\.(json|ts|tsx)|
             tsconfig(\.base)?\.json
           )$
+
+      - id: pnpm-lint-commit-message
+        name: pnpm lint:commit-messages
+        entry: >-
+          pnpm --config.verify-deps-before-run=false lint:commit-messages --edit
+        language: system
+        stages:
+          - commit-msg

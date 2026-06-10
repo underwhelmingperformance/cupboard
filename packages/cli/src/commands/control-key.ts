@@ -4,12 +4,16 @@ import type {
 	ControlKeyRotateResponse,
 	ControlKeySummary
 } from '@cupboard/protocol/control-keys';
+import {
+	createReporter,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
-import { createReporter, type Reporter, type ResultRow } from '../reporter.ts';
 
 export interface ControlKeyClient {
 	listControlKeys(token: AccessCredential): Promise<ControlKeyListResponse>;
