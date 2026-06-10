@@ -54,6 +54,7 @@
 		"fix:format": "prettier --write .",
 		"fix:lint": "eslint . --fix",
 		"fixtures:generate": "node tests/fixtures/generate.ts",
+		"lint:commit-messages": "node --no-warnings --experimental-transform-types packages/commit-lint/src/main.ts",
 		"test:actions": "vitest run actions/lib/cupboard-action.test.ts",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts"
 	},

@@ -13,6 +13,7 @@ import type {
 	UploadNegotiateRequest,
 	UploadStatusResponse
 } from '@cupboard/protocol/upload';
+import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import type { AccessCredential } from '../client/client.ts';
@@ -29,7 +30,6 @@ import {
 } from '../nix/blob.ts';
 import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
 import type { NixStoreClient, NixValidPathInfo } from '../nix/nix-store.ts';
-import { formatBytes, type Reporter, type ResultRow } from '../reporter.ts';
 
 import {
 	type PushClient,

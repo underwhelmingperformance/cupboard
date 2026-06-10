@@ -2,8 +2,10 @@
 	"$schema": "https://unpkg.com/knip@5/schema.json",
 	"workspaces": {
 		"packages/cli": {},
+		"packages/commit-lint": {},
 		"packages/nix": {},
 		"packages/protocol": {},
+		"packages/reporter": {},
 		"packages/server": {
 			"entry": ["src/do/server.ts", "src/tenant-worker.ts"]
 		}

@@ -4,13 +4,17 @@ import type {
 	OidcTrustRemoveResponse,
 	OidcTrustSummary
 } from '@cupboard/protocol/oidc';
+import {
+	createReporter,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { InvalidClaimError } from '../errors.ts';
-import { createReporter, type Reporter, type ResultRow } from '../reporter.ts';
 
 interface OidcTrustAddOptions {
 	readonly issuer: string;

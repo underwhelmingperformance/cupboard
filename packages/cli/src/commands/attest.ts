@@ -1,5 +1,6 @@
 import { env } from 'node:process';
 
+import { createReporter, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import {
@@ -7,7 +8,6 @@ import {
 	verifyRemoteAttestations
 } from '../attest/verify.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
-import { createReporter, formatCount } from '../reporter.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;

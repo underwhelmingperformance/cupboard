@@ -1,3 +1,4 @@
+import { createReporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { authenticateForPush } from '../auth/auth.ts';
@@ -6,7 +7,6 @@ import { CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
 import { AttestationsDisabledError } from '../errors.ts';
 import { runPush } from '../push/push.ts';
-import { createReporter } from '../reporter.ts';
 
 interface PushOptions {
 	readonly githubOidc?: boolean;

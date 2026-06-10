@@ -1,10 +1,10 @@
 import type { CheckDiscrepancy, CheckReport } from '@cupboard/protocol/reports';
+import { createReporter, formatCount, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
-import { createReporter, formatCount, type Reporter } from '../reporter.ts';
 
 interface CheckOptions {
 	readonly token: string;

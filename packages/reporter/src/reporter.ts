@@ -1,5 +1,4 @@
 import { stderr } from 'node:process';
-import type { WriteStream } from 'node:tty';
 
 import Table from 'cli-table3';
 import ora from 'ora';
@@ -25,20 +24,29 @@ export interface Reporter {
 }
 
 export interface ReporterOptions {
+	/**
+	 * Terminal (spinner) or JSON output. When omitted it is chosen from
+	 * `process.stderr.isTTY`, not from an injected `stream`, so an injected
+	 * non-TTY stream should set `mode` explicitly.
+	 */
 	readonly mode?: 'terminal' | 'json';
-	readonly stream?: WriteStream;
+	/**
+	 * Where output is written, one line at a time; defaults to `process.stderr`.
+	 * Tests can pass an in-memory `node:stream.Writable` to assert on the output.
+	 */
+	readonly stream?: NodeJS.WritableStream;
 }
 
 export function createReporter(options: ReporterOptions = {}): Reporter {
 	const stream = options.stream ?? stderr;
-	const mode = options.mode ?? (stream.isTTY ? 'terminal' : 'json');
+	const mode = options.mode ?? (stderr.isTTY ? 'terminal' : 'json');
 
 	return mode === 'terminal'
 		? createTerminalReporter(stream)
 		: createJsonReporter(stream);
 }
 
-function createTerminalReporter(stream: WriteStream): Reporter {
+function createTerminalReporter(stream: NodeJS.WritableStream): Reporter {
 	function writeLine(line: string): void {
 		stream.write(`${line}\n`);
 	}
@@ -117,7 +125,7 @@ function createTerminalReporter(stream: WriteStream): Reporter {
 	};
 }
 
-function createJsonReporter(stream: WriteStream): Reporter {
+function createJsonReporter(stream: NodeJS.WritableStream): Reporter {
 	function emit(event: Record<string, unknown>): void {
 		stream.write(`${JSON.stringify(event)}\n`);
 	}
