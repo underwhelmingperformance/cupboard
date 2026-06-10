@@ -149,7 +149,10 @@ describe('runDeploy', () => {
 			options: {
 				domain: 'cupboard.store',
 				dryRun: false,
-				secrets: [{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'k' }]
+				secrets: {
+					control: [{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'k' }],
+					tenant: []
+				}
 			}
 		});
 
