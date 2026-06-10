@@ -12,7 +12,7 @@ import {
 	runDeploy
 } from './deploy-run.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
-import { assembleSecrets } from './secrets.ts';
+import { assembleSecrets, generateWrapSecret } from './secrets.ts';
 import { planWorkerSource } from './source.ts';
 
 export interface DeployCliOptions {
@@ -134,17 +134,36 @@ export async function executeDeploy(
 			})
 	);
 
-	const { secrets, missing } = assembleSecrets({
+	const assembled = assembleSecrets({
 		env: process.env,
 		accountId,
 		bucketName
 	});
+	const controlSecrets = [...assembled.secrets.control];
+	let missing = assembled.missing;
+
+	// Generate the control key wrapping secret on a first deploy, but never
+	// overwrite an existing one: a different value cannot unwrap stored data.
+	if (missing.includes('CONTROL_KEY_WRAP_SECRET')) {
+		const existing = await api.listScriptSecrets(artifact.config.control.name);
+		missing = missing.filter((name) => name !== 'CONTROL_KEY_WRAP_SECRET');
+
+		if (!existing.includes('CONTROL_KEY_WRAP_SECRET')) {
+			const generated = generateWrapSecret();
+			controlSecrets.push({ name: 'CONTROL_KEY_WRAP_SECRET', text: generated });
+			reporter.warn(
+				'Generated CONTROL_KEY_WRAP_SECRET',
+				`save this value now; a different one cannot unwrap existing data:\n${generated}`
+			);
+		}
+	}
+
 	warnMissing(missing);
 
 	const options: DeployOptions = {
 		domain: cliOptions.domain,
 		dryRun: false,
-		secrets
+		secrets: { control: controlSecrets, tenant: assembled.secrets.tenant }
 	};
 
 	await runDeploy({ artifact, api, reporter, options });

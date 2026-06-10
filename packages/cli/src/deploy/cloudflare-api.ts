@@ -53,6 +53,7 @@ export interface CloudflareApi {
 	): Promise<void>;
 	putSchedules(scriptName: string, crons: readonly string[]): Promise<void>;
 	putSecret(scriptName: string, secret: WorkerSecret): Promise<void>;
+	listScriptSecrets(scriptName: string): Promise<string[]>;
 
 	findZoneId(name: string): Promise<string | undefined>;
 	attachCustomDomain(
@@ -243,6 +244,32 @@ export function createCloudflareApi(
 				text: secret.text,
 				type: 'secret_text'
 			});
+		},
+
+		async listScriptSecrets(scriptName) {
+			const names: string[] = [];
+
+			try {
+				for await (const secret of client.workers.scripts.secrets.list(
+					scriptName,
+					account
+				)) {
+					names.push(secret.name);
+				}
+			} catch (error) {
+				// A script that has not been deployed yet has no secrets to list.
+				if (
+					error instanceof Error &&
+					'status' in error &&
+					error.status === 404
+				) {
+					return [];
+				}
+
+				throw error;
+			}
+
+			return names;
 		},
 
 		async findZoneId(name) {
