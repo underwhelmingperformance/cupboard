@@ -1,5 +1,7 @@
 {
 	"$schema": "./node_modules/wrangler/config-schema.json",
+	// Provision and deploy with `cupboard deploy`, alongside the control Worker in
+	// wrangler.jsonc; it reconciles resources by name and never edits this file.
 	// The tenant Durable Object Worker. `CupboardServer` is defined here and runs in
 	// this script's own context, so it only ever sees this script's bindings. The
 	// control-plane Worker (wrangler.jsonc) reaches it through an external Durable

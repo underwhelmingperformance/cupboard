@@ -1,0 +1,280 @@
+import type { Reporter, ResultRow } from '@cupboard/reporter';
+
+import type { DeploymentArtifact } from './artifact.ts';
+import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
+import type { DeploymentConfig } from './config.ts';
+import {
+	applyD1Migrations,
+	computeDurableObjectMigration
+} from './migrations.ts';
+import { buildScriptMetadata, type ResolvedResources } from './upload.ts';
+
+export interface DeployOptions {
+	readonly domain: string | undefined;
+	readonly dryRun: boolean;
+	readonly secrets: readonly WorkerSecret[];
+}
+
+export interface DeployDeps {
+	readonly artifact: DeploymentArtifact;
+	readonly api: CloudflareApi;
+	readonly reporter: Reporter;
+	readonly options: DeployOptions;
+}
+
+interface ResourcePlan {
+	readonly r2Buckets: readonly string[];
+	readonly d1Databases: readonly string[];
+	readonly kvTitles: readonly string[];
+	readonly queues: readonly string[];
+}
+
+function uniqueSorted(values: Iterable<string>): string[] {
+	return [...new Set(values)].toSorted((left, right) =>
+		left.localeCompare(right)
+	);
+}
+
+/**
+ * The full set of named resources both Workers depend on, deduped. Drives both
+ * the dry-run plan and the reconcile step.
+ */
+export function collectResources(config: DeploymentConfig): ResourcePlan {
+	const workers = [config.control, config.tenant];
+
+	const queues = [
+		...config.control.queueProducers.map((producer) => producer.queue),
+		...config.control.queueConsumers.flatMap((consumer) => [
+			consumer.queue,
+			...(consumer.deadLetterQueue === undefined
+				? []
+				: [consumer.deadLetterQueue])
+		])
+	];
+
+	return {
+		r2Buckets: uniqueSorted(
+			workers.flatMap((worker) =>
+				worker.r2Buckets.map((bucket) => bucket.bucketName)
+			)
+		),
+		d1Databases: uniqueSorted(
+			workers.flatMap((worker) =>
+				worker.d1Databases.map((database) => database.databaseName)
+			)
+		),
+		kvTitles: uniqueSorted(
+			workers.flatMap((worker) =>
+				worker.kvNamespaces.map((namespace) => namespace.title)
+			)
+		),
+		queues: uniqueSorted(queues)
+	};
+}
+
+/**
+ * The dry-run plan: bundle sizes and the resources, migrations, triggers,
+ * domain, and secrets a deploy would touch. Pure, so the command can render it
+ * without authenticating.
+ */
+export function deploymentPlanRows(
+	artifact: DeploymentArtifact,
+	options: DeployOptions
+): ResultRow[] {
+	const resources = collectResources(artifact.config);
+
+	return [
+		{
+			label: 'Control worker',
+			value: `${(artifact.controlBundle.code.length / 1024).toFixed(0)} KiB`
+		},
+		{
+			label: 'Tenant worker',
+			value: `${(artifact.tenantBundle.code.length / 1024).toFixed(0)} KiB`
+		},
+		{ label: 'R2 buckets', value: resources.r2Buckets.join(', ') },
+		{ label: 'D1 databases', value: resources.d1Databases.join(', ') },
+		{ label: 'KV namespaces', value: resources.kvTitles.join(', ') },
+		{ label: 'Queues', value: resources.queues.join(', ') },
+		{ label: 'D1 migrations', value: String(artifact.d1Migrations.length) },
+		{
+			label: 'Cron triggers',
+			value: artifact.config.control.crons.join(', ') || '(none)'
+		},
+		{
+			label: 'Custom domain',
+			value: options.domain ?? '(none)'
+		},
+		{
+			label: 'Secrets',
+			value:
+				options.secrets.map((secret) => secret.name).join(', ') ||
+				'(none provided)'
+		}
+	];
+}
+
+async function reconcileResources(
+	deps: DeployDeps,
+	plan: ResourcePlan
+): Promise<ResolvedResources> {
+	const { api, reporter } = deps;
+
+	return reporter.phase('Reconciling resources', async (context) => {
+		await Promise.all(plan.r2Buckets.map((name) => api.ensureR2Bucket(name)));
+		await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));
+
+		const d1 = new Map<string, string>();
+
+		for (const name of plan.d1Databases) {
+			d1.set(name, await api.ensureD1Database(name));
+		}
+
+		const kv = new Map<string, string>();
+
+		for (const title of plan.kvTitles) {
+			kv.set(title, await api.ensureKvNamespace(title));
+		}
+
+		context.fact(
+			'resources',
+			plan.r2Buckets.length +
+				plan.d1Databases.length +
+				plan.kvTitles.length +
+				plan.queues.length
+		);
+
+		return { d1, kv };
+	});
+}
+
+async function configureTriggers(
+	deps: DeployDeps,
+	resources: ResolvedResources
+): Promise<void> {
+	const { api, reporter, options, artifact } = deps;
+	const control = artifact.config.control;
+
+	await reporter.phase('Configuring triggers', async () => {
+		for (const consumer of control.queueConsumers) {
+			const queueId = await api.ensureQueue(consumer.queue);
+
+			await api.putQueueConsumer(queueId, control.name, {
+				maxBatchSize: consumer.maxBatchSize,
+				maxBatchTimeout: consumer.maxBatchTimeout,
+				maxRetries: consumer.maxRetries,
+				maxConcurrency: consumer.maxConcurrency,
+				deadLetterQueue: consumer.deadLetterQueue
+			});
+		}
+
+		if (control.crons.length > 0) {
+			await api.putSchedules(control.name, control.crons);
+		}
+
+		if (options.domain !== undefined) {
+			const zoneId = await api.findZoneId(zoneOf(options.domain));
+
+			if (zoneId === undefined) {
+				deps.reporter.warn(
+					'No Cloudflare zone for',
+					`${options.domain}; add the domain to this account, then re-run.`
+				);
+			} else {
+				await api.attachCustomDomain(control.name, options.domain, zoneId);
+			}
+		}
+
+		return resources;
+	});
+}
+
+// The registrable zone for a hostname is the apex (last two labels), which is
+// what `zones.list` matches on.
+function zoneOf(hostname: string): string {
+	return hostname.split('.').slice(-2).join('.');
+}
+
+/**
+ * Provision, migrate, upload, and wire up a cupboard deployment. The tenant
+ * Durable Object script is uploaded before the control plane that binds it
+ * cross-script. With `--dry-run` it renders the plan and stops before any
+ * mutation.
+ */
+export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
+	const { artifact, api, reporter, options } = deps;
+
+	const resources = await reconcileResources(
+		deps,
+		collectResources(artifact.config)
+	);
+
+	await reporter.phase('Applying D1 migrations', async (context) => {
+		const databaseId = resources.d1.get(
+			artifact.config.tenant.d1Databases[0]?.databaseName ?? ''
+		);
+
+		if (databaseId !== undefined) {
+			const applied = await applyD1Migrations(
+				{
+					query: (database, sql) => api.d1Query(database, sql),
+					queryRows: (database, sql) => api.d1QueryRows(database, sql)
+				},
+				databaseId,
+				artifact.d1Migrations
+			);
+			context.fact('applied', applied.length);
+		}
+	});
+
+	await reporter.phase('Uploading tenant worker', async () => {
+		const tag = await api.getScriptMigrationTag(artifact.config.tenant.name);
+		const migration = computeDurableObjectMigration(
+			tag,
+			artifact.config.tenant.migrations
+		);
+		const metadata = buildScriptMetadata(
+			artifact.config.tenant,
+			resources,
+			migration
+		);
+		await api.uploadScript(
+			artifact.config.tenant.name,
+			metadata,
+			artifact.tenantBundle
+		);
+	});
+
+	await reporter.phase('Uploading control worker', async () => {
+		const metadata = buildScriptMetadata(artifact.config.control, resources);
+		await api.uploadScript(
+			artifact.config.control.name,
+			metadata,
+			artifact.controlBundle
+		);
+	});
+
+	if (options.secrets.length > 0) {
+		await reporter.phase('Setting secrets', async (context) => {
+			for (const secret of options.secrets) {
+				await api.putSecret(artifact.config.control.name, secret);
+			}
+
+			context.fact('secrets', options.secrets.length);
+		});
+	}
+
+	await configureTriggers(deps, resources);
+
+	const rows: ResultRow[] = [
+		{ label: 'Control worker', value: artifact.config.control.name },
+		{ label: 'Tenant worker', value: artifact.config.tenant.name },
+		...(options.domain === undefined
+			? []
+			: [{ label: 'Cache URL', value: `https://${options.domain}` }])
+	];
+
+	reporter.result(rows);
+
+	return rows;
+}

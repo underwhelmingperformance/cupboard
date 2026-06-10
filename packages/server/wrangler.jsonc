@@ -1,5 +1,9 @@
 {
 	"$schema": "./node_modules/wrangler/config-schema.json",
+	// Provision and deploy with `cupboard deploy`: it reconciles these resources
+	// by name and never edits this file. The placeholder ids below are left as-is;
+	// only local `wrangler dev` and the test pool read them, and they ignore
+	// remote ids.
 	// The public control-plane Worker: the bare-host control surface and the tenant
 	// read/dispatch front. It holds the control signing-key wrapping secret and reaches
 	// every tenant's `CupboardServer` through an external Durable Object binding into
