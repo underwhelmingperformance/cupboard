@@ -7,12 +7,13 @@ import {
 	applyD1Migrations,
 	computeDurableObjectMigration
 } from './migrations.ts';
+import type { DeploySecrets } from './secrets.ts';
 import { buildScriptMetadata, type ResolvedResources } from './upload.ts';
 
 export interface DeployOptions {
 	readonly domain: string | undefined;
 	readonly dryRun: boolean;
-	readonly secrets: readonly WorkerSecret[];
+	readonly secrets: DeploySecrets;
 }
 
 export interface DeployDeps {
@@ -108,8 +109,9 @@ export function deploymentPlanRows(
 		{
 			label: 'Secrets',
 			value:
-				options.secrets.map((secret) => secret.name).join(', ') ||
-				'(none provided)'
+				[...options.secrets.control, ...options.secrets.tenant]
+					.map((secret) => secret.name)
+					.join(', ') || '(none)'
 		}
 	];
 }
@@ -254,13 +256,24 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 		);
 	});
 
-	if (options.secrets.length > 0) {
+	const secretWork: { scriptName: string; secret: WorkerSecret }[] = [
+		...options.secrets.control.map((secret) => ({
+			scriptName: artifact.config.control.name,
+			secret
+		})),
+		...options.secrets.tenant.map((secret) => ({
+			scriptName: artifact.config.tenant.name,
+			secret
+		}))
+	];
+
+	if (secretWork.length > 0) {
 		await reporter.phase('Setting secrets', async (context) => {
-			for (const secret of options.secrets) {
-				await api.putSecret(artifact.config.control.name, secret);
+			for (const { scriptName, secret } of secretWork) {
+				await api.putSecret(scriptName, secret);
 			}
 
-			context.fact('secrets', options.secrets.length);
+			context.fact('secrets', secretWork.length);
 		});
 	}
 
