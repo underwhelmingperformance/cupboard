@@ -115,6 +115,9 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`secret:${scriptName}:${secret.name}`);
 				return Promise.resolve();
 			},
+			listScriptSecrets() {
+				return Promise.resolve([]);
+			},
 			findZoneId(name) {
 				calls.push(`zone:${name}`);
 				return Promise.resolve('zone-1');

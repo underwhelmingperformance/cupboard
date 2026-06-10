@@ -1,4 +1,15 @@
+import { randomBytes } from 'node:crypto';
+
 import type { WorkerSecret } from './cloudflare-api.ts';
+
+/**
+ * Generate a fresh `CONTROL_KEY_WRAP_SECRET`: a base64 AES-256 key. Used on a
+ * first deploy when the operator has not supplied one. It must stay stable
+ * afterwards, as a different value cannot unwrap the existing control key.
+ */
+export function generateWrapSecret(): string {
+	return randomBytes(32).toString('base64');
+}
 
 /**
  * The secrets each Worker needs, ready to apply. The control plane holds the
