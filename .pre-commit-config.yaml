@@ -17,7 +17,8 @@ repos:
       - id: destroyed-symlinks
       - id: end-of-file-fixer
       - id: mixed-line-ending
-        args: [--fix=lf]
+        args:
+          - --fix=lf
       - id: trailing-whitespace
 
   - repo: https://github.com/rhysd/actionlint
@@ -41,7 +42,7 @@ repos:
         entry: pnpm check:deps
         language: system
         pass_filenames: false
-        files: &dependency_files >-
+        files: >-
           (?x)^(
             \.syncpackrc\.ts|
             package\.json|
@@ -55,7 +56,7 @@ repos:
         entry: pnpm check:format
         language: system
         pass_filenames: false
-        files: &format_files >-
+        files: >-
           (?x)^(
             \.editorconfig|
             \.markdownlint\.json|
