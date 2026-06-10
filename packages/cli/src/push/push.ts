@@ -27,6 +27,13 @@ import type {
 	UploadPrepareResponse,
 	UploadStatusResponse
 } from '@cupboard/protocol/upload';
+import {
+	formatBytes,
+	formatCount,
+	type PhaseContext,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
 import { z } from 'zod';
 
 import type { AccessCredential } from '../client/client.ts';
@@ -56,13 +63,6 @@ import {
 	prepareStorePathMetadata,
 	prepareStorePathNegotiation
 } from '../nix/nix-store.ts';
-import {
-	formatBytes,
-	formatCount,
-	type PhaseContext,
-	type Reporter,
-	type ResultRow
-} from '../reporter.ts';
 
 export interface PushDependencies {
 	readonly nixStore?: NixStoreClient;

@@ -1,7 +1,7 @@
+import type { Reporter } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import { InvalidCacheNameError } from '../errors.ts';
-import type { Reporter } from '../reporter.ts';
 
 import { cacheSubstituterUrl, runConfig } from './config.ts';
 

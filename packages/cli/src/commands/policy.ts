@@ -6,6 +6,12 @@ import {
 	retentionPolicyScopeSchema,
 	type RetentionPolicySummary
 } from '@cupboard/protocol/retention';
+import {
+	createReporter,
+	formatCount,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -13,12 +19,6 @@ import { reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
 import { InvalidPolicyScopeError } from '../errors.ts';
-import {
-	createReporter,
-	formatCount,
-	type Reporter,
-	type ResultRow
-} from '../reporter.ts';
 
 interface PolicyAddOptions {
 	readonly ttl: number;

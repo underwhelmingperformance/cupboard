@@ -1,8 +1,8 @@
+import { createReporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
-import { createReporter } from '../reporter.ts';
 
 export function registerPubkeyCommand(program: Command): void {
 	program

@@ -2,11 +2,11 @@ import { env } from 'node:process';
 
 import { NixConfig, renderNetrc } from '@cupboard/nix/nix-config';
 import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { createReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { reporterModeFromGlobals } from '../cli.ts';
 import { InvalidCacheNameError } from '../errors.ts';
-import { createReporter, type Reporter } from '../reporter.ts';
 
 export interface ConfigCredential {
 	readonly user: string;
