@@ -1,4 +1,4 @@
-import { parse as parseJsonc } from 'jsonc-parser';
+import JSON5 from 'json5';
 import { z } from 'zod';
 
 import { controlWorker, tenantWorker } from './source.ts';
@@ -197,7 +197,7 @@ function parseWorker(
 	source: string,
 	mainModule: string
 ): WorkerConfig {
-	const parsed = rawWranglerSchema.safeParse(parseJsonc(source));
+	const parsed = rawWranglerSchema.safeParse(JSON5.parse(source));
 
 	if (!parsed.success) {
 		throw new WranglerConfigError(label, parsed.error.message);

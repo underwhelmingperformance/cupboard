@@ -107,9 +107,9 @@ importers:
       commander:
         specifier: ^15.0.0
         version: 15.0.0
-      jsonc-parser:
-        specifier: ^3.3.1
-        version: 3.3.1
+      json5:
+        specifier: ^2.2.3
+        version: 2.2.3
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -2838,8 +2838,10 @@ packages:
   json-stable-stringify-without-jsonify@1.0.1:
     resolution: {integrity: sha512-Bdboy+l7tA3OGW6FjyFHWkP5LuByj1Tk33Ljyq0axyzdk9//JSi2u3fP1QSmd1KNwq6VOKYGlAu87CisVir6Pw==}
 
-  jsonc-parser@3.3.1:
-    resolution: {integrity: sha512-HUgH65KyejrUFPvHFPbqOY0rsFip3Bo5wb4ngvdi1EpCYWUQDC5V+Y7mZws+DLkr4M//zQJoanu1SP+87Dv1oQ==}
+  json5@2.2.3:
+    resolution: {integrity: sha512-XmOWe7eyHYH14cLdVPoyg+GOH3rYX++KpzrylJwSW98t3Nk+U8XOl8FWKOgwtzdb8lXGf6zYwDUzeHMWfxasyg==}
+    engines: {node: '>=6'}
+    hasBin: true
 
   just-git@1.7.1:
     resolution: {integrity: sha512-XAxD3x+8aSo8Kx62pkcj3Jzmhw2I4mhw1xvqTNbpVcTFUMIZKak5W00hVM7/LywUFLfMj+7Riu8cEcn8JnEHHw==}
@@ -5887,7 +5889,7 @@ snapshots:
 
   json-stable-stringify-without-jsonify@1.0.1: {}
 
-  jsonc-parser@3.3.1: {}
+  json5@2.2.3: {}
 
   just-git@1.7.1: {}
 
