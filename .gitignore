@@ -18,3 +18,5 @@ Thumbs.db
 *.tsbuildinfo
 .vitest-attachments
 packages/server/src/build-info.generated.ts
+
+.claude/
