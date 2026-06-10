@@ -1,10 +1,14 @@
+import { fileURLToPath } from 'node:url';
+
 import eslint from '@eslint/js';
-import { defineConfig } from 'eslint/config';
+import { defineConfig, includeIgnoreFile } from 'eslint/config';
 import eslintConfigPrettier from 'eslint-config-prettier/flat';
 import simpleImportSort from 'eslint-plugin-simple-import-sort';
 import unicorn from 'eslint-plugin-unicorn';
 import globals from 'globals';
 import ts from 'typescript-eslint';
+
+const gitignorePath = fileURLToPath(new URL('.gitignore', import.meta.url));
 
 const nodeBuiltInImports = [
 	'assert',
@@ -53,6 +57,7 @@ const nodeBuiltInImports = [
 ];
 
 export default defineConfig(
+	includeIgnoreFile(gitignorePath),
 	eslint.configs.recommended,
 	...ts.configs.strictTypeChecked,
 	...ts.configs.stylisticTypeChecked,
