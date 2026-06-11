@@ -188,3 +188,38 @@ describe('ensureSchedules', () => {
 		]);
 	});
 });
+
+describe('findCustomDomain', () => {
+	const domainsPath = '/accounts/acc-1/workers/domains';
+
+	it('answers the hostname routed to the script', async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${domainsPath}`]: [
+				{ hostname: 'other.example.com', service: 'other-worker' },
+				{ hostname: 'cupboard.supply', service: 'cupboard' }
+			]
+		});
+
+		const hostname = await createCloudflareApi(
+			client,
+			'acc-1'
+		).findCustomDomain('cupboard');
+
+		expect(hostname).toBe('cupboard.supply');
+	});
+
+	it('answers undefined when no domain is routed to the script', async () => {
+		const { client } = fakeCloudflare({
+			[`GET ${domainsPath}`]: [
+				{ hostname: 'other.example.com', service: 'other-worker' }
+			]
+		});
+
+		const hostname = await createCloudflareApi(
+			client,
+			'acc-1'
+		).findCustomDomain('cupboard');
+
+		expect(hostname).toBeUndefined();
+	});
+});

@@ -134,6 +134,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`zone:${name}`);
 				return Promise.resolve('zone-1');
 			},
+			findCustomDomain: notExpected('findCustomDomain'),
 			ensureCustomDomain(scriptName, hostname) {
 				calls.push(`domain:${hostname}->${scriptName}`);
 				return Promise.resolve();
