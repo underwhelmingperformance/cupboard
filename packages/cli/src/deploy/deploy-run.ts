@@ -1,6 +1,9 @@
 import type { Reporter, ResultRow } from '@cupboard/reporter';
+import { APIError } from 'cloudflare';
+import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 
 import type { DeploymentArtifact } from './artifact.ts';
+import type { WorkerBundle } from './bundle.ts';
 import type { CloudflareApi, WorkerSecret } from './cloudflare-api.ts';
 import type { DeploymentConfig } from './config.ts';
 import {
@@ -9,6 +12,44 @@ import {
 } from './migrations.ts';
 import type { DeploySecrets } from './secrets.ts';
 import { buildScriptMetadata, type ResolvedResources } from './upload.ts';
+
+// Cloudflare's error code for `limits` on a plan that does not allow them.
+const cpuLimitsUnsupportedCode = 100_328;
+
+function isCpuLimitsUnsupported(error: unknown): boolean {
+	return (
+		error instanceof APIError &&
+		error.errors.some((detail) => detail.code === cpuLimitsUnsupportedCode)
+	);
+}
+
+/**
+ * Upload a script, dropping the CPU limit if the plan does not support one
+ * (the Free plan rejects the `limits` field outright). The Worker still
+ * deploys and runs within the plan's own CPU budget.
+ */
+async function uploadScriptForPlan(
+	deps: DeployDeps,
+	scriptName: string,
+	metadata: ScriptUpdateParams.Metadata,
+	bundle: WorkerBundle
+): Promise<void> {
+	try {
+		await deps.api.uploadScript(scriptName, metadata, bundle);
+	} catch (error) {
+		if (!isCpuLimitsUnsupported(error) || metadata.limits === undefined) {
+			throw error;
+		}
+
+		deps.reporter.warn(
+			'CPU limit not applied',
+			`${scriptName}: this plan does not support CPU limits, so the Worker runs within the plan's CPU budget`
+		);
+
+		const { limits: _limits, ...withoutLimits } = metadata;
+		await deps.api.uploadScript(scriptName, withoutLimits, bundle);
+	}
+}
 
 export interface DeployOptions {
 	readonly domain: string | undefined;
@@ -250,7 +291,8 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 			resources,
 			migration
 		);
-		await api.uploadScript(
+		await uploadScriptForPlan(
+			deps,
 			artifact.config.tenant.name,
 			metadata,
 			artifact.tenantBundle
@@ -259,7 +301,8 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 
 	await reporter.phase('Uploading control worker', async () => {
 		const metadata = buildScriptMetadata(artifact.config.control, resources);
-		await api.uploadScript(
+		await uploadScriptForPlan(
+			deps,
 			artifact.config.control.name,
 			metadata,
 			artifact.controlBundle

@@ -341,7 +341,11 @@ describe('R2 credential settlement', () => {
 				ui,
 				accountId: 'acc-1',
 				bucketName: 'cupboard-blobs',
-				create: () => Promise.resolve(created)
+				creation: {
+					kind: 'available',
+					bucketExists: true,
+					create: () => Promise.resolve(created)
+				}
 			})
 		).toStrictEqual({ credentials: created, created: true });
 	});
@@ -358,10 +362,14 @@ describe('R2 credential settlement', () => {
 				ui,
 				accountId: 'acc-1',
 				bucketName: 'cupboard-blobs',
-				create: () =>
-					Promise.reject(
-						new TokenManagementNotPermittedError({ cause: undefined })
-					)
+				creation: {
+					kind: 'available',
+					bucketExists: true,
+					create: () =>
+						Promise.reject(
+							new TokenManagementNotPermittedError({ cause: undefined })
+						)
+				}
 			})
 		).toStrictEqual({ credentials: pair, created: false });
 	});
@@ -378,7 +386,27 @@ describe('R2 credential settlement', () => {
 				ui,
 				accountId: 'acc-1',
 				bucketName: 'cupboard-blobs',
-				create: unexpected('create')
+				creation: {
+					kind: 'available',
+					bucketExists: true,
+					create: unexpected('create')
+				}
+			})
+		).toStrictEqual({ credentials: pair, created: false });
+	});
+
+	it('goes straight to manual entry when creation is unavailable', async () => {
+		const ui = scriptedUi({
+			textEdits: [{ kind: 'set', value: pair.accessKeyId }],
+			secrets: [pair.secretAccessKey]
+		});
+
+		expect(
+			await obtainR2Credentials({
+				ui,
+				accountId: 'acc-1',
+				bucketName: 'cupboard-blobs',
+				creation: { kind: 'unavailable' }
 			})
 		).toStrictEqual({ credentials: pair, created: false });
 	});
@@ -391,7 +419,11 @@ describe('R2 credential settlement', () => {
 				ui,
 				accountId: 'acc-1',
 				bucketName: 'cupboard-blobs',
-				create: unexpected('create')
+				creation: {
+					kind: 'available',
+					bucketExists: true,
+					create: unexpected('create')
+				}
 			})
 		).toBeUndefined();
 	});
