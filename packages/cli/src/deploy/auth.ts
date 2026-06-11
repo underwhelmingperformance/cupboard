@@ -46,6 +46,13 @@ export interface CredentialChain {
 	/** Absent when a logged-in wrangler's stored token must not be used. */
 	readonly readWranglerToken?: () => Promise<string | undefined>;
 	readonly login: () => Promise<CloudflareGrant>;
+	/**
+	 * Whether a cached grant without an identity may be replaced by a fresh
+	 * browser login. A grant from before the `openid` scope carries no subject
+	 * and its refresh token cannot grow one, so only a new login can say who
+	 * the operator is; without a terminal the old grant is used as-is.
+	 */
+	readonly upgradeLogin: boolean;
 	readonly now: () => number;
 }
 
@@ -53,6 +60,8 @@ export interface CredentialChainOptions {
 	readonly openBrowser: (url: string) => void | Promise<void>;
 	/** Whether a logged-in wrangler's stored token may be used. */
 	readonly wrangler: boolean;
+	/** Whether a browser is available to upgrade an identity-less grant. */
+	readonly interactive: boolean;
 }
 
 /** The production {@link CredentialChain}: real store, endpoints and browser. */
@@ -66,6 +75,7 @@ export function defaultCredentialChain(
 		refreshGrant: (previous) => refreshCloudflareGrant(previous),
 		...(options.wrangler ? { readWranglerToken } : {}),
 		login: () => cloudflareLogin({ openBrowser: options.openBrowser }),
+		upgradeLogin: options.interactive,
 		now: Date.now
 	};
 }
@@ -109,10 +119,24 @@ export async function resolveCredential(
 	const cached = await chain.readGrant();
 
 	if (cached !== undefined && usable(cached, chain.now())) {
+		if (cached.subject !== undefined || !chain.upgradeLogin) {
+			return {
+				token: cached.accessToken,
+				source: 'cached login',
+				subject: cached.subject
+			};
+		}
+
+		// The grant predates identity capture and cannot learn its subject from
+		// a refresh; replace it with a fresh login so the deploy knows who is
+		// deploying.
+		const upgraded = await chain.login();
+		await chain.writeGrant(upgraded);
+
 		return {
-			token: cached.accessToken,
-			source: 'cached login',
-			subject: cached.subject
+			token: upgraded.accessToken,
+			source: 'browser login',
+			subject: upgraded.subject
 		};
 	}
 

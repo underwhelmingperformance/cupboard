@@ -522,11 +522,17 @@ async function promptR2CredentialPair(
 	return { accessKeyId: accessKeyEdit.value, secretAccessKey };
 }
 
-export interface ObtainedR2Credentials {
-	readonly credentials: R2Credentials;
-	/** True when the key was created just now and may not have propagated. */
-	readonly created: boolean;
-}
+/** How the R2 credential question was resolved. */
+export type R2Settlement =
+	| {
+			readonly kind: 'settled';
+			readonly credentials: R2Credentials;
+			/** True when the key was created just now and may not have propagated. */
+			readonly created: boolean;
+	  }
+	/** The pair already on the Worker stays as it is. */
+	| { readonly kind: 'keep' }
+	| { readonly kind: 'cancelled' };
 
 /**
  * Whether the deploy credential is able to create the scoped key. OAuth
@@ -545,56 +551,75 @@ export type R2KeyCreation =
 /**
  * Settle the R2 credential pair interactively: create a bucket-scoped key
  * through the Cloudflare API when the deploy credential allows it (the
- * recommended path), or take an existing pair. Returns undefined when
- * cancelled.
+ * recommended path), or take an existing pair. When the Worker already holds
+ * a pair that may no longer fit (the bucket was renamed), keeping it is
+ * offered as an explicit choice.
  */
 export async function obtainR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly accountId: string;
 	readonly bucketName: string;
 	readonly creation: R2KeyCreation;
-}): Promise<ObtainedR2Credentials | undefined> {
+	/** Set when the Worker holds a pair that was scoped to another bucket. */
+	readonly keep?: { readonly previousBucket: string };
+}): Promise<R2Settlement> {
 	const { ui, bucketName, creation } = options;
 
-	if (creation.kind === 'unavailable') {
-		const credentials = await promptR2CredentialPair(ui, options.accountId);
+	const settled = (credentials: R2Credentials | undefined): R2Settlement =>
+		credentials === undefined
+			? { kind: 'cancelled' }
+			: { kind: 'settled', credentials, created: false };
 
-		return credentials === undefined
-			? undefined
-			: { credentials, created: false };
+	if (creation.kind === 'unavailable' && options.keep === undefined) {
+		return settled(await promptR2CredentialPair(ui, options.accountId));
 	}
 
-	const choice = await ui.menu(
-		`The cache needs R2 credentials for ${bucketName}. How would you like to provide them?`,
-		[
-			{
-				value: 'create',
-				label: `Create a key scoped to ${bucketName}`,
-				hint: creation.bucketExists
-					? 'rotated on each deploy'
-					: 'creates the bucket too; rotated on each deploy'
-			},
-			{ value: 'enter', label: 'Enter an existing key pair' },
-			{ value: 'cancel', label: 'Cancel' }
-		]
-	);
+	const message =
+		options.keep === undefined
+			? `The cache needs R2 credentials for ${bucketName}. How would you like to provide them?`
+			: `The cache bucket is now ${bucketName}, but the key on the Worker was set up for ${options.keep.previousBucket}. How should the cache authenticate?`;
+
+	const choice = await ui.menu(message, [
+		...(creation.kind === 'available'
+			? [
+					{
+						value: 'create',
+						label: `Create a key scoped to ${bucketName}`,
+						hint: creation.bucketExists
+							? 'recommended; rotated on each deploy'
+							: 'creates the bucket too; rotated on each deploy'
+					} as const
+				]
+			: []),
+		{ value: 'enter', label: 'Enter an existing key pair' },
+		...(options.keep === undefined
+			? []
+			: [
+					{
+						value: 'keep',
+						label: 'Keep the current key',
+						hint: `may still be scoped to ${options.keep.previousBucket}`
+					} as const
+				]),
+		{ value: 'cancel', label: 'Cancel' }
+	]);
 
 	if (choice === undefined || choice === 'cancel') {
-		return undefined;
+		return { kind: 'cancelled' };
 	}
 
-	if (choice === 'enter') {
-		const credentials = await promptR2CredentialPair(ui, options.accountId);
+	if (choice === 'keep') {
+		return { kind: 'keep' };
+	}
 
-		return credentials === undefined
-			? undefined
-			: { credentials, created: false };
+	if (choice === 'enter' || creation.kind === 'unavailable') {
+		return settled(await promptR2CredentialPair(ui, options.accountId));
 	}
 
 	try {
 		const credentials = await creation.create();
 
-		return { credentials, created: true };
+		return { kind: 'settled', credentials, created: true };
 	} catch (error) {
 		if (!(error instanceof TokenManagementNotPermittedError)) {
 			throw error;
@@ -602,11 +627,7 @@ export async function obtainR2Credentials(options: {
 
 		ui.warn(error.message);
 
-		const credentials = await promptR2CredentialPair(ui, options.accountId);
-
-		return credentials === undefined
-			? undefined
-			: { credentials, created: false };
+		return settled(await promptR2CredentialPair(ui, options.accountId));
 	}
 }
 
@@ -828,7 +849,9 @@ async function deployFlow(
 			...derivedPlanRows(
 				artifact,
 				assembled.secrets,
-				assembled.missing.filter((name) => r2Names.has(name))
+				assembled.missing
+					.filter((name) => r2Names.has(name))
+					.map((name) => `${name} (pending)`)
 			),
 			{ label: '', value: '' },
 			...choicePlanRows(
@@ -862,7 +885,8 @@ async function deployFlow(
 					openBrowser: (url) => {
 						ui.openBrowser(url);
 					},
-					wrangler: cliOptions.wrangler ?? true
+					wrangler: cliOptions.wrangler ?? true,
+					interactive
 				})
 			));
 	} catch (error) {
@@ -894,20 +918,51 @@ async function deployFlow(
 		return created;
 	};
 
-	// Whether the control Worker already holds the wrapping secret, asked once
-	// per account; a fresh secret is generated at most once and reused across
-	// re-renders so the value shown to the user is the value deployed.
-	const wrapSecretChecks = new Map<string, Promise<readonly string[]>>();
+	// Whether a Worker already holds particular secrets, asked once per
+	// account and script; a fresh wrapping secret is generated at most once
+	// and reused across re-renders so the value shown is the value deployed.
+	const secretChecks = new Map<string, Promise<readonly string[]>>();
 	let generatedWrapSecret: string | undefined;
 
+	const existingSecretsFor = (
+		accountId: string,
+		scriptName: string
+	): Promise<readonly string[]> => {
+		const key = `${accountId}:${scriptName}`;
+		let existing = secretChecks.get(key);
+
+		if (existing === undefined) {
+			existing = ui
+				.reporter()
+				.phase('Checking existing secrets', () =>
+					apiFor(accountId).listScriptSecrets(scriptName)
+				);
+			secretChecks.set(key, existing);
+		}
+
+		return existing;
+	};
+
 	const r2SecretNames = new Set(['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']);
+
+	// The pair the tenant Worker already holds survives a re-deploy untouched,
+	// so it only needs settling when neither the environment nor the Worker
+	// has it. The values cannot be read back, only their presence.
+	const r2AlreadySetFor = async (state: PlanState): Promise<boolean> => {
+		const existing = await existingSecretsFor(
+			state.accountId,
+			state.config.tenant.name
+		);
+
+		return [...r2SecretNames].every((name) => existing.includes(name));
+	};
 
 	const planFor = async (
 		state: PlanState
 	): Promise<{
 		options: DeployOptions;
 		missing: readonly string[];
-		pending: readonly string[];
+		annotated: readonly string[];
 	}> => {
 		const assembled = assembleSecrets({
 			env: {
@@ -919,28 +974,26 @@ async function deployFlow(
 			bucketName: bucketNameOf(state.config)
 		});
 		const controlSecrets = [...assembled.secrets.control];
-		// The R2 pair is settled after the review (created or entered), so its
-		// absence is pending work rather than a problem to warn about.
-		const pending = assembled.missing.filter((name) => r2SecretNames.has(name));
+		// The R2 pair is settled after the review (kept, created or entered),
+		// so its absence is pending work rather than a problem to warn about.
+		const pendingR2 = assembled.missing.filter((name) =>
+			r2SecretNames.has(name)
+		);
+		const annotated =
+			pendingR2.length === 0
+				? []
+				: (await r2AlreadySetFor(state))
+					? pendingR2.map((name) => `${name} (already set)`)
+					: pendingR2.map((name) => `${name} (pending)`);
 		let missing = assembled.missing.filter((name) => !r2SecretNames.has(name));
 
 		// Generate the control key wrapping secret on a first deploy, but never
 		// overwrite an existing one: a different value cannot unwrap stored data.
 		if (missing.includes('CONTROL_KEY_WRAP_SECRET')) {
-			let existing = wrapSecretChecks.get(state.accountId);
-
-			if (existing === undefined) {
-				existing = ui
-					.reporter()
-					.phase('Checking existing secrets', () =>
-						apiFor(state.accountId).listScriptSecrets(
-							artifact.config.control.name
-						)
-					);
-				wrapSecretChecks.set(state.accountId, existing);
-			}
-
-			const names = await existing;
+			const names = await existingSecretsFor(
+				state.accountId,
+				artifact.config.control.name
+			);
 			missing = missing.filter((name) => name !== 'CONTROL_KEY_WRAP_SECRET');
 
 			if (!names.includes('CONTROL_KEY_WRAP_SECRET')) {
@@ -974,7 +1027,7 @@ async function deployFlow(
 				secrets: { control: controlSecrets, tenant: assembled.secrets.tenant }
 			},
 			missing,
-			pending
+			annotated
 		};
 	};
 
@@ -998,13 +1051,13 @@ async function deployFlow(
 		{
 			ui,
 			render: async (state) => {
-				const { options, missing, pending } = await planFor(state);
+				const { options, missing, annotated } = await planFor(state);
 
 				ui.note('Deployment plan', [
 					...derivedPlanRows(
 						{ ...artifact, config: state.config },
 						options.secrets,
-						pending
+						annotated
 					),
 					{ label: '', value: '' },
 					{ label: 'Account', value: state.accountId },
@@ -1024,51 +1077,73 @@ async function deployFlow(
 	}
 
 	const agreedBucket = bucketNameOf(agreed.config);
+	const bucketRenamed = agreedBucket !== bucketNameOf(artifact.config);
 	let createdNow = false;
 
 	if (r2Credentials === undefined) {
-		if (!interactive) {
-			throw new R2CredentialsRequiredError();
-		}
+		const alreadySet = await r2AlreadySetFor(agreed);
 
-		const obtained = await obtainR2Credentials({
+		if (alreadySet && !bucketRenamed) {
+			// The Worker keeps the pair it already holds; nothing to settle, and
+			// nothing to probe, since the values cannot be read back.
+			ui.info('Keeping the R2 credentials already set on the Worker.');
+		} else if (interactive) {
+			const settlement = await obtainR2Credentials({
+				ui,
+				accountId: agreed.accountId,
+				bucketName: agreedBucket,
+				creation: await r2KeyCreationFor({
+					ui,
+					api: apiFor(agreed.accountId),
+					credentialSource,
+					accountId: agreed.accountId,
+					bucketName: agreedBucket
+				}),
+				...(alreadySet && bucketRenamed
+					? { keep: { previousBucket: bucketNameOf(artifact.config) } }
+					: {})
+			});
+
+			if (settlement.kind === 'cancelled') {
+				ui.cancelled('Deploy aborted.');
+				return;
+			}
+
+			if (settlement.kind === 'settled') {
+				r2Credentials = settlement.credentials;
+				createdNow = settlement.created;
+			}
+		} else {
+			if (!alreadySet) {
+				throw new R2CredentialsRequiredError();
+			}
+
+			ui.warn(
+				'The cache bucket was renamed, and the R2 key already on the ' +
+					'Worker may be scoped to the old name. Re-run interactively to ' +
+					'replace it.'
+			);
+		}
+	}
+
+	if (r2Credentials !== undefined) {
+		const verified = await verifyR2Credentials({
 			ui,
+			interactive,
 			accountId: agreed.accountId,
 			bucketName: agreedBucket,
-			creation: await r2KeyCreationFor({
-				ui,
-				api: apiFor(agreed.accountId),
-				credentialSource,
-				accountId: agreed.accountId,
-				bucketName: agreedBucket
-			})
+			initial: r2Credentials,
+			attempts: createdNow ? propagationAttempts : 1
 		});
 
-		if (obtained === undefined) {
+		if (verified === undefined) {
 			ui.cancelled('Deploy aborted.');
 			return;
 		}
 
-		r2Credentials = obtained.credentials;
-		createdNow = obtained.created;
+		// The probe may have replaced the pair; the deploy must set what passed.
+		r2Credentials = verified;
 	}
-
-	const verified = await verifyR2Credentials({
-		ui,
-		interactive,
-		accountId: agreed.accountId,
-		bucketName: agreedBucket,
-		initial: r2Credentials,
-		attempts: createdNow ? propagationAttempts : 1
-	});
-
-	if (verified === undefined) {
-		ui.cancelled('Deploy aborted.');
-		return;
-	}
-
-	// The probe may have replaced the pair; the deploy must set what passed.
-	r2Credentials = verified;
 
 	const { options } = await planFor(agreed);
 
