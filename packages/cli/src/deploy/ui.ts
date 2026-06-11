@@ -221,21 +221,27 @@ function clackReporter(): Reporter {
 			const indicator = spinner();
 			indicator.start(label);
 
-			const facts: string[] = [];
+			// Keyed by fact label, so a repeated fact (an attempt counter, say)
+			// updates its entry rather than growing the spinner text unboundedly.
+			const facts = new Map<string, string>();
+			const rendered = (): string =>
+				facts.size === 0
+					? label
+					: `${label} ${pc.dim(
+							`· ${[...facts.entries()]
+								.map(([factLabel, value]) => `${factLabel} ${value}`)
+								.join(' · ')}`
+						)}`;
 
 			try {
 				const value = await body({
 					fact(factLabel, factValue) {
-						facts.push(`${factLabel} ${String(factValue)}`);
-						indicator.message(`${label} ${pc.dim(`· ${facts.join(' · ')}`)}`);
+						facts.set(factLabel, String(factValue));
+						indicator.message(rendered());
 					}
 				});
 
-				indicator.stop(
-					facts.length === 0
-						? label
-						: `${label} ${pc.dim(`· ${facts.join(' · ')}`)}`
-				);
+				indicator.stop(rendered());
 
 				return value;
 			} catch (error) {

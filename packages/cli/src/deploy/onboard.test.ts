@@ -191,7 +191,8 @@ describe('onboardDeployment', () => {
 			})
 		).toStrictEqual({
 			kind: 'unreachable',
-			url: 'https://cache.example.com'
+			url: 'https://cache.example.com',
+			lastProbe: 'unreachable'
 		});
 	});
 
