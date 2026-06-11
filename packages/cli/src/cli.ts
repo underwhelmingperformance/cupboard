@@ -10,7 +10,6 @@ import { registerConfigCommand } from './commands/config.ts';
 import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
-import { registerInitCommand } from './commands/init.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
 import { registerOidcTrustCommands } from './commands/oidc-trust.ts';
@@ -37,7 +36,6 @@ export function buildProgram(): Command {
 		.option('--no-colour', 'force plain line-delimited JSON output')
 		.showHelpAfterError();
 
-	registerInitCommand(program);
 	registerDeployCommand(program);
 	registerLoginCommand(program);
 	registerAttestCommands(program);

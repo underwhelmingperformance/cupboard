@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { NixConfig } from '@cupboard/nix/nix-config';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 
@@ -31,6 +32,7 @@ import {
 } from './deploy-run.ts';
 import { checkDomainOption, domainProblem } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
+import { onboardDeployment } from './onboard.ts';
 import { renameResource, withCrons, withOwner } from './overrides.ts';
 import {
 	cloudflareDashIssuer,
@@ -1084,9 +1086,47 @@ async function deployFlow(
 		options
 	});
 
-	ui.outro(
-		agreed.domain === undefined
-			? 'Deployed.'
-			: `Deployed: https://${agreed.domain}`
-	);
+	const outcome = await onboardDeployment({
+		api: apiFor(agreed.accountId),
+		ui,
+		controlScriptName: agreed.config.control.name,
+		domain: agreed.domain
+	});
+
+	if (outcome.kind === 'no-subdomain') {
+		ui.warn(
+			'The account has no workers.dev subdomain, so the cache has no URL ' +
+				'yet. Register one in the Cloudflare dashboard (Workers & Pages), ' +
+				'then run `cupboard config <url> <pubkey>` for the nix.conf lines.'
+		);
+		ui.outro('Deployed.');
+		return;
+	}
+
+	if (outcome.kind === 'unreachable') {
+		ui.warn(
+			`Deployed, but ${outcome.url} did not come online in time. A fresh ` +
+				'custom domain can take a while in DNS; once it resolves, run ' +
+				`\`cupboard config ${outcome.url} <pubkey>\` for the nix.conf lines.`
+		);
+		ui.outro('Deployed.');
+		return;
+	}
+
+	ui.note('Add to your nix.conf (e.g. /etc/nix/nix.conf)', [
+		{ label: 'Cache URL', value: outcome.url },
+		{ label: '', value: '' },
+		...new NixConfig(outcome.url, outcome.publicKey)
+			.render()
+			.trimEnd()
+			.split('\n')
+			.map((line) => ({ label: '', value: line }))
+	]);
+
+	const nextSteps = [
+		...(agreed.owner.kind === 'owner' ? [`cupboard login ${outcome.url}`] : []),
+		`cupboard push ${outcome.url} ./result`
+	];
+
+	ui.outro(`Deployed and initialised. Next: ${nextSteps.join(' · ')}`);
 }
