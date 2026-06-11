@@ -1,6 +1,7 @@
 import Cloudflare from 'cloudflare';
 import { NotFoundError, toFile } from 'cloudflare';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
+import { z } from 'zod';
 
 import type { WorkerBundle } from './bundle.ts';
 
@@ -105,6 +106,30 @@ async function firstMatch<T>(
 
 	return undefined;
 }
+
+/**
+ * A queue consumer as the live API answers it. The published schema (and the
+ * SDK's types) say the Worker is named by `script_name`, but the live
+ * endpoint answers `script` (and `service` for service bindings), which is
+ * also what wrangler matches on. All spellings are read, and the parse is
+ * deliberately independent of the SDK's view of the wire.
+ */
+const liveConsumerSchema = z.object({
+	type: z.string().optional(),
+	consumer_id: z.string().optional(),
+	script_name: z.string().optional(),
+	script: z.string().optional(),
+	service: z.string().optional(),
+	dead_letter_queue: z.string().optional(),
+	settings: z
+		.object({
+			batch_size: z.number().optional(),
+			max_wait_time_ms: z.number().optional(),
+			max_retries: z.number().optional(),
+			max_concurrency: z.number().optional()
+		})
+		.optional()
+});
 
 /**
  * Whether a live queue consumer already carries every setting the deploy
@@ -301,30 +326,43 @@ export function createCloudflareApi(
 					: { dead_letter_queue: settings.deadLetterQueue })
 			};
 
-			const existing = await firstMatch(
-				client.queues.consumers.list(queueId, account),
-				(consumer) =>
-					consumer.type === 'worker' && consumer.script_name === scriptName
-			);
+			const consumers: unknown[] = [];
+
+			for await (const consumer of client.queues.consumers.list(
+				queueId,
+				account
+			)) {
+				consumers.push(consumer);
+			}
+
+			const existing = consumers
+				.map((consumer) => liveConsumerSchema.safeParse(consumer))
+				.filter((parsed) => parsed.success)
+				.map((parsed) => parsed.data)
+				.find(
+					(consumer) =>
+						(consumer.type === undefined || consumer.type === 'worker') &&
+						[consumer.script_name, consumer.script, consumer.service].includes(
+							scriptName
+						)
+				);
 
 			if (existing === undefined) {
 				await client.queues.consumers.create(queueId, body);
 				return;
 			}
 
-			if (
-				existing.type === 'worker' &&
-				consumerSettled(existing, settings) &&
-				existing.consumer_id !== undefined
-			) {
+			if (consumerSettled(existing, settings)) {
 				return;
 			}
 
-			await client.queues.consumers.update(
-				queueId,
-				existing.type === 'worker' ? (existing.consumer_id ?? '') : '',
-				body
-			);
+			if (existing.consumer_id === undefined) {
+				// A matched consumer that cannot be addressed cannot be updated;
+				// leaving it is the only convergent move.
+				return;
+			}
+
+			await client.queues.consumers.update(queueId, existing.consumer_id, body);
 		},
 
 		async ensureSchedules(scriptName, crons) {
