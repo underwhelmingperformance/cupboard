@@ -74,6 +74,8 @@ export interface CloudflareApi {
 	listScriptSecrets(scriptName: string): Promise<string[]>;
 
 	findZoneId(name: string): Promise<string | undefined>;
+	/** The custom domain currently routed to the script, when one is. */
+	findCustomDomain(scriptName: string): Promise<string | undefined>;
 	ensureCustomDomain(
 		scriptName: string,
 		hostname: string,
@@ -427,6 +429,15 @@ export function createCloudflareApi(
 			);
 
 			return zone?.id;
+		},
+
+		async findCustomDomain(scriptName) {
+			const existing = await firstMatch(
+				client.workers.domains.list(account),
+				(domain) => domain.service === scriptName
+			);
+
+			return existing?.hostname;
 		},
 
 		async ensureCustomDomain(scriptName, hostname, zoneId) {

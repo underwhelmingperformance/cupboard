@@ -30,6 +30,7 @@ const baseApi: CloudflareApi = {
 	putSecret: unexpected('putSecret'),
 	listScriptSecrets: unexpected('listScriptSecrets'),
 	findZoneId: unexpected('findZoneId'),
+	findCustomDomain: unexpected('findCustomDomain'),
 	ensureCustomDomain: unexpected('ensureCustomDomain'),
 	listTokenPermissionGroups: unexpected('listTokenPermissionGroups'),
 	findApiTokenId: unexpected('findApiTokenId'),
