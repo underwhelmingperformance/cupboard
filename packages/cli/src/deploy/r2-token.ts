@@ -48,19 +48,15 @@ export function scopedR2TokenName(bucketName: string): string {
 /**
  * Creates (or, on a re-deploy, rolls) the account-owned API token that backs
  * the cache's R2 credentials: object read/write on exactly one bucket. The
- * bucket is created first when absent, since a key cannot meaningfully be
- * scoped to a bucket that does not exist (and the later reconcile step treats
- * an existing bucket as already done). The S3 pair is derived from the token;
- * nothing is stored anywhere except as Worker secrets, and re-running rotates
- * the secret.
+ * bucket must already exist; the caller creates it, visibly, first. The S3
+ * pair is derived from the token; nothing is stored anywhere except as Worker
+ * secrets, and re-running rotates the secret.
  */
 export async function createScopedR2Key(
 	api: CloudflareApi,
 	options: { readonly accountId: string; readonly bucketName: string }
 ): Promise<R2Credentials> {
 	try {
-		await api.ensureR2Bucket(options.bucketName);
-
 		const name = scopedR2TokenName(options.bucketName);
 		const existingId = await api.findApiTokenId(name);
 

@@ -1,4 +1,5 @@
 import type { Reporter } from '@cupboard/reporter';
+import { APIError } from 'cloudflare';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { DeploymentArtifact } from './artifact.ts';
@@ -77,6 +78,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 		calls,
 		api: {
 			listAccounts: () => Promise.resolve([{ id: 'acc', name: 'Acme' }]),
+			r2BucketExists: notExpected('r2BucketExists'),
 			listTokenPermissionGroups: notExpected('listTokenPermissionGroups'),
 			findApiTokenId: notExpected('findApiTokenId'),
 			createApiToken: notExpected('createApiToken'),
@@ -185,5 +187,68 @@ describe('runDeploy', () => {
 			'zone:cupboard.store',
 			'domain:cupboard.store->cupboard'
 		]);
+	});
+
+	it('retries an upload without CPU limits when the plan rejects them', async () => {
+		const { api, calls } = recordingApi();
+		const warnings: string[] = [];
+		const cpuLimitsRejected = APIError.generate(
+			400,
+			{
+				errors: [
+					{
+						code: 100_328,
+						message: 'CPU limits are not supported for the Free plan.'
+					}
+				]
+			},
+			'400 CPU limits are not supported',
+			{}
+		);
+
+		const planLimitedApi: CloudflareApi = {
+			...api,
+			uploadScript: (scriptName, metadata, bundle) => {
+				if (metadata.limits !== undefined) {
+					return Promise.reject(cpuLimitsRejected);
+				}
+
+				return api.uploadScript(scriptName, metadata, bundle);
+			}
+		};
+
+		await runDeploy({
+			artifact: {
+				...artifact,
+				config: {
+					control: artifact.config.control,
+					tenant: { ...artifact.config.tenant, cpuMs: undefined }
+				}
+			},
+			api: planLimitedApi,
+			reporter: {
+				...silentReporter,
+				warn: (label, value) => {
+					warnings.push(`${label}: ${value ?? ''}`);
+				}
+			},
+			options: {
+				domain: undefined,
+				dryRun: false,
+				secrets: { control: [], tenant: [] }
+			}
+		});
+
+		expect({
+			uploads: calls.filter((call) => call.startsWith('upload:')),
+			warnings: warnings.filter((warning) =>
+				warning.startsWith('CPU limit not applied')
+			).length
+		}).toStrictEqual({
+			// The control worker sets a CPU limit; it is uploaded again without
+			// one. The tenant worker sets none, so it uploads first time.
+			uploads: ['upload:cupboard-tenant', 'upload:cupboard'],
+			warnings: 1
+		});
 	});
 });

@@ -47,6 +47,7 @@ export interface CreatedApiToken {
 export interface CloudflareApi {
 	listAccounts(): Promise<AccountSummary[]>;
 
+	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
 	ensureD1Database(name: string): Promise<string>;
 	ensureKvNamespace(title: string): Promise<string>;
@@ -112,6 +113,12 @@ export function createCloudflareApi(
 ): CloudflareApi {
 	const account = { account_id: accountId };
 
+	const bucketExists = async (name: string): Promise<boolean> => {
+		const list = await client.r2.buckets.list(account);
+
+		return (list.buckets ?? []).some((bucket) => bucket.name === name);
+	};
+
 	return {
 		async listAccounts() {
 			const accounts: AccountSummary[] = [];
@@ -123,15 +130,14 @@ export function createCloudflareApi(
 			return accounts;
 		},
 
-		async ensureR2Bucket(name) {
-			const list = await client.r2.buckets.list(account);
-			const exists = (list.buckets ?? []).some(
-				(bucket) => bucket.name === name
-			);
+		r2BucketExists: bucketExists,
 
-			if (!exists) {
-				await client.r2.buckets.create({ ...account, name });
+		async ensureR2Bucket(name) {
+			if (await bucketExists(name)) {
+				return;
 			}
+
+			await client.r2.buckets.create({ ...account, name });
 		},
 
 		async ensureD1Database(name) {
