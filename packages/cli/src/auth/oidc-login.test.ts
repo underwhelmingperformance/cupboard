@@ -180,6 +180,34 @@ describe('loopbackLogin', () => {
 		).rejects.toBeInstanceOf(OidcLoginError);
 	});
 
+	it('serves a fixed redirect registration when one is given', async () => {
+		let redirectUri = '';
+
+		await loopbackLogin({
+			endpoints,
+			clientId: 'client-123',
+			openBrowser: async (target) => {
+				const authorize = new URL(target);
+				redirectUri = authorize.searchParams.get('redirect_uri') ?? '';
+				const callback = new URL(redirectUri);
+				callback.searchParams.set('code', 'auth-code');
+				callback.searchParams.set(
+					'state',
+					authorize.searchParams.get('state') ?? ''
+				);
+				await fetch(callback);
+			},
+			fetcher: () =>
+				Promise.resolve(Response.json({ id_token: 'owner.id.token' })),
+			loopback: { ports: [0], host: 'localhost', path: '/oauth/callback' }
+		});
+
+		expect({
+			host: new URL(redirectUri).hostname,
+			path: new URL(redirectUri).pathname
+		}).toStrictEqual({ host: 'localhost', path: '/oauth/callback' });
+	});
+
 	it('ignores a stray callback and completes on the matching one', async () => {
 		let strayStatus = 0;
 		const openBrowser = async (target: string): Promise<void> => {
