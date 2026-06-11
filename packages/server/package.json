@@ -1,7 +1,6 @@
 {
 	"name": "@cupboard/server",
 	"version": "0.0.0",
-	"license": "AGPL-3.0-or-later",
 	"dependencies": {
 		"@aws-sdk/client-s3": "^3.1062.0",
 		"@aws-sdk/s3-request-presigner": "^3.1062.0",
@@ -22,6 +21,7 @@
 		"vitest": "^4.1.8",
 		"wrangler": "^4.98.0"
 	},
+	"license": "AGPL-3.0-or-later",
 	"main": "src/worker.ts",
 	"private": true,
 	"scripts": {

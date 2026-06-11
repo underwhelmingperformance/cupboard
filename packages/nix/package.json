@@ -1,7 +1,6 @@
 {
 	"name": "@cupboard/nix",
 	"version": "0.0.0",
-	"license": "AGPL-3.0-or-later",
 	"dependencies": {
 		"zod": "^4.4.3"
 	},
@@ -22,6 +21,7 @@
 		"./store-path": "./src/store-path.ts",
 		"./zstd": "./src/zstd.ts"
 	},
+	"license": "AGPL-3.0-or-later",
 	"private": true,
 	"scripts": {
 		"check:types": "tsc --noEmit",

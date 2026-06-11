@@ -74,13 +74,13 @@ export function collectResources(config: DeploymentConfig): ResourcePlan {
 }
 
 /**
- * The dry-run plan: bundle sizes and the resources, migrations, triggers,
- * domain, and secrets a deploy would touch. Pure, so the command can render it
- * without authenticating.
+ * The plan facts that are derived from the built artifact and cannot be
+ * changed at deploy time: bundle sizes, derived KV titles, migration count,
+ * and which secrets will be set.
  */
-export function deploymentPlanRows(
+export function derivedPlanRows(
 	artifact: DeploymentArtifact,
-	options: DeployOptions
+	secrets: DeploySecrets
 ): ResultRow[] {
 	const resources = collectResources(artifact.config);
 
@@ -93,26 +93,37 @@ export function deploymentPlanRows(
 			label: 'Tenant worker',
 			value: `${(artifact.tenantBundle.code.length / 1024).toFixed(0)} KiB`
 		},
-		{ label: 'R2 buckets', value: resources.r2Buckets.join(', ') },
-		{ label: 'D1 databases', value: resources.d1Databases.join(', ') },
 		{ label: 'KV namespaces', value: resources.kvTitles.join(', ') },
-		{ label: 'Queues', value: resources.queues.join(', ') },
 		{ label: 'D1 migrations', value: String(artifact.d1Migrations.length) },
-		{
-			label: 'Cron triggers',
-			value: artifact.config.control.crons.join(', ') || '(none)'
-		},
-		{
-			label: 'Custom domain',
-			value: options.domain ?? '(none)'
-		},
 		{
 			label: 'Secrets',
 			value:
-				[...options.secrets.control, ...options.secrets.tenant]
+				[...secrets.control, ...secrets.tenant]
 					.map((secret) => secret.name)
 					.join(', ') || '(none)'
 		}
+	];
+}
+
+/**
+ * The plan facts the user may change while reviewing: resource names, cron
+ * triggers, and the custom domain.
+ */
+export function choicePlanRows(
+	config: DeploymentConfig,
+	domain: string | undefined
+): ResultRow[] {
+	const resources = collectResources(config);
+
+	return [
+		{ label: 'R2 buckets', value: resources.r2Buckets.join(', ') },
+		{ label: 'D1 databases', value: resources.d1Databases.join(', ') },
+		{ label: 'Queues', value: resources.queues.join(', ') },
+		{
+			label: 'Cron triggers',
+			value: config.control.crons.join(', ') || '(none)'
+		},
+		{ label: 'Custom domain', value: domain ?? '(none)' }
 	];
 }
 

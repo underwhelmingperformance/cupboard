@@ -105,3 +105,61 @@ describe('parseDeploymentConfig', () => {
 		});
 	});
 });
+
+function withControl(patch: (config: string) => string): () => void {
+	return () => parseDeploymentConfig(patch(controlSource), tenantSource);
+}
+
+describe('wrangler config validation', () => {
+	it.each([
+		[
+			'an uppercase worker name',
+			'"name": "cupboard"',
+			'"name": "Cupboard"',
+			'name: worker name must be lowercase'
+		],
+		[
+			'a bucket name with a trailing hyphen',
+			'"bucket_name": "cupboard-blobs"',
+			'"bucket_name": "cupboard-blobs-"',
+			'bucket_name: R2 bucket name must be lowercase'
+		],
+		[
+			'a queue name with invalid characters',
+			'"queue": "cupboard-maintenance" }',
+			'"queue": "cupboard_maintenance" }',
+			'queue: queue name must be lowercase'
+		],
+		[
+			'a four-field cron trigger',
+			'"crons": ["0 * * * *"]',
+			'"crons": ["0 * * *"]',
+			'cron trigger must have five fields'
+		],
+		[
+			'a cron trigger with stray characters',
+			'"crons": ["0 * * * *"]',
+			'"crons": ["0 * * * *; rm"]',
+			'cron trigger must have five fields'
+		],
+		[
+			'a compatibility date that is not a date',
+			'"compatibility_date": "2026-05-15"',
+			'"compatibility_date": "next-tuesday"',
+			'compatibility_date must be YYYY-MM-DD'
+		]
+	])('rejects %s', (_name, needle, replacement, message) => {
+		expect(
+			withControl((config) => config.replace(needle, replacement))
+		).toThrow(message);
+	});
+
+	it('accepts cron vocabulary like ranges, steps and day names', () => {
+		const config = controlSource.replace(
+			'"crons": ["0 * * * *"]',
+			'"crons": ["*/15 0-6 1 JAN MON-FRI"]'
+		);
+
+		expect(() => parseDeploymentConfig(config, tenantSource)).not.toThrow();
+	});
+});
