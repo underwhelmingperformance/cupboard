@@ -16,6 +16,7 @@ const unexpected = (member: string) => (): never => {
 
 const baseApi: CloudflareApi = {
 	listAccounts: unexpected('listAccounts'),
+	r2BucketExists: unexpected('r2BucketExists'),
 	ensureR2Bucket: unexpected('ensureR2Bucket'),
 	ensureD1Database: unexpected('ensureD1Database'),
 	ensureKvNamespace: unexpected('ensureKvNamespace'),
@@ -55,20 +56,14 @@ function sha256(value: string): string {
 }
 
 describe('createScopedR2Key', () => {
-	it('creates the bucket, then a token scoped to it, deriving the S3 pair', async () => {
+	it('creates a token scoped to the bucket and derives the S3 pair', async () => {
 		const created: { name: string; policy: TokenPolicyInput }[] = [];
-		const calls: string[] = [];
 
 		const api: CloudflareApi = {
 			...baseApi,
-			ensureR2Bucket: (name) => {
-				calls.push(`bucket:${name}`);
-				return Promise.resolve();
-			},
 			findApiTokenId: findIn({}),
 			listTokenPermissionGroups: () => Promise.resolve([...groups]),
 			createApiToken: (name, policy) => {
-				calls.push('token');
 				created.push({ name, policy });
 				return Promise.resolve({ id: 'token-id', value: 'token-value' });
 			}
@@ -76,7 +71,7 @@ describe('createScopedR2Key', () => {
 
 		const credentials = await createScopedR2Key(api, options);
 
-		expect({ credentials, created, calls }).toStrictEqual({
+		expect({ credentials, created }).toStrictEqual({
 			credentials: {
 				accessKeyId: 'token-id',
 				secretAccessKey: sha256('token-value')
@@ -91,8 +86,7 @@ describe('createScopedR2Key', () => {
 						}
 					}
 				}
-			],
-			calls: ['bucket:cupboard-blobs', 'token']
+			]
 		});
 	});
 
@@ -101,7 +95,6 @@ describe('createScopedR2Key', () => {
 
 		const api: CloudflareApi = {
 			...baseApi,
-			ensureR2Bucket: () => Promise.resolve(),
 			findApiTokenId: findIn({
 				[scopedR2TokenName('cupboard-blobs')]: 'existing-id'
 			}),
@@ -125,7 +118,6 @@ describe('createScopedR2Key', () => {
 	it('fails with the missing permission groups named', async () => {
 		const api: CloudflareApi = {
 			...baseApi,
-			ensureR2Bucket: () => Promise.resolve(),
 			findApiTokenId: findIn({}),
 			listTokenPermissionGroups: () =>
 				Promise.resolve([{ id: 'pg-other', name: 'Workers Scripts Write' }])
@@ -139,7 +131,6 @@ describe('createScopedR2Key', () => {
 	it('rejects a token response without a value', async () => {
 		const api: CloudflareApi = {
 			...baseApi,
-			ensureR2Bucket: () => Promise.resolve(),
 			findApiTokenId: findIn({}),
 			listTokenPermissionGroups: () => Promise.resolve([...groups]),
 			createApiToken: () => Promise.resolve({ id: 'token-id', value: '' })

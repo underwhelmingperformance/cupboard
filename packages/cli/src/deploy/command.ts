@@ -3,6 +3,7 @@ import { isSea } from 'node:sea';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import type Cloudflare from 'cloudflare';
+import { APIError } from 'cloudflare';
 
 import { CliError } from '../errors.ts';
 
@@ -414,18 +415,40 @@ export interface ObtainedR2Credentials {
 }
 
 /**
+ * Whether the deploy credential is able to create the scoped key. OAuth
+ * grants (the browser login, its cache, and wrangler's token) can never
+ * manage API tokens, so for them creation is not offered at all.
+ */
+export type R2KeyCreation =
+	| {
+			readonly kind: 'available';
+			/** Whether the bucket already exists, so the offer tells no lies. */
+			readonly bucketExists: boolean;
+			readonly create: () => Promise<R2Credentials>;
+	  }
+	| { readonly kind: 'unavailable' };
+
+/**
  * Settle the R2 credential pair interactively: create a bucket-scoped key
- * through the Cloudflare API (the recommended path), or take an existing pair.
- * A deploy credential without token-management rights falls back to manual
- * entry with an explanation. Returns undefined when cancelled.
+ * through the Cloudflare API when the deploy credential allows it (the
+ * recommended path), or take an existing pair. Returns undefined when
+ * cancelled.
  */
 export async function obtainR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly accountId: string;
 	readonly bucketName: string;
-	readonly create: () => Promise<R2Credentials>;
+	readonly creation: R2KeyCreation;
 }): Promise<ObtainedR2Credentials | undefined> {
-	const { ui, bucketName } = options;
+	const { ui, bucketName, creation } = options;
+
+	if (creation.kind === 'unavailable') {
+		const credentials = await promptR2CredentialPair(ui, options.accountId);
+
+		return credentials === undefined
+			? undefined
+			: { credentials, created: false };
+	}
 
 	const choice = await ui.menu(
 		`The cache needs R2 credentials for ${bucketName}. How would you like to provide them?`,
@@ -433,7 +456,9 @@ export async function obtainR2Credentials(options: {
 			{
 				value: 'create',
 				label: `Create a key scoped to ${bucketName}`,
-				hint: 'recommended; rotated on each deploy'
+				hint: creation.bucketExists
+					? 'rotated on each deploy'
+					: 'creates the bucket too; rotated on each deploy'
 			},
 			{ value: 'enter', label: 'Enter an existing key pair' },
 			{ value: 'cancel', label: 'Cancel' }
@@ -453,9 +478,7 @@ export async function obtainR2Credentials(options: {
 	}
 
 	try {
-		const credentials = await ui
-			.reporter()
-			.phase(`Creating an R2 API token for ${bucketName}`, options.create);
+		const credentials = await creation.create();
 
 		return { credentials, created: true };
 	} catch (error) {
@@ -471,6 +494,55 @@ export async function obtainR2Credentials(options: {
 			? undefined
 			: { credentials, created: false };
 	}
+}
+
+/**
+ * Whether and how this deploy can create the scoped key. Only an explicit API
+ * token can hold token-management rights; OAuth grants (the browser login,
+ * its cache, wrangler's token) are never offered creation, since Cloudflare
+ * has no token-management scope for them. The bucket existence check runs
+ * only when creation is on the table, and the bucket is created first, as its
+ * own visible step: a key cannot be scoped to a bucket that does not exist,
+ * and the reconcile step later treats an existing bucket as already done.
+ */
+async function r2KeyCreationFor(options: {
+	readonly ui: DeployUi;
+	readonly api: CloudflareApi;
+	readonly credentialSource: CredentialSource;
+	readonly accountId: string;
+	readonly bucketName: string;
+}): Promise<R2KeyCreation> {
+	const { ui, api, accountId, bucketName } = options;
+
+	if (options.credentialSource !== 'environment') {
+		return { kind: 'unavailable' };
+	}
+
+	const bucketExists = await ui
+		.reporter()
+		.phase(`Checking R2 bucket ${bucketName}`, () =>
+			api.r2BucketExists(bucketName)
+		);
+
+	return {
+		kind: 'available',
+		bucketExists,
+		create: async () => {
+			if (!bucketExists) {
+				await ui
+					.reporter()
+					.phase(`Creating R2 bucket ${bucketName}`, () =>
+						api.ensureR2Bucket(bucketName)
+					);
+			}
+
+			return ui
+				.reporter()
+				.phase(`Creating an R2 API token for ${bucketName}`, () =>
+					createScopedR2Key(api, { accountId, bucketName })
+				);
+		}
+	};
 }
 
 const propagationAttempts = 12;
@@ -570,16 +642,40 @@ export async function verifyR2Credentials(options: {
 /**
  * Run `cupboard deploy`. Imported lazily by the command shell so its heavy
  * dependencies stay out of the released single-executable's startup path.
- *
- * The order is deliberate: build, authenticate, collect what is missing, then
- * show a complete plan and let the user adjust it before agreeing. After the
- * agreement the only interaction left is a failed credential probe.
  */
 export async function executeDeploy(
 	cliOptions: DeployCliOptions
 ): Promise<void> {
 	const ui = createDeployUi();
 	const interactive = process.stdin.isTTY && process.stdout.isTTY;
+
+	try {
+		await deployFlow(cliOptions, ui, interactive);
+	} catch (error) {
+		if (!(error instanceof APIError)) {
+			throw error;
+		}
+
+		// The SDK error's own message is the raw response body; surface just
+		// the human-readable details Cloudflare provided.
+		const detail =
+			error.errors.map((item) => item.message).join('; ') ||
+			`HTTP ${String(error.status)}`;
+		ui.cancelled(`Cloudflare rejected the deploy: ${detail}`);
+		process.exitCode = 1;
+	}
+}
+
+/**
+ * The deploy flow proper. The order is deliberate: build, authenticate, then
+ * show a complete plan and let the user adjust it before agreeing. After the
+ * agreement the only interaction left is settling the R2 credentials.
+ */
+async function deployFlow(
+	cliOptions: DeployCliOptions,
+	ui: DeployUi,
+	interactive: boolean
+): Promise<void> {
 	const initialDomain =
 		cliOptions.domain === undefined
 			? undefined
@@ -802,11 +898,13 @@ export async function executeDeploy(
 			ui,
 			accountId: agreed.accountId,
 			bucketName: agreedBucket,
-			create: () =>
-				createScopedR2Key(apiFor(agreed.accountId), {
-					accountId: agreed.accountId,
-					bucketName: agreedBucket
-				})
+			creation: await r2KeyCreationFor({
+				ui,
+				api: apiFor(agreed.accountId),
+				credentialSource,
+				accountId: agreed.accountId,
+				bucketName: agreedBucket
+			})
 		});
 
 		if (obtained === undefined) {
