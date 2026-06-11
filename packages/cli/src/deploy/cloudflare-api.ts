@@ -63,17 +63,17 @@ export interface CloudflareApi {
 		bundle: WorkerBundle
 	): Promise<void>;
 
-	putQueueConsumer(
+	ensureQueueConsumer(
 		queueId: string,
 		scriptName: string,
 		settings: QueueConsumerSettings
 	): Promise<void>;
-	putSchedules(scriptName: string, crons: readonly string[]): Promise<void>;
+	ensureSchedules(scriptName: string, crons: readonly string[]): Promise<void>;
 	putSecret(scriptName: string, secret: WorkerSecret): Promise<void>;
 	listScriptSecrets(scriptName: string): Promise<string[]>;
 
 	findZoneId(name: string): Promise<string | undefined>;
-	attachCustomDomain(
+	ensureCustomDomain(
 		scriptName: string,
 		hostname: string,
 		zoneId: string
@@ -104,6 +104,43 @@ async function firstMatch<T>(
 	}
 
 	return undefined;
+}
+
+/**
+ * Whether a live queue consumer already carries every setting the deploy
+ * would write. Settings the config leaves undefined are the platform's to
+ * default, so they do not count against a match.
+ */
+function consumerSettled(
+	existing: {
+		readonly settings?: {
+			readonly batch_size?: number;
+			readonly max_wait_time_ms?: number;
+			readonly max_retries?: number;
+			readonly max_concurrency?: number;
+		};
+		readonly dead_letter_queue?: string;
+	},
+	desired: QueueConsumerSettings
+): boolean {
+	const settled = (
+		want: number | undefined,
+		live: number | undefined
+	): boolean => want === undefined || want === live;
+
+	return (
+		settled(desired.maxBatchSize, existing.settings?.batch_size) &&
+		settled(
+			desired.maxBatchTimeout === undefined
+				? undefined
+				: desired.maxBatchTimeout * 1000,
+			existing.settings?.max_wait_time_ms
+		) &&
+		settled(desired.maxRetries, existing.settings?.max_retries) &&
+		settled(desired.maxConcurrency, existing.settings?.max_concurrency) &&
+		(desired.deadLetterQueue === undefined ||
+			desired.deadLetterQueue === existing.dead_letter_queue)
+	);
 }
 
 /**
@@ -240,10 +277,10 @@ export function createCloudflareApi(
 			});
 		},
 
-		async putQueueConsumer(queueId, scriptName, settings) {
-			await client.queues.consumers.create(queueId, {
+		async ensureQueueConsumer(queueId, scriptName, settings) {
+			const body = {
 				...account,
-				type: 'worker',
+				type: 'worker' as const,
 				script_name: scriptName,
 				settings: {
 					...(settings.maxBatchSize === undefined
@@ -262,10 +299,48 @@ export function createCloudflareApi(
 				...(settings.deadLetterQueue === undefined
 					? {}
 					: { dead_letter_queue: settings.deadLetterQueue })
-			});
+			};
+
+			const existing = await firstMatch(
+				client.queues.consumers.list(queueId, account),
+				(consumer) =>
+					consumer.type === 'worker' && consumer.script_name === scriptName
+			);
+
+			if (existing === undefined) {
+				await client.queues.consumers.create(queueId, body);
+				return;
+			}
+
+			if (
+				existing.type === 'worker' &&
+				consumerSettled(existing, settings) &&
+				existing.consumer_id !== undefined
+			) {
+				return;
+			}
+
+			await client.queues.consumers.update(
+				queueId,
+				existing.type === 'worker' ? (existing.consumer_id ?? '') : '',
+				body
+			);
 		},
 
-		async putSchedules(scriptName, crons) {
+		async ensureSchedules(scriptName, crons) {
+			const current = await client.workers.scripts.schedules.get(
+				scriptName,
+				account
+			);
+			const live = current.schedules.map((schedule) => schedule.cron);
+
+			if (
+				live.length === crons.length &&
+				live.every((cron, index) => cron === crons[index])
+			) {
+				return;
+			}
+
 			await client.workers.scripts.schedules.update(scriptName, {
 				...account,
 				body: crons.map((cron) => ({ cron }))
@@ -316,7 +391,16 @@ export function createCloudflareApi(
 			return zone?.id;
 		},
 
-		async attachCustomDomain(scriptName, hostname, zoneId) {
+		async ensureCustomDomain(scriptName, hostname, zoneId) {
+			const existing = await firstMatch(
+				client.workers.domains.list(account),
+				(domain) => domain.hostname === hostname
+			);
+
+			if (existing?.service === scriptName) {
+				return;
+			}
+
 			await client.workers.domains.update({
 				...account,
 				hostname,

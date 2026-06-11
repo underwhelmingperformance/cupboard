@@ -918,26 +918,31 @@ async function deployFlow(
 		return created;
 	};
 
-	// Whether a Worker already holds particular secrets, asked once per
-	// account and script; a fresh wrapping secret is generated at most once
+	// What secrets both Workers already hold, fetched once per account in a
+	// single visible step; a fresh wrapping secret is generated at most once
 	// and reused across re-renders so the value shown is the value deployed.
-	const secretChecks = new Map<string, Promise<readonly string[]>>();
+	const secretChecks = new Map<
+		string,
+		Promise<{ control: readonly string[]; tenant: readonly string[] }>
+	>();
 	let generatedWrapSecret: string | undefined;
 
 	const existingSecretsFor = (
-		accountId: string,
-		scriptName: string
-	): Promise<readonly string[]> => {
-		const key = `${accountId}:${scriptName}`;
-		let existing = secretChecks.get(key);
+		accountId: string
+	): Promise<{ control: readonly string[]; tenant: readonly string[] }> => {
+		let existing = secretChecks.get(accountId);
 
 		if (existing === undefined) {
-			existing = ui
-				.reporter()
-				.phase('Checking existing secrets', () =>
-					apiFor(accountId).listScriptSecrets(scriptName)
-				);
-			secretChecks.set(key, existing);
+			existing = ui.reporter().phase('Checking existing secrets', async () => {
+				const accountApi = apiFor(accountId);
+				const [control, tenant] = await Promise.all([
+					accountApi.listScriptSecrets(artifact.config.control.name),
+					accountApi.listScriptSecrets(artifact.config.tenant.name)
+				]);
+
+				return { control, tenant };
+			});
+			secretChecks.set(accountId, existing);
 		}
 
 		return existing;
@@ -949,12 +954,9 @@ async function deployFlow(
 	// so it only needs settling when neither the environment nor the Worker
 	// has it. The values cannot be read back, only their presence.
 	const r2AlreadySetFor = async (state: PlanState): Promise<boolean> => {
-		const existing = await existingSecretsFor(
-			state.accountId,
-			state.config.tenant.name
-		);
+		const { tenant } = await existingSecretsFor(state.accountId);
 
-		return [...r2SecretNames].every((name) => existing.includes(name));
+		return [...r2SecretNames].every((name) => tenant.includes(name));
 	};
 
 	const planFor = async (
@@ -990,13 +992,10 @@ async function deployFlow(
 		// Generate the control key wrapping secret on a first deploy, but never
 		// overwrite an existing one: a different value cannot unwrap stored data.
 		if (missing.includes('CONTROL_KEY_WRAP_SECRET')) {
-			const names = await existingSecretsFor(
-				state.accountId,
-				artifact.config.control.name
-			);
+			const { control } = await existingSecretsFor(state.accountId);
 			missing = missing.filter((name) => name !== 'CONTROL_KEY_WRAP_SECRET');
 
-			if (!names.includes('CONTROL_KEY_WRAP_SECRET')) {
+			if (!control.includes('CONTROL_KEY_WRAP_SECRET')) {
 				const isNewlyGenerated = generatedWrapSecret === undefined;
 				generatedWrapSecret ??= generateWrapSecret();
 				controlSecrets.push({
