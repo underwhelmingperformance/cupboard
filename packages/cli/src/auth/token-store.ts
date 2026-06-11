@@ -1,23 +1,21 @@
-import { createHash, randomBytes } from 'node:crypto';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { createHash } from 'node:crypto';
 import path from 'node:path';
-import { env } from 'node:process';
 
 import { z } from 'zod';
 
+import {
+	configDirectory,
+	readSecretFile,
+	writeSecretFile
+} from './secret-file.ts';
+
 /**
- * Where cached access tokens live: under `$XDG_CONFIG_HOME` when set, otherwise
- * `~/.config`. Tokens are keyed per target, so logging in to one tenant does not
- * make its token usable against another tenant on the same host.
+ * Where cached access tokens live, within the CLI's configuration directory.
+ * Tokens are keyed per target, so logging in to one tenant does not make its
+ * token usable against another tenant on the same host.
  */
 function tokensDirectory(): string {
-	const base =
-		env.XDG_CONFIG_HOME !== undefined && env.XDG_CONFIG_HOME !== ''
-			? env.XDG_CONFIG_HOME
-			: path.join(homedir(), '.config');
-
-	return path.join(base, 'cupboard', 'tokens');
+	return path.join(configDirectory(), 'tokens');
 }
 
 /**
@@ -66,16 +64,10 @@ export async function writeCachedToken(
 }
 
 async function readTokenFile(file: string): Promise<string | undefined> {
-	let contents: string;
+	const contents = await readSecretFile(file);
 
-	try {
-		contents = await readFile(file, 'utf8');
-	} catch (error) {
-		if (isNotFound(error)) {
-			return undefined;
-		}
-
-		throw error;
+	if (contents === undefined) {
+		return undefined;
 	}
 
 	const token = contents.trim();
@@ -84,17 +76,7 @@ async function readTokenFile(file: string): Promise<string | undefined> {
 }
 
 async function writeTokenFile(file: string, token: string): Promise<void> {
-	const directory = path.dirname(file);
-
-	await mkdir(directory, { recursive: true, mode: 0o700 });
-	await chmod(directory, 0o700);
-
-	const temporary = path.join(
-		directory,
-		`.token.${randomBytes(8).toString('hex')}`
-	);
-	await writeFile(temporary, `${token}\n`, { mode: 0o600, flag: 'wx' });
-	await rename(temporary, file);
+	await writeSecretFile(file, `${token}\n`);
 }
 
 const jwtClaimsSchema = z.object({
@@ -164,10 +146,4 @@ function isHttpUrl(value: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-function isNotFound(error: unknown): boolean {
-	return (
-		error instanceof Error && (error as { code?: string }).code === 'ENOENT'
-	);
 }
