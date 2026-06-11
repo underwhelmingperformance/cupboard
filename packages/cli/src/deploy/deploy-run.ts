@@ -215,7 +215,7 @@ async function configureTriggers(
 		for (const consumer of control.queueConsumers) {
 			const queueId = await api.ensureQueue(consumer.queue);
 
-			await api.putQueueConsumer(queueId, control.name, {
+			await api.ensureQueueConsumer(queueId, control.name, {
 				maxBatchSize: consumer.maxBatchSize,
 				maxBatchTimeout: consumer.maxBatchTimeout,
 				maxRetries: consumer.maxRetries,
@@ -225,7 +225,7 @@ async function configureTriggers(
 		}
 
 		if (control.crons.length > 0) {
-			await api.putSchedules(control.name, control.crons);
+			await api.ensureSchedules(control.name, control.crons);
 		}
 
 		if (options.domain !== undefined) {
@@ -237,7 +237,7 @@ async function configureTriggers(
 					`${options.domain}; add the domain to this account, then re-run.`
 				);
 			} else {
-				await api.attachCustomDomain(control.name, options.domain, zoneId);
+				await api.ensureCustomDomain(control.name, options.domain, zoneId);
 			}
 		}
 
