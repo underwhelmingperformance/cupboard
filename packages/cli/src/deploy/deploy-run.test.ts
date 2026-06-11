@@ -115,11 +115,11 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`upload:${scriptName}`);
 				return Promise.resolve();
 			},
-			putQueueConsumer(queueId, scriptName) {
+			ensureQueueConsumer(queueId, scriptName) {
 				calls.push(`consumer:${queueId}->${scriptName}`);
 				return Promise.resolve();
 			},
-			putSchedules(scriptName, crons) {
+			ensureSchedules(scriptName, crons) {
 				calls.push(`cron:${scriptName}:${crons.join(',')}`);
 				return Promise.resolve();
 			},
@@ -134,7 +134,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`zone:${name}`);
 				return Promise.resolve('zone-1');
 			},
-			attachCustomDomain(scriptName, hostname) {
+			ensureCustomDomain(scriptName, hostname) {
 				calls.push(`domain:${hostname}->${scriptName}`);
 				return Promise.resolve();
 			}
