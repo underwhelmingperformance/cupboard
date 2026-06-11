@@ -1179,8 +1179,10 @@ async function deployFlow(
 
 	if (outcome.kind === 'unreachable') {
 		ui.warn(
-			`Deployed, but ${outcome.url} did not come online in time. A fresh ` +
-				'custom domain can take a while in DNS; once it resolves, run ' +
+			`Deployed, but ${outcome.url} did not come online in time ` +
+				`(last answer: ${outcome.lastProbe}). A fresh custom domain can take ` +
+				'a while in DNS; a persistent HTTP answer means the Worker is up ' +
+				'but not serving the cache there. Once it responds, run ' +
 				`\`cupboard config ${outcome.url} <pubkey>\` for the nix.conf lines.`
 		);
 		ui.outro('Deployed.');
