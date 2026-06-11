@@ -1,14 +1,18 @@
 import { spawn } from 'node:child_process';
 import { platform } from 'node:process';
 
-import type { Reporter } from '@cupboard/reporter';
+/** Where the launch narrates itself; satisfied by any reporter-like sink. */
+export interface BrowserMessages {
+	info(message: string): void;
+	warn(message: string): void;
+}
 
 /**
  * Best-effort browser launch: the URL is always printed, so a failed or absent
  * opener leaves the user a link to follow rather than a dead end.
  */
-export function openBrowser(target: string, reporter: Reporter): void {
-	reporter.info(`Opening your browser to:\n${target}`);
+export function openBrowser(target: string, messages: BrowserMessages): void {
+	messages.info(`Opening your browser to:\n${target}`);
 
 	const launch = browserLaunch(platform, target);
 	const child = spawn(launch.command, launch.args, {
@@ -16,7 +20,7 @@ export function openBrowser(target: string, reporter: Reporter): void {
 		detached: true
 	});
 	child.on('error', () => {
-		reporter.warn('Could not open a browser automatically');
+		messages.warn('Could not open a browser automatically');
 	});
 	child.unref();
 }

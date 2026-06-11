@@ -1,6 +1,5 @@
 import type { Command } from 'commander';
 
-import { reporterModeFromGlobals } from '../cli.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
 
 export function registerDeployCommand(program: Command): void {
@@ -21,6 +20,6 @@ export function registerDeployCommand(program: Command): void {
 			// out of the released binary's startup and the other commands' cost.
 			const { executeDeploy } = await import('../deploy/command.ts');
 
-			await executeDeploy(cliOptions, reporterModeFromGlobals(program));
+			await executeDeploy(cliOptions);
 		});
 }
