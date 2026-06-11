@@ -68,6 +68,14 @@ export class LoginTimeoutError extends OidcLoginError {
 	}
 }
 
+/** The issuer refused to start a device authorization (RFC 8628). */
+export class DeviceAuthorizationRequestError extends OidcLoginError {
+	constructor(public readonly status: number) {
+		super(`Device authorization request failed with HTTP ${String(status)}`);
+		this.name = 'DeviceAuthorizationRequestError';
+	}
+}
+
 /** None of the loopback redirect ports could be bound. */
 export class LoopbackBindError extends OidcLoginError {
 	constructor(
@@ -195,6 +203,8 @@ export interface LoopbackLoginOptions {
 	readonly openBrowser: (url: string) => void | Promise<void>;
 	readonly fetcher?: typeof fetch;
 	readonly timeoutMs?: number;
+	/** Fixed redirect registration, for providers with exact-match URLs. */
+	readonly loopback?: LoopbackOptions;
 }
 
 /**
@@ -212,7 +222,8 @@ export async function loopbackLogin(
 		clientId: options.clientId,
 		scope: options.scope ?? 'openid',
 		openBrowser: options.openBrowser,
-		timeoutMs: options.timeoutMs
+		timeoutMs: options.timeoutMs,
+		loopback: options.loopback
 	});
 
 	return exchangeCode(options.endpoints, fetcher, {
@@ -577,9 +588,7 @@ async function requestDeviceCode(
 	const response = await fetcher(endpoint, postForm(form));
 
 	if (!response.ok) {
-		throw new OidcLoginError(
-			`Device authorization request failed with HTTP ${String(response.status)}`
-		);
+		throw new DeviceAuthorizationRequestError(response.status);
 	}
 
 	const parsed = deviceAuthorizationSchema.safeParse(await readJson(response));
