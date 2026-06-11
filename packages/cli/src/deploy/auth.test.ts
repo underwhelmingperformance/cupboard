@@ -10,18 +10,20 @@ const now = 1_700_000_000_000;
 const freshGrant: CloudflareGrant = {
 	accessToken: 'cached-access',
 	refreshToken: 'cached-refresh',
-	expiresAt: now + hour
+	expiresAt: now + hour,
+	subject: 'cf-user-1'
 };
 
 const expiredGrant: CloudflareGrant = {
 	accessToken: 'stale-access',
 	refreshToken: 'stale-refresh',
-	expiresAt: now - hour
+	expiresAt: now - hour,
+	subject: 'cf-user-1'
 };
 
 interface ChainCalls {
 	readonly written: CloudflareGrant[];
-	readonly refreshedWith: string[];
+	readonly refreshedWith: CloudflareGrant[];
 	readonly logins: number;
 }
 
@@ -39,7 +41,7 @@ function chainWith(world: ChainWorld): {
 	calls: ChainCalls;
 } {
 	const written: CloudflareGrant[] = [];
-	const refreshedWith: string[] = [];
+	const refreshedWith: CloudflareGrant[] = [];
 	const counter = { logins: 0 };
 
 	const chain: CredentialChain = {
@@ -49,8 +51,8 @@ function chainWith(world: ChainWorld): {
 			written.push(grant);
 			return Promise.resolve();
 		},
-		refreshGrant: (refreshToken) => {
-			refreshedWith.push(refreshToken);
+		refreshGrant: (previous) => {
+			refreshedWith.push(previous);
 			return Promise.resolve(world.renewedGrant);
 		},
 		readWranglerToken: () => Promise.resolve(world.wranglerToken),
@@ -87,17 +89,19 @@ describe('resolveCredential', () => {
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'env-token',
-			source: 'environment'
+			source: 'environment',
+			subject: undefined
 		});
 		expect(calls.logins).toBe(0);
 	});
 
-	it('uses a cached grant that is still valid', async () => {
+	it('uses a cached grant that is still valid, surfacing its subject', async () => {
 		const { chain, calls } = chainWith({ storedGrant: freshGrant });
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'cached-access',
-			source: 'cached login'
+			source: 'cached login',
+			subject: 'cf-user-1'
 		});
 		expect(calls.refreshedWith).toStrictEqual([]);
 	});
@@ -106,7 +110,8 @@ describe('resolveCredential', () => {
 		const renewed: CloudflareGrant = {
 			accessToken: 'renewed-access',
 			refreshToken: 'renewed-refresh',
-			expiresAt: now + hour
+			expiresAt: now + hour,
+			subject: 'cf-user-1'
 		};
 		const { chain, calls } = chainWith({
 			storedGrant: expiredGrant,
@@ -115,7 +120,8 @@ describe('resolveCredential', () => {
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'renewed-access',
-			source: 'cached login'
+			source: 'cached login',
+			subject: 'cf-user-1'
 		});
 		expect(calls.written).toStrictEqual([renewed]);
 	});
@@ -128,7 +134,8 @@ describe('resolveCredential', () => {
 		const renewed: CloudflareGrant = {
 			accessToken: 'renewed-access',
 			refreshToken: 'renewed-refresh',
-			expiresAt: now + hour
+			expiresAt: now + hour,
+			subject: 'cf-user-1'
 		};
 		const { chain, calls } = chainWith({
 			storedGrant: nearlyExpired,
@@ -137,9 +144,10 @@ describe('resolveCredential', () => {
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'renewed-access',
-			source: 'cached login'
+			source: 'cached login',
+			subject: 'cf-user-1'
 		});
-		expect(calls.refreshedWith).toStrictEqual(['cached-refresh']);
+		expect(calls.refreshedWith).toStrictEqual([nearlyExpired]);
 	});
 
 	it('falls back to wrangler when the refresh is declined', async () => {
@@ -150,41 +158,38 @@ describe('resolveCredential', () => {
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'wrangler-token',
-			source: 'wrangler'
+			source: 'wrangler',
+			subject: undefined
 		});
 		expect({
 			refreshedWith: calls.refreshedWith,
 			logins: calls.logins
-		}).toStrictEqual({ refreshedWith: ['stale-refresh'], logins: 0 });
+		}).toStrictEqual({ refreshedWith: [expiredGrant], logins: 0 });
 	});
 
 	it('logs in interactively as the last resort and caches the grant', async () => {
-		const { chain, calls } = chainWith({
-			loginGrant: {
-				accessToken: 'login-access',
-				refreshToken: 'login-refresh',
-				expiresAt: now + hour
-			}
-		});
+		const loginGrant: CloudflareGrant = {
+			accessToken: 'login-access',
+			refreshToken: 'login-refresh',
+			expiresAt: now + hour,
+			subject: 'cf-user-2'
+		};
+		const { chain, calls } = chainWith({ loginGrant });
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'login-access',
-			source: 'browser login'
+			source: 'browser login',
+			subject: 'cf-user-2'
 		});
-		expect(calls.written).toStrictEqual([
-			{
-				accessToken: 'login-access',
-				refreshToken: 'login-refresh',
-				expiresAt: now + hour
-			}
-		]);
+		expect(calls.written).toStrictEqual([loginGrant]);
 	});
 
 	it('skips wrangler entirely when the chain has no reader for it', async () => {
 		const loginGrant: CloudflareGrant = {
 			accessToken: 'login-access',
 			refreshToken: 'login-refresh',
-			expiresAt: now + hour
+			expiresAt: now + hour,
+			subject: undefined
 		};
 		const { chain } = chainWith({
 			wranglerToken: 'wrangler-token',
@@ -194,7 +199,8 @@ describe('resolveCredential', () => {
 
 		expect(await resolveCredential(withoutWrangler)).toStrictEqual({
 			token: 'login-access',
-			source: 'browser login'
+			source: 'browser login',
+			subject: undefined
 		});
 	});
 
@@ -206,7 +212,8 @@ describe('resolveCredential', () => {
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'cached-access',
-			source: 'cached login'
+			source: 'cached login',
+			subject: 'cf-user-1'
 		});
 	});
 });

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { AuthorizationAccessDeniedError } from '../auth/oidc-login.ts';
 
 import {
+	type CloudflareGrant,
 	cloudflareLogin,
 	cloudflareOauthClientId,
 	CloudflareTokenRequestError,
@@ -11,6 +12,18 @@ import {
 } from './cloudflare-oauth.ts';
 
 const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
+
+/** An unsigned id_token carrying just a `sub`, as the decoder reads it. */
+function idToken(subject: string): string {
+	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
+		'base64url'
+	);
+	const payload = Buffer.from(JSON.stringify({ sub: subject })).toString(
+		'base64url'
+	);
+
+	return `${header}.${payload}.signature`;
+}
 
 interface RecordedRequest {
 	readonly url: string;
@@ -89,7 +102,8 @@ describe('cloudflareLogin', () => {
 		expect(grant).toStrictEqual({
 			accessToken: 'access-1',
 			refreshToken: 'refresh-1',
-			expiresAt: 1_000_000 + 3600 * 1000
+			expiresAt: 1_000_000 + 3600 * 1000,
+			subject: undefined
 		});
 
 		const authorize = new URL(authorizeUrl);
@@ -112,6 +126,47 @@ describe('cloudflareLogin', () => {
 			exchangeClientId: cloudflareOauthClientId,
 			redirectUri: authorize.searchParams.get('redirect_uri')
 		});
+	});
+
+	it('captures the deployer identity from the id_token', async () => {
+		const { fetcher } = fakeCloudflare({
+			tokenBody: {
+				access_token: 'access-1',
+				expires_in: 3600,
+				id_token: idToken('cf-user-1')
+			}
+		});
+
+		const grant = await cloudflareLogin({
+			openBrowser: approvingBrowser('code-1'),
+			fetcher,
+			ports: [0],
+			now: () => 0
+		});
+
+		expect({
+			subject: grant.subject,
+			requestsIdentity: deployScopes.includes('openid')
+		}).toStrictEqual({ subject: 'cf-user-1', requestsIdentity: true });
+	});
+
+	it('tolerates a malformed id_token, leaving the identity unknown', async () => {
+		const { fetcher } = fakeCloudflare({
+			tokenBody: {
+				access_token: 'access-1',
+				expires_in: 3600,
+				id_token: 'not-a-jwt'
+			}
+		});
+
+		const grant = await cloudflareLogin({
+			openBrowser: approvingBrowser('code-1'),
+			fetcher,
+			ports: [0],
+			now: () => 0
+		});
+
+		expect(grant.subject).toBeUndefined();
 	});
 
 	it('rejects with the HTTP status when the token exchange fails', async () => {
@@ -158,16 +213,19 @@ describe('cloudflareLogin', () => {
 });
 
 describe('refreshCloudflareGrant', () => {
-	it('renews the grant and keeps the previous refresh token when none is reissued', async () => {
+	const previous: CloudflareGrant = {
+		accessToken: 'access-old',
+		refreshToken: 'refresh-old',
+		expiresAt: 0,
+		subject: 'cf-user-1'
+	};
+
+	it('renews the grant, keeping the refresh token and subject when not reissued', async () => {
 		const { fetcher, tokenRequests } = fakeCloudflare({
 			tokenBody: { access_token: 'access-4', expires_in: 1800 }
 		});
 
-		const grant = await refreshCloudflareGrant(
-			'refresh-old',
-			fetcher,
-			() => 5000
-		);
+		const grant = await refreshCloudflareGrant(previous, fetcher, () => 5000);
 
 		expect({
 			grant,
@@ -177,25 +235,42 @@ describe('refreshCloudflareGrant', () => {
 			grant: {
 				accessToken: 'access-4',
 				refreshToken: 'refresh-old',
-				expiresAt: 5000 + 1800 * 1000
+				expiresAt: 5000 + 1800 * 1000,
+				subject: 'cf-user-1'
 			},
 			grantType: 'refresh_token',
 			refreshToken: 'refresh-old'
 		});
 	});
 
-	it('adopts a rotated refresh token', async () => {
+	it('adopts a rotated refresh token and a reissued identity', async () => {
 		const { fetcher } = fakeCloudflare({
 			tokenBody: {
 				access_token: 'access-5',
 				refresh_token: 'refresh-new',
-				expires_in: 1800
+				expires_in: 1800,
+				id_token: idToken('cf-user-2')
 			}
 		});
 
-		const grant = await refreshCloudflareGrant('refresh-old', fetcher, () => 0);
+		const grant = await refreshCloudflareGrant(previous, fetcher, () => 0);
 
-		expect(grant?.refreshToken).toBe('refresh-new');
+		expect({
+			refreshToken: grant?.refreshToken,
+			subject: grant?.subject
+		}).toStrictEqual({ refreshToken: 'refresh-new', subject: 'cf-user-2' });
+	});
+
+	it('returns undefined when the grant has no refresh token', async () => {
+		const { fetcher, tokenRequests } = fakeCloudflare({ tokenBody: {} });
+
+		expect({
+			grant: await refreshCloudflareGrant(
+				{ ...previous, refreshToken: undefined },
+				fetcher
+			),
+			requests: tokenRequests.length
+		}).toStrictEqual({ grant: undefined, requests: 0 });
 	});
 
 	it('returns undefined when Cloudflare declines the refresh', async () => {
@@ -204,8 +279,6 @@ describe('refreshCloudflareGrant', () => {
 			tokenStatus: 401
 		});
 
-		expect(
-			await refreshCloudflareGrant('refresh-old', fetcher)
-		).toBeUndefined();
+		expect(await refreshCloudflareGrant(previous, fetcher)).toBeUndefined();
 	});
 });

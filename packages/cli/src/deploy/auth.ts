@@ -28,6 +28,8 @@ export type CredentialSource =
 export interface CloudflareCredential {
 	readonly token: string;
 	readonly source: CredentialSource;
+	/** The Cloudflare user behind an OAuth grant; undefined for raw tokens. */
+	readonly subject: string | undefined;
 }
 
 /**
@@ -39,7 +41,7 @@ export interface CredentialChain {
 	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
 	readonly writeGrant: (grant: CloudflareGrant) => Promise<void>;
 	readonly refreshGrant: (
-		refreshToken: string
+		previous: CloudflareGrant
 	) => Promise<CloudflareGrant | undefined>;
 	/** Absent when a logged-in wrangler's stored token must not be used. */
 	readonly readWranglerToken?: () => Promise<string | undefined>;
@@ -61,7 +63,7 @@ export function defaultCredentialChain(
 		env: process.env,
 		readGrant: readCachedGrant,
 		writeGrant: writeCachedGrant,
-		refreshGrant: (refreshToken) => refreshCloudflareGrant(refreshToken),
+		refreshGrant: (previous) => refreshCloudflareGrant(previous),
 		...(options.wrangler ? { readWranglerToken } : {}),
 		login: () => cloudflareLogin({ openBrowser: options.openBrowser }),
 		now: Date.now
@@ -101,35 +103,47 @@ export async function resolveCredential(
 	const fromEnv = chain.env.CLOUDFLARE_API_TOKEN ?? chain.env.CF_API_TOKEN;
 
 	if (fromEnv !== undefined && fromEnv !== '') {
-		return { token: fromEnv, source: 'environment' };
+		return { token: fromEnv, source: 'environment', subject: undefined };
 	}
 
 	const cached = await chain.readGrant();
 
 	if (cached !== undefined && usable(cached, chain.now())) {
-		return { token: cached.accessToken, source: 'cached login' };
+		return {
+			token: cached.accessToken,
+			source: 'cached login',
+			subject: cached.subject
+		};
 	}
 
 	if (cached?.refreshToken !== undefined) {
-		const renewed = await chain.refreshGrant(cached.refreshToken);
+		const renewed = await chain.refreshGrant(cached);
 
 		if (renewed !== undefined) {
 			await chain.writeGrant(renewed);
 
-			return { token: renewed.accessToken, source: 'cached login' };
+			return {
+				token: renewed.accessToken,
+				source: 'cached login',
+				subject: renewed.subject
+			};
 		}
 	}
 
 	const wrangler = await chain.readWranglerToken?.();
 
 	if (wrangler !== undefined) {
-		return { token: wrangler, source: 'wrangler' };
+		return { token: wrangler, source: 'wrangler', subject: undefined };
 	}
 
 	const grant = await chain.login();
 	await chain.writeGrant(grant);
 
-	return { token: grant.accessToken, source: 'browser login' };
+	return {
+		token: grant.accessToken,
+		source: 'browser login',
+		subject: grant.subject
+	};
 }
 
 export interface ResolvedAccount {
@@ -137,6 +151,8 @@ export interface ResolvedAccount {
 	readonly api: CloudflareApi;
 	readonly accountId: string;
 	readonly credentialSource: CredentialSource;
+	/** The Cloudflare user behind an OAuth grant; undefined for raw tokens. */
+	readonly subject: string | undefined;
 }
 
 /**
@@ -161,7 +177,8 @@ export async function resolveCloudflare(
 			client,
 			api: createCloudflareApi(client, fromEnv),
 			accountId: fromEnv,
-			credentialSource: credential.source
+			credentialSource: credential.source,
+			subject: credential.subject
 		};
 	}
 
@@ -181,6 +198,7 @@ export async function resolveCloudflare(
 		client,
 		api: createCloudflareApi(client, accountId),
 		accountId,
-		credentialSource: credential.source
+		credentialSource: credential.source,
+		subject: credential.subject
 	};
 }
