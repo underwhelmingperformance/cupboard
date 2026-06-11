@@ -4,8 +4,12 @@ import type { DeployCliOptions } from '../deploy/command.ts';
 
 export function registerDeployCommand(program: Command): void {
 	program
-		.command('deploy')
-		.description('Provision and deploy this cupboard to a Cloudflare account.')
+		.command('init')
+		.alias('deploy')
+		.description(
+			'Provision, deploy and initialise this cupboard on a Cloudflare ' +
+				'account, ready for nix.conf.'
+		)
 		.option('--domain <host>', 'custom domain to serve the cache on')
 		.option('--account <id>', 'Cloudflare account id (otherwise resolved)')
 		.option(
