@@ -1,7 +1,6 @@
 {
 	"name": "@cupboard/cli",
 	"version": "0.0.0",
-	"license": "AGPL-3.0-or-later",
 	"bin": {
 		"cupboard": "./src/main.ts"
 	},
@@ -16,6 +15,7 @@
 		"@sigstore/protobuf-specs": "^0.5.1",
 		"@sigstore/tuf": "^5.0.0",
 		"@sigstore/verify": "^4.0.0",
+		"aws4fetch": "^1.0.20",
 		"cloudflare": "^6.3.0",
 		"commander": "^15.0.0",
 		"json5": "^2.2.3",
@@ -32,6 +32,7 @@
 	"engines": {
 		"node": ">=24"
 	},
+	"license": "AGPL-3.0-or-later",
 	"private": true,
 	"scripts": {
 		"check:types": "tsc --noEmit",

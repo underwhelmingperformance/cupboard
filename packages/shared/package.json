@@ -1,7 +1,6 @@
 {
 	"name": "@cupboard/shared",
 	"version": "0.0.0",
-	"license": "AGPL-3.0-or-later",
 	"dependencies": {
 		"@cupboard/reporter": "workspace:*"
 	},
@@ -13,6 +12,7 @@
 	"exports": {
 		".": "./src/cli.ts"
 	},
+	"license": "AGPL-3.0-or-later",
 	"private": true,
 	"scripts": {
 		"check:types": "tsc --noEmit",

@@ -1,7 +1,6 @@
 {
 	"name": "@cupboard/commit-lint",
 	"version": "0.0.0",
-	"license": "AGPL-3.0-or-later",
 	"bin": {
 		"lint-commit-messages": "./dist/main.js"
 	},
@@ -32,6 +31,7 @@
 	"files": [
 		"dist"
 	],
+	"license": "AGPL-3.0-or-later",
 	"private": true,
 	"scripts": {
 		"build": "node --experimental-transform-types build.ts && chmod +x dist/main.js",

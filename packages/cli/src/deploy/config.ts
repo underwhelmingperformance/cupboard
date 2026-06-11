@@ -76,9 +76,76 @@ export interface DeploymentConfig {
 	readonly tenant: WorkerConfig;
 }
 
+// Account-level resource names (Workers, buckets, queues, databases) share
+// Cloudflare's shape: lowercase letters, digits and inner hyphens.
+function resourceName(what: string, maximumLength: number): z.ZodString {
+	return z
+		.string()
+		.regex(
+			/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/,
+			`${what} must be lowercase letters, digits and hyphens (not at the ends)`
+		)
+		.max(
+			maximumLength,
+			`${what} must be at most ${String(maximumLength)} characters`
+		);
+}
+
+const workerName = resourceName('worker name', 63);
+const bucketName = resourceName('R2 bucket name', 63).min(
+	3,
+	'R2 bucket name must be at least 3 characters'
+);
+const databaseName = resourceName('D1 database name', 63);
+const queueName = resourceName('queue name', 63);
+
+/** What a deploy-time edit can rename; KV titles are derived, not edited. */
+export type EditableResourceKind = 'bucket' | 'database' | 'queue';
+
+const editableSchemas: Record<EditableResourceKind, () => z.ZodString> = {
+	bucket: () => bucketName,
+	database: () => databaseName,
+	queue: () => queueName
+};
+
+/**
+ * Why `value` cannot name a resource of `kind`, or undefined when it can.
+ * Reuses the wrangler-config schema rules, so interactive edits are held to
+ * exactly the bar the checked-in config is.
+ */
+export function resourceNameProblem(
+	kind: EditableResourceKind,
+	value: string
+): string | undefined {
+	const parsed = editableSchemas[kind]().safeParse(value);
+
+	return parsed.success ? undefined : parsed.error.issues[0]?.message;
+}
+
+/** Why `value` cannot be a cron trigger, or undefined when it can. */
+export function cronProblem(value: string): string | undefined {
+	const parsed = cronExpression.safeParse(value);
+
+	return parsed.success ? undefined : parsed.error.issues[0]?.message;
+}
+
+// Five whitespace-separated fields of cron vocabulary. Cloudflare evaluates
+// the expression itself at deploy time; this catches structural mistakes
+// (missing fields, stray characters) before anything is provisioned.
+const cronExpression = z.string().refine((value) => {
+	const fields = value.trim().split(/\s+/);
+
+	return (
+		fields.length === 5 &&
+		fields.every((field) => /^[A-Za-z0-9*,/-]+$/.test(field))
+	);
+}, 'cron trigger must have five fields: minute hour day month weekday');
+
 const rawWranglerSchema = z.object({
-	name: z.string(),
-	compatibility_date: z.string(),
+	name: workerName,
+	compatibility_date: z
+		.string()
+		.regex(/^\d{4}-\d{2}-\d{2}$/, 'compatibility_date must be YYYY-MM-DD'),
 	compatibility_flags: z.array(z.string()).default([]),
 	vars: z.record(z.string(), z.string()).default({}),
 	limits: z.object({ cpu_ms: z.number() }).partial().optional(),
@@ -95,34 +162,34 @@ const rawWranglerSchema = z.object({
 		})
 		.optional(),
 	r2_buckets: z
-		.array(z.object({ binding: z.string(), bucket_name: z.string() }))
+		.array(z.object({ binding: z.string(), bucket_name: bucketName }))
 		.default([]),
 	kv_namespaces: z
 		.array(z.object({ binding: z.string(), id: z.string() }))
 		.default([]),
 	d1_databases: z
-		.array(z.object({ binding: z.string(), database_name: z.string() }))
+		.array(z.object({ binding: z.string(), database_name: databaseName }))
 		.default([]),
 	queues: z
 		.object({
 			producers: z
-				.array(z.object({ binding: z.string(), queue: z.string() }))
+				.array(z.object({ binding: z.string(), queue: queueName }))
 				.default([]),
 			consumers: z
 				.array(
 					z.object({
-						queue: z.string(),
+						queue: queueName,
 						max_batch_size: z.number().optional(),
 						max_batch_timeout: z.number().optional(),
 						max_retries: z.number().optional(),
 						max_concurrency: z.number().optional(),
-						dead_letter_queue: z.string().optional()
+						dead_letter_queue: queueName.optional()
 					})
 				)
 				.default([])
 		})
 		.optional(),
-	triggers: z.object({ crons: z.array(z.string()).default([]) }).optional(),
+	triggers: z.object({ crons: z.array(cronExpression).default([]) }).optional(),
 	migrations: z
 		.array(
 			z.object({
@@ -200,7 +267,11 @@ function parseWorker(
 	const parsed = rawWranglerSchema.safeParse(JSON5.parse(source));
 
 	if (!parsed.success) {
-		throw new WranglerConfigError(label, parsed.error.message);
+		const detail = parsed.error.issues
+			.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+			.join('; ');
+
+		throw new WranglerConfigError(label, detail);
 	}
 
 	return toWorkerConfig(parsed.data, mainModule);
