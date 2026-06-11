@@ -3,6 +3,7 @@ import type {
 	EditableResourceKind,
 	WorkerConfig
 } from './config.ts';
+import type { OwnerBinding } from './owner.ts';
 
 function renameIn(value: string, from: string, to: string): string {
 	return value === from ? to : value;
@@ -94,5 +95,32 @@ export function withCrons(
 	return {
 		...config,
 		control: { ...config.control, crons }
+	};
+}
+
+/**
+ * Sets the owner identity vars on both Workers. No owner writes empty
+ * strings, the server's contract for an ownerless deployment (the admin rule
+ * is deleted rather than seeded).
+ */
+export function withOwner(
+	config: DeploymentConfig,
+	owner?: OwnerBinding
+): DeploymentConfig {
+	const variables = {
+		CUPBOARD_OWNER_ISSUER: owner?.issuer ?? '',
+		CUPBOARD_OWNER_SUBJECT: owner?.subject ?? '',
+		CUPBOARD_OWNER_AUDIENCE: owner?.audience ?? ''
+	};
+
+	return {
+		control: {
+			...config.control,
+			vars: { ...config.control.vars, ...variables }
+		},
+		tenant: {
+			...config.tenant,
+			vars: { ...config.tenant.vars, ...variables }
+		}
 	};
 }

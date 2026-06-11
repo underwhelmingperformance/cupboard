@@ -14,6 +14,7 @@ import {
 } from './command.ts';
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
+import { deployerOwner, type OwnerBinding } from './owner.ts';
 import { TokenManagementNotPermittedError } from './r2-token.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
 
@@ -161,9 +162,16 @@ describe('chooseDeployAccount', () => {
 	});
 });
 
+const deployer = deployerOwner('cf-user-1');
+
 describe('planMenuEntries', () => {
 	it('lists Deploy first, every editable value, then Cancel', () => {
-		const state: PlanState = { accountId: 'acc-1', domain: undefined, config };
+		const state: PlanState = {
+			accountId: 'acc-1',
+			domain: undefined,
+			config,
+			owner: { kind: 'owner', owner: deployer, origin: 'deployer' }
+		};
 
 		expect(planMenuEntries(state)).toStrictEqual([
 			{ value: 'deploy', label: 'Deploy' },
@@ -181,17 +189,30 @@ describe('planMenuEntries', () => {
 				hint: 'cupboard-maintenance'
 			},
 			{ value: 'crons', label: 'Cron triggers', hint: '0 * * * *' },
+			{
+				value: 'owner',
+				label: 'Owner',
+				hint: 'dash.cloudflare.com · cf-user-1 (you, the deployer)'
+			},
 			{ value: 'cancel', label: 'Cancel' }
 		]);
 	});
 });
 
 describe('reviewPlan', () => {
-	const initial: PlanState = { accountId: 'acc-1', domain: undefined, config };
+	const initial: PlanState = {
+		accountId: 'acc-1',
+		domain: undefined,
+		config,
+		owner: { kind: 'none' }
+	};
 
 	function world(
 		ui: DeployUi,
-		options?: { readonly skipReview?: boolean }
+		options?: {
+			readonly skipReview?: boolean;
+			readonly deployer?: OwnerBinding;
+		}
 	): { world: PlanReviewWorld; rendered: PlanState[] } {
 		const rendered: PlanState[] = [];
 
@@ -204,6 +225,7 @@ describe('reviewPlan', () => {
 					return Promise.resolve();
 				},
 				accounts: () => Promise.resolve(accounts),
+				deployer: options?.deployer,
 				skipReview: options?.skipReview ?? false
 			}
 		};
@@ -303,6 +325,74 @@ describe('reviewPlan', () => {
 		);
 
 		expect(await reviewPlan(initial, w)).toStrictEqual(initial);
+	});
+
+	it('binds the deployer as owner from the owner submenu', async () => {
+		const { world: w } = world(
+			scriptedUi({ menuChoices: ['owner', 'deployer', 'deploy'] }),
+			{ deployer }
+		);
+
+		expect(await reviewPlan(initial, w)).toStrictEqual({
+			...initial,
+			owner: { kind: 'owner', owner: deployer, origin: 'deployer' }
+		});
+	});
+
+	it('binds a manually entered identity', async () => {
+		const { world: w } = world(
+			scriptedUi({
+				menuChoices: ['owner', 'manual', 'deploy'],
+				textEdits: [
+					{ kind: 'set', value: 'https://accounts.example.com' },
+					{ kind: 'set', value: 'user-7' },
+					{ kind: 'set', value: 'client-9' }
+				]
+			})
+		);
+
+		expect(await reviewPlan(initial, w)).toStrictEqual({
+			...initial,
+			owner: {
+				kind: 'owner',
+				owner: {
+					issuer: 'https://accounts.example.com',
+					subject: 'user-7',
+					audience: 'client-9'
+				},
+				origin: 'manual'
+			}
+		});
+	});
+
+	it('keeps the owner when the manual entry is cancelled midway', async () => {
+		const { world: w } = world(
+			scriptedUi({
+				menuChoices: ['owner', 'manual', 'deploy'],
+				textEdits: [
+					{ kind: 'set', value: 'https://accounts.example.com' },
+					{ kind: 'cancelled' }
+				]
+			})
+		);
+
+		expect(await reviewPlan(initial, w)).toStrictEqual(initial);
+	});
+
+	it('unbinds the owner when nobody is chosen', async () => {
+		const bound: PlanState = {
+			...initial,
+			owner: { kind: 'owner', owner: deployer, origin: 'deployer' }
+		};
+		const { world: w } = world(
+			scriptedUi({ menuChoices: ['owner', 'none', 'deploy'] }),
+			{ deployer }
+		);
+
+		expect(await reviewPlan(bound, w)).toStrictEqual({
+			...bound,
+			owner: { kind: 'none' }
+		});
 	});
 });
 
