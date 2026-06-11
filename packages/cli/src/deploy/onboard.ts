@@ -13,7 +13,12 @@ type Probe =
 
 export type OnboardOutcome =
 	| { readonly kind: 'ready'; readonly url: string; readonly publicKey: string }
-	| { readonly kind: 'unreachable'; readonly url: string }
+	| {
+			readonly kind: 'unreachable';
+			readonly url: string;
+			/** What the final probe saw, e.g. `HTTP 404` or `unreachable`. */
+			readonly lastProbe: string;
+	  }
 	| { readonly kind: 'no-subdomain' };
 
 export interface OnboardOptions {
@@ -71,6 +76,7 @@ export async function onboardDeployment(
 
 	const client = clientFactory(url);
 	let ready: string | undefined;
+	let lastProbe = 'no answer';
 
 	await ui.reporter().phase('Initialising the cache', async (context) => {
 		for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -81,15 +87,18 @@ export async function onboardDeployment(
 				return;
 			}
 
+			lastProbe = probe.detail;
+
 			if (attempt < attempts) {
-				context.fact('waiting for the Worker to come online, attempt', attempt);
+				context.fact('waiting for the Worker, attempt', attempt);
+				context.fact('last answer', probe.detail);
 				await sleep(attemptDelayMs);
 			}
 		}
 	});
 
 	return ready === undefined
-		? { kind: 'unreachable', url }
+		? { kind: 'unreachable', url, lastProbe }
 		: { kind: 'ready', url, publicKey: ready };
 }
 
