@@ -1,0 +1,232 @@
+import { describe, expect, it } from 'vitest';
+
+import type { CredentialChain } from './auth.ts';
+import { defaultCredentialChain, resolveCredential } from './auth.ts';
+import type { CloudflareGrant } from './cloudflare-oauth.ts';
+
+const hour = 60 * 60 * 1000;
+const now = 1_700_000_000_000;
+
+const freshGrant: CloudflareGrant = {
+	accessToken: 'cached-access',
+	refreshToken: 'cached-refresh',
+	expiresAt: now + hour
+};
+
+const expiredGrant: CloudflareGrant = {
+	accessToken: 'stale-access',
+	refreshToken: 'stale-refresh',
+	expiresAt: now - hour
+};
+
+interface ChainCalls {
+	readonly written: CloudflareGrant[];
+	readonly refreshedWith: string[];
+	readonly logins: number;
+}
+
+/** What the fake chain's world contains; anything not given is absent. */
+interface ChainWorld {
+	readonly env?: Readonly<Record<string, string | undefined>>;
+	readonly storedGrant?: CloudflareGrant;
+	readonly renewedGrant?: CloudflareGrant;
+	readonly wranglerToken?: string;
+	readonly loginGrant?: CloudflareGrant;
+}
+
+function chainWith(world: ChainWorld): {
+	chain: CredentialChain;
+	calls: ChainCalls;
+} {
+	const written: CloudflareGrant[] = [];
+	const refreshedWith: string[] = [];
+	const counter = { logins: 0 };
+
+	const chain: CredentialChain = {
+		env: world.env ?? {},
+		readGrant: () => Promise.resolve(world.storedGrant),
+		writeGrant: (grant) => {
+			written.push(grant);
+			return Promise.resolve();
+		},
+		refreshGrant: (refreshToken) => {
+			refreshedWith.push(refreshToken);
+			return Promise.resolve(world.renewedGrant);
+		},
+		readWranglerToken: () => Promise.resolve(world.wranglerToken),
+		login: () => {
+			counter.logins += 1;
+
+			if (world.loginGrant === undefined) {
+				return Promise.reject(new Error('login was not expected'));
+			}
+
+			return Promise.resolve(world.loginGrant);
+		},
+		now: () => now
+	};
+
+	return {
+		chain,
+		calls: {
+			written,
+			refreshedWith,
+			get logins() {
+				return counter.logins;
+			}
+		}
+	};
+}
+
+describe('resolveCredential', () => {
+	it.each([
+		['CLOUDFLARE_API_TOKEN', { CLOUDFLARE_API_TOKEN: 'env-token' }],
+		['CF_API_TOKEN', { CF_API_TOKEN: 'env-token' }]
+	])('prefers %s over everything else', async (_name, env) => {
+		const { chain, calls } = chainWith({ env, storedGrant: freshGrant });
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'env-token',
+			source: 'environment'
+		});
+		expect(calls.logins).toBe(0);
+	});
+
+	it('uses a cached grant that is still valid', async () => {
+		const { chain, calls } = chainWith({ storedGrant: freshGrant });
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'cached-access',
+			source: 'cached login'
+		});
+		expect(calls.refreshedWith).toStrictEqual([]);
+	});
+
+	it('renews an expired grant from its refresh token and persists the result', async () => {
+		const renewed: CloudflareGrant = {
+			accessToken: 'renewed-access',
+			refreshToken: 'renewed-refresh',
+			expiresAt: now + hour
+		};
+		const { chain, calls } = chainWith({
+			storedGrant: expiredGrant,
+			renewedGrant: renewed
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'renewed-access',
+			source: 'cached login'
+		});
+		expect(calls.written).toStrictEqual([renewed]);
+	});
+
+	it('treats a grant within the expiry margin as expired', async () => {
+		const nearlyExpired: CloudflareGrant = {
+			...freshGrant,
+			expiresAt: now + 30 * 1000
+		};
+		const renewed: CloudflareGrant = {
+			accessToken: 'renewed-access',
+			refreshToken: 'renewed-refresh',
+			expiresAt: now + hour
+		};
+		const { chain, calls } = chainWith({
+			storedGrant: nearlyExpired,
+			renewedGrant: renewed
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'renewed-access',
+			source: 'cached login'
+		});
+		expect(calls.refreshedWith).toStrictEqual(['cached-refresh']);
+	});
+
+	it('falls back to wrangler when the refresh is declined', async () => {
+		const { chain, calls } = chainWith({
+			storedGrant: expiredGrant,
+			wranglerToken: 'wrangler-token'
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'wrangler-token',
+			source: 'wrangler'
+		});
+		expect({
+			refreshedWith: calls.refreshedWith,
+			logins: calls.logins
+		}).toStrictEqual({ refreshedWith: ['stale-refresh'], logins: 0 });
+	});
+
+	it('logs in interactively as the last resort and caches the grant', async () => {
+		const { chain, calls } = chainWith({
+			loginGrant: {
+				accessToken: 'login-access',
+				refreshToken: 'login-refresh',
+				expiresAt: now + hour
+			}
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'login-access',
+			source: 'browser login'
+		});
+		expect(calls.written).toStrictEqual([
+			{
+				accessToken: 'login-access',
+				refreshToken: 'login-refresh',
+				expiresAt: now + hour
+			}
+		]);
+	});
+
+	it('skips wrangler entirely when the chain has no reader for it', async () => {
+		const loginGrant: CloudflareGrant = {
+			accessToken: 'login-access',
+			refreshToken: 'login-refresh',
+			expiresAt: now + hour
+		};
+		const { chain } = chainWith({
+			wranglerToken: 'wrangler-token',
+			loginGrant
+		});
+		const { readWranglerToken: _wrangler, ...withoutWrangler } = chain;
+
+		expect(await resolveCredential(withoutWrangler)).toStrictEqual({
+			token: 'login-access',
+			source: 'browser login'
+		});
+	});
+
+	it('does not consult the cache when the env token is empty', async () => {
+		const { chain } = chainWith({
+			env: { CLOUDFLARE_API_TOKEN: '' },
+			storedGrant: freshGrant
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'cached-access',
+			source: 'cached login'
+		});
+	});
+});
+
+function unexpectedBrowser(): void {
+	throw new Error('openBrowser was not expected');
+}
+
+describe('defaultCredentialChain', () => {
+	it.each([
+		['installs the wrangler reader when allowed', true],
+		['omits the wrangler reader when disallowed', false]
+	])('%s', (_name, wrangler) => {
+		const chain = defaultCredentialChain({
+			openBrowser: unexpectedBrowser,
+			wrangler
+		});
+
+		expect(typeof chain.readWranglerToken).toBe(
+			wrangler ? 'function' : 'undefined'
+		);
+	});
+});

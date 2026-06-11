@@ -14,6 +14,74 @@ export class OidcLoginError extends CliError {
 	}
 }
 
+/** Base: the authorization server declined the login. */
+export abstract class AuthorizationDeclinedError extends OidcLoginError {
+	protected constructor(public readonly providerError: string) {
+		super(`Authorization failed: ${providerError}`);
+	}
+
+	/** The specific error for an RFC 6749 authorize-endpoint error code. */
+	static fromProviderCode(code: string): AuthorizationDeclinedError {
+		switch (code) {
+			case 'access_denied': {
+				return new AuthorizationAccessDeniedError();
+			}
+			case 'invalid_scope': {
+				return new AuthorizationInvalidScopeError();
+			}
+			default: {
+				return new AuthorizationProviderError(code);
+			}
+		}
+	}
+}
+
+/** The user (or a policy) refused consent. */
+export class AuthorizationAccessDeniedError extends AuthorizationDeclinedError {
+	constructor() {
+		super('access_denied');
+		this.name = 'AuthorizationAccessDeniedError';
+	}
+}
+
+/** The client's registration does not allow a requested scope. */
+export class AuthorizationInvalidScopeError extends AuthorizationDeclinedError {
+	constructor() {
+		super('invalid_scope');
+		this.name = 'AuthorizationInvalidScopeError';
+	}
+}
+
+/** Any other RFC 6749 error code, carried verbatim. */
+export class AuthorizationProviderError extends AuthorizationDeclinedError {
+	constructor(providerError: string) {
+		super(providerError);
+		this.name = 'AuthorizationProviderError';
+	}
+}
+
+/** The browser never completed the login within the bounded wait. */
+export class LoginTimeoutError extends OidcLoginError {
+	constructor() {
+		super('Timed out waiting for the browser to complete login');
+		this.name = 'LoginTimeoutError';
+	}
+}
+
+/** None of the loopback redirect ports could be bound. */
+export class LoopbackBindError extends OidcLoginError {
+	constructor(
+		public readonly ports: readonly number[],
+		options?: { readonly cause: unknown }
+	) {
+		super(
+			`Could not bind the loopback server on port(s) ${ports.join(', ')}`,
+			options
+		);
+		this.name = 'LoopbackBindError';
+	}
+}
+
 export interface Pkce {
 	readonly verifier: string;
 	readonly challenge: string;
@@ -139,67 +207,35 @@ export async function loopbackLogin(
 	options: LoopbackLoginOptions
 ): Promise<string> {
 	const fetcher = options.fetcher ?? fetch;
-	const timeoutMs = options.timeoutMs ?? loopbackLoginTimeoutMs;
-	const pkce = createPkce();
-	const state = randomState();
-	const loopback = await startLoopbackServer(state);
-	let timer: ReturnType<typeof setTimeout> | undefined;
+	const obtained = await obtainAuthorizationCode({
+		authorizationEndpoint: options.endpoints.authorizationEndpoint,
+		clientId: options.clientId,
+		scope: options.scope ?? 'openid',
+		openBrowser: options.openBrowser,
+		timeoutMs: options.timeoutMs
+	});
 
-	try {
-		const redirectUri = `http://127.0.0.1:${String(loopback.port)}/callback`;
-		const authorizeUrl = buildAuthorizeUrl(
-			options.endpoints.authorizationEndpoint,
-			{
-				clientId: options.clientId,
-				redirectUri,
-				state,
-				challenge: pkce.challenge,
-				scope: options.scope ?? 'openid'
-			}
-		);
-
-		await options.openBrowser(authorizeUrl);
-
-		// A login the user never finishes would otherwise hang the CLI on the
-		// pending callback, so the wait is bounded; the timer is cleared below.
-		const timeout = new Promise<never>((_, reject) => {
-			timer = setTimeout(() => {
-				reject(
-					new OidcLoginError(
-						'Timed out waiting for the browser to complete login'
-					)
-				);
-			}, timeoutMs);
-		});
-		const code = await Promise.race([loopback.code, timeout]);
-
-		return await exchangeCode(options.endpoints, fetcher, {
-			grant_type: 'authorization_code',
-			code,
-			redirect_uri: redirectUri,
-			client_id: options.clientId,
-			code_verifier: pkce.verifier
-		});
-	} finally {
-		if (timer !== undefined) {
-			clearTimeout(timer);
-		}
-
-		loopback.server.close();
-	}
+	return exchangeCode(options.endpoints, fetcher, {
+		grant_type: 'authorization_code',
+		code: obtained.code,
+		redirect_uri: obtained.redirectUri,
+		client_id: options.clientId,
+		code_verifier: obtained.codeVerifier
+	});
 }
 
-function buildAuthorizeUrl(
-	endpoint: string,
-	parameters: {
-		readonly clientId: string;
-		readonly redirectUri: string;
-		readonly state: string;
-		readonly challenge: string;
-		readonly scope: string;
-	}
-): string {
-	const url = new URL(endpoint);
+export interface AuthorizeUrlParameters {
+	readonly endpoint: string;
+	readonly clientId: string;
+	readonly redirectUri: string;
+	readonly state: string;
+	readonly challenge: string;
+	readonly scope: string;
+}
+
+/** The authorization-endpoint URL for a PKCE authorization code request. */
+export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
+	const url = new URL(parameters.endpoint);
 	url.searchParams.set('response_type', 'code');
 	url.searchParams.set('client_id', parameters.clientId);
 	url.searchParams.set('redirect_uri', parameters.redirectUri);
@@ -211,13 +247,131 @@ function buildAuthorizeUrl(
 	return url.toString();
 }
 
+/** Where the loopback redirect is served; defaults match the tenant login. */
+export interface LoopbackOptions {
+	/** Ports to try in order; `[0]` (an ephemeral port) when not given. */
+	readonly ports?: readonly number[];
+	readonly host?: string;
+	readonly path?: string;
+}
+
+export interface AuthorizationCodeOptions {
+	readonly authorizationEndpoint: string;
+	readonly clientId: string;
+	readonly scope: string;
+	readonly openBrowser: (url: string) => void | Promise<void>;
+	readonly timeoutMs?: number;
+	readonly loopback?: LoopbackOptions;
+}
+
+export interface ObtainedAuthorizationCode {
+	readonly code: string;
+	/** The exact redirect URI used; the token exchange must repeat it. */
+	readonly redirectUri: string;
+	/** The PKCE verifier whose challenge the code is bound to. */
+	readonly codeVerifier: string;
+}
+
+/**
+ * The browser half of a PKCE authorization code flow, shared by every provider:
+ * binds a loopback redirect server, opens the browser to the authorization
+ * endpoint, and waits (bounded) for the matching redirect. The caller performs
+ * the token exchange, which is where providers differ.
+ */
+export async function obtainAuthorizationCode(
+	options: AuthorizationCodeOptions
+): Promise<ObtainedAuthorizationCode> {
+	const pkce = createPkce();
+	const state = randomState();
+	const host = options.loopback?.host ?? '127.0.0.1';
+	const path = options.loopback?.path ?? '/callback';
+	const loopback = await startLoopbackServer({
+		expectedState: state,
+		ports: options.loopback?.ports,
+		host,
+		path
+	});
+	let timer: ReturnType<typeof setTimeout> | undefined;
+
+	try {
+		const redirectUri = `http://${host}:${String(loopback.port)}${path}`;
+		const authorizeUrl = buildAuthorizeUrl({
+			endpoint: options.authorizationEndpoint,
+			clientId: options.clientId,
+			redirectUri,
+			state,
+			challenge: pkce.challenge,
+			scope: options.scope
+		});
+
+		// A login the user never finishes would otherwise hang the CLI on the
+		// pending callback, so the wait is bounded; the timer is cleared below.
+		const timeout = new Promise<never>((_, reject) => {
+			timer = setTimeout(() => {
+				reject(new LoginTimeoutError());
+			}, options.timeoutMs ?? loopbackLoginTimeoutMs);
+		});
+		// The redirect can arrive while `openBrowser` is still pending, so the
+		// browser launch and the wait for the code are awaited together: either
+		// failing fails the login, and neither rejection goes unobserved.
+		const [, code] = await Promise.all([
+			options.openBrowser(authorizeUrl),
+			Promise.race([loopback.code, timeout])
+		]);
+
+		return { code, redirectUri, codeVerifier: pkce.verifier };
+	} finally {
+		if (timer !== undefined) {
+			clearTimeout(timer);
+		}
+
+		loopback.server.close();
+	}
+}
+
 interface LoopbackServer {
 	readonly server: Server;
 	readonly port: number;
 	readonly code: Promise<string>;
 }
 
-function startLoopbackServer(expectedState: string): Promise<LoopbackServer> {
+interface LoopbackServerOptions {
+	readonly expectedState: string;
+	readonly ports?: readonly number[];
+	readonly host?: string;
+	readonly path?: string;
+}
+
+/**
+ * Binds a throwaway HTTP server that waits for an authorization redirect. The
+ * returned `code` promise settles on the first callback whose `state` matches;
+ * stray requests are answered and ignored. Each port is tried in order, so a
+ * provider with pre-registered redirect URLs can offer a few fixed ports while
+ * the default remains an ephemeral one.
+ */
+async function startLoopbackServer(
+	options: LoopbackServerOptions
+): Promise<LoopbackServer> {
+	const ports = options.ports ?? [0];
+	let lastError: unknown;
+
+	for (const port of ports) {
+		try {
+			return await bindLoopbackServer(port, options);
+		} catch (error) {
+			lastError = error;
+		}
+	}
+
+	throw new LoopbackBindError(ports, { cause: lastError });
+}
+
+function bindLoopbackServer(
+	port: number,
+	options: LoopbackServerOptions
+): Promise<LoopbackServer> {
+	const callbackPath = options.path ?? '/callback';
+
 	return new Promise((resolveServer, rejectServer) => {
 		let resolveCode!: (code: string) => void;
 		let rejectCode!: (error: Error) => void;
@@ -229,13 +383,13 @@ function startLoopbackServer(expectedState: string): Promise<LoopbackServer> {
 		const server = createServer((request, response) => {
 			const url = new URL(request.url ?? '/', 'http://127.0.0.1');
 
-			if (url.pathname !== '/callback') {
+			if (url.pathname !== callbackPath) {
 				response.writeHead(404);
 				response.end();
 				return;
 			}
 
-			const outcome = readCallback(url, expectedState);
+			const outcome = readCallback(url, options.expectedState);
 			response.writeHead(outcome.kind === 'code' ? 200 : 400, {
 				'content-type': 'text/plain; charset=utf-8'
 			});
@@ -244,15 +398,30 @@ function startLoopbackServer(expectedState: string): Promise<LoopbackServer> {
 			// A stray request, or one whose `state` is not ours, is answered but
 			// otherwise ignored so it cannot abort an in-flight login; only the
 			// matching redirect resolves or rejects the wait.
-			if (outcome.kind === 'code') {
-				resolveCode(outcome.code);
-			} else if (outcome.kind === 'error') {
-				rejectCode(new OidcLoginError(outcome.message));
+			switch (outcome.kind) {
+				case 'code': {
+					resolveCode(outcome.code);
+
+					break;
+				}
+				case 'declined': {
+					rejectCode(
+						AuthorizationDeclinedError.fromProviderCode(outcome.providerError)
+					);
+
+					break;
+				}
+				case 'malformed': {
+					rejectCode(new OidcLoginError(outcome.message));
+
+					break;
+				}
+				// No default
 			}
 		});
 
 		server.on('error', rejectServer);
-		server.listen(0, '127.0.0.1', () => {
+		server.listen(port, options.host ?? '127.0.0.1', () => {
 			const address = server.address();
 
 			if (address === null || typeof address === 'string') {
@@ -267,7 +436,12 @@ function startLoopbackServer(expectedState: string): Promise<LoopbackServer> {
 
 type CallbackOutcome =
 	| { readonly kind: 'code'; readonly code: string; readonly message: string }
-	| { readonly kind: 'error'; readonly message: string }
+	| {
+			readonly kind: 'declined';
+			readonly providerError: string;
+			readonly message: string;
+	  }
+	| { readonly kind: 'malformed'; readonly message: string }
 	| { readonly kind: 'ignore'; readonly message: string };
 
 function readCallback(url: URL, expectedState: string): CallbackOutcome {
@@ -280,13 +454,20 @@ function readCallback(url: URL, expectedState: string): CallbackOutcome {
 	const error = url.searchParams.get('error');
 
 	if (error !== null) {
-		return { kind: 'error', message: `Authorization failed: ${error}` };
+		return {
+			kind: 'declined',
+			providerError: error,
+			message: `Authorization failed: ${error}`
+		};
 	}
 
 	const code = url.searchParams.get('code');
 
 	if (code === null || code === '') {
-		return { kind: 'error', message: 'Authorization response carried no code' };
+		return {
+			kind: 'malformed',
+			message: 'Authorization response carried no code'
+		};
 	}
 
 	return {
@@ -487,7 +668,8 @@ async function exchangeCode(
 	return parsed.data.id_token;
 }
 
-function postForm(form: Readonly<Record<string, string>>): RequestInit {
+/** A `application/x-www-form-urlencoded` POST, as token endpoints expect. */
+export function postForm(form: Readonly<Record<string, string>>): RequestInit {
 	return {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },

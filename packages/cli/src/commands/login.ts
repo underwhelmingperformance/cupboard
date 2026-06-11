@@ -1,8 +1,5 @@
-import { spawn } from 'node:child_process';
-import { platform } from 'node:process';
-
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
-import { createReporter, type Reporter } from '@cupboard/reporter';
+import { createReporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import {
@@ -13,6 +10,7 @@ import {
 import { writeCachedToken } from '../auth/token-store.ts';
 import { reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
+import { openBrowser } from '../io/open-browser.ts';
 
 interface LoginOptions {
 	readonly oidcIssuer: string;
@@ -76,35 +74,4 @@ export function registerLoginCommand(program: Command): void {
 				{ label: 'Session', value: 'admin token cached' }
 			]);
 		});
-}
-
-// Best-effort browser launch: the URL is always printed, so a failed or absent
-// opener leaves the owner a link to follow rather than a dead end.
-function openBrowser(target: string, reporter: Reporter): void {
-	reporter.info(`Opening your browser to:\n${target}`);
-
-	const launch = browserLaunch(platform, target);
-	const child = spawn(launch.command, launch.args, {
-		stdio: 'ignore',
-		detached: true
-	});
-	child.on('error', () => {
-		reporter.warn('Could not open a browser automatically');
-	});
-	child.unref();
-}
-
-function browserLaunch(
-	os: NodeJS.Platform,
-	target: string
-): { readonly command: string; readonly args: readonly string[] } {
-	if (os === 'darwin') {
-		return { command: 'open', args: [target] };
-	}
-
-	if (os === 'win32') {
-		return { command: 'cmd', args: ['/c', 'start', '', target] };
-	}
-
-	return { command: 'xdg-open', args: [target] };
 }
