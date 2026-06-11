@@ -1,7 +1,6 @@
 {
 	"name": "@cupboard/protocol",
 	"version": "0.0.0",
-	"license": "AGPL-3.0-or-later",
 	"dependencies": {
 		"@cupboard/nix": "workspace:*",
 		"zod": "^4.4.3"
@@ -24,6 +23,7 @@
 		"./tenants": "./src/tenants.ts",
 		"./upload": "./src/upload.ts"
 	},
+	"license": "AGPL-3.0-or-later",
 	"private": true,
 	"scripts": {
 		"check:types": "tsc --noEmit",

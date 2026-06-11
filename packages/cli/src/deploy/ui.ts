@@ -1,13 +1,14 @@
 import {
 	cancel,
-	confirm,
 	intro,
 	isCancel,
 	log,
 	note,
 	outro,
+	password,
 	select,
-	spinner
+	spinner,
+	text
 } from '@clack/prompts';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import pc from 'picocolors';
@@ -24,8 +25,35 @@ export function formatRows(rows: readonly ResultRow[]): string {
 	const width = Math.max(...rows.map((row) => row.label.length));
 
 	return rows
-		.map((row) => `${pc.dim(row.label.padEnd(width))}  ${row.value}`)
+		.map((row) =>
+			row.label === '' && row.value === ''
+				? ''
+				: `${pc.dim(row.label.padEnd(width))}  ${row.value}`
+		)
 		.join('\n');
+}
+
+/** One choice in a menu prompt. */
+export interface MenuEntry<T extends string> {
+	readonly value: T;
+	readonly label: string;
+	readonly hint?: string;
+}
+
+/** The outcome of a text edit. */
+export type TextEdit =
+	| { readonly kind: 'set'; readonly value: string }
+	| { readonly kind: 'clear' }
+	| { readonly kind: 'cancelled' };
+
+export interface TextEditOptions {
+	readonly message: string;
+	readonly initial?: string;
+	readonly placeholder?: string;
+	/** When true an empty answer means "clear"; otherwise it must validate. */
+	readonly emptyClears?: boolean;
+	/** Why the value is unacceptable, or undefined when it is fine. */
+	readonly problem?: (value: string) => string | undefined;
 }
 
 /**
@@ -41,8 +69,18 @@ export interface DeployUi {
 	success(message: string): void;
 	warn(message: string): void;
 	note(title: string, rows: readonly ResultRow[]): void;
-	/** False when declined or cancelled; the caller aborts either way. */
-	confirmDeploy(): Promise<boolean>;
+	/** Pick from a menu; undefined when the prompt is cancelled. */
+	menu<T extends string>(
+		message: string,
+		entries: readonly MenuEntry<T>[]
+	): Promise<T | undefined>;
+	/** Edit a single text value. */
+	editText(options: TextEditOptions): Promise<TextEdit>;
+	/** Ask for a secret value, masked; undefined when cancelled. */
+	secret(
+		message: string,
+		problem: (value: string) => string | undefined
+	): Promise<string | undefined>;
 	/** Undefined when cancelled. */
 	chooseAccount(
 		accounts: readonly AccountSummary[]
@@ -82,13 +120,56 @@ export function createDeployUi(): DeployUi {
 			note(formatRows(rows), title);
 		},
 
-		async confirmDeploy() {
-			const answer = await confirm({
-				message: 'Deploy to Cloudflare with the plan above?',
-				initialValue: false
+		async menu(message, entries) {
+			const choice = await select<string>({
+				message,
+				options: entries.map((entry) => ({
+					value: entry.value,
+					label: entry.label,
+					...(entry.hint === undefined ? {} : { hint: entry.hint })
+				}))
 			});
 
-			return answer === true;
+			if (isCancel(choice)) {
+				return;
+			}
+
+			// Resolve back through the entries so the value keeps its narrow type.
+			return entries.find((entry) => entry.value === choice)?.value;
+		},
+
+		async editText(options) {
+			const answer = await text({
+				message: options.message,
+				initialValue: options.initial ?? '',
+				...(options.placeholder === undefined
+					? {}
+					: { placeholder: options.placeholder }),
+				validate: (value = '') => {
+					if (value === '') {
+						return options.emptyClears === true
+							? undefined
+							: 'a value is required';
+					}
+
+					return options.problem?.(value);
+				}
+			});
+
+			if (isCancel(answer)) {
+				return { kind: 'cancelled' };
+			}
+
+			return answer === '' ? { kind: 'clear' } : { kind: 'set', value: answer };
+		},
+
+		async secret(message, problem) {
+			const answer = await password({
+				message,
+				validate: (value) => problem(value ?? '')
+			});
+
+			return isCancel(answer) ? undefined : answer;
 		},
 
 		async chooseAccount(accounts) {
