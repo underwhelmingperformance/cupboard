@@ -900,6 +900,16 @@ async function deployFlow(
 
 	ui.success(`Authenticated with Cloudflare (${credentialSource})`);
 
+	// A domain already routed to the control Worker is part of the current
+	// deployment, so the plan starts from it; `--domain` overrides it.
+	const currentDomain =
+		initialDomain ??
+		(await ui
+			.reporter()
+			.phase('Checking the custom domain', () =>
+				api.findCustomDomain(artifact.config.control.name)
+			));
+
 	// From the environment when set; otherwise settled after the plan review,
 	// so a created key is scoped to the bucket and account as finally agreed.
 	let r2Credentials = envR2Credentials(process.env);
@@ -1043,7 +1053,7 @@ async function deployFlow(
 	const agreed = await reviewPlan(
 		{
 			accountId,
-			domain: initialDomain,
+			domain: currentDomain,
 			config: artifact.config,
 			owner: initialOwner
 		},
