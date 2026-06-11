@@ -1,5 +1,5 @@
 import Cloudflare from 'cloudflare';
-import { toFile } from 'cloudflare';
+import { NotFoundError, toFile } from 'cloudflare';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 
 import type { WorkerBundle } from './bundle.ts';
@@ -87,6 +87,10 @@ export interface CloudflareApi {
 	): Promise<CreatedApiToken>;
 	/** Rolls the token's secret, returning the new value. */
 	rollApiTokenSecret(tokenId: string): Promise<string>;
+
+	/** The account's workers.dev subdomain, or undefined when unregistered. */
+	getWorkersDevSubdomain(): Promise<string | undefined>;
+	enableWorkersDevRoute(scriptName: string): Promise<void>;
 }
 
 async function firstMatch<T>(
@@ -367,6 +371,27 @@ export function createCloudflareApi(
 			return client.accounts.tokens.value.update(tokenId, {
 				...account,
 				body: {}
+			});
+		},
+
+		async getWorkersDevSubdomain() {
+			try {
+				const response = await client.workers.subdomains.get(account);
+
+				return response.subdomain === '' ? undefined : response.subdomain;
+			} catch (error) {
+				if (error instanceof NotFoundError) {
+					return;
+				}
+
+				throw error;
+			}
+		},
+
+		async enableWorkersDevRoute(scriptName) {
+			await client.workers.scripts.subdomain.create(scriptName, {
+				...account,
+				enabled: true
 			});
 		}
 	};

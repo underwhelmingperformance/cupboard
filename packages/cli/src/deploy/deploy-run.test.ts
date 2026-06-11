@@ -83,6 +83,8 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 			findApiTokenId: notExpected('findApiTokenId'),
 			createApiToken: notExpected('createApiToken'),
 			rollApiTokenSecret: notExpected('rollApiTokenSecret'),
+			getWorkersDevSubdomain: notExpected('getWorkersDevSubdomain'),
+			enableWorkersDevRoute: notExpected('enableWorkersDevRoute'),
 			ensureR2Bucket(name) {
 				calls.push(`r2:${name}`);
 				return Promise.resolve();

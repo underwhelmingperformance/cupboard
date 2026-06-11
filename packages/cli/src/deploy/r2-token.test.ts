@@ -34,7 +34,9 @@ const baseApi: CloudflareApi = {
 	listTokenPermissionGroups: unexpected('listTokenPermissionGroups'),
 	findApiTokenId: unexpected('findApiTokenId'),
 	createApiToken: unexpected('createApiToken'),
-	rollApiTokenSecret: unexpected('rollApiTokenSecret')
+	rollApiTokenSecret: unexpected('rollApiTokenSecret'),
+	getWorkersDevSubdomain: unexpected('getWorkersDevSubdomain'),
+	enableWorkersDevRoute: unexpected('enableWorkersDevRoute')
 };
 
 const groups = [
