@@ -99,28 +99,26 @@ export function withCrons(
 }
 
 /**
- * Sets the owner identity vars on both Workers. No owner writes empty
- * strings, the server's contract for an ownerless deployment (the admin rule
- * is deleted rather than seeded).
+ * Sets the control-plane signup gate on the control Worker: the OIDC identity
+ * allowed to claim global admin (`POST /signup`). No admin writes empty
+ * strings, leaving the gate closed; a `CUPBOARD_SIGNUP_SECRET` Worker secret,
+ * when set, takes precedence over the subject pin.
  */
-export function withOwner(
+export function withSignupGate(
 	config: DeploymentConfig,
-	owner?: OwnerBinding
+	admin?: OwnerBinding
 ): DeploymentConfig {
 	const variables = {
-		CUPBOARD_OWNER_ISSUER: owner?.issuer ?? '',
-		CUPBOARD_OWNER_SUBJECT: owner?.subject ?? '',
-		CUPBOARD_OWNER_AUDIENCE: owner?.audience ?? ''
+		CUPBOARD_SIGNUP_ISSUER: admin?.issuer ?? '',
+		CUPBOARD_SIGNUP_AUDIENCE: admin?.audience ?? '',
+		CUPBOARD_SIGNUP_SUBJECT: admin?.subject ?? ''
 	};
 
 	return {
+		...config,
 		control: {
 			...config.control,
 			vars: { ...config.control.vars, ...variables }
-		},
-		tenant: {
-			...config.tenant,
-			vars: { ...config.tenant.vars, ...variables }
 		}
 	};
 }
