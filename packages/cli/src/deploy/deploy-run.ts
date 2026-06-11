@@ -10,6 +10,7 @@ import {
 	applyD1Migrations,
 	computeDurableObjectMigration
 } from './migrations.ts';
+import { type OwnerChoice, ownerHint } from './owner.ts';
 import type { DeploySecrets } from './secrets.ts';
 import { buildScriptMetadata, type ResolvedResources } from './upload.ts';
 
@@ -147,11 +148,12 @@ export function derivedPlanRows(
 
 /**
  * The plan facts the user may change while reviewing: resource names, cron
- * triggers, and the custom domain.
+ * triggers, the custom domain, and the owner identity.
  */
 export function choicePlanRows(
 	config: DeploymentConfig,
-	domain: string | undefined
+	domain: string | undefined,
+	owner: OwnerChoice
 ): ResultRow[] {
 	const resources = collectResources(config);
 
@@ -163,7 +165,8 @@ export function choicePlanRows(
 			label: 'Cron triggers',
 			value: config.control.crons.join(', ') || '(none)'
 		},
-		{ label: 'Custom domain', value: domain ?? '(none)' }
+		{ label: 'Custom domain', value: domain ?? '(none)' },
+		{ label: 'Owner', value: ownerHint(owner) }
 	];
 }
 
