@@ -3,8 +3,10 @@ import { isSea } from 'node:sea';
 
 import { createReporter, type ReporterMode } from '@cupboard/reporter';
 
+import { openBrowser } from '../io/open-browser.ts';
+
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
-import { resolveCloudflare } from './auth.ts';
+import { defaultCredentialChain, resolveCloudflare } from './auth.ts';
 import { createEsbuildBundler } from './bundle.ts';
 import {
 	deploymentPlanRows,
@@ -21,6 +23,8 @@ export interface DeployCliOptions {
 	readonly dryRun?: boolean;
 	readonly fromTree?: boolean;
 	readonly yes?: boolean;
+	/** False when `--no-wrangler` was passed; absent means allowed. */
+	readonly wrangler?: boolean;
 }
 
 function bucketNameOf(artifact: DeploymentArtifact): string {
@@ -122,7 +126,7 @@ export async function executeDeploy(
 		}
 	}
 
-	const { api, accountId } = await resolveCloudflare(
+	const { api, accountId, credentialSource } = await resolveCloudflare(
 		cliOptions.account,
 		(accounts) =>
 			select({
@@ -131,8 +135,16 @@ export async function executeDeploy(
 					name: `${account.name} (${account.id})`,
 					value: account.id
 				}))
-			})
+			}),
+		defaultCredentialChain({
+			openBrowser: (url) => {
+				openBrowser(url, reporter);
+			},
+			wrangler: cliOptions.wrangler ?? true
+		})
 	);
+
+	reporter.info(`Using Cloudflare credentials from: ${credentialSource}`);
 
 	const assembled = assembleSecrets({
 		env: process.env,
