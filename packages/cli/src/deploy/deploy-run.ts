@@ -123,12 +123,12 @@ export function collectResources(config: DeploymentConfig): ResourcePlan {
 export function derivedPlanRows(
 	artifact: DeploymentArtifact,
 	secrets: DeploySecrets,
-	pendingSecrets: readonly string[] = []
+	annotatedSecrets: readonly string[] = []
 ): ResultRow[] {
 	const resources = collectResources(artifact.config);
 	const secretNames = [
 		...[...secrets.control, ...secrets.tenant].map((secret) => secret.name),
-		...pendingSecrets.map((name) => `${name} (pending)`)
+		...annotatedSecrets
 	];
 
 	return [
