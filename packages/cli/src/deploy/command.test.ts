@@ -191,7 +191,7 @@ describe('planMenuEntries', () => {
 			{ value: 'crons', label: 'Cron triggers', hint: '0 * * * *' },
 			{
 				value: 'owner',
-				label: 'Owner',
+				label: 'Admin',
 				hint: 'dash.cloudflare.com · cf-user-1 (you, the deployer)'
 			},
 			{ value: 'cancel', label: 'Cancel' }

@@ -148,7 +148,7 @@ export function derivedPlanRows(
 
 /**
  * The plan facts the user may change while reviewing: resource names, cron
- * triggers, the custom domain, and the owner identity.
+ * triggers, the custom domain, and the admin identity.
  */
 export function choicePlanRows(
 	config: DeploymentConfig,
@@ -166,7 +166,7 @@ export function choicePlanRows(
 			value: config.control.crons.join(', ') || '(none)'
 		},
 		{ label: 'Custom domain', value: domain ?? '(none)' },
-		{ label: 'Owner', value: ownerHint(owner) }
+		{ label: 'Admin', value: ownerHint(owner) }
 	];
 }
 
