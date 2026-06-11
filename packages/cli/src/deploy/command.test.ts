@@ -437,7 +437,7 @@ describe('R2 credential settlement', () => {
 					create: () => Promise.resolve(created)
 				}
 			})
-		).toStrictEqual({ credentials: created, created: true });
+		).toStrictEqual({ kind: 'settled', credentials: created, created: true });
 	});
 
 	it('falls back to manual entry when token management is not permitted', async () => {
@@ -461,7 +461,7 @@ describe('R2 credential settlement', () => {
 						)
 				}
 			})
-		).toStrictEqual({ credentials: pair, created: false });
+		).toStrictEqual({ kind: 'settled', credentials: pair, created: false });
 	});
 
 	it('accepts an existing pair when chosen', async () => {
@@ -482,7 +482,39 @@ describe('R2 credential settlement', () => {
 					create: unexpected('create')
 				}
 			})
-		).toStrictEqual({ credentials: pair, created: false });
+		).toStrictEqual({ kind: 'settled', credentials: pair, created: false });
+	});
+
+	it('keeps the current key when the user says so after a bucket rename', async () => {
+		const ui = scriptedUi({ menuChoices: ['keep'] });
+
+		expect(
+			await obtainR2Credentials({
+				ui,
+				accountId: 'acc-1',
+				bucketName: 'pantry',
+				creation: {
+					kind: 'available',
+					bucketExists: false,
+					create: unexpected('create')
+				},
+				keep: { previousBucket: 'cupboard-blobs' }
+			})
+		).toStrictEqual({ kind: 'keep' });
+	});
+
+	it('offers keeping the key even when creation is unavailable', async () => {
+		const ui = scriptedUi({ menuChoices: ['keep'] });
+
+		expect(
+			await obtainR2Credentials({
+				ui,
+				accountId: 'acc-1',
+				bucketName: 'pantry',
+				creation: { kind: 'unavailable' },
+				keep: { previousBucket: 'cupboard-blobs' }
+			})
+		).toStrictEqual({ kind: 'keep' });
 	});
 
 	it('goes straight to manual entry when creation is unavailable', async () => {
@@ -498,10 +530,10 @@ describe('R2 credential settlement', () => {
 				bucketName: 'cupboard-blobs',
 				creation: { kind: 'unavailable' }
 			})
-		).toStrictEqual({ credentials: pair, created: false });
+		).toStrictEqual({ kind: 'settled', credentials: pair, created: false });
 	});
 
-	it('returns undefined when the menu is cancelled', async () => {
+	it('cancels cleanly from the settle menu', async () => {
 		const ui = scriptedUi({ menuChoices: ['cancel'] });
 
 		expect(
@@ -515,7 +547,7 @@ describe('R2 credential settlement', () => {
 					create: unexpected('create')
 				}
 			})
-		).toBeUndefined();
+		).toStrictEqual({ kind: 'cancelled' });
 	});
 });
 

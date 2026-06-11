@@ -34,6 +34,7 @@ interface ChainWorld {
 	readonly renewedGrant?: CloudflareGrant;
 	readonly wranglerToken?: string;
 	readonly loginGrant?: CloudflareGrant;
+	readonly upgradeLogin?: boolean;
 }
 
 function chainWith(world: ChainWorld): {
@@ -65,6 +66,7 @@ function chainWith(world: ChainWorld): {
 
 			return Promise.resolve(world.loginGrant);
 		},
+		upgradeLogin: world.upgradeLogin ?? false,
 		now: () => now
 	};
 
@@ -216,6 +218,54 @@ describe('resolveCredential', () => {
 			subject: 'cf-user-1'
 		});
 	});
+
+	it('replaces an identity-less grant with a fresh login when allowed', async () => {
+		const loginGrant: CloudflareGrant = {
+			accessToken: 'login-access',
+			refreshToken: 'login-refresh',
+			expiresAt: now + hour,
+			subject: 'cf-user-9'
+		};
+		const { chain, calls } = chainWith({
+			storedGrant: { ...freshGrant, subject: undefined },
+			loginGrant,
+			upgradeLogin: true
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'login-access',
+			source: 'browser login',
+			subject: 'cf-user-9'
+		});
+		expect(calls.written).toStrictEqual([loginGrant]);
+	});
+
+	it('keeps an identity-less grant when no upgrade is possible', async () => {
+		const { chain, calls } = chainWith({
+			storedGrant: { ...freshGrant, subject: undefined }
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'cached-access',
+			source: 'cached login',
+			subject: undefined
+		});
+		expect(calls.logins).toBe(0);
+	});
+
+	it('does not upgrade a grant that already has an identity', async () => {
+		const { chain, calls } = chainWith({
+			storedGrant: freshGrant,
+			upgradeLogin: true
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'cached-access',
+			source: 'cached login',
+			subject: 'cf-user-1'
+		});
+		expect(calls.logins).toBe(0);
+	});
 });
 
 function unexpectedBrowser(): void {
@@ -229,11 +279,16 @@ describe('defaultCredentialChain', () => {
 	])('%s', (_name, wrangler) => {
 		const chain = defaultCredentialChain({
 			openBrowser: unexpectedBrowser,
-			wrangler
+			wrangler,
+			interactive: true
 		});
 
-		expect(typeof chain.readWranglerToken).toBe(
-			wrangler ? 'function' : 'undefined'
-		);
+		expect({
+			wranglerReader: typeof chain.readWranglerToken,
+			upgradeLogin: chain.upgradeLogin
+		}).toStrictEqual({
+			wranglerReader: wrangler ? 'function' : 'undefined',
+			upgradeLogin: true
+		});
 	});
 });
