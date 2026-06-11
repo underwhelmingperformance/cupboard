@@ -22,6 +22,22 @@ export interface WorkerSecret {
 	readonly text: string;
 }
 
+export interface TokenPermissionGroup {
+	readonly id: string;
+	readonly name: string;
+}
+
+export interface TokenPolicyInput {
+	readonly permissionGroupIds: readonly string[];
+	readonly resources: Readonly<Record<string, string>>;
+}
+
+export interface CreatedApiToken {
+	readonly id: string;
+	/** The token's secret value; only ever returned at creation or roll. */
+	readonly value: string;
+}
+
 /**
  * The Cloudflare operations the deploy pipeline performs, as a narrow seam over
  * the official SDK so the orchestration is testable against a fake. Every method
@@ -61,6 +77,15 @@ export interface CloudflareApi {
 		hostname: string,
 		zoneId: string
 	): Promise<void>;
+
+	listTokenPermissionGroups(): Promise<TokenPermissionGroup[]>;
+	findApiTokenId(name: string): Promise<string | undefined>;
+	createApiToken(
+		name: string,
+		policy: TokenPolicyInput
+	): Promise<CreatedApiToken>;
+	/** Rolls the token's secret, returning the new value. */
+	rollApiTokenSecret(tokenId: string): Promise<string>;
 }
 
 async function firstMatch<T>(
@@ -288,6 +313,54 @@ export function createCloudflareApi(
 				zone_id: zoneId,
 				service: scriptName,
 				environment: 'production'
+			});
+		},
+
+		async listTokenPermissionGroups() {
+			const groups: TokenPermissionGroup[] = [];
+
+			for await (const group of client.accounts.tokens.permissionGroups.list(
+				account
+			)) {
+				if (group.id !== undefined && group.name !== undefined) {
+					groups.push({ id: group.id, name: group.name });
+				}
+			}
+
+			return groups;
+		},
+
+		async findApiTokenId(name) {
+			const existing = await firstMatch(
+				client.accounts.tokens.list(account),
+				(token) => token.name === name
+			);
+
+			return existing?.id;
+		},
+
+		async createApiToken(name, policy) {
+			const created = await client.accounts.tokens.create({
+				...account,
+				name,
+				policies: [
+					{
+						effect: 'allow',
+						permission_groups: policy.permissionGroupIds.map((id) => ({
+							id
+						})),
+						resources: { ...policy.resources }
+					}
+				]
+			});
+
+			return { id: created.id ?? '', value: created.value ?? '' };
+		},
+
+		async rollApiTokenSecret(tokenId) {
+			return client.accounts.tokens.value.update(tokenId, {
+				...account,
+				body: {}
 			});
 		}
 	};

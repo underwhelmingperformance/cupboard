@@ -66,6 +66,10 @@ const silentReporter: Reporter = {
 	info: vi.fn()
 };
 
+const notExpected = (member: string) => (): never => {
+	throw new Error(`${member} was not expected in this test`);
+};
+
 function recordingApi(): { api: CloudflareApi; calls: string[] } {
 	const calls: string[] = [];
 
@@ -73,6 +77,10 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 		calls,
 		api: {
 			listAccounts: () => Promise.resolve([{ id: 'acc', name: 'Acme' }]),
+			listTokenPermissionGroups: notExpected('listTokenPermissionGroups'),
+			findApiTokenId: notExpected('findApiTokenId'),
+			createApiToken: notExpected('createApiToken'),
+			rollApiTokenSecret: notExpected('rollApiTokenSecret'),
 			ensureR2Bucket(name) {
 				calls.push(`r2:${name}`);
 				return Promise.resolve();

@@ -3,16 +3,18 @@ import { describe, expect, it } from 'vitest';
 import {
 	AccountOptionRequiredError,
 	chooseDeployAccount,
-	collectR2Credentials,
 	DeployCancelledError,
+	envR2Credentials,
+	obtainR2Credentials,
 	planMenuEntries,
 	type PlanReviewWorld,
 	type PlanState,
-	R2CredentialsRequiredError,
-	reviewPlan
+	reviewPlan,
+	verifyR2Credentials
 } from './command.ts';
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
+import { TokenManagementNotPermittedError } from './r2-token.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
 
 const accounts = [
@@ -74,12 +76,36 @@ function scriptedUi(script: ReviewScript): DeployUi {
 	const textEdits = [...(script.textEdits ?? [])];
 	const secrets = [...(script.secrets ?? [])];
 	const infos: string[] = [];
+	const warnings: string[] = [];
+	const facts: string[] = [];
 
 	return {
 		...pickerUi(script.accountChoice),
 		info: (message) => {
 			infos.push(message);
 		},
+		warn: (message) => {
+			warnings.push(message);
+		},
+		reporter: () => ({
+			phase: (_label, body) =>
+				Promise.resolve(
+					body({
+						fact: (label, value) => {
+							facts.push(`${label} ${String(value)}`);
+						}
+					})
+				),
+			result: () => {
+				facts.push('result');
+			},
+			warn: (message) => {
+				warnings.push(message);
+			},
+			info: (message) => {
+				infos.push(message);
+			}
+		}),
 		menu: (_message, entries) => {
 			if (menuChoices.length === 0) {
 				throw new Error('menu asked more often than scripted');
@@ -280,46 +306,201 @@ describe('reviewPlan', () => {
 	});
 });
 
-describe('collectR2Credentials', () => {
+describe('R2 credential settlement', () => {
+	const pair = {
+		accessKeyId: 'a'.repeat(32),
+		secretAccessKey: 'b'.repeat(64)
+	};
+	const created = {
+		accessKeyId: 'c'.repeat(32),
+		secretAccessKey: 'd'.repeat(64)
+	};
+
+	it('takes both parts from the environment', () => {
+		expect(
+			envR2Credentials({
+				R2_ACCESS_KEY_ID: pair.accessKeyId,
+				R2_SECRET_ACCESS_KEY: pair.secretAccessKey
+			})
+		).toStrictEqual(pair);
+	});
+
+	it.each([
+		['both absent', {}],
+		['the secret absent', { R2_ACCESS_KEY_ID: 'a'.repeat(32) }],
+		['the id empty', { R2_ACCESS_KEY_ID: '', R2_SECRET_ACCESS_KEY: 'b' }]
+	])('reads the environment as unset with %s', (_name, env) => {
+		expect(envR2Credentials(env)).toBeUndefined();
+	});
+
+	it('creates a scoped key when chosen', async () => {
+		const ui = scriptedUi({ menuChoices: ['create'] });
+
+		expect(
+			await obtainR2Credentials({
+				ui,
+				accountId: 'acc-1',
+				bucketName: 'cupboard-blobs',
+				create: () => Promise.resolve(created)
+			})
+		).toStrictEqual({ credentials: created, created: true });
+	});
+
+	it('falls back to manual entry when token management is not permitted', async () => {
+		const ui = scriptedUi({
+			menuChoices: ['create'],
+			textEdits: [{ kind: 'set', value: pair.accessKeyId }],
+			secrets: [pair.secretAccessKey]
+		});
+
+		expect(
+			await obtainR2Credentials({
+				ui,
+				accountId: 'acc-1',
+				bucketName: 'cupboard-blobs',
+				create: () =>
+					Promise.reject(
+						new TokenManagementNotPermittedError({ cause: undefined })
+					)
+			})
+		).toStrictEqual({ credentials: pair, created: false });
+	});
+
+	it('accepts an existing pair when chosen', async () => {
+		const ui = scriptedUi({
+			menuChoices: ['enter'],
+			textEdits: [{ kind: 'set', value: pair.accessKeyId }],
+			secrets: [pair.secretAccessKey]
+		});
+
+		expect(
+			await obtainR2Credentials({
+				ui,
+				accountId: 'acc-1',
+				bucketName: 'cupboard-blobs',
+				create: unexpected('create')
+			})
+		).toStrictEqual({ credentials: pair, created: false });
+	});
+
+	it('returns undefined when the menu is cancelled', async () => {
+		const ui = scriptedUi({ menuChoices: ['cancel'] });
+
+		expect(
+			await obtainR2Credentials({
+				ui,
+				accountId: 'acc-1',
+				bucketName: 'cupboard-blobs',
+				create: unexpected('create')
+			})
+		).toBeUndefined();
+	});
+});
+
+describe('verifyR2Credentials', () => {
 	const pair = {
 		accessKeyId: 'a'.repeat(32),
 		secretAccessKey: 'b'.repeat(64)
 	};
 
-	it('takes both parts from the environment without prompting', async () => {
+	const base = {
+		interactive: true,
+		accountId: 'acc-1',
+		bucketName: 'cupboard-blobs',
+		initial: pair,
+		sleep: () => Promise.resolve()
+	};
+
+	it('returns the pair once the probe accepts it', async () => {
+		const ui = scriptedUi({});
+
 		expect(
-			await collectR2Credentials(
-				scriptedUi({}),
-				{
-					R2_ACCESS_KEY_ID: pair.accessKeyId,
-					R2_SECRET_ACCESS_KEY: pair.secretAccessKey
-				},
-				true
-			)
+			await verifyR2Credentials({
+				...base,
+				ui,
+				check: () => Promise.resolve({ kind: 'valid' })
+			})
 		).toStrictEqual(pair);
 	});
 
-	it('requires the environment when not interactive', async () => {
+	it('retries a freshly created key while it propagates', async () => {
+		const ui = scriptedUi({});
+		let probes = 0;
+
+		const verified = await verifyR2Credentials({
+			...base,
+			ui,
+			attempts: 5,
+			check: () => {
+				probes += 1;
+				return Promise.resolve(
+					probes < 3 ? { kind: 'rejected', status: 403 } : { kind: 'valid' }
+				);
+			}
+		});
+
+		expect({ verified, probes }).toStrictEqual({ verified: pair, probes: 3 });
+	});
+
+	it('lets a rejection be overridden with deploy-anyway', async () => {
+		const ui = scriptedUi({ menuChoices: ['continue'] });
+
+		expect(
+			await verifyR2Credentials({
+				...base,
+				ui,
+				check: () => Promise.resolve({ kind: 'rejected', status: 403 })
+			})
+		).toStrictEqual(pair);
+	});
+
+	it('verifies a re-entered pair before accepting it', async () => {
+		const replacement = {
+			accessKeyId: 'e'.repeat(32),
+			secretAccessKey: 'f'.repeat(64)
+		};
+		const ui = scriptedUi({
+			menuChoices: ['reenter'],
+			textEdits: [{ kind: 'set', value: replacement.accessKeyId }],
+			secrets: [replacement.secretAccessKey]
+		});
+
+		const verified = await verifyR2Credentials({
+			...base,
+			ui,
+			check: ({ credentials }) =>
+				Promise.resolve(
+					credentials.accessKeyId === replacement.accessKeyId
+						? { kind: 'valid' }
+						: { kind: 'rejected', status: 403 }
+				)
+		});
+
+		expect(verified).toStrictEqual(replacement);
+	});
+
+	it('cancels cleanly from the rejection menu', async () => {
+		const ui = scriptedUi({ menuChoices: ['cancel'] });
+
+		expect(
+			await verifyR2Credentials({
+				...base,
+				ui,
+				check: () => Promise.resolve({ kind: 'rejected', status: 403 })
+			})
+		).toBeUndefined();
+	});
+
+	it('is fatal without a terminal', async () => {
+		const ui = scriptedUi({});
+
 		await expect(
-			collectR2Credentials(scriptedUi({}), {}, false)
-		).rejects.toStrictEqual(new R2CredentialsRequiredError());
-	});
-
-	it('prompts for both parts when the environment has neither', async () => {
-		const ui = scriptedUi({
-			textEdits: [{ kind: 'set', value: pair.accessKeyId }],
-			secrets: [pair.secretAccessKey]
-		});
-
-		expect(await collectR2Credentials(ui, {}, true)).toStrictEqual(pair);
-	});
-
-	it('returns undefined when the secret prompt is cancelled', async () => {
-		const ui = scriptedUi({
-			textEdits: [{ kind: 'set', value: pair.accessKeyId }],
-			secrets: [undefined]
-		});
-
-		expect(await collectR2Credentials(ui, {}, true)).toBeUndefined();
+			verifyR2Credentials({
+				...base,
+				interactive: false,
+				ui,
+				check: () => Promise.resolve({ kind: 'rejected', status: 403 })
+			})
+		).rejects.toThrow('R2 rejected the credentials (HTTP 403)');
 	});
 });

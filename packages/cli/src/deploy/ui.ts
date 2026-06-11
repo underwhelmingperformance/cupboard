@@ -33,6 +33,14 @@ export function formatRows(rows: readonly ResultRow[]): string {
 		.join('\n');
 }
 
+/**
+ * An OSC 8 terminal hyperlink. Terminals that support it make `text`
+ * clickable; the rest ignore the control sequence and just show `text`.
+ */
+export function terminalLink(text: string, url: string): string {
+	return `\u001B]8;;${url}\u0007${text}\u001B]8;;\u0007`;
+}
+
 /** One choice in a menu prompt. */
 export interface MenuEntry<T extends string> {
 	readonly value: T;
