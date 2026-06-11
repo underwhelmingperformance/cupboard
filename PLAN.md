@@ -183,6 +183,35 @@ successfully substitute that path from the Worker.
   - [x] Integration: bootstrap mints an admin JWT and keeps the signing key
         stable across calls; stats returns accurate row counts.
 
+### Onboarding
+
+One command takes an operator from nothing to a usable cache, and the identity
+that deployed is the identity that administers.
+
+- [x] `cupboard init` (alias `deploy`): build, authenticate via cupboard's
+      public Cloudflare OAuth client (PKCE loopback on registered ports; grant
+      cached with owner-only permissions and renewed from its refresh token),
+      review an editable plan (account, custom domain, resource names, cron
+      triggers, owner), settle R2 credentials (created as a bucket-scoped
+      account-owned API token where the deploy credential may manage tokens,
+      rolled on re-deploys; entered manually otherwise; probed with a signed
+      HEAD before anything deploys), provision, then initialise: resolve the
+      cache URL (custom domain, or the workers.dev subdomain with the script
+      route enabled), poll `/pubkey` until the Worker is routable, and print the
+      `nix.conf` lines.
+- [x] Owner binding: the deploy seeds `CUPBOARD_OWNER_*` from the plan's Owner
+      choice. The default is the configured vars, then the deployer's Cloudflare
+      identity (`https://dash.cloudflare.com` is a compliant OIDC issuer; the
+      id_token's `sub` arrives with the `openid` scope; the audience is
+      cupboard's client id), then ownerless with a warning.
+- [x] `cupboard login` defaults to the same issuer and client, so a flagless
+      login presents exactly the triple the owner rule pins. `--headless` uses
+      the RFC 8628 device flow (the OAuth client carries the device code grant
+      type); a refused device authorization names the grant to enable.
+- [x] Plans adapt to the account: the Free plan rejects the `limits` field, so
+      uploads retry without CPU limits and warn; Cloudflare API errors end the
+      deploy with the response's human-readable detail, exit code 1.
+
 ### Test harness
 
 - [x] Tier 1 runs on per-package Vitest defaults (`*.test.ts` alongside the
