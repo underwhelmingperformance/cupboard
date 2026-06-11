@@ -4,7 +4,10 @@ import type { DeploymentConfig } from './config.ts';
 /** The Cloudflare dashboard's OIDC issuer, used for deployer-bound owners. */
 export const cloudflareDashIssuer = 'https://dash.cloudflare.com';
 
-/** The OIDC triple the server pins the owner's admin rule on. */
+/**
+ * The OIDC triple the control plane's signup gate pins: who may claim global
+ * admin of the deployment, and (by default) who owns the tenants it creates.
+ */
 export interface OwnerBinding {
 	readonly issuer: string;
 	readonly subject: string;
@@ -12,9 +15,9 @@ export interface OwnerBinding {
 }
 
 /**
- * Who the deployment's owner will be: a bound identity (and where it came
- * from), or nobody, which deploys an ownerless cache (no admin login; pushes
- * only via write rules minted elsewhere).
+ * Who will administer the deployment: a bound identity (and where it came
+ * from), or nobody, which leaves the signup gate closed (no admin claim, no
+ * tenants, until a redeploy configures one).
  */
 export type OwnerChoice =
 	| {
@@ -25,9 +28,9 @@ export type OwnerChoice =
 	| { readonly kind: 'none' };
 
 /**
- * The owner binding for the person deploying: their Cloudflare identity, as
- * carried in the id_token cupboard's OAuth client receives. The audience is
- * the client id, which is also what a flagless `cupboard login` presents.
+ * The binding for the person deploying: their Cloudflare identity, as carried
+ * in the id_token cupboard's OAuth client receives. The audience is the
+ * client id, which is also what a flagless `cupboard login` presents.
  */
 export function deployerOwner(subject: string): OwnerBinding {
 	return {
@@ -37,13 +40,13 @@ export function deployerOwner(subject: string): OwnerBinding {
 	};
 }
 
-/** The owner configured in the wrangler vars, when all three parts are set. */
+/** The admin gate configured in the wrangler vars, when fully set. */
 export function configuredOwner(
 	variables: Readonly<Record<string, string>>
 ): OwnerBinding | undefined {
-	const issuer = variables.CUPBOARD_OWNER_ISSUER;
-	const subject = variables.CUPBOARD_OWNER_SUBJECT;
-	const audience = variables.CUPBOARD_OWNER_AUDIENCE;
+	const issuer = variables.CUPBOARD_SIGNUP_ISSUER;
+	const subject = variables.CUPBOARD_SIGNUP_SUBJECT;
+	const audience = variables.CUPBOARD_SIGNUP_AUDIENCE;
 
 	if (!issuer || !subject || !audience) {
 		return undefined;
@@ -53,7 +56,7 @@ export function configuredOwner(
 }
 
 /**
- * The owner the plan starts from: an owner already configured in the wrangler
+ * The admin the plan starts from: a gate already configured in the wrangler
  * vars wins, then the deployer when their identity is known, otherwise nobody.
  */
 export function defaultOwnerChoice(
@@ -86,7 +89,7 @@ const originLabels = {
 /** A one-line description of the choice, for the plan row and menu hint. */
 export function ownerHint(choice: OwnerChoice): string {
 	if (choice.kind === 'none') {
-		return '(none: no admin login)';
+		return '(none: nobody can claim admin)';
 	}
 
 	const { owner, origin } = choice;

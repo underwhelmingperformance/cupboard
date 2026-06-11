@@ -28,9 +28,9 @@ describe('defaultOwnerChoice', () => {
 	it('prefers an owner already configured in the wrangler vars', () => {
 		const config = parseDeploymentConfig(
 			configWithVariables({
-				CUPBOARD_OWNER_ISSUER: 'https://accounts.example.com',
-				CUPBOARD_OWNER_SUBJECT: 'user-7',
-				CUPBOARD_OWNER_AUDIENCE: 'client-9'
+				CUPBOARD_SIGNUP_ISSUER: 'https://accounts.example.com',
+				CUPBOARD_SIGNUP_SUBJECT: 'user-7',
+				CUPBOARD_SIGNUP_AUDIENCE: 'client-9'
 			}),
 			tenantSource
 		);
@@ -49,9 +49,9 @@ describe('defaultOwnerChoice', () => {
 	it('binds the deployer when the vars are empty and an identity is known', () => {
 		const config = parseDeploymentConfig(
 			configWithVariables({
-				CUPBOARD_OWNER_ISSUER: '',
-				CUPBOARD_OWNER_SUBJECT: '',
-				CUPBOARD_OWNER_AUDIENCE: ''
+				CUPBOARD_SIGNUP_ISSUER: '',
+				CUPBOARD_SIGNUP_SUBJECT: '',
+				CUPBOARD_SIGNUP_AUDIENCE: ''
 			}),
 			tenantSource
 		);
@@ -78,9 +78,9 @@ describe('defaultOwnerChoice', () => {
 	it('treats a partially configured owner as unconfigured', () => {
 		const config = parseDeploymentConfig(
 			configWithVariables({
-				CUPBOARD_OWNER_ISSUER: 'https://accounts.example.com',
-				CUPBOARD_OWNER_SUBJECT: '',
-				CUPBOARD_OWNER_AUDIENCE: 'client-9'
+				CUPBOARD_SIGNUP_ISSUER: 'https://accounts.example.com',
+				CUPBOARD_SIGNUP_SUBJECT: '',
+				CUPBOARD_SIGNUP_AUDIENCE: 'client-9'
 			}),
 			tenantSource
 		);
@@ -102,8 +102,8 @@ describe('ownerHint', () => {
 		).toBe('dash.cloudflare.com · cf-user-1 (you, the deployer)');
 	});
 
-	it('spells out the consequence of no owner', () => {
-		expect(ownerHint({ kind: 'none' })).toBe('(none: no admin login)');
+	it('spells out the consequence of no admin', () => {
+		expect(ownerHint({ kind: 'none' })).toBe('(none: nobody can claim admin)');
 	});
 });
 

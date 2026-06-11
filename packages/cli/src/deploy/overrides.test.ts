@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
-import { renameResource, withCrons, withOwner } from './overrides.ts';
+import { renameResource, withCrons, withSignupGate } from './overrides.ts';
 
 const config = parseDeploymentConfig(
 	`{
@@ -87,19 +87,19 @@ describe('withCrons', () => {
 	});
 });
 
-describe('withOwner', () => {
-	const owner = {
+describe('withSignupGate', () => {
+	const admin = {
 		issuer: 'https://dash.cloudflare.com',
 		subject: 'cf-user-1',
 		audience: 'client-1'
 	};
 
-	it('sets the owner vars on both workers, preserving other vars', () => {
-		const updated = withOwner(config, owner);
+	it('sets the gate vars on the control worker, preserving other vars', () => {
+		const updated = withSignupGate(config, admin);
 		const expected = {
-			CUPBOARD_OWNER_ISSUER: 'https://dash.cloudflare.com',
-			CUPBOARD_OWNER_SUBJECT: 'cf-user-1',
-			CUPBOARD_OWNER_AUDIENCE: 'client-1'
+			CUPBOARD_SIGNUP_ISSUER: 'https://dash.cloudflare.com',
+			CUPBOARD_SIGNUP_SUBJECT: 'cf-user-1',
+			CUPBOARD_SIGNUP_AUDIENCE: 'client-1'
 		};
 
 		expect({
@@ -107,13 +107,13 @@ describe('withOwner', () => {
 			tenant: updated.tenant.vars
 		}).toStrictEqual({
 			control: { ...config.control.vars, ...expected },
-			tenant: { ...config.tenant.vars, ...expected }
+			tenant: config.tenant.vars
 		});
 	});
 
-	it('writes empty strings for an ownerless deployment', () => {
-		const updated = withOwner(withOwner(config, owner));
+	it('writes empty strings when nobody may claim admin', () => {
+		const updated = withSignupGate(withSignupGate(config, admin));
 
-		expect(updated.control.vars.CUPBOARD_OWNER_SUBJECT).toBe('');
+		expect(updated.control.vars.CUPBOARD_SIGNUP_SUBJECT).toBe('');
 	});
 });

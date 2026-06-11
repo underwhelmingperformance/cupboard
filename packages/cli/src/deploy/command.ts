@@ -33,7 +33,7 @@ import {
 import { checkDomainOption, domainProblem } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import { onboardDeployment } from './onboard.ts';
-import { renameResource, withCrons, withOwner } from './overrides.ts';
+import { renameResource, withCrons, withSignupGate } from './overrides.ts';
 import {
 	cloudflareDashIssuer,
 	defaultOwnerChoice,
@@ -240,7 +240,7 @@ export function planMenuEntries(state: PlanState): MenuEntry<PlanChoice>[] {
 			label: 'Cron triggers',
 			hint: state.config.control.crons.join(', ') || '(none)'
 		},
-		{ value: 'owner', label: 'Owner', hint: ownerHint(state.owner) },
+		{ value: 'owner', label: 'Admin', hint: ownerHint(state.owner) },
 		{ value: 'cancel', label: 'Cancel' }
 	];
 }
@@ -273,7 +273,7 @@ async function editOwner(
 ): Promise<PlanState> {
 	const { ui } = world;
 
-	const choice = await ui.menu('Who should own this deployment?', [
+	const choice = await ui.menu('Who should administer this deployment?', [
 		...(world.deployer === undefined
 			? []
 			: [
@@ -291,9 +291,9 @@ async function editOwner(
 		{
 			value: 'none',
 			label: 'Nobody',
-			hint: 'no admin login; pushes only via write rules minted elsewhere'
+			hint: 'the signup gate stays closed; no admin, no tenants'
 		},
-		{ value: 'keep', label: 'Keep the current owner' }
+		{ value: 'keep', label: 'Keep the current admin' }
 	]);
 
 	if (choice === undefined || choice === 'keep') {
@@ -1035,8 +1035,8 @@ async function deployFlow(
 
 	if (cliOptions.yes === true && initialOwner.kind === 'none') {
 		ui.warn(
-			'No owner is bound: `cupboard login` and the admin commands will not ' +
-				'work against this deployment until one is configured.'
+			'No admin is bound: the signup gate stays closed, so nobody can ' +
+				'claim this deployment or create tenants until one is configured.'
 		);
 	}
 
@@ -1146,9 +1146,9 @@ async function deployFlow(
 
 	const { options } = await planFor(agreed);
 
-	// The owner is applied exactly once, on the agreed config: applying it in
-	// the render loop would let repeated edits compound state and config.
-	const deployedConfig = withOwner(
+	// The admin gate is applied exactly once, on the agreed config: applying it
+	// in the render loop would let repeated edits compound state and config.
+	const deployedConfig = withSignupGate(
 		agreed.config,
 		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
 	);
