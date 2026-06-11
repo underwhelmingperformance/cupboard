@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import type Cloudflare from 'cloudflare';
 
@@ -35,9 +36,18 @@ import {
 	type R2Credentials,
 	secretAccessKeyProblem
 } from './r2-credentials.ts';
+import {
+	createScopedR2Key,
+	TokenManagementNotPermittedError
+} from './r2-token.ts';
 import { assembleSecrets, generateWrapSecret } from './secrets.ts';
 import { planWorkerSource } from './source.ts';
-import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
+import {
+	createDeployUi,
+	type DeployUi,
+	type MenuEntry,
+	terminalLink
+} from './ui.ts';
 
 /** The user backed out of a prompt; the deploy stops without error output. */
 export class DeployCancelledError extends CliError {
@@ -71,7 +81,8 @@ export class R2CredentialsRequiredError extends CliError {
 	constructor() {
 		super(
 			'R2 credentials are required: set R2_ACCESS_KEY_ID and ' +
-				'R2_SECRET_ACCESS_KEY (an R2 API token scoped to the cache bucket).'
+				'R2_SECRET_ACCESS_KEY (an R2 API token scoped to the cache bucket). ' +
+				'Create one at https://dash.cloudflare.com/?to=/:account/r2/api-tokens'
 		);
 		this.name = 'R2CredentialsRequiredError';
 	}
@@ -344,46 +355,43 @@ export async function reviewPlan(
 	}
 }
 
-/**
- * Settle the R2 credential pair: taken from the environment when both parts
- * are set, otherwise prompted for (the cache cannot serve without them).
- * Returns undefined when the prompts are cancelled.
- */
-export async function collectR2Credentials(
-	ui: DeployUi,
-	env: Readonly<Record<string, string | undefined>>,
-	interactive: boolean
-): Promise<R2Credentials | undefined> {
+/** The R2 pair from the environment, when both parts are present. */
+export function envR2Credentials(
+	env: Readonly<Record<string, string | undefined>>
+): R2Credentials | undefined {
 	const fromEnv = (name: string): string | undefined => {
 		const value = env[name];
 
 		return value === undefined || value === '' ? undefined : value;
 	};
 
-	const envAccessKeyId = fromEnv('R2_ACCESS_KEY_ID');
-	const envSecret = fromEnv('R2_SECRET_ACCESS_KEY');
+	const accessKeyId = fromEnv('R2_ACCESS_KEY_ID');
+	const secretAccessKey = fromEnv('R2_SECRET_ACCESS_KEY');
 
-	if (envAccessKeyId !== undefined && envSecret !== undefined) {
-		return { accessKeyId: envAccessKeyId, secretAccessKey: envSecret };
+	if (accessKeyId === undefined || secretAccessKey === undefined) {
+		return undefined;
 	}
 
-	if (!interactive) {
-		throw new R2CredentialsRequiredError();
-	}
+	return { accessKeyId, secretAccessKey };
+}
+
+/** Prompt for an existing pair; undefined when cancelled. */
+async function promptR2CredentialPair(
+	ui: DeployUi,
+	accountId: string
+): Promise<R2Credentials | undefined> {
+	const tokensPage = `https://dash.cloudflare.com/${accountId}/r2/api-tokens`;
 
 	ui.info(
-		'The tenant Worker presigns R2 uploads with an R2 API token ' +
-			'(Cloudflare dashboard: R2 → Manage API tokens → Object Read & Write).'
+		`Create an R2 API token (Object Read & Write on the cache bucket) at\n${terminalLink(tokensPage, tokensPage)}`
 	);
 
-	const accessKeyId =
-		envAccessKeyId ??
-		(await askText(ui, {
-			message: 'R2 access key id',
-			problem: accessKeyIdProblem
-		}));
+	const accessKeyEdit = await ui.editText({
+		message: 'R2 access key id',
+		problem: accessKeyIdProblem
+	});
 
-	if (accessKeyId === undefined) {
+	if (accessKeyEdit.kind !== 'set') {
 		return undefined;
 	}
 
@@ -396,51 +404,128 @@ export async function collectR2Credentials(
 		return undefined;
 	}
 
-	return { accessKeyId, secretAccessKey };
+	return { accessKeyId: accessKeyEdit.value, secretAccessKey };
 }
 
-async function askText(
-	ui: DeployUi,
-	options: {
-		readonly message: string;
-		readonly problem: (value: string) => string | undefined;
-	}
-): Promise<string | undefined> {
-	const edit = await ui.editText(options);
-
-	return edit.kind === 'set' ? edit.value : undefined;
+export interface ObtainedR2Credentials {
+	readonly credentials: R2Credentials;
+	/** True when the key was created just now and may not have propagated. */
+	readonly created: boolean;
 }
 
 /**
- * Probe R2 with the pair before deploying anything. Interactively, a rejection
- * offers to re-enter the pair, deploy anyway (a write-only token reads as
- * rejected), or cancel; without a terminal it is fatal.
+ * Settle the R2 credential pair interactively: create a bucket-scoped key
+ * through the Cloudflare API (the recommended path), or take an existing pair.
+ * A deploy credential without token-management rights falls back to manual
+ * entry with an explanation. Returns undefined when cancelled.
  */
-async function verifyR2Credentials(options: {
+export async function obtainR2Credentials(options: {
+	readonly ui: DeployUi;
+	readonly accountId: string;
+	readonly bucketName: string;
+	readonly create: () => Promise<R2Credentials>;
+}): Promise<ObtainedR2Credentials | undefined> {
+	const { ui, bucketName } = options;
+
+	const choice = await ui.menu(
+		`The cache needs R2 credentials for ${bucketName}. How would you like to provide them?`,
+		[
+			{
+				value: 'create',
+				label: `Create a key scoped to ${bucketName}`,
+				hint: 'recommended; rotated on each deploy'
+			},
+			{ value: 'enter', label: 'Enter an existing key pair' },
+			{ value: 'cancel', label: 'Cancel' }
+		]
+	);
+
+	if (choice === undefined || choice === 'cancel') {
+		return undefined;
+	}
+
+	if (choice === 'enter') {
+		const credentials = await promptR2CredentialPair(ui, options.accountId);
+
+		return credentials === undefined
+			? undefined
+			: { credentials, created: false };
+	}
+
+	try {
+		const credentials = await ui
+			.reporter()
+			.phase(`Creating an R2 API token for ${bucketName}`, options.create);
+
+		return { credentials, created: true };
+	} catch (error) {
+		if (!(error instanceof TokenManagementNotPermittedError)) {
+			throw error;
+		}
+
+		ui.warn(error.message);
+
+		const credentials = await promptR2CredentialPair(ui, options.accountId);
+
+		return credentials === undefined
+			? undefined
+			: { credentials, created: false };
+	}
+}
+
+const propagationAttempts = 12;
+const propagationDelayMs = 5000;
+
+/**
+ * Probe R2 with the pair before deploying anything. A freshly created token
+ * is retried while it propagates. Interactively, a rejection offers to
+ * re-enter the pair, deploy anyway (a write-only token reads as rejected), or
+ * cancel; without a terminal it is fatal.
+ */
+export async function verifyR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly interactive: boolean;
 	readonly accountId: string;
 	readonly bucketName: string;
 	readonly initial: R2Credentials;
+	/** Probe attempts before giving up; more for a just-created token. */
+	readonly attempts?: number;
+	readonly check?: typeof checkR2Credentials;
+	readonly sleep?: (ms: number) => Promise<void>;
 }): Promise<R2Credentials | undefined> {
 	const { ui } = options;
+	const check = options.check ?? checkR2Credentials;
+	const sleep = options.sleep ?? ((ms: number) => delay(ms));
 	let credentials = options.initial;
+	let attempts = options.attempts ?? 1;
 
 	for (;;) {
 		try {
-			await ui.reporter().phase('Checking R2 credentials', async () => {
-				const check = await checkR2Credentials({
-					accountId: options.accountId,
-					bucketName: options.bucketName,
-					credentials
-				});
+			await ui.reporter().phase('Checking R2 credentials', async (context) => {
+				for (let attempt = 1; ; attempt += 1) {
+					const result = await check({
+						accountId: options.accountId,
+						bucketName: options.bucketName,
+						credentials
+					});
 
-				if (check.kind === 'rejected') {
-					throw new R2CredentialsRejectedError(check.status);
-				}
+					if (result.kind === 'valid') {
+						return;
+					}
 
-				if (check.kind === 'unreachable') {
-					throw new R2UnreachableError({ cause: check.cause });
+					if (result.kind === 'unreachable') {
+						throw new R2UnreachableError({ cause: result.cause });
+					}
+
+					if (attempt >= attempts) {
+						throw new R2CredentialsRejectedError(result.status);
+					}
+
+					context.fact(
+						'waiting for the new key to propagate, attempt',
+						attempt
+					);
+					await sleep(propagationDelayMs);
 				}
 			});
 
@@ -470,13 +555,14 @@ async function verifyR2Credentials(options: {
 				return credentials;
 			}
 
-			const reentered = await collectR2Credentials(ui, {}, true);
+			const reentered = await promptR2CredentialPair(ui, options.accountId);
 
 			if (reentered === undefined) {
 				return undefined;
 			}
 
 			credentials = reentered;
+			attempts = 1;
 		}
 	}
 }
@@ -526,13 +612,18 @@ export async function executeDeploy(
 			accountId: '',
 			bucketName: bucketNameOf(artifact.config)
 		});
+		const r2Names = new Set(['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']);
 
 		ui.note('Deployment plan', [
-			...derivedPlanRows(artifact, assembled.secrets),
+			...derivedPlanRows(
+				artifact,
+				assembled.secrets,
+				assembled.missing.filter((name) => r2Names.has(name))
+			),
 			{ label: '', value: '' },
 			...choicePlanRows(artifact.config, initialDomain)
 		]);
-		warnMissing(assembled.missing);
+		warnMissing(assembled.missing.filter((name) => !r2Names.has(name)));
 		ui.outro('Dry run: nothing was changed.');
 		return;
 	}
@@ -568,12 +659,9 @@ export async function executeDeploy(
 
 	ui.success(`Authenticated with Cloudflare (${credentialSource})`);
 
-	let r2Credentials = await collectR2Credentials(ui, process.env, interactive);
-
-	if (r2Credentials === undefined) {
-		ui.cancelled('Deploy aborted.');
-		return;
-	}
+	// From the environment when set; otherwise settled after the plan review,
+	// so a created key is scoped to the bucket and account as finally agreed.
+	let r2Credentials = envR2Credentials(process.env);
 
 	const apis = new Map<string, CloudflareApi>([[accountId, api]]);
 	const apiFor = (id: string): CloudflareApi => {
@@ -595,9 +683,15 @@ export async function executeDeploy(
 	const wrapSecretChecks = new Map<string, Promise<readonly string[]>>();
 	let generatedWrapSecret: string | undefined;
 
+	const r2SecretNames = new Set(['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']);
+
 	const planFor = async (
 		state: PlanState
-	): Promise<{ options: DeployOptions; missing: readonly string[] }> => {
+	): Promise<{
+		options: DeployOptions;
+		missing: readonly string[];
+		pending: readonly string[];
+	}> => {
 		const assembled = assembleSecrets({
 			env: {
 				...process.env,
@@ -608,7 +702,10 @@ export async function executeDeploy(
 			bucketName: bucketNameOf(state.config)
 		});
 		const controlSecrets = [...assembled.secrets.control];
-		let missing = assembled.missing;
+		// The R2 pair is settled after the review (created or entered), so its
+		// absence is pending work rather than a problem to warn about.
+		const pending = assembled.missing.filter((name) => r2SecretNames.has(name));
+		let missing = assembled.missing.filter((name) => !r2SecretNames.has(name));
 
 		// Generate the control key wrapping secret on a first deploy, but never
 		// overwrite an existing one: a different value cannot unwrap stored data.
@@ -659,7 +756,8 @@ export async function executeDeploy(
 				dryRun: false,
 				secrets: { control: controlSecrets, tenant: assembled.secrets.tenant }
 			},
-			missing
+			missing,
+			pending
 		};
 	};
 
@@ -668,12 +766,13 @@ export async function executeDeploy(
 		{
 			ui,
 			render: async (state) => {
-				const { options, missing } = await planFor(state);
+				const { options, missing, pending } = await planFor(state);
 
 				ui.note('Deployment plan', [
 					...derivedPlanRows(
 						{ ...artifact, config: state.config },
-						options.secrets
+						options.secrets,
+						pending
 					),
 					{ label: '', value: '' },
 					{ label: 'Account', value: state.accountId },
@@ -691,12 +790,41 @@ export async function executeDeploy(
 		return;
 	}
 
+	const agreedBucket = bucketNameOf(agreed.config);
+	let createdNow = false;
+
+	if (r2Credentials === undefined) {
+		if (!interactive) {
+			throw new R2CredentialsRequiredError();
+		}
+
+		const obtained = await obtainR2Credentials({
+			ui,
+			accountId: agreed.accountId,
+			bucketName: agreedBucket,
+			create: () =>
+				createScopedR2Key(apiFor(agreed.accountId), {
+					accountId: agreed.accountId,
+					bucketName: agreedBucket
+				})
+		});
+
+		if (obtained === undefined) {
+			ui.cancelled('Deploy aborted.');
+			return;
+		}
+
+		r2Credentials = obtained.credentials;
+		createdNow = obtained.created;
+	}
+
 	const verified = await verifyR2Credentials({
 		ui,
 		interactive,
 		accountId: agreed.accountId,
-		bucketName: bucketNameOf(agreed.config),
-		initial: r2Credentials
+		bucketName: agreedBucket,
+		initial: r2Credentials,
+		attempts: createdNow ? propagationAttempts : 1
 	});
 
 	if (verified === undefined) {

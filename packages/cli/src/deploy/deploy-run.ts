@@ -80,9 +80,14 @@ export function collectResources(config: DeploymentConfig): ResourcePlan {
  */
 export function derivedPlanRows(
 	artifact: DeploymentArtifact,
-	secrets: DeploySecrets
+	secrets: DeploySecrets,
+	pendingSecrets: readonly string[] = []
 ): ResultRow[] {
 	const resources = collectResources(artifact.config);
+	const secretNames = [
+		...[...secrets.control, ...secrets.tenant].map((secret) => secret.name),
+		...pendingSecrets.map((name) => `${name} (pending)`)
+	];
 
 	return [
 		{
@@ -95,13 +100,7 @@ export function derivedPlanRows(
 		},
 		{ label: 'KV namespaces', value: resources.kvTitles.join(', ') },
 		{ label: 'D1 migrations', value: String(artifact.d1Migrations.length) },
-		{
-			label: 'Secrets',
-			value:
-				[...secrets.control, ...secrets.tenant]
-					.map((secret) => secret.name)
-					.join(', ') || '(none)'
-		}
+		{ label: 'Secrets', value: secretNames.join(', ') || '(none)' }
 	];
 }
 
