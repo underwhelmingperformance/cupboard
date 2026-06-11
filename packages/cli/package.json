@@ -6,12 +6,12 @@
 		"cupboard": "./src/main.ts"
 	},
 	"dependencies": {
+		"@clack/prompts": "^1.5.1",
 		"@cloudflare/workers-auth": "^0.1.1",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
-		"@inquirer/prompts": "^8.5.2",
 		"@sigstore/bundle": "^5.0.0",
 		"@sigstore/protobuf-specs": "^0.5.1",
 		"@sigstore/tuf": "^5.0.0",
@@ -19,6 +19,7 @@
 		"cloudflare": "^6.3.0",
 		"commander": "^15.0.0",
 		"json5": "^2.2.3",
+		"picocolors": "^1.1.1",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
