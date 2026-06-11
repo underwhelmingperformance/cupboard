@@ -1,13 +1,16 @@
 import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
 
-import { createReporter, type ReporterMode } from '@cupboard/reporter';
-
-import { openBrowser } from '../io/open-browser.ts';
+import { CliError } from '../errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
-import { defaultCredentialChain, resolveCloudflare } from './auth.ts';
+import {
+	type CredentialSource,
+	defaultCredentialChain,
+	resolveCloudflare
+} from './auth.ts';
 import { createEsbuildBundler } from './bundle.ts';
+import type { CloudflareApi } from './cloudflare-api.ts';
 import {
 	deploymentPlanRows,
 	type DeployOptions,
@@ -16,6 +19,34 @@ import {
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import { assembleSecrets, generateWrapSecret } from './secrets.ts';
 import { planWorkerSource } from './source.ts';
+import { createDeployUi, type DeployUi } from './ui.ts';
+
+/** The user backed out of a prompt; the deploy stops without error output. */
+export class DeployCancelledError extends CliError {
+	constructor() {
+		super('Deploy cancelled');
+		this.name = 'DeployCancelledError';
+	}
+}
+
+/** A confirmation is needed but there is no terminal to ask on. */
+export class ConfirmationRequiredError extends CliError {
+	constructor() {
+		super('Not running in a terminal: pass --yes to deploy without prompts.');
+		this.name = 'ConfirmationRequiredError';
+	}
+}
+
+/** An account must be chosen but there is no terminal to ask on. */
+export class AccountOptionRequiredError extends CliError {
+	constructor(accounts: readonly { id: string; name: string }[]) {
+		super(
+			'Several Cloudflare accounts are available; pass --account <id>:\n' +
+				accounts.map((account) => `  ${account.id}  ${account.name}`).join('\n')
+		);
+		this.name = 'AccountOptionRequiredError';
+	}
+}
 
 export interface DeployCliOptions {
 	readonly domain?: string;
@@ -58,93 +89,113 @@ async function resolveArtifact(
 }
 
 /**
+ * Settle on an account when the credential can see several: prompt when a
+ * terminal is available, otherwise instruct the caller to pass `--account`.
+ */
+export async function chooseDeployAccount(
+	ui: DeployUi,
+	accounts: readonly { id: string; name: string }[],
+	interactive: boolean
+): Promise<string> {
+	if (!interactive) {
+		throw new AccountOptionRequiredError(accounts);
+	}
+
+	const chosen = await ui.chooseAccount(accounts);
+
+	if (chosen === undefined) {
+		throw new DeployCancelledError();
+	}
+
+	return chosen;
+}
+
+/**
  * Run `cupboard deploy`. Imported lazily by the command shell so its heavy
  * dependencies stay out of the released single-executable's startup path.
+ *
+ * The order is deliberate: build, authenticate, then show a complete plan
+ * (account included) and ask once. Nothing interactive happens after the
+ * confirmation, other than the deploy itself.
  */
 export async function executeDeploy(
-	cliOptions: DeployCliOptions,
-	reporterMode: ReporterMode | undefined
+	cliOptions: DeployCliOptions
 ): Promise<void> {
-	const reporter = createReporter({ mode: reporterMode });
+	const ui = createDeployUi();
+	const interactive = process.stdin.isTTY && process.stdout.isTTY;
 
-	const { artifact, notice } = await reporter.phase('Building Workers', () =>
-		resolveArtifact(cliOptions.fromTree ?? false)
-	);
+	ui.intro();
+
+	const { artifact, notice } = await ui
+		.reporter()
+		.phase('Building Workers', () =>
+			resolveArtifact(cliOptions.fromTree ?? false)
+		);
 
 	if (notice !== undefined) {
-		reporter.info(notice);
+		ui.info(notice);
 	}
 
 	const bucketName = bucketNameOf(artifact);
 
 	const warnMissing = (missing: readonly string[]): void => {
 		if (missing.length > 0) {
-			reporter.warn(
-				'Missing secrets',
-				`${missing.join(', ')} not set; the cache will not work until they are provided.`
+			ui.warn(
+				`Missing secrets: ${missing.join(', ')}. ` +
+					'The cache will not work until they are provided.'
 			);
 		}
 	};
 
-	const planRowsFor = (
-		accountId: string
-	): ReturnType<typeof deploymentPlanRows> => {
-		const { secrets } = assembleSecrets({
+	if (cliOptions.dryRun === true) {
+		const assembled = assembleSecrets({
 			env: process.env,
-			accountId,
+			accountId: '',
 			bucketName
 		});
 
-		return deploymentPlanRows(artifact, {
-			domain: cliOptions.domain,
-			dryRun: cliOptions.dryRun ?? false,
-			secrets
-		});
-	};
-
-	if (cliOptions.dryRun === true) {
-		reporter.result(planRowsFor(''));
-		warnMissing(
-			assembleSecrets({ env: process.env, accountId: '', bucketName }).missing
+		ui.note(
+			'Deployment plan',
+			deploymentPlanRows(artifact, {
+				domain: cliOptions.domain,
+				dryRun: true,
+				secrets: assembled.secrets
+			})
 		);
+		warnMissing(assembled.missing);
+		ui.outro('Dry run: nothing was changed.');
 		return;
 	}
 
-	const { confirm, select } = await import('@inquirer/prompts');
-
-	if (cliOptions.yes !== true) {
-		reporter.result(planRowsFor(''));
-
-		const proceed = await confirm({
-			message: 'Deploy to Cloudflare with the plan above?',
-			default: false
-		});
-
-		if (!proceed) {
-			reporter.info('Aborted.');
-			return;
-		}
+	if (!interactive && cliOptions.yes !== true) {
+		throw new ConfirmationRequiredError();
 	}
 
-	const { api, accountId, credentialSource } = await resolveCloudflare(
-		cliOptions.account,
-		(accounts) =>
-			select({
-				message: 'Which Cloudflare account?',
-				choices: accounts.map((account) => ({
-					name: `${account.name} (${account.id})`,
-					value: account.id
-				}))
-			}),
-		defaultCredentialChain({
-			openBrowser: (url) => {
-				openBrowser(url, reporter);
-			},
-			wrangler: cliOptions.wrangler ?? true
-		})
-	);
+	let api: CloudflareApi;
+	let accountId: string;
+	let credentialSource: CredentialSource;
 
-	reporter.info(`Using Cloudflare credentials from: ${credentialSource}`);
+	try {
+		({ api, accountId, credentialSource } = await resolveCloudflare(
+			cliOptions.account,
+			(accounts) => chooseDeployAccount(ui, accounts, interactive),
+			defaultCredentialChain({
+				openBrowser: (url) => {
+					ui.openBrowser(url);
+				},
+				wrangler: cliOptions.wrangler ?? true
+			})
+		));
+	} catch (error) {
+		if (error instanceof DeployCancelledError) {
+			ui.cancelled('Deploy aborted.');
+			return;
+		}
+
+		throw error;
+	}
+
+	ui.success(`Authenticated with Cloudflare (${credentialSource})`);
 
 	const assembled = assembleSecrets({
 		env: process.env,
@@ -157,20 +208,22 @@ export async function executeDeploy(
 	// Generate the control key wrapping secret on a first deploy, but never
 	// overwrite an existing one: a different value cannot unwrap stored data.
 	if (missing.includes('CONTROL_KEY_WRAP_SECRET')) {
-		const existing = await api.listScriptSecrets(artifact.config.control.name);
+		const existing = await ui
+			.reporter()
+			.phase('Checking existing secrets', () =>
+				api.listScriptSecrets(artifact.config.control.name)
+			);
 		missing = missing.filter((name) => name !== 'CONTROL_KEY_WRAP_SECRET');
 
 		if (!existing.includes('CONTROL_KEY_WRAP_SECRET')) {
 			const generated = generateWrapSecret();
 			controlSecrets.push({ name: 'CONTROL_KEY_WRAP_SECRET', text: generated });
-			reporter.warn(
-				'Generated CONTROL_KEY_WRAP_SECRET',
-				`save this value now; a different one cannot unwrap existing data:\n${generated}`
-			);
+			ui.note('Generated CONTROL_KEY_WRAP_SECRET: save this value now', [
+				{ label: 'Value', value: generated },
+				{ label: 'Why', value: 'a different one cannot unwrap existing data' }
+			]);
 		}
 	}
-
-	warnMissing(missing);
 
 	const options: DeployOptions = {
 		domain: cliOptions.domain,
@@ -178,5 +231,22 @@ export async function executeDeploy(
 		secrets: { control: controlSecrets, tenant: assembled.secrets.tenant }
 	};
 
-	await runDeploy({ artifact, api, reporter, options });
+	ui.note('Deployment plan', [
+		{ label: 'Account', value: accountId },
+		...deploymentPlanRows(artifact, options)
+	]);
+	warnMissing(missing);
+
+	if (cliOptions.yes !== true && !(await ui.confirmDeploy())) {
+		ui.cancelled('Deploy aborted.');
+		return;
+	}
+
+	await runDeploy({ artifact, api, reporter: ui.reporter(), options });
+
+	ui.outro(
+		cliOptions.domain === undefined
+			? 'Deployed.'
+			: `Deployed: https://${cliOptions.domain}`
+	);
 }
