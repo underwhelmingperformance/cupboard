@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
-import { renameResource, withCrons } from './overrides.ts';
+import { renameResource, withCrons, withOwner } from './overrides.ts';
 
 const config = parseDeploymentConfig(
 	`{
@@ -84,5 +84,36 @@ describe('withCrons', () => {
 			control: updated.control.crons,
 			tenant: updated.tenant.crons
 		}).toStrictEqual({ control: ['*/5 * * * *'], tenant: [] });
+	});
+});
+
+describe('withOwner', () => {
+	const owner = {
+		issuer: 'https://dash.cloudflare.com',
+		subject: 'cf-user-1',
+		audience: 'client-1'
+	};
+
+	it('sets the owner vars on both workers, preserving other vars', () => {
+		const updated = withOwner(config, owner);
+		const expected = {
+			CUPBOARD_OWNER_ISSUER: 'https://dash.cloudflare.com',
+			CUPBOARD_OWNER_SUBJECT: 'cf-user-1',
+			CUPBOARD_OWNER_AUDIENCE: 'client-1'
+		};
+
+		expect({
+			control: updated.control.vars,
+			tenant: updated.tenant.vars
+		}).toStrictEqual({
+			control: { ...config.control.vars, ...expected },
+			tenant: { ...config.tenant.vars, ...expected }
+		});
+	});
+
+	it('writes empty strings for an ownerless deployment', () => {
+		const updated = withOwner(withOwner(config, owner));
+
+		expect(updated.control.vars.CUPBOARD_OWNER_SUBJECT).toBe('');
 	});
 });

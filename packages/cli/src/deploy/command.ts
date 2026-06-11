@@ -15,6 +15,7 @@ import {
 } from './auth.ts';
 import { createEsbuildBundler } from './bundle.ts';
 import { type CloudflareApi, createCloudflareApi } from './cloudflare-api.ts';
+import { cloudflareOauthClientId } from './cloudflare-oauth.ts';
 import {
 	cronProblem,
 	type DeploymentConfig,
@@ -30,7 +31,17 @@ import {
 } from './deploy-run.ts';
 import { checkDomainOption, domainProblem } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
-import { renameResource, withCrons } from './overrides.ts';
+import { renameResource, withCrons, withOwner } from './overrides.ts';
+import {
+	cloudflareDashIssuer,
+	defaultOwnerChoice,
+	deployerOwner,
+	type OwnerBinding,
+	type OwnerChoice,
+	ownerFieldProblem,
+	ownerHint,
+	ownerIssuerProblem
+} from './owner.ts';
 import {
 	accessKeyIdProblem,
 	checkR2Credentials,
@@ -176,6 +187,7 @@ export interface PlanState {
 	readonly accountId: string;
 	readonly domain: string | undefined;
 	readonly config: DeploymentConfig;
+	readonly owner: OwnerChoice;
 }
 
 type ResourceChoice = `${EditableResourceKind}:${string}`;
@@ -184,6 +196,7 @@ type PlanChoice =
 	| 'account'
 	| 'domain'
 	| 'crons'
+	| 'owner'
 	| 'cancel'
 	| ResourceChoice;
 
@@ -225,6 +238,7 @@ export function planMenuEntries(state: PlanState): MenuEntry<PlanChoice>[] {
 			label: 'Cron triggers',
 			hint: state.config.control.crons.join(', ') || '(none)'
 		},
+		{ value: 'owner', label: 'Owner', hint: ownerHint(state.owner) },
 		{ value: 'cancel', label: 'Cancel' }
 	];
 }
@@ -245,8 +259,102 @@ export interface PlanReviewWorld {
 	readonly ui: DeployUi;
 	readonly render: (state: PlanState) => Promise<void>;
 	readonly accounts: () => Promise<readonly { id: string; name: string }[]>;
+	/** The deployer's identity, when the credential carries one. */
+	readonly deployer: OwnerBinding | undefined;
 	/** True when `--yes` accepted the plan up front. */
 	readonly skipReview: boolean;
+}
+
+async function editOwner(
+	state: PlanState,
+	world: PlanReviewWorld
+): Promise<PlanState> {
+	const { ui } = world;
+
+	const choice = await ui.menu('Who should own this deployment?', [
+		...(world.deployer === undefined
+			? []
+			: [
+					{
+						value: 'deployer',
+						label: 'You, the deployer',
+						hint: world.deployer.subject
+					} as const
+				]),
+		{
+			value: 'manual',
+			label: 'Another OIDC identity',
+			hint: 'issuer, subject and audience'
+		},
+		{
+			value: 'none',
+			label: 'Nobody',
+			hint: 'no admin login; pushes only via write rules minted elsewhere'
+		},
+		{ value: 'keep', label: 'Keep the current owner' }
+	]);
+
+	if (choice === undefined || choice === 'keep') {
+		return state;
+	}
+
+	if (choice === 'deployer' && world.deployer !== undefined) {
+		return {
+			...state,
+			owner: { kind: 'owner', owner: world.deployer, origin: 'deployer' }
+		};
+	}
+
+	if (choice === 'none') {
+		return { ...state, owner: { kind: 'none' } };
+	}
+
+	const current = state.owner.kind === 'owner' ? state.owner.owner : undefined;
+
+	const issuer = await ui.editText({
+		message: 'OIDC issuer URL',
+		initial: current?.issuer ?? cloudflareDashIssuer,
+		problem: ownerIssuerProblem
+	});
+
+	if (issuer.kind !== 'set') {
+		return state;
+	}
+
+	const subject = await ui.editText({
+		message: 'Subject (the sub claim of your id_token)',
+		initial: current?.subject,
+		problem: ownerFieldProblem
+	});
+
+	if (subject.kind !== 'set') {
+		return state;
+	}
+
+	const audience = await ui.editText({
+		message: 'Audience (the OAuth client id the id_token is minted for)',
+		initial:
+			current?.audience ??
+			(issuer.value === cloudflareDashIssuer ? cloudflareOauthClientId : ''),
+		problem: ownerFieldProblem
+	});
+
+	if (audience.kind !== 'set') {
+		return state;
+	}
+
+	return {
+		...state,
+		owner: {
+			kind: 'owner',
+			owner: {
+				issuer: issuer.value,
+				subject: subject.value,
+				audience: audience.value
+			},
+			origin: 'manual'
+		}
+	};
 }
 
 async function applyPlanEdit(
@@ -276,6 +384,10 @@ async function applyPlanEdit(
 		}
 
 		return edit.kind === 'clear' ? { ...state, domain: undefined } : state;
+	}
+
+	if (choice === 'owner') {
+		return editOwner(state, world);
 	}
 
 	if (choice === 'crons') {
@@ -717,7 +829,12 @@ async function deployFlow(
 				assembled.missing.filter((name) => r2Names.has(name))
 			),
 			{ label: '', value: '' },
-			...choicePlanRows(artifact.config, initialDomain)
+			...choicePlanRows(
+				artifact.config,
+				initialDomain,
+				// A dry run never authenticates, so no deployer identity exists.
+				defaultOwnerChoice(artifact.config)
+			)
 		]);
 		warnMissing(assembled.missing.filter((name) => !r2Names.has(name)));
 		ui.outro('Dry run: nothing was changed.');
@@ -732,18 +849,20 @@ async function deployFlow(
 	let api: CloudflareApi;
 	let accountId: string;
 	let credentialSource: CredentialSource;
+	let subject: string | undefined;
 
 	try {
-		({ client, api, accountId, credentialSource } = await resolveCloudflare(
-			cliOptions.account,
-			(accounts) => chooseDeployAccount(ui, accounts, interactive),
-			defaultCredentialChain({
-				openBrowser: (url) => {
-					ui.openBrowser(url);
-				},
-				wrangler: cliOptions.wrangler ?? true
-			})
-		));
+		({ client, api, accountId, credentialSource, subject } =
+			await resolveCloudflare(
+				cliOptions.account,
+				(accounts) => chooseDeployAccount(ui, accounts, interactive),
+				defaultCredentialChain({
+					openBrowser: (url) => {
+						ui.openBrowser(url);
+					},
+					wrangler: cliOptions.wrangler ?? true
+				})
+			));
 	} catch (error) {
 		if (error instanceof DeployCancelledError) {
 			ui.cancelled('Deploy aborted.');
@@ -857,8 +976,23 @@ async function deployFlow(
 		};
 	};
 
+	const deployer = subject === undefined ? undefined : deployerOwner(subject);
+	const initialOwner = defaultOwnerChoice(artifact.config, subject);
+
+	if (cliOptions.yes === true && initialOwner.kind === 'none') {
+		ui.warn(
+			'No owner is bound: `cupboard login` and the admin commands will not ' +
+				'work against this deployment until one is configured.'
+		);
+	}
+
 	const agreed = await reviewPlan(
-		{ accountId, domain: initialDomain, config: artifact.config },
+		{
+			accountId,
+			domain: initialDomain,
+			config: artifact.config,
+			owner: initialOwner
+		},
 		{
 			ui,
 			render: async (state) => {
@@ -872,11 +1006,12 @@ async function deployFlow(
 					),
 					{ label: '', value: '' },
 					{ label: 'Account', value: state.accountId },
-					...choicePlanRows(state.config, state.domain)
+					...choicePlanRows(state.config, state.domain, state.owner)
 				]);
 				warnMissing(missing);
 			},
 			accounts: () => apiFor(accountId).listAccounts(),
+			deployer,
 			skipReview: cliOptions.yes === true
 		}
 	);
@@ -935,8 +1070,15 @@ async function deployFlow(
 
 	const { options } = await planFor(agreed);
 
+	// The owner is applied exactly once, on the agreed config: applying it in
+	// the render loop would let repeated edits compound state and config.
+	const deployedConfig = withOwner(
+		agreed.config,
+		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
+	);
+
 	await runDeploy({
-		artifact: { ...artifact, config: agreed.config },
+		artifact: { ...artifact, config: deployedConfig },
 		api: apiFor(agreed.accountId),
 		reporter: ui.reporter(),
 		options
