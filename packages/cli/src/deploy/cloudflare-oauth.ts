@@ -45,16 +45,25 @@ const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
 const callbackPorts: readonly number[] = [8377, 8378, 8379];
 const callbackPath = '/oauth/callback';
 
+/** The loopback redirect exactly as registered on cupboard's OAuth client. */
+export const cloudflareLoopback = {
+	ports: callbackPorts,
+	host: 'localhost',
+	path: callbackPath
+} as const;
+
 /**
  * The scopes every login requests: what the deploy pipeline needs, as
  * registered on the OAuth client (scope ids correspond to Cloudflare API token
  * permission names), plus `offline_access` so the grant carries a refresh
- * token and repeat deploys do not reopen the browser.
+ * token and repeat deploys do not reopen the browser, and `openid` so the
+ * grant carries the deployer's identity in an id_token.
  */
 export const deployScopes: readonly string[] = [
 	'account-settings.write',
 	'd1.write',
 	'offline_access',
+	'openid',
 	'queues.write',
 	'workers-kv-storage.write',
 	'workers-r2.write',
@@ -71,6 +80,8 @@ export interface CloudflareGrant {
 	readonly refreshToken: string | undefined;
 	/** Epoch milliseconds after which `accessToken` must not be used. */
 	readonly expiresAt: number;
+	/** The Cloudflare user the grant belongs to (the id_token `sub`). */
+	readonly subject: string | undefined;
 }
 
 export interface CloudflareLoginOptions {
@@ -84,8 +95,34 @@ export interface CloudflareLoginOptions {
 const tokenResponseSchema = z.object({
 	access_token: z.string().min(1),
 	refresh_token: z.string().min(1).optional(),
-	expires_in: z.number().int().positive().optional()
+	expires_in: z.number().int().positive().optional(),
+	id_token: z.string().min(1).optional()
 });
+
+const idTokenClaimsSchema = z.object({ sub: z.string().min(1) });
+
+// The `sub` of an id_token, or undefined when the token does not parse. The
+// claim is read unverified: it only seeds a default the user reviews in the
+// plan, and the server verifies the real login token against the issuer.
+function jwtSubject(idToken: string): string | undefined {
+	const segment = idToken.split('.').at(1);
+
+	if (segment === undefined) {
+		return undefined;
+	}
+
+	let payload: unknown;
+
+	try {
+		payload = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
+	} catch {
+		return undefined;
+	}
+
+	const parsed = idTokenClaimsSchema.safeParse(payload);
+
+	return parsed.success ? parsed.data.sub : undefined;
+}
 
 /**
  * Logs in to Cloudflare as cupboard's OAuth client: PKCE with a loopback
@@ -124,25 +161,30 @@ export async function cloudflareLogin(
 }
 
 /**
- * Renews a grant from its refresh token. Returns undefined when Cloudflare
- * declines (a revoked or expired grant) or the endpoint is unreachable, so the
- * caller can fall back to an interactive login.
+ * Renews a grant from its refresh token, carrying the subject across the
+ * renewal. Returns undefined when the grant has no refresh token, Cloudflare
+ * declines (a revoked or expired grant), or the endpoint is unreachable, so
+ * the caller can fall back to an interactive login.
  */
 export async function refreshCloudflareGrant(
-	refreshToken: string,
+	previous: CloudflareGrant,
 	fetcher: typeof fetch = fetch,
 	now: () => number = Date.now
 ): Promise<CloudflareGrant | undefined> {
+	if (previous.refreshToken === undefined) {
+		return undefined;
+	}
+
 	try {
 		return await exchangeForGrant(
 			fetcher,
 			{
 				grant_type: 'refresh_token',
-				refresh_token: refreshToken,
+				refresh_token: previous.refreshToken,
 				client_id: cloudflareOauthClientId
 			},
 			now,
-			refreshToken
+			previous
 		);
 	} catch {
 		return undefined;
@@ -153,7 +195,7 @@ async function exchangeForGrant(
 	fetcher: typeof fetch,
 	form: Readonly<Record<string, string>>,
 	now: () => number,
-	previousRefreshToken?: string
+	previous?: Pick<CloudflareGrant, 'refreshToken' | 'subject'>
 ): Promise<CloudflareGrant> {
 	const response = await fetcher(tokenEndpoint, postForm(form));
 
@@ -176,12 +218,18 @@ async function exchangeForGrant(
 	}
 
 	const expiresIn = parsed.data.expires_in ?? defaultAccessTokenLifetimeSeconds;
+	const subject =
+		parsed.data.id_token === undefined
+			? undefined
+			: jwtSubject(parsed.data.id_token);
 
 	return {
 		accessToken: parsed.data.access_token,
-		// The server may rotate the refresh token on use; keep the previous one
-		// only when no replacement is issued.
-		refreshToken: parsed.data.refresh_token ?? previousRefreshToken,
-		expiresAt: now() + expiresIn * 1000
+		// The server may rotate the refresh token on use, and a refresh response
+		// may omit the id_token; keep the previous values when nothing replaces
+		// them.
+		refreshToken: parsed.data.refresh_token ?? previous?.refreshToken,
+		expiresAt: now() + expiresIn * 1000,
+		subject: subject ?? previous?.subject
 	};
 }
