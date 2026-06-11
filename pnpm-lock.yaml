@@ -181,7 +181,7 @@ importers:
         version: 0.45.2(@cloudflare/workers-types@4.20260605.1)
       hono:
         specifier: ^4.12.23
-        version: 4.12.23
+        version: 4.12.24
       http-status-codes:
         specifier: ^2.3.0
         version: 2.3.0
@@ -2176,8 +2176,8 @@ packages:
     resolution: {integrity: sha512-sepffkT8stwnIYbsMBpoCHJuJM5l98FUF2AnE07hfvE0m/qp3R586hw4jF4uadbhvg1ooIdzuu7CsfD2jzCaNA==}
     engines: {node: '>=18'}
 
-  hono@4.12.23:
-    resolution: {integrity: sha512-eIaZ9qDgu7XV0pxOCrg7/WhnQ6Ivm22UcxhXx/A3dcbqbbYgBEkc6e/J/s7j2tS96zoB0S9VBdLwQNCWwUo4LA==}
+  hono@4.12.24:
+    resolution: {integrity: sha512-I36D1s+HgQc55KbhEr4iybfxv/9o1zdpw+XEM6dJa91LqQD0HCoSGdxpRJCZE+aavs87j4V3Ls2OJzq8C/U4iw==}
     engines: {node: '>=16.9.0'}
 
   http-status-codes@2.3.0:
@@ -4575,7 +4575,7 @@ snapshots:
 
   globals@17.6.0: {}
 
-  hono@4.12.23: {}
+  hono@4.12.24: {}
 
   http-status-codes@2.3.0: {}
 
