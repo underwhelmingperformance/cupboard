@@ -88,6 +88,8 @@ export type OnboardOutcome =
 			readonly kind: 'claim-refused';
 			readonly url: string;
 			readonly status: number;
+			/** The failing call and the server's own words. */
+			readonly detail: string;
 	  }
 	| { readonly kind: 'claim-cancelled'; readonly url: string }
 	| { readonly kind: 'cancelled'; readonly url: string }
@@ -228,7 +230,12 @@ export async function onboardDeployment(
 	);
 
 	if (claim.kind === 'refused') {
-		return { kind: 'claim-refused', url, status: claim.status };
+		return {
+			kind: 'claim-refused',
+			url,
+			status: claim.status,
+			detail: claim.detail
+		};
 	}
 
 	const tenant = await createFirstTenant(
@@ -293,7 +300,11 @@ async function resolveDeploymentUrl(
 
 type ClaimResult =
 	| { readonly kind: 'claimed'; readonly token: string }
-	| { readonly kind: 'refused'; readonly status: number };
+	| {
+			readonly kind: 'refused';
+			readonly status: number;
+			readonly detail: string;
+	  };
 
 /**
  * Settles the claim secret the signup must present: the value this deploy
@@ -380,7 +391,11 @@ async function claimAdmin(
 		});
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
-			return { kind: 'refused', status: error.status };
+			return {
+				kind: 'refused',
+				status: error.status,
+				detail: `${error.method} ${error.path} answered ${httpDetail(error)}`
+			};
 		}
 
 		throw error;
@@ -489,7 +504,7 @@ async function attemptProbe<T>(
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
 			if (retryableStatus(error.status)) {
-				return { kind: 'retry', detail: `HTTP ${String(error.status)}` };
+				return { kind: 'retry', detail: httpDetail(error) };
 			}
 
 			throw error;
@@ -506,4 +521,15 @@ async function attemptProbe<T>(
 
 function retryableStatus(status: number): boolean {
 	return status === 404 || status === 408 || status === 429 || status >= 500;
+}
+
+// The status with the server's own words, compacted to one short line so it
+// fits a spinner fact or a closing warning.
+function httpDetail(error: CupboardHttpError): string {
+	const body = error.body.replaceAll(/\s+/g, ' ').trim();
+	const compact = body.length <= 120 ? body : `${body.slice(0, 120)}…`;
+
+	return compact === ''
+		? `HTTP ${String(error.status)}`
+		: `HTTP ${String(error.status)}: ${compact}`;
 }

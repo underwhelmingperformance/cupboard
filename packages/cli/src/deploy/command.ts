@@ -1260,10 +1260,9 @@ async function deployFlow(
 
 		case 'claim-refused': {
 			ui.warn(
-				'The server did not accept you as the admin ' +
-					`(HTTP ${String(outcome.status)}). The deployment may already ` +
-					'belong to a different identity, or its claim secret did ' +
-					'not match.'
+				`The server did not accept you as the admin: ${outcome.detail}. ` +
+					'The deployment may already belong to a different identity, ' +
+					'or its claim secret did not match.'
 			);
 			ui.outro('Deployed.');
 			return;
