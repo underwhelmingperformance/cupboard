@@ -267,13 +267,38 @@ export function createDeployUi(): DeployUi {
 /**
  * Adapts the deploy pipeline's {@link Reporter} contract onto clack: each
  * phase is a spinner whose text accumulates the phase's facts, warnings become
- * clack warnings, and the closing result rows become a note.
+ * clack warnings, and the closing result rows become a note. A warning or
+ * info raised while a spinner is animating is held until the spinner stops,
+ * since interleaving the two corrupts the spinner's redraw.
  */
 function clackReporter(): Reporter {
+	let spinning = false;
+	const held: { kind: 'warn' | 'info'; message: string }[] = [];
+
+	const emit = (kind: 'warn' | 'info', message: string): void => {
+		if (spinning) {
+			held.push({ kind, message });
+			return;
+		}
+
+		if (kind === 'warn') {
+			log.warn(message);
+		} else {
+			log.info(message);
+		}
+	};
+
+	const flush = (): void => {
+		for (const entry of held.splice(0)) {
+			emit(entry.kind, entry.message);
+		}
+	};
+
 	return {
 		async phase(label, body) {
 			const indicator = spinner();
 			indicator.start(label);
+			spinning = true;
 
 			// Keyed by fact label, so a repeated fact (an attempt counter, say)
 			// updates its entry rather than growing the spinner text unboundedly.
@@ -302,6 +327,9 @@ function clackReporter(): Reporter {
 				indicator.error(`${label} ${pc.red('failed')}`);
 
 				throw error;
+			} finally {
+				spinning = false;
+				flush();
 			}
 		},
 
@@ -310,11 +338,11 @@ function clackReporter(): Reporter {
 		},
 
 		warn(label, value) {
-			log.warn(value === undefined ? label : `${label}: ${value}`);
+			emit('warn', value === undefined ? label : `${label}: ${value}`);
 		},
 
 		info(message) {
-			log.info(message);
+			emit('info', message);
 		}
 	};
 }

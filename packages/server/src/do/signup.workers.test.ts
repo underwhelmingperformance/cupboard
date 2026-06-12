@@ -89,6 +89,26 @@ describe('signup gate', () => {
 			allowed: true
 		},
 		{
+			// A deployment that never ran `wrangler secret put` has no secret
+			// binding at all: the env reads as undefined, not the empty string.
+			name: 'a pinned subject with the secret binding absent',
+			secret: undefined,
+			pinned: 'owner',
+			localDev: '',
+			claimSecret: undefined,
+			subject: 'owner',
+			allowed: true
+		},
+		{
+			name: 'every gate binding absent in hosted mode',
+			secret: undefined,
+			pinned: undefined,
+			localDev: undefined,
+			claimSecret: undefined,
+			subject: 'owner',
+			allowed: false
+		},
+		{
 			name: 'a wrong pinned subject',
 			secret: '',
 			pinned: 'owner',
