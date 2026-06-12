@@ -1,3 +1,4 @@
+import { NarInfo } from '@cupboard/nix/narinfo';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -11,19 +12,21 @@ import {
 	prepareUpload,
 	provisionFixtureTenant,
 	putNarBytes,
+	readStoredNarInfo,
 	resetTestServer,
 	uploadMetadata,
 	uploadStatus,
 	verifiableNar
 } from '../test-support.ts';
 
-// `push --wait` polls a deferred upload's status by its uploadId. The status is
-// derived from the durable per-upload verdict, so it reports `pending` while the
-// background pass works and then the terminal `servable`, `mismatch` or `over-quota`.
+// A deferred upload's status is derived from the durable per-upload verdict: it
+// reports `pending` while the background pass works and retains the terminal
+// `mismatch` and `over-quota` verdicts. A settled upload leaves no residue, so
+// its status reads `absent` and servability is observed at the narinfo itself.
 
 // Stages a deferred upload (negotiate, prepare, upload, mark pending) and returns
-// its uploadId, the state a too-large-to-verify-inline upload reaches before the
-// background pass runs.
+// its uploadId, the state every fresh upload reaches before the background pass
+// runs.
 async function stageDeferred(nar: {
 	readonly narHash: string;
 	readonly narSize: number;
@@ -59,17 +62,23 @@ describe('deferred upload status', () => {
 		await clearBlobStorage();
 	});
 
-	it('reports pending then servable across the background pass', async () => {
+	it('reports pending, then clears the settled upload once the path serves', async () => {
 		const nar = await verifiableNar('status-servable');
 		const uploadId = await stageDeferred(nar);
 
 		const whilePending = await uploadStatus(uploadId);
 		await currentServer().runVerification();
 		const afterVerify = await uploadStatus(uploadId);
+		const stored = await readStoredNarInfo('a'.repeat(32));
 
-		expect({ whilePending, afterVerify }).toStrictEqual({
+		expect({
+			whilePending,
+			afterVerify,
+			servedNarHash: NarInfo.parse(stored.body).narHash
+		}).toStrictEqual({
 			whilePending: 'pending',
-			afterVerify: 'servable'
+			afterVerify: 'absent',
+			servedNarHash: nar.narHash
 		});
 	});
 

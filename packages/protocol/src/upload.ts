@@ -117,10 +117,10 @@ export const commitResponseSchema = z.strictObject({
 });
 export type ParsedCommitResponse = z.output<typeof commitResponseSchema>;
 
-// The status of a deferred upload, polled by `push --wait` keyed on the uploadId it
-// already holds. `servable` once the background pass committed it, `pending` while it
-// still verifies, the terminal `mismatch`/`over-quota` on failure, and `absent` once
-// the upload is gone (its observation window passed, or it was never deferred).
+// The status of a deferred upload. `servable` once verification committed it,
+// `pending` while it still verifies, the terminal `mismatch`/`over-quota` on
+// failure, and `absent` once the upload is gone (its observation window
+// passed, or another upload of the same path settled it).
 export const uploadStatusSchema = z.enum([
 	'servable',
 	'pending',
@@ -135,6 +135,35 @@ export type ParsedUploadStatusResponse = z.output<
 	typeof uploadStatusResponseSchema
 >;
 export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
+
+// The commit endpoint is a WebSocket: the upgrade request carries the write
+// token, and every frame is server to client. The first frame settles the
+// path at commit time (`result`) or reports it stored pending verification
+// (`deferred`); a deferred upload's socket stays open until the verification
+// pass answers with the terminal `verdict`. `error` mirrors what the HTTP
+// error response would have said, then the socket closes.
+export const commitSocketFrameSchema = z.discriminatedUnion('event', [
+	z.strictObject({
+		event: z.literal('result'),
+		response: commitResponseSchema
+	}),
+	z.strictObject({
+		event: z.literal('deferred'),
+		storePathHash: storePathHashSchema,
+		narHash: nixSha256HashSchema
+	}),
+	z.strictObject({
+		event: z.literal('verdict'),
+		status: uploadStatusSchema
+	}),
+	z.strictObject({
+		event: z.literal('error'),
+		status: z.number().int(),
+		message: z.string()
+	})
+]);
+export type ParsedCommitSocketFrame = z.output<typeof commitSocketFrameSchema>;
+export type CommitSocketFrame = z.input<typeof commitSocketFrameSchema>;
 
 export const statsResponseSchema = z.strictObject({
 	storePaths: countSchema,

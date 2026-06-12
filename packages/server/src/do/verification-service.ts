@@ -1,5 +1,8 @@
 import { type VerifyReport } from '@cupboard/protocol/reports';
-import { type UploadPathMetadataFields } from '@cupboard/protocol/upload';
+import {
+	type ParsedUploadStatusResponse,
+	type UploadPathMetadataFields
+} from '@cupboard/protocol/upload';
 import { and, asc, eq, gt, or } from 'drizzle-orm';
 import { z } from 'zod';
 
@@ -16,6 +19,7 @@ import { parseRequestValue } from '../http/parse.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
+import { sendCommitFrame } from './commit-socket.ts';
 import { parseStoredUploadMetadata, type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -199,6 +203,19 @@ export class VerificationService {
 		}
 	}
 
+	// Settles every commit socket parked for an upload with its terminal
+	// verdict. Hibernation tags key the lookup, so waiters survive the object
+	// being evicted between the deferral and this pass.
+	private notifyWaiters(
+		uploadId: string,
+		status: ParsedUploadStatusResponse['status']
+	): void {
+		for (const socket of this.context.ctx.getWebSockets(uploadId)) {
+			sendCommitFrame(socket, { event: 'verdict', status });
+			socket.close(1000, status);
+		}
+	}
+
 	private async verifyAndCommitPending(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<void> {
@@ -222,6 +239,7 @@ export class VerificationService {
 				pending.r2Key,
 				metadata.narHash
 			);
+			this.notifyWaiters(pending.id, 'absent');
 			return;
 		}
 
@@ -298,21 +316,10 @@ export class VerificationService {
 		}
 
 		if (outcome === 'materialised') {
-			// A deferred upload (`pending`) is now servable: record a terminal
-			// `servable` verdict and keep the row for the status-observation window so
-			// `push --wait` sees it become servable rather than vanish. A re-driven
-			// crashed inline commit (`committing`) was never deferred and no client polls
-			// it, so it is cleared as the inline commit would have.
-			if (pending.verdict === 'pending') {
-				await this.uploadState.markUploadTerminal(
-					pending.id,
-					pending.r2Key,
-					metadata.narHash,
-					'servable'
-				);
-				return;
-			}
-
+			// The parked sockets carry the verdict, and the narinfo itself is the
+			// durable evidence of success, so a settled upload leaves no residue:
+			// the row clears and the staging bytes go.
+			this.notifyWaiters(pending.id, 'servable');
 			this.uploadState.clearPendingUpload(pending.id);
 			await this.context.env.BLOBS.delete(pending.r2Key);
 			return;
@@ -323,6 +330,7 @@ export class VerificationService {
 		// left for the reaper to collect.
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.context.env.BLOBS.delete(pending.r2Key);
+		this.notifyWaiters(pending.id, 'absent');
 	}
 
 	// Reclaims the reserved row a deferred upload never made servable and records its
@@ -349,5 +357,6 @@ export class VerificationService {
 			metadata.narHash,
 			verdict
 		);
+		this.notifyWaiters(pending.id, verdict);
 	}
 }

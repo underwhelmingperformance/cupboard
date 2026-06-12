@@ -16,6 +16,7 @@ import {
 	authorisedWorkerFetch,
 	casObjectRows,
 	clearBlobStorage,
+	commitUploadViaWorker,
 	currentOrigin,
 	fixtureWorkerServer,
 	handlerFetch,
@@ -609,13 +610,10 @@ async function pushPathThroughTenant(
 	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 
-	const committed = await tenantFetch(
-		tenant,
-		`/uploads/${decision.uploadId}/commit`,
-		token,
-		{ method: 'POST' }
-	);
-	expect(committed.status).toBe(StatusCodes.OK);
+	const committed = await commitUploadViaWorker(token, decision.uploadId, {
+		tenant
+	});
+	expect(committed.status).toBe('committed');
 }
 
 function tenantFetch(
