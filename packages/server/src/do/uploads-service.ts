@@ -1,10 +1,10 @@
 import {
+	type ParsedUploadNegotiateRequest,
+	type ParsedUploadPrepareRequest,
 	type UploadDecision,
-	uploadNegotiateRequestSchema,
 	type UploadNegotiateResponse,
 	type UploadPathMetadataFields,
 	type UploadPathNegotiationFields,
-	uploadPrepareRequestSchema,
 	type UploadPrepareResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
@@ -18,9 +18,7 @@ import {
 	UploadNotFoundError
 } from '../errors.ts';
 import { narObjectKey, stagingObjectKey } from '../http/http.ts';
-import { parseRequestBody } from '../http/parse.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import {
 	commitMetadataFromPathAndBlob,
 	parseStoredUploadPathMetadata,
@@ -62,37 +60,30 @@ function uploadStatusOf(
 export class UploadsService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly uploadState: UploadStateService,
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly deletionQueue: DeletionQueueService
 	) {}
 
-	// The status of a deferred upload, polled by `push --wait` on the uploadId it
-	// holds. Derived from the durable per-upload verdict: a row that is gone is
+	// The status of a deferred upload, polled on the uploadId the client holds.
+	// Derived from the durable per-upload verdict: a row that is gone is
 	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
 	// while it still verifies (a null or in-flight verdict).
-	async handleUploadStatus(
-		request: Request,
-		uploadId: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
-
+	uploadStatus(uploadId: string): UploadStatusResponse {
 		const pending = this.context.db
 			.select({ verdict: schema.pendingUploads.verdict })
 			.from(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
 
-		return Response.json({
-			status: uploadStatusOf(pending)
-		} satisfies UploadStatusResponse);
+		return { status: uploadStatusOf(pending) };
 	}
 
-	async handleNegotiate(request: Request, cache: string): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
-
-		const body = await parseRequestBody(uploadNegotiateRequestSchema, request);
+	async negotiate(
+		cache: string,
+		body: ParsedUploadNegotiateRequest,
+		origin: string
+	): Promise<UploadNegotiateResponse> {
 		const uploads: UploadDecision[] = [];
 
 		for (const metadata of body.paths) {
@@ -130,10 +121,7 @@ export class UploadsService {
 				}
 
 				if (committed) {
-					await this.deletionQueue.removeStaleNarInfo(
-						existingNarInfo,
-						new URL(request.url).origin
-					);
+					await this.deletionQueue.removeStaleNarInfo(existingNarInfo, origin);
 				}
 			}
 
@@ -200,16 +188,14 @@ export class UploadsService {
 			});
 		}
 
-		return Response.json({ uploads } satisfies UploadNegotiateResponse);
+		return { uploads };
 	}
 
-	async handlePrepareUpload(
-		request: Request,
+	async prepareUpload(
 		cache: string,
-		uploadId: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
-
+		uploadId: string,
+		blobMetadata: ParsedUploadPrepareRequest
+	): Promise<UploadPrepareResponse> {
 		const pending = this.context.db
 			.select()
 			.from(schema.pendingUploads)
@@ -246,10 +232,6 @@ export class UploadsService {
 			uploadId,
 			pending.metadataJson
 		);
-		const blobMetadata = await parseRequestBody(
-			uploadPrepareRequestSchema,
-			request
-		);
 		const metadata = commitMetadataFromPathAndBlob(pathMetadata, blobMetadata);
 		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
@@ -263,7 +245,7 @@ export class UploadsService {
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 
-		return Response.json({
+		return {
 			uploadUrl: await this.uploadState.presignedPutUrl(
 				pending.r2Key,
 				metadata.fileHash,
@@ -271,6 +253,6 @@ export class UploadsService {
 			),
 			uploadHeaders: uploadHeadersFor(metadata),
 			expiresAt: expiresAt.toISOString()
-		} satisfies UploadPrepareResponse);
+		};
 	}
 }

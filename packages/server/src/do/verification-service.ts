@@ -9,15 +9,8 @@ import { z } from 'zod';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
-import {
-	internalOrigin,
-	narInfoObjectKey,
-	narObjectKey,
-	verificationBatchSize
-} from '../http/http.ts';
-import { parseRequestValue } from '../http/parse.ts';
+import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitFrame } from './commit-socket.ts';
 import { parseStoredUploadMetadata, type ServerContext } from './context.ts';
@@ -28,39 +21,26 @@ import { type UploadStateService } from './upload-state-service.ts';
 // An optional `?limit` on `POST /verify`: a positive integer, clamped to
 // `verificationBatchSize` so a manual run cannot scan an unbounded batch in one
 // critical section.
-const verificationLimitSchema = z.coerce.number().int().min(1);
+export const verificationLimitSchema = z.coerce.number().int().min(1);
 
 export class VerificationService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly commitPipeline: CommitPipelineService,
 		private readonly deletionQueue: DeletionQueueService,
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly uploadState: UploadStateService
 	) {}
 
-	async handleVerify(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		// Interactive verify purges this colo's edge cache via the caller's public
-		// origin; the cron sweep arrives on the internal origin, cannot know the
-		// public URL, and relies on the narinfo TTL and the orphan-blob grace
-		// window instead, exactly as GC does.
-		const url = new URL(request.url);
-		const purgeOrigin = url.origin === internalOrigin ? undefined : url.origin;
-		const requested = url.searchParams.get('limit');
-		const limit =
-			requested === null
-				? verificationBatchSize
-				: Math.min(
-						parseRequestValue(verificationLimitSchema, requested),
-						verificationBatchSize
-					);
-
+	// One interactive verify pass: settle deferred uploads first, then run a
+	// bounded reconciling batch and report it.
+	async verify(
+		purgeOrigin: string | undefined,
+		limit: number
+	): Promise<VerifyReport> {
 		await this.verifyPendingUploads(limit);
 
-		return Response.json(await this.verifyBatch(purgeOrigin, limit));
+		return this.verifyBatch(purgeOrigin, limit);
 	}
 
 	verifyBatch(

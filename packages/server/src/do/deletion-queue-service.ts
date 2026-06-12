@@ -1,44 +1,23 @@
-import { storePathHashSchema } from '@cupboard/nix/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
 import { and, eq, exists, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoCachePath, narInfoObjectKey } from '../http/http.ts';
-import { parseRequestValue } from '../http/parse.ts';
 
 import {
 	type AttestationCasService,
 	type AttestationReference
 } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 
 export class DeletionQueueService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly attestationCas: AttestationCasService,
 		private readonly attestations: AttestationsService
 	) {}
-
-	async handleDeletePath(
-		request: Request,
-		cache: string,
-		hash: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		const storePathHash = parseRequestValue(storePathHashSchema, hash);
-		const result = await this.deleteStorePath(
-			cache,
-			storePathHash,
-			new URL(request.url).origin
-		);
-
-		return Response.json(result satisfies DeletePathResponse);
-	}
 
 	enqueueNarInfoDeletion(
 		handle: SchemaWriter,
