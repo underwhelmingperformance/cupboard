@@ -1,5 +1,9 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	signingKeyIdSchema
+} from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import { cachePutBodySchema } from '@cupboard/protocol/caches';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
@@ -106,7 +110,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.attestationCas,
 			this.attestations
 		);
-		this.signingKeys = new SigningKeysService(this.context, this.authKeys);
+		this.signingKeys = new SigningKeysService(this.context);
 		this.stats = new StatsService(this.context, this.authKeys);
 		this.oidcTrust = new OidcTrustService(
 			this.context,
@@ -416,43 +420,57 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.post('/token', (context) =>
 			this.tokenExchange.handleToken(context.req.raw)
 		);
-		this.app.on(['GET', 'HEAD'], '/.well-known/jwks.json', (context) =>
-			this.authKeys.handleJwks(context.req.raw)
+		// Both key documents are served uncached so a rotation is visible across
+		// colos at once.
+		this.app.on(['GET', 'HEAD'], '/.well-known/jwks.json', async (context) =>
+			context.json({ keys: await this.authKeys.authPublicJwks() }, 200, {
+				'cache-control': 'no-cache'
+			})
 		);
 		this.app.on(
 			['GET', 'HEAD'],
 			'/.well-known/oauth-authorization-server',
 			(context) =>
-				this.authKeys.handleAuthorizationServerMetadata(context.req.raw)
+				context.json(
+					this.authKeys.authorizationServerMetadata(
+						new URL(context.req.url).origin
+					)
+				)
 		);
-		this.app.get('/keys', (context) =>
-			this.signingKeys.handleKeyList(context.req.raw)
+		this.app.get('/keys', this.scoped('admin'), async (context) =>
+			context.json(await this.signingKeys.keyList())
 		);
-		this.app.post('/keys/rotate', (context) =>
-			this.signingKeys.handleKeyRotate(context.req.raw)
+		this.app.post('/keys/rotate', this.scoped('admin'), async (context) =>
+			context.json(await this.signingKeys.rotateKey())
 		);
-		this.app.post('/keys/retire/:id', (context) =>
-			this.signingKeys.handleKeyRetire(context.req.raw, context.req.param('id'))
+		this.app.post('/keys/retire/:id', this.scoped('admin'), async (context) =>
+			context.json(
+				await this.signingKeys.retireKey(
+					parseRequestValue(signingKeyIdSchema, context.req.param('id'))
+				)
+			)
 		);
 
 		// The auth-token signing key set, rotated independently of the narinfo
 		// keys above; tokens carry the active key's `kid` and verify against any
 		// key still in the set.
-		this.app.get('/keys/auth', (context) =>
-			this.authKeys.handleAuthKeyList(context.req.raw)
+		this.app.get('/keys/auth', this.scoped('admin'), async (context) =>
+			context.json(await this.authKeys.authKeyList())
 		);
-		this.app.post('/keys/auth/rotate', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.authKeys.handleAuthKeyRotate(context.req.raw)
-			)
+		this.app.post(
+			'/keys/auth/rotate',
+			this.scoped('admin'),
+			this.maintenance(),
+			async (context) => context.json(await this.authKeys.rotateAuthKey())
 		);
-		this.app.post('/keys/auth/retire/:kid', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.authKeys.handleAuthKeyRetire(
-					context.req.raw,
-					context.req.param('kid')
+		this.app.post(
+			'/keys/auth/retire/:kid',
+			this.scoped('admin'),
+			this.maintenance(),
+			async (context) =>
+				context.json(
+					await this.authKeys.retireAuthKey(context.req.param('kid'))
 				)
-			)
 		);
 
 		// The cache registry is deployment-wide, so it lives at `/caches` rather

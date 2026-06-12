@@ -35,6 +35,16 @@ import {
 	type TenantIdentityService
 } from './tenant-identity-service.ts';
 
+/** The RFC 8414 document a tenant advertises for its token endpoint. */
+export interface AuthorizationServerMetadata {
+	issuer: string;
+	token_endpoint: string;
+	jwks_uri: string;
+	grant_types_supported: string[];
+	scopes_supported: string[];
+	token_endpoint_auth_methods_supported: string[];
+}
+
 export class AuthKeysService {
 	private authKeysPromise: Promise<readonly AuthKey[]> | undefined;
 
@@ -43,59 +53,26 @@ export class AuthKeysService {
 		private readonly tenantIdentity: TenantIdentityService
 	) {}
 
-	async handleJwks(_request: Request): Promise<Response> {
-		const keys = await this.authPublicJwks();
-
-		// Served uncached so a key rotation is visible across colos at once.
-		return Response.json(
-			{ keys },
-			{ headers: { 'cache-control': 'no-cache' } }
-		);
-	}
-
 	// RFC 8414 authorization-server metadata. Served from the Durable Object (not the
 	// edge) so an unconfigured tenant 503s through the fetch guard rather than
 	// advertising an identity it has not been assigned. The endpoints are built from
 	// the request's own path-based URL, which provisioning stamps as the issuer, so
 	// the advertised issuer equals the `iss` of a token this tenant mints.
-	handleAuthorizationServerMetadata(request: Request): Promise<Response> {
-		const { origin } = new URL(request.url);
+	authorizationServerMetadata(origin: string): AuthorizationServerMetadata {
 		const base = `${origin}/t/${this.context.requireTenant()}`;
 
-		return Promise.resolve(
-			Response.json({
-				issuer: base,
-				token_endpoint: `${base}/token`,
-				jwks_uri: `${base}/.well-known/jwks.json`,
-				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
-				scopes_supported: ['write', 'admin'],
-				token_endpoint_auth_methods_supported: ['none']
-			})
-		);
+		return {
+			issuer: base,
+			token_endpoint: `${base}/token`,
+			jwks_uri: `${base}/.well-known/jwks.json`,
+			grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
+			scopes_supported: ['write', 'admin'],
+			token_endpoint_auth_methods_supported: ['none']
+		};
 	}
 
-	async handleAuthKeyList(request: Request): Promise<Response> {
-		await this.requireScope(request, 'admin');
-
-		return Response.json({
-			keys: await this.authKeySummaries()
-		} satisfies AuthKeyListResponse);
-	}
-
-	async handleAuthKeyRotate(request: Request): Promise<Response> {
-		await this.requireScope(request, 'admin');
-
-		return Response.json(
-			(await this.rotateAuthKey()) satisfies AuthKeyRotateResponse
-		);
-	}
-
-	async handleAuthKeyRetire(request: Request, kid: string): Promise<Response> {
-		await this.requireScope(request, 'admin');
-
-		return Response.json(
-			(await this.retireAuthKey(kid)) satisfies AuthKeyRetireResponse
-		);
+	async authKeyList(): Promise<AuthKeyListResponse> {
+		return { keys: await this.authKeySummaries() };
 	}
 
 	authIssuer(): string {
@@ -236,7 +213,7 @@ export class AuthKeysService {
 			}));
 	}
 
-	private rotateAuthKey(): Promise<AuthKeyRotateResponse> {
+	rotateAuthKey(): Promise<AuthKeyRotateResponse> {
 		// One critical section: the insert and cache reset must not interleave
 		// with a concurrent rotation or a verification reading the key set.
 		return this.context.ctx.blockConcurrencyWhile(async () => {
@@ -271,7 +248,7 @@ export class AuthKeysService {
 		});
 	}
 
-	private async retireAuthKey(kid: string): Promise<AuthKeyRetireResponse> {
+	async retireAuthKey(kid: string): Promise<AuthKeyRetireResponse> {
 		// The last-key check and the retirement share one critical section so two
 		// concurrent retirements cannot both see themselves as safe. A refused
 		// retirement is returned as an outcome and thrown afterwards: throwing
