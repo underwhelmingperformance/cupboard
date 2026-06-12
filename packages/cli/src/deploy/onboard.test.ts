@@ -102,6 +102,7 @@ const baseApi: CloudflareApi = {
 	d1Query: unexpected('d1Query'),
 	d1QueryRows: unexpected('d1QueryRows'),
 	getScriptMigrationTag: unexpected('getScriptMigrationTag'),
+	getScriptBindings: unexpected('getScriptBindings'),
 	uploadScript: unexpected('uploadScript'),
 	ensureQueueConsumer: unexpected('ensureQueueConsumer'),
 	ensureSchedules: unexpected('ensureSchedules'),
@@ -174,6 +175,8 @@ interface ClientScript {
 		subject: string;
 		claimed: boolean;
 	}>[];
+	/** What listing tenants answers; the claim flow always lists first. */
+	readonly lists?: Scripted<ParsedTenantSummary[]>[];
 	readonly creates?: Scripted<ParsedTenantSummary>[];
 	readonly publicKeys?: Scripted<string>[];
 }
@@ -190,6 +193,7 @@ interface ScriptedClient {
 function scriptedClient(script: ClientScript): ScriptedClient {
 	const versions = [...(script.versions ?? [])];
 	const signups = [...(script.signup ?? [])];
+	const lists = [...(script.lists ?? [])];
 	const creates = [...(script.creates ?? [])];
 	const publicKeys = [...(script.publicKeys ?? [])];
 	const urls: string[] = [];
@@ -215,6 +219,9 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					signupBodies.push(request);
 					return answer(signups, '/signup');
 				},
+				listTenants: async () => ({
+					tenants: await answer(lists, '/control/tenants')
+				}),
 				tokenExchange: () =>
 					Promise.resolve({
 						access_token: 'admin-jwt',
@@ -315,6 +322,7 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			versions: ['offline', 404, 'v-new'],
 			signup: [claimedSignup],
+			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: [503, 'pk-1']
 		});
@@ -359,6 +367,7 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			versions: ['v-old', 'v-old', 'v-new'],
 			signup: [claimedSignup],
+			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: ['pk-1']
 		});
@@ -389,6 +398,7 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			versions: ['v-new'],
 			signup: [claimedSignup],
+			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: ['pk-1']
 		});
@@ -411,6 +421,7 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			versions: ['v-new'],
 			signup: [claimedSignup],
+			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: ['pk-1']
 		});
@@ -453,6 +464,7 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			versions: ['v-new'],
 			signup: [{ ...claimedSignup, claimed: false }],
+			lists: [[]],
 			creates: [409, tenantSummary('builds-2')],
 			publicKeys: ['pk-2']
 		});
@@ -470,11 +482,50 @@ describe('onboardDeployment', () => {
 		});
 	});
 
+	it('keeps an existing sole cache instead of prompting again', async () => {
+		const { ui, infos } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [{ ...claimedSignup, claimed: false }],
+			lists: [[tenantSummary('laney')]],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment(baseOptions(ui, client));
+
+		expect({ outcome, infos }).toStrictEqual({
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'laney',
+				cacheUrl: 'https://cache.example.com/t/laney',
+				publicKey: 'pk-1'
+			} satisfies OnboardOutcome,
+			infos: ['The cache "laney" already exists; nothing to create.']
+		});
+	});
+
+	it('lists several existing caches and creates nothing', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [{ ...claimedSignup, claimed: false }],
+			lists: [[tenantSummary('laney'), tenantSummary('builds')]]
+		});
+
+		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
+			kind: 'already-initialised',
+			url: 'https://cache.example.com',
+			slugs: ['laney', 'builds']
+		});
+	});
+
 	it('stops with the claim intact when the slug prompt is cancelled', async () => {
 		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({
 			versions: ['v-new'],
-			signup: [claimedSignup]
+			signup: [claimedSignup],
+			lists: [[]]
 		});
 
 		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
@@ -616,6 +667,7 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			versions: ['v-new'],
 			signup: [claimedSignup],
+			lists: [[]],
 			creates: [tenantSummary('builds')],
 			publicKeys: [503, 503]
 		});

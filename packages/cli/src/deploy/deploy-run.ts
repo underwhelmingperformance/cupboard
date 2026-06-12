@@ -56,6 +56,8 @@ export interface DeployOptions {
 	readonly domain: string | undefined;
 	readonly dryRun: boolean;
 	readonly secrets: DeploySecrets;
+	/** What `/_version` answered before this deploy, when reachable. */
+	readonly liveBuild: string | undefined;
 }
 
 export interface DeployDeps {
@@ -253,6 +255,65 @@ function zoneOf(hostname: string): string {
 }
 
 /**
+ * Whether the bindings a deployed script answers match what this deploy would
+ * upload. The live list keeps its secrets across uploads, so `secret_text`
+ * entries are not part of the comparison; any other difference (an extra
+ * field the API reports included) reads as a mismatch, which costs at most a
+ * redundant upload.
+ */
+export function bindingsEqual(
+	planned: readonly unknown[] | undefined,
+	live: readonly unknown[] | undefined
+): boolean {
+	if (planned === undefined || live === undefined) {
+		return false;
+	}
+
+	const keptLive = live.filter((binding) => !isSecretBinding(binding));
+
+	if (keptLive.length !== planned.length) {
+		return false;
+	}
+
+	const plannedCanonical = canonicalise(planned);
+
+	return canonicalise(keptLive).every(
+		(binding, index) => binding === plannedCanonical[index]
+	);
+}
+
+function canonicalise(bindings: readonly unknown[]): string[] {
+	return bindings.map((binding) => canonicalJson(binding)).toSorted();
+}
+
+function isSecretBinding(binding: unknown): boolean {
+	return (
+		typeof binding === 'object' &&
+		binding !== null &&
+		'type' in binding &&
+		binding.type === 'secret_text'
+	);
+}
+
+// JSON with object keys sorted at every level, so two structurally equal
+// bindings serialise identically regardless of property order.
+function canonicalJson(value: unknown): string {
+	if (Array.isArray(value)) {
+		return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+	}
+
+	if (typeof value === 'object' && value !== null) {
+		const entries = Object.entries(value)
+			.toSorted(([left], [right]) => left.localeCompare(right))
+			.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalJson(entry)}`);
+
+		return `{${entries.join(',')}}`;
+	}
+
+	return JSON.stringify(value);
+}
+
+/**
  * Provision, migrate, upload, and wire up a cupboard deployment. The tenant
  * Durable Object script is uploaded before the control plane that binds it
  * cross-script. With `--dry-run` it renders the plan and stops before any
@@ -284,34 +345,80 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 		}
 	});
 
-	await reporter.phase('Uploading tenant worker', async () => {
-		const tag = await api.getScriptMigrationTag(artifact.config.tenant.name);
-		const migration = computeDurableObjectMigration(
-			tag,
-			artifact.config.tenant.migrations
-		);
-		const metadata = buildScriptMetadata(
-			artifact.config.tenant,
-			resources,
-			migration
-		);
-		await uploadScriptForPlan(
-			deps,
-			artifact.config.tenant.name,
-			metadata,
-			artifact.tenantBundle
-		);
-	});
+	const tag = await api.getScriptMigrationTag(artifact.config.tenant.name);
+	const migration = computeDurableObjectMigration(
+		tag,
+		artifact.config.tenant.migrations
+	);
+	const tenantMetadata = buildScriptMetadata(
+		artifact.config.tenant,
+		resources,
+		migration
+	);
+	const controlMetadata = buildScriptMetadata(
+		artifact.config.control,
+		resources
+	);
 
-	await reporter.phase('Uploading control worker', async () => {
-		const metadata = buildScriptMetadata(artifact.config.control, resources);
-		await uploadScriptForPlan(
-			deps,
-			artifact.config.control.name,
-			metadata,
-			artifact.controlBundle
+	const unchanged = await reporter.phase(
+		'Checking the deployed Workers',
+		async (context) => {
+			context.fact('build', artifact.buildVersion);
+
+			// A dirty build's version cannot distinguish two different working
+			// trees, so only a clean build that is already live can converge.
+			if (
+				options.liveBuild !== artifact.buildVersion ||
+				artifact.buildVersion.endsWith('+dirty')
+			) {
+				context.fact('live', options.liveBuild ?? 'unreachable');
+
+				return { tenant: false, control: false };
+			}
+
+			const [tenantLive, controlLive] = await Promise.all([
+				api.getScriptBindings(artifact.config.tenant.name),
+				api.getScriptBindings(artifact.config.control.name)
+			]);
+
+			return {
+				tenant:
+					migration === undefined &&
+					bindingsEqual(tenantMetadata.bindings, tenantLive),
+				control: bindingsEqual(controlMetadata.bindings, controlLive)
+			};
+		}
+	);
+
+	if (unchanged.tenant) {
+		reporter.info(
+			`${artifact.config.tenant.name} already runs this build and configuration; upload skipped.`
 		);
-	});
+	} else {
+		await reporter.phase('Uploading tenant worker', () =>
+			uploadScriptForPlan(
+				deps,
+				artifact.config.tenant.name,
+				tenantMetadata,
+				artifact.tenantBundle
+			)
+		);
+	}
+
+	if (unchanged.control) {
+		reporter.info(
+			`${artifact.config.control.name} already runs this build and configuration; upload skipped.`
+		);
+	} else {
+		await reporter.phase('Uploading control worker', () =>
+			uploadScriptForPlan(
+				deps,
+				artifact.config.control.name,
+				controlMetadata,
+				artifact.controlBundle
+			)
+		);
+	}
 
 	const secretWork: { scriptName: string; secret: WorkerSecret }[] = [
 		...options.secrets.control.map((secret) => ({

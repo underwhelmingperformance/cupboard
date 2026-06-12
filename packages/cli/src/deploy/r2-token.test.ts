@@ -24,6 +24,7 @@ const baseApi: CloudflareApi = {
 	d1Query: unexpected('d1Query'),
 	d1QueryRows: unexpected('d1QueryRows'),
 	getScriptMigrationTag: unexpected('getScriptMigrationTag'),
+	getScriptBindings: unexpected('getScriptBindings'),
 	uploadScript: unexpected('uploadScript'),
 	ensureQueueConsumer: unexpected('ensureQueueConsumer'),
 	ensureSchedules: unexpected('ensureSchedules'),
