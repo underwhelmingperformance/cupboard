@@ -15,7 +15,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
 import { InvalidPolicyScopeError } from '../errors.ts';
@@ -46,7 +46,10 @@ function parseScope(value: string): RetentionPolicyScope {
 	return result.data;
 }
 
-export function registerPolicyCommands(program: Command): void {
+export function registerPolicyCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const policy = program
 		.command('policy')
 		.description('Manage retention policies: default TTLs by cache or prefix.');
@@ -59,7 +62,9 @@ export function registerPolicyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runPolicyList(token, reporter, client);
@@ -86,7 +91,9 @@ export function registerPolicyCommands(program: Command): void {
 				const reporter = createReporter({
 					mode: reporterModeFromGlobals(program)
 				});
-				const client = CupboardClient.fromUrl(url);
+				const client = CupboardClient.fromUrl(url, {
+					signal: programOptions.signal
+				});
 				const token = cachedOwnerProvider(url);
 
 				await runPolicyAdd(
@@ -109,7 +116,9 @@ export function registerPolicyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runPolicyRemove(id, token, reporter, client);

@@ -2,6 +2,7 @@ import { env } from 'node:process';
 
 import { z } from 'zod';
 
+import { throwIfAborted } from '../abort.ts';
 import { CliError } from '../errors.ts';
 
 // The OIDC token request endpoint and bearer GitHub Actions injects when a
@@ -61,7 +62,10 @@ export async function fetchGithubOidcToken(options: {
 	readonly audience: string;
 	readonly environment?: GithubOidcEnvironment;
 	readonly fetcher?: typeof fetch;
+	readonly signal?: AbortSignal;
 }): Promise<string> {
+	throwIfAborted(options.signal);
+
 	const { requestUrl, requestToken } =
 		options.environment ?? githubOidcEnvironment();
 
@@ -79,7 +83,8 @@ export async function fetchGithubOidcToken(options: {
 
 	const fetcher = options.fetcher ?? fetch;
 	const response = await fetcher(url, {
-		headers: { authorization: `Bearer ${requestToken}` }
+		headers: { authorization: `Bearer ${requestToken}` },
+		signal: options.signal
 	});
 
 	if (!response.ok) {

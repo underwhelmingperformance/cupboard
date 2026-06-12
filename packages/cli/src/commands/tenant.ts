@@ -16,7 +16,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 
 export interface TenantClient {
@@ -131,7 +131,10 @@ export function readCredentialFromOptions(options: {
 const urlArgument =
 	'deployment URL (e.g. https://cupboard.example.workers.dev)';
 
-export function registerTenantCommands(program: Command): void {
+export function registerTenantCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const tenant = program
 		.command('tenant')
 		.description('Provision and manage tenants (operator only).');
@@ -169,7 +172,9 @@ export function registerTenantCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const readSelection = readCredentialFromOptions(options);
 			const body = tenantCreateBodySchema.parse({
 				id,
@@ -202,7 +207,9 @@ export function registerTenantCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runTenantList(cachedOwnerProvider(url), reporter, client);
 		});
@@ -216,7 +223,9 @@ export function registerTenantCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runTenantSuspend(id, cachedOwnerProvider(url), reporter, client);
 		});
@@ -230,7 +239,9 @@ export function registerTenantCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runTenantDelete(id, cachedOwnerProvider(url), reporter, client);
 		});

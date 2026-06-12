@@ -2,7 +2,7 @@ import { createReporter, formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 
 interface StatsOptions {
@@ -10,7 +10,10 @@ interface StatsOptions {
 	readonly cache?: string;
 }
 
-export function registerStatsCommand(program: Command): void {
+export function registerStatsCommand(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('stats')
 		.description('Show objects referenced by a cache.')
@@ -20,7 +23,10 @@ export function registerStatsCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, options.cache);
+			const client = CupboardClient.fromUrl(url, {
+				cache: options.cache,
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			const stats = await reporter.phase('Querying cupboard', () =>
@@ -52,7 +58,9 @@ export function registerStatsCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			const usage = await reporter.phase('Querying cupboard', () =>

@@ -12,7 +12,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 
 export interface AuthKeyClient {
@@ -24,7 +24,10 @@ export interface AuthKeyClient {
 	): Promise<AuthKeyRetireResponse>;
 }
 
-export function registerAuthKeyCommands(program: Command): void {
+export function registerAuthKeyCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const authKey = program
 		.command('auth-key')
 		.description('Manage the access-token signing keys and rotation.');
@@ -37,7 +40,9 @@ export function registerAuthKeyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runAuthKeyList(cachedOwnerProvider(url), reporter, client);
 		});
@@ -52,7 +57,9 @@ export function registerAuthKeyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runAuthKeyRotate(cachedOwnerProvider(url), reporter, client);
 		});
@@ -66,7 +73,9 @@ export function registerAuthKeyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runAuthKeyRetire(kid, cachedOwnerProvider(url), reporter, client);
 		});

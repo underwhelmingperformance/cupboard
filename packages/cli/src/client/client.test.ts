@@ -103,6 +103,35 @@ describe('CupboardClient.tokenExchange', () => {
 			body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=subject.jwt&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token'
 		});
 	});
+
+	it('passes a configured abort signal to the token exchange request', async () => {
+		const controller = new AbortController();
+		let signal: AbortSignal | null | undefined;
+		const response: TokenResponse = {
+			access_token: 'write-jwt',
+			token_type: 'Bearer',
+			expires_in: 900,
+			scope: 'write',
+			issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+		};
+		const client = new CupboardClient(
+			new URL('https://cupboard.test'),
+			(_input, init) => {
+				signal = init?.signal;
+
+				return Promise.resolve(Response.json(response));
+			},
+			'',
+			controller.signal
+		);
+
+		await client.tokenExchange(
+			'subject.jwt',
+			'urn:ietf:params:oauth:token-type:id_token'
+		);
+
+		expect(signal).toBe(controller.signal);
+	});
 });
 
 describe('CupboardClient.signup', () => {

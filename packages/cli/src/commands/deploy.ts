@@ -1,8 +1,12 @@
 import type { Command } from 'commander';
 
+import type { ProgramOptions } from '../cli.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
 
-export function registerDeployCommand(program: Command): void {
+export function registerDeployCommand(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('init')
 		.alias('deploy')
@@ -24,6 +28,6 @@ export function registerDeployCommand(program: Command): void {
 			// out of the released binary's startup and the other commands' cost.
 			const { executeDeploy } = await import('../deploy/command.ts');
 
-			await executeDeploy(cliOptions);
+			await executeDeploy(cliOptions, { signal: programOptions.signal });
 		});
 }
