@@ -33,21 +33,3 @@ export const serverErrorHandler: ErrorHandler = (error) => {
 
 	return mapped;
 };
-
-// Resolves a handler's response with the same mapping, for callers outside a
-// Hono app.
-export async function serverErrorResponse(
-	response: Promise<Response>
-): Promise<Response> {
-	try {
-		return await response;
-	} catch (error) {
-		const mapped = errorResponse(error);
-
-		if (mapped === undefined) {
-			throw error;
-		}
-
-		return mapped;
-	}
-}
