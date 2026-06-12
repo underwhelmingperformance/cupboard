@@ -1,9 +1,15 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { createServer } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import { ProtocolWriter } from '../../../../tests/support/protocol-writer.ts';
 
 import { NixSha256Hash } from './nar.ts';
 import {
+	connectToNixDaemon,
 	NixDaemonStoreClient,
 	type NixDaemonTransport,
 	UnsupportedNixDaemonProtocolError
@@ -19,6 +25,36 @@ const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
 const appHash = '11'.repeat(32);
 const libraryHash = '22'.repeat(32);
 const runtimeHash = '33'.repeat(32);
+
+describe('connectToNixDaemon', () => {
+	// The fakes elsewhere bypass the socket transport entirely, so this is the
+	// one place its write/read path meets a real socket (where Node calls the
+	// write callback with null, not undefined, on success).
+	it('writes and reads through a real unix socket', async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), 'cupboard-nix-'));
+		const socketPath = path.join(directory, 'socket');
+		const server = createServer((connection) => {
+			connection.pipe(connection);
+		});
+
+		await new Promise<void>((resolve) => {
+			server.listen(socketPath, resolve);
+		});
+
+		try {
+			const transport = await connectToNixDaemon(socketPath);
+
+			await transport.write(new Uint8Array([1, 2, 3, 4]));
+			const echoed = await transport.read(4);
+			transport.close();
+
+			expect([...echoed]).toStrictEqual([1, 2, 3, 4]);
+		} finally {
+			server.close();
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+});
 
 describe('NixDaemonStoreClient', () => {
 	it('reads path info through the Nix daemon protocol', async () => {

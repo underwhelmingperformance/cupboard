@@ -6,6 +6,7 @@ import { NixConfig } from '@cupboard/nix/nix-config';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 
+import { CupboardClient } from '../client/client.ts';
 import { CliError } from '../errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
@@ -34,6 +35,7 @@ import { checkDomainOption, domainProblem } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import {
 	type ClaimSecret,
+	deploymentUrl,
 	onboardAdminFor,
 	onboardDeployment
 } from './onboard.ts';
@@ -556,16 +558,16 @@ export type R2KeyCreation =
  * Settle the R2 credential pair interactively: create a bucket-scoped key
  * through the Cloudflare API when the deploy credential allows it (the
  * recommended path), or take an existing pair. When the Worker already holds
- * a pair that may no longer fit (the bucket was renamed), keeping it is
- * offered as an explicit choice.
+ * a pair, keeping it is an explicit choice: the default when nothing changed,
+ * flagged when the bucket was renamed and the pair may no longer fit.
  */
 export async function obtainR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly accountId: string;
 	readonly bucketName: string;
 	readonly creation: R2KeyCreation;
-	/** Set when the Worker holds a pair that was scoped to another bucket. */
-	readonly keep?: { readonly previousBucket: string };
+	/** Set when the Worker holds a pair; `previousBucket` flags a rename. */
+	readonly keep?: { readonly previousBucket?: string };
 }): Promise<R2Settlement> {
 	const { ui, bucketName, creation } = options;
 
@@ -578,12 +580,28 @@ export async function obtainR2Credentials(options: {
 		return settled(await promptR2CredentialPair(ui, options.accountId));
 	}
 
+	const previousBucket = options.keep?.previousBucket;
 	const message =
 		options.keep === undefined
 			? `The cache needs R2 credentials for ${bucketName}. How would you like to provide them?`
-			: `The cache bucket is now ${bucketName}, but the key on the Worker was set up for ${options.keep.previousBucket}. How should the cache authenticate?`;
+			: previousBucket === undefined
+				? `The Worker already holds R2 credentials for ${bucketName}. Keep or replace them?`
+				: `The cache bucket is now ${bucketName}, but the key on the Worker was set up for ${previousBucket}. How should the cache authenticate?`;
 
-	const choice = await ui.menu(message, [
+	const keepEntries =
+		options.keep === undefined
+			? []
+			: [
+					{
+						value: 'keep',
+						label: 'Keep the current key',
+						hint:
+							previousBucket === undefined
+								? 'set by an earlier deploy'
+								: `may still be scoped to ${previousBucket}`
+					} as const
+				];
+	const replaceEntries = [
 		...(creation.kind === 'available'
 			? [
 					{
@@ -595,16 +613,15 @@ export async function obtainR2Credentials(options: {
 					} as const
 				]
 			: []),
-		{ value: 'enter', label: 'Enter an existing key pair' },
-		...(options.keep === undefined
-			? []
-			: [
-					{
-						value: 'keep',
-						label: 'Keep the current key',
-						hint: `may still be scoped to ${options.keep.previousBucket}`
-					} as const
-				]),
+		{ value: 'enter', label: 'Enter an existing key pair' } as const
+	];
+
+	// An unchanged pair leads so plain Enter keeps it; after a rename the
+	// replacement paths lead, since the kept key is probably wrong.
+	const choice = await ui.menu(message, [
+		...(previousBucket === undefined
+			? [...keepEntries, ...replaceEntries]
+			: [...replaceEntries, ...keepEntries]),
 		{ value: 'cancel', label: 'Cancel' }
 	]);
 
@@ -1038,7 +1055,9 @@ async function deployFlow(
 			options: {
 				domain: state.domain,
 				dryRun: false,
-				secrets: { control: controlSecrets, tenant: assembled.secrets.tenant }
+				secrets: { control: controlSecrets, tenant: assembled.secrets.tenant },
+				// Settled right before the deploy runs, on the agreed plan.
+				liveBuild: undefined
 			},
 			missing,
 			annotated
@@ -1097,11 +1116,7 @@ async function deployFlow(
 	if (r2Credentials === undefined) {
 		const alreadySet = await r2AlreadySetFor(agreed);
 
-		if (alreadySet && !bucketRenamed) {
-			// The Worker keeps the pair it already holds; nothing to settle, and
-			// nothing to probe, since the values cannot be read back.
-			ui.info('Keeping the R2 credentials already set on the Worker.');
-		} else if (interactive) {
+		if (interactive) {
 			const settlement = await obtainR2Credentials({
 				ui,
 				accountId: agreed.accountId,
@@ -1113,8 +1128,12 @@ async function deployFlow(
 					accountId: agreed.accountId,
 					bucketName: agreedBucket
 				}),
-				...(alreadySet && bucketRenamed
-					? { keep: { previousBucket: bucketNameOf(artifact.config) } }
+				...(alreadySet
+					? {
+							keep: bucketRenamed
+								? { previousBucket: bucketNameOf(artifact.config) }
+								: {}
+						}
 					: {})
 			});
 
@@ -1132,11 +1151,15 @@ async function deployFlow(
 				throw new R2CredentialsRequiredError();
 			}
 
-			ui.warn(
-				'The cache bucket was renamed, and the R2 key already on the ' +
-					'Worker may be scoped to the old name. Re-run interactively to ' +
-					'replace it.'
-			);
+			if (bucketRenamed) {
+				ui.warn(
+					'The cache bucket was renamed, and the R2 key already on the ' +
+						'Worker may be scoped to the old name. Re-run interactively ' +
+						'to replace it.'
+				);
+			} else {
+				ui.info('Keeping the R2 credentials already set on the Worker.');
+			}
 		}
 	}
 
@@ -1168,11 +1191,38 @@ async function deployFlow(
 		agreed.owner.kind === 'owner' ? agreed.owner.owner : undefined
 	);
 
+	// What the deployment serves right now, so the deploy can skip uploading
+	// Workers that already run this build with this configuration.
+	const liveBuild = await ui
+		.reporter()
+		.phase('Checking the deployed build', async (context) => {
+			const url = await deploymentUrl(
+				apiFor(agreed.accountId),
+				agreed.config.control.name,
+				agreed.domain
+			);
+
+			if (url === undefined) {
+				return;
+			}
+
+			try {
+				const live = await CupboardClient.fromUrl(url).version();
+				context.fact('live', live);
+
+				return live;
+			} catch {
+				context.fact('live', 'unreachable');
+
+				return;
+			}
+		});
+
 	await runDeploy({
 		artifact: { ...artifact, config: deployedConfig },
 		api: apiFor(agreed.accountId),
 		reporter: ui.reporter(),
-		options
+		options: { ...options, liveBuild }
 	});
 
 	// What the claim must present beyond the id_token: the signup secret this
@@ -1283,6 +1333,20 @@ async function deployFlow(
 					'name when you are ready.'
 			);
 			ui.outro('Deployed; you are the admin.');
+			return;
+		}
+
+		case 'already-initialised': {
+			ui.note(
+				'Existing caches',
+				outcome.slugs.map((slug) => ({
+					label: slug,
+					value: `${outcome.url}/t/${slug}`
+				}))
+			);
+			ui.outro(
+				'Deployed; the caches are untouched. Manage them with `cupboard tenant`.'
+			);
 			return;
 		}
 
