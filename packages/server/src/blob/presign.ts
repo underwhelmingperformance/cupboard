@@ -41,7 +41,16 @@ export class R2Presigner {
 				Key: options.key,
 				ChecksumSHA256: options.checksumSha256
 			}),
-			{ expiresIn: options.expiresSeconds }
+			{
+				expiresIn: options.expiresSeconds,
+				// The presigner hoists headers into the query by default, but R2
+				// ignores a query-hoisted checksum (no integrity check) and then
+				// rejects the upload outright when the uploader sends the
+				// x-amz-checksum-sha256 header unsigned (SigV4 requires every
+				// x-amz-* header on the request to be signed). Keeping it a
+				// signed header makes R2 verify both the signature and the body.
+				unhoistableHeaders: new Set(['x-amz-checksum-sha256'])
+			}
 		);
 	}
 

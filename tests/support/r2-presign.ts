@@ -64,10 +64,20 @@ async function handlePresignedPut(
 	}
 
 	const scope = credential.slice(credential.indexOf('/') + 1);
+	const signedHeaderNames = signedHeaders.split(';');
+
+	// R2 enforces the SigV4 rule that every x-amz-* header on the request must
+	// be signed: sending one outside the signed set fails the whole signature.
+	for (const name of headers.keys()) {
+		if (name.startsWith('x-amz-') && !signedHeaderNames.includes(name)) {
+			return textResponse(403, `SignatureDoesNotMatch: unsigned ${name}`);
+		}
+	}
+
 	const actual = signRequest({
 		url,
 		headers,
-		signedHeaderNames: signedHeaders.split(';'),
+		signedHeaderNames,
 		amzDate,
 		scope,
 		secretAccessKey: credentials.secretAccessKey
@@ -77,7 +87,15 @@ async function handlePresignedPut(
 		return textResponse(403, 'SigV4 signature mismatch');
 	}
 
-	const checksum = url.searchParams.get('x-amz-checksum-sha256');
+	// R2 only honours the checksum as a signed header; a query-hoisted value
+	// is ignored, which silently drops integrity enforcement. The harness is
+	// stricter than R2 here and requires it, since enforced integrity is part
+	// of the upload contract under test.
+	if (!signedHeaderNames.includes('x-amz-checksum-sha256')) {
+		return textResponse(400, 'x-amz-checksum-sha256 must be a signed header');
+	}
+
+	const checksum = headers.get('x-amz-checksum-sha256');
 	const actualChecksum = createHash('sha256').update(body).digest('base64');
 
 	if (checksum !== actualChecksum) {
