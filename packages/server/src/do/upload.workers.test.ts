@@ -36,6 +36,7 @@ import {
 	commitVerifiablePath,
 	currentOrigin,
 	currentServer,
+	defaultCacheStatsPath,
 	deletePath,
 	deleteTestBase,
 	expectConditionalNotModified,
@@ -191,7 +192,7 @@ describe('upload flow', () => {
 	});
 
 	it('rejects unauthenticated management requests', async () => {
-		const stats = await fetchPath('/stats');
+		const stats = await fetchPath(defaultCacheStatsPath);
 		const negotiate = await fetchPath('/uploads', {
 			body: JSON.stringify({ paths: [] }),
 			headers: {
@@ -2635,7 +2636,7 @@ describe('upload flow', () => {
 				token,
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
 			);
-			const stats = await authorisedFetch('/stats', token);
+			const stats = await authorisedFetch(defaultCacheStatsPath, token);
 			const setRootResponse = await authorisedFetch('/roots/main', token, {
 				body: JSON.stringify({
 					targets: ['/nix/store/11111111111111111111111111111111-a']
@@ -2665,7 +2666,7 @@ describe('upload flow', () => {
 				headers: { 'content-type': 'application/json' },
 				method: 'PUT'
 			});
-			const stats = await authorisedFetch('/stats', writeToken);
+			const stats = await authorisedFetch(defaultCacheStatsPath, writeToken);
 			const removed = await authorisedFetch(
 				'/paths/11111111111111111111111111111111',
 				writeToken,
@@ -2696,7 +2697,10 @@ describe('upload flow', () => {
 				token: () => foreignKeyToken('admin')
 			}
 		])('rejects $name with 401', async ({ token }) => {
-			const response = await authorisedFetch('/stats', await token());
+			const response = await authorisedFetch(
+				defaultCacheStatsPath,
+				await token()
+			);
 
 			expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 		});

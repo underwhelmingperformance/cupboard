@@ -74,7 +74,7 @@ describe('Nix substitution from a named cache', () => {
 						server.tenantPath('/cache/builds/nix-cache-info')
 					);
 					const cacheInfoBody = await cacheInfo.text();
-					const stats = await client.stats(token);
+					const stats = await rpc.stats.cache({ cacheName: '_default' });
 					const listed = await rpc.caches.list();
 
 					await rpc.caches.remove({

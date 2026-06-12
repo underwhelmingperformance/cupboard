@@ -1,6 +1,10 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
-import { DEFAULT_CACHE, type PredicateType } from '@cupboard/nix/scalars';
+import {
+	DEFAULT_CACHE,
+	type PredicateType,
+	WIRE_DEFAULT_CACHE
+} from '@cupboard/nix/scalars';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
 import type {
 	RootListResponse,
@@ -1935,11 +1939,15 @@ export async function expectTextResponse(
 	});
 }
 
+// The contract addresses the default cache as `_default`; there is no bare
+// `/stats` route.
+export const defaultCacheStatsPath = `/cache/${WIRE_DEFAULT_CACHE}/stats`;
+
 export async function expectStats(
 	token: string,
 	expected: StatsExpectation
 ): Promise<void> {
-	const response = await authorisedFetch('/stats', token);
+	const response = await authorisedFetch(defaultCacheStatsPath, token);
 
 	expect(response.status).toBe(StatusCodes.OK);
 	expect(await response.json()).toStrictEqual(statsExpectation(expected));
@@ -1949,7 +1957,7 @@ export async function expectStatsViaWorker(
 	token: string,
 	expected: StatsExpectation
 ): Promise<void> {
-	const response = await authorisedWorkerFetch('/stats', token);
+	const response = await authorisedWorkerFetch(defaultCacheStatsPath, token);
 
 	expect(response.status).toBe(StatusCodes.OK);
 	expect(await response.json()).toStrictEqual(statsExpectation(expected));
@@ -1960,9 +1968,14 @@ export async function expectStatsForTenant(
 	token: string,
 	expected: StatsExpectation
 ): Promise<void> {
-	const response = await tenantWorkerFetch(tenant, '/stats', token, {
-		method: 'GET'
-	});
+	const response = await tenantWorkerFetch(
+		tenant,
+		defaultCacheStatsPath,
+		token,
+		{
+			method: 'GET'
+		}
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 	expect(await response.json()).toStrictEqual(statsExpectation(expected));

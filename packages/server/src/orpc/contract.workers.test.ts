@@ -167,6 +167,34 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('serves stats, usage and check, addressing the default cache as _default', async () => {
+		await useTestServer('contract-stats');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		await pushPath(
+			init.token,
+			uploadMetadata({ fileSize: narBytes.byteLength })
+		);
+
+		const stats = await client.stats.cache({ cacheName: '_default' });
+		const usage = await client.stats.usage();
+		const report = await client.check.run({ deep: true });
+
+		expect({
+			storePaths: stats.storePaths,
+			chargedBlobs: usage.narBlobs,
+			report: {
+				narInfosChecked: report.narInfosChecked,
+				complete: report.complete,
+				discrepancies: report.discrepancies
+			}
+		}).toStrictEqual({
+			storePaths: 1,
+			chargedBlobs: 1,
+			report: { narInfosChecked: 1, complete: true, discrepancies: [] }
+		});
+	});
+
 	it('refuses a write-scoped token on an admin procedure', async () => {
 		await useTestServer('contract-scope');
 		await bootstrap();

@@ -1,3 +1,4 @@
+import { cacheFromSelector } from '@cupboard/nix/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
@@ -93,6 +94,19 @@ export const tenantRouter = os.router({
 		),
 		remove: os.oidcTrust.remove.handler(({ input, context }) =>
 			context.services.oidcTrust.removeRule(input.id)
+		)
+	},
+	stats: {
+		cache: os.stats.cache.handler(({ input, context }) =>
+			context.services.stats.stats(cacheFromSelector(input.cacheName))
+		),
+		usage: os.stats.usage.handler(({ context }) =>
+			context.services.stats.usage()
+		)
+	},
+	check: {
+		run: os.check.run.handler(({ input, context }) =>
+			context.services.integrityCheck.check(input.deep)
 		)
 	}
 });
