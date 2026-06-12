@@ -8,8 +8,6 @@ import type {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import {
 	describeStage,
 	type KeyClient,
@@ -59,9 +57,9 @@ function uncalledClient(): never {
 
 function keyClient(overrides: Partial<KeyClient>): KeyClient {
 	return {
-		listKeys: uncalledClient,
-		rotateKey: uncalledClient,
-		retireKey: uncalledClient,
+		list: uncalledClient,
+		rotate: uncalledClient,
+		retire: uncalledClient,
 		...overrides
 	};
 }
@@ -87,9 +85,8 @@ describe('runKeyList', () => {
 		};
 
 		await runKeyList(
-			'admin-token',
 			reporter(results),
-			keyClient({ listKeys: () => Promise.resolve(response) })
+			keyClient({ list: () => Promise.resolve(response) })
 		);
 
 		expect(results).toStrictEqual([
@@ -103,7 +100,6 @@ describe('runKeyList', () => {
 
 describe('runKeyRotate', () => {
 	it('rotates, reports the new key, and prints migration guidance', async () => {
-		const calls: AccessCredential[] = [];
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 		const response: KeyRotateResponse = {
@@ -119,18 +115,11 @@ describe('runKeyRotate', () => {
 		};
 
 		await runKeyRotate(
-			'admin-token',
 			reporter(results, infos),
-			keyClient({
-				rotateKey(token) {
-					calls.push(token);
-					return Promise.resolve(response);
-				}
-			})
+			keyClient({ rotate: () => Promise.resolve(response) })
 		);
 
-		expect({ calls, results, infoCount: infos.length }).toStrictEqual({
-			calls: ['admin-token'],
+		expect({ results, infoCount: infos.length }).toStrictEqual({
 			results: [
 				[
 					{ label: 'New key', value: uuid },
@@ -148,25 +137,24 @@ describe('runKeyRetire', () => {
 		{ stage: 'publication', stageValue: 'published only', infoCount: 1 },
 		{ stage: 'absent', stageValue: 'removed', infoCount: 0 }
 	])('retires to $stage', async ({ stage, stageValue, infoCount }) => {
-		const calls: { token: AccessCredential; id: string }[] = [];
+		const calls: { id: string }[] = [];
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 		const response: KeyRetireResponse = { id: 'active', stage };
 
 		await runKeyRetire(
 			'active',
-			'admin-token',
 			reporter(results, infos),
 			keyClient({
-				retireKey(token, id) {
-					calls.push({ token, id });
+				retire(input) {
+					calls.push(input);
 					return Promise.resolve(response);
 				}
 			})
 		);
 
 		expect({ calls, results, infoCount: infos.length }).toStrictEqual({
-			calls: [{ token: 'admin-token', id: 'active' }],
+			calls: [{ id: 'active' }],
 			results: [
 				[
 					{ label: 'Key', value: 'active' },

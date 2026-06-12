@@ -17,20 +17,6 @@ import {
 	controlKeyRotateResponseSchema
 } from '@cupboard/protocol/control-keys';
 import {
-	type AuthKeyListResponse,
-	authKeyListResponseSchema,
-	type AuthKeyRetireResponse,
-	authKeyRetireResponseSchema,
-	type AuthKeyRotateResponse,
-	authKeyRotateResponseSchema,
-	type KeyListResponse,
-	keyListResponseSchema,
-	type KeyRetireResponse,
-	keyRetireResponseSchema,
-	type KeyRotateResponse,
-	keyRotateResponseSchema
-} from '@cupboard/protocol/keys';
-import {
 	type OidcTrustAddBody,
 	type OidcTrustListResponse,
 	oidcTrustListResponseSchema,
@@ -197,28 +183,6 @@ export class CupboardClient {
 		return this.requestJson('/usage', usageResponseSchema, { token });
 	}
 
-	listKeys(token: AccessCredential): Promise<KeyListResponse> {
-		return this.requestJson('/keys', keyListResponseSchema, { token });
-	}
-
-	rotateKey(token: AccessCredential): Promise<KeyRotateResponse> {
-		return this.requestJson('/keys/rotate', keyRotateResponseSchema, {
-			method: 'POST',
-			token
-		});
-	}
-
-	retireKey(token: AccessCredential, id: string): Promise<KeyRetireResponse> {
-		return this.requestJson(
-			`/keys/retire/${encodeURIComponent(id)}`,
-			keyRetireResponseSchema,
-			{
-				method: 'POST',
-				token
-			}
-		);
-	}
-
 	listPolicies(token: AccessCredential): Promise<RetentionPolicyListResponse> {
 		return this.requestJson('/policies', retentionPolicyListResponseSchema, {
 			token
@@ -276,31 +240,6 @@ export class CupboardClient {
 			oidcTrustRemoveResponseSchema,
 			{
 				method: 'DELETE',
-				token
-			}
-		);
-	}
-
-	listAuthKeys(token: AccessCredential): Promise<AuthKeyListResponse> {
-		return this.requestJson('/keys/auth', authKeyListResponseSchema, { token });
-	}
-
-	rotateAuthKey(token: AccessCredential): Promise<AuthKeyRotateResponse> {
-		return this.requestJson('/keys/auth/rotate', authKeyRotateResponseSchema, {
-			method: 'POST',
-			token
-		});
-	}
-
-	retireAuthKey(
-		token: AccessCredential,
-		kid: string
-	): Promise<AuthKeyRetireResponse> {
-		return this.requestJson(
-			`/keys/auth/retire/${encodeURIComponent(kid)}`,
-			authKeyRetireResponseSchema,
-			{
-				method: 'POST',
 				token
 			}
 		);

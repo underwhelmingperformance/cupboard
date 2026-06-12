@@ -155,18 +155,24 @@ describe('auth-key rotation', () => {
 		const retired = await retiredResponse.json<AuthKeyRetireResponse>();
 		const list = await listKeys(activeToken);
 		const refused = await retire(activeToken, rotated.rotated);
-		const refusedBody = await refused.text();
+		const refusedBody = await refused.json<{
+			code: string;
+			status: number;
+			message: string;
+		}>();
 
 		expect({
 			retired,
 			remainingKids: list.keys.map((key) => key.kid),
 			refusedStatus: refused.status,
-			refusedBody
+			refusedCode: refusedBody.code,
+			refusedMessage: refusedBody.message
 		}).toStrictEqual({
 			retired: { kid: original, retired: true },
 			remainingKids: [rotated.rotated],
 			refusedStatus: StatusCodes.CONFLICT,
-			refusedBody: 'Cannot retire the last auth key\n'
+			refusedCode: 'CONFLICT',
+			refusedMessage: 'Cannot retire the last auth key'
 		});
 	});
 

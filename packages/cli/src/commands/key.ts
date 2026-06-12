@@ -14,12 +14,17 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 
+/**
+ * The slice of the derived client the key commands consume, in the
+ * contract's input and output shapes; the real `tenantRpc(...).keys.signing`
+ * satisfies it by construction.
+ */
 export interface KeyClient {
-	listKeys(token: AccessCredential): Promise<KeyListResponse>;
-	rotateKey(token: AccessCredential): Promise<KeyRotateResponse>;
-	retireKey(token: AccessCredential, id: string): Promise<KeyRetireResponse>;
+	list(): Promise<KeyListResponse>;
+	rotate(): Promise<KeyRotateResponse>;
+	retire(input: { id: string }): Promise<KeyRetireResponse>;
 }
 
 export function registerKeyCommands(
@@ -38,12 +43,12 @@ export function registerKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runKeyList(token, reporter, client);
+			await runKeyList(reporter, rpc.keys.signing);
 		});
 
 	key
@@ -54,12 +59,12 @@ export function registerKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runKeyRotate(token, reporter, client);
+			await runKeyRotate(reporter, rpc.keys.signing);
 		});
 
 	key
@@ -71,22 +76,21 @@ export function registerKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runKeyRetire(id, token, reporter, client);
+			await runKeyRetire(id, reporter, rpc.keys.signing);
 		});
 }
 
 export async function runKeyList(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: KeyClient
 ): Promise<void> {
 	const { keys } = await reporter.phase('Listing signing keys', () =>
-		client.listKeys(token)
+		client.list()
 	);
 
 	if (keys.length === 0) {
@@ -98,12 +102,11 @@ export async function runKeyList(
 }
 
 export async function runKeyRotate(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: KeyClient
 ): Promise<void> {
 	const { rotated, keys } = await reporter.phase('Rotating signing key', () =>
-		client.rotateKey(token)
+		client.rotate()
 	);
 
 	reporter.result([
@@ -119,12 +122,11 @@ export async function runKeyRotate(
 
 export async function runKeyRetire(
 	id: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: KeyClient
 ): Promise<void> {
 	const result = await reporter.phase('Retiring signing key', () =>
-		client.retireKey(token, id)
+		client.retire({ id })
 	);
 
 	reporter.result([

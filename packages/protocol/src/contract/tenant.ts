@@ -1,4 +1,5 @@
 import { cachesContract } from './caches.ts';
+import { keysContract } from './keys.ts';
 
 /**
  * The tenant admin API: every JSON procedure a tenant deployment answers,
@@ -8,5 +9,6 @@ import { cachesContract } from './caches.ts';
  * two cannot drift.
  */
 export const tenantContract = {
-	caches: cachesContract
+	caches: cachesContract,
+	keys: keysContract
 };
