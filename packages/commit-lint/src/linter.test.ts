@@ -213,6 +213,41 @@ describe('checkCommitMessages', () => {
 		});
 	});
 
+	it('produces a reworded message that passes the same linter', async () => {
+		const [check] = await checkCommitMessages([
+			commitMessage(
+				'a1b2c3d4e5f6',
+				[
+					'docs: explain commit linting',
+					'',
+					'Short paragraph with trailing spaces. ',
+					'',
+					'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.'
+				].join('\n')
+			)
+		]);
+
+		const fixedMessage = check?.rewordMessage();
+		const [fixedCheck] = await checkCommitMessages([
+			commitMessage('a1b2c3d4e5f6', fixedMessage ?? '')
+		]);
+
+		expect({
+			fixedMessage,
+			status: fixedCheck?.status
+		}).toStrictEqual({
+			fixedMessage: [
+				'docs: explain commit linting',
+				'',
+				'Short paragraph with trailing spaces.',
+				'',
+				'An unwrapped paragraph with enough words to exceed the configured',
+				'seventy two column width so the reflower must wrap it.'
+			].join('\n'),
+			status: 'passed'
+		});
+	});
+
 	it('does not reflow git trailers into the body', async () => {
 		const reports = await checkCommitMessages([
 			commitMessage(
