@@ -241,10 +241,10 @@ describe('onboardAdminFor', () => {
 		).toStrictEqual({ kind: 'other', owner: other });
 	});
 
-	it('belongs to someone else when the deployer identity is unknown', () => {
+	it('is unproven when the session credential carries no identity', () => {
 		expect(
 			onboardAdminFor({ kind: 'owner', owner, origin: 'config' })
-		).toStrictEqual({ kind: 'other', owner });
+		).toStrictEqual({ kind: 'unproven', owner });
 	});
 
 	it('is closed when no admin is bound', () => {
@@ -317,7 +317,7 @@ describe('onboardDeployment', () => {
 			cachedTokens: [
 				{ token: 'admin-jwt', target: 'https://cache.example.com' }
 			],
-			successes: ['Claimed global admin as cf-user-1']
+			successes: ['You are now the admin of this deployment (cf-user-1).']
 		});
 	});
 
@@ -422,7 +422,7 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('leaves the claim to a gate naming someone else', async () => {
+	it('leaves the setup to an admin who is someone else', async () => {
 		const { ui } = scriptedUi();
 		const other: OwnerBinding = { ...owner, subject: 'cf-user-2' };
 		const client = scriptedClient({ health: ['ok'] });
@@ -442,6 +442,28 @@ describe('onboardDeployment', () => {
 			kind: 'admin-elsewhere',
 			url: 'https://cache.example.com',
 			owner: other
+		});
+	});
+
+	it('stops short when the session cannot prove the admin is the deployer', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({ health: ['ok'] });
+
+		const outcome = await onboardDeployment({
+			api: baseApi,
+			ui,
+			controlScriptName: 'cupboard',
+			domain: 'cache.example.com',
+			admin: { kind: 'unproven', owner },
+			clientFactory: client.factory,
+			cacheToken: client.cacheToken,
+			sleep: () => Promise.resolve()
+		});
+
+		expect(outcome).toStrictEqual({
+			kind: 'identity-unproven',
+			url: 'https://cache.example.com',
+			owner
 		});
 	});
 
