@@ -21,6 +21,8 @@ export interface DeploymentArtifact {
 	readonly controlBundle: WorkerBundle;
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
+	/** The version the bundled Workers answer on `/_version`. */
+	readonly buildVersion: string;
 }
 
 /**
@@ -35,6 +37,7 @@ export interface EmbeddedPayload {
 	readonly controlBundle: WorkerBundle;
 	readonly tenantBundle: WorkerBundle;
 	readonly d1Migrations: readonly D1Migration[];
+	readonly buildVersion: string;
 }
 
 export function payloadToArtifact(
@@ -44,7 +47,8 @@ export function payloadToArtifact(
 		config: parseDeploymentConfig(payload.controlSource, payload.tenantSource),
 		controlBundle: payload.controlBundle,
 		tenantBundle: payload.tenantBundle,
-		d1Migrations: payload.d1Migrations
+		d1Migrations: payload.d1Migrations,
+		buildVersion: payload.buildVersion
 	};
 }
 
@@ -54,12 +58,14 @@ const migrationsDirectory = `${serverDirectory}/drizzle-d1`;
 
 // The server entrypoints import `build-info.generated.ts`, which is produced by
 // `scripts/build-info.ts` and not committed. Generate it if missing so a tree
-// build does not depend on a prior `pnpm` step.
-async function ensureBuildInfo(checkoutRoot: string): Promise<void> {
+// build does not depend on a prior `pnpm` step. Returns the version the bundle
+// will embed: what matters downstream is that the artifact's record of its own
+// version agrees with the file the bundle compiles in.
+async function ensureBuildInfo(checkoutRoot: string): Promise<string> {
 	const outputPath = path.join(checkoutRoot, buildInfoPath);
 
 	if (existsSync(outputPath)) {
-		return;
+		return parseBuildVersion(await readFile(outputPath, 'utf8'));
 	}
 
 	const revision = await gitOutput(checkoutRoot, [
@@ -74,6 +80,31 @@ async function ensureBuildInfo(checkoutRoot: string): Promise<void> {
 		outputPath,
 		`export const buildVersion = ${JSON.stringify(version)};\n`
 	);
+
+	return version;
+}
+
+export class BuildInfoUnreadableError extends Error {
+	constructor() {
+		super(`${buildInfoPath} does not carry a parseable build version`);
+		this.name = 'BuildInfoUnreadableError';
+	}
+}
+
+function parseBuildVersion(source: string): string {
+	const match = /buildVersion = ("[^"\n]+");/.exec(source);
+
+	if (match?.[1] === undefined) {
+		throw new BuildInfoUnreadableError();
+	}
+
+	const version: unknown = JSON.parse(match[1]);
+
+	if (typeof version !== 'string') {
+		throw new BuildInfoUnreadableError();
+	}
+
+	return version;
 }
 
 async function gitOutput(
@@ -109,7 +140,7 @@ export async function buildEmbeddedPayload(
 	checkoutRoot: string,
 	bundler: Bundler
 ): Promise<EmbeddedPayload> {
-	await ensureBuildInfo(checkoutRoot);
+	const buildVersion = await ensureBuildInfo(checkoutRoot);
 
 	const [controlSource, tenantSource] = await Promise.all([
 		readFile(
@@ -139,7 +170,8 @@ export async function buildEmbeddedPayload(
 		tenantSource,
 		controlBundle,
 		tenantBundle,
-		d1Migrations
+		d1Migrations,
+		buildVersion
 	};
 }
 

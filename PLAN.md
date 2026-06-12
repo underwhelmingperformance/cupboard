@@ -199,14 +199,17 @@ that deployed is the identity that administers.
 - [x] Two-step initialisation after the deploy. Step one: resolve the deployment
       URL (custom domain, read back from the routing on re-runs, or the
       workers.dev subdomain with the script route enabled) and poll the
-      unauthenticated `/_health` route until the Worker is up. Step two: claim
-      global admin at `POST /signup` with the deployer's id_token (idempotent
-      for the same principal), exchange it for an admin token and cache that
-      token, prompt for the first cache's slug (typed inline after the
-      `<url>/t/` prefix; no default), create the tenant, and poll its
-      `/t/<slug>/pubkey` (whose first success creates the signing key) before
-      printing the `nix.conf` lines for the cache URL. The create call is the
-      arbiter of slug ownership: a conflict re-prompts, and re-creating an
+      unauthenticated `/_version` route until it answers with the build just
+      uploaded, since an older Worker version (with the old configuration) can
+      keep answering while the new one propagates. Step two: claim global admin
+      at `POST /signup` with the deployer's id_token (idempotent for the same
+      principal; a `CUPBOARD_SIGNUP_SECRET` on the Worker is presented too,
+      prompted for when only the Worker knows it), exchange it for an admin
+      token and cache that token, prompt for the first cache's slug (typed
+      inline after the `<url>/t/` prefix; no default), create the tenant, and
+      poll its `/t/<slug>/pubkey` (whose first success creates the signing key)
+      before printing the `nix.conf` lines for the cache URL. The create call is
+      the arbiter of slug ownership: a conflict re-prompts, and re-creating an
       identical tenant is idempotent, so re-runs converge.
 - [x] Admin binding: the deploy seeds the control Worker's signup gate
       (`CUPBOARD_SIGNUP_*`) from the plan's Admin choice. The default is the

@@ -57,7 +57,8 @@ const artifact: DeploymentArtifact = {
 	},
 	controlBundle: { mainModule: 'worker.js', code: 'control' },
 	tenantBundle: { mainModule: 'tenant-worker.js', code: 'tenant' },
-	d1Migrations: [{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }]
+	d1Migrations: [{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }],
+	buildVersion: 'abc123def456'
 };
 
 const silentReporter: Reporter = {
