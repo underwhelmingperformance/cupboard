@@ -103,7 +103,8 @@ describe('cloudflareLogin', () => {
 			accessToken: 'access-1',
 			refreshToken: 'refresh-1',
 			expiresAt: 1_000_000 + 3600 * 1000,
-			subject: undefined
+			subject: undefined,
+			idToken: undefined
 		});
 
 		const authorize = new URL(authorizeUrl);
@@ -129,11 +130,12 @@ describe('cloudflareLogin', () => {
 	});
 
 	it('captures the deployer identity from the id_token', async () => {
+		const issued = idToken('cf-user-1');
 		const { fetcher } = fakeCloudflare({
 			tokenBody: {
 				access_token: 'access-1',
 				expires_in: 3600,
-				id_token: idToken('cf-user-1')
+				id_token: issued
 			}
 		});
 
@@ -146,8 +148,13 @@ describe('cloudflareLogin', () => {
 
 		expect({
 			subject: grant.subject,
+			idToken: grant.idToken,
 			requestsIdentity: deployScopes.includes('openid')
-		}).toStrictEqual({ subject: 'cf-user-1', requestsIdentity: true });
+		}).toStrictEqual({
+			subject: 'cf-user-1',
+			idToken: issued,
+			requestsIdentity: true
+		});
 	});
 
 	it('tolerates a malformed id_token, leaving the identity unknown', async () => {
@@ -217,10 +224,11 @@ describe('refreshCloudflareGrant', () => {
 		accessToken: 'access-old',
 		refreshToken: 'refresh-old',
 		expiresAt: 0,
-		subject: 'cf-user-1'
+		subject: 'cf-user-1',
+		idToken: 'id-token-old'
 	};
 
-	it('renews the grant, keeping the refresh token and subject when not reissued', async () => {
+	it('renews the grant, keeping the refresh token and identity when not reissued', async () => {
 		const { fetcher, tokenRequests } = fakeCloudflare({
 			tokenBody: { access_token: 'access-4', expires_in: 1800 }
 		});
@@ -236,7 +244,8 @@ describe('refreshCloudflareGrant', () => {
 				accessToken: 'access-4',
 				refreshToken: 'refresh-old',
 				expiresAt: 5000 + 1800 * 1000,
-				subject: 'cf-user-1'
+				subject: 'cf-user-1',
+				idToken: 'id-token-old'
 			},
 			grantType: 'refresh_token',
 			refreshToken: 'refresh-old'
@@ -244,12 +253,13 @@ describe('refreshCloudflareGrant', () => {
 	});
 
 	it('adopts a rotated refresh token and a reissued identity', async () => {
+		const reissued = idToken('cf-user-2');
 		const { fetcher } = fakeCloudflare({
 			tokenBody: {
 				access_token: 'access-5',
 				refresh_token: 'refresh-new',
 				expires_in: 1800,
-				id_token: idToken('cf-user-2')
+				id_token: reissued
 			}
 		});
 
@@ -257,8 +267,13 @@ describe('refreshCloudflareGrant', () => {
 
 		expect({
 			refreshToken: grant?.refreshToken,
-			subject: grant?.subject
-		}).toStrictEqual({ refreshToken: 'refresh-new', subject: 'cf-user-2' });
+			subject: grant?.subject,
+			idToken: grant?.idToken
+		}).toStrictEqual({
+			refreshToken: 'refresh-new',
+			subject: 'cf-user-2',
+			idToken: reissued
+		});
 	});
 
 	it('returns undefined when the grant has no refresh token', async () => {

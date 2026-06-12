@@ -21,6 +21,7 @@ import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
+import type { SignupResponse } from '@cupboard/protocol/signup';
 import type {
 	DeletePathResponse,
 	UploadStatusResponse
@@ -28,6 +29,7 @@ import type {
 import { describe, expect, it } from 'vitest';
 
 import {
+	CupboardHttpError,
 	InvalidCacheNameError,
 	MalformedResponseError,
 	ResponseSchemaMismatchError
@@ -100,6 +102,61 @@ describe('CupboardClient.tokenExchange', () => {
 			contentType: 'application/x-www-form-urlencoded',
 			body: 'grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Atoken-exchange&subject_token=subject.jwt&subject_token_type=urn%3Aietf%3Aparams%3Aoauth%3Atoken-type%3Aid_token'
 		});
+	});
+});
+
+describe('CupboardClient.signup', () => {
+	const response: SignupResponse = {
+		issuer: 'https://dash.cloudflare.com',
+		subject: 'cf-user-1',
+		claimed: true
+	};
+
+	it('posts a urlencoded claim and returns the established principal', async () => {
+		const { client, captured } = capturingClient(response);
+
+		const result = await client.signup({ subject_token: 'subject.jwt' });
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/signup',
+			method: 'POST',
+			authorization: undefined,
+			contentType: 'application/x-www-form-urlencoded',
+			body: 'subject_token=subject.jwt'
+		});
+	});
+
+	it('sends the claim secret when one is given', async () => {
+		const { client, captured } = capturingClient(response);
+
+		await client.signup({
+			subject_token: 'subject.jwt',
+			claim_secret: 'secret-1'
+		});
+
+		expect(captured()?.body).toBe(
+			'subject_token=subject.jwt&claim_secret=secret-1'
+		);
+	});
+
+	it('throws a CupboardHttpError when the gate declines the claim', async () => {
+		const client = new CupboardClient(new URL('https://cupboard.test'), () =>
+			Promise.resolve(
+				new Response('claimed by another principal', { status: 409 })
+			)
+		);
+
+		await expect(
+			client.signup({ subject_token: 'subject.jwt' })
+		).rejects.toStrictEqual(
+			new CupboardHttpError(
+				'POST',
+				'/signup',
+				409,
+				'claimed by another principal'
+			)
+		);
 	});
 });
 

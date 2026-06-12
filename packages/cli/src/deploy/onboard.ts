@@ -1,18 +1,83 @@
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { cacheNamePattern } from '@cupboard/nix/scalars';
+import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
+import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
+
+import { writeCachedToken } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import { CupboardHttpError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
+import { deployerOwner, type OwnerBinding, type OwnerChoice } from './owner.ts';
 import type { DeployUi } from './ui.ts';
 
-/** What a single `/pubkey` probe concluded. */
-type Probe =
-	| { readonly kind: 'ready'; readonly publicKey: string }
+/** What a single probe of the deployment concluded. */
+type Probe<T> =
+	| { readonly kind: 'ready'; readonly value: T }
 	| { readonly kind: 'retry'; readonly detail: string };
 
+/** How the agreed admin gate relates to the person deploying. */
+export type OnboardAdmin =
+	| {
+			readonly kind: 'claimable';
+			readonly owner: OwnerBinding;
+			/** The deployer's id_token, the subject token the gate admits. */
+			readonly idToken: string;
+	  }
+	| { readonly kind: 'other'; readonly owner: OwnerBinding }
+	| { readonly kind: 'none' };
+
+/**
+ * The admin gate as the onboarding sees it: claimable right now when the
+ * agreed binding is the deployer's own identity and the login carried an
+ * id_token; otherwise someone else's to claim, or closed.
+ */
+export function onboardAdminFor(
+	choice: OwnerChoice,
+	deployer?: { readonly subject: string; readonly idToken: string }
+): OnboardAdmin {
+	if (choice.kind === 'none') {
+		return { kind: 'none' };
+	}
+
+	if (deployer === undefined) {
+		return { kind: 'other', owner: choice.owner };
+	}
+
+	const own = deployerOwner(deployer.subject);
+	const matches =
+		choice.owner.issuer === own.issuer &&
+		choice.owner.subject === own.subject &&
+		choice.owner.audience === own.audience;
+
+	return matches
+		? { kind: 'claimable', owner: choice.owner, idToken: deployer.idToken }
+		: { kind: 'other', owner: choice.owner };
+}
+
 export type OnboardOutcome =
-	| { readonly kind: 'ready'; readonly url: string; readonly publicKey: string }
+	| {
+			readonly kind: 'ready';
+			/** The deployment's base URL (the control plane). */
+			readonly url: string;
+			readonly slug: string;
+			/** The cache URL Nix talks to: `<url>/t/<slug>`. */
+			readonly cacheUrl: string;
+			readonly publicKey: string;
+	  }
+	| { readonly kind: 'no-admin'; readonly url: string }
+	| {
+			readonly kind: 'admin-elsewhere';
+			readonly url: string;
+			readonly owner: OwnerBinding;
+	  }
+	| {
+			readonly kind: 'claim-refused';
+			readonly url: string;
+			readonly status: number;
+	  }
+	| { readonly kind: 'cancelled'; readonly url: string }
 	| {
 			readonly kind: 'unreachable';
 			readonly url: string;
@@ -21,92 +86,309 @@ export type OnboardOutcome =
 	  }
 	| { readonly kind: 'no-subdomain' };
 
+/** The slice of {@link CupboardClient} the onboarding drives. */
+export type OnboardClient = Pick<
+	CupboardClient,
+	'health' | 'signup' | 'tokenExchange' | 'createTenant' | 'publicKey'
+>;
+
 export interface OnboardOptions {
 	readonly api: CloudflareApi;
 	readonly ui: DeployUi;
-	/** The control Worker's script name, which serves the cache. */
+	/** The control Worker's script name, which serves the control plane. */
 	readonly controlScriptName: string;
 	readonly domain: string | undefined;
-	readonly clientFactory?: (url: string) => Pick<CupboardClient, 'publicKey'>;
+	readonly admin: OnboardAdmin;
+	readonly clientFactory?: (url: string) => OnboardClient;
+	readonly cacheToken?: (token: string, target: string) => Promise<void>;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly attempts?: number;
 }
 
 const defaultAttempts = 30;
 const attemptDelayMs = 4000;
+const conflictStatusCode = 409;
+
+/** Why `value` cannot be a tenant slug, or undefined when it can. */
+export function slugProblem(value: string): string | undefined {
+	if (value === '') {
+		return 'a slug is required';
+	}
+
+	if (!cacheNamePattern.test(value)) {
+		return (
+			'use lowercase letters, digits, ".", "_" or "-", starting with a ' +
+			'letter or digit (63 characters at most)'
+		);
+	}
+
+	return undefined;
+}
 
 /**
- * Turns a deployed Worker into a usable cache: resolves its URL (the custom
- * domain, or the account's workers.dev subdomain with the script's route
- * enabled), then polls `/pubkey`, whose first success creates the signing key.
- * Routing and DNS take time to settle, so not-yet-routable answers are
- * retried; an authentication failure on the unauthenticated endpoint is
- * genuine and propagates.
+ * Turns a deployed Worker into a usable cache, in two steps. First the
+ * deployment must be up: its URL is resolved (the custom domain, or the
+ * account's workers.dev subdomain with the script's route enabled) and the
+ * unauthenticated health route polled until it answers, since routing and DNS
+ * take time to settle. Then it is initialised: the deployer claims global
+ * admin with their id_token, the admin token is cached for the other
+ * commands, a slug is chosen for the first cache (the create call is the
+ * arbiter of slug ownership, so a conflict re-prompts), and the new cache's
+ * `/pubkey` is polled, whose first success creates the signing key.
  */
 export async function onboardDeployment(
 	options: OnboardOptions
 ): Promise<OnboardOutcome> {
-	const { ui } = options;
+	const { ui, admin } = options;
 	const clientFactory =
 		options.clientFactory ?? ((url: string) => CupboardClient.fromUrl(url));
+	const cacheToken = options.cacheToken ?? writeCachedToken;
 	const sleep = options.sleep ?? ((ms: number) => delay(ms));
 	const attempts = options.attempts ?? defaultAttempts;
 
-	let url: string;
+	const resolved = await resolveDeploymentUrl(options);
 
-	if (options.domain === undefined) {
-		const subdomain = await options.api.getWorkersDevSubdomain();
-
-		if (subdomain === undefined) {
-			return { kind: 'no-subdomain' };
-		}
-
-		// With a custom domain the workers.dev route stays off: a private cache
-		// gains nothing from a second public hostname.
-		await ui
-			.reporter()
-			.phase('Enabling the workers.dev route', () =>
-				options.api.enableWorkersDevRoute(options.controlScriptName)
-			);
-
-		url = `https://${options.controlScriptName}.${subdomain}.workers.dev`;
-	} else {
-		url = `https://${options.domain}`;
+	if (resolved === undefined) {
+		return { kind: 'no-subdomain' };
 	}
 
+	const url = resolved;
 	const client = clientFactory(url);
-	let ready: string | undefined;
+
+	const up = await pollProbe(
+		ui,
+		'Waiting for the Worker',
+		attempts,
+		sleep,
+		() => client.health()
+	);
+
+	if (up.kind === 'gave-up') {
+		return { kind: 'unreachable', url, lastProbe: up.lastProbe };
+	}
+
+	if (admin.kind === 'none') {
+		return { kind: 'no-admin', url };
+	}
+
+	if (admin.kind === 'other') {
+		return { kind: 'admin-elsewhere', url, owner: admin.owner };
+	}
+
+	const claim = await claimAdmin(ui, client, url, admin.idToken, cacheToken);
+
+	if (claim.kind === 'refused') {
+		return { kind: 'claim-refused', url, status: claim.status };
+	}
+
+	const tenant = await createFirstTenant(
+		ui,
+		client,
+		url,
+		claim.token,
+		admin.owner
+	);
+
+	if (tenant === undefined) {
+		return { kind: 'cancelled', url };
+	}
+
+	const cacheUrl = `${url}/t/${tenant.id}`;
+	const cacheClient = clientFactory(cacheUrl);
+
+	const key = await pollProbe(
+		ui,
+		'Initialising the cache',
+		attempts,
+		sleep,
+		() => cacheClient.publicKey()
+	);
+
+	if (key.kind === 'gave-up') {
+		return { kind: 'unreachable', url: cacheUrl, lastProbe: key.lastProbe };
+	}
+
+	return {
+		kind: 'ready',
+		url,
+		slug: tenant.id,
+		cacheUrl,
+		publicKey: key.value
+	};
+}
+
+async function resolveDeploymentUrl(
+	options: OnboardOptions
+): Promise<string | undefined> {
+	if (options.domain !== undefined) {
+		return `https://${options.domain}`;
+	}
+
+	const subdomain = await options.api.getWorkersDevSubdomain();
+
+	if (subdomain === undefined) {
+		return undefined;
+	}
+
+	// With a custom domain the workers.dev route stays off: a private cache
+	// gains nothing from a second public hostname.
+	await options.ui
+		.reporter()
+		.phase('Enabling the workers.dev route', () =>
+			options.api.enableWorkersDevRoute(options.controlScriptName)
+		);
+
+	return `https://${options.controlScriptName}.${subdomain}.workers.dev`;
+}
+
+type ClaimResult =
+	| { readonly kind: 'claimed'; readonly token: string }
+	| { readonly kind: 'refused'; readonly status: number };
+
+/**
+ * Claims global admin with the deployer's id_token (idempotent for the same
+ * principal), exchanges it for an admin access token, and caches that token so
+ * the admin commands work without a separate `cupboard login`. A refusal is an
+ * answer, not a failure: the gate may name a different principal by the time
+ * the claim lands.
+ */
+async function claimAdmin(
+	ui: DeployUi,
+	client: OnboardClient,
+	url: string,
+	idToken: string,
+	cacheToken: (token: string, target: string) => Promise<void>
+): Promise<ClaimResult> {
+	let claim:
+		| {
+				readonly claimed: boolean;
+				readonly subject: string;
+				readonly token: string;
+		  }
+		| undefined;
+
+	try {
+		claim = await ui.reporter().phase('Claiming admin', async () => {
+			const signup = await client.signup({ subject_token: idToken });
+			const exchanged = await client.tokenExchange(
+				idToken,
+				subjectTokenTypeIdToken
+			);
+
+			await cacheToken(exchanged.access_token, url);
+
+			return {
+				claimed: signup.claimed,
+				subject: signup.subject,
+				token: exchanged.access_token
+			};
+		});
+	} catch (error) {
+		if (error instanceof CupboardHttpError) {
+			return { kind: 'refused', status: error.status };
+		}
+
+		throw error;
+	}
+
+	ui.success(
+		claim.claimed
+			? `Claimed global admin as ${claim.subject}`
+			: `Already the admin (${claim.subject}); token refreshed`
+	);
+
+	return { kind: 'claimed', token: claim.token };
+}
+
+/**
+ * Prompts for a slug (no default: the name is the operator's to choose) and
+ * creates the tenant under it. The create call is the arbiter of ownership:
+ * a slug can be claimed between the prompt and the request landing, and the
+ * conflict answer re-prompts. Re-creating an identical tenant is idempotent
+ * on the server, so a re-run converges by entering the same slug.
+ */
+async function createFirstTenant(
+	ui: DeployUi,
+	client: OnboardClient,
+	url: string,
+	token: string,
+	owner: OwnerBinding
+): Promise<ParsedTenantSummary | undefined> {
+	for (;;) {
+		const slug = await ui.prefixedText({
+			message: 'Choose a slug for the first cache',
+			prefix: `${url}/t/`,
+			problem: slugProblem
+		});
+
+		if (slug === undefined) {
+			return undefined;
+		}
+
+		try {
+			return await ui.reporter().phase(`Creating ${slug}`, () =>
+				client.createTenant(token, {
+					id: slug,
+					readMode: 'public',
+					ownerIssuer: owner.issuer,
+					ownerSubject: owner.subject,
+					ownerAudience: owner.audience
+				})
+			);
+		} catch (error) {
+			if (
+				error instanceof CupboardHttpError &&
+				error.status === conflictStatusCode
+			) {
+				ui.warn(`"${slug}" is already taken; choose another.`);
+				continue;
+			}
+
+			throw error;
+		}
+	}
+}
+
+async function pollProbe<T>(
+	ui: DeployUi,
+	label: string,
+	attempts: number,
+	sleep: (ms: number) => Promise<void>,
+	probe: () => Promise<T>
+): Promise<
+	| { readonly kind: 'ready'; readonly value: T }
+	| { readonly kind: 'gave-up'; readonly lastProbe: string }
+> {
+	let ready: { value: T } | undefined;
 	let lastProbe = 'no answer';
 
-	await ui.reporter().phase('Initialising the cache', async (context) => {
+	await ui.reporter().phase(label, async (context) => {
 		for (let attempt = 1; attempt <= attempts; attempt += 1) {
-			const probe = await probePublicKey(client);
+			const probed = await attemptProbe(probe);
 
-			if (probe.kind === 'ready') {
-				ready = probe.publicKey;
+			if (probed.kind === 'ready') {
+				ready = { value: probed.value };
 				return;
 			}
 
-			lastProbe = probe.detail;
+			lastProbe = probed.detail;
 
 			if (attempt < attempts) {
-				context.fact('waiting for the Worker, attempt', attempt);
-				context.fact('last answer', probe.detail);
+				context.fact('attempt', attempt);
+				context.fact('last answer', probed.detail);
 				await sleep(attemptDelayMs);
 			}
 		}
 	});
 
 	return ready === undefined
-		? { kind: 'unreachable', url, lastProbe }
-		: { kind: 'ready', url, publicKey: ready };
+		? { kind: 'gave-up', lastProbe }
+		: { kind: 'ready', value: ready.value };
 }
 
-async function probePublicKey(
-	client: Pick<CupboardClient, 'publicKey'>
-): Promise<Probe> {
+async function attemptProbe<T>(probe: () => Promise<T>): Promise<Probe<T>> {
 	try {
-		return { kind: 'ready', publicKey: await client.publicKey() };
+		return { kind: 'ready', value: await probe() };
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
 			if (retryableStatus(error.status)) {

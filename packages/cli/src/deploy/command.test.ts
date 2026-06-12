@@ -58,6 +58,7 @@ function pickerUi(choice?: string): DeployUi {
 		note: unexpected('note'),
 		menu: unexpected('menu'),
 		editText: unexpected('editText'),
+		prefixedText: unexpected('prefixedText'),
 		secret: unexpected('secret'),
 		chooseAccount: () => Promise.resolve(choice),
 		openBrowser: unexpected('openBrowser'),

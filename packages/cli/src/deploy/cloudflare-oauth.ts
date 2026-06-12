@@ -82,6 +82,8 @@ export interface CloudflareGrant {
 	readonly expiresAt: number;
 	/** The Cloudflare user the grant belongs to (the id_token `sub`). */
 	readonly subject: string | undefined;
+	/** The raw id_token, presentable as a subject token to a cupboard server. */
+	readonly idToken: string | undefined;
 }
 
 export interface CloudflareLoginOptions {
@@ -195,7 +197,7 @@ async function exchangeForGrant(
 	fetcher: typeof fetch,
 	form: Readonly<Record<string, string>>,
 	now: () => number,
-	previous?: Pick<CloudflareGrant, 'refreshToken' | 'subject'>
+	previous?: Pick<CloudflareGrant, 'refreshToken' | 'subject' | 'idToken'>
 ): Promise<CloudflareGrant> {
 	const response = await fetcher(tokenEndpoint, postForm(form));
 
@@ -230,6 +232,7 @@ async function exchangeForGrant(
 		// them.
 		refreshToken: parsed.data.refresh_token ?? previous?.refreshToken,
 		expiresAt: now() + expiresIn * 1000,
-		subject: subject ?? previous?.subject
+		subject: subject ?? previous?.subject,
+		idToken: parsed.data.id_token ?? previous?.idToken
 	};
 }

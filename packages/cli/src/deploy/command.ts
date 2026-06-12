@@ -32,7 +32,7 @@ import {
 } from './deploy-run.ts';
 import { checkDomainOption, domainProblem } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
-import { onboardDeployment } from './onboard.ts';
+import { onboardAdminFor, onboardDeployment } from './onboard.ts';
 import { renameResource, withCrons, withSignupGate } from './overrides.ts';
 import {
 	cloudflareDashIssuer,
@@ -875,9 +875,10 @@ async function deployFlow(
 	let accountId: string;
 	let credentialSource: CredentialSource;
 	let subject: string | undefined;
+	let idToken: string | undefined;
 
 	try {
-		({ client, api, accountId, credentialSource, subject } =
+		({ client, api, accountId, credentialSource, subject, idToken } =
 			await resolveCloudflare(
 				cliOptions.account,
 				(accounts) => chooseDeployAccount(ui, accounts, interactive),
@@ -1174,45 +1175,89 @@ async function deployFlow(
 		api: apiFor(agreed.accountId),
 		ui,
 		controlScriptName: agreed.config.control.name,
-		domain: agreed.domain
+		domain: agreed.domain,
+		admin: onboardAdminFor(
+			agreed.owner,
+			subject !== undefined && idToken !== undefined
+				? { subject, idToken }
+				: undefined
+		)
 	});
 
-	if (outcome.kind === 'no-subdomain') {
-		ui.warn(
-			'The account has no workers.dev subdomain, so the cache has no URL ' +
-				'yet. Register one in the Cloudflare dashboard (Workers & Pages), ' +
-				'then run `cupboard config <url> <pubkey>` for the nix.conf lines.'
-		);
-		ui.outro('Deployed.');
-		return;
+	switch (outcome.kind) {
+		case 'no-subdomain': {
+			ui.warn(
+				'The account has no workers.dev subdomain, so the deployment has ' +
+					'no URL yet. Register one in the Cloudflare dashboard ' +
+					'(Workers & Pages), then re-run `cupboard init`.'
+			);
+			ui.outro('Deployed.');
+			return;
+		}
+
+		case 'unreachable': {
+			ui.warn(
+				`Deployed, but ${outcome.url} did not come online in time ` +
+					`(last answer: ${outcome.lastProbe}). A fresh custom domain can ` +
+					'take a while in DNS. Once it responds, re-run `cupboard init` ' +
+					'to finish setting up.'
+			);
+			ui.outro('Deployed.');
+			return;
+		}
+
+		case 'no-admin': {
+			ui.warn(
+				'No admin is bound, so the deployment cannot be claimed or hold ' +
+					'any caches. Re-run `cupboard init` and bind an admin to ' +
+					'finish setting up.'
+			);
+			ui.outro('Deployed.');
+			return;
+		}
+
+		case 'admin-elsewhere': {
+			ui.info(
+				`The signup gate names ${outcome.owner.subject}; that identity ` +
+					'claims the deployment and creates its caches.'
+			);
+			ui.outro(`Deployed. Hand ${outcome.url} to the admin.`);
+			return;
+		}
+
+		case 'claim-refused': {
+			ui.warn(
+				`The server refused the admin claim (HTTP ${String(outcome.status)}). ` +
+					'The deployment may already be claimed by a different identity.'
+			);
+			ui.outro('Deployed.');
+			return;
+		}
+
+		case 'cancelled': {
+			ui.info(
+				'No cache was created. Re-run `cupboard init` to choose a slug ' +
+					'when you are ready.'
+			);
+			ui.outro('Deployed and claimed.');
+			return;
+		}
+
+		case 'ready': {
+			ui.note('Add to your nix.conf (e.g. /etc/nix/nix.conf)', [
+				{ label: 'Cache URL', value: outcome.cacheUrl },
+				{ label: '', value: '' },
+				...new NixConfig(outcome.cacheUrl, outcome.publicKey)
+					.render()
+					.trimEnd()
+					.split('\n')
+					.map((line) => ({ label: '', value: line }))
+			]);
+
+			ui.outro(
+				`Deployed and initialised. Next: cupboard push ${outcome.cacheUrl} ./result`
+			);
+			return;
+		}
 	}
-
-	if (outcome.kind === 'unreachable') {
-		ui.warn(
-			`Deployed, but ${outcome.url} did not come online in time ` +
-				`(last answer: ${outcome.lastProbe}). A fresh custom domain can take ` +
-				'a while in DNS; a persistent HTTP answer means the Worker is up ' +
-				'but not serving the cache there. Once it responds, run ' +
-				`\`cupboard config ${outcome.url} <pubkey>\` for the nix.conf lines.`
-		);
-		ui.outro('Deployed.');
-		return;
-	}
-
-	ui.note('Add to your nix.conf (e.g. /etc/nix/nix.conf)', [
-		{ label: 'Cache URL', value: outcome.url },
-		{ label: '', value: '' },
-		...new NixConfig(outcome.url, outcome.publicKey)
-			.render()
-			.trimEnd()
-			.split('\n')
-			.map((line) => ({ label: '', value: line }))
-	]);
-
-	const nextSteps = [
-		...(agreed.owner.kind === 'owner' ? [`cupboard login ${outcome.url}`] : []),
-		`cupboard push ${outcome.url} ./result`
-	];
-
-	ui.outro(`Deployed and initialised. Next: ${nextSteps.join(' · ')}`);
 }
