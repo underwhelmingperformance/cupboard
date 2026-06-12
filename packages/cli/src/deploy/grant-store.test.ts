@@ -19,7 +19,8 @@ describe('grant store', () => {
 				accessToken: 'access-1',
 				refreshToken: 'refresh-1',
 				expiresAt: 1_700_000_000_000,
-				subject: 'cf-user-1'
+				subject: 'cf-user-1',
+				idToken: 'id-token-1'
 			};
 
 			await writeCachedGrant(grant);
@@ -33,13 +34,14 @@ describe('grant store', () => {
 	);
 
 	testWithConfigHome(
-		'round-trips a grant without a refresh token or subject',
+		'round-trips a grant without a refresh token or identity',
 		async () => {
 			const grant = {
 				accessToken: 'access-2',
 				refreshToken: undefined,
 				expiresAt: 42,
-				subject: undefined
+				subject: undefined,
+				idToken: undefined
 			};
 
 			await writeCachedGrant(grant);
@@ -49,13 +51,14 @@ describe('grant store', () => {
 	);
 
 	testWithConfigHome(
-		'reads a cache written before subjects existed',
+		'reads a cache written before identities existed',
 		async ({ configHome }) => {
 			await writeCachedGrant({
 				accessToken: 'seed',
 				refreshToken: undefined,
 				expiresAt: 1,
-				subject: undefined
+				subject: undefined,
+				idToken: undefined
 			});
 			await writeFile(
 				grantFile(configHome),
@@ -66,7 +69,8 @@ describe('grant store', () => {
 				accessToken: 'access-5',
 				refreshToken: undefined,
 				expiresAt: 42,
-				subject: undefined
+				subject: undefined,
+				idToken: undefined
 			});
 		}
 	);
@@ -82,7 +86,8 @@ describe('grant store', () => {
 				accessToken: 'access-3',
 				refreshToken: undefined,
 				expiresAt: 42,
-				subject: undefined
+				subject: undefined,
+				idToken: undefined
 			};
 
 			// Establish the directory, then corrupt the file in place.
@@ -100,7 +105,8 @@ describe('grant store', () => {
 				accessToken: 'access-4',
 				refreshToken: undefined,
 				expiresAt: 42,
-				subject: undefined
+				subject: undefined,
+				idToken: undefined
 			});
 			await writeFile(
 				grantFile(configHome),

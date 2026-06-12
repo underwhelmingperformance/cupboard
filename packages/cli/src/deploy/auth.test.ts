@@ -11,14 +11,16 @@ const freshGrant: CloudflareGrant = {
 	accessToken: 'cached-access',
 	refreshToken: 'cached-refresh',
 	expiresAt: now + hour,
-	subject: 'cf-user-1'
+	subject: 'cf-user-1',
+	idToken: 'cached-id-token'
 };
 
 const expiredGrant: CloudflareGrant = {
 	accessToken: 'stale-access',
 	refreshToken: 'stale-refresh',
 	expiresAt: now - hour,
-	subject: 'cf-user-1'
+	subject: 'cf-user-1',
+	idToken: 'stale-id-token'
 };
 
 interface ChainCalls {
@@ -92,18 +94,20 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'env-token',
 			source: 'environment',
-			subject: undefined
+			subject: undefined,
+			idToken: undefined
 		});
 		expect(calls.logins).toBe(0);
 	});
 
-	it('uses a cached grant that is still valid, surfacing its subject', async () => {
+	it('uses a cached grant that is still valid, surfacing its identity', async () => {
 		const { chain, calls } = chainWith({ storedGrant: freshGrant });
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'cached-access',
 			source: 'cached login',
-			subject: 'cf-user-1'
+			subject: 'cf-user-1',
+			idToken: 'cached-id-token'
 		});
 		expect(calls.refreshedWith).toStrictEqual([]);
 	});
@@ -113,7 +117,8 @@ describe('resolveCredential', () => {
 			accessToken: 'renewed-access',
 			refreshToken: 'renewed-refresh',
 			expiresAt: now + hour,
-			subject: 'cf-user-1'
+			subject: 'cf-user-1',
+			idToken: 'renewed-id-token'
 		};
 		const { chain, calls } = chainWith({
 			storedGrant: expiredGrant,
@@ -123,7 +128,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'renewed-access',
 			source: 'cached login',
-			subject: 'cf-user-1'
+			subject: 'cf-user-1',
+			idToken: 'renewed-id-token'
 		});
 		expect(calls.written).toStrictEqual([renewed]);
 	});
@@ -137,7 +143,8 @@ describe('resolveCredential', () => {
 			accessToken: 'renewed-access',
 			refreshToken: 'renewed-refresh',
 			expiresAt: now + hour,
-			subject: 'cf-user-1'
+			subject: 'cf-user-1',
+			idToken: 'renewed-id-token'
 		};
 		const { chain, calls } = chainWith({
 			storedGrant: nearlyExpired,
@@ -147,7 +154,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'renewed-access',
 			source: 'cached login',
-			subject: 'cf-user-1'
+			subject: 'cf-user-1',
+			idToken: 'renewed-id-token'
 		});
 		expect(calls.refreshedWith).toStrictEqual([nearlyExpired]);
 	});
@@ -161,7 +169,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'wrangler-token',
 			source: 'wrangler',
-			subject: undefined
+			subject: undefined,
+			idToken: undefined
 		});
 		expect({
 			refreshedWith: calls.refreshedWith,
@@ -174,14 +183,16 @@ describe('resolveCredential', () => {
 			accessToken: 'login-access',
 			refreshToken: 'login-refresh',
 			expiresAt: now + hour,
-			subject: 'cf-user-2'
+			subject: 'cf-user-2',
+			idToken: 'login-id-token'
 		};
 		const { chain, calls } = chainWith({ loginGrant });
 
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'login-access',
 			source: 'browser login',
-			subject: 'cf-user-2'
+			subject: 'cf-user-2',
+			idToken: 'login-id-token'
 		});
 		expect(calls.written).toStrictEqual([loginGrant]);
 	});
@@ -191,7 +202,8 @@ describe('resolveCredential', () => {
 			accessToken: 'login-access',
 			refreshToken: 'login-refresh',
 			expiresAt: now + hour,
-			subject: undefined
+			subject: undefined,
+			idToken: undefined
 		};
 		const { chain } = chainWith({
 			wranglerToken: 'wrangler-token',
@@ -202,7 +214,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(withoutWrangler)).toStrictEqual({
 			token: 'login-access',
 			source: 'browser login',
-			subject: undefined
+			subject: undefined,
+			idToken: undefined
 		});
 	});
 
@@ -215,7 +228,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'cached-access',
 			source: 'cached login',
-			subject: 'cf-user-1'
+			subject: 'cf-user-1',
+			idToken: 'cached-id-token'
 		});
 	});
 
@@ -224,7 +238,8 @@ describe('resolveCredential', () => {
 			accessToken: 'login-access',
 			refreshToken: 'login-refresh',
 			expiresAt: now + hour,
-			subject: 'cf-user-9'
+			subject: 'cf-user-9',
+			idToken: 'login-id-token'
 		};
 		const { chain, calls } = chainWith({
 			storedGrant: { ...freshGrant, subject: undefined },
@@ -235,7 +250,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'login-access',
 			source: 'browser login',
-			subject: 'cf-user-9'
+			subject: 'cf-user-9',
+			idToken: 'login-id-token'
 		});
 		expect(calls.written).toStrictEqual([loginGrant]);
 	});
@@ -248,7 +264,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'cached-access',
 			source: 'cached login',
-			subject: undefined
+			subject: undefined,
+			idToken: 'cached-id-token'
 		});
 		expect(calls.logins).toBe(0);
 	});
@@ -262,7 +279,8 @@ describe('resolveCredential', () => {
 		expect(await resolveCredential(chain)).toStrictEqual({
 			token: 'cached-access',
 			source: 'cached login',
-			subject: 'cf-user-1'
+			subject: 'cf-user-1',
+			idToken: 'cached-id-token'
 		});
 		expect(calls.logins).toBe(0);
 	});

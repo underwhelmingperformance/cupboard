@@ -18,7 +18,8 @@ const storedGrantSchema = z.object({
 	access_token: z.string().min(1),
 	refresh_token: z.string().min(1).optional(),
 	expires_at: z.number().int(),
-	subject: z.string().min(1).optional()
+	subject: z.string().min(1).optional(),
+	id_token: z.string().min(1).optional()
 });
 
 /**
@@ -51,7 +52,8 @@ export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 		accessToken: parsed.data.access_token,
 		refreshToken: parsed.data.refresh_token,
 		expiresAt: parsed.data.expires_at,
-		subject: parsed.data.subject
+		subject: parsed.data.subject,
+		idToken: parsed.data.id_token
 	};
 }
 
@@ -63,7 +65,8 @@ export async function writeCachedGrant(grant: CloudflareGrant): Promise<void> {
 			? {}
 			: { refresh_token: grant.refreshToken }),
 		expires_at: grant.expiresAt,
-		...(grant.subject === undefined ? {} : { subject: grant.subject })
+		...(grant.subject === undefined ? {} : { subject: grant.subject }),
+		...(grant.idToken === undefined ? {} : { id_token: grant.idToken })
 	};
 
 	await writeSecretFile(grantFilePath(), `${JSON.stringify(stored)}\n`);

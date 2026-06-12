@@ -30,6 +30,8 @@ export interface CloudflareCredential {
 	readonly source: CredentialSource;
 	/** The Cloudflare user behind an OAuth grant; undefined for raw tokens. */
 	readonly subject: string | undefined;
+	/** The grant's raw id_token, presentable to a cupboard server's signup. */
+	readonly idToken: string | undefined;
 }
 
 /**
@@ -113,7 +115,12 @@ export async function resolveCredential(
 	const fromEnv = chain.env.CLOUDFLARE_API_TOKEN ?? chain.env.CF_API_TOKEN;
 
 	if (fromEnv !== undefined && fromEnv !== '') {
-		return { token: fromEnv, source: 'environment', subject: undefined };
+		return {
+			token: fromEnv,
+			source: 'environment',
+			subject: undefined,
+			idToken: undefined
+		};
 	}
 
 	const cached = await chain.readGrant();
@@ -123,7 +130,8 @@ export async function resolveCredential(
 			return {
 				token: cached.accessToken,
 				source: 'cached login',
-				subject: cached.subject
+				subject: cached.subject,
+				idToken: cached.idToken
 			};
 		}
 
@@ -136,7 +144,8 @@ export async function resolveCredential(
 		return {
 			token: upgraded.accessToken,
 			source: 'browser login',
-			subject: upgraded.subject
+			subject: upgraded.subject,
+			idToken: upgraded.idToken
 		};
 	}
 
@@ -149,7 +158,8 @@ export async function resolveCredential(
 			return {
 				token: renewed.accessToken,
 				source: 'cached login',
-				subject: renewed.subject
+				subject: renewed.subject,
+				idToken: renewed.idToken
 			};
 		}
 	}
@@ -157,7 +167,12 @@ export async function resolveCredential(
 	const wrangler = await chain.readWranglerToken?.();
 
 	if (wrangler !== undefined) {
-		return { token: wrangler, source: 'wrangler', subject: undefined };
+		return {
+			token: wrangler,
+			source: 'wrangler',
+			subject: undefined,
+			idToken: undefined
+		};
 	}
 
 	const grant = await chain.login();
@@ -166,7 +181,8 @@ export async function resolveCredential(
 	return {
 		token: grant.accessToken,
 		source: 'browser login',
-		subject: grant.subject
+		subject: grant.subject,
+		idToken: grant.idToken
 	};
 }
 
@@ -177,6 +193,8 @@ export interface ResolvedAccount {
 	readonly credentialSource: CredentialSource;
 	/** The Cloudflare user behind an OAuth grant; undefined for raw tokens. */
 	readonly subject: string | undefined;
+	/** The grant's raw id_token, presentable to a cupboard server's signup. */
+	readonly idToken: string | undefined;
 }
 
 /**
@@ -202,7 +220,8 @@ export async function resolveCloudflare(
 			api: createCloudflareApi(client, fromEnv),
 			accountId: fromEnv,
 			credentialSource: credential.source,
-			subject: credential.subject
+			subject: credential.subject,
+			idToken: credential.idToken
 		};
 	}
 
@@ -223,6 +242,7 @@ export async function resolveCloudflare(
 		api: createCloudflareApi(client, accountId),
 		accountId,
 		credentialSource: credential.source,
-		subject: credential.subject
+		subject: credential.subject,
+		idToken: credential.idToken
 	};
 }
