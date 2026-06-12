@@ -27,6 +27,7 @@ import {
 	narObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
+import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
@@ -194,6 +195,7 @@ export class CommitPipelineService {
 
 		if (metadata.narSize > inlineVerifyMaxBytes) {
 			this.uploadState.markUploadPending(uploadId);
+			await this.requestVerification(tenant);
 
 			return Response.json({
 				storePathHash: metadata.storePathHash,
@@ -203,6 +205,23 @@ export class CommitPipelineService {
 		}
 
 		return this.commitInlineUpload(cache, uploadId, metadata, pending.r2Key);
+	}
+
+	// Asks for a prompt verification pass over the maintenance queue, so a
+	// pending commit becomes servable in seconds rather than at the next
+	// hourly sweep. Requested, not awaited: the sweep remains the backstop, so
+	// a failed send only delays the promotion and must never fail the commit.
+	private async requestVerification(tenant: string): Promise<void> {
+		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
+
+		try {
+			await this.context.env.MAINTENANCE_QUEUE.send(message);
+		} catch (error) {
+			console.warn('verification request not enqueued', {
+				tenant,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
 	}
 
 	// Commits a fresh inline upload row-first: mark the saga in progress, reserve the

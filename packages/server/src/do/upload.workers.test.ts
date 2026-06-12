@@ -1,6 +1,7 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
@@ -1117,9 +1118,31 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
+		// The deferral must ask for a prompt verification pass rather than
+		// leaving the upload to the hourly sweep.
+		const sent: unknown[] = [];
+		const metrics = { backlogCount: 0, backlogBytes: 0 };
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: (message: unknown) => {
+						sent.push(message);
+						return Promise.resolve({ metadata: { metrics } });
+					},
+					sendBatch: () => Promise.resolve({ metadata: { metrics } }),
+					metrics: () => Promise.resolve(metrics)
+				}
+			};
+			return Promise.resolve();
+		});
+
 		const commit = await commitUpload(token, upload.uploadId);
 
-		expect(commit.status).toBe('pending');
+		expect({ status: commit.status, sent }).toStrictEqual({
+			status: 'pending',
+			sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }]
+		});
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();

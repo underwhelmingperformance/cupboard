@@ -136,7 +136,16 @@ export class CupboardTestServer {
 					},
 					d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
 					r2Buckets: { BLOBS: r2Credentials.bucketName },
-					kvNamespaces: { TENANT_CACHE: 'tenant-cache' }
+					kvNamespaces: { TENANT_CACHE: 'tenant-cache' },
+					// The maintenance queue, consumed by the control Worker as in
+					// production, so a deferred commit's verification request is
+					// processed rather than dropped.
+					queueProducers: {
+						MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
+					},
+					queueConsumers: {
+						'cupboard-maintenance': { maxBatchSize: 10, maxBatchTimeout: 0 }
+					}
 				},
 				{
 					name: 'cupboard-tenant',
@@ -153,7 +162,10 @@ export class CupboardTestServer {
 						}
 					},
 					d1Databases: { CUPBOARD_DB: 'cupboard-e2e' },
-					r2Buckets: { BLOBS: r2Credentials.bucketName }
+					r2Buckets: { BLOBS: r2Credentials.bucketName },
+					queueProducers: {
+						MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
+					}
 				}
 			]
 		});
