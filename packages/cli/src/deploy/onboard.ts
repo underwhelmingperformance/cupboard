@@ -1,10 +1,9 @@
-import { setTimeout as delay } from 'node:timers/promises';
-
 import { cacheNamePattern } from '@cupboard/nix/scalars';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
 
+import { delayMs, throwIfAborted } from '../abort.ts';
 import { writeCachedToken } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import { CupboardHttpError } from '../errors.ts';
@@ -161,6 +160,7 @@ export interface OnboardOptions {
 	readonly buildVersion: string;
 	readonly claimSecret: ClaimSecret;
 	readonly r2: OnboardR2;
+	readonly signal?: AbortSignal;
 	/**
 	 * Fetches an id_token fit to present right now. The login's snapshot can
 	 * expire while the deploy runs, so the claim asks at the moment of use and
@@ -212,10 +212,13 @@ export async function onboardDeployment(
 ): Promise<OnboardOutcome> {
 	const { ui, admin } = options;
 	const clientFactory =
-		options.clientFactory ?? ((url: string) => CupboardClient.fromUrl(url));
+		options.clientFactory ??
+		((url: string) => CupboardClient.fromUrl(url, { signal: options.signal }));
 	const cacheToken = options.cacheToken ?? writeCachedToken;
-	const sleep = options.sleep ?? ((ms: number) => delay(ms));
 	const attempts = options.attempts ?? defaultAttempts;
+	const signal = options.signal;
+
+	throwIfAborted(signal);
 
 	const resolved = await resolveDeploymentUrl(options);
 
@@ -230,7 +233,8 @@ export async function onboardDeployment(
 		ui,
 		`Waiting for build ${options.buildVersion} to be ready`,
 		attempts,
-		sleep,
+		options.sleep,
+		signal,
 		async () => {
 			const live = await client.version();
 
@@ -333,7 +337,8 @@ export async function onboardDeployment(
 			tenantScriptName: options.tenantScriptName,
 			check: options.checkCredentials ?? checkR2Credentials,
 			attempts,
-			sleep
+			sleep: options.sleep,
+			signal
 		});
 	}
 
@@ -344,7 +349,8 @@ export async function onboardDeployment(
 		ui,
 		'Initialising the cache',
 		attempts,
-		sleep,
+		options.sleep,
+		signal,
 		async () => ({ kind: 'ready', value: await cacheClient.publicKey() })
 	);
 
@@ -439,10 +445,13 @@ async function ensureWorkerR2(deps: {
 	readonly tenantScriptName: string;
 	readonly check: typeof checkR2Credentials;
 	readonly attempts: number;
-	readonly sleep: (ms: number) => Promise<void>;
+	readonly sleep?: (ms: number) => Promise<void>;
+	readonly signal?: AbortSignal;
 }): Promise<void> {
 	const { ui, client, token, r2 } = deps;
 	let report: ParsedR2CredentialCheck;
+
+	throwIfAborted(deps.signal);
 
 	try {
 		report = await ui
@@ -480,6 +489,8 @@ async function ensureWorkerR2(deps: {
 	);
 
 	for (;;) {
+		throwIfAborted(deps.signal);
+
 		const pair = await promptR2CredentialPair(ui, r2.accountId);
 
 		if (pair === undefined) {
@@ -536,6 +547,7 @@ async function ensureWorkerR2(deps: {
 			'Waiting for the Worker to pick up the new credentials',
 			deps.attempts,
 			deps.sleep,
+			deps.signal,
 			async () => {
 				const report = await client.controlCheck(token);
 				const checked = report.r2;
@@ -717,7 +729,8 @@ async function pollProbe<T>(
 	ui: DeployUi,
 	label: string,
 	attempts: number,
-	sleep: (ms: number) => Promise<void>,
+	sleep: ((ms: number) => Promise<void>) | undefined,
+	signal: AbortSignal | undefined,
 	probe: () => Promise<Probe<T>>
 ): Promise<
 	| { readonly kind: 'ready'; readonly value: T }
@@ -728,6 +741,8 @@ async function pollProbe<T>(
 
 	await ui.reporter().phase(label, async (context) => {
 		for (let attempt = 1; attempt <= attempts; attempt += 1) {
+			throwIfAborted(signal);
+
 			const probed = await attemptProbe(probe);
 
 			if (probed.kind === 'ready') {
@@ -740,7 +755,7 @@ async function pollProbe<T>(
 			if (attempt < attempts) {
 				context.fact('attempt', attempt);
 				context.fact('last answer', probed.detail);
-				await sleep(attemptDelayMs);
+				await delayMs(attemptDelayMs, { delay: sleep, signal });
 			}
 		}
 	});

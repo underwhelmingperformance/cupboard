@@ -13,7 +13,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
 
@@ -51,7 +51,10 @@ function parsePriority(value: string): number {
 	return priority;
 }
 
-export function registerCacheCommands(program: Command): void {
+export function registerCacheCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const cache = program
 		.command('cache')
 		.description('Manage named caches: list, create, inspect and tear down.');
@@ -64,7 +67,9 @@ export function registerCacheCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runCacheList(token, reporter, client);
@@ -84,7 +89,9 @@ export function registerCacheCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runCacheCreate(
@@ -106,7 +113,9 @@ export function registerCacheCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runCacheRemove(
@@ -127,7 +136,9 @@ export function registerCacheCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runCacheInspect(name, token, reporter, client);

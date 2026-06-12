@@ -66,6 +66,7 @@ export interface CredentialChainOptions {
 	readonly wrangler: boolean;
 	/** Whether a browser is available to upgrade an identity-less grant. */
 	readonly interactive: boolean;
+	readonly signal?: AbortSignal;
 }
 
 /** The production {@link CredentialChain}: real store, endpoints and browser. */
@@ -76,9 +77,14 @@ export function defaultCredentialChain(
 		env: process.env,
 		readGrant: readCachedGrant,
 		writeGrant: writeCachedGrant,
-		refreshGrant: (previous) => refreshCloudflareGrant(previous),
+		refreshGrant: (previous) =>
+			refreshCloudflareGrant(previous, fetch, Date.now, options.signal),
 		...(options.wrangler ? { readWranglerToken } : {}),
-		login: () => cloudflareLogin({ openBrowser: options.openBrowser }),
+		login: () =>
+			cloudflareLogin({
+				openBrowser: options.openBrowser,
+				signal: options.signal
+			}),
 		upgradeLogin: options.interactive,
 		now: Date.now
 	};

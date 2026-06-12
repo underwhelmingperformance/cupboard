@@ -5,7 +5,7 @@ import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { createReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { InvalidCacheNameError } from '../errors.ts';
 
 export interface ConfigCredential {
@@ -65,7 +65,10 @@ export function runConfig(
 	);
 }
 
-export function registerConfigCommand(program: Command): void {
+export function registerConfigCommand(
+	program: Command,
+	_programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('config')
 		.description(

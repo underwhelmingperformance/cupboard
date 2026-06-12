@@ -36,6 +36,7 @@ import {
 } from '@cupboard/reporter';
 import { z } from 'zod';
 
+import { type Delay, delayMs } from '../abort.ts';
 import type { AccessCredential } from '../client/client.ts';
 import {
 	AttestationBundleInvalidError,
@@ -76,7 +77,8 @@ export interface PushDependencies {
 	readonly wait?: boolean;
 	readonly waitTimeoutSeconds?: number;
 	readonly waitPollIntervalMs?: number;
-	readonly sleep?: (ms: number) => Promise<void>;
+	readonly sleep?: Delay;
+	readonly signal?: AbortSignal;
 	readonly now?: () => number;
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
@@ -203,7 +205,8 @@ export async function runPush(
 					dependencies.waitTimeoutSeconds ?? defaultWaitTimeoutSeconds,
 				intervalMs:
 					dependencies.waitPollIntervalMs ?? defaultWaitPollIntervalMs,
-				sleep: dependencies.sleep ?? defaultSleep,
+				sleep: dependencies.sleep,
+				signal: dependencies.signal,
 				now: dependencies.now ?? Date.now
 			}
 		});
@@ -215,7 +218,8 @@ export async function runPush(
 interface WaitOptions {
 	readonly timeoutSeconds: number;
 	readonly intervalMs: number;
-	readonly sleep: (ms: number) => Promise<void>;
+	readonly sleep?: Delay;
+	readonly signal?: AbortSignal;
 	readonly now: () => number;
 }
 
@@ -1028,14 +1032,11 @@ async function waitForUploads(
 			throw new UploadWaitTimeoutError(pending.size, options.timeoutSeconds);
 		}
 
-		await options.sleep(options.intervalMs);
+		await delayMs(options.intervalMs, {
+			delay: options.sleep,
+			signal: options.signal
+		});
 	}
-}
-
-function defaultSleep(ms: number): Promise<void> {
-	return new Promise((resolve) => {
-		setTimeout(resolve, ms);
-	});
 }
 
 async function defaultReadAttestationBundle(path: string): Promise<Uint8Array> {

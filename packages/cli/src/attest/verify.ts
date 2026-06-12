@@ -60,6 +60,7 @@ export interface RemoteAttestationVerifyOptions extends AttestationPolicyOptions
 	readonly readPassword?: string;
 	readonly trustedPublicKey?: string;
 	readonly trustCachePubkey?: boolean;
+	readonly signal?: AbortSignal;
 }
 
 export interface VerifyResult {
@@ -137,7 +138,8 @@ export async function verifyRemoteAttestations(
 	const narInfo = await fetchNarInfo(
 		fetcher,
 		`${base}/${options.storePathHash}.narinfo`,
-		readHeaders
+		readHeaders,
+		options.signal
 	);
 	const publicKeys = await remoteTrustKeys(options, fetcher);
 
@@ -155,7 +157,8 @@ export async function verifyRemoteAttestations(
 	const descriptors = await fetchAttestationList(
 		fetcher,
 		`${base}/attestations/${options.storePathHash}`,
-		readHeaders
+		readHeaders,
+		options.signal
 	);
 	const predicateDescriptors = descriptors.filter(
 		(item) => item.predicateType === options.predicateType
@@ -180,7 +183,10 @@ export async function verifyRemoteAttestations(
 	return Promise.all(
 		selected.map(async (descriptor) => {
 			const bundleUrl = `${base}/attestation-bundles/${descriptor.digest}`;
-			const response = await fetcher(bundleUrl, { headers: readHeaders });
+			const response = await fetcher(bundleUrl, {
+				headers: readHeaders,
+				signal: options.signal
+			});
 
 			if (!response.ok) {
 				throw new Error(
@@ -393,9 +399,10 @@ function resultFor(
 async function fetchNarInfo(
 	fetcher: typeof fetch,
 	url: string,
-	headers: Headers
+	headers: Headers,
+	signal: AbortSignal | undefined
 ): Promise<NarInfo> {
-	const response = await fetcher(url, { headers });
+	const response = await fetcher(url, { headers, signal });
 
 	if (!response.ok) {
 		throw new Error('Could not fetch remote narinfo');
@@ -407,9 +414,10 @@ async function fetchNarInfo(
 async function fetchAttestationList(
 	fetcher: typeof fetch,
 	url: string,
-	headers: Headers
+	headers: Headers,
+	signal: AbortSignal | undefined
 ) {
-	const response = await fetcher(url, { headers });
+	const response = await fetcher(url, { headers, signal });
 
 	if (!response.ok) {
 		throw new Error('Could not fetch remote attestation list');
@@ -436,7 +444,9 @@ async function remoteTrustKeys(
 		);
 	}
 
-	const response = await fetcher(`${trimRight(options.url)}/pubkey`);
+	const response = await fetcher(`${trimRight(options.url)}/pubkey`, {
+		signal: options.signal
+	});
 
 	if (!response.ok) {
 		throw new Error('Could not fetch cache public key');

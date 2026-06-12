@@ -9,7 +9,7 @@ import {
 	loopbackLogin
 } from '../auth/oidc-login.ts';
 import { writeCachedToken } from '../auth/token-store.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import {
 	cloudflareLoopback,
@@ -54,7 +54,10 @@ export function mapDeviceLoginError(error: unknown, clientId: string): unknown {
 	return error;
 }
 
-export function registerLoginCommand(program: Command): void {
+export function registerLoginCommand(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('login')
 		.description(
@@ -75,7 +78,9 @@ export function registerLoginCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			// cupboard's own client has exact-match registered redirect URLs, so
 			// the loopback server must bind one of them; any other client keeps
 			// the ephemeral-port default.
@@ -83,7 +88,11 @@ export function registerLoginCommand(program: Command): void {
 
 			const idToken = await reporter.phase('Logging in', async (ctx) => {
 				ctx.fact('issuer', options.oidcIssuer);
-				const endpoints = await discoverOidcLogin(options.oidcIssuer);
+				const endpoints = await discoverOidcLogin(
+					options.oidcIssuer,
+					fetch,
+					programOptions.signal
+				);
 
 				if (options.headless === true) {
 					try {
@@ -94,7 +103,8 @@ export function registerLoginCommand(program: Command): void {
 								reporter.info(
 									`Visit ${verification.verificationUri} and enter code ${verification.userCode}`
 								);
-							}
+							},
+							signal: programOptions.signal
 						});
 					} catch (error) {
 						throw mapDeviceLoginError(error, options.clientId);
@@ -107,7 +117,8 @@ export function registerLoginCommand(program: Command): void {
 					openBrowser: (target) => {
 						openBrowser(target, reporter);
 					},
-					loopback: usesCupboardClient ? cloudflareLoopback : undefined
+					loopback: usesCupboardClient ? cloudflareLoopback : undefined,
+					signal: programOptions.signal
 				});
 			});
 

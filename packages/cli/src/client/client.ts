@@ -106,6 +106,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { z } from 'zod';
 
+import { throwIfAborted } from '../abort.ts';
 import {
 	CupboardHttpError,
 	CupboardUploadError,
@@ -143,11 +144,22 @@ export class CupboardClient {
 		// Prepended to path-scoped routes for a named cache (e.g. `/cache/builds`);
 		// empty for the default cache. Not baked into `baseUrl`, so resolving an
 		// absolute path against the base never discards it.
-		public readonly cachePrefix = ''
+		public readonly cachePrefix = '',
+		public readonly signal?: AbortSignal
 	) {}
 
-	static fromUrl(value: string, cache: string = DEFAULT_CACHE): CupboardClient {
-		return new CupboardClient(new URL(value), fetch, cachePrefixFor(cache));
+	static fromUrl(
+		value: string,
+		options: string | CupboardClientOptions = DEFAULT_CACHE
+	): CupboardClient {
+		const resolved = typeof options === 'string' ? { cache: options } : options;
+
+		return new CupboardClient(
+			new URL(value),
+			fetch,
+			cachePrefixFor(resolved.cache ?? DEFAULT_CACHE),
+			resolved.signal
+		);
 	}
 
 	async publicKey(): Promise<string> {
@@ -587,13 +599,16 @@ export class CupboardClient {
 	}
 
 	async uploadBlob(upload: CupboardBlobUpload): Promise<void> {
+		throwIfAborted(this.signal);
+
 		const requestHeaders = new Headers(upload.headers);
 		requestHeaders.set('content-length', String(upload.contentLength));
 		const request: StreamingRequestInit = {
 			method: 'PUT',
 			headers: requestHeaders,
 			body: upload.body,
-			duplex: 'half'
+			duplex: 'half',
+			signal: this.signal
 		};
 		const response = await this.fetcher(upload.uploadUrl, request);
 
@@ -621,6 +636,8 @@ export class CupboardClient {
 	 * deployment's signup gate — and takes a urlencoded body.
 	 */
 	async signup(request: SignupRequest): Promise<ParsedSignupResponse> {
+		throwIfAborted(this.signal);
+
 		const url = this.resolve('/signup');
 		const body = new URLSearchParams({
 			subject_token: request.subject_token,
@@ -631,7 +648,8 @@ export class CupboardClient {
 		const response = await this.fetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: body.toString()
+			body: body.toString(),
+			signal: this.signal
 		});
 
 		if (!response.ok) {
@@ -650,6 +668,8 @@ export class CupboardClient {
 		subjectToken: string,
 		subjectTokenType: string
 	): Promise<ParsedTokenResponse> {
+		throwIfAborted(this.signal);
+
 		const url = this.resolve('/token');
 		const body = new URLSearchParams({
 			grant_type: tokenExchangeGrantType,
@@ -659,7 +679,8 @@ export class CupboardClient {
 		const response = await this.fetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: body.toString()
+			body: body.toString(),
+			signal: this.signal
 		});
 
 		if (!response.ok) {
@@ -717,6 +738,8 @@ export class CupboardClient {
 		path: string,
 		options: ClientRequestOptions = {}
 	): Promise<Response> {
+		throwIfAborted(this.signal);
+
 		const method = options.method ?? 'GET';
 		const url = this.resolve(path);
 
@@ -769,6 +792,8 @@ export class CupboardClient {
 		body: string | undefined,
 		bearer: string | undefined
 	): Promise<Response> {
+		throwIfAborted(this.signal);
+
 		const requestHeaders = new Headers(headers);
 
 		if (bearer !== undefined) {
@@ -779,8 +804,18 @@ export class CupboardClient {
 			requestHeaders.set('content-type', 'application/json');
 		}
 
-		return this.fetcher(url, { method, headers: requestHeaders, body });
+		return this.fetcher(url, {
+			method,
+			headers: requestHeaders,
+			body,
+			signal: this.signal
+		});
 	}
+}
+
+export interface CupboardClientOptions {
+	readonly cache?: string;
+	readonly signal?: AbortSignal;
 }
 
 const unauthorizedStatusCode = 401;

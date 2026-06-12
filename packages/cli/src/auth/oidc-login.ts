@@ -1,10 +1,10 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import { setTimeout as delay } from 'node:timers/promises';
 
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { z } from 'zod';
 
+import { abortable, delayMs, throwIfAborted } from '../abort.ts';
 import { CliError } from '../errors.ts';
 
 export class OidcLoginError extends CliError {
@@ -133,8 +133,11 @@ const endpointsSchema = z.object({
  */
 export async function discoverOidcLogin(
 	issuer: string,
-	fetcher: typeof fetch = fetch
+	fetcher: typeof fetch = fetch,
+	signal?: AbortSignal
 ): Promise<OidcLoginEndpoints> {
+	throwIfAborted(signal);
+
 	const issuerUrl = IssuerUrl.parse(issuer);
 
 	if (issuerUrl === undefined) {
@@ -152,7 +155,8 @@ export async function discoverOidcLogin(
 		// then receive the authorization code and PKCE verifier. A 3xx fails the
 		// `ok` check below.
 		const response = await fetcher(issuerUrl.discoveryUrl, {
-			redirect: 'manual'
+			redirect: 'manual',
+			signal
 		});
 
 		if (!response.ok) {
@@ -203,6 +207,7 @@ export interface LoopbackLoginOptions {
 	readonly openBrowser: (url: string) => void | Promise<void>;
 	readonly fetcher?: typeof fetch;
 	readonly timeoutMs?: number;
+	readonly signal?: AbortSignal;
 	/** Fixed redirect registration, for providers with exact-match URLs. */
 	readonly loopback?: LoopbackOptions;
 }
@@ -216,6 +221,8 @@ export interface LoopbackLoginOptions {
 export async function loopbackLogin(
 	options: LoopbackLoginOptions
 ): Promise<string> {
+	throwIfAborted(options.signal);
+
 	const fetcher = options.fetcher ?? fetch;
 	const obtained = await obtainAuthorizationCode({
 		authorizationEndpoint: options.endpoints.authorizationEndpoint,
@@ -223,16 +230,22 @@ export async function loopbackLogin(
 		scope: options.scope ?? 'openid',
 		openBrowser: options.openBrowser,
 		timeoutMs: options.timeoutMs,
+		signal: options.signal,
 		loopback: options.loopback
 	});
 
-	return exchangeCode(options.endpoints, fetcher, {
-		grant_type: 'authorization_code',
-		code: obtained.code,
-		redirect_uri: obtained.redirectUri,
-		client_id: options.clientId,
-		code_verifier: obtained.codeVerifier
-	});
+	return exchangeCode(
+		options.endpoints,
+		fetcher,
+		{
+			grant_type: 'authorization_code',
+			code: obtained.code,
+			redirect_uri: obtained.redirectUri,
+			client_id: options.clientId,
+			code_verifier: obtained.codeVerifier
+		},
+		options.signal
+	);
 }
 
 export interface AuthorizeUrlParameters {
@@ -272,6 +285,7 @@ export interface AuthorizationCodeOptions {
 	readonly scope: string;
 	readonly openBrowser: (url: string) => void | Promise<void>;
 	readonly timeoutMs?: number;
+	readonly signal?: AbortSignal;
 	readonly loopback?: LoopbackOptions;
 }
 
@@ -292,6 +306,8 @@ export interface ObtainedAuthorizationCode {
 export async function obtainAuthorizationCode(
 	options: AuthorizationCodeOptions
 ): Promise<ObtainedAuthorizationCode> {
+	throwIfAborted(options.signal);
+
 	const pkce = createPkce();
 	const state = randomState();
 	const host = options.loopback?.host ?? '127.0.0.1';
@@ -326,8 +342,11 @@ export async function obtainAuthorizationCode(
 		// browser launch and the wait for the code are awaited together: either
 		// failing fails the login, and neither rejection goes unobserved.
 		const [, code] = await Promise.all([
-			options.openBrowser(authorizeUrl),
-			Promise.race([loopback.code, timeout])
+			abortable(
+				Promise.resolve().then(() => options.openBrowser(authorizeUrl)),
+				options.signal
+			),
+			abortable(Promise.race([loopback.code, timeout]), options.signal)
 		]);
 
 		return { code, redirectUri, codeVerifier: pkce.verifier };
@@ -499,6 +518,7 @@ export interface DeviceLoginOptions {
 	readonly fetcher?: typeof fetch;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly now?: () => number;
+	readonly signal?: AbortSignal;
 }
 
 const deviceAuthorizationSchema = z.object({
@@ -529,6 +549,8 @@ const deviceErrorSchema = z.object({ error: z.string() });
 export async function deviceLogin(
 	options: DeviceLoginOptions
 ): Promise<string> {
+	throwIfAborted(options.signal);
+
 	const endpoint = options.endpoints.deviceAuthorizationEndpoint;
 
 	if (endpoint === undefined) {
@@ -536,13 +558,17 @@ export async function deviceLogin(
 	}
 
 	const fetcher = options.fetcher ?? fetch;
-	const sleep = options.sleep ?? delay;
 	const now = options.now ?? Date.now;
 
-	const authorization = await requestDeviceCode(endpoint, fetcher, {
-		client_id: options.clientId,
-		scope: options.scope ?? 'openid'
-	});
+	const authorization = await requestDeviceCode(
+		endpoint,
+		fetcher,
+		{
+			client_id: options.clientId,
+			scope: options.scope ?? 'openid'
+		},
+		options.signal
+	);
 	options.prompt({
 		userCode: authorization.user_code,
 		verificationUri: authorization.verification_uri
@@ -554,7 +580,10 @@ export async function deviceLogin(
 		(authorization.expires_in ?? deviceCodeFallbackLifetimeSeconds) * 1000;
 
 	for (;;) {
-		await sleep(intervalMs);
+		await delayMs(intervalMs, {
+			delay: options.sleep,
+			signal: options.signal
+		});
 
 		if (now() >= deadlineMs) {
 			throw new OidcLoginError(
@@ -562,11 +591,16 @@ export async function deviceLogin(
 			);
 		}
 
-		const outcome = await pollDeviceToken(options.endpoints, fetcher, {
-			grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
-			device_code: authorization.device_code,
-			client_id: options.clientId
-		});
+		const outcome = await pollDeviceToken(
+			options.endpoints,
+			fetcher,
+			{
+				grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+				device_code: authorization.device_code,
+				client_id: options.clientId
+			},
+			options.signal
+		);
 
 		if (outcome.kind === 'token') {
 			return outcome.idToken;
@@ -583,9 +617,10 @@ export async function deviceLogin(
 async function requestDeviceCode(
 	endpoint: string,
 	fetcher: typeof fetch,
-	form: Readonly<Record<string, string>>
+	form: Readonly<Record<string, string>>,
+	signal: AbortSignal | undefined
 ): Promise<z.infer<typeof deviceAuthorizationSchema>> {
-	const response = await fetcher(endpoint, postForm(form));
+	const response = await fetcher(endpoint, postForm(form, signal));
 
 	if (!response.ok) {
 		throw new DeviceAuthorizationRequestError(response.status);
@@ -611,9 +646,13 @@ type PollOutcome =
 async function pollDeviceToken(
 	endpoints: OidcLoginEndpoints,
 	fetcher: typeof fetch,
-	form: Readonly<Record<string, string>>
+	form: Readonly<Record<string, string>>,
+	signal: AbortSignal | undefined
 ): Promise<PollOutcome> {
-	const response = await fetcher(endpoints.tokenEndpoint, postForm(form));
+	const response = await fetcher(
+		endpoints.tokenEndpoint,
+		postForm(form, signal)
+	);
 	const payload = await readJson(response);
 
 	if (response.ok) {
@@ -658,9 +697,13 @@ async function readJson(response: Response): Promise<unknown> {
 async function exchangeCode(
 	endpoints: OidcLoginEndpoints,
 	fetcher: typeof fetch,
-	form: Readonly<Record<string, string>>
+	form: Readonly<Record<string, string>>,
+	signal: AbortSignal | undefined
 ): Promise<string> {
-	const response = await fetcher(endpoints.tokenEndpoint, postForm(form));
+	const response = await fetcher(
+		endpoints.tokenEndpoint,
+		postForm(form, signal)
+	);
 
 	if (!response.ok) {
 		throw new OidcLoginError(
@@ -678,10 +721,14 @@ async function exchangeCode(
 }
 
 /** A `application/x-www-form-urlencoded` POST, as token endpoints expect. */
-export function postForm(form: Readonly<Record<string, string>>): RequestInit {
+export function postForm(
+	form: Readonly<Record<string, string>>,
+	signal?: AbortSignal
+): RequestInit {
 	return {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams(form).toString()
+		body: new URLSearchParams(form).toString(),
+		signal
 	};
 }

@@ -25,7 +25,11 @@ export interface GlobalOptions {
 	readonly colour?: boolean;
 }
 
-export function buildProgram(): Command {
+export interface ProgramOptions {
+	readonly signal?: AbortSignal;
+}
+
+export function buildProgram(options: ProgramOptions = {}): Command {
 	const program = new Command()
 		.name('cupboard')
 		.description(
@@ -36,23 +40,23 @@ export function buildProgram(): Command {
 		.option('--no-colour', 'force plain line-delimited JSON output')
 		.showHelpAfterError();
 
-	registerDeployCommand(program);
-	registerLoginCommand(program);
-	registerAttestCommands(program);
-	registerPushCommand(program);
-	registerConfigCommand(program);
-	registerPubkeyCommand(program);
-	registerStatsCommand(program);
-	registerDeleteCommand(program);
-	registerRootCommands(program);
-	registerKeyCommands(program);
-	registerAuthKeyCommands(program);
-	registerControlKeyCommands(program);
-	registerTenantCommands(program);
-	registerCacheCommands(program);
-	registerPolicyCommands(program);
-	registerOidcTrustCommands(program);
-	registerCheckCommand(program);
+	registerDeployCommand(program, options);
+	registerLoginCommand(program, options);
+	registerAttestCommands(program, options);
+	registerPushCommand(program, options);
+	registerConfigCommand(program, options);
+	registerPubkeyCommand(program, options);
+	registerStatsCommand(program, options);
+	registerDeleteCommand(program, options);
+	registerRootCommands(program, options);
+	registerKeyCommands(program, options);
+	registerAuthKeyCommands(program, options);
+	registerControlKeyCommands(program, options);
+	registerTenantCommands(program, options);
+	registerCacheCommands(program, options);
+	registerPolicyCommands(program, options);
+	registerOidcTrustCommands(program, options);
+	registerCheckCommand(program, options);
 
 	return program;
 }

@@ -4,7 +4,7 @@ import { createReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 
 interface DeleteOptions {
@@ -19,7 +19,10 @@ export interface DeleteClient {
 	): Promise<DeletePathResponse>;
 }
 
-export function registerDeleteCommand(program: Command): void {
+export function registerDeleteCommand(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('delete')
 		.description('Delete a single store path from the cache.')
@@ -36,7 +39,10 @@ export function registerDeleteCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, options.cache);
+			const client = CupboardClient.fromUrl(url, {
+				cache: options.cache,
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runDelete(storePath, token, reporter, client);
