@@ -8,21 +8,13 @@ import {
 	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
-	parseAttestationDigestName,
-	parseNarInfoName,
-	parseNarName,
+	notFoundResponse,
 	TextBody,
 	textResponse
 } from '../http/http.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
-import {
-	authoriseRead,
-	type ReadVerifier,
-	unauthorisedResponse
-} from './read-auth.ts';
-
-const narPrefix = '/nar/';
+import { authoriseRead, unauthorisedResponse } from './read-auth.ts';
 
 const cacheInfoBody = new TextBody(CacheInfo.default.render());
 
@@ -31,142 +23,11 @@ export interface ReadContext {
 	waitUntil(promise: Promise<unknown>): void;
 }
 
-export async function handleRead(
-	request: Request,
-	env: Env,
-	ctx: ReadContext,
-	tenant: string,
-	entry: ManifestEntry
-): Promise<Response | undefined> {
-	if (request.method !== 'GET' && request.method !== 'HEAD') {
-		return undefined;
-	}
-
-	// Suspension and offboarding stop reads, bounded by the manifest TTL: once the
-	// republished manifest marks the tenant non-active, the read path serves nothing
-	// for it. Writes stop at once through the authoritative D1 status read; reads stop
-	// as the manifest entry propagates, the eventual half of the lifecycle contract.
-	if (entry.status !== 'active') {
-		return notFound();
-	}
-
-	const { pathname } = new URL(request.url);
-
-	// A private cache turns narinfo, NAR and nix-cache-info into Basic-auth reads
-	// that never touch the shared edge cache. The verifier comes from the admission
-	// manifest, so the read path consults no D1 row or Durable Object.
-	const isPrivate = entry.readMode === 'private';
-	const verifier = entry.readVerifier;
-
-	// OAuth discovery (RFC 8414) and the auth public keys both proxy to the tenant's
-	// Durable Object, so an admitted but unconfigured tenant returns 503 here rather
-	// than advertising or serving an identity it has not been assigned. The object
-	// builds the metadata from its own request, so the issuer stays the tenant's
-	// path-based URL.
-	if (
-		pathname === '/.well-known/oauth-authorization-server' ||
-		pathname === '/.well-known/jwks.json'
-	) {
-		return tenantServer(env, tenant).fetch(request);
-	}
-
-	// A read may carry a `/cache/<name>/` prefix selecting a named cache; the
-	// bare root is the default cache. An unrecognised prefix is a 404.
-	const scope = cacheScope(pathname);
-
-	if (scope === undefined) {
-		return notFound();
-	}
-
-	const { cache, rest } = scope;
-
-	if (isAttestationListPath(rest) || isAttestationBundlePath(rest)) {
-		const denied = await guardRead(request, isPrivate, verifier);
-
-		return denied ?? tenantServer(env, tenant).fetch(request);
-	}
-
-	if (rest.startsWith(narPrefix)) {
-		const narName = safeDecode(rest.slice(narPrefix.length));
-		const narHash = narName === undefined ? undefined : parseNarName(narName);
-
-		if (narHash === undefined) {
-			return notFound();
-		}
-
-		const denied = await guardRead(request, isPrivate, verifier);
-
-		// NAR blobs are content-addressed and shared across all tenants, so the edge
-		// cache key stays global: identical bytes, safely shared.
-		return (
-			denied ??
-			serveR2(
-				request,
-				env,
-				ctx,
-				narObjectKey(narHash),
-				narCacheKey(narHash),
-				narHeaders,
-				!isPrivate
-			)
-		);
-	}
-
-	if (rest.endsWith('.narinfo')) {
-		const storePathHash = parseNarInfoName(rest.slice(1));
-
-		if (storePathHash === undefined) {
-			return notFound();
-		}
-
-		const denied = await guardRead(request, isPrivate, verifier);
-		const { origin } = new URL(request.url);
-
-		// The narinfo edge-cache key carries the tenant prefix, matching the deletion
-		// purge path, so two tenants sharing a host never collide on a store-path hash.
-		return (
-			denied ??
-			serveR2(
-				request,
-				env,
-				ctx,
-				narInfoObjectKey(tenant, storePathHash, cache),
-				`${origin}${narInfoCachePath(tenant, storePathHash, cache)}`,
-				narInfoHeaders,
-				!isPrivate
-			)
-		);
-	}
-
-	if (rest === '/nix-cache-info') {
-		const denied = await guardRead(request, isPrivate, verifier);
-
-		return denied ?? cacheInfoResponse(request, env, tenant, cache, isPrivate);
-	}
-
-	if (rest === '/pubkey') {
-		// This tenant's narinfo signing key set, served uncached from its Durable
-		// Object so a rotation is visible immediately.
-		const pubkeyUrl = new URL(request.url);
-		pubkeyUrl.pathname = '/pubkey';
-
-		return tenantServer(env, tenant).fetch(new Request(pubkeyUrl, request));
-	}
-
-	return undefined;
-}
-
-function narCacheKey(narHash: string): string {
-	return new URL(
-		narObjectKey(narHash),
-		'https://cupboard-nar-cache.invalid/'
-	).toString();
-}
-
-// Splits an optional `/cache/<name>/` prefix off the path. Returns the default
-// cache and the unchanged path for a bare route; `undefined` when the prefix is
-// present but malformed or names an invalid cache.
-function cacheScope(
+// Splits an optional `/cache/<name>/` prefix off a tenant-relative path.
+// Returns the default cache and the unchanged path for a bare route;
+// `undefined` when the prefix is present but malformed or names an invalid
+// cache.
+export function cacheScope(
 	pathname: string
 ): { cache: string; rest: string } | undefined {
 	const prefix = '/cache/';
@@ -191,35 +52,75 @@ function cacheScope(
 	return { cache: name, rest: remainder.slice(separator) };
 }
 
-function isAttestationListPath(rest: string): boolean {
-	const prefix = '/attestations/';
-
-	if (!rest.startsWith(prefix)) {
-		return false;
+// Returns a 401 when the cache is private and the request is unauthorised, or
+// `undefined` to let the read proceed (public, or authorised). A private cache
+// turns reads into Basic-auth reads that never touch the shared edge cache;
+// the verifier comes from the admission manifest, so the read path consults no
+// D1 row or Durable Object. A private cache with no verifier fails closed:
+// every read is rejected until a credential is set.
+export async function guardRead(
+	request: Request,
+	entry: ManifestEntry
+): Promise<Response | undefined> {
+	if (entry.readMode !== 'private') {
+		return undefined;
 	}
 
-	const hash = safeDecode(rest.slice(prefix.length));
+	const verifier = entry.readVerifier;
 
-	return (
-		hash !== undefined && parseNarInfoName(`${hash}.narinfo`) !== undefined
+	if (verifier !== undefined && (await authoriseRead(request, verifier))) {
+		return undefined;
+	}
+
+	return unauthorisedResponse();
+}
+
+// NAR blobs are content-addressed and shared across all tenants, so the edge
+// cache key stays global: identical bytes, safely shared.
+export function serveNar(
+	request: Request,
+	env: Env,
+	ctx: ReadContext,
+	narHash: string,
+	isPrivate: boolean
+): Promise<Response> {
+	return serveR2(
+		request,
+		env,
+		ctx,
+		narObjectKey(narHash),
+		narCacheKey(narHash),
+		narHeaders,
+		!isPrivate
 	);
 }
 
-function isAttestationBundlePath(rest: string): boolean {
-	const prefix = '/attestation-bundles/';
+// The narinfo edge-cache key carries the tenant prefix, matching the deletion
+// purge path, so two tenants sharing a host never collide on a store-path
+// hash.
+export function serveNarInfo(
+	request: Request,
+	env: Env,
+	ctx: ReadContext,
+	tenant: string,
+	cache: string,
+	storePathHash: string,
+	isPrivate: boolean
+): Promise<Response> {
+	const { origin } = new URL(request.url);
 
-	if (!rest.startsWith(prefix)) {
-		return false;
-	}
-
-	const digest = safeDecode(rest.slice(prefix.length));
-
-	return (
-		digest !== undefined && parseAttestationDigestName(digest) !== undefined
+	return serveR2(
+		request,
+		env,
+		ctx,
+		narInfoObjectKey(tenant, storePathHash, cache),
+		`${origin}${narInfoCachePath(tenant, storePathHash, cache)}`,
+		narInfoHeaders,
+		!isPrivate
 	);
 }
 
-async function cacheInfoResponse(
+export async function cacheInfoResponse(
 	request: Request,
 	env: Env,
 	tenant: string,
@@ -247,23 +148,11 @@ async function cacheInfoResponse(
 	return new Response(response.body, { status: response.status, headers });
 }
 
-// Returns a 401 when the cache is private and the request is unauthorised, or
-// `undefined` to let the read proceed (public, or authorised). A private cache with
-// no verifier fails closed: every read is rejected until a credential is set.
-async function guardRead(
-	request: Request,
-	isPrivate: boolean,
-	verifier: ReadVerifier | undefined
-): Promise<Response | undefined> {
-	if (!isPrivate) {
-		return undefined;
-	}
-
-	if (verifier !== undefined && (await authoriseRead(request, verifier))) {
-		return undefined;
-	}
-
-	return unauthorisedResponse();
+function narCacheKey(narHash: string): string {
+	return new URL(
+		narObjectKey(narHash),
+		'https://cupboard-nar-cache.invalid/'
+	).toString();
 }
 
 async function serveR2(
@@ -279,7 +168,7 @@ async function serveR2(
 		const object = await env.BLOBS.head(key);
 
 		if (object === null) {
-			return notFound();
+			return notFoundResponse();
 		}
 
 		const headers = privatise(headersFor(object), usePublicCache);
@@ -304,7 +193,7 @@ async function serveR2(
 	const object = await env.BLOBS.get(key);
 
 	if (object === null) {
-		return notFound();
+		return notFoundResponse();
 	}
 
 	const headers = privatise(headersFor(object), usePublicCache);
@@ -360,16 +249,4 @@ function notModified(headers: Headers): Response {
 		status: StatusCodes.NOT_MODIFIED,
 		headers
 	});
-}
-
-function notFound(): Response {
-	return new Response('Not found\n', { status: StatusCodes.NOT_FOUND });
-}
-
-function safeDecode(value: string): string | undefined {
-	try {
-		return decodeURIComponent(value);
-	} catch {
-		return undefined;
-	}
 }

@@ -1,24 +1,38 @@
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantWritesStoppedError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import { notFoundResponse, TextBody, textResponse } from '../http/http.ts';
-import { handleRead } from '../read/read.ts';
+import {
+	notFoundResponse,
+	parseAttestationDigestName,
+	parseNarInfoName,
+	parseNarName,
+	TextBody,
+	textResponse
+} from '../http/http.ts';
+import {
+	cacheInfoResponse,
+	cacheScope,
+	guardRead,
+	serveNar,
+	serveNarInfo
+} from '../read/read.ts';
 
 import { admitTenant } from './admission.ts';
 import { tenantServer } from './durable-object.ts';
+import { type WorkerHonoEnv } from './hono-env.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 
 const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<WorkerHonoEnv>();
 
 app.onError(serverErrorHandler);
 app.notFound(() => notFoundResponse());
@@ -38,14 +52,20 @@ app.get('/_version', (context) =>
 	})
 );
 
-// Every tenant request: admission resolves the slug against the published
+// Admission for every tenant request: the slug resolves against the published
 // manifest, reading only KV. A slug absent from the manifest is rejected here,
 // before any Durable Object is instantiated, so varying the slug cannot spin
 // up unbounded unprovisioned objects. The slug and the tenant-relative
-// remainder come from the raw pathname so an encoded slug never admits.
-app.all('/t/:tenant/*', async (context) => {
-	const url = new URL(context.req.url);
-	const route = parseTenantPath(url.pathname);
+// remainder come from parseTenantPath on the raw pathname, so an encoded slug
+// never admits.
+//
+// Suspension and offboarding stop reads here, bounded by the manifest TTL:
+// once the republished manifest marks the tenant non-active, the read path
+// serves nothing for it. Writes stop at once through the authoritative D1
+// status read in the dispatch fallback; reads stop as the manifest entry
+// propagates, the eventual half of the lifecycle contract.
+app.use('/t/:tenant/*', async (context, next) => {
+	const route = parseTenantPath(new URL(context.req.url).pathname);
 
 	if (route === undefined) {
 		return notFoundResponse();
@@ -57,23 +77,193 @@ app.all('/t/:tenant/*', async (context) => {
 		return notFoundResponse();
 	}
 
-	// Strip the `/t/<tenant>/` prefix and serve the tenant-relative request: a
-	// read from R2 and the edge, or otherwise the tenant's Durable Object.
-	const inner = tenantRequest(context.req.raw, url, route.rest);
-	const read = await handleRead(
-		inner,
-		context.env,
-		context.executionCtx,
-		route.tenant,
-		entry
-	);
+	const read = context.req.method === 'GET' || context.req.method === 'HEAD';
 
-	if (read !== undefined) {
-		return read;
+	if (read && entry.status !== 'active') {
+		return notFoundResponse();
 	}
 
-	return dispatchTenant(inner, context.env, route.tenant);
+	context.set('tenant', route.tenant);
+	context.set('tenantEntry', entry);
+	context.set('tenantRest', route.rest);
+
+	// A read may carry a `/cache/<name>/` prefix selecting a named cache; the
+	// bare root is the default cache. An unrecognised prefix is a 404.
+	if (read) {
+		const scope = cacheScope(route.rest);
+
+		if (scope === undefined) {
+			return notFoundResponse();
+		}
+
+		context.set('cache', scope.cache);
+	}
+
+	await next();
 });
+
+// OAuth discovery (RFC 8414) and the auth public keys both proxy to the
+// tenant's Durable Object, so an admitted but unconfigured tenant returns 503
+// here rather than advertising or serving an identity it has not been
+// assigned. The object builds the metadata from its own request, so the
+// issuer stays the tenant's path-based URL.
+app.on(
+	'GET',
+	[
+		'/t/:tenant/.well-known/oauth-authorization-server',
+		'/t/:tenant/.well-known/jwks.json'
+	],
+	(context) =>
+		tenantServer(context.env, context.get('tenant')).fetch(
+			innerRequest(context)
+		)
+);
+
+// Attestation lists and bundles are served by the Durable Object; a name that
+// does not parse falls through to the dispatch fallback, exactly as the
+// object's own routes would see it.
+app.on(
+	'GET',
+	[
+		'/t/:tenant/attestations/:hash',
+		'/t/:tenant/cache/:cacheName/attestations/:hash'
+	],
+	async (context, next) => {
+		if (
+			parseNarInfoName(`${context.req.param('hash')}.narinfo`) === undefined
+		) {
+			return next();
+		}
+
+		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+
+		return (
+			denied ??
+			tenantServer(context.env, context.get('tenant')).fetch(
+				innerRequest(context)
+			)
+		);
+	}
+);
+app.on(
+	'GET',
+	[
+		'/t/:tenant/attestation-bundles/:digest',
+		'/t/:tenant/cache/:cacheName/attestation-bundles/:digest'
+	],
+	async (context, next) => {
+		if (parseAttestationDigestName(context.req.param('digest')) === undefined) {
+			return next();
+		}
+
+		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+
+		return (
+			denied ??
+			tenantServer(context.env, context.get('tenant')).fetch(
+				innerRequest(context)
+			)
+		);
+	}
+);
+
+app.on(
+	'GET',
+	['/t/:tenant/nar/:name', '/t/:tenant/cache/:cacheName/nar/:name'],
+	async (context) => {
+		const narHash = parseNarName(context.req.param('name'));
+
+		if (narHash === undefined) {
+			return notFoundResponse();
+		}
+
+		const entry = context.get('tenantEntry');
+		const denied = await guardRead(context.req.raw, entry);
+
+		return (
+			denied ??
+			serveNar(
+				context.req.raw,
+				context.env,
+				context.executionCtx,
+				narHash,
+				entry.readMode === 'private'
+			)
+		);
+	}
+);
+
+app.on(
+	'GET',
+	[
+		String.raw`/t/:tenant/:name{[0-9a-z]+\.narinfo}`,
+		String.raw`/t/:tenant/cache/:cacheName/:name{[0-9a-z]+\.narinfo}`
+	],
+	async (context) => {
+		const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
+
+		if (storePathHash === undefined) {
+			return notFoundResponse();
+		}
+
+		const entry = context.get('tenantEntry');
+		const denied = await guardRead(context.req.raw, entry);
+
+		return (
+			denied ??
+			serveNarInfo(
+				context.req.raw,
+				context.env,
+				context.executionCtx,
+				context.get('tenant'),
+				context.get('cache'),
+				storePathHash,
+				entry.readMode === 'private'
+			)
+		);
+	}
+);
+
+app.on(
+	'GET',
+	['/t/:tenant/nix-cache-info', '/t/:tenant/cache/:cacheName/nix-cache-info'],
+	async (context) => {
+		const entry = context.get('tenantEntry');
+		const denied = await guardRead(context.req.raw, entry);
+
+		return (
+			denied ??
+			cacheInfoResponse(
+				innerRequest(context),
+				context.env,
+				context.get('tenant'),
+				context.get('cache'),
+				entry.readMode === 'private'
+			)
+		);
+	}
+);
+
+// This tenant's narinfo signing key set, served uncached from its Durable
+// Object so a rotation is visible immediately.
+app.on(
+	'GET',
+	['/t/:tenant/pubkey', '/t/:tenant/cache/:cacheName/pubkey'],
+	(context) => {
+		const pubkeyUrl = new URL(context.req.url);
+		pubkeyUrl.pathname = '/pubkey';
+
+		return tenantServer(context.env, context.get('tenant')).fetch(
+			new Request(pubkeyUrl, context.req.raw)
+		);
+	}
+);
+
+// Everything else under the tenant subtree dispatches to the Durable Object,
+// registered last so the read routes above answer first.
+app.all('/t/:tenant/*', (context) =>
+	dispatchTenant(innerRequest(context), context.env, context.get('tenant'))
+);
 
 // The bare host is the control surface: the control plane's own auth.
 app.route('/', controlApp);
@@ -91,6 +281,15 @@ export default {
 		await handleMaintenanceQueue(batch, env);
 	}
 } satisfies ExportedHandler<Env>;
+
+// The tenant-relative request: the `/t/<tenant>/` prefix stripped, everything
+// else preserved, as the Durable Object and the serve helpers expect it.
+function innerRequest(context: Context<WorkerHonoEnv>): Request {
+	const inner = new URL(context.req.url);
+	inner.pathname = context.get('tenantRest');
+
+	return new Request(inner, context.req.raw);
+}
 
 // Dispatches a non-read tenant request to its Durable Object. A write (anything but
 // a read or the auth-plane token exchange) is gated first: a write for a suspended or
@@ -146,11 +345,4 @@ async function tenantStatus(
 		.get();
 
 	return row?.status;
-}
-
-function tenantRequest(request: Request, url: URL, rest: string): Request {
-	const inner = new URL(url);
-	inner.pathname = rest;
-
-	return new Request(inner, request);
 }
