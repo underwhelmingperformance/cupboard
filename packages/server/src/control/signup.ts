@@ -175,8 +175,16 @@ function controlDatabase(env: Env): Database {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
-function signupIssuer(env: Env): string {
-	const configured: string = env.CUPBOARD_SIGNUP_ISSUER;
+// The verification half of the signup config. A hand-rolled deployment may
+// omit the vars entirely, in which case the env reads as undefined rather
+// than the empty string; both refuse.
+interface SignupVerificationConfig {
+	readonly CUPBOARD_SIGNUP_ISSUER: string | undefined;
+	readonly CUPBOARD_SIGNUP_AUDIENCE: string | undefined;
+}
+
+function signupIssuer(env: SignupVerificationConfig): string {
+	const configured = env.CUPBOARD_SIGNUP_ISSUER ?? '';
 
 	if (configured === '') {
 		throw new ControlNotConfiguredError();
@@ -185,8 +193,8 @@ function signupIssuer(env: Env): string {
 	return configured;
 }
 
-function signupAudience(env: Env): string {
-	const configured: string = env.CUPBOARD_SIGNUP_AUDIENCE;
+function signupAudience(env: SignupVerificationConfig): string {
+	const configured = env.CUPBOARD_SIGNUP_AUDIENCE ?? '';
 
 	if (configured === '') {
 		throw new ControlNotConfiguredError();

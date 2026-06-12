@@ -132,6 +132,7 @@ export function derivedPlanRows(
 	];
 
 	return [
+		{ label: 'Build', value: artifact.buildVersion },
 		{
 			label: 'Control worker',
 			value: `${(artifact.controlBundle.code.length / 1024).toFixed(0)} KiB`
