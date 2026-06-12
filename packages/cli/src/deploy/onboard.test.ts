@@ -2,6 +2,7 @@ import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
 import { describe, expect, it } from 'vitest';
 
+import type { CachedSession } from '../auth/token-store.ts';
 import { CupboardHttpError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
@@ -198,8 +199,11 @@ interface ScriptedClient {
 	readonly urls: string[];
 	readonly signupBodies: unknown[];
 	readonly createdBodies: unknown[];
-	readonly cachedTokens: { token: string; target: string }[];
-	readonly cacheToken: (token: string, target: string) => Promise<void>;
+	readonly cachedSessions: { session: CachedSession; target: string }[];
+	readonly cacheSession: (
+		session: CachedSession,
+		target: string
+	) => Promise<void>;
 }
 
 function scriptedClient(script: ClientScript): ScriptedClient {
@@ -212,15 +216,15 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const urls: string[] = [];
 	const signupBodies: unknown[] = [];
 	const createdBodies: unknown[] = [];
-	const cachedTokens: { token: string; target: string }[] = [];
+	const cachedSessions: { session: CachedSession; target: string }[] = [];
 
 	return {
 		urls,
 		signupBodies,
 		createdBodies,
-		cachedTokens,
-		cacheToken: (token, target) => {
-			cachedTokens.push({ token, target });
+		cachedSessions,
+		cacheSession: (session, target) => {
+			cachedSessions.push({ session, target });
 			return Promise.resolve();
 		},
 		factory: (url) => {
@@ -241,7 +245,8 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 						token_type: 'Bearer',
 						expires_in: 900,
 						scope: 'admin',
-						issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+						issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+						refresh_token: 'refresh-1'
 					}),
 				createTenant: (_token, body) => {
 					createdBodies.push(body);
@@ -275,7 +280,7 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 		claimSecret: { kind: 'none' },
 		r2: { kind: 'fresh' },
 		clientFactory: client.factory,
-		cacheToken: client.cacheToken,
+		cacheSession: client.cacheSession,
 		sleep: () => Promise.resolve()
 	};
 }
@@ -358,7 +363,7 @@ describe('onboardDeployment', () => {
 			urls: client.urls,
 			signupBodies: client.signupBodies,
 			createdBodies: client.createdBodies,
-			cachedTokens: client.cachedTokens,
+			cachedSessions: client.cachedSessions,
 			successes
 		}).toStrictEqual({
 			outcome: {
@@ -379,8 +384,11 @@ describe('onboardDeployment', () => {
 					ownerAudience: owner.audience
 				}
 			],
-			cachedTokens: [
-				{ token: 'admin-jwt', target: 'https://cache.example.com' }
+			cachedSessions: [
+				{
+					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
+					target: 'https://cache.example.com'
+				}
 			],
 			successes: ['You are now the admin of this deployment (cf-user-1).']
 		});

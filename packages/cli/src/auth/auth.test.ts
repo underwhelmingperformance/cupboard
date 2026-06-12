@@ -1,17 +1,22 @@
-import type { TokenResponse } from '@cupboard/protocol/oidc';
+import type {
+	ParsedTokenResponse,
+	TokenResponse
+} from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../client/client.ts';
-import { OwnerLoginRequiredError } from '../errors.ts';
+import type { CloudflareGrant } from '../deploy/cloudflare-oauth.ts';
+import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 import { testWithConfigHome } from '../test-support.ts';
 
 import {
 	authenticateForPush,
 	authenticateGithubOidc,
-	cachedOwnerProvider
+	cachedOwnerProvider,
+	type OwnerSessionDependencies
 } from './auth.ts';
 import type { GithubOidcEnvironment } from './github-oidc.ts';
-import { writeCachedToken } from './token-store.ts';
+import { type CachedSession, writeCachedSession } from './token-store.ts';
 
 const githubEnvironment: GithubOidcEnvironment = {
 	requestUrl: 'https://actions.example.com/token',
@@ -91,7 +96,7 @@ describe('authenticateForPush', () => {
 	});
 
 	testWithConfigHome(
-		'otherwise uses the cached owner token, prompting a login when absent',
+		'otherwise uses the cached owner session, prompting a login when absent',
 		async () => {
 			const provider = await authenticateForPush(federatingClient(), {
 				audience: 'https://cache.example.workers.dev'
@@ -104,26 +109,239 @@ describe('authenticateForPush', () => {
 	);
 });
 
+const farFuture = 4_000_000_000;
+const past = 1_000_000_000;
+
+function accessToken(name: string, expSeconds: number): string {
+	return jwt({ iss: target, aud: target, exp: expSeconds, name });
+}
+
+function tokenResponse(name: string): ParsedTokenResponse {
+	return {
+		access_token: accessToken(name, farFuture),
+		token_type: 'Bearer',
+		expires_in: 600,
+		scope: 'admin',
+		refresh_token: `refresh-${name}`
+	};
+}
+
+interface FakeSessionClient {
+	readonly tokenRefresh: (refreshToken: string) => Promise<ParsedTokenResponse>;
+	readonly tokenExchange: (
+		subjectToken: string,
+		subjectTokenType: string
+	) => Promise<ParsedTokenResponse>;
+}
+
+interface FakeGrantChain {
+	readonly readGrant: () => Promise<CloudflareGrant | undefined>;
+	readonly writeGrant: (grant: CloudflareGrant) => Promise<void>;
+	readonly refreshGrant: (
+		previous: CloudflareGrant
+	) => Promise<CloudflareGrant | undefined>;
+	readonly now: () => number;
+}
+
+interface SessionHarness extends OwnerSessionDependencies {
+	readonly client: FakeSessionClient;
+	readonly grantChain: FakeGrantChain;
+	readonly now: () => number;
+}
+
+// An in-memory session store plus a grant chain with no stored grant; tests
+// override the pieces the scenario needs.
+function sessionHarness(initial?: CachedSession): {
+	readonly harness: SessionHarness;
+	readonly sessions: () => readonly CachedSession[];
+} {
+	const written: CachedSession[] = [];
+	const stored: {
+		session: CachedSession | undefined;
+		grant: CloudflareGrant | undefined;
+	} = { session: initial, grant: undefined };
+
+	return {
+		harness: {
+			client: {
+				tokenRefresh: () => {
+					throw new Error('unexpected tokenRefresh');
+				},
+				tokenExchange: () => {
+					throw new Error('unexpected tokenExchange');
+				}
+			},
+			grantChain: {
+				readGrant: () => Promise.resolve(stored.grant),
+				writeGrant: () => Promise.resolve(),
+				refreshGrant: () => Promise.resolve(stored.grant),
+				now: () => past * 1000
+			},
+			readSession: () => Promise.resolve(stored.session),
+			writeSession: (session) => {
+				written.push(session);
+				stored.session = session;
+
+				return Promise.resolve();
+			},
+			now: () => past * 1000
+		},
+		sessions: () => written
+	};
+}
+
+function cloudflareGrant(idToken: string): CloudflareGrant {
+	return {
+		accessToken: 'cf-access',
+		refreshToken: 'cf-refresh',
+		expiresAt: farFuture * 1000,
+		subject: 'cf-user',
+		idToken
+	};
+}
+
 describe('cachedOwnerProvider', () => {
-	testWithConfigHome(
-		'returns the cached token and refuses to refresh it',
-		async () => {
-			const token = jwt({ iss: target, aud: target });
-			await writeCachedToken(token, target);
-			const provider = cachedOwnerProvider(target);
+	it('returns a fresh cached access token without renewing', async () => {
+		const fresh = accessToken('cached', farFuture);
+		const { harness } = sessionHarness({ accessToken: fresh });
 
-			expect(await provider.get()).toBe(token);
-			await expect(provider.refresh()).rejects.toBeInstanceOf(
-				OwnerLoginRequiredError
-			);
-		}
-	);
+		const provider = cachedOwnerProvider(target, harness);
 
-	testWithConfigHome('prompts a login when no token is cached', async () => {
-		const provider = cachedOwnerProvider(target);
+		expect(await provider.get()).toBe(fresh);
+	});
+
+	it('renews an expired access token by rotating the refresh token', async () => {
+		const { harness, sessions } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-stale'
+		});
+		const rotatedWith: string[] = [];
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenRefresh: (refreshToken) => {
+					rotatedWith.push(refreshToken);
+
+					return Promise.resolve(tokenResponse('rotated'));
+				}
+			}
+		});
+
+		const token = await provider.get();
+
+		expect({ token, rotatedWith, sessions: sessions() }).toStrictEqual({
+			token: accessToken('rotated', farFuture),
+			rotatedWith: ['refresh-stale'],
+			sessions: [
+				{
+					accessToken: accessToken('rotated', farFuture),
+					refreshToken: 'refresh-rotated'
+				}
+			]
+		});
+	});
+
+	it('falls back to the Cloudflare grant when the refresh token is refused', async () => {
+		const idToken = jwt({ sub: 'cf-user', exp: farFuture });
+		const { harness, sessions } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-spent'
+		});
+		const exchangedWith: string[] = [];
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				tokenRefresh: () =>
+					Promise.reject(
+						new CupboardHttpError('POST', '/token', 400, 'invalid_grant')
+					),
+				tokenExchange: (subjectToken) => {
+					exchangedWith.push(subjectToken);
+
+					return Promise.resolve(tokenResponse('exchanged'));
+				}
+			},
+			grantChain: {
+				...harness.grantChain,
+				readGrant: () => Promise.resolve(cloudflareGrant(idToken))
+			}
+		});
+
+		const token = await provider.refresh();
+
+		expect({ token, exchangedWith, sessions: sessions() }).toStrictEqual({
+			token: accessToken('exchanged', farFuture),
+			exchangedWith: [idToken],
+			sessions: [
+				{
+					accessToken: accessToken('exchanged', farFuture),
+					refreshToken: 'refresh-exchanged'
+				}
+			]
+		});
+	});
+
+	it('prompts a login when no silent path can mint', async () => {
+		const { harness } = sessionHarness();
+
+		const provider = cachedOwnerProvider(target, harness);
 
 		await expect(provider.get()).rejects.toBeInstanceOf(
 			OwnerLoginRequiredError
 		);
+	});
+
+	it('prompts a login when the exchange refuses the id_token', async () => {
+		const { harness } = sessionHarness();
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenExchange: () =>
+					Promise.reject(
+						new CupboardHttpError('POST', '/token', 400, 'invalid_grant')
+					)
+			},
+			grantChain: {
+				...harness.grantChain,
+				readGrant: () =>
+					Promise.resolve(cloudflareGrant(jwt({ exp: farFuture })))
+			}
+		});
+
+		await expect(provider.refresh()).rejects.toBeInstanceOf(
+			OwnerLoginRequiredError
+		);
+	});
+
+	it('propagates a server failure rather than prompting a login', async () => {
+		const failure = new CupboardHttpError('POST', '/token', 503, 'down');
+		const { harness } = sessionHarness({
+			accessToken: accessToken('stale', past - 60),
+			refreshToken: 'refresh-1'
+		});
+		const provider = cachedOwnerProvider(target, {
+			...harness,
+			client: {
+				...harness.client,
+				tokenRefresh: () => Promise.reject(failure)
+			}
+		});
+
+		await expect(provider.get()).rejects.toBe(failure);
+	});
+
+	testWithConfigHome('reads the session the login command cached', async () => {
+		const token = accessToken('login', farFuture);
+		await writeCachedSession(
+			{ accessToken: token, refreshToken: 'refresh-login' },
+			target
+		);
+		const provider = cachedOwnerProvider(target, {
+			now: () => past * 1000
+		});
+
+		expect(await provider.get()).toBe(token);
 	});
 });
