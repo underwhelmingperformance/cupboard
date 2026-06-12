@@ -6,8 +6,6 @@ import type {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import {
 	type ControlKeyClient,
 	runControlKeyList,
@@ -50,9 +48,9 @@ function controlKeyClient(
 	overrides: Partial<ControlKeyClient>
 ): ControlKeyClient {
 	return {
-		listControlKeys: uncalled,
-		rotateControlKey: uncalled,
-		retireControlKey: uncalled,
+		list: uncalled,
+		rotate: uncalled,
+		retire: uncalled,
 		...overrides
 	};
 }
@@ -72,9 +70,8 @@ describe('runControlKeyList', () => {
 		};
 
 		await runControlKeyList(
-			'admin-token',
 			reporter(results),
-			controlKeyClient({ listControlKeys: () => Promise.resolve(response) })
+			controlKeyClient({ list: () => Promise.resolve(response) })
 		);
 
 		expect(results).toStrictEqual([
@@ -88,7 +85,7 @@ describe('runControlKeyList', () => {
 
 describe('runControlKeyRotate', () => {
 	it('rotates and reports the scheduled retirement', async () => {
-		const calls: AccessCredential[] = [];
+		let rotateCalls = 0;
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 		const response: ControlKeyRotateResponse = {
@@ -100,18 +97,17 @@ describe('runControlKeyRotate', () => {
 		};
 
 		await runControlKeyRotate(
-			'admin-token',
 			reporter(results, infos),
 			controlKeyClient({
-				rotateControlKey(token) {
-					calls.push(token);
+				rotate() {
+					rotateCalls += 1;
 					return Promise.resolve(response);
 				}
 			})
 		);
 
-		expect({ calls, results, infoCount: infos.length }).toStrictEqual({
-			calls: ['admin-token'],
+		expect({ rotateCalls, results, infoCount: infos.length }).toStrictEqual({
+			rotateCalls: 1,
 			results: [
 				[
 					{ label: 'New key', value: 'kid-new' },
@@ -132,23 +128,22 @@ describe('runControlKeyRetire', () => {
 		{ retired: true, value: 'yes' },
 		{ retired: false, value: 'not present' }
 	])('reports retired=$retired', async ({ retired, value }) => {
-		const calls: { token: AccessCredential; kid: string }[] = [];
+		const calls: { kid: string }[] = [];
 		const results: ResultRow[][] = [];
 
 		await runControlKeyRetire(
 			'kid-old',
-			'admin-token',
 			reporter(results),
 			controlKeyClient({
-				retireControlKey(token, kid) {
-					calls.push({ token, kid });
+				retire(input) {
+					calls.push(input);
 					return Promise.resolve({ kid: 'kid-old', retired });
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ token: 'admin-token', kid: 'kid-old' }],
+			calls: [{ kid: 'kid-old' }],
 			results: [
 				[
 					{ label: 'Key', value: 'kid-old' },

@@ -4,23 +4,11 @@ import {
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
 import {
-	type ControlKeyListResponse,
-	controlKeyListResponseSchema,
-	type ControlKeyRetireResponse,
-	controlKeyRetireResponseSchema,
-	type ControlKeyRotateResponse,
-	controlKeyRotateResponseSchema
-} from '@cupboard/protocol/control-keys';
-import {
 	type ParsedTokenResponse,
 	refreshTokenGrantType,
 	tokenExchangeGrantType,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
-import {
-	controlCheckReportSchema,
-	type ParsedControlCheckReport
-} from '@cupboard/protocol/reports';
 import {
 	type RootSetBody,
 	type RootSetResponse,
@@ -31,15 +19,6 @@ import {
 	type SignupRequest,
 	signupResponseSchema
 } from '@cupboard/protocol/signup';
-import {
-	type TenantCreateBody,
-	type TenantListResponse,
-	tenantListResponseSchema,
-	type TenantMutateResponse,
-	tenantMutateResponseSchema,
-	type TenantSummary,
-	tenantSummarySchema
-} from '@cupboard/protocol/tenants';
 import { type CommitResponse } from '@cupboard/protocol/upload';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
@@ -136,97 +115,6 @@ export class CupboardClient {
 		url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
 
 		return url;
-	}
-
-	/**
-	 * The admin-gated deployment check at the bare host: diagnostics only the
-	 * deployment can perform on itself, such as proving the R2 credentials it
-	 * is bound with (their values cannot be read back from outside).
-	 */
-	controlCheck(token: AccessCredential): Promise<ParsedControlCheckReport> {
-		return this.requestJson('/control/check', controlCheckReportSchema, {
-			token
-		});
-	}
-
-	// The control-plane key routes live at the bare host, not under a tenant
-	// prefix, so this client must be built from the deployment's base URL.
-	listControlKeys(token: AccessCredential): Promise<ControlKeyListResponse> {
-		return this.requestJson('/control/keys', controlKeyListResponseSchema, {
-			token
-		});
-	}
-
-	rotateControlKey(token: AccessCredential): Promise<ControlKeyRotateResponse> {
-		return this.requestJson(
-			'/control/keys/rotate',
-			controlKeyRotateResponseSchema,
-			{
-				method: 'POST',
-				token
-			}
-		);
-	}
-
-	retireControlKey(
-		token: AccessCredential,
-		kid: string
-	): Promise<ControlKeyRetireResponse> {
-		return this.requestJson(
-			`/control/keys/retire/${encodeURIComponent(kid)}`,
-			controlKeyRetireResponseSchema,
-			{
-				method: 'POST',
-				token
-			}
-		);
-	}
-
-	// The tenant registry routes live at the bare host, so this client must be
-	// built from the deployment's base URL with a control-admin token.
-	createTenant(
-		token: AccessCredential,
-		body: TenantCreateBody
-	): Promise<TenantSummary> {
-		return this.requestJson('/control/tenants', tenantSummarySchema, {
-			method: 'POST',
-			token,
-			body
-		});
-	}
-
-	listTenants(token: AccessCredential): Promise<TenantListResponse> {
-		return this.requestJson('/control/tenants', tenantListResponseSchema, {
-			token
-		});
-	}
-
-	suspendTenant(
-		token: AccessCredential,
-		id: string
-	): Promise<TenantMutateResponse> {
-		return this.requestJson(
-			`/control/tenants/${encodeURIComponent(id)}/suspend`,
-			tenantMutateResponseSchema,
-			{
-				method: 'POST',
-				token
-			}
-		);
-	}
-
-	deleteTenant(
-		token: AccessCredential,
-		id: string
-	): Promise<TenantMutateResponse> {
-		return this.requestJson(
-			`/control/tenants/${encodeURIComponent(id)}`,
-			tenantMutateResponseSchema,
-			{
-				method: 'DELETE',
-				token
-			}
-		);
 	}
 
 	setRoot(

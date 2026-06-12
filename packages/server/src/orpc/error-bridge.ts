@@ -10,6 +10,7 @@ const codeByStatus: Record<number, string> = {
 	[StatusCodes.FORBIDDEN]: 'FORBIDDEN',
 	[StatusCodes.NOT_FOUND]: 'NOT_FOUND',
 	[StatusCodes.CONFLICT]: 'CONFLICT',
+	[StatusCodes.GONE]: 'GONE',
 	[StatusCodes.REQUEST_TOO_LONG]: 'PAYLOAD_TOO_LARGE',
 	[StatusCodes.UNPROCESSABLE_ENTITY]: 'UNPROCESSABLE_CONTENT',
 	[StatusCodes.INSUFFICIENT_STORAGE]: 'INSUFFICIENT_STORAGE',

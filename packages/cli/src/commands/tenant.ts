@@ -17,22 +17,18 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { controlRpc } from '../client/orpc.ts';
 
+/**
+ * The slice of the derived control client the tenant commands consume, in the
+ * contract's input and output shapes; the real `controlRpc(...).tenants`
+ * satisfies it by construction.
+ */
 export interface TenantClient {
-	createTenant(
-		token: AccessCredential,
-		body: TenantCreateBody
-	): Promise<TenantSummary>;
-	listTenants(token: AccessCredential): Promise<TenantListResponse>;
-	suspendTenant(
-		token: AccessCredential,
-		id: string
-	): Promise<TenantMutateResponse>;
-	deleteTenant(
-		token: AccessCredential,
-		id: string
-	): Promise<TenantMutateResponse>;
+	list(): Promise<TenantListResponse>;
+	create(input: TenantCreateBody): Promise<TenantSummary>;
+	suspend(input: { id: string }): Promise<TenantMutateResponse>;
+	remove(input: { id: string }): Promise<TenantMutateResponse>;
 }
 
 interface CreateOptions {
@@ -172,7 +168,8 @@ export function registerTenantCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 			const readSelection = readCredentialFromOptions(options);
@@ -192,9 +189,8 @@ export function registerTenantCommands(
 
 			await runTenantCreate(
 				body,
-				cachedOwnerProvider(url),
 				reporter,
-				client,
+				rpc.tenants,
 				readSelection.generatedPassword
 			);
 		});
@@ -207,11 +203,12 @@ export function registerTenantCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runTenantList(cachedOwnerProvider(url), reporter, client);
+			await runTenantList(reporter, rpc.tenants);
 		});
 
 	tenant
@@ -223,11 +220,12 @@ export function registerTenantCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runTenantSuspend(id, cachedOwnerProvider(url), reporter, client);
+			await runTenantSuspend(id, reporter, rpc.tenants);
 		});
 
 	tenant
@@ -239,23 +237,23 @@ export function registerTenantCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runTenantDelete(id, cachedOwnerProvider(url), reporter, client);
+			await runTenantDelete(id, reporter, rpc.tenants);
 		});
 }
 
 export async function runTenantCreate(
 	body: TenantCreateBody,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: TenantClient,
 	generatedReadPassword?: string
 ): Promise<void> {
 	const summary = await reporter.phase('Creating tenant', () =>
-		client.createTenant(token, body)
+		client.create(body)
 	);
 
 	const rows: ResultRow[] = [
@@ -285,12 +283,11 @@ export async function runTenantCreate(
 }
 
 export async function runTenantList(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: TenantClient
 ): Promise<void> {
 	const { tenants } = await reporter.phase('Listing tenants', () =>
-		client.listTenants(token)
+		client.list()
 	);
 
 	reporter.result(tenants.map((summary) => tenantRow(summary)));
@@ -298,12 +295,11 @@ export async function runTenantList(
 
 export async function runTenantSuspend(
 	id: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: TenantClient
 ): Promise<void> {
 	const result = await reporter.phase('Suspending tenant', () =>
-		client.suspendTenant(token, id)
+		client.suspend({ id })
 	);
 
 	reporter.result([{ label: result.id, value: result.status }]);
@@ -311,12 +307,11 @@ export async function runTenantSuspend(
 
 export async function runTenantDelete(
 	id: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: TenantClient
 ): Promise<void> {
 	const result = await reporter.phase('Offboarding tenant', () =>
-		client.deleteTenant(token, id)
+		client.remove({ id })
 	);
 
 	reporter.result([{ label: result.id, value: result.status }]);
