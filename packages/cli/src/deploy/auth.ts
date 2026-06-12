@@ -49,10 +49,11 @@ export interface CredentialChain {
 	readonly readWranglerToken?: () => Promise<string | undefined>;
 	readonly login: () => Promise<CloudflareGrant>;
 	/**
-	 * Whether a cached grant without an identity may be replaced by a fresh
-	 * browser login. A grant from before the `openid` scope carries no subject
-	 * and its refresh token cannot grow one, so only a new login can say who
-	 * the operator is; without a terminal the old grant is used as-is.
+	 * Whether an incomplete cached grant may be replaced by a fresh browser
+	 * login. A grant from before the `openid` scope carries no subject and its
+	 * refresh token cannot grow one, so only a new login can say who the
+	 * operator is; without a terminal the old grant is used as-is. (A grant
+	 * missing only its id_token upgrades by refresh first, browser second.)
 	 */
 	readonly upgradeLogin: boolean;
 	readonly now: () => number;
@@ -126,7 +127,7 @@ export async function resolveCredential(
 	const cached = await chain.readGrant();
 
 	if (cached !== undefined && usable(cached, chain.now())) {
-		if (cached.subject !== undefined || !chain.upgradeLogin) {
+		if (cached.subject !== undefined && cached.idToken !== undefined) {
 			return {
 				token: cached.accessToken,
 				source: 'cached login',
@@ -135,9 +136,43 @@ export async function resolveCredential(
 			};
 		}
 
-		// The grant predates identity capture and cannot learn its subject from
-		// a refresh; replace it with a fresh login so the deploy knows who is
-		// deploying.
+		// A grant with a subject but no stored id_token was issued with the
+		// openid scope, so a refresh reissues the id_token without a browser.
+		// The renewal is persisted even without one: the refresh token may have
+		// rotated on use.
+		if (cached.subject !== undefined) {
+			const renewed = await chain.refreshGrant(cached);
+
+			if (renewed !== undefined) {
+				await chain.writeGrant(renewed);
+			}
+
+			const best = renewed ?? cached;
+
+			if (best.idToken !== undefined || !chain.upgradeLogin) {
+				return {
+					token: best.accessToken,
+					source: 'cached login',
+					subject: best.subject,
+					idToken: best.idToken
+				};
+			}
+		}
+
+		// Without a terminal the incomplete grant is used as-is; the deploy
+		// proceeds, it just cannot present an identity.
+		if (!chain.upgradeLogin) {
+			return {
+				token: cached.accessToken,
+				source: 'cached login',
+				subject: cached.subject,
+				idToken: cached.idToken
+			};
+		}
+
+		// A grant from before the openid scope cannot learn its identity from a
+		// refresh, and a refresh that reissued nothing leaves the identity
+		// unproven; only a fresh login can supply it.
 		const upgraded = await chain.login();
 		await chain.writeGrant(upgraded);
 

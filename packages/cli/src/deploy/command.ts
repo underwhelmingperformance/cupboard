@@ -1208,8 +1208,8 @@ async function deployFlow(
 
 		case 'no-admin': {
 			ui.warn(
-				'No admin is bound, so the deployment cannot be claimed or hold ' +
-					'any caches. Re-run `cupboard init` and bind an admin to ' +
+				'Nobody was made admin, so this deployment cannot hold any ' +
+					'caches yet. Re-run `cupboard init` and pick an admin to ' +
 					'finish setting up.'
 			);
 			ui.outro('Deployed.');
@@ -1218,17 +1218,29 @@ async function deployFlow(
 
 		case 'admin-elsewhere': {
 			ui.info(
-				`The signup gate names ${outcome.owner.subject}; that identity ` +
-					'claims the deployment and creates its caches.'
+				`${outcome.owner.subject} is the admin of this deployment, so ` +
+					'creating its first cache is theirs to do.'
 			);
-			ui.outro(`Deployed. Hand ${outcome.url} to the admin.`);
+			ui.outro('Deployed.');
+			return;
+		}
+
+		case 'identity-unproven': {
+			ui.warn(
+				`The plan makes ${outcome.owner.subject} the admin, but this ` +
+					'session used a raw API token, which carries no identity to ' +
+					'prove that is you. Re-run `cupboard init` and log in through ' +
+					'the browser to finish setting up.'
+			);
+			ui.outro('Deployed.');
 			return;
 		}
 
 		case 'claim-refused': {
 			ui.warn(
-				`The server refused the admin claim (HTTP ${String(outcome.status)}). ` +
-					'The deployment may already be claimed by a different identity.'
+				'The server did not accept you as the admin ' +
+					`(HTTP ${String(outcome.status)}). The deployment may already ` +
+					'belong to a different identity.'
 			);
 			ui.outro('Deployed.');
 			return;
@@ -1236,10 +1248,10 @@ async function deployFlow(
 
 		case 'cancelled': {
 			ui.info(
-				'No cache was created. Re-run `cupboard init` to choose a slug ' +
-					'when you are ready.'
+				'No cache was created yet. Re-run `cupboard init` to pick a ' +
+					'name when you are ready.'
 			);
-			ui.outro('Deployed and claimed.');
+			ui.outro('Deployed; you are the admin.');
 			return;
 		}
 
