@@ -51,10 +51,9 @@ import {
 	ownerIssuerProblem
 } from './owner.ts';
 import {
-	accessKeyIdProblem,
 	checkR2Credentials,
-	type R2Credentials,
-	secretAccessKeyProblem
+	promptR2CredentialPair,
+	type R2Credentials
 } from './r2-credentials.ts';
 import {
 	createScopedR2Key,
@@ -62,12 +61,7 @@ import {
 } from './r2-token.ts';
 import { assembleSecrets, generateWrapSecret } from './secrets.ts';
 import { planWorkerSource } from './source.ts';
-import {
-	createDeployUi,
-	type DeployUi,
-	type MenuEntry,
-	terminalLink
-} from './ui.ts';
+import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
 
 /** The user backed out of a prompt; the deploy stops without error output. */
 export class DeployCancelledError extends CliError {
@@ -496,38 +490,6 @@ export function envR2Credentials(
 	return { accessKeyId, secretAccessKey };
 }
 
-/** Prompt for an existing pair; undefined when cancelled. */
-async function promptR2CredentialPair(
-	ui: DeployUi,
-	accountId: string
-): Promise<R2Credentials | undefined> {
-	const tokensPage = `https://dash.cloudflare.com/${accountId}/r2/api-tokens`;
-
-	ui.info(
-		`Create an R2 API token (Object Read & Write on the cache bucket) at\n${terminalLink(tokensPage, tokensPage)}`
-	);
-
-	const accessKeyEdit = await ui.editText({
-		message: 'R2 access key id',
-		problem: accessKeyIdProblem
-	});
-
-	if (accessKeyEdit.kind !== 'set') {
-		return undefined;
-	}
-
-	const secretAccessKey = await ui.secret(
-		'R2 secret access key',
-		secretAccessKeyProblem
-	);
-
-	if (secretAccessKey === undefined) {
-		return undefined;
-	}
-
-	return { accessKeyId: accessKeyEdit.value, secretAccessKey };
-}
-
 /** How the R2 credential question was resolved. */
 export type R2Settlement =
 	| {
@@ -558,16 +520,16 @@ export type R2KeyCreation =
  * Settle the R2 credential pair interactively: create a bucket-scoped key
  * through the Cloudflare API when the deploy credential allows it (the
  * recommended path), or take an existing pair. When the Worker already holds
- * a pair, keeping it is an explicit choice: the default when nothing changed,
- * flagged when the bucket was renamed and the pair may no longer fit.
+ * a pair that may no longer fit (the bucket was renamed), keeping it is
+ * offered as an explicit choice.
  */
 export async function obtainR2Credentials(options: {
 	readonly ui: DeployUi;
 	readonly accountId: string;
 	readonly bucketName: string;
 	readonly creation: R2KeyCreation;
-	/** Set when the Worker holds a pair; `previousBucket` flags a rename. */
-	readonly keep?: { readonly previousBucket?: string };
+	/** Set when the Worker holds a pair that was scoped to another bucket. */
+	readonly keep?: { readonly previousBucket: string };
 }): Promise<R2Settlement> {
 	const { ui, bucketName, creation } = options;
 
@@ -580,28 +542,12 @@ export async function obtainR2Credentials(options: {
 		return settled(await promptR2CredentialPair(ui, options.accountId));
 	}
 
-	const previousBucket = options.keep?.previousBucket;
 	const message =
 		options.keep === undefined
 			? `The cache needs R2 credentials for ${bucketName}. How would you like to provide them?`
-			: previousBucket === undefined
-				? `The Worker already holds R2 credentials for ${bucketName}. Keep or replace them?`
-				: `The cache bucket is now ${bucketName}, but the key on the Worker was set up for ${previousBucket}. How should the cache authenticate?`;
+			: `The cache bucket is now ${bucketName}, but the key on the Worker was set up for ${options.keep.previousBucket}. How should the cache authenticate?`;
 
-	const keepEntries =
-		options.keep === undefined
-			? []
-			: [
-					{
-						value: 'keep',
-						label: 'Keep the current key',
-						hint:
-							previousBucket === undefined
-								? 'set by an earlier deploy'
-								: `may still be scoped to ${previousBucket}`
-					} as const
-				];
-	const replaceEntries = [
+	const choice = await ui.menu(message, [
 		...(creation.kind === 'available'
 			? [
 					{
@@ -613,15 +559,16 @@ export async function obtainR2Credentials(options: {
 					} as const
 				]
 			: []),
-		{ value: 'enter', label: 'Enter an existing key pair' } as const
-	];
-
-	// An unchanged pair leads so plain Enter keeps it; after a rename the
-	// replacement paths lead, since the kept key is probably wrong.
-	const choice = await ui.menu(message, [
-		...(previousBucket === undefined
-			? [...keepEntries, ...replaceEntries]
-			: [...replaceEntries, ...keepEntries]),
+		{ value: 'enter', label: 'Enter an existing key pair' },
+		...(options.keep === undefined
+			? []
+			: [
+					{
+						value: 'keep',
+						label: 'Keep the current key',
+						hint: `may still be scoped to ${options.keep.previousBucket}`
+					} as const
+				]),
 		{ value: 'cancel', label: 'Cancel' }
 	]);
 
@@ -1116,7 +1063,12 @@ async function deployFlow(
 	if (r2Credentials === undefined) {
 		const alreadySet = await r2AlreadySetFor(agreed);
 
-		if (interactive) {
+		if (alreadySet && !bucketRenamed) {
+			// The Worker keeps the pair it already holds. The values cannot be
+			// read back, so the onboarding asks the deployment to prove them
+			// once a cache exists to ask through.
+			ui.info('Keeping the R2 credentials already set on the Worker.');
+		} else if (interactive) {
 			const settlement = await obtainR2Credentials({
 				ui,
 				accountId: agreed.accountId,
@@ -1128,12 +1080,8 @@ async function deployFlow(
 					accountId: agreed.accountId,
 					bucketName: agreedBucket
 				}),
-				...(alreadySet
-					? {
-							keep: bucketRenamed
-								? { previousBucket: bucketNameOf(artifact.config) }
-								: {}
-						}
+				...(alreadySet && bucketRenamed
+					? { keep: { previousBucket: bucketNameOf(artifact.config) } }
 					: {})
 			});
 
@@ -1151,15 +1099,11 @@ async function deployFlow(
 				throw new R2CredentialsRequiredError();
 			}
 
-			if (bucketRenamed) {
-				ui.warn(
-					'The cache bucket was renamed, and the R2 key already on the ' +
-						'Worker may be scoped to the old name. Re-run interactively ' +
-						'to replace it.'
-				);
-			} else {
-				ui.info('Keeping the R2 credentials already set on the Worker.');
-			}
+			ui.warn(
+				'The cache bucket was renamed, and the R2 key already on the ' +
+					'Worker may be scoped to the old name. Re-run interactively to ' +
+					'replace it.'
+			);
 		}
 	}
 
@@ -1245,6 +1189,7 @@ async function deployFlow(
 		api: apiFor(agreed.accountId),
 		ui,
 		controlScriptName: agreed.config.control.name,
+		tenantScriptName: agreed.config.tenant.name,
 		domain: agreed.domain,
 		admin: onboardAdminFor(
 			agreed.owner,
@@ -1253,7 +1198,17 @@ async function deployFlow(
 				: undefined
 		),
 		buildVersion: artifact.buildVersion,
-		claimSecret
+		claimSecret,
+		// A pair settled this run was probed client-side before it was set; a
+		// kept pair is only on the Worker, so the onboarding proves it there.
+		r2:
+			r2Credentials === undefined
+				? {
+						kind: 'kept',
+						accountId: agreed.accountId,
+						bucketName: agreedBucket
+					}
+				: { kind: 'fresh' }
 	});
 
 	switch (outcome.kind) {

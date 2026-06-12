@@ -46,6 +46,29 @@ export const verifyReportSchema = z.strictObject({
 });
 export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
 
+// Whether the R2 credentials bound to the tenant script sign requests R2
+// accepts: the values cannot be read back, so the deployment proves them by
+// performing a signed probe itself. The probe runs inside a tenant's Durable
+// Object (the script that holds the credentials), so a deployment with no
+// tenants yet has nowhere to run it.
+export const r2CredentialCheckSchema = z.discriminatedUnion('result', [
+	z.strictObject({ result: z.literal('ok') }),
+	z.strictObject({ result: z.literal('rejected'), status: z.number().int() }),
+	z.strictObject({ result: z.literal('unconfigured') }),
+	z.strictObject({ result: z.literal('no-tenant') })
+]);
+export type ParsedR2CredentialCheck = z.output<typeof r2CredentialCheckSchema>;
+
+// The admin-gated deployment check served by the control plane. Future
+// deployment diagnostics join the report as further fields.
+export const controlCheckReportSchema = z.strictObject({
+	r2: r2CredentialCheckSchema
+});
+export type ParsedControlCheckReport = z.output<
+	typeof controlCheckReportSchema
+>;
+
 export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
 export type CheckReport = z.input<typeof checkReportSchema>;
+export type ControlCheckReport = z.input<typeof controlCheckReportSchema>;
 export type VerifyReport = z.input<typeof verifyReportSchema>;

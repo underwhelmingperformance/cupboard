@@ -1,13 +1,18 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
+import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { DurableObject } from 'cloudflare:workers';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
 
 import migrations from '../../drizzle/migrations.js';
 import * as schema from '../db/schema.ts';
-import { TenantNotConfiguredError, ZstdUnavailableError } from '../errors.ts';
+import {
+	R2PresignConfigurationMissingError,
+	TenantNotConfiguredError,
+	ZstdUnavailableError
+} from '../errors.ts';
 import { serverErrorResponse } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
@@ -300,6 +305,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.authKeys.resetAuthKeyCache();
 			this.signingKeys.resetKeyCaches();
 		});
+	}
+
+	// Proves the R2 credentials this script is bound with: their values cannot
+	// be read back, so the control plane asks the Durable Object (which holds
+	// them) to sign a HEAD probe and see whether R2 accepts the signature. The
+	// probe touches only the env, never this object's storage, so any instance
+	// can answer it.
+	async checkR2(): Promise<ParsedR2CredentialCheck> {
+		let probeUrl: string;
+
+		try {
+			probeUrl = await this.context
+				.r2Presigner()
+				.presignHeadUrl('.cupboard-credential-probe', 60);
+		} catch (error) {
+			if (error instanceof R2PresignConfigurationMissingError) {
+				return { result: 'unconfigured' };
+			}
+
+			throw error;
+		}
+
+		const response = await fetch(probeUrl, { method: 'HEAD' });
+
+		// A missing probe object still answers 404 with a valid signature; only
+		// a rejected signature speaks against the credentials.
+		if (response.ok || response.status === 404) {
+			return { result: 'ok' };
+		}
+
+		return { result: 'rejected', status: response.status };
 	}
 
 	// The control plane assigns this Durable Object its identity at provision time

@@ -486,24 +486,6 @@ describe('R2 credential settlement', () => {
 		).toStrictEqual({ kind: 'settled', credentials: pair, created: false });
 	});
 
-	it('offers keeping an unchanged pair and keeps it when chosen', async () => {
-		const ui = scriptedUi({ menuChoices: ['keep'] });
-
-		expect(
-			await obtainR2Credentials({
-				ui,
-				accountId: 'acc-1',
-				bucketName: 'cupboard-blobs',
-				creation: {
-					kind: 'available',
-					bucketExists: true,
-					create: unexpected('create')
-				},
-				keep: {}
-			})
-		).toStrictEqual({ kind: 'keep' });
-	});
-
 	it('keeps the current key when the user says so after a bucket rename', async () => {
 		const ui = scriptedUi({ menuChoices: ['keep'] });
 

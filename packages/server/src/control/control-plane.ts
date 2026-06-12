@@ -6,6 +6,7 @@ import {
 	tokenExchangeRequestSchema,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import {
 	tenantCreateBodySchema,
 	type TenantListResponse,
@@ -96,6 +97,10 @@ export async function handleControl(
 		return serverErrorResponse(
 			Promise.resolve().then(() => controlAsMetadata(request, env))
 		);
+	}
+
+	if (read && pathname === '/control/check') {
+		return serverErrorResponse(controlCheck(request, env));
 	}
 
 	if (read && pathname === '/control/keys') {
@@ -318,6 +323,27 @@ async function requireControlAdmin(request: Request, env: Env): Promise<void> {
 	if (scope !== 'admin') {
 		throw new InsufficientScopeError();
 	}
+}
+
+// The admin-gated deployment check: diagnostics only the deployment itself
+// can perform, starting with whether its R2 credentials sign requests R2
+// accepts. The credentials live on the tenant script, so a tenant's Durable
+// Object answers; the bindings are script-wide, so any live tenant's object
+// speaks for the deployment, and with none there is nowhere to run the probe.
+async function controlCheck(request: Request, env: Env): Promise<Response> {
+	await requireControlAdmin(request, env);
+
+	const tenants = await listTenants(controlDatabase(env));
+	const live = tenants.find((tenant) => tenant.status !== 'offboarded');
+
+	const r2 =
+		live === undefined
+			? ({ result: 'no-tenant' } as const)
+			: await tenantServer(env, live.id).checkR2();
+
+	return Response.json({ r2 } satisfies ControlCheckReport, {
+		headers: { 'cache-control': 'no-store' }
+	});
 }
 
 async function controlKeyList(request: Request, env: Env): Promise<Response> {
