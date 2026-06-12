@@ -143,7 +143,10 @@ describe('tenant routing', () => {
 
 		// No token: the write is dispatched to the tenant's object, which rejects it as
 		// unauthorised, rather than the Worker refusing every named write.
-		const response = await handlerFetch('/t/acme/uploads', writeRequest());
+		const response = await handlerFetch(
+			'/t/acme/cache/_default/uploads',
+			writeRequest()
+		);
 
 		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
 	});
@@ -152,7 +155,7 @@ describe('tenant routing', () => {
 		await suspendTenant(fixtureTenant);
 
 		const response = await handlerFetch(
-			`/t/${fixtureTenant}/uploads`,
+			`/t/${fixtureTenant}/cache/_default/uploads`,
 			writeRequest()
 		);
 

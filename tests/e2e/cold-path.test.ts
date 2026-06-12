@@ -4,7 +4,7 @@ import { implicitPinName } from '@cupboard/nix/retention';
 import { StorePath } from '@cupboard/nix/store-path';
 import { describe, expect, it } from 'vitest';
 
-import { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
@@ -25,11 +25,10 @@ describe('cold-path retention TTL', () => {
 				});
 
 				try {
-					const client = new CupboardClient(
-						server.tenantUrl,
-						server.uploadFetcher()
-					);
 					const token = await server.ownerAdminToken();
+					const client = pushClientFor(server.tenantUrl, token, {
+						fetcher: server.uploadFetcher()
+					});
 					const source = await NixStore.host(
 						path.join(directory, 'source-home')
 					);
@@ -38,16 +37,15 @@ describe('cold-path retention TTL', () => {
 					// Root activation gates on servability, so the target must be pushed
 					// before it can be rooted.
 					await pushStorePaths(
-						{ client, token, store: source, workDirectory: directory },
+						{ client, store: source, workDirectory: directory },
 						[storePath]
 					);
 
 					const pin = await client.setRoot(
-						token,
 						implicitPinName(StorePath.hash(storePath)),
 						{ targets: [storePath] }
 					);
-					const named = await client.setRoot(token, 'github:owner/repo/main', {
+					const named = await client.setRoot('github:owner/repo/main', {
 						targets: [storePath]
 					});
 

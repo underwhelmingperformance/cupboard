@@ -6,16 +6,15 @@ import {
 	type UploadPathNegotiationFields
 } from '@cupboard/protocol/upload';
 
-import type { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/io/file-stream.ts';
 import { compressAndHashNarToFile } from '../../packages/cli/src/nix/blob.ts';
 import { NarArchive } from '../../packages/cli/src/nix/nar.ts';
+import type { PushClient } from '../../packages/cli/src/push/push.ts';
 
 import { NixStore } from './nix.ts';
 
 export interface PushContext {
-	readonly client: CupboardClient;
-	readonly token: string;
+	readonly client: PushClient;
 	readonly store: NixStore;
 	readonly workDirectory: string;
 }
@@ -42,7 +41,7 @@ export async function pushStorePaths(
 		prepared.map((entry) => [entry.metadata.storePathHash, entry])
 	);
 
-	const { uploads } = await context.client.negotiate(context.token, {
+	const { uploads } = await context.client.negotiate({
 		paths: prepared.map((entry) => negotiationFields(entry.metadata))
 	});
 
@@ -54,15 +53,11 @@ export async function pushStorePaths(
 		}
 
 		if (decision.action === 'upload') {
-			const prepared = await context.client.prepareUpload(
-				context.token,
-				decision.uploadId,
-				{
-					fileHash: entry.metadata.fileHash,
-					fileSize: entry.metadata.fileSize,
-					compression: entry.metadata.compression
-				}
-			);
+			const prepared = await context.client.prepareUpload(decision.uploadId, {
+				fileHash: entry.metadata.fileHash,
+				fileSize: entry.metadata.fileSize,
+				compression: entry.metadata.compression
+			});
 
 			await context.client.uploadBlob({
 				r2Key: decision.r2Key,
@@ -74,7 +69,7 @@ export async function pushStorePaths(
 		}
 
 		if (decision.action !== 'skip') {
-			await context.client.commit(context.token, decision.uploadId);
+			await context.client.commit(decision.uploadId, {});
 		}
 	}
 
@@ -115,7 +110,7 @@ export async function negotiateUpload(
 	storePath: string
 ): Promise<NegotiatedUpload> {
 	const entry = await preparePath(context, storePath);
-	const { uploads } = await context.client.negotiate(context.token, {
+	const { uploads } = await context.client.negotiate({
 		paths: [negotiationFields(entry.metadata)]
 	});
 	const [decision] = uploads;
@@ -124,15 +119,11 @@ export async function negotiateUpload(
 		throw new UnexpectedUploadDecisionError(entry.metadata.storePathHash);
 	}
 
-	const prepared = await context.client.prepareUpload(
-		context.token,
-		decision.uploadId,
-		{
-			fileHash: entry.metadata.fileHash,
-			fileSize: entry.metadata.fileSize,
-			compression: entry.metadata.compression
-		}
-	);
+	const prepared = await context.client.prepareUpload(decision.uploadId, {
+		fileHash: entry.metadata.fileHash,
+		fileSize: entry.metadata.fileSize,
+		compression: entry.metadata.compression
+	});
 
 	return {
 		r2Key: decision.r2Key,

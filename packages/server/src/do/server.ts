@@ -1,12 +1,11 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
-import { zstdDecompressionStream } from '@cupboard/nix/zstd';
-import { attestationNegotiateRequestSchema } from '@cupboard/protocol/attestations';
-import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import {
-	uploadNegotiateRequestSchema,
-	uploadPrepareRequestSchema
-} from '@cupboard/protocol/upload';
+	cacheFromSelector,
+	cacheSelectorSchema,
+	DEFAULT_CACHE
+} from '@cupboard/nix/scalars';
+import { zstdDecompressionStream } from '@cupboard/nix/zstd';
+import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { DurableObject } from 'cloudflare:workers';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
@@ -29,7 +28,7 @@ import {
 	textResponse,
 	verificationBatchSize
 } from '../http/http.ts';
-import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
+import { parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
@@ -387,7 +386,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// Every request addresses a cache: the default one unless a
 		// `/cache/:cacheName/` prefix names another, validated here so the routes
-		// under the prefix always see a well-formed name.
+		// under the prefix always see a well-formed name. The `_default` wire
+		// alias maps back to the default cache's stored name.
 		this.app.use(async (context, next) => {
 			context.set('cache', DEFAULT_CACHE);
 			await next();
@@ -395,7 +395,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.use('/cache/:cacheName/*', async (context, next) => {
 			context.set(
 				'cache',
-				parseRequestValue(cacheNameSchema, context.req.param('cacheName'))
+				cacheFromSelector(
+					parseRequestValue(cacheSelectorSchema, context.req.param('cacheName'))
+				)
 			);
 			await next();
 		});
@@ -476,37 +478,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 		);
 
-		this.app.on(
-			'POST',
-			['/uploads', '/cache/:cacheName/uploads'],
-			this.scoped('write'),
-			this.maintenance(),
-			async (context) =>
-				context.json(
-					await this.uploads.negotiate(
-						context.get('cache'),
-						await parseRequestBody(
-							uploadNegotiateRequestSchema,
-							context.req.raw
-						),
-						new URL(context.req.url).origin
-					)
-				)
-		);
-		this.app.on(
-			'PUT',
-			['/uploads/:id', '/cache/:cacheName/uploads/:id'],
-			this.scoped('write'),
-			this.maintenance(),
-			async (context) =>
-				context.json(
-					await this.uploads.prepareUpload(
-						context.get('cache'),
-						context.req.param('id'),
-						await parseRequestBody(uploadPrepareRequestSchema, context.req.raw)
-					)
-				)
-		);
 		// The commit endpoint is a WebSocket: the upgrade request carries the
 		// write token, the first frame settles or defers the path, and a
 		// deferred upload's socket parks (hibernating) until verification
@@ -521,11 +492,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.get('cache'),
 					context.req.param('id')
 				)
-		);
-		// A deferred upload's status is polled by its uploadId, which is unique
-		// across caches, so a single route serves it regardless of cache.
-		this.app.get('/uploads/:id/status', this.scoped('write'), (context) =>
-			context.json(this.uploads.uploadStatus(context.req.param('id')))
 		);
 		// The serve routes stream stored objects with conditional-request
 		// handling, so they keep their Response-shaped handlers.
@@ -550,48 +516,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					context.req.raw,
 					context.get('cache'),
 					context.req.param('digest')
-				)
-		);
-		this.app.on(
-			'POST',
-			['/attestations', '/cache/:cacheName/attestations'],
-			this.scoped('write'),
-			this.maintenance(),
-			async (context) =>
-				context.json(
-					await this.attestations.negotiate(
-						context.get('cache'),
-						await parseRequestBody(
-							attestationNegotiateRequestSchema,
-							context.req.raw
-						)
-					)
-				)
-		);
-		this.app.on(
-			'PUT',
-			['/attestations/:id', '/cache/:cacheName/attestations/:id'],
-			this.scoped('write'),
-			this.maintenance(),
-			async (context) =>
-				context.json(
-					await this.attestations.prepare(
-						context.get('cache'),
-						context.req.param('id')
-					)
-				)
-		);
-		this.app.on(
-			'POST',
-			['/attestations/:id/attach', '/cache/:cacheName/attestations/:id/attach'],
-			this.scoped('write'),
-			this.maintenance(),
-			async (context) =>
-				context.json(
-					await this.attestations.attach(
-						context.get('cache'),
-						context.req.param('id')
-					)
 				)
 		);
 	}
@@ -693,7 +617,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			integrityCheck: this.integrityCheck,
 			roots: this.roots,
 			deletionQueue: this.deletionQueue,
-			garbageCollection: this.garbageCollection
+			garbageCollection: this.garbageCollection,
+			uploads: this.uploads,
+			attestations: this.attestations
 		};
 	}
 

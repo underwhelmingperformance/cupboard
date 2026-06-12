@@ -7,6 +7,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
+import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore, type RealiseOptions } from '../support/nix.ts';
@@ -50,8 +51,9 @@ describe('Nix substitution through a signing-key rotation', () => {
 					const push = (storePath: string): Promise<unknown> =>
 						pushStorePaths(
 							{
-								client,
-								token: token,
+								client: pushClientFor(server.tenantUrl, token, {
+									fetcher: server.uploadFetcher()
+								}),
 								store: source,
 								workDirectory: directory
 							},
