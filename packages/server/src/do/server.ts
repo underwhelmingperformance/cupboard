@@ -7,12 +7,8 @@ import {
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import { attestationNegotiateRequestSchema } from '@cupboard/protocol/attestations';
-import { oidcTrustAddBodySchema } from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
-import {
-	retentionPolicyAddBodySchema,
-	rootSetBodySchema
-} from '@cupboard/protocol/retention';
+import { rootSetBodySchema } from '@cupboard/protocol/retention';
 import {
 	uploadNegotiateRequestSchema,
 	uploadPrepareRequestSchema
@@ -457,36 +453,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		this.app.get('/policies', this.scoped('admin'), (context) =>
-			context.json(this.retention.listPolicies())
-		);
-		this.app.post('/policies', this.scoped('admin'), async (context) =>
-			context.json(
-				this.retention.addPolicy(
-					await parseRequestBody(retentionPolicyAddBodySchema, context.req.raw)
-				)
-			)
-		);
-		this.app.delete('/policies/:id', this.scoped('admin'), (context) =>
-			context.json(this.retention.removePolicy(context.req.param('id')))
-		);
-
-		// The owner manages CI write-trust rules here; the owner's own admin rule
-		// is seeded from deploy config and is not editable through this API.
-		this.app.get('/oidc-trust', this.scoped('admin'), (context) =>
-			context.json(this.oidcTrust.listRules())
-		);
-		this.app.post('/oidc-trust', this.scoped('admin'), async (context) =>
-			context.json(
-				this.oidcTrust.addRule(
-					await parseRequestBody(oidcTrustAddBodySchema, context.req.raw)
-				)
-			)
-		);
-		this.app.delete('/oidc-trust/:id', this.scoped('admin'), (context) =>
-			context.json(this.oidcTrust.removeRule(context.req.param('id')))
-		);
-
 		// A read-only storage check across every cache. Blobs are shared, so it is
 		// deployment-wide: one bare `/check` covering all caches.
 		this.app.get('/check', this.scoped('admin'), async (context) =>
@@ -836,7 +802,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.withMaintenanceEligibility(body),
 			cacheAdmin: this.cacheAdmin,
 			signingKeys: this.signingKeys,
-			authKeys: this.authKeys
+			authKeys: this.authKeys,
+			retention: this.retention,
+			oidcTrust: this.oidcTrust
 		};
 	}
 

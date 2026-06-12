@@ -72,5 +72,27 @@ export const tenantRouter = os.router({
 				context.services.authKeys.retireAuthKey(input.kid)
 			)
 		}
+	},
+	policies: {
+		list: os.policies.list.handler(({ context }) =>
+			context.services.retention.listPolicies()
+		),
+		add: os.policies.add.handler(({ input, context }) =>
+			context.services.retention.addPolicy(input)
+		),
+		remove: os.policies.remove.handler(({ input, context }) =>
+			context.services.retention.removePolicy(input.id)
+		)
+	},
+	oidcTrust: {
+		list: os.oidcTrust.list.handler(({ context }) =>
+			context.services.oidcTrust.listRules()
+		),
+		add: os.oidcTrust.add.handler(({ input, context }) =>
+			context.services.oidcTrust.addRule(input)
+		),
+		remove: os.oidcTrust.remove.handler(({ input, context }) =>
+			context.services.oidcTrust.removeRule(input.id)
+		)
 	}
 });

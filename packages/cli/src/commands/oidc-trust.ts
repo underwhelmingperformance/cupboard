@@ -13,7 +13,7 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
 
 interface OidcTrustAddOptions {
@@ -23,16 +23,15 @@ interface OidcTrustAddOptions {
 	readonly allowedRoot: readonly string[];
 }
 
+/**
+ * The slice of the derived client the trust commands consume, in the
+ * contract's input and output shapes; the real `tenantRpc(...).oidcTrust`
+ * satisfies it by construction.
+ */
 export interface OidcTrustClient {
-	listOidcTrust(token: AccessCredential): Promise<OidcTrustListResponse>;
-	addOidcTrust(
-		token: AccessCredential,
-		body: OidcTrustAddBody
-	): Promise<OidcTrustSummary>;
-	removeOidcTrust(
-		token: AccessCredential,
-		id: string
-	): Promise<OidcTrustRemoveResponse>;
+	list(): Promise<OidcTrustListResponse>;
+	add(input: OidcTrustAddBody): Promise<OidcTrustSummary>;
+	remove(input: { id: string }): Promise<OidcTrustRemoveResponse>;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
@@ -71,11 +70,12 @@ export function registerOidcTrustCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runOidcTrustList(cachedOwnerProvider(url), reporter, client);
+			await runOidcTrustList(reporter, rpc.oidcTrust);
 		});
 
 	oidcTrust
@@ -100,7 +100,8 @@ export function registerOidcTrustCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 			const body: OidcTrustAddBody = {
@@ -110,7 +111,7 @@ export function registerOidcTrustCommands(
 				allowedRoots: [...options.allowedRoot]
 			};
 
-			await runOidcTrustAdd(body, cachedOwnerProvider(url), reporter, client);
+			await runOidcTrustAdd(body, reporter, rpc.oidcTrust);
 		});
 
 	oidcTrust
@@ -122,21 +123,21 @@ export function registerOidcTrustCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runOidcTrustRemove(id, cachedOwnerProvider(url), reporter, client);
+			await runOidcTrustRemove(id, reporter, rpc.oidcTrust);
 		});
 }
 
 export async function runOidcTrustList(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: OidcTrustClient
 ): Promise<void> {
 	const { rules } = await reporter.phase('Listing OIDC trust rules', () =>
-		client.listOidcTrust(token)
+		client.list()
 	);
 
 	if (rules.length === 0) {
@@ -149,12 +150,11 @@ export async function runOidcTrustList(
 
 export async function runOidcTrustAdd(
 	body: OidcTrustAddBody,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: OidcTrustClient
 ): Promise<void> {
 	const summary = await reporter.phase('Adding OIDC trust rule', () =>
-		client.addOidcTrust(token, body)
+		client.add(body)
 	);
 
 	reporter.result([
@@ -171,12 +171,11 @@ export async function runOidcTrustAdd(
 
 export async function runOidcTrustRemove(
 	id: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: OidcTrustClient
 ): Promise<void> {
 	const result = await reporter.phase('Removing OIDC trust rule', () =>
-		client.removeOidcTrust(token, id)
+		client.remove({ id })
 	);
 
 	reporter.result([

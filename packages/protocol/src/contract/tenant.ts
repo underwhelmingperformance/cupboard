@@ -1,5 +1,7 @@
 import { cachesContract } from './caches.ts';
 import { keysContract } from './keys.ts';
+import { oidcTrustContract } from './oidc-trust.ts';
+import { policiesContract } from './policies.ts';
 
 /**
  * The tenant admin API: every JSON procedure a tenant deployment answers,
@@ -10,5 +12,7 @@ import { keysContract } from './keys.ts';
  */
 export const tenantContract = {
 	caches: cachesContract,
-	keys: keysContract
+	keys: keysContract,
+	policies: policiesContract,
+	oidcTrust: oidcTrustContract
 };
