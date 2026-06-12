@@ -3,13 +3,19 @@ import { z } from 'zod';
 
 import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
 
-// RFC 8693 token-exchange is the only grant the token endpoint accepts. The
+// RFC 8693 token-exchange mints the first cupboard token of a session. The
 // subject token is an external OIDC JWT — the owner's `id_token` or a CI GitHub
 // Actions token. The issued cupboard token is reported as an access token.
 export const tokenExchangeGrantType =
 	'urn:ietf:params:oauth:grant-type:token-exchange';
 export const issuedAccessTokenType =
 	'urn:ietf:params:oauth:token-type:access_token';
+
+// RFC 6749 §6: presenting a refresh token re-issues an access token without a
+// fresh external login. A tenant's token endpoint grants one alongside an
+// admin exchange and rotates it on every use; the control plane's endpoint
+// stays exchange-only.
+export const refreshTokenGrantType = 'refresh_token';
 
 // The subject token is a JWT either way. cupboard accepts only these two RFC 8693
 // type identifiers and verifies both the same way, rejecting any other type. Its
@@ -31,15 +37,29 @@ export type ParsedTokenExchangeRequest = z.output<
 	typeof tokenExchangeRequestSchema
 >;
 
+// The tenant token endpoint's request, before grant dispatch: only the grant
+// type is required here, and each grant validates its own fields afterwards,
+// so an unknown grant type answers `unsupported_grant_type` rather than a
+// generic schema failure.
+export const tokenRequestSchema = z.object({
+	grant_type: z.string().min(1),
+	subject_token: z.string().min(1).optional(),
+	subject_token_type: z.string().min(1).optional(),
+	refresh_token: z.string().min(1).optional()
+});
+export type ParsedTokenRequest = z.output<typeof tokenRequestSchema>;
+
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the cupboard JWT; `issued_token_type` is present for the
-// token-exchange grant. Field names are the OAuth wire spelling.
+// token-exchange grant. A `refresh_token` accompanies an admin session and is
+// rotated on every refresh. Field names are the OAuth wire spelling.
 export const tokenResponseSchema = z.strictObject({
 	access_token: z.string(),
 	token_type: z.literal('Bearer'),
 	expires_in: positiveIntSchema,
 	scope: z.string().optional(),
-	issued_token_type: z.string().optional()
+	issued_token_type: z.string().optional(),
+	refresh_token: z.string().optional()
 });
 export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
 

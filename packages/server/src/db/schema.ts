@@ -108,6 +108,21 @@ export const authKeys = sqliteTable('auth_key', {
 	retiredAt: text('retired_at')
 });
 
+// A live refresh grant: the wire token is `<id>.<secret>` and only the secret's
+// SHA-256 is held here, so a copy of this table mints nothing. Presenting the
+// token rotates the row (the spent row is deleted, a successor inserted), which
+// makes each refresh token single-use: a replayed one finds no row and fails as
+// `invalid_grant`. The rule id re-derives the scope and roots at refresh time,
+// so retiring or disabling a trust rule ends its sessions.
+export const refreshTokens = sqliteTable('refresh_token', {
+	id: text('id').primaryKey(),
+	secretHash: text('secret_hash').notNull(),
+	ruleId: text('rule_id').notNull(),
+	subject: text('subject').notNull(),
+	createdAt: text('created_at').notNull(),
+	expiresAt: text('expires_at').notNull()
+});
+
 // The Durable Object's own identity, set by the control plane's `configure` RPC at
 // provision time and on config-version bumps. It is the sole identity source for a
 // configured tenant: the slug it serves, the path-based issuer and audience it pins

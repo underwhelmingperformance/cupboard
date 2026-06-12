@@ -246,6 +246,13 @@ export class GarbageCollectionService {
 				.delete(schema.pendingAttestations)
 				.where(lt(schema.pendingAttestations.expiresAt, now))
 				.run();
+			// An expired refresh token nobody presented again still holds a row;
+			// the sweep reclaims it. A live session is untouched (rotation renews
+			// its expiry on every use).
+			this.context.db
+				.delete(schema.refreshTokens)
+				.where(lt(schema.refreshTokens.expiresAt, now))
+				.run();
 
 			// Reachability GC is per-cache: each registered cache keeps its own
 			// closure. A bare /gc sweeps every cache; /cache/:name/gc sweeps one.
