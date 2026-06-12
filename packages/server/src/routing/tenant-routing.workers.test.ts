@@ -1,4 +1,7 @@
-import { tokenExchangeGrantType } from '@cupboard/protocol/oidc';
+import {
+	refreshTokenGrantType,
+	tokenExchangeGrantType
+} from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -58,7 +61,7 @@ describe('tenant routing', () => {
 				issuer: base,
 				token_endpoint: `${base}/token`,
 				jwks_uri: `${base}/.well-known/jwks.json`,
-				grant_types_supported: [tokenExchangeGrantType],
+				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				scopes_supported: ['write', 'admin'],
 				token_endpoint_auth_methods_supported: ['none']
 			}

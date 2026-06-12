@@ -1,15 +1,18 @@
 import {
+	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
-	tokenExchangeGrantType
+	tokenExchangeGrantType,
+	type TokenResponse
 } from '@cupboard/protocol/oidc';
 import { runInDurableObject } from 'cloudflare:test';
+import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
-import { generateKeyPair, SignJWT } from 'jose';
+import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { oidcTrust } from '../db/schema.ts';
+import { oidcTrust, refreshTokens } from '../db/schema.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import {
 	currentOrigin,
@@ -169,6 +172,267 @@ describe('POST /token', () => {
 	});
 });
 
+// Installs a trust rule for a stub issuer whose discovery and JWKS documents
+// are served from memory, and returns a subject token it signed: a full,
+// successful exchange without any network.
+async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
+	const idp = await generateKeyPair('RS256', { extractable: true });
+	const jwk = await exportJWK(idp.publicKey);
+	const subjectToken = await new SignJWT({})
+		.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
+		.setIssuer('https://idp.test')
+		.setAudience('cupboard-aud')
+		.setSubject('alice')
+		.setIssuedAt()
+		.setExpirationTime('5m')
+		.sign(idp.privateKey);
+
+	await runInDurableObject(currentServer(), async (instance, state) => {
+		await migrateThrough(state, latestMigrationIndex);
+		drizzle(state.storage, { schema: { oidcTrust } })
+			.insert(oidcTrust)
+			.values({
+				id: `${scope}-rule`,
+				issuer: 'https://idp.test',
+				audience: 'cupboard-aud',
+				scope,
+				claimsJson: JSON.stringify({ sub: 'alice' }),
+				allowedRootsJson: '[]',
+				createdAt: '2026-01-01T00:00:00.000Z'
+			})
+			.run();
+		instance.discovery = new OidcDiscoveryStore({
+			fetcher: (input) => {
+				const url = input instanceof Request ? input.url : String(input);
+
+				if (url === 'https://idp.test/.well-known/openid-configuration') {
+					return Promise.resolve(
+						Response.json({
+							issuer: 'https://idp.test',
+							jwks_uri: 'https://idp.test/jwks'
+						})
+					);
+				}
+
+				if (url === 'https://idp.test/jwks') {
+					return Promise.resolve(
+						Response.json({ keys: [{ ...jwk, kid: 'idp', alg: 'RS256' }] })
+					);
+				}
+
+				return Promise.resolve(new Response('not found', { status: 404 }));
+			}
+		});
+	});
+
+	return subjectToken;
+}
+
+async function exchange(subjectToken: string): Promise<TokenResponse> {
+	const response = await postToken({
+		grant_type: tokenExchangeGrantType,
+		subject_token: subjectToken,
+		subject_token_type: subjectTokenTypeIdToken
+	});
+
+	expect(response.status).toBe(StatusCodes.OK);
+
+	return response.json<TokenResponse>();
+}
+
+function refreshTokenRows(): Promise<{ id: string; expiresAt: string }[]> {
+	return runInDurableObject(currentServer(), (_instance, state) =>
+		drizzle(state.storage, { schema: { refreshTokens } })
+			.select({ id: refreshTokens.id, expiresAt: refreshTokens.expiresAt })
+			.from(refreshTokens)
+			.all()
+	);
+}
+
+describe('refresh grant', () => {
+	beforeEach(resetTestServer);
+
+	it('grants a rotating refresh token alongside an admin exchange', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+
+		const refreshed = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: exchanged.refresh_token ?? ''
+		});
+		const refreshedBody = await refreshed.json<TokenResponse>();
+		const claims = decodeJwt(refreshedBody.access_token);
+
+		const replayed = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: exchanged.refresh_token ?? ''
+		});
+
+		expect({
+			exchangedHasRefreshToken: typeof exchanged.refresh_token,
+			refreshedStatus: refreshed.status,
+			refreshedCacheControl: refreshed.headers.get('cache-control'),
+			refreshedScope: refreshedBody.scope,
+			refreshedExpiresIn: refreshedBody.expires_in,
+			refreshedHasRefreshToken: typeof refreshedBody.refresh_token,
+			rotated: refreshedBody.refresh_token !== exchanged.refresh_token,
+			subject: claims.sub,
+			scopeClaim: claims.scope,
+			replayedStatus: replayed.status,
+			replayedBody: await replayed.json<OAuthError>()
+		}).toStrictEqual({
+			exchangedHasRefreshToken: 'string',
+			refreshedStatus: StatusCodes.OK,
+			refreshedCacheControl: 'no-store',
+			refreshedScope: 'admin',
+			refreshedExpiresIn: 600,
+			refreshedHasRefreshToken: 'string',
+			rotated: true,
+			subject: 'alice',
+			scopeClaim: 'admin',
+			replayedStatus: StatusCodes.BAD_REQUEST,
+			replayedBody: {
+				error: 'invalid_grant',
+				error_description: 'Refresh token is invalid or expired'
+			}
+		});
+	});
+
+	it('issues no refresh token for a write exchange', async () => {
+		const subjectToken = await installTrustedIdp('write');
+		const exchanged = await exchange(subjectToken);
+
+		expect({
+			refreshToken: exchanged.refresh_token,
+			rows: await refreshTokenRows()
+		}).toStrictEqual({ refreshToken: undefined, rows: [] });
+	});
+
+	it('rejects an expired refresh token and reclaims its row', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { refreshTokens } })
+				.update(refreshTokens)
+				.set({ expiresAt: '2020-01-01T00:00:00.000Z' })
+				.run();
+		});
+
+		const refreshed = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: exchanged.refresh_token ?? ''
+		});
+
+		expect({
+			status: refreshed.status,
+			body: await refreshed.json<OAuthError>(),
+			rows: await refreshTokenRows()
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			body: {
+				error: 'invalid_grant',
+				error_description: 'Refresh token is invalid or expired'
+			},
+			rows: []
+		});
+	});
+
+	it('ends the session when its trust rule is gone', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			drizzle(state.storage, { schema: { oidcTrust } })
+				.delete(oidcTrust)
+				.where(eq(oidcTrust.id, 'admin-rule'))
+				.run();
+		});
+
+		const refreshed = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: exchanged.refresh_token ?? ''
+		});
+
+		expect({
+			status: refreshed.status,
+			body: await refreshed.json<OAuthError>()
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			body: {
+				error: 'invalid_grant',
+				error_description: 'Refresh token is invalid or expired'
+			}
+		});
+	});
+
+	it.each([
+		{ name: 'a malformed refresh token', refresh_token: 'nonsense' },
+		{
+			name: 'a refresh token with an unknown id',
+			refresh_token: `${crypto.randomUUID()}.deadbeef`
+		}
+	])('rejects $name as invalid_grant', async ({ refresh_token }) => {
+		await installTrustedIdp('admin');
+
+		const refreshed = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token
+		});
+
+		expect({
+			status: refreshed.status,
+			body: await refreshed.json<OAuthError>()
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			body: {
+				error: 'invalid_grant',
+				error_description: 'Refresh token is invalid or expired'
+			}
+		});
+	});
+
+	it('rejects a refresh request missing the token as invalid_request', async () => {
+		const response = await postToken({ grant_type: refreshTokenGrantType });
+		const body = await response.json<OAuthError>();
+
+		expect({ status: response.status, error: body.error }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request'
+		});
+	});
+
+	it('reaps expired refresh tokens in the garbage-collection sweep', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		await exchange(subjectToken);
+		await exchange(subjectToken);
+
+		const [live] = await refreshTokenRows();
+
+		await runInDurableObject(currentServer(), (_instance, state) => {
+			const database = drizzle(state.storage, { schema: { refreshTokens } });
+			const rows = database.select().from(refreshTokens).all();
+			const stale = rows.find((row) => row.id !== live?.id);
+
+			if (stale === undefined) {
+				throw new Error('expected two refresh-token rows');
+			}
+
+			database
+				.update(refreshTokens)
+				.set({ expiresAt: '2020-01-01T00:00:00.000Z' })
+				.where(eq(refreshTokens.id, stale.id))
+				.run();
+		});
+
+		await currentServer().runGarbageCollection();
+
+		const survivors = await refreshTokenRows();
+
+		expect(survivors.map((row) => row.id)).toStrictEqual([live?.id ?? '']);
+	});
+});
+
 describe('owner rule seeding', () => {
 	beforeEach(resetTestServer);
 
@@ -300,7 +564,7 @@ describe('auth discovery endpoints', () => {
 				// The endpoints carry this tenant's `/t/<tenant>/` prefix.
 				token_endpoint: `${origin}/t/v1/token`,
 				jwks_uri: `${origin}/t/v1/.well-known/jwks.json`,
-				grant_types_supported: [tokenExchangeGrantType],
+				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				scopes_supported: ['write', 'admin'],
 				token_endpoint_auth_methods_supported: ['none']
 			}
