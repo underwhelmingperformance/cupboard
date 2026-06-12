@@ -4,18 +4,20 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 
 interface CheckOptions {
 	readonly token: string;
 	readonly deep?: boolean;
 }
 
+/**
+ * The slice of the derived client the check command consumes, in the
+ * contract's input and output shapes; the real `tenantRpc(...).check`
+ * satisfies it by construction.
+ */
 export interface CheckClient {
-	check(
-		token: AccessCredential,
-		options: { readonly deep: boolean }
-	): Promise<CheckReport>;
+	run(input: { deep: boolean }): Promise<CheckReport>;
 }
 
 export function registerCheckCommand(
@@ -31,23 +33,22 @@ export function registerCheckCommand(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runCheck(options.deep ?? false, token, reporter, client);
+			await runCheck(options.deep ?? false, reporter, rpc.check);
 		});
 }
 
 export async function runCheck(
 	deep: boolean,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: CheckClient
 ): Promise<void> {
 	const report = await reporter.phase('Checking cupboard', () =>
-		client.check(token, { deep })
+		client.run({ deep })
 	);
 
 	reporter.result([

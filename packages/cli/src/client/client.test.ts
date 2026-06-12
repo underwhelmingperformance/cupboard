@@ -4,7 +4,6 @@ import type {
 	AttestationPrepareResponse
 } from '@cupboard/protocol/attestations';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
-import type { CheckReport } from '@cupboard/protocol/reports';
 import type {
 	RootListResponse,
 	RootRemoveResponse,
@@ -539,76 +538,23 @@ describe('CupboardClient.removeRoot', () => {
 	});
 });
 
-describe('CupboardClient check', () => {
-	const report: CheckReport = {
-		narInfosChecked: 1,
-		narBlobsChecked: 1,
-		complete: true,
-		discrepancies: []
-	};
-
-	it.each([
-		{ deep: false, url: 'https://cupboard.test/check' },
-		{ deep: true, url: 'https://cupboard.test/check?deep=true' }
-	])('requests /check with deep=$deep', async ({ deep, url }) => {
-		const { client, captured } = capturingClient(report);
-
-		const result = await client.check('admin-token', { deep });
-
-		expect(result).toStrictEqual(report);
-		expect(captured()).toStrictEqual({
-			url,
-			method: 'GET',
-			authorization: 'Bearer admin-token',
-			contentType: undefined,
-			body: undefined
-		});
-	});
-
-	it('rejects a check response that does not match the schema', async () => {
-		const { client } = capturingClient({ narInfosChecked: -1 });
-
-		await expect(client.check('admin-token', { deep: false })).rejects.toThrow(
-			ResponseSchemaMismatchError
-		);
-	});
-});
-
 describe('CupboardClient cache prefix', () => {
-	const statsResponse = {
-		storePaths: 0,
-		narBlobs: 0,
-		narFileSize: 0,
-		casObjects: 0,
-		casFileSize: 0,
-		pendingUploads: 0,
-		totalFileSize: 0
-	};
-	const usageResponse = {
-		narBlobs: 0,
-		narFileSize: 0,
-		casObjects: 0,
-		casFileSize: 0,
-		totalFileSize: 0
-	};
-
 	it('prepends the cache prefix to a path-scoped route', async () => {
+		const hash = 'b6gz4hjcjafdvbmgmrasqcwwf4byqqlv';
 		const { client, captured } = capturingClient(
-			statsResponse,
+			{
+				storePathHash: hash,
+				deleted: true,
+				narScheduledForDeletion: false
+			},
 			'/cache/builds'
 		);
 
-		await client.stats('admin-token');
+		await client.deleteStorePath('admin-token', hash);
 
-		expect(captured()?.url).toBe('https://cupboard.test/cache/builds/stats');
-	});
-
-	it('leaves a path-scoped route bare for the default cache', async () => {
-		const { client, captured } = capturingClient(statsResponse);
-
-		await client.stats('admin-token');
-
-		expect(captured()?.url).toBe('https://cupboard.test/stats');
+		expect(captured()?.url).toBe(
+			`https://cupboard.test/cache/builds/paths/${hash}`
+		);
 	});
 
 	it('does not prefix a deployment-wide route', async () => {
@@ -620,17 +566,6 @@ describe('CupboardClient cache prefix', () => {
 		await client.publicKey();
 
 		expect(captured()?.url).toBe('https://cupboard.test/pubkey');
-	});
-
-	it('leaves usage deployment-scoped under a cache prefix', async () => {
-		const { client, captured } = capturingClient(
-			usageResponse,
-			'/cache/builds'
-		);
-
-		await client.usage('admin-token');
-
-		expect(captured()?.url).toBe('https://cupboard.test/usage');
 	});
 
 	it('rejects an invalid cache name when building a scoped client', () => {
