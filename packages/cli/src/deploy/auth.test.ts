@@ -233,6 +233,83 @@ describe('resolveCredential', () => {
 		});
 	});
 
+	it('refreshes a grant that predates id_token storage', async () => {
+		const stored: CloudflareGrant = { ...freshGrant, idToken: undefined };
+		const renewed: CloudflareGrant = {
+			...freshGrant,
+			accessToken: 'renewed-access',
+			idToken: 'renewed-id-token'
+		};
+		const { chain, calls } = chainWith({
+			storedGrant: stored,
+			renewedGrant: renewed,
+			upgradeLogin: true
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'renewed-access',
+			source: 'cached login',
+			subject: 'cf-user-1',
+			idToken: 'renewed-id-token'
+		});
+		expect({
+			refreshedWith: calls.refreshedWith,
+			written: calls.written,
+			logins: calls.logins
+		}).toStrictEqual({
+			refreshedWith: [stored],
+			written: [renewed],
+			logins: 0
+		});
+	});
+
+	it('falls back to a login when the refresh reissues no id_token', async () => {
+		const stored: CloudflareGrant = { ...freshGrant, idToken: undefined };
+		const renewed: CloudflareGrant = {
+			...stored,
+			refreshToken: 'rotated-refresh'
+		};
+		const loginGrant: CloudflareGrant = {
+			accessToken: 'login-access',
+			refreshToken: 'login-refresh',
+			expiresAt: now + hour,
+			subject: 'cf-user-1',
+			idToken: 'login-id-token'
+		};
+		const { chain, calls } = chainWith({
+			storedGrant: stored,
+			renewedGrant: renewed,
+			loginGrant,
+			upgradeLogin: true
+		});
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'login-access',
+			source: 'browser login',
+			subject: 'cf-user-1',
+			idToken: 'login-id-token'
+		});
+		// The rotation is persisted before the login overwrites it, so a login
+		// abandoned midway does not strand a revoked refresh token.
+		expect(calls.written).toStrictEqual([renewed, loginGrant]);
+	});
+
+	it('keeps an id_token-less grant when no upgrade is possible', async () => {
+		const stored: CloudflareGrant = { ...freshGrant, idToken: undefined };
+		const { chain, calls } = chainWith({ storedGrant: stored });
+
+		expect(await resolveCredential(chain)).toStrictEqual({
+			token: 'cached-access',
+			source: 'cached login',
+			subject: 'cf-user-1',
+			idToken: undefined
+		});
+		expect({
+			refreshedWith: calls.refreshedWith,
+			logins: calls.logins
+		}).toStrictEqual({ refreshedWith: [stored], logins: 0 });
+	});
+
 	it('replaces an identity-less grant with a fresh login when allowed', async () => {
 		const loginGrant: CloudflareGrant = {
 			accessToken: 'login-access',

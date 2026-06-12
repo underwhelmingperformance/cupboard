@@ -17,21 +17,28 @@ type Probe<T> =
 	| { readonly kind: 'ready'; readonly value: T }
 	| { readonly kind: 'retry'; readonly detail: string };
 
-/** How the agreed admin gate relates to the person deploying. */
+/** How the agreed admin binding relates to the person deploying. */
 export type OnboardAdmin =
 	| {
 			readonly kind: 'claimable';
 			readonly owner: OwnerBinding;
-			/** The deployer's id_token, the subject token the gate admits. */
+			/** The deployer's id_token, the proof the server checks. */
 			readonly idToken: string;
 	  }
 	| { readonly kind: 'other'; readonly owner: OwnerBinding }
+	| {
+			/** The session's credential carries no identity to prove a match. */
+			readonly kind: 'unproven';
+			readonly owner: OwnerBinding;
+	  }
 	| { readonly kind: 'none' };
 
 /**
- * The admin gate as the onboarding sees it: claimable right now when the
+ * The admin binding as the onboarding sees it: claimable right now when the
  * agreed binding is the deployer's own identity and the login carried an
- * id_token; otherwise someone else's to claim, or closed.
+ * id_token to prove it; someone else's when it names a different identity;
+ * unproven when the session's credential carries no identity at all; or
+ * nobody's.
  */
 export function onboardAdminFor(
 	choice: OwnerChoice,
@@ -42,7 +49,7 @@ export function onboardAdminFor(
 	}
 
 	if (deployer === undefined) {
-		return { kind: 'other', owner: choice.owner };
+		return { kind: 'unproven', owner: choice.owner };
 	}
 
 	const own = deployerOwner(deployer.subject);
@@ -69,6 +76,11 @@ export type OnboardOutcome =
 	| { readonly kind: 'no-admin'; readonly url: string }
 	| {
 			readonly kind: 'admin-elsewhere';
+			readonly url: string;
+			readonly owner: OwnerBinding;
+	  }
+	| {
+			readonly kind: 'identity-unproven';
 			readonly url: string;
 			readonly owner: OwnerBinding;
 	  }
@@ -175,6 +187,10 @@ export async function onboardDeployment(
 		return { kind: 'admin-elsewhere', url, owner: admin.owner };
 	}
 
+	if (admin.kind === 'unproven') {
+		return { kind: 'identity-unproven', url, owner: admin.owner };
+	}
+
 	const claim = await claimAdmin(ui, client, url, admin.idToken, cacheToken);
 
 	if (claim.kind === 'refused') {
@@ -268,7 +284,7 @@ async function claimAdmin(
 		| undefined;
 
 	try {
-		claim = await ui.reporter().phase('Claiming admin', async () => {
+		claim = await ui.reporter().phase('Setting up admin access', async () => {
 			const signup = await client.signup({ subject_token: idToken });
 			const exchanged = await client.tokenExchange(
 				idToken,
@@ -293,8 +309,8 @@ async function claimAdmin(
 
 	ui.success(
 		claim.claimed
-			? `Claimed global admin as ${claim.subject}`
-			: `Already the admin (${claim.subject}); token refreshed`
+			? `You are now the admin of this deployment (${claim.subject}).`
+			: `You are already the admin of this deployment (${claim.subject}).`
 	);
 
 	return { kind: 'claimed', token: claim.token };
