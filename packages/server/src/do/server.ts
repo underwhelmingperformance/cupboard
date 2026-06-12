@@ -8,7 +8,6 @@ import {
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import { attestationNegotiateRequestSchema } from '@cupboard/protocol/attestations';
-import { cachePutBodySchema } from '@cupboard/protocol/caches';
 import { oidcTrustAddBodySchema } from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import {
@@ -44,6 +43,8 @@ import {
 } from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
+import { type TenantRpcServices } from '../orpc/context.ts';
+import { tenantOrpcHandler } from '../orpc/handler.ts';
 
 import {
 	AttestationCasService,
@@ -378,6 +379,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
+		// The contract procedures answer first: the oRPC handler serves every
+		// JSON admin route declared in @cupboard/protocol/contract, and anything
+		// it does not match falls through to the wire-format routes below.
+		this.app.use(async (context, next) => {
+			const { matched, response } = await tenantOrpcHandler.handle(
+				context.req.raw,
+				{
+					context: { request: context.req.raw, services: this.rpcServices() }
+				}
+			);
+
+			if (matched) {
+				return response;
+			}
+
+			await next();
+		});
+
 		// Every request addresses a cache: the default one unless a
 		// `/cache/:cacheName/` prefix names another, validated here so the routes
 		// under the prefix always see a well-formed name.
@@ -474,46 +493,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 		);
 
-		// The cache registry is deployment-wide, so it lives at `/caches` rather
-		// than under a per-cache prefix.
-		this.app.get('/caches', this.scoped('admin'), (context) =>
-			context.json(this.cacheAdmin.listCaches())
-		);
-		this.app.put(
-			'/caches/:cacheName',
-			this.scoped('admin'),
-			async (context) => {
-				const cache = parseRequestValue(
-					cacheNameSchema,
-					context.req.param('cacheName')
-				);
-				const body = await parseRequestBody(
-					cachePutBodySchema,
-					context.req.raw
-				);
-
-				return context.json(this.cacheAdmin.putCache(cache, body.priority));
-			}
-		);
-		this.app.delete(
-			'/caches/:cacheName',
-			this.scoped('admin'),
-			this.maintenance(),
-			async (context) => {
-				const cache = parseRequestValue(
-					cacheNameSchema,
-					context.req.param('cacheName')
-				);
-
-				return context.json(
-					await this.cacheAdmin.removeCache(
-						cache,
-						context.req.query('force') === 'true',
-						new URL(context.req.url).origin
-					)
-				);
-			}
-		);
 		this.app.get('/policies', this.scoped('admin'), (context) =>
 			context.json(this.retention.listPolicies())
 		);
@@ -881,6 +860,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	webSocketError(socket: WebSocket): void {
 		socket.close(1011, 'socket error');
+	}
+
+	// The capabilities the contract procedures reach through the oRPC context:
+	// authentication, the maintenance bracket, and the domain services.
+	private rpcServices(): TenantRpcServices {
+		return {
+			requireScope: (request, scope) =>
+				this.authKeys.requireScope(request, scope),
+			withMaintenanceEligibility: (body) =>
+				this.withMaintenanceEligibility(body),
+			cacheAdmin: this.cacheAdmin
+		};
 	}
 
 	// Authenticates a route against the tenant's auth keys, making the verified

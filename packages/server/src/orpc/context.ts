@@ -1,0 +1,20 @@
+import type { AccessClaims, AccessScope } from '../auth/auth.ts';
+import type { CacheAdminService } from '../do/cache-admin-service.ts';
+
+/**
+ * The capabilities the contract's procedures need from the Durable Object:
+ * authentication, the maintenance-eligibility bracket, and the domain
+ * services. The object supplies an instance per request through the handler
+ * context.
+ */
+export interface TenantRpcServices {
+	requireScope(request: Request, scope: AccessScope): Promise<AccessClaims>;
+	withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
+	readonly cacheAdmin: CacheAdminService;
+}
+
+/** The initial oRPC context for every tenant procedure call. */
+export interface TenantOrpcContext {
+	readonly request: Request;
+	readonly services: TenantRpcServices;
+}
