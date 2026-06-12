@@ -1,8 +1,11 @@
 import { cacheFromSelector } from '@cupboard/nix/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
+import { type GcResponse } from '@cupboard/protocol/retention';
 import { implement } from '@orpc/server';
 
-import { type TenantOrpcContext } from './context.ts';
+import { internalOrigin } from '../http/http.ts';
+
+import { type TenantOrpcContext, type TenantRpcServices } from './context.ts';
 import { bridgedError } from './error-bridge.ts';
 
 // The implementer carries the cross-cutting middleware every procedure runs:
@@ -108,5 +111,63 @@ export const tenantRouter = os.router({
 		run: os.check.run.handler(({ input, context }) =>
 			context.services.integrityCheck.check(input.deep)
 		)
+	},
+	roots: {
+		list: os.roots.list.handler(({ input, context }) =>
+			context.services.roots.listRoots(cacheFromSelector(input.cacheName))
+		),
+		set: os.roots.set.handler(({ input, context }) =>
+			context.services.roots.setRoot(
+				context.claims,
+				cacheFromSelector(input.cacheName),
+				input.name,
+				{ targets: input.targets, ttlSeconds: input.ttlSeconds }
+			)
+		),
+		remove: os.roots.remove.handler(({ input, context }) =>
+			context.services.roots.removeRoot(
+				cacheFromSelector(input.cacheName),
+				input.name
+			)
+		)
+	},
+	paths: {
+		remove: os.paths.remove.handler(({ input, context }) =>
+			context.services.deletionQueue.deleteStorePath(
+				cacheFromSelector(input.cacheName),
+				input.hash,
+				new URL(context.request.url).origin
+			)
+		)
+	},
+	gc: {
+		runAll: os.gc.runAll.handler(({ context }) =>
+			collectGarbage(context.request, context.services)
+		),
+		runCache: os.gc.runCache.handler(({ input, context }) =>
+			collectGarbage(
+				context.request,
+				context.services,
+				cacheFromSelector(input.cacheName)
+			)
+		)
 	}
 });
+
+// Interactive GC purges this colo's edge cache via the caller's public
+// origin. The cron sweep arrives on the internal origin and cannot know the
+// public URL, so it skips purging and relies on the narinfo TTL and the
+// orphan-blob grace window instead.
+async function collectGarbage(
+	request: Request,
+	services: TenantRpcServices,
+	cache?: string
+): Promise<GcResponse> {
+	const { origin } = new URL(request.url);
+	const purgeOrigin = origin === internalOrigin ? undefined : origin;
+
+	return {
+		ok: true,
+		...(await services.garbageCollection.collectGarbage(cache, purgeOrigin))
+	};
+}

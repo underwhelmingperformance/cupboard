@@ -15,11 +15,15 @@ const targetMetadata = uploadMetadata({ fileSize: narBytes.byteLength });
 const target = targetMetadata.storePath;
 
 function putRoot(token: string, name: string): Promise<Response> {
-	return authorisedFetch(`/roots/${encodeURIComponent(name)}`, token, {
-		body: JSON.stringify({ targets: [target] }),
-		headers: { 'content-type': 'application/json' },
-		method: 'PUT'
-	});
+	return authorisedFetch(
+		`/cache/_default/roots/${encodeURIComponent(name)}`,
+		token,
+		{
+			body: JSON.stringify({ targets: [target] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		}
+	);
 }
 
 describe('cb_roots enforcement at PUT /roots', () => {
@@ -83,13 +87,16 @@ describe('cb_roots enforcement at PUT /roots', () => {
 		const token = await mintServerSignedToken('write', 'ci', cbRoots);
 
 		const response = await putRoot(token, root);
+		const body = await response.json<{ code: string; message: string }>();
 
 		expect({
 			status: response.status,
-			body: await response.text()
+			code: body.code,
+			message: body.message
 		}).toStrictEqual({
 			status: StatusCodes.FORBIDDEN,
-			body: 'Token is not permitted to set this root\n'
+			code: 'FORBIDDEN',
+			message: 'Token is not permitted to set this root'
 		});
 	});
 

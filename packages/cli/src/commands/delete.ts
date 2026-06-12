@@ -1,3 +1,4 @@
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import { createReporter, type Reporter } from '@cupboard/reporter';
@@ -5,18 +6,23 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 
 interface DeleteOptions {
 	readonly token: string;
 	readonly cache?: string;
 }
 
+/**
+ * The slice of the derived client the delete command consumes, in the
+ * contract's input and output shapes; the real `tenantRpc(...).paths`
+ * satisfies it by construction.
+ */
 export interface DeleteClient {
-	deleteStorePath(
-		token: AccessCredential,
-		storePathHash: string
-	): Promise<DeletePathResponse>;
+	remove(input: {
+		cacheName: string;
+		hash: string;
+	}): Promise<DeletePathResponse>;
 }
 
 export function registerDeleteCommand(
@@ -39,26 +45,30 @@ export function registerDeleteCommand(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
-				cache: options.cache,
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runDelete(storePath, token, reporter, client);
+			await runDelete(
+				selectorForCache(options.cache ?? DEFAULT_CACHE),
+				storePath,
+				reporter,
+				rpc.paths
+			);
 		});
 }
 
 export async function runDelete(
+	cacheName: string,
 	storePath: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: DeleteClient
 ): Promise<void> {
 	const storePathHash = StorePath.hash(storePath);
 
 	const result = await reporter.phase('Deleting from cupboard', () =>
-		client.deleteStorePath(token, storePathHash)
+		client.remove({ cacheName, hash: storePathHash })
 	);
 
 	reporter.result([

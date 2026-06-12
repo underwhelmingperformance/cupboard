@@ -1,8 +1,11 @@
 import { cachesContract } from './caches.ts';
+import { gcContract } from './gc.ts';
 import { keysContract } from './keys.ts';
 import { oidcTrustContract } from './oidc-trust.ts';
+import { pathsContract } from './paths.ts';
 import { policiesContract } from './policies.ts';
 import { checkContract } from './reports.ts';
+import { rootsContract } from './roots.ts';
 import { statsContract } from './stats.ts';
 
 /**
@@ -18,5 +21,8 @@ export const tenantContract = {
 	policies: policiesContract,
 	oidcTrust: oidcTrustContract,
 	stats: statsContract,
-	check: checkContract
+	check: checkContract,
+	roots: rootsContract,
+	paths: pathsContract,
+	gc: gcContract
 };

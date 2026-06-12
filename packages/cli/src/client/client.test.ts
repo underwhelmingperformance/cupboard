@@ -5,16 +5,11 @@ import type {
 } from '@cupboard/protocol/attestations';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type {
-	RootListResponse,
-	RootRemoveResponse,
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
 import type { SignupResponse } from '@cupboard/protocol/signup';
-import type {
-	CommitSocketFrame,
-	DeletePathResponse
-} from '@cupboard/protocol/upload';
+import type { CommitSocketFrame } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -201,31 +196,6 @@ describe('CupboardClient.signup', () => {
 				'claimed by another principal'
 			)
 		);
-	});
-});
-
-describe('CupboardClient.deleteStorePath', () => {
-	it('deletes the store path hash with the admin token', async () => {
-		const response: DeletePathResponse = {
-			storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
-			deleted: true,
-			narScheduledForDeletion: true
-		};
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.deleteStorePath(
-			'admin-token',
-			'0123456789abcdfghijklmnpqrsvwxyz'
-		);
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/paths/0123456789abcdfghijklmnpqrsvwxyz',
-			method: 'DELETE',
-			authorization: 'Bearer admin-token',
-			contentType: undefined,
-			body: undefined
-		});
 	});
 });
 
@@ -490,7 +460,7 @@ describe('CupboardClient.setRoot', () => {
 
 		expect(result).toStrictEqual(response);
 		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/roots/github%3Aowner%2Frepo%2Fmain',
+			url: 'https://cupboard.test/cache/_default/roots/github%3Aowner%2Frepo%2Fmain',
 			method: 'PUT',
 			authorization: 'Bearer admin-token',
 			contentType: 'application/json',
@@ -499,61 +469,23 @@ describe('CupboardClient.setRoot', () => {
 	});
 });
 
-describe('CupboardClient.listRoots', () => {
-	it('gets the roots with the admin token and no body', async () => {
-		const response: RootListResponse = { roots: [] };
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.listRoots('admin-token');
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/roots',
-			method: 'GET',
-			authorization: 'Bearer admin-token',
-			contentType: undefined,
-			body: undefined
-		});
-	});
-});
-
-describe('CupboardClient.removeRoot', () => {
-	it('deletes the root by name with the admin token, encoding the name in the path', async () => {
-		const response: RootRemoveResponse = {
-			name: 'pr-123',
-			removed: true
-		};
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.removeRoot('admin-token', 'pr-123');
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/roots/pr-123',
-			method: 'DELETE',
-			authorization: 'Bearer admin-token',
-			contentType: undefined,
-			body: undefined
-		});
-	});
-});
-
 describe('CupboardClient cache prefix', () => {
-	it('prepends the cache prefix to a path-scoped route', async () => {
-		const hash = 'b6gz4hjcjafdvbmgmrasqcwwf4byqqlv';
-		const { client, captured } = capturingClient(
-			{
-				storePathHash: hash,
-				deleted: true,
-				narScheduledForDeletion: false
-			},
-			'/cache/builds'
-		);
+	it('prepends the cache prefix to a contract route', async () => {
+		const response: RootSetResponse = {
+			name: 'main',
+			expired: false,
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z',
+			targets: []
+		};
+		const { client, captured } = capturingClient(response, '/cache/builds');
 
-		await client.deleteStorePath('admin-token', hash);
+		await client.setRoot('admin-token', 'main', {
+			targets: ['/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app']
+		});
 
 		expect(captured()?.url).toBe(
-			`https://cupboard.test/cache/builds/paths/${hash}`
+			'https://cupboard.test/cache/builds/roots/main'
 		);
 	});
 
@@ -576,24 +508,12 @@ describe('CupboardClient cache prefix', () => {
 });
 
 describe('CupboardClient response validation', () => {
-	it('rejects a response that does not match the schema', async () => {
-		const { client } = capturingClient({
-			storePathHash: 'not-a-valid-hash',
-			deleted: true,
-			narScheduledForDeletion: true
-		});
+	it('rejects a response missing a required field', async () => {
+		const { client } = capturingClient({ name: 'main' });
 
 		await expect(
-			client.deleteStorePath('admin-token', '0123456789abcdfghijklmnpqrsvwxyz')
+			client.setRoot('admin-token', 'main', { targets: ['/nix/store/x'] })
 		).rejects.toThrow(ResponseSchemaMismatchError);
-	});
-
-	it('rejects a response missing a required field', async () => {
-		const { client } = capturingClient({ roots: [{ name: 'pr-1' }] });
-
-		await expect(client.listRoots('admin-token')).rejects.toThrow(
-			ResponseSchemaMismatchError
-		);
 	});
 
 	it('rejects a 200 response whose body is not valid JSON', async () => {
@@ -601,13 +521,21 @@ describe('CupboardClient response validation', () => {
 			Promise.resolve(new Response('{ not json', { status: 200 }))
 		);
 
-		await expect(client.listRoots('admin-token')).rejects.toThrow(
-			MalformedResponseError
-		);
+		await expect(
+			client.setRoot('admin-token', 'main', { targets: ['/nix/store/x'] })
+		).rejects.toThrow(MalformedResponseError);
 	});
 });
 
 describe('CupboardClient token refresh', () => {
+	const rootResponse: RootSetResponse = {
+		name: 'main',
+		expired: false,
+		createdAt: '2026-01-01T00:00:00.000Z',
+		updatedAt: '2026-01-01T00:00:00.000Z',
+		targets: []
+	};
+
 	it('refreshes the token and retries once when a provider call returns 401', async () => {
 		const authorisations: (string | undefined)[] = [];
 		const provider: TokenProvider = {
@@ -629,16 +557,16 @@ describe('CupboardClient token refresh', () => {
 					);
 				}
 
-				return Promise.resolve(
-					Response.json({ roots: [] } satisfies RootListResponse)
-				);
+				return Promise.resolve(Response.json(rootResponse));
 			}
 		);
 
-		const result = await client.listRoots(provider);
+		const result = await client.setRoot(provider, 'main', {
+			targets: ['/nix/store/x']
+		});
 
 		expect({ result, authorisations }).toStrictEqual({
-			result: { roots: [] },
+			result: rootResponse,
 			authorisations: ['Bearer stale-token', 'Bearer fresh-token']
 		});
 	});
@@ -651,7 +579,9 @@ describe('CupboardClient token refresh', () => {
 			return Promise.resolve(new Response('Unauthorised\n', { status: 401 }));
 		});
 
-		await expect(client.listRoots('static-token')).rejects.toThrow();
+		await expect(
+			client.setRoot('static-token', 'main', { targets: ['/nix/store/x'] })
+		).rejects.toThrow();
 		expect(calls).toBe(1);
 	});
 });

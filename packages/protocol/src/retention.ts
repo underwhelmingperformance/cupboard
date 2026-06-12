@@ -8,6 +8,8 @@ import {
 } from '@cupboard/nix/scalars';
 import { z } from 'zod';
 
+import { countSchema } from './internal/counts.ts';
+
 export const rootSetBodySchema = z.strictObject({
 	targets: z.array(storePathSchema).min(1),
 	ttlSeconds: ttlSecondsSchema.optional()
@@ -47,6 +49,19 @@ export const rootRemoveResponseSchema = z.strictObject({
 export type ParsedRootRemoveResponse = z.output<
 	typeof rootRemoveResponseSchema
 >;
+
+// One garbage-collection sweep's counts: expired roots, swept paths, and the
+// pending and committed rows it removed.
+export const gcResponseSchema = z.strictObject({
+	ok: z.literal(true),
+	pendingUploadsDeleted: countSchema,
+	pendingAttestationsDeleted: countSchema,
+	rootsExpired: countSchema,
+	pathsSwept: countSchema,
+	narInfosDeleted: countSchema
+});
+export type ParsedGcResponse = z.output<typeof gcResponseSchema>;
+export type GcResponse = z.input<typeof gcResponseSchema>;
 
 // A retention policy applies a default TTL to roots by cache (the pattern is a
 // cache name, or the empty string for the default cache) or by root-name prefix

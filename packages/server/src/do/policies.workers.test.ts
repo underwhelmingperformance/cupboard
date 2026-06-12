@@ -38,7 +38,7 @@ async function addPolicy(
 
 async function setRoot(token: string, name: string): Promise<RootSetResponse> {
 	const response = await authorisedFetch(
-		`/roots/${encodeURIComponent(name)}`,
+		`/cache/_default/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			body: JSON.stringify({ targets: [storePath] }),

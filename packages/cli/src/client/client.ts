@@ -1,4 +1,8 @@
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	WIRE_DEFAULT_CACHE
+} from '@cupboard/nix/scalars';
 import {
 	type AttestationAttachResponse,
 	attestationAttachResponseSchema,
@@ -27,10 +31,6 @@ import {
 	type ParsedControlCheckReport
 } from '@cupboard/protocol/reports';
 import {
-	type RootListResponse,
-	rootListResponseSchema,
-	type RootRemoveResponse,
-	rootRemoveResponseSchema,
 	type RootSetBody,
 	type RootSetResponse,
 	rootSetResponseSchema
@@ -51,8 +51,6 @@ import {
 } from '@cupboard/protocol/tenants';
 import {
 	type CommitResponse,
-	type DeletePathResponse,
-	deletePathResponseSchema,
 	type UploadNegotiateRequest,
 	type UploadNegotiateResponse,
 	uploadNegotiateResponseSchema,
@@ -141,6 +139,14 @@ export class CupboardClient {
 
 	private scoped(path: string): string {
 		return `${this.cachePrefix}${path}`;
+	}
+
+	// Routes that moved onto the contract address the default cache by its wire
+	// alias rather than a bare path, so the selector form is always prefixed.
+	private selectorScoped(path: string): string {
+		return this.cachePrefix === ''
+			? `/cache/${WIRE_DEFAULT_CACHE}${path}`
+			: `${this.cachePrefix}${path}`;
 	}
 
 	// Resolves a route under the base URL's full path, so a tenant base like
@@ -244,52 +250,18 @@ export class CupboardClient {
 		);
 	}
 
-	deleteStorePath(
-		token: AccessCredential,
-		storePathHash: string
-	): Promise<DeletePathResponse> {
-		return this.requestJson(
-			this.scoped(`/paths/${storePathHash}`),
-			deletePathResponseSchema,
-			{
-				method: 'DELETE',
-				token
-			}
-		);
-	}
-
 	setRoot(
 		token: AccessCredential,
 		name: string,
 		body: RootSetBody
 	): Promise<RootSetResponse> {
 		return this.requestJson(
-			this.scoped(`/roots/${encodeURIComponent(name)}`),
+			this.selectorScoped(`/roots/${encodeURIComponent(name)}`),
 			rootSetResponseSchema,
 			{
 				method: 'PUT',
 				token,
 				body
-			}
-		);
-	}
-
-	listRoots(token: AccessCredential): Promise<RootListResponse> {
-		return this.requestJson(this.scoped('/roots'), rootListResponseSchema, {
-			token
-		});
-	}
-
-	removeRoot(
-		token: AccessCredential,
-		name: string
-	): Promise<RootRemoveResponse> {
-		return this.requestJson(
-			this.scoped(`/roots/${encodeURIComponent(name)}`),
-			rootRemoveResponseSchema,
-			{
-				method: 'DELETE',
-				token
 			}
 		);
 	}
