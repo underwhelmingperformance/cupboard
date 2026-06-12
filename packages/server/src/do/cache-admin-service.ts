@@ -1,8 +1,7 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { type CacheName, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import {
 	type CacheListResponse,
-	cachePutBodySchema,
 	type CacheRemoveResponse,
 	type CacheSummary
 } from '@cupboard/protocol/caches';
@@ -10,25 +9,19 @@ import { and, count, eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
-import { narObjectKey, textResponse } from '../http/http.ts';
-import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
+import { narObjectKey } from '../http/http.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 
 export class CacheAdminService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly deletionQueue: DeletionQueueService
 	) {}
 
-	async handleCacheInfo(
-		request: Request,
-		cacheName: string
-	): Promise<Response> {
-		const cache = parseRequestValue(cacheNameSchema, cacheName);
+	/** Renders a cache's nix-cache-info body from its registry priority. */
+	cacheInfoBody(cache: string): string {
 		const row = this.context.db
 			.select({ priority: schema.caches.priority })
 			.from(schema.caches)
@@ -40,55 +33,40 @@ export class CacheAdminService {
 			row?.priority ?? CacheInfo.default.priority
 		);
 
-		return textResponse(request, info.render(), {
-			'content-type': 'text/x-nix-cache-info; charset=utf-8'
-		});
+		return info.render();
 	}
 
-	async handleListCaches(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
+	listCaches(): CacheListResponse {
 		const registered = this.context.db.select().from(schema.caches).all();
 		const caches = registered
 			.map((row) => this.cacheSummary(row.name, row.priority))
 			.toSorted((left, right) => (left.name > right.name ? 1 : -1));
 
-		return Response.json({ caches } satisfies CacheListResponse);
+		return { caches };
 	}
 
-	async handlePutCache(request: Request, cacheName: string): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		const cache = parseRequestValue(cacheNameSchema, cacheName);
-		const body = await parseRequestBody(cachePutBodySchema, request);
-
+	putCache(cache: CacheName, priority: number): CacheSummary {
 		this.context.db
 			.insert(schema.caches)
 			.values({
 				name: cache,
-				priority: body.priority,
+				priority,
 				createdAt: new Date().toISOString()
 			})
 			.onConflictDoUpdate({
 				target: schema.caches.name,
-				set: { priority: body.priority }
+				set: { priority }
 			})
 			.run();
 
-		return Response.json(
-			this.cacheSummary(cache, body.priority) satisfies CacheSummary
-		);
+		return this.cacheSummary(cache, priority);
 	}
 
-	async handleRemoveCache(
-		request: Request,
-		cacheName: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		const cache = parseRequestValue(cacheNameSchema, cacheName);
-		const url = new URL(request.url);
-		const force = url.searchParams.get('force') === 'true';
+	async removeCache(
+		cache: CacheName,
+		force: boolean,
+		origin: string
+	): Promise<CacheRemoveResponse> {
 		const committedCount = this.cacheStorePathCount(cache);
 		const registered =
 			this.context.db
@@ -101,13 +79,13 @@ export class CacheAdminService {
 			throw new CacheNotEmptyError(cache);
 		}
 
-		const storePathsRemoved = await this.tearDownCache(cache, url.origin);
+		const storePathsRemoved = await this.tearDownCache(cache, origin);
 
-		return Response.json({
+		return {
 			name: cache,
 			removed: registered || committedCount > 0,
 			storePathsRemoved
-		} satisfies CacheRemoveResponse);
+		};
 	}
 
 	cacheStorePathCount(cache: string): number {
