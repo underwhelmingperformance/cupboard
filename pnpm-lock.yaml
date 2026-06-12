@@ -326,6 +326,15 @@ importers:
       '@cloudflare/workers-types':
         specifier: ^4.20260605.1
         version: 4.20260605.1
+      '@orpc/client':
+        specifier: ^1.14.6
+        version: 1.14.6
+      '@orpc/contract':
+        specifier: ^1.14.6
+        version: 1.14.6
+      '@orpc/openapi-client':
+        specifier: ^1.14.6
+        version: 1.14.6
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.10
