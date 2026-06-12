@@ -158,7 +158,9 @@ function answer<T>(remaining: Scripted<T>[], member: string): Promise<T> {
 	}
 
 	if (typeof next === 'number') {
-		return Promise.reject(new CupboardHttpError('GET', member, next, 'no'));
+		return Promise.reject(
+			new CupboardHttpError('GET', member, next, 'computer says no\n')
+		);
 	}
 
 	return Promise.resolve(next);
@@ -481,7 +483,7 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('reports a refused claim as an answer, not a failure', async () => {
+	it('reports a refused claim with the server response, not as a failure', async () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
 			versions: ['v-new'],
@@ -491,7 +493,8 @@ describe('onboardDeployment', () => {
 		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
 			kind: 'claim-refused',
 			url: 'https://cache.example.com',
-			status: 403
+			status: 403,
+			detail: 'GET /signup answered HTTP 403: computer says no'
 		});
 	});
 
@@ -604,7 +607,7 @@ describe('onboardDeployment', () => {
 		).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com',
-			lastProbe: 'HTTP 404'
+			lastProbe: 'HTTP 404: computer says no'
 		});
 	});
 
@@ -625,7 +628,7 @@ describe('onboardDeployment', () => {
 		).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com/t/builds',
-			lastProbe: 'HTTP 503'
+			lastProbe: 'HTTP 503: computer says no'
 		});
 	});
 

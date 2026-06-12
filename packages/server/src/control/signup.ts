@@ -68,11 +68,13 @@ export async function handleSignup(
 }
 
 // The deployment gate configuration the claim consults: a single-use claim secret,
-// a pinned subject, and the local-development relaxation flag.
+// a pinned subject, and the local-development relaxation flag. A secret never put
+// (and a var a hand-rolled deploy omitted) is an absent binding, so each member
+// reads as undefined rather than the empty string.
 export interface SignupGate {
-	readonly CUPBOARD_SIGNUP_SECRET: string;
-	readonly CUPBOARD_SIGNUP_SUBJECT: string;
-	readonly CUPBOARD_LOCAL_DEV: string;
+	readonly CUPBOARD_SIGNUP_SECRET: string | undefined;
+	readonly CUPBOARD_SIGNUP_SUBJECT: string | undefined;
+	readonly CUPBOARD_LOCAL_DEV: string | undefined;
 }
 
 // Enforces the deployment gate that decides who may claim global admin. A
@@ -85,7 +87,7 @@ export function enforceGate(
 	claimSecret: string | undefined,
 	subject: string
 ): void {
-	const secret: string = env.CUPBOARD_SIGNUP_SECRET;
+	const secret = env.CUPBOARD_SIGNUP_SECRET ?? '';
 
 	if (secret !== '') {
 		if (claimSecret === undefined || !constantTimeEquals(claimSecret, secret)) {
@@ -95,7 +97,7 @@ export function enforceGate(
 		return;
 	}
 
-	const pinnedSubject: string = env.CUPBOARD_SIGNUP_SUBJECT;
+	const pinnedSubject = env.CUPBOARD_SIGNUP_SUBJECT ?? '';
 
 	if (pinnedSubject !== '') {
 		if (subject !== pinnedSubject) {
@@ -164,7 +166,7 @@ function constantTimeEquals(a: string, b: string): boolean {
 }
 
 function isLocalDevelopment(env: SignupGate): boolean {
-	const flag: string = env.CUPBOARD_LOCAL_DEV;
+	const flag = env.CUPBOARD_LOCAL_DEV;
 
 	return flag === '1' || flag === 'true';
 }
