@@ -5,6 +5,7 @@ import { CacheInfo } from '@cupboard/nix/cache-info';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
@@ -32,6 +33,10 @@ describe('Nix substitution from a named cache', () => {
 						server.uploadFetcher()
 					);
 					const token = await server.ownerAdminToken();
+					const rpc = tenantRpc(server.tenantUrl, {
+						credential: token,
+						fetcher: server.uploadFetcher()
+					});
 					const publicKey = await client.publicKey();
 					const source = await NixStore.host(
 						path.join(directory, 'source-home')
@@ -48,7 +53,7 @@ describe('Nix substitution from a named cache', () => {
 						workDirectory: directory
 					});
 
-					await client.putCache(token, 'builds', 30);
+					await rpc.caches.put({ cacheName: 'builds', priority: 30 });
 
 					// Push the same path to the named and default caches: the NAR blob is
 					// shared, so only one is stored.
@@ -70,10 +75,13 @@ describe('Nix substitution from a named cache', () => {
 					);
 					const cacheInfoBody = await cacheInfo.text();
 					const stats = await client.stats(token);
-					const listed = await client.listCaches(token);
+					const listed = await rpc.caches.list();
 
-					await client.removeCache(token, 'builds', true);
-					const afterRemoval = await client.listCaches(token);
+					await rpc.caches.remove({
+						params: { cacheName: 'builds' },
+						query: { force: true }
+					});
+					const afterRemoval = await rpc.caches.list();
 
 					expect({
 						substituted: await readFile(target.physicalPath(storePath), 'utf8'),
