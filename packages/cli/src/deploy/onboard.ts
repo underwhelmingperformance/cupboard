@@ -161,6 +161,12 @@ export interface OnboardOptions {
 	readonly buildVersion: string;
 	readonly claimSecret: ClaimSecret;
 	readonly r2: OnboardR2;
+	/**
+	 * Fetches an id_token fit to present right now. The login's snapshot can
+	 * expire while the deploy runs, so the claim asks at the moment of use and
+	 * falls back to the snapshot when no fresher one can be had.
+	 */
+	readonly freshIdToken?: () => Promise<string | undefined>;
 	readonly clientFactory?: (url: string) => OnboardClient;
 	readonly cacheToken?: (token: string, target: string) => Promise<void>;
 	readonly checkCredentials?: typeof checkR2Credentials;
@@ -256,11 +262,13 @@ export async function onboardDeployment(
 		return { kind: 'claim-cancelled', url };
 	}
 
+	const subjectToken = (await options.freshIdToken?.()) ?? admin.idToken;
+
 	const claim = await claimAdmin(
 		ui,
 		client,
 		url,
-		{ idToken: admin.idToken, claimSecret: secret.value },
+		{ idToken: subjectToken, claimSecret: secret.value },
 		cacheToken
 	);
 
