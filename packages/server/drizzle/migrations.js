@@ -20,6 +20,7 @@ import m0017 from './0017_drop_orphan_blob_deletion.sql';
 import m0018 from './0018_tenant_identity.sql';
 import m0019 from './0019_wet_frank_castle.sql';
 import m0020 from './0020_large_lorna_dane.sql';
+import m0021 from './0021_refresh_tokens.sql';
 
 export default {
 	journal,
@@ -44,6 +45,7 @@ export default {
 		m0017,
 		m0018,
 		m0019,
-		m0020
+		m0020,
+		m0021
 	}
 };

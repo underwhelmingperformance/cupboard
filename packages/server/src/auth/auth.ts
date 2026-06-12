@@ -19,6 +19,10 @@ const callbackRootsClaim = 'cb_roots';
 
 export const adminJwtTtlSeconds = 10 * 60;
 export const writeJwtTtlSeconds = 15 * 60;
+// Each refresh rotates the token with a fresh window, so a session lives as
+// long as it is used at least this often; an idle one lapses to `cupboard
+// login`.
+export const refreshTokenTtlSeconds = 30 * 24 * 60 * 60;
 export const accessJwtClockToleranceSeconds = 30;
 export const accessJwtRetirementMarginSeconds = 5 * 60;
 

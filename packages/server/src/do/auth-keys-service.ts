@@ -4,7 +4,10 @@ import {
 	type AuthKeyRotateResponse,
 	type AuthKeySummary
 } from '@cupboard/protocol/keys';
-import { tokenExchangeGrantType } from '@cupboard/protocol/oidc';
+import {
+	refreshTokenGrantType,
+	tokenExchangeGrantType
+} from '@cupboard/protocol/oidc';
 import { and, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 
 import {
@@ -64,7 +67,7 @@ export class AuthKeysService {
 				issuer: base,
 				token_endpoint: `${base}/token`,
 				jwks_uri: `${base}/.well-known/jwks.json`,
-				grant_types_supported: [tokenExchangeGrantType],
+				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
 				scopes_supported: ['write', 'admin'],
 				token_endpoint_auth_methods_supported: ['none']
 			})
