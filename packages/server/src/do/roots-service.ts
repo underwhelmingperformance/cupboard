@@ -1,9 +1,9 @@
-import { rootNameSchema } from '@cupboard/nix/scalars';
+import { type RootName } from '@cupboard/nix/scalars';
 import { resolveRootTargets } from '@cupboard/nix/store-path';
 import {
+	type ParsedRootSetBody,
 	type RootListResponse,
 	type RootRemoveResponse,
-	rootSetBodySchema,
 	type RootSetResponse,
 	type RootSummary
 } from '@cupboard/protocol/retention';
@@ -15,10 +15,8 @@ import {
 	RootNotPermittedError,
 	RootTargetsUnavailableError
 } from '../errors.ts';
-import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type RootSetCommand,
@@ -45,23 +43,19 @@ type RootActivation =
 export class RootsService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly cacheAdmin: CacheAdminService,
 		private readonly retention: RetentionService,
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	async handleSetRoot(
-		request: Request,
+	async setRoot(
+		claims: AccessClaims,
 		cache: string,
-		name: string
-	): Promise<Response> {
-		const claims = await this.authKeys.requireScope(request, 'write');
-		const rootName = parseRequestValue(rootNameSchema, name);
-
+		rootName: RootName,
+		body: ParsedRootSetBody
+	): Promise<RootSetResponse> {
 		this.enforceRootConstraint(claims, rootName);
 
-		const body = await parseRequestBody(rootSetBodySchema, request);
 		const requested: RootSetCommand = {
 			name: rootName,
 			targets: resolveRootTargets(body.targets),
@@ -77,7 +71,7 @@ export class RootsService {
 		// does not reset the Durable Object.
 		const activation = await this.context.ctx.blockConcurrencyWhile(
 			async (): Promise<RootActivation> => {
-				const presence = await this.presence(cache, requested.targets, (hash) =>
+				const presence = await this.presence(requested.targets, (hash) =>
 					this.narInfoObjects.isServableLocked(cache, hash)
 				);
 				const unavailable = requested.targets
@@ -100,14 +94,12 @@ export class RootsService {
 			throw new RootTargetsUnavailableError(rootName, activation.unavailable);
 		}
 
-		return Response.json(
-			this.rootSummaryFrom(
-				rootName,
-				activation.stored,
-				activation.stored.updatedAt,
-				requested.targets,
-				activation.presence
-			) satisfies RootSetResponse
+		return this.rootSummaryFrom(
+			rootName,
+			activation.stored,
+			activation.stored.updatedAt,
+			requested.targets,
+			activation.presence
 		);
 	}
 
@@ -126,28 +118,6 @@ export class RootsService {
 		}
 
 		throw new RootNotPermittedError(rootName);
-	}
-
-	async handleListRoots(request: Request, cache: string): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		return Response.json(
-			(await this.listRoots(cache)) satisfies RootListResponse
-		);
-	}
-
-	async handleRemoveRoot(
-		request: Request,
-		cache: string,
-		name: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		const rootName = parseRequestValue(rootNameSchema, name);
-
-		return Response.json(
-			this.removeRoot(cache, rootName) satisfies RootRemoveResponse
-		);
 	}
 
 	private writeRoot(cache: string, request: RootSetCommand): StoredRoot {
@@ -226,7 +196,7 @@ export class RootsService {
 		return { expiresAt, createdAt, updatedAt: nowIso };
 	}
 
-	private async listRoots(cache: string): Promise<RootListResponse> {
+	async listRoots(cache: string): Promise<RootListResponse> {
 		const now = new Date().toISOString();
 		const roots = this.context.db
 			.select()
@@ -238,7 +208,7 @@ export class RootsService {
 
 		for (const root of roots) {
 			const targets = this.rootTargetRows(cache, root.name);
-			const presence = await this.presence(cache, targets, (hash) =>
+			const presence = await this.presence(targets, (hash) =>
 				this.narInfoObjects.isServable(cache, hash)
 			);
 
@@ -260,7 +230,7 @@ export class RootsService {
 		return { roots: summaries.toSorted((a, b) => (a.name > b.name ? 1 : -1)) };
 	}
 
-	private removeRoot(cache: string, name: string): RootRemoveResponse {
+	removeRoot(cache: string, name: string): RootRemoveResponse {
 		return this.context.db.transaction((tx) => {
 			const existing = tx
 				.select()
@@ -319,7 +289,6 @@ export class RootsService {
 	// while a summary passes the section-opening variant. Both report exactly what
 	// serving would, so the gate and the `present` flag cannot drift.
 	private async presence(
-		cache: string,
 		targets: readonly { storePathHash: string }[],
 		isServable: (storePathHash: string) => Promise<boolean>
 	): Promise<ReadonlyMap<string, boolean>> {

@@ -2,14 +2,19 @@ import { CacheInfo } from '@cupboard/nix/cache-info';
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	rootNameSchema,
 	signingKeyIdSchema,
 	storePathHashSchema
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
+import { attestationNegotiateRequestSchema } from '@cupboard/protocol/attestations';
 import { cachePutBodySchema } from '@cupboard/protocol/caches';
 import { oidcTrustAddBodySchema } from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
-import { retentionPolicyAddBodySchema } from '@cupboard/protocol/retention';
+import {
+	retentionPolicyAddBodySchema,
+	rootSetBodySchema
+} from '@cupboard/protocol/retention';
 import {
 	uploadNegotiateRequestSchema,
 	uploadPrepareRequestSchema
@@ -28,6 +33,7 @@ import {
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	TenantNotConfiguredError,
+	UnauthenticatedError,
 	ZstdUnavailableError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
@@ -113,7 +119,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.narInfoObjects = new NarInfoObjectsService(this.context);
 		this.attestations = new AttestationsService(
 			this.context,
-			this.authKeys,
 			this.attestationCas,
 			this.narInfoObjects
 		);
@@ -160,7 +165,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.roots = new RootsService(
 			this.context,
-			this.authKeys,
 			this.cacheAdmin,
 			this.retention,
 			this.narInfoObjects
@@ -613,53 +617,49 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					)
 				)
 		);
-		this.app.get('/roots', (context) =>
-			this.roots.handleListRoots(context.req.raw, DEFAULT_CACHE)
+		this.app.on(
+			'GET',
+			['/roots', '/cache/:cacheName/roots'],
+			this.scoped('admin'),
+			async (context) =>
+				context.json(await this.roots.listRoots(context.get('cache')))
 		);
-		this.app.get('/cache/:cacheName/roots', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.roots.handleListRoots(context.req.raw, cache)
-			)
+		// Setting a root is the one route whose handler consumes the verified
+		// claims: a write token may only set the roots its grant permits.
+		this.app.on(
+			'PUT',
+			['/roots/:name', '/cache/:cacheName/roots/:name'],
+			this.scoped('write'),
+			this.maintenance(),
+			async (context) => {
+				const claims = context.get('claims');
+
+				if (claims === undefined) {
+					throw new UnauthenticatedError();
+				}
+
+				return context.json(
+					await this.roots.setRoot(
+						claims,
+						context.get('cache'),
+						parseRequestValue(rootNameSchema, context.req.param('name')),
+						await parseRequestBody(rootSetBodySchema, context.req.raw)
+					)
+				);
+			}
 		);
-		this.app.put('/roots/:name', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.roots.handleSetRoot(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('name')
-				)
-			)
-		);
-		this.app.put('/cache/:cacheName/roots/:name', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.roots.handleSetRoot(
-						context.req.raw,
-						cache,
-						context.req.param('name')
+		this.app.on(
+			'DELETE',
+			['/roots/:name', '/cache/:cacheName/roots/:name'],
+			this.scoped('admin'),
+			this.maintenance(),
+			(context) =>
+				context.json(
+					this.roots.removeRoot(
+						context.get('cache'),
+						parseRequestValue(rootNameSchema, context.req.param('name'))
 					)
 				)
-			)
-		);
-		this.app.delete('/roots/:name', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.roots.handleRemoveRoot(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('name')
-				)
-			)
-		);
-		this.app.delete('/cache/:cacheName/roots/:name', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.roots.handleRemoveRoot(
-						context.req.raw,
-						cache,
-						context.req.param('name')
-					)
-				)
-			)
 		);
 		this.app.on(
 			'POST',
@@ -712,95 +712,72 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.get('/uploads/:id/status', this.scoped('write'), (context) =>
 			context.json(this.uploads.uploadStatus(context.req.param('id')))
 		);
-		this.app.on(['GET', 'HEAD'], '/attestations/:hash', (context) =>
-			this.attestations.handleServeList(
-				context.req.raw,
-				DEFAULT_CACHE,
-				context.req.param('hash')
-			)
+		// The serve routes stream stored objects with conditional-request
+		// handling, so they keep their Response-shaped handlers.
+		this.app.on(
+			['GET', 'HEAD'],
+			['/attestations/:hash', '/cache/:cacheName/attestations/:hash'],
+			(context) =>
+				this.attestations.handleServeList(
+					context.req.raw,
+					context.get('cache'),
+					context.req.param('hash')
+				)
 		);
 		this.app.on(
 			['GET', 'HEAD'],
-			'/cache/:cacheName/attestations/:hash',
+			[
+				'/attestation-bundles/:digest',
+				'/cache/:cacheName/attestation-bundles/:digest'
+			],
 			(context) =>
-				this.withCache(context.req.param('cacheName'), (cache) =>
-					this.attestations.handleServeList(
-						context.req.raw,
-						cache,
-						context.req.param('hash')
-					)
+				this.attestations.handleServeBundle(
+					context.req.raw,
+					context.get('cache'),
+					context.req.param('digest')
 				)
-		);
-		this.app.on(['GET', 'HEAD'], '/attestation-bundles/:digest', (context) =>
-			this.attestations.handleServeBundle(
-				context.req.raw,
-				DEFAULT_CACHE,
-				context.req.param('digest')
-			)
 		);
 		this.app.on(
-			['GET', 'HEAD'],
-			'/cache/:cacheName/attestation-bundles/:digest',
-			(context) =>
-				this.withCache(context.req.param('cacheName'), (cache) =>
-					this.attestations.handleServeBundle(
-						context.req.raw,
-						cache,
-						context.req.param('digest')
+			'POST',
+			['/attestations', '/cache/:cacheName/attestations'],
+			this.scoped('write'),
+			this.maintenance(),
+			async (context) =>
+				context.json(
+					await this.attestations.negotiate(
+						context.get('cache'),
+						await parseRequestBody(
+							attestationNegotiateRequestSchema,
+							context.req.raw
+						)
 					)
 				)
 		);
-		this.app.post('/attestations', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.attestations.handleNegotiate(context.req.raw, DEFAULT_CACHE)
-			)
-		);
-		this.app.post('/cache/:cacheName/attestations', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.attestations.handleNegotiate(context.req.raw, cache)
-				)
-			)
-		);
-		this.app.put('/attestations/:id', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.attestations.handlePrepare(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('id')
-				)
-			)
-		);
-		this.app.put('/cache/:cacheName/attestations/:id', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.attestations.handlePrepare(
-						context.req.raw,
-						cache,
+		this.app.on(
+			'PUT',
+			['/attestations/:id', '/cache/:cacheName/attestations/:id'],
+			this.scoped('write'),
+			this.maintenance(),
+			async (context) =>
+				context.json(
+					await this.attestations.prepare(
+						context.get('cache'),
 						context.req.param('id')
 					)
 				)
-			)
 		);
-		this.app.post('/attestations/:id/attach', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.attestations.handleAttach(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('id')
-				)
-			)
-		);
-		this.app.post('/cache/:cacheName/attestations/:id/attach', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.attestations.handleAttach(
-						context.req.raw,
-						cache,
+		this.app.on(
+			'POST',
+			['/attestations/:id/attach', '/cache/:cacheName/attestations/:id/attach'],
+			this.scoped('write'),
+			this.maintenance(),
+			async (context) =>
+				context.json(
+					await this.attestations.attach(
+						context.get('cache'),
 						context.req.param('id')
 					)
 				)
-			)
 		);
 		// Interactive GC purges this colo's edge cache via the caller's public
 		// origin. The cron sweep arrives on the internal origin and cannot know
@@ -958,13 +935,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// Eligibility is an admission hint. If it cannot be refreshed, cron fails
 			// open through a missing or stale row rather than failing the mutation.
 		}
-	}
-
-	private withCache(
-		cacheName: string | undefined,
-		handler: (cache: string) => Promise<Response>
-	): Promise<Response> {
-		return handler(parseRequestValue(cacheNameSchema, cacheName));
 	}
 
 	private initialise(): Promise<void> {
