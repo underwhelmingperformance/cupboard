@@ -47,6 +47,7 @@ import {
 	type OidcTrustSummary,
 	oidcTrustSummarySchema,
 	type ParsedTokenResponse,
+	refreshTokenGrantType,
 	tokenExchangeGrantType,
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
@@ -699,18 +700,40 @@ export class CupboardClient {
 		subjectToken: string,
 		subjectTokenType: string
 	): Promise<ParsedTokenResponse> {
-		throwIfAborted(this.signal);
-
-		const url = this.resolve('/token');
-		const body = new URLSearchParams({
+		const response = await this.postTokenForm({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
 			subject_token_type: subjectTokenType
 		});
+
+		return this.parseJson('/token', tokenResponseSchema, response);
+	}
+
+	/**
+	 * Renews a session at the OAuth `POST /token` endpoint with the RFC 6749
+	 * refresh_token grant. The refresh token is the credential and the server
+	 * rotates it on every use: the response carries its successor, and the
+	 * presented token is spent whether or not the caller stores it.
+	 */
+	async tokenRefresh(refreshToken: string): Promise<ParsedTokenResponse> {
+		const response = await this.postTokenForm({
+			grant_type: refreshTokenGrantType,
+			refresh_token: refreshToken
+		});
+
+		return this.parseJson('/token', tokenResponseSchema, response);
+	}
+
+	private async postTokenForm(
+		form: Readonly<Record<string, string>>
+	): Promise<Response> {
+		throwIfAborted(this.signal);
+
+		const url = this.resolve('/token');
 		const response = await this.fetcher(url, {
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: body.toString(),
+			body: new URLSearchParams(form).toString(),
 			signal: this.signal
 		});
 
@@ -723,7 +746,7 @@ export class CupboardClient {
 			);
 		}
 
-		return this.parseJson('/token', tokenResponseSchema, response);
+		return response;
 	}
 
 	private async requestJson<S extends z.ZodType>(

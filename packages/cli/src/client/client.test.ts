@@ -108,6 +108,28 @@ describe('CupboardClient.tokenExchange', () => {
 		});
 	});
 
+	it('posts a urlencoded refresh and returns the rotated session tokens', async () => {
+		const response: TokenResponse = {
+			access_token: 'admin-jwt-2',
+			token_type: 'Bearer',
+			expires_in: 600,
+			scope: 'admin',
+			refresh_token: 'refresh-2'
+		};
+		const { client, captured } = capturingClient(response);
+
+		const result = await client.tokenRefresh('refresh-1');
+
+		expect(result).toStrictEqual(response);
+		expect(captured()).toStrictEqual({
+			url: 'https://cupboard.test/token',
+			method: 'POST',
+			authorization: undefined,
+			contentType: 'application/x-www-form-urlencoded',
+			body: 'grant_type=refresh_token&refresh_token=refresh-1'
+		});
+	});
+
 	it('passes a configured abort signal to the token exchange request', async () => {
 		const controller = new AbortController();
 		let signal: AbortSignal | null | undefined;
