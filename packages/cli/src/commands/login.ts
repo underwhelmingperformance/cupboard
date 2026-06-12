@@ -11,10 +11,17 @@ import {
 import { writeCachedToken } from '../auth/token-store.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
+import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
 import {
+	type CloudflareGrant,
+	cloudflareLogin,
 	cloudflareLoopback,
-	cloudflareOauthClientId
+	cloudflareOauthClientId,
+	deployScopes,
+	jwtExpiryMs,
+	refreshCloudflareGrant
 } from '../deploy/cloudflare-oauth.ts';
+import { readCachedGrant, writeCachedGrant } from '../deploy/grant-store.ts';
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { CliError } from '../errors.ts';
 import { openBrowser } from '../io/open-browser.ts';
@@ -54,6 +61,61 @@ export function mapDeviceLoginError(error: unknown, clientId: string): unknown {
 	return error;
 }
 
+export function loginScopeForClient(clientId: string): string | undefined {
+	return clientId === cloudflareOauthClientId
+		? deployScopes.join(' ')
+		: undefined;
+}
+
+/** A fresh Cloudflare login answered without an id_token to present. */
+export class LoginIdTokenMissingError extends CliError {
+	constructor() {
+		super(
+			'The Cloudflare login returned no id token. Check that ID token ' +
+				'support is enabled on the cupboard OAuth client.'
+		);
+		this.name = 'LoginIdTokenMissingError';
+	}
+}
+
+/**
+ * The id_token a cupboard-client login presents. The built-in client shares
+ * the deploy's grant, so a cached or refreshable login answers without a
+ * browser; only a missing, unrefreshable or expired one logs in afresh, with
+ * the client's full registered scope set (the dashboard errors on a bare
+ * `openid` authorize, and a narrower grant would desynchronise the cache the
+ * deploy reuses). A fresh login is persisted for both flows to share.
+ */
+export async function cupboardIdToken(deps: {
+	readonly chain: Pick<
+		CredentialChain,
+		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
+	>;
+	readonly login: () => Promise<CloudflareGrant>;
+}): Promise<string> {
+	const cached = await freshIdToken(deps.chain);
+	const expiry = cached === undefined ? undefined : jwtExpiryMs(cached);
+
+	// `freshIdToken` falls back to a stale token when the refresh declines;
+	// that is fine for a claim that may still land, but a login presenting a
+	// token known to be expired would only bounce, so it goes to the browser.
+	if (
+		cached !== undefined &&
+		(expiry === undefined || expiry > deps.chain.now())
+	) {
+		return cached;
+	}
+
+	const grant = await deps.login();
+	await deps.chain.writeGrant(grant);
+
+	if (grant.idToken === undefined) {
+		throw new LoginIdTokenMissingError();
+	}
+
+	return grant.idToken;
+}
+
 export function registerLoginCommand(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -85,9 +147,36 @@ export function registerLoginCommand(
 			// the loopback server must bind one of them; any other client keeps
 			// the ephemeral-port default.
 			const usesCupboardClient = options.clientId === cloudflareOauthClientId;
+			const scope = loginScopeForClient(options.clientId);
 
 			const idToken = await reporter.phase('Logging in', async (ctx) => {
 				ctx.fact('issuer', options.oidcIssuer);
+
+				// The built-in client against its own issuer uses the deploy's
+				// cached grant: silent while a cached login can be renewed, the
+				// browser only as a last resort.
+				if (
+					usesCupboardClient &&
+					options.oidcIssuer === cloudflareDashIssuer &&
+					options.headless !== true
+				) {
+					return cupboardIdToken({
+						chain: {
+							readGrant: readCachedGrant,
+							writeGrant: writeCachedGrant,
+							refreshGrant: (previous) => refreshCloudflareGrant(previous),
+							now: Date.now
+						},
+						login: () =>
+							cloudflareLogin({
+								openBrowser: (target) => {
+									openBrowser(target, reporter);
+								},
+								signal: programOptions.signal
+							})
+					});
+				}
+
 				const endpoints = await discoverOidcLogin(
 					options.oidcIssuer,
 					fetch,
@@ -99,6 +188,7 @@ export function registerLoginCommand(
 						return await deviceLogin({
 							endpoints,
 							clientId: options.clientId,
+							scope,
 							prompt: (verification) => {
 								reporter.info(
 									`Visit ${verification.verificationUri} and enter code ${verification.userCode}`
@@ -114,6 +204,7 @@ export function registerLoginCommand(
 				return loopbackLogin({
 					endpoints,
 					clientId: options.clientId,
+					scope,
 					openBrowser: (target) => {
 						openBrowser(target, reporter);
 					},
