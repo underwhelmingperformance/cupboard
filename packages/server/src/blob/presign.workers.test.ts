@@ -50,8 +50,8 @@ describe('R2Presigner', () => {
 				'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
 				'X-Amz-Credential': 'test-access-key-id/20260528/auto/s3/aws4_request',
 				'X-Amz-Expires': '900',
-				'X-Amz-SignedHeaders': 'host',
-				'x-amz-checksum-sha256': 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc='
+				'X-Amz-SignedHeaders': 'host;x-amz-checksum-sha256',
+				'x-amz-checksum-sha256': undefined
 			},
 			hasSignature: true
 		});
