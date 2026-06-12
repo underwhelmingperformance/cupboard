@@ -132,13 +132,20 @@ describe('oidc-trust admin API', () => {
 		const response = await authorisedFetch('/oidc-trust/owner', token, {
 			method: 'DELETE'
 		});
+		const body = await response.json<{
+			code: string;
+			status: number;
+			message: string;
+		}>();
 
 		expect({
 			status: response.status,
-			body: await response.text()
+			code: body.code,
+			message: body.message
 		}).toStrictEqual({
 			status: StatusCodes.CONFLICT,
-			body: 'Cannot change the owner rule; update deploy config instead\n'
+			code: 'CONFLICT',
+			message: 'Cannot change the owner rule; update deploy config instead'
 		});
 	});
 

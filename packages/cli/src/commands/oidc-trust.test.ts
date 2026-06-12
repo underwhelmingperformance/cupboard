@@ -6,8 +6,6 @@ import type {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import {
 	type OidcTrustClient,
 	runOidcTrustAdd,
@@ -57,9 +55,9 @@ function uncalled(): never {
 
 function trustClient(overrides: Partial<OidcTrustClient>): OidcTrustClient {
 	return {
-		listOidcTrust: uncalled,
-		addOidcTrust: uncalled,
-		removeOidcTrust: uncalled,
+		list: uncalled,
+		add: uncalled,
+		remove: uncalled,
 		...overrides
 	};
 }
@@ -79,9 +77,8 @@ describe('runOidcTrustList', () => {
 		};
 
 		await runOidcTrustList(
-			'admin-token',
 			reporter(results),
-			trustClient({ listOidcTrust: () => Promise.resolve(response) })
+			trustClient({ list: () => Promise.resolve(response) })
 		);
 
 		expect(results).toStrictEqual([
@@ -105,9 +102,8 @@ describe('runOidcTrustList', () => {
 		const infos: string[] = [];
 
 		await runOidcTrustList(
-			'admin-token',
 			reporter(results, infos),
-			trustClient({ listOidcTrust: () => Promise.resolve({ rules: [] }) })
+			trustClient({ list: () => Promise.resolve({ rules: [] }) })
 		);
 
 		expect({ results, infos }).toStrictEqual({
@@ -119,7 +115,7 @@ describe('runOidcTrustList', () => {
 
 describe('runOidcTrustAdd', () => {
 	it('adds the rule and reports its summary', async () => {
-		const calls: { token: AccessCredential; body: OidcTrustAddBody }[] = [];
+		const calls: OidcTrustAddBody[] = [];
 		const results: ResultRow[][] = [];
 		const body: OidcTrustAddBody = {
 			issuer: 'https://token.actions.githubusercontent.com',
@@ -130,18 +126,17 @@ describe('runOidcTrustAdd', () => {
 
 		await runOidcTrustAdd(
 			body,
-			'admin-token',
 			reporter(results),
 			trustClient({
-				addOidcTrust(token, added) {
-					calls.push({ token, body: added });
+				add(added) {
+					calls.push(added);
 					return Promise.resolve(summary({ id: 'rule-1' }));
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ token: 'admin-token', body }],
+			calls: [body],
 			results: [
 				[
 					{ label: 'Rule', value: 'rule-1' },
@@ -167,10 +162,9 @@ describe('runOidcTrustRemove', () => {
 
 		await runOidcTrustRemove(
 			'rule-1',
-			'admin-token',
 			reporter(results),
 			trustClient({
-				removeOidcTrust: () => Promise.resolve({ id: 'rule-1', removed })
+				remove: () => Promise.resolve({ id: 'rule-1', removed })
 			})
 		);
 

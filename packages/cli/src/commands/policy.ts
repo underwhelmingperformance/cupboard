@@ -16,7 +16,7 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
 import { InvalidPolicyScopeError } from '../errors.ts';
 
@@ -24,16 +24,15 @@ interface PolicyAddOptions {
 	readonly ttl: number;
 }
 
+/**
+ * The slice of the derived client the policy commands consume, in the
+ * contract's input and output shapes; the real `tenantRpc(...).policies`
+ * satisfies it by construction.
+ */
 export interface PolicyClient {
-	listPolicies(token: AccessCredential): Promise<RetentionPolicyListResponse>;
-	addPolicy(
-		token: AccessCredential,
-		body: RetentionPolicyAddBody
-	): Promise<RetentionPolicySummary>;
-	removePolicy(
-		token: AccessCredential,
-		id: string
-	): Promise<RetentionPolicyRemoveResponse>;
+	list(): Promise<RetentionPolicyListResponse>;
+	add(input: RetentionPolicyAddBody): Promise<RetentionPolicySummary>;
+	remove(input: { id: string }): Promise<RetentionPolicyRemoveResponse>;
 }
 
 function parseScope(value: string): RetentionPolicyScope {
@@ -62,12 +61,12 @@ export function registerPolicyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runPolicyList(token, reporter, client);
+			await runPolicyList(reporter, rpc.policies);
 		});
 
 	policy
@@ -91,18 +90,17 @@ export function registerPolicyCommands(
 				const reporter = createReporter({
 					mode: reporterModeFromGlobals(program)
 				});
-				const client = CupboardClient.fromUrl(url, {
+				const rpc = tenantRpc(url, {
+					credential: cachedOwnerProvider(url),
 					signal: programOptions.signal
 				});
-				const token = cachedOwnerProvider(url);
 
 				await runPolicyAdd(
 					parseScope(scope),
 					pattern,
 					options.ttl,
-					token,
 					reporter,
-					client
+					rpc.policies
 				);
 			}
 		);
@@ -116,22 +114,21 @@ export function registerPolicyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runPolicyRemove(id, token, reporter, client);
+			await runPolicyRemove(id, reporter, rpc.policies);
 		});
 }
 
 export async function runPolicyList(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: PolicyClient
 ): Promise<void> {
 	const { policies } = await reporter.phase('Listing retention policies', () =>
-		client.listPolicies(token)
+		client.list()
 	);
 
 	if (policies.length === 0) {
@@ -146,7 +143,6 @@ export async function runPolicyAdd(
 	scope: RetentionPolicyScope,
 	pattern: string,
 	ttlSeconds: number,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: PolicyClient
 ): Promise<void> {
@@ -156,7 +152,7 @@ export async function runPolicyAdd(
 			: { scope: 'root-name-prefix', pattern, ttlSeconds };
 
 	const summary = await reporter.phase('Adding retention policy', () =>
-		client.addPolicy(token, body)
+		client.add(body)
 	);
 
 	reporter.result([
@@ -169,12 +165,11 @@ export async function runPolicyAdd(
 
 export async function runPolicyRemove(
 	id: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: PolicyClient
 ): Promise<void> {
 	const result = await reporter.phase('Removing retention policy', () =>
-		client.removePolicy(token, id)
+		client.remove({ id })
 	);
 
 	reporter.result([
