@@ -38,7 +38,9 @@ export const cachesContract = {
 			// stays open; the parts we consume are strict.
 			z.object({
 				params: z.strictObject({ cacheName: cacheNameSchema }),
-				query: z.strictObject({ force: z.boolean().default(false) })
+				query: z
+					.strictObject({ force: z.boolean().default(false) })
+					.default({ force: false })
 			})
 		)
 		.errors({
