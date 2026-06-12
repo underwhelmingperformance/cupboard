@@ -1,8 +1,8 @@
 import {
-	oidcTrustAddBodySchema,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
-	type OidcTrustSummary
+	type OidcTrustSummary,
+	type ParsedOidcTrustAddBody
 } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { asc, eq, isNull, sql } from 'drizzle-orm';
@@ -15,7 +15,6 @@ import {
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError
 } from '../errors.ts';
-import { parseRequestBody } from '../http/parse.ts';
 import {
 	decodeInboundClaims,
 	OidcKeysUnreachableError,
@@ -23,7 +22,6 @@ import {
 } from '../oidc/oidc.ts';
 import { type OidcClaims, type OidcTrustRule } from '../oidc/oidc-trust.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import {
 	oidcTrustRuleFromRow,
 	oidcTrustSummaryFromRow,
@@ -36,13 +34,10 @@ import { type TenantIdentityService } from './tenant-identity-service.ts';
 export class OidcTrustService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly tenantIdentity: TenantIdentityService
 	) {}
 
-	async handleListOidcTrust(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
+	listRules(): OidcTrustListResponse {
 		const rules = this.context.db
 			.select()
 			.from(schema.oidcTrust)
@@ -50,13 +45,10 @@ export class OidcTrustService {
 			.all()
 			.map((row) => oidcTrustSummaryFromRow(row));
 
-		return Response.json({ rules } satisfies OidcTrustListResponse);
+		return { rules };
 	}
 
-	async handleAddOidcTrust(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		const body = await parseRequestBody(oidcTrustAddBodySchema, request);
+	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
 		const id = crypto.randomUUID();
 
 		// Rules added through the API are always `write`; the only `admin` rule is
@@ -74,7 +66,7 @@ export class OidcTrustService {
 			})
 			.run();
 
-		return Response.json({
+		return {
 			id,
 			issuer: body.issuer,
 			audience: body.audience,
@@ -82,12 +74,10 @@ export class OidcTrustService {
 			claims: body.claims,
 			allowedRoots: body.allowedRoots,
 			disabled: false
-		} satisfies OidcTrustSummary);
+		};
 	}
 
-	async handleRemoveOidcTrust(request: Request, id: string): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
+	removeRule(id: string): OidcTrustRemoveResponse {
 		const existing = this.context.db
 			.select()
 			.from(schema.oidcTrust)
@@ -110,7 +100,7 @@ export class OidcTrustService {
 				.run();
 		}
 
-		return Response.json({ id, removed } satisfies OidcTrustRemoveResponse);
+		return { id, removed };
 	}
 
 	decodeInbound(token: string): OidcClaims {

@@ -6,7 +6,9 @@ import {
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import { cachePutBodySchema } from '@cupboard/protocol/caches';
+import { oidcTrustAddBodySchema } from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
+import { retentionPolicyAddBodySchema } from '@cupboard/protocol/retention';
 import { DurableObject } from 'cloudflare:workers';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
@@ -111,17 +113,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.attestations
 		);
 		this.signingKeys = new SigningKeysService(this.context);
-		this.stats = new StatsService(this.context, this.authKeys);
-		this.oidcTrust = new OidcTrustService(
-			this.context,
-			this.authKeys,
-			this.tenantIdentity
-		);
-		this.retention = new RetentionService(this.context, this.authKeys);
-		this.integrityCheck = new IntegrityCheckService(
-			this.context,
-			this.authKeys
-		);
+		this.stats = new StatsService(this.context);
+		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
+		this.retention = new RetentionService(this.context);
+		this.integrityCheck = new IntegrityCheckService(this.context);
 		this.cacheAdmin = new CacheAdminService(this.context, this.deletionQueue);
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
@@ -513,38 +508,42 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				);
 			}
 		);
-		this.app.get('/policies', (context) =>
-			this.retention.handleListPolicies(context.req.raw)
+		this.app.get('/policies', this.scoped('admin'), (context) =>
+			context.json(this.retention.listPolicies())
 		);
-		this.app.post('/policies', (context) =>
-			this.retention.handleAddPolicy(context.req.raw)
-		);
-		this.app.delete('/policies/:id', (context) =>
-			this.retention.handleRemovePolicy(
-				context.req.raw,
-				context.req.param('id')
+		this.app.post('/policies', this.scoped('admin'), async (context) =>
+			context.json(
+				this.retention.addPolicy(
+					await parseRequestBody(retentionPolicyAddBodySchema, context.req.raw)
+				)
 			)
+		);
+		this.app.delete('/policies/:id', this.scoped('admin'), (context) =>
+			context.json(this.retention.removePolicy(context.req.param('id')))
 		);
 
 		// The owner manages CI write-trust rules here; the owner's own admin rule
 		// is seeded from deploy config and is not editable through this API.
-		this.app.get('/oidc-trust', (context) =>
-			this.oidcTrust.handleListOidcTrust(context.req.raw)
+		this.app.get('/oidc-trust', this.scoped('admin'), (context) =>
+			context.json(this.oidcTrust.listRules())
 		);
-		this.app.post('/oidc-trust', (context) =>
-			this.oidcTrust.handleAddOidcTrust(context.req.raw)
-		);
-		this.app.delete('/oidc-trust/:id', (context) =>
-			this.oidcTrust.handleRemoveOidcTrust(
-				context.req.raw,
-				context.req.param('id')
+		this.app.post('/oidc-trust', this.scoped('admin'), async (context) =>
+			context.json(
+				this.oidcTrust.addRule(
+					await parseRequestBody(oidcTrustAddBodySchema, context.req.raw)
+				)
 			)
+		);
+		this.app.delete('/oidc-trust/:id', this.scoped('admin'), (context) =>
+			context.json(this.oidcTrust.removeRule(context.req.param('id')))
 		);
 
 		// A read-only storage check across every cache. Blobs are shared, so it is
 		// deployment-wide: one bare `/check` covering all caches.
-		this.app.get('/check', (context) =>
-			this.integrityCheck.handleCheck(context.req.raw)
+		this.app.get('/check', this.scoped('admin'), async (context) =>
+			context.json(
+				await this.integrityCheck.check(context.req.query('deep') === 'true')
+			)
 		);
 
 		// A bounded reconciling pass driven by the cron tick. Its own route, kept
@@ -558,16 +557,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// Each path-scoped route has a bare form (the default cache) and a
 		// `/cache/:cacheName/` form. The per-route scope is identical between the
 		// two; the cache-scoped form validates the name inside the error boundary.
-		this.app.get('/stats', (context) =>
-			this.stats.handleStats(context.req.raw, DEFAULT_CACHE)
+		this.app.get('/stats', this.scoped('admin'), async (context) =>
+			context.json(await this.stats.stats(context.get('cache')))
 		);
-		this.app.get('/usage', (context) =>
-			this.stats.handleUsage(context.req.raw)
+		this.app.get('/usage', this.scoped('admin'), async (context) =>
+			context.json(await this.stats.usage())
 		);
-		this.app.get('/cache/:cacheName/stats', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.stats.handleStats(context.req.raw, cache)
-			)
+		this.app.get(
+			'/cache/:cacheName/stats',
+			this.scoped('admin'),
+			async (context) =>
+				context.json(await this.stats.stats(context.get('cache')))
 		);
 		this.app.delete('/paths/:hash', (context) =>
 			this.withMaintenanceEligibility(() =>
