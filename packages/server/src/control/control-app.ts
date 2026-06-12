@@ -48,15 +48,13 @@ controlApp.post('/signup', (context) =>
 	handleSignup(context.req.raw, context.env)
 );
 // Served uncached so a key rotation is visible across colos at once.
-controlApp.on(['GET', 'HEAD'], '/.well-known/jwks.json', async (context) =>
+controlApp.get('/.well-known/jwks.json', async (context) =>
 	context.json(await controlJwks(context.env), 200, {
 		'cache-control': 'no-cache'
 	})
 );
-controlApp.on(
-	['GET', 'HEAD'],
-	'/.well-known/oauth-authorization-server',
-	(context) => context.json(controlAsMetadata(context.req.raw, context.env))
+controlApp.get('/.well-known/oauth-authorization-server', (context) =>
+	context.json(controlAsMetadata(context.req.raw, context.env))
 );
 controlApp.get('/control/check', controlAdmin, async (context) =>
 	context.json(await controlCheck(context.env))

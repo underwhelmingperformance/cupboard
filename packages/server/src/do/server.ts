@@ -393,7 +393,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
-		this.app.on(['GET', 'HEAD'], '/pubkey', async (context) =>
+		this.app.get('/pubkey', async (context) =>
 			// Served uncached so a rotation is visible across colos at once; the
 			// strong ETag still lets Nix revalidate conditionally.
 			textResponse(
@@ -408,17 +408,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// A named cache's nix-cache-info is rendered from its registry priority;
 		// the Worker forwards it here (the default cache's is rendered at the edge).
-		this.app.on(
-			['GET', 'HEAD'],
-			'/cache/:cacheName/nix-cache-info',
-			(context) =>
-				textResponse(
-					context.req.raw,
-					this.cacheAdmin.cacheInfoBody(context.get('cache')),
-					{
-						'content-type': 'text/x-nix-cache-info; charset=utf-8'
-					}
-				)
+		this.app.get('/cache/:cacheName/nix-cache-info', (context) =>
+			textResponse(
+				context.req.raw,
+				this.cacheAdmin.cacheInfoBody(context.get('cache')),
+				{
+					'content-type': 'text/x-nix-cache-info; charset=utf-8'
+				}
+			)
 		);
 
 		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
@@ -429,20 +426,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		// Both key documents are served uncached so a rotation is visible across
 		// colos at once.
-		this.app.on(['GET', 'HEAD'], '/.well-known/jwks.json', async (context) =>
+		this.app.get('/.well-known/jwks.json', async (context) =>
 			context.json({ keys: await this.authKeys.authPublicJwks() }, 200, {
 				'cache-control': 'no-cache'
 			})
 		);
-		this.app.on(
-			['GET', 'HEAD'],
-			'/.well-known/oauth-authorization-server',
-			(context) =>
-				context.json(
-					this.authKeys.authorizationServerMetadata(
-						new URL(context.req.url).origin
-					)
+		this.app.get('/.well-known/oauth-authorization-server', (context) =>
+			context.json(
+				this.authKeys.authorizationServerMetadata(
+					new URL(context.req.url).origin
 				)
+			)
 		);
 		this.app.get('/keys', this.scoped('admin'), async (context) =>
 			context.json(await this.signingKeys.keyList())
@@ -715,7 +709,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// The serve routes stream stored objects with conditional-request
 		// handling, so they keep their Response-shaped handlers.
 		this.app.on(
-			['GET', 'HEAD'],
+			'GET',
 			['/attestations/:hash', '/cache/:cacheName/attestations/:hash'],
 			(context) =>
 				this.attestations.handleServeList(
@@ -725,7 +719,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 		);
 		this.app.on(
-			['GET', 'HEAD'],
+			'GET',
 			[
 				'/attestation-bundles/:digest',
 				'/cache/:cacheName/attestation-bundles/:digest'
