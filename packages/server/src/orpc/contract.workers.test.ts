@@ -133,6 +133,40 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('drives policies and trust rules through the derived client', async () => {
+		await useTestServer('contract-policies-trust');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+
+		const policy = await client.policies.add({
+			scope: 'root-name-prefix',
+			pattern: 'pr-',
+			ttlSeconds: 604_800
+		});
+		const policies = await client.policies.list();
+		const policyRemoved = await client.policies.remove({ id: policy.id });
+
+		const rule = await client.oidcTrust.add({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: 'https://cache.example.workers.dev',
+			claims: { repository_owner_id: '5678' },
+			allowedRoots: ['github:owner/']
+		});
+		const ruleRemoved = await client.oidcTrust.remove({ id: rule.id });
+
+		expect({
+			policyListed: policies.policies.map((entry) => entry.id),
+			policyRemoved,
+			ruleScope: rule.scope,
+			ruleRemoved
+		}).toStrictEqual({
+			policyListed: [policy.id],
+			policyRemoved: { id: policy.id, removed: true },
+			ruleScope: 'write',
+			ruleRemoved: { id: rule.id, removed: true }
+		});
+	});
+
 	it('refuses a write-scoped token on an admin procedure', async () => {
 		await useTestServer('contract-scope');
 		await bootstrap();

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import {
 	CupboardTestServer,
 	ownerAudience,
@@ -49,9 +50,13 @@ function withFederation(
 
 describe('OIDC federation', () => {
 	it('exchanges an owner id_token for an admin token and refuses a non-owner', () =>
-		withFederation('cupboard-e2e-owner-', async ({ server, client }) => {
+		withFederation('cupboard-e2e-owner-', async ({ server }) => {
 			const adminToken = await server.ownerAdminToken();
-			const { rules } = await client.listOidcTrust(adminToken);
+			const rpc = tenantRpc(server.tenantUrl, {
+				credential: adminToken,
+				fetcher: server.uploadFetcher()
+			});
+			const { rules } = await rpc.oidcTrust.list();
 
 			const nonOwner = server.issuer.sign({
 				aud: ownerAudience,
@@ -76,7 +81,11 @@ describe('OIDC federation', () => {
 			'cupboard-e2e-ci-',
 			async ({ server, client, directory }) => {
 				const adminToken = await server.ownerAdminToken();
-				await client.addOidcTrust(adminToken, {
+				const rpc = tenantRpc(server.tenantUrl, {
+					credential: adminToken,
+					fetcher: server.uploadFetcher()
+				});
+				await rpc.oidcTrust.add({
 					issuer: server.issuer.issuer,
 					audience: ciAudience,
 					claims: { repository_owner_id: '5678' },
@@ -124,9 +133,13 @@ describe('OIDC federation', () => {
 		));
 
 	it('refuses a CI token whose claims do not match the rule', () =>
-		withFederation('cupboard-e2e-ci-mismatch-', async ({ server, client }) => {
+		withFederation('cupboard-e2e-ci-mismatch-', async ({ server }) => {
 			const adminToken = await server.ownerAdminToken();
-			await client.addOidcTrust(adminToken, {
+			const rpc = tenantRpc(server.tenantUrl, {
+				credential: adminToken,
+				fetcher: server.uploadFetcher()
+			});
+			await rpc.oidcTrust.add({
 				issuer: server.issuer.issuer,
 				audience: ciAudience,
 				claims: { repository_owner_id: '5678' },

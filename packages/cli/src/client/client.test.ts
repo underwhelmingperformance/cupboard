@@ -6,8 +6,6 @@ import type {
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { CheckReport } from '@cupboard/protocol/reports';
 import type {
-	RetentionPolicyRemoveResponse,
-	RetentionPolicySummary,
 	RootListResponse,
 	RootRemoveResponse,
 	RootSetBody,
@@ -538,61 +536,6 @@ describe('CupboardClient.removeRoot', () => {
 			contentType: undefined,
 			body: undefined
 		});
-	});
-});
-
-describe('CupboardClient retention policies', () => {
-	it('posts a policy to /policies', async () => {
-		const response: RetentionPolicySummary = {
-			id: 'p1',
-			scope: 'root-name-prefix',
-			pattern: 'pr-',
-			ttlSeconds: 604_800
-		};
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.addPolicy('admin-token', {
-			scope: 'root-name-prefix',
-			pattern: 'pr-',
-			ttlSeconds: 604_800
-		});
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/policies',
-			method: 'POST',
-			authorization: 'Bearer admin-token',
-			contentType: 'application/json',
-			body: JSON.stringify({
-				scope: 'root-name-prefix',
-				pattern: 'pr-',
-				ttlSeconds: 604_800
-			})
-		});
-	});
-
-	it('deletes a policy by id', async () => {
-		const response: RetentionPolicyRemoveResponse = { id: 'p1', removed: true };
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.removePolicy('admin-token', 'p1');
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/policies/p1',
-			method: 'DELETE',
-			authorization: 'Bearer admin-token',
-			contentType: undefined,
-			body: undefined
-		});
-	});
-
-	it('rejects a policy list response that does not match the schema', async () => {
-		const { client } = capturingClient({ policies: [{ id: 'p1' }] });
-
-		await expect(client.listPolicies('admin-token')).rejects.toThrow(
-			ResponseSchemaMismatchError
-		);
 	});
 });
 

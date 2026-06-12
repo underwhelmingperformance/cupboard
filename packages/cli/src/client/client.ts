@@ -17,13 +17,6 @@ import {
 	controlKeyRotateResponseSchema
 } from '@cupboard/protocol/control-keys';
 import {
-	type OidcTrustAddBody,
-	type OidcTrustListResponse,
-	oidcTrustListResponseSchema,
-	type OidcTrustRemoveResponse,
-	oidcTrustRemoveResponseSchema,
-	type OidcTrustSummary,
-	oidcTrustSummarySchema,
 	type ParsedTokenResponse,
 	refreshTokenGrantType,
 	tokenExchangeGrantType,
@@ -36,13 +29,6 @@ import {
 	type ParsedControlCheckReport
 } from '@cupboard/protocol/reports';
 import {
-	type RetentionPolicyAddBody,
-	type RetentionPolicyListResponse,
-	retentionPolicyListResponseSchema,
-	type RetentionPolicyRemoveResponse,
-	retentionPolicyRemoveResponseSchema,
-	type RetentionPolicySummary,
-	retentionPolicySummarySchema,
 	type RootListResponse,
 	rootListResponseSchema,
 	type RootRemoveResponse,
@@ -181,68 +167,6 @@ export class CupboardClient {
 
 	usage(token: AccessCredential): Promise<UsageResponse> {
 		return this.requestJson('/usage', usageResponseSchema, { token });
-	}
-
-	listPolicies(token: AccessCredential): Promise<RetentionPolicyListResponse> {
-		return this.requestJson('/policies', retentionPolicyListResponseSchema, {
-			token
-		});
-	}
-
-	addPolicy(
-		token: AccessCredential,
-		body: RetentionPolicyAddBody
-	): Promise<RetentionPolicySummary> {
-		return this.requestJson('/policies', retentionPolicySummarySchema, {
-			method: 'POST',
-			token,
-			body
-		});
-	}
-
-	removePolicy(
-		token: AccessCredential,
-		id: string
-	): Promise<RetentionPolicyRemoveResponse> {
-		return this.requestJson(
-			`/policies/${encodeURIComponent(id)}`,
-			retentionPolicyRemoveResponseSchema,
-			{
-				method: 'DELETE',
-				token
-			}
-		);
-	}
-
-	listOidcTrust(token: AccessCredential): Promise<OidcTrustListResponse> {
-		return this.requestJson('/oidc-trust', oidcTrustListResponseSchema, {
-			token
-		});
-	}
-
-	addOidcTrust(
-		token: AccessCredential,
-		body: OidcTrustAddBody
-	): Promise<OidcTrustSummary> {
-		return this.requestJson('/oidc-trust', oidcTrustSummarySchema, {
-			method: 'POST',
-			token,
-			body
-		});
-	}
-
-	removeOidcTrust(
-		token: AccessCredential,
-		id: string
-	): Promise<OidcTrustRemoveResponse> {
-		return this.requestJson(
-			`/oidc-trust/${encodeURIComponent(id)}`,
-			oidcTrustRemoveResponseSchema,
-			{
-				method: 'DELETE',
-				token
-			}
-		);
 	}
 
 	/**

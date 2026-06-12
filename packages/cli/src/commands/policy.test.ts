@@ -7,8 +7,6 @@ import type {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import {
 	type PolicyClient,
 	runPolicyAdd,
@@ -45,9 +43,9 @@ function uncalledClient(): never {
 
 function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 	return {
-		listPolicies: uncalledClient,
-		addPolicy: uncalledClient,
-		removePolicy: uncalledClient,
+		list: uncalledClient,
+		add: uncalledClient,
+		remove: uncalledClient,
 		...overrides
 	};
 }
@@ -67,9 +65,8 @@ describe('runPolicyList', () => {
 		};
 
 		await runPolicyList(
-			'admin-token',
 			reporter(results),
-			policyClient({ listPolicies: () => Promise.resolve(response) })
+			policyClient({ list: () => Promise.resolve(response) })
 		);
 
 		expect(results).toStrictEqual([
@@ -82,9 +79,8 @@ describe('runPolicyList', () => {
 		const infos: string[] = [];
 
 		await runPolicyList(
-			'admin-token',
 			reporter(results, infos),
-			policyClient({ listPolicies: () => Promise.resolve({ policies: [] }) })
+			policyClient({ list: () => Promise.resolve({ policies: [] }) })
 		);
 
 		expect({ results, infos }).toStrictEqual({
@@ -96,8 +92,7 @@ describe('runPolicyList', () => {
 
 describe('runPolicyAdd', () => {
 	it('builds a cache-scoped body and reports the policy', async () => {
-		const calls: { token: AccessCredential; body: RetentionPolicyAddBody }[] =
-			[];
+		const calls: RetentionPolicyAddBody[] = [];
 		const results: ResultRow[][] = [];
 		const summary: RetentionPolicySummary = {
 			id: 'p1',
@@ -110,23 +105,17 @@ describe('runPolicyAdd', () => {
 			'cache',
 			'builds',
 			1_209_600,
-			'admin-token',
 			reporter(results),
 			policyClient({
-				addPolicy(token, body) {
-					calls.push({ token, body });
+				add(body) {
+					calls.push(body);
 					return Promise.resolve(summary);
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [
-				{
-					token: 'admin-token',
-					body: { scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 }
-				}
-			],
+			calls: [{ scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 }],
 			results: [
 				[
 					{ label: 'Policy', value: 'p1' },
@@ -141,24 +130,23 @@ describe('runPolicyAdd', () => {
 
 describe('runPolicyRemove', () => {
 	it('removes a policy and reports the outcome', async () => {
-		const calls: { token: AccessCredential; id: string }[] = [];
+		const calls: { id: string }[] = [];
 		const results: ResultRow[][] = [];
 		const response: RetentionPolicyRemoveResponse = { id: 'p1', removed: true };
 
 		await runPolicyRemove(
 			'p1',
-			'admin-token',
 			reporter(results),
 			policyClient({
-				removePolicy(token, id) {
-					calls.push({ token, id });
+				remove(input) {
+					calls.push(input);
 					return Promise.resolve(response);
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ token: 'admin-token', id: 'p1' }],
+			calls: [{ id: 'p1' }],
 			results: [
 				[
 					{ label: 'Policy', value: 'p1' },
