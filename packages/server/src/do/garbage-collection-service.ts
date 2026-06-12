@@ -3,10 +3,9 @@ import { and, eq, isNull, lt, lte, or } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { StoredReferencesInvalidError } from '../errors.ts';
-import { internalOrigin, narObjectKey } from '../http/http.ts';
+import { narObjectKey } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import {
 	type GarbageCollectionOutcome,
 	type ServerContext
@@ -16,7 +15,6 @@ import { type DeletionQueueService } from './deletion-queue-service.ts';
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly deletionQueue: DeletionQueueService
 	) {}
 
@@ -171,26 +169,6 @@ export class GarbageCollectionService {
 		}
 
 		return { rootsExpired: expiredRoots.length, pathsSwept };
-	}
-
-	async handleGarbageCollection(
-		request: Request,
-		cache?: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		// Interactive GC purges this colo's edge cache via the caller's public
-		// origin. The cron sweep arrives on the internal origin and cannot know
-		// the public URL, so it skips purging and relies on the narinfo TTL and
-		// the orphan-blob grace window instead.
-		const requestOrigin = new URL(request.url).origin;
-		const purgeOrigin =
-			requestOrigin === internalOrigin ? undefined : requestOrigin;
-
-		return Response.json({
-			ok: true,
-			...(await this.collectGarbage(cache, purgeOrigin))
-		});
 	}
 
 	collectGarbage(

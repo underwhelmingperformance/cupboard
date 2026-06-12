@@ -2,13 +2,18 @@ import { CacheInfo } from '@cupboard/nix/cache-info';
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
-	signingKeyIdSchema
+	signingKeyIdSchema,
+	storePathHashSchema
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import { cachePutBodySchema } from '@cupboard/protocol/caches';
 import { oidcTrustAddBodySchema } from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { retentionPolicyAddBodySchema } from '@cupboard/protocol/retention';
+import {
+	uploadNegotiateRequestSchema,
+	uploadPrepareRequestSchema
+} from '@cupboard/protocol/upload';
 import { DurableObject } from 'cloudflare:workers';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
@@ -26,7 +31,11 @@ import {
 	ZstdUnavailableError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import { textResponse, verificationBatchSize } from '../http/http.ts';
+import {
+	internalOrigin,
+	textResponse,
+	verificationBatchSize
+} from '../http/http.ts';
 import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
@@ -62,7 +71,10 @@ import {
 import { TokenExchangeService } from './token-exchange-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
-import { VerificationService } from './verification-service.ts';
+import {
+	verificationLimitSchema,
+	VerificationService
+} from './verification-service.ts';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -108,7 +120,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.uploadState = new UploadStateService(this.context);
 		this.deletionQueue = new DeletionQueueService(
 			this.context,
-			this.authKeys,
 			this.attestationCas,
 			this.attestations
 		);
@@ -120,7 +131,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.cacheAdmin = new CacheAdminService(this.context, this.deletionQueue);
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
-			this.authKeys,
 			this.deletionQueue
 		);
 		this.tokenExchange = new TokenExchangeService(
@@ -130,7 +140,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.uploads = new UploadsService(
 			this.context,
-			this.authKeys,
 			this.uploadState,
 			this.narInfoObjects,
 			this.deletionQueue
@@ -144,7 +153,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.verification = new VerificationService(
 			this.context,
-			this.authKeys,
 			this.commitPipeline,
 			this.deletionQueue,
 			this.narInfoObjects,
@@ -548,10 +556,32 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// A bounded reconciling pass driven by the cron tick. Its own route, kept
 		// separate from `/gc`, so each can run and be asserted independently.
-		this.app.post('/verify', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.verification.handleVerify(context.req.raw)
-			)
+		// Interactive runs purge this colo's edge cache via the caller's public
+		// origin; the cron sweep arrives on the internal origin, cannot know the
+		// public URL, and relies on the narinfo TTL and the orphan-blob grace
+		// window instead.
+		this.app.post(
+			'/verify',
+			this.scoped('admin'),
+			this.maintenance(),
+			async (context) => {
+				const { origin } = new URL(context.req.url);
+				const requested = context.req.query('limit');
+				const limit =
+					requested === undefined
+						? verificationBatchSize
+						: Math.min(
+								parseRequestValue(verificationLimitSchema, requested),
+								verificationBatchSize
+							);
+
+				return context.json(
+					await this.verification.verify(
+						origin === internalOrigin ? undefined : origin,
+						limit
+					)
+				);
+			}
 		);
 
 		// Each path-scoped route has a bare form (the default cache) and a
@@ -569,25 +599,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			async (context) =>
 				context.json(await this.stats.stats(context.get('cache')))
 		);
-		this.app.delete('/paths/:hash', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.deletionQueue.handleDeletePath(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('hash')
-				)
-			)
-		);
-		this.app.delete('/cache/:cacheName/paths/:hash', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.deletionQueue.handleDeletePath(
-						context.req.raw,
-						cache,
-						context.req.param('hash')
+		this.app.on(
+			'DELETE',
+			['/paths/:hash', '/cache/:cacheName/paths/:hash'],
+			this.scoped('admin'),
+			this.maintenance(),
+			async (context) =>
+				context.json(
+					await this.deletionQueue.deleteStorePath(
+						context.get('cache'),
+						parseRequestValue(storePathHashSchema, context.req.param('hash')),
+						new URL(context.req.url).origin
 					)
 				)
-			)
 		);
 		this.app.get('/roots', (context) =>
 			this.roots.handleListRoots(context.req.raw, DEFAULT_CACHE)
@@ -637,54 +661,56 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 		);
-		this.app.post('/uploads', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.uploads.handleNegotiate(context.req.raw, DEFAULT_CACHE)
-			)
-		);
-		this.app.post('/cache/:cacheName/uploads', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.uploads.handleNegotiate(context.req.raw, cache)
-				)
-			)
-		);
-		this.app.put('/uploads/:id', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.uploads.handlePrepareUpload(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('id')
-				)
-			)
-		);
-		this.app.put('/cache/:cacheName/uploads/:id', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.uploads.handlePrepareUpload(
-						context.req.raw,
-						cache,
-						context.req.param('id')
+		this.app.on(
+			'POST',
+			['/uploads', '/cache/:cacheName/uploads'],
+			this.scoped('write'),
+			this.maintenance(),
+			async (context) =>
+				context.json(
+					await this.uploads.negotiate(
+						context.get('cache'),
+						await parseRequestBody(
+							uploadNegotiateRequestSchema,
+							context.req.raw
+						),
+						new URL(context.req.url).origin
 					)
 				)
-			)
+		);
+		this.app.on(
+			'PUT',
+			['/uploads/:id', '/cache/:cacheName/uploads/:id'],
+			this.scoped('write'),
+			this.maintenance(),
+			async (context) =>
+				context.json(
+					await this.uploads.prepareUpload(
+						context.get('cache'),
+						context.req.param('id'),
+						await parseRequestBody(uploadPrepareRequestSchema, context.req.raw)
+					)
+				)
 		);
 		// The commit endpoint is a WebSocket: the upgrade request carries the
 		// write token, the first frame settles or defers the path, and a
 		// deferred upload's socket parks (hibernating) until verification
 		// answers with the terminal verdict.
-		this.app.get('/uploads/:id/commit', (context) =>
-			this.commitSocket(context.req.raw, DEFAULT_CACHE, context.req.param('id'))
+		this.app.on(
+			'GET',
+			['/uploads/:id/commit', '/cache/:cacheName/uploads/:id/commit'],
+			this.scoped('write'),
+			(context) =>
+				this.commitSocket(
+					context.req.raw,
+					context.get('cache'),
+					context.req.param('id')
+				)
 		);
-		this.app.get('/cache/:cacheName/uploads/:id/commit', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.commitSocket(context.req.raw, cache, context.req.param('id'))
-			)
-		);
-		// `push --wait` polls a deferred upload's status by its uploadId, which is
-		// unique across caches, so a single route serves it regardless of cache.
-		this.app.get('/uploads/:id/status', (context) =>
-			this.uploads.handleUploadStatus(context.req.raw, context.req.param('id'))
+		// A deferred upload's status is polled by its uploadId, which is unique
+		// across caches, so a single route serves it regardless of cache.
+		this.app.get('/uploads/:id/status', this.scoped('write'), (context) =>
+			context.json(this.uploads.uploadStatus(context.req.param('id')))
 		);
 		this.app.on(['GET', 'HEAD'], '/attestations/:hash', (context) =>
 			this.attestations.handleServeList(
@@ -776,32 +802,46 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 		);
-		this.app.post('/gc', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.garbageCollection.handleGarbageCollection(context.req.raw)
-			)
+		// Interactive GC purges this colo's edge cache via the caller's public
+		// origin. The cron sweep arrives on the internal origin and cannot know
+		// the public URL, so it skips purging and relies on the narinfo TTL and
+		// the orphan-blob grace window instead. The bare form sweeps every cache;
+		// the scoped form sweeps one.
+		this.app.post('/gc', this.scoped('admin'), this.maintenance(), (context) =>
+			this.garbageCollectionResponse(context.req.url)
 		);
-		this.app.post('/cache/:cacheName/gc', (context) =>
-			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.garbageCollection.handleGarbageCollection(context.req.raw, cache)
-				)
-			)
+		this.app.post(
+			'/cache/:cacheName/gc',
+			this.scoped('admin'),
+			this.maintenance(),
+			(context) =>
+				this.garbageCollectionResponse(context.req.url, context.get('cache'))
 		);
 	}
 
-	// Authenticates and upgrades a commit request, parks the socket through the
-	// hibernation API (tagged by upload id, so verification can find every
-	// waiter even after this object was evicted), and runs the commit
-	// transition once the 101 is on its way. Auth failures answer as plain
-	// HTTP before any socket exists.
-	private async commitSocket(
+	private async garbageCollectionResponse(
+		url: string,
+		cache?: string
+	): Promise<Response> {
+		const { origin } = new URL(url);
+		const purgeOrigin = origin === internalOrigin ? undefined : origin;
+
+		return Response.json({
+			ok: true,
+			...(await this.garbageCollection.collectGarbage(cache, purgeOrigin))
+		});
+	}
+
+	// Upgrades a commit request, parks the socket through the hibernation API
+	// (tagged by upload id, so verification can find every waiter even after
+	// this object was evicted), and runs the commit transition once the 101 is
+	// on its way. The scoped('write') middleware authenticates the upgrade
+	// request as plain HTTP before any socket exists.
+	private commitSocket(
 		request: Request,
 		cache: string,
 		uploadId: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
-
+	): Response {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
 		}
