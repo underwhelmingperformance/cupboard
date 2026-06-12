@@ -483,6 +483,28 @@ describe('onboardDeployment', () => {
 		});
 	});
 
+	it('presents a freshly fetched id_token to the claim', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		await onboardDeployment({
+			...baseOptions(ui, client),
+			// The login's snapshot ('id-token-1') can expire mid-deploy; the
+			// claim asks for a fresh token at the moment of use.
+			freshIdToken: () => Promise.resolve('id-token-fresh')
+		});
+
+		expect(client.signupBodies).toStrictEqual([
+			{ subject_token: 'id-token-fresh' }
+		]);
+	});
+
 	it('proves a kept R2 pair through the new cache', async () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({

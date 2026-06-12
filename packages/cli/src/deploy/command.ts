@@ -13,11 +13,15 @@ import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
 import {
 	type CredentialSource,
 	defaultCredentialChain,
+	freshIdToken,
 	resolveCloudflare
 } from './auth.ts';
 import { createEsbuildBundler } from './bundle.ts';
 import { type CloudflareApi, createCloudflareApi } from './cloudflare-api.ts';
-import { cloudflareOauthClientId } from './cloudflare-oauth.ts';
+import {
+	cloudflareOauthClientId,
+	refreshCloudflareGrant
+} from './cloudflare-oauth.ts';
 import {
 	cronProblem,
 	type DeploymentConfig,
@@ -33,6 +37,7 @@ import {
 } from './deploy-run.ts';
 import { checkDomainOption, domainProblem } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
+import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
 import {
 	type ClaimSecret,
 	deploymentUrl,
@@ -1208,7 +1213,21 @@ async function deployFlow(
 						accountId: agreed.accountId,
 						bucketName: agreedBucket
 					}
-				: { kind: 'fresh' }
+				: { kind: 'fresh' },
+		// Only a grant-backed credential can reissue an id_token; raw API
+		// tokens carry no identity to begin with.
+		...(credentialSource === 'cached login' ||
+		credentialSource === 'browser login'
+			? {
+					freshIdToken: () =>
+						freshIdToken({
+							readGrant: readCachedGrant,
+							writeGrant: writeCachedGrant,
+							refreshGrant: (previous) => refreshCloudflareGrant(previous),
+							now: Date.now
+						})
+				}
+			: {})
 	});
 
 	switch (outcome.kind) {
@@ -1266,8 +1285,11 @@ async function deployFlow(
 		case 'claim-refused': {
 			ui.warn(
 				`The server did not accept you as the admin: ${outcome.detail}. ` +
-					'The deployment may already belong to a different identity, ' +
-					'or its claim secret did not match.'
+					(outcome.status === 403
+						? 'The deployment may already belong to a different ' +
+							'identity, or its claim secret did not match.'
+						: 'Your Cloudflare login may have gone stale; re-running ' +
+							'`cupboard init` signs in again.')
 			);
 			ui.outro('Deployed.');
 			return;
