@@ -187,7 +187,7 @@ export async function onboardDeployment(
 
 	const up = await pollProbe(
 		ui,
-		'Waiting for the deployed version',
+		`Waiting for build ${options.buildVersion} to serve`,
 		attempts,
 		sleep,
 		async () => {
@@ -195,7 +195,7 @@ export async function onboardDeployment(
 
 			return live === options.buildVersion
 				? { kind: 'ready', value: undefined }
-				: { kind: 'retry', detail: `still version ${live}` };
+				: { kind: 'retry', detail: `still serving ${live}` };
 		}
 	);
 

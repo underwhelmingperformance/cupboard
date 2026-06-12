@@ -74,11 +74,13 @@
 	"vars": {
 		"CUPBOARD_AUTH_ISSUER": "cupboard",
 		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
-		// The control-plane OAuth audience (the control client id). The base64 AES-256
-		// key wrapping the control signing key is sensitive: set
+		// The audience stamped into and verified on control-plane admin tokens. Its
+		// only job is to keep control tokens distinct from everything else this
+		// deployment verifies, so a fixed value works for every deployment. The
+		// base64 AES-256 key wrapping the control signing key is sensitive: set
 		// `CONTROL_KEY_WRAP_SECRET` in production with `wrangler secret put`. Tests
 		// supply their own via the pool/Miniflare bindings.
-		"CUPBOARD_CONTROL_AUDIENCE": "",
+		"CUPBOARD_CONTROL_AUDIENCE": "cupboard-control",
 		// The OIDC issuer and audience (the control client id) trusted for the first-signup
 		// claim, and the non-secret gates that decide who may claim global admin. The
 		// single-use claim secret is sensitive: set `CUPBOARD_SIGNUP_SECRET` in
