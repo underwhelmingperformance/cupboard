@@ -163,6 +163,49 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
+	it('runs a tenant-verify message regardless of the maintenance cadence', async () => {
+		await provisionNamedTenant('acme');
+		// Freshly maintained, so an ordinary maintenance message would be a
+		// stale no-op; the verify pass was asked for by a commit and runs anyway.
+		await writeEligibility('acme', {
+			reconciledAt: '2026-01-01T00:00:00.000Z'
+		});
+
+		const seen: string[] = [];
+		const decision = await runWithClock('2026-01-01T00:00:00.000Z', () =>
+			executeMaintenanceQueueMessage(
+				env,
+				{ kind: 'tenant-verify', tenant: 'acme' },
+				{
+					verifyTenant: (_env, id) => {
+						seen.push(id);
+
+						return Promise.resolve();
+					}
+				}
+			)
+		);
+
+		expect({ decision, seen }).toStrictEqual({
+			decision: { action: 'ack' },
+			seen: ['acme']
+		});
+	});
+
+	it('retries a tenant-verify message whose pass fails', async () => {
+		const decision = await executeMaintenanceQueueMessage(
+			env,
+			{ kind: 'tenant-verify', tenant: 'acme' },
+			{ verifyTenant: () => Promise.reject(new Error('verify failed')) }
+		);
+
+		expect(decision).toStrictEqual({
+			action: 'retry',
+			delaySeconds: 60,
+			reason: 'Error: verify failed'
+		});
+	});
+
 	it('records tenant maintenance queue outcomes after an actual attempt', async () => {
 		await provisionNamedTenant('acme');
 		await deleteEligibility('acme');

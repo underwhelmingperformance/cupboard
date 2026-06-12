@@ -61,6 +61,7 @@ type MaintenanceQueueDecision =
 	  };
 interface ExecuteMaintenanceQueueOptions {
 	readonly maintainTenant?: MaintainTenant;
+	readonly verifyTenant?: MaintainTenant;
 	readonly drainTenant?: DrainTenant;
 	readonly runBlobReaper?: (env: Env) => Promise<unknown>;
 	readonly runCasReaper?: (env: Env) => Promise<unknown>;
@@ -75,6 +76,7 @@ const queueSendBatchSize = 100;
 
 const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 	z.object({ kind: z.literal('tenant-maintenance'), tenant: tenantIdSchema }),
+	z.object({ kind: z.literal('tenant-verify'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('offboard'), tenant: tenantIdSchema }),
 	z.object({ kind: z.literal('blob-reaper') }),
 	z.object({ kind: z.literal('cas-reaper') }),
@@ -85,6 +87,7 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 
 export type MaintenanceQueueMessage =
 	| { readonly kind: 'tenant-maintenance'; readonly tenant: string }
+	| { readonly kind: 'tenant-verify'; readonly tenant: string }
 	| { readonly kind: 'offboard'; readonly tenant: string }
 	| { readonly kind: 'blob-reaper' }
 	| { readonly kind: 'cas-reaper' }
@@ -213,6 +216,12 @@ export async function executeMaintenanceQueueMessage(
 					message.tenant,
 					options.maintainTenant ?? maintainTenant
 				);
+			}
+			case 'tenant-verify': {
+				// A commit asked for this pass because it stored a blob pending
+				// verification, so it runs regardless of the maintenance cadence.
+				await (options.verifyTenant ?? verifyTenant)(env, message.tenant);
+				return { action: 'ack' };
 			}
 			case 'offboard': {
 				return await executeOffboardMessage(
@@ -611,6 +620,10 @@ function maintainTenant(env: Env, id: string): Promise<void> {
 		() => server.runVerification(),
 		() => server.runAuthKeyRetirement()
 	);
+}
+
+function verifyTenant(env: Env, id: string): Promise<void> {
+	return tenantServer(env, id).runVerification();
 }
 
 async function executeTenantMaintenanceMessage(

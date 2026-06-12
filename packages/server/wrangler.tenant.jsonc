@@ -34,6 +34,16 @@
 			"migrations_dir": "drizzle-d1"
 		}
 	],
+	// A commit that stores a blob too large to verify inline asks for a prompt
+	// verification pass over this queue; the hourly cron remains the backstop.
+	"queues": {
+		"producers": [
+			{
+				"binding": "MAINTENANCE_QUEUE",
+				"queue": "cupboard-maintenance"
+			}
+		]
+	},
 	"vars": {
 		"CUPBOARD_AUTH_ISSUER": "cupboard",
 		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
