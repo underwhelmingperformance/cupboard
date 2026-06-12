@@ -102,28 +102,40 @@ const tokenResponseSchema = z.object({
 });
 
 const idTokenClaimsSchema = z.object({ sub: z.string().min(1) });
+const idTokenExpirySchema = z.object({ exp: z.number() });
 
-// The `sub` of an id_token, or undefined when the token does not parse. The
-// claim is read unverified: it only seeds a default the user reviews in the
-// plan, and the server verifies the real login token against the issuer.
-function jwtSubject(idToken: string): string | undefined {
-	const segment = idToken.split('.').at(1);
+function decodeJwtPayload(token: string): unknown {
+	const segment = token.split('.', 2).at(1);
 
 	if (segment === undefined) {
 		return undefined;
 	}
 
-	let payload: unknown;
-
 	try {
-		payload = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
+		return JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
 	} catch {
 		return undefined;
 	}
+}
 
-	const parsed = idTokenClaimsSchema.safeParse(payload);
+// The `sub` of an id_token, or undefined when the token does not parse. The
+// claim is read unverified: it only seeds a default the user reviews in the
+// plan, and the server verifies the real login token against the issuer.
+function jwtSubject(idToken: string): string | undefined {
+	const parsed = idTokenClaimsSchema.safeParse(decodeJwtPayload(idToken));
 
 	return parsed.success ? parsed.data.sub : undefined;
+}
+
+/**
+ * The token's `exp` in epoch milliseconds, or undefined when the token does
+ * not parse or carries none. Read unverified: it only decides whether a
+ * cached id_token is worth presenting, and the server verifies for real.
+ */
+export function jwtExpiryMs(token: string): number | undefined {
+	const parsed = idTokenExpirySchema.safeParse(decodeJwtPayload(token));
+
+	return parsed.success ? parsed.data.exp * 1000 : undefined;
 }
 
 /**

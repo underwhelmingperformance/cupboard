@@ -7,6 +7,7 @@ import { createCloudflareApi } from './cloudflare-api.ts';
 import {
 	type CloudflareGrant,
 	cloudflareLogin,
+	jwtExpiryMs,
 	refreshCloudflareGrant
 } from './cloudflare-oauth.ts';
 import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
@@ -219,6 +220,47 @@ export async function resolveCredential(
 		subject: grant.subject,
 		idToken: grant.idToken
 	};
+}
+
+// An id_token within a few minutes of expiry is not worth presenting: the
+// request it authorises may land after the cut-off.
+const idTokenFreshnessMarginMs = 5 * 60 * 1000;
+
+/**
+ * An id_token fit to present as a subject token right now: the cached one
+ * while it has time left, otherwise one reissued by refreshing the grant. A
+ * deploy can outlive the id_token it logged in with (the tokens live an hour
+ * and the claim happens minutes in), so callers fetch one at the moment of
+ * use rather than carrying the login's snapshot.
+ */
+export async function freshIdToken(
+	chain: Pick<
+		CredentialChain,
+		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
+	>
+): Promise<string | undefined> {
+	const cached = await chain.readGrant();
+
+	if (cached === undefined) {
+		return undefined;
+	}
+
+	const expiry =
+		cached.idToken === undefined ? undefined : jwtExpiryMs(cached.idToken);
+
+	if (expiry !== undefined && expiry > chain.now() + idTokenFreshnessMarginMs) {
+		return cached.idToken;
+	}
+
+	const renewed = await chain.refreshGrant(cached);
+
+	if (renewed === undefined) {
+		return cached.idToken;
+	}
+
+	await chain.writeGrant(renewed);
+
+	return renewed.idToken;
 }
 
 export interface ResolvedAccount {

@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import type { CredentialChain } from './auth.ts';
-import { defaultCredentialChain, resolveCredential } from './auth.ts';
+import {
+	defaultCredentialChain,
+	freshIdToken,
+	resolveCredential
+} from './auth.ts';
 import type { CloudflareGrant } from './cloudflare-oauth.ts';
 
 const hour = 60 * 60 * 1000;
@@ -360,6 +364,79 @@ describe('resolveCredential', () => {
 			idToken: 'cached-id-token'
 		});
 		expect(calls.logins).toBe(0);
+	});
+});
+
+/** An unsigned id_token whose payload carries the given expiry (seconds). */
+function tokenExpiringAt(expSeconds: number): string {
+	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
+		'base64url'
+	);
+	const payload = Buffer.from(
+		JSON.stringify({ sub: 'cf-user-1', exp: expSeconds })
+	).toString('base64url');
+
+	return `${header}.${payload}.signature`;
+}
+
+describe('freshIdToken', () => {
+	const nowSeconds = now / 1000;
+
+	it('keeps a cached id_token with time left, without refreshing', async () => {
+		const idToken = tokenExpiringAt(nowSeconds + 3600);
+		const { chain, calls } = chainWith({
+			storedGrant: { ...freshGrant, idToken }
+		});
+
+		expect({
+			token: await freshIdToken(chain),
+			refreshes: calls.refreshedWith.length,
+			written: calls.written
+		}).toStrictEqual({ token: idToken, refreshes: 0, written: [] });
+	});
+
+	it('refreshes an id_token at the edge of expiry and persists the grant', async () => {
+		const stale = tokenExpiringAt(nowSeconds + 60);
+		const reissued = tokenExpiringAt(nowSeconds + 3600);
+		const renewed: CloudflareGrant = { ...freshGrant, idToken: reissued };
+		const { chain, calls } = chainWith({
+			storedGrant: { ...freshGrant, idToken: stale },
+			renewedGrant: renewed
+		});
+
+		expect({
+			token: await freshIdToken(chain),
+			written: calls.written
+		}).toStrictEqual({ token: reissued, written: [renewed] });
+	});
+
+	it('refreshes when the grant has no id_token at all', async () => {
+		const reissued = tokenExpiringAt(nowSeconds + 3600);
+		const renewed: CloudflareGrant = { ...freshGrant, idToken: reissued };
+		const { chain } = chainWith({
+			storedGrant: { ...freshGrant, idToken: undefined },
+			renewedGrant: renewed
+		});
+
+		expect(await freshIdToken(chain)).toBe(reissued);
+	});
+
+	it('falls back to the stale token when the refresh declines', async () => {
+		const stale = tokenExpiringAt(nowSeconds - 60);
+		const { chain, calls } = chainWith({
+			storedGrant: { ...freshGrant, idToken: stale }
+		});
+
+		expect({
+			token: await freshIdToken(chain),
+			written: calls.written
+		}).toStrictEqual({ token: stale, written: [] });
+	});
+
+	it('answers nothing without a cached grant', async () => {
+		const { chain } = chainWith({});
+
+		expect(await freshIdToken(chain)).toBeUndefined();
 	});
 });
 
