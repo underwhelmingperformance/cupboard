@@ -7,28 +7,12 @@ import { and, count, eq } from 'drizzle-orm';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
 
 export class StatsService {
-	constructor(
-		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService
-	) {}
+	constructor(private readonly context: ServerContext) {}
 
-	async handleStats(request: Request, cache: string): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		return Response.json((await this.stats(cache)) satisfies StatsResponse);
-	}
-
-	async handleUsage(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		return Response.json((await this.usage()) satisfies UsageResponse);
-	}
-
-	private async stats(cache: string): Promise<StatsResponse> {
+	async stats(cache: string): Promise<StatsResponse> {
 		const tenant = this.context.requireTenant();
 		const storePaths = this.context.db
 			.select({ count: count() })
@@ -95,7 +79,7 @@ export class StatsService {
 		};
 	}
 
-	private async usage(): Promise<UsageResponse> {
+	async usage(): Promise<UsageResponse> {
 		const tenant = this.context.requireTenant();
 		const usage = await this.context.d1
 			.select({
