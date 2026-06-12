@@ -126,7 +126,8 @@ repos:
       - id: pnpm-lint-commit-message
         name: pnpm lint:commit-messages
         entry: >-
-          pnpm --config.verify-deps-before-run=false lint:commit-messages --edit
+          pnpm --config.verify-deps-before-run=false lint:commit-messages
+          --no-colour --edit
         language: system
         stages:
           - commit-msg
