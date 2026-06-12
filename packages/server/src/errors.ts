@@ -36,7 +36,7 @@ export class OwnerConfigurationInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor(public readonly issuer: string) {
-		super('CUPBOARD_OWNER_ISSUER is not a valid https issuer URL');
+		super('The configured owner issuer is not a valid https issuer URL');
 		this.name = 'OwnerConfigurationInvalidError';
 	}
 }
