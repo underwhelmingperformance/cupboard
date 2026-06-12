@@ -198,22 +198,35 @@ interface R2PresignConfiguration {
 	readonly secretAccessKey: string;
 }
 
-function r2PresignConfiguration(env: RuntimeEnv): R2PresignConfiguration {
-	const missingBindings: R2PresignBindingName[] = [];
+// The generated env types say `string`, but a secret never put has no binding
+// at all and reads as undefined; both spellings of "missing" must count.
+interface R2PresignEnv {
+	readonly R2_ACCOUNT_ID: string | undefined;
+	readonly R2_ACCESS_KEY_ID: string | undefined;
+	readonly R2_BUCKET_NAME: string | undefined;
+	readonly R2_SECRET_ACCESS_KEY: string | undefined;
+}
 
-	if (env.R2_ACCOUNT_ID === '') {
+function r2PresignConfiguration(env: R2PresignEnv): R2PresignConfiguration {
+	const missingBindings: R2PresignBindingName[] = [];
+	const accountId = env.R2_ACCOUNT_ID ?? '';
+	const accessKeyId = env.R2_ACCESS_KEY_ID ?? '';
+	const bucketName = env.R2_BUCKET_NAME ?? '';
+	const secretAccessKey = env.R2_SECRET_ACCESS_KEY ?? '';
+
+	if (accountId === '') {
 		missingBindings.push('R2_ACCOUNT_ID');
 	}
 
-	if (env.R2_ACCESS_KEY_ID === '') {
+	if (accessKeyId === '') {
 		missingBindings.push('R2_ACCESS_KEY_ID');
 	}
 
-	if (env.R2_BUCKET_NAME === '') {
+	if (bucketName === '') {
 		missingBindings.push('R2_BUCKET_NAME');
 	}
 
-	if (env.R2_SECRET_ACCESS_KEY === '') {
+	if (secretAccessKey === '') {
 		missingBindings.push('R2_SECRET_ACCESS_KEY');
 	}
 
@@ -221,12 +234,7 @@ function r2PresignConfiguration(env: RuntimeEnv): R2PresignConfiguration {
 		throw new R2PresignConfigurationMissingError(missingBindings);
 	}
 
-	return {
-		accountId: env.R2_ACCOUNT_ID,
-		accessKeyId: env.R2_ACCESS_KEY_ID,
-		bucketName: env.R2_BUCKET_NAME,
-		secretAccessKey: env.R2_SECRET_ACCESS_KEY
-	};
+	return { accountId, accessKeyId, bucketName, secretAccessKey };
 }
 
 export function oidcTrustRuleFromRow(
