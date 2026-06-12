@@ -16,7 +16,7 @@ import {
 	TenantNotConfiguredError,
 	ZstdUnavailableError
 } from '../errors.ts';
-import { serverErrorResponse } from '../http/error-response.ts';
+import { serverErrorHandler } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
@@ -190,16 +190,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async fetch(request: Request): Promise<Response> {
 		await this.initialise();
 
-		// An unconfigured Durable Object has no identity to mint, verify or advertise
-		// under, so it serves nothing rather than falling back to a default. This is
-		// input-gated: the control plane's `configure` RPC, which assigns the
-		// identity, is a method and so is not gated here.
-		if (this.tenantIdentity.current() === undefined) {
-			return serverErrorResponse(
-				Promise.reject(new TenantNotConfiguredError())
-			);
-		}
-
 		return this.app.fetch(request, this.env);
 	}
 
@@ -363,6 +353,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private routes(): void {
+		this.app.onError(serverErrorHandler);
+
+		// An unconfigured Durable Object has no identity to mint, verify or advertise
+		// under, so it serves nothing rather than falling back to a default. This is
+		// input-gated: the control plane's `configure` RPC, which assigns the
+		// identity, is a method and so is not gated here.
+		this.app.use(async (_context, next) => {
+			if (this.tenantIdentity.current() === undefined) {
+				throw new TenantNotConfiguredError();
+			}
+
+			await next();
+		});
+
 		this.app.on(['GET', 'HEAD'], '/pubkey', async (context) =>
 			// Served uncached so a rotation is visible across colos at once; the
 			// strong ETag still lets Nix revalidate conditionally.
@@ -382,11 +386,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			['GET', 'HEAD'],
 			'/cache/:cacheName/nix-cache-info',
 			(context) =>
-				serverErrorResponse(
-					this.cacheAdmin.handleCacheInfo(
-						context.req.raw,
-						context.req.param('cacheName')
-					)
+				this.cacheAdmin.handleCacheInfo(
+					context.req.raw,
+					context.req.param('cacheName')
 				)
 		);
 
@@ -394,54 +396,43 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// the tokens it mints. `/token` is unauthenticated: the subject token is
 		// itself the credential. The Worker proxies `/.well-known/jwks.json` here.
 		this.app.post('/token', (context) =>
-			serverErrorResponse(this.tokenExchange.handleToken(context.req.raw))
+			this.tokenExchange.handleToken(context.req.raw)
 		);
 		this.app.on(['GET', 'HEAD'], '/.well-known/jwks.json', (context) =>
-			serverErrorResponse(this.authKeys.handleJwks(context.req.raw))
+			this.authKeys.handleJwks(context.req.raw)
 		);
 		this.app.on(
 			['GET', 'HEAD'],
 			'/.well-known/oauth-authorization-server',
 			(context) =>
-				serverErrorResponse(
-					this.authKeys.handleAuthorizationServerMetadata(context.req.raw)
-				)
+				this.authKeys.handleAuthorizationServerMetadata(context.req.raw)
 		);
 		this.app.get('/keys', (context) =>
-			serverErrorResponse(this.signingKeys.handleKeyList(context.req.raw))
+			this.signingKeys.handleKeyList(context.req.raw)
 		);
 		this.app.post('/keys/rotate', (context) =>
-			serverErrorResponse(this.signingKeys.handleKeyRotate(context.req.raw))
+			this.signingKeys.handleKeyRotate(context.req.raw)
 		);
 		this.app.post('/keys/retire/:id', (context) =>
-			serverErrorResponse(
-				this.signingKeys.handleKeyRetire(
-					context.req.raw,
-					context.req.param('id')
-				)
-			)
+			this.signingKeys.handleKeyRetire(context.req.raw, context.req.param('id'))
 		);
 
 		// The auth-token signing key set, rotated independently of the narinfo
 		// keys above; tokens carry the active key's `kid` and verify against any
 		// key still in the set.
 		this.app.get('/keys/auth', (context) =>
-			serverErrorResponse(this.authKeys.handleAuthKeyList(context.req.raw))
+			this.authKeys.handleAuthKeyList(context.req.raw)
 		);
 		this.app.post('/keys/auth/rotate', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.authKeys.handleAuthKeyRotate(context.req.raw)
-				)
+			this.withMaintenanceEligibility(() =>
+				this.authKeys.handleAuthKeyRotate(context.req.raw)
 			)
 		);
 		this.app.post('/keys/auth/retire/:kid', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.authKeys.handleAuthKeyRetire(
-						context.req.raw,
-						context.req.param('kid')
-					)
+			this.withMaintenanceEligibility(() =>
+				this.authKeys.handleAuthKeyRetire(
+					context.req.raw,
+					context.req.param('kid')
 				)
 			)
 		);
@@ -449,71 +440,61 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// The cache registry is deployment-wide, so it lives at `/caches` rather
 		// than under a per-cache prefix.
 		this.app.get('/caches', (context) =>
-			serverErrorResponse(this.cacheAdmin.handleListCaches(context.req.raw))
+			this.cacheAdmin.handleListCaches(context.req.raw)
 		);
 		this.app.put('/caches/:cacheName', (context) =>
-			serverErrorResponse(
-				this.cacheAdmin.handlePutCache(
+			this.cacheAdmin.handlePutCache(
+				context.req.raw,
+				context.req.param('cacheName')
+			)
+		);
+		this.app.delete('/caches/:cacheName', (context) =>
+			this.withMaintenanceEligibility(() =>
+				this.cacheAdmin.handleRemoveCache(
 					context.req.raw,
 					context.req.param('cacheName')
 				)
 			)
 		);
-		this.app.delete('/caches/:cacheName', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.cacheAdmin.handleRemoveCache(
-						context.req.raw,
-						context.req.param('cacheName')
-					)
-				)
-			)
-		);
 		this.app.get('/policies', (context) =>
-			serverErrorResponse(this.retention.handleListPolicies(context.req.raw))
+			this.retention.handleListPolicies(context.req.raw)
 		);
 		this.app.post('/policies', (context) =>
-			serverErrorResponse(this.retention.handleAddPolicy(context.req.raw))
+			this.retention.handleAddPolicy(context.req.raw)
 		);
 		this.app.delete('/policies/:id', (context) =>
-			serverErrorResponse(
-				this.retention.handleRemovePolicy(
-					context.req.raw,
-					context.req.param('id')
-				)
+			this.retention.handleRemovePolicy(
+				context.req.raw,
+				context.req.param('id')
 			)
 		);
 
 		// The owner manages CI write-trust rules here; the owner's own admin rule
 		// is seeded from deploy config and is not editable through this API.
 		this.app.get('/oidc-trust', (context) =>
-			serverErrorResponse(this.oidcTrust.handleListOidcTrust(context.req.raw))
+			this.oidcTrust.handleListOidcTrust(context.req.raw)
 		);
 		this.app.post('/oidc-trust', (context) =>
-			serverErrorResponse(this.oidcTrust.handleAddOidcTrust(context.req.raw))
+			this.oidcTrust.handleAddOidcTrust(context.req.raw)
 		);
 		this.app.delete('/oidc-trust/:id', (context) =>
-			serverErrorResponse(
-				this.oidcTrust.handleRemoveOidcTrust(
-					context.req.raw,
-					context.req.param('id')
-				)
+			this.oidcTrust.handleRemoveOidcTrust(
+				context.req.raw,
+				context.req.param('id')
 			)
 		);
 
 		// A read-only storage check across every cache. Blobs are shared, so it is
 		// deployment-wide: one bare `/check` covering all caches.
 		this.app.get('/check', (context) =>
-			serverErrorResponse(this.integrityCheck.handleCheck(context.req.raw))
+			this.integrityCheck.handleCheck(context.req.raw)
 		);
 
 		// A bounded reconciling pass driven by the cron tick. Its own route, kept
 		// separate from `/gc`, so each can run and be asserted independently.
 		this.app.post('/verify', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.verification.handleVerify(context.req.raw)
-				)
+			this.withMaintenanceEligibility(() =>
+				this.verification.handleVerify(context.req.raw)
 			)
 		);
 
@@ -521,12 +502,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// `/cache/:cacheName/` form. The per-route scope is identical between the
 		// two; the cache-scoped form validates the name inside the error boundary.
 		this.app.get('/stats', (context) =>
-			serverErrorResponse(
-				this.stats.handleStats(context.req.raw, DEFAULT_CACHE)
-			)
+			this.stats.handleStats(context.req.raw, DEFAULT_CACHE)
 		);
 		this.app.get('/usage', (context) =>
-			serverErrorResponse(this.stats.handleUsage(context.req.raw))
+			this.stats.handleUsage(context.req.raw)
 		);
 		this.app.get('/cache/:cacheName/stats', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
@@ -534,13 +513,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.delete('/paths/:hash', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.deletionQueue.handleDeletePath(
-						context.req.raw,
-						DEFAULT_CACHE,
-						context.req.param('hash')
-					)
+			this.withMaintenanceEligibility(() =>
+				this.deletionQueue.handleDeletePath(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('hash')
 				)
 			)
 		);
@@ -556,9 +533,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.get('/roots', (context) =>
-			serverErrorResponse(
-				this.roots.handleListRoots(context.req.raw, DEFAULT_CACHE)
-			)
+			this.roots.handleListRoots(context.req.raw, DEFAULT_CACHE)
 		);
 		this.app.get('/cache/:cacheName/roots', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
@@ -566,13 +541,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.put('/roots/:name', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.roots.handleSetRoot(
-						context.req.raw,
-						DEFAULT_CACHE,
-						context.req.param('name')
-					)
+			this.withMaintenanceEligibility(() =>
+				this.roots.handleSetRoot(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('name')
 				)
 			)
 		);
@@ -588,13 +561,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.delete('/roots/:name', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.roots.handleRemoveRoot(
-						context.req.raw,
-						DEFAULT_CACHE,
-						context.req.param('name')
-					)
+			this.withMaintenanceEligibility(() =>
+				this.roots.handleRemoveRoot(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('name')
 				)
 			)
 		);
@@ -610,10 +581,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.post('/uploads', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.uploads.handleNegotiate(context.req.raw, DEFAULT_CACHE)
-				)
+			this.withMaintenanceEligibility(() =>
+				this.uploads.handleNegotiate(context.req.raw, DEFAULT_CACHE)
 			)
 		);
 		this.app.post('/cache/:cacheName/uploads', (context) =>
@@ -624,13 +593,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.put('/uploads/:id', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.uploads.handlePrepareUpload(
-						context.req.raw,
-						DEFAULT_CACHE,
-						context.req.param('id')
-					)
+			this.withMaintenanceEligibility(() =>
+				this.uploads.handlePrepareUpload(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('id')
 				)
 			)
 		);
@@ -650,13 +617,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// deferred upload's socket parks (hibernating) until verification
 		// answers with the terminal verdict.
 		this.app.get('/uploads/:id/commit', (context) =>
-			serverErrorResponse(
-				this.commitSocket(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('id')
-				)
-			)
+			this.commitSocket(context.req.raw, DEFAULT_CACHE, context.req.param('id'))
 		);
 		this.app.get('/cache/:cacheName/uploads/:id/commit', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
@@ -666,20 +627,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// `push --wait` polls a deferred upload's status by its uploadId, which is
 		// unique across caches, so a single route serves it regardless of cache.
 		this.app.get('/uploads/:id/status', (context) =>
-			serverErrorResponse(
-				this.uploads.handleUploadStatus(
-					context.req.raw,
-					context.req.param('id')
-				)
-			)
+			this.uploads.handleUploadStatus(context.req.raw, context.req.param('id'))
 		);
 		this.app.on(['GET', 'HEAD'], '/attestations/:hash', (context) =>
-			serverErrorResponse(
-				this.attestations.handleServeList(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('hash')
-				)
+			this.attestations.handleServeList(
+				context.req.raw,
+				DEFAULT_CACHE,
+				context.req.param('hash')
 			)
 		);
 		this.app.on(
@@ -695,12 +649,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 		);
 		this.app.on(['GET', 'HEAD'], '/attestation-bundles/:digest', (context) =>
-			serverErrorResponse(
-				this.attestations.handleServeBundle(
-					context.req.raw,
-					DEFAULT_CACHE,
-					context.req.param('digest')
-				)
+			this.attestations.handleServeBundle(
+				context.req.raw,
+				DEFAULT_CACHE,
+				context.req.param('digest')
 			)
 		);
 		this.app.on(
@@ -716,10 +668,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 		);
 		this.app.post('/attestations', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.attestations.handleNegotiate(context.req.raw, DEFAULT_CACHE)
-				)
+			this.withMaintenanceEligibility(() =>
+				this.attestations.handleNegotiate(context.req.raw, DEFAULT_CACHE)
 			)
 		);
 		this.app.post('/cache/:cacheName/attestations', (context) =>
@@ -730,13 +680,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.put('/attestations/:id', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.attestations.handlePrepare(
-						context.req.raw,
-						DEFAULT_CACHE,
-						context.req.param('id')
-					)
+			this.withMaintenanceEligibility(() =>
+				this.attestations.handlePrepare(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('id')
 				)
 			)
 		);
@@ -752,13 +700,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.post('/attestations/:id/attach', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.attestations.handleAttach(
-						context.req.raw,
-						DEFAULT_CACHE,
-						context.req.param('id')
-					)
+			this.withMaintenanceEligibility(() =>
+				this.attestations.handleAttach(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('id')
 				)
 			)
 		);
@@ -774,10 +720,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 		this.app.post('/gc', (context) =>
-			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.garbageCollection.handleGarbageCollection(context.req.raw)
-				)
+			this.withMaintenanceEligibility(() =>
+				this.garbageCollection.handleGarbageCollection(context.req.raw)
 			)
 		);
 		this.app.post('/cache/:cacheName/gc', (context) =>
@@ -896,9 +840,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cacheName: string | undefined,
 		handler: (cache: string) => Promise<Response>
 	): Promise<Response> {
-		return serverErrorResponse(
-			(async () => handler(parseRequestValue(cacheNameSchema, cacheName)))()
-		);
+		return handler(parseRequestValue(cacheNameSchema, cacheName));
 	}
 
 	private initialise(): Promise<void> {
