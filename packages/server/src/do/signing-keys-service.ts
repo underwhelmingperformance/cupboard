@@ -1,4 +1,4 @@
-import { signingKeyIdSchema } from '@cupboard/nix/scalars';
+import { type SigningKeyId } from '@cupboard/nix/scalars';
 import {
 	type KeyListResponse,
 	type KeyRetireResponse,
@@ -11,9 +11,7 @@ import { generateSigningKey } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import { LastSigningKeyError } from '../errors.ts';
 import { TextBody } from '../http/http.ts';
-import { parseRequestValue } from '../http/parse.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import {
 	bootstrapKeyName,
 	byPublicKey,
@@ -28,32 +26,7 @@ export class SigningKeysService {
 	private keysPromise: Promise<readonly SigningKey[]> | undefined;
 	private publicKeyBody: TextBody | undefined;
 
-	constructor(
-		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService
-	) {}
-
-	async handleKeyList(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		return Response.json((await this.keyList()) satisfies KeyListResponse);
-	}
-
-	async handleKeyRotate(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		return Response.json((await this.rotateKey()) satisfies KeyRotateResponse);
-	}
-
-	async handleKeyRetire(request: Request, id: string): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		const keyId = parseRequestValue(signingKeyIdSchema, id);
-
-		return Response.json(
-			(await this.retireKey(keyId)) satisfies KeyRetireResponse
-		);
-	}
+	constructor(private readonly context: ServerContext) {}
 
 	private loadedKeys(): Promise<readonly SigningKey[]> {
 		// A shared in-flight promise so concurrent first requests against an
@@ -107,7 +80,7 @@ export class SigningKeysService {
 		this.publicKeyBody = undefined;
 	}
 
-	private rotateKey(): Promise<KeyRotateResponse> {
+	rotateKey(): Promise<KeyRotateResponse> {
 		// One critical section: the read of the existing names, the insert, and
 		// the cache reset must not interleave with a concurrent rotation or a
 		// commit reading the key set.
@@ -144,7 +117,7 @@ export class SigningKeysService {
 		});
 	}
 
-	private async retireKey(id: string): Promise<KeyRetireResponse> {
+	async retireKey(id: SigningKeyId): Promise<KeyRetireResponse> {
 		// The last-signing-key check and the demotion share one critical section
 		// so two concurrent retirements cannot both see themselves as safe. A
 		// refused retirement is reported as an outcome and thrown afterwards:
@@ -194,7 +167,7 @@ export class SigningKeysService {
 		return { id, stage: outcome.stage };
 	}
 
-	private async keyList(): Promise<KeyListResponse> {
+	async keyList(): Promise<KeyListResponse> {
 		const keys = await this.loadedKeys();
 
 		return { keys: keys.map((key) => keySummary(key)) };
