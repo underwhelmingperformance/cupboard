@@ -23,7 +23,8 @@ const payloadSchema = z.object({
 	tenantBundle: workerBundleSchema,
 	d1Migrations: z.array(
 		z.object({ name: z.string(), statements: z.array(z.string()) })
-	)
+	),
+	buildVersion: z.string()
 });
 
 export class EmbeddedArtifactError extends Error {

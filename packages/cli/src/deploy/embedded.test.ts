@@ -24,7 +24,8 @@ const payloadJson = JSON.stringify({
 	tenantSource,
 	controlBundle: { mainModule: 'worker.js', code: 'control-bytes' },
 	tenantBundle: { mainModule: 'tenant-worker.js', code: 'tenant-bytes' },
-	d1Migrations: [{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }]
+	d1Migrations: [{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }],
+	buildVersion: 'abc123def456'
 });
 
 describe('parseEmbeddedPayload', () => {
@@ -42,6 +43,7 @@ describe('parseEmbeddedPayload', () => {
 		expect(artifact.d1Migrations).toStrictEqual([
 			{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }
 		]);
+		expect(artifact.buildVersion).toBe('abc123def456');
 	});
 
 	it('rejects a payload of the wrong shape', () => {

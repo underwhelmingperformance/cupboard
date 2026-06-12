@@ -8,6 +8,7 @@ import {
 	onboardAdminFor,
 	type OnboardClient,
 	onboardDeployment,
+	type OnboardOptions,
 	type OnboardOutcome,
 	slugProblem
 } from './onboard.ts';
@@ -18,24 +19,34 @@ const unexpected = (member: string) => (): never => {
 	throw new Error(`${member} was not expected`);
 };
 
+interface UiScript {
+	readonly slugs?: readonly (string | undefined)[];
+	readonly secrets?: readonly (string | undefined)[];
+}
+
 interface ScriptedUi {
 	readonly ui: DeployUi;
 	readonly warnings: string[];
 	readonly successes: string[];
+	readonly infos: string[];
 }
 
-/** A UI whose slug prompt answers from `slugs` and records what it is told. */
-function scriptedUi(slugs: readonly (string | undefined)[] = []): ScriptedUi {
-	const remainingSlugs = [...slugs];
+/** A UI whose prompts answer from the script and which records what it says. */
+function scriptedUi(script: UiScript = {}): ScriptedUi {
+	const remainingSlugs = [...(script.slugs ?? [])];
+	const remainingSecrets = [...(script.secrets ?? [])];
 	const warnings: string[] = [];
 	const successes: string[] = [];
+	const infos: string[] = [];
 	const facts: string[] = [];
 
 	const ui: DeployUi = {
 		intro: unexpected('intro'),
 		outro: unexpected('outro'),
 		cancelled: unexpected('cancelled'),
-		info: unexpected('info'),
+		info: (message) => {
+			infos.push(message);
+		},
 		success: (message) => {
 			successes.push(message);
 		},
@@ -54,7 +65,13 @@ function scriptedUi(slugs: readonly (string | undefined)[] = []): ScriptedUi {
 
 			return Promise.resolve(remainingSlugs.shift());
 		},
-		secret: unexpected('secret'),
+		secret: () => {
+			if (remainingSecrets.length === 0) {
+				throw new Error('secret asked more often than scripted');
+			}
+
+			return Promise.resolve(remainingSecrets.shift());
+		},
 		chooseAccount: unexpected('chooseAccount'),
 		openBrowser: unexpected('openBrowser'),
 		reporter: () => ({
@@ -72,7 +89,7 @@ function scriptedUi(slugs: readonly (string | undefined)[] = []): ScriptedUi {
 		})
 	};
 
-	return { ui, warnings, successes };
+	return { ui, warnings, successes, infos };
 }
 
 const baseApi: CloudflareApi = {
@@ -148,7 +165,8 @@ function answer<T>(remaining: Scripted<T>[], member: string): Promise<T> {
 }
 
 interface ClientScript {
-	readonly health?: Scripted<'ok'>[];
+	/** What `/_version` answers; the deployed build is `v-new`. */
+	readonly versions?: Scripted<string>[];
 	readonly signup?: Scripted<{
 		issuer: string;
 		subject: string;
@@ -161,22 +179,25 @@ interface ClientScript {
 interface ScriptedClient {
 	readonly factory: (url: string) => OnboardClient;
 	readonly urls: string[];
+	readonly signupBodies: unknown[];
 	readonly createdBodies: unknown[];
 	readonly cachedTokens: { token: string; target: string }[];
 	readonly cacheToken: (token: string, target: string) => Promise<void>;
 }
 
 function scriptedClient(script: ClientScript): ScriptedClient {
-	const health = [...(script.health ?? [])];
+	const versions = [...(script.versions ?? [])];
 	const signups = [...(script.signup ?? [])];
 	const creates = [...(script.creates ?? [])];
 	const publicKeys = [...(script.publicKeys ?? [])];
 	const urls: string[] = [];
+	const signupBodies: unknown[] = [];
 	const createdBodies: unknown[] = [];
 	const cachedTokens: { token: string; target: string }[] = [];
 
 	return {
 		urls,
+		signupBodies,
 		createdBodies,
 		cachedTokens,
 		cacheToken: (token, target) => {
@@ -187,10 +208,11 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 			urls.push(url);
 
 			return {
-				health: async () => {
-					await answer(health, '/_health');
+				version: () => answer(versions, '/_version'),
+				signup: (request) => {
+					signupBodies.push(request);
+					return answer(signups, '/signup');
 				},
-				signup: () => answer(signups, '/signup'),
 				tokenExchange: () =>
 					Promise.resolve({
 						access_token: 'admin-jwt',
@@ -214,6 +236,22 @@ const claimedSignup = {
 	subject: owner.subject,
 	claimed: true
 };
+
+/** The options every test starts from; spread and override per case. */
+function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
+	return {
+		api: baseApi,
+		ui,
+		controlScriptName: 'cupboard',
+		domain: 'cache.example.com',
+		admin: claimable,
+		buildVersion: 'v-new',
+		claimSecret: { kind: 'none' },
+		clientFactory: client.factory,
+		cacheToken: client.cacheToken,
+		sleep: () => Promise.resolve()
+	};
+}
 
 describe('onboardAdminFor', () => {
 	const deployer = { subject: 'cf-user-1', idToken: 'id-token-1' };
@@ -271,28 +309,20 @@ describe('slugProblem', () => {
 
 describe('onboardDeployment', () => {
 	it('claims, creates the chosen tenant and initialises its cache', async () => {
-		const { ui, successes } = scriptedUi(['builds']);
+		const { ui, successes } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
-			health: ['offline', 404, 'ok'],
+			versions: ['offline', 404, 'v-new'],
 			signup: [claimedSignup],
 			creates: [tenantSummary('builds')],
 			publicKeys: [503, 'pk-1']
 		});
 
-		const outcome = await onboardDeployment({
-			api: baseApi,
-			ui,
-			controlScriptName: 'cupboard',
-			domain: 'cache.example.com',
-			admin: claimable,
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
-		});
+		const outcome = await onboardDeployment(baseOptions(ui, client));
 
 		expect({
 			outcome,
 			urls: client.urls,
+			signupBodies: client.signupBodies,
 			createdBodies: client.createdBodies,
 			cachedTokens: client.cachedTokens,
 			successes
@@ -305,6 +335,7 @@ describe('onboardDeployment', () => {
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
 			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
+			signupBodies: [{ subject_token: 'id-token-1' }],
 			createdBodies: [
 				{
 					id: 'builds',
@@ -321,25 +352,110 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('re-prompts when the slug is claimed first, and converges on the next', async () => {
-		const { ui, warnings } = scriptedUi(['builds', 'builds-2']);
+	it('waits out an older version that is still serving', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
-			health: ['ok'],
+			versions: ['v-old', 'v-old', 'v-new'],
+			signup: [claimedSignup],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment(baseOptions(ui, client));
+
+		expect(outcome.kind).toBe('ready');
+	});
+
+	it('gives up naming the version that kept answering', async () => {
+		const { ui } = scriptedUi();
+		const client = scriptedClient({ versions: ['v-old', 'v-old'] });
+
+		expect(
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				attempts: 2
+			})
+		).toStrictEqual({
+			kind: 'unreachable',
+			url: 'https://cache.example.com',
+			lastProbe: 'still version v-old'
+		});
+	});
+
+	it('sends the claim secret this deploy supplied', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		await onboardDeployment({
+			...baseOptions(ui, client),
+			claimSecret: { kind: 'known', value: 'hunter2' }
+		});
+
+		expect(client.signupBodies).toStrictEqual([
+			{ subject_token: 'id-token-1', claim_secret: 'hunter2' }
+		]);
+	});
+
+	it('asks for the claim secret only the Worker holds, then claims', async () => {
+		const { ui, infos } = scriptedUi({
+			slugs: ['builds'],
+			secrets: ['hunter2']
+		});
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			creates: [tenantSummary('builds')],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			claimSecret: { kind: 'configured' }
+		});
+
+		expect({
+			kind: outcome.kind,
+			signupBodies: client.signupBodies,
+			explained: infos.some((message) =>
+				message.includes('protected by a claim secret')
+			)
+		}).toStrictEqual({
+			kind: 'ready',
+			signupBodies: [{ subject_token: 'id-token-1', claim_secret: 'hunter2' }],
+			explained: true
+		});
+	});
+
+	it('withholds the claim when the secret prompt is dismissed', async () => {
+		const { ui } = scriptedUi({ secrets: [undefined] });
+		const client = scriptedClient({ versions: ['v-new'] });
+
+		expect(
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				claimSecret: { kind: 'configured' }
+			})
+		).toStrictEqual({
+			kind: 'claim-cancelled',
+			url: 'https://cache.example.com'
+		});
+	});
+
+	it('re-prompts when the slug is claimed first, and converges on the next', async () => {
+		const { ui, warnings } = scriptedUi({ slugs: ['builds', 'builds-2'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
 			signup: [{ ...claimedSignup, claimed: false }],
 			creates: [409, tenantSummary('builds-2')],
 			publicKeys: ['pk-2']
 		});
 
-		const outcome = await onboardDeployment({
-			api: baseApi,
-			ui,
-			controlScriptName: 'cupboard',
-			domain: 'cache.example.com',
-			admin: claimable,
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
-		});
+		const outcome = await onboardDeployment(baseOptions(ui, client));
 
 		expect({
 			kind: outcome.kind,
@@ -353,24 +469,13 @@ describe('onboardDeployment', () => {
 	});
 
 	it('stops with the claim intact when the slug prompt is cancelled', async () => {
-		const { ui } = scriptedUi([undefined]);
+		const { ui } = scriptedUi({ slugs: [undefined] });
 		const client = scriptedClient({
-			health: ['ok'],
+			versions: ['v-new'],
 			signup: [claimedSignup]
 		});
 
-		const outcome = await onboardDeployment({
-			api: baseApi,
-			ui,
-			controlScriptName: 'cupboard',
-			domain: 'cache.example.com',
-			admin: claimable,
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
-		});
-
-		expect(outcome).toStrictEqual({
+		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
 			kind: 'cancelled',
 			url: 'https://cache.example.com'
 		});
@@ -379,44 +484,27 @@ describe('onboardDeployment', () => {
 	it('reports a refused claim as an answer, not a failure', async () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({
-			health: ['ok'],
+			versions: ['v-new'],
 			signup: [403]
 		});
 
-		const outcome = await onboardDeployment({
-			api: baseApi,
-			ui,
-			controlScriptName: 'cupboard',
-			domain: 'cache.example.com',
-			admin: claimable,
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
-		});
-
-		expect(outcome).toStrictEqual({
+		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
 			kind: 'claim-refused',
 			url: 'https://cache.example.com',
 			status: 403
 		});
 	});
 
-	it('stops after the health poll when no admin is bound', async () => {
+	it('stops after the version wait when no admin is bound', async () => {
 		const { ui } = scriptedUi();
-		const client = scriptedClient({ health: ['ok'] });
+		const client = scriptedClient({ versions: ['v-new'] });
 
-		const outcome = await onboardDeployment({
-			api: baseApi,
-			ui,
-			controlScriptName: 'cupboard',
-			domain: 'cache.example.com',
-			admin: { kind: 'none' },
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
-		});
-
-		expect(outcome).toStrictEqual({
+		expect(
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				admin: { kind: 'none' }
+			})
+		).toStrictEqual({
 			kind: 'no-admin',
 			url: 'https://cache.example.com'
 		});
@@ -425,20 +513,14 @@ describe('onboardDeployment', () => {
 	it('leaves the setup to an admin who is someone else', async () => {
 		const { ui } = scriptedUi();
 		const other: OwnerBinding = { ...owner, subject: 'cf-user-2' };
-		const client = scriptedClient({ health: ['ok'] });
+		const client = scriptedClient({ versions: ['v-new'] });
 
-		const outcome = await onboardDeployment({
-			api: baseApi,
-			ui,
-			controlScriptName: 'cupboard',
-			domain: 'cache.example.com',
-			admin: { kind: 'other', owner: other },
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
-		});
-
-		expect(outcome).toStrictEqual({
+		expect(
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				admin: { kind: 'other', owner: other }
+			})
+		).toStrictEqual({
 			kind: 'admin-elsewhere',
 			url: 'https://cache.example.com',
 			owner: other
@@ -447,20 +529,14 @@ describe('onboardDeployment', () => {
 
 	it('stops short when the session cannot prove the admin is the deployer', async () => {
 		const { ui } = scriptedUi();
-		const client = scriptedClient({ health: ['ok'] });
+		const client = scriptedClient({ versions: ['v-new'] });
 
-		const outcome = await onboardDeployment({
-			api: baseApi,
-			ui,
-			controlScriptName: 'cupboard',
-			domain: 'cache.example.com',
-			admin: { kind: 'unproven', owner },
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
-		});
-
-		expect(outcome).toStrictEqual({
+		expect(
+			await onboardDeployment({
+				...baseOptions(ui, client),
+				admin: { kind: 'unproven', owner }
+			})
+		).toStrictEqual({
 			kind: 'identity-unproven',
 			url: 'https://cache.example.com',
 			owner
@@ -478,17 +554,13 @@ describe('onboardDeployment', () => {
 			}
 		};
 		const { ui } = scriptedUi();
-		const client = scriptedClient({ health: ['ok'] });
+		const client = scriptedClient({ versions: ['v-new'] });
 
 		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
 			api,
-			ui,
-			controlScriptName: 'cupboard',
 			domain: undefined,
-			admin: { kind: 'none' },
-			clientFactory: client.factory,
-			cacheToken: client.cacheToken,
-			sleep: () => Promise.resolve()
+			admin: { kind: 'none' }
 		});
 
 		expect({ outcome, enabled, urls: client.urls }).toStrictEqual({
@@ -507,34 +579,26 @@ describe('onboardDeployment', () => {
 			getWorkersDevSubdomain: subdomainOf()
 		};
 		const { ui } = scriptedUi();
+		const client = scriptedClient({});
 
 		expect(
 			await onboardDeployment({
+				...baseOptions(ui, client),
 				api,
-				ui,
-				controlScriptName: 'cupboard',
 				domain: undefined,
 				admin: { kind: 'none' },
-				clientFactory: unexpected('clientFactory'),
-				sleep: () => Promise.resolve()
+				clientFactory: unexpected('clientFactory')
 			})
 		).toStrictEqual({ kind: 'no-subdomain' });
 	});
 
 	it('gives up when the Worker never comes up', async () => {
 		const { ui } = scriptedUi();
-		const client = scriptedClient({ health: ['offline', 'offline', 404] });
+		const client = scriptedClient({ versions: ['offline', 'offline', 404] });
 
 		expect(
 			await onboardDeployment({
-				api: baseApi,
-				ui,
-				controlScriptName: 'cupboard',
-				domain: 'cache.example.com',
-				admin: claimable,
-				clientFactory: client.factory,
-				cacheToken: client.cacheToken,
-				sleep: () => Promise.resolve(),
+				...baseOptions(ui, client),
 				attempts: 3
 			})
 		).toStrictEqual({
@@ -545,9 +609,9 @@ describe('onboardDeployment', () => {
 	});
 
 	it('gives up on the cache URL when the new tenant never answers', async () => {
-		const { ui } = scriptedUi(['builds']);
+		const { ui } = scriptedUi({ slugs: ['builds'] });
 		const client = scriptedClient({
-			health: ['ok'],
+			versions: ['v-new'],
 			signup: [claimedSignup],
 			creates: [tenantSummary('builds')],
 			publicKeys: [503, 503]
@@ -555,14 +619,7 @@ describe('onboardDeployment', () => {
 
 		expect(
 			await onboardDeployment({
-				api: baseApi,
-				ui,
-				controlScriptName: 'cupboard',
-				domain: 'cache.example.com',
-				admin: claimable,
-				clientFactory: client.factory,
-				cacheToken: client.cacheToken,
-				sleep: () => Promise.resolve(),
+				...baseOptions(ui, client),
 				attempts: 2
 			})
 		).toStrictEqual({
@@ -572,21 +629,12 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('propagates a genuine failure on the health route', async () => {
+	it('propagates a genuine failure on the version route', async () => {
 		const { ui } = scriptedUi();
-		const client = scriptedClient({ health: [403] });
+		const client = scriptedClient({ versions: [403] });
 
 		await expect(
-			onboardDeployment({
-				api: baseApi,
-				ui,
-				controlScriptName: 'cupboard',
-				domain: 'cache.example.com',
-				admin: claimable,
-				clientFactory: client.factory,
-				cacheToken: client.cacheToken,
-				sleep: () => Promise.resolve()
-			})
+			onboardDeployment(baseOptions(ui, client))
 		).rejects.toBeInstanceOf(CupboardHttpError);
 	});
 });
