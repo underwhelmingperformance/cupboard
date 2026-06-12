@@ -380,7 +380,7 @@ describe('onboardDeployment', () => {
 		).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com',
-			lastProbe: 'still version v-old'
+			lastProbe: 'still serving v-old'
 		});
 	});
 

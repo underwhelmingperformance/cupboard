@@ -451,8 +451,17 @@ function controlIssuer(request: Request): string {
 	return new URL(request.url).origin;
 }
 
-function controlAudience(env: Env): string {
-	const configured: string = env.CUPBOARD_CONTROL_AUDIENCE;
+// The token-minting configuration. The generated Env types these as `string`,
+// but a deployment that never set the var (or never put the secret) has no
+// binding at all and the env reads as undefined; both spellings of "not
+// configured" must refuse.
+interface ControlMintConfig {
+	readonly CUPBOARD_CONTROL_AUDIENCE: string | undefined;
+	readonly CONTROL_KEY_WRAP_SECRET: string | undefined;
+}
+
+function controlAudience(env: ControlMintConfig): string {
+	const configured = env.CUPBOARD_CONTROL_AUDIENCE ?? '';
 
 	if (configured === '') {
 		throw new ControlNotConfiguredError();
@@ -461,8 +470,8 @@ function controlAudience(env: Env): string {
 	return configured;
 }
 
-function controlWrappingSecret(env: Env): string {
-	const secret: string = env.CONTROL_KEY_WRAP_SECRET;
+function controlWrappingSecret(env: ControlMintConfig): string {
+	const secret = env.CONTROL_KEY_WRAP_SECRET ?? '';
 
 	if (secret === '') {
 		throw new ControlNotConfiguredError();
