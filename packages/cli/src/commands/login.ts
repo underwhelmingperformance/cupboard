@@ -8,7 +8,10 @@ import {
 	discoverOidcLogin,
 	loopbackLogin
 } from '../auth/oidc-login.ts';
-import { writeCachedToken } from '../auth/token-store.ts';
+import {
+	sessionFromTokenResponse,
+	writeCachedSession
+} from '../auth/token-store.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
@@ -217,7 +220,7 @@ export function registerLoginCommand(
 				idToken,
 				subjectTokenTypeIdToken
 			);
-			await writeCachedToken(exchanged.access_token, url);
+			await writeCachedSession(sessionFromTokenResponse(exchanged), url);
 
 			reporter.result([
 				{ label: 'Cache URL', value: url },

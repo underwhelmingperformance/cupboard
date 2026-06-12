@@ -890,10 +890,15 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
       127.0.0.1 loopback redirect; `--headless` falls back to the RFC 8628
       device flow. The owner rule pins `aud` to the client id, blocking
       cross-app `id_token` replay.
-- [x] Cache the admin JWT at `~/.config/cupboard/token` (mode 0600) and reuse it
-      across invocations; a 401 prompts re-login. `init` and the admin commands
-      take the cached token through the existing `TokenProvider` contract. A
-      `refresh_token` grant is deferred.
+- [x] Cache the admin session at `~/.config/cupboard/tokens/` (mode 0600) and
+      reuse it across invocations. `init` and the admin commands take the cached
+      token through the existing `TokenProvider` contract. The tenant token
+      endpoint implements the RFC 6749 `refresh_token` grant (rotating,
+      single-use, a thirty-day window renewed on use; admin sessions only), and
+      an expired or refused access token renews silently: first by rotating the
+      cupboard refresh token, then by exchanging a fresh `id_token` from the
+      deploy's stored Cloudflare grant. Only when neither silent path can mint
+      does a command prompt for `cupboard login`.
 
 ### CI federation
 

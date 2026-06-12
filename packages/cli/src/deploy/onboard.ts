@@ -4,7 +4,11 @@ import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
 
 import { delayMs, throwIfAborted } from '../abort.ts';
-import { writeCachedToken } from '../auth/token-store.ts';
+import {
+	type CachedSession,
+	sessionFromTokenResponse,
+	writeCachedSession
+} from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import { CupboardHttpError } from '../errors.ts';
 
@@ -168,7 +172,10 @@ export interface OnboardOptions {
 	 */
 	readonly freshIdToken?: () => Promise<string | undefined>;
 	readonly clientFactory?: (url: string) => OnboardClient;
-	readonly cacheToken?: (token: string, target: string) => Promise<void>;
+	readonly cacheSession?: (
+		session: CachedSession,
+		target: string
+	) => Promise<void>;
 	readonly checkCredentials?: typeof checkR2Credentials;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly attempts?: number;
@@ -214,7 +221,7 @@ export async function onboardDeployment(
 	const clientFactory =
 		options.clientFactory ??
 		((url: string) => CupboardClient.fromUrl(url, { signal: options.signal }));
-	const cacheToken = options.cacheToken ?? writeCachedToken;
+	const cacheSession = options.cacheSession ?? writeCachedSession;
 	const attempts = options.attempts ?? defaultAttempts;
 	const signal = options.signal;
 
@@ -273,7 +280,7 @@ export async function onboardDeployment(
 		client,
 		url,
 		{ idToken: subjectToken, claimSecret: secret.value },
-		cacheToken
+		cacheSession
 	);
 
 	if (claim.kind === 'refused') {
@@ -624,7 +631,7 @@ async function claimAdmin(
 	client: OnboardClient,
 	url: string,
 	proof: { readonly idToken: string; readonly claimSecret: string | undefined },
-	cacheToken: (token: string, target: string) => Promise<void>
+	cacheSession: (session: CachedSession, target: string) => Promise<void>
 ): Promise<ClaimResult> {
 	let claim:
 		| {
@@ -647,7 +654,7 @@ async function claimAdmin(
 				subjectTokenTypeIdToken
 			);
 
-			await cacheToken(exchanged.access_token, url);
+			await cacheSession(sessionFromTokenResponse(exchanged), url);
 
 			return {
 				claimed: signup.claimed,
