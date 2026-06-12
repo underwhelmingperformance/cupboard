@@ -218,6 +218,14 @@ function withoutWeakPrefix(etag: string): string {
 	return etag.startsWith('W/') ? etag.slice(2) : etag;
 }
 
+/** The deployment-wide plain-text 404. */
+export function notFoundResponse(): Response {
+	return new Response('Not found\n', {
+		status: StatusCodes.NOT_FOUND,
+		headers: { 'content-type': 'text/plain; charset=utf-8' }
+	});
+}
+
 export async function textResponse(
 	request: Request,
 	body: string | TextBody,

@@ -8,7 +8,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import {
-	tenantCreateBodySchema,
+	type ParsedTenantCreateBody,
 	type TenantListResponse,
 	type TenantMutateResponse,
 	type TenantSummary
@@ -23,6 +23,7 @@ import {
 	verifyAccessJwt
 } from '../auth/auth.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { type AuthorizationServerMetadata } from '../do/auth-keys-service.ts';
 import {
 	ControlNotConfiguredError,
 	InsufficientScopeError,
@@ -32,8 +33,7 @@ import {
 	UnauthenticatedError,
 	UnsupportedGrantTypeError
 } from '../errors.ts';
-import { serverErrorResponse } from '../http/error-response.ts';
-import { parseFormBody, parseRequestBody } from '../http/parse.ts';
+import { parseFormBody } from '../http/parse.ts';
 import {
 	decodeInboundClaims,
 	OidcDiscoveryStore,
@@ -45,14 +45,15 @@ import { tenantServer } from '../routing/durable-object.ts';
 
 import {
 	activeControlKey,
+	type ControlKeyRotation,
 	controlKeySummaries,
+	type ControlKeySummary,
 	controlVerificationKeys,
 	ensureControlKey,
 	retireControlKey,
 	rotateControlKey
 } from './control-key-store.ts';
 import { controlTrustRules } from './control-trust.ts';
-import { handleSignup } from './signup.ts';
 import { publishTenantManifest } from './tenant-manifest.ts';
 import {
 	ensureTenant,
@@ -67,93 +68,11 @@ const discovery = new OidcDiscoveryStore();
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
-// The bare-host control surface: the control plane's own OAuth issuer, entirely
-// separate from every tenant (I3). It mints global-admin tokens and publishes the
-// keys that verify them. Returns undefined for a path it does not own, so the
-// Worker falls through to a 404.
-export async function handleControl(
-	request: Request,
-	env: Env
-): Promise<Response | undefined> {
-	const { pathname } = new URL(request.url);
-	const read = request.method === 'GET' || request.method === 'HEAD';
-
-	if (request.method === 'POST' && pathname === '/token') {
-		return serverErrorResponse(controlTokenExchange(request, env));
-	}
-
-	if (request.method === 'POST' && pathname === '/signup') {
-		return serverErrorResponse(handleSignup(request, env));
-	}
-
-	if (read && pathname === '/.well-known/jwks.json') {
-		return serverErrorResponse(controlJwks(env));
-	}
-
-	if (read && pathname === '/.well-known/oauth-authorization-server') {
-		// Deferred into a promise so a configuration error reaches
-		// `serverErrorResponse` as a 503, the same way the exchange fails, rather
-		// than advertising an issuer it cannot mint for.
-		return serverErrorResponse(
-			Promise.resolve().then(() => controlAsMetadata(request, env))
-		);
-	}
-
-	if (read && pathname === '/control/check') {
-		return serverErrorResponse(controlCheck(request, env));
-	}
-
-	if (read && pathname === '/control/keys') {
-		return serverErrorResponse(controlKeyList(request, env));
-	}
-
-	if (request.method === 'POST' && pathname === '/control/keys/rotate') {
-		return serverErrorResponse(controlKeyRotate(request, env));
-	}
-
-	const retirePrefix = '/control/keys/retire/';
-
-	if (request.method === 'POST' && pathname.startsWith(retirePrefix)) {
-		const kid = decodeURIComponent(pathname.slice(retirePrefix.length));
-
-		return serverErrorResponse(controlKeyRetire(request, env, kid));
-	}
-
-	if (read && pathname === '/control/tenants') {
-		return serverErrorResponse(controlTenantList(request, env));
-	}
-
-	if (request.method === 'POST' && pathname === '/control/tenants') {
-		return serverErrorResponse(controlTenantCreate(request, env));
-	}
-
-	const tenantsPrefix = '/control/tenants/';
-
-	if (pathname.startsWith(tenantsPrefix)) {
-		const rest = pathname.slice(tenantsPrefix.length);
-		const suspendSuffix = '/suspend';
-
-		if (request.method === 'POST' && rest.endsWith(suspendSuffix)) {
-			const slug = decodeURIComponent(rest.slice(0, -suspendSuffix.length));
-
-			return serverErrorResponse(controlTenantSuspend(request, env, slug));
-		}
-
-		if (request.method === 'DELETE') {
-			return serverErrorResponse(
-				controlTenantOffboard(request, env, decodeURIComponent(rest))
-			);
-		}
-	}
-
-	return undefined;
-}
-
 // RFC 8693 token exchange for the control plane: an external OIDC subject token is
 // matched to a control trust rule on its unverified claims, the signature is then
 // checked against that rule's issuer JWKS, and only then is a global-admin token
 // minted with the control signing key. A forged claim earns no scope.
-async function controlTokenExchange(
+export async function controlTokenExchange(
 	request: Request,
 	env: Env
 ): Promise<Response> {
@@ -259,7 +178,10 @@ async function verifyControlInbound(
 	}
 }
 
-async function controlJwks(env: Env): Promise<Response> {
+/** The key set verifying control-minted admin tokens, as a JWKS document. */
+export async function controlJwks(env: Env): Promise<{
+	keys: (JsonWebKey & { kid: string; alg: string; use: string })[];
+}> {
 	const database = controlDatabase(env);
 
 	await ensureControlKey(
@@ -276,29 +198,34 @@ async function controlJwks(env: Env): Promise<Response> {
 		use: 'sig'
 	}));
 
-	// Served uncached so a key rotation is visible across colos at once.
-	return Response.json({ keys }, { headers: { 'cache-control': 'no-cache' } });
+	return { keys };
 }
 
-function controlAsMetadata(request: Request, env: Env): Response {
+export function controlAsMetadata(
+	request: Request,
+	env: Env
+): AuthorizationServerMetadata {
 	const { origin } = new URL(request.url);
 	controlAudience(env);
 
-	return Response.json({
+	return {
 		issuer: controlIssuer(request),
 		token_endpoint: `${origin}/token`,
 		jwks_uri: `${origin}/.well-known/jwks.json`,
 		grant_types_supported: [tokenExchangeGrantType],
 		scopes_supported: ['admin'],
 		token_endpoint_auth_methods_supported: ['none']
-	});
+	};
 }
 
 // Verifies a control admin bearer token: signed by a live control key, carrying
 // the control issuer and audience and the admin scope. Anything else — a missing
 // token, a tenant token, the wrong scope — is rejected, so only a control-minted
 // admin token drives control operations.
-async function requireControlAdmin(request: Request, env: Env): Promise<void> {
+export async function requireControlAdmin(
+	request: Request,
+	env: Env
+): Promise<void> {
 	const token = bearerToken(request);
 
 	if (token === undefined) {
@@ -330,9 +257,12 @@ async function requireControlAdmin(request: Request, env: Env): Promise<void> {
 // accepts. The credentials live on the tenant script, so a tenant's Durable
 // Object answers; the bindings are script-wide, so any live tenant's object
 // speaks for the deployment, and with none there is nowhere to run the probe.
-async function controlCheck(request: Request, env: Env): Promise<Response> {
-	await requireControlAdmin(request, env);
-
+// The admin-gated deployment check: diagnostics only the deployment itself
+// can perform, starting with whether its R2 credentials sign requests R2
+// accepts. The credentials live on the tenant script, so a tenant's Durable
+// Object answers; the bindings are script-wide, so any live tenant's object
+// speaks for the deployment, and with none there is nowhere to run the probe.
+export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 	const tenants = await listTenants(controlDatabase(env));
 	const live = tenants.find((tenant) => tenant.status !== 'offboarded');
 
@@ -341,65 +271,45 @@ async function controlCheck(request: Request, env: Env): Promise<Response> {
 			? ({ result: 'no-tenant' } as const)
 			: await tenantServer(env, live.id).checkR2();
 
-	return Response.json({ r2 } satisfies ControlCheckReport, {
-		headers: { 'cache-control': 'no-store' }
-	});
+	return { r2 };
 }
 
-async function controlKeyList(request: Request, env: Env): Promise<Response> {
-	await requireControlAdmin(request, env);
-	const keys = await controlKeySummaries(controlDatabase(env));
-
-	return Response.json({ keys }, { headers: { 'cache-control': 'no-store' } });
+export async function controlKeys(
+	env: Env
+): Promise<{ keys: ControlKeySummary[] }> {
+	return { keys: await controlKeySummaries(controlDatabase(env)) };
 }
 
-async function controlKeyRotate(request: Request, env: Env): Promise<Response> {
-	await requireControlAdmin(request, env);
-	const rotated = await rotateControlKey(
+export function controlKeyRotate(env: Env): Promise<ControlKeyRotation> {
+	return rotateControlKey(
 		controlDatabase(env),
 		controlWrappingSecret(env),
 		new Date().toISOString()
 	);
-
-	return Response.json(rotated, { headers: { 'cache-control': 'no-store' } });
 }
 
-async function controlKeyRetire(
-	request: Request,
+export async function controlKeyRetire(
 	env: Env,
 	kid: string
-): Promise<Response> {
-	await requireControlAdmin(request, env);
+): Promise<{ kid: string; retired: boolean }> {
 	const retired = await retireControlKey(
 		controlDatabase(env),
 		kid,
 		new Date().toISOString()
 	);
 
-	return Response.json(
-		{ kid, retired },
-		{ headers: { 'cache-control': 'no-store' } }
-	);
+	return { kid, retired };
 }
 
-async function controlTenantList(
-	request: Request,
-	env: Env
-): Promise<Response> {
-	await requireControlAdmin(request, env);
-	const tenants = await listTenants(controlDatabase(env));
-
-	return Response.json({ tenants } satisfies TenantListResponse, {
-		headers: { 'cache-control': 'no-store' }
-	});
+export async function controlTenantList(env: Env): Promise<TenantListResponse> {
+	return { tenants: await listTenants(controlDatabase(env)) };
 }
 
-async function controlTenantCreate(
-	request: Request,
-	env: Env
-): Promise<Response> {
-	await requireControlAdmin(request, env);
-	const body = await parseRequestBody(tenantCreateBodySchema, request);
+export async function controlTenantCreate(
+	env: Env,
+	body: ParsedTenantCreateBody,
+	origin: string
+): Promise<TenantSummary> {
 	const database = controlDatabase(env);
 
 	// Provision in order: write the authoritative row, configure the Durable Object,
@@ -408,7 +318,7 @@ async function controlTenantCreate(
 	// failure replays cleanly rather than stranding an admitted-but-unconfigured
 	// tenant.
 	const summary = await ensureTenant(database, body, new Date().toISOString());
-	const issuer = `${new URL(request.url).origin}/t/${summary.id}`;
+	const issuer = `${origin}/t/${summary.id}`;
 
 	await tenantServer(env, summary.id).configure({
 		tenant: summary.id,
@@ -421,34 +331,25 @@ async function controlTenantCreate(
 	});
 	await publishTenantManifest(database, env.TENANT_CACHE);
 
-	return Response.json(summary satisfies TenantSummary, {
-		headers: { 'cache-control': 'no-store' }
-	});
+	return summary;
 }
 
-async function controlTenantSuspend(
-	request: Request,
+export async function controlTenantSuspend(
 	env: Env,
 	id: string
-): Promise<Response> {
-	await requireControlAdmin(request, env);
+): Promise<TenantMutateResponse> {
 	const database = controlDatabase(env);
 	const summary = await setTenantStatus(database, id, 'suspended');
 
 	await publishTenantManifest(database, env.TENANT_CACHE);
 
-	return Response.json(
-		{ id: summary.id, status: summary.status } satisfies TenantMutateResponse,
-		{ headers: { 'cache-control': 'no-store' } }
-	);
+	return { id: summary.id, status: summary.status };
 }
 
-async function controlTenantOffboard(
-	request: Request,
+export async function controlTenantOffboard(
 	env: Env,
 	id: string
-): Promise<Response> {
-	await requireControlAdmin(request, env);
+): Promise<TenantMutateResponse> {
 	const database = controlDatabase(env);
 	const summary = await setTenantStatus(database, id, 'offboarding');
 
@@ -460,10 +361,7 @@ async function controlTenantOffboard(
 		await tenantServer(env, id).beginOffboard();
 	}
 
-	return Response.json(
-		{ id: summary.id, status: summary.status } satisfies TenantMutateResponse,
-		{ headers: { 'cache-control': 'no-store' } }
-	);
+	return { id: summary.id, status: summary.status };
 }
 
 function controlDatabase(env: Env): Database {
