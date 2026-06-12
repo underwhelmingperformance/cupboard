@@ -1,8 +1,4 @@
 import type { TokenResponse } from '@cupboard/protocol/oidc';
-import type {
-	RootSetBody,
-	RootSetResponse
-} from '@cupboard/protocol/retention';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import type { CommitSocketFrame } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
@@ -322,62 +318,7 @@ describe('CupboardClient.commit', () => {
 	});
 });
 
-describe('CupboardClient.setRoot', () => {
-	it('puts the root body with the admin token, encoding the name in the path', async () => {
-		const name = 'github:owner/repo/main';
-		const body: RootSetBody = {
-			targets: ['/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'],
-			ttlSeconds: 604_800
-		};
-		const response: RootSetResponse = {
-			name,
-			expiresAt: '2026-01-08T00:00:00.000Z',
-			expired: false,
-			createdAt: '2026-01-01T00:00:00.000Z',
-			updatedAt: '2026-01-01T00:00:00.000Z',
-			targets: [
-				{
-					storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
-					storePath: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-					present: true
-				}
-			]
-		};
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.setRoot('admin-token', name, body);
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/cache/_default/roots/github%3Aowner%2Frepo%2Fmain',
-			method: 'PUT',
-			authorization: 'Bearer admin-token',
-			contentType: 'application/json',
-			body: JSON.stringify(body)
-		});
-	});
-});
-
 describe('CupboardClient cache prefix', () => {
-	it('prepends the cache prefix to a contract route', async () => {
-		const response: RootSetResponse = {
-			name: 'main',
-			expired: false,
-			createdAt: '2026-01-01T00:00:00.000Z',
-			updatedAt: '2026-01-01T00:00:00.000Z',
-			targets: []
-		};
-		const { client, captured } = capturingClient(response, '/cache/builds');
-
-		await client.setRoot('admin-token', 'main', {
-			targets: ['/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app']
-		});
-
-		expect(captured()?.url).toBe(
-			'https://cupboard.test/cache/builds/roots/main'
-		);
-	});
-
 	it('does not prefix a deployment-wide route', async () => {
 		const { client, captured } = capturingClient(
 			'cupboard-1:k\n',
@@ -397,11 +338,14 @@ describe('CupboardClient cache prefix', () => {
 });
 
 describe('CupboardClient response validation', () => {
-	it('rejects a response missing a required field', async () => {
-		const { client } = capturingClient({ name: 'main' });
+	it('rejects a token response missing a required field', async () => {
+		const { client } = capturingClient({ token_type: 'Bearer' });
 
 		await expect(
-			client.setRoot('admin-token', 'main', { targets: ['/nix/store/x'] })
+			client.tokenExchange(
+				'subject.jwt',
+				'urn:ietf:params:oauth:token-type:id_token'
+			)
 		).rejects.toThrow(ResponseSchemaMismatchError);
 	});
 
@@ -411,66 +355,10 @@ describe('CupboardClient response validation', () => {
 		);
 
 		await expect(
-			client.setRoot('admin-token', 'main', { targets: ['/nix/store/x'] })
+			client.tokenExchange(
+				'subject.jwt',
+				'urn:ietf:params:oauth:token-type:id_token'
+			)
 		).rejects.toThrow(MalformedResponseError);
-	});
-});
-
-describe('CupboardClient token refresh', () => {
-	const rootResponse: RootSetResponse = {
-		name: 'main',
-		expired: false,
-		createdAt: '2026-01-01T00:00:00.000Z',
-		updatedAt: '2026-01-01T00:00:00.000Z',
-		targets: []
-	};
-
-	it('refreshes the token and retries once when a provider call returns 401', async () => {
-		const authorisations: (string | undefined)[] = [];
-		const provider: TokenProvider = {
-			get: () => Promise.resolve('stale-token'),
-			refresh: () => Promise.resolve('fresh-token')
-		};
-		let calls = 0;
-		const client = new CupboardClient(
-			new URL('https://cupboard.test'),
-			(_input, init) => {
-				authorisations.push(
-					new Headers(init?.headers).get('authorization') ?? undefined
-				);
-				calls += 1;
-
-				if (calls === 1) {
-					return Promise.resolve(
-						new Response('Unauthorised\n', { status: 401 })
-					);
-				}
-
-				return Promise.resolve(Response.json(rootResponse));
-			}
-		);
-
-		const result = await client.setRoot(provider, 'main', {
-			targets: ['/nix/store/x']
-		});
-
-		expect({ result, authorisations }).toStrictEqual({
-			result: rootResponse,
-			authorisations: ['Bearer stale-token', 'Bearer fresh-token']
-		});
-	});
-
-	it('does not retry a fixed string token on 401', async () => {
-		let calls = 0;
-		const client = new CupboardClient(new URL('https://cupboard.test'), () => {
-			calls += 1;
-
-			return Promise.resolve(new Response('Unauthorised\n', { status: 401 }));
-		});
-
-		await expect(
-			client.setRoot('static-token', 'main', { targets: ['/nix/store/x'] })
-		).rejects.toThrow();
-		expect(calls).toBe(1);
 	});
 });

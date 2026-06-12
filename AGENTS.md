@@ -50,3 +50,12 @@ it.
 - Hono answers HEAD by re-dispatching the request to the GET handler with the
   body stripped, so register reads with `.get()`; an explicit HEAD registration
   never matches.
+- The JSON admin APIs are contract-first: every procedure's method, path, input,
+  output, errors and scope metadata is declared exactly once, in
+  `@cupboard/protocol/contract`. The server implements the contract with oRPC
+  (`packages/server/src/orpc/`) and the CLI derives its clients from it
+  (`tenantRpc`/`controlRpc` in `packages/cli/src/client/orpc.ts`), with
+  responses validated at runtime on both sides. A new admin endpoint starts as a
+  contract procedure; never add a hand-written route and client pair for JSON.
+  Only wire-format endpoints listed above stay outside the contract, on the slim
+  hand-written `CupboardClient`.
