@@ -233,29 +233,35 @@ describe('multi-tenant writes', () => {
 
 		await runQueuedMaintenanceTick();
 
+		// The settled upload leaves no residue, so its status clears and the proof
+		// of the commit is the narinfo serving under acme's prefix.
 		const afterCron = await tenantUploadStatus('acme', token, uploadId);
+		const served = await handlerFetch(
+			`/t/acme/${metadata.storePathHash}.narinfo`
+		);
 
-		expect({ whilePending, afterCron }).toStrictEqual({
+		expect({ whilePending, afterCron, served: served.status }).toStrictEqual({
 			whilePending: 'pending',
-			afterCron: 'servable'
+			afterCron: 'absent',
+			served: StatusCodes.OK
 		});
 	});
 
 	it('maintains the most-overdue tenants first, covering the fleet over ticks', async () => {
 		// Three tenants, all never-maintained (NULL `last_maintained_at`); the fixture
 		// tenant is suspended so the active fleet is exactly these three.
-		const acme = await stageDeferredForNewTenant('acme');
-		const beta = await stageDeferredForNewTenant('beta');
-		const gamma = await stageDeferredForNewTenant('gamma');
+		await stageDeferredForNewTenant('acme');
+		await stageDeferredForNewTenant('beta');
+		await stageDeferredForNewTenant('gamma');
 		await suspendTenant(fixtureTenant);
 
 		// A batch of two: the first tick takes the two most-overdue (all NULL, so by
 		// slug tiebreaker acme and beta), maintains and stamps them; gamma is left.
 		await runCronSweep(env, 2);
 		const afterFirst = {
-			acme: await tenantUploadStatus('acme', acme.token, acme.uploadId),
-			beta: await tenantUploadStatus('beta', beta.token, beta.uploadId),
-			gamma: await tenantUploadStatus('gamma', gamma.token, gamma.uploadId),
+			acme: await servedAt('acme'),
+			beta: await servedAt('beta'),
+			gamma: await servedAt('gamma'),
 			acmeStamped: await tenantMaintained('acme'),
 			gammaStamped: await tenantMaintained('gamma')
 		};
@@ -263,11 +269,7 @@ describe('multi-tenant writes', () => {
 		// The second tick: gamma is now the most overdue (still NULL, while acme and
 		// beta carry a stamp), so it is maintained next.
 		await runCronSweep(env, 2);
-		const gammaAfterSecond = await tenantUploadStatus(
-			'gamma',
-			gamma.token,
-			gamma.uploadId
-		);
+		const gammaAfterSecond = await servedAt('gamma');
 
 		expect({
 			afterFirst,
@@ -275,17 +277,26 @@ describe('multi-tenant writes', () => {
 			gammaStampedAfterSecond: await tenantMaintained('gamma')
 		}).toStrictEqual({
 			afterFirst: {
-				acme: 'servable',
-				beta: 'servable',
-				gamma: 'pending',
+				acme: StatusCodes.OK,
+				beta: StatusCodes.OK,
+				gamma: StatusCodes.NOT_FOUND,
 				acmeStamped: true,
 				gammaStamped: false
 			},
-			gammaAfterSecond: 'servable',
+			gammaAfterSecond: StatusCodes.OK,
 			gammaStampedAfterSecond: true
 		});
 	});
 });
+
+// The staged uploads all share the `'a'.repeat(32)` store path, so whether its
+// narinfo serves under a tenant's prefix shows whether that tenant's verify
+// pass has run.
+async function servedAt(id: string): Promise<number> {
+	const response = await handlerFetch(`/t/${id}/${'a'.repeat(32)}.narinfo`);
+
+	return response.status;
+}
 
 async function runQueuedMaintenanceTick(): Promise<void> {
 	const messages = await enqueueMaintenanceJobs(env, queueCollector());

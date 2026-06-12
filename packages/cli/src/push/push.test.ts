@@ -9,19 +9,15 @@ import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
-import type {
-	UploadNegotiateRequest,
-	UploadStatusResponse
-} from '@cupboard/protocol/upload';
+import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
 import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
+import type { AccessCredential, CommitOptions } from '../client/client.ts';
 import {
 	AttestationSubjectNotPushedError,
 	PushNarMetadataMismatchError,
-	UploadVerificationFailedError,
-	UploadWaitTimeoutError
+	UploadVerificationFailedError
 } from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
 import {
@@ -126,9 +122,6 @@ describe('runPush', () => {
 					expect(token).toBe('write-token');
 
 					return Promise.resolve(rootSummary({ name, ...body }));
-				},
-				uploadStatus() {
-					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -259,9 +252,6 @@ describe('runPush', () => {
 				},
 				setRoot() {
 					throw new UnexpectedPushClientCallError('setRoot');
-				},
-				uploadStatus() {
-					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -324,9 +314,6 @@ describe('runPush', () => {
 				},
 				setRoot(_token, name, body) {
 					return Promise.resolve(rootSummary({ name, ...body }));
-				},
-				uploadStatus() {
-					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -571,9 +558,6 @@ describe('runPush', () => {
 				},
 				setRoot(_token, name, body) {
 					return Promise.resolve(rootSummary({ name, ...body }));
-				},
-				uploadStatus() {
-					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -629,9 +613,6 @@ describe('runPush', () => {
 					},
 					setRoot() {
 						throw new UnexpectedPushClientCallError('setRoot');
-					},
-					uploadStatus() {
-						throw new UnexpectedPushClientCallError('uploadStatus');
 					}
 				} satisfies PushClient,
 				token: 'write-token',
@@ -874,9 +855,6 @@ describe('runPush', () => {
 					events.push('setRoot');
 
 					return Promise.resolve(rootSummary({ name, ...body }));
-				},
-				uploadStatus() {
-					throw new UnexpectedPushClientCallError('uploadStatus');
 				}
 			} satisfies PushClient,
 			token: 'write-token',
@@ -934,9 +912,6 @@ describe('runPush', () => {
 				call += 1;
 
 				return Promise.resolve(rootSummary({ name, ...body }, expiresAt));
-			},
-			uploadStatus() {
-				throw new UnexpectedPushClientCallError('uploadStatus');
 			}
 		};
 
@@ -971,24 +946,27 @@ describe('runPush', () => {
 		]);
 	});
 
-	it('waits for a deferred upload to become servable before recording retention', async () => {
+	it('parks the commit for a deferred upload, then records retention', async () => {
 		const events: string[] = [];
-		const statuses: UploadStatusResponse['status'][] = ['pending', 'servable'];
-		let statusCall = 0;
+		const commitOptions: CommitOptions[] = [];
 
 		await runPush([appPath], reporter([]), {
 			token: 'write-token',
 			wait: true,
-			sleep: () => Promise.resolve(),
-			now: () => 0,
+			waitTimeoutSeconds: 30,
 			client: {
 				...deferredUpload(events),
-				uploadStatus() {
-					events.push('uploadStatus');
-					const status = statuses[statusCall] ?? 'servable';
-					statusCall += 1;
+				commit(_token, _uploadId, options) {
+					events.push('commit');
+					commitOptions.push(options);
 
-					return Promise.resolve({ status });
+					// The client parks on the commit socket and settles once the
+					// verification verdict arrives.
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						status: 'committed'
+					});
 				},
 				setRoot(_token, name, body) {
 					events.push('setRoot');
@@ -999,27 +977,22 @@ describe('runPush', () => {
 			...deferredDeps()
 		});
 
-		expect(events).toStrictEqual([
-			'negotiate',
-			'prepareUpload',
-			'uploadBlob',
-			'commit',
-			'uploadStatus',
-			'uploadStatus',
-			'setRoot'
-		]);
+		expect({ events, commitOptions }).toStrictEqual({
+			events: ['negotiate', 'prepareUpload', 'uploadBlob', 'commit', 'setRoot'],
+			commitOptions: [{ wait: true, timeoutSeconds: 30 }]
+		});
 	});
 
-	it('fails fast when a deferred upload reports mismatch', async () => {
+	it('propagates a failed commit verdict and records no retention', async () => {
 		await expect(
 			runPush([appPath], reporter([]), {
 				token: 'write-token',
-				sleep: () => Promise.resolve(),
-				now: () => 0,
 				client: {
 					...deferredUpload([]),
-					uploadStatus() {
-						return Promise.resolve({ status: 'mismatch' });
+					commit() {
+						return Promise.reject(
+							new UploadVerificationFailedError('upload-app', 'mismatch')
+						);
 					},
 					setRoot() {
 						throw new UnexpectedPushClientCallError('setRoot');
@@ -1028,33 +1001,6 @@ describe('runPush', () => {
 				...deferredDeps()
 			})
 		).rejects.toThrow(UploadVerificationFailedError);
-	});
-
-	it('times out when a deferred upload stays pending', async () => {
-		let clock = 0;
-
-		await expect(
-			runPush([appPath], reporter([]), {
-				token: 'write-token',
-				waitTimeoutSeconds: 1,
-				sleep: () => Promise.resolve(),
-				now: () => {
-					clock += 5000;
-
-					return clock;
-				},
-				client: {
-					...deferredUpload([]),
-					uploadStatus() {
-						return Promise.resolve({ status: 'pending' });
-					},
-					setRoot() {
-						throw new UnexpectedPushClientCallError('setRoot');
-					}
-				} satisfies PushClient,
-				...deferredDeps()
-			})
-		).rejects.toThrow(UploadWaitTimeoutError);
 	});
 });
 
@@ -1332,9 +1278,6 @@ function skipClient(setRoots: SetRootCall[]): PushClient {
 			setRoots.push({ token, fields });
 
 			return Promise.resolve(rootSummary(fields));
-		},
-		uploadStatus() {
-			throw new UnexpectedPushClientCallError('uploadStatus');
 		}
 	};
 }

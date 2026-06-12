@@ -136,6 +136,16 @@ export class UploadVerificationFailedError extends CliError {
 	}
 }
 
+export class CommitSocketProtocolError extends CliError {
+	constructor(
+		public readonly path: string,
+		public readonly detail: string
+	) {
+		super(`Commit over ${path} broke protocol: ${detail}`);
+		this.name = 'CommitSocketProtocolError';
+	}
+}
+
 export class UploadWaitTimeoutError extends CliError {
 	constructor(
 		public readonly pending: number,

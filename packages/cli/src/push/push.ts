@@ -24,8 +24,7 @@ import type {
 	UploadNegotiateRequest,
 	UploadNegotiateResponse,
 	UploadPrepareRequest,
-	UploadPrepareResponse,
-	UploadStatusResponse
+	UploadPrepareResponse
 } from '@cupboard/protocol/upload';
 import {
 	formatBytes,
@@ -36,17 +35,14 @@ import {
 } from '@cupboard/reporter';
 import { z } from 'zod';
 
-import { type Delay, delayMs } from '../abort.ts';
-import type { AccessCredential } from '../client/client.ts';
+import type { AccessCredential, CommitOptions } from '../client/client.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationSubjectNotPushedError,
 	AttestationUploadUnavailableError,
 	PushNarMetadataMismatchError,
 	UnexpectedAttestationDecisionError,
-	UnexpectedUploadDecisionError,
-	UploadVerificationFailedError,
-	UploadWaitTimeoutError
+	UnexpectedUploadDecisionError
 } from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
 import { readFileByteStream } from '../io/file-stream.ts';
@@ -76,10 +72,7 @@ export interface PushDependencies {
 	// `--no-wait` returns with the deferred uploads still pending.
 	readonly wait?: boolean;
 	readonly waitTimeoutSeconds?: number;
-	readonly waitPollIntervalMs?: number;
-	readonly sleep?: Delay;
 	readonly signal?: AbortSignal;
-	readonly now?: () => number;
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
@@ -101,11 +94,11 @@ export interface PushClient {
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse>;
 	uploadBlob(upload: PushBlobUpload): Promise<void>;
-	commit(token: AccessCredential, uploadId: string): Promise<CommitResponse>;
-	uploadStatus(
+	commit(
 		token: AccessCredential,
-		uploadId: string
-	): Promise<UploadStatusResponse>;
+		uploadId: string,
+		options: CommitOptions
+	): Promise<CommitResponse>;
 	negotiateAttestations?(
 		token: AccessCredential,
 		body: AttestationNegotiateRequest
@@ -126,7 +119,6 @@ export interface PushClient {
 }
 
 const defaultWaitTimeoutSeconds = 600;
-const defaultWaitPollIntervalMs = 2000;
 
 export type PushNarArchive =
 	| ReadableStream<Uint8Array>
@@ -200,27 +192,12 @@ export async function runPush(
 			readCompressedNar,
 			temporaryDirectory,
 			wait: dependencies.wait ?? true,
-			waitOptions: {
-				timeoutSeconds:
-					dependencies.waitTimeoutSeconds ?? defaultWaitTimeoutSeconds,
-				intervalMs:
-					dependencies.waitPollIntervalMs ?? defaultWaitPollIntervalMs,
-				sleep: dependencies.sleep,
-				signal: dependencies.signal,
-				now: dependencies.now ?? Date.now
-			}
+			waitTimeoutSeconds:
+				dependencies.waitTimeoutSeconds ?? defaultWaitTimeoutSeconds
 		});
 	} finally {
 		await removeTemporaryDirectory(temporaryDirectory);
 	}
-}
-
-interface WaitOptions {
-	readonly timeoutSeconds: number;
-	readonly intervalMs: number;
-	readonly sleep?: Delay;
-	readonly signal?: AbortSignal;
-	readonly now: () => number;
 }
 
 interface PushRuntimeDependencies {
@@ -233,7 +210,7 @@ interface PushRuntimeDependencies {
 	readonly readCompressedNar: ReadCompressedNar;
 	readonly temporaryDirectory: string;
 	readonly wait: boolean;
-	readonly waitOptions: WaitOptions;
+	readonly waitTimeoutSeconds: number;
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
@@ -253,7 +230,7 @@ async function runPushWithTemporaryDirectory(
 		compressNar,
 		readCompressedNar,
 		wait,
-		waitOptions
+		waitTimeoutSeconds
 	} = dependencies;
 	const closure = await reporter.phase(
 		'Resolving store closure',
@@ -328,21 +305,25 @@ async function runPushWithTemporaryDirectory(
 		}
 	);
 
+	// Every commit conversation runs concurrently: deferred uploads park on
+	// their sockets and the server's verification pass settles them together,
+	// so committing serially would wait one pass per path. With `--no-wait` a
+	// deferred upload reports `pending` as soon as it is stored.
 	const commit = await reporter.phase('Committing metadata', async (ctx) => {
 		const decisions = negotiation.uploads.filter((decision) =>
 			needsCommit(decision)
 		);
-		const responses: CommitResponse[] = [];
-		const pending: string[] = [];
-
-		for (const decision of decisions) {
-			const response = await client.commit(token, decision.uploadId);
-			responses.push(response);
-
-			if (response.status === 'pending') {
-				pending.push(decision.uploadId);
-			}
-		}
+		const responses = await Promise.all(
+			decisions.map((decision) =>
+				client.commit(token, decision.uploadId, {
+					wait,
+					timeoutSeconds: waitTimeoutSeconds
+				})
+			)
+		);
+		const pending = decisions
+			.filter((_decision, index) => responses[index]?.status === 'pending')
+			.map((decision) => decision.uploadId);
 
 		ctx.fact(
 			'committed',
@@ -351,17 +332,6 @@ async function runPushWithTemporaryDirectory(
 
 		return { responses, pending };
 	});
-
-	// A path whose blob exceeds the server's inline-verify budget commits as
-	// `pending`: it is stored but not substitutable until the background pass
-	// verifies it. `push` waits for those to become servable, because root
-	// activation only admits servable targets; `--no-wait` returns with them
-	// pending and records no retention over them.
-	if (commit.pending.length > 0 && wait) {
-		await reporter.phase('Waiting for verification', (ctx) =>
-			waitForUploads(client, token, commit.pending, ctx, waitOptions)
-		);
-	}
 
 	const deferRetention = !wait && commit.pending.length > 0;
 	const pendingStorePathHashes = deferRetention
@@ -992,51 +962,6 @@ function narHashDigestHex(hash: NixValidPathInfo['narHash']): string {
 
 function sha256Hex(bytes: Uint8Array): string {
 	return createHash('sha256').update(bytes).digest('hex');
-}
-
-// Polls the deferred uploads until each reports `servable`, backing off between
-// rounds. A `mismatch`, `over-quota` or `absent` verdict fails fast rather than
-// hanging on a blob that will never become servable; exceeding the deadline times
-// out. Shares the server's serve predicate via the status query.
-async function waitForUploads(
-	client: PushClient,
-	token: AccessCredential,
-	uploadIds: readonly string[],
-	ctx: PhaseContext,
-	options: WaitOptions
-): Promise<void> {
-	const pending = new Set(uploadIds);
-	const deadline = options.now() + options.timeoutSeconds * 1000;
-
-	while (pending.size > 0) {
-		for (const uploadId of pending) {
-			const { status } = await client.uploadStatus(token, uploadId);
-
-			if (status === 'servable') {
-				pending.delete(uploadId);
-				continue;
-			}
-
-			if (status !== 'pending') {
-				throw new UploadVerificationFailedError(uploadId, status);
-			}
-		}
-
-		ctx.fact('pending', formatCount(pending.size));
-
-		if (pending.size === 0) {
-			return;
-		}
-
-		if (options.now() >= deadline) {
-			throw new UploadWaitTimeoutError(pending.size, options.timeoutSeconds);
-		}
-
-		await delayMs(options.intervalMs, {
-			delay: options.sleep,
-			signal: options.signal
-		});
-	}
 }
 
 async function defaultReadAttestationBundle(path: string): Promise<Uint8Array> {

@@ -41,6 +41,15 @@ export class OwnerConfigurationInvalidError extends ServerHttpError {
 	}
 }
 
+export class CommitUpgradeRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.UPGRADE_REQUIRED;
+
+	constructor() {
+		super('The commit endpoint is a WebSocket; upgrade the request');
+		this.name = 'CommitUpgradeRequiredError';
+	}
+}
+
 export class CacheNotEmptyError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 

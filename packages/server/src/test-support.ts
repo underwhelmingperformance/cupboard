@@ -8,13 +8,15 @@ import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
-import type {
-	CommitResponse,
-	DeletePathResponse,
-	StatsResponse,
-	UploadNegotiateResponse,
-	UploadPathMetadataFields,
-	UploadStatusResponse
+import {
+	type CommitResponse,
+	commitSocketFrameSchema,
+	type DeletePathResponse,
+	type ParsedCommitSocketFrame,
+	type StatsResponse,
+	type UploadNegotiateResponse,
+	type UploadPathMetadataFields,
+	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
 import {
 	createExecutionContext,
@@ -1261,20 +1263,18 @@ export async function pushPathToTenant(
 	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 
-	const committed = await tenantWorkerFetch(
-		tenant,
-		`/uploads/${decision.uploadId}/commit`,
-		token,
-		{ method: 'POST' }
-	);
+	const committed = await commitUploadViaWorker(token, decision.uploadId, {
+		tenant
+	});
 
-	expect(committed.status).toBe(StatusCodes.OK);
+	expect(committed.status).toBe('committed');
 }
 
 /**
  * Negotiates, uploads and commits a tenant path through the Worker, returning the
- * commit response status without asserting success, so a test can assert a commit
- * that the Durable Object refuses (for example one settling after offboarding began).
+ * HTTP status the commit refusal carried (or OK when it settles), so a test can
+ * assert a commit that the Durable Object refuses (for example one settling after
+ * offboarding began).
  */
 export async function attemptPushToTenant(
 	tenant: string,
@@ -1308,14 +1308,34 @@ export async function attemptPushToTenant(
 	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 
-	const committed = await tenantWorkerFetch(
+	const upgraded = await tenantWorkerFetch(
 		tenant,
 		`/uploads/${decision.uploadId}/commit`,
 		token,
-		{ method: 'POST' }
+		{ headers: { upgrade: 'websocket' } }
 	);
 
-	return committed.status;
+	const switchingProtocols: number = StatusCodes.SWITCHING_PROTOCOLS;
+
+	if (upgraded.status !== switchingProtocols) {
+		return upgraded.status;
+	}
+
+	try {
+		await settleCommitSocket(
+			commitSocketFromResponse(upgraded),
+			() => tenantServer(env, tenant).runVerification(),
+			{}
+		);
+	} catch (error) {
+		if (error instanceof CommitSocketError) {
+			return error.status;
+		}
+
+		throw error;
+	}
+
+	return StatusCodes.OK;
 }
 
 // Stages a deferred upload for a named tenant through the Worker (negotiate, prepare,
@@ -1370,20 +1390,235 @@ function tenantWorkerFetch(
 	return handlerFetch(`/t/${tenant}${path}`, { ...init, headers });
 }
 
-export async function commitUpload(
+/** What the commit socket said when it refused the commit. */
+export class CommitSocketError extends Error {
+	constructor(
+		public readonly status: number,
+		message: string
+	) {
+		super(message);
+		this.name = 'CommitSocketError';
+	}
+}
+
+/** A deferred upload's verification settled on a non-servable verdict. */
+export class CommitVerdictError extends Error {
+	constructor(public readonly verdict: string) {
+		super(`Upload verification settled on ${verdict}`);
+		this.name = 'CommitVerdictError';
+	}
+}
+
+/** The commit socket conversation departed from the frame protocol. */
+export class CommitSocketProtocolError extends Error {
+	constructor(detail: string) {
+		super(`Commit socket protocol violation: ${detail}`);
+		this.name = 'CommitSocketProtocolError';
+	}
+}
+
+/**
+ * Accepts the client end of a commit upgrade and returns it alongside a frame
+ * reader. The listener attaches before `accept()` so no frame the server sent
+ * during the commit transition is missed.
+ */
+export function commitSocketFromResponse(response: Response): {
+	socket: WebSocket;
+	nextFrame: () => Promise<ParsedCommitSocketFrame>;
+} {
+	expect(response.status).toBe(StatusCodes.SWITCHING_PROTOCOLS);
+	const socket = response.webSocket;
+
+	if (socket === null) {
+		throw new CommitSocketProtocolError(
+			'the upgrade answered without a socket'
+		);
+	}
+
+	const frames: ParsedCommitSocketFrame[] = [];
+	const waiters: {
+		resolve: (frame: ParsedCommitSocketFrame) => void;
+		reject: (reason: Error) => void;
+	}[] = [];
+
+	socket.addEventListener('message', (event) => {
+		const frame = commitSocketFrameSchema.parse(JSON.parse(String(event.data)));
+		const waiter = waiters.shift();
+
+		if (waiter === undefined) {
+			frames.push(frame);
+		} else {
+			waiter.resolve(frame);
+		}
+	});
+	socket.addEventListener('close', () => {
+		for (const waiter of waiters.splice(0)) {
+			waiter.reject(
+				new CommitSocketProtocolError('the socket closed before the frame')
+			);
+		}
+	});
+	socket.accept();
+
+	const nextFrame = (): Promise<ParsedCommitSocketFrame> => {
+		const queued = frames.shift();
+
+		if (queued !== undefined) {
+			return Promise.resolve(queued);
+		}
+
+		return new Promise((resolve, reject) => {
+			waiters.push({ resolve, reject });
+		});
+	};
+
+	return { socket, nextFrame };
+}
+
+/** Opens the commit WebSocket against the Durable Object stub. */
+export async function openCommitSocket(
 	token: string,
 	uploadId: string,
 	cache: string = DEFAULT_CACHE
-): Promise<CommitResponse> {
-	const response = await authorisedFetch(
+): Promise<{
+	socket: WebSocket;
+	nextFrame: () => Promise<ParsedCommitSocketFrame>;
+}> {
+	const response = await fetchPath(
 		cacheScopedPath(cache, `/uploads/${uploadId}/commit`),
-		token,
-		{ method: 'POST' }
+		{
+			headers: {
+				authorization: `Bearer ${token}`,
+				upgrade: 'websocket'
+			}
+		}
 	);
 
-	expect(response.status).toBe(StatusCodes.OK);
+	return commitSocketFromResponse(response);
+}
 
-	return response.json<CommitResponse>();
+interface CommitConversation {
+	readonly socket: WebSocket;
+	readonly nextFrame: () => Promise<ParsedCommitSocketFrame>;
+}
+
+// The frame dance both commit helpers share: settle on the first frame, or
+// drive the verification pass (the queue would run it in production) and
+// settle on the verdict; `wait: false` returns the deferral as `pending`.
+async function settleCommitSocket(
+	conversation: CommitConversation,
+	runVerification: () => Promise<void>,
+	options: { readonly wait?: boolean }
+): Promise<CommitResponse> {
+	const { socket, nextFrame } = conversation;
+	const first = await nextFrame();
+
+	if (first.event === 'result') {
+		return first.response;
+	}
+
+	if (first.event === 'error') {
+		socket.close();
+		throw new CommitSocketError(first.status, first.message);
+	}
+
+	if (first.event !== 'deferred') {
+		socket.close();
+		throw new CommitSocketProtocolError(
+			`unexpected first frame: ${first.event}`
+		);
+	}
+
+	if (options.wait === false) {
+		socket.close();
+
+		return {
+			storePathHash: first.storePathHash,
+			narHash: first.narHash,
+			status: 'pending'
+		};
+	}
+
+	await runVerification();
+	const verdict = await nextFrame();
+
+	if (verdict.event !== 'verdict') {
+		throw new CommitSocketProtocolError(`unexpected frame: ${verdict.event}`);
+	}
+
+	if (verdict.status !== 'servable') {
+		throw new CommitVerdictError(verdict.status);
+	}
+
+	return {
+		storePathHash: first.storePathHash,
+		narHash: first.narHash,
+		status: 'committed'
+	};
+}
+
+/**
+ * Commits an upload over the WebSocket the way a client does, against the
+ * Durable Object stub. A deferred upload's verification is driven
+ * synchronously and the verdict awaited, so callers see the settled
+ * `committed` result; `wait: false` returns the deferral as `pending`
+ * instead. A refused commit throws {@link CommitSocketError} with the status
+ * the error frame carried; a non-servable verdict throws
+ * {@link CommitVerdictError}.
+ */
+export async function commitUpload(
+	token: string,
+	uploadId: string,
+	cache: string = DEFAULT_CACHE,
+	options: { readonly wait?: boolean } = {}
+): Promise<CommitResponse> {
+	const conversation = await openCommitSocket(token, uploadId, cache);
+
+	return settleCommitSocket(
+		conversation,
+		() => currentServer().runVerification(),
+		options
+	);
+}
+
+/**
+ * Drives a commit the server is expected to refuse, returning the error it
+ * settles with so a test can assert on it structurally. Fails if the commit
+ * unexpectedly succeeds.
+ */
+export async function commitUploadRejection(
+	token: string,
+	uploadId: string,
+	cache: string = DEFAULT_CACHE
+): Promise<unknown> {
+	try {
+		await commitUpload(token, uploadId, cache);
+	} catch (error) {
+		return error;
+	}
+
+	throw new Error(`expected the commit of upload ${uploadId} to be refused`);
+}
+
+/** As {@link commitUpload}, routed through the Worker like a real client. */
+export async function commitUploadViaWorker(
+	token: string,
+	uploadId: string,
+	options: { readonly wait?: boolean; readonly tenant?: string } = {}
+): Promise<CommitResponse> {
+	const tenant = options.tenant ?? fixtureTenant;
+	const response = await tenantWorkerFetch(
+		tenant,
+		`/uploads/${uploadId}/commit`,
+		token,
+		{ headers: { upgrade: 'websocket' } }
+	);
+
+	return settleCommitSocket(
+		commitSocketFromResponse(response),
+		() => tenantServer(env, tenant).runVerification(),
+		options
+	);
 }
 
 export async function prepareUpload(

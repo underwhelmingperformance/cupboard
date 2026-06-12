@@ -36,7 +36,7 @@ async function prepare(
 describe('concurrent writes', () => {
 	beforeEach(resetTestServer);
 
-	it('commits one of two concurrent commits and reports the other as already present', async () => {
+	it('settles two concurrent commits of one path, both reporting committed', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -53,18 +53,18 @@ describe('concurrent writes', () => {
 		await prepare(token, second.uploadId, metadata);
 		await putNarBytes(second.r2Key);
 
-		const [a, b] = await Promise.all([
+		// Both commits defer (neither sees a committed reference yet), so both park
+		// on their sockets and hear the verdict of the single materialisation.
+		const settled = await Promise.all([
 			commitUpload(token, first.uploadId),
 			commitUpload(token, second.uploadId)
 		]);
 
-		expect(
-			[a, b].toSorted((left, right) => left.status.localeCompare(right.status))
-		).toStrictEqual([
+		expect(settled).toStrictEqual([
 			{
 				storePathHash: metadata.storePathHash,
 				narHash: metadata.narHash,
-				status: 'already-present'
+				status: 'committed'
 			},
 			{
 				storePathHash: metadata.storePathHash,

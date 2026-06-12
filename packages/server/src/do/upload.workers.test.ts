@@ -1,6 +1,7 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
+import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -9,7 +10,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { buildVersion } from '../build-info.generated.ts';
 import {
-	inlineVerifyMaxBytes,
 	narInfoCachePath,
 	narInfoObjectKey,
 	narObjectKey,
@@ -25,12 +25,14 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	afterGrace,
 	authorisedFetch,
-	authorisedWorkerFetch,
 	bootstrap,
 	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
+	CommitSocketError,
 	commitUpload,
+	commitUploadViaWorker,
+	CommitVerdictError,
 	commitVerifiablePath,
 	currentOrigin,
 	currentServer,
@@ -198,7 +200,7 @@ describe('upload flow', () => {
 			method: 'POST'
 		});
 		const commit = await fetchPath('/uploads/not-real/commit', {
-			method: 'POST'
+			headers: { upgrade: 'websocket' }
 		});
 
 		expect({
@@ -342,20 +344,16 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		const commit = await authorisedFetch(
-			`/uploads/${upload.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
+		await expect(commitUpload(token, upload.uploadId)).rejects.toStrictEqual(
+			new CommitVerdictError('mismatch')
 		);
-
-		expect(commit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 	});
 
-	it('rejects an inline upload of corrupt, undecompressable bytes as a 422', async () => {
+	it('rejects corrupt, undecompressable bytes at verification', async () => {
 		const token = await initialise();
 		// Bytes that are not a valid zstd frame but whose declared compressed hash
 		// matches, so only the decompress step can reject them. The error it raises
@@ -384,13 +382,9 @@ describe('upload flow', () => {
 			fileHash: garbageFileHash
 		});
 
-		const commit = await authorisedFetch(
-			`/uploads/${upload.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
+		await expect(commitUpload(token, upload.uploadId)).rejects.toStrictEqual(
+			new CommitVerdictError('mismatch')
 		);
-
-		expect(commit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
@@ -419,13 +413,9 @@ describe('upload flow', () => {
 		await prepareUpload(token, bad, badMetadata);
 		await putNarBytes(bad.r2Key, wrong);
 
-		const badCommit = await authorisedFetch(
-			`/uploads/${bad.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
+		await expect(commitUpload(token, bad.uploadId)).rejects.toStrictEqual(
+			new CommitVerdictError('mismatch')
 		);
-
-		expect(badCommit.status).toBe(StatusCodes.UNPROCESSABLE_ENTITY);
 
 		// The hash is not poisoned: a correct upload of `good` for another store path
 		// still negotiates as an upload, verifies, commits, and is served.
@@ -736,9 +726,11 @@ describe('upload flow', () => {
 		await markUploadCommitting(upload.uploadId);
 
 		// A client retry must not concede `already-present` for the not-yet-servable
-		// row, nor delete the staged bytes the re-drive needs: it reports the saga in
-		// progress and leaves the marker and bytes intact.
-		const retry = await commitUpload(token, upload.uploadId);
+		// row, nor delete the staged bytes the re-drive needs: it defers, leaving
+		// the marker and bytes intact.
+		const retry = await commitUpload(token, upload.uploadId, DEFAULT_CACHE, {
+			wait: false
+		});
 
 		expect(retry.status).toBe('pending');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
@@ -890,10 +882,10 @@ describe('upload flow', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('pending');
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
 
-		// The next pass reads cleanly, commits, and marks the upload servable.
+		// The next pass reads cleanly, commits, and clears the settled upload.
 		await currentServer().runVerification();
 
-		expect(await pendingUploadVerdict(upload.uploadId)).toBe('servable');
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 		expect(narInfo.narHash).toBe(metadata.narHash);
 	});
@@ -912,16 +904,15 @@ describe('upload flow', () => {
 
 		await currentServer().runVerification();
 
-		// The background commit records a terminal `servable` verdict, retained for the
-		// status window rather than re-driven; the verify pass only re-drives
-		// pending/committing rows.
-		expect(await pendingUploadVerdict(upload.uploadId)).toBe('servable');
+		// The background commit settles the upload completely: the waiters held
+		// the verdict, so no row remains to re-drive.
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
 
-		// Deleting the committed path is not undone by a later verify pass: the
-		// `servable` row is terminal and never re-promoted.
+		// Deleting the committed path is not undone by a later verify pass:
+		// nothing of the settled upload survives to re-promote it.
 		await deletePath(token, metadata.storePathHash);
 		await currentServer().runVerification();
 
@@ -993,7 +984,7 @@ describe('upload flow', () => {
 		await putNarBytes(xUpload.r2Key, narX);
 		await markUploadPendingVerification(xUpload.uploadId);
 
-		// Commit the SAME path P at a different narHash Y — the winner.
+		// Defer a second upload of the SAME path P at a different narHash Y.
 		const y = uploadMetadata({
 			name: 'p',
 			storePathHash,
@@ -1002,22 +993,29 @@ describe('upload flow', () => {
 			fileSize: narY.narBytes.byteLength,
 			narSize: narY.narSize
 		});
-		await commitPath(token, y, narY);
+		const yUpload = expectSingleUploadDecision(
+			await negotiateUploads(token, [y]),
+			y
+		);
+		await prepareUpload(token, yUpload, y);
+		await putNarBytes(yUpload.r2Key, narY);
+		await markUploadPendingVerification(yUpload.uploadId);
 
-		// X's deferred verify loses the narinfo race; the nar/X it promoted is now
-		// orphaned and must be enqueued for orphan deletion and reaped, while the
-		// winner Y survives and P serves Y.
+		// One pass settles both: whichever verifies first wins the narinfo row,
+		// the other loses it, and anything the loser staged or promoted that no
+		// edge references must be reaped rather than stranded.
 		await currentServer().runVerification();
 		await currentServer().runGarbageCollection();
 
 		const served = await fetchNarInfo(storePathHash);
+		const winner = served.narHash === narX.narHash ? narX : narY;
+		const loser = winner === narX ? narY : narX;
 
-		expect(served.narHash).toBe(narY.narHash);
 		await expect(
-			env.BLOBS.head(narObjectKey(narX.narHash))
+			env.BLOBS.head(narObjectKey(loser.narHash))
 		).resolves.toBeNull();
 		await expect(
-			env.BLOBS.head(narObjectKey(narY.narHash))
+			env.BLOBS.head(narObjectKey(winner.narHash))
 		).resolves.not.toBeNull();
 	});
 
@@ -1090,27 +1088,21 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		const commit = await authorisedFetch(
-			`/uploads/${upload.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
+		await expect(commitUpload(token, upload.uploadId)).rejects.toStrictEqual(
+			new CommitSocketError(
+				StatusCodes.REQUEST_TOO_LONG,
+				'NAR is too large to verify and cannot be served'
+			)
 		);
-
-		expect(commit.status).toBe(StatusCodes.REQUEST_TOO_LONG);
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.toBeNull();
 	});
 
-	it('defers a blob above the inline budget to background verification', async () => {
+	it('defers every fresh upload to verification, asking for a prompt pass', async () => {
 		const token = await initialise();
-		const metadata = uploadMetadata({
-			name: 'large',
-			storePathHash: '77777777777777777777777777777777',
-			narSize: inlineVerifyMaxBytes + 1,
-			fileSize: narBytes.byteLength
-		});
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
 			metadata
@@ -1137,7 +1129,9 @@ describe('upload flow', () => {
 			return Promise.resolve();
 		});
 
-		const commit = await commitUpload(token, upload.uploadId);
+		const commit = await commitUpload(token, upload.uploadId, DEFAULT_CACHE, {
+			wait: false
+		});
 
 		expect({ status: commit.status, sent }).toStrictEqual({
 			status: 'pending',
@@ -1524,13 +1518,10 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		const response = await authorisedFetch(
-			`/uploads/${upload.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
-
-		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+		await expect(commitUpload(token, upload.uploadId)).rejects.toMatchObject({
+			name: 'CommitSocketError',
+			status: StatusCodes.BAD_REQUEST
+		});
 
 		await expectStats(token, {
 			storePaths: 0,
@@ -1581,13 +1572,10 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		const response = await authorisedFetch(
-			`/uploads/${upload.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
-
-		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+		await expect(commitUpload(token, upload.uploadId)).rejects.toMatchObject({
+			name: 'CommitSocketError',
+			status: StatusCodes.BAD_REQUEST
+		});
 
 		await expectStats(token, {
 			storePaths: 0,
@@ -1607,13 +1595,10 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await env.BLOBS.put(upload.r2Key, narBytes);
 
-		const response = await authorisedFetch(
-			`/uploads/${upload.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
-
-		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+		await expect(commitUpload(token, upload.uploadId)).rejects.toMatchObject({
+			name: 'CommitSocketError',
+			status: StatusCodes.BAD_REQUEST
+		});
 
 		await expectStats(token, {
 			storePaths: 0,
@@ -1912,12 +1897,8 @@ describe('upload flow', () => {
 		);
 		await prepareUploadViaWorker(token, committedUpload, committed);
 		await putNarBytes(committedUpload.r2Key);
-		const commit = await authorisedWorkerFetch(
-			`/uploads/${committedUpload.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
-		expect(commit.status).toBe(StatusCodes.OK);
+		const commit = await commitUploadViaWorker(token, committedUpload.uploadId);
+		expect(commit.status).toBe('committed');
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, committed.storePathHash)
 		);

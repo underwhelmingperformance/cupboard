@@ -23,8 +23,8 @@ import type {
 } from '@cupboard/protocol/retention';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import type {
-	DeletePathResponse,
-	UploadStatusResponse
+	CommitSocketFrame,
+	DeletePathResponse
 } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
@@ -36,6 +36,10 @@ import {
 } from '../errors.ts';
 
 import { CupboardClient, type TokenProvider } from './client.ts';
+import {
+	FakeCommitSocket,
+	FakeUpgradeFailure
+} from './commit-socket.test-support.ts';
 
 interface CapturedRequest {
 	readonly url: string;
@@ -214,36 +218,130 @@ describe('CupboardClient.deleteStorePath', () => {
 	});
 });
 
-describe('CupboardClient.uploadStatus', () => {
-	it('gets the deferred upload status with the write token', async () => {
-		const response: UploadStatusResponse = { status: 'pending' };
-		const { client, captured } = capturingClient(response);
+interface CapturedConnection {
+	readonly url: string;
+	readonly authorization: string | undefined;
+}
 
-		const result = await client.uploadStatus('write-token', 'upload-app');
+// A client whose commit sockets are scripted: the nth connection plays the nth
+// script against its listeners once they are attached.
+function commitClient(
+	scripts: readonly ((socket: FakeCommitSocket) => void)[],
+	cachePrefix = ''
+): {
+	readonly client: CupboardClient;
+	readonly connections: () => readonly CapturedConnection[];
+} {
+	const connections: CapturedConnection[] = [];
 
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/uploads/upload-app/status',
-			method: 'GET',
-			authorization: 'Bearer write-token',
-			contentType: undefined,
-			body: undefined
+	const client = new CupboardClient(
+		new URL('https://cupboard.test'),
+		fetch,
+		cachePrefix,
+		undefined,
+		(url, headers) => {
+			const script = scripts[connections.length];
+			connections.push({
+				url: url.href,
+				authorization: headers.authorization
+			});
+
+			const socket = new FakeCommitSocket();
+
+			if (script !== undefined) {
+				queueMicrotask(() => {
+					script(socket);
+				});
+			}
+
+			return socket;
+		}
+	);
+
+	return { client, connections: () => connections };
+}
+
+function sendFrame(socket: FakeCommitSocket, frame: CommitSocketFrame): void {
+	socket.emit('message', JSON.stringify(frame));
+}
+
+describe('CupboardClient.commit', () => {
+	const response = {
+		storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
+		narHash: `sha256:${'1'.repeat(52)}`,
+		status: 'committed'
+	} as const;
+
+	it('commits over a wss socket carrying the bearer token on the upgrade', async () => {
+		const { client, connections } = commitClient([
+			(socket) => {
+				sendFrame(socket, { event: 'result', response });
+			}
+		]);
+
+		const result = await client.commit('write-token', 'upload-app');
+
+		expect({ result, connections: connections() }).toStrictEqual({
+			result: response,
+			connections: [
+				{
+					url: 'wss://cupboard.test/uploads/upload-app/commit',
+					authorization: 'Bearer write-token'
+				}
+			]
 		});
 	});
 
-	it('does not scope the status request through a named cache', async () => {
-		const response: UploadStatusResponse = { status: 'servable' };
-		const { client, captured } = capturingClient(response, '/cache/builds');
+	it('scopes the commit socket through a named cache', async () => {
+		const { client, connections } = commitClient(
+			[
+				(socket) => {
+					sendFrame(socket, { event: 'result', response });
+				}
+			],
+			'/cache/builds'
+		);
 
-		const result = await client.uploadStatus('write-token', 'upload-build');
+		await client.commit('write-token', 'upload-build');
 
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/uploads/upload-build/status',
-			method: 'GET',
-			authorization: 'Bearer write-token',
-			contentType: undefined,
-			body: undefined
+		expect(connections()).toStrictEqual([
+			{
+				url: 'wss://cupboard.test/cache/builds/uploads/upload-build/commit',
+				authorization: 'Bearer write-token'
+			}
+		]);
+	});
+
+	it('refreshes the token and retries once when the upgrade is refused with a 401', async () => {
+		const { client, connections } = commitClient([
+			(socket) => {
+				const refusal = new FakeUpgradeFailure(401);
+				socket.emit('unexpected-response', {}, refusal);
+				refusal.emit('end');
+			},
+			(socket) => {
+				sendFrame(socket, { event: 'result', response });
+			}
+		]);
+		const provider: TokenProvider = {
+			get: () => Promise.resolve('stale-token'),
+			refresh: () => Promise.resolve('fresh-token')
+		};
+
+		const result = await client.commit(provider, 'upload-app');
+
+		expect({ result, connections: connections() }).toStrictEqual({
+			result: response,
+			connections: [
+				{
+					url: 'wss://cupboard.test/uploads/upload-app/commit',
+					authorization: 'Bearer stale-token'
+				},
+				{
+					url: 'wss://cupboard.test/uploads/upload-app/commit',
+					authorization: 'Bearer fresh-token'
+				}
+			]
 		});
 	});
 });

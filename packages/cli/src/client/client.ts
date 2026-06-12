@@ -88,7 +88,6 @@ import {
 } from '@cupboard/protocol/tenants';
 import {
 	type CommitResponse,
-	commitResponseSchema,
 	type DeletePathResponse,
 	deletePathResponseSchema,
 	type StatsResponse,
@@ -99,11 +98,10 @@ import {
 	type UploadPrepareRequest,
 	type UploadPrepareResponse,
 	uploadPrepareResponseSchema,
-	type UploadStatusResponse,
-	uploadStatusResponseSchema,
 	type UsageResponse,
 	usageResponseSchema
 } from '@cupboard/protocol/upload';
+import { WebSocket } from 'ws';
 import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
@@ -114,6 +112,11 @@ import {
 	MalformedResponseError,
 	ResponseSchemaMismatchError
 } from '../errors.ts';
+
+import {
+	type CommitSocketConnect,
+	settleCommitSocket
+} from './commit-socket.ts';
 
 /**
  * Supplies bearer tokens to the client and can refresh them. The CLI obtains a
@@ -145,7 +148,8 @@ export class CupboardClient {
 		// empty for the default cache. Not baked into `baseUrl`, so resolving an
 		// absolute path against the base never discards it.
 		public readonly cachePrefix = '',
-		public readonly signal?: AbortSignal
+		public readonly signal?: AbortSignal,
+		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
 	) {}
 
 	static fromUrl(
@@ -517,26 +521,53 @@ export class CupboardClient {
 		);
 	}
 
-	commit(token: AccessCredential, uploadId: string): Promise<CommitResponse> {
-		return this.requestJson(
-			this.scoped(`/uploads/${uploadId}/commit`),
-			commitResponseSchema,
-			{
-				method: 'POST',
-				token
+	/**
+	 * Commits an upload over the commit WebSocket. The upgrade request carries
+	 * the write token; a deferred upload parks on the socket for the server's
+	 * verification verdict, or returns `pending` straight away when `wait` is
+	 * off.
+	 */
+	async commit(
+		token: AccessCredential,
+		uploadId: string,
+		options: CommitOptions = {}
+	): Promise<CommitResponse> {
+		throwIfAborted(this.signal);
+
+		const path = this.scoped(`/uploads/${uploadId}/commit`);
+		const settle = (bearer: string | undefined): Promise<CommitResponse> =>
+			settleCommitSocket(
+				this.connectSocket(this.socketUrl(path), bearerHeaders(bearer)),
+				{
+					path,
+					uploadId,
+					wait: options.wait ?? true,
+					timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
+					signal: this.signal
+				}
+			);
+
+		try {
+			return await settle(await resolveBearer(token));
+		} catch (error) {
+			// A long push can outlive the exchanged JWT; refresh once and retry.
+			if (
+				error instanceof CupboardHttpError &&
+				error.status === unauthorizedStatusCode &&
+				isTokenProvider(token)
+			) {
+				return settle(await token.refresh());
 			}
-		);
+
+			throw error;
+		}
 	}
 
-	uploadStatus(
-		token: AccessCredential,
-		uploadId: string
-	): Promise<UploadStatusResponse> {
-		return this.requestJson(
-			`/uploads/${uploadId}/status`,
-			uploadStatusResponseSchema,
-			{ token }
-		);
+	private socketUrl(path: string): URL {
+		const url = this.resolve(path);
+		url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+
+		return url;
 	}
 
 	prepareUpload(
@@ -818,7 +849,24 @@ export interface CupboardClientOptions {
 	readonly signal?: AbortSignal;
 }
 
+export interface CommitOptions {
+	/** Park for the verification verdict on a deferred upload (the default). */
+	readonly wait?: boolean;
+	/** Bounds how long a parked upload waits for its verdict. */
+	readonly timeoutSeconds?: number;
+}
+
 const unauthorizedStatusCode = 401;
+const defaultCommitWaitSeconds = 600;
+
+const connectCommitSocket: CommitSocketConnect = (url, headers) =>
+	new WebSocket(url, { headers: { ...headers } });
+
+function bearerHeaders(
+	bearer: string | undefined
+): Readonly<Record<string, string>> {
+	return bearer === undefined ? {} : { authorization: `Bearer ${bearer}` };
+}
 
 function cachePrefixFor(cache: string): string {
 	if (cache === DEFAULT_CACHE) {

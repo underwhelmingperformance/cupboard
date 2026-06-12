@@ -13,7 +13,6 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	NarTooLargeError,
-	NarVerificationFailedError,
 	QuotaExceededError,
 	TenantWritesStoppedError,
 	UploadCacheMismatchError,
@@ -22,14 +21,12 @@ import {
 	UploadNotFoundError
 } from '../errors.ts';
 import {
-	inlineVerifyMaxBytes,
 	narInfoObjectKey,
 	narObjectKey,
 	verifiableMaxBytes
 } from '../http/http.ts';
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type MaterialiseOutcome,
@@ -41,22 +38,39 @@ import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
+/**
+ * What a commit settled to at commit time: the path is served (`settled`,
+ * committed by these bytes or already present from an earlier upload), or the
+ * upload is stored pending verification (`deferred`) and the caller waits for
+ * the verification pass's verdict. Failures are thrown.
+ */
+export type CommitOutcome =
+	| { readonly kind: 'settled'; readonly response: CommitResponse }
+	| {
+			readonly kind: 'deferred';
+			readonly storePathHash: string;
+			readonly narHash: string;
+	  };
+
 export class CommitPipelineService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly cacheAdmin: CacheAdminService,
 		private readonly signingKeysService: SigningKeysService,
 		private readonly uploadState: UploadStateService,
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	async handleCommit(
-		request: Request,
-		cache: string,
-		uploadId: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
+	async commit(cache: string, uploadId: string): Promise<CommitOutcome> {
+		// A commit settling after offboarding began must publish nothing: refuse
+		// before deferring, so the writer hears a stopped write rather than a
+		// verification verdict that never comes.
+		if (this.context.offboarding) {
+			throw new TenantWritesStoppedError(
+				this.context.requireTenant(),
+				'offboarding'
+			);
+		}
 
 		const pending = this.context.db
 			.select()
@@ -103,19 +117,18 @@ export class CommitPipelineService {
 			.get();
 
 		if (existingNarInfo !== undefined) {
-			// This upload already started its own commit saga — an inline commit that
-			// reserved the row but did not finish, or a deferred upload mid-verify. Its
-			// row is reserved, not yet servable, and the verify pass re-drives it from
-			// the durable marker. Report it in progress, leaving the marker and the
-			// staged bytes the re-drive needs intact, rather than conceding and deleting
-			// them. A concurrent commit, by contrast, reaches here with its own verdict
-			// still null.
+			// This upload already started its own commit saga and is mid-verify:
+			// its row is reserved, not yet servable, and the verification pass
+			// re-drives it from the durable marker. Stay deferred, leaving the
+			// marker and the staged bytes the re-drive needs intact, rather than
+			// conceding and deleting them. A concurrent commit, by contrast,
+			// reaches here with its own verdict still null.
 			if (pending.verdict === 'committing' || pending.verdict === 'pending') {
-				return Response.json({
+				return {
+					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash,
-					status: 'pending'
-				} satisfies CommitResponse);
+					narHash: metadata.narHash
+				};
 			}
 
 			if (
@@ -124,11 +137,11 @@ export class CommitPipelineService {
 					existingNarInfo
 				))
 			) {
-				return Response.json({
+				return {
+					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash,
-					status: 'pending'
-				} satisfies CommitResponse);
+					narHash: metadata.narHash
+				};
 			}
 
 			// A concurrent commit already holds the path: heal its object if missing
@@ -143,11 +156,14 @@ export class CommitPipelineService {
 				metadata.narHash
 			);
 
-			return Response.json({
-				storePathHash: metadata.storePathHash,
-				narHash: existingNarInfo.narHash,
-				status: 'already-present'
-			} satisfies CommitResponse);
+			return {
+				kind: 'settled',
+				response: {
+					storePathHash: metadata.storePathHash,
+					narHash: existingNarInfo.narHash,
+					status: 'already-present'
+				}
+			};
 		}
 
 		const object =
@@ -177,12 +193,12 @@ export class CommitPipelineService {
 			return this.commitReusedBlob(cache, uploadId, metadata);
 		}
 
-		// Verify-before-serve for a fresh upload staged under a private key: a blob
-		// within the inline budget is verified and promoted now, so it is immediately
-		// servable; a larger one is marked `pending` for the background pass; one too
-		// large to verify within the CPU budget is rejected, since it could never be
-		// served. A failure deletes the private staging object and leaves no global
-		// trace.
+		// Verify-before-serve for a fresh upload staged under a private key. One
+		// too large to ever verify within the CPU budget is rejected, since it
+		// could never be served; every other fresh upload defers: it is marked
+		// pending, a prompt verification pass is requested, and the caller's
+		// socket parks until the pass answers. One path for every size, so no
+		// caller has to know about budgets or thresholds.
 		if (metadata.narSize > verifiableMaxBytes) {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
@@ -193,18 +209,14 @@ export class CommitPipelineService {
 			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
 		}
 
-		if (metadata.narSize > inlineVerifyMaxBytes) {
-			this.uploadState.markUploadPending(uploadId);
-			await this.requestVerification(tenant);
+		this.uploadState.markUploadPending(uploadId);
+		await this.requestVerification(tenant);
 
-			return Response.json({
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				status: 'pending'
-			} satisfies CommitResponse);
-		}
-
-		return this.commitInlineUpload(cache, uploadId, metadata, pending.r2Key);
+		return {
+			kind: 'deferred',
+			storePathHash: metadata.storePathHash,
+			narHash: metadata.narHash
+		};
 	}
 
 	// Asks for a prompt verification pass over the maintenance queue, so a
@@ -230,111 +242,6 @@ export class CommitPipelineService {
 	// then materialise the servable object. A concurrent commit that already holds
 	// the path is conceded to; a verification failure reclaims the reserved row and
 	// rejects.
-	private async commitInlineUpload(
-		cache: string,
-		uploadId: string,
-		metadata: UploadPathMetadataFields,
-		stagingKey: string
-	): Promise<Response> {
-		this.uploadState.markUploadCommitting(uploadId);
-
-		const reserved = await this.reserveNarInfoRow(cache, metadata);
-
-		if (reserved.kind !== 'reserved') {
-			return this.concedeToWinner(cache, uploadId, metadata, stagingKey);
-		}
-
-		// A returned `{ok:false}` is a definitive content failure (a mismatch or
-		// undecodable bytes whose compressed checksum still matched): reject 422 and
-		// reclaim the reserved row and staging object. A thrown error (a transient R2
-		// read) propagates as a 5xx the client can retry, leaving the row reserved and
-		// the bytes staged for the verify pass to re-drive.
-		const verification = await this.verifyPendingNar(stagingKey, metadata);
-
-		if (!verification.ok) {
-			await this.context.ctx.blockConcurrencyWhile(() =>
-				this.reclaimReservedRow(
-					cache,
-					metadata.storePathHash,
-					reserved.generation,
-					metadata.narHash
-				)
-			);
-			await this.uploadState.clearPendingUploadAndStaging(
-				uploadId,
-				stagingKey,
-				metadata.narHash
-			);
-
-			throw new NarVerificationFailedError(stagingKey, verification.reason);
-		}
-
-		await this.uploadState.promoteStagingBlob(stagingKey, metadata);
-
-		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
-			this.materialiseServable(cache, metadata, reserved.generation)
-		);
-
-		// The tenant began offboarding while this commit was in flight: reclaim the
-		// reserved row and clear the upload rather than publishing an edge the drain
-		// would have to chase, then reject as a stopped write.
-		if (outcome === 'tenant-inactive') {
-			await this.context.ctx.blockConcurrencyWhile(() =>
-				this.reclaimReservedRow(
-					cache,
-					metadata.storePathHash,
-					reserved.generation,
-					metadata.narHash
-				)
-			);
-			await this.uploadState.clearPendingUploadAndStaging(
-				uploadId,
-				stagingKey,
-				metadata.narHash
-			);
-
-			throw new TenantWritesStoppedError(
-				this.context.requireTenant(),
-				'inactive'
-			);
-		}
-
-		// Over quota on the canonical size: reclaim the reserved row and clear the
-		// upload so a retry is not stranded re-driving forever, then reject cleanly.
-		if (outcome === 'over-quota') {
-			await this.context.ctx.blockConcurrencyWhile(() =>
-				this.reclaimReservedRow(
-					cache,
-					metadata.storePathHash,
-					reserved.generation,
-					metadata.narHash
-				)
-			);
-			await this.uploadState.clearPendingUploadAndStaging(
-				uploadId,
-				stagingKey,
-				metadata.narHash
-			);
-
-			throw new QuotaExceededError(this.context.requireTenant());
-		}
-
-		if (outcome !== 'materialised') {
-			return this.concedeToWinner(cache, uploadId, metadata, stagingKey);
-		}
-
-		// An inline commit returns servable synchronously, so its upload row is cleared
-		// rather than retained for a status poll.
-		this.uploadState.clearPendingUpload(uploadId);
-		await this.context.env.BLOBS.delete(stagingKey);
-
-		return Response.json({
-			storePathHash: metadata.storePathHash,
-			narHash: metadata.narHash,
-			status: 'committed'
-		} satisfies CommitResponse);
-	}
-
 	// Commits a reuse of a blob already in the verified CAS: reserve the row, then
 	// materialise from the existing canonical object and `blob_state`. If the shared
 	// blob was reaped between negotiate and now, reclaim the row and report it gone so
@@ -343,7 +250,7 @@ export class CommitPipelineService {
 		cache: string,
 		uploadId: string,
 		metadata: UploadPathMetadataFields
-	): Promise<Response> {
+	): Promise<CommitOutcome> {
 		this.uploadState.markUploadCommitting(uploadId);
 
 		const canonicalKey = narObjectKey(metadata.narHash);
@@ -358,15 +265,18 @@ export class CommitPipelineService {
 		);
 
 		if (outcome === 'materialised') {
-			// A reuse commit returns servable synchronously, so its upload row is
-			// cleared rather than retained for a status poll.
+			// A reuse commit settles synchronously, so its upload row is cleared
+			// rather than retained for observation.
 			this.uploadState.clearPendingUpload(uploadId);
 
-			return Response.json({
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				status: 'committed'
-			} satisfies CommitResponse);
+			return {
+				kind: 'settled',
+				response: {
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					status: 'committed'
+				}
+			};
 		}
 
 		if (outcome === 'superseded') {
@@ -412,7 +322,7 @@ export class CommitPipelineService {
 		uploadId: string,
 		metadata: UploadPathMetadataFields,
 		stagingKey: string
-	): Promise<Response> {
+	): Promise<CommitOutcome> {
 		const winner = await this.narInfoObjects.committedNarInfoRow(
 			cache,
 			metadata.storePathHash
@@ -431,11 +341,14 @@ export class CommitPipelineService {
 			metadata.narHash
 		);
 
-		return Response.json({
-			storePathHash: metadata.storePathHash,
-			narHash: winner?.narHash ?? metadata.narHash,
-			status: 'already-present'
-		} satisfies CommitResponse);
+		return {
+			kind: 'settled',
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: winner?.narHash ?? metadata.narHash,
+				status: 'already-present'
+			}
+		};
 	}
 
 	// Reserves the narinfo row for a commit before its bytes are verified, the
