@@ -47,7 +47,7 @@ describe('signing with a key set', () => {
 		}
 
 		const prepared = await authorisedFetch(
-			`/uploads/${upload.uploadId}`,
+			`/cache/_default/uploads/${upload.uploadId}`,
 			init.token,
 			{
 				body: JSON.stringify(uploadBlobMetadata(metadata)),

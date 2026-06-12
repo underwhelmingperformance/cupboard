@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
+import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
@@ -43,12 +44,10 @@ describe('Nix substitution from a named cache', () => {
 					);
 					const storePath = await source.build(namedCacheDerivation);
 					const pushContext = (cache: string): PushContext => ({
-						client: new CupboardClient(
-							server.tenantUrl,
-							server.uploadFetcher(),
-							cache === '' ? '' : `/cache/${cache}`
-						),
-						token: token,
+						client: pushClientFor(server.tenantUrl, token, {
+							cache,
+							fetcher: server.uploadFetcher()
+						}),
 						store: source,
 						workDirectory: directory
 					});

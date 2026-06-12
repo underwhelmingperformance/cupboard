@@ -5,6 +5,7 @@ import { renderNetrc } from '@cupboard/nix/nix-config';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore, type RealiseOptions } from '../support/nix.ts';
@@ -47,8 +48,9 @@ describe('Nix substitution from a private-read cache', () => {
 					const storePath = await source.build(privateDerivation);
 					await pushStorePaths(
 						{
-							client,
-							token,
+							client: pushClientFor(server.tenantUrl, token, {
+								fetcher: server.uploadFetcher()
+							}),
 							store: source,
 							workDirectory: directory
 						},

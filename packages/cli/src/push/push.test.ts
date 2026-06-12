@@ -13,7 +13,7 @@ import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
 import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential, CommitOptions } from '../client/client.ts';
+import type { CommitOptions } from '../client/client.ts';
 import {
 	AttestationSubjectNotPushedError,
 	PushNarMetadataMismatchError,
@@ -65,8 +65,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: {
-				negotiate(token, body) {
-					expect(token).toBe('write-token');
+				negotiate(body) {
 					negotiations.push(body);
 
 					return Promise.resolve({
@@ -87,8 +86,7 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareUpload(token, uploadId, body) {
-					expect(token).toBe('write-token');
+				prepareUpload(uploadId, body) {
 					preparedUploads.push({ uploadId, body });
 
 					return Promise.resolve({
@@ -108,8 +106,7 @@ describe('runPush', () => {
 						headers: upload.headers
 					});
 				},
-				commit(token, uploadId) {
-					expect(token).toBe('write-token');
+				commit(uploadId) {
 					commits.push(uploadId);
 
 					return Promise.resolve({
@@ -118,13 +115,10 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(token, name, body) {
-					expect(token).toBe('write-token');
-
+				setRoot(name, body) {
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			token: 'write-token',
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
@@ -254,7 +248,6 @@ describe('runPush', () => {
 					throw new UnexpectedPushClientCallError('setRoot');
 				}
 			} satisfies PushClient,
-			token: 'write-token',
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
 			compressNar(nar, path) {
@@ -303,7 +296,7 @@ describe('runPush', () => {
 				prepareUpload() {
 					throw new UnexpectedPushClientCallError('prepareUpload');
 				},
-				commit(_token, uploadId) {
+				commit(uploadId) {
 					expect(uploadId).toBe('reuse-app');
 
 					return Promise.resolve({
@@ -312,11 +305,10 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(_token, name, body) {
+				setRoot(name, body) {
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			token: 'write-token',
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [])
 			}),
@@ -366,8 +358,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter(results), {
 			client: {
 				...skipClient(setRoots),
-				negotiateAttestations(token, body) {
-					expect(token).toBe('write-token');
+				negotiateAttestations(body) {
 					negotiations.push(body);
 
 					return Promise.resolve({
@@ -383,8 +374,7 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareAttestation(token, uploadId) {
-					expect(token).toBe('write-token');
+				prepareAttestation(uploadId) {
 					expect(uploadId).toBe('attestation-app');
 
 					return Promise.resolve(attestationUpload);
@@ -397,8 +387,7 @@ describe('runPush', () => {
 						headers: upload.headers
 					});
 				},
-				attachAttestation(token, uploadId) {
-					expect(token).toBe('write-token');
+				attachAttestation(uploadId) {
 					attached.push(uploadId);
 
 					return Promise.resolve({
@@ -409,7 +398,6 @@ describe('runPush', () => {
 					});
 				}
 			} satisfies PushClient,
-			token: 'write-token',
 			attestations: [{ path: 'app.sigstore.json' }],
 			readAttestationBundle(path) {
 				expect(path).toBe('app.sigstore.json');
@@ -470,7 +458,6 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: skipClient(setRoots),
-			token: 'write-token',
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
 			readAttestationBundle() {
@@ -504,7 +491,6 @@ describe('runPush', () => {
 		await expect(
 			runPush([appPath], reporter([]), {
 				client: skipClient([]),
-				token: 'write-token',
 				attestations: [{ path: 'other.sigstore.json' }],
 				readAttestationBundle() {
 					return Promise.resolve(bundle);
@@ -556,11 +542,10 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(_token, name, body) {
+				setRoot(name, body) {
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			token: 'write-token',
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [])
 			}),
@@ -615,7 +600,6 @@ describe('runPush', () => {
 						throw new UnexpectedPushClientCallError('setRoot');
 					}
 				} satisfies PushClient,
-				token: 'write-token',
 				nixStore: nixStore({
 					[appPath]: pathInfo(appPath, appDigest, [])
 				}),
@@ -639,7 +623,6 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: skipClient(setRoots),
-			token: 'write-token',
 			root: 'main',
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory() {
@@ -651,7 +634,7 @@ describe('runPush', () => {
 		});
 
 		expect(setRoots).toStrictEqual([
-			{ token: 'write-token', fields: { name: 'main', targets: [appPath] } }
+			{ fields: { name: 'main', targets: [appPath] } }
 		]);
 		expect(results).toStrictEqual([
 			[
@@ -671,7 +654,6 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: skipClient(setRoots),
-			token: 'write-token',
 			root: 'main',
 			ttlSeconds: 1_209_600,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -684,10 +666,7 @@ describe('runPush', () => {
 		});
 
 		expect(setRoots).toStrictEqual([
-			{
-				token: 'write-token',
-				fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 }
-			}
+			{ fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 } }
 		]);
 		expect(results).toStrictEqual([
 			[
@@ -707,7 +686,6 @@ describe('runPush', () => {
 
 		await runPush([appPath, runtimePath], reporter(results), {
 			client: skipClient(setRoots),
-			token: 'write-token',
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
@@ -722,11 +700,9 @@ describe('runPush', () => {
 
 		expect(setRoots).toStrictEqual([
 			{
-				token: 'write-token',
 				fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
 			},
 			{
-				token: 'write-token',
 				fields: {
 					name: `pin:${StorePath.hash(runtimePath)}`,
 					targets: [runtimePath]
@@ -751,7 +727,6 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: skipClient(setRoots),
-			token: 'write-token',
 			ttlSeconds: 604_800,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory() {
@@ -764,7 +739,6 @@ describe('runPush', () => {
 
 		expect(setRoots).toStrictEqual([
 			{
-				token: 'write-token',
 				fields: {
 					name: `pin:${StorePath.hash(appPath)}`,
 					targets: [appPath],
@@ -788,7 +762,6 @@ describe('runPush', () => {
 		const setRoots: SetRootCall[] = [];
 		const dependencies = {
 			client: skipClient(setRoots),
-			token: 'write-token',
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory() {
 				return Promise.resolve('/tmp/cupboard-test');
@@ -851,13 +824,12 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(_token, name, body) {
+				setRoot(name, body) {
 					events.push('setRoot');
 
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			token: 'write-token',
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
 			compressNar(nar, path) {
@@ -889,7 +861,7 @@ describe('runPush', () => {
 		const results: ResultRow[][] = [];
 
 		const client: PushClient = {
-			negotiate(_token, body) {
+			negotiate(body) {
 				return Promise.resolve({
 					uploads: body.paths.map((path) => ({
 						action: 'skip',
@@ -907,7 +879,7 @@ describe('runPush', () => {
 			commit() {
 				throw new UnexpectedPushClientCallError('commit');
 			},
-			setRoot(_token, name, body) {
+			setRoot(name, body) {
 				const expiresAt = expiries.at(call) ?? expiries.at(-1);
 				call += 1;
 
@@ -917,7 +889,6 @@ describe('runPush', () => {
 
 		await runPush([appPath, runtimePath], reporter(results), {
 			client,
-			token: 'write-token',
 			ttlSeconds: 604_800,
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
@@ -951,12 +922,11 @@ describe('runPush', () => {
 		const commitOptions: CommitOptions[] = [];
 
 		await runPush([appPath], reporter([]), {
-			token: 'write-token',
 			wait: true,
 			waitTimeoutSeconds: 30,
 			client: {
 				...deferredUpload(events),
-				commit(_token, _uploadId, options) {
+				commit(_uploadId, options) {
 					events.push('commit');
 					commitOptions.push(options);
 
@@ -968,7 +938,7 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(_token, name, body) {
+				setRoot(name, body) {
 					events.push('setRoot');
 
 					return Promise.resolve(rootSummary({ name, ...body }));
@@ -986,7 +956,6 @@ describe('runPush', () => {
 	it('propagates a failed commit verdict and records no retention', async () => {
 		await expect(
 			runPush([appPath], reporter([]), {
-				token: 'write-token',
 				client: {
 					...deferredUpload([]),
 					commit() {
@@ -1249,13 +1218,12 @@ function rootSummary(
 type SetRootFields = { readonly name: string } & RootSetBody;
 
 interface SetRootCall {
-	readonly token: AccessCredential;
 	readonly fields: SetRootFields;
 }
 
 function skipClient(setRoots: SetRootCall[]): PushClient {
 	return {
-		negotiate(_token, body) {
+		negotiate(body) {
 			return Promise.resolve({
 				uploads: body.paths.map((path) => ({
 					action: 'skip',
@@ -1273,9 +1241,9 @@ function skipClient(setRoots: SetRootCall[]): PushClient {
 		commit() {
 			throw new UnexpectedPushClientCallError('commit');
 		},
-		setRoot(token, name, body) {
+		setRoot(name, body) {
 			const fields = { name, ...body };
-			setRoots.push({ token, fields });
+			setRoots.push({ fields });
 
 			return Promise.resolve(rootSummary(fields));
 		}

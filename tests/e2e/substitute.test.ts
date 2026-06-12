@@ -7,6 +7,8 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { readFileByteStream } from '../../packages/cli/src/io/file-stream.ts';
+import type { PushClient } from '../../packages/cli/src/push/push.ts';
+import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import {
@@ -126,8 +128,7 @@ interface Harness {
 	readonly server: CupboardTestServer;
 	readonly source: NixStore;
 	readonly target: NixStore;
-	readonly client: CupboardClient;
-	readonly token: string;
+	readonly client: PushClient;
 	readonly publicKey: string;
 	readonly directory: string;
 }
@@ -142,12 +143,12 @@ function withHarness(
 			const server = await CupboardTestServer.start(directory);
 
 			try {
-				const client = new CupboardClient(
+				const raw = new CupboardClient(
 					server.tenantUrl,
 					server.uploadFetcher()
 				);
 				const token = await server.ownerAdminToken();
-				const publicKey = await client.publicKey();
+				const publicKey = await raw.publicKey();
 
 				await body({
 					server,
@@ -156,8 +157,9 @@ function withHarness(
 						path.join(directory, 'target-store'),
 						path.join(directory, 'target-home')
 					),
-					client,
-					token,
+					client: pushClientFor(server.tenantUrl, token, {
+						fetcher: server.uploadFetcher()
+					}),
 					publicKey,
 					directory
 				});
@@ -172,7 +174,6 @@ function withHarness(
 function pushContext(harness: Harness): PushContext {
 	return {
 		client: harness.client,
-		token: harness.token,
 		store: harness.source,
 		workDirectory: harness.directory
 	};

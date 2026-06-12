@@ -1,4 +1,5 @@
 import type { AccessClaims, AccessScope } from '../auth/auth.ts';
+import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
@@ -9,6 +10,7 @@ import type { RetentionService } from '../do/retention-service.ts';
 import type { RootsService } from '../do/roots-service.ts';
 import type { SigningKeysService } from '../do/signing-keys-service.ts';
 import type { StatsService } from '../do/stats-service.ts';
+import type { UploadsService } from '../do/uploads-service.ts';
 
 /**
  * The capabilities the contract's procedures need from the Durable Object:
@@ -29,6 +31,8 @@ export interface TenantRpcServices {
 	readonly roots: RootsService;
 	readonly deletionQueue: DeletionQueueService;
 	readonly garbageCollection: GarbageCollectionService;
+	readonly uploads: UploadsService;
+	readonly attestations: AttestationsService;
 }
 
 /** The initial oRPC context for every tenant procedure call. */
