@@ -26,10 +26,15 @@ const narPrefix = '/nar/';
 
 const cacheInfoBody = new TextBody(CacheInfo.default.render());
 
+/** The slice of the execution context the read path needs: deferred work. */
+export interface ReadContext {
+	waitUntil(promise: Promise<unknown>): void;
+}
+
 export async function handleRead(
 	request: Request,
 	env: Env,
-	ctx: ExecutionContext,
+	ctx: ReadContext,
 	tenant: string,
 	entry: ManifestEntry
 ): Promise<Response | undefined> {
@@ -264,7 +269,7 @@ async function guardRead(
 async function serveR2(
 	request: Request,
 	env: Env,
-	ctx: ExecutionContext,
+	ctx: ReadContext,
 	key: string,
 	cacheKey: string,
 	headersFor: (object: R2Object) => Headers,

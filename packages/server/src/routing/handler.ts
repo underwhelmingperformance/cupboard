@@ -1,57 +1,85 @@
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { Hono } from 'hono';
 
+import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantWritesStoppedError } from '../errors.ts';
-import { serverErrorResponse } from '../http/error-response.ts';
+import { serverErrorHandler } from '../http/error-response.ts';
+import { notFoundResponse, TextBody, textResponse } from '../http/http.ts';
 import { handleRead } from '../read/read.ts';
 
 import { admitTenant } from './admission.ts';
-import { handleDeployment } from './deployment.ts';
 import { tenantServer } from './durable-object.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 
+const healthBody = new TextBody('ok\n');
+const versionBody = new TextBody(`${buildVersion}\n`);
+
+const app = new Hono<{ Bindings: Env }>();
+
+app.onError(serverErrorHandler);
+app.notFound(() => notFoundResponse());
+
+// Deployment-level endpoints answer at the bare host regardless of tenancy: a
+// liveness probe and the build version. They carry no tenant or cache prefix.
+app.get('/_health', (context) =>
+	textResponse(context.req.raw, healthBody, {
+		'content-type': 'text/plain; charset=utf-8',
+		'cache-control': 'no-store'
+	})
+);
+app.get('/_version', (context) =>
+	textResponse(context.req.raw, versionBody, {
+		'content-type': 'text/plain; charset=utf-8',
+		'cache-control': 'no-store'
+	})
+);
+
+// Every tenant request: admission resolves the slug against the published
+// manifest, reading only KV. A slug absent from the manifest is rejected here,
+// before any Durable Object is instantiated, so varying the slug cannot spin
+// up unbounded unprovisioned objects. The slug and the tenant-relative
+// remainder come from the raw pathname so an encoded slug never admits.
+app.all('/t/:tenant/*', async (context) => {
+	const url = new URL(context.req.url);
+	const route = parseTenantPath(url.pathname);
+
+	if (route === undefined) {
+		return notFoundResponse();
+	}
+
+	const entry = await admitTenant(context.env.TENANT_CACHE, route.tenant);
+
+	if (entry === undefined) {
+		return notFoundResponse();
+	}
+
+	// Strip the `/t/<tenant>/` prefix and serve the tenant-relative request: a
+	// read from R2 and the edge, or otherwise the tenant's Durable Object.
+	const inner = tenantRequest(context.req.raw, url, route.rest);
+	const read = await handleRead(
+		inner,
+		context.env,
+		context.executionCtx,
+		route.tenant,
+		entry
+	);
+
+	if (read !== undefined) {
+		return read;
+	}
+
+	return dispatchTenant(inner, context.env, route.tenant);
+});
+
+// The bare host is the control surface: the control plane's own auth.
+app.route('/', controlApp);
+
 export default {
-	async fetch(request, env, ctx) {
-		// Deployment-level endpoints answer at the bare host before any tenant or
-		// control routing.
-		const deployment = await handleDeployment(request);
-
-		if (deployment !== undefined) {
-			return deployment;
-		}
-
-		const url = new URL(request.url);
-		const route = parseTenantPath(url.pathname);
-
-		// The bare host is the control surface: the control plane's own auth.
-		if (route === undefined) {
-			return controlApp.fetch(request, env, ctx);
-		}
-
-		// Admission resolves the slug against the published manifest, reading only
-		// KV. A slug absent from the manifest is rejected here, before any Durable
-		// Object is instantiated, so varying the slug cannot spin up unbounded
-		// unprovisioned objects.
-		const entry = await admitTenant(env.TENANT_CACHE, route.tenant);
-
-		if (entry === undefined) {
-			return notFound();
-		}
-
-		// Strip the `/t/<tenant>/` prefix and serve the tenant-relative request: a
-		// read from R2 and the edge, or otherwise the tenant's Durable Object.
-		const inner = tenantRequest(request, url, route.rest);
-		const read = await handleRead(inner, env, ctx, route.tenant, entry);
-
-		if (read !== undefined) {
-			return read;
-		}
-
-		return dispatchTenant(inner, env, route.tenant);
-	},
+	fetch: app.fetch,
 
 	async scheduled(_controller, env) {
 		// Cron plans bounded work; the queue consumer owns execution and outcome
@@ -81,9 +109,7 @@ async function dispatchTenant(
 	const status = await tenantStatus(env, tenant);
 
 	if (status !== 'active') {
-		return serverErrorResponse(
-			Promise.reject(new TenantWritesStoppedError(tenant, status ?? 'unknown'))
-		);
+		throw new TenantWritesStoppedError(tenant, status ?? 'unknown');
 	}
 
 	return tenantServer(env, tenant).fetch(inner);
@@ -120,13 +146,6 @@ async function tenantStatus(
 		.get();
 
 	return row?.status;
-}
-
-function notFound(): Response {
-	return new Response('Not found\n', {
-		status: 404,
-		headers: { 'content-type': 'text/plain; charset=utf-8' }
-	});
 }
 
 function tenantRequest(request: Request, url: URL, rest: string): Request {
