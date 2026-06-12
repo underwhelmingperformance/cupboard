@@ -1,8 +1,42 @@
 import { AwsClient } from 'aws4fetch';
 
+import { type DeployUi, terminalLink } from './ui.ts';
+
 export interface R2Credentials {
 	readonly accessKeyId: string;
 	readonly secretAccessKey: string;
+}
+
+/** Prompt for an existing pair; undefined when cancelled. */
+export async function promptR2CredentialPair(
+	ui: DeployUi,
+	accountId: string
+): Promise<R2Credentials | undefined> {
+	const tokensPage = `https://dash.cloudflare.com/${accountId}/r2/api-tokens`;
+
+	ui.info(
+		`Create an R2 API token (Object Read & Write on the cache bucket) at\n${terminalLink(tokensPage, tokensPage)}`
+	);
+
+	const accessKeyEdit = await ui.editText({
+		message: 'R2 access key id',
+		problem: accessKeyIdProblem
+	});
+
+	if (accessKeyEdit.kind !== 'set') {
+		return undefined;
+	}
+
+	const secretAccessKey = await ui.secret(
+		'R2 secret access key',
+		secretAccessKeyProblem
+	);
+
+	if (secretAccessKey === undefined) {
+		return undefined;
+	}
+
+	return { accessKeyId: accessKeyEdit.value, secretAccessKey };
 }
 
 /** The verdict of probing R2 with a credential pair. */

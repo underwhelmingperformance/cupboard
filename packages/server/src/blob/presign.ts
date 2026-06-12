@@ -1,4 +1,8 @@
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import {
+	HeadObjectCommand,
+	PutObjectCommand,
+	S3Client
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 
 export interface R2PresignOptions {
@@ -38,6 +42,22 @@ export class R2Presigner {
 				ChecksumSHA256: options.checksumSha256
 			}),
 			{ expiresIn: options.expiresSeconds }
+		);
+	}
+
+	/**
+	 * A presigned HEAD for a probe object, used to prove the configured
+	 * credentials sign requests R2 accepts (a missing object still answers
+	 * 404 with a valid signature; a bad pair answers 401 or 403).
+	 */
+	presignHeadUrl(key: string, expiresSeconds: number): Promise<string> {
+		return getSignedUrl(
+			this.client,
+			new HeadObjectCommand({
+				Bucket: this.configuration.bucketName,
+				Key: key
+			}),
+			{ expiresIn: expiresSeconds }
 		);
 	}
 }

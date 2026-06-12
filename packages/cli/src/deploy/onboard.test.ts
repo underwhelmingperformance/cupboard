@@ -1,3 +1,4 @@
+import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
 import { describe, expect, it } from 'vitest';
 
@@ -13,7 +14,7 @@ import {
 	slugProblem
 } from './onboard.ts';
 import { deployerOwner, type OwnerBinding } from './owner.ts';
-import type { DeployUi } from './ui.ts';
+import type { DeployUi, TextEdit } from './ui.ts';
 
 const unexpected = (member: string) => (): never => {
 	throw new Error(`${member} was not expected`);
@@ -22,6 +23,7 @@ const unexpected = (member: string) => (): never => {
 interface UiScript {
 	readonly slugs?: readonly (string | undefined)[];
 	readonly secrets?: readonly (string | undefined)[];
+	readonly textEdits?: readonly TextEdit[];
 }
 
 interface ScriptedUi {
@@ -35,6 +37,7 @@ interface ScriptedUi {
 function scriptedUi(script: UiScript = {}): ScriptedUi {
 	const remainingSlugs = [...(script.slugs ?? [])];
 	const remainingSecrets = [...(script.secrets ?? [])];
+	const remainingTextEdits = [...(script.textEdits ?? [])];
 	const warnings: string[] = [];
 	const successes: string[] = [];
 	const infos: string[] = [];
@@ -55,7 +58,15 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 		},
 		note: unexpected('note'),
 		menu: unexpected('menu'),
-		editText: unexpected('editText'),
+		editText: () => {
+			const edit = remainingTextEdits.shift();
+
+			if (edit === undefined) {
+				throw new Error('editText asked more often than scripted');
+			}
+
+			return Promise.resolve(edit);
+		},
 		prefixedText: ({ prefix }) => {
 			if (remainingSlugs.length === 0) {
 				throw new Error('prefixedText asked more often than scripted');
@@ -178,6 +189,7 @@ interface ClientScript {
 	/** What listing tenants answers; the claim flow always lists first. */
 	readonly lists?: Scripted<ParsedTenantSummary[]>[];
 	readonly creates?: Scripted<ParsedTenantSummary>[];
+	readonly controlChecks?: Scripted<ParsedR2CredentialCheck>[];
 	readonly publicKeys?: Scripted<string>[];
 }
 
@@ -195,6 +207,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const signups = [...(script.signup ?? [])];
 	const lists = [...(script.lists ?? [])];
 	const creates = [...(script.creates ?? [])];
+	const controlChecks = [...(script.controlChecks ?? [])];
 	const publicKeys = [...(script.publicKeys ?? [])];
 	const urls: string[] = [];
 	const signupBodies: unknown[] = [];
@@ -234,6 +247,9 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					createdBodies.push(body);
 					return answer(creates, '/control/tenants');
 				},
+				controlCheck: async () => ({
+					r2: await answer(controlChecks, '/control/check')
+				}),
 				publicKey: () => answer(publicKeys, '/pubkey')
 			};
 		}
@@ -252,15 +268,23 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 		api: baseApi,
 		ui,
 		controlScriptName: 'cupboard',
+		tenantScriptName: 'cupboard-tenant',
 		domain: 'cache.example.com',
 		admin: claimable,
 		buildVersion: 'v-new',
 		claimSecret: { kind: 'none' },
+		r2: { kind: 'fresh' },
 		clientFactory: client.factory,
 		cacheToken: client.cacheToken,
 		sleep: () => Promise.resolve()
 	};
 }
+
+const keptR2 = {
+	kind: 'kept',
+	accountId: 'acc-1',
+	bucketName: 'cupboard-blobs'
+} as const;
 
 describe('onboardAdminFor', () => {
 	const deployer = { subject: 'cf-user-1', idToken: 'id-token-1' };
@@ -457,6 +481,120 @@ describe('onboardDeployment', () => {
 			kind: 'claim-cancelled',
 			url: 'https://cache.example.com'
 		});
+	});
+
+	it('proves a kept R2 pair through the new cache', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			controlChecks: [{ result: 'ok' }],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			r2: keptR2
+		});
+
+		expect(outcome.kind).toBe('ready');
+	});
+
+	it('replaces a rejected kept pair, looping until R2 accepts one', async () => {
+		const secretsSet: string[] = [];
+		const api: CloudflareApi = {
+			...baseApi,
+			putSecret: (scriptName, secret) => {
+				secretsSet.push(`${scriptName}:${secret.name}`);
+				return Promise.resolve();
+			}
+		};
+		const probed: string[] = [];
+		const goodKey = 'b'.repeat(32);
+		const { ui, warnings } = scriptedUi({
+			slugs: ['builds'],
+			// The first entered pair is rejected by R2; the loop asks again.
+			textEdits: [
+				{ kind: 'set', value: 'a'.repeat(32) },
+				{ kind: 'set', value: goodKey }
+			],
+			secrets: ['c'.repeat(64), 'd'.repeat(64)]
+		});
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			// The kept pair fails; after the new pair is set, the Worker still
+			// answers with the old env once before the restart lands.
+			controlChecks: [
+				{ result: 'rejected', status: 403 },
+				{ result: 'rejected', status: 403 },
+				{ result: 'ok' }
+			],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			api,
+			r2: keptR2,
+			checkCredentials: ({ credentials }) => {
+				probed.push(credentials.accessKeyId);
+
+				return Promise.resolve(
+					credentials.accessKeyId === goodKey
+						? { kind: 'valid' }
+						: { kind: 'rejected', status: 403 }
+				);
+			}
+		});
+
+		expect({
+			kind: outcome.kind,
+			probed,
+			secretsSet,
+			rejectionsSaid: warnings.filter((message) =>
+				message.includes('R2 rejected')
+			).length
+		}).toStrictEqual({
+			kind: 'ready',
+			probed: ['a'.repeat(32), goodKey],
+			secretsSet: [
+				'cupboard-tenant:R2_ACCESS_KEY_ID',
+				'cupboard-tenant:R2_SECRET_ACCESS_KEY'
+			],
+			rejectionsSaid: 2
+		});
+	});
+
+	it('continues unchanged when the replacement prompt is dismissed', async () => {
+		const { ui, infos } = scriptedUi({
+			slugs: ['builds'],
+			textEdits: [{ kind: 'cancelled' }]
+		});
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			controlChecks: [{ result: 'rejected', status: 403 }],
+			publicKeys: ['pk-1']
+		});
+
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			r2: keptR2
+		});
+
+		expect({
+			kind: outcome.kind,
+			unchanged: infos.some((message) =>
+				message.includes('credentials are unchanged')
+			)
+		}).toStrictEqual({ kind: 'ready', unchanged: true });
 	});
 
 	it('re-prompts when the slug is claimed first, and converges on the next', async () => {

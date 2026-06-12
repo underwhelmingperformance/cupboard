@@ -52,7 +52,9 @@ import {
 } from '@cupboard/protocol/oidc';
 import {
 	type CheckReport,
-	checkReportSchema
+	checkReportSchema,
+	controlCheckReportSchema,
+	type ParsedControlCheckReport
 } from '@cupboard/protocol/reports';
 import {
 	type RetentionPolicyAddBody,
@@ -335,6 +337,17 @@ export class CupboardClient {
 				token
 			}
 		);
+	}
+
+	/**
+	 * The admin-gated deployment check at the bare host: diagnostics only the
+	 * deployment can perform on itself, such as proving the R2 credentials it
+	 * is bound with (their values cannot be read back from outside).
+	 */
+	controlCheck(token: AccessCredential): Promise<ParsedControlCheckReport> {
+		return this.requestJson('/control/check', controlCheckReportSchema, {
+			token
+		});
 	}
 
 	// The control-plane key routes live at the bare host, not under a tenant

@@ -2,6 +2,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { cacheNamePattern } from '@cupboard/nix/scalars';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
+import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
 
 import { writeCachedToken } from '../auth/token-store.ts';
@@ -10,6 +11,10 @@ import { CupboardHttpError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
 import { deployerOwner, type OwnerBinding, type OwnerChoice } from './owner.ts';
+import {
+	checkR2Credentials,
+	promptR2CredentialPair
+} from './r2-credentials.ts';
 import type { DeployUi } from './ui.ts';
 
 /** What a single probe of the deployment concluded. */
@@ -115,8 +120,23 @@ export type OnboardClient = Pick<
 	| 'tokenExchange'
 	| 'listTenants'
 	| 'createTenant'
+	| 'controlCheck'
 	| 'publicKey'
 >;
+
+/**
+ * How this deploy settled the Worker's R2 pair: freshly set after a
+ * client-side probe, or kept in place. A kept pair's values cannot be read
+ * back, so the deployment is asked to prove it once a cache exists to ask
+ * through.
+ */
+export type OnboardR2 =
+	| {
+			readonly kind: 'kept';
+			readonly accountId: string;
+			readonly bucketName: string;
+	  }
+	| { readonly kind: 'fresh' };
 
 /**
  * What the deploy knows about the `CUPBOARD_SIGNUP_SECRET` Worker secret,
@@ -133,13 +153,17 @@ export interface OnboardOptions {
 	readonly ui: DeployUi;
 	/** The control Worker's script name, which serves the control plane. */
 	readonly controlScriptName: string;
+	/** The tenant script's name, which holds the R2 credential secrets. */
+	readonly tenantScriptName: string;
 	readonly domain: string | undefined;
 	readonly admin: OnboardAdmin;
 	/** The version the uploaded Workers answer on `/_version`. */
 	readonly buildVersion: string;
 	readonly claimSecret: ClaimSecret;
+	readonly r2: OnboardR2;
 	readonly clientFactory?: (url: string) => OnboardClient;
 	readonly cacheToken?: (token: string, target: string) => Promise<void>;
+	readonly checkCredentials?: typeof checkR2Credentials;
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly attempts?: number;
 }
@@ -289,6 +313,22 @@ export async function onboardDeployment(
 		slug = sole.id;
 	}
 
+	// A kept R2 pair has never been proved by this run; now that a cache
+	// exists, its Durable Object (which holds the credentials) can be asked.
+	if (options.r2.kind === 'kept') {
+		await ensureWorkerR2({
+			ui,
+			api: options.api,
+			client,
+			token: claim.token,
+			r2: options.r2,
+			tenantScriptName: options.tenantScriptName,
+			check: options.checkCredentials ?? checkR2Credentials,
+			attempts,
+			sleep
+		});
+	}
+
 	const cacheUrl = `${url}/t/${slug}`;
 	const cacheClient = clientFactory(cacheUrl);
 
@@ -365,6 +405,152 @@ type ClaimResult =
 			readonly status: number;
 			readonly detail: string;
 	  };
+
+function describeR2Check(check: ParsedR2CredentialCheck): string {
+	return check.result === 'rejected'
+		? `HTTP ${String(check.status)}`
+		: check.result;
+}
+
+/**
+ * Proves the R2 pair the Worker kept, and replaces it when the proof fails.
+ * The deployment performs the probe itself (the values cannot be read back),
+ * inside the new cache's Durable Object. A failed probe loops: a replacement
+ * pair is prompted for, checked against R2 directly before anything changes,
+ * set as the tenant script's secrets, and the deployment re-probed until the
+ * new pair is what answers. Nothing here fails the onboarding: a cache with
+ * bad credentials still serves reads, so problems are said out loud and left
+ * fixable by a re-run.
+ */
+async function ensureWorkerR2(deps: {
+	readonly ui: DeployUi;
+	readonly api: CloudflareApi;
+	readonly client: OnboardClient;
+	readonly token: string;
+	readonly r2: Extract<OnboardR2, { kind: 'kept' }>;
+	readonly tenantScriptName: string;
+	readonly check: typeof checkR2Credentials;
+	readonly attempts: number;
+	readonly sleep: (ms: number) => Promise<void>;
+}): Promise<void> {
+	const { ui, client, token, r2 } = deps;
+	let report: ParsedR2CredentialCheck;
+
+	try {
+		report = await ui
+			.reporter()
+			.phase('Checking the R2 credentials on the Worker', async (context) => {
+				const answered = await client.controlCheck(token);
+				context.fact('r2', describeR2Check(answered.r2));
+
+				return answered.r2;
+			});
+	} catch (error) {
+		// An older deployment has no check route; the credentials stay
+		// unproven rather than the onboarding failing.
+		if (error instanceof CupboardHttpError) {
+			ui.warn(
+				`Could not check the R2 credentials (${error.method} ${error.path} ` +
+					`answered HTTP ${String(error.status)}).`
+			);
+
+			return;
+		}
+
+		throw error;
+	}
+
+	if (report.result === 'ok' || report.result === 'no-tenant') {
+		return;
+	}
+
+	ui.warn(
+		report.result === 'unconfigured'
+			? 'The Worker has no R2 credentials bound, so pushes will fail.'
+			: `R2 rejected the credentials on the Worker ` +
+					`(HTTP ${String(report.status)}), so pushes will fail.`
+	);
+
+	for (;;) {
+		const pair = await promptR2CredentialPair(ui, r2.accountId);
+
+		if (pair === undefined) {
+			ui.info(
+				'The credentials are unchanged. Re-run `cupboard init` to replace ' +
+					'them later.'
+			);
+
+			return;
+		}
+
+		const probe = await ui
+			.reporter()
+			.phase('Checking the new pair against R2', () =>
+				deps.check({
+					accountId: r2.accountId,
+					bucketName: r2.bucketName,
+					credentials: pair
+				})
+			);
+
+		if (probe.kind === 'rejected') {
+			ui.warn(
+				`R2 rejected that pair too (HTTP ${String(probe.status)}); ` +
+					'check the values and try again.'
+			);
+			continue;
+		}
+
+		if (probe.kind === 'unreachable') {
+			ui.warn('Could not reach R2 to check the pair; nothing was changed.');
+
+			return;
+		}
+
+		await ui
+			.reporter()
+			.phase('Setting the new credentials on the Worker', async () => {
+				await deps.api.putSecret(deps.tenantScriptName, {
+					name: 'R2_ACCESS_KEY_ID',
+					text: pair.accessKeyId
+				});
+				await deps.api.putSecret(deps.tenantScriptName, {
+					name: 'R2_SECRET_ACCESS_KEY',
+					text: pair.secretAccessKey
+				});
+			});
+
+		// The Durable Object keeps its old env until it restarts on the new
+		// Worker version, so the deployment may answer with the old pair for
+		// a little while.
+		const settled = await pollProbe(
+			ui,
+			'Waiting for the Worker to pick up the new credentials',
+			deps.attempts,
+			deps.sleep,
+			async () => {
+				const report = await client.controlCheck(token);
+				const checked = report.r2;
+
+				return checked.result === 'ok'
+					? { kind: 'ready', value: undefined }
+					: { kind: 'retry', detail: describeR2Check(checked) };
+			}
+		);
+
+		if (settled.kind === 'ready') {
+			ui.success('The R2 credentials on the Worker are working.');
+		} else {
+			ui.warn(
+				'The new pair is set and checks out against R2, but the Worker ' +
+					'is still answering with the old one. It should settle ' +
+					'shortly; re-run `cupboard init` to re-check.'
+			);
+		}
+
+		return;
+	}
+}
 
 /**
  * Settles the claim secret the signup must present: the value this deploy
