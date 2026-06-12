@@ -9,6 +9,7 @@ import {
 	blobStateNarHashes,
 	bootstrap,
 	currentOrigin,
+	defaultCacheStatsPath,
 	narBytes,
 	pushPath,
 	readStoredNarInfo,
@@ -97,7 +98,7 @@ describe('durable object state', () => {
 		// A second bootstrap mints a JWT from the persisted auth key; it must be
 		// accepted by an admin route.
 		const second = await bootstrap();
-		const stats = await authorisedFetch('/stats', second.token);
+		const stats = await authorisedFetch(defaultCacheStatsPath, second.token);
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 		const committedVerifies = await verifyNarInfoSignature(

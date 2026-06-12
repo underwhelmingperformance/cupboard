@@ -1,9 +1,10 @@
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import { createReporter, formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 
 interface StatsOptions {
 	readonly token: string;
@@ -23,14 +24,15 @@ export function registerStatsCommand(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
-				cache: options.cache,
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
 			const stats = await reporter.phase('Querying cupboard', () =>
-				client.stats(token)
+				rpc.stats.cache({
+					cacheName: selectorForCache(options.cache ?? DEFAULT_CACHE)
+				})
 			);
 
 			reporter.result([
@@ -58,13 +60,13 @@ export function registerStatsCommand(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
 			const usage = await reporter.phase('Querying cupboard', () =>
-				client.usage(token)
+				rpc.stats.usage()
 			);
 
 			reporter.result([

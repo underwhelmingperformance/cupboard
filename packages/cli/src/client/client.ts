@@ -23,8 +23,6 @@ import {
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import {
-	type CheckReport,
-	checkReportSchema,
 	controlCheckReportSchema,
 	type ParsedControlCheckReport
 } from '@cupboard/protocol/reports';
@@ -55,16 +53,12 @@ import {
 	type CommitResponse,
 	type DeletePathResponse,
 	deletePathResponseSchema,
-	type StatsResponse,
-	statsResponseSchema,
 	type UploadNegotiateRequest,
 	type UploadNegotiateResponse,
 	uploadNegotiateResponseSchema,
 	type UploadPrepareRequest,
 	type UploadPrepareResponse,
-	uploadPrepareResponseSchema,
-	type UsageResponse,
-	usageResponseSchema
+	uploadPrepareResponseSchema
 } from '@cupboard/protocol/upload';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
@@ -159,16 +153,6 @@ export class CupboardClient {
 		return url;
 	}
 
-	stats(token: AccessCredential): Promise<StatsResponse> {
-		return this.requestJson(this.scoped('/stats'), statsResponseSchema, {
-			token
-		});
-	}
-
-	usage(token: AccessCredential): Promise<UsageResponse> {
-		return this.requestJson('/usage', usageResponseSchema, { token });
-	}
-
 	/**
 	 * The admin-gated deployment check at the bare host: diagnostics only the
 	 * deployment can perform on itself, such as proving the R2 credentials it
@@ -258,16 +242,6 @@ export class CupboardClient {
 				token
 			}
 		);
-	}
-
-	check(
-		token: AccessCredential,
-		options: { readonly deep: boolean }
-	): Promise<CheckReport> {
-		return this.requestJson('/check', checkReportSchema, {
-			token,
-			query: options.deep ? { deep: 'true' } : undefined
-		});
 	}
 
 	deleteStorePath(

@@ -106,6 +106,30 @@ export const cacheNameSchema = z
 	.brand('CacheName');
 export type CacheName = z.infer<typeof cacheNameSchema>;
 
+// The default cache's name on the wire. Its stored name is the empty string,
+// which cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell
+// it `_default`. The leading underscore fails `cacheNamePattern`, so the alias
+// can never collide with a creatable cache, matching the `/_health` and
+// `/_version` convention for non-content names.
+export const WIRE_DEFAULT_CACHE = '_default';
+
+/** A cache named in a contract URL: a real cache name or the default alias. */
+export const cacheSelectorSchema = z.union([
+	z.literal(WIRE_DEFAULT_CACHE),
+	cacheNameSchema
+]);
+export type CacheSelector = z.output<typeof cacheSelectorSchema>;
+
+/** The stored cache name a wire selector addresses. */
+export function cacheFromSelector(selector: CacheSelector): string {
+	return selector === WIRE_DEFAULT_CACHE ? DEFAULT_CACHE : selector;
+}
+
+/** The wire selector addressing a stored cache name. */
+export function selectorForCache(cache: string): string {
+	return cache === DEFAULT_CACHE ? WIRE_DEFAULT_CACHE : cache;
+}
+
 // A tenant slug: the outer addressing boundary, one isolated namespace per tenant
 // at `/t/<tenant>/`. It shares the cache-name shape but is its own branded type;
 // named caches nest within a tenant at `/t/<tenant>/cache/<name>/`.

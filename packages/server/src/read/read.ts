@@ -1,5 +1,9 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import {
+	cacheFromSelector,
+	cacheSelectorSchema,
+	DEFAULT_CACHE
+} from '@cupboard/nix/scalars';
 import { StatusCodes } from 'http-status-codes';
 
 import { type ManifestEntry } from '../control/tenant-manifest.ts';
@@ -24,9 +28,9 @@ export interface ReadContext {
 }
 
 // Splits an optional `/cache/<name>/` prefix off a tenant-relative path.
-// Returns the default cache and the unchanged path for a bare route;
-// `undefined` when the prefix is present but malformed or names an invalid
-// cache.
+// Returns the default cache and the unchanged path for a bare route, mapping
+// the `_default` wire alias back to the default cache; `undefined` when the
+// prefix is present but malformed or names an invalid cache.
 export function cacheScope(
 	pathname: string
 ): { cache: string; rest: string } | undefined {
@@ -43,13 +47,16 @@ export function cacheScope(
 		return undefined;
 	}
 
-	const name = remainder.slice(0, separator);
+	const selector = cacheSelectorSchema.safeParse(remainder.slice(0, separator));
 
-	if (!cacheNameSchema.safeParse(name).success) {
+	if (!selector.success) {
 		return undefined;
 	}
 
-	return { cache: name, rest: remainder.slice(separator) };
+	return {
+		cache: cacheFromSelector(selector.data),
+		rest: remainder.slice(separator)
+	};
 }
 
 // Returns a 401 when the cache is private and the request is unauthorised, or

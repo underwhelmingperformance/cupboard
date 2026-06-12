@@ -1,3 +1,4 @@
+import { selectorForCache } from '@cupboard/nix/scalars';
 import type { StatsResponse, UsageResponse } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -54,7 +55,7 @@ async function statsForCache(
 	cache: string
 ): Promise<StatsResponse> {
 	const response = await authorisedFetch(
-		cacheScopedPath(cache, '/stats'),
+		`/cache/${selectorForCache(cache)}/stats`,
 		token
 	);
 
@@ -239,17 +240,27 @@ describe('named caches', () => {
 		});
 	});
 
-	it('rejects an invalid cache name before authorising', async () => {
+	it('authenticates before judging an invalid cache name', async () => {
 		await useTestServer('named-cache-invalid');
 
-		// The name is validated in the routing layer ahead of the scope check, so
-		// a malformed cache name is a 400 regardless of the bearer token.
-		const response = await authorisedFetch(
+		// The contract authenticates ahead of input validation, so a request
+		// without a valid token learns nothing about the path's validity.
+		const unauthenticated = await authorisedFetch(
 			'/cache/Bad_NAME!/stats',
 			'any-token'
 		);
+		const malformed = await authorisedFetch(
+			'/cache/Bad_NAME!/stats',
+			await mintServerSignedToken('admin')
+		);
 
-		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+		expect({
+			unauthenticated: unauthenticated.status,
+			malformed: malformed.status
+		}).toStrictEqual({
+			unauthenticated: StatusCodes.UNAUTHORIZED,
+			malformed: StatusCodes.BAD_REQUEST
+		});
 	});
 
 	it('refuses to commit an upload under a different cache than negotiated', async () => {

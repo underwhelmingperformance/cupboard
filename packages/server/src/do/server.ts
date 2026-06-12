@@ -453,14 +453,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		// A read-only storage check across every cache. Blobs are shared, so it is
-		// deployment-wide: one bare `/check` covering all caches.
-		this.app.get('/check', this.scoped('admin'), async (context) =>
-			context.json(
-				await this.integrityCheck.check(context.req.query('deep') === 'true')
-			)
-		);
-
 		// A bounded reconciling pass driven by the cron tick. Its own route, kept
 		// separate from `/gc`, so each can run and be asserted independently.
 		// Interactive runs purge this colo's edge cache via the caller's public
@@ -491,21 +483,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			}
 		);
 
-		// Each path-scoped route has a bare form (the default cache) and a
-		// `/cache/:cacheName/` form. The per-route scope is identical between the
-		// two; the cache-scoped form validates the name inside the error boundary.
-		this.app.get('/stats', this.scoped('admin'), async (context) =>
-			context.json(await this.stats.stats(context.get('cache')))
-		);
-		this.app.get('/usage', this.scoped('admin'), async (context) =>
-			context.json(await this.stats.usage())
-		);
-		this.app.get(
-			'/cache/:cacheName/stats',
-			this.scoped('admin'),
-			async (context) =>
-				context.json(await this.stats.stats(context.get('cache')))
-		);
 		this.app.on(
 			'DELETE',
 			['/paths/:hash', '/cache/:cacheName/paths/:hash'],
@@ -804,7 +781,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
 			retention: this.retention,
-			oidcTrust: this.oidcTrust
+			oidcTrust: this.oidcTrust,
+			stats: this.stats,
+			integrityCheck: this.integrityCheck
 		};
 	}
 
