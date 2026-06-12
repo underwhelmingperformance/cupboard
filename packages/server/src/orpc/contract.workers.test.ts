@@ -106,6 +106,33 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('drives both key sets through the derived client', async () => {
+		await useTestServer('contract-keys');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+
+		const rotated = await client.keys.signing.rotate();
+		const retired = await client.keys.signing.retire({
+			id: rotated.rotated.id
+		});
+		const authRotated = await client.keys.auth.rotate();
+		const authListed = await client.keys.auth.list();
+
+		expect({
+			retired,
+			rotatedIsListed: rotated.keys.some(
+				(key) => key.id === rotated.rotated.id
+			),
+			authRotatedListed: authListed.keys.some(
+				(key) => key.kid === authRotated.rotated && key.active
+			)
+		}).toStrictEqual({
+			retired: { id: rotated.rotated.id, stage: 'publication' },
+			rotatedIsListed: true,
+			authRotatedListed: true
+		});
+	});
+
 	it('refuses a write-scoped token on an admin procedure', async () => {
 		await useTestServer('contract-scope');
 		await bootstrap();

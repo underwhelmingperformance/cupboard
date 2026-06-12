@@ -6,6 +6,7 @@ import { StorePath } from '@cupboard/nix/store-path';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore, type RealiseOptions } from '../support/nix.ts';
@@ -38,6 +39,10 @@ describe('Nix substitution through a signing-key rotation', () => {
 						server.uploadFetcher()
 					);
 					const token = await server.ownerAdminToken();
+					const rpc = tenantRpc(server.tenantUrl, {
+						credential: token,
+						fetcher: server.uploadFetcher()
+					});
 					const oldKey = await client.publicKey();
 					const source = await NixStore.host(
 						path.join(directory, 'source-home')
@@ -75,7 +80,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 					await targetOld.realise(before, trusting([oldKey]));
 
 					// Open the window. A path pushed now is signed by both keys.
-					const { rotated, keys } = await client.rotateKey(token);
+					const { rotated, keys } = await rpc.keys.signing.rotate();
 					const newKey = rotated.publicKey;
 
 					const windowPath = await source.build(rotationDerivation('window'));
@@ -90,8 +95,8 @@ describe('Nix substitution through a signing-key rotation', () => {
 
 					// Retire the old key fully; a path pushed afterwards is signed by the
 					// new key only and still substitutes under it.
-					await client.retireKey(token, 'active');
-					await client.retireKey(token, 'active');
+					await rpc.keys.signing.retire({ id: 'active' });
+					await rpc.keys.signing.retire({ id: 'active' });
 					const publishedAfterRetire = await publishedKeys(server);
 
 					const postPath = await source.build(rotationDerivation('post'));

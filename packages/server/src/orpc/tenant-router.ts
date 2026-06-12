@@ -48,5 +48,29 @@ export const tenantRouter = os.router({
 				new URL(context.request.url).origin
 			)
 		)
+	},
+	keys: {
+		signing: {
+			list: os.keys.signing.list.handler(({ context }) =>
+				context.services.signingKeys.keyList()
+			),
+			rotate: os.keys.signing.rotate.handler(({ context }) =>
+				context.services.signingKeys.rotateKey()
+			),
+			retire: os.keys.signing.retire.handler(({ input, context }) =>
+				context.services.signingKeys.retireKey(input.id)
+			)
+		},
+		auth: {
+			list: os.keys.auth.list.handler(({ context }) =>
+				context.services.authKeys.authKeyList()
+			),
+			rotate: os.keys.auth.rotate.handler(({ context }) =>
+				context.services.authKeys.rotateAuthKey()
+			),
+			retire: os.keys.auth.retire.handler(({ input, context }) =>
+				context.services.authKeys.retireAuthKey(input.kid)
+			)
+		}
 	}
 });

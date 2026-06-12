@@ -13,15 +13,17 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 
+/**
+ * The slice of the derived client the auth-key commands consume, in the
+ * contract's input and output shapes; the real `tenantRpc(...).keys.auth`
+ * satisfies it by construction.
+ */
 export interface AuthKeyClient {
-	listAuthKeys(token: AccessCredential): Promise<AuthKeyListResponse>;
-	rotateAuthKey(token: AccessCredential): Promise<AuthKeyRotateResponse>;
-	retireAuthKey(
-		token: AccessCredential,
-		kid: string
-	): Promise<AuthKeyRetireResponse>;
+	list(): Promise<AuthKeyListResponse>;
+	rotate(): Promise<AuthKeyRotateResponse>;
+	retire(input: { kid: string }): Promise<AuthKeyRetireResponse>;
 }
 
 export function registerAuthKeyCommands(
@@ -40,11 +42,12 @@ export function registerAuthKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runAuthKeyList(cachedOwnerProvider(url), reporter, client);
+			await runAuthKeyList(reporter, rpc.keys.auth);
 		});
 
 	authKey
@@ -57,11 +60,12 @@ export function registerAuthKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runAuthKeyRotate(cachedOwnerProvider(url), reporter, client);
+			await runAuthKeyRotate(reporter, rpc.keys.auth);
 		});
 
 	authKey
@@ -73,34 +77,33 @@ export function registerAuthKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runAuthKeyRetire(kid, cachedOwnerProvider(url), reporter, client);
+			await runAuthKeyRetire(kid, reporter, rpc.keys.auth);
 		});
 }
 
 export async function runAuthKeyList(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: AuthKeyClient
 ): Promise<void> {
 	const { keys } = await reporter.phase('Listing auth keys', () =>
-		client.listAuthKeys(token)
+		client.list()
 	);
 
 	reporter.result(keys.map((key) => authKeyRow(key)));
 }
 
 export async function runAuthKeyRotate(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: AuthKeyClient
 ): Promise<void> {
 	const { rotated, retiring, keys } = await reporter.phase(
 		'Rotating auth key',
-		() => client.rotateAuthKey(token)
+		() => client.rotate()
 	);
 
 	reporter.result([
@@ -121,12 +124,11 @@ export async function runAuthKeyRotate(
 
 export async function runAuthKeyRetire(
 	kid: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: AuthKeyClient
 ): Promise<void> {
 	const result = await reporter.phase('Retiring auth key', () =>
-		client.retireAuthKey(token, kid)
+		client.retire({ kid })
 	);
 
 	reporter.result([

@@ -3,10 +3,6 @@ import type {
 	AttestationNegotiateResponse,
 	AttestationPrepareResponse
 } from '@cupboard/protocol/attestations';
-import type {
-	KeyRetireResponse,
-	KeyRotateResponse
-} from '@cupboard/protocol/keys';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { CheckReport } from '@cupboard/protocol/reports';
 import type {
@@ -542,65 +538,6 @@ describe('CupboardClient.removeRoot', () => {
 			contentType: undefined,
 			body: undefined
 		});
-	});
-});
-
-describe('CupboardClient.rotateKey', () => {
-	it('posts to /keys/rotate with the admin token', async () => {
-		const response: KeyRotateResponse = {
-			rotated: {
-				id: '123e4567-e89b-12d3-a456-426614174000',
-				publicKey: 'cupboard-2:k2',
-				stage: 'signing',
-				createdAt: '2026-02-01T00:00:00.000Z'
-			},
-			keys: [
-				{
-					id: 'active',
-					publicKey: 'cupboard-1:k1',
-					stage: 'signing',
-					createdAt: '2026-01-01T00:00:00.000Z'
-				}
-			]
-		};
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.rotateKey('admin-token');
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/keys/rotate',
-			method: 'POST',
-			authorization: 'Bearer admin-token',
-			contentType: undefined,
-			body: undefined
-		});
-	});
-});
-
-describe('CupboardClient.retireKey', () => {
-	it('posts to /keys/retire/<id> with the admin token', async () => {
-		const response: KeyRetireResponse = { id: 'active', stage: 'publication' };
-		const { client, captured } = capturingClient(response);
-
-		const result = await client.retireKey('admin-token', 'active');
-
-		expect(result).toStrictEqual(response);
-		expect(captured()).toStrictEqual({
-			url: 'https://cupboard.test/keys/retire/active',
-			method: 'POST',
-			authorization: 'Bearer admin-token',
-			contentType: undefined,
-			body: undefined
-		});
-	});
-
-	it('rejects a retire response with an unknown stage', async () => {
-		const { client } = capturingClient({ id: 'active', stage: 'gone' });
-
-		await expect(client.retireKey('admin-token', 'active')).rejects.toThrow(
-			ResponseSchemaMismatchError
-		);
 	});
 });
 
