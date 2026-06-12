@@ -1,3 +1,4 @@
+import { TextPrompt } from '@clack/core';
 import {
 	cancel,
 	intro,
@@ -6,8 +7,11 @@ import {
 	note,
 	outro,
 	password,
+	S_BAR,
+	S_BAR_END,
 	select,
 	spinner,
+	symbol,
 	text
 } from '@clack/prompts';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
@@ -64,6 +68,14 @@ export interface TextEditOptions {
 	readonly problem?: (value: string) => string | undefined;
 }
 
+export interface PrefixedTextOptions {
+	readonly message: string;
+	/** Rendered dimmed, immediately before the editable value. */
+	readonly prefix: string;
+	/** Why the value is unacceptable, or undefined when it is fine. */
+	readonly problem: (value: string) => string | undefined;
+}
+
 /**
  * Everything `cupboard deploy` says or asks. One clack-based visual language
  * for the whole command: spinners for phases, notes for structured facts,
@@ -84,6 +96,11 @@ export interface DeployUi {
 	): Promise<T | undefined>;
 	/** Edit a single text value. */
 	editText(options: TextEditOptions): Promise<TextEdit>;
+	/**
+	 * Ask for a value typed inline after a fixed prefix (a URL the value
+	 * completes, say). There is no default; undefined when cancelled.
+	 */
+	prefixedText(options: PrefixedTextOptions): Promise<string | undefined>;
 	/** Ask for a secret value, masked; undefined when cancelled. */
 	secret(
 		message: string,
@@ -169,6 +186,43 @@ export function createDeployUi(): DeployUi {
 			}
 
 			return answer === '' ? { kind: 'clear' } : { kind: 'set', value: answer };
+		},
+
+		async prefixedText(options) {
+			const prompt: TextPrompt = new TextPrompt({
+				validate: (value = '') => options.problem(value),
+				render: () => {
+					const title = `${pc.gray(S_BAR)}\n${symbol(prompt.state)}  ${options.message}\n`;
+					const typed = `${pc.dim(options.prefix)}${prompt.userInputWithCursor}`;
+					const settled = options.prefix + (prompt.value ?? '');
+
+					switch (prompt.state) {
+						case 'submit': {
+							return `${title}${pc.gray(S_BAR)}  ${pc.dim(settled)}`;
+						}
+
+						case 'cancel': {
+							return `${title}${pc.gray(S_BAR)}  ${pc.strikethrough(pc.dim(settled))}\n${pc.gray(S_BAR)}`;
+						}
+
+						case 'error': {
+							const detail =
+								prompt.error === '' ? '' : `  ${pc.yellow(prompt.error)}`;
+
+							return `${title.trim()}\n${pc.yellow(S_BAR)}  ${typed}\n${pc.yellow(S_BAR_END)}${detail}\n`;
+						}
+
+						default: {
+							return `${title}${pc.cyan(S_BAR)}  ${typed}\n${pc.cyan(S_BAR_END)}\n`;
+						}
+					}
+				}
+			});
+			const answer = await prompt.prompt();
+
+			return isCancel(answer) || typeof answer !== 'string'
+				? undefined
+				: answer;
 		},
 
 		async secret(message, problem) {

@@ -71,6 +71,11 @@ import {
 	rootSetResponseSchema
 } from '@cupboard/protocol/retention';
 import {
+	type ParsedSignupResponse,
+	type SignupRequest,
+	signupResponseSchema
+} from '@cupboard/protocol/signup';
+import {
 	type TenantCreateBody,
 	type TenantListResponse,
 	tenantListResponseSchema,
@@ -150,6 +155,14 @@ export class CupboardClient {
 		// The route renders the key set with a trailing newline; the keys
 		// themselves carry none, so return them without it.
 		return body.trimEnd();
+	}
+
+	/**
+	 * Probes the deployment's unauthenticated health route at the base URL,
+	 * throwing a {@link CupboardHttpError} when it does not answer OK.
+	 */
+	async health(): Promise<void> {
+		await this.request('/_health');
 	}
 
 	private scoped(path: string): string {
@@ -585,6 +598,38 @@ export class CupboardClient {
 	 * token is the credential — and takes a urlencoded body, so it bypasses the
 	 * JSON request path the rest of the client uses.
 	 */
+	/**
+	 * Claims (or idempotently re-claims) global admin of the deployment at the
+	 * bootstrap `POST /signup` endpoint. The endpoint is unauthenticated — the
+	 * external OIDC subject token is the credential, judged against the
+	 * deployment's signup gate — and takes a urlencoded body.
+	 */
+	async signup(request: SignupRequest): Promise<ParsedSignupResponse> {
+		const url = this.resolve('/signup');
+		const body = new URLSearchParams({
+			subject_token: request.subject_token,
+			...(request.claim_secret === undefined
+				? {}
+				: { claim_secret: request.claim_secret })
+		});
+		const response = await this.fetcher(url, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: body.toString()
+		});
+
+		if (!response.ok) {
+			throw new CupboardHttpError(
+				'POST',
+				'/signup',
+				response.status,
+				await response.text()
+			);
+		}
+
+		return this.parseJson('/signup', signupResponseSchema, response);
+	}
+
 	async tokenExchange(
 		subjectToken: string,
 		subjectTokenType: string

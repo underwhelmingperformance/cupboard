@@ -5,6 +5,7 @@
 		"cupboard": "./src/main.ts"
 	},
 	"dependencies": {
+		"@clack/core": "^1.4.1",
 		"@clack/prompts": "^1.5.1",
 		"@cloudflare/workers-auth": "^0.1.1",
 		"@cupboard/nix": "workspace:*",

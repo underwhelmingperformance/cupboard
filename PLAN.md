@@ -192,18 +192,29 @@ that deployed is the identity that administers.
       public Cloudflare OAuth client (PKCE loopback on registered ports; grant
       cached with owner-only permissions and renewed from its refresh token),
       review an editable plan (account, custom domain, resource names, cron
-      triggers, owner), settle R2 credentials (created as a bucket-scoped
+      triggers, admin), settle R2 credentials (created as a bucket-scoped
       account-owned API token where the deploy credential may manage tokens,
       rolled on re-deploys; entered manually otherwise; probed with a signed
-      HEAD before anything deploys), provision, then initialise: resolve the
-      cache URL (custom domain, or the workers.dev subdomain with the script
-      route enabled), poll `/pubkey` until the Worker is routable, and print the
-      `nix.conf` lines.
-- [x] Owner binding: the deploy seeds `CUPBOARD_OWNER_*` from the plan's Owner
-      choice. The default is the configured vars, then the deployer's Cloudflare
-      identity (`https://dash.cloudflare.com` is a compliant OIDC issuer; the
-      id_token's `sub` arrives with the `openid` scope; the audience is
-      cupboard's client id), then ownerless with a warning.
+      HEAD before anything deploys), then provision.
+- [x] Two-step initialisation after the deploy. Step one: resolve the deployment
+      URL (custom domain, read back from the routing on re-runs, or the
+      workers.dev subdomain with the script route enabled) and poll the
+      unauthenticated `/_health` route until the Worker is up. Step two: claim
+      global admin at `POST /signup` with the deployer's id_token (idempotent
+      for the same principal), exchange it for an admin token and cache that
+      token, prompt for the first cache's slug (typed inline after the
+      `<url>/t/` prefix; no default), create the tenant, and poll its
+      `/t/<slug>/pubkey` (whose first success creates the signing key) before
+      printing the `nix.conf` lines for the cache URL. The create call is the
+      arbiter of slug ownership: a conflict re-prompts, and re-creating an
+      identical tenant is idempotent, so re-runs converge.
+- [x] Admin binding: the deploy seeds the control Worker's signup gate
+      (`CUPBOARD_SIGNUP_*`) from the plan's Admin choice. The default is the
+      configured vars, then the deployer's Cloudflare identity
+      (`https://dash.cloudflare.com` is a compliant OIDC issuer; the id_token's
+      `sub` arrives with the `openid` scope; the audience is cupboard's client
+      id), then nobody, with a warning that the gate stays closed. A gate naming
+      someone else leaves the claim to them.
 - [x] `cupboard login` defaults to the same issuer and client, so a flagless
       login presents exactly the triple the owner rule pins. `--headless` uses
       the RFC 8628 device flow (the OAuth client carries the device code grant
