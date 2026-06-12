@@ -6,6 +6,9 @@ allowBuilds:
   sharp: false
   workerd: true
 
+minimumReleaseAgeExclude:
+  - cloudflare@6.4.0
+
 onlyBuiltDependencies:
   - esbuild
   - workerd
