@@ -117,6 +117,14 @@ export const fileHash = NixSha256Hash.parse(
 );
 export const deleteTestBase = new Date('2026-01-01T00:00:00.000Z');
 
+// The owner identity the fixture tenant is provisioned with, matching the
+// triple the admin-token and trust-rule tests mint their subject tokens for.
+export const fixtureOwner = {
+	issuer: 'https://accounts.google.com',
+	subject: 'owner-subject',
+	audience: 'client-id.apps.googleusercontent.com'
+} as const;
+
 let origin = 'https://cupboard.test';
 let server = testServerFor('initial');
 let nextTestServerId = 0;
@@ -191,9 +199,9 @@ export async function provisionFixtureTenant(
 			id: fixtureTenant,
 			status: 'active',
 			readMode,
-			ownerIssuer: env.CUPBOARD_OWNER_ISSUER,
-			ownerSubject: env.CUPBOARD_OWNER_SUBJECT,
-			ownerAudience: env.CUPBOARD_OWNER_AUDIENCE,
+			ownerIssuer: fixtureOwner.issuer,
+			ownerSubject: fixtureOwner.subject,
+			ownerAudience: fixtureOwner.audience,
 			configVersion: 1,
 			createdAt: now,
 			readUser,
@@ -387,8 +395,7 @@ export function currentOrigin(): string {
 const tenantTestIssuer = 'cupboard';
 
 // Configures a Durable Object as the fixture tenant, the way provisioning would,
-// with the fixed legacy issuer for low-level token round-trips; the owner triple
-// comes from the deploy env the pool binds.
+// with the fixed legacy issuer for low-level token round-trips.
 async function configureFixtureTenant(
 	stub: DurableObjectStub<CupboardServer>
 ): Promise<void> {
@@ -398,9 +405,9 @@ async function configureFixtureTenant(
 		tenant: fixtureTenant,
 		issuer,
 		audience: issuer,
-		ownerIssuer: env.CUPBOARD_OWNER_ISSUER,
-		ownerSubject: env.CUPBOARD_OWNER_SUBJECT,
-		ownerAudience: env.CUPBOARD_OWNER_AUDIENCE,
+		ownerIssuer: fixtureOwner.issuer,
+		ownerSubject: fixtureOwner.subject,
+		ownerAudience: fixtureOwner.audience,
 		configVersion: 1
 	});
 }

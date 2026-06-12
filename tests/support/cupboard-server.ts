@@ -101,9 +101,6 @@ export class CupboardTestServer {
 		// The control-plane Worker binds the wrapping secret and reaches the Durable
 		// Object across scripts via `scriptName`.
 		const tenantBindings = {
-			CUPBOARD_OWNER_ISSUER: issuer.issuer,
-			CUPBOARD_OWNER_SUBJECT: ownerSubject,
-			CUPBOARD_OWNER_AUDIENCE: ownerAudience,
 			CUPBOARD_COLD_PATH_TTL_SECONDS: '',
 			R2_ACCESS_KEY_ID: r2Credentials.accessKeyId,
 			R2_ACCOUNT_ID: r2Credentials.accountId,

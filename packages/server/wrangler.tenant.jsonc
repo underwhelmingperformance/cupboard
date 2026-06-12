@@ -37,9 +37,6 @@
 	"vars": {
 		"CUPBOARD_AUTH_ISSUER": "cupboard",
 		"CUPBOARD_AUTH_AUDIENCE": "cupboard",
-		"CUPBOARD_OWNER_ISSUER": "",
-		"CUPBOARD_OWNER_SUBJECT": "",
-		"CUPBOARD_OWNER_AUDIENCE": "",
 		"CUPBOARD_COLD_PATH_TTL_SECONDS": ""
 	},
 	"migrations": [
