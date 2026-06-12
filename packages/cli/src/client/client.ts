@@ -10,11 +10,6 @@ import {
 	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import {
-	type RootSetBody,
-	type RootSetResponse,
-	rootSetResponseSchema
-} from '@cupboard/protocol/retention';
-import {
 	type ParsedSignupResponse,
 	type SignupRequest,
 	signupResponseSchema
@@ -79,21 +74,36 @@ export class CupboardClient {
 		);
 	}
 
-	async publicKey(): Promise<string> {
-		const response = await this.request('/pubkey');
-		const body = await response.text();
-
-		// The route renders the key set with a trailing newline; the keys
-		// themselves carry none, so return them without it.
-		return body.trimEnd();
+	// The route renders the key set with a trailing newline; the keys
+	// themselves carry none, so it is returned without it.
+	publicKey(): Promise<string> {
+		return this.fetchText('/pubkey');
 	}
 
 	/**
 	 * The build version the deployment answers on its unauthenticated
 	 * `/_version` route, without the trailing newline the route renders.
 	 */
-	async version(): Promise<string> {
-		const response = await this.request('/_version');
+	version(): Promise<string> {
+		return this.fetchText('/_version');
+	}
+
+	private async fetchText(path: string): Promise<string> {
+		throwIfAborted(this.signal);
+
+		const response = await this.fetcher(this.resolve(path), {
+			signal: this.signal
+		});
+
+		if (!response.ok) {
+			throw new CupboardHttpError(
+				'GET',
+				path,
+				response.status,
+				await response.text()
+			);
+		}
+
 		const body = await response.text();
 
 		return body.trimEnd();
@@ -115,22 +125,6 @@ export class CupboardClient {
 		url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
 
 		return url;
-	}
-
-	setRoot(
-		token: AccessCredential,
-		name: string,
-		body: RootSetBody
-	): Promise<RootSetResponse> {
-		return this.requestJson(
-			this.selectorScoped(`/roots/${encodeURIComponent(name)}`),
-			rootSetResponseSchema,
-			{
-				method: 'PUT',
-				token,
-				body
-			}
-		);
 	}
 
 	/**
@@ -301,16 +295,6 @@ export class CupboardClient {
 		return response;
 	}
 
-	private async requestJson<S extends z.ZodType>(
-		path: string,
-		schema: S,
-		options: ClientRequestOptions = {}
-	): Promise<z.output<S>> {
-		const response = await this.request(path, options);
-
-		return this.parseJson(path, schema, response);
-	}
-
 	private async parseJson<S extends z.ZodType>(
 		path: string,
 		schema: S,
@@ -338,84 +322,6 @@ export class CupboardClient {
 		}
 
 		return result.data;
-	}
-
-	private async request(
-		path: string,
-		options: ClientRequestOptions = {}
-	): Promise<Response> {
-		throwIfAborted(this.signal);
-
-		const method = options.method ?? 'GET';
-		const url = this.resolve(path);
-
-		for (const [key, value] of Object.entries(options.query ?? {})) {
-			url.searchParams.set(key, value);
-		}
-
-		const body =
-			options.body === undefined ? undefined : JSON.stringify(options.body);
-		const credential = options.token;
-
-		let response = await this.send(
-			url,
-			method,
-			options.headers,
-			body,
-			await resolveBearer(credential)
-		);
-
-		// A long push can outlive the exchanged JWT; refresh once and retry.
-		if (
-			response.status === unauthorizedStatusCode &&
-			isTokenProvider(credential)
-		) {
-			response = await this.send(
-				url,
-				method,
-				options.headers,
-				body,
-				await credential.refresh()
-			);
-		}
-
-		if (!response.ok) {
-			throw new CupboardHttpError(
-				method,
-				path,
-				response.status,
-				await response.text()
-			);
-		}
-
-		return response;
-	}
-
-	private send(
-		url: URL,
-		method: string,
-		headers: ConstructorParameters<typeof Headers>[0],
-		body: string | undefined,
-		bearer: string | undefined
-	): Promise<Response> {
-		throwIfAborted(this.signal);
-
-		const requestHeaders = new Headers(headers);
-
-		if (bearer !== undefined) {
-			requestHeaders.set('authorization', `Bearer ${bearer}`);
-		}
-
-		if (body !== undefined) {
-			requestHeaders.set('content-type', 'application/json');
-		}
-
-		return this.fetcher(url, {
-			method,
-			headers: requestHeaders,
-			body,
-			signal: this.signal
-		});
 	}
 }
 
@@ -447,14 +353,6 @@ export function cachePrefixFor(cache: string): string {
 	}
 
 	return `/cache/${cache}`;
-}
-
-interface ClientRequestOptions {
-	readonly method?: 'GET' | 'POST' | 'PUT' | 'DELETE';
-	readonly token?: AccessCredential;
-	readonly headers?: ConstructorParameters<typeof Headers>[0];
-	readonly body?: unknown;
-	readonly query?: Readonly<Record<string, string>>;
 }
 
 interface StreamingRequestInit extends RequestInit {

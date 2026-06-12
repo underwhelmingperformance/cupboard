@@ -2,7 +2,6 @@ import path from 'node:path';
 
 import { describe, expect, it } from 'vitest';
 
-import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
 import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import {
@@ -22,7 +21,6 @@ const contentAddressedFixture = path.join(
 
 interface Federation {
 	readonly server: CupboardTestServer;
-	readonly client: CupboardClient;
 	readonly directory: string;
 }
 
@@ -36,11 +34,7 @@ function withFederation(
 			const server = await CupboardTestServer.start(directory);
 
 			try {
-				await body({
-					server,
-					client: new CupboardClient(server.tenantUrl, server.uploadFetcher()),
-					directory
-				});
+				await body({ server, directory });
 			} finally {
 				await server.stop();
 			}
@@ -78,61 +72,70 @@ describe('OIDC federation', () => {
 		}));
 
 	it('federates a CI token into a write token bound to its allowed roots', () =>
-		withFederation(
-			'cupboard-e2e-ci-',
-			async ({ server, client, directory }) => {
-				const adminToken = await server.ownerAdminToken();
-				const rpc = tenantRpc(server.tenantUrl, {
-					credential: adminToken,
-					fetcher: server.uploadFetcher()
-				});
-				await rpc.oidcTrust.add({
-					issuer: server.issuer.issuer,
-					audience: ciAudience,
-					claims: { repository_owner_id: '5678' },
-					allowedRoots: ['github:owner/']
-				});
+		withFederation('cupboard-e2e-ci-', async ({ server, directory }) => {
+			const adminToken = await server.ownerAdminToken();
+			const rpc = tenantRpc(server.tenantUrl, {
+				credential: adminToken,
+				fetcher: server.uploadFetcher()
+			});
+			await rpc.oidcTrust.add({
+				issuer: server.issuer.issuer,
+				audience: ciAudience,
+				claims: { repository_owner_id: '5678' },
+				allowedRoots: ['github:owner/']
+			});
 
-				const ciToken = await server.exchangeIdToken(
-					server.issuer.sign({
-						aud: ciAudience,
-						sub: 'repo:owner/repo:ref:refs/heads/main',
-						repository_owner_id: '5678'
+			const ciToken = await server.exchangeIdToken(
+				server.issuer.sign({
+					aud: ciAudience,
+					sub: 'repo:owner/repo:ref:refs/heads/main',
+					repository_owner_id: '5678'
+				})
+			);
+
+			// Root activation gates on servability, so push a real target first.
+			const source = await NixStore.host(path.join(directory, 'source-home'));
+			const target = await source.add(contentAddressedFixture);
+			await pushStorePaths(
+				{
+					client: pushClientFor(server.tenantUrl, adminToken, {
+						fetcher: server.uploadFetcher()
+					}),
+					store: source,
+					workDirectory: directory
+				},
+				[target]
+			);
+
+			// The CI token authorises per call, so its derived client binds it
+			// directly rather than going through the cached owner session.
+			const ciRoots = tenantRpc(server.tenantUrl, {
+				credential: ciToken,
+				fetcher: server.uploadFetcher()
+			}).roots;
+			const permitted = await ciRoots.set({
+				cacheName: '_default',
+				name: 'github:owner/repo',
+				targets: [target]
+			});
+
+			expect({
+				permittedRoot: permitted.name,
+				outsideAllowedRoots: await ciRoots
+					.set({
+						cacheName: '_default',
+						name: 'github:other/repo',
+						targets: [target]
 					})
-				);
-
-				// Root activation gates on servability, so push a real target first.
-				const source = await NixStore.host(path.join(directory, 'source-home'));
-				const target = await source.add(contentAddressedFixture);
-				await pushStorePaths(
-					{
-						client: pushClientFor(server.tenantUrl, adminToken, {
-							fetcher: server.uploadFetcher()
-						}),
-						store: source,
-						workDirectory: directory
-					},
-					[target]
-				);
-
-				const permitted = await client.setRoot(ciToken, 'github:owner/repo', {
-					targets: [target]
-				});
-
-				expect({
-					permittedRoot: permitted.name,
-					outsideAllowedRoots: await client
-						.setRoot(ciToken, 'github:other/repo', { targets: [target] })
-						.then(
-							() => 'accepted',
-							() => 'refused'
-						)
-				}).toStrictEqual({
-					permittedRoot: 'github:owner/repo',
-					outsideAllowedRoots: 'refused'
-				});
-			}
-		));
+					.then(
+						() => 'accepted',
+						() => 'refused'
+					)
+			}).toStrictEqual({
+				permittedRoot: 'github:owner/repo',
+				outsideAllowedRoots: 'refused'
+			});
+		}));
 
 	it('refuses a CI token whose claims do not match the rule', () =>
 		withFederation('cupboard-e2e-ci-mismatch-', async ({ server }) => {
