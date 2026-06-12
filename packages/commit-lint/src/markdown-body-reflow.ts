@@ -103,7 +103,7 @@ export class MarkdownBodyReflower {
 					? paragraph.startColumn
 					: (paragraph.contentColumns.get(lineNumber) ?? 1);
 
-			return line.slice(contentColumn - 1);
+			return line.slice(contentColumn - 1).trimEnd();
 		});
 		const content = contentLines.join('\n').trim();
 
@@ -131,7 +131,9 @@ export class MarkdownBodyReflower {
 			}
 
 			return wrappedLines.map((line, index) =>
-				protectedContent.restore(index === 0 ? `${firstPrefix}${line}` : line)
+				protectedContent
+					.restore(index === 0 ? `${firstPrefix}${line}` : line)
+					.trimEnd()
 			);
 		} catch {
 			return undefined;

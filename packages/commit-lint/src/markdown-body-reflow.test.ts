@@ -246,6 +246,56 @@ describe('MarkdownBodyReflower', () => {
 		});
 	});
 
+	it('removes trailing prose spaces while wrapping paragraphs', () => {
+		const body = [
+			'This paragraph has a trailing space that should be removed before the ',
+			'reflowed text is linted again.',
+			''
+		].join('\n');
+
+		expect(reflowSummary(reflower.reflow(body))).toStrictEqual({
+			changed: true,
+			original: body,
+			reflowed: [
+				'This paragraph has a trailing space that should be removed before the',
+				'reflowed text is linted again.',
+				''
+			].join('\n')
+		});
+	});
+
+	it('removes trailing spaces introduced at wrapped soft line breaks', () => {
+		const body = [
+			"The R2 step consults the tenant Worker's secret names (values are",
+			'write-only and cannot be read back): when the pair is present and the',
+			'bucket name unchanged, it is kept without prompting or probing, and',
+			"the plan's Secrets row shows it as already set. When the bucket was",
+			'renamed during the review, the kept key may be scoped to the old name,',
+			'so the settle menu reappears with the fix in it: create a key scoped',
+			'to the new bucket (recommended), enter a pair, or keep the current key',
+			'as an explicit choice. The settle outcome is a sum type (settled, keep,',
+			'cancelled) rather than an optional pair.',
+			''
+		].join('\n');
+
+		expect(reflowSummary(reflower.reflow(body))).toStrictEqual({
+			changed: true,
+			original: body,
+			reflowed: [
+				"The R2 step consults the tenant Worker's secret names (values are write-",
+				'only and cannot be read back): when the pair is present and the bucket',
+				"name unchanged, it is kept without prompting or probing, and the plan's",
+				'Secrets row shows it as already set. When the bucket was renamed during',
+				'the review, the kept key may be scoped to the old name, so the settle',
+				'menu reappears with the fix in it: create a key scoped to the new bucket',
+				'(recommended), enter a pair, or keep the current key as an explicit',
+				'choice. The settle outcome is a sum type (settled, keep, cancelled)',
+				'rather than an optional pair.',
+				''
+			].join('\n')
+		});
+	});
+
 	it('uses display width for wide characters', () => {
 		const body = [
 			'これはとても長い日本語の文章ですこれはとても長い日本語の文章ですこれはとても長い日本語の文章ですこれはとても長い日本語の文章です',
@@ -281,6 +331,19 @@ describe('MarkdownBodyReflower', () => {
 		'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.\n',
 		'See [the release notes](https://example.com/releases/2026/06/09) before changing `*.ts` files because those details explain the compatibility rules.\n',
 		'- This list item has enough prose to exceed the configured seventy two column width and should keep a hanging indent.\n',
+		'This paragraph has a trailing space that should be removed before the \nreflowed text is linted again.\n',
+		[
+			"The R2 step consults the tenant Worker's secret names (values are",
+			'write-only and cannot be read back): when the pair is present and the',
+			'bucket name unchanged, it is kept without prompting or probing, and',
+			"the plan's Secrets row shows it as already set. When the bucket was",
+			'renamed during the review, the kept key may be scoped to the old name,',
+			'so the settle menu reappears with the fix in it: create a key scoped',
+			'to the new bucket (recommended), enter a pair, or keep the current key',
+			'as an explicit choice. The settle outcome is a sum type (settled, keep,',
+			'cancelled) rather than an optional pair.',
+			''
+		].join('\n'),
 		'Read https://example.com/releases/2026/06/09/with/a/very/long/path before changing the compatibility rules for clients.\n',
 		'これはとても長い日本語の文章ですこれはとても長い日本語の文章ですこれはとても長い日本語の文章ですこれはとても長い日本語の文章です\n'
 	])('is idempotent: reflowing the result changes nothing (%#)', (body) => {
