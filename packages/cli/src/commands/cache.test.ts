@@ -6,8 +6,6 @@ import type {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import {
 	type CacheClient,
 	runCacheCreate,
@@ -45,9 +43,9 @@ function uncalledClient(): never {
 
 function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 	return {
-		listCaches: uncalledClient,
-		putCache: uncalledClient,
-		removeCache: uncalledClient,
+		list: uncalledClient,
+		put: uncalledClient,
+		remove: uncalledClient,
 		...overrides
 	};
 }
@@ -63,9 +61,8 @@ describe('runCacheList', () => {
 		};
 
 		await runCacheList(
-			'admin-token',
 			reporter(results),
-			cacheClient({ listCaches: () => Promise.resolve(response) })
+			cacheClient({ list: () => Promise.resolve(response) })
 		);
 
 		expect(results).toStrictEqual([
@@ -79,8 +76,7 @@ describe('runCacheList', () => {
 
 describe('runCacheCreate', () => {
 	it('upserts the cache priority and reports the summary', async () => {
-		const calls: { token: AccessCredential; name: string; priority: number }[] =
-			[];
+		const calls: { cacheName: string; priority: number }[] = [];
 		const results: ResultRow[][] = [];
 		const summary: CacheSummary = {
 			name: 'builds',
@@ -91,18 +87,17 @@ describe('runCacheCreate', () => {
 		await runCacheCreate(
 			'builds',
 			30,
-			'admin-token',
 			reporter(results),
 			cacheClient({
-				putCache(token, name, priority) {
-					calls.push({ token, name, priority });
+				put(input) {
+					calls.push(input);
 					return Promise.resolve(summary);
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ token: 'admin-token', name: 'builds', priority: 30 }],
+			calls: [{ cacheName: 'builds', priority: 30 }],
 			results: [
 				[
 					{ label: 'Cache', value: 'builds' },
@@ -116,8 +111,7 @@ describe('runCacheCreate', () => {
 
 describe('runCacheRemove', () => {
 	it('removes the cache with the force flag and reports the outcome', async () => {
-		const calls: { token: AccessCredential; name: string; force: boolean }[] =
-			[];
+		const calls: Parameters<CacheClient['remove']>[0][] = [];
 		const results: ResultRow[][] = [];
 		const response: CacheRemoveResponse = {
 			name: 'builds',
@@ -128,18 +122,17 @@ describe('runCacheRemove', () => {
 		await runCacheRemove(
 			'builds',
 			true,
-			'admin-token',
 			reporter(results),
 			cacheClient({
-				removeCache(token, name, force) {
-					calls.push({ token, name, force });
+				remove(input) {
+					calls.push(input);
 					return Promise.resolve(response);
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ token: 'admin-token', name: 'builds', force: true }],
+			calls: [{ params: { cacheName: 'builds' }, query: { force: true } }],
 			results: [
 				[
 					{ label: 'Cache', value: 'builds' },
@@ -157,10 +150,9 @@ describe('runCacheInspect', () => {
 
 		await runCacheInspect(
 			'builds',
-			'admin-token',
 			reporter(results),
 			cacheClient({
-				listCaches: () =>
+				list: () =>
 					Promise.resolve({
 						caches: [{ name: 'builds', priority: 30, storePaths: 5 }]
 					})
@@ -182,9 +174,8 @@ describe('runCacheInspect', () => {
 
 		await runCacheInspect(
 			'missing',
-			'admin-token',
 			reporter(results, infos),
-			cacheClient({ listCaches: () => Promise.resolve({ caches: [] }) })
+			cacheClient({ list: () => Promise.resolve({ caches: [] }) })
 		);
 
 		expect({ results, infos }).toStrictEqual({
