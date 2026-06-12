@@ -1,5 +1,7 @@
 import type { AccessClaims, AccessScope } from '../auth/auth.ts';
+import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
+import type { SigningKeysService } from '../do/signing-keys-service.ts';
 
 /**
  * The capabilities the contract's procedures need from the Durable Object:
@@ -11,6 +13,8 @@ export interface TenantRpcServices {
 	requireScope(request: Request, scope: AccessScope): Promise<AccessClaims>;
 	withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
 	readonly cacheAdmin: CacheAdminService;
+	readonly signingKeys: SigningKeysService;
+	readonly authKeys: AuthKeysService;
 }
 
 /** The initial oRPC context for every tenant procedure call. */

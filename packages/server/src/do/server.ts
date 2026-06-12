@@ -3,7 +3,6 @@ import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
 	rootNameSchema,
-	signingKeyIdSchema,
 	storePathHashSchema
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
@@ -457,41 +456,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 		);
-		this.app.get('/keys', this.scoped('admin'), async (context) =>
-			context.json(await this.signingKeys.keyList())
-		);
-		this.app.post('/keys/rotate', this.scoped('admin'), async (context) =>
-			context.json(await this.signingKeys.rotateKey())
-		);
-		this.app.post('/keys/retire/:id', this.scoped('admin'), async (context) =>
-			context.json(
-				await this.signingKeys.retireKey(
-					parseRequestValue(signingKeyIdSchema, context.req.param('id'))
-				)
-			)
-		);
-
-		// The auth-token signing key set, rotated independently of the narinfo
-		// keys above; tokens carry the active key's `kid` and verify against any
-		// key still in the set.
-		this.app.get('/keys/auth', this.scoped('admin'), async (context) =>
-			context.json(await this.authKeys.authKeyList())
-		);
-		this.app.post(
-			'/keys/auth/rotate',
-			this.scoped('admin'),
-			this.maintenance(),
-			async (context) => context.json(await this.authKeys.rotateAuthKey())
-		);
-		this.app.post(
-			'/keys/auth/retire/:kid',
-			this.scoped('admin'),
-			this.maintenance(),
-			async (context) =>
-				context.json(
-					await this.authKeys.retireAuthKey(context.req.param('kid'))
-				)
-		);
 
 		this.app.get('/policies', this.scoped('admin'), (context) =>
 			context.json(this.retention.listPolicies())
@@ -870,7 +834,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				this.authKeys.requireScope(request, scope),
 			withMaintenanceEligibility: (body) =>
 				this.withMaintenanceEligibility(body),
-			cacheAdmin: this.cacheAdmin
+			cacheAdmin: this.cacheAdmin,
+			signingKeys: this.signingKeys,
+			authKeys: this.authKeys
 		};
 	}
 

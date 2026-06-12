@@ -6,8 +6,6 @@ import type {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import {
 	type AuthKeyClient,
 	runAuthKeyList,
@@ -53,9 +51,9 @@ function uncalled(): never {
 
 function authKeyClient(overrides: Partial<AuthKeyClient>): AuthKeyClient {
 	return {
-		listAuthKeys: uncalled,
-		rotateAuthKey: uncalled,
-		retireAuthKey: uncalled,
+		list: uncalled,
+		rotate: uncalled,
+		retire: uncalled,
 		...overrides
 	};
 }
@@ -75,9 +73,8 @@ describe('runAuthKeyList', () => {
 		};
 
 		await runAuthKeyList(
-			'admin-token',
 			reporter(results),
-			authKeyClient({ listAuthKeys: () => Promise.resolve(response) })
+			authKeyClient({ list: () => Promise.resolve(response) })
 		);
 
 		expect(results).toStrictEqual([
@@ -95,7 +92,6 @@ describe('runAuthKeyList', () => {
 
 describe('runAuthKeyRotate', () => {
 	it('rotates and reports the scheduled retirement', async () => {
-		const calls: AccessCredential[] = [];
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 		const response: AuthKeyRotateResponse = {
@@ -115,18 +111,11 @@ describe('runAuthKeyRotate', () => {
 		};
 
 		await runAuthKeyRotate(
-			'admin-token',
 			reporter(results, infos),
-			authKeyClient({
-				rotateAuthKey(token) {
-					calls.push(token);
-					return Promise.resolve(response);
-				}
-			})
+			authKeyClient({ rotate: () => Promise.resolve(response) })
 		);
 
-		expect({ calls, results, infoCount: infos.length }).toStrictEqual({
-			calls: ['admin-token'],
+		expect({ results, infoCount: infos.length }).toStrictEqual({
 			results: [
 				[
 					{ label: 'New key', value: 'kid-new' },
@@ -148,23 +137,22 @@ describe('runAuthKeyRetire', () => {
 		{ retired: true, value: 'yes' },
 		{ retired: false, value: 'not present' }
 	])('reports retired=$retired', async ({ retired, value }) => {
-		const calls: { token: AccessCredential; kid: string }[] = [];
+		const calls: { kid: string }[] = [];
 		const results: ResultRow[][] = [];
 
 		await runAuthKeyRetire(
 			'kid-old',
-			'admin-token',
 			reporter(results),
 			authKeyClient({
-				retireAuthKey(token, kid) {
-					calls.push({ token, kid });
+				retire(input) {
+					calls.push(input);
 					return Promise.resolve({ kid: 'kid-old', retired });
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ token: 'admin-token', kid: 'kid-old' }],
+			calls: [{ kid: 'kid-old' }],
 			results: [
 				[
 					{ label: 'Key', value: 'kid-old' },
