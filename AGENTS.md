@@ -39,3 +39,14 @@ it.
 
 - Do not put program logic in `index.ts` files; keep them to module entrypoints
   and re-exports.
+- All HTTP routing in `packages/server` is Hono: the worker app in
+  `routing/handler.ts`, the control plane in `control/control-app.ts`, and the
+  tenant Durable Object's app in `do/server.ts`. Never hand-roll a dispatcher
+  over pathnames. Authentication, maintenance eligibility and cache scoping are
+  middleware; services take parsed values and return typed protocol objects,
+  with the route layer doing the parsing and rendering. Only wire-format
+  endpoints (OAuth, the Nix binary-cache protocol, the commit WebSocket,
+  streamed object serves) handle raw Request/Response.
+- Hono answers HEAD by re-dispatching the request to the GET handler with the
+  body stripped, so register reads with `.get()`; an explicit HEAD registration
+  never matches.
