@@ -14,7 +14,7 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
 
 interface CacheCreateOptions {
@@ -27,18 +27,18 @@ interface CacheRemoveOptions {
 	readonly force?: boolean;
 }
 
+/**
+ * The slice of the derived client the cache commands consume, in the
+ * contract's input and output shapes; the real `tenantRpc(...).caches`
+ * satisfies it by construction.
+ */
 export interface CacheClient {
-	listCaches(token: AccessCredential): Promise<CacheListResponse>;
-	putCache(
-		token: AccessCredential,
-		name: string,
-		priority: number
-	): Promise<CacheSummary>;
-	removeCache(
-		token: AccessCredential,
-		name: string,
-		force: boolean
-	): Promise<CacheRemoveResponse>;
+	list(): Promise<CacheListResponse>;
+	put(input: { cacheName: string; priority: number }): Promise<CacheSummary>;
+	remove(input: {
+		params: { cacheName: string };
+		query?: { force?: boolean };
+	}): Promise<CacheRemoveResponse>;
 }
 
 function parsePriority(value: string): number {
@@ -67,12 +67,12 @@ export function registerCacheCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runCacheList(token, reporter, client);
+			await runCacheList(reporter, rpc.caches);
 		});
 
 	cache
@@ -89,17 +89,16 @@ export function registerCacheCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
 			await runCacheCreate(
 				name,
 				options.priority ?? CacheInfo.default.priority,
-				token,
 				reporter,
-				client
+				rpc.caches
 			);
 		});
 
@@ -113,18 +112,12 @@ export function registerCacheCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runCacheRemove(
-				name,
-				options.force ?? false,
-				token,
-				reporter,
-				client
-			);
+			await runCacheRemove(name, options.force ?? false, reporter, rpc.caches);
 		});
 
 	cache
@@ -136,22 +129,21 @@ export function registerCacheCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runCacheInspect(name, token, reporter, client);
+			await runCacheInspect(name, reporter, rpc.caches);
 		});
 }
 
 export async function runCacheList(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: CacheClient
 ): Promise<void> {
 	const { caches } = await reporter.phase('Listing caches', () =>
-		client.listCaches(token)
+		client.list()
 	);
 
 	reporter.result(caches.map((summary) => cacheRow(summary)));
@@ -160,12 +152,11 @@ export async function runCacheList(
 export async function runCacheCreate(
 	name: string,
 	priority: number,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: CacheClient
 ): Promise<void> {
 	const summary = await reporter.phase('Creating cache', () =>
-		client.putCache(token, name, priority)
+		client.put({ cacheName: name, priority })
 	);
 
 	reporter.result(summaryRows(summary));
@@ -174,12 +165,11 @@ export async function runCacheCreate(
 export async function runCacheRemove(
 	name: string,
 	force: boolean,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: CacheClient
 ): Promise<void> {
 	const result = await reporter.phase('Removing cache', () =>
-		client.removeCache(token, name, force)
+		client.remove({ params: { cacheName: name }, query: { force } })
 	);
 
 	reporter.result([
@@ -194,12 +184,11 @@ export async function runCacheRemove(
 
 export async function runCacheInspect(
 	name: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: CacheClient
 ): Promise<void> {
 	const { caches } = await reporter.phase('Inspecting cache', () =>
-		client.listCaches(token)
+		client.list()
 	);
 	const summary = caches.find((candidate) => candidate.name === name);
 
