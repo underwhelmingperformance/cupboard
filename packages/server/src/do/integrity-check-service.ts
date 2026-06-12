@@ -19,20 +19,12 @@ import {
 	narObjectKey
 } from '../http/http.ts';
 
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
 
 export class IntegrityCheckService {
-	constructor(
-		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService
-	) {}
+	constructor(private readonly context: ServerContext) {}
 
-	async handleCheck(request: Request): Promise<Response> {
-		await this.authKeys.requireScope(request, 'admin');
-
-		const deep = new URL(request.url).searchParams.get('deep') === 'true';
-
+	async check(deep: boolean): Promise<CheckReport> {
 		const total =
 			this.context.db.select({ count: count() }).from(schema.narInfos).get()
 				?.count ?? 0;
@@ -87,12 +79,12 @@ export class IntegrityCheckService {
 			}
 		}
 
-		return Response.json({
+		return {
 			narInfosChecked: rows.length,
 			narBlobsChecked,
 			complete: rows.length === total,
 			discrepancies
-		} satisfies CheckReport);
+		};
 	}
 
 	private async checkNarBlob(
