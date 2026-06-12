@@ -1,13 +1,16 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
+import { cachePutBodySchema } from '@cupboard/protocol/caches';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { DurableObject } from 'cloudflare:workers';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
+import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
 
 import migrations from '../../drizzle/migrations.js';
+import type { AccessScope } from '../auth/auth.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CommitUpgradeRequiredError,
@@ -18,7 +21,7 @@ import {
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
-import { parseRequestValue } from '../http/parse.ts';
+import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 
 import {
@@ -36,6 +39,7 @@ import { sendCommitFrame } from './commit-socket.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
+import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -55,7 +59,7 @@ import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
-	private readonly app = new Hono<{ Bindings: RuntimeEnv }>();
+	private readonly app = new Hono<TenantHonoEnv>();
 	readonly context: ServerContext;
 	private migrationPromise: Promise<void> | undefined;
 
@@ -114,11 +118,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.context,
 			this.authKeys
 		);
-		this.cacheAdmin = new CacheAdminService(
-			this.context,
-			this.authKeys,
-			this.deletionQueue
-		);
+		this.cacheAdmin = new CacheAdminService(this.context, this.deletionQueue);
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
 			this.authKeys,
@@ -367,6 +367,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await next();
 		});
 
+		// Every request addresses a cache: the default one unless a
+		// `/cache/:cacheName/` prefix names another, validated here so the routes
+		// under the prefix always see a well-formed name.
+		this.app.use(async (context, next) => {
+			context.set('cache', DEFAULT_CACHE);
+			await next();
+		});
+		this.app.use('/cache/:cacheName/*', async (context, next) => {
+			context.set(
+				'cache',
+				parseRequestValue(cacheNameSchema, context.req.param('cacheName'))
+			);
+			await next();
+		});
+
 		this.app.on(['GET', 'HEAD'], '/pubkey', async (context) =>
 			// Served uncached so a rotation is visible across colos at once; the
 			// strong ETag still lets Nix revalidate conditionally.
@@ -386,9 +401,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			['GET', 'HEAD'],
 			'/cache/:cacheName/nix-cache-info',
 			(context) =>
-				this.cacheAdmin.handleCacheInfo(
+				textResponse(
 					context.req.raw,
-					context.req.param('cacheName')
+					this.cacheAdmin.cacheInfoBody(context.get('cache')),
+					{
+						'content-type': 'text/x-nix-cache-info; charset=utf-8'
+					}
 				)
 		);
 
@@ -439,22 +457,43 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		// The cache registry is deployment-wide, so it lives at `/caches` rather
 		// than under a per-cache prefix.
-		this.app.get('/caches', (context) =>
-			this.cacheAdmin.handleListCaches(context.req.raw)
+		this.app.get('/caches', this.scoped('admin'), (context) =>
+			context.json(this.cacheAdmin.listCaches())
 		);
-		this.app.put('/caches/:cacheName', (context) =>
-			this.cacheAdmin.handlePutCache(
-				context.req.raw,
-				context.req.param('cacheName')
-			)
-		);
-		this.app.delete('/caches/:cacheName', (context) =>
-			this.withMaintenanceEligibility(() =>
-				this.cacheAdmin.handleRemoveCache(
-					context.req.raw,
+		this.app.put(
+			'/caches/:cacheName',
+			this.scoped('admin'),
+			async (context) => {
+				const cache = parseRequestValue(
+					cacheNameSchema,
 					context.req.param('cacheName')
-				)
-			)
+				);
+				const body = await parseRequestBody(
+					cachePutBodySchema,
+					context.req.raw
+				);
+
+				return context.json(this.cacheAdmin.putCache(cache, body.priority));
+			}
+		);
+		this.app.delete(
+			'/caches/:cacheName',
+			this.scoped('admin'),
+			this.maintenance(),
+			async (context) => {
+				const cache = parseRequestValue(
+					cacheNameSchema,
+					context.req.param('cacheName')
+				);
+
+				return context.json(
+					await this.cacheAdmin.removeCache(
+						cache,
+						context.req.query('force') === 'true',
+						new URL(context.req.url).origin
+					)
+				);
+			}
 		);
 		this.app.get('/policies', (context) =>
 			this.retention.handleListPolicies(context.req.raw)
@@ -813,6 +852,33 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	webSocketError(socket: WebSocket): void {
 		socket.close(1011, 'socket error');
+	}
+
+	// Authenticates a route against the tenant's auth keys, making the verified
+	// claims available to the handler. Admin tokens satisfy every scope.
+	private scoped(scope: AccessScope) {
+		return createMiddleware<TenantHonoEnv>(async (context, next) => {
+			context.set(
+				'claims',
+				await this.authKeys.requireScope(context.req.raw, scope)
+			);
+			await next();
+		});
+	}
+
+	// Brackets a mutating route with the maintenance-eligibility bookkeeping:
+	// invalidated before the work, reconciled after it, failing open if the
+	// reconciliation cannot run.
+	private maintenance() {
+		return createMiddleware<TenantHonoEnv>(async (_context, next) => {
+			await this.maintenanceEligibility.invalidate();
+
+			try {
+				await next();
+			} finally {
+				await this.reconcileMaintenanceEligibility();
+			}
+		});
 	}
 
 	private async withMaintenanceEligibility<T>(
