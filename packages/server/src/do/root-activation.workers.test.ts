@@ -48,11 +48,15 @@ describe('root activation gating', () => {
 		// Deferred to the background pass: staged and pending, never yet servable.
 		await markUploadPendingVerification(upload.uploadId);
 
-		const response = await authorisedFetch('/roots/main', token, {
-			body: JSON.stringify({ targets: [metadata.storePath] }),
-			headers: { 'content-type': 'application/json' },
-			method: 'PUT'
-		});
+		const response = await authorisedFetch(
+			'/cache/_default/roots/main',
+			token,
+			{
+				body: JSON.stringify({ targets: [metadata.storePath] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
 		const { roots } = await listRoots(token);
 
 		expect({ status: response.status, roots }).toStrictEqual({

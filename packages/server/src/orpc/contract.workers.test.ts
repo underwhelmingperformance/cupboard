@@ -195,6 +195,47 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('drives roots, path deletion and gc through the derived client', async () => {
+		await useTestServer('contract-roots');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await pushPath(init.token, metadata);
+
+		const set = await client.roots.set({
+			cacheName: '_default',
+			name: 'github:owner/repo/main',
+			targets: [metadata.storePath]
+		});
+		const listed = await client.roots.list({ cacheName: '_default' });
+		const removedRoot = await client.roots.remove({
+			cacheName: '_default',
+			name: 'github:owner/repo/main'
+		});
+		const removedPath = await client.paths.remove({
+			cacheName: '_default',
+			hash: metadata.storePathHash
+		});
+		const swept = await client.gc.runAll();
+
+		expect({
+			setTargets: set.targets.map((entry) => entry.present),
+			listedNames: listed.roots.map((entry) => entry.name),
+			removedRoot,
+			removedPath: {
+				deleted: removedPath.deleted,
+				storePathHash: removedPath.storePathHash
+			},
+			sweptOk: swept.ok
+		}).toStrictEqual({
+			setTargets: [true],
+			listedNames: ['github:owner/repo/main'],
+			removedRoot: { name: 'github:owner/repo/main', removed: true },
+			removedPath: { deleted: true, storePathHash: metadata.storePathHash },
+			sweptOk: true
+		});
+	});
+
 	it('refuses a write-scoped token on an admin procedure', async () => {
 		await useTestServer('contract-scope');
 		await bootstrap();

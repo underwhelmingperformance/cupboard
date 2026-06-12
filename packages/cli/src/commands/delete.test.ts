@@ -3,8 +3,6 @@ import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';
 
 describe('describeNarOutcome', () => {
@@ -35,15 +33,15 @@ describe('describeNarOutcome', () => {
 });
 
 describe('runDelete', () => {
-	it('derives the hash, calls the client with the token, and reports', async () => {
-		const calls: { token: AccessCredential; storePathHash: string }[] = [];
+	it('derives the hash, addresses the cache, and reports', async () => {
+		const calls: { cacheName: string; hash: string }[] = [];
 		const results: ResultRow[][] = [];
 		const client: DeleteClient = {
-			deleteStorePath(token, storePathHash) {
-				calls.push({ token, storePathHash });
+			remove(input) {
+				calls.push(input);
 
 				return Promise.resolve({
-					storePathHash,
+					storePathHash: input.hash,
 					deleted: true,
 					narScheduledForDeletion: false
 				});
@@ -51,16 +49,16 @@ describe('runDelete', () => {
 		};
 
 		await runDelete(
+			'_default',
 			'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
-			'admin-token',
 			reporter(results),
 			client
 		);
 
 		expect(calls).toStrictEqual([
 			{
-				token: 'admin-token',
-				storePathHash: '0123456789abcdfghijklmnpqrsvwxyz'
+				cacheName: '_default',
+				hash: '0123456789abcdfghijklmnpqrsvwxyz'
 			}
 		]);
 		expect(results).toStrictEqual([
@@ -77,8 +75,8 @@ describe('runDelete', () => {
 
 	it('rejects an argument that is not a store path', async () => {
 		await expect(
-			runDelete('/tmp/not-a-store-path', 't', reporter([]), {
-				deleteStorePath() {
+			runDelete('_default', '/tmp/not-a-store-path', reporter([]), {
+				remove() {
 					throw new Error('client should not be called');
 				}
 			})

@@ -2055,7 +2055,7 @@ describe('upload flow', () => {
 
 	it('rejects an unauthenticated delete', async () => {
 		const response = await fetchPath(
-			'/paths/11111111111111111111111111111111',
+			'/cache/_default/paths/11111111111111111111111111111111',
 			{
 				method: 'DELETE'
 			}
@@ -2066,9 +2066,13 @@ describe('upload flow', () => {
 
 	it('rejects a malformed store path hash', async () => {
 		const token = await initialise();
-		const response = await authorisedFetch('/paths/not-a-valid-hash', token, {
-			method: 'DELETE'
-		});
+		const response = await authorisedFetch(
+			'/cache/_default/paths/not-a-valid-hash',
+			token,
+			{
+				method: 'DELETE'
+			}
+		);
 
 		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
@@ -2216,11 +2220,15 @@ describe('upload flow', () => {
 
 			// Re-setting the same root with a not-yet-servable target must be refused
 			// wholesale, so the channel keeps its previous, servable target set.
-			const response = await authorisedFetch('/roots/main', token, {
-				body: JSON.stringify({ targets: [committed.storePath, absentPath] }),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			});
+			const response = await authorisedFetch(
+				'/cache/_default/roots/main',
+				token,
+				{
+					body: JSON.stringify({ targets: [committed.storePath, absentPath] }),
+					headers: { 'content-type': 'application/json' },
+					method: 'PUT'
+				}
+			);
 			const { roots } = await listRoots(token);
 
 			expect({ status: response.status, roots }).toStrictEqual({
@@ -2348,13 +2356,15 @@ describe('upload flow', () => {
 
 		it('requires auth for the root routes', async () => {
 			const target = '/nix/store/11111111111111111111111111111111-a';
-			const set = await fetchPath('/roots/main', {
+			const set = await fetchPath('/cache/_default/roots/main', {
 				body: JSON.stringify({ targets: [target] }),
 				headers: { 'content-type': 'application/json' },
 				method: 'PUT'
 			});
-			const list = await fetchPath('/roots');
-			const remove = await fetchPath('/roots/main', { method: 'DELETE' });
+			const list = await fetchPath('/cache/_default/roots');
+			const remove = await fetchPath('/cache/_default/roots/main', {
+				method: 'DELETE'
+			});
 
 			expect([set.status, list.status, remove.status]).toStrictEqual([
 				StatusCodes.UNAUTHORIZED,
@@ -2365,11 +2375,15 @@ describe('upload flow', () => {
 
 		it('rejects a malformed root request', async () => {
 			const token = await initialise();
-			const response = await authorisedFetch('/roots/main', token, {
-				body: JSON.stringify({ targets: [] }),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			});
+			const response = await authorisedFetch(
+				'/cache/_default/roots/main',
+				token,
+				{
+					body: JSON.stringify({ targets: [] }),
+					headers: { 'content-type': 'application/json' },
+					method: 'PUT'
+				}
+			);
 
 			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 		});
@@ -2637,13 +2651,17 @@ describe('upload flow', () => {
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
 			);
 			const stats = await authorisedFetch(defaultCacheStatsPath, token);
-			const setRootResponse = await authorisedFetch('/roots/main', token, {
-				body: JSON.stringify({
-					targets: ['/nix/store/11111111111111111111111111111111-a']
-				}),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			});
+			const setRootResponse = await authorisedFetch(
+				'/cache/_default/roots/main',
+				token,
+				{
+					body: JSON.stringify({
+						targets: ['/nix/store/11111111111111111111111111111111-a']
+					}),
+					headers: { 'content-type': 'application/json' },
+					method: 'PUT'
+				}
+			);
 
 			expect([stats.status, setRootResponse.status]).toStrictEqual([
 				StatusCodes.OK,
@@ -2661,14 +2679,18 @@ describe('upload flow', () => {
 			);
 			const writeToken = await mintServerSignedToken('write', 'ci', ['main']);
 
-			const setRoot = await authorisedFetch('/roots/main', writeToken, {
-				body: JSON.stringify({ targets: [target] }),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			});
+			const setRoot = await authorisedFetch(
+				'/cache/_default/roots/main',
+				writeToken,
+				{
+					body: JSON.stringify({ targets: [target] }),
+					headers: { 'content-type': 'application/json' },
+					method: 'PUT'
+				}
+			);
 			const stats = await authorisedFetch(defaultCacheStatsPath, writeToken);
 			const removed = await authorisedFetch(
-				'/paths/11111111111111111111111111111111',
+				'/cache/_default/paths/11111111111111111111111111111111',
 				writeToken,
 				{ method: 'DELETE' }
 			);

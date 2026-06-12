@@ -1706,9 +1706,13 @@ export async function deletePath(
 	token: string,
 	storePathHash: string
 ): Promise<DeletePathResponse> {
-	const response = await authorisedFetch(`/paths/${storePathHash}`, token, {
-		method: 'DELETE'
-	});
+	const response = await authorisedFetch(
+		`/cache/${WIRE_DEFAULT_CACHE}/paths/${storePathHash}`,
+		token,
+		{
+			method: 'DELETE'
+		}
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -1721,7 +1725,7 @@ export async function setRoot(
 ): Promise<RootSetResponse> {
 	const { name, ...body } = fields;
 	const response = await authorisedFetch(
-		`/roots/${encodeURIComponent(name)}`,
+		`/cache/${WIRE_DEFAULT_CACHE}/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			body: JSON.stringify(body),
@@ -1736,7 +1740,10 @@ export async function setRoot(
 }
 
 export async function listRoots(token: string): Promise<RootListResponse> {
-	const response = await authorisedFetch('/roots', token);
+	const response = await authorisedFetch(
+		`/cache/${WIRE_DEFAULT_CACHE}/roots`,
+		token
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -1748,7 +1755,7 @@ export async function removeRoot(
 	name: string
 ): Promise<RootRemoveResponse> {
 	const response = await authorisedFetch(
-		`/roots/${encodeURIComponent(name)}`,
+		`/cache/${WIRE_DEFAULT_CACHE}/roots/${encodeURIComponent(name)}`,
 		token,
 		{
 			method: 'DELETE'
