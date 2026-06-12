@@ -1,7 +1,7 @@
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 
-import { handleControl } from '../control/control-plane.ts';
+import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantWritesStoppedError } from '../errors.ts';
 import { serverErrorResponse } from '../http/error-response.ts';
@@ -28,9 +28,7 @@ export default {
 
 		// The bare host is the control surface: the control plane's own auth.
 		if (route === undefined) {
-			const control = await handleControl(request, env);
-
-			return control ?? notFound();
+			return controlApp.fetch(request, env, ctx);
 		}
 
 		// Admission resolves the slug against the published manifest, reading only
