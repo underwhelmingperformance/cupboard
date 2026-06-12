@@ -7,8 +7,6 @@ import {
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
-import type { AccessCredential } from '../client/client.ts';
-
 import {
 	InvalidQuotaBytesError,
 	parseQuotaBytes,
@@ -74,10 +72,10 @@ function uncalled(): never {
 
 function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 	return {
-		createTenant: uncalled,
-		listTenants: uncalled,
-		suspendTenant: uncalled,
-		deleteTenant: uncalled,
+		create: uncalled,
+		list: uncalled,
+		suspend: uncalled,
+		remove: uncalled,
 		...overrides
 	};
 }
@@ -89,10 +87,9 @@ describe('runTenantCreate', () => {
 
 		await runTenantCreate(
 			createBody(),
-			'admin-token',
 			reporter(results),
 			tenantClient({
-				createTenant(_token, body) {
+				create(body) {
 					calls.push(body);
 					return Promise.resolve(summary({}));
 				}
@@ -130,10 +127,9 @@ describe('runTenantCreate', () => {
 
 		await runTenantCreate(
 			body,
-			'admin-token',
 			reporter(results),
 			tenantClient({
-				createTenant(_token, sent) {
+				create(sent) {
 					calls.push(sent);
 					return Promise.resolve(summary({}));
 				}
@@ -168,10 +164,9 @@ describe('runTenantCreate', () => {
 
 		await runTenantCreate(
 			body,
-			'admin-token',
 			reporter(results),
 			tenantClient({
-				createTenant() {
+				create() {
 					return Promise.resolve(summary({}));
 				}
 			}),
@@ -280,9 +275,8 @@ describe('runTenantList', () => {
 		};
 
 		await runTenantList(
-			'admin-token',
 			reporter(results),
-			tenantClient({ listTenants: () => Promise.resolve(response) })
+			tenantClient({ list: () => Promise.resolve(response) })
 		);
 
 		expect(results).toStrictEqual([
@@ -299,33 +293,32 @@ describe('runTenantSuspend / runTenantDelete', () => {
 		{
 			name: 'suspend',
 			run: runTenantSuspend,
-			method: 'suspendTenant' as const,
+			method: 'suspend' as const,
 			status: 'suspended' as const
 		},
 		{
 			name: 'delete',
 			run: runTenantDelete,
-			method: 'deleteTenant' as const,
+			method: 'remove' as const,
 			status: 'offboarding' as const
 		}
 	])('$name reports the resulting status', async ({ run, method, status }) => {
 		const results: ResultRow[][] = [];
-		const calls: { token: AccessCredential; id: string }[] = [];
+		const calls: { id: string }[] = [];
 
 		await run(
 			'acme',
-			'admin-token',
 			reporter(results),
 			tenantClient({
-				[method](token: AccessCredential, id: string) {
-					calls.push({ token, id });
+				[method](input: { id: string }) {
+					calls.push(input);
 					return Promise.resolve({ id: 'acme', status });
 				}
 			})
 		);
 
 		expect({ calls, results }).toStrictEqual({
-			calls: [{ token: 'admin-token', id: 'acme' }],
+			calls: [{ id: 'acme' }],
 			results: [[{ label: 'acme', value: status }]]
 		});
 	});

@@ -1,6 +1,6 @@
-import { tenantContract } from '@cupboard/protocol/contract';
+import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import { createORPCClient } from '@orpc/client';
-import type { ContractRouterClient } from '@orpc/contract';
+import type { AnyContractRouter, ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
@@ -34,6 +34,14 @@ export interface TenantRpcOptions {
 const unauthorizedStatusCode = 401;
 
 /**
+ * The control-plane admin client, derived from the control contract the same
+ * way {@link TenantRpc} derives from the tenant one.
+ */
+export type ControlRpc = JsonifiedClient<
+	ContractRouterClient<typeof controlContract>
+>;
+
+/**
  * Builds the derived client against a tenant base URL (the worker origin, or
  * `https://host/t/<slug>` for a hosted tenant; the link preserves the path
  * prefix). The credential binds at construction; a provider-backed credential
@@ -44,10 +52,32 @@ export function tenantRpc(
 	baseUrl: string | URL,
 	options: TenantRpcOptions = {}
 ): TenantRpc {
+	return derivedClient(tenantContract, new URL(baseUrl), options);
+}
+
+/**
+ * Builds the derived control client against the deployment's bare host; the
+ * contract's procedures live under its `/control` prefix.
+ */
+export function controlRpc(
+	baseUrl: string | URL,
+	options: TenantRpcOptions = {}
+): ControlRpc {
+	const url = new URL(baseUrl);
+	url.pathname = `${url.pathname.replace(/\/$/, '')}/control`;
+
+	return derivedClient(controlContract, url, options);
+}
+
+function derivedClient<C extends AnyContractRouter>(
+	contract: C,
+	url: URL,
+	options: TenantRpcOptions
+): JsonifiedClient<ContractRouterClient<C>> {
 	const { credential, signal, fetcher = fetch } = options;
 
-	const link = new OpenAPILink(tenantContract, {
-		url: new URL(baseUrl),
+	const link = new OpenAPILink(contract, {
+		url,
 		headers: async () => bearerHeaders(await resolveBearer(credential)),
 		fetch: async (request, init) => {
 			throwIfAborted(signal);
@@ -72,7 +102,7 @@ export function tenantRpc(
 				signal
 			});
 		},
-		plugins: [new ResponseValidationPlugin(tenantContract)]
+		plugins: [new ResponseValidationPlugin(contract)]
 	});
 
 	return createORPCClient(link);

@@ -3,6 +3,7 @@ import { OpenAPIHandler } from '@orpc/openapi/fetch';
 import { ZodToJsonSchemaConverter } from '@orpc/zod/zod4';
 
 import { type TenantOrpcContext } from './context.ts';
+import { type ControlOrpcContext, controlRouter } from './control-router.ts';
 import { tenantRouter } from './tenant-router.ts';
 
 /**
@@ -13,6 +14,21 @@ import { tenantRouter } from './tenant-router.ts';
  */
 export const tenantOrpcHandler = new OpenAPIHandler<TenantOrpcContext>(
 	tenantRouter,
+	{
+		plugins: [
+			new SmartCoercionPlugin({
+				schemaConverters: [new ZodToJsonSchemaConverter()]
+			})
+		]
+	}
+);
+
+/**
+ * The fetch-shaped handler serving the control contract, mounted in the
+ * worker's control app under the `/control` prefix.
+ */
+export const controlOrpcHandler = new OpenAPIHandler<ControlOrpcContext>(
+	controlRouter,
 	{
 		plugins: [
 			new SmartCoercionPlugin({

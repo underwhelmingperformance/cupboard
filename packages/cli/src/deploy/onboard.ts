@@ -1,7 +1,15 @@
 import { cacheNamePattern } from '@cupboard/nix/scalars';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
-import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
-import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
+import type {
+	ParsedControlCheckReport,
+	ParsedR2CredentialCheck
+} from '@cupboard/protocol/reports';
+import type {
+	ParsedTenantListResponse,
+	ParsedTenantSummary,
+	TenantCreateBody
+} from '@cupboard/protocol/tenants';
+import { ORPCError } from '@orpc/client';
 
 import { delayMs, throwIfAborted } from '../abort.ts';
 import {
@@ -10,6 +18,7 @@ import {
 	writeCachedSession
 } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
+import { controlRpc } from '../client/orpc.ts';
 import { CupboardHttpError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
@@ -115,17 +124,24 @@ export type OnboardOutcome =
 	  }
 	| { readonly kind: 'no-subdomain' };
 
-/** The slice of {@link CupboardClient} the onboarding drives. */
-export type OnboardClient = Pick<
+/**
+ * What the onboarding drives: the raw endpoints {@link CupboardClient}
+ * serves, plus the control procedures in the contract's shapes. The tokens
+ * arrive per call because they are minted mid-flow, after the client is
+ * built; the default factory answers each control call with a derived client
+ * bound to that token.
+ */
+export interface OnboardClient extends Pick<
 	CupboardClient,
-	| 'version'
-	| 'signup'
-	| 'tokenExchange'
-	| 'listTenants'
-	| 'createTenant'
-	| 'controlCheck'
-	| 'publicKey'
->;
+	'version' | 'signup' | 'tokenExchange' | 'publicKey'
+> {
+	listTenants(token: string): Promise<ParsedTenantListResponse>;
+	createTenant(
+		token: string,
+		body: TenantCreateBody
+	): Promise<ParsedTenantSummary>;
+	controlCheck(token: string): Promise<ParsedControlCheckReport>;
+}
 
 /**
  * How this deploy settled the Worker's R2 pair: freshly set after a
@@ -220,7 +236,7 @@ export async function onboardDeployment(
 	const { ui, admin } = options;
 	const clientFactory =
 		options.clientFactory ??
-		((url: string) => CupboardClient.fromUrl(url, { signal: options.signal }));
+		((url: string) => onboardClientFor(url, options.signal));
 	const cacheSession = options.cacheSession ?? writeCachedSession;
 	const attempts = options.attempts ?? defaultAttempts;
 	const signal = options.signal;
@@ -419,6 +435,25 @@ async function resolveDeploymentUrl(
 	return url;
 }
 
+// The raw endpoints come from the hand-written client; each control call
+// builds a derived client bound to the token minted earlier in the flow.
+function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
+	const raw = CupboardClient.fromUrl(url, { signal });
+	const control = (token: string) =>
+		controlRpc(url, { credential: token, signal });
+
+	return {
+		version: () => raw.version(),
+		publicKey: () => raw.publicKey(),
+		signup: (request) => raw.signup(request),
+		tokenExchange: (subjectToken, subjectTokenType) =>
+			raw.tokenExchange(subjectToken, subjectTokenType),
+		listTenants: (token) => control(token).tenants.list(),
+		createTenant: (token, body) => control(token).tenants.create(body),
+		controlCheck: (token) => control(token).check()
+	};
+}
+
 type ClaimResult =
 	| { readonly kind: 'claimed'; readonly token: string }
 	| {
@@ -472,10 +507,10 @@ async function ensureWorkerR2(deps: {
 	} catch (error) {
 		// An older deployment has no check route; the credentials stay
 		// unproven rather than the onboarding failing.
-		if (error instanceof CupboardHttpError) {
+		if (error instanceof ORPCError) {
 			ui.warn(
-				`Could not check the R2 credentials (${error.method} ${error.path} ` +
-					`answered HTTP ${String(error.status)}).`
+				`Could not check the R2 credentials (the deployment answered ` +
+					`HTTP ${String(error.status)}).`
 			);
 
 			return;
@@ -719,10 +754,7 @@ async function createFirstTenant(
 				})
 			);
 		} catch (error) {
-			if (
-				error instanceof CupboardHttpError &&
-				error.status === conflictStatusCode
-			) {
+			if (error instanceof ORPCError && error.status === conflictStatusCode) {
 				ui.warn(`"${slug}" is already taken; choose another.`);
 				continue;
 			}
