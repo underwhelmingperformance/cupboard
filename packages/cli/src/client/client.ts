@@ -158,11 +158,14 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Probes the deployment's unauthenticated health route at the base URL,
-	 * throwing a {@link CupboardHttpError} when it does not answer OK.
+	 * The build version the deployment answers on its unauthenticated
+	 * `/_version` route, without the trailing newline the route renders.
 	 */
-	async health(): Promise<void> {
-		await this.request('/_health');
+	async version(): Promise<string> {
+		const response = await this.request('/_version');
+		const body = await response.text();
+
+		return body.trimEnd();
 	}
 
 	private scoped(path: string): string {

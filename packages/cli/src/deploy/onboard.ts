@@ -89,6 +89,7 @@ export type OnboardOutcome =
 			readonly url: string;
 			readonly status: number;
 	  }
+	| { readonly kind: 'claim-cancelled'; readonly url: string }
 	| { readonly kind: 'cancelled'; readonly url: string }
 	| {
 			readonly kind: 'unreachable';
@@ -101,8 +102,18 @@ export type OnboardOutcome =
 /** The slice of {@link CupboardClient} the onboarding drives. */
 export type OnboardClient = Pick<
 	CupboardClient,
-	'health' | 'signup' | 'tokenExchange' | 'createTenant' | 'publicKey'
+	'version' | 'signup' | 'tokenExchange' | 'createTenant' | 'publicKey'
 >;
+
+/**
+ * What the deploy knows about the `CUPBOARD_SIGNUP_SECRET` Worker secret,
+ * which takes precedence over the admin binding when set: the value itself
+ * when this deploy supplied it, only that one exists, or nothing.
+ */
+export type ClaimSecret =
+	| { readonly kind: 'known'; readonly value: string }
+	| { readonly kind: 'configured' }
+	| { readonly kind: 'none' };
 
 export interface OnboardOptions {
 	readonly api: CloudflareApi;
@@ -111,6 +122,9 @@ export interface OnboardOptions {
 	readonly controlScriptName: string;
 	readonly domain: string | undefined;
 	readonly admin: OnboardAdmin;
+	/** The version the uploaded Workers answer on `/_version`. */
+	readonly buildVersion: string;
+	readonly claimSecret: ClaimSecret;
 	readonly clientFactory?: (url: string) => OnboardClient;
 	readonly cacheToken?: (token: string, target: string) => Promise<void>;
 	readonly sleep?: (ms: number) => Promise<void>;
@@ -141,12 +155,14 @@ export function slugProblem(value: string): string | undefined {
  * Turns a deployed Worker into a usable cache, in two steps. First the
  * deployment must be up: its URL is resolved (the custom domain, or the
  * account's workers.dev subdomain with the script's route enabled) and the
- * unauthenticated health route polled until it answers, since routing and DNS
- * take time to settle. Then it is initialised: the deployer claims global
- * admin with their id_token, the admin token is cached for the other
- * commands, a slug is chosen for the first cache (the create call is the
- * arbiter of slug ownership, so a conflict re-prompts), and the new cache's
- * `/pubkey` is polled, whose first success creates the signing key.
+ * unauthenticated `/_version` route polled until it answers with the version
+ * just uploaded, since routing, DNS and the new Worker version all take time
+ * to settle (an older version may still answer, with the old configuration).
+ * Then it is initialised: the deployer claims global admin with their
+ * id_token, the admin token is cached for the other commands, a slug is
+ * chosen for the first cache (the create call is the arbiter of slug
+ * ownership, so a conflict re-prompts), and the new cache's `/pubkey` is
+ * polled, whose first success creates the signing key.
  */
 export async function onboardDeployment(
 	options: OnboardOptions
@@ -169,10 +185,16 @@ export async function onboardDeployment(
 
 	const up = await pollProbe(
 		ui,
-		'Waiting for the Worker',
+		'Waiting for the deployed version',
 		attempts,
 		sleep,
-		() => client.health()
+		async () => {
+			const live = await client.version();
+
+			return live === options.buildVersion
+				? { kind: 'ready', value: undefined }
+				: { kind: 'retry', detail: `still version ${live}` };
+		}
 	);
 
 	if (up.kind === 'gave-up') {
@@ -191,7 +213,19 @@ export async function onboardDeployment(
 		return { kind: 'identity-unproven', url, owner: admin.owner };
 	}
 
-	const claim = await claimAdmin(ui, client, url, admin.idToken, cacheToken);
+	const secret = await resolveClaimSecret(ui, options.claimSecret);
+
+	if (secret.kind === 'withheld') {
+		return { kind: 'claim-cancelled', url };
+	}
+
+	const claim = await claimAdmin(
+		ui,
+		client,
+		url,
+		{ idToken: admin.idToken, claimSecret: secret.value },
+		cacheToken
+	);
 
 	if (claim.kind === 'refused') {
 		return { kind: 'claim-refused', url, status: claim.status };
@@ -217,7 +251,7 @@ export async function onboardDeployment(
 		'Initialising the cache',
 		attempts,
 		sleep,
-		() => cacheClient.publicKey()
+		async () => ({ kind: 'ready', value: await cacheClient.publicKey() })
 	);
 
 	if (key.kind === 'gave-up') {
@@ -262,6 +296,46 @@ type ClaimResult =
 	| { readonly kind: 'refused'; readonly status: number };
 
 /**
+ * Settles the claim secret the signup must present: the value this deploy
+ * already knows, the one the operator types when only the Worker holds it,
+ * or none at all. A dismissed prompt withholds the claim rather than sending
+ * one that is sure to be refused.
+ */
+async function resolveClaimSecret(
+	ui: DeployUi,
+	claimSecret: ClaimSecret
+): Promise<
+	| { readonly kind: 'settled'; readonly value: string | undefined }
+	| { readonly kind: 'withheld' }
+> {
+	switch (claimSecret.kind) {
+		case 'none': {
+			return { kind: 'settled', value: undefined };
+		}
+
+		case 'known': {
+			return { kind: 'settled', value: claimSecret.value };
+		}
+
+		case 'configured': {
+			ui.info(
+				'This deployment is protected by a claim secret ' +
+					'(the CUPBOARD_SIGNUP_SECRET Worker secret), which must be ' +
+					'presented to become the admin.'
+			);
+
+			const entered = await ui.secret('Enter the claim secret', (value) =>
+				value === '' ? 'a value is required' : undefined
+			);
+
+			return entered === undefined
+				? { kind: 'withheld' }
+				: { kind: 'settled', value: entered };
+		}
+	}
+}
+
+/**
  * Claims global admin with the deployer's id_token (idempotent for the same
  * principal), exchanges it for an admin access token, and caches that token so
  * the admin commands work without a separate `cupboard login`. A refusal is an
@@ -272,7 +346,7 @@ async function claimAdmin(
 	ui: DeployUi,
 	client: OnboardClient,
 	url: string,
-	idToken: string,
+	proof: { readonly idToken: string; readonly claimSecret: string | undefined },
 	cacheToken: (token: string, target: string) => Promise<void>
 ): Promise<ClaimResult> {
 	let claim:
@@ -285,9 +359,14 @@ async function claimAdmin(
 
 	try {
 		claim = await ui.reporter().phase('Setting up admin access', async () => {
-			const signup = await client.signup({ subject_token: idToken });
+			const signup = await client.signup({
+				subject_token: proof.idToken,
+				...(proof.claimSecret === undefined
+					? {}
+					: { claim_secret: proof.claimSecret })
+			});
 			const exchanged = await client.tokenExchange(
-				idToken,
+				proof.idToken,
 				subjectTokenTypeIdToken
 			);
 
@@ -370,7 +449,7 @@ async function pollProbe<T>(
 	label: string,
 	attempts: number,
 	sleep: (ms: number) => Promise<void>,
-	probe: () => Promise<T>
+	probe: () => Promise<Probe<T>>
 ): Promise<
 	| { readonly kind: 'ready'; readonly value: T }
 	| { readonly kind: 'gave-up'; readonly lastProbe: string }
@@ -402,9 +481,11 @@ async function pollProbe<T>(
 		: { kind: 'ready', value: ready.value };
 }
 
-async function attemptProbe<T>(probe: () => Promise<T>): Promise<Probe<T>> {
+async function attemptProbe<T>(
+	probe: () => Promise<Probe<T>>
+): Promise<Probe<T>> {
 	try {
-		return { kind: 'ready', value: await probe() };
+		return await probe();
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
 			if (retryableStatus(error.status)) {

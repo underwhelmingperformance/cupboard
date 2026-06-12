@@ -32,7 +32,11 @@ import {
 } from './deploy-run.ts';
 import { checkDomainOption, domainProblem } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
-import { onboardAdminFor, onboardDeployment } from './onboard.ts';
+import {
+	type ClaimSecret,
+	onboardAdminFor,
+	onboardDeployment
+} from './onboard.ts';
 import { renameResource, withCrons, withSignupGate } from './overrides.ts';
 import {
 	cloudflareDashIssuer,
@@ -1171,6 +1175,22 @@ async function deployFlow(
 		options
 	});
 
+	// What the claim must present beyond the id_token: the signup secret this
+	// deploy just set (its value is in hand), or one already on the Worker
+	// (only the operator knows it), or none.
+	const suppliedSignupSecret = options.secrets.control.find(
+		(secret) => secret.name === 'CUPBOARD_SIGNUP_SECRET'
+	)?.text;
+	const { control: controlSecrets } = await existingSecretsFor(
+		agreed.accountId
+	);
+	const claimSecret: ClaimSecret =
+		suppliedSignupSecret === undefined
+			? controlSecrets.includes('CUPBOARD_SIGNUP_SECRET')
+				? { kind: 'configured' }
+				: { kind: 'none' }
+			: { kind: 'known', value: suppliedSignupSecret };
+
 	const outcome = await onboardDeployment({
 		api: apiFor(agreed.accountId),
 		ui,
@@ -1181,7 +1201,9 @@ async function deployFlow(
 			subject !== undefined && idToken !== undefined
 				? { subject, idToken }
 				: undefined
-		)
+		),
+		buildVersion: artifact.buildVersion,
+		claimSecret
 	});
 
 	switch (outcome.kind) {
@@ -1240,7 +1262,17 @@ async function deployFlow(
 			ui.warn(
 				'The server did not accept you as the admin ' +
 					`(HTTP ${String(outcome.status)}). The deployment may already ` +
-					'belong to a different identity.'
+					'belong to a different identity, or its claim secret did ' +
+					'not match.'
+			);
+			ui.outro('Deployed.');
+			return;
+		}
+
+		case 'claim-cancelled': {
+			ui.info(
+				'Nothing was claimed without the claim secret. Re-run ' +
+					'`cupboard init` to finish setting up when you have it.'
 			);
 			ui.outro('Deployed.');
 			return;
