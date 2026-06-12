@@ -193,7 +193,7 @@ describe('upload flow', () => {
 
 	it('rejects unauthenticated management requests', async () => {
 		const stats = await fetchPath(defaultCacheStatsPath);
-		const negotiate = await fetchPath('/uploads', {
+		const negotiate = await fetchPath('/cache/_default/uploads', {
 			body: JSON.stringify({ paths: [] }),
 			headers: {
 				'content-type': 'application/json'
@@ -608,11 +608,15 @@ describe('upload flow', () => {
 		// Preparing a reuse upload must be rejected outright: its r2Key is the shared
 		// canonical key, so presigning it would hand out a direct write to the CAS
 		// object that the reuse commit does not re-verify.
-		const prepare = await authorisedFetch(`/uploads/${reuse.uploadId}`, token, {
-			body: JSON.stringify(uploadBlobMetadata(second)),
-			headers: { 'content-type': 'application/json' },
-			method: 'PUT'
-		});
+		const prepare = await authorisedFetch(
+			`/cache/_default/uploads/${reuse.uploadId}`,
+			token,
+			{
+				body: JSON.stringify(uploadBlobMetadata(second)),
+				headers: { 'content-type': 'application/json' },
+				method: 'PUT'
+			}
+		);
 
 		expect(prepare.status).toBe(StatusCodes.CONFLICT);
 		await expect(
@@ -1545,7 +1549,7 @@ describe('upload flow', () => {
 			const negotiate = await negotiateUploads(token, [metadata]);
 			const upload = expectSingleUploadDecision(negotiate, metadata);
 			const response = await authorisedFetch(
-				`/uploads/${upload.uploadId}`,
+				`/cache/_default/uploads/${upload.uploadId}`,
 				token,
 				{
 					body: JSON.stringify(uploadBlobMetadata(metadata)),
@@ -1627,7 +1631,7 @@ describe('upload flow', () => {
 			...fields
 		});
 
-		const response = await authorisedFetch('/uploads', token, {
+		const response = await authorisedFetch('/cache/_default/uploads', token, {
 			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] }),
 			headers: {
 				'content-type': 'application/json'
@@ -1669,7 +1673,7 @@ describe('upload flow', () => {
 			metadata
 		);
 		const response = await authorisedFetch(
-			`/uploads/${upload.uploadId}`,
+			`/cache/_default/uploads/${upload.uploadId}`,
 			token,
 			{
 				body: JSON.stringify({
@@ -1703,7 +1707,7 @@ describe('upload flow', () => {
 
 	it('rejects malformed JSON upload requests', async () => {
 		const token = await initialise();
-		const response = await authorisedFetch('/uploads', token, {
+		const response = await authorisedFetch('/cache/_default/uploads', token, {
 			body: '{',
 			headers: {
 				'content-type': 'application/json'

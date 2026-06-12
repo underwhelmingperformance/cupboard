@@ -1,3 +1,4 @@
+import { attestationsContract } from './attestations.ts';
 import { cachesContract } from './caches.ts';
 import { gcContract } from './gc.ts';
 import { keysContract } from './keys.ts';
@@ -7,6 +8,7 @@ import { policiesContract } from './policies.ts';
 import { checkContract } from './reports.ts';
 import { rootsContract } from './roots.ts';
 import { statsContract } from './stats.ts';
+import { uploadsContract } from './uploads.ts';
 
 /**
  * The tenant admin API: every JSON procedure a tenant deployment answers,
@@ -24,5 +26,7 @@ export const tenantContract = {
 	check: checkContract,
 	roots: rootsContract,
 	paths: pathsContract,
-	gc: gcContract
+	gc: gcContract,
+	uploads: uploadsContract,
+	attestations: attestationsContract
 };

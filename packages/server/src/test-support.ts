@@ -3,6 +3,7 @@ import { NarInfo } from '@cupboard/nix/narinfo';
 import {
 	DEFAULT_CACHE,
 	type PredicateType,
+	selectorForCache,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
@@ -1147,9 +1148,9 @@ export function fixtureWorkerServer(): DurableObjectStub<CupboardServer> {
 	return tenantServer(env, fixtureTenant);
 }
 
-/** Prepends `/cache/<name>` to a path-scoped route for a named cache. */
+/** Prepends the `/cache/<selector>` prefix to a cache-scoped route. */
 export function cacheScopedPath(cache: string, suffix: string): string {
-	return cache === DEFAULT_CACHE ? suffix : `/cache/${cache}${suffix}`;
+	return `/cache/${selectorForCache(cache)}${suffix}`;
 }
 
 export async function negotiateUploads(
@@ -1180,15 +1181,19 @@ export async function negotiateViaWorker(
 	token: string,
 	paths: readonly UploadPathMetadataFields[]
 ): Promise<UploadNegotiateResponse> {
-	const response = await authorisedWorkerFetch('/uploads', token, {
-		body: JSON.stringify({
-			paths: paths.map((path) => uploadPathNegotiation(path))
-		}),
-		headers: {
-			'content-type': 'application/json'
-		},
-		method: 'POST'
-	});
+	const response = await authorisedWorkerFetch(
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		token,
+		{
+			body: JSON.stringify({
+				paths: paths.map((path) => uploadPathNegotiation(path))
+			}),
+			headers: {
+				'content-type': 'application/json'
+			},
+			method: 'POST'
+		}
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 
@@ -1241,11 +1246,16 @@ export async function pushPathToTenant(
 	metadata: UploadPathMetadataFields,
 	nar?: VerifiableNar
 ): Promise<void> {
-	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
-	});
+	const negotiated = await tenantWorkerFetch(
+		tenant,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		token,
+		{
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+		}
+	);
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
@@ -1255,7 +1265,7 @@ export async function pushPathToTenant(
 
 	const prepared = await tenantWorkerFetch(
 		tenant,
-		`/uploads/${decision.uploadId}`,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
 		token,
 		{
 			method: 'PUT',
@@ -1286,11 +1296,16 @@ export async function attemptPushToTenant(
 	metadata: UploadPathMetadataFields,
 	nar?: VerifiableNar
 ): Promise<number> {
-	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
-	});
+	const negotiated = await tenantWorkerFetch(
+		tenant,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		token,
+		{
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+		}
+	);
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
@@ -1300,7 +1315,7 @@ export async function attemptPushToTenant(
 
 	const prepared = await tenantWorkerFetch(
 		tenant,
-		`/uploads/${decision.uploadId}`,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
 		token,
 		{
 			method: 'PUT',
@@ -1352,11 +1367,16 @@ export async function stageDeferredForTenant(
 	metadata: UploadPathMetadataFields,
 	nar?: VerifiableNar
 ): Promise<string> {
-	const negotiated = await tenantWorkerFetch(tenant, '/uploads', token, {
-		method: 'POST',
-		headers: { 'content-type': 'application/json' },
-		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
-	});
+	const negotiated = await tenantWorkerFetch(
+		tenant,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		token,
+		{
+			method: 'POST',
+			headers: { 'content-type': 'application/json' },
+			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+		}
+	);
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
@@ -1366,7 +1386,7 @@ export async function stageDeferredForTenant(
 
 	const prepared = await tenantWorkerFetch(
 		tenant,
-		`/uploads/${decision.uploadId}`,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
 		token,
 		{
 			method: 'PUT',
@@ -1632,7 +1652,7 @@ export async function prepareUpload(
 ): Promise<void> {
 	const expectedExpiresAt = uploadExpiryFromNow();
 	const response = await authorisedFetch(
-		`/uploads/${decision.uploadId}`,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
 		token,
 		{
 			body: JSON.stringify(uploadBlobMetadata(metadata)),
@@ -1658,7 +1678,7 @@ export async function prepareUploadViaWorker(
 ): Promise<void> {
 	const expectedExpiresAt = uploadExpiryFromNow();
 	const response = await authorisedWorkerFetch(
-		`/uploads/${decision.uploadId}`,
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
 		token,
 		{
 			body: JSON.stringify(uploadBlobMetadata(metadata)),
@@ -2095,6 +2115,54 @@ export async function verifiableNar(seed: string): Promise<VerifiableNar> {
 		narSize: uncompressed.byteLength,
 		fileHash: fileHashValue
 	};
+}
+
+/**
+ * A minimal sigstore DSSE bundle whose in-toto statement attests the given
+ * subject digest, byte-encoded the way the attach flow stages it.
+ */
+export function sigstoreBundleBytes(
+	subjectDigest: string,
+	predicateType = 'https://slsa.dev/provenance/v1'
+): Uint8Array {
+	const statement = {
+		_type: 'https://in-toto.io/Statement/v1',
+		subject: [{ name: 'nar', digest: { sha256: subjectDigest } }],
+		predicateType,
+		predicate: { buildDefinition: {}, runDetails: {} }
+	};
+	const bundle = {
+		mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
+		verificationMaterial: {
+			publicKey: { hint: 'test-key' },
+			tlogEntries: []
+		},
+		dsseEnvelope: {
+			payload: btoa(JSON.stringify(statement)),
+			payloadType: 'application/vnd.in-toto+json',
+			signatures: [{ sig: btoa('signature') }]
+		}
+	};
+
+	return new TextEncoder().encode(JSON.stringify(bundle));
+}
+
+/** The lowercase hex digest of a `sha256:<base32>` NAR hash. */
+export function narDigestHex(narHash: string): string {
+	return [...NixSha256Hash.parse(narHash).digestBytes()]
+		.map((byte) => byte.toString(16).padStart(2, '0'))
+		.join('');
+}
+
+/** Decodes a lowercase hex digest into its bytes. */
+export function hexBytes(value: string): Uint8Array {
+	const bytes = new Uint8Array(value.length / 2);
+
+	for (let index = 0; index < bytes.byteLength; index += 1) {
+		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+	}
+
+	return bytes;
 }
 
 // Wraps `payload` in a single uncompressed-block ("stored") zstd frame. It

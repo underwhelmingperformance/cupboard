@@ -7,6 +7,7 @@ import { CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
 import { AttestationsDisabledError } from '../errors.ts';
 import { runPush } from '../push/push.ts';
+import { pushClientFor } from '../push/push-client.ts';
 
 interface PushOptions {
 	readonly githubOidc?: boolean;
@@ -73,7 +74,7 @@ export function registerPushCommand(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const raw = CupboardClient.fromUrl(url, {
 				cache: options.cache,
 				signal: programOptions.signal
 			});
@@ -81,14 +82,16 @@ export function registerPushCommand(
 				throw new AttestationsDisabledError();
 			}
 
-			const token = await authenticateForPush(client, {
+			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? url
 			});
 
 			await runPush(paths, reporter, {
-				client,
-				token,
+				client: pushClientFor(url, token, {
+					cache: options.cache,
+					signal: programOptions.signal
+				}),
 				wait: options.wait,
 				signal: programOptions.signal,
 				attest: options.attest,

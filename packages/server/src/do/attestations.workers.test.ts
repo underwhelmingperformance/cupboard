@@ -1,4 +1,3 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
 import { type AttestationNegotiateResponse } from '@cupboard/protocol/attestations';
 import { type UploadNegotiateResponse } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -17,17 +16,19 @@ import {
 	casObjectRows,
 	clearBlobStorage,
 	commitUploadViaWorker,
-	currentOrigin,
 	fixtureWorkerServer,
 	handlerFetch,
+	hexBytes,
 	initialiseViaWorker,
 	mintTokenForTenant,
+	narDigestHex,
 	pendingAttestationRows,
 	provisionFixtureTenant,
 	provisionNamedTenant,
 	putNarBytes,
 	readFetch,
 	resetTestServer,
+	sigstoreBundleBytes,
 	tenantCasBlobRows,
 	tenantUsageRow,
 	testServerFor,
@@ -98,16 +99,19 @@ describe('attestation attach and reads', () => {
 			bundle
 		);
 		const list = await readFetch(`/attestations/${metadata.storePathHash}`);
+		const body = await response.json<{ code: string; message: string }>();
 
 		expect({
 			status: response.status,
-			body: await response.text(),
+			code: body.code,
+			message: body.message,
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows(),
 			listStatus: list.status
 		}).toStrictEqual({
 			status: StatusCodes.UNPROCESSABLE_ENTITY,
-			body: 'Attestation subject digest does not match the committed NAR\n',
+			code: 'UNPROCESSABLE_CONTENT',
+			message: 'Attestation subject digest does not match the committed NAR',
 			refs: [],
 			objects: [],
 			listStatus: StatusCodes.NOT_FOUND
@@ -123,15 +127,18 @@ describe('attestation attach and reads', () => {
 			metadata.storePathHash,
 			garbage
 		);
+		const body = await response.json<{ code: string; message: string }>();
 
 		expect({
 			status: response.status,
-			body: await response.text(),
+			code: body.code,
+			message: body.message,
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows()
 		}).toStrictEqual({
 			status: StatusCodes.UNPROCESSABLE_ENTITY,
-			body: 'Attestation bundle is not JSON\n',
+			code: 'UNPROCESSABLE_CONTENT',
+			message: 'Attestation bundle is not JSON',
 			refs: [],
 			objects: []
 		});
@@ -268,9 +275,12 @@ describe('attestation attach and reads', () => {
 			bundle
 		);
 
+		const body = await response.json<{ code: string; message: string }>();
+
 		expect({
 			status: response.status,
-			body: await response.text(),
+			code: body.code,
+			message: body.message,
 			refs: await attestationReferenceRows(),
 			presence: await tenantCasBlobRows(),
 			objects: await casObjectRows(),
@@ -278,7 +288,8 @@ describe('attestation attach and reads', () => {
 			usage: await tenantUsageRow()
 		}).toStrictEqual({
 			status: StatusCodes.INSUFFICIENT_STORAGE,
-			body: 'This tenant is over its storage quota\n',
+			code: 'INSUFFICIENT_STORAGE',
+			message: 'This tenant is over its storage quota',
 			refs: [],
 			presence: [],
 			objects: [],
@@ -304,7 +315,7 @@ describe('attestation attach and reads', () => {
 		}
 
 		const prepared = await authorisedWorkerFetch(
-			`/attestations/${decision.uploadId}`,
+			`/cache/_default/attestations/${decision.uploadId}`,
 			token,
 			{ method: 'PUT' }
 		);
@@ -321,11 +332,7 @@ describe('attestation attach and reads', () => {
 						) => ReturnType<typeof instance.measureAttestationBundle>;
 					};
 					readonly attestations: {
-						handleAttach(
-							request: Request,
-							cache: string,
-							uploadId: string
-						): Promise<Response>;
+						attach(cache: string, uploadId: string): Promise<unknown>;
 					};
 				};
 				const measure = services.attestationCas.measureStagedBundle.bind(
@@ -343,17 +350,7 @@ describe('attestation attach and reads', () => {
 				};
 
 				try {
-					await services.attestations.handleAttach(
-						new Request(
-							new URL(
-								`/t/${fixtureTenant}/attestations/${decision.uploadId}/attach`,
-								currentOrigin()
-							),
-							{ headers: { authorization: `Bearer ${token}` } }
-						),
-						'',
-						decision.uploadId
-					);
+					await services.attestations.attach('', decision.uploadId);
 				} catch (error_) {
 					return error_;
 				}
@@ -383,7 +380,7 @@ describe('attestation attach and reads', () => {
 		}
 
 		const prepared = await authorisedWorkerFetch(
-			`/attestations/${decision.uploadId}`,
+			`/cache/_default/attestations/${decision.uploadId}`,
 			token,
 			{ method: 'PUT' }
 		);
@@ -441,7 +438,7 @@ describe('attestation attach and reads', () => {
 		}
 
 		const prepared = await authorisedWorkerFetch(
-			`/attestations/${decision.uploadId}`,
+			`/cache/_default/attestations/${decision.uploadId}`,
 			token,
 			{ method: 'PUT' }
 		);
@@ -449,24 +446,27 @@ describe('attestation attach and reads', () => {
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 		const response = await authorisedWorkerFetch(
-			`/attestations/${decision.uploadId}/attach`,
+			`/cache/_default/attestations/${decision.uploadId}/attach`,
 			token,
 			{ method: 'POST' }
 		);
 
 		const staging = await env.BLOBS.head(decision.r2Key);
 		const pending = await pendingAttestationRows();
+		const body = await response.json<{ code: string; message: string }>();
 
 		expect({
 			status: response.status,
-			body: await response.text(),
+			code: body.code,
+			message: body.message,
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows(),
 			pending: pending.filter((row) => row.id === decision.uploadId),
 			stagingPresent: staging !== null
 		}).toStrictEqual({
 			status: StatusCodes.REQUEST_TOO_LONG,
-			body: 'Attestation bundle is too large\n',
+			code: 'PAYLOAD_TOO_LARGE',
+			message: 'Attestation bundle is too large',
 			refs: [],
 			objects: [],
 			pending: [],
@@ -531,7 +531,7 @@ async function attachBundleResponse(
 	}
 
 	const prepared = await authorisedWorkerFetch(
-		`/attestations/${decision.uploadId}`,
+		`/cache/_default/attestations/${decision.uploadId}`,
 		token,
 		{ method: 'PUT' }
 	);
@@ -539,7 +539,7 @@ async function attachBundleResponse(
 	await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 	return authorisedWorkerFetch(
-		`/attestations/${decision.uploadId}/attach`,
+		`/cache/_default/attestations/${decision.uploadId}/attach`,
 		token,
 		{ method: 'POST' }
 	);
@@ -550,11 +550,15 @@ async function negotiate(
 	pathHash: string,
 	digest: string
 ): Promise<AttestationNegotiateResponse['bundles'][number]> {
-	const response = await authorisedWorkerFetch('/attestations', token, {
-		body: JSON.stringify({ bundles: [{ storePathHash: pathHash, digest }] }),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
+	const response = await authorisedWorkerFetch(
+		'/cache/_default/attestations',
+		token,
+		{
+			body: JSON.stringify({ bundles: [{ storePathHash: pathHash, digest }] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		}
+	);
 	expect(response.status).toBe(StatusCodes.OK);
 	const body = await response.json<AttestationNegotiateResponse>();
 
@@ -567,11 +571,16 @@ async function negotiateTenant(
 	pathHash: string,
 	digest: string
 ): Promise<AttestationNegotiateResponse['bundles'][number]> {
-	const response = await tenantFetch(tenant, '/attestations', token, {
-		body: JSON.stringify({ bundles: [{ storePathHash: pathHash, digest }] }),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
+	const response = await tenantFetch(
+		tenant,
+		'/cache/_default/attestations',
+		token,
+		{
+			body: JSON.stringify({ bundles: [{ storePathHash: pathHash, digest }] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		}
+	);
 	expect(response.status).toBe(StatusCodes.OK);
 	const body = await response.json<AttestationNegotiateResponse>();
 
@@ -584,11 +593,16 @@ async function pushPathThroughTenant(
 	metadata: ReturnType<typeof uploadMetadata>,
 	nar: Awaited<ReturnType<typeof verifiableNar>>
 ): Promise<void> {
-	const negotiated = await tenantFetch(tenant, '/uploads', token, {
-		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] }),
-		headers: { 'content-type': 'application/json' },
-		method: 'POST'
-	});
+	const negotiated = await tenantFetch(
+		tenant,
+		'/cache/_default/uploads',
+		token,
+		{
+			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		}
+	);
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const body = await negotiated.json<UploadNegotiateResponse>();
 	const decision = body.uploads[0] ?? failUploadDecision();
@@ -599,7 +613,7 @@ async function pushPathThroughTenant(
 
 	const prepared = await tenantFetch(
 		tenant,
-		`/uploads/${decision.uploadId}`,
+		`/cache/_default/uploads/${decision.uploadId}`,
 		token,
 		{
 			body: JSON.stringify(uploadBlobMetadata(metadata)),
@@ -626,45 +640,6 @@ function tenantFetch(
 	headers.set('authorization', `Bearer ${token}`);
 
 	return handlerFetch(`/t/${tenant}${path}`, { ...init, headers });
-}
-
-function sigstoreBundleBytes(subjectDigest: string): Uint8Array {
-	const statement = {
-		_type: 'https://in-toto.io/Statement/v1',
-		subject: [{ name: 'nar', digest: { sha256: subjectDigest } }],
-		predicateType,
-		predicate: { buildDefinition: {}, runDetails: {} }
-	};
-	const bundle = {
-		mediaType: 'application/vnd.dev.sigstore.bundle.v0.3+json',
-		verificationMaterial: {
-			publicKey: { hint: 'test-key' },
-			tlogEntries: []
-		},
-		dsseEnvelope: {
-			payload: btoa(JSON.stringify(statement)),
-			payloadType: 'application/vnd.in-toto+json',
-			signatures: [{ sig: btoa('signature') }]
-		}
-	};
-
-	return new TextEncoder().encode(JSON.stringify(bundle));
-}
-
-function narDigestHex(narHash: string): string {
-	return [...NixSha256Hash.parse(narHash).digestBytes()]
-		.map((byte) => byte.toString(16).padStart(2, '0'))
-		.join('');
-}
-
-function hexBytes(value: string): Uint8Array {
-	const bytes = new Uint8Array(value.length / 2);
-
-	for (let index = 0; index < bytes.byteLength; index += 1) {
-		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
-	}
-
-	return bytes;
 }
 
 function eqStorePath(storePathHash: string) {

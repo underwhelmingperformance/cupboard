@@ -4,15 +4,6 @@ import {
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
 import {
-	type AttestationAttachResponse,
-	attestationAttachResponseSchema,
-	type AttestationNegotiateRequest,
-	type AttestationNegotiateResponse,
-	attestationNegotiateResponseSchema,
-	type AttestationPrepareResponse,
-	attestationPrepareResponseSchema
-} from '@cupboard/protocol/attestations';
-import {
 	type ControlKeyListResponse,
 	controlKeyListResponseSchema,
 	type ControlKeyRetireResponse,
@@ -49,15 +40,7 @@ import {
 	type TenantSummary,
 	tenantSummarySchema
 } from '@cupboard/protocol/tenants';
-import {
-	type CommitResponse,
-	type UploadNegotiateRequest,
-	type UploadNegotiateResponse,
-	uploadNegotiateResponseSchema,
-	type UploadPrepareRequest,
-	type UploadPrepareResponse,
-	uploadPrepareResponseSchema
-} from '@cupboard/protocol/upload';
+import { type CommitResponse } from '@cupboard/protocol/upload';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
 
@@ -135,10 +118,6 @@ export class CupboardClient {
 		const body = await response.text();
 
 		return body.trimEnd();
-	}
-
-	private scoped(path: string): string {
-		return `${this.cachePrefix}${path}`;
 	}
 
 	// Routes that moved onto the contract address the default cache by its wire
@@ -266,21 +245,6 @@ export class CupboardClient {
 		);
 	}
 
-	negotiate(
-		token: AccessCredential,
-		body: UploadNegotiateRequest
-	): Promise<UploadNegotiateResponse> {
-		return this.requestJson(
-			this.scoped('/uploads'),
-			uploadNegotiateResponseSchema,
-			{
-				method: 'POST',
-				token,
-				body
-			}
-		);
-	}
-
 	/**
 	 * Commits an upload over the commit WebSocket. The upgrade request carries
 	 * the write token; a deferred upload parks on the socket for the server's
@@ -294,7 +258,7 @@ export class CupboardClient {
 	): Promise<CommitResponse> {
 		throwIfAborted(this.signal);
 
-		const path = this.scoped(`/uploads/${uploadId}/commit`);
+		const path = this.selectorScoped(`/uploads/${uploadId}/commit`);
 		const settle = (bearer: string | undefined): Promise<CommitResponse> =>
 			settleCommitSocket(
 				this.connectSocket(this.socketUrl(path), bearerHeaders(bearer)),
@@ -328,65 +292,6 @@ export class CupboardClient {
 		url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
 
 		return url;
-	}
-
-	prepareUpload(
-		token: AccessCredential,
-		uploadId: string,
-		body: UploadPrepareRequest
-	): Promise<UploadPrepareResponse> {
-		return this.requestJson(
-			this.scoped(`/uploads/${uploadId}`),
-			uploadPrepareResponseSchema,
-			{
-				method: 'PUT',
-				token,
-				body
-			}
-		);
-	}
-
-	negotiateAttestations(
-		token: AccessCredential,
-		body: AttestationNegotiateRequest
-	): Promise<AttestationNegotiateResponse> {
-		return this.requestJson(
-			this.scoped('/attestations'),
-			attestationNegotiateResponseSchema,
-			{
-				method: 'POST',
-				token,
-				body
-			}
-		);
-	}
-
-	prepareAttestation(
-		token: AccessCredential,
-		uploadId: string
-	): Promise<AttestationPrepareResponse> {
-		return this.requestJson(
-			this.scoped(`/attestations/${uploadId}`),
-			attestationPrepareResponseSchema,
-			{
-				method: 'PUT',
-				token
-			}
-		);
-	}
-
-	attachAttestation(
-		token: AccessCredential,
-		uploadId: string
-	): Promise<AttestationAttachResponse> {
-		return this.requestJson(
-			this.scoped(`/attestations/${uploadId}/attach`),
-			attestationAttachResponseSchema,
-			{
-				method: 'POST',
-				token
-			}
-		);
 	}
 
 	async uploadBlob(upload: CupboardBlobUpload): Promise<void> {
@@ -644,7 +549,7 @@ const defaultCommitWaitSeconds = 600;
 const connectCommitSocket: CommitSocketConnect = (url, headers) =>
 	new WebSocket(url, { headers: { ...headers } });
 
-function cachePrefixFor(cache: string): string {
+export function cachePrefixFor(cache: string): string {
 	if (cache === DEFAULT_CACHE) {
 		return '';
 	}

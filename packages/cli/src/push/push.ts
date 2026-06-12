@@ -35,7 +35,7 @@ import {
 } from '@cupboard/reporter';
 import { z } from 'zod';
 
-import type { AccessCredential, CommitOptions } from '../client/client.ts';
+import type { CommitOptions } from '../client/client.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationSubjectNotPushedError,
@@ -64,7 +64,6 @@ import {
 export interface PushDependencies {
 	readonly nixStore?: NixStoreClient;
 	readonly client: PushClient;
-	readonly token: AccessCredential;
 	readonly root?: string;
 	readonly ttlSeconds?: number;
 	// `push` waits by default for deferred uploads to become servable before it
@@ -83,39 +82,26 @@ export interface PushDependencies {
 	readonly removeTemporaryDirectory?: (path: string) => Promise<void>;
 }
 
+/**
+ * The client surface a push consumes. The contract-backed conversations
+ * (negotiate, prepare, attestations, roots) come from the derived client with
+ * the credential and cache bound at construction; the blob upload PUTs to a
+ * presigned URL and the commit speaks the WebSocket, so both stay raw.
+ */
 export interface PushClient {
-	negotiate(
-		token: AccessCredential,
-		body: UploadNegotiateRequest
-	): Promise<UploadNegotiateResponse>;
+	negotiate(body: UploadNegotiateRequest): Promise<UploadNegotiateResponse>;
 	prepareUpload(
-		token: AccessCredential,
 		uploadId: string,
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse>;
 	uploadBlob(upload: PushBlobUpload): Promise<void>;
-	commit(
-		token: AccessCredential,
-		uploadId: string,
-		options: CommitOptions
-	): Promise<CommitResponse>;
+	commit(uploadId: string, options: CommitOptions): Promise<CommitResponse>;
 	negotiateAttestations?(
-		token: AccessCredential,
 		body: AttestationNegotiateRequest
 	): Promise<AttestationNegotiateResponse>;
-	prepareAttestation?(
-		token: AccessCredential,
-		uploadId: string
-	): Promise<AttestationPrepareResponse>;
-	attachAttestation?(
-		token: AccessCredential,
-		uploadId: string
-	): Promise<AttestationAttachResponse>;
-	setRoot(
-		token: AccessCredential,
-		name: string,
-		body: RootSetBody
-	): Promise<RootSetResponse>;
+	prepareAttestation?(uploadId: string): Promise<AttestationPrepareResponse>;
+	attachAttestation?(uploadId: string): Promise<AttestationAttachResponse>;
+	setRoot(name: string, body: RootSetBody): Promise<RootSetResponse>;
 }
 
 const defaultWaitTimeoutSeconds = 600;
@@ -203,7 +189,6 @@ export async function runPush(
 interface PushRuntimeDependencies {
 	readonly nixStore: NixStoreClient;
 	readonly client: PushClient;
-	readonly token: AccessCredential;
 	readonly retention: RetentionPlan;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
@@ -224,7 +209,6 @@ async function runPushWithTemporaryDirectory(
 	const {
 		nixStore,
 		client,
-		token,
 		retention,
 		createNarArchive,
 		compressNar,
@@ -246,7 +230,7 @@ async function runPushWithTemporaryDirectory(
 	const negotiation = await reporter.phase(
 		'Negotiating with cache',
 		async (ctx) => {
-			const response = await client.negotiate(token, {
+			const response = await client.negotiate({
 				paths: closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
 			});
 			const uploadCount = response.uploads.filter((decision) =>
@@ -272,7 +256,6 @@ async function runPushWithTemporaryDirectory(
 			ctx.fact('paths', formatCount(decisions.length));
 			const preparedUploads = await prepareUploads(decisions, closure, {
 				client,
-				token,
 				createNarArchive,
 				compressNar,
 				temporaryDirectory: dependencies.temporaryDirectory
@@ -315,7 +298,7 @@ async function runPushWithTemporaryDirectory(
 		);
 		const responses = await Promise.all(
 			decisions.map((decision) =>
-				client.commit(token, decision.uploadId, {
+				client.commit(decision.uploadId, {
 					wait,
 					timeoutSeconds: waitTimeoutSeconds
 				})
@@ -347,7 +330,6 @@ async function runPushWithTemporaryDirectory(
 
 	const attestationRows = await attachPushedAttestations(closure, reporter, {
 		client,
-		token,
 		enabled: dependencies.attest ?? true,
 		sources: dependencies.attestations ?? [],
 		readBundle:
@@ -361,7 +343,7 @@ async function runPushWithTemporaryDirectory(
 				retention.kind === 'pins'
 					? 'Pinning pushed paths'
 					: 'Updating retention root',
-				(ctx) => recordRetention(retention, { client, token }, ctx)
+				(ctx) => recordRetention(retention, client, ctx)
 			);
 
 	const uploadedPaths = negotiation.uploads.filter((decision) =>
@@ -388,7 +370,6 @@ async function runPushWithTemporaryDirectory(
 
 interface AttachAttestationsDependencies {
 	readonly client: PushClient;
-	readonly token: AccessCredential;
 	readonly enabled: boolean;
 	readonly sources: readonly PushAttestationSource[];
 	readonly readBundle: ReadAttestationBundle;
@@ -452,15 +433,12 @@ async function attachPushedAttestations(
 				throw new AttestationUploadUnavailableError('negotiateAttestations');
 			}
 
-			const response = await dependencies.client.negotiateAttestations(
-				dependencies.token,
-				{
-					bundles: ready.map((bundle) => ({
-						storePathHash: bundle.storePathHash,
-						digest: bundle.digest
-					}))
-				}
-			);
+			const response = await dependencies.client.negotiateAttestations({
+				bundles: ready.map((bundle) => ({
+					storePathHash: bundle.storePathHash,
+					digest: bundle.digest
+				}))
+			});
 			ctx.fact(
 				'upload',
 				formatCount(
@@ -495,7 +473,6 @@ async function attachPushedAttestations(
 				}
 
 				const preparedUpload = await dependencies.client.prepareAttestation(
-					dependencies.token,
 					decision.uploadId
 				);
 
@@ -527,10 +504,7 @@ async function attachPushedAttestations(
 					throw new AttestationUploadUnavailableError('attachAttestation');
 				}
 
-				await dependencies.client.attachAttestation(
-					dependencies.token,
-					decision.uploadId
-				);
+				await dependencies.client.attachAttestation(decision.uploadId);
 				count += 1;
 				ctx.fact('attached', formatCount(count));
 			}
@@ -654,17 +628,12 @@ function planRetention(
 
 async function recordRetention(
 	retention: RetentionPlan,
-	dependencies: {
-		readonly client: PushClient;
-		readonly token: AccessCredential;
-	},
+	client: PushClient,
 	ctx: PhaseContext
 ): Promise<readonly ResultRow[]> {
-	const { client, token } = dependencies;
-
 	if (retention.kind === 'root') {
 		const { name, body } = retention.request;
-		const summary = await client.setRoot(token, name, body);
+		const summary = await client.setRoot(name, body);
 		const expiry = formatExpiry(summary);
 		ctx.fact('root', retention.name);
 		ctx.fact('expiry', expiry);
@@ -678,7 +647,7 @@ async function recordRetention(
 	const summaries: RootSummary[] = [];
 
 	for (const { name, body } of retention.requests) {
-		summaries.push(await client.setRoot(token, name, body));
+		summaries.push(await client.setRoot(name, body));
 	}
 
 	const expiry = describePinExpiry(summaries);
@@ -722,7 +691,6 @@ interface PreparePushPathDependencies {
 
 interface PrepareUploadsDependencies extends PreparePushPathDependencies {
 	readonly client: PushClient;
-	readonly token: AccessCredential;
 }
 
 async function prepareUploads(
@@ -735,15 +703,11 @@ async function prepareUploads(
 	for (const decision of decisions) {
 		const pathInfo = findNegotiatedPath(closure, decision);
 		const preparedPath = await preparePushPath(pathInfo, dependencies);
-		const upload = await dependencies.client.prepareUpload(
-			dependencies.token,
-			decision.uploadId,
-			{
-				fileHash: preparedPath.blob.fileHash.toString(),
-				fileSize: preparedPath.blob.fileSize,
-				compression: preparedPath.blob.compression
-			}
-		);
+		const upload = await dependencies.client.prepareUpload(decision.uploadId, {
+			fileHash: preparedPath.blob.fileHash.toString(),
+			fileSize: preparedPath.blob.fileSize,
+			compression: preparedPath.blob.compression
+		});
 
 		uploads.push({
 			decision,

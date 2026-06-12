@@ -327,7 +327,7 @@ describe('named caches', () => {
 		}
 
 		const prepare = await authorisedFetch(
-			`/uploads/${decision.uploadId}`,
+			`/cache/_default/uploads/${decision.uploadId}`,
 			init.token,
 			{
 				body: JSON.stringify(uploadBlobMetadata(metadata)),

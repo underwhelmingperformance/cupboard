@@ -24,11 +24,15 @@ async function prepare(
 	uploadId: string,
 	metadata: UploadPathMetadataFields
 ): Promise<void> {
-	const response = await authorisedFetch(`/uploads/${uploadId}`, token, {
-		body: JSON.stringify(uploadBlobMetadata(metadata)),
-		headers: { 'content-type': 'application/json' },
-		method: 'PUT'
-	});
+	const response = await authorisedFetch(
+		`/cache/_default/uploads/${uploadId}`,
+		token,
+		{
+			body: JSON.stringify(uploadBlobMetadata(metadata)),
+			headers: { 'content-type': 'application/json' },
+			method: 'PUT'
+		}
+	);
 
 	expect(response.status).toBe(StatusCodes.OK);
 }

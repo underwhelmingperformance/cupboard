@@ -1,22 +1,31 @@
+import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { createORPCClient, isDefinedError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
+import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { sha256HexBytes } from '../crypto/crypto.ts';
 import {
 	bootstrap,
 	currentOrigin,
 	currentServer,
+	hexBytes,
 	mintServerSignedToken,
 	narBytes,
+	narDigestHex,
 	pushPath,
 	resetTestServer,
+	sigstoreBundleBytes,
+	uploadBlobMetadata,
 	uploadMetadata,
-	useTestServer
+	uploadPathNegotiation,
+	useTestServer,
+	verifiableNar
 } from '../test-support.ts';
 
 type TenantClient = JsonifiedClient<
@@ -233,6 +242,89 @@ describe('tenant contract round trip', () => {
 			removedRoot: { name: 'github:owner/repo/main', removed: true },
 			removedPath: { deleted: true, storePathHash: metadata.storePathHash },
 			sweptOk: true
+		});
+	});
+
+	it('drives upload negotiation and preparation through the derived client', async () => {
+		await useTestServer('contract-uploads');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		const negotiated = await client.uploads.negotiate({
+			cacheName: '_default',
+			paths: [uploadPathNegotiation(metadata)]
+		});
+		const [decision] = negotiated.uploads;
+
+		if (decision?.action !== 'upload') {
+			throw new Error('expected an upload decision for a new path');
+		}
+
+		const prepared = await client.uploads.prepare({
+			cacheName: '_default',
+			id: decision.uploadId,
+			...uploadBlobMetadata(metadata)
+		});
+		const status = await client.uploads.status({ id: decision.uploadId });
+
+		expect({
+			storePathHash: decision.storePathHash,
+			presigned: prepared.uploadUrl.length > 0,
+			status
+		}).toStrictEqual({
+			storePathHash: metadata.storePathHash,
+			presigned: true,
+			status: { status: 'pending' }
+		});
+	});
+
+	it('attaches an attestation bundle through the derived client', async () => {
+		await useTestServer('contract-attestations');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const nar = await verifiableNar('contract-attestation');
+		const metadata = uploadMetadata({
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		await pushPath(init.token, metadata, DEFAULT_CACHE, nar);
+
+		const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
+		const digest = await sha256HexBytes(bundle);
+		const negotiated = await client.attestations.negotiate({
+			cacheName: '_default',
+			bundles: [{ storePathHash: metadata.storePathHash, digest }]
+		});
+		const [decision] = negotiated.bundles;
+
+		if (decision?.action !== 'upload') {
+			throw new Error('expected an attestation upload decision');
+		}
+
+		const prepared = await client.attestations.prepare({
+			cacheName: '_default',
+			id: decision.uploadId
+		});
+		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
+		const attached = await client.attestations.attach({
+			cacheName: '_default',
+			id: decision.uploadId
+		});
+
+		expect({
+			presigned: prepared.uploadUrl.length > 0,
+			attached
+		}).toStrictEqual({
+			presigned: true,
+			attached: {
+				storePathHash: metadata.storePathHash,
+				digest,
+				predicateType: 'https://slsa.dev/provenance/v1',
+				status: 'attached'
+			}
 		});
 	});
 

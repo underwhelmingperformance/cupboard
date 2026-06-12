@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
+import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import {
 	CupboardTestServer,
 	ownerAudience,
@@ -105,8 +106,9 @@ describe('OIDC federation', () => {
 				const target = await source.add(contentAddressedFixture);
 				await pushStorePaths(
 					{
-						client,
-						token: adminToken,
+						client: pushClientFor(server.tenantUrl, adminToken, {
+							fetcher: server.uploadFetcher()
+						}),
 						store: source,
 						workDirectory: directory
 					},
