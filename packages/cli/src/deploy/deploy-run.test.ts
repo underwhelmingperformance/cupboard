@@ -6,6 +6,7 @@ import type { DeploymentArtifact } from './artifact.ts';
 import type { CloudflareApi } from './cloudflare-api.ts';
 import type { WorkerConfig } from './config.ts';
 import { collectResources, runDeploy } from './deploy-run.ts';
+import { buildScriptMetadata } from './upload.ts';
 
 function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 	return {
@@ -112,6 +113,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 			getScriptMigrationTag() {
 				return Promise.resolve('v0');
 			},
+			getScriptBindings: notExpected('getScriptBindings'),
 			uploadScript(scriptName) {
 				calls.push(`upload:${scriptName}`);
 				return Promise.resolve();
@@ -169,7 +171,8 @@ describe('runDeploy', () => {
 				secrets: {
 					control: [{ name: 'CONTROL_KEY_WRAP_SECRET', text: 'k' }],
 					tenant: []
-				}
+				},
+				liveBuild: undefined
 			}
 		});
 
@@ -190,6 +193,78 @@ describe('runDeploy', () => {
 			'cron:cupboard:0 * * * *',
 			'zone:cupboard.store',
 			'domain:cupboard.store->cupboard'
+		]);
+	});
+
+	it('skips both uploads when the live build and configuration match', async () => {
+		const { api, calls } = recordingApi();
+		const skipped: string[] = [];
+
+		// What the deployed scripts would answer: exactly the bindings this
+		// deploy would upload, plus the secrets the upload keeps but the
+		// comparison must ignore.
+		const convergedApi: CloudflareApi = {
+			...api,
+			getScriptMigrationTag: () => Promise.resolve('v1'),
+			getScriptBindings: (scriptName) => {
+				const resources = {
+					d1: new Map([['cupboard', 'db-id']]),
+					kv: new Map([['cupboard-tenant-cache', 'kv-cupboard-tenant-cache']])
+				};
+				const config =
+					scriptName === 'cupboard-tenant'
+						? artifact.config.tenant
+						: artifact.config.control;
+				const { bindings } = buildScriptMetadata(config, resources);
+
+				return Promise.resolve([
+					{ type: 'secret_text', name: 'R2_SECRET_ACCESS_KEY' },
+					...(bindings ?? [])
+				]);
+			}
+		};
+
+		await runDeploy({
+			artifact,
+			api: convergedApi,
+			reporter: {
+				...silentReporter,
+				info: (message) => {
+					skipped.push(message);
+				}
+			},
+			options: {
+				domain: undefined,
+				dryRun: false,
+				secrets: { control: [], tenant: [] },
+				liveBuild: 'abc123def456'
+			}
+		});
+
+		expect({
+			uploads: calls.filter((call) => call.startsWith('upload:')),
+			skipped: skipped.length
+		}).toStrictEqual({ uploads: [], skipped: 2 });
+	});
+
+	it('never skips a dirty build, whose version cannot be trusted', async () => {
+		const { api, calls } = recordingApi();
+
+		await runDeploy({
+			artifact: { ...artifact, buildVersion: 'abc123def456+dirty' },
+			api,
+			reporter: silentReporter,
+			options: {
+				domain: undefined,
+				dryRun: false,
+				secrets: { control: [], tenant: [] },
+				liveBuild: 'abc123def456+dirty'
+			}
+		});
+
+		expect(calls.filter((call) => call.startsWith('upload:'))).toStrictEqual([
+			'upload:cupboard-tenant',
+			'upload:cupboard'
 		]);
 	});
 
@@ -239,7 +314,8 @@ describe('runDeploy', () => {
 			options: {
 				domain: undefined,
 				dryRun: false,
-				secrets: { control: [], tenant: [] }
+				secrets: { control: [], tenant: [] },
+				liveBuild: undefined
 			}
 		});
 

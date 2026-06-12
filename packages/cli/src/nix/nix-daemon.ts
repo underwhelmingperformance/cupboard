@@ -500,17 +500,14 @@ class SocketNixDaemonTransport implements NixDaemonTransport {
 
 	write(bytes: Uint8Array): Promise<void> {
 		return new Promise((resolve, reject) => {
+			// Node invokes the callback with null (not undefined) on success.
 			this.socket.write(bytes, (error) => {
-				if (error !== undefined) {
-					reject(
-						error instanceof Error
-							? error
-							: new NixDaemonRemoteError(String(error))
-					);
+				if (error === undefined || error === null) {
+					resolve();
 					return;
 				}
 
-				resolve();
+				reject(error);
 			});
 		});
 	}

@@ -94,6 +94,12 @@ export type OnboardOutcome =
 	| { readonly kind: 'claim-cancelled'; readonly url: string }
 	| { readonly kind: 'cancelled'; readonly url: string }
 	| {
+			/** Several caches already exist, so there is no "first" to create. */
+			readonly kind: 'already-initialised';
+			readonly url: string;
+			readonly slugs: readonly string[];
+	  }
+	| {
 			readonly kind: 'unreachable';
 			readonly url: string;
 			/** What the final probe saw, e.g. `HTTP 404` or `unreachable`. */
@@ -104,7 +110,12 @@ export type OnboardOutcome =
 /** The slice of {@link CupboardClient} the onboarding drives. */
 export type OnboardClient = Pick<
 	CupboardClient,
-	'version' | 'signup' | 'tokenExchange' | 'createTenant' | 'publicKey'
+	| 'version'
+	| 'signup'
+	| 'tokenExchange'
+	| 'listTenants'
+	| 'createTenant'
+	| 'publicKey'
 >;
 
 /**
@@ -187,7 +198,7 @@ export async function onboardDeployment(
 
 	const up = await pollProbe(
 		ui,
-		`Waiting for build ${options.buildVersion} to serve`,
+		`Waiting for build ${options.buildVersion} to be ready`,
 		attempts,
 		sleep,
 		async () => {
@@ -238,19 +249,47 @@ export async function onboardDeployment(
 		};
 	}
 
-	const tenant = await createFirstTenant(
-		ui,
-		client,
-		url,
-		claim.token,
-		admin.owner
-	);
+	// Read before creating: a re-run against an initialised deployment has
+	// nothing to prompt for, and several caches mean there is no "first".
+	const existing = await ui
+		.reporter()
+		.phase('Checking existing caches', async () => {
+			const listed = await client.listTenants(claim.token);
 
-	if (tenant === undefined) {
-		return { kind: 'cancelled', url };
+			return listed.tenants.filter((tenant) => tenant.status !== 'offboarded');
+		});
+
+	if (existing.length > 1) {
+		return {
+			kind: 'already-initialised',
+			url,
+			slugs: existing.map((tenant) => tenant.id)
+		};
 	}
 
-	const cacheUrl = `${url}/t/${tenant.id}`;
+	let slug: string;
+	const sole = existing[0];
+
+	if (sole === undefined) {
+		const tenant = await createFirstTenant(
+			ui,
+			client,
+			url,
+			claim.token,
+			admin.owner
+		);
+
+		if (tenant === undefined) {
+			return { kind: 'cancelled', url };
+		}
+
+		slug = tenant.id;
+	} else {
+		ui.info(`The cache "${sole.id}" already exists; nothing to create.`);
+		slug = sole.id;
+	}
+
+	const cacheUrl = `${url}/t/${slug}`;
 	const cacheClient = clientFactory(cacheUrl);
 
 	const key = await pollProbe(
@@ -268,23 +307,44 @@ export async function onboardDeployment(
 	return {
 		kind: 'ready',
 		url,
-		slug: tenant.id,
+		slug,
 		cacheUrl,
 		publicKey: key.value
 	};
 }
 
+/**
+ * The URL the deployment serves on: the custom domain, or the script's
+ * workers.dev hostname when the account has a subdomain registered. Purely a
+ * lookup; enabling the workers.dev route is the onboarding's job.
+ */
+export async function deploymentUrl(
+	api: CloudflareApi,
+	controlScriptName: string,
+	domain: string | undefined
+): Promise<string | undefined> {
+	if (domain !== undefined) {
+		return `https://${domain}`;
+	}
+
+	const subdomain = await api.getWorkersDevSubdomain();
+
+	return subdomain === undefined
+		? undefined
+		: `https://${controlScriptName}.${subdomain}.workers.dev`;
+}
+
 async function resolveDeploymentUrl(
 	options: OnboardOptions
 ): Promise<string | undefined> {
-	if (options.domain !== undefined) {
-		return `https://${options.domain}`;
-	}
+	const url = await deploymentUrl(
+		options.api,
+		options.controlScriptName,
+		options.domain
+	);
 
-	const subdomain = await options.api.getWorkersDevSubdomain();
-
-	if (subdomain === undefined) {
-		return undefined;
+	if (url === undefined || options.domain !== undefined) {
+		return url;
 	}
 
 	// With a custom domain the workers.dev route stays off: a private cache
@@ -295,7 +355,7 @@ async function resolveDeploymentUrl(
 			options.api.enableWorkersDevRoute(options.controlScriptName)
 		);
 
-	return `https://${options.controlScriptName}.${subdomain}.workers.dev`;
+	return url;
 }
 
 type ClaimResult =

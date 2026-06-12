@@ -58,6 +58,10 @@ export interface CloudflareApi {
 	d1QueryRows(databaseId: string, sql: string): Promise<string[]>;
 
 	getScriptMigrationTag(scriptName: string): Promise<string | undefined>;
+	/** The script's live bindings, or undefined when it is not deployed. */
+	getScriptBindings(
+		scriptName: string
+	): Promise<readonly unknown[] | undefined>;
 	uploadScript(
 		scriptName: string,
 		metadata: ScriptUpdateParams.Metadata,
@@ -288,6 +292,24 @@ export function createCloudflareApi(
 			);
 
 			return script?.migration_tag ?? undefined;
+		},
+
+		async getScriptBindings(scriptName) {
+			try {
+				const settings =
+					await client.workers.scripts.scriptAndVersionSettings.get(
+						scriptName,
+						account
+					);
+
+				return settings.bindings ?? [];
+			} catch (error) {
+				if (error instanceof NotFoundError) {
+					return;
+				}
+
+				throw error;
+			}
 		},
 
 		async uploadScript(scriptName, metadata, bundle) {
