@@ -1,5 +1,12 @@
 export abstract class CliError extends Error {}
 
+export class CliAbortError extends CliError {
+	constructor() {
+		super('Aborted');
+		this.name = 'CliAbortError';
+	}
+}
+
 export class InvalidCacheNameError extends CliError {
 	constructor(public readonly cache: string) {
 		super(`Invalid cache name: ${cache}`);

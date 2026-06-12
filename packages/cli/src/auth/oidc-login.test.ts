@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
 
+import { CliAbortError } from '../errors.ts';
+
 import {
 	createPkce,
 	deviceLogin,
@@ -16,6 +18,12 @@ const endpoints: OidcLoginEndpoints = {
 	tokenEndpoint: 'https://idp.example.com/token',
 	deviceAuthorizationEndpoint: 'https://idp.example.com/device'
 };
+
+function pendingPromise(): Promise<never> {
+	return new Promise<never>(() => {
+		// Intentionally pending.
+	});
+}
 
 function requestBody(init: RequestInit | undefined): URLSearchParams {
 	return new URLSearchParams(typeof init?.body === 'string' ? init.body : '');
@@ -46,6 +54,29 @@ describe('discoverOidcLogin', () => {
 		);
 
 		expect(discovered).toStrictEqual(endpoints);
+	});
+
+	it('passes the abort signal to the metadata request', async () => {
+		const controller = new AbortController();
+		let signal: AbortSignal | null | undefined;
+
+		await discoverOidcLogin(
+			'https://idp.example.com/',
+			(_input, init) => {
+				signal = init?.signal;
+
+				return Promise.resolve(
+					Response.json({
+						issuer: 'https://idp.example.com',
+						authorization_endpoint: endpoints.authorizationEndpoint,
+						token_endpoint: endpoints.tokenEndpoint
+					})
+				);
+			},
+			controller.signal
+		);
+
+		expect(signal).toBe(controller.signal);
 	});
 
 	it('throws when the metadata lacks endpoints', async () => {
@@ -178,6 +209,23 @@ describe('loopbackLogin', () => {
 				timeoutMs: 1
 			})
 		).rejects.toBeInstanceOf(OidcLoginError);
+	});
+
+	it('aborts while waiting for the browser callback', async () => {
+		const controller = new AbortController();
+
+		await expect(
+			loopbackLogin({
+				endpoints,
+				clientId: 'client-123',
+				openBrowser: () => {
+					controller.abort(new CliAbortError());
+				},
+				fetcher: () => Promise.reject(new Error('should not exchange a code')),
+				timeoutMs: 60_000,
+				signal: controller.signal
+			})
+		).rejects.toBeInstanceOf(CliAbortError);
 	});
 
 	it('serves a fixed redirect registration when one is given', async () => {
@@ -376,5 +424,35 @@ describe('deviceLogin', () => {
 				}
 			})
 		).rejects.toBeInstanceOf(OidcLoginError);
+	});
+
+	it('aborts while waiting between device token polls', async () => {
+		const controller = new AbortController();
+
+		await expect(
+			deviceLogin({
+				endpoints,
+				clientId: 'client-123',
+				prompt: () => {
+					controller.abort(new CliAbortError());
+				},
+				fetcher: (input) => {
+					if (input === endpoints.deviceAuthorizationEndpoint) {
+						return Promise.resolve(
+							Response.json({
+								device_code: 'dev-code',
+								user_code: 'WXYZ-1234',
+								verification_uri: 'https://idp.example.com/activate',
+								interval: 1
+							})
+						);
+					}
+
+					return Promise.reject(new Error('should not poll after abort'));
+				},
+				sleep: pendingPromise,
+				signal: controller.signal
+			})
+		).rejects.toBeInstanceOf(CliAbortError);
 	});
 });

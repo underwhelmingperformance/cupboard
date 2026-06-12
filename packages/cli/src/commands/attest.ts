@@ -7,7 +7,7 @@ import {
 	verifyLocalAttestations,
 	verifyRemoteAttestations
 } from '../attest/verify.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -56,7 +56,10 @@ export function parseVerifierThreshold(option: string) {
 	};
 }
 
-export function registerAttestCommands(program: Command): void {
+export function registerAttestCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const attest = program
 		.command('attest')
 		.description('Work with filed Sigstore attestation bundles.');
@@ -157,7 +160,8 @@ export function registerAttestCommands(program: Command): void {
 						readUser,
 						readPassword,
 						trustedPublicKey: options.trustedPublicKey,
-						trustCachePubkey: options.trustCachePubkey
+						trustCachePubkey: options.trustCachePubkey,
+						signal: programOptions.signal
 					});
 				}
 

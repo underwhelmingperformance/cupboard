@@ -3,7 +3,7 @@ import { createReporter, formatCount, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 
 interface CheckOptions {
@@ -18,7 +18,10 @@ export interface CheckClient {
 	): Promise<CheckReport>;
 }
 
-export function registerCheckCommand(program: Command): void {
+export function registerCheckCommand(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('check')
 		.description('Check stored objects against committed metadata.')
@@ -28,7 +31,9 @@ export function registerCheckCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runCheck(options.deep ?? false, token, reporter, client);

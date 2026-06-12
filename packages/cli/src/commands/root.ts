@@ -13,7 +13,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
 
@@ -41,7 +41,10 @@ export interface RootClient {
 	): Promise<RootRemoveResponse>;
 }
 
-export function registerRootCommands(program: Command): void {
+export function registerRootCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const root = program
 		.command('root')
 		.description(
@@ -70,7 +73,10 @@ export function registerRootCommands(program: Command): void {
 				const reporter = createReporter({
 					mode: reporterModeFromGlobals(program)
 				});
-				const client = CupboardClient.fromUrl(url, options.cache);
+				const client = CupboardClient.fromUrl(url, {
+					cache: options.cache,
+					signal: programOptions.signal
+				});
 				const token = cachedOwnerProvider(url);
 
 				await runRootSet(name, targets, options.ttl, token, reporter, client);
@@ -86,7 +92,10 @@ export function registerRootCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, options.cache);
+			const client = CupboardClient.fromUrl(url, {
+				cache: options.cache,
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runRootList(token, reporter, client);
@@ -102,7 +111,10 @@ export function registerRootCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, options.cache);
+			const client = CupboardClient.fromUrl(url, {
+				cache: options.cache,
+				signal: programOptions.signal
+			});
 			const token = cachedOwnerProvider(url);
 
 			await runRootRemove(name, token, reporter, client);

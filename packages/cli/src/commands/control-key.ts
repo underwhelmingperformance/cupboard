@@ -12,7 +12,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 
 export interface ControlKeyClient {
@@ -27,7 +27,10 @@ export interface ControlKeyClient {
 const urlArgument =
 	'deployment URL (e.g. https://cupboard.example.workers.dev)';
 
-export function registerControlKeyCommands(program: Command): void {
+export function registerControlKeyCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const controlKey = program
 		.command('control-key')
 		.description('Manage the control-plane signing keys and rotation.');
@@ -40,7 +43,9 @@ export function registerControlKeyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runControlKeyList(cachedOwnerProvider(url), reporter, client);
 		});
@@ -55,7 +60,9 @@ export function registerControlKeyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runControlKeyRotate(cachedOwnerProvider(url), reporter, client);
 		});
@@ -71,7 +78,9 @@ export function registerControlKeyCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runControlKeyRetire(
 				kid,

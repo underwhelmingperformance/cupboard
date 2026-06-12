@@ -96,7 +96,8 @@ class GithubOidcTokenProvider implements TokenProvider {
 		const subjectToken = await fetchGithubOidcToken({
 			audience: this.audience,
 			environment: this.environment,
-			fetcher: this.client.fetcher
+			fetcher: this.client.fetcher,
+			signal: this.client.signal
 		});
 		const { access_token } = await this.client.tokenExchange(
 			subjectToken,

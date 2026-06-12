@@ -1,10 +1,13 @@
 import { createReporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 
-export function registerPubkeyCommand(program: Command): void {
+export function registerPubkeyCommand(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('pubkey')
 		.description(
@@ -15,7 +18,9 @@ export function registerPubkeyCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const publicKey = await reporter.phase('Reading public key', () =>
 				client.publicKey()
 			);

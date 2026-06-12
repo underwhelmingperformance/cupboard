@@ -12,7 +12,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { type AccessCredential, CupboardClient } from '../client/client.ts';
 import { InvalidClaimError } from '../errors.ts';
 
@@ -55,7 +55,10 @@ function parseClaims(pairs: readonly string[]): Record<string, string> {
 	return claims;
 }
 
-export function registerOidcTrustCommands(program: Command): void {
+export function registerOidcTrustCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	const oidcTrust = program
 		.command('oidc-trust')
 		.description('Manage the CI write-trust rules used by token exchange.');
@@ -68,7 +71,9 @@ export function registerOidcTrustCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runOidcTrustList(cachedOwnerProvider(url), reporter, client);
 		});
@@ -95,7 +100,9 @@ export function registerOidcTrustCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 			const body: OidcTrustAddBody = {
 				issuer: options.issuer,
 				audience: options.audience,
@@ -115,7 +122,9 @@ export function registerOidcTrustCommands(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url);
+			const client = CupboardClient.fromUrl(url, {
+				signal: programOptions.signal
+			});
 
 			await runOidcTrustRemove(id, cachedOwnerProvider(url), reporter, client);
 		});

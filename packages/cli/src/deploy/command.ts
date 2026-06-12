@@ -1,11 +1,11 @@
 import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
-import { setTimeout as delay } from 'node:timers/promises';
 
 import { NixConfig } from '@cupboard/nix/nix-config';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 
+import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
 import { CupboardClient } from '../client/client.ts';
 import { CliError } from '../errors.ts';
 
@@ -135,6 +135,10 @@ export interface DeployCliOptions {
 	readonly yes?: boolean;
 	/** False when `--no-wrangler` was passed; absent means allowed. */
 	readonly wrangler?: boolean;
+}
+
+export interface DeployRuntimeOptions {
+	readonly signal?: AbortSignal;
 }
 
 function bucketNameOf(config: DeploymentConfig): string {
@@ -668,6 +672,7 @@ export async function verifyR2Credentials(options: {
 	readonly accountId: string;
 	readonly bucketName: string;
 	readonly initial: R2Credentials;
+	readonly signal?: AbortSignal;
 	/** Probe attempts before giving up; more for a just-created token. */
 	readonly attempts?: number;
 	readonly check?: typeof checkR2Credentials;
@@ -675,14 +680,17 @@ export async function verifyR2Credentials(options: {
 }): Promise<R2Credentials | undefined> {
 	const { ui } = options;
 	const check = options.check ?? checkR2Credentials;
-	const sleep = options.sleep ?? ((ms: number) => delay(ms));
 	let credentials = options.initial;
 	let attempts = options.attempts ?? 1;
 
 	for (;;) {
+		throwIfAborted(options.signal);
+
 		try {
 			await ui.reporter().phase('Checking R2 credentials', async (context) => {
 				for (let attempt = 1; ; attempt += 1) {
+					throwIfAborted(options.signal);
+
 					const result = await check({
 						accountId: options.accountId,
 						bucketName: options.bucketName,
@@ -705,12 +713,19 @@ export async function verifyR2Credentials(options: {
 						'waiting for the new key to propagate, attempt',
 						attempt
 					);
-					await sleep(propagationDelayMs);
+					await delayMs(propagationDelayMs, {
+						delay: options.sleep,
+						signal: options.signal
+					});
 				}
 			});
 
 			return credentials;
 		} catch (error) {
+			if (isAbortError(error)) {
+				throw error;
+			}
+
 			if (!options.interactive || !(error instanceof CliError)) {
 				throw error;
 			}
@@ -752,13 +767,16 @@ export async function verifyR2Credentials(options: {
  * dependencies stay out of the released single-executable's startup path.
  */
 export async function executeDeploy(
-	cliOptions: DeployCliOptions
+	cliOptions: DeployCliOptions,
+	runtimeOptions: DeployRuntimeOptions = {}
 ): Promise<void> {
+	throwIfAborted(runtimeOptions.signal);
+
 	const ui = createDeployUi();
 	const interactive = process.stdin.isTTY && process.stdout.isTTY;
 
 	try {
-		await deployFlow(cliOptions, ui, interactive);
+		await deployFlow(cliOptions, ui, interactive, runtimeOptions);
 	} catch (error) {
 		if (!(error instanceof APIError)) {
 			throw error;
@@ -782,8 +800,11 @@ export async function executeDeploy(
 async function deployFlow(
 	cliOptions: DeployCliOptions,
 	ui: DeployUi,
-	interactive: boolean
+	interactive: boolean,
+	runtimeOptions: DeployRuntimeOptions
 ): Promise<void> {
+	throwIfAborted(runtimeOptions.signal);
+
 	const initialDomain =
 		cliOptions.domain === undefined
 			? undefined
@@ -860,7 +881,8 @@ async function deployFlow(
 						ui.openBrowser(url);
 					},
 					wrangler: cliOptions.wrangler ?? true,
-					interactive
+					interactive,
+					signal: runtimeOptions.signal
 				})
 			));
 	} catch (error) {
@@ -1119,7 +1141,8 @@ async function deployFlow(
 			accountId: agreed.accountId,
 			bucketName: agreedBucket,
 			initial: r2Credentials,
-			attempts: createdNow ? propagationAttempts : 1
+			attempts: createdNow ? propagationAttempts : 1,
+			signal: runtimeOptions.signal
 		});
 
 		if (verified === undefined) {
@@ -1156,7 +1179,9 @@ async function deployFlow(
 			}
 
 			try {
-				const live = await CupboardClient.fromUrl(url).version();
+				const live = await CupboardClient.fromUrl(url, {
+					signal: runtimeOptions.signal
+				}).version();
 				context.fact('live', live);
 
 				return live;
@@ -1204,6 +1229,7 @@ async function deployFlow(
 		),
 		buildVersion: artifact.buildVersion,
 		claimSecret,
+		signal: runtimeOptions.signal,
 		// A pair settled this run was probed client-side before it was set; a
 		// kept pair is only on the Worker, so the onboarding proves it there.
 		r2:
@@ -1223,7 +1249,13 @@ async function deployFlow(
 						freshIdToken({
 							readGrant: readCachedGrant,
 							writeGrant: writeCachedGrant,
-							refreshGrant: (previous) => refreshCloudflareGrant(previous),
+							refreshGrant: (previous) =>
+								refreshCloudflareGrant(
+									previous,
+									fetch,
+									Date.now,
+									runtimeOptions.signal
+								),
 							now: Date.now
 						})
 				}

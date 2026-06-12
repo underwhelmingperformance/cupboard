@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { isAbortError, throwIfAborted } from '../abort.ts';
 import { obtainAuthorizationCode, postForm } from '../auth/oidc-login.ts';
 import { CliError } from '../errors.ts';
 
@@ -92,6 +93,7 @@ export interface CloudflareLoginOptions {
 	readonly timeoutMs?: number;
 	readonly ports?: readonly number[];
 	readonly now?: () => number;
+	readonly signal?: AbortSignal;
 }
 
 const tokenResponseSchema = z.object({
@@ -113,7 +115,11 @@ function decodeJwtPayload(token: string): unknown {
 
 	try {
 		return JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
-	} catch {
+	} catch (error) {
+		if (isAbortError(error)) {
+			throw error;
+		}
+
 		return undefined;
 	}
 }
@@ -145,6 +151,8 @@ export function jwtExpiryMs(token: string): number | undefined {
 export async function cloudflareLogin(
 	options: CloudflareLoginOptions
 ): Promise<CloudflareGrant> {
+	throwIfAborted(options.signal);
+
 	const fetcher = options.fetcher ?? fetch;
 	const now = options.now ?? Date.now;
 
@@ -154,6 +162,7 @@ export async function cloudflareLogin(
 		scope: deployScopes.join(' '),
 		openBrowser: options.openBrowser,
 		timeoutMs: options.timeoutMs,
+		signal: options.signal,
 		loopback: {
 			ports: options.ports ?? callbackPorts,
 			host: 'localhost',
@@ -170,7 +179,9 @@ export async function cloudflareLogin(
 			client_id: cloudflareOauthClientId,
 			code_verifier: obtained.codeVerifier
 		},
-		now
+		now,
+		undefined,
+		options.signal
 	);
 }
 
@@ -183,8 +194,11 @@ export async function cloudflareLogin(
 export async function refreshCloudflareGrant(
 	previous: CloudflareGrant,
 	fetcher: typeof fetch = fetch,
-	now: () => number = Date.now
+	now: () => number = Date.now,
+	signal?: AbortSignal
 ): Promise<CloudflareGrant | undefined> {
+	throwIfAborted(signal);
+
 	if (previous.refreshToken === undefined) {
 		return undefined;
 	}
@@ -198,7 +212,8 @@ export async function refreshCloudflareGrant(
 				client_id: cloudflareOauthClientId
 			},
 			now,
-			previous
+			previous,
+			signal
 		);
 	} catch {
 		return undefined;
@@ -209,9 +224,10 @@ async function exchangeForGrant(
 	fetcher: typeof fetch,
 	form: Readonly<Record<string, string>>,
 	now: () => number,
-	previous?: Pick<CloudflareGrant, 'refreshToken' | 'subject' | 'idToken'>
+	previous?: Pick<CloudflareGrant, 'refreshToken' | 'subject' | 'idToken'>,
+	signal?: AbortSignal
 ): Promise<CloudflareGrant> {
-	const response = await fetcher(tokenEndpoint, postForm(form));
+	const response = await fetcher(tokenEndpoint, postForm(form, signal));
 
 	if (!response.ok) {
 		throw new CloudflareTokenRequestError(response.status);

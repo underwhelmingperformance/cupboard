@@ -2,7 +2,7 @@ import { createReporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { authenticateForPush } from '../auth/auth.ts';
-import { reporterModeFromGlobals } from '../cli.ts';
+import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { parseTtl } from '../duration.ts';
 import { AttestationsDisabledError } from '../errors.ts';
@@ -24,7 +24,10 @@ function collect(value: string, previous: readonly string[]): string[] {
 	return [...previous, value];
 }
 
-export function registerPushCommand(program: Command): void {
+export function registerPushCommand(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
 	program
 		.command('push')
 		.description(
@@ -70,7 +73,10 @@ export function registerPushCommand(program: Command): void {
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, options.cache);
+			const client = CupboardClient.fromUrl(url, {
+				cache: options.cache,
+				signal: programOptions.signal
+			});
 			if (options.attest === false && options.attestation.length > 0) {
 				throw new AttestationsDisabledError();
 			}
@@ -84,6 +90,7 @@ export function registerPushCommand(program: Command): void {
 				client,
 				token,
 				wait: options.wait,
+				signal: programOptions.signal,
 				attest: options.attest,
 				attestations: options.attestation.map((path) => ({ path })),
 				...(options.root === undefined ? {} : { root: options.root }),
