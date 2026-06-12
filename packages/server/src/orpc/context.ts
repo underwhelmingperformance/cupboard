@@ -1,9 +1,12 @@
 import type { AccessClaims, AccessScope } from '../auth/auth.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
+import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
+import type { GarbageCollectionService } from '../do/garbage-collection-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
+import type { RootsService } from '../do/roots-service.ts';
 import type { SigningKeysService } from '../do/signing-keys-service.ts';
 import type { StatsService } from '../do/stats-service.ts';
 
@@ -23,6 +26,9 @@ export interface TenantRpcServices {
 	readonly oidcTrust: OidcTrustService;
 	readonly stats: StatsService;
 	readonly integrityCheck: IntegrityCheckService;
+	readonly roots: RootsService;
+	readonly deletionQueue: DeletionQueueService;
+	readonly garbageCollection: GarbageCollectionService;
 }
 
 /** The initial oRPC context for every tenant procedure call. */

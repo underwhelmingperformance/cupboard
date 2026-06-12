@@ -1,7 +1,7 @@
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import type {
 	RootListResponse,
 	RootRemoveResponse,
-	RootSetBody,
 	RootSetResponse,
 	RootSummary
 } from '@cupboard/protocol/retention';
@@ -14,7 +14,7 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
 
 interface RootSetOptions {
@@ -28,17 +28,23 @@ interface RootOptions {
 	readonly cache?: string;
 }
 
+/**
+ * The slice of the derived client the root commands consume, in the
+ * contract's input and output shapes; the real `tenantRpc(...).roots`
+ * satisfies it by construction.
+ */
 export interface RootClient {
-	setRoot(
-		token: AccessCredential,
-		name: string,
-		body: RootSetBody
-	): Promise<RootSetResponse>;
-	listRoots(token: AccessCredential): Promise<RootListResponse>;
-	removeRoot(
-		token: AccessCredential,
-		name: string
-	): Promise<RootRemoveResponse>;
+	set(input: {
+		cacheName: string;
+		name: string;
+		targets: string[];
+		ttlSeconds?: number;
+	}): Promise<RootSetResponse>;
+	list(input: { cacheName: string }): Promise<RootListResponse>;
+	remove(input: {
+		cacheName: string;
+		name: string;
+	}): Promise<RootRemoveResponse>;
 }
 
 export function registerRootCommands(
@@ -73,13 +79,19 @@ export function registerRootCommands(
 				const reporter = createReporter({
 					mode: reporterModeFromGlobals(program)
 				});
-				const client = CupboardClient.fromUrl(url, {
-					cache: options.cache,
+				const rpc = tenantRpc(url, {
+					credential: cachedOwnerProvider(url),
 					signal: programOptions.signal
 				});
-				const token = cachedOwnerProvider(url);
 
-				await runRootSet(name, targets, options.ttl, token, reporter, client);
+				await runRootSet(
+					selectorForCache(options.cache ?? DEFAULT_CACHE),
+					name,
+					targets,
+					options.ttl,
+					reporter,
+					rpc.roots
+				);
 			}
 		);
 
@@ -92,13 +104,16 @@ export function registerRootCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
-				cache: options.cache,
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runRootList(token, reporter, client);
+			await runRootList(
+				selectorForCache(options.cache ?? DEFAULT_CACHE),
+				reporter,
+				rpc.roots
+			);
 		});
 
 	root
@@ -111,31 +126,35 @@ export function registerRootCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
-				cache: options.cache,
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
-			const token = cachedOwnerProvider(url);
 
-			await runRootRemove(name, token, reporter, client);
+			await runRootRemove(
+				selectorForCache(options.cache ?? DEFAULT_CACHE),
+				name,
+				reporter,
+				rpc.roots
+			);
 		});
 }
 
 export async function runRootSet(
+	cacheName: string,
 	name: string,
 	targets: readonly string[],
 	ttlSeconds: number | undefined,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: RootClient
 ): Promise<void> {
-	const body: RootSetBody = {
-		targets: [...targets],
-		...(ttlSeconds === undefined ? {} : { ttlSeconds })
-	};
-
 	const summary = await reporter.phase('Setting retention root', () =>
-		client.setRoot(token, name, body)
+		client.set({
+			cacheName,
+			name,
+			targets: [...targets],
+			...(ttlSeconds === undefined ? {} : { ttlSeconds })
+		})
 	);
 
 	reporter.result([
@@ -146,12 +165,12 @@ export async function runRootSet(
 }
 
 export async function runRootList(
-	token: AccessCredential,
+	cacheName: string,
 	reporter: Reporter,
 	client: RootClient
 ): Promise<void> {
 	const { roots } = await reporter.phase('Listing retention roots', () =>
-		client.listRoots(token)
+		client.list({ cacheName })
 	);
 
 	if (roots.length === 0) {
@@ -163,13 +182,13 @@ export async function runRootList(
 }
 
 export async function runRootRemove(
+	cacheName: string,
 	name: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: RootClient
 ): Promise<void> {
 	const result = await reporter.phase('Removing retention root', () =>
-		client.removeRoot(token, name)
+		client.remove({ cacheName, name })
 	);
 
 	reporter.result([

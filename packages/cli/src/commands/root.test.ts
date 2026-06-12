@@ -1,14 +1,11 @@
 import type {
 	RootListResponse,
 	RootRemoveResponse,
-	RootSetBody,
 	RootSetResponse,
 	RootSummary
 } from '@cupboard/protocol/retention';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
-
-import type { AccessCredential } from '../client/client.ts';
 
 import {
 	describeExpiry,
@@ -18,7 +15,7 @@ import {
 	runRootSet
 } from './root.ts';
 
-type SetRootFields = { readonly name: string } & RootSetBody;
+type SetRootInput = Parameters<RootClient['set']>[0];
 
 const target = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 
@@ -39,8 +36,8 @@ describe('describeExpiry', () => {
 });
 
 describe('runRootSet', () => {
-	it('validates, sends the fields with the token, and reports', async () => {
-		const calls: { token: AccessCredential; fields: SetRootFields }[] = [];
+	it('addresses the cache, sends the fields, and reports', async () => {
+		const calls: SetRootInput[] = [];
 		const results: ResultRow[][] = [];
 		const response: RootSetResponse = summary({
 			name: 'github:owner/repo/main',
@@ -55,22 +52,20 @@ describe('runRootSet', () => {
 		});
 
 		await runRootSet(
+			'_default',
 			'github:owner/repo/main',
 			[target],
 			604_800,
-			'admin-token',
 			reporter(results),
 			setRootClient(response, calls)
 		);
 
 		expect(calls).toStrictEqual([
 			{
-				token: 'admin-token',
-				fields: {
-					name: 'github:owner/repo/main',
-					targets: [target],
-					ttlSeconds: 604_800
-				}
+				cacheName: '_default',
+				name: 'github:owner/repo/main',
+				targets: [target],
+				ttlSeconds: 604_800
 			}
 		]);
 		expect(results).toStrictEqual([
@@ -82,16 +77,16 @@ describe('runRootSet', () => {
 		]);
 	});
 
-	it('rejects a target that is not a store path', async () => {
+	it('rejects a target the client refuses', async () => {
 		await expect(
-			runRootSet('main', ['/tmp/nope'], undefined, 't', reporter([]), {
-				setRoot() {
+			runRootSet('_default', 'main', ['/tmp/nope'], undefined, reporter([]), {
+				set() {
+					throw new Error('not a store path');
+				},
+				list() {
 					throw new Error('client should not be called');
 				},
-				listRoots() {
-					throw new Error('client should not be called');
-				},
-				removeRoot() {
+				remove() {
 					throw new Error('client should not be called');
 				}
 			})
@@ -113,7 +108,7 @@ describe('runRootList', () => {
 			]
 		};
 
-		await runRootList('admin-token', reporter(results), listClient(response));
+		await runRootList('_default', reporter(results), listClient(response));
 
 		expect(results).toStrictEqual([
 			[
@@ -131,7 +126,7 @@ describe('runRootList', () => {
 		const infos: string[] = [];
 
 		await runRootList(
-			'admin-token',
+			'_default',
 			reporter(results, infos),
 			listClient({ roots: [] })
 		);
@@ -145,17 +140,17 @@ describe('runRootList', () => {
 
 describe('runRootRemove', () => {
 	it('removes the root and reports the outcome', async () => {
-		const calls: { token: AccessCredential; name: string }[] = [];
+		const calls: { cacheName: string; name: string }[] = [];
 		const results: ResultRow[][] = [];
 
 		await runRootRemove(
+			'builds',
 			'pr-123',
-			'admin-token',
 			reporter(results),
 			removeClient({ name: 'pr-123', removed: true }, calls)
 		);
 
-		expect(calls).toStrictEqual([{ token: 'admin-token', name: 'pr-123' }]);
+		expect(calls).toStrictEqual([{ cacheName: 'builds', name: 'pr-123' }]);
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Root', value: 'pr-123' },
@@ -186,18 +181,18 @@ function summary(overrides: Partial<RootSummary>): RootSummary {
 
 function setRootClient(
 	response: RootSetResponse,
-	calls: { token: AccessCredential; fields: SetRootFields }[]
+	calls: SetRootInput[]
 ): RootClient {
 	return {
-		setRoot(token, name, body) {
-			calls.push({ token, fields: { name, ...body } });
+		set(input) {
+			calls.push(input);
 
 			return Promise.resolve(response);
 		},
-		listRoots() {
+		list() {
 			throw new Error('client should not be called');
 		},
-		removeRoot() {
+		remove() {
 			throw new Error('client should not be called');
 		}
 	};
@@ -205,13 +200,13 @@ function setRootClient(
 
 function listClient(response: RootListResponse): RootClient {
 	return {
-		setRoot() {
+		set() {
 			throw new Error('client should not be called');
 		},
-		listRoots() {
+		list() {
 			return Promise.resolve(response);
 		},
-		removeRoot() {
+		remove() {
 			throw new Error('client should not be called');
 		}
 	};
@@ -219,17 +214,17 @@ function listClient(response: RootListResponse): RootClient {
 
 function removeClient(
 	response: RootRemoveResponse,
-	calls: { token: AccessCredential; name: string }[]
+	calls: { cacheName: string; name: string }[]
 ): RootClient {
 	return {
-		setRoot() {
+		set() {
 			throw new Error('client should not be called');
 		},
-		listRoots() {
+		list() {
 			throw new Error('client should not be called');
 		},
-		removeRoot(token, name) {
-			calls.push({ token, name });
+		remove(input) {
+			calls.push(input);
 
 			return Promise.resolve(response);
 		}

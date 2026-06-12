@@ -38,7 +38,7 @@ async function putRoot(
 	storePath: string
 ): Promise<void> {
 	const response = await authorisedFetch(
-		cacheScopedPath(cache, `/roots/${name}`),
+		`/cache/${selectorForCache(cache)}/roots/${name}`,
 		token,
 		{
 			body: JSON.stringify({ targets: [storePath] }),

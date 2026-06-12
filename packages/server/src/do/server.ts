@@ -1,14 +1,8 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
-import {
-	cacheNameSchema,
-	DEFAULT_CACHE,
-	rootNameSchema,
-	storePathHashSchema
-} from '@cupboard/nix/scalars';
+import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import { attestationNegotiateRequestSchema } from '@cupboard/protocol/attestations';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
-import { rootSetBodySchema } from '@cupboard/protocol/retention';
 import {
 	uploadNegotiateRequestSchema,
 	uploadPrepareRequestSchema
@@ -27,7 +21,6 @@ import {
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	TenantNotConfiguredError,
-	UnauthenticatedError,
 	ZstdUnavailableError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
@@ -484,64 +477,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 
 		this.app.on(
-			'DELETE',
-			['/paths/:hash', '/cache/:cacheName/paths/:hash'],
-			this.scoped('admin'),
-			this.maintenance(),
-			async (context) =>
-				context.json(
-					await this.deletionQueue.deleteStorePath(
-						context.get('cache'),
-						parseRequestValue(storePathHashSchema, context.req.param('hash')),
-						new URL(context.req.url).origin
-					)
-				)
-		);
-		this.app.on(
-			'GET',
-			['/roots', '/cache/:cacheName/roots'],
-			this.scoped('admin'),
-			async (context) =>
-				context.json(await this.roots.listRoots(context.get('cache')))
-		);
-		// Setting a root is the one route whose handler consumes the verified
-		// claims: a write token may only set the roots its grant permits.
-		this.app.on(
-			'PUT',
-			['/roots/:name', '/cache/:cacheName/roots/:name'],
-			this.scoped('write'),
-			this.maintenance(),
-			async (context) => {
-				const claims = context.get('claims');
-
-				if (claims === undefined) {
-					throw new UnauthenticatedError();
-				}
-
-				return context.json(
-					await this.roots.setRoot(
-						claims,
-						context.get('cache'),
-						parseRequestValue(rootNameSchema, context.req.param('name')),
-						await parseRequestBody(rootSetBodySchema, context.req.raw)
-					)
-				);
-			}
-		);
-		this.app.on(
-			'DELETE',
-			['/roots/:name', '/cache/:cacheName/roots/:name'],
-			this.scoped('admin'),
-			this.maintenance(),
-			(context) =>
-				context.json(
-					this.roots.removeRoot(
-						context.get('cache'),
-						parseRequestValue(rootNameSchema, context.req.param('name'))
-					)
-				)
-		);
-		this.app.on(
 			'POST',
 			['/uploads', '/cache/:cacheName/uploads'],
 			this.scoped('write'),
@@ -659,34 +594,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					)
 				)
 		);
-		// Interactive GC purges this colo's edge cache via the caller's public
-		// origin. The cron sweep arrives on the internal origin and cannot know
-		// the public URL, so it skips purging and relies on the narinfo TTL and
-		// the orphan-blob grace window instead. The bare form sweeps every cache;
-		// the scoped form sweeps one.
-		this.app.post('/gc', this.scoped('admin'), this.maintenance(), (context) =>
-			this.garbageCollectionResponse(context.req.url)
-		);
-		this.app.post(
-			'/cache/:cacheName/gc',
-			this.scoped('admin'),
-			this.maintenance(),
-			(context) =>
-				this.garbageCollectionResponse(context.req.url, context.get('cache'))
-		);
-	}
-
-	private async garbageCollectionResponse(
-		url: string,
-		cache?: string
-	): Promise<Response> {
-		const { origin } = new URL(url);
-		const purgeOrigin = origin === internalOrigin ? undefined : origin;
-
-		return Response.json({
-			ok: true,
-			...(await this.garbageCollection.collectGarbage(cache, purgeOrigin))
-		});
 	}
 
 	// Upgrades a commit request, parks the socket through the hibernation API
@@ -783,7 +690,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			retention: this.retention,
 			oidcTrust: this.oidcTrust,
 			stats: this.stats,
-			integrityCheck: this.integrityCheck
+			integrityCheck: this.integrityCheck,
+			roots: this.roots,
+			deletionQueue: this.deletionQueue,
+			garbageCollection: this.garbageCollection
 		};
 	}
 
