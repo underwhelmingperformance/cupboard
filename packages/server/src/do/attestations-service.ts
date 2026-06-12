@@ -11,9 +11,9 @@ import {
 	type AttestationDecision,
 	type AttestationDescriptor,
 	type AttestationList,
-	attestationNegotiateRequestSchema,
 	type AttestationNegotiateResponse,
-	type AttestationPrepareResponse
+	type AttestationPrepareResponse,
+	type ParsedAttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
 import { bundleFromJSON, isBundleWithDsseEnvelope } from '@sigstore/bundle';
 import { and, eq } from 'drizzle-orm';
@@ -41,14 +41,13 @@ import {
 	isNotModified,
 	parseAttestationDigestName
 } from '../http/http.ts';
-import { parseRequestBody, parseRequestValue } from '../http/parse.ts';
+import { parseRequestValue } from '../http/parse.ts';
 
 import {
 	type AttestationCasService,
 	type AttestationReference,
 	type MeasuredAttestationBundle
 } from './attestation-cas-service.ts';
-import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 
@@ -76,18 +75,14 @@ interface ParsedAttestationBundle {
 export class AttestationsService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly authKeys: AuthKeysService,
 		private readonly attestationCas: AttestationCasService,
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	async handleNegotiate(request: Request, cache: string): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
-
-		const body = await parseRequestBody(
-			attestationNegotiateRequestSchema,
-			request
-		);
+	async negotiate(
+		cache: string,
+		body: ParsedAttestationNegotiateRequest
+	): Promise<AttestationNegotiateResponse> {
 		const bundles: AttestationDecision[] = [];
 
 		for (const bundle of body.bundles) {
@@ -142,16 +137,13 @@ export class AttestationsService {
 			});
 		}
 
-		return Response.json({ bundles } satisfies AttestationNegotiateResponse);
+		return { bundles };
 	}
 
-	async handlePrepare(
-		request: Request,
+	async prepare(
 		cache: string,
 		uploadId: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
-
+	): Promise<AttestationPrepareResponse> {
 		const pending = await this.pendingUpload(cache, uploadId);
 		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
@@ -161,7 +153,7 @@ export class AttestationsService {
 			.where(eq(schema.pendingAttestations.id, uploadId))
 			.run();
 
-		return Response.json({
+		return {
 			uploadUrl: await this.context.r2Presigner().presignPutUrl({
 				key: pending.r2Key,
 				checksumSha256: hexDigestBase64(pending.digest),
@@ -174,16 +166,13 @@ export class AttestationsService {
 				'x-amz-checksum-sha256': hexDigestBase64(pending.digest)
 			},
 			expiresAt: expiresAt.toISOString()
-		} satisfies AttestationPrepareResponse);
+		};
 	}
 
-	async handleAttach(
-		request: Request,
+	async attach(
 		cache: string,
 		uploadId: string
-	): Promise<Response> {
-		await this.authKeys.requireScope(request, 'write');
-
+	): Promise<AttestationAttachResponse> {
 		const pending = await this.pendingUpload(cache, uploadId);
 		const initialRow = await this.narInfoObjects.committedNarInfoRow(
 			cache,
@@ -214,17 +203,20 @@ export class AttestationsService {
 
 		const parsed = parseAttestationBundle(measured.bytes);
 
+		// A rejection inside blockConcurrencyWhile would break the input gate, so
+		// the outcome is carried out as a value and rethrown afterwards.
 		const finalised = await this.context.ctx.blockConcurrencyWhile(() =>
-			this.finaliseAttach(cache, pending, measured, parsed).catch(
-				(error: unknown) => error
+			this.finaliseAttach(cache, pending, measured, parsed).then(
+				(value) => ({ ok: true as const, value }),
+				(error: unknown) => ({ ok: false as const, error })
 			)
 		);
 
-		if (finalised instanceof Response) {
-			return finalised;
+		if (finalised.ok) {
+			return finalised.value;
 		}
 
-		throw finalised;
+		throw finalised.error;
 	}
 
 	private async finaliseAttach(
@@ -232,7 +224,7 @@ export class AttestationsService {
 		pending: typeof schema.pendingAttestations.$inferSelect,
 		measured: MeasuredAttestationBundle,
 		parsed: ParsedAttestationBundle
-	): Promise<Response> {
+	): Promise<AttestationAttachResponse> {
 		const row = await this.narInfoObjects.committedNarInfoRow(
 			cache,
 			pending.storePathHash
@@ -293,12 +285,12 @@ export class AttestationsService {
 		await this.materialiseList(cache, pending.storePathHash);
 		await this.clearPendingUploadAndStaging(pending);
 
-		return Response.json({
+		return {
 			storePathHash: pending.storePathHash,
 			digest: measured.digest,
 			predicateType: parsed.predicateType,
 			status: outcome === 'already-present' ? 'already-present' : 'attached'
-		} satisfies AttestationAttachResponse);
+		};
 	}
 
 	async handleServeList(
