@@ -92,8 +92,14 @@ async function dispatchTenant(
 }
 
 // Whether a tenant request mutates state. Reads never do; the token exchange is an
-// auth-plane request available to any configured tenant, so it is not a write.
+// auth-plane request available to any configured tenant, so it is not a write. A
+// WebSocket upgrade is a GET on the wire, but the only socket route is the commit,
+// a write, so upgrades are gated as writes.
 function isTenantWrite(inner: Request): boolean {
+	if (inner.headers.get('upgrade')?.toLowerCase() === 'websocket') {
+		return true;
+	}
+
 	if (inner.method === 'GET' || inner.method === 'HEAD') {
 		return false;
 	}

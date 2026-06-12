@@ -60,6 +60,6 @@ export function isAbortError(error: unknown): boolean {
 	);
 }
 
-function abortReason(signal: AbortSignal): Error {
+export function abortReason(signal: AbortSignal): Error {
 	return signal.reason instanceof Error ? signal.reason : new CliAbortError();
 }

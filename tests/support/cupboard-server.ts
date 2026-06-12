@@ -3,10 +3,12 @@ import {
 	createServer,
 	type IncomingMessage,
 	type Server,
-	type ServerResponse
+	type ServerResponse,
+	STATUS_CODES
 } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
+import type { Duplex } from 'node:stream';
 
 import {
 	subjectTokenTypeIdToken,
@@ -14,6 +16,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
+import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 
 import { fixtureTenant } from '../../packages/server/src/routing/tenant-routing.test-support.ts';
 
@@ -175,6 +178,10 @@ export class CupboardTestServer {
 		const bucket = await worker.getR2Bucket('BLOBS', 'cupboard');
 		const httpServer = createServer((request, response) => {
 			void forwardToWorker(worker, request, response);
+		});
+		const upgrades = new WebSocketServer({ noServer: true });
+		httpServer.on('upgrade', (request, socket, head) => {
+			void forwardUpgradeToWorker(worker, upgrades, request, socket, head);
 		});
 		const url = await listen(httpServer);
 		const instance = new CupboardTestServer(
@@ -510,6 +517,111 @@ async function forwardToWorker(
 		});
 		response.end(`${error instanceof Error ? error.message : String(error)}\n`);
 	}
+}
+
+type MiniflareResponse = Awaited<ReturnType<Miniflare['dispatchFetch']>>;
+type WorkerSocket = NonNullable<MiniflareResponse['webSocket']>;
+
+// Bridges a WebSocket upgrade to the worker: the upgrade request (with its
+// Authorization header) dispatches into Miniflare; an accepted socket relays
+// frames both ways, and a refusal is written back as the plain HTTP response
+// so the client sees the status and body it carries.
+async function forwardUpgradeToWorker(
+	worker: Miniflare,
+	upgrades: WebSocketServer,
+	request: IncomingMessage,
+	socket: Duplex,
+	head: Buffer
+): Promise<void> {
+	try {
+		const response = await worker.dispatchFetch(
+			new URL(request.url ?? '/', localOrigin(request)).toString(),
+			{ headers: requestHeaders(request), method: 'GET' }
+		);
+		const workerSocket = response.webSocket;
+
+		if (workerSocket === null) {
+			await refuseUpgrade(socket, response);
+
+			return;
+		}
+
+		workerSocket.accept();
+		upgrades.handleUpgrade(request, socket, head, (client) => {
+			relaySockets(client, workerSocket);
+		});
+	} catch (error) {
+		socket.destroy(error instanceof Error ? error : new Error(String(error)));
+	}
+}
+
+function relaySockets(client: WebSocket, workerSocket: WorkerSocket): void {
+	client.on('message', (data, isBinary) => {
+		const bytes = rawDataBytes(data);
+		workerSocket.send(
+			isBinary ? new Uint8Array(bytes) : bytes.toString('utf8')
+		);
+	});
+	client.on('close', () => {
+		workerSocket.close();
+	});
+	client.on('error', () => {
+		workerSocket.close();
+	});
+
+	workerSocket.addEventListener('message', (event) => {
+		client.send(event.data);
+	});
+	workerSocket.addEventListener('close', (event) => {
+		// `ws` only accepts codes a close frame may carry; anything else (1005
+		// "no status", 1006 "abnormal") closes with the default.
+		if (event.code === 1000 || (event.code >= 3000 && event.code <= 4999)) {
+			client.close(event.code, event.reason);
+
+			return;
+		}
+
+		client.close();
+	});
+	workerSocket.addEventListener('error', () => {
+		client.close();
+	});
+}
+
+function rawDataBytes(data: RawData): Buffer {
+	if (Array.isArray(data)) {
+		return Buffer.concat(data);
+	}
+
+	if (data instanceof ArrayBuffer) {
+		return Buffer.from(data);
+	}
+
+	return data;
+}
+
+async function refuseUpgrade(
+	socket: Duplex,
+	response: MiniflareResponse
+): Promise<void> {
+	const body = Buffer.from(await response.arrayBuffer());
+	const lines = [
+		`HTTP/1.1 ${String(response.status)} ${STATUS_CODES[response.status] ?? ''}`,
+		'connection: close',
+		`content-length: ${String(body.byteLength)}`
+	];
+
+	for (const [name, value] of response.headers) {
+		if (['connection', 'content-length', 'transfer-encoding'].includes(name)) {
+			continue;
+		}
+
+		lines.push(`${name}: ${value}`);
+	}
+
+	socket.write(`${lines.join('\r\n')}\r\n\r\n`);
+	socket.write(body);
+	socket.end();
 }
 
 function listen(server: Server): Promise<URL> {

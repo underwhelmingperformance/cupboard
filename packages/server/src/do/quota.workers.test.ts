@@ -5,11 +5,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
-	authorisedFetch,
 	blobReferenceRows,
 	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
+	CommitSocketError,
+	commitUploadRejection,
+	CommitVerdictError,
 	currentServer,
 	deletePath,
 	deleteTestBase,
@@ -208,19 +210,18 @@ describe('per-tenant quota', () => {
 		);
 		await prepareUpload(token, decision, metadata);
 		await putNarBytes(decision.r2Key, nar);
-		const response = await authorisedFetch(
-			`/uploads/${decision.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
+		const commitError = await commitUploadRejection(token, decision.uploadId);
 
 		expect({
-			status: response.status,
+			error: commitError,
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			usage: await tenantUsageRow()
 		}).toStrictEqual({
-			status: StatusCodes.INSUFFICIENT_STORAGE,
+			error: new CommitSocketError(
+				StatusCodes.INSUFFICIENT_STORAGE,
+				'This tenant is over its storage quota'
+			),
 			edges: [],
 			presence: [],
 			usage: {
@@ -260,19 +261,18 @@ describe('per-tenant quota', () => {
 		);
 		await prepareUpload(token, decision, metadata);
 		await putNarBytes(decision.r2Key, nar);
-		const response = await authorisedFetch(
-			`/uploads/${decision.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
+		const commitError = await commitUploadRejection(token, decision.uploadId);
 
 		expect({
-			status: response.status,
+			error: commitError,
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			usage: await tenantUsageRow()
 		}).toStrictEqual({
-			status: StatusCodes.INSUFFICIENT_STORAGE,
+			error: new CommitSocketError(
+				StatusCodes.INSUFFICIENT_STORAGE,
+				'This tenant is over its storage quota'
+			),
 			edges: [],
 			presence: [],
 			usage: {
@@ -342,30 +342,26 @@ describe('per-tenant quota', () => {
 		);
 		await prepareUpload(token, decision, metadata);
 		await putNarBytes(decision.r2Key, small);
-		const response = await authorisedFetch(
-			`/uploads/${decision.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
-		// A retry must not hang reporting pending: the reservation was reclaimed and the
-		// upload cleared, so the upload is gone rather than stranded re-driving.
-		const retry = await authorisedFetch(
-			`/uploads/${decision.uploadId}/commit`,
-			token,
-			{ method: 'POST' }
-		);
+		const commitError = await commitUploadRejection(token, decision.uploadId);
+		// A retry must not hang reporting pending: the over-quota verdict is
+		// terminal and its staging reclaimed, so the retry is refused outright
+		// rather than stranded re-driving.
+		const retryError = await commitUploadRejection(token, decision.uploadId);
 
 		const usage = await tenantUsageRow();
 
 		expect({
-			status: response.status,
-			retryStatus: retry.status,
+			error: commitError,
+			retryError,
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			bytes: usage?.bytes
 		}).toStrictEqual({
-			status: StatusCodes.INSUFFICIENT_STORAGE,
-			retryStatus: StatusCodes.NOT_FOUND,
+			error: new CommitVerdictError('over-quota'),
+			retryError: new CommitSocketError(
+				StatusCodes.BAD_REQUEST,
+				'Uploaded object not found'
+			),
 			edges: [],
 			presence: [],
 			bytes: 0

@@ -21,18 +21,15 @@ export const checkBatchSize = 1000;
 // cron tick advances a cursor by one batch per run, wrapping at the end.
 export const verificationBatchSize = 500;
 
-// Verify-before-serve size bounds, keyed on the uncompressed NAR size (`narSize`,
-// the cost of decompress-and-hash), not the compressed `fileSize`. At or below
-// `inlineVerifyMaxBytes` a blob is decompressed and hash-verified synchronously at
-// commit, so it is immediately servable; a larger one is verified in the
-// background pass and is not servable until then. Above `verifiableMaxBytes` a
-// blob cannot be decompressed within the worker CPU budget and the commit is
-// rejected — it could never be served.
+// The verify-before-serve ceiling, keyed on the uncompressed NAR size
+// (`narSize`, the cost of decompress-and-hash), not the compressed
+// `fileSize`. Every commit defers to the verification pass; a blob above this
+// bound cannot be decompressed within the worker CPU budget in any single
+// pass, so the commit is rejected, since it could never be served.
 //
-// PROVISIONAL: these await the step-1 runtime benchmark (real workerd throughput
-// and whether the Durable Object honours `cpu_ms = 300000`); see PLAN.md V5 step
-// 1. The mechanism is correct at any values; only the thresholds are unmeasured.
-export const inlineVerifyMaxBytes = 8 * 1024 * 1024;
+// PROVISIONAL: awaits the step-1 runtime benchmark (real workerd throughput
+// and whether the Durable Object honours `cpu_ms = 300000`); see PLAN.md V5
+// step 1. The mechanism is correct at any value; only the bound is unmeasured.
 export const verifiableMaxBytes = 4 * 1024 * 1024 * 1024;
 export const maxAttestationBundleBytes = 1024 * 1024;
 

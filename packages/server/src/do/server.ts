@@ -5,11 +5,14 @@ import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { DurableObject } from 'cloudflare:workers';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
+import { StatusCodes } from 'http-status-codes';
 
 import migrations from '../../drizzle/migrations.js';
 import * as schema from '../db/schema.ts';
 import {
+	CommitUpgradeRequiredError,
 	R2PresignConfigurationMissingError,
+	ServerHttpError,
 	TenantNotConfiguredError,
 	ZstdUnavailableError
 } from '../errors.ts';
@@ -29,6 +32,7 @@ import { AuthKeysService } from './auth-keys-service.ts';
 import { type DemoteTarget } from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
+import { sendCommitFrame } from './commit-socket.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
@@ -134,7 +138,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 		this.commitPipeline = new CommitPipelineService(
 			this.context,
-			this.authKeys,
 			this.cacheAdmin,
 			this.signingKeys,
 			this.uploadState,
@@ -158,6 +161,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.offboarding = new OffboardingService(this.context);
 		this.maintenanceEligibility = new MaintenanceEligibilityService(
 			this.context
+		);
+
+		// Parked commit sockets answer keepalive pings without waking the
+		// hibernated object.
+		ctx.setWebSocketAutoResponse(
+			new WebSocketRequestResponsePair('ping', 'pong')
 		);
 
 		this.routes();
@@ -636,26 +645,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 		);
-		this.app.post('/uploads/:id/commit', (context) =>
+		// The commit endpoint is a WebSocket: the upgrade request carries the
+		// write token, the first frame settles or defers the path, and a
+		// deferred upload's socket parks (hibernating) until verification
+		// answers with the terminal verdict.
+		this.app.get('/uploads/:id/commit', (context) =>
 			serverErrorResponse(
-				this.withMaintenanceEligibility(() =>
-					this.commitPipeline.handleCommit(
-						context.req.raw,
-						DEFAULT_CACHE,
-						context.req.param('id')
-					)
+				this.commitSocket(
+					context.req.raw,
+					DEFAULT_CACHE,
+					context.req.param('id')
 				)
 			)
 		);
-		this.app.post('/cache/:cacheName/uploads/:id/commit', (context) =>
+		this.app.get('/cache/:cacheName/uploads/:id/commit', (context) =>
 			this.withCache(context.req.param('cacheName'), (cache) =>
-				this.withMaintenanceEligibility(() =>
-					this.commitPipeline.handleCommit(
-						context.req.raw,
-						cache,
-						context.req.param('id')
-					)
-				)
+				this.commitSocket(context.req.raw, cache, context.req.param('id'))
 			)
 		);
 		// `push --wait` polls a deferred upload's status by its uploadId, which is
@@ -782,6 +787,88 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				)
 			)
 		);
+	}
+
+	// Authenticates and upgrades a commit request, parks the socket through the
+	// hibernation API (tagged by upload id, so verification can find every
+	// waiter even after this object was evicted), and runs the commit
+	// transition once the 101 is on its way. Auth failures answer as plain
+	// HTTP before any socket exists.
+	private async commitSocket(
+		request: Request,
+		cache: string,
+		uploadId: string
+	): Promise<Response> {
+		await this.authKeys.requireScope(request, 'write');
+
+		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+			throw new CommitUpgradeRequiredError();
+		}
+
+		const pair = new WebSocketPair();
+		const client = pair[0];
+		const server = pair[1];
+
+		this.ctx.acceptWebSocket(server, [uploadId]);
+		this.ctx.waitUntil(this.runSocketCommit(server, cache, uploadId));
+
+		return new Response(undefined, { status: 101, webSocket: client });
+	}
+
+	private async runSocketCommit(
+		socket: WebSocket,
+		cache: string,
+		uploadId: string
+	): Promise<void> {
+		try {
+			const outcome = await this.withMaintenanceEligibility(() =>
+				this.commitPipeline.commit(cache, uploadId)
+			);
+
+			if (outcome.kind === 'settled') {
+				sendCommitFrame(socket, {
+					event: 'result',
+					response: outcome.response
+				});
+				socket.close(1000, 'settled');
+
+				return;
+			}
+
+			sendCommitFrame(socket, {
+				event: 'deferred',
+				storePathHash: outcome.storePathHash,
+				narHash: outcome.narHash
+			});
+			// The socket stays parked; verification closes it with the verdict.
+		} catch (error) {
+			sendCommitFrame(socket, {
+				event: 'error',
+				status:
+					error instanceof ServerHttpError
+						? error.status
+						: StatusCodes.INTERNAL_SERVER_ERROR,
+				message: error instanceof Error ? error.message : String(error)
+			});
+			socket.close(1000, 'failed');
+		}
+	}
+
+	// The commit protocol is server-to-client: the only client frames are the
+	// keepalive pings the auto-response answers without waking this object, so
+	// anything that reaches the handler is a protocol violation.
+	webSocketMessage(socket: WebSocket): void {
+		socket.close(1002, 'unexpected message');
+	}
+
+	// A waiter that hangs up needs no bookkeeping (the hibernation API drops it
+	// from `getWebSockets`); closing our end completes the handshake.
+	webSocketClose(socket: WebSocket): void {
+		socket.close();
+	}
+
+	webSocketError(socket: WebSocket): void {
+		socket.close(1011, 'socket error');
 	}
 
 	private async withMaintenanceEligibility<T>(

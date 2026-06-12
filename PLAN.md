@@ -337,7 +337,7 @@ and GC routes.
 | POST      | `/uploads`                                | write JWT          | DO. Returns skip, commit, or upload plans.      |
 | PUT       | `/uploads/<id>`                           | write JWT          | DO. Returns R2 PUT URL and headers.             |
 | PUT       | (presigned R2 URL)                        | URL                | Client uploads blob directly to R2.             |
-| POST      | `/uploads/<id>/commit`                    | write JWT          | DO. Writes the narinfo row and R2 object.       |
+| GET (WS)  | `/uploads/<id>/commit`                    | write JWT          | DO. WebSocket; parks until the verdict settles. |
 | POST      | `/gc`                                     | admin JWT          | DO. Runs pending-upload, retention, and R2 GC.  |
 | GET       | `/caches`                                 | admin JWT          | DO. Lists the cache registry with counts.       |
 | PUT       | `/caches/<name>`                          | admin JWT          | DO. Upserts a named cache's priority.           |
@@ -1297,11 +1297,11 @@ encoding.
 
 Verification failures stay on the per-tenant staging upload, never in global
 `blob_state`: a bad upload claiming `narHash = X` proves that upload is bad and
-must not poison hash `X` globally. A synchronous inline failure rejects the
-commit and clears the upload at once — a mismatch is `422`, an over-budget blob
-`413` — so it needs no stored verdict. An asynchronous background failure
-instead records a durable `mismatch` verdict on the upload, so `push --wait` or
-a status endpoint can observe why a deferred path never became servable.
+must not poison hash `X` globally. Every fresh upload defers to the background
+verification pass; the commit WebSocket parks until that pass delivers the
+verdict. A failure records a durable `mismatch` or `over-quota` verdict on the
+upload, so a waiter that reconnects later can still observe why a deferred path
+never became servable.
 
 Counts and usage are derived from edges:
 
@@ -1504,28 +1504,19 @@ only the compressed `fileHash`. V5 verifies the uncompressed NAR server-side.
 - The Web-stream/R2 to Node-stream/zlib to Web-stream/DigestStream bridge must
   be backpressure-safe. Tests prove that a multi-hundred-MB stream does not
   buffer the whole output.
-- The runtime spike sets two named config defaults: `inlineVerifyMaxBytes` and
-  `verifiableMaxBytes`. The benchmark search starts around a 10-20 GiB
-  verifiable cap. The provisional values keep the deferred window open:
-  `inlineVerifyMaxBytes` is 8 MiB (verified inline at commit) and
-  `verifiableMaxBytes` is 4 GiB, so a blob between them is accepted and verified
-  in the background pass. This makes the background verify path and the
-  push-wait contract live now, rather than gating them behind the spike. The
-  spike is therefore a **measurement, not an enabler**: it must confirm the
-  background pass holds its CPU and memory budget on a multi-hundred-MB blob on
-  the real account runtime (and `cpu_ms = 300_000`), and may then lower
-  `verifiableMaxBytes` if the measurements demand it. (An earlier draft made the
-  provisional config reject anything over the inline bound so nothing deferred
-  until the spike; that fail-safe is deliberately not taken — the deferred
-  window stays open.)
-- Blobs at or below `inlineVerifyMaxBytes` verify synchronously at commit and
-  become immediately servable. Larger blobs go pending and verify in the
-  background pass. A blob whose declared NAR size exceeds `verifiableMaxBytes`
-  is rejected synchronously at commit with `413`; it could never be served.
-- An inline mismatch is rejected synchronously with `422` and its staging object
-  deleted. A background-pass failure deletes the staging object and records a
-  durable `mismatch` verdict on the upload. Neither writes a negative verdict to
-  global `blob_state`.
+- The runtime spike sizes the one named config default, `verifiableMaxBytes`.
+  The benchmark search starts around a 10-20 GiB verifiable cap; the provisional
+  value is 4 GiB. Every fresh upload verifies in the background pass (there is
+  no inline tier; the commit WebSocket parks until the verdict), so the spike is
+  a **measurement, not an enabler**: it must confirm the background pass holds
+  its CPU and memory budget on a multi-hundred-MB blob on the real account
+  runtime (and `cpu_ms = 300_000`), and may then lower `verifiableMaxBytes` if
+  the measurements demand it.
+- A blob whose declared NAR size exceeds `verifiableMaxBytes` is rejected
+  synchronously at commit with `413`; it could never be served.
+- A background-pass mismatch deletes the staging object and records a durable
+  `mismatch` verdict on the upload. It never writes a negative verdict to global
+  `blob_state`.
 - DO init calls `createZstdDecompress` once and fails loudly if the runtime
   lacks native zstd.
 
@@ -1538,31 +1529,25 @@ with pending blobs for CI that does not need to block. A root update activates
 only once all its target narinfos are available, so a root never advertises an
 unservable path.
 
-`push --wait` polls an explicit status query keyed by `uploadId` (which the
-client already holds, avoiding a path-to-upload mapping); root-activation asks
-the tenant DO, by `(cache, storePathHash)`, for the **same availability
-predicate as serving** — the materialised tenant narinfo R2 object exists (which
-the DO's classifier confirms only when the edge exists, `blob_state` is
-`available`, and the shared R2 blob is present, repairing if needed). It must
-**not** activate on narinfo-row + `blob_state` alone: a root would then
-advertise a path whose tenant narinfo object is not yet materialised — an
-unservable path. Root-activation and `push --wait` thus share one
-classifier/repair path. The `uploadId` query needs a durable status record that
-outlives the commit for any upload the client may poll — every deferred
-(`pending`) upload. So a `pending` upload's `pending_upload` row is not deleted
-when the background pass commits it; it transitions `pending` to `servable` (or
-to `mismatch` on failure) and is reaped only after a status-observation window,
-retaining the `uploadId` to `(cache, storePathHash, nar_hash)` mapping for the
-poll. The anti-resurrection guarantee no longer rests on deleting the row: the
-verify pass only re-drives `verdict = 'pending'`, so a terminal row is never
-re-promoted (this replaces step 1's "clear the pending row in the commit
-transaction" with "set it terminal" for the deferred path). Synchronous outcomes
-return at commit and need no poll: inline success returns servable; inline
-mismatch/too-large return `422`/`413` and clear the row (step 1's behaviour).
-The query returns `servable`, `pending`, `mismatch`, `over-quota`, or `absent`;
-`push --wait` backs off and terminates on `servable`, on `mismatch` or
-`over-quota` as a hard error (it must not hang on a failed deferred blob), or on
-timeout.
+`push` waits on the commit WebSocket itself: a deferred upload's socket parks
+until the verification pass delivers the verdict, so the client never polls.
+Root-activation asks the tenant DO, by `(cache, storePathHash)`, for the **same
+availability predicate as serving** — the materialised tenant narinfo R2 object
+exists (which the DO's classifier confirms only when the edge exists,
+`blob_state` is `available`, and the shared R2 blob is present, repairing if
+needed). It must **not** activate on narinfo-row + `blob_state` alone: a root
+would then advertise a path whose tenant narinfo object is not yet materialised
+— an unservable path. Root-activation and serving thus share one
+classifier/repair path. A settled upload leaves no residue: the background pass
+notifies the parked waiters, then clears the `pending_upload` row and its
+staging object. A failed upload's row instead turns terminal (`mismatch` or
+`over-quota`) and is retained, so a waiter that lost its socket can re-drive the
+commit and still hear why the path never became servable. The anti-resurrection
+guarantee: the verify pass only re-drives `verdict = 'pending'`, so a terminal
+row is never re-promoted. The parked socket settles on `servable` (reported as
+committed), hard-errors on `mismatch` or `over-quota` (it must not hang on a
+failed deferred blob), or times out client-side; `--no-wait` returns `pending`
+as soon as the deferral is stored.
 
 ### Tenant auth and issuer
 
@@ -1743,12 +1728,10 @@ Per-tenant DO SQLite changes:
 - `pending_upload` keeps its async verification verdicts from step 1: `pending`
   while a deferred blob awaits the background pass, then a terminal `mismatch`
   (the NAR-hash check failed) or `over-quota` (the canonical size exceeds the
-  tenant quota) on failure. A deferred upload's row is retained through its
-  terminal state, or until its narinfo object is servable, as the durable
-  `uploadId`-keyed record `push --wait` polls; it is reaped after a
-  status-observation window, including the terminal `over-quota` rows.
-  Synchronous inline failures reject and clear the upload; an over-budget blob
-  (above `verifiableMaxBytes`) is rejected at commit, never deferred.
+  tenant quota) on failure. A settled upload's row clears once its waiters are
+  notified; a failed upload's row is retained terminal so a reconnecting waiter
+  still hears the verdict. An over-budget blob (above `verifiableMaxBytes`) is
+  rejected at commit, never deferred.
 - Move blob lifecycle to D1: `nar_blob` (already removed) and
   `orphan_blob_deletion` (removed in 2c) are superseded by `blob_ref`,
   `tenant_blob`, `blob_state`, and the global reaper.
@@ -1797,13 +1780,12 @@ together.
    real workerd zstd+SHA-256 throughput, confirming the DO honours
    `cpu_ms = 300_000`, and proving bounded peak memory on a multi-hundred-MB
    fixture — needs a deploy to the operator's account, so it is deferred. The
-   provisional bounds keep the deferred window open: `inlineVerifyMaxBytes` is 8
-   MiB and `verifiableMaxBytes` is 4 GiB, so blobs between them go to the
-   background pass and the push-wait contract is exercised now. The spike is a
-   measurement, not an enabler: it confirms the background pass holds CPU and
-   memory on the real runtime and may lower `verifiableMaxBytes` from the
-   measurements, alongside the multi-hundred-MB bounded-memory and `node:zlib`
-   self-test-failure tests.
+   provisional `verifiableMaxBytes` is 4 GiB; every fresh upload goes to the
+   background pass, so the deferred contract is exercised on every push. The
+   spike is a measurement, not an enabler: it confirms the background pass holds
+   CPU and memory on the real runtime and may lower `verifiableMaxBytes` from
+   the measurements, alongside the multi-hundred-MB bounded-memory and
+   `node:zlib` self-test-failure tests.
 2. **D1 substrate + per-narinfo edges + shared-CAS.** Sub-commits: **2a**
    `blob_state` replaces `nar_blob` (done); **2b** `blob_ref` (with its
    `nar_hash` index) + `tenant_blob` + the durable `generation_seq` counter,
@@ -1866,9 +1848,9 @@ together.
    lifted, so a tenant writes through the Worker to its own object; the
    per-upload status query (`servable`/`pending`/`mismatch`/`over-quota`/
    `absent`, keyed on `uploadId`, mapping the durable per-upload verdict) is in
-   place, with a deferred (`pending`) upload's row retained through its terminal
-   verdict so the poll outlives its commit; the cron fans out maintenance to
-   every active tenant, so a non-default tenant's deferred uploads reach the
+   place (the commit WebSocket has since become the wait channel, with a failed
+   upload's row retained terminal); the cron fans out maintenance to every
+   active tenant, so a non-default tenant's deferred uploads reach the
    background verify pass (the unsharded fan-out; the cursor, subrequest budget
    and global reaper are step 7); and the push contract waits. Root activation
    gates on the serve predicate: `RootsService` reuses one
@@ -1877,8 +1859,8 @@ together.
    and the summary `present` flag, so serving, root activation, and root
    summaries cannot drift; setting a root over a not-yet-servable target is
    refused with a typed 409 and leaves the existing root intact. The CLI `push`
-   waits by default for its deferred uploads to become servable (polling the
-   status query, failing fast on `mismatch`/`over-quota`, bounded by
+   waits by default for its deferred uploads to become servable (parked on the
+   commit socket, failing fast on `mismatch`/`over-quota`, bounded by
    `--wait-timeout`) before recording retention, so the gated activation is
    admitted; `--no-wait` returns with the paths pending and records no retention
    over them. The CLI token cache is keyed per target (origin plus any
@@ -1986,7 +1968,7 @@ together.
 - Push UX tests cover push waiting until substitution succeeds, `--no-wait`
   returning pending, roots activating only when targets are available, and a
   background mismatch terminating `push --wait` with a hard error (not hanging)
-  via the per-upload status query.
+  via the commit socket's verdict frame.
 - Runtime validation records CPU limit, throughput, bounded memory, and
   Miniflare zstd availability before setting the size thresholds.
 
@@ -2054,9 +2036,9 @@ Implementation sequence:
 1. Add usage instrumentation. Record route-level and maintenance-pass timing for
    tenant DO calls: upload negotiate/prepare/commit, `runVerification`,
    `runGarbageCollection`, deletion flush, reaper passes, OIDC token exchange,
-   and `push --wait` status polling. Record enough detail to distinguish CPU
-   work from storage wait where the platform exposes it, and keep the metrics
-   outside the substitution hot path.
+   and commit-socket settles. Record enough detail to distinguish CPU work from
+   storage wait where the platform exposes it, and keep the metrics outside the
+   substitution hot path.
 2. Add maintenance eligibility. _(Done.)_ Cron now uses a D1-visible eligibility
    source so it can skip active tenants with no work instead of waking every
    active tenant every tick. One row per tenant carries pending verification
@@ -2137,13 +2119,13 @@ Implementation sequence:
    been superseded, or already reached a terminal verdict. The verifier may be a
    stateless Worker, Queue consumer, or other Cloudflare primitive, but it must
    not become a second writer of tenant metadata.
-6. Add an optional hibernating status watch. Use a WebSocket watch only for
-   `push --wait` upload status notifications. The durable upload status row and
-   HTTP status query remain the source of truth and the CLI fallback. On
-   connect, the DO reads the current durable status for each requested
-   `uploadId`; terminal transitions notify subscribed sockets after the status
-   row is written. A missed notification is harmless because the CLI reconnects
-   or polls.
+6. Hibernating commit WebSocket. _(Done.)_ The commit endpoint is itself the
+   WebSocket: the upgrade request carries the write token, a settled commit
+   answers in its first frame, and a deferred upload parks on the socket (via
+   the hibernation API, tagged by `uploadId`) until the verification pass
+   notifies every waiter with the terminal verdict. The durable verdict row
+   remains the source of truth for terminal failures; a waiter that disconnects
+   re-drives the same commit and hears the settled answer.
 
 Verification:
 

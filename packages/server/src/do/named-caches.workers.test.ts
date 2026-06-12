@@ -13,7 +13,9 @@ import {
 	blobStateCount,
 	bootstrap,
 	cacheScopedPath,
+	CommitSocketError,
 	commitUpload,
+	commitUploadRejection,
 	mintServerSignedToken,
 	narBytes,
 	narHash,
@@ -262,10 +264,9 @@ describe('named caches', () => {
 		}
 
 		// Commit through the default cache: the pending row is bound to `builds`.
-		const crossCommit = await authorisedFetch(
-			`/uploads/${decision.uploadId}/commit`,
+		const crossCommitError = await commitUploadRejection(
 			init.token,
-			{ method: 'POST' }
+			decision.uploadId
 		);
 
 		// The same upload still completes through the cache it was negotiated under.
@@ -288,12 +289,15 @@ describe('named caches', () => {
 		const buildsStats = await statsForCache(init.token, 'builds');
 
 		expect({
-			crossCommit: crossCommit.status,
+			crossCommit: crossCommitError,
 			committed: committed.status,
 			defaultPaths: defaultStats.storePaths,
 			buildsPaths: buildsStats.storePaths
 		}).toStrictEqual({
-			crossCommit: StatusCodes.BAD_REQUEST,
+			crossCommit: new CommitSocketError(
+				StatusCodes.BAD_REQUEST,
+				'Upload prepared or committed under a different cache'
+			),
 			committed: 'committed',
 			defaultPaths: 0,
 			buildsPaths: 1
