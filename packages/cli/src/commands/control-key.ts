@@ -13,15 +13,17 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
-import { type AccessCredential, CupboardClient } from '../client/client.ts';
+import { controlRpc } from '../client/orpc.ts';
 
+/**
+ * The slice of the derived control client the control-key commands consume,
+ * in the contract's input and output shapes; the real `controlRpc(...).keys`
+ * satisfies it by construction.
+ */
 export interface ControlKeyClient {
-	listControlKeys(token: AccessCredential): Promise<ControlKeyListResponse>;
-	rotateControlKey(token: AccessCredential): Promise<ControlKeyRotateResponse>;
-	retireControlKey(
-		token: AccessCredential,
-		kid: string
-	): Promise<ControlKeyRetireResponse>;
+	list(): Promise<ControlKeyListResponse>;
+	rotate(): Promise<ControlKeyRotateResponse>;
+	retire(input: { kid: string }): Promise<ControlKeyRetireResponse>;
 }
 
 const urlArgument =
@@ -43,11 +45,12 @@ export function registerControlKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runControlKeyList(cachedOwnerProvider(url), reporter, client);
+			await runControlKeyList(reporter, rpc.keys);
 		});
 
 	controlKey
@@ -60,11 +63,12 @@ export function registerControlKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runControlKeyRotate(cachedOwnerProvider(url), reporter, client);
+			await runControlKeyRotate(reporter, rpc.keys);
 		});
 
 	controlKey
@@ -78,38 +82,32 @@ export function registerControlKeyCommands(
 			const reporter = createReporter({
 				mode: reporterModeFromGlobals(program)
 			});
-			const client = CupboardClient.fromUrl(url, {
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runControlKeyRetire(
-				kid,
-				cachedOwnerProvider(url),
-				reporter,
-				client
-			);
+			await runControlKeyRetire(kid, reporter, rpc.keys);
 		});
 }
 
 export async function runControlKeyList(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: ControlKeyClient
 ): Promise<void> {
 	const { keys } = await reporter.phase('Listing control keys', () =>
-		client.listControlKeys(token)
+		client.list()
 	);
 
 	reporter.result(keys.map((key) => controlKeyRow(key)));
 }
 
 export async function runControlKeyRotate(
-	token: AccessCredential,
 	reporter: Reporter,
 	client: ControlKeyClient
 ): Promise<void> {
 	const { kid, retiring } = await reporter.phase('Rotating control key', () =>
-		client.rotateControlKey(token)
+		client.rotate()
 	);
 
 	reporter.result([
@@ -129,12 +127,11 @@ export async function runControlKeyRotate(
 
 export async function runControlKeyRetire(
 	kid: string,
-	token: AccessCredential,
 	reporter: Reporter,
 	client: ControlKeyClient
 ): Promise<void> {
 	const result = await reporter.phase('Retiring control key', () =>
-		client.retireControlKey(token, kid)
+		client.retire({ kid })
 	);
 
 	reporter.result([

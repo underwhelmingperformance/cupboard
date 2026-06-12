@@ -621,6 +621,20 @@ export async function controlFetch(
 	return response;
 }
 
+// The Request-shaped variant of {@link controlFetch}, for callers that build
+// their own requests (the derived contract client's link).
+export async function controlWorkerFetch(request: Request): Promise<Response> {
+	const ctx = createExecutionContext();
+	const response = await worker.fetch(
+		new Request<unknown, IncomingRequestCfProperties>(request),
+		Object.assign({}, env, testControlEnv),
+		ctx
+	);
+	await waitOnExecutionContext(ctx);
+
+	return response;
+}
+
 // A control admin token, minted the way the control plane does: signed by the
 // active control key for the control issuer (the current origin) and audience.
 export async function mintControlAdminToken(

@@ -1,5 +1,6 @@
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
+import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 
 import type { CachedSession } from '../auth/token-store.ts';
@@ -159,7 +160,11 @@ function tenantSummary(id: string): ParsedTenantSummary {
 /** One scripted answer: a value, an HTTP status to fail with, or no route. */
 type Scripted<T> = T | number | 'offline';
 
-function answer<T>(remaining: Scripted<T>[], member: string): Promise<T> {
+function answer<T>(
+	remaining: Scripted<T>[],
+	member: string,
+	rejection: (status: number, member: string) => Error = httpRejection
+): Promise<T> {
 	const next = remaining.shift();
 
 	if (next === undefined) {
@@ -171,12 +176,23 @@ function answer<T>(remaining: Scripted<T>[], member: string): Promise<T> {
 	}
 
 	if (typeof next === 'number') {
-		return Promise.reject(
-			new CupboardHttpError('GET', member, next, 'computer says no\n')
-		);
+		return Promise.reject(rejection(next, member));
 	}
 
 	return Promise.resolve(next);
+}
+
+// The raw endpoints fail as CupboardHttpError; the control procedures arrive
+// through the derived client, whose failures are ORPCErrors.
+function httpRejection(status: number, member: string): Error {
+	return new CupboardHttpError('GET', member, status, 'computer says no\n');
+}
+
+function orpcRejection(status: number): Error {
+	return new ORPCError('INTERNAL_SERVER_ERROR', {
+		status,
+		message: 'computer says no'
+	});
 }
 
 interface ClientScript {
@@ -237,7 +253,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					return answer(signups, '/signup');
 				},
 				listTenants: async () => ({
-					tenants: await answer(lists, '/control/tenants')
+					tenants: await answer(lists, '/control/tenants', orpcRejection)
 				}),
 				tokenExchange: () =>
 					Promise.resolve({
@@ -250,10 +266,10 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					}),
 				createTenant: (_token, body) => {
 					createdBodies.push(body);
-					return answer(creates, '/control/tenants');
+					return answer(creates, '/control/tenants', orpcRejection);
 				},
 				controlCheck: async () => ({
-					r2: await answer(controlChecks, '/control/check')
+					r2: await answer(controlChecks, '/control/check', orpcRejection)
 				}),
 				publicKey: () => answer(publicKeys, '/pubkey')
 			};
