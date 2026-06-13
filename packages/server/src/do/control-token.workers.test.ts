@@ -150,7 +150,7 @@ describe('control plane POST /token', () => {
 		{ name: 'the wrapping secret', override: { CONTROL_KEY_WRAP_SECRET: '' } },
 		{ name: 'the audience', override: { CUPBOARD_CONTROL_AUDIENCE: '' } }
 	])(
-		'reports 503 when $name is not configured, minting nothing',
+		'reports 503 when $name is not configured, issuing nothing',
 		async ({ override }) => {
 			const response = await postToken(
 				{
@@ -166,7 +166,7 @@ describe('control plane POST /token', () => {
 		}
 	);
 
-	it('refuses to mint, failing closed, when a control trust rule pins no subject', async () => {
+	it('refuses to issue, failing closed, when a control trust rule pins no subject', async () => {
 		// An admin-scoped rule with no pinned subject would match every subject of
 		// the trusted issuer and audience, so it must be rejected rather than honoured.
 		await seedControlTrust({

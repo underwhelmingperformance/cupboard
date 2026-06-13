@@ -28,7 +28,7 @@ export interface ClaimOutcome {
 }
 
 // Promotes a verified principal to global admin and seeds the control trust rule
-// that lets it mint admin tokens, in one atomic D1 batch so a crash can never
+// that lets it issue admin tokens, in one atomic D1 batch so a crash can never
 // leave the deployment claimed but with no trust rule (and so un-administerable).
 //
 // The `global_admin` singleton is inserted first-writer-wins. The trust seed is an

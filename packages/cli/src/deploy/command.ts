@@ -343,7 +343,7 @@ async function editOwner(
 	}
 
 	const audience = await ui.editText({
-		message: 'Audience (the OAuth client id the id_token is minted for)',
+		message: 'Audience (the OAuth client id the id_token is issued for)',
 		initial:
 			current?.audience ??
 			(issuer.value === cloudflareDashIssuer ? cloudflareOauthClientId : ''),

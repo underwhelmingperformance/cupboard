@@ -98,7 +98,7 @@ export const narInfoDeletions = sqliteTable(
 
 export const authKeys = sqliteTable('auth_key', {
 	id: text('id').primaryKey(),
-	// The JWKS key id carried in each minted token's header so a verifier can
+	// The JWKS key id carried in each issued token's header so a verifier can
 	// pick the right key across a rotation. Always populated on key creation.
 	kid: text('kid').notNull().default(''),
 	privateJwkJson: text('private_jwk_json').notNull(),
@@ -109,7 +109,7 @@ export const authKeys = sqliteTable('auth_key', {
 });
 
 // A live refresh grant: the wire token is `<id>.<secret>` and only the secret's
-// SHA-256 is held here, so a copy of this table mints nothing. Presenting the
+// SHA-256 is held here, so a copy of this table issues nothing. Presenting the
 // token rotates the row (the spent row is deleted, a successor inserted), which
 // makes each refresh token single-use: a replayed one finds no row and fails as
 // `invalid_grant`. The rule id re-derives the scope and roots at refresh time,
@@ -126,7 +126,7 @@ export const refreshTokens = sqliteTable('refresh_token', {
 // The Durable Object's own identity, set by the control plane's `configure` RPC at
 // provision time and on config-version bumps. It is the sole identity source for a
 // configured tenant: the slug it serves, the path-based issuer and audience it pins
-// into minted tokens, and the owner OIDC triple its admin rule is seeded from.
+// into issued tokens, and the owner OIDC triple its admin rule is seeded from.
 // `config_version` is a monotonic fence: a `configure` carrying a version no greater
 // than the applied one is ignored, so identity never moves backwards. A single row,
 // keyed `singleton`, since one Durable Object backs one tenant.
@@ -206,7 +206,7 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 // inbound token verified against `issuer`'s discovered JWKS, with `audience` and
 // every `claims_json` entry matched exactly, grants `scope`. The issuer's
 // `jwks_uri` and signing algorithms come from its OIDC metadata, not this row. A
-// `write` rule binds the minted token to `allowed_roots_json`; the owner's
+// `write` rule binds the issued token to `allowed_roots_json`; the owner's
 // `admin` rule is seeded from deploy config. `disabled_at` soft-disables a rule
 // without losing the audit row.
 export const oidcTrust = sqliteTable('oidc_trust', {

@@ -95,7 +95,7 @@ describe('durable object state', () => {
 		);
 		const pubkey = await pubkeyResponse.text();
 
-		// A second bootstrap mints a JWT from the persisted auth key; it must be
+		// A second bootstrap issues a JWT from the persisted auth key; it must be
 		// accepted by an admin route.
 		const second = await bootstrap();
 		const stats = await authorisedFetch(defaultCacheStatsPath, second.token);

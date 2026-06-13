@@ -13,7 +13,7 @@ import {
 	blobStateCount,
 	corruptCommittedNarInfo,
 	initialise,
-	mintServerSignedToken,
+	issueServerSignedToken,
 	narBytes,
 	pushPath,
 	resetTestServer,
@@ -302,7 +302,7 @@ describe('background verification', () => {
 
 	it('requires admin scope', async () => {
 		await initialise();
-		const writeToken = await mintServerSignedToken('write');
+		const writeToken = await issueServerSignedToken('write');
 
 		const response = await authorisedFetch('/verify', writeToken, {
 			method: 'POST'

@@ -5,7 +5,7 @@ import {
 } from '../errors.ts';
 
 // AES-256-GCM envelope wrapping for the control-plane private signing key. The
-// control key mints global-admin tokens, so it must be reachable only by the
+// control key issues global-admin tokens, so it must be reachable only by the
 // control-plane Worker. A `D1Database` binding is database-wide: a tenant Durable
 // Object can issue arbitrary SQL against `CUPBOARD_DB` regardless of its Drizzle
 // schema, so storing the key in D1 unwrapped, or merely omitting the table from

@@ -7,7 +7,7 @@ import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	controlFetch,
-	mintControlAdminToken,
+	issueControlAdminToken,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -45,7 +45,7 @@ describe('control plane tenant administration', () => {
 	});
 
 	it('creates, lists, suspends, and offboards a tenant', async () => {
-		const token = await mintControlAdminToken();
+		const token = await issueControlAdminToken();
 
 		const create = await controlFetch(
 			'/control/tenants',
@@ -94,7 +94,7 @@ describe('control plane tenant administration', () => {
 	});
 
 	it('treats repeated delete of an offboarded tenant as idempotent', async () => {
-		const token = await mintControlAdminToken();
+		const token = await issueControlAdminToken();
 
 		await controlFetch('/control/tenants', authed(token, 'POST', createBody));
 		await controlFetch('/control/tenants/acme', authed(token, 'DELETE'));
@@ -128,7 +128,7 @@ describe('control plane tenant administration', () => {
 	});
 
 	it('re-creates a matching slug idempotently but refuses a conflicting config', async () => {
-		const token = await mintControlAdminToken();
+		const token = await issueControlAdminToken();
 
 		const first = await controlFetch(
 			'/control/tenants',

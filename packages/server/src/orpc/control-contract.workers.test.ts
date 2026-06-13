@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
 	controlWorkerFetch,
 	currentOrigin,
-	mintControlAdminToken,
+	issueControlAdminToken,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -36,7 +36,7 @@ describe('control contract round trip', () => {
 	beforeEach(resetTestServer);
 
 	it('drives the control keys through the derived client', async () => {
-		const client = controlClient(await mintControlAdminToken());
+		const client = controlClient(await issueControlAdminToken());
 
 		const rotated = await client.keys.rotate();
 		const listed = await client.keys.list();
@@ -57,7 +57,7 @@ describe('control contract round trip', () => {
 	});
 
 	it('drives the tenant registry through the derived client', async () => {
-		const client = controlClient(await mintControlAdminToken());
+		const client = controlClient(await issueControlAdminToken());
 
 		const created = await client.tenants.create({
 			id: 'acme',
@@ -89,7 +89,7 @@ describe('control contract round trip', () => {
 	});
 
 	it('drives resume, read mode and read credential through the derived client', async () => {
-		const client = controlClient(await mintControlAdminToken());
+		const client = controlClient(await issueControlAdminToken());
 
 		await client.tenants.create({
 			id: 'acme',

@@ -127,7 +127,7 @@ export type OnboardOutcome =
 /**
  * What the onboarding drives: the raw endpoints {@link CupboardClient}
  * serves, plus the control procedures in the contract's shapes. The tokens
- * arrive per call because they are minted mid-flow, after the client is
+ * arrive per call because they are issued mid-flow, after the client is
  * built; the default factory answers each control call with a derived client
  * bound to that token.
  */
@@ -436,7 +436,7 @@ async function resolveDeploymentUrl(
 }
 
 // The raw endpoints come from the hand-written client; each control call
-// builds a derived client bound to the token minted earlier in the flow.
+// builds a derived client bound to the token issued earlier in the flow.
 function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
 	const raw = CupboardClient.fromUrl(url, { signal });
 	const control = (token: string) =>

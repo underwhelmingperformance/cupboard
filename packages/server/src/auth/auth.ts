@@ -12,7 +12,7 @@ export interface AccessClaims {
 	readonly cbRoots?: readonly string[];
 }
 
-// The minted-token type per RFC 9068, set in the header and verified on the way
+// The issued-token type per RFC 9068, set in the header and verified on the way
 // back in.
 const accessTokenType = 'at+jwt';
 const callbackRootsClaim = 'cb_roots';
@@ -45,7 +45,7 @@ export function bearerToken(request: Request): string | undefined {
 	return header.slice('Bearer '.length);
 }
 
-export interface MintAccessJwtOptions {
+export interface IssueAccessJwtOptions {
 	readonly issuer: string;
 	readonly audience: string;
 	readonly subject: string;
@@ -136,9 +136,9 @@ export async function generateAuthKeyPair(): Promise<{
 	};
 }
 
-export async function mintAccessJwt(
+export async function issueAccessJwt(
 	privateJwk: JsonWebKey,
-	options: MintAccessJwtOptions,
+	options: IssueAccessJwtOptions,
 	now: Date
 ): Promise<string> {
 	const key = await importJWK(privateJwk, jwtAlgorithm);

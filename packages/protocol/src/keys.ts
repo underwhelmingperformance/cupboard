@@ -35,7 +35,7 @@ export const keyRetireResponseSchema = z.strictObject({
 });
 export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
 
-// The auth-token signing keys. `active` marks the key that currently mints;
+// The auth-token signing keys. `active` marks the key that currently issues;
 // every listed key still verifies and is published in the JWKS.
 export const authKeySummarySchema = z.strictObject({
 	kid: z.string(),

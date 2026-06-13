@@ -59,7 +59,7 @@ const accessTokenFreshnessMarginMs = 30 * 1000;
  * alive without a browser. A fresh cached access token is used as is; an
  * expired or refused one is renewed by rotating the cupboard refresh token,
  * falling back to exchanging a fresh `id_token` from the deploy's stored
- * Cloudflare grant. Only when neither silent path can mint does the session
+ * Cloudflare grant. Only when neither silent path can issue does the session
  * surface as a prompt to run `cupboard login` again.
  */
 export function cachedOwnerProvider(

@@ -15,16 +15,16 @@ import {
 	currentServer,
 	fetchPath,
 	initialise,
+	issueServerSignedToken,
 	latestMigrationIndex,
 	migrateThrough,
-	mintServerSignedToken,
 	resetTestServer
 } from '../test-support.ts';
 
 async function adminToken(): Promise<string> {
 	await initialise();
 
-	return mintServerSignedToken('admin');
+	return issueServerSignedToken('admin');
 }
 
 async function listKeys(token: string): Promise<AuthKeyListResponse> {
@@ -67,7 +67,7 @@ describe('auth-key rotation', () => {
 		});
 	});
 
-	it('rotates so the new key mints and both keys still verify', async () => {
+	it('rotates so the new key issues and both keys still verify', async () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(rotateAt);
 
@@ -118,12 +118,12 @@ describe('auth-key rotation', () => {
 
 		vi.setSystemTime(new Date('2026-01-01T00:21:29.999Z'));
 		await currentServer().runAuthKeyRetirement();
-		const earlyToken = await mintServerSignedToken('admin');
+		const earlyToken = await issueServerSignedToken('admin');
 		const early = await listKeys(earlyToken);
 
 		vi.setSystemTime(new Date(scheduledRetireAt));
 		await currentServer().runAuthKeyRetirement();
-		const dueToken = await mintServerSignedToken('admin');
+		const dueToken = await issueServerSignedToken('admin');
 		const due = await listKeys(dueToken);
 
 		await currentServer().runAuthKeyRetirement();
@@ -149,8 +149,8 @@ describe('auth-key rotation', () => {
 		const rotated = await rotate(token);
 
 		// Retiring the original would invalidate `token`, which it signed, so act
-		// with a token minted by the now-active rotated key.
-		const activeToken = await mintServerSignedToken('admin');
+		// with a token issued by the now-active rotated key.
+		const activeToken = await issueServerSignedToken('admin');
 		const retiredResponse = await retire(activeToken, original);
 		const retired = await retiredResponse.json<AuthKeyRetireResponse>();
 		const list = await listKeys(activeToken);
@@ -189,7 +189,7 @@ describe('auth-key rotation', () => {
 
 	it('refuses a write token', async () => {
 		await initialise();
-		const token = await mintServerSignedToken('write');
+		const token = await issueServerSignedToken('write');
 
 		const response = await authorisedFetch('/keys/auth', token);
 

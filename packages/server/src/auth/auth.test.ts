@@ -8,7 +8,7 @@ import {
 	generateAuthKeyPair,
 	InvalidRootConstraintError,
 	InvalidScopeError,
-	mintAccessJwt,
+	issueAccessJwt,
 	MissingScopeError,
 	MissingSubjectError,
 	verifyAccessJwt
@@ -24,7 +24,7 @@ function keySet(publicJwk: JsonWebKey): AuthPublicKey[] {
 	return [{ kid, publicJwk }];
 }
 
-describe('mintAccessJwt and verifyAccessJwt', () => {
+describe('issueAccessJwt and verifyAccessJwt', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 		vi.setSystemTime(now);
@@ -38,7 +38,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 		'round-trips a %s token, preserving scope and subject',
 		async (scope) => {
 			const keyPair = await generateAuthKeyPair();
-			const token = await mintAccessJwt(
+			const token = await issueAccessJwt(
 				keyPair.privateJwk,
 				{ issuer, audience, subject: 'ci', scope, kid, ttlSeconds },
 				now
@@ -58,7 +58,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 	it('round-trips a write token carrying a cb_roots constraint', async () => {
 		const keyPair = await generateAuthKeyPair();
 		const callbackRoots = ['github:owner/repo/', 'pin:abc'];
-		const token = await mintAccessJwt(
+		const token = await issueAccessJwt(
 			keyPair.privateJwk,
 			{
 				issuer,
@@ -90,7 +90,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 	it('selects the verification key by kid from a rotated set', async () => {
 		const retired = await generateAuthKeyPair();
 		const active = await generateAuthKeyPair();
-		const token = await mintAccessJwt(
+		const token = await issueAccessJwt(
 			active.privateJwk,
 			{
 				issuer,
@@ -123,7 +123,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 			token: async () => {
 				const foreign = await generateAuthKeyPair();
 
-				return mintAccessJwt(
+				return issueAccessJwt(
 					foreign.privateJwk,
 					{ issuer, audience, subject: 'ci', scope: 'admin', kid, ttlSeconds },
 					now
@@ -136,7 +136,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 			name: 'an unknown key id',
 			error: AccessTokenVerificationError,
 			token: async (privateJwk: JsonWebKey) =>
-				mintAccessJwt(
+				issueAccessJwt(
 					privateJwk,
 					{
 						issuer,
@@ -155,7 +155,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 			name: 'a mismatched issuer',
 			error: AccessTokenVerificationError,
 			token: async (privateJwk: JsonWebKey) =>
-				mintAccessJwt(
+				issueAccessJwt(
 					privateJwk,
 					{
 						issuer: 'someone-else',
@@ -174,7 +174,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 			name: 'a mismatched audience',
 			error: AccessTokenVerificationError,
 			token: async (privateJwk: JsonWebKey) =>
-				mintAccessJwt(
+				issueAccessJwt(
 					privateJwk,
 					{
 						issuer,
@@ -193,7 +193,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 			name: 'an expired token',
 			error: AccessTokenVerificationError,
 			token: async (privateJwk: JsonWebKey) =>
-				mintAccessJwt(
+				issueAccessJwt(
 					privateJwk,
 					{ issuer, audience, subject: 'ci', scope: 'admin', kid, ttlSeconds },
 					now
@@ -207,7 +207,7 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 			token: async (privateJwk: JsonWebKey) => {
 				const future = new Date(now.getTime() + 3600 * 1000);
 
-				return mintAccessJwt(
+				return issueAccessJwt(
 					privateJwk,
 					{ issuer, audience, subject: 'ci', scope: 'admin', kid, ttlSeconds },
 					future
@@ -340,10 +340,10 @@ describe('mintAccessJwt and verifyAccessJwt', () => {
 	])('rejects $name', async ({ token, error, verifyOptions, at }) => {
 		const keyPair = await generateAuthKeyPair();
 		const signingKey = await importPrivateKey(keyPair.privateJwk);
-		const minted = await token(keyPair.privateJwk, signingKey);
+		const issued = await token(keyPair.privateJwk, signingKey);
 
 		await expect(
-			verifyAccessJwt(keySet(keyPair.publicJwk), minted, verifyOptions, at)
+			verifyAccessJwt(keySet(keyPair.publicJwk), issued, verifyOptions, at)
 		).rejects.toBeInstanceOf(error);
 	});
 

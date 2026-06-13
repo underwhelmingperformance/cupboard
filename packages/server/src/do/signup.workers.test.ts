@@ -174,7 +174,7 @@ describe('control plane POST /signup', () => {
 		});
 	});
 
-	it('reports 503 when the signup issuer is unconfigured, minting nothing', async () => {
+	it('reports 503 when the signup issuer is unconfigured, issuing nothing', async () => {
 		const response = await postSignup(
 			{ subject_token: 'x' },
 			{ CUPBOARD_SIGNUP_ISSUER: '' }
