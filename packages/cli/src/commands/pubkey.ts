@@ -25,6 +25,8 @@ export function registerPubkeyCommand(
 				client.publicKey()
 			);
 
-			reporter.info(publicKey.trimEnd());
+			// The key is the command's payload: write it to stdout so
+			// `cupboard pubkey <url> > key.txt` captures it.
+			reporter.data(publicKey.trimEnd());
 		});
 }
