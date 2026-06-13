@@ -10,6 +10,7 @@ import {
 } from '../auth/oidc-login.ts';
 import {
 	sessionFromTokenResponse,
+	tokensDirectory,
 	writeCachedSession
 } from '../auth/token-store.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
@@ -243,12 +244,15 @@ export function registerLoginCommand(
 			);
 			await writeCachedSession(sessionFromTokenResponse(exchanged), url);
 
+			const storedIn = tokensDirectory();
+
 			reporter.result({
 				kind: 'login',
-				data: { url, scope },
+				data: { url, scope, storedIn },
 				rows: [
 					{ label: 'Cache URL', value: url },
-					{ label: 'Session', value: 'admin token cached' }
+					{ label: 'Session', value: 'admin token cached' },
+					{ label: 'Stored', value: storedIn }
 				]
 			});
 		});
