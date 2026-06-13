@@ -61,6 +61,12 @@ function reporter(results: ResultRow[][]): Reporter {
 		result(rows) {
 			results.push([...rows]);
 		},
+		data() {
+			return;
+		},
+		error() {
+			return;
+		},
 		warn() {
 			return;
 		},

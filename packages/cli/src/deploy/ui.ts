@@ -1,3 +1,5 @@
+import { stdout } from 'node:process';
+
 import { TextPrompt } from '@clack/core';
 import {
 	cancel,
@@ -336,12 +338,20 @@ function clackReporter(): Reporter {
 			note(formatRows(rows), 'Deployed');
 		},
 
+		data(text) {
+			stdout.write(`${text}\n`);
+		},
+
 		warn(label, value) {
 			emit('warn', value === undefined ? label : `${label}: ${value}`);
 		},
 
 		info(message) {
 			emit('info', message);
+		},
+
+		error(error) {
+			log.error(error instanceof Error ? error.message : String(error));
 		}
 	};
 }

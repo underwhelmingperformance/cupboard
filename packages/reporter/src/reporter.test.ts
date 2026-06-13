@@ -108,24 +108,99 @@ describe('createReporter (json mode)', () => {
 			{ event: 'info', message: 'all done' }
 		]);
 	});
+
+	it('writes data payloads to stdout and emits one error event', () => {
+		const { events, payloads, reporter } = jsonReporter();
+
+		reporter.data('{"public_key":"abc"}');
+		reporter.error(new RangeError('too big'));
+
+		expect({ payloads: payloads(), events: events() }).toStrictEqual({
+			payloads: ['{"public_key":"abc"}\n'],
+			events: [{ event: 'error', name: 'RangeError', message: 'too big' }]
+		});
+	});
 });
+
+describe('createReporter (terminal mode)', () => {
+	it('writes a data payload to stdout and an error marker to stderr', () => {
+		const { lines, payloads, reporter } = terminalReporter();
+
+		reporter.data('netrc contents');
+		reporter.error(new RangeError('too big'));
+
+		expect({
+			payloads: payloads(),
+			errorLine: stripAnsi(lines().join('')).trim()
+		}).toStrictEqual({
+			payloads: ['netrc contents\n'],
+			errorLine: '✖ RangeError: too big'
+		});
+	});
+});
+
+function captureStream(): {
+	readonly lines: () => string[];
+	readonly stream: Writable;
+} {
+	const lines: string[] = [];
+
+	return {
+		lines: () => lines,
+		stream: new Writable({
+			write(chunk: Buffer | string, _encoding, callback) {
+				lines.push(String(chunk));
+				callback();
+			}
+		})
+	};
+}
 
 function jsonReporter(): {
 	readonly events: () => readonly unknown[];
+	readonly payloads: () => string[];
 	readonly reporter: ReturnType<typeof createReporter>;
 } {
-	const lines: string[] = [];
-	const stream = new Writable({
-		write(chunk: Buffer | string, _encoding, callback) {
-			lines.push(String(chunk));
-			callback();
-		}
-	});
+	const diagnostics = captureStream();
+	const payloads = captureStream();
 
 	return {
-		events: () => lines.map((line) => JSON.parse(line) as unknown),
-		reporter: createReporter({ mode: 'json', stream })
+		events: () =>
+			diagnostics.lines().map((line) => JSON.parse(line) as unknown),
+		payloads: payloads.lines,
+		reporter: createReporter({
+			mode: 'json',
+			stream: diagnostics.stream,
+			out: payloads.stream
+		})
 	};
+}
+
+function terminalReporter(): {
+	readonly lines: () => string[];
+	readonly payloads: () => string[];
+	readonly reporter: ReturnType<typeof createReporter>;
+} {
+	const diagnostics = captureStream();
+	const payloads = captureStream();
+
+	return {
+		lines: diagnostics.lines,
+		payloads: payloads.lines,
+		reporter: createReporter({
+			mode: 'terminal',
+			stream: diagnostics.stream,
+			out: payloads.stream
+		})
+	};
+}
+
+// Drops SGR colour escapes so a terminal line can be asserted exactly regardless
+// of whether picocolors emitted them in this environment.
+function stripAnsi(value: string): string {
+	const escape = String.fromCodePoint(27);
+
+	return value.replaceAll(new RegExp(String.raw`${escape}\[[0-9;]*m`, 'g'), '');
 }
 
 function withoutDurations(events: readonly unknown[]): readonly unknown[] {

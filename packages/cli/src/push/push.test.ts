@@ -1268,6 +1268,12 @@ function reporter(
 		result(rows) {
 			results.push([...rows]);
 		},
+		data() {
+			return;
+		},
+		error() {
+			return;
+		},
 		warn(label, value) {
 			warnings.push({ label, value });
 		},
