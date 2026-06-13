@@ -13,6 +13,7 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
+import { parseWorkerUrl, reachableFetcher } from './transport.ts';
 
 /**
  * The tenant admin client, derived entirely from the contract: every
@@ -52,7 +53,7 @@ export function tenantRpc(
 	baseUrl: string | URL,
 	options: TenantRpcOptions = {}
 ): TenantRpc {
-	return derivedClient(tenantContract, new URL(baseUrl), options);
+	return derivedClient(tenantContract, parseWorkerUrl(baseUrl), options);
 }
 
 /**
@@ -63,7 +64,7 @@ export function controlRpc(
 	baseUrl: string | URL,
 	options: TenantRpcOptions = {}
 ): ControlRpc {
-	const url = new URL(baseUrl);
+	const url = parseWorkerUrl(baseUrl);
 	url.pathname = `${url.pathname.replace(/\/$/, '')}/control`;
 
 	return derivedClient(controlContract, url, options);
@@ -75,6 +76,7 @@ function derivedClient<C extends AnyContractRouter>(
 	options: TenantRpcOptions
 ): JsonifiedClient<ContractRouterClient<C>> {
 	const { credential, signal, fetcher = fetch } = options;
+	const reachable = reachableFetcher(fetcher);
 
 	const link = new OpenAPILink(contract, {
 		url,
@@ -85,7 +87,7 @@ function derivedClient<C extends AnyContractRouter>(
 			// Bodies are buffered JSON, so the clone held back for a retry is
 			// cheap.
 			const retryable = request.clone();
-			const response = await fetcher(request, { ...init, signal });
+			const response = await reachable(request, { ...init, signal });
 
 			if (
 				response.status !== unauthorizedStatusCode ||
@@ -97,7 +99,7 @@ function derivedClient<C extends AnyContractRouter>(
 			const headers = new Headers(retryable.headers);
 			headers.set('authorization', `Bearer ${await credential.refresh()}`);
 
-			return fetcher(new Request(retryable, { headers }), {
+			return reachable(new Request(retryable, { headers }), {
 				...init,
 				signal
 			});
