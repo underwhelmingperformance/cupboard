@@ -292,7 +292,10 @@ export const tenantUsage = sqliteTable(
 	},
 	(table) => [
 		check('tenant_usage_bytes_nonnegative', sql`${table.bytes} >= 0`),
+		check('tenant_usage_narinfos_nonnegative', sql`${table.narinfos} >= 0`),
+		check('tenant_usage_blobs_nonnegative', sql`${table.blobs} >= 0`),
 		check('tenant_usage_cas_bytes_nonnegative', sql`${table.casBytes} >= 0`),
+		check('tenant_usage_cas_blobs_nonnegative', sql`${table.casBlobs} >= 0`),
 		check(
 			'tenant_usage_within_quota',
 			sql`${table.quotaBytes} IS NULL OR ${table.bytes} + ${table.casBytes} <= ${table.quotaBytes}`
