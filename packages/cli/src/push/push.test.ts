@@ -195,9 +195,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '1' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '1' },
-				{ label: 'Uploaded', value: '456 B' },
+				{ label: 'Bytes uploaded', value: '456 B' },
 				{ label: 'Pinned paths', value: '1' },
 				{ label: 'Pin expiry', value: 'permanent' }
 			]
@@ -327,9 +327,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '1' },
+				{ label: 'Already cached', value: '1' },
 				{ label: 'Skipped', value: '0' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Pinned paths', value: '1' },
 				{ label: 'Pin expiry', value: 'permanent' }
 			]
@@ -435,9 +435,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '1' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{
 					label: 'Attestations',
 					value: '1 attached, 0 reused, 0 deferred'
@@ -475,9 +475,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '1' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Pinned paths', value: '1' },
 				{ label: 'Pin expiry', value: 'permanent' }
 			]
@@ -639,9 +639,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '1' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Root', value: 'main' },
 				{ label: 'Root expiry', value: 'permanent' }
 			]
@@ -671,9 +671,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '1' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Root', value: 'main' },
 				{ label: 'Root expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
 			]
@@ -712,9 +712,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '2' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Pinned paths', value: '2' },
 				{ label: 'Pin expiry', value: 'permanent' }
 			]
@@ -749,9 +749,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '1' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Pinned paths', value: '1' },
 				{ label: 'Pin expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
 			]
@@ -905,9 +905,9 @@ describe('runPush', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Reused blobs', value: '0' },
+				{ label: 'Already cached', value: '0' },
 				{ label: 'Skipped', value: '2' },
-				{ label: 'Uploaded', value: '0 B' },
+				{ label: 'Bytes uploaded', value: '0 B' },
 				{ label: 'Pinned paths', value: '2' },
 				{
 					label: 'Pin expiry',

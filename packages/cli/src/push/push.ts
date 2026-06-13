@@ -365,9 +365,9 @@ async function runPushWithTemporaryDirectory(
 		data: { uploadedPaths, reusedBlobs, skipped, uploadedBytes },
 		rows: [
 			{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
-			{ label: 'Reused blobs', value: formatCount(reusedBlobs) },
+			{ label: 'Already cached', value: formatCount(reusedBlobs) },
 			{ label: 'Skipped', value: formatCount(skipped) },
-			{ label: 'Uploaded', value: formatBytes(uploadedBytes) },
+			{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
 			...attestationRows,
 			...retentionRows
 		]
