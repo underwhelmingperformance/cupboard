@@ -1,4 +1,4 @@
-import { createReporter } from '@cupboard/reporter';
+import { createCliUi } from '@cupboard/cli-ui';
 import type { Command } from 'commander';
 
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
@@ -15,9 +15,9 @@ export function registerPubkeyCommand(
 		)
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const client = CupboardClient.fromUrl(url, {
 				signal: programOptions.signal
 			});

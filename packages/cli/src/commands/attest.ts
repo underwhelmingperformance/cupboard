@@ -1,6 +1,7 @@
 import { env } from 'node:process';
 
-import { createReporter, formatCount } from '@cupboard/reporter';
+import { createCliUi } from '@cupboard/cli-ui';
+import { formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import {
@@ -119,9 +120,9 @@ export function registerAttestCommands(
 			'regular expression for the signing OIDC issuer'
 		)
 		.action(async (bundles: string[], options: VerifyOptions) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const readUser = options.readUser ?? env.CUPBOARD_READ_USER;
 			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
 			const common = {

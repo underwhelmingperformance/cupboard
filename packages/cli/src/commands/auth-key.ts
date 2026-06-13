@@ -6,7 +6,6 @@ import type {
 	AuthKeySummary
 } from '@cupboard/protocol/keys';
 import {
-	createReporter,
 	formatTimestamp,
 	type Reporter,
 	type ResultRow
@@ -45,9 +44,9 @@ export function registerAuthKeyCommands(
 		.description('List the auth signing-key set.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -63,9 +62,9 @@ export function registerAuthKeyCommands(
 		)
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

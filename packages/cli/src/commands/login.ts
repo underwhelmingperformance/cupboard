@@ -1,6 +1,5 @@
-import { openBrowser } from '@cupboard/cli-ui';
+import { createCliUi, openBrowser } from '@cupboard/cli-ui';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
-import { createReporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import {
@@ -68,6 +67,29 @@ export function loginScopeForClient(clientId: string): string | undefined {
 	return clientId === cloudflareOauthClientId
 		? deployScopes.join(' ')
 		: undefined;
+}
+
+/**
+ * What to tell the user to do for the device flow, preferring the complete
+ * verification URL (the code filled in) when the issuer provides one.
+ */
+function deviceLoginInstruction(verification: {
+	readonly userCode: string;
+	readonly verificationUri: string;
+	readonly verificationUriComplete?: string;
+}): string {
+	if (verification.verificationUriComplete !== undefined) {
+		return (
+			`To authorise, open ${verification.verificationUriComplete} ` +
+			`(the code ${verification.userCode} is filled in), then return here. ` +
+			'Waiting for authorisation…'
+		);
+	}
+
+	return (
+		`To authorise, open ${verification.verificationUri} and enter the code ` +
+		`${verification.userCode}, then return here. Waiting for authorisation…`
+	);
 }
 
 /** A fresh Cloudflare login answered without an id_token to present. */
@@ -140,9 +162,9 @@ export function registerLoginCommand(
 			'use the device flow instead of opening a browser (for SSH/containers)'
 		)
 		.action(async (url: string, options: LoginOptions) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const client = CupboardClient.fromUrl(url, {
 				signal: programOptions.signal
 			});
@@ -152,9 +174,14 @@ export function registerLoginCommand(
 			const usesCupboardClient = options.clientId === cloudflareOauthClientId;
 			const scope = loginScopeForClient(options.clientId);
 
-			const idToken = await reporter.phase('Logging in', async (ctx) => {
-				ctx.fact('issuer', options.oidcIssuer);
+			const browserPrompt = (target: string): void => {
+				openBrowser(target, reporter);
+				reporter.info('Waiting for you to authorise in your browser…');
+			};
 
+			// Login is interactive, so show its prompts the moment they happen
+			// rather than holding them behind a spinner the user is meant to act on.
+			const idToken = await (async (): Promise<string> => {
 				// The built-in client against its own issuer uses the deploy's
 				// cached grant: silent while a cached login can be renewed, the
 				// browser only as a last resort.
@@ -172,9 +199,7 @@ export function registerLoginCommand(
 						},
 						login: () =>
 							cloudflareLogin({
-								openBrowser: (target) => {
-									openBrowser(target, reporter);
-								},
+								openBrowser: browserPrompt,
 								signal: programOptions.signal
 							})
 					});
@@ -193,9 +218,7 @@ export function registerLoginCommand(
 							clientId: options.clientId,
 							scope,
 							prompt: (verification) => {
-								reporter.info(
-									`Visit ${verification.verificationUri} and enter code ${verification.userCode}`
-								);
+								reporter.info(deviceLoginInstruction(verification));
 							},
 							signal: programOptions.signal
 						});
@@ -208,13 +231,11 @@ export function registerLoginCommand(
 					endpoints,
 					clientId: options.clientId,
 					scope,
-					openBrowser: (target) => {
-						openBrowser(target, reporter);
-					},
+					openBrowser: browserPrompt,
 					loopback: usesCupboardClient ? cloudflareLoopback : undefined,
 					signal: programOptions.signal
 				});
-			});
+			})();
 
 			const exchanged = await client.tokenExchange(
 				idToken,

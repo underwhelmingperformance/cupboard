@@ -6,7 +6,6 @@ import type {
 	ControlKeySummary
 } from '@cupboard/protocol/control-keys';
 import {
-	createReporter,
 	formatTimestamp,
 	type Reporter,
 	type ResultRow
@@ -48,9 +47,9 @@ export function registerControlKeyCommands(
 		.description('List the control-plane signing-key set.')
 		.argument('<url>', urlArgument)
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -66,9 +65,9 @@ export function registerControlKeyCommands(
 		)
 		.argument('<url>', urlArgument)
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

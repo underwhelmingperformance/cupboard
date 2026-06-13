@@ -514,6 +514,8 @@ export interface DeviceLoginOptions {
 	readonly prompt: (verification: {
 		readonly userCode: string;
 		readonly verificationUri: string;
+		/** The verification URL with the code already filled in, when the issuer sends one. */
+		readonly verificationUriComplete?: string;
 	}) => void;
 	readonly fetcher?: typeof fetch;
 	readonly sleep?: (ms: number) => Promise<void>;
@@ -525,6 +527,7 @@ const deviceAuthorizationSchema = z.object({
 	device_code: z.string().min(1),
 	user_code: z.string().min(1),
 	verification_uri: z.string().min(1),
+	verification_uri_complete: z.string().min(1).optional(),
 	expires_in: z.number().int().positive().optional(),
 	interval: z.number().int().positive().optional()
 });
@@ -571,7 +574,8 @@ export async function deviceLogin(
 	);
 	options.prompt({
 		userCode: authorization.user_code,
-		verificationUri: authorization.verification_uri
+		verificationUri: authorization.verification_uri,
+		verificationUriComplete: authorization.verification_uri_complete
 	});
 
 	let intervalMs = (authorization.interval ?? devicePollIntervalSeconds) * 1000;
