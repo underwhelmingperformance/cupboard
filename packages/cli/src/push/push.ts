@@ -61,6 +61,8 @@ import {
 	prepareStorePathNegotiation
 } from '../nix/nix-store.ts';
 
+import { runWithConcurrency } from './pool.ts';
+
 export interface PushDependencies {
 	readonly nixStore?: NixStoreClient;
 	readonly client: PushClient;
@@ -80,7 +82,11 @@ export interface PushDependencies {
 	readonly readCompressedNar?: ReadCompressedNar;
 	readonly createTemporaryDirectory?: () => Promise<string>;
 	readonly removeTemporaryDirectory?: (path: string) => Promise<void>;
+	/** How many blob uploads run at once; defaults to {@link defaultUploadConcurrency}. */
+	readonly uploadConcurrency?: number;
 }
+
+export const defaultUploadConcurrency = 6;
 
 /**
  * The client surface a push consumes. The contract-backed conversations
@@ -199,6 +205,7 @@ interface PushRuntimeDependencies {
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
+	readonly uploadConcurrency?: number;
 }
 
 async function runPushWithTemporaryDirectory(
@@ -269,20 +276,41 @@ async function runPushWithTemporaryDirectory(
 	const uploadedBytes = await reporter.phase(
 		'Uploading missing blobs',
 		async (ctx) => {
+			const startedAt = Date.now();
 			let totalUploaded = 0;
+			let done = 0;
 
-			for (const upload of uploads) {
-				await client.uploadBlob({
-					r2Key: upload.decision.r2Key,
-					uploadUrl: upload.uploadUrl,
-					body: readCompressedNar(upload.preparedPath.compressedPath),
-					contentLength: upload.preparedPath.blob.fileSize,
-					headers: upload.uploadHeaders
-				});
-
-				totalUploaded += upload.preparedPath.blob.fileSize;
+			const report = (): void => {
+				ctx.fact(
+					'blobs',
+					`${formatCount(done)}/${formatCount(uploads.length)}`
+				);
 				ctx.fact('uploaded', formatBytes(totalUploaded));
-			}
+
+				const elapsedSeconds = (Date.now() - startedAt) / 1000;
+
+				if (elapsedSeconds > 0 && totalUploaded > 0) {
+					ctx.fact('rate', `${formatBytes(totalUploaded / elapsedSeconds)}/s`);
+				}
+			};
+
+			await runWithConcurrency(
+				uploads,
+				dependencies.uploadConcurrency ?? defaultUploadConcurrency,
+				async (upload) => {
+					await client.uploadBlob({
+						r2Key: upload.decision.r2Key,
+						uploadUrl: upload.uploadUrl,
+						body: readCompressedNar(upload.preparedPath.compressedPath),
+						contentLength: upload.preparedPath.blob.fileSize,
+						headers: upload.uploadHeaders
+					});
+
+					totalUploaded += upload.preparedPath.blob.fileSize;
+					done += 1;
+					report();
+				}
+			);
 
 			return totalUploaded;
 		}
