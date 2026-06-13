@@ -8,7 +8,6 @@ import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 
 interface StatsOptions {
-	readonly token: string;
 	readonly cache?: string;
 }
 

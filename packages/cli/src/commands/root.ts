@@ -19,13 +19,11 @@ import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
 
 interface RootSetOptions {
-	readonly token: string;
 	readonly ttl?: number;
 	readonly cache?: string;
 }
 
 interface RootOptions {
-	readonly token: string;
 	readonly cache?: string;
 	readonly yes?: boolean;
 }
