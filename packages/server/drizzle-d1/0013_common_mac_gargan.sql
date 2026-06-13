@@ -35,7 +35,10 @@ CREATE TABLE `__new_tenant_usage` (
 	`quota_bytes` integer,
 	`updated_at` text NOT NULL,
 	CONSTRAINT "tenant_usage_bytes_nonnegative" CHECK("__new_tenant_usage"."bytes" >= 0),
+	CONSTRAINT "tenant_usage_narinfos_nonnegative" CHECK("__new_tenant_usage"."narinfos" >= 0),
+	CONSTRAINT "tenant_usage_blobs_nonnegative" CHECK("__new_tenant_usage"."blobs" >= 0),
 	CONSTRAINT "tenant_usage_cas_bytes_nonnegative" CHECK("__new_tenant_usage"."cas_bytes" >= 0),
+	CONSTRAINT "tenant_usage_cas_blobs_nonnegative" CHECK("__new_tenant_usage"."cas_blobs" >= 0),
 	CONSTRAINT "tenant_usage_within_quota" CHECK("__new_tenant_usage"."quota_bytes" IS NULL OR "__new_tenant_usage"."bytes" + "__new_tenant_usage"."cas_bytes" <= "__new_tenant_usage"."quota_bytes")
 );
 --> statement-breakpoint

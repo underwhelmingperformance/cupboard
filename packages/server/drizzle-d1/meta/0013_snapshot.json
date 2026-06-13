@@ -777,9 +777,21 @@
 					"name": "tenant_usage_bytes_nonnegative",
 					"value": "\"tenant_usage\".\"bytes\" >= 0"
 				},
+				"tenant_usage_narinfos_nonnegative": {
+					"name": "tenant_usage_narinfos_nonnegative",
+					"value": "\"tenant_usage\".\"narinfos\" >= 0"
+				},
+				"tenant_usage_blobs_nonnegative": {
+					"name": "tenant_usage_blobs_nonnegative",
+					"value": "\"tenant_usage\".\"blobs\" >= 0"
+				},
 				"tenant_usage_cas_bytes_nonnegative": {
 					"name": "tenant_usage_cas_bytes_nonnegative",
 					"value": "\"tenant_usage\".\"cas_bytes\" >= 0"
+				},
+				"tenant_usage_cas_blobs_nonnegative": {
+					"name": "tenant_usage_cas_blobs_nonnegative",
+					"value": "\"tenant_usage\".\"cas_blobs\" >= 0"
 				},
 				"tenant_usage_within_quota": {
 					"name": "tenant_usage_within_quota",
