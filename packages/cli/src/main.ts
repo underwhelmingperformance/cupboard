@@ -7,6 +7,7 @@ import {
 	failureReporterMode,
 	reportCliFailure
 } from './cli.ts';
+import { translateRpcError } from './client/rpc-errors.ts';
 import { CliAbortError } from './errors.ts';
 
 const controller = new AbortController();
@@ -32,12 +33,13 @@ const program = buildProgram({ signal: controller.signal });
 try {
 	await program.parseAsync();
 } catch (error: unknown) {
+	const failure = translateRpcError(error);
 	const reporter = createCliUi({
 		mode: failureReporterMode(program)
 	}).reporter();
 
-	reportCliFailure(reporter, error);
-	process.exit(cliExitCode(error, abortExitCode));
+	reportCliFailure(reporter, failure);
+	process.exit(cliExitCode(failure, abortExitCode));
 } finally {
 	process.removeListener('SIGINT', abortSigint);
 	process.removeListener('SIGTERM', abortSigterm);

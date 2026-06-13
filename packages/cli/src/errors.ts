@@ -98,6 +98,47 @@ export class OwnerLoginRequiredError extends CliError {
 	}
 }
 
+export class SessionRejectedError extends CliError {
+	constructor() {
+		super(
+			'The server refused your session; it may have expired. ' +
+				'Run `cupboard login <url>` to sign in again.'
+		);
+		this.name = 'SessionRejectedError';
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
+	}
+}
+
+export class ScopeForbiddenError extends CliError {
+	constructor() {
+		super(
+			'Your token lacks the scope this command needs. A tenant command ' +
+				"needs that tenant's admin token; a control-plane command (tenant, " +
+				'control-key) needs the operator token.'
+		);
+		this.name = 'ScopeForbiddenError';
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
+	}
+}
+
+export class QuotaExceededError extends CliError {
+	constructor(detail: string) {
+		const explanation =
+			detail === '' ? 'The cache is over its storage quota.' : detail;
+
+		super(
+			`${explanation} Free space by deleting unused paths or raise the quota.`
+		);
+		this.name = 'QuotaExceededError';
+	}
+}
+
 export class CupboardHttpError extends CliError {
 	constructor(
 		public readonly method: string,
