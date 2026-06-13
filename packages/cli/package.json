@@ -5,9 +5,8 @@
 		"cupboard": "./src/main.ts"
 	},
 	"dependencies": {
-		"@clack/core": "^1.4.1",
-		"@clack/prompts": "^1.5.1",
 		"@cloudflare/workers-auth": "^0.1.1",
+		"@cupboard/cli-ui": "workspace:*",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
@@ -23,7 +22,6 @@
 		"cloudflare": "^6.4.0",
 		"commander": "^15.0.0",
 		"json5": "^2.2.3",
-		"picocolors": "^1.1.1",
 		"ws": "^8.21.0",
 		"zod": "^4.4.3"
 	},
