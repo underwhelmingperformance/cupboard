@@ -84,6 +84,8 @@ export interface PushDependencies {
 	readonly removeTemporaryDirectory?: (path: string) => Promise<void>;
 	/** How many blob uploads run at once; defaults to {@link defaultUploadConcurrency}. */
 	readonly uploadConcurrency?: number;
+	/** Report what a push would do, without uploading or committing anything. */
+	readonly dryRun?: boolean;
 }
 
 export const defaultUploadConcurrency = 6;
@@ -206,6 +208,7 @@ interface PushRuntimeDependencies {
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly uploadConcurrency?: number;
+	readonly dryRun?: boolean;
 }
 
 async function runPushWithTemporaryDirectory(
@@ -255,6 +258,11 @@ async function runPushWithTemporaryDirectory(
 			return response;
 		}
 	);
+
+	if (dependencies.dryRun === true) {
+		reportDryRun(reporter, negotiation, retention);
+		return;
+	}
 
 	const uploads = await reporter.phase(
 		'Preparing missing NARs',
@@ -400,6 +408,59 @@ async function runPushWithTemporaryDirectory(
 			...retentionRows
 		]
 	});
+}
+
+function reportDryRun(
+	reporter: Reporter,
+	negotiation: UploadNegotiateResponse,
+	retention: RetentionPlan
+): void {
+	const wouldUpload = negotiation.uploads.filter((decision) =>
+		needsUpload(decision)
+	).length;
+	const reusedBlobs = negotiation.uploads.filter((decision) =>
+		needsReusedBlobCommit(decision)
+	).length;
+	const skipped = negotiation.uploads.filter((decision) =>
+		isSkip(decision)
+	).length;
+
+	reporter.result({
+		kind: 'push-plan',
+		data: { wouldUpload, reusedBlobs, skipped },
+		rows: [
+			{ label: 'Would upload', value: formatCount(wouldUpload) },
+			{ label: 'Already cached', value: formatCount(reusedBlobs) },
+			{ label: 'Skipped', value: formatCount(skipped) },
+			...retentionPlanRows(retention)
+		]
+	});
+}
+
+function retentionPlanRows(retention: RetentionPlan): ResultRow[] {
+	if (retention.kind === 'root') {
+		return [
+			{ label: 'Would set root', value: retention.name },
+			{
+				label: 'Root expiry',
+				value: planExpiry(retention.request.body.ttlSeconds)
+			}
+		];
+	}
+
+	return [
+		{ label: 'Would pin paths', value: formatCount(retention.requests.length) },
+		{
+			label: 'Pin expiry',
+			value: planExpiry(retention.requests[0]?.body.ttlSeconds)
+		}
+	];
+}
+
+function planExpiry(ttlSeconds: number | undefined): string {
+	return ttlSeconds === undefined
+		? 'permanent'
+		: `expires after ${formatCount(ttlSeconds)}s`;
 }
 
 interface AttachAttestationsDependencies {
