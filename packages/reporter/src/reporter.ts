@@ -220,5 +220,25 @@ export function formatCount(count: number): string {
 	return count.toLocaleString('en-GB');
 }
 
+/**
+ * Renders an ISO 8601 timestamp as a compact `YYYY-MM-DD HH:mm UTC` for terminal
+ * display, dropping the seconds and milliseconds. The result is in UTC so it does
+ * not depend on the machine's timezone. A value that does not parse is returned
+ * unchanged.
+ */
+export function formatTimestamp(value: string): string {
+	const date = new Date(value);
+
+	if (Number.isNaN(date.getTime())) {
+		return value;
+	}
+
+	const pad = (part: number): string => String(part).padStart(2, '0');
+	const day = `${String(date.getUTCFullYear())}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}`;
+	const time = `${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}`;
+
+	return `${day} ${time} UTC`;
+}
+
 export { default as colour } from 'picocolors';
 export { default as formatBytes } from 'pretty-bytes';

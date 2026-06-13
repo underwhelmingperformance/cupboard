@@ -2,7 +2,12 @@ import { Writable } from 'node:stream';
 
 import { describe, expect, it } from 'vitest';
 
-import { createReporter, formatCount, formatDuration } from './reporter.ts';
+import {
+	createReporter,
+	formatCount,
+	formatDuration,
+	formatTimestamp
+} from './reporter.ts';
 
 describe('formatDuration', () => {
 	it.each([
@@ -28,6 +33,19 @@ describe('formatCount', () => {
 		[1_234_567, '1,234,567']
 	])('groups %i as %s', (count, expected) => {
 		expect(formatCount(count)).toBe(expected);
+	});
+});
+
+describe('formatTimestamp', () => {
+	it.each([
+		['2026-06-13T14:30:45.123Z', '2026-06-13 14:30 UTC'],
+		['2026-01-02T03:04:05.000Z', '2026-01-02 03:04 UTC'],
+		// A non-UTC offset is normalised to UTC.
+		['2026-06-13T14:30:00+02:00', '2026-06-13 12:30 UTC'],
+		// An unparseable value passes through unchanged.
+		['not a date', 'not a date']
+	])('renders %s as %s', (value, expected) => {
+		expect(formatTimestamp(value)).toBe(expected);
 	});
 });
 
