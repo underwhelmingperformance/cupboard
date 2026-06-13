@@ -8,6 +8,7 @@ import type {
 } from '@cupboard/protocol/retention';
 import {
 	createReporter,
+	formatTimestamp,
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
@@ -237,8 +238,8 @@ export function describeExpiry(summary: RootSummary): string {
 	}
 
 	if (summary.expired) {
-		return `expired (${summary.expiresAt})`;
+		return `expired (${formatTimestamp(summary.expiresAt)})`;
 	}
 
-	return `expires ${summary.expiresAt}`;
+	return `expires ${formatTimestamp(summary.expiresAt)}`;
 }
