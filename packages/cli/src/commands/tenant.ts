@@ -11,11 +11,7 @@ import {
 	tenantReadModeSchema,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
-import {
-	createReporter,
-	type Reporter,
-	type ResultRow
-} from '@cupboard/reporter';
+import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -187,9 +183,9 @@ export function registerTenantCommands(
 			parseQuotaBytes
 		)
 		.action(async (url: string, id: string, options: CreateOptions) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -222,9 +218,9 @@ export function registerTenantCommands(
 		.description('List provisioned tenants.')
 		.argument('<url>', urlArgument)
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -260,9 +256,9 @@ export function registerTenantCommands(
 		.argument('<url>', urlArgument)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: string, id: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -278,9 +274,9 @@ export function registerTenantCommands(
 		.argument('<id>', 'tenant slug')
 		.argument('<mode>', 'public or private')
 		.action(async (url: string, id: string, mode: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -311,9 +307,9 @@ export function registerTenantCommands(
 		)
 		.action(
 			async (url: string, id: string, options: RotateCredentialOptions) => {
-				const reporter = createReporter({
+				const reporter = createCliUi({
 					mode: reporterModeFromGlobals(program)
-				});
+				}).reporter();
 				const rpc = controlRpc(url, {
 					credential: cachedOwnerProvider(url, {
 						signal: programOptions.signal
@@ -333,9 +329,9 @@ export function registerTenantCommands(
 		.argument('<url>', urlArgument)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: string, id: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

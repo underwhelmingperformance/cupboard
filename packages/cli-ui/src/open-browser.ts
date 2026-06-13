@@ -20,7 +20,9 @@ export function openBrowser(target: string, messages: BrowserMessages): void {
 		detached: true
 	});
 	child.on('error', () => {
-		messages.warn('Could not open a browser automatically');
+		messages.warn(
+			'Could not open a browser automatically; open the URL above yourself.'
+		);
 	});
 	child.unref();
 }

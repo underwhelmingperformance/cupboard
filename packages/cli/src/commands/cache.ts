@@ -5,12 +5,7 @@ import type {
 	CacheRemoveResponse,
 	CacheSummary
 } from '@cupboard/protocol/caches';
-import {
-	createReporter,
-	formatCount,
-	type Reporter,
-	type ResultRow
-} from '@cupboard/reporter';
+import { formatCount, type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -65,9 +60,9 @@ export function registerCacheCommands(
 		.description('List the caches and their priority and size.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -87,9 +82,9 @@ export function registerCacheCommands(
 			parsePriority
 		)
 		.action(async (url: string, name: string, options: CacheCreateOptions) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -129,9 +124,9 @@ export function registerCacheCommands(
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<name>', 'cache name')
 		.action(async (url: string, name: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

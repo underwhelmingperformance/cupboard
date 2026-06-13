@@ -7,7 +7,6 @@ import type {
 	RootSummary
 } from '@cupboard/protocol/retention';
 import {
-	createReporter,
 	formatTimestamp,
 	type Reporter,
 	type ResultRow
@@ -79,9 +78,9 @@ export function registerRootCommands(
 				targets: string[],
 				options: RootSetOptions
 			) => {
-				const reporter = createReporter({
+				const reporter = createCliUi({
 					mode: reporterModeFromGlobals(program)
-				});
+				}).reporter();
 				const rpc = tenantRpc(url, {
 					credential: cachedOwnerProvider(url, {
 						signal: programOptions.signal
@@ -106,9 +105,9 @@ export function registerRootCommands(
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.option('--cache <name>', 'target a named cache rather than the default')
 		.action(async (url: string, options: RootOptions) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
