@@ -172,14 +172,38 @@ export async function enqueueMaintenanceJobs(
 	return messages;
 }
 
-async function sendQueueMessages(
+// One or more maintenance queue batches failed to send. It carries the
+// underlying send failures so a partial send is observable, distinct from the
+// per-tenant pass failures the cron also aggregates.
+export class QueueBatchSendError extends AggregateError {
+	constructor(failures: readonly unknown[]) {
+		super(failures);
+		this.name = 'QueueBatchSendError';
+	}
+}
+
+export async function sendQueueMessages(
 	queue: MaintenanceQueue,
 	messages: readonly MaintenanceQueueMessage[]
 ): Promise<void> {
+	// Attempt every chunk even if one fails, so a failed send of an earlier chunk
+	// does not skip the global passes (reaper, demote, control-key retirement) that
+	// trail the per-tenant messages. Failures are aggregated and rethrown so the
+	// tick still records that the send was incomplete.
+	const failures: unknown[] = [];
+
 	for (let offset = 0; offset < messages.length; offset += queueSendBatchSize) {
 		const batch = messages.slice(offset, offset + queueSendBatchSize);
 
-		await queue.sendBatch(batch.map((body) => ({ body })));
+		try {
+			await queue.sendBatch(batch.map((body) => ({ body })));
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+
+	if (failures.length > 0) {
+		throw new QueueBatchSendError(failures);
 	}
 }
 

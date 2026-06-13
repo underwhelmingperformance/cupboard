@@ -20,8 +20,10 @@ import {
 	enqueueMaintenanceJobs,
 	executeMaintenanceQueueMessage,
 	type MaintenanceQueueMessage,
+	QueueBatchSendError,
 	runCronSweep,
-	runOffboardSweep
+	runOffboardSweep,
+	sendQueueMessages
 } from './scheduled.ts';
 
 describe('scheduled tenant pass failure records', () => {
@@ -89,6 +91,82 @@ describe('scheduled tenant pass failure records', () => {
 			retiringOutcome: undefined,
 			acmeMaintained: false
 		});
+	});
+
+	it('attempts every batch when an earlier one fails, surfacing a typed error', async () => {
+		// More than one batch of messages: a tenant-maintenance message per tenant
+		// followed by a trailing global pass, the order a live tick produces.
+		const messages: MaintenanceQueueMessage[] = [
+			...Array.from(
+				{ length: 120 },
+				(_, index): MaintenanceQueueMessage => ({
+					kind: 'tenant-maintenance',
+					tenant: `tenant-${String(index)}`
+				})
+			),
+			{ kind: 'blob-reaper' }
+		];
+		const attempted: MaintenanceQueueMessage[] = [];
+		const rejection = new Error('queue unavailable');
+		let call = 0;
+
+		const sending = sendQueueMessages(
+			{
+				sendBatch: (batch) => {
+					call += 1;
+					attempted.push(...Array.from(batch, (entry) => entry.body));
+
+					return call === 1
+						? Promise.reject(rejection)
+						: Promise.resolve(queueSendBatchResponse());
+				}
+			},
+			messages
+		);
+
+		// The partial send surfaces as the typed error carrying the one failure.
+		await expect(sending).rejects.toBeInstanceOf(QueueBatchSendError);
+		await expect(sending).rejects.toMatchObject({ errors: [rejection] });
+
+		// The trailing batch was still handed to the queue despite the first failing.
+		expect(attempted).toStrictEqual(messages);
+	});
+
+	it('aggregates a failure from every batch in send order', async () => {
+		// 150 messages span two batches (100 then 50); both sends fail.
+		const messages: MaintenanceQueueMessage[] = Array.from(
+			{ length: 150 },
+			(_, index): MaintenanceQueueMessage => ({
+				kind: 'tenant-maintenance',
+				tenant: `tenant-${String(index)}`
+			})
+		);
+		const failures = [
+			new Error('first batch down'),
+			new Error('second batch down')
+		];
+		let call = 0;
+
+		const sending = sendQueueMessages(
+			{
+				sendBatch: () => {
+					const failure = failures[call];
+					call += 1;
+
+					if (failure === undefined) {
+						throw new Error('unexpected extra batch');
+					}
+
+					return Promise.reject(failure);
+				}
+			},
+			messages
+		);
+
+		// Both batches are attempted and their failures are aggregated in send order,
+		// so the accumulation keeps every failure rather than only the last.
+		await expect(sending).rejects.toBeInstanceOf(QueueBatchSendError);
+		await expect(sending).rejects.toMatchObject({ errors: failures });
 	});
 
 	it('scheduled entrypoint enqueues bounded maintenance jobs', async () => {
