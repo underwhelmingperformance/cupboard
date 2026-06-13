@@ -365,6 +365,13 @@
 					"notNull": false,
 					"autoincrement": false
 				},
+				"read_password_salt": {
+					"name": "read_password_salt",
+					"type": "text",
+					"primaryKey": false,
+					"notNull": false,
+					"autoincrement": false
+				},
 				"last_maintained_at": {
 					"name": "last_maintained_at",
 					"type": "text",

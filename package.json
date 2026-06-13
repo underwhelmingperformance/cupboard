@@ -45,6 +45,7 @@
 		"check:format": "prettier --check .",
 		"check:knip": "knip --include dependencies,unlisted --no-progress",
 		"check:lint": "eslint .",
+		"check:migrations": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/check-d1-migrations.ts",
 		"check:test": "pnpm -r run test && pnpm test:actions",
 		"check:types": "pnpm -r run check:types",
 		"check:types:tests": "tsc -p tests/e2e/tsconfig.json",
