@@ -758,6 +758,90 @@ describe('upload flow', () => {
 		expect(narInfo.narHash).toBe(metadata.narHash);
 	});
 
+	it('requests a prompt verification pass when an in-flight commit is retried', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		// A crashed inline reuse saga: reserved row, marked committing, never settled
+		// and never requested a prompt pass.
+		await seedReservedNarInfo(metadata);
+		await markUploadCommitting(upload.uploadId);
+
+		const sent: unknown[] = [];
+		const metrics = { backlogCount: 0, backlogBytes: 0 };
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: (message: unknown) => {
+						sent.push(message);
+						return Promise.resolve({ metadata: { metrics } });
+					},
+					sendBatch: () => Promise.resolve({ metadata: { metrics } }),
+					metrics: () => Promise.resolve(metrics)
+				}
+			};
+			return Promise.resolve();
+		});
+
+		// Retrying the commit re-drives the saga through a prompt pass, so the socket
+		// settles within its wait window.
+		const commit = await commitUpload(token, upload.uploadId, DEFAULT_CACHE, {
+			wait: false
+		});
+
+		expect({ status: commit.status, sent }).toStrictEqual({
+			status: 'pending',
+			sent: [{ kind: 'tenant-verify', tenant: fixtureTenant }]
+		});
+	});
+
+	it('tracks the loser of a commit race for verification', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const loser = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, loser, metadata);
+		await putNarBytes(loser.r2Key);
+
+		// A rival commit reserved the path but has not committed its reference yet:
+		// the narinfo row exists, unmaterialised, with no D1 edge or R2 object. This
+		// upload's own verdict is still null, so it is a distinct racer, not a retry.
+		await seedReservedNarInfo(metadata);
+
+		const committed = await commitUpload(token, loser.uploadId, DEFAULT_CACHE, {
+			wait: false
+		});
+
+		// There is nothing committed to concede to, so rather than returning an
+		// untracked deferral whose socket would park until the commit timeout, the
+		// loser is marked pending and staged for the prompt verification pass.
+		expect({
+			status: committed.status,
+			verdict: await pendingUploadVerdict(loser.uploadId),
+			staged: (await env.BLOBS.head(loser.r2Key)) !== null
+		}).toStrictEqual({ status: 'pending', verdict: 'pending', staged: true });
+
+		// The pass drives the tracked loser to servable, the terminal verdict its
+		// socket would have carried.
+		await currentServer().runVerification();
+
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+
+		expect({
+			verdict: await pendingUploadVerdict(loser.uploadId),
+			narHash: narInfo.narHash
+		}).toStrictEqual({ verdict: undefined, narHash: metadata.narHash });
+	});
+
 	it('verifies staged bytes on commit even when the shared blob already exists', async () => {
 		const token = await initialise();
 		const good = await verifiableNar('reuse-verify-good');
