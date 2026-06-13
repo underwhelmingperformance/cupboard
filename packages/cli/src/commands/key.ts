@@ -98,7 +98,11 @@ export async function runKeyList(
 		return;
 	}
 
-	reporter.result(keys.map((key) => keyRow(key)));
+	reporter.result({
+		kind: 'keys',
+		data: keys,
+		rows: keys.map((key) => keyRow(key))
+	});
 }
 
 export async function runKeyRotate(
@@ -109,11 +113,15 @@ export async function runKeyRotate(
 		client.rotate()
 	);
 
-	reporter.result([
-		{ label: 'New key', value: rotated.id },
-		{ label: 'Public key', value: rotated.publicKey },
-		{ label: 'Published keys', value: String(keys.length) }
-	]);
+	reporter.result({
+		kind: 'key-rotation',
+		data: { rotated, keys },
+		rows: [
+			{ label: 'New key', value: rotated.id },
+			{ label: 'Public key', value: rotated.publicKey },
+			{ label: 'Published keys', value: String(keys.length) }
+		]
+	});
 	reporter.info(
 		'Add the new public key to trusted-public-keys on every client, then ' +
 			'`cupboard key retire <id>` the old key once they have updated.'
@@ -129,10 +137,14 @@ export async function runKeyRetire(
 		client.retire({ id })
 	);
 
-	reporter.result([
-		{ label: 'Key', value: result.id },
-		{ label: 'Stage', value: describeStage(result.stage) }
-	]);
+	reporter.result({
+		kind: 'key',
+		data: result,
+		rows: [
+			{ label: 'Key', value: result.id },
+			{ label: 'Stage', value: describeStage(result.stage) }
+		]
+	});
 
 	if (result.stage === 'publication') {
 		reporter.info(

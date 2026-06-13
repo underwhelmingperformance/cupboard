@@ -93,16 +93,24 @@ describe('createReporter (json mode)', () => {
 	it('emits result, warn, and info events', () => {
 		const { events, reporter } = jsonReporter();
 
-		reporter.result([
-			{ label: 'paths', value: '5' },
-			{ label: 'bytes', value: '1,024' }
-		]);
+		reporter.result({
+			kind: 'push-summary',
+			data: { uploaded: 5, bytes: 1024 },
+			rows: [
+				{ label: 'paths', value: '5' },
+				{ label: 'bytes', value: '1,024' }
+			]
+		});
 		reporter.warn('skipped', 'already present');
 		reporter.warn('detached');
 		reporter.info('all done');
 
 		expect(events()).toStrictEqual([
-			{ data: { bytes: '1,024', paths: '5' }, event: 'result' },
+			{
+				event: 'result',
+				kind: 'push-summary',
+				data: { uploaded: 5, bytes: 1024 }
+			},
 			{ event: 'warn', label: 'skipped', value: 'already present' },
 			{ event: 'warn', label: 'detached' },
 			{ event: 'info', message: 'all done' }

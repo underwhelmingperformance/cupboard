@@ -386,7 +386,11 @@ export async function runTenantCreate(
 		);
 	}
 
-	reporter.result(rows);
+	reporter.result({
+		kind: 'tenant',
+		data: { ...summary, generatedReadPassword },
+		rows
+	});
 }
 
 export async function runTenantList(
@@ -397,7 +401,11 @@ export async function runTenantList(
 		client.list()
 	);
 
-	reporter.result(tenants.map((summary) => tenantRow(summary)));
+	reporter.result({
+		kind: 'tenants',
+		data: tenants,
+		rows: tenants.map((summary) => tenantRow(summary))
+	});
 }
 
 export async function runTenantSuspend(
@@ -409,7 +417,11 @@ export async function runTenantSuspend(
 		client.suspend({ id })
 	);
 
-	reporter.result([{ label: result.id, value: result.status }]);
+	reporter.result({
+		kind: 'tenant',
+		data: result,
+		rows: [{ label: result.id, value: result.status }]
+	});
 }
 
 export async function runTenantResume(
@@ -421,7 +433,11 @@ export async function runTenantResume(
 		client.resume({ id })
 	);
 
-	reporter.result([{ label: result.id, value: result.status }]);
+	reporter.result({
+		kind: 'tenant',
+		data: result,
+		rows: [{ label: result.id, value: result.status }]
+	});
 }
 
 export async function runTenantReadMode(
@@ -434,7 +450,11 @@ export async function runTenantReadMode(
 		client.setReadMode({ id, readMode })
 	);
 
-	reporter.result([{ label: result.id, value: result.readMode }]);
+	reporter.result({
+		kind: 'tenant',
+		data: result,
+		rows: [{ label: result.id, value: result.readMode }]
+	});
 }
 
 export async function runTenantRotateCredential(
@@ -471,7 +491,11 @@ export async function runTenantRotateCredential(
 		});
 	}
 
-	reporter.result(rows);
+	reporter.result({
+		kind: 'tenant',
+		data: { ...result, readUser: user, generatedReadPassword: generated },
+		rows
+	});
 }
 
 export async function runTenantClearCredential(
@@ -483,7 +507,11 @@ export async function runTenantClearCredential(
 		client.clearReadCredential({ id })
 	);
 
-	reporter.result([{ label: result.id, value: result.readMode }]);
+	reporter.result({
+		kind: 'tenant',
+		data: result,
+		rows: [{ label: result.id, value: result.readMode }]
+	});
 }
 
 export async function runTenantDelete(
@@ -495,7 +523,11 @@ export async function runTenantDelete(
 		client.remove({ id })
 	);
 
-	reporter.result([{ label: result.id, value: result.status }]);
+	reporter.result({
+		kind: 'tenant',
+		data: result,
+		rows: [{ label: result.id, value: result.status }]
+	});
 }
 
 function tenantRow(summary: TenantSummary): ResultRow {

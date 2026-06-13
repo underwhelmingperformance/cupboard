@@ -71,11 +71,15 @@ export async function runDelete(
 		client.remove({ cacheName, hash: storePathHash })
 	);
 
-	reporter.result([
-		{ label: 'Store path hash', value: result.storePathHash },
-		{ label: 'Deleted', value: result.deleted ? 'yes' : 'not present' },
-		{ label: 'NAR', value: describeNarOutcome(result) }
-	]);
+	reporter.result({
+		kind: 'deleted-path',
+		data: result,
+		rows: [
+			{ label: 'Store path hash', value: result.storePathHash },
+			{ label: 'Deleted', value: result.deleted ? 'yes' : 'not present' },
+			{ label: 'NAR', value: describeNarOutcome(result) }
+		]
+	});
 }
 
 export function describeNarOutcome(result: DeletePathResponse): string {

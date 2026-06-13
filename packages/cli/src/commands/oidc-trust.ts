@@ -145,7 +145,11 @@ export async function runOidcTrustList(
 		return;
 	}
 
-	reporter.result(rules.map((rule) => trustRow(rule)));
+	reporter.result({
+		kind: 'oidc-trust-rules',
+		data: rules,
+		rows: rules.map((rule) => trustRow(rule))
+	});
 }
 
 export async function runOidcTrustAdd(
@@ -157,16 +161,20 @@ export async function runOidcTrustAdd(
 		client.add(body)
 	);
 
-	reporter.result([
-		{ label: 'Rule', value: summary.id },
-		{ label: 'Issuer', value: summary.issuer },
-		{ label: 'Audience', value: summary.audience },
-		{ label: 'Scope', value: summary.scope },
-		{
-			label: 'Allowed roots',
-			value: summary.allowedRoots.join(', ') || '(none)'
-		}
-	]);
+	reporter.result({
+		kind: 'oidc-trust-rule',
+		data: summary,
+		rows: [
+			{ label: 'Rule', value: summary.id },
+			{ label: 'Issuer', value: summary.issuer },
+			{ label: 'Audience', value: summary.audience },
+			{ label: 'Scope', value: summary.scope },
+			{
+				label: 'Allowed roots',
+				value: summary.allowedRoots.join(', ') || '(none)'
+			}
+		]
+	});
 }
 
 export async function runOidcTrustRemove(
@@ -178,10 +186,14 @@ export async function runOidcTrustRemove(
 		client.remove({ id })
 	);
 
-	reporter.result([
-		{ label: 'Rule', value: result.id },
-		{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
-	]);
+	reporter.result({
+		kind: 'oidc-trust-rule',
+		data: result,
+		rows: [
+			{ label: 'Rule', value: result.id },
+			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
+		]
+	});
 }
 
 function trustRow(rule: OidcTrustSummary): ResultRow {

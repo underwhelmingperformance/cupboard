@@ -136,7 +136,11 @@ export async function runPolicyList(
 		return;
 	}
 
-	reporter.result(policies.map((policy) => policyRow(policy)));
+	reporter.result({
+		kind: 'retention-policies',
+		data: policies,
+		rows: policies.map((policy) => policyRow(policy))
+	});
 }
 
 export async function runPolicyAdd(
@@ -155,12 +159,16 @@ export async function runPolicyAdd(
 		client.add(body)
 	);
 
-	reporter.result([
-		{ label: 'Policy', value: summary.id },
-		{ label: 'Scope', value: summary.scope },
-		{ label: 'Pattern', value: summary.pattern },
-		{ label: 'TTL (seconds)', value: formatCount(summary.ttlSeconds) }
-	]);
+	reporter.result({
+		kind: 'retention-policy',
+		data: summary,
+		rows: [
+			{ label: 'Policy', value: summary.id },
+			{ label: 'Scope', value: summary.scope },
+			{ label: 'Pattern', value: summary.pattern },
+			{ label: 'TTL (seconds)', value: formatCount(summary.ttlSeconds) }
+		]
+	});
 }
 
 export async function runPolicyRemove(
@@ -172,10 +180,14 @@ export async function runPolicyRemove(
 		client.remove({ id })
 	);
 
-	reporter.result([
-		{ label: 'Policy', value: result.id },
-		{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
-	]);
+	reporter.result({
+		kind: 'retention-policy',
+		data: result,
+		rows: [
+			{ label: 'Policy', value: result.id },
+			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
+		]
+	});
 }
 
 function policyRow(policy: RetentionPolicySummary): ResultRow {

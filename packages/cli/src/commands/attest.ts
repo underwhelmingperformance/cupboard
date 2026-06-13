@@ -180,15 +180,19 @@ export function registerAttestCommands(
 				});
 			});
 
-			reporter.result([
-				{ label: 'Verified bundles', value: formatCount(results.length) },
-				{
-					label: 'Predicate types',
-					value: formatCount(
-						new Set(results.map((item) => item.predicateType)).size
-					)
-				}
-			]);
+			reporter.result({
+				kind: 'attestation-verification',
+				data: results,
+				rows: [
+					{ label: 'Verified bundles', value: formatCount(results.length) },
+					{
+						label: 'Predicate types',
+						value: formatCount(
+							new Set(results.map((item) => item.predicateType)).size
+						)
+					}
+				]
+			});
 
 			for (const result of results) {
 				reporter.info(
