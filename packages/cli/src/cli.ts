@@ -1,3 +1,4 @@
+import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { resolveReporterMode } from '@cupboard/shared';
 import { Command, CommanderError } from 'commander';
@@ -101,6 +102,12 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
 	// version; any other commander failure is a usage error.
 	if (error instanceof CommanderError) {
 		return error.exitCode === 0 ? error.exitCode : usageExitCode;
+	}
+
+	// A confirmation refused for want of a terminal is the caller's to fix by
+	// passing --yes or running interactively: a usage error, like a bad flag.
+	if (error instanceof ConfirmationRequiredError) {
+		return usageExitCode;
 	}
 
 	return error instanceof CliError ? error.exitCode : 1;
