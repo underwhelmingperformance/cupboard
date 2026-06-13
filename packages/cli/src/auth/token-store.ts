@@ -13,9 +13,10 @@ import {
 /**
  * Where cached sessions live, within the CLI's configuration directory.
  * Sessions are keyed per target, so logging in to one tenant does not make
- * its tokens usable against another tenant on the same host.
+ * its tokens usable against another tenant on the same host. Exposed so the
+ * login command can disclose where it cached the session.
  */
-function tokensDirectory(): string {
+export function tokensDirectory(): string {
 	return path.join(configDirectory(), 'tokens');
 }
 
