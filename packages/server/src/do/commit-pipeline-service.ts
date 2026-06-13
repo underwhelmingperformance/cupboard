@@ -124,6 +124,12 @@ export class CommitPipelineService {
 			// conceding and deleting them. A concurrent commit, by contrast,
 			// reaches here with its own verdict still null.
 			if (pending.verdict === 'committing' || pending.verdict === 'pending') {
+				// Request a prompt verification pass so a retried socket is re-driven
+				// within its wait window. A `committing` reuse saga that crashed before
+				// settling never requested one, so the hourly sweep would otherwise be
+				// its only re-drive.
+				await this.requestVerification(this.context.requireTenant());
+
 				return {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
@@ -137,6 +143,15 @@ export class CommitPipelineService {
 					existingNarInfo
 				))
 			) {
+				// A concurrent commit reserved the path but has not committed its
+				// reference yet, so there is nothing to concede to. Track this upload for
+				// verification, exactly as a fresh deferral does, so the pass drives it to
+				// a terminal verdict (`servable` once it owns the path, `absent` if the
+				// rival version won) instead of leaving its socket parked until the commit
+				// timeout.
+				this.uploadState.markUploadPending(uploadId);
+				await this.requestVerification(this.context.requireTenant());
+
 				return {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
