@@ -1,3 +1,4 @@
+import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import type {
 	KeyListResponse,
 	KeyRetireResponse,
@@ -142,32 +143,56 @@ describe('runKeyRetire', () => {
 	it.each<{ stage: SigningKeyStage; stageValue: string; infoCount: number }>([
 		{ stage: 'publication', stageValue: 'published only', infoCount: 1 },
 		{ stage: 'absent', stageValue: 'removed', infoCount: 0 }
-	])('retires to $stage', async ({ stage, stageValue, infoCount }) => {
-		const calls: { id: string }[] = [];
-		const results: ResultRow[][] = [];
-		const infos: string[] = [];
-		const response: KeyRetireResponse = { id: 'active', stage };
+	])(
+		'retires to $stage once confirmed',
+		async ({ stage, stageValue, infoCount }) => {
+			const calls: { id: string }[] = [];
+			const response: KeyRetireResponse = { id: 'active', stage };
+			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
-		await runKeyRetire(
-			'active',
-			reporter(results, infos),
-			keyClient({
-				retire(input) {
-					calls.push(input);
-					return Promise.resolve(response);
-				}
-			})
-		);
+			await runKeyRetire(
+				'active',
+				ui,
+				keyClient({
+					retire(input) {
+						calls.push(input);
+						return Promise.resolve(response);
+					}
+				})
+			);
 
-		expect({ calls, results, infoCount: infos.length }).toStrictEqual({
-			calls: [{ id: 'active' }],
-			results: [
-				[
-					{ label: 'Key', value: 'active' },
-					{ label: 'Stage', value: stageValue }
-				]
-			],
-			infoCount
+			expect({
+				calls,
+				results: captured.results,
+				infoCount: captured.infos.length
+			}).toStrictEqual({
+				calls: [{ id: 'active' }],
+				results: [
+					{
+						kind: 'key',
+						data: response,
+						rows: [
+							{ label: 'Key', value: 'active' },
+							{ label: 'Stage', value: stageValue }
+						]
+					}
+				],
+				infoCount
+			});
+		}
+	);
+
+	it('leaves the key in place when the confirmation is declined', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+		await runKeyRetire('active', ui, keyClient({}));
+
+		expect({
+			results: captured.results,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			results: [],
+			cancellations: ['The key was left in place.']
 		});
 	});
 });

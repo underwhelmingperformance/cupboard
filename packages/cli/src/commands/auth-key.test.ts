@@ -1,3 +1,4 @@
+import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import type {
 	AuthKeyListResponse,
 	AuthKeyRotateResponse,
@@ -142,29 +143,48 @@ describe('runAuthKeyRetire', () => {
 	it.each([
 		{ retired: true, value: 'yes' },
 		{ retired: false, value: 'not present' }
-	])('reports retired=$retired', async ({ retired, value }) => {
+	])('reports retired=$retired once confirmed', async ({ retired, value }) => {
 		const calls: { kid: string }[] = [];
-		const results: ResultRow[][] = [];
+		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
+		const response = { kid: 'kid-old', retired };
 
 		await runAuthKeyRetire(
 			'kid-old',
-			reporter(results),
+			ui,
 			authKeyClient({
 				retire(input) {
 					calls.push(input);
-					return Promise.resolve({ kid: 'kid-old', retired });
+					return Promise.resolve(response);
 				}
 			})
 		);
 
-		expect({ calls, results }).toStrictEqual({
+		expect({ calls, results: captured.results }).toStrictEqual({
 			calls: [{ kid: 'kid-old' }],
 			results: [
-				[
-					{ label: 'Key', value: 'kid-old' },
-					{ label: 'Retired', value }
-				]
+				{
+					kind: 'auth-key',
+					data: response,
+					rows: [
+						{ label: 'Key', value: 'kid-old' },
+						{ label: 'Retired', value }
+					]
+				}
 			]
+		});
+	});
+
+	it('leaves the key in place when the confirmation is declined', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+		await runAuthKeyRetire('kid-old', ui, authKeyClient({}));
+
+		expect({
+			results: captured.results,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			results: [],
+			cancellations: ['The key was left in place.']
 		});
 	});
 });
