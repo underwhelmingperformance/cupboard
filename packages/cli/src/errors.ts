@@ -169,7 +169,7 @@ export class CupboardUploadError extends CliError {
 		public readonly status: number,
 		public readonly body: string
 	) {
-		super(`Upload to ${r2Key} failed with ${String(status)}: ${body}`);
+		super(`Uploading a NAR failed (HTTP ${String(status)}): ${body}`);
 		this.name = 'CupboardUploadError';
 	}
 }
@@ -233,13 +233,31 @@ export class UnexpectedUploadDecisionError extends CliError {
 	}
 }
 
+export type UploadVerificationStatus = 'mismatch' | 'over-quota' | 'absent';
+
 export class UploadVerificationFailedError extends CliError {
 	constructor(
 		public readonly uploadId: string,
-		public readonly status: 'mismatch' | 'over-quota' | 'absent'
+		public readonly status: UploadVerificationStatus
 	) {
-		super(`Upload ${uploadId} did not become servable: ${status}`);
+		super(uploadVerificationMessage(status));
 		this.name = 'UploadVerificationFailedError';
+	}
+}
+
+function uploadVerificationMessage(status: UploadVerificationStatus): string {
+	switch (status) {
+		case 'mismatch': {
+			return 'An uploaded NAR did not match the hash it declared. Re-run cupboard push to retry.';
+		}
+
+		case 'over-quota': {
+			return 'The cache is over its storage quota. Free space by deleting unused paths or raise the quota.';
+		}
+
+		case 'absent': {
+			return 'An uploaded NAR was not stored. Re-run cupboard push to retry.';
+		}
 	}
 }
 
