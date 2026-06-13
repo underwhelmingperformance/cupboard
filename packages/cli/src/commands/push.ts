@@ -23,6 +23,7 @@ interface PushOptions {
 	readonly attest?: boolean;
 	readonly attestation: readonly string[];
 	readonly uploadConcurrency?: number;
+	readonly dryRun?: boolean;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
@@ -87,6 +88,10 @@ export function registerPushCommand(
 			'how many blob uploads to run at once (default 6)',
 			parseUploadConcurrency
 		)
+		.option(
+			'--dry-run',
+			'show what would be uploaded, reused, and retained without changing anything'
+		)
 		.action(async (url: string, paths: string[], options: PushOptions) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -120,7 +125,8 @@ export function registerPushCommand(
 					: { waitTimeoutSeconds: options.waitTimeout }),
 				...(options.uploadConcurrency === undefined
 					? {}
-					: { uploadConcurrency: options.uploadConcurrency })
+					: { uploadConcurrency: options.uploadConcurrency }),
+				...(options.dryRun === undefined ? {} : { dryRun: options.dryRun })
 			});
 		});
 }

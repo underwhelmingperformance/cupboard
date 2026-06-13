@@ -204,6 +204,63 @@ describe('runPush', () => {
 		]);
 	});
 
+	it('with --dry-run, reports the plan without uploading or committing', async () => {
+		const results: ResultRow[][] = [];
+
+		await runPush([appPath], reporter(results), {
+			dryRun: true,
+			client: {
+				negotiate() {
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							},
+							{
+								action: 'skip',
+								storePathHash: StorePath.hash(runtimePath),
+								narHash: runtimeDigest.narHash.toString()
+							}
+						]
+					});
+				},
+				prepareUpload: () => {
+					throw new UnexpectedPushClientCallError('prepareUpload');
+				},
+				uploadBlob: () => {
+					throw new UnexpectedPushClientCallError('uploadBlob');
+				},
+				commit: () => {
+					throw new UnexpectedPushClientCallError('commit');
+				},
+				setRoot: () => {
+					throw new UnexpectedPushClientCallError('setRoot');
+				}
+			} satisfies PushClient,
+			nixStore: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Would upload', value: '1' },
+				{ label: 'Already cached', value: '0' },
+				{ label: 'Skipped', value: '1' },
+				{ label: 'Would pin paths', value: '1' },
+				{ label: 'Pin expiry', value: 'permanent' }
+			]
+		]);
+	});
+
 	it('with --no-wait, returns with pending paths and records no retention', async () => {
 		const results: ResultRow[][] = [];
 		const warnings: { label: string; value?: string }[] = [];
