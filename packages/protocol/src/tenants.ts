@@ -69,8 +69,8 @@ export type ParsedTenantListResponse = z.output<
 >;
 export type TenantListResponse = z.input<typeof tenantListResponseSchema>;
 
-// The body returned by a tenant status mutation (suspend / delete): the slug and
-// its resulting status.
+// The body returned by a tenant status mutation (suspend / resume / delete): the
+// slug and its resulting status.
 export const tenantMutateResponseSchema = z.strictObject({
 	id: z.string(),
 	status: tenantStatusSchema
@@ -79,3 +79,17 @@ export type ParsedTenantMutateResponse = z.output<
 	typeof tenantMutateResponseSchema
 >;
 export type TenantMutateResponse = z.input<typeof tenantMutateResponseSchema>;
+
+// The body returned by a readMode or read-credential mutation: the slug and its
+// resulting read mode, so the caller can see whether a credential it just set
+// actually gates reads (it is moot for a public cache).
+export const tenantReadModeResponseSchema = z.strictObject({
+	id: z.string(),
+	readMode: tenantReadModeSchema
+});
+export type ParsedTenantReadModeResponse = z.output<
+	typeof tenantReadModeResponseSchema
+>;
+export type TenantReadModeResponse = z.input<
+	typeof tenantReadModeResponseSchema
+>;

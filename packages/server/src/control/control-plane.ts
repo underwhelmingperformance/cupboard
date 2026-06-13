@@ -9,8 +9,10 @@ import {
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import {
 	type ParsedTenantCreateBody,
+	type ParsedTenantReadCredential,
 	type TenantListResponse,
 	type TenantMutateResponse,
+	type TenantReadModeResponse,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -60,8 +62,12 @@ import {
 	writeTenantMember
 } from './tenant-membership.ts';
 import {
+	clearTenantReadCredential,
 	ensureTenant,
 	listTenants,
+	resumeTenant,
+	setTenantReadCredential,
+	setTenantReadMode,
 	setTenantStatus
 } from './tenant-registry.ts';
 
@@ -355,6 +361,48 @@ export async function controlTenantSuspend(
 	await invalidateTenantRow(id);
 
 	return { id: summary.id, status: summary.status };
+}
+
+export async function controlTenantResume(
+	env: Env,
+	id: string
+): Promise<TenantMutateResponse> {
+	const summary = await resumeTenant(controlDatabase(env), id);
+	await invalidateTenantRow(id);
+
+	return { id: summary.id, status: summary.status };
+}
+
+export async function controlTenantSetReadMode(
+	env: Env,
+	id: string,
+	readMode: 'public' | 'private'
+): Promise<TenantReadModeResponse> {
+	const summary = await setTenantReadMode(controlDatabase(env), id, readMode);
+	await invalidateTenantRow(id);
+
+	return { id: summary.id, readMode: summary.readMode };
+}
+
+export async function controlTenantRotateReadCredential(
+	env: Env,
+	id: string,
+	read: ParsedTenantReadCredential
+): Promise<TenantReadModeResponse> {
+	const summary = await setTenantReadCredential(controlDatabase(env), id, read);
+	await invalidateTenantRow(id);
+
+	return { id: summary.id, readMode: summary.readMode };
+}
+
+export async function controlTenantClearReadCredential(
+	env: Env,
+	id: string
+): Promise<TenantReadModeResponse> {
+	const summary = await clearTenantReadCredential(controlDatabase(env), id);
+	await invalidateTenantRow(id);
+
+	return { id: summary.id, readMode: summary.readMode };
 }
 
 export async function controlTenantOffboard(

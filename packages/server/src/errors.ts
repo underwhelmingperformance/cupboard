@@ -170,6 +170,19 @@ export class TenantRetiredError extends ServerHttpError {
 	}
 }
 
+// Resume only moves a suspended tenant back to active. A tenant that is already
+// active cannot be resumed (an offboarding or offboarded one is a
+// `TenantRetiredError`), so the mutation is refused as a conflict rather than
+// silently no-oping.
+export class TenantNotSuspendedError extends ServerHttpError {
+	readonly status = StatusCodes.CONFLICT;
+
+	constructor(public readonly tenant: string) {
+		super(`Tenant '${tenant}' is not suspended`);
+		this.name = 'TenantNotSuspendedError';
+	}
+}
+
 // Committing this blob would take the tenant past its storage quota. The charge is
 // gated on the tenant's 0-to-1 blob transition, so this is raised only when the
 // tenant does not already hold the hash and the new bytes would exceed the limit.

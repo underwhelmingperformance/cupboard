@@ -6,6 +6,8 @@ import {
 	tenantCreateBodySchema,
 	type TenantListResponse,
 	type TenantMutateResponse,
+	type TenantReadModeResponse,
+	tenantReadModeSchema,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
 import {
@@ -28,7 +30,22 @@ export interface TenantClient {
 	list(): Promise<TenantListResponse>;
 	create(input: TenantCreateBody): Promise<TenantSummary>;
 	suspend(input: { id: string }): Promise<TenantMutateResponse>;
+	resume(input: { id: string }): Promise<TenantMutateResponse>;
+	setReadMode(input: {
+		id: string;
+		readMode: 'public' | 'private';
+	}): Promise<TenantReadModeResponse>;
+	rotateReadCredential(input: {
+		id: string;
+		read: { user: string; password: string };
+	}): Promise<TenantReadModeResponse>;
+	clearReadCredential(input: { id: string }): Promise<TenantReadModeResponse>;
 	remove(input: { id: string }): Promise<TenantMutateResponse>;
+}
+
+interface RotateCredentialOptions {
+	readonly readUser?: string;
+	readonly readPassword?: string;
 }
 
 interface CreateOptions {
@@ -229,6 +246,96 @@ export function registerTenantCommands(
 		});
 
 	tenant
+		.command('resume')
+		.description(
+			'Resume a suspended tenant: reads and writes are allowed again.'
+		)
+		.argument('<url>', urlArgument)
+		.argument('<id>', 'tenant slug')
+		.action(async (url: string, id: string) => {
+			const reporter = createReporter({
+				mode: reporterModeFromGlobals(program)
+			});
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
+				signal: programOptions.signal
+			});
+
+			await runTenantResume(id, reporter, rpc.tenants);
+		});
+
+	tenant
+		.command('read-mode')
+		.description("Set a tenant's read mode.")
+		.argument('<url>', urlArgument)
+		.argument('<id>', 'tenant slug')
+		.argument('<mode>', 'public or private')
+		.action(async (url: string, id: string, mode: string) => {
+			const reporter = createReporter({
+				mode: reporterModeFromGlobals(program)
+			});
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
+				signal: programOptions.signal
+			});
+
+			await runTenantReadMode(
+				id,
+				tenantReadModeSchema.parse(mode),
+				reporter,
+				rpc.tenants
+			);
+		});
+
+	tenant
+		.command('rotate-credential')
+		.description(
+			"Set a private cache's read credential, generating a password by default."
+		)
+		.argument('<url>', urlArgument)
+		.argument('<id>', 'tenant slug')
+		.option(
+			'--read-user <user>',
+			'the Basic-auth user a private cache requires from readers'
+		)
+		.option(
+			'--read-password <password>',
+			'the Basic-auth password a private cache requires from readers (default: auto)'
+		)
+		.action(
+			async (url: string, id: string, options: RotateCredentialOptions) => {
+				const reporter = createReporter({
+					mode: reporterModeFromGlobals(program)
+				});
+				const rpc = controlRpc(url, {
+					credential: cachedOwnerProvider(url),
+					signal: programOptions.signal
+				});
+
+				await runTenantRotateCredential(id, options, reporter, rpc.tenants);
+			}
+		);
+
+	tenant
+		.command('clear-credential')
+		.description(
+			"Clear a tenant's read credential; a private cache then fails closed."
+		)
+		.argument('<url>', urlArgument)
+		.argument('<id>', 'tenant slug')
+		.action(async (url: string, id: string) => {
+			const reporter = createReporter({
+				mode: reporterModeFromGlobals(program)
+			});
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url),
+				signal: programOptions.signal
+			});
+
+			await runTenantClearCredential(id, reporter, rpc.tenants);
+		});
+
+	tenant
 		.command('delete')
 		.description('Begin offboarding a tenant.')
 		.argument('<url>', urlArgument)
@@ -303,6 +410,80 @@ export async function runTenantSuspend(
 	);
 
 	reporter.result([{ label: result.id, value: result.status }]);
+}
+
+export async function runTenantResume(
+	id: string,
+	reporter: Reporter,
+	client: TenantClient
+): Promise<void> {
+	const result = await reporter.phase('Resuming tenant', () =>
+		client.resume({ id })
+	);
+
+	reporter.result([{ label: result.id, value: result.status }]);
+}
+
+export async function runTenantReadMode(
+	id: string,
+	readMode: 'public' | 'private',
+	reporter: Reporter,
+	client: TenantClient
+): Promise<void> {
+	const result = await reporter.phase('Setting read mode', () =>
+		client.setReadMode({ id, readMode })
+	);
+
+	reporter.result([{ label: result.id, value: result.readMode }]);
+}
+
+export async function runTenantRotateCredential(
+	id: string,
+	options: RotateCredentialOptions,
+	reporter: Reporter,
+	client: TenantClient
+): Promise<void> {
+	const user = options.readUser ?? defaultReadUser;
+	const password = options.readPassword ?? generateReadPassword();
+	const generated = options.readPassword === undefined ? password : undefined;
+
+	const result = await reporter.phase('Rotating read credential', () =>
+		client.rotateReadCredential({ id, read: { user, password } })
+	);
+
+	const rows: ResultRow[] = [
+		{ label: 'Tenant', value: result.id },
+		{ label: 'Read mode', value: result.readMode },
+		{ label: 'Read user', value: user }
+	];
+
+	if (generated !== undefined) {
+		rows.push({ label: 'Read password', value: generated });
+	}
+
+	// A read credential only gates a private cache; flag the public case so the
+	// operator is not left thinking reads are now authenticated.
+	if (result.readMode === 'public') {
+		rows.push({
+			label: 'Warning',
+			value:
+				'tenant is public; the read credential is unused until it is private'
+		});
+	}
+
+	reporter.result(rows);
+}
+
+export async function runTenantClearCredential(
+	id: string,
+	reporter: Reporter,
+	client: TenantClient
+): Promise<void> {
+	const result = await reporter.phase('Clearing read credential', () =>
+		client.clearReadCredential({ id })
+	);
+
+	reporter.result([{ label: result.id, value: result.readMode }]);
 }
 
 export async function runTenantDelete(
