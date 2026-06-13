@@ -1,3 +1,4 @@
+import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import {
 	type TenantCreateBody,
 	tenantCreateBodySchema,
@@ -14,9 +15,9 @@ import {
 	ReadCredentialIncompleteError,
 	runTenantClearCredential,
 	runTenantCreate,
-	runTenantDelete,
 	runTenantList,
 	runTenantReadMode,
+	runTenantRemove,
 	runTenantResume,
 	runTenantRotateCredential,
 	runTenantSuspend,
@@ -302,40 +303,70 @@ describe('runTenantList', () => {
 	});
 });
 
-describe('runTenantSuspend / runTenantDelete', () => {
-	it.each([
+describe('runTenantSuspend / runTenantRemove', () => {
+	const cases = [
 		{
 			name: 'suspend',
 			run: runTenantSuspend,
 			method: 'suspend' as const,
-			status: 'suspended' as const
+			status: 'suspended' as const,
+			cancelled: 'The tenant was left running.'
 		},
 		{
-			name: 'delete',
-			run: runTenantDelete,
+			name: 'remove',
+			run: runTenantRemove,
 			method: 'remove' as const,
-			status: 'offboarding' as const
+			status: 'offboarding' as const,
+			cancelled: 'The tenant was left in place.'
 		}
-	])('$name reports the resulting status', async ({ run, method, status }) => {
-		const results: ResultRow[][] = [];
-		const calls: { id: string }[] = [];
+	];
 
-		await run(
-			'acme',
-			reporter(results),
-			tenantClient({
-				[method](input: { id: string }) {
-					calls.push(input);
-					return Promise.resolve({ id: 'acme', status });
-				}
-			})
-		);
+	it.each(cases)(
+		'$name reports the resulting status once confirmed',
+		async ({ run, method, status }) => {
+			const calls: { id: string }[] = [];
+			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
-		expect({ calls, results }).toStrictEqual({
-			calls: [{ id: 'acme' }],
-			results: [[{ label: 'acme', value: status }]]
-		});
-	});
+			await run(
+				'acme',
+				ui,
+				tenantClient({
+					[method](input: { id: string }) {
+						calls.push(input);
+						return Promise.resolve({ id: 'acme', status });
+					}
+				})
+			);
+
+			expect({ calls, results: captured.results }).toStrictEqual({
+				calls: [{ id: 'acme' }],
+				results: [
+					{
+						kind: 'tenant',
+						data: { id: 'acme', status },
+						rows: [{ label: 'acme', value: status }]
+					}
+				]
+			});
+		}
+	);
+
+	it.each(cases)(
+		'$name does nothing when the confirmation is declined',
+		async ({ run, cancelled }) => {
+			const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+			await run('acme', ui, tenantClient({}));
+
+			expect({
+				results: captured.results,
+				cancellations: captured.cancellations
+			}).toStrictEqual({
+				results: [],
+				cancellations: [cancelled]
+			});
+		}
+	);
 });
 
 describe('runTenantResume', () => {

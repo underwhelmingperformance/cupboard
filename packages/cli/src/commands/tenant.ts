@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import {
 	defaultReadUser,
 	type TenantCreateBody,
@@ -46,6 +47,10 @@ export interface TenantClient {
 interface RotateCredentialOptions {
 	readonly readUser?: string;
 	readonly readPassword?: string;
+}
+
+interface ConfirmableOptions {
+	readonly yes?: boolean;
 }
 
 interface CreateOptions {
@@ -233,16 +238,18 @@ export function registerTenantCommands(
 		.description('Suspend a tenant: new writes stop, reads stop after the TTL.')
 		.argument('<url>', urlArgument)
 		.argument('<id>', 'tenant slug')
-		.action(async (url: string, id: string) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+		.option('-y, --yes', 'suspend without the confirmation prompt')
+		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runTenantSuspend(id, reporter, rpc.tenants);
+			await runTenantSuspend(id, ui, rpc.tenants);
 		});
 
 	tenant
@@ -336,20 +343,23 @@ export function registerTenantCommands(
 		});
 
 	tenant
-		.command('delete')
+		.command('remove')
+		.alias('delete')
 		.description('Begin offboarding a tenant.')
 		.argument('<url>', urlArgument)
 		.argument('<id>', 'tenant slug')
-		.action(async (url: string, id: string) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+		.option('-y, --yes', 'offboard without the confirmation prompt')
+		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runTenantDelete(id, reporter, rpc.tenants);
+			await runTenantRemove(id, ui, rpc.tenants);
 		});
 }
 
@@ -410,9 +420,20 @@ export async function runTenantList(
 
 export async function runTenantSuspend(
 	id: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: TenantClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Suspend tenant ${id}?`,
+		detail: 'New writes stop at once; reads stop after the read TTL.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The tenant was left running.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Suspending tenant', () =>
 		client.suspend({ id })
 	);
@@ -514,11 +535,23 @@ export async function runTenantClearCredential(
 	});
 }
 
-export async function runTenantDelete(
+export async function runTenantRemove(
 	id: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: TenantClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Begin offboarding tenant ${id}?`,
+		detail:
+			'Writes stop at once and the tenant drains its data in the background.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The tenant was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Offboarding tenant', () =>
 		client.remove({ id })
 	);
