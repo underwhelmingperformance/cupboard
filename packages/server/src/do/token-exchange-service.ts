@@ -8,7 +8,7 @@ import {
 	tokenRequestSchema,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 
 import {
 	adminJwtTtlSeconds,
@@ -16,6 +16,7 @@ import {
 	refreshTokenTtlSeconds,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
+import { constantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
 	InvalidGrantError,
@@ -103,39 +104,61 @@ export class TokenExchangeService {
 			throw new InvalidGrantError(staleRefreshTokenMessage);
 		}
 
+		// Hash the presented secret before touching the row. The hash is the only
+		// await in the verify-and-consume path; doing it first leaves the lookup and
+		// the compare-and-delete with no await between them, so a second presentation
+		// of the same token cannot interleave the input gate and issue a second
+		// session. The durable-SQLite reads and writes are synchronous, so the block
+		// below runs to completion before any concurrent request resumes.
+		const presentedHash = await sha256Hex(presented.secret);
+
 		const row = this.context.db
 			.select()
 			.from(schema.refreshTokens)
 			.where(eq(schema.refreshTokens.id, presented.id))
 			.get();
 
-		if (row === undefined) {
+		if (
+			row === undefined ||
+			!constantTimeEqual(row.secretHash, presentedHash)
+		) {
 			throw new InvalidGrantError(staleRefreshTokenMessage);
 		}
 
-		if (row.secretHash !== (await sha256Hex(presented.secret))) {
-			throw new InvalidGrantError(staleRefreshTokenMessage);
-		}
+		// Compare-and-delete: consume the row only while it still carries the
+		// presented secret, returning what was removed. Of two concurrent
+		// presentations only the one that removes the row proceeds; the loser removes
+		// nothing and is refused.
+		const consumed = this.context.db
+			.delete(schema.refreshTokens)
+			.where(
+				and(
+					eq(schema.refreshTokens.id, presented.id),
+					eq(schema.refreshTokens.secretHash, presentedHash)
+				)
+			)
+			.returning()
+			.all();
+		const claimed = consumed.at(0);
 
-		// An expired or orphaned row is reclaimed on touch; the GC sweep catches
-		// the ones nobody presents again.
-		if (row.expiresAt <= new Date().toISOString()) {
-			this.deleteRefreshToken(row.id);
+		// Lost the consume race, or the row was expired (reclaimed on touch): refused.
+		if (
+			claimed === undefined ||
+			claimed.expiresAt <= new Date().toISOString()
+		) {
 			throw new InvalidGrantError(staleRefreshTokenMessage);
 		}
 
 		const rule = this.oidcTrust
 			.enabledOidcTrustRules()
-			.find((candidate) => candidate.id === row.ruleId);
+			.find((candidate) => candidate.id === claimed.ruleId);
 
+		// The row is already consumed, so a retired rule simply refuses the grant.
 		if (rule === undefined) {
-			this.deleteRefreshToken(row.id);
 			throw new InvalidGrantError(staleRefreshTokenMessage);
 		}
 
-		this.deleteRefreshToken(row.id);
-
-		return this.mintedResponse(rule, row.subject, {});
+		return this.mintedResponse(rule, claimed.subject, {});
 	}
 
 	// Mints the access token (and, for an admin session, a successor refresh
@@ -194,13 +217,6 @@ export class TokenExchangeService {
 			.run();
 
 		return `${id}.${secret}`;
-	}
-
-	private deleteRefreshToken(id: string): void {
-		this.context.db
-			.delete(schema.refreshTokens)
-			.where(eq(schema.refreshTokens.id, id))
-			.run();
 	}
 
 	private async mintRuleToken(

@@ -298,6 +298,57 @@ describe('refresh grant', () => {
 		});
 	});
 
+	it('grants once when the same refresh token is presented concurrently', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const refreshToken = exchanged.refresh_token ?? '';
+		const present = (): Request =>
+			new Request(new URL('/token', currentOrigin()), {
+				method: 'POST',
+				headers: { 'content-type': 'application/x-www-form-urlencoded' },
+				body: new URLSearchParams({
+					grant_type: refreshTokenGrantType,
+					refresh_token: refreshToken
+				}).toString()
+			});
+
+		// Present the same token twice against one instance and assert the row is
+		// consumed exactly once: one presentation is granted and its successor is the
+		// only surviving row, the other is refused. The bodies are read inside the
+		// Durable Object's own I/O context.
+		const outcomes = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const responses = await Promise.all([
+					instance.fetch(present()),
+					instance.fetch(present())
+				]);
+
+				return Promise.all(
+					responses.map(async (response) => {
+						const body = await response.json<OAuthError>();
+
+						return { status: response.status, error: body.error };
+					})
+				);
+			}
+		);
+		const rows = await refreshTokenRows();
+
+		// Exactly one presentation is granted and the other is refused, with the
+		// granted successor the only surviving row.
+		expect({
+			outcomes: outcomes.toSorted((left, right) => left.status - right.status),
+			rows: rows.length
+		}).toStrictEqual({
+			outcomes: [
+				{ status: StatusCodes.OK, error: undefined },
+				{ status: StatusCodes.BAD_REQUEST, error: 'invalid_grant' }
+			],
+			rows: 1
+		});
+	});
+
 	it('issues no refresh token for a write exchange', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const exchanged = await exchange(subjectToken);
