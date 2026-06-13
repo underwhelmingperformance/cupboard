@@ -14,7 +14,6 @@ import { tenantRpc } from '../client/orpc.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
 
 interface CacheCreateOptions {
-	readonly token: string;
 	readonly priority?: number;
 }
 
