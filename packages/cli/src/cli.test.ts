@@ -1,6 +1,6 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import type { Reporter } from '@cupboard/reporter';
-import { CommanderError } from 'commander';
+import { type Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import { buildProgram, cliExitCode, reportCliFailure } from './cli.ts';
@@ -145,5 +145,55 @@ describe('reportCliFailure', () => {
 		reportCliFailure(reporter, error);
 
 		expect(errors).toStrictEqual([error]);
+	});
+});
+
+function helpFor(path: readonly string[]): string {
+	let command: Command = buildProgram();
+
+	for (const name of path) {
+		const next = command.commands.find(
+			(candidate) =>
+				candidate.name() === name || candidate.aliases().includes(name)
+		);
+
+		if (next === undefined) {
+			throw new Error(`no such command: ${path.join(' ')}`);
+		}
+
+		command = next;
+	}
+
+	// `helpInformation()` omits `addHelpText('after')`, which is appended only
+	// when help is written, so capture the full rendered output instead.
+	let captured = '';
+	command.configureOutput({
+		writeOut: (text) => {
+			captured += text;
+		}
+	});
+	command.outputHelp();
+
+	return captured;
+}
+
+describe('command help', () => {
+	it('shows usage examples for push', () => {
+		const help = helpFor(['push']);
+
+		expect(help).toContain('Examples:');
+		expect(help).toContain('cupboard push');
+		expect(help).toContain('--dry-run');
+	});
+
+	it('shows local and remote examples for attest verify', () => {
+		const help = helpFor(['attest', 'verify']);
+
+		expect(help).toContain('Local mode');
+		expect(help).toContain('Remote mode');
+	});
+
+	it('notes that most commands need a login', () => {
+		expect(helpFor([])).toContain('cupboard login');
 	});
 });
