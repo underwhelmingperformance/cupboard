@@ -11,6 +11,7 @@ import {
 	controlWorkerFetch,
 	currentOrigin,
 	issueControlAdminToken,
+	issueServerSignedToken,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -121,6 +122,54 @@ describe('control contract round trip', () => {
 
 	it('refuses a missing control token as the defined UNAUTHORIZED error', async () => {
 		const client = controlClient();
+
+		const [error, data, isDefined] = await safe(client.tenants.list());
+
+		if (!isDefinedError(error)) {
+			throw new Error('expected a defined contract error');
+		}
+
+		expect({
+			isDefined,
+			data,
+			code: error.code,
+			status: error.status
+		}).toStrictEqual({
+			isDefined: true,
+			data: undefined,
+			code: 'UNAUTHORIZED',
+			status: StatusCodes.UNAUTHORIZED
+		});
+	});
+
+	it('refuses a write-scoped control token as FORBIDDEN', async () => {
+		const client = controlClient(
+			await issueControlAdminToken('writer', 'write')
+		);
+
+		const [error, data, isDefined] = await safe(client.tenants.list());
+
+		if (!isDefinedError(error)) {
+			throw new Error('expected a defined contract error');
+		}
+
+		expect({
+			isDefined,
+			data,
+			code: error.code,
+			status: error.status
+		}).toStrictEqual({
+			isDefined: true,
+			data: undefined,
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN
+		});
+	});
+
+	it('refuses a tenant-plane token as UNAUTHORIZED', async () => {
+		// A tenant admin token is signed by the tenant's auth key for the tenant
+		// audience; presented to the control plane it must not verify.
+		const client = controlClient(await issueServerSignedToken('admin'));
 
 		const [error, data, isDefined] = await safe(client.tenants.list());
 
