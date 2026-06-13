@@ -8,6 +8,7 @@ import { parseStored } from '../http/parse.ts';
 
 import {
 	type GarbageCollectionOutcome,
+	parseStoredUploadMetadata,
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
@@ -131,6 +132,41 @@ export class GarbageCollectionService {
 			return { rootsExpired: expiredRoots.length, pathsSwept: 0 };
 		}
 
+		// A narinfo row reserved by an in-flight commit saga (`committing`/`pending`)
+		// is not yet reachable from a root and carries no committed reference, so the
+		// reachability sweep would delete it during the deferred-commit promote window.
+		// Spare those rows; the verify pass owns them and either materialises or
+		// reclaims them, mirroring how the upload sweep spares their pending rows.
+		const inFlight = new Set<string>();
+
+		for (const upload of this.context.db
+			.select({
+				id: schema.pendingUploads.id,
+				metadataJson: schema.pendingUploads.metadataJson
+			})
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					eq(schema.pendingUploads.cache, cache),
+					or(
+						eq(schema.pendingUploads.verdict, 'committing'),
+						eq(schema.pendingUploads.verdict, 'pending')
+					)
+				)
+			)
+			.all()) {
+			try {
+				inFlight.add(
+					parseStoredUploadMetadata(upload.id, upload.metadataJson)
+						.storePathHash
+				);
+			} catch {
+				// An unparseable row cannot be matched to a reserved narinfo to spare;
+				// the verify pass re-drives or reclaims it, so omitting it is safe.
+				continue;
+			}
+		}
+
 		const committed = this.context.db
 			.select({
 				storePathHash: schema.narInfos.storePathHash,
@@ -143,7 +179,10 @@ export class GarbageCollectionService {
 		let pathsSwept = 0;
 
 		for (const path of committed) {
-			if (retainedCommitted.has(path.storePathHash)) {
+			if (
+				retainedCommitted.has(path.storePathHash) ||
+				inFlight.has(path.storePathHash)
+			) {
 				continue;
 			}
 

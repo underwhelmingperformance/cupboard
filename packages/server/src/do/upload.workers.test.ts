@@ -1604,6 +1604,50 @@ describe('upload flow', () => {
 		);
 	});
 
+	it('spares an in-flight reserved narinfo row from the reachability sweep', async () => {
+		const token = await initialise();
+		// A distinct NAR so the in-flight upload below stays a genuine upload rather
+		// than a reuse of this committed path's blob.
+		const kept = await commitVerifiablePath(token, 'kept', { name: 'kept' });
+
+		await setRoot(token, { name: 'main', targets: [kept.storePath] });
+
+		// An in-flight commit saga: its narinfo row is reserved but unmaterialised, so
+		// it is unreachable from the root and a sweep landing now would delete it.
+		const reserved = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			name: 'reserved',
+			storePathHash: '33333333333333333333333333333333'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [reserved]),
+			reserved
+		);
+		await prepareUpload(token, upload, reserved);
+		await putNarBytes(upload.r2Key);
+		await seedReservedNarInfo(reserved);
+		await markUploadCommitting(upload.uploadId);
+
+		const result = await runGcResult();
+
+		// The sweep spared the reserved row, so the verify pass still drives the
+		// preserved saga to servable.
+		await currentServer().runVerification();
+		const narInfo = await fetchNarInfo(reserved.storePathHash);
+
+		expect({ result, narHash: narInfo.narHash }).toStrictEqual({
+			result: {
+				ok: true,
+				pendingUploadsDeleted: 0,
+				pendingAttestationsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 0,
+				narInfosDeleted: 0
+			},
+			narHash: reserved.narHash
+		});
+	});
+
 	it('keeps an upload pending when the object size does not match metadata', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
