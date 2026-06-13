@@ -7,6 +7,7 @@ import type {
 } from '@cupboard/protocol/keys';
 import {
 	createReporter,
+	formatTimestamp,
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
@@ -128,7 +129,7 @@ export async function runAuthKeyRotate(
 						{ label: 'Retiring key', value: retiring.kid },
 						{
 							label: 'Scheduled retirement',
-							value: retiring.scheduledRetireAt
+							value: formatTimestamp(retiring.scheduledRetireAt)
 						}
 					]),
 			{ label: 'Keys in set', value: String(keys.length) }
@@ -171,10 +172,10 @@ function authKeyRow(key: AuthKeySummary): ResultRow {
 	const retirement =
 		key.scheduledRetireAt === undefined
 			? ''
-			: `; retires ${key.scheduledRetireAt}`;
+			: `; retires ${formatTimestamp(key.scheduledRetireAt)}`;
 
 	return {
 		label: key.kid,
-		value: `${key.active ? 'active' : 'retained'}; created ${key.createdAt}${retirement}`
+		value: `${key.active ? 'active' : 'retained'}; created ${formatTimestamp(key.createdAt)}${retirement}`
 	};
 }
