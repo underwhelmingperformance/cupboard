@@ -80,7 +80,13 @@ function derivedClient<C extends AnyContractRouter>(
 
 	const link = new OpenAPILink(contract, {
 		url,
-		headers: async () => bearerHeaders(await resolveBearer(credential)),
+		headers: async () => {
+			// The credential fetch is the first thing every admin command does;
+			// honour an abort here so Ctrl-C is prompt rather than waiting on it.
+			throwIfAborted(signal);
+
+			return bearerHeaders(await resolveBearer(credential));
+		},
 		fetch: async (request, init) => {
 			throwIfAborted(signal);
 

@@ -46,6 +46,8 @@ export interface OwnerSessionDependencies {
 		target: string
 	) => Promise<void>;
 	readonly now?: () => number;
+	/** Aborts the token fetch the provider makes, so Ctrl-C is prompt. */
+	readonly signal?: AbortSignal;
 }
 
 // An access token this close to its expiry is renewed up front rather than
@@ -64,7 +66,9 @@ export function cachedOwnerProvider(
 	target: string,
 	dependencies: OwnerSessionDependencies = {}
 ): TokenProvider {
-	const client = dependencies.client ?? CupboardClient.fromUrl(target);
+	const client =
+		dependencies.client ??
+		CupboardClient.fromUrl(target, { signal: dependencies.signal });
 	const readSession = dependencies.readSession ?? readCachedSession;
 	const writeSession = dependencies.writeSession ?? writeCachedSession;
 	const grantChain = dependencies.grantChain ?? {

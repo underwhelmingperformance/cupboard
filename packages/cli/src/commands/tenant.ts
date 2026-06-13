@@ -191,7 +191,7 @@ export function registerTenantCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 			const readSelection = readCredentialFromOptions(options);
@@ -226,7 +226,7 @@ export function registerTenantCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -245,7 +245,7 @@ export function registerTenantCommands(
 				assumeYes: options.yes
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -264,7 +264,7 @@ export function registerTenantCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -282,7 +282,7 @@ export function registerTenantCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -315,7 +315,9 @@ export function registerTenantCommands(
 					mode: reporterModeFromGlobals(program)
 				});
 				const rpc = controlRpc(url, {
-					credential: cachedOwnerProvider(url),
+					credential: cachedOwnerProvider(url, {
+						signal: programOptions.signal
+					}),
 					signal: programOptions.signal
 				});
 
@@ -335,7 +337,7 @@ export function registerTenantCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -355,7 +357,7 @@ export function registerTenantCommands(
 				assumeYes: options.yes
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 

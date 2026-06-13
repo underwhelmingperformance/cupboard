@@ -76,7 +76,7 @@ export function registerOidcTrustCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -106,7 +106,7 @@ export function registerOidcTrustCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 			const body: OidcTrustAddBody = {
@@ -131,7 +131,7 @@ export function registerOidcTrustCommands(
 				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 

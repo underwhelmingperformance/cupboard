@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { CliAbortError } from '../errors.ts';
+
 import type { TokenProvider } from './credentials.ts';
 import { controlRpc, tenantRpc } from './orpc.ts';
 
@@ -55,6 +57,20 @@ describe('tenantRpc', () => {
 				}
 			]
 		});
+	});
+
+	it('aborts before fetching when the signal is already aborted', async () => {
+		const { fetcher, captured } = capturingFetcher([]);
+		const controller = new AbortController();
+		controller.abort(new CliAbortError());
+		const rpc = tenantRpc('https://cupboard.test', {
+			credential: 'admin-token',
+			signal: controller.signal,
+			fetcher
+		});
+
+		await expect(rpc.caches.list()).rejects.toBeInstanceOf(CliAbortError);
+		expect(captured).toStrictEqual([]);
 	});
 
 	it('refreshes a provider credential once on a 401 and retries', async () => {
