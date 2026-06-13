@@ -10,22 +10,27 @@ A Cloudflare Workers substituter for Nix.
 
 ## Tenancy
 
-Single-tenant for now — one owner per deployment. This is a deliberate current
-scope, not a permanent exclusion.
+Multi-tenant. One operator runs the instance and onboards independent,
+mutually-distrusting tenants. Each tenant has its own owner, signing keys, OIDC
+trust rules, retention roots, narinfo metadata, and storage accounting. NAR
+bytes sit underneath that in a shared, content-verified CAS.
 
-It is single-tenant structurally, not just by intent: one Durable Object per
-deployment holds all metadata, roots, and keys; one deployment-wide signing key;
-NAR blobs are shared (content-addressed) across caches; and one
-bootstrap-derived admin governs the whole deployment. None of these is a tenant
-boundary. Named caches and V4 per-repository write scopes are organisation
-_within_ one owner's trust domain — shared key, blobs, and admin — not isolation
-between owners.
+Tenancy is structural, not just intent. A tenant is addressed by a slug in the
+URL path, `https://<host>/t/<tenant>/...`, and is backed by one `CupboardServer`
+Durable Object addressed by `idFromName(<tenant>)`. That DO owns the tenant's
+SQLite database: its narinfos, roots, signing keys, auth keys, OIDC trust rules,
+and identity, none of which crosses a tenant boundary. The bare host serves only
+the control surface and no cache content. Named caches and per-repository write
+scopes are organisation _within_ one tenant's trust domain, not isolation
+between tenants; the tenant boundary is the DO.
 
-V5 is the point where this changes. Multi-tenancy is a clean-slate hosted mode:
-one Durable Object per tenant, per-tenant signing keys, per-tenant admin and
-OIDC trust rules, per-tenant storage accounting, and a shared content-verified
-CAS beneath those tenant boundaries. Existing single-tenant deployments stay on
-the V4 line unless an operator re-pushes content into V5.
+The control plane is a Hono coordinator on the Worker, not a Durable Object.
+Global state lives in D1 (the tenant registry, per-narinfo reference edges, the
+shared blob set, the control-plane signing keys, the global-admin record, and
+per-tenant usage and quota), with a versioned KV manifest as the admission
+read-cache. The control plane is its own OAuth issuer, separate from every
+tenant issuer, and the only holder of `CONTROL_KEY_WRAP_SECRET`, so a tenant DO
+cannot unwrap the control signing key it can read from shared D1.
 
 ## Compatibility
 
@@ -37,14 +42,31 @@ the V4 line unless an operator re-pushes content into V5.
   so anything older could not substitute at all — but the point is broader: we
   do not certify a minimum version, and adding fallback NAR compression for old
   clients is not worth it for a personal cache.
-- The CLI orchestrates the v1 write path. Pure TypeScript code serialises NARs,
-  computes hashes, compresses blobs, and speaks the cupboard upload protocol.
-  The only local Nix dependency is a daemon client used to query valid path
-  metadata and closure membership. The Worker owns authentication, R2 presigned
-  URL generation, signing, and metadata commit. The CLI never receives R2
-  credentials.
+- The CLI drives the write path. Pure TypeScript code serialises NARs, computes
+  hashes, compresses blobs, and speaks the cupboard upload protocol. The CLI
+  negotiates, prepares an upload, uploads the blob to a presigned R2 PUT, and
+  awaits the server's commit verdict; verification and promotion into
+  `blob_state` are server-side. The only local Nix dependency is a daemon client
+  used to query valid path metadata and closure membership. The Worker owns
+  authentication, R2 presigned URL generation, signing, and metadata commit. The
+  CLI never receives R2 credentials.
 - Signing uses the standard Ed25519 narinfo format so any Nix client with the
-  public key in `trusted-public-keys` can verify substitutions.
+  public key in `trusted-public-keys` can verify substitutions. Each tenant
+  signs with its own key, so a substituter trusts a tenant only via that
+  tenant's published key.
+
+## Current state
+
+The multi-tenant model described above is live on the `hono-orpc-refactor`
+branch, not deferred. The V1-V4 sections below record how the single-cache,
+single-owner cache was built up; the V5 section describes the multi-tenant
+target, which is now implemented. The early "single-tenant for now" framing has
+been overtaken by that work. Routing is Hono throughout, and the JSON admin APIs
+are contract-first oRPC: every admin procedure is declared once in
+`@cupboard/protocol/contract`, the server implements it with oRPC, and the CLI
+derives its typed clients from it. Only wire-format endpoints (`pubkey`,
+`signup`, the commit WebSocket, public reads, private Basic auth) stay outside
+the contract.
 
 ## V1
 
@@ -1027,6 +1049,10 @@ pure lexer handles text formats such as narinfo before a schema validates them.
       multi-signature verification path.
 
 ## V5
+
+Status: implemented and live on `hono-orpc-refactor`. The sections below are the
+design record for the multi-tenant system that now runs; see "Current state"
+near the top of this document for how it maps onto the code.
 
 V5 turns cupboard into a hosted, multi-tenant service. One operator runs the
 instance and onboards independent, mutually-distrusting tenants. Each tenant has
