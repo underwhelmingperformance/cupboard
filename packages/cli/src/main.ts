@@ -1,6 +1,12 @@
 #!/usr/bin/env -S node --experimental-transform-types --disable-warning=ExperimentalWarning
-import { isAbortError } from './abort.ts';
-import { buildProgram } from './cli.ts';
+import { createCliUi } from '@cupboard/cli-ui';
+
+import {
+	buildProgram,
+	cliExitCode,
+	failureReporterMode,
+	reportCliFailure
+} from './cli.ts';
 import { CliAbortError } from './errors.ts';
 
 const controller = new AbortController();
@@ -21,13 +27,17 @@ const abortSigterm = (): void => {
 process.once('SIGINT', abortSigint);
 process.once('SIGTERM', abortSigterm);
 
+const program = buildProgram({ signal: controller.signal });
+
 try {
-	await buildProgram({ signal: controller.signal }).parseAsync();
+	await program.parseAsync();
 } catch (error: unknown) {
-	process.stderr.write(
-		`${error instanceof Error ? error.message : String(error)}\n`
-	);
-	process.exit(isAbortError(error) ? abortExitCode : 1);
+	const reporter = createCliUi({
+		mode: failureReporterMode(program)
+	}).reporter();
+
+	reportCliFailure(reporter, error);
+	process.exit(cliExitCode(error, abortExitCode));
 } finally {
 	process.removeListener('SIGINT', abortSigint);
 	process.removeListener('SIGTERM', abortSigterm);

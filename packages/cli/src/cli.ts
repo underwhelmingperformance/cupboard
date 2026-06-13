@@ -1,7 +1,8 @@
-import type { ReporterMode } from '@cupboard/reporter';
+import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { resolveReporterMode } from '@cupboard/shared';
 import { Command } from 'commander';
 
+import { isAbortError } from './abort.ts';
 import { registerAttestCommands } from './commands/attest.ts';
 import { registerAuthKeyCommands } from './commands/auth-key.ts';
 import { registerCacheCommands } from './commands/cache.ts';
@@ -19,6 +20,7 @@ import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
+import { CliError } from './errors.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {
@@ -63,4 +65,42 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 
 export function reporterModeFromGlobals(program: Command): ReporterMode {
 	return resolveReporterMode(program.opts<GlobalOptions>().colour);
+}
+
+/**
+ * The reporter mode for a top-level failure. The `--colour` flag wins when it
+ * parsed; a failure before parsing finished falls back to the environment.
+ */
+export function failureReporterMode(program: Command): ReporterMode {
+	try {
+		return reporterModeFromGlobals(program);
+	} catch {
+		return resolveReporterMode();
+	}
+}
+
+/**
+ * The process exit code a thrown value maps to: the abort code for a Ctrl-C, a
+ * typed CLI failure's own code, or the catch-all 1 for anything else.
+ */
+export function cliExitCode(error: unknown, abortExitCode: number): number {
+	if (isAbortError(error)) {
+		return abortExitCode;
+	}
+
+	return error instanceof CliError ? error.exitCode : 1;
+}
+
+/**
+ * Reports a top-level failure through the reporter: one `{event:'error'}` in JSON
+ * mode, one red marker line in terminal mode. An abort (Ctrl-C) is a
+ * cancellation, not a failure, so it reports nothing and the exit code carries
+ * it.
+ */
+export function reportCliFailure(reporter: Reporter, error: unknown): void {
+	if (isAbortError(error)) {
+		return;
+	}
+
+	reporter.error(error);
 }
