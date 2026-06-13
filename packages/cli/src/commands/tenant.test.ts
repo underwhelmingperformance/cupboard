@@ -48,7 +48,7 @@ function createBody(): TenantCreateBody {
 	});
 }
 
-function reporter(results: ResultRow[][]): Reporter {
+function reporter(results: ResultRow[][], infos: string[] = []): Reporter {
 	return {
 		phase(_label, body) {
 			return Promise.resolve(
@@ -71,8 +71,8 @@ function reporter(results: ResultRow[][]): Reporter {
 		warn() {
 			return;
 		},
-		info() {
-			return;
+		info(message) {
+			infos.push(message);
 		}
 	};
 }
@@ -300,6 +300,21 @@ describe('runTenantList', () => {
 				{ label: 'beta', value: 'suspended; public; config v1' }
 			]
 		]);
+	});
+
+	it('reports nothing when there are no tenants', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+
+		await runTenantList(
+			reporter(results, infos),
+			tenantClient({ list: () => Promise.resolve({ tenants: [] }) })
+		);
+
+		expect({ results, infos }).toStrictEqual({
+			results: [],
+			infos: ['No tenants.']
+		});
 	});
 });
 

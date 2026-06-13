@@ -88,6 +88,21 @@ describe('runControlKeyList', () => {
 			]
 		]);
 	});
+
+	it('reports nothing when there are no keys', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+
+		await runControlKeyList(
+			reporter(results, infos),
+			controlKeyClient({ list: () => Promise.resolve({ keys: [] }) })
+		);
+
+		expect({ results, infos }).toStrictEqual({
+			results: [],
+			infos: ['No control keys.']
+		});
+	});
 });
 
 describe('runControlKeyRotate', () => {
