@@ -1,3 +1,4 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import type {
 	AuthKeyListResponse,
 	AuthKeyRetireResponse,
@@ -14,6 +15,10 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+
+interface RetireOptions {
+	readonly yes?: boolean;
+}
 
 /**
  * The slice of the derived client the auth-key commands consume, in the
@@ -73,16 +78,18 @@ export function registerAuthKeyCommands(
 		.description('Retire a superseded auth key once its tokens have expired.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<kid>', 'auth key id')
-		.action(async (url: string, kid: string) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+		.option('-y, --yes', 'retire without the confirmation prompt')
+		.action(async (url: string, kid: string, options: RetireOptions) => {
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runAuthKeyRetire(kid, reporter, rpc.keys.auth);
+			await runAuthKeyRetire(kid, ui, rpc.keys.auth);
 		});
 }
 
@@ -132,9 +139,20 @@ export async function runAuthKeyRotate(
 
 export async function runAuthKeyRetire(
 	kid: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: AuthKeyClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Retire auth key ${kid}?`,
+		detail: 'Tokens still signed by this key can no longer be verified.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The key was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Retiring auth key', () =>
 		client.retire({ kid })
 	);

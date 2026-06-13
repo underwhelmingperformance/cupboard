@@ -1,3 +1,4 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import type {
 	KeyListResponse,
 	KeyRetireResponse,
@@ -15,6 +16,10 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+
+interface RetireOptions {
+	readonly yes?: boolean;
+}
 
 /**
  * The slice of the derived client the key commands consume, in the
@@ -72,16 +77,18 @@ export function registerKeyCommands(
 		.description('Retire a signing key one stage at a time.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<id>', "key id: a rotated key's UUID, or 'active'")
-		.action(async (url: string, id: string) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+		.option('-y, --yes', 'retire without the confirmation prompt')
+		.action(async (url: string, id: string, options: RetireOptions) => {
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runKeyRetire(id, reporter, rpc.keys.signing);
+			await runKeyRetire(id, ui, rpc.keys.signing);
 		});
 }
 
@@ -130,9 +137,22 @@ export async function runKeyRotate(
 
 export async function runKeyRetire(
 	id: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: KeyClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Retire signing key ${id}?`,
+		detail:
+			'A signing key stops signing; a published key is then removed. ' +
+			'Clients still trusting a removed key reject its signatures.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The key was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Retiring signing key', () =>
 		client.retire({ id })
 	);
