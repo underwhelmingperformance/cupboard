@@ -58,6 +58,35 @@ export class InvalidClaimError extends CliUsageError {
 	}
 }
 
+export class InvalidWorkerUrlError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`Invalid Worker URL: ${value}. ` +
+				'Expected a URL like https://cupboard.example.workers.dev.'
+		);
+		this.name = 'InvalidWorkerUrlError';
+	}
+}
+
+export class UnreachableHostError extends CliError {
+	constructor(
+		public readonly host: string,
+		cause: Error
+	) {
+		const underlying = cause.cause;
+		const detail =
+			underlying instanceof Error ? underlying.message : cause.message;
+
+		super(`Could not reach ${host}: ${detail}`);
+		this.name = 'UnreachableHostError';
+		this.cause = cause;
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
 export class OwnerLoginRequiredError extends CliError {
 	constructor() {
 		super('No cupboard session, or it has expired. Run `cupboard login`.');
