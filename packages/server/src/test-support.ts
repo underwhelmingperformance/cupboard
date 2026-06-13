@@ -642,7 +642,8 @@ export async function controlWorkerFetch(request: Request): Promise<Response> {
 // A control admin token, issued the way the control plane does: signed by the
 // active control key for the control issuer (the current origin) and audience.
 export async function issueControlAdminToken(
-	subject = 'global-admin'
+	subject = 'global-admin',
+	scope: AccessScope = 'admin'
 ): Promise<string> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const wrappingSecret = testControlEnv.CONTROL_KEY_WRAP_SECRET;
@@ -656,7 +657,7 @@ export async function issueControlAdminToken(
 			issuer: new URL(origin).origin,
 			audience: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
 			subject,
-			scope: 'admin',
+			scope,
 			kid: active.kid,
 			ttlSeconds: 600
 		},
