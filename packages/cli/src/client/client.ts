@@ -37,6 +37,7 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
+import { parseWorkerUrl, reachableFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
 
@@ -67,8 +68,8 @@ export class CupboardClient {
 		const resolved = typeof options === 'string' ? { cache: options } : options;
 
 		return new CupboardClient(
-			new URL(value),
-			fetch,
+			parseWorkerUrl(value),
+			reachableFetcher(fetch),
 			cachePrefixFor(resolved.cache ?? DEFAULT_CACHE),
 			resolved.signal
 		);
