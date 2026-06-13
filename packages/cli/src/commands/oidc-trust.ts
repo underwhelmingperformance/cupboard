@@ -97,6 +97,20 @@ export function registerOidcTrustCommands(
 			collect,
 			[]
 		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Example:',
+				'  # Trust a specific reusable workflow to push under a root prefix,',
+				'  # keyed on the job_workflow_ref claim',
+				'  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \\',
+				'    --issuer https://token.actions.githubusercontent.com \\',
+				'    --audience https://cupboard.example.workers.dev/t/acme \\',
+				'    --claim job_workflow_ref=acme/ci/.github/workflows/push.yml@refs/heads/main \\',
+				'    --allowed-root github:acme/'
+			].join('\n')
+		)
 		.action(async (url: string, options: OidcTrustAddOptions) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
