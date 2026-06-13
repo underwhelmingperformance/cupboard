@@ -25,11 +25,11 @@ describe('describeExpiry', () => {
 		{ root: summary({ expired: false }), expected: 'permanent' },
 		{
 			root: summary({ expiresAt: '2026-01-08T00:00:00.000Z', expired: false }),
-			expected: 'expires 2026-01-08T00:00:00.000Z'
+			expected: 'expires 2026-01-08 00:00 UTC'
 		},
 		{
 			root: summary({ expiresAt: '2026-01-01T00:00:00.000Z', expired: true }),
-			expected: 'expired (2026-01-01T00:00:00.000Z)'
+			expected: 'expired (2026-01-01 00:00 UTC)'
 		}
 	])('describes "$expected"', ({ root, expected }) => {
 		expect(describeExpiry(root)).toBe(expected);
@@ -73,7 +73,7 @@ describe('runRootSet', () => {
 			[
 				{ label: 'Root', value: 'github:owner/repo/main' },
 				{ label: 'Targets', value: '1' },
-				{ label: 'Expiry', value: 'expires 2026-01-08T00:00:00.000Z' }
+				{ label: 'Expiry', value: 'expires 2026-01-08 00:00 UTC' }
 			]
 		]);
 	});
@@ -116,7 +116,7 @@ describe('runRootList', () => {
 				{ label: 'main', value: '1 target(s); permanent' },
 				{
 					label: 'pr-123',
-					value: '1 target(s); expires 2026-01-08T00:00:00.000Z'
+					value: '1 target(s); expires 2026-01-08 00:00 UTC'
 				}
 			]
 		]);

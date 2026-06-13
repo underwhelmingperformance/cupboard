@@ -89,9 +89,9 @@ describe('runAuthKeyList', () => {
 				{
 					label: 'kid-old',
 					value:
-						'retained; created 2026-01-01T00:00:00.000Z; retires 2026-01-01T00:20:30.000Z'
+						'retained; created 2026-01-01 00:00 UTC; retires 2026-01-01 00:20 UTC'
 				},
-				{ label: 'kid-new', value: 'active; created 2026-01-01T00:00:00.000Z' }
+				{ label: 'kid-new', value: 'active; created 2026-01-01 00:00 UTC' }
 			]
 		]);
 	});
@@ -129,7 +129,7 @@ describe('runAuthKeyRotate', () => {
 					{ label: 'Retiring key', value: 'kid-old' },
 					{
 						label: 'Scheduled retirement',
-						value: '2026-01-01T00:20:30.000Z'
+						value: '2026-01-01 00:20 UTC'
 					},
 					{ label: 'Keys in set', value: '2' }
 				]

@@ -7,6 +7,7 @@ import type {
 } from '@cupboard/protocol/control-keys';
 import {
 	createReporter,
+	formatTimestamp,
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
@@ -132,7 +133,7 @@ export async function runControlKeyRotate(
 						{ label: 'Retiring key', value: retiring.kid },
 						{
 							label: 'Scheduled retirement',
-							value: retiring.scheduledRetireAt
+							value: formatTimestamp(retiring.scheduledRetireAt)
 						}
 					])
 		]
@@ -174,7 +175,7 @@ function controlKeyRow(key: ControlKeySummary): ResultRow {
 	const retirement =
 		key.scheduledRetireAt === undefined
 			? ''
-			: `; retires ${key.scheduledRetireAt}`;
+			: `; retires ${formatTimestamp(key.scheduledRetireAt)}`;
 
 	return {
 		label: key.kid,

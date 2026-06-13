@@ -83,7 +83,7 @@ describe('runControlKeyList', () => {
 
 		expect(results).toStrictEqual([
 			[
-				{ label: 'kid-old', value: 'live; retires 2026-01-01T00:20:30.000Z' },
+				{ label: 'kid-old', value: 'live; retires 2026-01-01 00:20 UTC' },
 				{ label: 'kid-new', value: 'live' }
 			]
 		]);
@@ -121,7 +121,7 @@ describe('runControlKeyRotate', () => {
 					{ label: 'Retiring key', value: 'kid-old' },
 					{
 						label: 'Scheduled retirement',
-						value: '2026-01-01T00:20:30.000Z'
+						value: '2026-01-01 00:20 UTC'
 					}
 				]
 			],
