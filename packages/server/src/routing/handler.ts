@@ -71,7 +71,11 @@ app.use('/t/:tenant/*', async (context, next) => {
 		return notFoundResponse();
 	}
 
-	const entry = await admitTenant(context.env.TENANT_CACHE, route.tenant);
+	const entry = await admitTenant(
+		context.env,
+		context.executionCtx,
+		route.tenant
+	);
 
 	if (entry === undefined) {
 		return notFoundResponse();

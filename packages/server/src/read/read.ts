@@ -8,7 +8,7 @@ import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 
-import { type ManifestEntry } from '../control/tenant-manifest.ts';
+import { type TenantEntry } from '../control/tenant-membership.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	isNotModified,
@@ -70,7 +70,7 @@ export function cacheScope(
 // every read is rejected until a credential is set.
 export async function guardRead(
 	request: Request,
-	entry: ManifestEntry
+	entry: TenantEntry
 ): Promise<Response | undefined> {
 	if (entry.readMode !== 'private') {
 		return undefined;

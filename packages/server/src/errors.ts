@@ -376,6 +376,33 @@ export class StoredSignaturesInvalidError extends ServerHttpError {
 	}
 }
 
+export class BinaryFuseFilterInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('Binary fuse filter is invalid');
+		this.name = 'BinaryFuseFilterInvalidError';
+	}
+}
+
+export class BinaryFuseConstructionFailedError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('Binary fuse construction failed for every seed');
+		this.name = 'BinaryFuseConstructionFailedError';
+	}
+}
+
+export class BinaryFuseConstructionIndexOutOfBoundsError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('Binary fuse construction index is out of bounds');
+		this.name = 'BinaryFuseConstructionIndexOutOfBoundsError';
+	}
+}
+
 export class UploadNotPreparedError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 

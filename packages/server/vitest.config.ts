@@ -21,6 +21,9 @@ export default defineConfig(async () => {
 					test: {
 						name: 'node',
 						sequence: { groupOrder: 0 },
+						benchmark: {
+							include: ['src/**/*.bench.ts']
+						},
 						include: ['src/**/*.test.ts'],
 						exclude: ['src/**/*.workers.test.ts']
 					}
