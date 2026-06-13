@@ -135,18 +135,20 @@ export class CupboardClient {
 	 */
 	async commit(
 		token: AccessCredential,
-		uploadId: string,
+		target: CommitTarget,
 		options: CommitOptions = {}
 	): Promise<CommitResponse> {
 		throwIfAborted(this.signal);
 
-		const path = this.selectorScoped(`/uploads/${uploadId}/commit`);
+		const path = this.selectorScoped(`/uploads/${target.uploadId}/commit`);
 		const settle = (bearer: string | undefined): Promise<CommitResponse> =>
 			settleCommitSocket(
 				this.connectSocket(this.socketUrl(path), bearerHeaders(bearer)),
 				{
 					path,
-					uploadId,
+					uploadId: target.uploadId,
+					storePathHash: target.storePathHash,
+					narHash: target.narHash,
 					wait: options.wait ?? true,
 					timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
 					signal: this.signal
@@ -328,6 +330,17 @@ export class CupboardClient {
 export interface CupboardClientOptions {
 	readonly cache?: string;
 	readonly signal?: AbortSignal;
+}
+
+/**
+ * The upload a commit settles: its id and the path identity negotiated for it.
+ * The identity lets the client report a verdict that races ahead of the server's
+ * deferred frame.
+ */
+export interface CommitTarget {
+	readonly uploadId: string;
+	readonly storePathHash: string;
+	readonly narHash: string;
 }
 
 export interface CommitOptions {

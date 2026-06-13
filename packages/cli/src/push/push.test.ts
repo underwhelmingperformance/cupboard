@@ -106,8 +106,8 @@ describe('runPush', () => {
 						headers: upload.headers
 					});
 				},
-				commit(uploadId) {
-					commits.push(uploadId);
+				commit(target) {
+					commits.push(target.uploadId);
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
@@ -296,8 +296,8 @@ describe('runPush', () => {
 				prepareUpload() {
 					throw new UnexpectedPushClientCallError('prepareUpload');
 				},
-				commit(uploadId) {
-					expect(uploadId).toBe('reuse-app');
+				commit(target) {
+					expect(target.uploadId).toBe('reuse-app');
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),

@@ -35,7 +35,7 @@ import {
 } from '@cupboard/reporter';
 import { z } from 'zod';
 
-import type { CommitOptions } from '../client/client.ts';
+import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationSubjectNotPushedError,
@@ -95,7 +95,7 @@ export interface PushClient {
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse>;
 	uploadBlob(upload: PushBlobUpload): Promise<void>;
-	commit(uploadId: string, options: CommitOptions): Promise<CommitResponse>;
+	commit(target: CommitTarget, options: CommitOptions): Promise<CommitResponse>;
 	negotiateAttestations?(
 		body: AttestationNegotiateRequest
 	): Promise<AttestationNegotiateResponse>;
@@ -298,10 +298,14 @@ async function runPushWithTemporaryDirectory(
 		);
 		const responses = await Promise.all(
 			decisions.map((decision) =>
-				client.commit(decision.uploadId, {
-					wait,
-					timeoutSeconds: waitTimeoutSeconds
-				})
+				client.commit(
+					{
+						uploadId: decision.uploadId,
+						storePathHash: decision.storePathHash,
+						narHash: decision.narHash
+					},
+					{ wait, timeoutSeconds: waitTimeoutSeconds }
+				)
 			)
 		);
 		const pending = decisions

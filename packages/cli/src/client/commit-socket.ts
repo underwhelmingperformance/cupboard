@@ -50,6 +50,12 @@ export interface CommitSettleOptions {
 	/** The route path the socket was opened on, for error messages. */
 	readonly path: string;
 	readonly uploadId: string;
+	// The upload's identity from negotiation. The server binds the same metadata
+	// to this uploadId, so it matches the deferred frame's values; it lets the
+	// client settle a verdict that races ahead of the deferred frame, where the
+	// server never sent the identity.
+	readonly storePathHash: string;
+	readonly narHash: string;
 	/** Park for the verification verdict on a deferred upload. */
 	readonly wait: boolean;
 	/** Bounds how long a parked upload waits for its verdict. */
@@ -159,14 +165,23 @@ export function settleCommitSocket(
 				}
 
 				case 'verdict': {
-					if (deferred === undefined || frame.data.status === 'pending') {
+					if (frame.data.status === 'pending') {
 						protocolError(`unexpected verdict frame: ${text}`);
 
 						return;
 					}
 
+					// Verification can settle the upload as the socket opens, delivering
+					// the verdict before the deferred frame. The path's identity is then
+					// the one negotiated for this uploadId, which the server bound to the
+					// same metadata.
+					const settled = deferred ?? {
+						storePathHash: options.storePathHash,
+						narHash: options.narHash
+					};
+
 					if (frame.data.status === 'servable') {
-						succeed({ ...deferred, status: 'committed' });
+						succeed({ ...settled, status: 'committed' });
 
 						return;
 					}
