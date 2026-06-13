@@ -241,6 +241,7 @@ export class AttestationCasService {
 		}
 
 		const presenceFilter = this.presenceFilter(tenant, reference.digest);
+
 		await this.context.d1.batch([
 			this.context.d1
 				.update(d1Schema.tenantUsage)
