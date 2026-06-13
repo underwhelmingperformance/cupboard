@@ -5,7 +5,12 @@ import { InvalidCacheNameError } from '../errors.ts';
 
 import { cacheSubstituterUrl, runConfig } from './config.ts';
 
-function capturingReporter(infos: string[]): Reporter {
+interface CapturedOutput {
+	readonly data: string[];
+	readonly infos: string[];
+}
+
+function capturingReporter(captured: CapturedOutput): Reporter {
 	return {
 		phase(_label, body) {
 			return Promise.resolve(
@@ -19,14 +24,14 @@ function capturingReporter(infos: string[]): Reporter {
 		result() {
 			return;
 		},
-		data() {
-			return;
+		data(text) {
+			captured.data.push(text);
 		},
 		warn() {
 			return;
 		},
 		info(message) {
-			infos.push(message);
+			captured.infos.push(message);
 		},
 		error() {
 			return;
@@ -34,68 +39,71 @@ function capturingReporter(infos: string[]): Reporter {
 	};
 }
 
+const nixConfig = [
+	'substituters = https://cupboard.example.workers.dev',
+	'trusted-public-keys = cupboard-1:abc123'
+].join('\n');
+
 describe('runConfig', () => {
-	it('renders a nix.conf snippet for the given URL and public key', () => {
-		const infos: string[] = [];
+	it('writes a nix.conf snippet to the payload stream', () => {
+		const captured: CapturedOutput = { data: [], infos: [] };
 
 		runConfig(
 			'https://cupboard.example.workers.dev',
 			'cupboard-1:abc123',
-			capturingReporter(infos)
+			capturingReporter(captured)
 		);
 
-		expect(infos).toStrictEqual([
-			[
-				'substituters = https://cupboard.example.workers.dev',
-				'trusted-public-keys = cupboard-1:abc123'
-			].join('\n')
-		]);
+		expect(captured).toStrictEqual({ data: [nixConfig], infos: [] });
 	});
 
-	it('appends a netrc snippet when a read credential is configured', () => {
-		const infos: string[] = [];
+	it('writes the nix.conf to the payload and the netrc as guidance', () => {
+		const captured: CapturedOutput = { data: [], infos: [] };
 
 		runConfig(
 			'https://cupboard.example.workers.dev',
 			'cupboard-1:abc123',
-			capturingReporter(infos),
+			capturingReporter(captured),
 			{ user: 'alice', password: 'correct-horse-battery-staple' }
 		);
 
-		expect(infos).toStrictEqual([
-			[
-				'substituters = https://cupboard.example.workers.dev',
-				'trusted-public-keys = cupboard-1:abc123'
-			].join('\n'),
-			[
-				'# Private cache: add this line to your Nix netrc-file ' +
-					'(e.g. ~/.config/nix/netrc):',
-				'machine cupboard.example.workers.dev login alice password correct-horse-battery-staple'
-			].join('\n')
-		]);
+		expect(captured).toStrictEqual({
+			data: [nixConfig],
+			infos: [
+				[
+					'# Private cache: add this line to your Nix netrc-file ' +
+						'(e.g. ~/.config/nix/netrc):',
+					'machine cupboard.example.workers.dev login alice password correct-horse-battery-staple'
+				].join('\n')
+			]
+		});
 	});
 
 	it('uses the URL hostname for the netrc machine', () => {
-		const infos: string[] = [];
+		const captured: CapturedOutput = { data: [], infos: [] };
 
 		runConfig(
 			'http://localhost:1234',
 			'cupboard-1:abc123',
-			capturingReporter(infos),
+			capturingReporter(captured),
 			{ user: 'alice', password: 'correct-horse-battery-staple' }
 		);
 
-		expect(infos).toStrictEqual([
-			[
-				'substituters = http://localhost:1234',
-				'trusted-public-keys = cupboard-1:abc123'
-			].join('\n'),
-			[
-				'# Private cache: add this line to your Nix netrc-file ' +
-					'(e.g. ~/.config/nix/netrc):',
-				'machine localhost login alice password correct-horse-battery-staple'
-			].join('\n')
-		]);
+		expect(captured).toStrictEqual({
+			data: [
+				[
+					'substituters = http://localhost:1234',
+					'trusted-public-keys = cupboard-1:abc123'
+				].join('\n')
+			],
+			infos: [
+				[
+					'# Private cache: add this line to your Nix netrc-file ' +
+						'(e.g. ~/.config/nix/netrc):',
+					'machine localhost login alice password correct-horse-battery-staple'
+				].join('\n')
+			]
+		});
 	});
 });
 

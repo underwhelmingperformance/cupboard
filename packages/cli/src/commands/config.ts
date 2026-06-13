@@ -48,7 +48,10 @@ export function runConfig(
 	reporter: Reporter,
 	credential?: ConfigCredential
 ): void {
-	reporter.info(new NixConfig(url, publicKey).render().trimEnd());
+	// The nix.conf snippet is the command's payload, so it goes to stdout and
+	// `cupboard config <url> <pubkey> >> nix.conf` works. The netrc lines belong in
+	// a different file, so they stay on stderr as guidance.
+	reporter.data(new NixConfig(url, publicKey).render().trimEnd());
 
 	if (credential === undefined) {
 		return;
