@@ -4,9 +4,12 @@ import {
 } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { blobReaperGraceMs, casObjectKey } from '../http/http.ts';
 import { runCasReaper, runCasReaperDemote } from '../routing/scheduled.ts';
@@ -420,6 +423,82 @@ describe('attestation CAS lifecycle', () => {
 				quotaBytes: undefined
 			}
 		});
+	});
+
+	it('leaves a present CAS object and its references intact when a demote is routed for it', async () => {
+		const bundle = await fileAttestationReference({
+			uploadId: 'repromoted',
+			bytes: new TextEncoder().encode('repromoted'),
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+
+		const before = {
+			objects: await casObjectRows(),
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		};
+
+		// The reaper routes a demote for this digest, but the shared object is present
+		// in the Durable Object: a concurrent re-promote restored it, or the reaper's
+		// head was stale. Stripping the references and crediting quota would corrupt a
+		// live object's accounting, so the demote re-checks and is a no-op. The stale
+		// fence value is never consulted because the presence check short-circuits.
+		await currentServer().demoteAttestationReferences(
+			bundle.digest,
+			'2000-01-01T00:00:00.000Z'
+		);
+
+		expect({
+			objects: await casObjectRows(),
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual(before);
+	});
+
+	it('aborts a demote whose fence is stale, keeping the re-promoted reference and its charge', async () => {
+		const bundle = await fileAttestationReference({
+			uploadId: 'fence-abort',
+			bytes: new TextEncoder().encode('fence-abort'),
+			storePathHash,
+			generation: 0,
+			predicateType
+		});
+
+		const before = {
+			objects: await casObjectRows(),
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		};
+
+		// The reaper observed the object gone at one storedAt, but a concurrent
+		// re-promote rewrote the object and bumped cas_object.storedAt by the time the
+		// Durable Object acts. The object is absent again here, so the re-head guard
+		// passes and the per-reference storedAt fence is what must abort: a row carrying
+		// a different storedAt means the reference is live and must not be stripped, nor
+		// its charge credited away.
+		await env.BLOBS.delete(casObjectKey(bundle.digest));
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.update(d1Schema.casObject)
+			.set({ storedAt: '2099-01-01T00:00:00.000Z' })
+			.where(eq(d1Schema.casObject.digest, bundle.digest))
+			.run();
+
+		await currentServer().demoteAttestationReferences(
+			bundle.digest,
+			'2000-01-01T00:00:00.000Z'
+		);
+
+		expect({
+			objects: await casObjectRows(),
+			refs: await attestationReferenceRows(),
+			presence: await tenantCasBlobRows(),
+			usage: await tenantUsageRow()
+		}).toStrictEqual(before);
 	});
 
 	it('drains attestation refs and tenant CAS presence during offboarding', async () => {

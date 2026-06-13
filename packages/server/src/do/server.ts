@@ -270,9 +270,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.attestationCas.removeCapturedReference(reference);
 	}
 
-	async demoteAttestationReferences(digest: string): Promise<void> {
+	async demoteAttestationReferences(
+		digest: string,
+		fenceStoredAt: string
+	): Promise<void> {
 		await this.initialise();
-		await this.attestations.removeReferencesForDigest(digest);
+		await this.attestations.removeReferencesForDigest(digest, fenceStoredAt);
 	}
 
 	// The control plane begins offboarding this tenant. Marking it stops the

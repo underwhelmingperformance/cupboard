@@ -400,8 +400,11 @@ class TenantNarInfoDemoter implements NarInfoDemoter {
 class TenantCasReferenceDemoter implements CasReferenceDemoter {
 	constructor(private readonly env: Env) {}
 
-	demote(tenant: string, digest: string): Promise<void> {
-		return tenantServer(this.env, tenant).demoteAttestationReferences(digest);
+	demote(tenant: string, digest: string, fenceStoredAt: string): Promise<void> {
+		return tenantServer(this.env, tenant).demoteAttestationReferences(
+			digest,
+			fenceStoredAt
+		);
 	}
 }
 
