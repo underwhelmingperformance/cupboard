@@ -1,0 +1,26 @@
+{
+	"name": "@cupboard/cli-ui",
+	"version": "0.0.0",
+	"dependencies": {
+		"@clack/core": "^1.4.1",
+		"@clack/prompts": "^1.5.1",
+		"@cupboard/reporter": "workspace:*",
+		"picocolors": "^1.1.1"
+	},
+	"devDependencies": {
+		"@types/node": "^25.9.1",
+		"typescript": "^6.0.3",
+		"vitest": "^4.1.8"
+	},
+	"exports": {
+		".": "./src/cli-ui.ts",
+		"./testing": "./src/testing.ts"
+	},
+	"license": "AGPL-3.0-or-later",
+	"private": true,
+	"scripts": {
+		"check:types": "tsc --noEmit",
+		"test": "vitest run --passWithNoTests"
+	},
+	"type": "module"
+}

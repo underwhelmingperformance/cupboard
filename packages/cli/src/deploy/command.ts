@@ -773,7 +773,7 @@ export async function executeDeploy(
 	throwIfAborted(runtimeOptions.signal);
 
 	const ui = createDeployUi();
-	const interactive = process.stdin.isTTY && process.stdout.isTTY;
+	const interactive = ui.interactive;
 
 	try {
 		await deployFlow(cliOptions, ui, interactive, runtimeOptions);
@@ -810,7 +810,7 @@ async function deployFlow(
 			? undefined
 			: checkDomainOption(cliOptions.domain);
 
-	ui.intro();
+	ui.intro('cupboard deploy');
 
 	const { artifact, notice } = await ui
 		.reporter()

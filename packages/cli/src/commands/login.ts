@@ -1,3 +1,4 @@
+import { openBrowser } from '@cupboard/cli-ui';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import { createReporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
@@ -27,7 +28,6 @@ import {
 import { readCachedGrant, writeCachedGrant } from '../deploy/grant-store.ts';
 import { cloudflareDashIssuer } from '../deploy/owner.ts';
 import { CliError } from '../errors.ts';
-import { openBrowser } from '../io/open-browser.ts';
 
 interface LoginOptions {
 	readonly oidcIssuer: string;
