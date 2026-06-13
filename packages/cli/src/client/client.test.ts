@@ -243,6 +243,11 @@ describe('CupboardClient.commit', () => {
 		narHash: `sha256:${'1'.repeat(52)}`,
 		status: 'committed'
 	} as const;
+	const target = (uploadId: string) => ({
+		uploadId,
+		storePathHash: response.storePathHash,
+		narHash: response.narHash
+	});
 
 	it('commits over a wss socket carrying the bearer token on the upgrade', async () => {
 		const { client, connections } = commitClient([
@@ -251,7 +256,7 @@ describe('CupboardClient.commit', () => {
 			}
 		]);
 
-		const result = await client.commit('write-token', 'upload-app');
+		const result = await client.commit('write-token', target('upload-app'));
 
 		expect({ result, connections: connections() }).toStrictEqual({
 			result: response,
@@ -274,7 +279,7 @@ describe('CupboardClient.commit', () => {
 			'/cache/builds'
 		);
 
-		await client.commit('write-token', 'upload-build');
+		await client.commit('write-token', target('upload-build'));
 
 		expect(connections()).toStrictEqual([
 			{
@@ -300,7 +305,7 @@ describe('CupboardClient.commit', () => {
 			refresh: () => Promise.resolve('fresh-token')
 		};
 
-		const result = await client.commit(provider, 'upload-app');
+		const result = await client.commit(provider, target('upload-app'));
 
 		expect({ result, connections: connections() }).toStrictEqual({
 			result: response,

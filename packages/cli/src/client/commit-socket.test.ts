@@ -33,6 +33,8 @@ function settle(
 	return settleCommitSocket(socket, {
 		path: '/uploads/upload-app/commit',
 		uploadId: 'upload-app',
+		storePathHash,
+		narHash,
 		wait: options.wait ?? true,
 		timeoutSeconds: options.timeoutSeconds ?? 600,
 		signal: options.signal,
@@ -93,6 +95,23 @@ describe('settleCommitSocket', () => {
 			'message',
 			frame({ event: 'deferred', storePathHash, narHash })
 		);
+		socket.emit('message', frame({ event: 'verdict', status: 'servable' }));
+
+		await expect(settled).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect(socket.closed).toBe(true);
+	});
+
+	it('settles committed on a servable verdict that arrives before the deferred frame', async () => {
+		const socket = new FakeCommitSocket();
+		const settled = settle(socket);
+
+		// Verification settled the upload as the socket opened, so the verdict races
+		// ahead of the deferred frame. The client settles from the upload's known
+		// identity instead of failing the push.
 		socket.emit('message', frame({ event: 'verdict', status: 'servable' }));
 
 		await expect(settled).resolves.toStrictEqual({
