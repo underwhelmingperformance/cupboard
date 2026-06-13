@@ -54,7 +54,11 @@ import {
 	rotateControlKey
 } from './control-key-store.ts';
 import { controlTrustRules } from './control-trust.ts';
-import { publishTenantManifest } from './tenant-manifest.ts';
+import {
+	invalidateTenantRow,
+	rebuildMembershipFilter,
+	writeTenantMember
+} from './tenant-membership.ts';
 import {
 	ensureTenant,
 	listTenants,
@@ -308,15 +312,15 @@ export async function controlTenantList(env: Env): Promise<TenantListResponse> {
 export async function controlTenantCreate(
 	env: Env,
 	body: ParsedTenantCreateBody,
-	origin: string
+	origin: string,
+	rebuildFilter: (env: Env) => Promise<void> = rebuildMembershipFilter
 ): Promise<TenantSummary> {
 	const database = controlDatabase(env);
 
 	// Provision in order: write the authoritative row, configure the Durable Object,
-	// and publish the admission manifest last, so a tenant is admitted only once its
-	// object is configured. Each step is idempotent, so a retry after a mid-provision
-	// failure replays cleanly rather than stranding an admitted-but-unconfigured
-	// tenant.
+	// write the tenant's membership marker, then publish the rebuilt filter. Each
+	// step is idempotent, so a retry after a mid-provision failure replays cleanly
+	// rather than stranding an admitted-but-unconfigured tenant.
 	const summary = await ensureTenant(database, body, new Date().toISOString());
 	const issuer = `${origin}/t/${summary.id}`;
 
@@ -329,7 +333,15 @@ export async function controlTenantCreate(
 		ownerAudience: summary.ownerAudience,
 		configVersion: summary.configVersion
 	});
-	await publishTenantManifest(database, env.TENANT_CACHE);
+	await writeTenantMember(env.TENANT_CACHE, summary.id);
+	await invalidateTenantRow(summary.id);
+
+	// Publish the rebuilt filter so the new tenant is admittable within the filter
+	// cache TTL. A filter negative is definitive, so the create must not report
+	// success while leaving the tenant inadmissible until the hourly cron: if the
+	// filter cannot publish, the create fails and the caller retries. The row and
+	// marker already persist, so the retry (or the cron) recovers cleanly.
+	await rebuildFilter(env);
 
 	return summary;
 }
@@ -340,8 +352,7 @@ export async function controlTenantSuspend(
 ): Promise<TenantMutateResponse> {
 	const database = controlDatabase(env);
 	const summary = await setTenantStatus(database, id, 'suspended');
-
-	await publishTenantManifest(database, env.TENANT_CACHE);
+	await invalidateTenantRow(id);
 
 	return { id: summary.id, status: summary.status };
 }
@@ -352,9 +363,13 @@ export async function controlTenantOffboard(
 ): Promise<TenantMutateResponse> {
 	const database = controlDatabase(env);
 	const summary = await setTenantStatus(database, id, 'offboarding');
+	await invalidateTenantRow(id);
 
-	await publishTenantManifest(database, env.TENANT_CACHE);
-
+	// The membership marker is left in place: an offboarding tenant is still
+	// `status != 'offboarded'`, so it stays admittable to the authoritative status
+	// read, which stops its writes and 404s its reads. Finalisation deletes the
+	// marker once the drain completes.
+	//
 	// Tell the Durable Object it is offboarding so an in-flight commit settling after
 	// the status flip cannot re-materialise an object the drain will remove.
 	if (summary.status === 'offboarding') {

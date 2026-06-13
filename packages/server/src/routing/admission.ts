@@ -1,19 +1,7 @@
-import {
-	type ManifestEntry,
-	readTenantManifest
-} from '../control/tenant-manifest.ts';
-
-// Resolves a tenant slug against the published admission manifest, reading only KV
-// (never D1 or a Durable Object) so it runs on the read and dispatch hot path.
-// Returns the manifest entry for a provisioned slug, or undefined for one absent
-// from the manifest, so the caller can reject an unprovisioned slug before
-// instantiating its Durable Object: varying the slug otherwise spins up unbounded
-// unprovisioned objects, effectively public signup and a denial-of-service vector.
-export async function admitTenant(
-	kv: KVNamespace,
-	tenant: string
-): Promise<ManifestEntry | undefined> {
-	const manifest = await readTenantManifest(kv);
-
-	return manifest?.tenants[tenant];
-}
+// Tenant admission for the read and dispatch hot path. A slug is resolved through
+// the layered gate in `tenant-membership.ts`: an in-memory filter and a per-tenant
+// KV marker reject unknown slugs without touching the Durable Object, so varying
+// the slug cannot spin up unbounded unprovisioned objects (effectively public
+// signup and a denial-of-service vector); only a filter-positive with a present
+// marker, or a KV fault that forces fail-open, reaches the authoritative D1 row.
+export { admitTenant, type TenantEntry } from '../control/tenant-membership.ts';
