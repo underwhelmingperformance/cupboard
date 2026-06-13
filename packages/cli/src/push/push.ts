@@ -356,20 +356,22 @@ async function runPushWithTemporaryDirectory(
 	const reusedBlobs = negotiation.uploads.filter((decision) =>
 		needsReusedBlobCommit(decision)
 	).length;
+	const skipped = negotiation.uploads.filter((decision) =>
+		isSkip(decision)
+	).length;
 
-	reporter.result([
-		{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
-		{ label: 'Reused blobs', value: formatCount(reusedBlobs) },
-		{
-			label: 'Skipped',
-			value: formatCount(
-				negotiation.uploads.filter((decision) => isSkip(decision)).length
-			)
-		},
-		{ label: 'Uploaded', value: formatBytes(uploadedBytes) },
-		...attestationRows,
-		...retentionRows
-	]);
+	reporter.result({
+		kind: 'push-summary',
+		data: { uploadedPaths, reusedBlobs, skipped, uploadedBytes },
+		rows: [
+			{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
+			{ label: 'Reused blobs', value: formatCount(reusedBlobs) },
+			{ label: 'Skipped', value: formatCount(skipped) },
+			{ label: 'Uploaded', value: formatBytes(uploadedBytes) },
+			...attestationRows,
+			...retentionRows
+		]
+	});
 }
 
 interface AttachAttestationsDependencies {

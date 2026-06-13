@@ -146,7 +146,11 @@ export async function runCacheList(
 		client.list()
 	);
 
-	reporter.result(caches.map((summary) => cacheRow(summary)));
+	reporter.result({
+		kind: 'caches',
+		data: caches,
+		rows: caches.map((summary) => cacheRow(summary))
+	});
 }
 
 export async function runCacheCreate(
@@ -159,7 +163,7 @@ export async function runCacheCreate(
 		client.put({ cacheName: name, priority })
 	);
 
-	reporter.result(summaryRows(summary));
+	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
 }
 
 export async function runCacheRemove(
@@ -172,14 +176,18 @@ export async function runCacheRemove(
 		client.remove({ params: { cacheName: name }, query: { force } })
 	);
 
-	reporter.result([
-		{ label: 'Cache', value: cacheLabel(result.name) },
-		{ label: 'Removed', value: result.removed ? 'yes' : 'not present' },
-		{
-			label: 'Store paths removed',
-			value: formatCount(result.storePathsRemoved)
-		}
-	]);
+	reporter.result({
+		kind: 'cache',
+		data: result,
+		rows: [
+			{ label: 'Cache', value: cacheLabel(result.name) },
+			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' },
+			{
+				label: 'Store paths removed',
+				value: formatCount(result.storePathsRemoved)
+			}
+		]
+	});
 }
 
 export async function runCacheInspect(
@@ -197,7 +205,7 @@ export async function runCacheInspect(
 		return;
 	}
 
-	reporter.result(summaryRows(summary));
+	reporter.result({ kind: 'cache', data: summary, rows: summaryRows(summary) });
 }
 
 function cacheRow(summary: CacheSummary): ResultRow {

@@ -94,7 +94,11 @@ export async function runAuthKeyList(
 		client.list()
 	);
 
-	reporter.result(keys.map((key) => authKeyRow(key)));
+	reporter.result({
+		kind: 'auth-keys',
+		data: keys,
+		rows: keys.map((key) => authKeyRow(key))
+	});
 }
 
 export async function runAuthKeyRotate(
@@ -106,19 +110,23 @@ export async function runAuthKeyRotate(
 		() => client.rotate()
 	);
 
-	reporter.result([
-		{ label: 'New key', value: rotated },
-		...(retiring === undefined
-			? []
-			: [
-					{ label: 'Retiring key', value: retiring.kid },
-					{
-						label: 'Scheduled retirement',
-						value: retiring.scheduledRetireAt
-					}
-				]),
-		{ label: 'Keys in set', value: String(keys.length) }
-	]);
+	reporter.result({
+		kind: 'auth-key-rotation',
+		data: { rotated, retiring, keys },
+		rows: [
+			{ label: 'New key', value: rotated },
+			...(retiring === undefined
+				? []
+				: [
+						{ label: 'Retiring key', value: retiring.kid },
+						{
+							label: 'Scheduled retirement',
+							value: retiring.scheduledRetireAt
+						}
+					]),
+			{ label: 'Keys in set', value: String(keys.length) }
+		]
+	});
 	reporter.info('New tokens are signed with this key.');
 }
 
@@ -131,10 +139,14 @@ export async function runAuthKeyRetire(
 		client.retire({ kid })
 	);
 
-	reporter.result([
-		{ label: 'Key', value: result.kid },
-		{ label: 'Retired', value: result.retired ? 'yes' : 'not present' }
-	]);
+	reporter.result({
+		kind: 'auth-key',
+		data: result,
+		rows: [
+			{ label: 'Key', value: result.kid },
+			{ label: 'Retired', value: result.retired ? 'yes' : 'not present' }
+		]
+	});
 }
 
 function authKeyRow(key: AuthKeySummary): ResultRow {

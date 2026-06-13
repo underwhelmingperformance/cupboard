@@ -13,12 +13,24 @@ export interface ResultRow {
 	readonly value: string;
 }
 
+/**
+ * A command's result, carried in both shapes the two modes need. Terminal mode
+ * renders `rows` as a table; JSON mode emits `{event:'result', kind, data}`,
+ * where `kind` is a stable machine name for the result and `data` is the typed
+ * value behind it, so a consumer can address it without re-parsing the rows.
+ */
+export interface ResultPayload<T = unknown> {
+	readonly kind: string;
+	readonly data: T;
+	readonly rows: readonly ResultRow[];
+}
+
 export interface Reporter {
 	phase<T>(
 		label: string,
 		body: (context: PhaseContext) => Promise<T> | T
 	): Promise<T>;
-	result(rows: readonly ResultRow[]): void;
+	result(payload: ResultPayload): void;
 	/**
 	 * Writes a raw payload, followed by a newline, to stdout in both terminal and
 	 * JSON modes. This is the reporter's only stdout sink: progress, results and
@@ -110,7 +122,7 @@ function createTerminalReporter(
 			}
 		},
 
-		result(rows) {
+		result(payload) {
 			const table = new Table({
 				chars: {
 					top: '',
@@ -132,7 +144,7 @@ function createTerminalReporter(
 				style: { 'padding-left': 0, 'padding-right': 0, border: [], head: [] }
 			});
 
-			for (const row of rows) {
+			for (const row of payload.rows) {
 				table.push([pc.dim(row.label), row.value]);
 			}
 
@@ -203,14 +215,8 @@ function createJsonReporter(
 			}
 		},
 
-		result(rows) {
-			const data: Record<string, string> = {};
-
-			for (const row of rows) {
-				data[row.label] = row.value;
-			}
-
-			emit({ event: 'result', data });
+		result(payload) {
+			emit({ event: 'result', kind: payload.kind, data: payload.data });
 		},
 
 		data(text) {

@@ -51,12 +51,25 @@ export async function runCheck(
 		client.run({ deep })
 	);
 
-	reporter.result([
-		{ label: 'Narinfos checked', value: formatCount(report.narInfosChecked) },
-		{ label: 'NAR blobs checked', value: formatCount(report.narBlobsChecked) },
-		{ label: 'Complete', value: report.complete ? 'yes' : 'no' },
-		{ label: 'Discrepancies', value: formatCount(report.discrepancies.length) }
-	]);
+	reporter.result({
+		kind: 'check-report',
+		data: report,
+		rows: [
+			{
+				label: 'Narinfos checked',
+				value: formatCount(report.narInfosChecked)
+			},
+			{
+				label: 'NAR blobs checked',
+				value: formatCount(report.narBlobsChecked)
+			},
+			{ label: 'Complete', value: report.complete ? 'yes' : 'no' },
+			{
+				label: 'Discrepancies',
+				value: formatCount(report.discrepancies.length)
+			}
+		]
+	});
 
 	if (report.discrepancies.length === 0) {
 		reporter.info('No discrepancies.');

@@ -222,9 +222,13 @@ export function registerLoginCommand(
 			);
 			await writeCachedSession(sessionFromTokenResponse(exchanged), url);
 
-			reporter.result([
-				{ label: 'Cache URL', value: url },
-				{ label: 'Session', value: 'admin token cached' }
-			]);
+			reporter.result({
+				kind: 'login',
+				data: { url, scope },
+				rows: [
+					{ label: 'Cache URL', value: url },
+					{ label: 'Session', value: 'admin token cached' }
+				]
+			});
 		});
 }

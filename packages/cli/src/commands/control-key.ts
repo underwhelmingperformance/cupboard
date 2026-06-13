@@ -99,7 +99,11 @@ export async function runControlKeyList(
 		client.list()
 	);
 
-	reporter.result(keys.map((key) => controlKeyRow(key)));
+	reporter.result({
+		kind: 'control-keys',
+		data: keys,
+		rows: keys.map((key) => controlKeyRow(key))
+	});
 }
 
 export async function runControlKeyRotate(
@@ -110,18 +114,22 @@ export async function runControlKeyRotate(
 		client.rotate()
 	);
 
-	reporter.result([
-		{ label: 'New key', value: kid },
-		...(retiring === undefined
-			? []
-			: [
-					{ label: 'Retiring key', value: retiring.kid },
-					{
-						label: 'Scheduled retirement',
-						value: retiring.scheduledRetireAt
-					}
-				])
-	]);
+	reporter.result({
+		kind: 'control-key-rotation',
+		data: { kid, retiring },
+		rows: [
+			{ label: 'New key', value: kid },
+			...(retiring === undefined
+				? []
+				: [
+						{ label: 'Retiring key', value: retiring.kid },
+						{
+							label: 'Scheduled retirement',
+							value: retiring.scheduledRetireAt
+						}
+					])
+		]
+	});
 	reporter.info('New control tokens are signed with this key.');
 }
 
@@ -134,10 +142,14 @@ export async function runControlKeyRetire(
 		client.retire({ kid })
 	);
 
-	reporter.result([
-		{ label: 'Key', value: result.kid },
-		{ label: 'Retired', value: result.retired ? 'yes' : 'not present' }
-	]);
+	reporter.result({
+		kind: 'control-key',
+		data: result,
+		rows: [
+			{ label: 'Key', value: result.kid },
+			{ label: 'Retired', value: result.retired ? 'yes' : 'not present' }
+		]
+	});
 }
 
 function controlKeyRow(key: ControlKeySummary): ResultRow {

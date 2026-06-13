@@ -335,8 +335,8 @@ function clackReporter(): Reporter {
 			}
 		},
 
-		result(rows) {
-			note(formatRows(rows), 'Deployed');
+		result(payload) {
+			note(formatRows(payload.rows), 'Deployed');
 		},
 
 		data(text) {

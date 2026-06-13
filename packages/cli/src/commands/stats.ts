@@ -35,21 +35,34 @@ export function registerStatsCommand(
 				})
 			);
 
-			reporter.result([
-				{ label: 'Store paths', value: formatCount(stats.storePaths) },
-				{ label: 'Referenced NAR blobs', value: formatCount(stats.narBlobs) },
-				{ label: 'Referenced NAR size', value: formatBytes(stats.narFileSize) },
-				{
-					label: 'Referenced CAS objects',
-					value: formatCount(stats.casObjects)
-				},
-				{ label: 'Referenced CAS size', value: formatBytes(stats.casFileSize) },
-				{ label: 'Pending uploads', value: formatCount(stats.pendingUploads) },
-				{
-					label: 'Referenced total size',
-					value: formatBytes(stats.totalFileSize)
-				}
-			]);
+			reporter.result({
+				kind: 'cache-stats',
+				data: stats,
+				rows: [
+					{ label: 'Store paths', value: formatCount(stats.storePaths) },
+					{ label: 'Referenced NAR blobs', value: formatCount(stats.narBlobs) },
+					{
+						label: 'Referenced NAR size',
+						value: formatBytes(stats.narFileSize)
+					},
+					{
+						label: 'Referenced CAS objects',
+						value: formatCount(stats.casObjects)
+					},
+					{
+						label: 'Referenced CAS size',
+						value: formatBytes(stats.casFileSize)
+					},
+					{
+						label: 'Pending uploads',
+						value: formatCount(stats.pendingUploads)
+					},
+					{
+						label: 'Referenced total size',
+						value: formatBytes(stats.totalFileSize)
+					}
+				]
+			});
 		});
 
 	program
@@ -69,27 +82,34 @@ export function registerStatsCommand(
 				rpc.stats.usage()
 			);
 
-			reporter.result([
-				{ label: 'Charged NAR blobs', value: formatCount(usage.narBlobs) },
-				{ label: 'Charged NAR size', value: formatBytes(usage.narFileSize) },
-				{ label: 'Charged CAS objects', value: formatCount(usage.casObjects) },
-				{ label: 'Charged CAS size', value: formatBytes(usage.casFileSize) },
-				{
-					label: 'Charged total size',
-					value: formatBytes(usage.totalFileSize)
-				},
-				...(usage.quotaBytes === undefined
-					? []
-					: [
-							{
-								label: 'Quota',
-								value: formatBytes(usage.quotaBytes)
-							},
-							{
-								label: 'Remaining quota',
-								value: formatBytes(usage.remainingQuotaBytes ?? 0)
-							}
-						])
-			]);
+			reporter.result({
+				kind: 'tenant-usage',
+				data: usage,
+				rows: [
+					{ label: 'Charged NAR blobs', value: formatCount(usage.narBlobs) },
+					{ label: 'Charged NAR size', value: formatBytes(usage.narFileSize) },
+					{
+						label: 'Charged CAS objects',
+						value: formatCount(usage.casObjects)
+					},
+					{ label: 'Charged CAS size', value: formatBytes(usage.casFileSize) },
+					{
+						label: 'Charged total size',
+						value: formatBytes(usage.totalFileSize)
+					},
+					...(usage.quotaBytes === undefined
+						? []
+						: [
+								{
+									label: 'Quota',
+									value: formatBytes(usage.quotaBytes)
+								},
+								{
+									label: 'Remaining quota',
+									value: formatBytes(usage.remainingQuotaBytes ?? 0)
+								}
+							])
+				]
+			});
 		});
 }

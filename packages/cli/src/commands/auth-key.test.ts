@@ -33,8 +33,8 @@ function reporter(results: ResultRow[][], infos: string[] = []): Reporter {
 				})
 			);
 		},
-		result(rows) {
-			results.push([...rows]);
+		result(payload) {
+			results.push([...payload.rows]);
 		},
 		data() {
 			return;

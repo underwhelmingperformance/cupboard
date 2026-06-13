@@ -26,8 +26,8 @@ function reporter(captured: Captured): Reporter {
 				})
 			);
 		},
-		result(rows) {
-			captured.results.push([...rows]);
+		result(payload) {
+			captured.results.push([...payload.rows]);
 		},
 		data() {
 			return;
