@@ -36,7 +36,7 @@ export interface NarInfoDemoter {
 }
 
 export interface CasReferenceDemoter {
-	demote(tenant: string, digest: string): Promise<void>;
+	demote(tenant: string, digest: string, fenceStoredAt: string): Promise<void>;
 }
 
 // The demote scan's resume position across cron ticks. It is the last `nar_hash`
@@ -140,7 +140,7 @@ export class BlobReaperService {
 			const tenants = await this.casReferencingTenants(object.digest);
 
 			for (const tenant of tenants) {
-				await this.casDemoter.demote(tenant, object.digest);
+				await this.casDemoter.demote(tenant, object.digest, object.storedAt);
 			}
 
 			if (await this.demoteCasObject(object.digest, object.storedAt)) {

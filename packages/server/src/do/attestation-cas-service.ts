@@ -2,7 +2,7 @@ import {
 	type PredicateType,
 	type Sha256HexDigest
 } from '@cupboard/nix/scalars';
-import { and, eq, exists, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -183,15 +183,37 @@ export class AttestationCasService {
 	}
 
 	async removeCapturedReference(
-		reference: AttestationReference
+		reference: AttestationReference,
+		fenceStoredAt?: string
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const now = new Date().toISOString();
-		const edgeFilter = this.edgeFilter(tenant, reference);
+
+		// On the reaper demote path, fence every destructive step on the shared object
+		// generation the reaper observed gone. A re-promote bumps cas_object.storedAt,
+		// so a row carrying a different one means the object is live again and its
+		// reference, presence and quota must all stand together; a row gone (or still
+		// carrying the observed value) lets the demote proceed. A direct removal passes
+		// no fence. Fencing the edge delete keeps it consistent with the credit: a
+		// re-promoted reference is neither stripped nor its charge credited away.
+		const notRepromoted =
+			fenceStoredAt === undefined
+				? undefined
+				: notExists(
+						this.context.d1
+							.select({ one: sql`1` })
+							.from(d1Schema.casObject)
+							.where(
+								and(
+									eq(d1Schema.casObject.digest, reference.digest),
+									ne(d1Schema.casObject.storedAt, fenceStoredAt)
+								)
+							)
+					);
 
 		await this.context.d1
 			.delete(d1Schema.attestationReference)
-			.where(edgeFilter);
+			.where(and(this.edgeFilter(tenant, reference), notRepromoted));
 
 		const stillReferenced = await this.context.d1
 			.select({ digest: d1Schema.attestationReference.digest })
@@ -235,10 +257,13 @@ export class AttestationCasService {
 								.select({ one: sql`1` })
 								.from(d1Schema.tenantCasBlob)
 								.where(presenceFilter)
-						)
+						),
+						notRepromoted
 					)
 				),
-			this.context.d1.delete(d1Schema.tenantCasBlob).where(presenceFilter)
+			this.context.d1
+				.delete(d1Schema.tenantCasBlob)
+				.where(and(presenceFilter, notRepromoted))
 		]);
 	}
 

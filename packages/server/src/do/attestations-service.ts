@@ -372,8 +372,21 @@ export class AttestationsService {
 		});
 	}
 
-	async removeReferencesForDigest(digest: string): Promise<void> {
+	async removeReferencesForDigest(
+		digest: string,
+		fenceStoredAt: string
+	): Promise<void> {
 		const tenant = this.context.requireTenant();
+
+		// The reaper routes here on a single head()===null observation. Re-check inside
+		// this Durable Object, the single writer of the tenant's rows: a concurrent
+		// re-promote may have restored the shared object, in which case its references
+		// are valid and must not be stripped. Unlike the re-materialisable narinfo
+		// demote, stripping a reference and crediting quota cannot be undone.
+		if ((await this.context.env.BLOBS.head(casObjectKey(digest))) !== null) {
+			return;
+		}
+
 		const references = await this.context.d1
 			.select({
 				cache: d1Schema.attestationReference.cache,
@@ -394,7 +407,8 @@ export class AttestationsService {
 
 		for (const reference of references) {
 			await this.attestationCas.removeCapturedReference(
-				reference as AttestationReference
+				reference as AttestationReference,
+				fenceStoredAt
 			);
 			touchedPaths.add(`${reference.cache}\0${reference.storePathHash}`);
 		}
