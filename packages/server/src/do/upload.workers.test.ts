@@ -2572,6 +2572,93 @@ describe('upload flow', () => {
 			).resolves.not.toBeNull();
 		});
 
+		it('keeps a transitively-referenced closure a -> b -> c', async () => {
+			vi.setSystemTime(deleteTestBase);
+			const hashD = '44444444444444444444444444444444';
+
+			const token = await initialise();
+			const a = await commitVerifiablePath(token, 'a', {
+				name: 'a',
+				storePathHash: hashA,
+				references: [`${hashB}-b`]
+			});
+			await commitVerifiablePath(token, 'b', {
+				name: 'b',
+				storePathHash: hashB,
+				references: [`${hashC}-c`]
+			});
+			await commitVerifiablePath(token, 'c', {
+				name: 'c',
+				storePathHash: hashC,
+				references: []
+			});
+			await commitVerifiablePath(token, 'd', {
+				name: 'd',
+				storePathHash: hashD,
+				references: []
+			});
+			await setRoot(token, { name: 'main', targets: [a.storePath] });
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				pendingAttestationsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 1,
+				narInfosDeleted: 1
+			});
+
+			for (const hash of [hashA, hashB, hashC]) {
+				await expect(
+					env.BLOBS.head(narInfoObjectKey(fixtureTenant, hash))
+				).resolves.not.toBeNull();
+			}
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashD))
+			).resolves.toBeNull();
+		});
+
+		it('keeps a cyclic closure a <-> b and still terminates', async () => {
+			vi.setSystemTime(deleteTestBase);
+			const hashD = '44444444444444444444444444444444';
+
+			const token = await initialise();
+			const a = await commitVerifiablePath(token, 'a', {
+				name: 'a',
+				storePathHash: hashA,
+				references: [`${hashB}-b`]
+			});
+			await commitVerifiablePath(token, 'b', {
+				name: 'b',
+				storePathHash: hashB,
+				references: [`${hashA}-a`]
+			});
+			await commitVerifiablePath(token, 'd', {
+				name: 'd',
+				storePathHash: hashD,
+				references: []
+			});
+			await setRoot(token, { name: 'main', targets: [a.storePath] });
+
+			expect(await runGcResult()).toStrictEqual({
+				ok: true,
+				pendingUploadsDeleted: 0,
+				pendingAttestationsDeleted: 0,
+				rootsExpired: 0,
+				pathsSwept: 1,
+				narInfosDeleted: 1
+			});
+
+			for (const hash of [hashA, hashB]) {
+				await expect(
+					env.BLOBS.head(narInfoObjectKey(fixtureTenant, hash))
+				).resolves.not.toBeNull();
+			}
+			await expect(
+				env.BLOBS.head(narInfoObjectKey(fixtureTenant, hashD))
+			).resolves.toBeNull();
+		});
+
 		it('skips the sweep when no root is defined', async () => {
 			const token = await initialise();
 			const path = uploadMetadata({ fileSize: narBytes.byteLength });
