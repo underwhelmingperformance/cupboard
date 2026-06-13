@@ -5,7 +5,7 @@ import {
 	clearBlobStorage,
 	deleteTestBase,
 	handlerFetch,
-	mintTokenForTenant,
+	issueTokenForTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
 	resetTestServer,
@@ -30,7 +30,7 @@ describe('cross-tenant NAR read isolation', () => {
 
 	it('serves a NAR to its owner but 404s a tenant that does not reference it', async () => {
 		const ownerIssuer = await provisionNamedTenant('acme');
-		const ownerToken = await mintTokenForTenant(
+		const ownerToken = await issueTokenForTenant(
 			testServerFor('acme'),
 			ownerIssuer,
 			'write'

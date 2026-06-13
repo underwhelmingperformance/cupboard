@@ -20,7 +20,7 @@ import {
 	handlerFetch,
 	hexBytes,
 	initialiseViaWorker,
-	mintTokenForTenant,
+	issueTokenForTenant,
 	narDigestHex,
 	pendingAttestationRows,
 	provisionFixtureTenant,
@@ -221,7 +221,7 @@ describe('attestation attach and reads', () => {
 			await committedPathBundle();
 		await attachBundle(token, metadata.storePathHash, bundle);
 		const issuer = await provisionNamedTenant('other');
-		const otherToken = await mintTokenForTenant(
+		const otherToken = await issueTokenForTenant(
 			testServerFor('other'),
 			issuer,
 			'write'

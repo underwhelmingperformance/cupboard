@@ -94,7 +94,7 @@ export const predicateTypeSchema = z
 export type PredicateType = z.infer<typeof predicateTypeSchema>;
 
 // The bootstrap signing key keeps the fixed id `active`; rotated keys are
-// minted with a random UUID.
+// issued with a random UUID.
 export const signingKeyIdSchema = z
 	.union([z.literal('active'), z.uuid()])
 	.brand('SigningKeyId');

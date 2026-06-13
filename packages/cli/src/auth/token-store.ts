@@ -42,7 +42,7 @@ export function sessionFromTokenResponse(
 /**
  * The canonical form of a target URL: a parsed URL with any trailing slash
  * removed, so the same target keys the same cache entry and matches the issuer a
- * tenant mints regardless of how the URL was typed.
+ * tenant issues regardless of how the URL was typed.
  */
 export function normaliseTarget(target: string): string {
 	return new URL(target).href.replace(/\/+$/, '');
@@ -70,7 +70,7 @@ export async function readCachedSession(
 		return undefined;
 	}
 
-	// A cached session is reused only against the target it was minted for: the
+	// A cached session is reused only against the target it was issued for: the
 	// access token's issuer must be that target, and its audience must admit
 	// it. This stops a session cached for one tenant being sent to another on
 	// the same host.
@@ -127,8 +127,8 @@ const jwtClaimsSchema = z.object({
 });
 
 // Whether a token's signed claims bind it to this target. The issuer is the
-// per-target binding: a tenant mints `iss` equal to its base URL, the control
-// plane mints `iss` equal to the bare host, so an issuer match alone rules out
+// per-target binding: a tenant issues `iss` equal to its base URL, the control
+// plane issues `iss` equal to the bare host, so an issuer match alone rules out
 // cross-target reuse. The audience must also admit the target: a tenant token's
 // audience is the target URL, while a control token's audience is a configured
 // client id rather than a URL, so a non-URL audience is accepted too.

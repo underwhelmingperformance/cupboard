@@ -18,7 +18,7 @@ const storedClaimsSchema = z.record(z.string(), z.string());
 // A control rule MUST pin a subject. Without it an admin-scoped rule would match
 // every subject of the trusted issuer and audience — the highest-privilege grant
 // in the system, handed out on issuer membership alone. A rule that does not pin a
-// non-empty `sub` is rejected (fail closed), so no unpinned rule can ever mint an
+// non-empty `sub` is rejected (fail closed), so no unpinned rule can ever issue an
 // admin token, whatever wrote it.
 export async function controlTrustRules(
 	database: Database

@@ -17,7 +17,7 @@ import {
 	tenantSummarySchema
 } from '../tenants.ts';
 
-// Every control procedure requires a control-minted admin token; there is no
+// Every control procedure requires a control-issued admin token; there is no
 // scope gradation to declare, so the base carries only the auth failures.
 const controlProcedure = oc.errors({
 	UNAUTHORIZED: {},

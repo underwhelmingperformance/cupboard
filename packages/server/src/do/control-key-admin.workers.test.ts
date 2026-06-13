@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	controlFetch,
-	mintControlAdminToken,
-	mintServerSignedToken,
+	issueControlAdminToken,
+	issueServerSignedToken,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -34,7 +34,7 @@ describe('control key administration', () => {
 	it('rejects a tenant token at the control surface', async () => {
 		// A tenant admin token is signed by a tenant key, with the tenant issuer and
 		// audience; it must not verify against the control key set.
-		const tenantToken = await mintServerSignedToken('admin');
+		const tenantToken = await issueServerSignedToken('admin');
 		const response = await controlFetch(
 			'/control/keys/rotate',
 			authed(tenantToken)
@@ -44,7 +44,7 @@ describe('control key administration', () => {
 	});
 
 	it('rotates to a new key, retires it, and refuses to retire the last live key', async () => {
-		const token = await mintControlAdminToken();
+		const token = await issueControlAdminToken();
 		const beforeRotate = await liveControlKids();
 		const firstKid = beforeRotate[0] ?? '';
 
@@ -75,7 +75,7 @@ describe('control key administration', () => {
 			`/control/keys/retire/${firstKid}`,
 			authed(token)
 		);
-		const mintedAfterManualRetire = await mintControlAdminToken();
+		const issuedAfterManualRetire = await issueControlAdminToken();
 
 		expect({
 			beforeRotateCount: beforeRotate.length,
@@ -87,7 +87,7 @@ describe('control key administration', () => {
 			retireSecondStatus: retireSecond.status,
 			afterRetire,
 			retireLastStatus: retireLast.status,
-			mintedAfterManualRetire: mintedAfterManualRetire.length > 0
+			issuedAfterManualRetire: issuedAfterManualRetire.length > 0
 		}).toStrictEqual({
 			beforeRotateCount: 1,
 			rotateStatus: StatusCodes.OK,
@@ -98,7 +98,7 @@ describe('control key administration', () => {
 			retireSecondStatus: StatusCodes.OK,
 			afterRetire: [firstKid],
 			retireLastStatus: StatusCodes.CONFLICT,
-			mintedAfterManualRetire: true
+			issuedAfterManualRetire: true
 		});
 	});
 });

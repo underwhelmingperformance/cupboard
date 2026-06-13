@@ -8,7 +8,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
 	currentOrigin,
 	handlerFetch,
-	mintTokenForTenant,
+	issueTokenForTenant,
 	provisionNamedTenant,
 	resetTestServer,
 	suspendTenant,
@@ -68,10 +68,10 @@ describe('tenant routing', () => {
 		});
 	});
 
-	it('mints under its own issuer, and that token verifies at that tenant only', async () => {
+	it('issues under its own issuer, and that token verifies at that tenant only', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
 		await provisionNamedTenant('beta');
-		const token = await mintTokenForTenant(
+		const token = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
 			'admin'

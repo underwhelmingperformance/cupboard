@@ -12,7 +12,7 @@ import { and, eq } from 'drizzle-orm';
 
 import {
 	adminJwtTtlSeconds,
-	mintAccessJwt,
+	issueAccessJwt,
 	refreshTokenTtlSeconds,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
@@ -71,7 +71,7 @@ export class TokenExchangeService {
 
 		// Matching routes the token to a rule on its unverified claims; the
 		// signature is then checked against that rule's issuer JWKS before any
-		// cupboard token is minted, so a forged claim cannot earn a scope.
+		// cupboard token is issued, so a forged claim cannot earn a scope.
 		const claims = this.oidcTrust.decodeInbound(body.subject_token);
 		const rule = matchOidcTrust(this.oidcTrust.enabledOidcTrustRules(), claims);
 
@@ -88,7 +88,7 @@ export class TokenExchangeService {
 				? verified.sub
 				: rule.id;
 
-		return this.mintedResponse(rule, subject, {
+		return this.issuedResponse(rule, subject, {
 			issued_token_type: issuedAccessTokenType
 		});
 	}
@@ -158,20 +158,20 @@ export class TokenExchangeService {
 			throw new InvalidGrantError(staleRefreshTokenMessage);
 		}
 
-		return this.mintedResponse(rule, claimed.subject, {});
+		return this.issuedResponse(rule, claimed.subject, {});
 	}
 
-	// Mints the access token (and, for an admin session, a successor refresh
+	// Issues the access token (and, for an admin session, a successor refresh
 	// token) for a rule, reading the rule's current scope and roots so a
 	// refreshed session never outlives an edit to its rule.
-	private async mintedResponse(
+	private async issuedResponse(
 		rule: OidcTrustRule,
 		subject: string,
 		extra: Pick<TokenResponse, 'issued_token_type'>
 	): Promise<Response> {
 		const ttlSeconds =
 			rule.scope === 'admin' ? adminJwtTtlSeconds : writeJwtTtlSeconds;
-		const accessToken = await this.mintRuleToken(rule, subject, ttlSeconds);
+		const accessToken = await this.issueRuleToken(rule, subject, ttlSeconds);
 
 		// Only an admin session gets a refresh token: a write exchange (CI)
 		// federates a fresh subject token per run, so a stored grant would only
@@ -219,7 +219,7 @@ export class TokenExchangeService {
 		return `${id}.${secret}`;
 	}
 
-	private async mintRuleToken(
+	private async issueRuleToken(
 		rule: OidcTrustRule,
 		subject: string,
 		ttlSeconds: number
@@ -228,7 +228,7 @@ export class TokenExchangeService {
 
 		// A write token is pinned to the rule's roots via `cb_roots`; an admin
 		// token is unconstrained. The rule id rides along as an audit breadcrumb.
-		return mintAccessJwt(
+		return issueAccessJwt(
 			key.privateJwk,
 			{
 				issuer: this.authKeys.authIssuer(),

@@ -53,10 +53,10 @@ import {
 	handlerFetch,
 	initialise,
 	initialiseViaWorker,
+	issueServerSignedToken,
 	listRoots,
 	markUploadCommitting,
 	markUploadPendingVerification,
-	mintServerSignedToken,
 	narBytes,
 	narHash,
 	negotiateUploads,
@@ -176,7 +176,7 @@ describe('upload flow', () => {
 			publicKey: first.publicKey
 		});
 
-		// A re-bootstrap mints a fresh token but never rotates the signing key.
+		// A re-bootstrap issues a fresh token but never rotates the signing key.
 		expect(second.token).not.toBe('');
 		expect({ url: second.url, publicKey: second.publicKey }).toStrictEqual({
 			url: currentOrigin(),
@@ -2782,7 +2782,7 @@ describe('upload flow', () => {
 	});
 
 	describe('authentication', () => {
-		it('accepts a bootstrap-minted admin token on each scope of route', async () => {
+		it('accepts a bootstrap-issued admin token on each scope of route', async () => {
 			const token = await initialise();
 			// Root activation gates on servability, so commit the target first.
 			await pushPath(
@@ -2816,7 +2816,7 @@ describe('upload flow', () => {
 				admin,
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
 			);
-			const writeToken = await mintServerSignedToken('write', 'ci', ['main']);
+			const writeToken = await issueServerSignedToken('write', 'ci', ['main']);
 
 			const setRoot = await authorisedFetch(
 				'/cache/_default/roots/main',

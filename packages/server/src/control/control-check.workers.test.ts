@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	controlFetch,
-	mintControlAdminToken,
+	issueControlAdminToken,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -36,7 +36,7 @@ describe('control plane GET /control/check', () => {
 			.delete(d1Schema.tenant)
 			.run();
 
-		const token = await mintControlAdminToken();
+		const token = await issueControlAdminToken();
 		const response = await controlFetch('/control/check', {
 			headers: { authorization: `Bearer ${token}` }
 		});
@@ -57,7 +57,7 @@ describe('control plane GET /control/check', () => {
 	])(
 		'relays the probe verdict for an %s through the tenant Durable Object',
 		async (_name, r2Status, expected) => {
-			const token = await mintControlAdminToken();
+			const token = await issueControlAdminToken();
 
 			const probed: string[] = [];
 			vi.stubGlobal('fetch', (input: RequestInfo | URL) => {

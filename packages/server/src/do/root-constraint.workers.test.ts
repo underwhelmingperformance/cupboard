@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
 	authorisedFetch,
 	initialise,
-	mintServerSignedToken,
+	issueServerSignedToken,
 	narBytes,
 	pushPath,
 	resetTestServer,
@@ -49,7 +49,7 @@ describe('cb_roots enforcement at PUT /roots', () => {
 		const admin = await initialise();
 		// Activation gates on servability, so the target must be committed first.
 		await pushPath(admin, targetMetadata);
-		const token = await mintServerSignedToken('write', 'ci', cbRoots);
+		const token = await issueServerSignedToken('write', 'ci', cbRoots);
 
 		const response = await putRoot(token, root);
 
@@ -84,7 +84,7 @@ describe('cb_roots enforcement at PUT /roots', () => {
 		}
 	])('refuses a write token $name', async ({ cbRoots, root }) => {
 		await initialise();
-		const token = await mintServerSignedToken('write', 'ci', cbRoots);
+		const token = await issueServerSignedToken('write', 'ci', cbRoots);
 
 		const response = await putRoot(token, root);
 		const body = await response.json<{ code: string; message: string }>();
@@ -103,7 +103,7 @@ describe('cb_roots enforcement at PUT /roots', () => {
 	it('lets an admin token set any root', async () => {
 		const admin = await initialise();
 		await pushPath(admin, targetMetadata);
-		const token = await mintServerSignedToken('admin', 'owner');
+		const token = await issueServerSignedToken('admin', 'owner');
 
 		const response = await putRoot(token, 'github:anything/at-all');
 

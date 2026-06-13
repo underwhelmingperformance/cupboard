@@ -194,7 +194,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// The cron drives maintenance through these RPC methods rather than the HTTP
 	// admin routes: the service binding authorises the call, so no token is
-	// minted or exchanged. The same cores back `/gc` and `/verify` for manual
+	// issued or exchanged. The same cores back `/gc` and `/verify` for manual
 	// use. Both sweep every cache and skip the edge-cache purge, exactly as an
 	// internal-origin HTTP sweep did, relying on the narinfo TTL and the
 	// orphan-blob grace window.
@@ -357,7 +357,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private routes(): void {
 		this.app.onError(serverErrorHandler);
 
-		// An unconfigured Durable Object has no identity to mint, verify or advertise
+		// An unconfigured Durable Object has no identity to issue, verify or advertise
 		// under, so it serves nothing rather than falling back to a default. This is
 		// input-gated: the control plane's `configure` RPC, which assigns the
 		// identity, is a method and so is not gated here.
@@ -431,7 +431,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 
 		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
-		// the tokens it mints. `/token` is unauthenticated: the subject token is
+		// the tokens it issues. `/token` is unauthenticated: the subject token is
 		// itself the credential. The Worker proxies `/.well-known/jwks.json` here.
 		this.app.post('/token', (context) =>
 			this.tokenExchange.handleToken(context.req.raw)

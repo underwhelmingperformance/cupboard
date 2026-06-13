@@ -31,7 +31,7 @@ const discovery = new OidcDiscoveryStore();
 // The gated first-signup claim: a caller presents an external OIDC subject token,
 // it is verified against the deploy-configured signup issuer, the deployment gate
 // is enforced, and only then is the principal claimed as global admin (which also
-// seeds the control trust rule that lets it mint admin tokens). The gate is checked
+// seeds the control trust rule that lets it issue admin tokens). The gate is checked
 // after verification, so only an authenticated principal can probe it.
 export async function handleSignup(
 	request: Request,

@@ -7,7 +7,7 @@ import type { ServerContext } from './context.ts';
 const identityId = 'singleton';
 
 // The identity the control plane assigns a tenant Durable Object: the slug it
-// serves, the issuer and audience it pins into minted tokens, the owner OIDC triple
+// serves, the issuer and audience it pins into issued tokens, the owner OIDC triple
 // its admin rule is seeded from, and the monotonic config version that fences it.
 export interface TenantIdentity {
 	readonly tenant: string;

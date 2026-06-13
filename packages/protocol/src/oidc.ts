@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
 
-// RFC 8693 token-exchange mints the first cupboard token of a session. The
+// RFC 8693 token-exchange issues the first cupboard token of a session. The
 // subject token is an external OIDC JWT — the owner's `id_token` or a CI GitHub
 // Actions token. The issued cupboard token is reported as an access token.
 export const tokenExchangeGrantType =
@@ -65,7 +65,7 @@ export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
 
 // A trust rule federates an external OIDC identity into a cupboard scope. The
 // owner's `admin` rule is seeded from deploy config; `write` rules (CI) are
-// managed through the admin API and bind the minted token to `allowedRoots`.
+// managed through the admin API and bind the issued token to `allowedRoots`.
 export const oidcTrustScopeSchema = z.enum(['write', 'admin']);
 export type OidcTrustScope = z.infer<typeof oidcTrustScopeSchema>;
 

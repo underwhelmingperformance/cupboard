@@ -91,9 +91,9 @@ export interface GarbageCollectionOutcome {
 	readonly narInfosDeleted: number;
 }
 
-// A key in the auth signing set. The newest non-retired key mints; every
+// A key in the auth signing set. The newest non-retired key issues; every
 // non-retired key verifies and is published in the JWKS. Retiring sets
-// `retired`, dropping the key from minting, verification and the JWKS at once.
+// `retired`, dropping the key from issuing, verification and the JWKS at once.
 export interface AuthKey {
 	readonly kid: string;
 	readonly privateJwk: JsonWebKey;

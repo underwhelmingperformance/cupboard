@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
-import { mintAccessJwt, verifyAccessJwt } from '../auth/auth.ts';
+import { issueAccessJwt, verifyAccessJwt } from '../auth/auth.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { LastControlKeyError } from '../errors.ts';
 
@@ -31,7 +31,7 @@ function controlDatabase(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 }
 
 describe('control key store', () => {
-	it('bootstraps a single key and mints a token verifiable against its JWKS', async () => {
+	it('bootstraps a single key and issues a token verifiable against its JWKS', async () => {
 		const database = controlDatabase();
 
 		await ensureControlKey(database, secret, t0);
@@ -40,7 +40,7 @@ describe('control key store', () => {
 
 		const verificationKeys = await controlVerificationKeys(database);
 		const active = await activeControlKey(database, secret);
-		const token = await mintAccessJwt(
+		const token = await issueAccessJwt(
 			active.privateJwk,
 			{
 				issuer,
@@ -70,7 +70,7 @@ describe('control key store', () => {
 		});
 	});
 
-	it('rotates to a new minting key while the old key keeps verifying', async () => {
+	it('rotates to a new issuing key while the old key keeps verifying', async () => {
 		const database = controlDatabase();
 
 		await ensureControlKey(database, secret, t0);

@@ -21,7 +21,7 @@ import {
 	blobStateNarHashes,
 	clearBlobStorage,
 	deleteTestBase,
-	mintTokenForTenant,
+	issueTokenForTenant,
 	offboardTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
@@ -62,7 +62,7 @@ async function provisionedWritingTenant(): Promise<{
 	nextTenant += 1;
 	const id = `offboard-test-${String(nextTenant)}`;
 	const issuer = await provisionNamedTenant(id);
-	const token = await mintTokenForTenant(testServerFor(id), issuer, 'write');
+	const token = await issueTokenForTenant(testServerFor(id), issuer, 'write');
 
 	return { id, token };
 }

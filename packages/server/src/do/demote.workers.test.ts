@@ -8,7 +8,7 @@ import {
 	blobStateNarHashes,
 	clearBlobStorage,
 	deleteTestBase,
-	mintTokenForTenant,
+	issueTokenForTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
 	resetTestServer,
@@ -35,7 +35,7 @@ async function committedTenantPath(seed: string) {
 	nextTenant += 1;
 	const tenant = `demote-test-${String(nextTenant)}`;
 	const issuer = await provisionNamedTenant(tenant);
-	const token = await mintTokenForTenant(
+	const token = await issueTokenForTenant(
 		testServerFor(tenant),
 		issuer,
 		'write'
