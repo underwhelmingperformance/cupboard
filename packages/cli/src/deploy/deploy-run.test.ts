@@ -65,8 +65,10 @@ const artifact: DeploymentArtifact = {
 const silentReporter: Reporter = {
 	phase: (_label, body) => Promise.resolve(body({ fact: vi.fn() })),
 	result: vi.fn(),
+	data: vi.fn(),
 	warn: vi.fn(),
-	info: vi.fn()
+	info: vi.fn(),
+	error: vi.fn()
 };
 
 const notExpected = (member: string) => (): never => {

@@ -31,6 +31,12 @@ function reporter(results: ResultRow[][], infos: string[] = []): Reporter {
 		result(rows) {
 			results.push([...rows]);
 		},
+		data() {
+			return;
+		},
+		error() {
+			return;
+		},
 		warn() {
 			return;
 		},

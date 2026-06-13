@@ -1,4 +1,4 @@
-import { stderr } from 'node:process';
+import { stderr, stdout } from 'node:process';
 
 import Table from 'cli-table3';
 import ora from 'ora';
@@ -19,8 +19,20 @@ export interface Reporter {
 		body: (context: PhaseContext) => Promise<T> | T
 	): Promise<T>;
 	result(rows: readonly ResultRow[]): void;
+	/**
+	 * Writes a raw payload, followed by a newline, to stdout in both terminal and
+	 * JSON modes. This is the reporter's only stdout sink: progress, results and
+	 * diagnostics all go to stderr, so a payload written here can be redirected on
+	 * its own (`cupboard pubkey <url> > key.txt`).
+	 */
+	data(text: string): void;
 	warn(label: string, value?: string): void;
 	info(message: string): void;
+	/**
+	 * Reports a terminal failure: a single red marker line in terminal mode, or
+	 * one `{event:'error', name, message}` in JSON mode.
+	 */
+	error(error: unknown): void;
 }
 
 /** Terminal (spinner) or line-delimited JSON output. */
@@ -34,22 +46,33 @@ export interface ReporterOptions {
 	 */
 	readonly mode?: ReporterMode;
 	/**
-	 * Where output is written, one line at a time; defaults to `process.stderr`.
-	 * Tests can pass an in-memory `node:stream.Writable` to assert on the output.
+	 * Where progress and diagnostics are written, one line at a time; defaults to
+	 * `process.stderr`. Tests can pass an in-memory `node:stream.Writable` to
+	 * assert on the output.
 	 */
 	readonly stream?: NodeJS.WritableStream;
+	/**
+	 * Where `data` payloads are written; defaults to `process.stdout`. Kept
+	 * separate from `stream` so a payload can be redirected without the progress
+	 * output. Tests can pass an in-memory stream to assert on it.
+	 */
+	readonly out?: NodeJS.WritableStream;
 }
 
 export function createReporter(options: ReporterOptions = {}): Reporter {
 	const stream = options.stream ?? stderr;
+	const out = options.out ?? stdout;
 	const mode = options.mode ?? (stderr.isTTY ? 'terminal' : 'json');
 
 	return mode === 'terminal'
-		? createTerminalReporter(stream)
-		: createJsonReporter(stream);
+		? createTerminalReporter(stream, out)
+		: createJsonReporter(stream, out);
 }
 
-function createTerminalReporter(stream: NodeJS.WritableStream): Reporter {
+function createTerminalReporter(
+	stream: NodeJS.WritableStream,
+	out: NodeJS.WritableStream
+): Reporter {
 	function writeLine(line: string): void {
 		stream.write(`${line}\n`);
 	}
@@ -116,6 +139,10 @@ function createTerminalReporter(stream: NodeJS.WritableStream): Reporter {
 			writeLine(table.toString());
 		},
 
+		data(text) {
+			out.write(`${text}\n`);
+		},
+
 		warn(label, value) {
 			writeLine(
 				`${pc.yellow('!')} ${pc.yellow(label)}${value === undefined ? '' : ` ${value}`}`
@@ -124,11 +151,20 @@ function createTerminalReporter(stream: NodeJS.WritableStream): Reporter {
 
 		info(message) {
 			writeLine(`${pc.dim('›')} ${message}`);
+		},
+
+		error(error) {
+			const { name, message } = describeError(error);
+
+			writeLine(`${pc.red('✖')} ${pc.red(name)}: ${message}`);
 		}
 	};
 }
 
-function createJsonReporter(stream: NodeJS.WritableStream): Reporter {
+function createJsonReporter(
+	stream: NodeJS.WritableStream,
+	out: NodeJS.WritableStream
+): Reporter {
 	function emit(event: Record<string, unknown>): void {
 		stream.write(`${JSON.stringify(event)}\n`);
 	}
@@ -177,6 +213,10 @@ function createJsonReporter(stream: NodeJS.WritableStream): Reporter {
 			emit({ event: 'result', data });
 		},
 
+		data(text) {
+			out.write(`${text}\n`);
+		},
+
 		warn(label, value) {
 			emit(
 				value === undefined
@@ -187,8 +227,21 @@ function createJsonReporter(stream: NodeJS.WritableStream): Reporter {
 
 		info(message) {
 			emit({ event: 'info', message });
+		},
+
+		error(error) {
+			emit({ event: 'error', ...describeError(error) });
 		}
 	};
+}
+
+// Splits any thrown value into the name and message the reporter renders.
+function describeError(error: unknown): { name: string; message: string } {
+	if (error instanceof Error) {
+		return { name: error.name, message: error.message };
+	}
+
+	return { name: 'Error', message: String(error) };
 }
 
 function formatFacts(
