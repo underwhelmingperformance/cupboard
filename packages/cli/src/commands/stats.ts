@@ -25,7 +25,7 @@ export function registerStatsCommand(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -74,7 +74,7 @@ export function registerStatsCommand(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
