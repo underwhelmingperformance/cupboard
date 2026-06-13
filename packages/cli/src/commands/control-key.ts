@@ -1,3 +1,4 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import type {
 	ControlKeyListResponse,
 	ControlKeyRetireResponse,
@@ -14,6 +15,10 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
+
+interface RetireOptions {
+	readonly yes?: boolean;
+}
 
 /**
  * The slice of the derived control client the control-key commands consume,
@@ -78,16 +83,18 @@ export function registerControlKeyCommands(
 		)
 		.argument('<url>', urlArgument)
 		.argument('<kid>', 'control key id')
-		.action(async (url: string, kid: string) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+		.option('-y, --yes', 'retire without the confirmation prompt')
+		.action(async (url: string, kid: string, options: RetireOptions) => {
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runControlKeyRetire(kid, reporter, rpc.keys);
+			await runControlKeyRetire(kid, ui, rpc.keys);
 		});
 }
 
@@ -135,9 +142,20 @@ export async function runControlKeyRotate(
 
 export async function runControlKeyRetire(
 	kid: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: ControlKeyClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Retire control key ${kid}?`,
+		detail: 'Control tokens still signed by this key can no longer be verified.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The key was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Retiring control key', () =>
 		client.retire({ kid })
 	);
