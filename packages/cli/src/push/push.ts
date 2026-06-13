@@ -353,7 +353,7 @@ async function runPushWithTemporaryDirectory(
 			formatCount(responses.filter((row) => row.status !== 'pending').length)
 		);
 
-		return { responses, pending };
+		return { pending };
 	});
 
 	const deferRetention = !wait && commit.pending.length > 0;
