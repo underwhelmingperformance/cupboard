@@ -2416,7 +2416,12 @@ export async function seedReservedNarInfo(
  */
 export async function corruptCommittedNarInfo(
 	storePathHash: string,
-	fields: Partial<{ narHash: string; narSize: number }>
+	fields: Partial<{
+		narHash: string;
+		narSize: number;
+		deriver: string;
+		ca: string;
+	}>
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { narInfos } })

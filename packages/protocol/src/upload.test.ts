@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	statsResponseSchema,
 	uploadDecisionSchema,
+	uploadNegotiateMaxPaths,
 	uploadNegotiateRequestSchema,
 	usageResponseSchema
 } from './upload.ts';
@@ -28,6 +29,17 @@ describe('uploadNegotiateRequestSchema', () => {
 	});
 
 	it.each([
+		{ name: 'a deriver', field: 'deriver' as const },
+		{ name: 'a ca', field: 'ca' as const }
+	])('accepts $name metadata line', ({ field }) => {
+		expect(
+			uploadNegotiateRequestSchema.safeParse({
+				paths: [{ ...negotiationPath, [field]: `${storePath}.drv` }]
+			}).success
+		).toBe(true);
+	});
+
+	it.each([
 		{ name: 'an unknown top-level key', value: { paths: [], extra: 1 } },
 		{
 			name: 'an unknown key inside a path',
@@ -49,6 +61,26 @@ describe('uploadNegotiateRequestSchema', () => {
 			name: 'a store path hash that does not match the store path',
 			value: {
 				paths: [{ ...negotiationPath, storePathHash: '1'.repeat(32) }]
+			}
+		},
+		{
+			name: 'a deriver carrying a control character',
+			value: { paths: [{ ...negotiationPath, deriver: 'a\nb' }] }
+		},
+		{
+			name: 'a ca carrying a control character',
+			value: { paths: [{ ...negotiationPath, ca: 'fixed:r:sha256:\t' }] }
+		},
+		{
+			name: 'an over-length ca line',
+			value: { paths: [{ ...negotiationPath, ca: 'a'.repeat(1025) }] }
+		},
+		{
+			name: 'more paths than the cap allows',
+			value: {
+				paths: Array.from({ length: uploadNegotiateMaxPaths + 1 }, () => ({
+					...negotiationPath
+				}))
 			}
 		}
 	])('rejects $name', ({ value }) => {

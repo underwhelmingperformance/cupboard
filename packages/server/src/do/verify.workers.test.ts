@@ -11,6 +11,7 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	blobStateCount,
+	corruptCommittedNarInfo,
 	initialise,
 	mintServerSignedToken,
 	narBytes,
@@ -68,6 +69,64 @@ describe('background verification', () => {
 				wrapped: true
 			},
 			restored: true
+		});
+	});
+
+	it('skips a narinfo row that cannot render and still advances the pass', async () => {
+		const token = await initialise();
+		const fileSize = narBytes.byteLength;
+		const sound = uploadMetadata({
+			fileSize,
+			storePathHash: '1'.repeat(32),
+			name: 'sound'
+		});
+		const poison = uploadMetadata({
+			fileSize,
+			storePathHash: '2'.repeat(32),
+			name: 'poison'
+		});
+
+		await pushPath(token, sound);
+		await pushPath(token, poison);
+
+		// Corrupt the poison row's deriver with a control character it could never
+		// have been uploaded with: rendering its narinfo now throws, the residue a
+		// pre-validation upload could once have left.
+		await corruptCommittedNarInfo(poison.storePathHash, { deriver: 'a\nb' });
+
+		// Both narinfo objects are gone, so the pass tries to restore each.
+		await env.BLOBS.delete(
+			narInfoObjectKey(fixtureTenant, sound.storePathHash)
+		);
+		await env.BLOBS.delete(
+			narInfoObjectKey(fixtureTenant, poison.storePathHash)
+		);
+
+		const report = await runVerify(token);
+
+		// The unrenderable row is skipped, but the pass still restores the sound
+		// row and advances its cursor to the end rather than parking on the poison.
+		expect({
+			report,
+			soundRestored:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, sound.storePathHash)
+				)) !== null,
+			poisonRestored:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, poison.storePathHash)
+				)) !== null
+		}).toStrictEqual({
+			report: {
+				scanned: 2,
+				narInfoObjectsRestored: 1,
+				danglingNarInfosRemoved: 0,
+				cursor: '',
+				cursorCache: '',
+				wrapped: true
+			},
+			soundRestored: true,
+			poisonRestored: false
 		});
 	});
 

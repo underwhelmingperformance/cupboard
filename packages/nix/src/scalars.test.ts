@@ -9,6 +9,7 @@ import {
 	nixSha256HashSchema,
 	positiveIntSchema,
 	predicateTypeSchema,
+	referencesMaxLength,
 	referencesSchema,
 	rootNameSchema,
 	sha256HexDigestSchema,
@@ -154,6 +155,36 @@ const cases: readonly {
 		name: 'a store path basename with a control character',
 		schema: storePathBasenameSchema,
 		value: `${storePathHash}-name\u0007`,
+		valid: false
+	},
+	{
+		name: 'a store path whose name exceeds the length cap',
+		schema: storePathSchema,
+		value: `/nix/store/${storePathHash}-${'a'.repeat(212)}`,
+		valid: false
+	},
+	{
+		name: 'a store path basename whose name exceeds the length cap',
+		schema: storePathBasenameSchema,
+		value: `${storePathHash}-${'a'.repeat(212)}`,
+		valid: false
+	},
+	{
+		name: 'a references array within the cap',
+		schema: referencesSchema,
+		value: Array.from(
+			{ length: referencesMaxLength },
+			() => `${storePathHash}-name`
+		),
+		valid: true
+	},
+	{
+		name: 'a references array exceeding the cap',
+		schema: referencesSchema,
+		value: Array.from(
+			{ length: referencesMaxLength + 1 },
+			() => `${storePathHash}-name`
+		),
 		valid: false
 	},
 	{
