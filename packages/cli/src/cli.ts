@@ -1,6 +1,6 @@
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { resolveReporterMode } from '@cupboard/shared';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 
 import { isAbortError } from './abort.ts';
 import { registerAttestCommands } from './commands/attest.ts';
@@ -20,7 +20,7 @@ import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
-import { CliError } from './errors.ts';
+import { CliError, usageExitCode } from './errors.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {
@@ -40,7 +40,16 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 		.version(cupboardVersion)
 		.option('--colour', 'force interactive spinner and colour output')
 		.option('--no-colour', 'force plain line-delimited JSON output')
-		.showHelpAfterError();
+		// Throw a CommanderError instead of writing to stderr and exiting, and
+		// suppress commander's own error text, so a usage error (unknown command,
+		// missing argument) reaches the top-level funnel and is reported once in the
+		// active mode rather than as prose plus a usage block.
+		.exitOverride()
+		.configureOutput({
+			outputError: () => {
+				// The top-level funnel reports the failure; commander stays silent.
+			}
+		});
 
 	registerDeployCommand(program, options);
 	registerLoginCommand(program, options);
@@ -88,6 +97,12 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
 		return abortExitCode;
 	}
 
+	// A CommanderError's own exit code is 0 when it merely displayed help or the
+	// version; any other commander failure is a usage error.
+	if (error instanceof CommanderError) {
+		return error.exitCode === 0 ? error.exitCode : usageExitCode;
+	}
+
 	return error instanceof CliError ? error.exitCode : 1;
 }
 
@@ -99,6 +114,11 @@ export function cliExitCode(error: unknown, abortExitCode: number): number {
  */
 export function reportCliFailure(reporter: Reporter, error: unknown): void {
 	if (isAbortError(error)) {
+		return;
+	}
+
+	// Displaying help or the version is a clean exit, not a failure to report.
+	if (error instanceof CommanderError && error.exitCode === 0) {
 		return;
 	}
 

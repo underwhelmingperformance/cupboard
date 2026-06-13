@@ -1,7 +1,8 @@
 import type { Reporter } from '@cupboard/reporter';
+import { CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
-import { cliExitCode, reportCliFailure } from './cli.ts';
+import { buildProgram, cliExitCode, reportCliFailure } from './cli.ts';
 import {
 	authExitCode,
 	CliAbortError,
@@ -48,9 +49,31 @@ describe('cliExitCode', () => {
 			error: new UploadWaitTimeoutError(1, 600),
 			expected: transientExitCode
 		},
+		{
+			name: 'a commander usage error',
+			error: new CommanderError(
+				1,
+				'commander.unknownCommand',
+				"error: unknown command 'bogus'"
+			),
+			expected: usageExitCode
+		},
+		{
+			name: 'a commander help display',
+			error: new CommanderError(0, 'commander.helpDisplayed', '(outputHelp)'),
+			expected: 0
+		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }
 	])('maps $name to its exit code', ({ error, expected }) => {
 		expect(cliExitCode(error, abortExitCode)).toBe(expected);
+	});
+});
+
+describe('buildProgram', () => {
+	it('throws a commander usage error for an unknown command', async () => {
+		await expect(
+			buildProgram().parseAsync(['node', 'cupboard', 'bogus'])
+		).rejects.toBeInstanceOf(CommanderError);
 	});
 });
 
@@ -92,5 +115,29 @@ describe('reportCliFailure', () => {
 		reportCliFailure(reporter, new CliAbortError());
 
 		expect(errors).toStrictEqual([]);
+	});
+
+	it('stays silent when commander merely displayed help', () => {
+		const { reporter, errors } = fakeReporter();
+
+		reportCliFailure(
+			reporter,
+			new CommanderError(0, 'commander.helpDisplayed', '(outputHelp)')
+		);
+
+		expect(errors).toStrictEqual([]);
+	});
+
+	it('reports a commander usage error', () => {
+		const { reporter, errors } = fakeReporter();
+		const error = new CommanderError(
+			1,
+			'commander.unknownCommand',
+			"error: unknown command 'bogus'"
+		);
+
+		reportCliFailure(reporter, error);
+
+		expect(errors).toStrictEqual([error]);
 	});
 });
