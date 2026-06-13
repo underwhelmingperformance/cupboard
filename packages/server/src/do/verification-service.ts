@@ -84,35 +84,46 @@ export class VerificationService {
 			let danglingNarInfosRemoved = 0;
 
 			for (const row of rows) {
-				const narPresent =
-					(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !==
-					null;
+				// One row's failure (an unrenderable narinfo, a transient R2 fault) must
+				// not abort the batch and leave the cursor parked on it forever; log it
+				// and advance, mirroring verifyPendingUploads.
+				try {
+					const narPresent =
+						(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !==
+						null;
 
-				if (!narPresent) {
-					await this.deletionQueue.reconcileMissingNar(row, origin);
-					danglingNarInfosRemoved += 1;
-					continue;
-				}
-
-				const narInfoObject = await this.context.env.BLOBS.head(
-					narInfoObjectKey(
-						this.context.requireTenant(),
-						row.storePathHash,
-						row.cache
-					)
-				);
-
-				if (narInfoObject === null) {
-					const narInfo = await this.narInfoObjects.narInfoFromRow(row);
-
-					if (narInfo !== undefined) {
-						await this.narInfoObjects.putNarInfoObject(
-							row.cache,
-							row.storePathHash,
-							narInfo
-						);
-						narInfoObjectsRestored += 1;
+					if (!narPresent) {
+						await this.deletionQueue.reconcileMissingNar(row, origin);
+						danglingNarInfosRemoved += 1;
+						continue;
 					}
+
+					const narInfoObject = await this.context.env.BLOBS.head(
+						narInfoObjectKey(
+							this.context.requireTenant(),
+							row.storePathHash,
+							row.cache
+						)
+					);
+
+					if (narInfoObject === null) {
+						const narInfo = await this.narInfoObjects.narInfoFromRow(row);
+
+						if (narInfo !== undefined) {
+							await this.narInfoObjects.putNarInfoObject(
+								row.cache,
+								row.storePathHash,
+								narInfo
+							);
+							narInfoObjectsRestored += 1;
+						}
+					}
+				} catch (error) {
+					console.warn('verification skipped a narinfo row', {
+						cache: row.cache,
+						storePathHash: row.storePathHash,
+						error: error instanceof Error ? error.message : String(error)
+					});
 				}
 			}
 
