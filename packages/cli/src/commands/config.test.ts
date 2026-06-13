@@ -19,11 +19,17 @@ function capturingReporter(infos: string[]): Reporter {
 		result() {
 			return;
 		},
+		data() {
+			return;
+		},
 		warn() {
 			return;
 		},
 		info(message) {
 			infos.push(message);
+		},
+		error() {
+			return;
 		}
 	};
 }

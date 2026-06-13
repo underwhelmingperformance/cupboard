@@ -97,8 +97,10 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 					})
 				),
 			result: unexpected('result'),
+			data: unexpected('reporter.data'),
 			warn: unexpected('reporter.warn'),
-			info: unexpected('reporter.info')
+			info: unexpected('reporter.info'),
+			error: unexpected('reporter.error')
 		})
 	};
 

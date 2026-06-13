@@ -101,11 +101,17 @@ function scriptedUi(script: ReviewScript): DeployUi {
 			result: () => {
 				facts.push('result');
 			},
+			data: () => {
+				return;
+			},
 			warn: (message) => {
 				warnings.push(message);
 			},
 			info: (message) => {
 				infos.push(message);
+			},
+			error: () => {
+				return;
 			}
 		}),
 		menu: (_message, entries) => {

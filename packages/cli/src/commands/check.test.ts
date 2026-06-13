@@ -29,6 +29,12 @@ function reporter(captured: Captured): Reporter {
 		result(rows) {
 			captured.results.push([...rows]);
 		},
+		data() {
+			return;
+		},
+		error() {
+			return;
+		},
 		warn(label, value) {
 			captured.warnings.push({ label, value });
 		},
