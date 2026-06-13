@@ -34,7 +34,7 @@ export function registerKeyCommands(
 ): void {
 	const key = program
 		.command('key')
-		.description('Manage the deployment signing keys and rotation.');
+		.description("Manage a tenant's narinfo signing keys and rotation.");
 
 	key
 		.command('list')

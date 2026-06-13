@@ -40,7 +40,9 @@ export function registerControlKeyCommands(
 ): void {
 	const controlKey = program
 		.command('control-key')
-		.description('Manage the control-plane signing keys and rotation.');
+		.description(
+			'Manage the control-plane signing keys and rotation (operator only).'
+		);
 
 	controlKey
 		.command('list')

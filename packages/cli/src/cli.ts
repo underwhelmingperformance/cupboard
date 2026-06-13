@@ -36,11 +36,17 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	const program = new Command()
 		.name('cupboard')
 		.description(
-			'Push and configure a personal Nix binary cache hosted on Cloudflare Workers.'
+			'Operate a multi-tenant Nix binary cache hosted on Cloudflare Workers: ' +
+				'push store paths, manage tenants and keys, and configure Nix clients.'
 		)
 		.version(cupboardVersion)
 		.option('--colour', 'force interactive spinner and colour output')
 		.option('--no-colour', 'force plain line-delimited JSON output')
+		.addHelpText(
+			'after',
+			'\nMost commands act on a deployment and need a session first: ' +
+				'run `cupboard login <url>`.'
+		)
 		// Throw a CommanderError instead of writing to stderr and exiting, and
 		// suppress commander's own error text, so a usage error (unknown command,
 		// missing argument) reaches the top-level funnel and is reported once in the
