@@ -10,7 +10,7 @@ import {
 	authorisedFetch,
 	corruptCommittedNarInfo,
 	initialise,
-	mintServerSignedToken,
+	issueServerSignedToken,
 	narBytes,
 	narHash,
 	pushPath,
@@ -216,7 +216,7 @@ describe('storage check', () => {
 
 	it('requires admin scope', async () => {
 		await initialise();
-		const writeToken = await mintServerSignedToken('write');
+		const writeToken = await issueServerSignedToken('write');
 
 		const response = await authorisedFetch('/check', writeToken);
 

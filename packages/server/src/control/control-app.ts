@@ -16,7 +16,7 @@ interface ControlHonoEnv {
 }
 
 // The bare-host control surface: the control plane's own OAuth issuer, entirely
-// separate from every tenant (I3). It mints global-admin tokens and publishes
+// separate from every tenant (I3). It issues global-admin tokens and publishes
 // the keys that verify them.
 export const controlApp = new Hono<ControlHonoEnv>()
 	.onError(serverErrorHandler)

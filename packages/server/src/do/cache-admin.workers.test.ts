@@ -13,7 +13,7 @@ import {
 	authorisedFetch,
 	bootstrap,
 	cacheScopedPath,
-	mintServerSignedToken,
+	issueServerSignedToken,
 	narBytes,
 	negotiateUploads,
 	pushPath,
@@ -110,7 +110,7 @@ describe('cache registry admin', () => {
 	it('requires admin scope for the registry routes', async () => {
 		await useTestServer('cache-admin-scope');
 		await bootstrap();
-		const writeToken = await mintServerSignedToken('write');
+		const writeToken = await issueServerSignedToken('write');
 
 		const list = await authorisedFetch('/caches', writeToken);
 		const put = await authorisedFetch('/caches/builds', writeToken, {

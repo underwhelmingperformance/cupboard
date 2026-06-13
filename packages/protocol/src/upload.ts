@@ -203,7 +203,7 @@ export type ParsedDeletePathResponse = z.output<
 >;
 
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
-// request bodies and the server builds response bodies without minting brands.
+// request bodies and the server builds response bodies without issuing brands.
 // The `Parsed…` outputs above are the branded results of a successful parse.
 export type UploadPathNegotiationFields = z.input<
 	typeof uploadPathNegotiationSchema

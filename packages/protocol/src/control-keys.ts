@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 // The control-plane signing keys, as the admin surface sees them. `retired` keys
-// no longer verify; the rest are the live set, with the newest one minting.
+// no longer verify; the rest are the live set, with the newest one issuing.
 export const controlKeySummarySchema = z.strictObject({
 	kid: z.string(),
 	retired: z.boolean(),

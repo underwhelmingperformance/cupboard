@@ -10,7 +10,7 @@ import {
 	bootstrap,
 	fetchNarInfo,
 	fetchPath,
-	mintServerSignedToken,
+	issueServerSignedToken,
 	narBytes,
 	pushPath,
 	resetTestServer,
@@ -143,7 +143,7 @@ describe('signing key rotation', () => {
 
 	it('rejects rotation and retirement without admin scope', async () => {
 		await bootstrap();
-		const writeToken = await mintServerSignedToken('write');
+		const writeToken = await issueServerSignedToken('write');
 
 		const rotateResponse = await authorisedFetch('/keys/rotate', writeToken, {
 			method: 'POST'

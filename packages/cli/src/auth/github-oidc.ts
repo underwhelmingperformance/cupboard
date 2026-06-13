@@ -6,7 +6,7 @@ import { throwIfAborted } from '../abort.ts';
 import { CliError } from '../errors.ts';
 
 // The OIDC token request endpoint and bearer GitHub Actions injects when a
-// workflow grants `id-token: write`. Both are required to mint a token.
+// workflow grants `id-token: write`. Both are required to issue a token.
 export interface GithubOidcEnvironment {
 	readonly requestUrl: string | undefined;
 	readonly requestToken: string | undefined;

@@ -21,7 +21,7 @@ import type { JWTPayload } from 'jose';
 import {
 	adminJwtTtlSeconds,
 	bearerToken,
-	mintAccessJwt,
+	issueAccessJwt,
 	verifyAccessJwt
 } from '../auth/auth.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -81,7 +81,7 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 // RFC 8693 token exchange for the control plane: an external OIDC subject token is
 // matched to a control trust rule on its unverified claims, the signature is then
 // checked against that rule's issuer JWKS, and only then is a global-admin token
-// minted with the control signing key. A forged claim earns no scope.
+// issued with the control signing key. A forged claim earns no scope.
 export async function controlTokenExchange(
 	request: Request,
 	env: Env
@@ -130,7 +130,7 @@ export async function controlTokenExchange(
 
 	await ensureControlKey(database, wrappingSecret, now.toISOString());
 	const active = await activeControlKey(database, wrappingSecret);
-	const accessToken = await mintAccessJwt(
+	const accessToken = await issueAccessJwt(
 		active.privateJwk,
 		{
 			issuer: controlIssuer(request),
@@ -188,7 +188,7 @@ async function verifyControlInbound(
 	}
 }
 
-/** The key set verifying control-minted admin tokens, as a JWKS document. */
+/** The key set verifying control-issued admin tokens, as a JWKS document. */
 export async function controlJwks(env: Env): Promise<{
 	keys: (JsonWebKey & { kid: string; alg: string; use: string })[];
 }> {
@@ -230,7 +230,7 @@ export function controlAsMetadata(
 
 // Verifies a control admin bearer token: signed by a live control key, carrying
 // the control issuer and audience and the admin scope. Anything else — a missing
-// token, a tenant token, the wrong scope — is rejected, so only a control-minted
+// token, a tenant token, the wrong scope — is rejected, so only a control-issued
 // admin token drives control operations.
 export async function requireControlAdmin(
 	request: Request,
@@ -438,16 +438,16 @@ function controlIssuer(request: Request): string {
 	return new URL(request.url).origin;
 }
 
-// The token-minting configuration. The generated Env types these as `string`,
+// The token-issuing configuration. The generated Env types these as `string`,
 // but a deployment that never set the var (or never put the secret) has no
 // binding at all and the env reads as undefined; both spellings of "not
 // configured" must refuse.
-interface ControlMintConfig {
+interface ControlIssueConfig {
 	readonly CUPBOARD_CONTROL_AUDIENCE: string | undefined;
 	readonly CONTROL_KEY_WRAP_SECRET: string | undefined;
 }
 
-function controlAudience(env: ControlMintConfig): string {
+function controlAudience(env: ControlIssueConfig): string {
 	const configured = env.CUPBOARD_CONTROL_AUDIENCE ?? '';
 
 	if (configured === '') {
@@ -457,7 +457,7 @@ function controlAudience(env: ControlMintConfig): string {
 	return configured;
 }
 
-function controlWrappingSecret(env: ControlMintConfig): string {
+function controlWrappingSecret(env: ControlIssueConfig): string {
 	const secret = env.CONTROL_KEY_WRAP_SECRET ?? '';
 
 	if (secret === '') {

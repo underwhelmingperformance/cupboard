@@ -15,7 +15,7 @@ import {
 	currentOrigin,
 	currentServer,
 	hexBytes,
-	mintServerSignedToken,
+	issueServerSignedToken,
 	narBytes,
 	narDigestHex,
 	pushPath,
@@ -331,7 +331,7 @@ describe('tenant contract round trip', () => {
 	it('refuses a write-scoped token on an admin procedure', async () => {
 		await useTestServer('contract-scope');
 		await bootstrap();
-		const client = tenantClient(await mintServerSignedToken('write'));
+		const client = tenantClient(await issueServerSignedToken('write'));
 
 		const [error, data, isDefined] = await safe(client.caches.list());
 

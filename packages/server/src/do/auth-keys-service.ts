@@ -57,7 +57,7 @@ export class AuthKeysService {
 	// edge) so an unconfigured tenant 503s through the fetch guard rather than
 	// advertising an identity it has not been assigned. The endpoints are built from
 	// the request's own path-based URL, which provisioning stamps as the issuer, so
-	// the advertised issuer equals the `iss` of a token this tenant mints.
+	// the advertised issuer equals the `iss` of a token this tenant issues.
 	authorizationServerMetadata(origin: string): AuthorizationServerMetadata {
 		const base = `${origin}/t/${this.context.requireTenant()}`;
 
@@ -83,8 +83,8 @@ export class AuthKeysService {
 		return this.requireIdentity().audience;
 	}
 
-	// Identity is the sole source for the issuer and audience the tenant mints and
-	// verifies under. An unconfigured Durable Object has no identity and cannot mint
+	// Identity is the sole source for the issuer and audience the tenant issues and
+	// verifies under. An unconfigured Durable Object has no identity and cannot issue
 	// or verify, so it fails as not configured rather than falling back to a default.
 	private requireIdentity(): TenantIdentity {
 		const identity = this.tenantIdentity.current();
@@ -172,8 +172,8 @@ export class AuthKeysService {
 		this.authKeysPromise = undefined;
 	}
 
-	// The minting key: the last key inserted that is still in service, so a fresh
-	// rotation takes over minting at once.
+	// The issuing key: the last key inserted that is still in service, so a fresh
+	// rotation takes over issuing at once.
 	async activeAuthKey(): Promise<AuthKey> {
 		const keys = await this.authKeys();
 		const active =

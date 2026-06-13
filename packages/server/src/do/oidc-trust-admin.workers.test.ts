@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
 	authorisedFetch,
 	initialise,
-	mintServerSignedToken,
+	issueServerSignedToken,
 	resetTestServer
 } from '../test-support.ts';
 
@@ -34,7 +34,7 @@ const addBody: OidcTrustAddBody = {
 async function adminToken(): Promise<string> {
 	await initialise();
 
-	return mintServerSignedToken('admin');
+	return issueServerSignedToken('admin');
 }
 
 function listRules(token: string): Promise<Response> {
@@ -151,7 +151,7 @@ describe('oidc-trust admin API', () => {
 
 	it('refuses a write token', async () => {
 		await initialise();
-		const token = await mintServerSignedToken('write');
+		const token = await issueServerSignedToken('write');
 
 		const response = await listRules(token);
 

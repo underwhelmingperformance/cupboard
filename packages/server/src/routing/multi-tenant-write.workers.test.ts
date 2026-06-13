@@ -11,7 +11,7 @@ import {
 	expectStatsForTenant,
 	handlerFetch,
 	initialise,
-	mintTokenForTenant,
+	issueTokenForTenant,
 	provisionNamedTenant,
 	pushPath,
 	pushPathToTenant,
@@ -41,7 +41,7 @@ async function stageDeferredForNewTenant(
 	id: string
 ): Promise<{ readonly token: string; readonly uploadId: string }> {
 	const issuer = await provisionNamedTenant(id);
-	const token = await mintTokenForTenant(testServerFor(id), issuer, 'write');
+	const token = await issueTokenForTenant(testServerFor(id), issuer, 'write');
 	const nar = await verifiableNar(`sweep-${id}`);
 	const metadata = uploadMetadata({
 		storePathHash: 'a'.repeat(32),
@@ -71,7 +71,7 @@ describe('multi-tenant writes', () => {
 
 	it('lets a named tenant push a path that serves only under its own prefix', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
-		const token = await mintTokenForTenant(
+		const token = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
 			'write'
@@ -126,7 +126,7 @@ describe('multi-tenant writes', () => {
 
 	it('dedups a NAR pushed by two tenants into one shared blob with per-tenant edges', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
-		const acmeToken = await mintTokenForTenant(
+		const acmeToken = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
 			'write'
@@ -166,7 +166,7 @@ describe('multi-tenant writes', () => {
 
 	it('reports blob totals scoped to the tenant', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
-		const acmeToken = await mintTokenForTenant(
+		const acmeToken = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
 			'admin'
@@ -210,7 +210,7 @@ describe('multi-tenant writes', () => {
 
 	it('drives a named tenant deferred upload to servable from the scheduled handler', async () => {
 		const acmeIssuer = await provisionNamedTenant('acme');
-		const token = await mintTokenForTenant(
+		const token = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
 			'write'

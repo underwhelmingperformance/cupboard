@@ -17,7 +17,7 @@ import {
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 
-// The key that currently mints control tokens: its kid and unwrapped private JWK.
+// The key that currently issues control tokens: its kid and unwrapped private JWK.
 export interface ControlSigningKey {
 	readonly kid: string;
 	readonly privateJwk: JsonWebKey;
@@ -42,7 +42,7 @@ const bootstrapId = 'bootstrap';
 
 // Ensures a control signing key exists, creating the first one if the set is
 // empty. First-writer-wins on a fixed bootstrap id, so concurrent Workers racing
-// the first request settle on a single key rather than each minting their own (the
+// the first request settle on a single key rather than each issuing their own (the
 // loser's generated key is simply discarded).
 export async function ensureControlKey(
 	database: Database,
@@ -77,7 +77,7 @@ export async function ensureControlKey(
 		.run();
 }
 
-// The key that currently mints: the newest non-retired key, with its private JWK
+// The key that currently issues: the newest non-retired key, with its private JWK
 // unwrapped. Throws if none exists, so callers run {@link ensureControlKey} first.
 export async function activeControlKey(
 	database: Database,
@@ -154,7 +154,7 @@ export async function controlKeySummaries(
 	});
 }
 
-// Adds a new control key that becomes the minting key, leaving the existing keys
+// Adds a new control key that becomes the issuing key, leaving the existing keys
 // live so tokens they already signed keep verifying until those keys are retired.
 export async function rotateControlKey(
 	database: Database,

@@ -38,7 +38,7 @@ import { expect, vi } from 'vitest';
 
 import migrations from '../drizzle/migrations.js';
 
-import { type AccessScope, mintAccessJwt } from './auth/auth.ts';
+import { type AccessScope, issueAccessJwt } from './auth/auth.ts';
 import {
 	activeControlKey,
 	ensureControlKey
@@ -128,7 +128,7 @@ export const fileHash = NixSha256Hash.parse(
 export const deleteTestBase = new Date('2026-01-01T00:00:00.000Z');
 
 // The owner identity the fixture tenant is provisioned with, matching the
-// triple the admin-token and trust-rule tests mint their subject tokens for.
+// triple the admin-token and trust-rule tests issue their subject tokens for.
 export const fixtureOwner = {
 	issuer: 'https://accounts.google.com',
 	subject: 'owner-subject',
@@ -399,7 +399,7 @@ export function currentOrigin(): string {
 	return origin;
 }
 
-// The issuer and audience the Durable Object is configured with and mints under in
+// The issuer and audience the Durable Object is configured with and issues under in
 // low-level tests. A fixed value, independent of the per-test origin, so a token
 // stays valid when a test switches origin via useTestServer. Route-level behaviour
 // (a provisioned tenant's path-based issuer) is proved separately.
@@ -451,12 +451,12 @@ export interface InitialisedServer {
 }
 
 /**
- * Brings a server up the way a deployment is: it mints an owner-equivalent admin
+ * Brings a server up the way a deployment is: it issues an owner-equivalent admin
  * token from the active auth key and reads the published signing key, standing
  * in for what the old bootstrap exchange returned.
  */
 export async function bootstrap(): Promise<InitialisedServer> {
-	const token = await mintServerSignedToken('admin');
+	const token = await issueServerSignedToken('admin');
 	const response = await fetchPath('/pubkey');
 	const body = await response.text();
 
@@ -465,29 +465,29 @@ export async function bootstrap(): Promise<InitialisedServer> {
 
 /** An admin token against the current per-test server. */
 export function initialise(): Promise<string> {
-	return mintServerSignedToken('admin');
+	return issueServerSignedToken('admin');
 }
 
 /** An admin token against the shared `v1` server the Worker routes to. */
 export function initialiseViaWorker(): Promise<string> {
-	return mintServerSignedTokenFor(fixtureWorkerServer(), 'admin');
+	return issueServerSignedTokenFor(fixtureWorkerServer(), 'admin');
 }
 
 /**
- * Mints an access token signed by the active server key for an arbitrary
+ * Issues an access token signed by the active server key for an arbitrary
  * scope, so tests can prove scope enforcement (e.g. a write token refused by
  * an admin route). The active key is the newest one still in service, matching
- * what the server mints with, so a token stays valid across a rotation.
+ * what the server issues with, so a token stays valid across a rotation.
  */
-export function mintServerSignedToken(
+export function issueServerSignedToken(
 	scope: AccessScope,
 	subject = 'scope-test',
 	callbackRoots?: readonly string[]
 ): Promise<string> {
-	return mintServerSignedTokenFor(server, scope, subject, callbackRoots);
+	return issueServerSignedTokenFor(server, scope, subject, callbackRoots);
 }
 
-async function mintServerSignedTokenFor(
+async function issueServerSignedTokenFor(
 	stub: DurableObjectStub<CupboardServer>,
 	scope: AccessScope,
 	subject = 'scope-test',
@@ -495,7 +495,7 @@ async function mintServerSignedTokenFor(
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
 
-	return mintAccessJwt(
+	return issueAccessJwt(
 		key.privateJwk,
 		{
 			issuer: tenantTestIssuer,
@@ -511,11 +511,11 @@ async function mintServerSignedTokenFor(
 }
 
 /**
- * Mints a token signed by a Durable Object's active auth key but pinned to an
- * explicit issuer and audience, so a route-level test can prove a tenant mints
+ * Issues a token signed by a Durable Object's active auth key but pinned to an
+ * explicit issuer and audience, so a route-level test can prove a tenant issues
  * under its own path-based issuer rather than the fixed low-level one.
  */
-export async function mintTokenForTenant(
+export async function issueTokenForTenant(
 	stub: DurableObjectStub<CupboardServer>,
 	issuer: string,
 	scope: AccessScope,
@@ -523,7 +523,7 @@ export async function mintTokenForTenant(
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
 
-	return mintAccessJwt(
+	return issueAccessJwt(
 		key.privateJwk,
 		{ issuer, audience: issuer, subject, scope, kid: key.kid, ttlSeconds: 600 },
 		new Date()
@@ -534,7 +534,7 @@ async function activeAuthKeyFor(
 	stub: DurableObjectStub<CupboardServer>
 ): Promise<{ kid: string; privateJwk: JsonWebKey }> {
 	// The auth key is created on first use; a JWKS request creates it without
-	// minting anything, so reading it straight after always finds a key.
+	// issuing anything, so reading it straight after always finds a key.
 	const jwks = await stub.fetch(new URL('/.well-known/jwks.json', origin));
 	expect(jwks.status).toBe(StatusCodes.OK);
 	await jwks.text();
@@ -550,7 +550,7 @@ async function activeAuthKeyFor(
 			.at(-1);
 
 		if (row === undefined) {
-			throw new Error('expected an active auth key to mint a scoped token');
+			throw new Error('expected an active auth key to issue a scoped token');
 		}
 
 		return { kid: row.kid, privateJwk: parseJwk(row.privateJwkJson) };
@@ -639,9 +639,9 @@ export async function controlWorkerFetch(request: Request): Promise<Response> {
 	return response;
 }
 
-// A control admin token, minted the way the control plane does: signed by the
+// A control admin token, issued the way the control plane does: signed by the
 // active control key for the control issuer (the current origin) and audience.
-export async function mintControlAdminToken(
+export async function issueControlAdminToken(
 	subject = 'global-admin'
 ): Promise<string> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -650,7 +650,7 @@ export async function mintControlAdminToken(
 	await ensureControlKey(database, wrappingSecret, new Date().toISOString());
 	const active = await activeControlKey(database, wrappingSecret);
 
-	return mintAccessJwt(
+	return issueAccessJwt(
 		active.privateJwk,
 		{
 			issuer: new URL(origin).origin,
@@ -1257,7 +1257,7 @@ export async function pushPath(
 
 // Drives a full negotiate, prepare, upload and commit for a path through the Worker
 // under a named tenant's `/t/<tenant>/` prefix, the multi-tenant write path. The
-// token must be a write token minted by that tenant's Durable Object.
+// token must be a write token issued by that tenant's Durable Object.
 export async function pushPathToTenant(
 	tenant: string,
 	token: string,

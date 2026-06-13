@@ -26,7 +26,7 @@ export interface ControlOrpcContext {
 }
 
 // Every control procedure runs behind the error bridge and the control-admin
-// gate; only a control-minted admin token reaches a handler.
+// gate; only a control-issued admin token reaches a handler.
 const os = implement(controlContract)
 	.$context<ControlOrpcContext>()
 	.use(async ({ next }) => {
