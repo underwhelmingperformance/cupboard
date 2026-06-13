@@ -23,7 +23,7 @@ interface PublishedKey {
 }
 
 function decodeJwtClaims(token: string): Record<string, unknown> {
-	const payload = token.split('.')[1] ?? '';
+	const payload = token.split('.', 2)[1] ?? '';
 
 	return JSON.parse(Buffer.from(payload, 'base64url').toString()) as Record<
 		string,
@@ -41,11 +41,15 @@ function jwtVerifiesAgainst(
 ): boolean {
 	const [headerPart, payloadPart, signaturePart] = token.split('.');
 
-	if (
-		headerPart === undefined ||
-		payloadPart === undefined ||
-		signaturePart === undefined
-	) {
+	if (headerPart === undefined) {
+		return false;
+	}
+
+	if (payloadPart === undefined) {
+		return false;
+	}
+
+	if (signaturePart === undefined) {
 		return false;
 	}
 

@@ -20,7 +20,7 @@ interface TokenClaims {
 }
 
 function decodeClaims(token: string): TokenClaims {
-	const payload = token.split('.')[1] ?? '';
+	const payload = token.split('.', 2)[1] ?? '';
 	const json = atob(payload.replaceAll('-', '+').replaceAll('_', '/'));
 
 	return JSON.parse(json) as TokenClaims;
