@@ -95,7 +95,7 @@ export default defineConfig(
 				{
 					groups: [
 						[String.raw`^\u0000`],
-						[String.raw`^node:`],
+						['^node:'],
 						[String.raw`^@?\w`],
 						[String.raw`^\.\.`],
 						[String.raw`^\.`]
@@ -159,6 +159,15 @@ export default defineConfig(
 		rules: {
 			'unicorn/require-module-specifiers': 'off',
 			'@typescript-eslint/no-empty-object-type': 'off'
+		}
+	},
+	{
+		// Tests deliberately exercise plain-http issuers and IdP endpoints (for
+		// example asserting that http issuers are rejected), so the https
+		// preference does not apply to fixture URLs here.
+		files: ['**/*.test.ts'],
+		rules: {
+			'unicorn/prefer-https': 'off'
 		}
 	},
 	{

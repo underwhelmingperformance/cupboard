@@ -137,7 +137,7 @@ function audienceAdmits(
 function decodeJwtClaims(
 	token: string
 ): { iss?: string; aud?: string | string[] } | undefined {
-	const segment = token.split('.').at(1);
+	const segment = token.split('.', 2).at(1);
 
 	if (segment === undefined) {
 		return undefined;
