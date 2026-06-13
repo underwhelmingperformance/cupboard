@@ -52,7 +52,7 @@ export function registerControlKeyCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -70,7 +70,7 @@ export function registerControlKeyCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -91,7 +91,7 @@ export function registerControlKeyCommands(
 				assumeYes: options.yes
 			});
 			const rpc = controlRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 

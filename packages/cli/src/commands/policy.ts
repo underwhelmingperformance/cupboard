@@ -67,7 +67,7 @@ export function registerPolicyCommands(
 				mode: reporterModeFromGlobals(program)
 			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
@@ -96,7 +96,9 @@ export function registerPolicyCommands(
 					mode: reporterModeFromGlobals(program)
 				});
 				const rpc = tenantRpc(url, {
-					credential: cachedOwnerProvider(url),
+					credential: cachedOwnerProvider(url, {
+						signal: programOptions.signal
+					}),
 					signal: programOptions.signal
 				});
 
@@ -122,7 +124,7 @@ export function registerPolicyCommands(
 				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url),
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
 
