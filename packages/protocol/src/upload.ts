@@ -1,5 +1,6 @@
 import {
 	compressionSchema,
+	narInfoLineSchema,
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
@@ -27,8 +28,8 @@ const uploadPathNegotiationShape = {
 	narHash: nixSha256HashSchema,
 	narSize: positiveIntSchema,
 	references: referencesSchema,
-	deriver: z.string().optional(),
-	ca: z.string().optional()
+	deriver: narInfoLineSchema.optional(),
+	ca: narInfoLineSchema.optional()
 };
 
 const uploadBlobMetadataShape = {
@@ -59,8 +60,13 @@ export type ParsedUploadPathMetadata = z.output<
 	typeof uploadPathMetadataSchema
 >;
 
+// One negotiate carries a store-path closure, bounded by the store itself. The
+// cap sits well above any real closure, so it rejects only an abusive body, not
+// a legitimate push.
+export const uploadNegotiateMaxPaths = 100_000;
+
 export const uploadNegotiateRequestSchema = z.strictObject({
-	paths: z.array(uploadPathNegotiationSchema)
+	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
 });
 export type ParsedUploadNegotiateRequest = z.output<
 	typeof uploadNegotiateRequestSchema

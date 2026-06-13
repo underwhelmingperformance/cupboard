@@ -571,13 +571,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			});
 			// The socket stays parked; verification closes it with the verdict.
 		} catch (error) {
+			// A ServerHttpError carries a client-facing message; anything else is an
+			// internal fault whose detail must not leak over the socket, matching the
+			// platform 500 the HTTP error handler rethrows to.
+			const known = error instanceof ServerHttpError;
+
 			sendCommitFrame(socket, {
 				event: 'error',
-				status:
-					error instanceof ServerHttpError
-						? error.status
-						: StatusCodes.INTERNAL_SERVER_ERROR,
-				message: error instanceof Error ? error.message : String(error)
+				status: known ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
+				message: known ? error.message : 'internal error'
 			});
 			socket.close(1000, 'failed');
 		}

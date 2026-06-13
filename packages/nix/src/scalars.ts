@@ -11,6 +11,17 @@ export const storePathPattern =
 
 export const rootNameMaxLength = 256;
 export const predicateTypeMaxLength = 512;
+export const narInfoLineMaxLength = 1024;
+// Nix caps a store-path name at 211 characters, so a basename (32-char hash, a
+// dash, the name) is at most 244 and a full `/nix/store/<basename>` at most 255.
+// The patterns already constrain the charset; these bound the length so a single
+// upload body cannot carry a multi-megabyte name.
+export const storePathNameMaxLength = 211;
+export const storePathBasenameMaxLength = 33 + storePathNameMaxLength;
+export const storePathMaxLength = 11 + storePathBasenameMaxLength;
+// One path's references are its direct closure neighbours; a few thousand is
+// already extreme, so the cap rejects only an abusive body.
+export const referencesMaxLength = 10_000;
 export const rootTtlMinSeconds = 1;
 export const rootTtlMaxSeconds = 315_360_000;
 
@@ -46,12 +57,14 @@ export type StorePathHash = z.infer<typeof storePathHashSchema>;
 
 export const storePathSchema = z
 	.string()
+	.max(storePathMaxLength)
 	.regex(storePathPattern)
 	.brand('StorePath');
 export type StorePathString = z.infer<typeof storePathSchema>;
 
 export const storePathBasenameSchema = z
 	.string()
+	.max(storePathBasenameMaxLength)
 	.regex(storePathBasenamePattern)
 	.brand('StorePathBasename');
 export type StorePathBasename = z.infer<typeof storePathBasenameSchema>;
@@ -150,4 +163,15 @@ export type CachePriority = z.infer<typeof cachePrioritySchema>;
 
 export const compressionSchema = z.literal('zstd');
 
-export const referencesSchema = z.array(storePathBasenameSchema);
+export const referencesSchema = z
+	.array(storePathBasenameSchema)
+	.max(referencesMaxLength);
+
+// A single free-form narinfo metadata line (`Deriver`, `CA`): bounded and free
+// of control characters, so a value that parses here always renders back to a
+// well-formed narinfo line. The render path rejects control characters, so an
+// upload that accepted them would write a charged edge that can never render.
+export const narInfoLineSchema = z
+	.string()
+	.max(narInfoLineMaxLength)
+	.refine((value) => !hasControlCharacter(value));
