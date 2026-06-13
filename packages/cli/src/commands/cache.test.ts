@@ -79,6 +79,21 @@ describe('runCacheList', () => {
 			]
 		]);
 	});
+
+	it('reports nothing when there are no caches', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+
+		await runCacheList(
+			reporter(results, infos),
+			cacheClient({ list: () => Promise.resolve({ caches: [] }) })
+		);
+
+		expect({ results, infos }).toStrictEqual({
+			results: [],
+			infos: ['No caches.']
+		});
+	});
 });
 
 describe('runCacheCreate', () => {

@@ -95,6 +95,21 @@ describe('runAuthKeyList', () => {
 			]
 		]);
 	});
+
+	it('reports nothing when there are no keys', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+
+		await runAuthKeyList(
+			reporter(results, infos),
+			authKeyClient({ list: () => Promise.resolve({ keys: [] }) })
+		);
+
+		expect({ results, infos }).toStrictEqual({
+			results: [],
+			infos: ['No auth keys.']
+		});
+	});
 });
 
 describe('runAuthKeyRotate', () => {

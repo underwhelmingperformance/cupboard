@@ -409,6 +409,11 @@ export async function runTenantList(
 		client.list()
 	);
 
+	if (tenants.length === 0) {
+		reporter.info('No tenants.');
+		return;
+	}
+
 	reporter.result({
 		kind: 'tenants',
 		data: tenants,
