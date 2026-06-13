@@ -324,7 +324,11 @@ describe('loopbackLogin', () => {
 
 describe('deviceLogin', () => {
 	it('polls through pending and slow_down to an id_token', async () => {
-		const prompts: { userCode: string; verificationUri: string }[] = [];
+		const prompts: {
+			userCode: string;
+			verificationUri: string;
+			verificationUriComplete?: string;
+		}[] = [];
 		let polls = 0;
 		const fetcher: typeof fetch = (input) => {
 			if (input === endpoints.deviceAuthorizationEndpoint) {
@@ -368,11 +372,53 @@ describe('deviceLogin', () => {
 			prompts: [
 				{
 					userCode: 'WXYZ-1234',
-					verificationUri: 'https://idp.example.com/activate'
+					verificationUri: 'https://idp.example.com/activate',
+					verificationUriComplete: undefined
 				}
 			],
 			polls: 3
 		});
+	});
+
+	it('passes the complete verification URL through when the issuer sends one', async () => {
+		const prompts: {
+			userCode: string;
+			verificationUri: string;
+			verificationUriComplete?: string;
+		}[] = [];
+		const fetcher: typeof fetch = (input) => {
+			if (input === endpoints.deviceAuthorizationEndpoint) {
+				return Promise.resolve(
+					Response.json({
+						device_code: 'dev-code',
+						user_code: 'WXYZ-1234',
+						verification_uri: 'https://idp.example.com/activate',
+						verification_uri_complete:
+							'https://idp.example.com/activate?code=WXYZ-1234',
+						interval: 1
+					})
+				);
+			}
+
+			return Promise.resolve(Response.json({ id_token: 'owner.id.token' }));
+		};
+
+		await deviceLogin({
+			endpoints,
+			clientId: 'client-123',
+			prompt: (verification) => prompts.push(verification),
+			fetcher,
+			sleep: () => Promise.resolve()
+		});
+
+		expect(prompts).toStrictEqual([
+			{
+				userCode: 'WXYZ-1234',
+				verificationUri: 'https://idp.example.com/activate',
+				verificationUriComplete:
+					'https://idp.example.com/activate?code=WXYZ-1234'
+			}
+		]);
 	});
 
 	it('refuses the device flow when the issuer does not support it', async () => {

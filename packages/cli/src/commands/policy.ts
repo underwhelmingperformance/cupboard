@@ -7,12 +7,7 @@ import {
 	retentionPolicyScopeSchema,
 	type RetentionPolicySummary
 } from '@cupboard/protocol/retention';
-import {
-	createReporter,
-	formatCount,
-	type Reporter,
-	type ResultRow
-} from '@cupboard/reporter';
+import { formatCount, type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -63,9 +58,9 @@ export function registerPolicyCommands(
 		.description('List retention policies.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -92,9 +87,9 @@ export function registerPolicyCommands(
 				pattern: string,
 				options: PolicyAddOptions
 			) => {
-				const reporter = createReporter({
+				const reporter = createCliUi({
 					mode: reporterModeFromGlobals(program)
-				});
+				}).reporter();
 				const rpc = tenantRpc(url, {
 					credential: cachedOwnerProvider(url, {
 						signal: programOptions.signal

@@ -1,5 +1,6 @@
+import { createCliUi } from '@cupboard/cli-ui';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
-import { createReporter, formatBytes, formatCount } from '@cupboard/reporter';
+import { formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -21,9 +22,9 @@ export function registerStatsCommand(
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.option('--cache <name>', 'report on a named cache rather than the default')
 		.action(async (url: string, options: StatsOptions) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -70,9 +71,9 @@ export function registerStatsCommand(
 		.description('Show tenant-wide charged storage usage.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

@@ -5,11 +5,7 @@ import type {
 	OidcTrustRemoveResponse,
 	OidcTrustSummary
 } from '@cupboard/protocol/oidc';
-import {
-	createReporter,
-	type Reporter,
-	type ResultRow
-} from '@cupboard/reporter';
+import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -72,9 +68,9 @@ export function registerOidcTrustCommands(
 		.description('List OIDC trust rules.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.action(async (url: string) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -102,9 +98,9 @@ export function registerOidcTrustCommands(
 			[]
 		)
 		.action(async (url: string, options: OidcTrustAddOptions) => {
-			const reporter = createReporter({
+			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
-			});
+			}).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
