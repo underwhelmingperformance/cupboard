@@ -43,7 +43,10 @@ import {
 	activeControlKey,
 	ensureControlKey
 } from './control/control-key-store.ts';
-import { publishTenantManifest } from './control/tenant-manifest.ts';
+import {
+	invalidateTenantRow,
+	refreshTenantMembership
+} from './control/tenant-membership.ts';
 import { generateSigningKey, parseJwk } from './crypto/crypto.ts';
 import * as d1Schema from './db/d1-schema.ts';
 import {
@@ -239,13 +242,14 @@ export async function provisionFixtureTenant(
 		})
 		.run();
 
-	await publishTenantManifest(database, env.TENANT_CACHE);
+	await refreshTenantMembership(env);
+	await invalidateTenantRow(fixtureTenant);
 }
 
 /**
  * Provisions a named tenant for a route-level test: writes its D1 row,
  * optionally configures its Durable Object with its path-based issuer, and
- * publishes the admission manifest. Returns the tenant's issuer URL. Pass
+ * seeds the membership filter and marker. Returns the tenant's issuer URL. Pass
  * `configure: false` to admit a slug whose Durable Object stays unconfigured, so a
  * test can prove that route 503s rather than serving under a fallback identity.
  */
@@ -309,15 +313,16 @@ export async function provisionNamedTenant(
 		});
 	}
 
-	await publishTenantManifest(database, env.TENANT_CACHE);
+	await refreshTenantMembership(env);
+	await invalidateTenantRow(id);
 
 	return issuer;
 }
 
 /**
  * Marks a provisioned tenant suspended, the way the control plane does: it updates
- * the authoritative D1 status (which the write gate reads) and republishes the
- * admission manifest (which the read path reads), so both gates see the change.
+ * the authoritative D1 status (which the write gate reads) and invalidates the
+ * cached row, so a read reflects the new status without waiting on the row TTL.
  */
 export async function suspendTenant(id: string): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -327,14 +332,13 @@ export async function suspendTenant(id: string): Promise<void> {
 		.set({ status: 'suspended' })
 		.where(eq(d1Schema.tenant.id, id))
 		.run();
-	await publishTenantManifest(database, env.TENANT_CACHE);
+	await invalidateTenantRow(id);
 }
 
 /**
  * Begins offboarding a provisioned tenant the way the control plane does: it updates
- * the authoritative D1 status, republishes the admission manifest, and tells the
- * Durable Object to stop re-materialising its objects, so the cron's offboard drain
- * can run.
+ * the authoritative D1 status, invalidates the cached row, and tells the Durable
+ * Object to stop re-materialising its objects, so the cron's offboard drain can run.
  */
 export async function offboardTenant(id: string): Promise<void> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -344,7 +348,7 @@ export async function offboardTenant(id: string): Promise<void> {
 		.set({ status: 'offboarding' })
 		.where(eq(d1Schema.tenant.id, id))
 		.run();
-	await publishTenantManifest(database, env.TENANT_CACHE);
+	await invalidateTenantRow(id);
 	await tenantServer(env, id).beginOffboard();
 }
 

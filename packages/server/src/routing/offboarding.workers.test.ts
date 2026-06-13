@@ -1,9 +1,16 @@
+import {
+	createExecutionContext,
+	waitOnExecutionContext
+} from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { readTenantManifest } from '../control/tenant-manifest.ts';
+import {
+	admitTenant,
+	refreshTenantMembership
+} from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { narObjectKey } from '../http/http.ts';
@@ -35,10 +42,18 @@ import { runBlobReaper, runCronTick, runOffboardSweep } from './scheduled.ts';
 // the cron drains a bounded batch of its reference and presence rows through the
 // tenant's own Durable Object and a bounded batch of its R2 objects through the
 // Worker. A fully drained tenant is finalised into a terminal scrubbed `offboarded`
-// tombstone the manifest no longer admits, and the shared blobs it released are
+// tombstone admission no longer admits, and the shared blobs it released are
 // collected by the global reaper.
 
 let nextTenant = 0;
+
+async function admittable(slug: string): Promise<boolean> {
+	const ctx = createExecutionContext();
+	const entry = await admitTenant(env, ctx, slug);
+	await waitOnExecutionContext(ctx);
+
+	return entry !== undefined;
+}
 
 async function provisionedWritingTenant(): Promise<{
 	id: string;
@@ -286,27 +301,24 @@ describe('offboarding drain', () => {
 		});
 	});
 
-	it('reconciles a manifest left stale by an interrupted finalisation', async () => {
+	it('never admits a tombstone left by an interrupted finalisation, before or after the refresh', async () => {
 		const { id } = await provisionedWritingTenant();
 
 		// Plant the crash state: the D1 row is finalised to the `offboarded` tombstone
-		// (status flipped, scrubbed, usage dropped) but the manifest republish never
-		// ran, so the slug still lingers in the published manifest.
+		// (status flipped, scrubbed, usage dropped) but the membership filter still
+		// lists the slug, so admission still reaches the authoritative row read.
 		await finaliseOffboardedTenant(
 			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 			id
 		);
-		const beforeManifest = await readTenantManifest(env.TENANT_CACHE);
+		// The row read fails closed on the tombstone, so the slug 404s at once despite
+		// the stale filter; the next rebuild then drops it from the filter too.
+		const before = await admittable(id);
 
-		await runOffboardSweep(env);
-		const afterManifest = await readTenantManifest(env.TENANT_CACHE);
+		await refreshTenantMembership(env);
+		const after = await admittable(id);
 
-		// The sweep's reconciliation republishes the manifest without the tombstone, so
-		// admission no longer admits the retired slug.
-		expect({
-			before: beforeManifest?.tenants[id] !== undefined,
-			after: afterManifest?.tenants[id] !== undefined
-		}).toStrictEqual({ before: true, after: false });
+		expect({ before, after }).toStrictEqual({ before: false, after: false });
 	});
 
 	it('finalises an offboarding tenant within the cron tick and frees its blob, never resurrecting it', async () => {

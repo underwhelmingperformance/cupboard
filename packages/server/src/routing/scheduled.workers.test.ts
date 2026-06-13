@@ -3,7 +3,6 @@ import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { readTenantManifest } from '../control/tenant-manifest.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -255,30 +254,24 @@ describe('scheduled tenant pass failure records', () => {
 		});
 	});
 
-	it('reconciles already-offboarded queue messages without recording a fresh outcome', async () => {
+	it('acks an already-offboarded queue message without recording a fresh outcome', async () => {
 		await provisionNamedTenant('retiring');
 		await finaliseOffboardedTenant(
 			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
 			'retiring'
 		);
-		const beforeManifest = await readTenantManifest(env.TENANT_CACHE);
 
 		const decision = await executeMaintenanceQueueMessage(env, {
 			kind: 'offboard',
 			tenant: 'retiring'
 		});
-		const afterManifest = await readTenantManifest(env.TENANT_CACHE);
 
 		expect({
 			decision,
-			outcome: await tenantMaintenanceFailureRow('retiring', 'offboard'),
-			before: beforeManifest?.tenants.retiring !== undefined,
-			after: afterManifest?.tenants.retiring !== undefined
+			outcome: await tenantMaintenanceFailureRow('retiring', 'offboard')
 		}).toStrictEqual({
 			decision: { action: 'ack' },
-			outcome: undefined,
-			before: true,
-			after: false
+			outcome: undefined
 		});
 	});
 

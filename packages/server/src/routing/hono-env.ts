@@ -1,15 +1,15 @@
-import { type ManifestEntry } from '../control/tenant-manifest.ts';
+import { type TenantEntry } from '../control/tenant-membership.ts';
 
 /**
  * The Hono environment for the worker app: the admission middleware resolves
- * a tenant request's slug, manifest entry and tenant-relative path, and (for
+ * a tenant request's slug, tenant entry and tenant-relative path, and (for
  * reads) the cache the path addresses, before any route runs.
  */
 export interface WorkerHonoEnv {
 	Bindings: Env;
 	Variables: {
 		tenant: string;
-		tenantEntry: ManifestEntry;
+		tenantEntry: TenantEntry;
 		tenantRest: string;
 		cache: string;
 	};

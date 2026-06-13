@@ -5,9 +5,9 @@ import { z } from 'zod';
 
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
-	publishTenantManifest,
-	readTenantManifest
-} from '../control/tenant-manifest.ts';
+	deleteTenantMember,
+	refreshTenantMembership
+} from '../control/tenant-membership.ts';
 import { finaliseOffboardedTenant } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -136,6 +136,11 @@ export async function enqueueMaintenanceJobs(
 	env: Env,
 	queue: MaintenanceQueue = env.MAINTENANCE_QUEUE
 ): Promise<MaintenanceQueueMessage[]> {
+	// Rebuild the membership filter and reassert per-tenant markers inline each
+	// tick, before fanning work out: new-tenant liveness and dropped-marker healing
+	// must not depend on a queue send that can be dropped.
+	await refreshTenantMembership(env);
+
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const maintenanceTenants = await overdueActiveTenants(
 		database,
@@ -425,12 +430,6 @@ export async function runOffboardSweep(
 
 	await recordTenantPassOutcomes(database, 'offboard', tenants, results);
 
-	// Republish the manifest if a finalised tenant still lingers in it: finalisation
-	// flips the registry status to `offboarded` (excluded from the manifest) but a
-	// crash before the republish would otherwise strand the slug in it forever, since
-	// the drain selects only `offboarding`. One republish drops every stale tombstone.
-	await reconcileOffboardedManifest(env, database);
-
 	const failures = results.flatMap((result): unknown[] =>
 		result.status === 'rejected' ? [result.reason] : []
 	);
@@ -454,34 +453,6 @@ function selectOffboardTenants(
 		.orderBy(asc(d1Schema.tenant.id))
 		.limit(tenantLimit)
 		.all();
-}
-
-async function reconcileOffboardedManifest(
-	env: Env,
-	database: CronDatabase
-): Promise<void> {
-	const manifest = await readTenantManifest(env.TENANT_CACHE);
-	const ids = manifest === undefined ? [] : Object.keys(manifest.tenants);
-
-	if (ids.length === 0) {
-		return;
-	}
-
-	const stale = await database
-		.select({ id: d1Schema.tenant.id })
-		.from(d1Schema.tenant)
-		.where(
-			and(
-				eq(d1Schema.tenant.status, 'offboarded'),
-				inArray(d1Schema.tenant.id, ids)
-			)
-		)
-		.limit(1)
-		.get();
-
-	if (stale !== undefined) {
-		await publishTenantManifest(database, env.TENANT_CACHE);
-	}
 }
 
 // Drains a single tenant for up to a bounded number of rounds this tick, finalising
@@ -527,14 +498,16 @@ async function deleteTenantObjects(
 // Finalises a fully drained tenant: wipe its Durable Object storage (keys, identity,
 // narinfos), then scrub its registry row to the terminal `offboarded` tombstone with
 // its usage row dropped. Purging first and tolerating an already-purged object in the
-// drain makes an interrupted finalisation converge on the next tick. The manifest is
-// republished by the sweep's reconciliation, not here, so a crash before it cannot
-// strand the slug in the manifest.
+// drain makes an interrupted finalisation converge on the next tick. The membership
+// marker is deleted here, since it tracks `status != 'offboarded'`; the next filter
+// rebuild then drops the slug, and an interrupted finalisation leaves only a
+// harmless tombstone the rebuild reconciles.
 async function finaliseTenant(env: Env, id: string): Promise<void> {
 	await tenantServer(env, id).purgeStorage();
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	await finaliseOffboardedTenant(database, id);
+	await deleteTenantMember(env.TENANT_CACHE, id);
 }
 
 /**
@@ -677,13 +650,8 @@ async function executeOffboardMessage(
 			[{ id: tenant }],
 			[result]
 		);
-		await reconcileOffboardedManifest(env, database);
 
 		return { action: 'ack' };
-	}
-
-	if (status === 'offboarded') {
-		await reconcileOffboardedManifest(env, database);
 	}
 
 	return { action: 'ack' };

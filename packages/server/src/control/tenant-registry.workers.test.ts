@@ -15,10 +15,6 @@ import {
 } from '../errors.ts';
 
 import {
-	publishTenantManifest,
-	readTenantManifest
-} from './tenant-manifest.ts';
-import {
 	ensureTenant,
 	finaliseOffboardedTenant,
 	listTenants,
@@ -79,32 +75,23 @@ function quotaBody(id: string, quotaBytes: number): ParsedTenantCreateBody {
 	});
 }
 
-// Mirrors the control plane's provisioning order minus the Durable Object
-// configure: write the row, then publish the admission manifest.
 async function provision(body: ParsedTenantCreateBody): Promise<void> {
 	await ensureTenant(database(), body, now);
-	await publishTenantManifest(database(), env.TENANT_CACHE);
 }
 
 describe('tenant registry', () => {
-	it('creates a tenant, returns its summary, and publishes it to the manifest', async () => {
+	it('creates a tenant and returns its summary', async () => {
 		const summary = await ensureTenant(database(), createBody('acme'), now);
 
-		await publishTenantManifest(database(), env.TENANT_CACHE);
-		const manifest = await readTenantManifest(env.TENANT_CACHE);
-
-		expect({ summary, entry: manifest?.tenants.acme }).toStrictEqual({
-			summary: {
-				id: 'acme',
-				status: 'active',
-				readMode: 'private',
-				ownerIssuer: 'https://idp.test',
-				ownerSubject: 'owner',
-				ownerAudience: 'aud',
-				configVersion: 1,
-				createdAt: now
-			},
-			entry: { status: 'active', readMode: 'private', configVersion: 1 }
+		expect(summary).toStrictEqual({
+			id: 'acme',
+			status: 'active',
+			readMode: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud',
+			configVersion: 1,
+			createdAt: now
 		});
 	});
 
@@ -123,17 +110,24 @@ describe('tenant registry', () => {
 		).rejects.toThrow(TenantAlreadyExistsError);
 	});
 
-	it('publishes only the hashed private-read verifier', async () => {
+	it('stores only the hashed private-read verifier', async () => {
 		await provision(privateBodyWithRead('acme'));
 
-		const manifest = await readTenantManifest(env.TENANT_CACHE);
-		const verifier = manifest?.tenants.acme?.readVerifier;
+		const row = await database()
+			.select({
+				readUser: d1Schema.tenant.readUser,
+				readPasswordHash: d1Schema.tenant.readPasswordHash,
+				readPasswordSalt: d1Schema.tenant.readPasswordSalt
+			})
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, 'acme'))
+			.get();
 
 		expect({
-			user: verifier?.user,
-			passwordHash: typeof verifier?.passwordHash,
-			passwordSalt: typeof verifier?.passwordSalt,
-			hashIsPlaintext: verifier?.passwordHash === 'correct-horse-battery-staple'
+			user: row?.readUser,
+			passwordHash: typeof row?.readPasswordHash,
+			passwordSalt: typeof row?.readPasswordSalt,
+			hashIsPlaintext: row?.readPasswordHash === 'correct-horse-battery-staple'
 		}).toStrictEqual({
 			user: 'cupboard',
 			passwordHash: 'string',
@@ -236,19 +230,24 @@ describe('tenant registry', () => {
 	it.each([
 		{ name: 'suspends', status: 'suspended' as const },
 		{ name: 'offboards', status: 'offboarding' as const }
-	])('$name a tenant and reflects it in the manifest', async ({ status }) => {
-		await provision(createBody('acme'));
+	])(
+		'$name a tenant and reflects it in the registry row',
+		async ({ status }) => {
+			await provision(createBody('acme'));
 
-		const summary = await setTenantStatus(database(), 'acme', status);
+			const summary = await setTenantStatus(database(), 'acme', status);
+			const stored = await database()
+				.select({ status: d1Schema.tenant.status })
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, 'acme'))
+				.get();
 
-		await publishTenantManifest(database(), env.TENANT_CACHE);
-		const manifest = await readTenantManifest(env.TENANT_CACHE);
-
-		expect({
-			returned: summary.status,
-			published: manifest?.tenants.acme?.status
-		}).toStrictEqual({ returned: status, published: status });
-	});
+			expect({
+				returned: summary.status,
+				stored: stored?.status
+			}).toStrictEqual({ returned: status, stored: status });
+		}
+	);
 
 	it('throws not found when mutating an unknown tenant', async () => {
 		await expect(
@@ -262,7 +261,7 @@ describe('tenant registry', () => {
 		await finaliseOffboardedTenant(database(), 'acme');
 
 		// A repeated delete after finalisation must not flip the tombstone back to
-		// offboarding (which the caller would then republish into the manifest).
+		// offboarding.
 		const repeated = await setTenantStatus(database(), 'acme', 'offboarding');
 
 		await expect(
@@ -293,7 +292,7 @@ describe('tenant registry', () => {
 		).rejects.toThrow(TenantAlreadyExistsError);
 	});
 
-	it('finalises a drained tenant into a scrubbed tombstone that the manifest drops and re-provisioning refuses', async () => {
+	it('finalises a drained tenant into a scrubbed tombstone that re-provisioning refuses', async () => {
 		await provision(
 			createBody('acme', 'private')
 			// A private cache, so the row carries a read verifier to scrub.
@@ -306,7 +305,6 @@ describe('tenant registry', () => {
 		await setTenantStatus(database(), 'acme', 'offboarding');
 
 		await finaliseOffboardedTenant(database(), 'acme');
-		await publishTenantManifest(database(), env.TENANT_CACHE);
 
 		const stored = await database()
 			.select({
@@ -330,7 +328,6 @@ describe('tenant registry', () => {
 			ownerSubject: stored?.ownerSubject,
 			ownerAudience: stored?.ownerAudience
 		};
-		const manifest = await readTenantManifest(env.TENANT_CACHE);
 		const reProvision = await ensureTenant(
 			database(),
 			createBody('acme', 'private'),
@@ -344,7 +341,6 @@ describe('tenant registry', () => {
 		expect({
 			row,
 			usage: await usageRow('acme'),
-			entry: manifest?.tenants.acme,
 			reProvision
 		}).toStrictEqual({
 			row: {
@@ -356,7 +352,6 @@ describe('tenant registry', () => {
 				ownerAudience: ''
 			},
 			usage: undefined,
-			entry: undefined,
 			reProvision: 'refused'
 		});
 	});
