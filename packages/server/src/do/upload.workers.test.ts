@@ -298,31 +298,38 @@ describe('upload flow', () => {
 		);
 	});
 
-	it('shares public NAR edge-cache entries across tenant URLs', async () => {
+	it('serves a tenant its own cached NAR but never one it does not reference', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		await commitPath(token, metadata);
 		await provisionNamedTenant('acme');
 
+		// The owning tenant reads its NAR, populating its tenant-scoped edge cache.
 		const first = await readFetch(`/nar/${metadata.narHash}.nar.zst`);
 		expect([...new Uint8Array(await first.arrayBuffer())]).toStrictEqual([
 			...narBytes
 		]);
 
+		// With the R2 object gone, the owner is still served from its edge cache,
+		// but a tenant that never referenced the hash gets a 404, not the shared
+		// bytes: the NAR namespace is content-addressed but read access is per
+		// tenant.
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
-
-		const second = await handlerFetch(
+		const owner = await readFetch(`/nar/${metadata.narHash}.nar.zst`);
+		const intruder = await handlerFetch(
 			`/t/acme/nar/${metadata.narHash}.nar.zst`
 		);
 
 		expect({
-			status: second.status,
-			cacheControl: second.headers.get('cache-control'),
-			body: [...new Uint8Array(await second.arrayBuffer())]
+			ownerStatus: owner.status,
+			ownerCacheControl: owner.headers.get('cache-control'),
+			ownerBody: [...new Uint8Array(await owner.arrayBuffer())],
+			intruderStatus: intruder.status
 		}).toStrictEqual({
-			status: StatusCodes.OK,
-			cacheControl: 'public, max-age=31536000, immutable',
-			body: [...narBytes]
+			ownerStatus: StatusCodes.OK,
+			ownerCacheControl: 'public, max-age=31536000, immutable',
+			ownerBody: [...narBytes],
+			intruderStatus: StatusCodes.NOT_FOUND
 		});
 	});
 
