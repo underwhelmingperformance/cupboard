@@ -49,6 +49,7 @@ const unexpected = (member: string) => (): never => {
 /** A {@link DeployUi} whose account picker answers with `choice` (or cancels). */
 function pickerUi(choice?: string): DeployUi {
 	return {
+		interactive: true,
 		intro: unexpected('intro'),
 		outro: unexpected('outro'),
 		cancelled: unexpected('cancelled'),
@@ -56,6 +57,8 @@ function pickerUi(choice?: string): DeployUi {
 		success: unexpected('success'),
 		warn: unexpected('warn'),
 		note: unexpected('note'),
+		data: unexpected('data'),
+		confirm: unexpected('confirm'),
 		menu: unexpected('menu'),
 		editText: unexpected('editText'),
 		prefixedText: unexpected('prefixedText'),

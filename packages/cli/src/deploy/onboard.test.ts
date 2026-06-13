@@ -85,6 +85,9 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 
 			return Promise.resolve(remainingSecrets.shift());
 		},
+		interactive: true,
+		data: unexpected('data'),
+		confirm: unexpected('confirm'),
 		chooseAccount: unexpected('chooseAccount'),
 		openBrowser: unexpected('openBrowser'),
 		reporter: () => ({
