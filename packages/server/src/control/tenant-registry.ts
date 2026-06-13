@@ -1,14 +1,17 @@
 import type {
 	ParsedTenantCreateBody,
+	ParsedTenantReadCredential,
 	ParsedTenantSummary
 } from '@cupboard/protocol/tenants';
-import { and, eq, ne, sql } from 'drizzle-orm';
+import { and, eq, ne, notInArray, sql } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
+import type { SQLiteUpdateSetSource } from 'drizzle-orm/sqlite-core';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
+	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
 import {
@@ -261,6 +264,113 @@ export async function setTenantStatus(
 
 	if (status === 'offboarding' && existing.status === 'offboarded') {
 		return existing;
+	}
+
+	throw new TenantRetiredError(id);
+}
+
+// Resumes a suspended tenant, returning its summary. Only a `suspended` tenant
+// moves back to `active`; an already-active tenant is a conflict and a draining or
+// retired one is gone, so resume never silently no-ops or resurrects a tenant.
+export async function resumeTenant(
+	database: Database,
+	id: string
+): Promise<ParsedTenantSummary> {
+	const updated = await database
+		.update(d1Schema.tenant)
+		.set({ status: 'active' })
+		.where(
+			and(eq(d1Schema.tenant.id, id), eq(d1Schema.tenant.status, 'suspended'))
+		)
+		.returning();
+	const row = updated[0];
+
+	if (row !== undefined) {
+		return toSummary(row);
+	}
+
+	const existing = await loadTenant(database, id);
+
+	if (existing === undefined) {
+		throw new TenantNotFoundError(id);
+	}
+
+	if (existing.status === 'offboarding' || existing.status === 'offboarded') {
+		throw new TenantRetiredError(id);
+	}
+
+	throw new TenantNotSuspendedError(id);
+}
+
+// Sets a tenant's read mode, returning its summary. Only an active or suspended
+// tenant is mutated; a draining or retired one is refused.
+export async function setTenantReadMode(
+	database: Database,
+	id: string,
+	readMode: 'public' | 'private'
+): Promise<ParsedTenantSummary> {
+	return updateLiveTenant(database, id, { readMode });
+}
+
+// Sets a tenant's read credential (the Basic-auth user and a freshly salted hash
+// of its password), returning its summary. Only an active or suspended tenant is
+// mutated, so a credential is never reintroduced into a draining or scrubbed
+// tenant.
+export async function setTenantReadCredential(
+	database: Database,
+	id: string,
+	read: ParsedTenantReadCredential
+): Promise<ParsedTenantSummary> {
+	const readPasswordSalt = generateReadPasswordSalt();
+
+	return updateLiveTenant(database, id, {
+		readUser: read.user,
+		readPasswordHash: await hashReadPassword(read.password, readPasswordSalt),
+		readPasswordSalt
+	});
+}
+
+// Clears a tenant's read credential, returning its summary; a private cache with
+// no credential then fails closed. Only an active or suspended tenant is mutated.
+export async function clearTenantReadCredential(
+	database: Database,
+	id: string
+): Promise<ParsedTenantSummary> {
+	return updateLiveTenant(database, id, {
+		readUser: sql`null`,
+		readPasswordHash: sql`null`,
+		readPasswordSalt: sql`null`
+	});
+}
+
+// Applies a column update to a tenant only while it is active or suspended,
+// refusing a draining (`offboarding`) or retired (`offboarded`) one, and telling a
+// missing tenant apart from a retired one.
+async function updateLiveTenant(
+	database: Database,
+	id: string,
+	set: SQLiteUpdateSetSource<typeof d1Schema.tenant>
+): Promise<ParsedTenantSummary> {
+	const updated = await database
+		.update(d1Schema.tenant)
+		.set(set)
+		.where(
+			and(
+				eq(d1Schema.tenant.id, id),
+				notInArray(d1Schema.tenant.status, ['offboarding', 'offboarded'])
+			)
+		)
+		.returning();
+	const row = updated[0];
+
+	if (row !== undefined) {
+		return toSummary(row);
+	}
+
+	const existing = await loadTenant(database, id);
+
+	if (existing === undefined) {
+		throw new TenantNotFoundError(id);
 	}
 
 	throw new TenantRetiredError(id);

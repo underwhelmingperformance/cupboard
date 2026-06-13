@@ -88,6 +88,37 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('drives resume, read mode and read credential through the derived client', async () => {
+		const client = controlClient(await mintControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			readMode: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+		const suspended = await client.tenants.suspend({ id: 'acme' });
+		const resumed = await client.tenants.resume({ id: 'acme' });
+		const readMode = await client.tenants.setReadMode({
+			id: 'acme',
+			readMode: 'public'
+		});
+		const rotated = await client.tenants.rotateReadCredential({
+			id: 'acme',
+			read: { user: 'reader', password: 'correct-horse-battery-staple' }
+		});
+		const cleared = await client.tenants.clearReadCredential({ id: 'acme' });
+
+		expect({ suspended, resumed, readMode, rotated, cleared }).toStrictEqual({
+			suspended: { id: 'acme', status: 'suspended' },
+			resumed: { id: 'acme', status: 'active' },
+			readMode: { id: 'acme', readMode: 'public' },
+			rotated: { id: 'acme', readMode: 'public' },
+			cleared: { id: 'acme', readMode: 'public' }
+		});
+	});
+
 	it('refuses a missing control token as the defined UNAUTHORIZED error', async () => {
 		const client = controlClient();
 

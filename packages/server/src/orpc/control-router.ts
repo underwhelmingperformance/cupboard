@@ -6,9 +6,13 @@ import {
 	controlKeyRetire,
 	controlKeyRotate,
 	controlKeys,
+	controlTenantClearReadCredential,
 	controlTenantCreate,
 	controlTenantList,
 	controlTenantOffboard,
+	controlTenantResume,
+	controlTenantRotateReadCredential,
+	controlTenantSetReadMode,
 	controlTenantSuspend,
 	requireControlAdmin
 } from '../control/control-plane.ts';
@@ -62,6 +66,20 @@ export const controlRouter = os.router({
 		),
 		suspend: os.tenants.suspend.handler(({ input, context }) =>
 			controlTenantSuspend(context.env, input.id)
+		),
+		resume: os.tenants.resume.handler(({ input, context }) =>
+			controlTenantResume(context.env, input.id)
+		),
+		setReadMode: os.tenants.setReadMode.handler(({ input, context }) =>
+			controlTenantSetReadMode(context.env, input.id, input.readMode)
+		),
+		rotateReadCredential: os.tenants.rotateReadCredential.handler(
+			({ input, context }) =>
+				controlTenantRotateReadCredential(context.env, input.id, input.read)
+		),
+		clearReadCredential: os.tenants.clearReadCredential.handler(
+			({ input, context }) =>
+				controlTenantClearReadCredential(context.env, input.id)
 		),
 		remove: os.tenants.remove.handler(({ input, context }) =>
 			controlTenantOffboard(context.env, input.id)

@@ -11,6 +11,9 @@ import {
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
+	tenantReadCredentialSchema,
+	tenantReadModeResponseSchema,
+	tenantReadModeSchema,
 	tenantSummarySchema
 } from '../tenants.ts';
 
@@ -61,6 +64,28 @@ export const controlContract = {
 			.route({ method: 'POST', path: '/tenants/{id}/suspend' })
 			.input(z.strictObject({ id: z.string() }))
 			.output(tenantMutateResponseSchema),
+
+		resume: controlProcedure
+			.route({ method: 'POST', path: '/tenants/{id}/resume' })
+			.input(z.strictObject({ id: z.string() }))
+			.output(tenantMutateResponseSchema),
+
+		setReadMode: controlProcedure
+			.route({ method: 'POST', path: '/tenants/{id}/read-mode' })
+			.input(z.strictObject({ id: z.string(), readMode: tenantReadModeSchema }))
+			.output(tenantReadModeResponseSchema),
+
+		rotateReadCredential: controlProcedure
+			.route({ method: 'POST', path: '/tenants/{id}/read-credential' })
+			.input(
+				z.strictObject({ id: z.string(), read: tenantReadCredentialSchema })
+			)
+			.output(tenantReadModeResponseSchema),
+
+		clearReadCredential: controlProcedure
+			.route({ method: 'DELETE', path: '/tenants/{id}/read-credential' })
+			.input(z.strictObject({ id: z.string() }))
+			.output(tenantReadModeResponseSchema),
 
 		remove: controlProcedure
 			.route({ method: 'DELETE', path: '/tenants/{id}' })
