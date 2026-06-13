@@ -182,6 +182,18 @@ export function registerTenantCommands(
 			'the storage quota in bytes (unlimited by default)',
 			parseQuotaBytes
 		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Example:',
+				'  # The owner triple is the OIDC identity that may administer the',
+				'  # tenant: the same one it presents to `cupboard login`.',
+				'  cupboard tenant create https://cupboard.example.workers.dev acme \\',
+				'    --owner-issuer <issuer> --owner-subject <subject> \\',
+				'    --owner-audience <audience>'
+			].join('\n')
+		)
 		.action(async (url: string, id: string, options: CreateOptions) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)

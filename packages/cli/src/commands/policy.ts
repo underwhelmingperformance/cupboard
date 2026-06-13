@@ -80,6 +80,16 @@ export function registerPolicyCommands(
 			'default TTL for matching roots (e.g. 14d, 12h)',
 			parseTtl
 		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Example:',
+				'  # Default 14-day retention for roots in a named cache',
+				'  cupboard policy add https://cupboard.example.workers.dev/t/acme \\',
+				'    cache builds --ttl 14d'
+			].join('\n')
+		)
 		.action(
 			async (
 				url: string,

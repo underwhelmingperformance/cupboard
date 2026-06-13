@@ -92,6 +92,22 @@ export function registerPushCommand(
 			'--dry-run',
 			'show what would be uploaded, reused, and retained without changing anything'
 		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Examples:',
+				'  # Push a build result to a tenant, pinning it under a named root',
+				'  cupboard push https://cache.example.workers.dev/t/acme ./result \\',
+				'    --root github:acme/infra/main',
+				'',
+				'  # Preview a push without uploading anything',
+				'  cupboard push https://cache.example.workers.dev/t/acme ./result --dry-run',
+				'',
+				'  # Push from CI with a GitHub Actions OIDC token',
+				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result'
+			].join('\n')
+		)
 		.action(async (url: string, paths: string[], options: PushOptions) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)

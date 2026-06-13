@@ -69,6 +69,16 @@ export function registerRootCommands(
 			parseTtl
 		)
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Example:',
+				"  # Keep a channel's top-level paths, expiring after 30 days",
+				'  cupboard root set https://cupboard.example.workers.dev/t/acme \\',
+				'    github:acme/infra/main /nix/store/<hash>-app --ttl 30d'
+			].join('\n')
+		)
 		.action(
 			async (
 				url: string,

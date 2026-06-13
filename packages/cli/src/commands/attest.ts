@@ -119,6 +119,21 @@ export function registerAttestCommands(
 			'--certificate-oidc-issuer-regex <regex>',
 			'regular expression for the signing OIDC issuer'
 		)
+		.addHelpText(
+			'after',
+			[
+				'',
+				'Examples:',
+				'  # Local mode: verify bundle files against an expected NAR hash',
+				'  cupboard attest verify ./app.sigstore.json \\',
+				'    --nar-hash sha256:... --predicate-type https://slsa.dev/provenance/v1',
+				'',
+				'  # Remote mode: verify what a cache holds for a store path',
+				'  cupboard attest verify --url https://cache.example.workers.dev/t/acme \\',
+				'    --store-path-hash <hash> --trust-cache-pubkey \\',
+				'    --predicate-type https://slsa.dev/provenance/v1'
+			].join('\n')
+		)
 		.action(async (bundles: string[], options: VerifyOptions) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
