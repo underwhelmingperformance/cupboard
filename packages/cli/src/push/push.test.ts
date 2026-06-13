@@ -1265,8 +1265,8 @@ function reporter(
 				})
 			);
 		},
-		result(rows) {
-			results.push([...rows]);
+		result(payload) {
+			results.push([...payload.rows]);
 		},
 		data() {
 			return;

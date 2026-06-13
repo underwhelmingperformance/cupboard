@@ -451,7 +451,16 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 			: [{ label: 'Cache URL', value: `https://${options.domain}` }])
 	];
 
-	reporter.result(rows);
+	reporter.result({
+		kind: 'deployment',
+		data: {
+			controlWorker: artifact.config.control.name,
+			tenantWorker: artifact.config.tenant.name,
+			cacheUrl:
+				options.domain === undefined ? undefined : `https://${options.domain}`
+		},
+		rows
+	});
 
 	return rows;
 }

@@ -157,11 +157,15 @@ export async function runRootSet(
 		})
 	);
 
-	reporter.result([
-		{ label: 'Root', value: summary.name },
-		{ label: 'Targets', value: String(summary.targets.length) },
-		{ label: 'Expiry', value: describeExpiry(summary) }
-	]);
+	reporter.result({
+		kind: 'root',
+		data: summary,
+		rows: [
+			{ label: 'Root', value: summary.name },
+			{ label: 'Targets', value: String(summary.targets.length) },
+			{ label: 'Expiry', value: describeExpiry(summary) }
+		]
+	});
 }
 
 export async function runRootList(
@@ -178,7 +182,11 @@ export async function runRootList(
 		return;
 	}
 
-	reporter.result(roots.map((root) => rootListRow(root)));
+	reporter.result({
+		kind: 'roots',
+		data: roots,
+		rows: roots.map((root) => rootListRow(root))
+	});
 }
 
 export async function runRootRemove(
@@ -191,10 +199,14 @@ export async function runRootRemove(
 		client.remove({ cacheName, name })
 	);
 
-	reporter.result([
-		{ label: 'Root', value: result.name },
-		{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
-	]);
+	reporter.result({
+		kind: 'root',
+		data: result,
+		rows: [
+			{ label: 'Root', value: result.name },
+			{ label: 'Removed', value: result.removed ? 'yes' : 'not present' }
+		]
+	});
 }
 
 function rootListRow(root: RootSummary): ResultRow {
