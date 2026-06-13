@@ -69,7 +69,14 @@ export async function pushStorePaths(
 		}
 
 		if (decision.action !== 'skip') {
-			await context.client.commit(decision.uploadId, {});
+			await context.client.commit(
+				{
+					uploadId: decision.uploadId,
+					storePathHash: decision.storePathHash,
+					narHash: decision.narHash
+				},
+				{}
+			);
 		}
 	}
 
