@@ -58,6 +58,15 @@ export class InvalidClaimError extends CliUsageError {
 	}
 }
 
+export class InvalidUploadConcurrencyError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`Invalid --upload-concurrency (expected a positive integer): ${value}`
+		);
+		this.name = 'InvalidUploadConcurrencyError';
+	}
+}
+
 export class InvalidWorkerUrlError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(
