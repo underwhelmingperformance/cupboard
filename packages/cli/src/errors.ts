@@ -1,4 +1,25 @@
-export abstract class CliError extends Error {}
+// Process exit codes by failure category, so a script can tell a misuse from a
+// missing session from a transient outage. The values follow the BSD sysexits
+// convention where one exists (77 EX_NOPERM, 75 EX_TEMPFAIL); 2 is the usual
+// shell convention for a usage error, and 1 is the catch-all.
+export const genericExitCode = 1;
+export const usageExitCode = 2;
+export const authExitCode = 77;
+export const transientExitCode = 75;
+
+export abstract class CliError extends Error {
+	/** The process exit code this failure should produce. */
+	get exitCode(): number {
+		return genericExitCode;
+	}
+}
+
+/** A misuse of the CLI: a bad flag value or an unsupported combination. */
+export abstract class CliUsageError extends CliError {
+	override get exitCode(): number {
+		return usageExitCode;
+	}
+}
 
 export class CliAbortError extends CliError {
 	constructor() {
@@ -7,21 +28,21 @@ export class CliAbortError extends CliError {
 	}
 }
 
-export class InvalidCacheNameError extends CliError {
+export class InvalidCacheNameError extends CliUsageError {
 	constructor(public readonly cache: string) {
 		super(`Invalid cache name: ${cache}`);
 		this.name = 'InvalidCacheNameError';
 	}
 }
 
-export class InvalidCachePriorityError extends CliError {
+export class InvalidCachePriorityError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid cache priority (expected a non-negative integer): ${value}`);
 		this.name = 'InvalidCachePriorityError';
 	}
 }
 
-export class InvalidPolicyScopeError extends CliError {
+export class InvalidPolicyScopeError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(
 			`Invalid policy scope (expected cache or root-name-prefix): ${value}`
@@ -30,7 +51,7 @@ export class InvalidPolicyScopeError extends CliError {
 	}
 }
 
-export class InvalidClaimError extends CliError {
+export class InvalidClaimError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid --claim (expected key=value): ${value}`);
 		this.name = 'InvalidClaimError';
@@ -41,6 +62,10 @@ export class OwnerLoginRequiredError extends CliError {
 	constructor() {
 		super('No cupboard session, or it has expired. Run `cupboard login`.');
 		this.name = 'OwnerLoginRequiredError';
+	}
+
+	override get exitCode(): number {
+		return authExitCode;
 	}
 }
 
@@ -53,6 +78,18 @@ export class CupboardHttpError extends CliError {
 	) {
 		super(`${method} ${path} failed with ${String(status)}: ${body}`);
 		this.name = 'CupboardHttpError';
+	}
+
+	override get exitCode(): number {
+		if (this.status === 401 || this.status === 403) {
+			return authExitCode;
+		}
+
+		if (this.status === 408 || this.status === 429 || this.status >= 500) {
+			return transientExitCode;
+		}
+
+		return genericExitCode;
 	}
 }
 
@@ -156,6 +193,10 @@ export class UploadWaitTimeoutError extends CliError {
 		);
 		this.name = 'UploadWaitTimeoutError';
 	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
 }
 
 export class AttestationBundleInvalidError extends CliError {
@@ -199,7 +240,7 @@ export class UnexpectedAttestationDecisionError extends CliError {
 	}
 }
 
-export class AttestationsDisabledError extends CliError {
+export class AttestationsDisabledError extends CliUsageError {
 	constructor() {
 		super('Cannot pass --attestation when attestation attachment is disabled');
 		this.name = 'AttestationsDisabledError';
