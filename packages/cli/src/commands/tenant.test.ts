@@ -12,9 +12,13 @@ import {
 	parseQuotaBytes,
 	readCredentialFromOptions,
 	ReadCredentialIncompleteError,
+	runTenantClearCredential,
 	runTenantCreate,
 	runTenantDelete,
 	runTenantList,
+	runTenantReadMode,
+	runTenantResume,
+	runTenantRotateCredential,
 	runTenantSuspend,
 	type TenantClient
 } from './tenant.ts';
@@ -75,6 +79,10 @@ function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 		create: uncalled,
 		list: uncalled,
 		suspend: uncalled,
+		resume: uncalled,
+		setReadMode: uncalled,
+		rotateReadCredential: uncalled,
+		clearReadCredential: uncalled,
 		remove: uncalled,
 		...overrides
 	};
@@ -96,8 +104,8 @@ describe('runTenantCreate', () => {
 			})
 		);
 
-		expect({ sentId: calls[0]?.id, results }).toStrictEqual({
-			sentId: 'acme',
+		expect({ calls, results }).toStrictEqual({
+			calls: [createBody()],
 			results: [
 				[
 					{ label: 'Tenant', value: 'acme' },
@@ -136,8 +144,8 @@ describe('runTenantCreate', () => {
 			})
 		);
 
-		expect({ sentRead: calls[0]?.read, results }).toStrictEqual({
-			sentRead: { user: 'alice', password: 'correct-horse-battery-staple' },
+		expect({ calls, results }).toStrictEqual({
+			calls: [body],
 			results: [
 				[
 					{ label: 'Tenant', value: 'acme' },
@@ -320,6 +328,186 @@ describe('runTenantSuspend / runTenantDelete', () => {
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ id: 'acme' }],
 			results: [[{ label: 'acme', value: status }]]
+		});
+	});
+});
+
+describe('runTenantResume', () => {
+	it('reports the resumed status', async () => {
+		const results: ResultRow[][] = [];
+		const calls: { id: string }[] = [];
+
+		await runTenantResume(
+			'acme',
+			reporter(results),
+			tenantClient({
+				resume(input) {
+					calls.push(input);
+					return Promise.resolve({ id: 'acme', status: 'active' });
+				}
+			})
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [{ id: 'acme' }],
+			results: [[{ label: 'acme', value: 'active' }]]
+		});
+	});
+});
+
+describe('runTenantReadMode', () => {
+	it('sets the read mode and reports it', async () => {
+		const results: ResultRow[][] = [];
+		const calls: { id: string; readMode: 'public' | 'private' }[] = [];
+
+		await runTenantReadMode(
+			'acme',
+			'public',
+			reporter(results),
+			tenantClient({
+				setReadMode(input) {
+					calls.push(input);
+					return Promise.resolve({ id: 'acme', readMode: 'public' });
+				}
+			})
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [{ id: 'acme', readMode: 'public' }],
+			results: [[{ label: 'acme', value: 'public' }]]
+		});
+	});
+});
+
+describe('runTenantRotateCredential', () => {
+	it('sends an explicit credential and shows the user without echoing the password', async () => {
+		const results: ResultRow[][] = [];
+		const calls: {
+			id: string;
+			read: { user: string; password: string };
+		}[] = [];
+
+		await runTenantRotateCredential(
+			'acme',
+			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
+			reporter(results),
+			tenantClient({
+				rotateReadCredential(input) {
+					calls.push(input);
+					return Promise.resolve({ id: 'acme', readMode: 'private' });
+				}
+			})
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [
+				{
+					id: 'acme',
+					read: { user: 'alice', password: 'correct-horse-battery-staple' }
+				}
+			],
+			results: [
+				[
+					{ label: 'Tenant', value: 'acme' },
+					{ label: 'Read mode', value: 'private' },
+					{ label: 'Read user', value: 'alice' }
+				]
+			]
+		});
+	});
+
+	it('generates a password by default and reports the same value it sends', async () => {
+		const results: ResultRow[][] = [];
+		const calls: {
+			id: string;
+			read: { user: string; password: string };
+		}[] = [];
+
+		await runTenantRotateCredential(
+			'acme',
+			{},
+			reporter(results),
+			tenantClient({
+				rotateReadCredential(input) {
+					calls.push(input);
+					return Promise.resolve({ id: 'acme', readMode: 'private' });
+				}
+			})
+		);
+
+		// The generated password is sent to the server and printed to the operator,
+		// so capture what was sent and assert the printed value is exactly it: an
+		// operator shown a different value would hold a password that cannot
+		// authenticate.
+		const sentPassword = calls.at(0)?.read.password;
+
+		expect(sentPassword).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect({ calls, results }).toStrictEqual({
+			calls: [
+				{
+					id: 'acme',
+					read: { user: 'cupboard', password: sentPassword }
+				}
+			],
+			results: [
+				[
+					{ label: 'Tenant', value: 'acme' },
+					{ label: 'Read mode', value: 'private' },
+					{ label: 'Read user', value: 'cupboard' },
+					{ label: 'Read password', value: sentPassword }
+				]
+			]
+		});
+	});
+
+	it('warns when the tenant is public', async () => {
+		const results: ResultRow[][] = [];
+
+		await runTenantRotateCredential(
+			'acme',
+			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
+			reporter(results),
+			tenantClient({
+				rotateReadCredential() {
+					return Promise.resolve({ id: 'acme', readMode: 'public' });
+				}
+			})
+		);
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Tenant', value: 'acme' },
+				{ label: 'Read mode', value: 'public' },
+				{ label: 'Read user', value: 'alice' },
+				{
+					label: 'Warning',
+					value:
+						'tenant is public; the read credential is unused until it is private'
+				}
+			]
+		]);
+	});
+});
+
+describe('runTenantClearCredential', () => {
+	it('clears the credential and reports the read mode', async () => {
+		const results: ResultRow[][] = [];
+		const calls: { id: string }[] = [];
+
+		await runTenantClearCredential(
+			'acme',
+			reporter(results),
+			tenantClient({
+				clearReadCredential(input) {
+					calls.push(input);
+					return Promise.resolve({ id: 'acme', readMode: 'private' });
+				}
+			})
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [{ id: 'acme' }],
+			results: [[{ label: 'acme', value: 'private' }]]
 		});
 	});
 });

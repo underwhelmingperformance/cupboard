@@ -11,13 +11,18 @@ import * as d1Schema from '../db/d1-schema.ts';
 import {
 	TenantAlreadyExistsError,
 	TenantNotFoundError,
+	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
 
 import {
+	clearTenantReadCredential,
 	ensureTenant,
 	finaliseOffboardedTenant,
 	listTenants,
+	resumeTenant,
+	setTenantReadCredential,
+	setTenantReadMode,
 	setTenantStatus
 } from './tenant-registry.ts';
 
@@ -354,5 +359,126 @@ describe('tenant registry', () => {
 			usage: undefined,
 			reProvision: 'refused'
 		});
+	});
+});
+
+describe('tenant lifecycle operations', () => {
+	it('resumes a suspended tenant back to active', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await setTenantStatus(database(), 'acme', 'suspended');
+
+		const resumed = await resumeTenant(database(), 'acme');
+
+		expect(resumed.status).toBe('active');
+	});
+
+	it.each([
+		{
+			name: 'active',
+			setup: async () => {
+				await ensureTenant(database(), createBody('acme'), now);
+			},
+			error: TenantNotSuspendedError
+		},
+		{
+			name: 'offboarding',
+			setup: async () => {
+				await ensureTenant(database(), createBody('acme'), now);
+				await setTenantStatus(database(), 'acme', 'offboarding');
+			},
+			error: TenantRetiredError
+		},
+		{
+			name: 'missing',
+			setup: () => Promise.resolve(),
+			error: TenantNotFoundError
+		}
+	])('refuses to resume a $name tenant', async ({ setup, error }) => {
+		await setup();
+
+		await expect(resumeTenant(database(), 'acme')).rejects.toThrow(error);
+	});
+
+	it('sets the read mode of a live tenant', async () => {
+		await ensureTenant(database(), createBody('acme', 'private'), now);
+
+		const updated = await setTenantReadMode(database(), 'acme', 'public');
+
+		expect(updated.readMode).toBe('public');
+	});
+
+	it('stores a rotated read credential hashed, not in plaintext', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+
+		await setTenantReadCredential(database(), 'acme', {
+			user: 'reader',
+			password: 'correct-horse-battery-staple'
+		});
+		const row = await database()
+			.select({
+				readUser: d1Schema.tenant.readUser,
+				readPasswordHash: d1Schema.tenant.readPasswordHash,
+				readPasswordSalt: d1Schema.tenant.readPasswordSalt
+			})
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, 'acme'))
+			.get();
+
+		expect({
+			user: row?.readUser,
+			hashIsPlaintext: row?.readPasswordHash === 'correct-horse-battery-staple',
+			hashType: typeof row?.readPasswordHash,
+			saltType: typeof row?.readPasswordSalt
+		}).toStrictEqual({
+			user: 'reader',
+			hashIsPlaintext: false,
+			hashType: 'string',
+			saltType: 'string'
+		});
+	});
+
+	it('clears a read credential to empty columns', async () => {
+		await ensureTenant(database(), privateBodyWithRead('acme'), now);
+
+		await clearTenantReadCredential(database(), 'acme');
+		const row = await database()
+			.select({
+				readUser: d1Schema.tenant.readUser,
+				readPasswordHash: d1Schema.tenant.readPasswordHash,
+				readPasswordSalt: d1Schema.tenant.readPasswordSalt
+			})
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, 'acme'))
+			.get();
+
+		expect({
+			user: row?.readUser ?? undefined,
+			hash: row?.readPasswordHash ?? undefined,
+			salt: row?.readPasswordSalt ?? undefined
+		}).toStrictEqual({ user: undefined, hash: undefined, salt: undefined });
+	});
+
+	it.each([
+		{
+			name: 'read mode',
+			run: (id: string) => setTenantReadMode(database(), id, 'public')
+		},
+		{
+			name: 'read credential',
+			run: (id: string) =>
+				setTenantReadCredential(database(), id, {
+					user: 'reader',
+					password: 'correct-horse-battery-staple'
+				})
+		},
+		{
+			name: 'cleared credential',
+			run: (id: string) => clearTenantReadCredential(database(), id)
+		}
+	])('refuses to set the $name of an offboarding tenant', async ({ run }) => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await setTenantStatus(database(), 'acme', 'offboarding');
+
+		await expect(run('acme')).rejects.toThrow(TenantRetiredError);
 	});
 });
