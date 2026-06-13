@@ -1,3 +1,4 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import type {
 	RootListResponse,
@@ -26,6 +27,7 @@ interface RootSetOptions {
 interface RootOptions {
 	readonly token: string;
 	readonly cache?: string;
+	readonly yes?: boolean;
 }
 
 /**
@@ -122,9 +124,11 @@ export function registerRootCommands(
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<name>', 'root name to remove')
 		.option('--cache <name>', 'target a named cache rather than the default')
+		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, name: string, options: RootOptions) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url),
@@ -134,7 +138,7 @@ export function registerRootCommands(
 			await runRootRemove(
 				selectorForCache(options.cache ?? DEFAULT_CACHE),
 				name,
-				reporter,
+				ui,
 				rpc.roots
 			);
 		});
@@ -192,9 +196,20 @@ export async function runRootList(
 export async function runRootRemove(
 	cacheName: string,
 	name: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: RootClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Remove retention root ${name}?`,
+		detail: 'Paths kept only by this root become eligible for collection.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The retention root was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Removing retention root', () =>
 		client.remove({ cacheName, name })
 	);

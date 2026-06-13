@@ -1,3 +1,4 @@
+import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import type {
 	CacheListResponse,
 	CacheRemoveResponse,
@@ -116,9 +117,9 @@ describe('runCacheCreate', () => {
 });
 
 describe('runCacheRemove', () => {
-	it('removes the cache with the force flag and reports the outcome', async () => {
+	it('removes the cache with the force flag once confirmed', async () => {
 		const calls: Parameters<CacheClient['remove']>[0][] = [];
-		const results: ResultRow[][] = [];
+		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 		const response: CacheRemoveResponse = {
 			name: 'builds',
 			removed: true,
@@ -128,7 +129,7 @@ describe('runCacheRemove', () => {
 		await runCacheRemove(
 			'builds',
 			true,
-			reporter(results),
+			ui,
 			cacheClient({
 				remove(input) {
 					calls.push(input);
@@ -137,15 +138,33 @@ describe('runCacheRemove', () => {
 			})
 		);
 
-		expect({ calls, results }).toStrictEqual({
+		expect({ calls, results: captured.results }).toStrictEqual({
 			calls: [{ params: { cacheName: 'builds' }, query: { force: true } }],
 			results: [
-				[
-					{ label: 'Cache', value: 'builds' },
-					{ label: 'Removed', value: 'yes' },
-					{ label: 'Store paths removed', value: '5' }
-				]
+				{
+					kind: 'cache',
+					data: response,
+					rows: [
+						{ label: 'Cache', value: 'builds' },
+						{ label: 'Removed', value: 'yes' },
+						{ label: 'Store paths removed', value: '5' }
+					]
+				}
 			]
+		});
+	});
+
+	it('leaves the cache in place when the confirmation is declined', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+		await runCacheRemove('builds', false, ui, cacheClient({}));
+
+		expect({
+			results: captured.results,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			results: [],
+			cancellations: ['The cache was left in place.']
 		});
 	});
 });

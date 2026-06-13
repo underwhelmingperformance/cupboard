@@ -1,3 +1,4 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import type {
 	OidcTrustAddBody,
 	OidcTrustListResponse,
@@ -15,6 +16,10 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
+
+interface ConfirmableOptions {
+	readonly yes?: boolean;
+}
 
 interface OidcTrustAddOptions {
 	readonly issuer: string;
@@ -119,16 +124,18 @@ export function registerOidcTrustCommands(
 		.description('Disable an OIDC trust rule by id.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<id>', 'trust rule id')
-		.action(async (url: string, id: string) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+		.option('-y, --yes', 'remove without the confirmation prompt')
+		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runOidcTrustRemove(id, reporter, rpc.oidcTrust);
+			await runOidcTrustRemove(id, ui, rpc.oidcTrust);
 		});
 }
 
@@ -179,9 +186,20 @@ export async function runOidcTrustAdd(
 
 export async function runOidcTrustRemove(
 	id: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: OidcTrustClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Remove OIDC trust rule ${id}?`,
+		detail: 'CI workflows relying on this rule can no longer exchange tokens.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The trust rule was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Removing OIDC trust rule', () =>
 		client.remove({ id })
 	);
