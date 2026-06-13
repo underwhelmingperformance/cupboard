@@ -1,3 +1,4 @@
+import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import type {
 	OidcTrustAddBody,
 	OidcTrustListResponse,
@@ -163,22 +164,39 @@ describe('runOidcTrustRemove', () => {
 	it.each([
 		{ removed: true, value: 'yes' },
 		{ removed: false, value: 'not present' }
-	])('reports removed=$removed', async ({ removed, value }) => {
-		const results: ResultRow[][] = [];
+	])('reports removed=$removed once confirmed', async ({ removed, value }) => {
+		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
+		const response = { id: 'rule-1', removed };
 
 		await runOidcTrustRemove(
 			'rule-1',
-			reporter(results),
-			trustClient({
-				remove: () => Promise.resolve({ id: 'rule-1', removed })
-			})
+			ui,
+			trustClient({ remove: () => Promise.resolve(response) })
 		);
 
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Rule', value: 'rule-1' },
-				{ label: 'Removed', value }
-			]
+		expect(captured.results).toStrictEqual([
+			{
+				kind: 'oidc-trust-rule',
+				data: response,
+				rows: [
+					{ label: 'Rule', value: 'rule-1' },
+					{ label: 'Removed', value }
+				]
+			}
 		]);
+	});
+
+	it('leaves the rule in place when the confirmation is declined', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+		await runOidcTrustRemove('rule-1', ui, trustClient({}));
+
+		expect({
+			results: captured.results,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			results: [],
+			cancellations: ['The trust rule was left in place.']
+		});
 	});
 });

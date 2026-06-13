@@ -1,3 +1,4 @@
+import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import type {
 	RetentionPolicyAddBody,
 	RetentionPolicyListResponse,
@@ -135,14 +136,14 @@ describe('runPolicyAdd', () => {
 });
 
 describe('runPolicyRemove', () => {
-	it('removes a policy and reports the outcome', async () => {
+	it('removes a policy and reports the outcome once confirmed', async () => {
 		const calls: { id: string }[] = [];
-		const results: ResultRow[][] = [];
+		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 		const response: RetentionPolicyRemoveResponse = { id: 'p1', removed: true };
 
 		await runPolicyRemove(
 			'p1',
-			reporter(results),
+			ui,
 			policyClient({
 				remove(input) {
 					calls.push(input);
@@ -151,14 +152,32 @@ describe('runPolicyRemove', () => {
 			})
 		);
 
-		expect({ calls, results }).toStrictEqual({
+		expect({ calls, results: captured.results }).toStrictEqual({
 			calls: [{ id: 'p1' }],
 			results: [
-				[
-					{ label: 'Policy', value: 'p1' },
-					{ label: 'Removed', value: 'yes' }
-				]
+				{
+					kind: 'retention-policy',
+					data: response,
+					rows: [
+						{ label: 'Policy', value: 'p1' },
+						{ label: 'Removed', value: 'yes' }
+					]
+				}
 			]
+		});
+	});
+
+	it('leaves the policy in place when the confirmation is declined', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
+
+		await runPolicyRemove('p1', ui, policyClient({}));
+
+		expect({
+			results: captured.results,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			results: [],
+			cancellations: ['The retention policy was left in place.']
 		});
 	});
 });

@@ -1,3 +1,4 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import type {
 	CacheListResponse,
@@ -23,8 +24,8 @@ interface CacheCreateOptions {
 }
 
 interface CacheRemoveOptions {
-	readonly token: string;
 	readonly force?: boolean;
+	readonly yes?: boolean;
 }
 
 /**
@@ -57,7 +58,7 @@ export function registerCacheCommands(
 ): void {
 	const cache = program
 		.command('cache')
-		.description('Manage named caches: list, create, inspect and tear down.');
+		.description('Manage named caches: list, create, inspect and remove.');
 
 	cache
 		.command('list')
@@ -104,20 +105,22 @@ export function registerCacheCommands(
 
 	cache
 		.command('remove')
-		.description('Tear down a named cache.')
+		.description('Remove a named cache.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<name>', 'cache name')
-		.option('--force', 'tear down even when the cache still holds store paths')
+		.option('--force', 'remove even when the cache still holds store paths')
+		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, name: string, options: CacheRemoveOptions) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runCacheRemove(name, options.force ?? false, reporter, rpc.caches);
+			await runCacheRemove(name, options.force ?? false, ui, rpc.caches);
 		});
 
 	cache
@@ -169,9 +172,22 @@ export async function runCacheCreate(
 export async function runCacheRemove(
 	name: string,
 	force: boolean,
-	reporter: Reporter,
+	ui: CliUi,
 	client: CacheClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Remove cache ${cacheLabel(name)}?`,
+		detail: force
+			? 'With --force this removes the cache and every store path it holds.'
+			: 'The cache must be empty; pass --force to remove one that still holds paths.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The cache was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Removing cache', () =>
 		client.remove({ params: { cacheName: name }, query: { force } })
 	);

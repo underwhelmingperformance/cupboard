@@ -1,3 +1,4 @@
+import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import type {
 	RootListResponse,
 	RootRemoveResponse,
@@ -139,24 +140,45 @@ describe('runRootList', () => {
 });
 
 describe('runRootRemove', () => {
-	it('removes the root and reports the outcome', async () => {
+	it('removes the root and reports the outcome once confirmed', async () => {
 		const calls: { cacheName: string; name: string }[] = [];
-		const results: ResultRow[][] = [];
+		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
+		const response: RootRemoveResponse = { name: 'pr-123', removed: true };
+
+		await runRootRemove('builds', 'pr-123', ui, removeClient(response, calls));
+
+		expect({ calls, results: captured.results }).toStrictEqual({
+			calls: [{ cacheName: 'builds', name: 'pr-123' }],
+			results: [
+				{
+					kind: 'root',
+					data: response,
+					rows: [
+						{ label: 'Root', value: 'pr-123' },
+						{ label: 'Removed', value: 'yes' }
+					]
+				}
+			]
+		});
+	});
+
+	it('leaves the root in place when the confirmation is declined', async () => {
+		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
 		await runRootRemove(
 			'builds',
 			'pr-123',
-			reporter(results),
-			removeClient({ name: 'pr-123', removed: true }, calls)
+			ui,
+			removeClient({ name: 'pr-123', removed: true }, [])
 		);
 
-		expect(calls).toStrictEqual([{ cacheName: 'builds', name: 'pr-123' }]);
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Root', value: 'pr-123' },
-				{ label: 'Removed', value: 'yes' }
-			]
-		]);
+		expect({
+			results: captured.results,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			results: [],
+			cancellations: ['The retention root was left in place.']
+		});
 	});
 });
 

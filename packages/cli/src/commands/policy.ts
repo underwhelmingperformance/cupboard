@@ -1,3 +1,4 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import {
 	type RetentionPolicyAddBody,
 	type RetentionPolicyListResponse,
@@ -22,6 +23,10 @@ import { InvalidPolicyScopeError } from '../errors.ts';
 
 interface PolicyAddOptions {
 	readonly ttl: number;
+}
+
+interface ConfirmableOptions {
+	readonly yes?: boolean;
 }
 
 /**
@@ -110,16 +115,18 @@ export function registerPolicyCommands(
 		.description('Remove a retention policy by id.')
 		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
 		.argument('<id>', 'policy id')
-		.action(async (url: string, id: string) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+		.option('-y, --yes', 'remove without the confirmation prompt')
+		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url),
 				signal: programOptions.signal
 			});
 
-			await runPolicyRemove(id, reporter, rpc.policies);
+			await runPolicyRemove(id, ui, rpc.policies);
 		});
 }
 
@@ -173,9 +180,20 @@ export async function runPolicyAdd(
 
 export async function runPolicyRemove(
 	id: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: PolicyClient
 ): Promise<void> {
+	const outcome = await ui.confirm({
+		message: `Remove retention policy ${id}?`,
+		detail: 'Paths kept only by this policy fall back to the default retention.'
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('The retention policy was left in place.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Removing retention policy', () =>
 		client.remove({ id })
 	);
