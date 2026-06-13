@@ -4,9 +4,12 @@ import {
 	cacheSelectorSchema,
 	DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
+import { and, eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
 
 import { type ManifestEntry } from '../control/tenant-manifest.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import {
 	isNotModified,
 	narInfoCachePath,
@@ -82,12 +85,19 @@ export async function guardRead(
 	return unauthorisedResponse();
 }
 
-// NAR blobs are content-addressed and shared across all tenants, so the edge
-// cache key stays global: identical bytes, safely shared.
+// NAR blobs are content-addressed and shared at rest across all tenants, but
+// read access is per-tenant: the serve is gated on the requesting tenant holding
+// its own presence edge for the hash, so one tenant's bytes are never readable
+// through another's path. The R2 object stays global for dedupe; the edge cache
+// key carries the tenant so a cached entry is only ever replayed to the tenant
+// that was authorised to populate it. An unowned hash reads as a miss,
+// indistinguishable from one that exists for no tenant, closing the existence
+// oracle the negotiate path already guards.
 export function serveNar(
 	request: Request,
 	env: Env,
 	ctx: ReadContext,
+	tenant: string,
 	narHash: string,
 	isPrivate: boolean
 ): Promise<Response> {
@@ -96,10 +106,34 @@ export function serveNar(
 		env,
 		ctx,
 		narObjectKey(narHash),
-		narCacheKey(narHash),
+		narCacheKey(tenant, narHash),
 		narHeaders,
-		!isPrivate
+		!isPrivate,
+		() => tenantReferencesNar(env, tenant, narHash)
 	);
+}
+
+// Whether the tenant holds its own presence edge for the NAR hash. Mirrors the
+// `tenant_blob` ownership check `findReusableBlob` uses on the negotiate path.
+async function tenantReferencesNar(
+	env: Env,
+	tenant: string,
+	narHash: string
+): Promise<boolean> {
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	const owned = await database
+		.select({ narHash: d1Schema.tenantBlob.narHash })
+		.from(d1Schema.tenantBlob)
+		.where(
+			and(
+				eq(d1Schema.tenantBlob.tenant, tenant),
+				eq(d1Schema.tenantBlob.narHash, narHash)
+			)
+		)
+		.get();
+
+	return owned !== undefined;
 }
 
 // The narinfo edge-cache key carries the tenant prefix, matching the deletion
@@ -155,13 +189,17 @@ export async function cacheInfoResponse(
 	return new Response(response.body, { status: response.status, headers });
 }
 
-function narCacheKey(narHash: string): string {
+function narCacheKey(tenant: string, narHash: string): string {
 	return new URL(
-		narObjectKey(narHash),
+		`t/${tenant}/${narObjectKey(narHash)}`,
 		'https://cupboard-nar-cache.invalid/'
 	).toString();
 }
 
+// `authorize`, when provided, gates access to a shared object. It runs before
+// any uncached read or existence probe, never on an edge-cache hit: a cached
+// entry is keyed per tenant, so a hit already proves this tenant was authorised
+// when it populated the cache. A false verdict reads as a 404.
 async function serveR2(
 	request: Request,
 	env: Env,
@@ -169,9 +207,14 @@ async function serveR2(
 	key: string,
 	cacheKey: string,
 	headersFor: (object: R2Object) => Headers,
-	usePublicCache: boolean
+	usePublicCache: boolean,
+	authorize?: () => Promise<boolean>
 ): Promise<Response> {
 	if (request.method === 'HEAD') {
+		if (authorize !== undefined && !(await authorize())) {
+			return notFoundResponse();
+		}
+
 		const object = await env.BLOBS.head(key);
 
 		if (object === null) {
@@ -195,6 +238,10 @@ async function serveR2(
 				? notModified(cached.headers)
 				: cached;
 		}
+	}
+
+	if (authorize !== undefined && !(await authorize())) {
+		return notFoundResponse();
 	}
 
 	const object = await env.BLOBS.get(key);

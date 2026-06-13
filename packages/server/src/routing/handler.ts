@@ -186,6 +186,7 @@ app.on(
 				context.req.raw,
 				context.env,
 				context.executionCtx,
+				context.get('tenant'),
 				narHash,
 				entry.readMode === 'private'
 			)
