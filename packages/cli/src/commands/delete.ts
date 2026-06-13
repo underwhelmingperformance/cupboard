@@ -1,7 +1,7 @@
+import { type CliUi, createCliUi } from '@cupboard/cli-ui';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
-import { createReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -9,8 +9,8 @@ import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 
 interface DeleteOptions {
-	readonly token: string;
 	readonly cache?: string;
+	readonly yes?: boolean;
 }
 
 /**
@@ -41,9 +41,11 @@ export function registerDeleteCommand(
 			'--cache <name>',
 			'delete from a named cache rather than the default'
 		)
+		.option('-y, --yes', 'delete without the confirmation prompt')
 		.action(async (url: string, storePath: string, options: DeleteOptions) => {
-			const reporter = createReporter({
-				mode: reporterModeFromGlobals(program)
+			const ui = createCliUi({
+				mode: reporterModeFromGlobals(program),
+				assumeYes: options.yes
 			});
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url),
@@ -53,7 +55,7 @@ export function registerDeleteCommand(
 			await runDelete(
 				selectorForCache(options.cache ?? DEFAULT_CACHE),
 				storePath,
-				reporter,
+				ui,
 				rpc.paths
 			);
 		});
@@ -62,11 +64,21 @@ export function registerDeleteCommand(
 export async function runDelete(
 	cacheName: string,
 	storePath: string,
-	reporter: Reporter,
+	ui: CliUi,
 	client: DeleteClient
 ): Promise<void> {
 	const storePathHash = StorePath.hash(storePath);
 
+	const outcome = await ui.confirm({
+		message: `Permanently delete ${storePath} from the cache?`
+	});
+
+	if (outcome !== 'yes') {
+		ui.cancelled('Nothing was deleted.');
+		return;
+	}
+
+	const reporter = ui.reporter();
 	const result = await reporter.phase('Deleting from cupboard', () =>
 		client.remove({ cacheName, hash: storePathHash })
 	);

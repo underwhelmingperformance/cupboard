@@ -1,3 +1,4 @@
+import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import type { Reporter } from '@cupboard/reporter';
 import { CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
@@ -62,6 +63,11 @@ describe('cliExitCode', () => {
 			name: 'a commander help display',
 			error: new CommanderError(0, 'commander.helpDisplayed', '(outputHelp)'),
 			expected: 0
+		},
+		{
+			name: 'a refused confirmation',
+			error: new ConfirmationRequiredError('Remove tenant acme?'),
+			expected: usageExitCode
 		},
 		{ name: 'an unknown error', error: new Error('boom'), expected: 1 }
 	])('maps $name to its exit code', ({ error, expected }) => {
