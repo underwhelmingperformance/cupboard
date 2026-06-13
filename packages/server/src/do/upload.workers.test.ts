@@ -802,7 +802,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('tracks the loser of a commit race for verification', async () => {
+	it('tracks the loser of a commit race for verification rather than parking its socket', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const loser = expectSingleUploadDecision(
