@@ -1012,8 +1012,9 @@ describe('runPush', () => {
 		});
 	});
 
-	it('records a failed commit, skips retention, and fails incomplete', async () => {
-		const result = runPush([appPath], reporter([]), {
+	it('records a failed commit, warns with its reason, and fails incomplete', async () => {
+		const warnings: { label: string; value?: string }[] = [];
+		const result = runPush([appPath], reporter([], warnings), {
 			client: {
 				...deferredUpload([]),
 				commit() {
@@ -1034,6 +1035,20 @@ describe('runPush', () => {
 		await expect(result).rejects.toMatchObject({
 			failedPaths: [StorePath.basename(appPath)]
 		});
+
+		// The failed path's reason is surfaced per path, like an upload failure,
+		// so a terminal user sees why it failed and not only the count.
+		expect(warnings).toStrictEqual([
+			{
+				label: 'commit failed',
+				value: `${StorePath.basename(appPath)}: An uploaded NAR did not match the hash it declared. Re-run cupboard push to retry.`
+			},
+			{
+				label: 'incomplete',
+				value:
+					'1 path(s) failed; retention not recorded, re-run cupboard push to finish'
+			}
+		]);
 	});
 
 	it('uploads what it can, skips retention, and fails when an upload fails', async () => {
