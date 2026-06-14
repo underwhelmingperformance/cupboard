@@ -73,7 +73,7 @@ describe('runControlKeyList', () => {
 		);
 
 		expect({ results, infos }).toStrictEqual({
-			results: [],
+			results: [[]],
 			infos: ['No control keys.']
 		});
 	});

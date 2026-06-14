@@ -77,6 +77,21 @@ describe('runKeyList', () => {
 			]
 		]);
 	});
+
+	it('reports an empty result and a message when there are no keys', async () => {
+		const results: ResultRow[][] = [];
+		const infos: string[] = [];
+
+		await runKeyList(
+			reporter(results, infos),
+			keyClient({ list: () => Promise.resolve({ keys: [] }) })
+		);
+
+		expect({ results, infos }).toStrictEqual({
+			results: [[]],
+			infos: ['No signing keys.']
+		});
+	});
 });
 
 describe('runKeyRotate', () => {

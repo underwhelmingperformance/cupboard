@@ -592,6 +592,14 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 		},
 
 		result(payload) {
+			if (payload.rows.length === 0) {
+				if (payload.empty !== undefined) {
+					log.info(payload.empty);
+				}
+
+				return;
+			}
+
 			box(formatRows(payload.rows), resultTitle(payload.kind));
 		},
 

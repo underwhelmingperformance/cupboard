@@ -64,7 +64,7 @@ describe('runCacheList', () => {
 		);
 
 		expect({ results, infos }).toStrictEqual({
-			results: [],
+			results: [[]],
 			infos: ['No caches.']
 		});
 	});

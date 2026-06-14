@@ -65,7 +65,7 @@ describe('runPolicyList', () => {
 		);
 
 		expect({ results, infos }).toStrictEqual({
-			results: [],
+			results: [[]],
 			infos: ['No retention policies.']
 		});
 	});

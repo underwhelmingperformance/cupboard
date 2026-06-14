@@ -136,7 +136,7 @@ describe('runRootList', () => {
 		);
 
 		expect({ results, infos }).toStrictEqual({
-			results: [],
+			results: [[]],
 			infos: ['No retention roots.']
 		});
 	});

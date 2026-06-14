@@ -158,15 +158,11 @@ export async function runOidcTrustList(
 		client.list()
 	);
 
-	if (rules.length === 0) {
-		reporter.info('No OIDC trust rules.');
-		return;
-	}
-
 	reporter.result({
 		kind: 'oidc-trust-rules',
 		data: rules,
-		rows: rules.map((rule) => trustRow(rule))
+		rows: rules.map((rule) => trustRow(rule)),
+		empty: 'No OIDC trust rules.'
 	});
 }
 
