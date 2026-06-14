@@ -111,7 +111,7 @@ describe('runAuthKeyRotate', () => {
 			authKeyClient({ rotate: () => Promise.resolve(response) })
 		);
 
-		expect({ results, infoCount: infos.length }).toStrictEqual({
+		expect({ results, infos }).toStrictEqual({
 			results: [
 				[
 					{ label: 'New key', value: 'kid-new' },
@@ -123,7 +123,7 @@ describe('runAuthKeyRotate', () => {
 					{ label: 'Keys in set', value: '2' }
 				]
 			],
-			infoCount: 1
+			infos: ['New tokens are signed with this key.']
 		});
 	});
 });

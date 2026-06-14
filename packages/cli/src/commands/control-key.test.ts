@@ -102,7 +102,7 @@ describe('runControlKeyRotate', () => {
 			})
 		);
 
-		expect({ rotateCalls, results, infoCount: infos.length }).toStrictEqual({
+		expect({ rotateCalls, results, infos }).toStrictEqual({
 			rotateCalls: 1,
 			results: [
 				[
@@ -114,7 +114,7 @@ describe('runControlKeyRotate', () => {
 					}
 				]
 			],
-			infoCount: 1
+			infos: ['New control tokens are signed with this key.']
 		});
 	});
 });
