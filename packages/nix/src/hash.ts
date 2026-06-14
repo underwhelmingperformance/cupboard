@@ -44,6 +44,13 @@ export class NixSha256Hash {
 		return bytesToBase64(this.bytes);
 	}
 
+	/** The raw digest as lowercase hex, the form an in-toto subject uses. */
+	digestHex(): string {
+		return [...this.bytes]
+			.map((byte) => byte.toString(16).padStart(2, '0'))
+			.join('');
+	}
+
 	toString(): string {
 		return this.value;
 	}

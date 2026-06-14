@@ -108,7 +108,7 @@ export async function verifyLocalAttestations(
 	dependencies: AttestationVerifyDependencies = {}
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
-	const expectedSubject = narHashDigestHex(options.narHash);
+	const expectedSubject = NixSha256Hash.parse(options.narHash).digestHex();
 	const read = dependencies.readFile ?? nodeReadFile;
 	const verify = dependencies.verify ?? verifyBundle;
 	const results: VerifyResult[] = [];
@@ -153,7 +153,7 @@ export async function verifyRemoteAttestations(
 		);
 	}
 
-	const expectedSubject = narHashDigestHex(narInfo.narHash);
+	const expectedSubject = NixSha256Hash.parse(narInfo.narHash).digestHex();
 	const descriptors = await fetchAttestationList(
 		fetcher,
 		`${base}/attestations/${options.storePathHash}`,
@@ -538,12 +538,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 		bytes.byteOffset,
 		bytes.byteOffset + bytes.byteLength
 	) as ArrayBuffer;
-}
-
-function narHashDigestHex(hash: string): string {
-	return [...NixSha256Hash.parse(hash).digestBytes()]
-		.map((byte) => byte.toString(16).padStart(2, '0'))
-		.join('');
 }
 
 function cacheUrl(url: string, cache: string | undefined): string {
