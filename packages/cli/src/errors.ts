@@ -67,6 +67,37 @@ export class InvalidUploadConcurrencyError extends CliUsageError {
 	}
 }
 
+export class InvalidDurationError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`Invalid duration (expected a value like "7d", "12h" or "30m", units s, m, h, d, w): ${value}`
+		);
+		this.name = 'InvalidDurationError';
+	}
+}
+
+export class InvalidTtlError extends CliUsageError {
+	constructor(
+		public readonly value: string,
+		public readonly minSeconds: number,
+		public readonly maxSeconds: number
+	) {
+		super(
+			`TTL must be between ${String(minSeconds)} and ${String(maxSeconds)} seconds: ${value}`
+		);
+		this.name = 'InvalidTtlError';
+	}
+}
+
+export class InvalidWaitTimeoutError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(
+			`--wait-timeout must be at least 1 second; use --no-wait to skip waiting: ${value}`
+		);
+		this.name = 'InvalidWaitTimeoutError';
+	}
+}
+
 export class InvalidWorkerUrlError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(
