@@ -299,5 +299,4 @@ export function formatTimestamp(value: string): string {
 	return `${day} ${time} UTC`;
 }
 
-export { default as colour } from 'picocolors';
 export { default as formatBytes } from 'pretty-bytes';

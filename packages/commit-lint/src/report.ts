@@ -1,6 +1,7 @@
-import { colour as pc, formatCount as formatInteger } from '@cupboard/reporter';
+import pc from 'picocolors';
 
 import type { CommitMessageCheck, Finding } from './linter.ts';
+import { formatCount as formatInteger } from './reporter.ts';
 
 export type CommitMessageLintStatus = 'failed' | 'ok';
 
