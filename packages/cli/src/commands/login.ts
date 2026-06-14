@@ -1,4 +1,4 @@
-import { createCliUi, openBrowser } from '@cupboard/cli-ui';
+import { openBrowser } from '@cupboard/cli-ui';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type { Command } from 'commander';
 
@@ -13,7 +13,7 @@ import {
 	tokensDirectory,
 	writeCachedSession
 } from '../auth/token-store.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
 import {
@@ -167,9 +167,7 @@ export function registerLoginCommand(
 			'use the device flow instead of opening a browser (for SSH/containers)'
 		)
 		.action(async (url: string, options: LoginOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const client = CupboardClient.fromUrl(url, {
 				signal: programOptions.signal
 			});

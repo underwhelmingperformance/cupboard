@@ -1,10 +1,9 @@
-import { createCliUi } from '@cupboard/cli-ui';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import { formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -22,9 +21,7 @@ export function registerStatsCommand(
 		.argument('<url>', tenantUrlArgument)
 		.option('--cache <name>', 'report on a named cache rather than the default')
 		.action(async (url: string, options: StatsOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -71,9 +68,7 @@ export function registerStatsCommand(
 		.description('Show tenant-wide charged storage usage.')
 		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

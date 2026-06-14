@@ -1,11 +1,11 @@
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -44,10 +44,7 @@ export function registerDeleteCommand(
 		)
 		.option('-y, --yes', 'delete without the confirmation prompt')
 		.action(async (url: string, storePath: string, options: DeleteOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

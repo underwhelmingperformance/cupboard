@@ -15,8 +15,8 @@ export interface DeployUi extends CliUi {
 	): Promise<string | undefined>;
 }
 
-export function createDeployUi(): DeployUi {
-	const ui = createCliUi({ mode: 'terminal' });
+export function createDeployUi(signal?: AbortSignal): DeployUi {
+	const ui = createCliUi({ mode: 'terminal', signal });
 
 	return {
 		...ui,

@@ -1,4 +1,4 @@
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import type {
 	CacheListResponse,
@@ -9,7 +9,7 @@ import { formatCount, type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -60,9 +60,7 @@ export function registerCacheCommands(
 		.description('List the caches and their priority and size.')
 		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -82,9 +80,7 @@ export function registerCacheCommands(
 			parsePriority
 		)
 		.action(async (url: string, name: string, options: CacheCreateOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -106,10 +102,7 @@ export function registerCacheCommands(
 		.option('--force', 'remove even when the cache still holds store paths')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, name: string, options: CacheRemoveOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -124,9 +117,7 @@ export function registerCacheCommands(
 		.argument('<url>', tenantUrlArgument)
 		.argument('<name>', 'cache name')
 		.action(async (url: string, name: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

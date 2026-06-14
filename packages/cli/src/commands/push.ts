@@ -1,8 +1,7 @@
-import { createCliUi } from '@cupboard/cli-ui';
 import type { Command } from 'commander';
 
 import { authenticateForPush } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { parseTtl, parseWaitTimeout } from '../duration.ts';
 import {
@@ -110,9 +109,7 @@ export function registerPushCommand(
 			].join('\n')
 		)
 		.action(async (url: string, paths: string[], options: PushOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
 				cache: options.cache,
 				signal: programOptions.signal

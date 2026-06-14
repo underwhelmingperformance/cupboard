@@ -1,12 +1,11 @@
 import { env } from 'node:process';
 
-import { createCliUi } from '@cupboard/cli-ui';
 import { NixConfig, renderNetrc } from '@cupboard/nix/nix-config';
 import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { InvalidCacheNameError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -72,7 +71,7 @@ export function runConfig(
 
 export function registerConfigCommand(
 	program: Command,
-	_programOptions: ProgramOptions = {}
+	programOptions: ProgramOptions = {}
 ): void {
 	program
 		.command('config')
@@ -91,9 +90,7 @@ export function registerConfigCommand(
 		)
 		.option('--cache <name>', 'configure a named cache rather than the default')
 		.action((url: string, publicKey: string, options: ConfigOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const user = options.readUser ?? env.CUPBOARD_READ_USER;
 			const password = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
 			const credential = user && password ? { user, password } : undefined;
