@@ -2,8 +2,11 @@ import { NarInfo } from '@cupboard/nix/narinfo';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { narInfos, signingKeys } from '../db/schema.ts';
+import { StoredSignaturesInvalidError } from '../errors.ts';
+import { parseStored } from '../http/parse.ts';
 import {
 	authorisedFetch,
 	blobStateNarHashes,
@@ -19,6 +22,25 @@ import {
 	useTestServer,
 	verifyNarInfoSignature
 } from '../test-support.ts';
+
+import { storedSignaturesSchema } from './context.ts';
+
+function signatureShape(signature: string): {
+	readonly keyName: string;
+	readonly rawBytes: number;
+} {
+	const [keyName, encoded] = z
+		.tuple([z.string(), z.string()])
+		.parse(signature.split(':'));
+
+	return {
+		keyName,
+		rawBytes: Uint8Array.from(
+			atob(encoded),
+			(character) => character.codePointAt(0) ?? 0
+		).byteLength
+	};
+}
 
 // The vitest-pool-workers harness exposes no API to force a Durable Object to be
 // evicted and re-instantiated, so durability is asserted two ways: the per-DO
@@ -66,7 +88,11 @@ describe('durable object state', () => {
 		const narInfoRows = persisted.narInfos.map((row) => ({
 			cache: row.cache,
 			storePathHash: row.storePathHash,
-			sigCount: (JSON.parse(row.sigsJson) as string[]).length
+			signatures: parseStored(
+				storedSignaturesSchema,
+				row.sigsJson,
+				(cause) => new StoredSignaturesInvalidError(row.storePathHash, cause)
+			).map((signature) => signatureShape(signature))
 		}));
 
 		expect({
@@ -76,7 +102,11 @@ describe('durable object state', () => {
 		}).toStrictEqual({
 			signingKeys: [{ signing: true, published: true }],
 			narInfoRows: [
-				{ cache: '', storePathHash: metadata.storePathHash, sigCount: 1 }
+				{
+					cache: '',
+					storePathHash: metadata.storePathHash,
+					signatures: [{ keyName: 'cupboard-1', rawBytes: 64 }]
+				}
 			],
 			blobState: [{ narHash: metadata.narHash }]
 		});

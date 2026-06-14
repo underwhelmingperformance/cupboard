@@ -1,5 +1,10 @@
 import { selectorForCache } from '@cupboard/nix/scalars';
-import type { StatsResponse, UsageResponse } from '@cupboard/protocol/upload';
+import {
+	type StatsResponse,
+	statsResponseSchema,
+	type UsageResponse,
+	usageResponseSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -17,6 +22,7 @@ import {
 	CommitSocketError,
 	commitUpload,
 	commitUploadRejection,
+	expectSingleUploadDecision,
 	issueServerSignedToken,
 	narBytes,
 	narHash,
@@ -24,12 +30,17 @@ import {
 	pushPath,
 	putNarBytes,
 	resetTestServer,
-	singleDecision,
 	testServerFor,
 	uploadBlobMetadata,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
+
+function expectCommitSocketError(
+	error: unknown
+): asserts error is CommitSocketError {
+	expect(error).toBeInstanceOf(CommitSocketError);
+}
 
 async function putRoot(
 	token: string,
@@ -60,14 +71,14 @@ async function statsForCache(
 	);
 
 	expect(response.status).toBe(StatusCodes.OK);
-	return response.json<StatsResponse>();
+	return statsResponseSchema.parse(await response.json());
 }
 
 async function usageForTenant(token: string): Promise<UsageResponse> {
 	const response = await authorisedFetch('/usage', token);
 
 	expect(response.status).toBe(StatusCodes.OK);
-	return response.json<UsageResponse>();
+	return usageResponseSchema.parse(await response.json());
 }
 
 describe('named caches', () => {
@@ -266,13 +277,10 @@ describe('named caches', () => {
 	it('refuses to commit an upload under a different cache than negotiated', async () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const decision = singleDecision(
-			await negotiateUploads(init.token, [metadata], 'builds')
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(init.token, [metadata], 'builds'),
+			metadata
 		);
-
-		if (decision.action !== 'upload') {
-			throw new Error('expected an upload decision');
-		}
 
 		// Commit through the default cache: the pending row is bound to `builds`.
 		const crossCommitError = await commitUploadRejection(
@@ -299,16 +307,20 @@ describe('named caches', () => {
 		const defaultStats = await statsForCache(init.token, '');
 		const buildsStats = await statsForCache(init.token, 'builds');
 
+		expectCommitSocketError(crossCommitError);
 		expect({
-			crossCommit: crossCommitError,
+			crossCommit: {
+				name: crossCommitError.name,
+				status: crossCommitError.status
+			},
 			committed: committed.status,
 			defaultPaths: defaultStats.storePaths,
 			buildsPaths: buildsStats.storePaths
 		}).toStrictEqual({
-			crossCommit: new CommitSocketError(
-				StatusCodes.BAD_REQUEST,
-				'Upload prepared or committed under a different cache'
-			),
+			crossCommit: {
+				name: 'CommitSocketError',
+				status: StatusCodes.BAD_REQUEST
+			},
 			committed: 'committed',
 			defaultPaths: 0,
 			buildsPaths: 1
@@ -318,13 +330,10 @@ describe('named caches', () => {
 	it('refuses to prepare an upload under a different cache than negotiated', async () => {
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const decision = singleDecision(
-			await negotiateUploads(init.token, [metadata], 'builds')
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(init.token, [metadata], 'builds'),
+			metadata
 		);
-
-		if (decision.action !== 'upload') {
-			throw new Error('expected an upload decision');
-		}
 
 		const prepare = await authorisedFetch(
 			`/cache/_default/uploads/${decision.uploadId}`,

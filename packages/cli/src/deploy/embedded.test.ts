@@ -1,7 +1,20 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { payloadToArtifact } from './artifact.ts';
 import { EmbeddedArtifactError, parseEmbeddedPayload } from './embedded.ts';
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 const controlSource = `{
 	"name": "cupboard",
@@ -32,23 +45,63 @@ describe('parseEmbeddedPayload', () => {
 	it('rebuilds the artifact, parsing the embedded wrangler sources', () => {
 		const artifact = payloadToArtifact(parseEmbeddedPayload(payloadJson));
 
-		expect(artifact.config.control.name).toBe('cupboard');
-		expect(artifact.config.tenant.migrations).toStrictEqual([
-			{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }
-		]);
-		expect(artifact.controlBundle).toStrictEqual({
-			mainModule: 'worker.js',
-			code: 'control-bytes'
+		expect(artifact).toStrictEqual({
+			config: {
+				control: {
+					name: 'cupboard',
+					mainModule: 'worker.js',
+					compatibilityDate: '2026-05-15',
+					compatibilityFlags: ['nodejs_compat'],
+					cpuMs: undefined,
+					observability: true,
+					vars: {},
+					durableObjects: [],
+					r2Buckets: [{ binding: 'BLOBS', bucketName: 'cupboard-blobs' }],
+					kvNamespaces: [],
+					d1Databases: [{ binding: 'CUPBOARD_DB', databaseName: 'cupboard' }],
+					queueProducers: [],
+					queueConsumers: [],
+					crons: [],
+					migrations: []
+				},
+				tenant: {
+					name: 'cupboard-tenant',
+					mainModule: 'tenant-worker.js',
+					compatibilityDate: '2026-05-15',
+					compatibilityFlags: ['nodejs_compat'],
+					cpuMs: undefined,
+					observability: false,
+					vars: {},
+					durableObjects: [],
+					r2Buckets: [],
+					kvNamespaces: [],
+					d1Databases: [],
+					queueProducers: [],
+					queueConsumers: [],
+					crons: [],
+					migrations: [{ tag: 'v1', newSqliteClasses: ['CupboardServer'] }]
+				}
+			},
+			controlBundle: { mainModule: 'worker.js', code: 'control-bytes' },
+			tenantBundle: { mainModule: 'tenant-worker.js', code: 'tenant-bytes' },
+			d1Migrations: [
+				{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }
+			],
+			buildVersion: 'abc123def456'
 		});
-		expect(artifact.d1Migrations).toStrictEqual([
-			{ name: '0000_a.sql', statements: ['CREATE TABLE a (id);'] }
-		]);
-		expect(artifact.buildVersion).toBe('abc123def456');
 	});
 
 	it('rejects a payload of the wrong shape', () => {
-		expect(() => parseEmbeddedPayload('{"controlSource":"x"}')).toThrow(
-			EmbeddedArtifactError
-		);
+		const error = z
+			.instanceof(EmbeddedArtifactError)
+			.parse(thrownBy(() => parseEmbeddedPayload('{"controlSource":"x"}')));
+
+		expect({
+			name: error.name,
+			hasDetail: error.detail.length > 0
+		}).toStrictEqual({
+			name: 'EmbeddedArtifactError',
+			hasDetail: true
+		});
 	});
 });

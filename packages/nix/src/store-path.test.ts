@@ -19,7 +19,7 @@ describe('StorePath', () => {
 		});
 	});
 
-	it('rejects invalid store paths with a typed error', () => {
+	it('rejects a path outside the store', () => {
 		expect(() => new StorePath('/tmp/example')).toThrow(InvalidStorePathError);
 	});
 });

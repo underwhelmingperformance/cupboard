@@ -32,15 +32,19 @@ function summary(overrides: Partial<SigningKeySummary>): SigningKeySummary {
 	};
 }
 
-function uncalledClient(): never {
-	throw new Error('client should not be called');
-}
-
 function keyClient(overrides: Partial<KeyClient>): KeyClient {
 	return {
-		list: uncalledClient,
-		rotate: uncalledClient,
-		retire: uncalledClient,
+		list: () => Promise.resolve({ keys: [] }),
+		rotate: () =>
+			Promise.resolve({
+				rotated: summary({
+					id: uuid,
+					publicKey: 'cupboard-2:cHVi',
+					stage: 'publication'
+				}),
+				keys: []
+			}),
+		retire: ({ id }) => Promise.resolve({ id, stage: 'absent' }),
 		...overrides
 	};
 }
@@ -65,10 +69,9 @@ describe('runKeyList', () => {
 			]
 		};
 
-		await runKeyList(
-			reporter(results),
-			keyClient({ list: () => Promise.resolve(response) })
-		);
+		await runKeyList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
 
 		expect(results).toStrictEqual([
 			[
@@ -110,10 +113,9 @@ describe('runKeyRotate', () => {
 			]
 		};
 
-		await runKeyRotate(
-			reporter(results, infos),
-			keyClient({ rotate: () => Promise.resolve(response) })
-		);
+		await runKeyRotate(reporter(results, infos), {
+			rotate: () => Promise.resolve(response)
+		});
 
 		expect({ results, infos }).toStrictEqual({
 			results: [
@@ -132,7 +134,11 @@ describe('runKeyRotate', () => {
 });
 
 describe('runKeyRetire', () => {
-	it.each<{ stage: SigningKeyStage; stageValue: string; infos: string[] }>([
+	it.each<{
+		stage: SigningKeyStage;
+		stageValue: string;
+		infos: readonly string[];
+	}>([
 		{
 			stage: 'publication',
 			stageValue: 'published only',

@@ -1,7 +1,7 @@
 import { applyD1Migrations } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/d1';
-import { beforeEach } from 'vitest';
+import { afterEach, beforeEach, vi } from 'vitest';
 
 import {
 	attestationReference,
@@ -33,6 +33,9 @@ await applyD1Migrations(env.CUPBOARD_DB, env.TEST_MIGRATIONS);
 // test gives every test the empty shared store it expects. Every D1 table must
 // be cleared here; add new ones as the schema grows.
 beforeEach(async () => {
+	vi.useFakeTimers({ toFake: ['Date'] });
+	vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
+
 	const database = drizzle(env.CUPBOARD_DB);
 	await database.delete(attestationReference).run();
 	await database.delete(blobReference).run();
@@ -56,4 +59,8 @@ beforeEach(async () => {
 		const { keys } = await kv.list();
 		await Promise.all(keys.map((key) => kv.delete(key.name)));
 	}
+});
+
+afterEach(() => {
+	vi.useRealTimers();
 });

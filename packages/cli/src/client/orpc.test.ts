@@ -1,4 +1,7 @@
+import { ORPCError } from '@orpc/client';
+import { ValidationError } from '@orpc/contract';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { CliAbortError } from '../errors.ts';
 
@@ -25,15 +28,25 @@ function capturingFetcher(responses: (() => Response)[]): {
 				authorization: request.headers.get('authorization')
 			});
 
-			const next = responses.shift();
-
-			if (next === undefined) {
-				throw new Error('fetched more often than scripted');
-			}
+			const next = z
+				.custom<() => Response>((value) => typeof value === 'function')
+				.parse(responses.shift());
 
 			return Promise.resolve(next());
 		}
 	};
+}
+
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
 }
 
 describe('tenantRpc', () => {
@@ -107,7 +120,23 @@ describe('tenantRpc', () => {
 			fetcher
 		});
 
-		await expect(rpc.caches.list()).rejects.toThrow();
+		const rejected = await rejectedBy(() => rpc.caches.list());
+
+		expect(rejected).toBeInstanceOf(ORPCError);
+
+		if (rejected instanceof ORPCError) {
+			expect(rejected).toMatchObject({
+				defined: true,
+				code: 'UNAUTHORIZED',
+				status: 401,
+				data: {
+					body: 'Unauthorised\n',
+					headers: { 'content-type': 'text/plain;charset=UTF-8' },
+					status: 401
+				}
+			});
+		}
+
 		expect(captured.map((request) => request.authorization)).toStrictEqual([
 			'Bearer static-token'
 		]);
@@ -122,7 +151,22 @@ describe('tenantRpc', () => {
 			fetcher
 		});
 
-		await expect(rpc.caches.list()).rejects.toThrow();
+		const rejected = await rejectedBy(() => rpc.caches.list());
+
+		expect(rejected).toBeInstanceOf(ValidationError);
+
+		if (rejected instanceof ValidationError) {
+			expect({
+				data: rejected.data,
+				issuePaths: rejected.issues.map((issue) => issue.path)
+			}).toStrictEqual({
+				data: { caches: [{ name: 'builds' }] },
+				issuePaths: [
+					['caches', 0, 'priority'],
+					['caches', 0, 'storePaths']
+				]
+			});
+		}
 	});
 });
 

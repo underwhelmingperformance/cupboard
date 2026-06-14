@@ -93,7 +93,7 @@ export function registerControlKeyCommands(
 
 export async function runControlKeyList(
 	reporter: Reporter,
-	client: ControlKeyClient
+	client: Pick<ControlKeyClient, 'list'>
 ): Promise<void> {
 	const { keys } = await reporter.phase('Listing control keys', () =>
 		client.list()
@@ -109,7 +109,7 @@ export async function runControlKeyList(
 
 export async function runControlKeyRotate(
 	reporter: Reporter,
-	client: ControlKeyClient
+	client: Pick<ControlKeyClient, 'rotate'>
 ): Promise<void> {
 	const { kid, retiring } = await reporter.phase('Rotating control key', () =>
 		client.rotate()

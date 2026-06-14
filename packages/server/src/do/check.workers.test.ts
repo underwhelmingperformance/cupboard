@@ -1,5 +1,6 @@
 import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import type { CheckReport } from '@cupboard/protocol/reports';
+import { checkReportSchema } from '@cupboard/protocol/reports';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -28,7 +29,7 @@ async function runCheck(token: string, deep = false): Promise<CheckReport> {
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<CheckReport>();
+	return checkReportSchema.parse(await response.json());
 }
 
 describe('storage check', () => {

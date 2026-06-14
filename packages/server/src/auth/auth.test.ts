@@ -24,6 +24,35 @@ function keySet(publicJwk: JsonWebKey): AuthPublicKey[] {
 	return [{ kid, publicJwk }];
 }
 
+function accessErrorShape(
+	error: unknown
+):
+	| { readonly name: string; readonly hasCause: boolean }
+	| { readonly name: string; readonly scope: unknown }
+	| { readonly name: string } {
+	if (error instanceof AccessTokenVerificationError) {
+		return { name: error.name, hasCause: error.cause instanceof Error };
+	}
+
+	if (error instanceof InvalidScopeError) {
+		return { name: error.name, scope: error.scope };
+	}
+
+	if (
+		error instanceof MissingScopeError ||
+		error instanceof MissingSubjectError ||
+		error instanceof InvalidRootConstraintError
+	) {
+		return { name: error.name };
+	}
+
+	if (error instanceof Error) {
+		return { name: error.name };
+	}
+
+	return { name: 'NonErrorAccessTokenFailure' };
+}
+
 describe('issueAccessJwt and verifyAccessJwt', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
@@ -119,7 +148,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 	it.each([
 		{
 			name: 'a foreign signing key',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async () => {
 				const foreign = await generateAuthKeyPair();
 
@@ -134,7 +163,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'an unknown key id',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async (privateJwk: JsonWebKey) =>
 				issueAccessJwt(
 					privateJwk,
@@ -153,7 +182,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a mismatched issuer',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async (privateJwk: JsonWebKey) =>
 				issueAccessJwt(
 					privateJwk,
@@ -172,7 +201,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a mismatched audience',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async (privateJwk: JsonWebKey) =>
 				issueAccessJwt(
 					privateJwk,
@@ -191,7 +220,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'an expired token',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async (privateJwk: JsonWebKey) =>
 				issueAccessJwt(
 					privateJwk,
@@ -203,7 +232,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a not-yet-valid token',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async (privateJwk: JsonWebKey) => {
 				const future = new Date(now.getTime() + 3600 * 1000);
 
@@ -218,7 +247,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a token without the at+jwt type header',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
@@ -238,7 +267,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a token without a scope claim',
-			error: MissingScopeError,
+			expected: { name: 'MissingScopeError' },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
@@ -258,7 +287,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a token whose scope claim is not a known scope',
-			error: InvalidScopeError,
+			expected: { name: 'InvalidScopeError', scope: 'root' },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
@@ -278,7 +307,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a token signed with a different algorithm',
-			error: AccessTokenVerificationError,
+			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async () => {
 				const issuedAt = Math.floor(now.getTime() / 1000);
 				const symmetricKey = new TextEncoder().encode(
@@ -300,7 +329,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a token without a subject claim',
-			error: MissingSubjectError,
+			expected: { name: 'MissingSubjectError' },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
@@ -319,7 +348,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		},
 		{
 			name: 'a token whose cb_roots claim is not an array of strings',
-			error: InvalidRootConstraintError,
+			expected: { name: 'InvalidRootConstraintError' },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
@@ -337,27 +366,41 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			verifyOptions: { issuer, audience },
 			at: now
 		}
-	])('rejects $name', async ({ token, error, verifyOptions, at }) => {
+	])('rejects $name', async ({ token, expected, verifyOptions, at }) => {
 		const keyPair = await generateAuthKeyPair();
 		const signingKey = await importPrivateKey(keyPair.privateJwk);
 		const issued = await token(keyPair.privateJwk, signingKey);
 
-		await expect(
-			verifyAccessJwt(keySet(keyPair.publicJwk), issued, verifyOptions, at)
-		).rejects.toBeInstanceOf(error);
+		const rejected = await verifyAccessJwt(
+			keySet(keyPair.publicJwk),
+			issued,
+			verifyOptions,
+			at
+		).then(
+			(value) => ({ value }),
+			(error_: unknown) => accessErrorShape(error_)
+		);
+
+		expect(rejected).toStrictEqual(expected);
 	});
 
 	it('rejects a structurally invalid token with a verification error', async () => {
 		const keyPair = await generateAuthKeyPair();
 
-		await expect(
-			verifyAccessJwt(
-				keySet(keyPair.publicJwk),
-				'not-a-jwt',
-				{ issuer, audience },
-				now
-			)
-		).rejects.toBeInstanceOf(AccessTokenVerificationError);
+		const error = await verifyAccessJwt(
+			keySet(keyPair.publicJwk),
+			'not-a-jwt',
+			{ issuer, audience },
+			now
+		).then(
+			(value) => ({ value }),
+			(error_: unknown) => accessErrorShape(error_)
+		);
+
+		expect(error).toStrictEqual({
+			name: 'AccessTokenVerificationError',
+			hasCause: true
+		});
 	});
 });
 

@@ -9,9 +9,13 @@ import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
-import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
+import type {
+	UploadNegotiateRequest,
+	UploadPrepareResponse
+} from '@cupboard/protocol/upload';
 import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import type { CommitOptions } from '../client/client.ts';
 import {
@@ -42,6 +46,22 @@ const appDigest = digest(1, 123);
 const runtimeDigest = digest(2, 234);
 const fileHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 9));
 
+function fallbackPrepareUploadResponse(): UploadPrepareResponse {
+	return {
+		uploadUrl: '',
+		uploadHeaders: {},
+		expiresAt: ''
+	};
+}
+
+function fallbackCommitResponse() {
+	return {
+		storePathHash: StorePath.hash(appPath),
+		narHash: appDigest.narHash.toString(),
+		status: 'committed' as const
+	};
+}
+
 describe('runPush', () => {
 	it('uploads missing blobs and commits uploaded metadata', async () => {
 		const negotiations: UploadNegotiateRequest[] = [];
@@ -56,6 +76,7 @@ describe('runPush', () => {
 		const commits: string[] = [];
 		const results: ResultRow[][] = [];
 		const uploadBody = Buffer.from('compressed nar');
+		const removedTemporaryDirectories: string[] = [];
 		const preparedUploads: {
 			uploadId: string;
 			body: {
@@ -139,7 +160,7 @@ describe('runPush', () => {
 				return Promise.resolve('/tmp/cupboard-test');
 			},
 			removeTemporaryDirectory(path) {
-				expect(path).toBe('/tmp/cupboard-test');
+				removedTemporaryDirectories.push(path);
 
 				return Promise.resolve();
 			}
@@ -194,25 +215,31 @@ describe('runPush', () => {
 			`/tmp/cupboard-test/${StorePath.hash(appPath)}.nar.zst`
 		]);
 		expect(commits).toStrictEqual(['upload-app']);
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '1' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
-				{ label: 'Bytes uploaded', value: '456 B' },
-				{ label: 'Pinned paths', value: '1' },
-				{ label: 'Pin expiry', value: 'permanent' }
+		expect({ removedTemporaryDirectories, results }).toStrictEqual({
+			removedTemporaryDirectories: ['/tmp/cupboard-test'],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '1' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Bytes uploaded', value: '456 B' },
+					{ label: 'Pinned paths', value: '1' },
+					{ label: 'Pin expiry', value: 'permanent' }
+				]
 			]
-		]);
+		});
 	});
 
 	it('with --dry-run, reports the plan without uploading or committing', async () => {
 		const results: ResultRow[][] = [];
+		const clientCalls: unknown[] = [];
 
 		await runPush([appPath], reporter(results), {
 			dryRun: true,
 			client: {
 				negotiate() {
+					clientCalls.push({ method: 'negotiate', paths: [appPath] });
+
 					return Promise.resolve({
 						uploads: [
 							{
@@ -232,16 +259,24 @@ describe('runPush', () => {
 					});
 				},
 				prepareUpload: () => {
-					throw new UnexpectedPushClientCallError('prepareUpload');
+					clientCalls.push({ method: 'prepareUpload' });
+
+					return Promise.resolve(fallbackPrepareUploadResponse());
 				},
 				uploadBlob: () => {
-					throw new UnexpectedPushClientCallError('uploadBlob');
+					clientCalls.push({ method: 'uploadBlob' });
+
+					return Promise.resolve();
 				},
 				commit: () => {
-					throw new UnexpectedPushClientCallError('commit');
+					clientCalls.push({ method: 'commit' });
+
+					return Promise.resolve(fallbackCommitResponse());
 				},
 				setRoot: () => {
-					throw new UnexpectedPushClientCallError('setRoot');
+					clientCalls.push({ method: 'setRoot' });
+
+					return Promise.resolve(rootSummary({ name: '', targets: [] }));
 				}
 			} satisfies PushClient,
 			nixStore: nixStore({
@@ -252,25 +287,34 @@ describe('runPush', () => {
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Would upload', value: '1' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
-				{ label: 'Would pin paths', value: '1' },
-				{ label: 'Pin expiry', value: 'permanent' }
+		expect({ clientCalls, results }).toStrictEqual({
+			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+			results: [
+				[
+					{ label: 'Would upload', value: '1' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Would pin paths', value: '1' },
+					{ label: 'Pin expiry', value: 'permanent' }
+				]
 			]
-		]);
+		});
 	});
 
 	it('with --no-wait, returns with pending paths and records no retention', async () => {
 		const results: ResultRow[][] = [];
 		const warnings: { label: string; value?: string }[] = [];
+		const clientCalls: unknown[] = [];
 
 		await runPush([appPath], reporter(results, warnings), {
 			wait: false,
 			client: {
-				negotiate() {
+				negotiate(body) {
+					clientCalls.push({
+						method: 'negotiate',
+						paths: body.paths.map((path) => path.storePath)
+					});
+
 					return Promise.resolve({
 						uploads: [
 							{
@@ -285,6 +329,8 @@ describe('runPush', () => {
 					});
 				},
 				prepareUpload() {
+					clientCalls.push({ method: 'prepareUpload' });
+
 					return Promise.resolve({
 						uploadUrl: 'https://upload.example/app',
 						uploadHeaders: {
@@ -294,9 +340,13 @@ describe('runPush', () => {
 					});
 				},
 				uploadBlob() {
+					clientCalls.push({ method: 'uploadBlob' });
+
 					return Promise.resolve();
 				},
 				commit() {
+					clientCalls.push({ method: 'commit' });
+
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
@@ -304,7 +354,9 @@ describe('runPush', () => {
 					});
 				},
 				setRoot() {
-					throw new UnexpectedPushClientCallError('setRoot');
+					clientCalls.push({ method: 'setRoot' });
+
+					return Promise.resolve(rootSummary({ name: '', targets: [] }));
 				}
 			} satisfies PushClient,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -323,21 +375,43 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(warnings).toStrictEqual([
-			{
-				label: 'pending verification',
-				value:
-					'1 path(s) await server-side verification; retention not recorded (omit --no-wait to wait and record it)'
-			}
-		]);
+		expect({ clientCalls, results, warnings }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{ method: 'prepareUpload' },
+				{ method: 'uploadBlob' },
+				{ method: 'commit' }
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '1' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '0' },
+					{ label: 'Bytes uploaded', value: '456 B' }
+				]
+			],
+			warnings: [
+				{
+					label: 'pending verification',
+					value:
+						'1 path(s) await server-side verification; retention not recorded (omit --no-wait to wait and record it)'
+				}
+			]
+		});
 	});
 
 	it('reports reused blobs separately from freshly uploaded paths', async () => {
 		const results: ResultRow[][] = [];
+		const clientCalls: unknown[] = [];
 
 		await runPush([appPath], reporter(results), {
 			client: {
-				negotiate() {
+				negotiate(body) {
+					clientCalls.push({
+						method: 'negotiate',
+						paths: body.paths.map((path) => path.storePath)
+					});
+
 					return Promise.resolve({
 						uploads: [
 							{
@@ -350,13 +424,21 @@ describe('runPush', () => {
 					});
 				},
 				uploadBlob() {
-					throw new UnexpectedPushClientCallError('uploadBlob');
+					clientCalls.push({ method: 'uploadBlob' });
+
+					return Promise.resolve();
 				},
 				prepareUpload() {
-					throw new UnexpectedPushClientCallError('prepareUpload');
+					clientCalls.push({ method: 'prepareUpload' });
+
+					return Promise.resolve({
+						uploadUrl: '',
+						uploadHeaders: {},
+						expiresAt: ''
+					});
 				},
 				commit(target) {
-					expect(target.uploadId).toBe('reuse-app');
+					clientCalls.push({ method: 'commit', uploadId: target.uploadId });
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
@@ -365,6 +447,8 @@ describe('runPush', () => {
 					});
 				},
 				setRoot(name, body) {
+					clientCalls.push({ method: 'setRoot', fields: { name, ...body } });
+
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
@@ -373,7 +457,13 @@ describe('runPush', () => {
 			}),
 			createNarArchive: () => new FakeNarArchive(appDigest),
 			compressNar() {
-				throw new UnexpectedPushClientCallError('compressNar');
+				clientCalls.push({ method: 'compressNar' });
+
+				return fakeCompressedNar(
+					new FakeNarArchive(appDigest),
+					appPath,
+					appDigest
+				);
 			},
 			createTemporaryDirectory() {
 				return Promise.resolve('/tmp/cupboard-test');
@@ -383,16 +473,29 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '1' },
-				{ label: 'Skipped', value: '0' },
-				{ label: 'Bytes uploaded', value: '0 B' },
-				{ label: 'Pinned paths', value: '1' },
-				{ label: 'Pin expiry', value: 'permanent' }
+		expect({ clientCalls, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{ method: 'commit', uploadId: 'reuse-app' },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '1' },
+					{ label: 'Skipped', value: '0' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Pinned paths', value: '1' },
+					{ label: 'Pin expiry', value: 'permanent' }
+				]
 			]
-		]);
+		});
 	});
 
 	it('attaches attestation bundles to the matching pushed closure path', async () => {
@@ -405,6 +508,9 @@ describe('runPush', () => {
 			readonly headers: Readonly<Record<string, string>>;
 		}[] = [];
 		const attached: string[] = [];
+		const preparedAttestations: string[] = [];
+		const readBundles: string[] = [];
+		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
 		const bundleDigest = sha256Hex(bundle);
@@ -416,7 +522,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: {
-				...skipClient(setRoots),
+				...skipClient(setRoots, clientCalls),
 				negotiateAttestations(body) {
 					negotiations.push(body);
 
@@ -434,7 +540,7 @@ describe('runPush', () => {
 					});
 				},
 				prepareAttestation(uploadId) {
-					expect(uploadId).toBe('attestation-app');
+					preparedAttestations.push(uploadId);
 
 					return Promise.resolve(attestationUpload);
 				},
@@ -459,7 +565,7 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			attestations: [{ path: 'app.sigstore.json' }],
 			readAttestationBundle(path) {
-				expect(path).toBe('app.sigstore.json');
+				readBundles.push(path);
 
 				return Promise.resolve(bundle);
 			},
@@ -482,6 +588,30 @@ describe('runPush', () => {
 				]
 			}
 		]);
+		expect({ preparedAttestations, readBundles }).toStrictEqual({
+			preparedAttestations: ['attestation-app'],
+			readBundles: ['app.sigstore.json']
+		});
+		expect({ clientCalls, setRoots }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			],
+			setRoots: [
+				{
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			]
+		});
 		expect(uploaded).toStrictEqual([
 			{
 				r2Key: 'staging/attestations/attestation-app',
@@ -514,14 +644,12 @@ describe('runPush', () => {
 	it('skips attestation work when attachment is disabled', async () => {
 		const setRoots: SetRootCall[] = [];
 		const results: ResultRow[][] = [];
+		const clientCalls: unknown[] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots),
+			client: skipClient(setRoots, clientCalls),
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
-			readAttestationBundle() {
-				throw new UnexpectedPushClientCallError('readAttestationBundle');
-			},
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory() {
 				return Promise.resolve('/tmp/cupboard-test');
@@ -531,38 +659,79 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
-				{ label: 'Bytes uploaded', value: '0 B' },
-				{ label: 'Pinned paths', value: '1' },
-				{ label: 'Pin expiry', value: 'permanent' }
+		expect({ clientCalls, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Pinned paths', value: '1' },
+					{ label: 'Pin expiry', value: 'permanent' }
+				]
 			]
-		]);
+		});
 	});
 
 	it('rejects an attestation bundle whose subject is outside the closure', async () => {
 		const otherDigest = digest(9, 999);
 		const bundle = sigstoreBundleBytes(narDigestHex(otherDigest.narHash));
+		const clientCalls: unknown[] = [];
+		const readBundles: string[] = [];
 
-		await expect(
-			runPush([appPath], reporter([]), {
-				client: skipClient([]),
-				attestations: [{ path: 'other.sigstore.json' }],
-				readAttestationBundle() {
-					return Promise.resolve(bundle);
-				},
-				nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-				createTemporaryDirectory() {
-					return Promise.resolve('/tmp/cupboard-test');
-				},
-				removeTemporaryDirectory() {
-					return Promise.resolve();
+		const outcome = await runPush([appPath], reporter([]), {
+			client: skipClient([], clientCalls),
+			attestations: [{ path: 'other.sigstore.json' }],
+			readAttestationBundle(path) {
+				readBundles.push(path);
+
+				return Promise.resolve(bundle);
+			},
+			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		}).then(
+			() => ({ pushed: true }),
+			(error_: unknown) => {
+				const error = z
+					.instanceof(AttestationSubjectNotPushedError)
+					.parse(error_);
+
+				return {
+					error: {
+						name: error.name,
+						path: error.path,
+						subjectDigests: error.subjectDigests
+					}
+				};
+			}
+		);
+
+		expect({ outcome, clientCalls, readBundles }).toStrictEqual({
+			outcome: {
+				error: {
+					name: AttestationSubjectNotPushedError.name,
+					path: 'other.sigstore.json',
+					subjectDigests: [narDigestHex(otherDigest.narHash)]
 				}
-			})
-		).rejects.toThrow(AttestationSubjectNotPushedError);
+			},
+			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+			readBundles: ['other.sigstore.json']
+		});
 	});
 
 	it('compresses and hashes uploaded NARs in a single pass', async () => {
@@ -629,59 +798,113 @@ describe('runPush', () => {
 	});
 
 	it('rejects mismatched computed NAR metadata with a typed error', async () => {
-		await expect(
-			runPush([appPath], reporter([]), {
-				client: {
-					negotiate() {
-						return Promise.resolve({
-							uploads: [
-								{
-									action: 'upload',
-									storePathHash: StorePath.hash(appPath),
-									narHash: appDigest.narHash.toString(),
-									uploadId: 'upload-app',
-									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-									expiresAt: '2026-05-18T12:00:00.000Z'
-								}
-							]
-						});
-					},
-					prepareUpload() {
-						throw new UnexpectedPushClientCallError('prepareUpload');
-					},
-					uploadBlob() {
-						throw new UnexpectedPushClientCallError('uploadBlob');
-					},
-					commit() {
-						throw new UnexpectedPushClientCallError('commit');
-					},
-					setRoot() {
-						throw new UnexpectedPushClientCallError('setRoot');
-					}
-				} satisfies PushClient,
-				nixStore: nixStore({
-					[appPath]: pathInfo(appPath, appDigest, [])
-				}),
-				createNarArchive: () => new FakeNarArchive(digest(8, 999)),
-				compressNar(nar, path) {
-					return fakeCompressedNar(nar, path, digest(8, 999));
+		const clientCalls: unknown[] = [];
+		const expectedPathInfo = pathInfo(appPath, appDigest, []);
+		const actualNar = await fakeCompressedNar(
+			new FakeNarArchive(digest(8, 999)),
+			'/tmp/cupboard-test/app.nar.zst',
+			digest(8, 999)
+		);
+
+		const outcome = await runPush([appPath], reporter([]), {
+			client: {
+				negotiate(body) {
+					clientCalls.push({
+						method: 'negotiate',
+						paths: body.paths.map((path) => path.storePath)
+					});
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
 				},
-				createTemporaryDirectory() {
-					return Promise.resolve('/tmp/cupboard-test');
+				prepareUpload() {
+					clientCalls.push({ method: 'prepareUpload' });
+
+					return Promise.resolve(fallbackPrepareUploadResponse());
 				},
-				removeTemporaryDirectory() {
+				uploadBlob() {
+					clientCalls.push({ method: 'uploadBlob' });
+
 					return Promise.resolve();
+				},
+				commit() {
+					clientCalls.push({ method: 'commit' });
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot() {
+					clientCalls.push({ method: 'setRoot' });
+
+					return Promise.resolve(rootSummary({ name: '', targets: [] }));
 				}
-			})
-		).rejects.toThrow(PushNarMetadataMismatchError);
+			} satisfies PushClient,
+			nixStore: nixStore({
+				[appPath]: expectedPathInfo
+			}),
+			createNarArchive: () => new FakeNarArchive(digest(8, 999)),
+			compressNar(nar, path) {
+				return fakeCompressedNar(nar, path, digest(8, 999));
+			},
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		}).then(
+			() => ({ pushed: true }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(PushNarMetadataMismatchError);
+
+				if (error_ instanceof PushNarMetadataMismatchError) {
+					return {
+						error: {
+							name: error_.name,
+							storePath: error_.storePath,
+							expectedNarHash: error_.expectedNarHash,
+							actualNarHash: error_.actualNarHash,
+							expectedNarSize: error_.expectedNarSize,
+							actualNarSize: error_.actualNarSize
+						}
+					};
+				}
+
+				return { pushed: true };
+			}
+		);
+
+		expect({ outcome, clientCalls }).toStrictEqual({
+			outcome: {
+				error: {
+					name: PushNarMetadataMismatchError.name,
+					storePath: appPath,
+					expectedNarHash: expectedPathInfo.narHash.toString(),
+					actualNarHash: actualNar.narDigest.narHash.toString(),
+					expectedNarSize: expectedPathInfo.narSize,
+					actualNarSize: actualNar.narDigest.narSize
+				}
+			},
+			clientCalls: [{ method: 'negotiate', paths: [appPath] }]
+		});
 	});
 
 	it('sets a named channel to the pushed paths with --root', async () => {
 		const setRoots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots),
+			client: skipClient(setRoots, clientCalls),
 			root: 'main',
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory() {
@@ -692,27 +915,32 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(setRoots).toStrictEqual([
-			{ fields: { name: 'main', targets: [appPath] } }
-		]);
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
-				{ label: 'Bytes uploaded', value: '0 B' },
-				{ label: 'Root', value: 'main' },
-				{ label: 'Root expiry', value: 'permanent' }
+		expect({ clientCalls, setRoots, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
+			],
+			setRoots: [{ fields: { name: 'main', targets: [appPath] } }],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Root', value: 'main' },
+					{ label: 'Root expiry', value: 'permanent' }
+				]
 			]
-		]);
+		});
 	});
 
 	it('sets an expiring channel with --root and --ttl', async () => {
 		const setRoots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots),
+			client: skipClient(setRoots, clientCalls),
 			root: 'main',
 			ttlSeconds: 1_209_600,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -724,27 +952,40 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(setRoots).toStrictEqual([
-			{ fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 } }
-		]);
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
-				{ label: 'Bytes uploaded', value: '0 B' },
-				{ label: 'Root', value: 'main' },
-				{ label: 'Root expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
+		expect({ clientCalls, setRoots, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 }
+				}
+			],
+			setRoots: [
+				{ fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 } }
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Root', value: 'main' },
+					{
+						label: 'Root expiry',
+						value: 'expires 2026-01-15T00:00:00.000Z'
+					}
+				]
 			]
-		]);
+		});
 	});
 
 	it('pins each pushed path when no root is given', async () => {
 		const setRoots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath, runtimePath], reporter(results), {
-			client: skipClient(setRoots),
+			client: skipClient(setRoots, clientCalls),
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
@@ -757,35 +998,55 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(setRoots).toStrictEqual([
-			{
-				fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
-			},
-			{
-				fields: {
-					name: `pin:${StorePath.hash(runtimePath)}`,
-					targets: [runtimePath]
+		expect({ clientCalls, setRoots, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath, runtimePath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				},
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(runtimePath)}`,
+						targets: [runtimePath]
+					}
 				}
-			}
-		]);
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '2' },
-				{ label: 'Bytes uploaded', value: '0 B' },
-				{ label: 'Pinned paths', value: '2' },
-				{ label: 'Pin expiry', value: 'permanent' }
+			],
+			setRoots: [
+				{
+					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
+				},
+				{
+					fields: {
+						name: `pin:${StorePath.hash(runtimePath)}`,
+						targets: [runtimePath]
+					}
+				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '2' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Pinned paths', value: '2' },
+					{ label: 'Pin expiry', value: 'permanent' }
+				]
 			]
-		]);
+		});
 	});
 
 	it('applies --ttl to implicit pins when no root is given', async () => {
 		const setRoots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots),
+			client: skipClient(setRoots, clientCalls),
 			ttlSeconds: 604_800,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory() {
@@ -796,31 +1057,45 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(setRoots).toStrictEqual([
-			{
-				fields: {
-					name: `pin:${StorePath.hash(appPath)}`,
-					targets: [appPath],
-					ttlSeconds: 604_800
+		expect({ clientCalls, setRoots, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath],
+						ttlSeconds: 604_800
+					}
 				}
-			}
-		]);
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '1' },
-				{ label: 'Bytes uploaded', value: '0 B' },
-				{ label: 'Pinned paths', value: '1' },
-				{ label: 'Pin expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
+			],
+			setRoots: [
+				{
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath],
+						ttlSeconds: 604_800
+					}
+				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Pinned paths', value: '1' },
+					{ label: 'Pin expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
+				]
 			]
-		]);
+		});
 	});
 
 	it('derives a stable pin name when the same path is pushed again', async () => {
 		const setRoots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
 		const dependencies = {
-			client: skipClient(setRoots),
+			client: skipClient(setRoots, clientCalls),
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory() {
 				return Promise.resolve('/tmp/cupboard-test');
@@ -833,10 +1108,40 @@ describe('runPush', () => {
 		await runPush([appPath], reporter([]), dependencies);
 		await runPush([appPath], reporter([]), dependencies);
 
-		expect(setRoots.map((call) => call.fields.name)).toStrictEqual([
-			`pin:${StorePath.hash(appPath)}`,
-			`pin:${StorePath.hash(appPath)}`
-		]);
+		expect({ clientCalls, setRoots }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				},
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			],
+			setRoots: [
+				{
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				},
+				{
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			]
+		});
 	});
 
 	it('records retention only after committing the uploads', async () => {
@@ -918,9 +1223,15 @@ describe('runPush', () => {
 		const expiries = ['2026-01-15T00:00:00.000Z', '2026-01-15T00:00:05.000Z'];
 		let call = 0;
 		const results: ResultRow[][] = [];
+		const clientCalls: unknown[] = [];
 
 		const client: PushClient = {
 			negotiate(body) {
+				clientCalls.push({
+					method: 'negotiate',
+					paths: body.paths.map((path) => path.storePath)
+				});
+
 				return Promise.resolve({
 					uploads: body.paths.map((path) => ({
 						action: 'skip',
@@ -930,17 +1241,24 @@ describe('runPush', () => {
 				});
 			},
 			prepareUpload() {
-				throw new UnexpectedPushClientCallError('prepareUpload');
+				clientCalls.push({ method: 'prepareUpload' });
+
+				return Promise.resolve(fallbackPrepareUploadResponse());
 			},
 			uploadBlob() {
-				throw new UnexpectedPushClientCallError('uploadBlob');
+				clientCalls.push({ method: 'uploadBlob' });
+
+				return Promise.resolve();
 			},
 			commit() {
-				throw new UnexpectedPushClientCallError('commit');
+				clientCalls.push({ method: 'commit' });
+
+				return Promise.resolve(fallbackCommitResponse());
 			},
 			setRoot(name, body) {
 				const expiresAt = expiries.at(call) ?? expiries.at(-1);
 				call += 1;
+				clientCalls.push({ method: 'setRoot', fields: { name, ...body } });
 
 				return Promise.resolve(rootSummary({ name, ...body }, expiresAt));
 			}
@@ -961,19 +1279,41 @@ describe('runPush', () => {
 			}
 		});
 
-		expect(results).toStrictEqual([
-			[
-				{ label: 'Uploaded paths', value: '0' },
-				{ label: 'Already cached', value: '0' },
-				{ label: 'Skipped', value: '2' },
-				{ label: 'Bytes uploaded', value: '0 B' },
-				{ label: 'Pinned paths', value: '2' },
+		expect({ clientCalls, results }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath, runtimePath] },
 				{
-					label: 'Pin expiry',
-					value: 'expires 2026-01-15T00:00:00.000Z to 2026-01-15T00:00:05.000Z'
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath],
+						ttlSeconds: 604_800
+					}
+				},
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(runtimePath)}`,
+						targets: [runtimePath],
+						ttlSeconds: 604_800
+					}
 				}
+			],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '2' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Pinned paths', value: '2' },
+					{
+						label: 'Pin expiry',
+						value:
+							'expires 2026-01-15T00:00:00.000Z to 2026-01-15T00:00:05.000Z'
+					}
+				]
 			]
-		]);
+		});
 	});
 
 	it('parks the commit for a deferred upload, then records retention', async () => {
@@ -1014,30 +1354,53 @@ describe('runPush', () => {
 
 	it('records a failed commit, warns with its reason, and fails incomplete', async () => {
 		const warnings: { label: string; value?: string }[] = [];
-		const result = runPush([appPath], reporter([], warnings), {
+		const events: string[] = [];
+
+		const outcome = await runPush([appPath], reporter([], warnings), {
 			client: {
-				...deferredUpload([]),
+				...deferredUpload(events),
 				commit() {
+					events.push('commit');
+
 					return Promise.reject(
 						new UploadVerificationFailedError('upload-app', 'mismatch')
 					);
 				},
-				setRoot() {
-					throw new UnexpectedPushClientCallError('setRoot');
+				setRoot(name, body) {
+					events.push('setRoot');
+
+					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
 			...deferredDeps()
+		}).then(
+			() => ({ pushed: true }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(PushIncompleteError);
+
+				if (error_ instanceof PushIncompleteError) {
+					return {
+						error: {
+							name: error_.name,
+							failedPaths: error_.failedPaths
+						}
+					};
+				}
+
+				return { pushed: true };
+			}
+		);
+
+		expect({ outcome, events }).toStrictEqual({
+			outcome: {
+				error: {
+					name: PushIncompleteError.name,
+					failedPaths: [StorePath.basename(appPath)]
+				}
+			},
+			events: ['negotiate', 'prepareUpload', 'uploadBlob', 'commit']
 		});
 
-		// The commit failed, so the push fails as a whole (PushIncompleteError,
-		// not the raw verdict) and never records retention (setRoot would throw).
-		await expect(result).rejects.toBeInstanceOf(PushIncompleteError);
-		await expect(result).rejects.toMatchObject({
-			failedPaths: [StorePath.basename(appPath)]
-		});
-
-		// The failed path's reason is surfaced per path, like an upload failure,
-		// so a terminal user sees why it failed and not only the count.
 		expect(warnings).toStrictEqual([
 			{
 				label: 'commit failed',
@@ -1054,8 +1417,9 @@ describe('runPush', () => {
 	it('uploads what it can, skips retention, and fails when an upload fails', async () => {
 		const uploaded: string[] = [];
 		const committed: string[] = [];
+		const setRoots: RootSetBody[] = [];
 
-		const result = runPush([appPath, runtimePath], reporter([]), {
+		const outcome = await runPush([appPath, runtimePath], reporter([]), {
 			client: {
 				negotiate() {
 					return Promise.resolve({
@@ -1106,8 +1470,10 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot() {
-					throw new UnexpectedPushClientCallError('setRoot');
+				setRoot(_name, body) {
+					setRoots.push(body);
+
+					return Promise.resolve(rootSummary({ name: '', ...body }));
 				}
 			} satisfies PushClient,
 			nixStore: nixStore({
@@ -1124,17 +1490,34 @@ describe('runPush', () => {
 			},
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
-		});
+		}).then(
+			() => ({ pushed: true }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(PushIncompleteError);
 
-		// The good path still uploads and commits; the failed one is reported and
-		// the push fails as a whole, with no retention recorded.
-		await expect(result).rejects.toBeInstanceOf(PushIncompleteError);
-		await expect(result).rejects.toMatchObject({
-			failedPaths: [StorePath.basename(runtimePath)]
-		});
-		expect({ uploaded, committed }).toStrictEqual({
+				if (error_ instanceof PushIncompleteError) {
+					return {
+						error: {
+							name: error_.name,
+							failedPaths: error_.failedPaths
+						}
+					};
+				}
+
+				return { pushed: true };
+			}
+		);
+
+		expect({ outcome, uploaded, committed, setRoots }).toStrictEqual({
+			outcome: {
+				error: {
+					name: PushIncompleteError.name,
+					failedPaths: [StorePath.basename(runtimePath)]
+				}
+			},
 			uploaded: [`nar/${appDigest.narHash.toString()}.nar.zst`],
-			committed: ['upload-app']
+			committed: ['upload-app'],
+			setRoots: []
 		});
 	});
 });
@@ -1259,11 +1642,11 @@ async function collectReadableStream(
 }
 
 function digestForNar(nar: PushNarArchive): NarDigest {
-	if (nar instanceof FakeNarArchive) {
-		return nar.digestValue;
+	if (!(nar instanceof FakeNarArchive)) {
+		throw new TypeError('expected a FakeNarArchive');
 	}
 
-	throw new UnexpectedNarArchiveError();
+	return nar.digestValue;
 }
 
 function digest(byte: number, narSize: number): NarDigest {
@@ -1320,6 +1703,15 @@ function pathInfo(
 	};
 }
 
+function knownPathInfo(
+	paths: Record<string, NixValidPathInfo>,
+	storePath: string
+): NixValidPathInfo {
+	return z
+		.custom<NixValidPathInfo>((value) => value !== undefined)
+		.parse(paths[storePath]);
+}
+
 function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 	return {
 		resolveClosure(storePaths) {
@@ -1332,25 +1724,11 @@ function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 			}
 
 			return Promise.resolve(
-				[...closure].map((storePath) => {
-					const info = paths[storePath];
-
-					if (info !== undefined) {
-						return info;
-					}
-
-					throw new UnexpectedPathInfoRequestError(storePath);
-				})
+				[...closure].map((storePath) => knownPathInfo(paths, storePath))
 			);
 		},
 		queryPathInfo(storePath) {
-			const info = paths[storePath];
-
-			if (info !== undefined) {
-				return Promise.resolve(info);
-			}
-
-			throw new UnexpectedPathInfoRequestError(storePath);
+			return Promise.resolve(knownPathInfo(paths, storePath));
 		}
 	};
 }
@@ -1387,9 +1765,17 @@ interface SetRootCall {
 	readonly fields: SetRootFields;
 }
 
-function skipClient(setRoots: SetRootCall[]): PushClient {
+function skipClient(
+	setRoots: SetRootCall[],
+	clientCalls: unknown[]
+): PushClient {
 	return {
 		negotiate(body) {
+			clientCalls.push({
+				method: 'negotiate',
+				paths: body.paths.map((path) => path.storePath)
+			});
+
 			return Promise.resolve({
 				uploads: body.paths.map((path) => ({
 					action: 'skip',
@@ -1399,16 +1785,23 @@ function skipClient(setRoots: SetRootCall[]): PushClient {
 			});
 		},
 		prepareUpload() {
-			throw new UnexpectedPushClientCallError('prepareUpload');
+			clientCalls.push({ method: 'prepareUpload' });
+
+			return Promise.resolve(fallbackPrepareUploadResponse());
 		},
 		uploadBlob() {
-			throw new UnexpectedPushClientCallError('uploadBlob');
+			clientCalls.push({ method: 'uploadBlob' });
+
+			return Promise.resolve();
 		},
 		commit() {
-			throw new UnexpectedPushClientCallError('commit');
+			clientCalls.push({ method: 'commit' });
+
+			return Promise.resolve(fallbackCommitResponse());
 		},
 		setRoot(name, body) {
 			const fields = { name, ...body };
+			clientCalls.push({ method: 'setRoot', fields });
 			setRoots.push({ fields });
 
 			return Promise.resolve(rootSummary(fields));
@@ -1481,30 +1874,4 @@ function reporter(
 			void message;
 		}
 	};
-}
-
-class UnexpectedPathInfoRequestError extends Error {
-	constructor(public readonly storePath: string) {
-		super(`Unexpected path info request: ${storePath}`);
-		this.name = 'UnexpectedPathInfoRequestError';
-	}
-}
-
-class UnexpectedPushClientCallError extends Error {
-	constructor(
-		public readonly method:
-			| keyof PushClient
-			| 'compressNar'
-			| 'readAttestationBundle'
-	) {
-		super(`Unexpected push client call: ${method}`);
-		this.name = 'UnexpectedPushClientCallError';
-	}
-}
-
-class UnexpectedNarArchiveError extends Error {
-	constructor() {
-		super('Unexpected NAR archive');
-		this.name = 'UnexpectedNarArchiveError';
-	}
 }

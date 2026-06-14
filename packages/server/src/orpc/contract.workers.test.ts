@@ -1,6 +1,8 @@
 import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { attestationUploadDecisionSchema } from '@cupboard/protocol/attestations';
 import { tenantContract } from '@cupboard/protocol/contract';
-import { createORPCClient, isDefinedError, safe } from '@orpc/client';
+import { uploadActionDecisionSchema } from '@cupboard/protocol/upload';
+import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
@@ -8,6 +10,7 @@ import { OpenAPILink } from '@orpc/openapi-client/fetch';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import {
@@ -94,24 +97,17 @@ describe('tenant contract round trip', () => {
 			query: { force: true }
 		});
 
-		if (!isDefinedError(error)) {
-			throw new Error('expected a defined contract error');
-		}
-
-		expect({
-			isDefined,
-			data,
-			code: error.code,
-			status: error.status,
-			errorData: error.data,
-			forced
-		}).toStrictEqual({
+		expect({ isDefined, data, forced }).toStrictEqual({
 			isDefined: true,
 			data: undefined,
+			forced: { name: 'builds', removed: true, storePathsRemoved: 1 }
+		});
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			defined: true,
 			code: 'CACHE_NOT_EMPTY',
 			status: StatusCodes.CONFLICT,
-			errorData: { cache: 'builds' },
-			forced: { name: 'builds', removed: true, storePathsRemoved: 1 }
+			data: { cache: 'builds' }
 		});
 	});
 
@@ -125,20 +121,45 @@ describe('tenant contract round trip', () => {
 			id: rotated.rotated.id
 		});
 		const authRotated = await client.keys.auth.rotate();
+		const authRetiring = z
+			.object({ kid: z.string(), scheduledRetireAt: z.string() })
+			.parse(authRotated.retiring);
 		const authListed = await client.keys.auth.list();
 
 		expect({
 			retired,
-			rotatedIsListed: rotated.keys.some(
-				(key) => key.id === rotated.rotated.id
-			),
-			authRotatedListed: authListed.keys.some(
-				(key) => key.kid === authRotated.rotated && key.active
-			)
+			signingKeys: rotated.keys.map((key) => ({
+				id: key.id,
+				stage: key.stage
+			})),
+			authKeys: authListed.keys
+				.map((key) => ({
+					kid: key.kid,
+					active: key.active
+				}))
+				.toSorted((left, right) => left.kid.localeCompare(right.kid))
 		}).toStrictEqual({
 			retired: { id: rotated.rotated.id, stage: 'publication' },
-			rotatedIsListed: true,
-			authRotatedListed: true
+			signingKeys: [
+				{
+					id: 'active',
+					stage: 'signing'
+				},
+				{
+					id: rotated.rotated.id,
+					stage: 'signing'
+				}
+			],
+			authKeys: [
+				{
+					kid: authRotated.rotated,
+					active: true
+				},
+				{
+					kid: authRetiring.kid,
+					active: false
+				}
+			].toSorted((left, right) => left.kid.localeCompare(right.kid))
 		});
 	});
 
@@ -255,11 +276,11 @@ describe('tenant contract round trip', () => {
 			cacheName: '_default',
 			paths: [uploadPathNegotiation(metadata)]
 		});
-		const [decision] = negotiated.uploads;
-
-		if (decision?.action !== 'upload') {
-			throw new Error('expected an upload decision for a new path');
-		}
+		const decision = uploadActionDecisionSchema
+			.array()
+			.length(1)
+			.transform(([decision]) => uploadActionDecisionSchema.parse(decision))
+			.parse(negotiated.uploads);
 
 		const prepared = await client.uploads.prepare({
 			cacheName: '_default',
@@ -298,11 +319,13 @@ describe('tenant contract round trip', () => {
 			cacheName: '_default',
 			bundles: [{ storePathHash: metadata.storePathHash, digest }]
 		});
-		const [decision] = negotiated.bundles;
-
-		if (decision?.action !== 'upload') {
-			throw new Error('expected an attestation upload decision');
-		}
+		const decision = attestationUploadDecisionSchema
+			.array()
+			.length(1)
+			.transform(([decision]) =>
+				attestationUploadDecisionSchema.parse(decision)
+			)
+			.parse(negotiated.bundles);
 
 		const prepared = await client.attestations.prepare({
 			cacheName: '_default',
@@ -334,19 +357,13 @@ describe('tenant contract round trip', () => {
 		const client = tenantClient(await issueServerSignedToken('write'));
 
 		const [error, data, isDefined] = await safe(client.caches.list());
-
-		if (!isDefinedError(error)) {
-			throw new Error('expected a defined contract error');
-		}
-
-		expect({
-			isDefined,
-			data,
-			code: error.code,
-			status: error.status
-		}).toStrictEqual({
+		expect({ isDefined, data }).toStrictEqual({
 			isDefined: true,
-			data: undefined,
+			data: undefined
+		});
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			defined: true,
 			code: 'FORBIDDEN',
 			status: StatusCodes.FORBIDDEN
 		});

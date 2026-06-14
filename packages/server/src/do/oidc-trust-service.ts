@@ -10,10 +10,11 @@ import type { JWTPayload } from 'jose';
 
 import * as schema from '../db/schema.ts';
 import {
-	InvalidGrantError,
 	IssuerUnavailableError,
 	OwnerConfigurationInvalidError,
-	OwnerRuleImmutableError
+	OwnerRuleImmutableError,
+	SubjectTokenNotJwtError,
+	SubjectTokenVerificationFailedError
 } from '../errors.ts';
 import {
 	decodeInboundClaims,
@@ -107,7 +108,7 @@ export class OidcTrustService {
 		try {
 			return decodeInboundClaims(token);
 		} catch {
-			throw new InvalidGrantError('Subject token is not a JWT');
+			throw new SubjectTokenNotJwtError();
 		}
 	}
 
@@ -141,7 +142,7 @@ export class OidcTrustService {
 				throw new IssuerUnavailableError(rule.issuer, { cause: error });
 			}
 
-			throw new InvalidGrantError('Subject token failed verification');
+			throw new SubjectTokenVerificationFailedError();
 		}
 	}
 

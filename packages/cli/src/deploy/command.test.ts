@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	AccountOptionRequiredError,
@@ -9,12 +10,14 @@ import {
 	planMenuEntries,
 	type PlanReviewWorld,
 	type PlanState,
+	R2CredentialsRejectedError,
 	reviewPlan,
 	verifyR2Credentials
 } from './command.ts';
 import { parseDeploymentConfig } from './config.ts';
 import { collectResources } from './deploy-run.ts';
 import { deployerOwner, type OwnerBinding } from './owner.ts';
+import type { R2CredentialCheck } from './r2-credentials.ts';
 import { TokenManagementNotPermittedError } from './r2-token.ts';
 import type { DeployUi, TextEdit } from './ui.ts';
 
@@ -42,30 +45,97 @@ const config = parseDeploymentConfig(
 	}`
 );
 
-const unexpected = (member: string) => (): never => {
-	throw new Error(`${member} was not expected`);
-};
+interface UiCall {
+	readonly method: string;
+}
+
+const recordUiCall =
+	(calls: UiCall[], method: string): (() => void) =>
+	() => {
+		calls.push({ method });
+	};
+
+const absentValues: { readonly choice?: never } = {};
+
+function absentString(): string | undefined {
+	return undefined;
+}
 
 /** A {@link DeployUi} whose account picker answers with `choice` (or cancels). */
-function pickerUi(choice?: string): DeployUi {
+function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 	return {
 		interactive: true,
-		intro: unexpected('intro'),
-		outro: unexpected('outro'),
-		cancelled: unexpected('cancelled'),
-		info: unexpected('info'),
-		success: unexpected('success'),
-		warn: unexpected('warn'),
-		note: unexpected('note'),
-		data: unexpected('data'),
-		confirm: unexpected('confirm'),
-		menu: unexpected('menu'),
-		editText: unexpected('editText'),
-		prefixedText: unexpected('prefixedText'),
-		secret: unexpected('secret'),
-		chooseAccount: () => Promise.resolve(choice),
-		openBrowser: unexpected('openBrowser'),
-		reporter: unexpected('reporter')
+		intro: recordUiCall(uiCalls, 'intro'),
+		outro: recordUiCall(uiCalls, 'outro'),
+		cancelled: recordUiCall(uiCalls, 'cancelled'),
+		info: recordUiCall(uiCalls, 'info'),
+		success: recordUiCall(uiCalls, 'success'),
+		warn: recordUiCall(uiCalls, 'warn'),
+		note: recordUiCall(uiCalls, 'note'),
+		data: recordUiCall(uiCalls, 'data'),
+		confirm: (options) => {
+			uiCalls.push({ method: 'confirm' });
+			void options;
+
+			return Promise.resolve('no');
+		},
+		menu: (_message, entries) => {
+			uiCalls.push({ method: 'menu' });
+			void entries;
+
+			return Promise.resolve(absentValues.choice);
+		},
+		editText: (options) => {
+			uiCalls.push({ method: 'editText' });
+			void options;
+
+			return Promise.resolve({ kind: 'cancelled' });
+		},
+		prefixedText: (options) => {
+			uiCalls.push({ method: 'prefixedText' });
+			void options;
+
+			return Promise.resolve(absentString());
+		},
+		secret: (message) => {
+			uiCalls.push({ method: 'secret' });
+			void message;
+
+			return Promise.resolve(absentString());
+		},
+		chooseAccount: () => {
+			uiCalls.push({ method: 'chooseAccount' });
+
+			return Promise.resolve(choice);
+		},
+		openBrowser: recordUiCall(uiCalls, 'openBrowser'),
+		reporter: () => ({
+			phase: (_label, body) =>
+				Promise.resolve(body({ fact: recordUiCall(uiCalls, 'fact') })),
+			progress: (_label, _options, body) =>
+				Promise.resolve(
+					body({
+						advance: recordUiCall(uiCalls, 'reporter.progress.advance'),
+						fact: recordUiCall(uiCalls, 'reporter.progress.fact')
+					})
+				),
+			steps: (_label, body) =>
+				Promise.resolve(
+					body({
+						message: recordUiCall(uiCalls, 'reporter.steps.message'),
+						group: () => ({
+							message: recordUiCall(uiCalls, 'reporter.steps.group.message'),
+							success: recordUiCall(uiCalls, 'reporter.steps.group.success'),
+							error: recordUiCall(uiCalls, 'reporter.steps.group.error')
+						})
+					})
+				),
+			result: recordUiCall(uiCalls, 'result'),
+			data: recordUiCall(uiCalls, 'reporter.data'),
+			warn: recordUiCall(uiCalls, 'reporter.warn'),
+			info: recordUiCall(uiCalls, 'reporter.info'),
+			error: recordUiCall(uiCalls, 'reporter.error')
+		})
 	};
 }
 
@@ -148,57 +218,98 @@ function scriptedUi(script: ReviewScript): DeployUi {
 			}
 		}),
 		menu: (_message, entries) => {
-			if (menuChoices.length === 0) {
-				throw new Error('menu asked more often than scripted');
+			const [scripted] = z
+				.array(z.string().optional())
+				.length(1)
+				.parse(menuChoices.splice(0, 1));
+
+			if (scripted === undefined) {
+				return Promise.resolve(absentValues.choice);
 			}
 
-			const scripted = menuChoices.shift();
+			const choice = z
+				.custom<
+					(typeof entries)[number]['value']
+				>((value) => value === scripted)
+				.parse(entries.find((entry) => entry.value === scripted)?.value);
 
-			// Resolve through the caller's entries, as the real menu does, so the
-			// scripted answer keeps the caller's narrow type.
-			return Promise.resolve(
-				entries.find((entry) => entry.value === scripted)?.value
-			);
+			return Promise.resolve(choice);
 		},
 		editText: () => {
-			const edit = textEdits.shift();
-
-			if (edit === undefined) {
-				throw new Error('editText asked more often than scripted');
-			}
+			const edit = z
+				.custom<TextEdit>((value) => value !== undefined)
+				.parse(textEdits.shift());
 
 			return Promise.resolve(edit);
 		},
 		secret: () => {
-			if (secrets.length === 0) {
-				throw new Error('secret asked more often than scripted');
-			}
+			const [secret] = z
+				.array(z.string().optional())
+				.length(1)
+				.parse(secrets.splice(0, 1));
 
-			return Promise.resolve(secrets.shift());
+			return Promise.resolve(secret);
 		}
 	};
 }
 
 describe('chooseDeployAccount', () => {
 	it('returns the account picked in the terminal', async () => {
-		expect(await chooseDeployAccount(pickerUi('acc-2'), accounts, true)).toBe(
-			'acc-2'
+		const uiCalls: UiCall[] = [];
+		const choice = await chooseDeployAccount(
+			pickerUi('acc-2', uiCalls),
+			accounts,
+			true
 		);
+
+		expect({ choice, uiCalls }).toStrictEqual({
+			choice: 'acc-2',
+			uiCalls: [{ method: 'chooseAccount' }]
+		});
 	});
 
 	it('treats a cancelled picker as a cancelled deploy', async () => {
-		await expect(
-			chooseDeployAccount(pickerUi(), accounts, true)
-		).rejects.toStrictEqual(new DeployCancelledError());
+		const uiCalls: UiCall[] = [];
+		const outcome = await chooseDeployAccount(
+			pickerUi(undefined, uiCalls),
+			accounts,
+			true
+		).then(
+			(choice) => ({ choice }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(DeployCancelledError);
+
+				if (error_ instanceof DeployCancelledError) {
+					return { error: { name: error_.name } };
+				}
+
+				throw error_;
+			}
+		);
+
+		expect({ outcome, uiCalls }).toStrictEqual({
+			outcome: { error: { name: 'DeployCancelledError' } },
+			uiCalls: [{ method: 'chooseAccount' }]
+		});
 	});
 
 	it('instructs non-interactive callers to pass --account, listing them', async () => {
-		const choice = chooseDeployAccount(pickerUi('acc-1'), accounts, false);
+		let rejection: unknown;
+		try {
+			await chooseDeployAccount(pickerUi('acc-1'), accounts, false);
+		} catch (error_) {
+			rejection = error_;
+		}
 
-		await expect(choice).rejects.toStrictEqual(
-			new AccountOptionRequiredError(accounts)
-		);
-		await expect(choice).rejects.toThrow('acc-2  Work');
+		expect(rejection).toBeInstanceOf(AccountOptionRequiredError);
+
+		if (rejection instanceof AccountOptionRequiredError) {
+			expect({
+				error: { name: rejection.name, accounts: rejection.accounts }
+			}).toStrictEqual({
+				error: { name: AccountOptionRequiredError.name, accounts }
+			});
+		}
 	});
 });
 
@@ -305,9 +416,9 @@ describe('reviewPlan', () => {
 
 		const agreed = await reviewPlan(initial, w);
 
-		expect({ agreed, renders: rendered.length }).toStrictEqual({
+		expect({ agreed, rendered }).toStrictEqual({
 			agreed: { ...initial, domain: 'cache.example.com' },
-			renders: 2
+			rendered: [initial, { ...initial, domain: 'cache.example.com' }]
 		});
 	});
 
@@ -320,10 +431,13 @@ describe('reviewPlan', () => {
 		);
 
 		const agreed = await reviewPlan(initial, w);
+		const plan = z
+			.custom<PlanState>((value) => value !== undefined)
+			.parse(agreed);
 
-		expect(collectResources(agreed?.config ?? config).r2Buckets).toStrictEqual([
-			'my-cache'
-		]);
+		expect({
+			r2Buckets: collectResources(plan.config).r2Buckets
+		}).toStrictEqual({ r2Buckets: ['my-cache'] });
 	});
 
 	it('replaces the cron triggers from a comma-separated edit', async () => {
@@ -335,11 +449,13 @@ describe('reviewPlan', () => {
 		);
 
 		const agreed = await reviewPlan(initial, w);
+		const plan = z
+			.custom<PlanState>((value) => value !== undefined)
+			.parse(agreed);
 
-		expect(agreed?.config.control.crons).toStrictEqual([
-			'*/30 * * * *',
-			'0 4 * * MON'
-		]);
+		expect({ crons: plan.config.control.crons }).toStrictEqual({
+			crons: ['*/30 * * * *', '0 4 * * MON']
+		});
 	});
 
 	it('switches account from the live account list', async () => {
@@ -465,19 +581,27 @@ describe('R2 credential settlement', () => {
 
 	it('creates a scoped key when chosen', async () => {
 		const ui = scriptedUi({ menuChoices: ['create'] });
+		const creates: string[] = [];
 
-		expect(
-			await obtainR2Credentials({
-				ui,
-				accountId: 'acc-1',
-				bucketName: 'cupboard-blobs',
-				creation: {
-					kind: 'available',
-					bucketExists: true,
-					create: () => Promise.resolve(created)
+		const outcome = await obtainR2Credentials({
+			ui,
+			accountId: 'acc-1',
+			bucketName: 'cupboard-blobs',
+			creation: {
+				kind: 'available',
+				bucketExists: true,
+				create: () => {
+					creates.push('create');
+
+					return Promise.resolve(created);
 				}
-			})
-		).toStrictEqual({ kind: 'settled', credentials: created, created: true });
+			}
+		});
+
+		expect({ outcome, creates }).toStrictEqual({
+			outcome: { kind: 'settled', credentials: created, created: true },
+			creates: ['create']
+		});
 	});
 
 	it('falls back to manual entry when token management is not permitted', async () => {
@@ -510,37 +634,57 @@ describe('R2 credential settlement', () => {
 			textEdits: [{ kind: 'set', value: pair.accessKeyId }],
 			secrets: [pair.secretAccessKey]
 		});
+		const creates: string[] = [];
 
-		expect(
-			await obtainR2Credentials({
-				ui,
-				accountId: 'acc-1',
-				bucketName: 'cupboard-blobs',
-				creation: {
-					kind: 'available',
-					bucketExists: true,
-					create: unexpected('create')
+		const outcome = await obtainR2Credentials({
+			ui,
+			accountId: 'acc-1',
+			bucketName: 'cupboard-blobs',
+			creation: {
+				kind: 'available',
+				bucketExists: true,
+				create: () => {
+					creates.push('create');
+
+					return Promise.resolve(created);
 				}
-			})
-		).toStrictEqual({ kind: 'settled', credentials: pair, created: false });
+			}
+		});
+
+		expect({ outcome, creates }).toStrictEqual({
+			outcome: {
+				kind: 'settled',
+				credentials: pair,
+				created: false
+			},
+			creates: []
+		});
 	});
 
 	it('keeps the current key when the user says so after a bucket rename', async () => {
 		const ui = scriptedUi({ menuChoices: ['keep'] });
+		const creates: string[] = [];
 
-		expect(
-			await obtainR2Credentials({
-				ui,
-				accountId: 'acc-1',
-				bucketName: 'pantry',
-				creation: {
-					kind: 'available',
-					bucketExists: false,
-					create: unexpected('create')
-				},
-				keep: { previousBucket: 'cupboard-blobs' }
-			})
-		).toStrictEqual({ kind: 'keep' });
+		const outcome = await obtainR2Credentials({
+			ui,
+			accountId: 'acc-1',
+			bucketName: 'pantry',
+			creation: {
+				kind: 'available',
+				bucketExists: false,
+				create: () => {
+					creates.push('create');
+
+					return Promise.resolve(created);
+				}
+			},
+			keep: { previousBucket: 'cupboard-blobs' }
+		});
+
+		expect({ outcome, creates }).toStrictEqual({
+			outcome: { kind: 'keep' },
+			creates: []
+		});
 	});
 
 	it('offers keeping the key even when creation is unavailable', async () => {
@@ -575,19 +719,27 @@ describe('R2 credential settlement', () => {
 
 	it('cancels cleanly from the settle menu', async () => {
 		const ui = scriptedUi({ menuChoices: ['cancel'] });
+		const creates: string[] = [];
 
-		expect(
-			await obtainR2Credentials({
-				ui,
-				accountId: 'acc-1',
-				bucketName: 'cupboard-blobs',
-				creation: {
-					kind: 'available',
-					bucketExists: true,
-					create: unexpected('create')
+		const outcome = await obtainR2Credentials({
+			ui,
+			accountId: 'acc-1',
+			bucketName: 'cupboard-blobs',
+			creation: {
+				kind: 'available',
+				bucketExists: true,
+				create: () => {
+					creates.push('create');
+
+					return Promise.resolve(created);
 				}
-			})
-		).toStrictEqual({ kind: 'cancelled' });
+			}
+		});
+
+		expect({ outcome, creates }).toStrictEqual({
+			outcome: { kind: 'cancelled' },
+			creates: []
+		});
 	});
 });
 
@@ -619,21 +771,35 @@ describe('verifyR2Credentials', () => {
 
 	it('retries a freshly created key while it propagates', async () => {
 		const ui = scriptedUi({});
-		let probes = 0;
+		const checks: R2CredentialCheck[] = [
+			{ kind: 'rejected', status: 403 },
+			{ kind: 'rejected', status: 403 },
+			{ kind: 'valid' }
+		];
+		const sleeps: number[] = [];
 
 		const verified = await verifyR2Credentials({
 			...base,
 			ui,
 			attempts: 5,
 			check: () => {
-				probes += 1;
-				return Promise.resolve(
-					probes < 3 ? { kind: 'rejected', status: 403 } : { kind: 'valid' }
-				);
+				const [check] = z
+					.tuple([z.custom<R2CredentialCheck>()])
+					.parse(checks.splice(0, 1));
+
+				return Promise.resolve(check);
+			},
+			sleep: (milliseconds) => {
+				sleeps.push(milliseconds);
+
+				return Promise.resolve();
 			}
 		});
 
-		expect({ verified, probes }).toStrictEqual({ verified: pair, probes: 3 });
+		expect({ verified, sleeps }).toStrictEqual({
+			verified: pair,
+			sleeps: [5000, 5000]
+		});
 	});
 
 	it('lets a rejection be overridden with deploy-anyway', async () => {
@@ -688,13 +854,34 @@ describe('verifyR2Credentials', () => {
 	it('is fatal without a terminal', async () => {
 		const ui = scriptedUi({});
 
-		await expect(
-			verifyR2Credentials({
-				...base,
-				interactive: false,
-				ui,
-				check: () => Promise.resolve({ kind: 'rejected', status: 403 })
-			})
-		).rejects.toThrow('R2 rejected the credentials (HTTP 403)');
+		const outcome = await verifyR2Credentials({
+			...base,
+			interactive: false,
+			ui,
+			check: () => Promise.resolve({ kind: 'rejected', status: 403 })
+		}).then(
+			(credentials) => ({ credentials }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(R2CredentialsRejectedError);
+
+				if (error_ instanceof R2CredentialsRejectedError) {
+					return {
+						error: {
+							name: error_.name,
+							status: error_.status
+						}
+					};
+				}
+
+				throw error_;
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: R2CredentialsRejectedError.name,
+				status: 403
+			}
+		});
 	});
 });

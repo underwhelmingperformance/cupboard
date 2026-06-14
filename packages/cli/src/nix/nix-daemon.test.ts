@@ -124,9 +124,30 @@ describe('NixDaemonStoreClient', () => {
 			connect: () => Promise.resolve(new FakeDaemonTransport({}))
 		});
 
-		await expect(client.queryPathInfo(appPath)).rejects.toThrow(
-			NixStorePathNotFoundError
+		const outcome = await client.queryPathInfo(appPath).then(
+			(value) => ({ value }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(NixStorePathNotFoundError);
+
+				if (error_ instanceof NixStorePathNotFoundError) {
+					return {
+						error: {
+							name: error_.name,
+							storePath: error_.storePath
+						}
+					};
+				}
+
+				throw error_;
+			}
 		);
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: 'NixStorePathNotFoundError',
+				storePath: appPath
+			}
+		});
 	});
 
 	it('rejects daemon protocol minors older than the SetOptions frame it sends', async () => {
@@ -135,9 +156,30 @@ describe('NixDaemonStoreClient', () => {
 				Promise.resolve(new FakeDaemonTransport({}, { protocolMinor: 37 }))
 		});
 
-		await expect(client.queryPathInfo(appPath)).rejects.toThrow(
-			UnsupportedNixDaemonProtocolError
+		const outcome = await client.queryPathInfo(appPath).then(
+			(value) => ({ value }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(UnsupportedNixDaemonProtocolError);
+
+				if (error_ instanceof UnsupportedNixDaemonProtocolError) {
+					return {
+						error: {
+							name: error_.name,
+							version: error_.version
+						}
+					};
+				}
+
+				throw error_;
+			}
 		);
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: 'UnsupportedNixDaemonProtocolError',
+				version: { major: 1, minor: 37 }
+			}
+		});
 	});
 });
 

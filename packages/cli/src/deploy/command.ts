@@ -35,7 +35,7 @@ import {
 	derivedPlanRows,
 	runDeploy
 } from './deploy-run.ts';
-import { checkDomainOption, domainProblem } from './domain.ts';
+import { checkDomainOption, domainProblemText } from './domain.ts';
 import { EmbeddedArtifactError, loadEmbeddedArtifact } from './embedded.ts';
 import { readCachedGrant, writeCachedGrant } from './grant-store.ts';
 import {
@@ -51,9 +51,9 @@ import {
 	deployerOwner,
 	type OwnerBinding,
 	type OwnerChoice,
-	ownerFieldProblem,
+	ownerFieldProblemText,
 	ownerHint,
-	ownerIssuerProblem
+	ownerIssuerProblemText
 } from './owner.ts';
 import {
 	checkR2Credentials,
@@ -86,7 +86,9 @@ export class ConfirmationRequiredError extends CliError {
 
 /** An account must be chosen but there is no terminal to ask on. */
 export class AccountOptionRequiredError extends CliError {
-	constructor(accounts: readonly { id: string; name: string }[]) {
+	constructor(
+		public readonly accounts: readonly { id: string; name: string }[]
+	) {
 		super(
 			'Several Cloudflare accounts are available; pass --account <id>:\n' +
 				accounts.map((account) => `  ${account.id}  ${account.name}`).join('\n')
@@ -325,7 +327,7 @@ async function editOwner(
 	const issuer = await ui.editText({
 		message: 'OIDC issuer URL',
 		initial: current?.issuer ?? cloudflareDashIssuer,
-		problem: ownerIssuerProblem
+		problem: ownerIssuerProblemText
 	});
 
 	if (issuer.kind !== 'set') {
@@ -335,7 +337,7 @@ async function editOwner(
 	const subject = await ui.editText({
 		message: 'Subject (the sub claim of your id_token)',
 		initial: current?.subject,
-		problem: ownerFieldProblem
+		problem: ownerFieldProblemText
 	});
 
 	if (subject.kind !== 'set') {
@@ -347,7 +349,7 @@ async function editOwner(
 		initial:
 			current?.audience ??
 			(issuer.value === cloudflareDashIssuer ? cloudflareOauthClientId : ''),
-		problem: ownerFieldProblem
+		problem: ownerFieldProblemText
 	});
 
 	if (audience.kind !== 'set') {
@@ -387,7 +389,7 @@ async function applyPlanEdit(
 			initial: state.domain,
 			placeholder: 'cache.example.com',
 			emptyClears: true,
-			problem: domainProblem
+			problem: domainProblemText
 		});
 
 		if (edit.kind === 'set') {

@@ -7,6 +7,18 @@ import {
 	type ResolvedResources
 } from './upload.ts';
 
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
+
 const controlConfig: WorkerConfig = {
 	name: 'cupboard',
 	mainModule: 'worker.js',
@@ -84,8 +96,25 @@ describe('buildScriptMetadata', () => {
 	});
 
 	it('throws when a resolved id is missing', () => {
-		expect(() =>
-			buildScriptMetadata(controlConfig, { d1: new Map(), kv: resources.kv })
-		).toThrow(MissingResourceError);
+		const thrown = thrownBy(() =>
+			buildScriptMetadata(controlConfig, {
+				d1: new Map(),
+				kv: resources.kv
+			})
+		);
+
+		expect(thrown).toBeInstanceOf(MissingResourceError);
+
+		if (thrown instanceof MissingResourceError) {
+			expect({
+				name: thrown.name,
+				kind: thrown.kind,
+				resourceName: thrown.resourceName
+			}).toStrictEqual({
+				name: 'MissingResourceError',
+				kind: 'D1 database',
+				resourceName: 'cupboard'
+			});
+		}
 	});
 });

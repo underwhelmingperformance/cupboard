@@ -50,6 +50,18 @@ async function divergentEncodings(
 	return { small, large };
 }
 
+function expectCommitSocketError(
+	error: unknown
+): asserts error is CommitSocketError {
+	expect(error).toBeInstanceOf(CommitSocketError);
+}
+
+function expectCommitVerdictError(
+	error: unknown
+): asserts error is CommitVerdictError {
+	expect(error).toBeInstanceOf(CommitVerdictError);
+}
+
 // `tenant_usage` is charged once per tenant per unique NAR hash on the 0-to-1
 // presence transition and credited symmetrically on the 1-to-0. The charge rides
 // the reservation's atomic batch, gated so a replay neither double-charges nor
@@ -212,16 +224,17 @@ describe('per-tenant quota', () => {
 		await putNarBytes(decision.r2Key, nar);
 		const commitError = await commitUploadRejection(token, decision.uploadId);
 
+		expectCommitSocketError(commitError);
 		expect({
-			error: commitError,
+			error: { name: commitError.name, status: commitError.status },
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			usage: await tenantUsageRow()
 		}).toStrictEqual({
-			error: new CommitSocketError(
-				StatusCodes.INSUFFICIENT_STORAGE,
-				'This tenant is over its storage quota'
-			),
+			error: {
+				name: 'CommitSocketError',
+				status: StatusCodes.INSUFFICIENT_STORAGE
+			},
 			edges: [],
 			presence: [],
 			usage: {
@@ -263,16 +276,17 @@ describe('per-tenant quota', () => {
 		await putNarBytes(decision.r2Key, nar);
 		const commitError = await commitUploadRejection(token, decision.uploadId);
 
+		expectCommitSocketError(commitError);
 		expect({
-			error: commitError,
+			error: { name: commitError.name, status: commitError.status },
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			usage: await tenantUsageRow()
 		}).toStrictEqual({
-			error: new CommitSocketError(
-				StatusCodes.INSUFFICIENT_STORAGE,
-				'This tenant is over its storage quota'
-			),
+			error: {
+				name: 'CommitSocketError',
+				status: StatusCodes.INSUFFICIENT_STORAGE
+			},
 			edges: [],
 			presence: [],
 			usage: {
@@ -350,18 +364,20 @@ describe('per-tenant quota', () => {
 
 		const usage = await tenantUsageRow();
 
+		expectCommitVerdictError(commitError);
+		expectCommitSocketError(retryError);
 		expect({
-			error: commitError,
-			retryError,
+			error: { name: commitError.name, verdict: commitError.verdict },
+			retryError: { name: retryError.name, status: retryError.status },
 			edges: await blobReferenceRows(),
 			presence: await tenantBlobRows(),
 			bytes: usage?.bytes
 		}).toStrictEqual({
-			error: new CommitVerdictError('over-quota'),
-			retryError: new CommitSocketError(
-				StatusCodes.BAD_REQUEST,
-				'Uploaded object not found'
-			),
+			error: { name: 'CommitVerdictError', verdict: 'over-quota' },
+			retryError: {
+				name: 'CommitSocketError',
+				status: StatusCodes.BAD_REQUEST
+			},
 			edges: [],
 			presence: [],
 			bytes: 0

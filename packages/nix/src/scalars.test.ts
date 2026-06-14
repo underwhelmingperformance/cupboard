@@ -25,149 +25,40 @@ const storePathHash = '0'.repeat(32);
 const storePath = `/nix/store/${storePathHash}-name`;
 const uuid = '123e4567-e89b-12d3-a456-426614174000';
 
-const cases: readonly {
+const acceptedCases: readonly {
 	name: string;
 	schema: z.ZodType;
 	value: unknown;
-	valid: boolean;
 }[] = [
 	{
 		name: 'a valid nix hash',
 		schema: nixSha256HashSchema,
-		value: nixHash,
-		valid: true
-	},
-	{
-		name: 'a too-short nix hash',
-		schema: nixSha256HashSchema,
-		value: 'sha256:short',
-		valid: false
-	},
-	{
-		name: 'a nix hash with an out-of-alphabet character',
-		schema: nixSha256HashSchema,
-		value: `sha256:${'e'.repeat(52)}`,
-		valid: false
-	},
-	{
-		name: 'a nix hash without the prefix',
-		schema: nixSha256HashSchema,
-		value: '1'.repeat(52),
-		valid: false
+		value: nixHash
 	},
 	{
 		name: 'a valid sha256 hex digest',
 		schema: sha256HexDigestSchema,
-		value: 'a'.repeat(64),
-		valid: true
-	},
-	{
-		name: 'a sha256 hex digest with upper-case characters',
-		schema: sha256HexDigestSchema,
-		value: 'A'.repeat(64),
-		valid: false
-	},
-	{
-		name: 'a sha256 hex digest with the nix hash prefix',
-		schema: sha256HexDigestSchema,
-		value: `sha256:${'a'.repeat(64)}`,
-		valid: false
-	},
-	{
-		name: 'a short sha256 hex digest',
-		schema: sha256HexDigestSchema,
-		value: 'a'.repeat(63),
-		valid: false
+		value: 'a'.repeat(64)
 	},
 	{
 		name: 'a valid store path hash',
 		schema: storePathHashSchema,
-		value: storePathHash,
-		valid: true
-	},
-	{
-		name: 'a store path hash with bad characters',
-		schema: storePathHashSchema,
-		value: 'e'.repeat(32),
-		valid: false
-	},
-	{
-		name: 'a short store path hash',
-		schema: storePathHashSchema,
-		value: '0'.repeat(31),
-		valid: false
+		value: storePathHash
 	},
 	{
 		name: 'a valid store path',
 		schema: storePathSchema,
-		value: storePath,
-		valid: true
+		value: storePath
 	},
 	{
 		name: 'a store path with an upper-case and punctuation name',
 		schema: storePathSchema,
-		value: `/nix/store/${storePathHash}-Name+._?=`,
-		valid: true
-	},
-	{
-		name: 'a store path with a short hash',
-		schema: storePathSchema,
-		value: '/nix/store/short-name',
-		valid: false
-	},
-	{
-		name: 'a store path with whitespace in the name',
-		schema: storePathSchema,
-		value: `${storePath} with-space`,
-		valid: false
-	},
-	{
-		name: 'a store path with a newline in the name',
-		schema: storePathSchema,
-		value: `${storePath}\nInjected: value`,
-		valid: false
-	},
-	{
-		name: 'a path outside the store',
-		schema: storePathSchema,
-		value: '/etc/passwd',
-		valid: false
-	},
-	{
-		name: 'a nested path under a store path',
-		schema: storePathSchema,
-		value: `${storePath}/child`,
-		valid: false
+		value: `/nix/store/${storePathHash}-Name+._?=`
 	},
 	{
 		name: 'a valid store path basename',
 		schema: storePathBasenameSchema,
-		value: `${storePathHash}-Name+._?=`,
-		valid: true
-	},
-	{
-		name: 'a store path basename with a slash',
-		schema: storePathBasenameSchema,
-		value: `${storePathHash}-name/child`,
-		valid: false
-	},
-	{
-		name: 'a store path basename with a control character',
-		schema: storePathBasenameSchema,
-		value: `${storePathHash}-name\u0007`,
-		valid: false
-	},
-	{
-		name: 'a store path whose name exceeds the length cap',
-		schema: storePathSchema,
-		value: `/nix/store/${storePathHash}-${'a'.repeat(212)}`,
-		valid: false
-	},
-	{
-		name: 'a store path basename whose name exceeds the length cap',
-		schema: storePathBasenameSchema,
-		value: `${storePathHash}-${'a'.repeat(212)}`,
-		valid: false
+		value: `${storePathHash}-Name+._?=`
 	},
 	{
 		name: 'a references array within the cap',
@@ -175,8 +66,160 @@ const cases: readonly {
 		value: Array.from(
 			{ length: referencesMaxLength },
 			() => `${storePathHash}-name`
-		),
-		valid: true
+		)
+	},
+	{
+		name: 'a valid root name',
+		schema: rootNameSchema,
+		value: 'github:owner/repo/main'
+	},
+	{
+		name: 'a valid predicate type',
+		schema: predicateTypeSchema,
+		value: 'https://slsa.dev/provenance/v1'
+	},
+	{ name: 'a valid ttl', schema: ttlSecondsSchema, value: 3600 },
+	{
+		name: 'a positive integer',
+		schema: positiveIntSchema,
+		value: 1
+	},
+	{
+		name: 'a supported compression',
+		schema: compressionSchema,
+		value: 'zstd'
+	},
+	{
+		name: 'valid references',
+		schema: referencesSchema,
+		value: [`${storePathHash}-a`, `${'1'.repeat(32)}-B+._?=`]
+	},
+	{
+		name: 'the active signing key id',
+		schema: signingKeyIdSchema,
+		value: 'active'
+	},
+	{
+		name: 'a uuid signing key id',
+		schema: signingKeyIdSchema,
+		value: uuid
+	},
+	{
+		name: 'a simple cache name',
+		schema: cacheNameSchema,
+		value: 'builds'
+	},
+	{
+		name: 'a cache name with the allowed punctuation',
+		schema: cacheNameSchema,
+		value: '0a.b-c_d'
+	},
+	{
+		name: 'a 63-character cache name',
+		schema: cacheNameSchema,
+		value: 'a'.repeat(63)
+	},
+	{
+		name: 'a zero cache priority',
+		schema: cachePrioritySchema,
+		value: 0
+	},
+	{
+		name: 'a positive cache priority',
+		schema: cachePrioritySchema,
+		value: 40
+	}
+];
+
+const rejectedCases: readonly {
+	name: string;
+	schema: z.ZodType;
+	value: unknown;
+}[] = [
+	{
+		name: 'a too-short nix hash',
+		schema: nixSha256HashSchema,
+		value: 'sha256:short'
+	},
+	{
+		name: 'a nix hash with an out-of-alphabet character',
+		schema: nixSha256HashSchema,
+		value: `sha256:${'e'.repeat(52)}`
+	},
+	{
+		name: 'a nix hash without the prefix',
+		schema: nixSha256HashSchema,
+		value: '1'.repeat(52)
+	},
+	{
+		name: 'a sha256 hex digest with upper-case characters',
+		schema: sha256HexDigestSchema,
+		value: 'A'.repeat(64)
+	},
+	{
+		name: 'a sha256 hex digest with the nix hash prefix',
+		schema: sha256HexDigestSchema,
+		value: `sha256:${'a'.repeat(64)}`
+	},
+	{
+		name: 'a short sha256 hex digest',
+		schema: sha256HexDigestSchema,
+		value: 'a'.repeat(63)
+	},
+	{
+		name: 'a store path hash with bad characters',
+		schema: storePathHashSchema,
+		value: 'e'.repeat(32)
+	},
+	{
+		name: 'a short store path hash',
+		schema: storePathHashSchema,
+		value: '0'.repeat(31)
+	},
+	{
+		name: 'a store path with a short hash',
+		schema: storePathSchema,
+		value: '/nix/store/short-name'
+	},
+	{
+		name: 'a store path with whitespace in the name',
+		schema: storePathSchema,
+		value: `${storePath} with-space`
+	},
+	{
+		name: 'a store path with a newline in the name',
+		schema: storePathSchema,
+		value: `${storePath}\nInjected: value`
+	},
+	{
+		name: 'a path outside the store',
+		schema: storePathSchema,
+		value: '/etc/passwd'
+	},
+	{
+		name: 'a nested path under a store path',
+		schema: storePathSchema,
+		value: `${storePath}/child`
+	},
+	{
+		name: 'a store path basename with a slash',
+		schema: storePathBasenameSchema,
+		value: `${storePathHash}-name/child`
+	},
+	{
+		name: 'a store path basename with a control character',
+		schema: storePathBasenameSchema,
+		value: `${storePathHash}-name`
+	},
+	{
+		name: 'a store path whose name exceeds the length cap',
+		schema: storePathSchema,
+		value: `/nix/store/${storePathHash}-${'a'.repeat(212)}`
+	},
+	{
+		name: 'a store path basename whose name exceeds the length cap',
+		schema: storePathBasenameSchema,
+		value: `${storePathHash}-${'a'.repeat(212)}`
 	},
 	{
 		name: 'a references array exceeding the cap',
@@ -184,221 +227,137 @@ const cases: readonly {
 		value: Array.from(
 			{ length: referencesMaxLength + 1 },
 			() => `${storePathHash}-name`
-		),
-		valid: false
-	},
-	{
-		name: 'a valid root name',
-		schema: rootNameSchema,
-		value: 'github:owner/repo/main',
-		valid: true
+		)
 	},
 	{
 		name: 'an empty root name',
 		schema: rootNameSchema,
-		value: '',
-		valid: false
+		value: ''
 	},
 	{
 		name: 'an over-long root name',
 		schema: rootNameSchema,
-		value: 'a'.repeat(257),
-		valid: false
+		value: 'a'.repeat(257)
 	},
 	{
 		name: 'a root name with a control character',
 		schema: rootNameSchema,
-		value: 'bad\nname',
-		valid: false
-	},
-	{
-		name: 'a valid predicate type',
-		schema: predicateTypeSchema,
-		value: 'https://slsa.dev/provenance/v1',
-		valid: true
+		value: 'bad\nname'
 	},
 	{
 		name: 'an empty predicate type',
 		schema: predicateTypeSchema,
-		value: '',
-		valid: false
+		value: ''
 	},
 	{
 		name: 'a predicate type with a control character',
 		schema: predicateTypeSchema,
-		value: 'https://example.test/predicate\u007Fbad',
-		valid: false
+		value: 'https://example.test/predicatebad'
 	},
 	{
 		name: 'an overlong predicate type',
 		schema: predicateTypeSchema,
-		value: 'a'.repeat(513),
-		valid: false
+		value: 'a'.repeat(513)
 	},
-	{ name: 'a valid ttl', schema: ttlSecondsSchema, value: 3600, valid: true },
-	{ name: 'a zero ttl', schema: ttlSecondsSchema, value: 0, valid: false },
+	{
+		name: 'a zero ttl',
+		schema: ttlSecondsSchema,
+		value: 0
+	},
 	{
 		name: 'a fractional ttl',
 		schema: ttlSecondsSchema,
-		value: 1.5,
-		valid: false
+		value: 1.5
 	},
 	{
 		name: 'an out-of-range ttl',
 		schema: ttlSecondsSchema,
-		value: 315_360_001,
-		valid: false
+		value: 315_360_001
 	},
 	{
-		name: 'a positive integer',
+		name: 'a zero integer',
 		schema: positiveIntSchema,
-		value: 1,
-		valid: true
+		value: 0
 	},
-	{ name: 'a zero integer', schema: positiveIntSchema, value: 0, valid: false },
 	{
 		name: 'a negative integer',
 		schema: positiveIntSchema,
-		value: -1,
-		valid: false
+		value: -1
 	},
 	{
 		name: 'a fractional number',
 		schema: positiveIntSchema,
-		value: 1.5,
-		valid: false
-	},
-	{
-		name: 'a supported compression',
-		schema: compressionSchema,
-		value: 'zstd',
-		valid: true
+		value: 1.5
 	},
 	{
 		name: 'an unsupported compression',
 		schema: compressionSchema,
-		value: 'gzip',
-		valid: false
-	},
-	{
-		name: 'valid references',
-		schema: referencesSchema,
-		value: [`${storePathHash}-a`, `${'1'.repeat(32)}-B+._?=`],
-		valid: true
+		value: 'gzip'
 	},
 	{
 		name: 'a reference with a newline',
 		schema: referencesSchema,
-		value: [`${storePathHash}-a\nInjected: value`],
-		valid: false
+		value: [`${storePathHash}-a\nInjected: value`]
 	},
 	{
 		name: 'a reference without a store hash',
 		schema: referencesSchema,
-		value: ['name-only'],
-		valid: false
-	},
-	{
-		name: 'the active signing key id',
-		schema: signingKeyIdSchema,
-		value: 'active',
-		valid: true
-	},
-	{
-		name: 'a uuid signing key id',
-		schema: signingKeyIdSchema,
-		value: uuid,
-		valid: true
+		value: ['name-only']
 	},
 	{
 		name: 'a signing key id that is neither active nor a uuid',
 		schema: signingKeyIdSchema,
-		value: 'rotated',
-		valid: false
+		value: 'rotated'
 	},
 	{
 		name: 'a mis-cased active signing key id',
 		schema: signingKeyIdSchema,
-		value: 'Active',
-		valid: false
-	},
-	{
-		name: 'a simple cache name',
-		schema: cacheNameSchema,
-		value: 'builds',
-		valid: true
-	},
-	{
-		name: 'a cache name with the allowed punctuation',
-		schema: cacheNameSchema,
-		value: '0a.b-c_d',
-		valid: true
-	},
-	{
-		name: 'a 63-character cache name',
-		schema: cacheNameSchema,
-		value: 'a'.repeat(63),
-		valid: true
+		value: 'Active'
 	},
 	{
 		name: 'an empty cache name',
 		schema: cacheNameSchema,
-		value: '',
-		valid: false
+		value: ''
 	},
 	{
 		name: 'a cache name starting with punctuation',
 		schema: cacheNameSchema,
-		value: '-builds',
-		valid: false
+		value: '-builds'
 	},
 	{
 		name: 'an upper-case cache name',
 		schema: cacheNameSchema,
-		value: 'Builds',
-		valid: false
+		value: 'Builds'
 	},
 	{
 		name: 'a cache name with a slash',
 		schema: cacheNameSchema,
-		value: 'a/b',
-		valid: false
+		value: 'a/b'
 	},
 	{
 		name: 'a 64-character cache name',
 		schema: cacheNameSchema,
-		value: 'a'.repeat(64),
-		valid: false
-	},
-	{
-		name: 'a zero cache priority',
-		schema: cachePrioritySchema,
-		value: 0,
-		valid: true
-	},
-	{
-		name: 'a positive cache priority',
-		schema: cachePrioritySchema,
-		value: 40,
-		valid: true
+		value: 'a'.repeat(64)
 	},
 	{
 		name: 'a negative cache priority',
 		schema: cachePrioritySchema,
-		value: -1,
-		valid: false
+		value: -1
 	},
 	{
 		name: 'a fractional cache priority',
 		schema: cachePrioritySchema,
-		value: 1.5,
-		valid: false
+		value: 1.5
 	}
 ];
 
 describe('scalar schemas', () => {
-	it.each(cases)('accepts/rejects $name', ({ schema, value, valid }) => {
-		expect(schema.safeParse(value).success).toBe(valid);
+	it.each(acceptedCases)('accepts $name', ({ schema, value }) => {
+		expect(schema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each(rejectedCases)('rejects $name', ({ schema, value }) => {
+		expect(schema.safeParse(value).success).toBe(false);
 	});
 
 	it('represents the default cache as the empty string', () => {
@@ -409,15 +368,15 @@ describe('scalar schemas', () => {
 		{
 			name: 'basenames',
 			value: [`${storePathHash}-a`, `${'1'.repeat(32)}-b`],
-			valid: true
+			accepted: true
 		},
-		{ name: 'an empty list', value: [], valid: true },
+		{ name: 'an empty list', value: [], accepted: true },
 		{
 			name: 'a reference containing a slash',
 			value: ['has/slash'],
-			valid: false
+			accepted: false
 		}
-	])('references: $name', ({ value, valid }) => {
-		expect(referencesSchema.safeParse(value).success).toBe(valid);
+	])('references: $name', ({ value, accepted }) => {
+		expect(referencesSchema.safeParse(value).success).toBe(accepted);
 	});
 });

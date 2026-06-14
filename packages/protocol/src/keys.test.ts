@@ -22,44 +22,53 @@ describe('signing key schemas', () => {
 	};
 
 	it.each([
-		{ name: 'a well-formed summary', value: summary, valid: true },
+		{
+			name: 'a well-formed summary',
+			value: summary,
+			expected: summary
+		},
 		{
 			name: 'a publication-stage summary',
 			value: { ...summary, stage: 'publication' },
-			valid: true
-		},
+			expected: { ...summary, stage: 'publication' }
+		}
+	])('accepts $name', ({ value, expected }) => {
+		expect(signingKeySummarySchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
 		{
 			name: 'an unknown stage',
-			value: { ...summary, stage: 'retired' },
-			valid: false
+			value: { ...summary, stage: 'retired' }
 		},
 		{
 			name: 'an unknown key',
-			value: { ...summary, surprise: true },
-			valid: false
+			value: { ...summary, surprise: true }
 		},
 		{
 			name: 'a missing public key',
-			value: { id: 'active', stage: 'signing', createdAt: summary.createdAt },
-			valid: false
+			value: { id: 'active', stage: 'signing', createdAt: summary.createdAt }
 		}
-	])('summary: $name', ({ value, valid }) => {
-		expect(signingKeySummarySchema.safeParse(value).success).toBe(valid);
+	])('rejects $name', ({ value }) => {
+		expect(signingKeySummarySchema.safeParse(value).success).toBe(false);
 	});
 
 	it('accepts the list, rotate and retire responses', () => {
+		const rotate = {
+			rotated: rotatedSummary,
+			keys: [summary, rotatedSummary]
+		};
+		const retire = { id: 'active', stage: 'publication' };
+
 		expect({
-			list: keyListResponseSchema.safeParse({ keys: [summary, rotatedSummary] })
-				.success,
-			rotate: keyRotateResponseSchema.safeParse({
-				rotated: rotatedSummary,
-				keys: [summary, rotatedSummary]
-			}).success,
-			retire: keyRetireResponseSchema.safeParse({
-				id: 'active',
-				stage: 'publication'
-			}).success
-		}).toStrictEqual({ list: true, rotate: true, retire: true });
+			list: keyListResponseSchema.parse({ keys: [summary, rotatedSummary] }),
+			rotate: keyRotateResponseSchema.parse(rotate),
+			retire: keyRetireResponseSchema.parse(retire)
+		}).toStrictEqual({
+			list: { keys: [summary, rotatedSummary] },
+			rotate,
+			retire
+		});
 	});
 
 	it('rejects a retire response with an unknown stage', () => {

@@ -30,15 +30,11 @@ function summary(overrides: Partial<OidcTrustSummary>): OidcTrustSummary {
 	};
 }
 
-function uncalled(): never {
-	throw new Error('client should not be called');
-}
-
 function trustClient(overrides: Partial<OidcTrustClient>): OidcTrustClient {
 	return {
-		list: uncalled,
-		add: uncalled,
-		remove: uncalled,
+		list: () => Promise.resolve({ rules: [] }),
+		add: (body) => Promise.resolve(summary({ ...body, id: 'rule-1' })),
+		remove: ({ id }) => Promise.resolve({ id, removed: false }),
 		...overrides
 	};
 }
@@ -57,10 +53,9 @@ describe('runOidcTrustList', () => {
 			]
 		};
 
-		await runOidcTrustList(
-			reporter(results),
-			trustClient({ list: () => Promise.resolve(response) })
-		);
+		await runOidcTrustList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
 
 		expect(results).toStrictEqual([
 			[
@@ -82,10 +77,9 @@ describe('runOidcTrustList', () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 
-		await runOidcTrustList(
-			reporter(results, infos),
-			trustClient({ list: () => Promise.resolve({ rules: [] }) })
-		);
+		await runOidcTrustList(reporter(results, infos), {
+			list: () => Promise.resolve({ rules: [] })
+		});
 
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
@@ -105,16 +99,12 @@ describe('runOidcTrustAdd', () => {
 			allowedRoots: ['github:owner/']
 		};
 
-		await runOidcTrustAdd(
-			body,
-			reporter(results),
-			trustClient({
-				add(added) {
-					calls.push(added);
-					return Promise.resolve(summary({ id: 'rule-1' }));
-				}
-			})
-		);
+		await runOidcTrustAdd(body, reporter(results), {
+			add(added) {
+				calls.push(added);
+				return Promise.resolve(summary({ id: 'rule-1' }));
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [body],

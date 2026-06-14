@@ -1,10 +1,12 @@
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	authorisedFetch,
 	bootstrap,
 	commitUpload,
+	expectSingleUploadDecision,
 	fetchNarInfo,
 	fetchPath,
 	narBytes,
@@ -12,11 +14,18 @@ import {
 	putNarBytes,
 	resetTestServer,
 	seedSigningKeys,
-	singleDecision,
 	uploadBlobMetadata,
 	uploadMetadata,
 	verifyNarInfoSignature
 } from '../test-support.ts';
+
+function namedBytesName(value: string): string {
+	const [name] = z
+		.tuple([z.string().min(1), z.string()])
+		.parse(value.split(':'));
+
+	return name;
+}
 
 describe('signing with a key set', () => {
 	beforeEach(resetTestServer);
@@ -38,13 +47,10 @@ describe('signing with a key set', () => {
 
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const upload = singleDecision(
-			await negotiateUploads(init.token, [metadata])
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(init.token, [metadata]),
+			metadata
 		);
-
-		if (upload.action !== 'upload') {
-			throw new Error('expected an upload decision for a new path');
-		}
 
 		const prepared = await authorisedFetch(
 			`/cache/_default/uploads/${upload.uploadId}`,
@@ -61,9 +67,7 @@ describe('signing with a key set', () => {
 		await commitUpload(init.token, upload.uploadId);
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		const sigNames = narInfo.sigs
-			.map((sig) => sig.slice(0, sig.indexOf(':')))
-			.toSorted();
+		const sigNames = narInfo.sigs.map((sig) => namedBytesName(sig)).toSorted();
 		const verifiesUnderEachKey = await Promise.all(
 			seeded.map((key) => verifyNarInfoSignature(narInfo, key.publicKey))
 		);

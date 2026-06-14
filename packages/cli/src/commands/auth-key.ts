@@ -89,7 +89,7 @@ export function registerAuthKeyCommands(
 
 export async function runAuthKeyList(
 	reporter: Reporter,
-	client: AuthKeyClient
+	client: Pick<AuthKeyClient, 'list'>
 ): Promise<void> {
 	const { keys } = await reporter.phase('Listing auth keys', () =>
 		client.list()
@@ -105,7 +105,7 @@ export async function runAuthKeyList(
 
 export async function runAuthKeyRotate(
 	reporter: Reporter,
-	client: AuthKeyClient
+	client: Pick<AuthKeyClient, 'rotate'>
 ): Promise<void> {
 	const { rotated, retiring, keys } = await reporter.phase(
 		'Rotating auth key',

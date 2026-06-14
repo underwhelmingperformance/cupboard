@@ -170,3 +170,17 @@ export class MaintenanceEligibilityService {
 			.toSorted()[0];
 	}
 }
+
+export async function withMaintenanceEligibility<T>(
+	maintenanceEligibility: MaintenanceEligibilityService,
+	reconcileMaintenanceEligibility: () => Promise<void>,
+	body: () => Promise<T>
+): Promise<T> {
+	await maintenanceEligibility.invalidate();
+
+	try {
+		return await body();
+	} finally {
+		await reconcileMaintenanceEligibility();
+	}
+}

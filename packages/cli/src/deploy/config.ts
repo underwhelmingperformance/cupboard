@@ -202,8 +202,19 @@ const rawWranglerSchema = z.object({
 
 type RawWrangler = z.infer<typeof rawWranglerSchema>;
 
+export type WranglerConfigIssue = z.core.$ZodIssue;
+
 export class WranglerConfigError extends Error {
-	constructor(label: string, detail: string) {
+	constructor(
+		public readonly label: string,
+		public readonly issues: readonly WranglerConfigIssue[]
+	) {
+		const detail = issues
+			.map(
+				(issue) => `${issue.path.join('.')}: ${issue.code}: ${issue.message}`
+			)
+			.join('; ');
+
 		super(`Invalid ${label} wrangler config: ${detail}`);
 		this.name = 'WranglerConfigError';
 	}
@@ -267,11 +278,7 @@ function parseWorker(
 	const parsed = rawWranglerSchema.safeParse(JSON5.parse(source));
 
 	if (!parsed.success) {
-		const detail = parsed.error.issues
-			.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
-			.join('; ');
-
-		throw new WranglerConfigError(label, detail);
+		throw new WranglerConfigError(label, parsed.error.issues);
 	}
 
 	return toWorkerConfig(parsed.data, mainModule);

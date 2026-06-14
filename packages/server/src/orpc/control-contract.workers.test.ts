@@ -1,11 +1,12 @@
 import { controlContract } from '@cupboard/protocol/contract';
-import { createORPCClient, isDefinedError, safe } from '@orpc/client';
+import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	controlWorkerFetch,
@@ -41,19 +42,20 @@ describe('control contract round trip', () => {
 
 		const rotated = await client.keys.rotate();
 		const listed = await client.keys.list();
-		const retired =
-			rotated.retiring === undefined
-				? undefined
-				: await client.keys.retire({ kid: rotated.retiring.kid });
+		const retiring = z.object({ kid: z.string() }).parse(rotated.retiring);
+		const retired = await client.keys.retire({ kid: retiring.kid });
 
 		expect({
-			newKeyListed: listed.keys.some(
-				(key) => key.kid === rotated.kid && !key.retired
-			),
+			listed: listed.keys
+				.map(({ kid, retired }) => ({ kid, retired }))
+				.toSorted((left, right) => (left.kid > right.kid ? 1 : -1)),
 			retired
 		}).toStrictEqual({
-			newKeyListed: true,
-			retired: { kid: rotated.retiring?.kid, retired: true }
+			listed: [
+				{ kid: retiring.kid, retired: false },
+				{ kid: rotated.kid, retired: false }
+			].toSorted((left, right) => (left.kid > right.kid ? 1 : -1)),
+			retired: { kid: retiring.kid, retired: true }
 		});
 	});
 
@@ -125,18 +127,13 @@ describe('control contract round trip', () => {
 
 		const [error, data, isDefined] = await safe(client.tenants.list());
 
-		if (!isDefinedError(error)) {
-			throw new Error('expected a defined contract error');
-		}
-
-		expect({
-			isDefined,
-			data,
-			code: error.code,
-			status: error.status
-		}).toStrictEqual({
+		expect({ isDefined, data }).toStrictEqual({
 			isDefined: true,
-			data: undefined,
+			data: undefined
+		});
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			defined: true,
 			code: 'UNAUTHORIZED',
 			status: StatusCodes.UNAUTHORIZED
 		});
@@ -149,18 +146,13 @@ describe('control contract round trip', () => {
 
 		const [error, data, isDefined] = await safe(client.tenants.list());
 
-		if (!isDefinedError(error)) {
-			throw new Error('expected a defined contract error');
-		}
-
-		expect({
-			isDefined,
-			data,
-			code: error.code,
-			status: error.status
-		}).toStrictEqual({
+		expect({ isDefined, data }).toStrictEqual({
 			isDefined: true,
-			data: undefined,
+			data: undefined
+		});
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			defined: true,
 			code: 'FORBIDDEN',
 			status: StatusCodes.FORBIDDEN
 		});
@@ -173,18 +165,13 @@ describe('control contract round trip', () => {
 
 		const [error, data, isDefined] = await safe(client.tenants.list());
 
-		if (!isDefinedError(error)) {
-			throw new Error('expected a defined contract error');
-		}
-
-		expect({
-			isDefined,
-			data,
-			code: error.code,
-			status: error.status
-		}).toStrictEqual({
+		expect({ isDefined, data }).toStrictEqual({
 			isDefined: true,
-			data: undefined,
+			data: undefined
+		});
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			defined: true,
 			code: 'UNAUTHORIZED',
 			status: StatusCodes.UNAUTHORIZED
 		});

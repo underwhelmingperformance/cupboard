@@ -129,7 +129,7 @@ export function registerCacheCommands(
 
 export async function runCacheList(
 	reporter: Reporter,
-	client: CacheClient
+	client: Pick<CacheClient, 'list'>
 ): Promise<void> {
 	const { caches } = await reporter.phase('Listing caches', () =>
 		client.list()
@@ -147,7 +147,7 @@ export async function runCacheCreate(
 	name: string,
 	priority: number,
 	reporter: Reporter,
-	client: CacheClient
+	client: Pick<CacheClient, 'put'>
 ): Promise<void> {
 	const summary = await reporter.phase('Creating cache', () =>
 		client.put({ cacheName: name, priority })
@@ -196,7 +196,7 @@ export async function runCacheRemove(
 export async function runCacheInspect(
 	name: string,
 	reporter: Reporter,
-	client: CacheClient
+	client: Pick<CacheClient, 'list'>
 ): Promise<void> {
 	const { caches } = await reporter.phase('Inspecting cache', () =>
 		client.list()

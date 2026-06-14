@@ -1,18 +1,26 @@
+import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
-import { enforceGate } from '../control/signup.ts';
-import { SignupForbiddenError } from '../errors.ts';
+import { enforceGate, handleSignup } from '../control/signup.ts';
+import { SignupForbiddenError, SubjectTokenNotJwtError } from '../errors.ts';
 import {
 	controlFetch,
 	currentOrigin,
-	resetTestServer
+	resetTestServer,
+	testControlEnv
 } from '../test-support.ts';
 
-interface OAuthError {
-	readonly error: string;
-	readonly error_description: string;
+const oauthErrorSchema = z.strictObject({
+	error: z.string(),
+	error_description: z.string().min(1),
+	problem: z.string().optional()
+});
+
+function oauthErrorShape(value: unknown): z.infer<typeof oauthErrorSchema> {
+	return oauthErrorSchema.parse(value);
 }
 
 function postSignup(
@@ -28,6 +36,64 @@ function postSignup(
 		},
 		envOverride
 	);
+}
+
+function signupRequest(form: Record<string, string>): Request {
+	return new Request(new URL('/signup', currentOrigin()), {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams(form).toString()
+	});
+}
+
+function signupError(form: Record<string, string>): Promise<unknown> {
+	return handleSignup(
+		signupRequest(form),
+		Object.assign({}, env, testControlEnv)
+	).catch((error: unknown) => error);
+}
+
+type SignupGateOutcome =
+	| { readonly allowed: true }
+	| {
+			readonly allowed: false;
+			readonly error: {
+				readonly name: string;
+				readonly status: number;
+			};
+	  };
+
+const gateAllowed: SignupGateOutcome = { allowed: true };
+const gateForbidden: SignupGateOutcome = {
+	allowed: false,
+	error: {
+		name: 'SignupForbiddenError',
+		status: StatusCodes.FORBIDDEN
+	}
+};
+
+function gateOutcome(
+	gateEnv: Parameters<typeof enforceGate>[0],
+	claimSecret: string | undefined,
+	subject: string
+): SignupGateOutcome {
+	try {
+		enforceGate(gateEnv, claimSecret, subject);
+
+		return gateAllowed;
+	} catch (error) {
+		if (!(error instanceof SignupForbiddenError)) {
+			throw error;
+		}
+
+		return {
+			allowed: false,
+			error: {
+				name: error.name,
+				status: error.status
+			}
+		};
+	}
 }
 
 // A well-formed token for a given issuer/audience. Issuer discovery or key
@@ -59,7 +125,7 @@ describe('signup gate', () => {
 			localDev: '',
 			claimSecret: 'sssh',
 			subject: 'owner',
-			allowed: true
+			expected: gateAllowed
 		},
 		{
 			name: 'a wrong claim secret',
@@ -68,7 +134,7 @@ describe('signup gate', () => {
 			localDev: '',
 			claimSecret: 'nope',
 			subject: 'owner',
-			allowed: false
+			expected: gateForbidden
 		},
 		{
 			name: 'a missing claim secret',
@@ -77,7 +143,7 @@ describe('signup gate', () => {
 			localDev: '',
 			claimSecret: undefined,
 			subject: 'owner',
-			allowed: false
+			expected: gateForbidden
 		},
 		{
 			name: 'a matching pinned subject',
@@ -86,7 +152,7 @@ describe('signup gate', () => {
 			localDev: '',
 			claimSecret: undefined,
 			subject: 'owner',
-			allowed: true
+			expected: gateAllowed
 		},
 		{
 			// A deployment that never ran `wrangler secret put` has no secret
@@ -97,7 +163,7 @@ describe('signup gate', () => {
 			localDev: '',
 			claimSecret: undefined,
 			subject: 'owner',
-			allowed: true
+			expected: gateAllowed
 		},
 		{
 			name: 'every gate binding absent in hosted mode',
@@ -106,7 +172,7 @@ describe('signup gate', () => {
 			localDev: undefined,
 			claimSecret: undefined,
 			subject: 'owner',
-			allowed: false
+			expected: gateForbidden
 		},
 		{
 			name: 'a wrong pinned subject',
@@ -115,7 +181,7 @@ describe('signup gate', () => {
 			localDev: '',
 			claimSecret: undefined,
 			subject: 'intruder',
-			allowed: false
+			expected: gateForbidden
 		},
 		{
 			name: 'no gate with local dev relaxed',
@@ -124,7 +190,7 @@ describe('signup gate', () => {
 			localDev: '1',
 			claimSecret: undefined,
 			subject: 'owner',
-			allowed: true
+			expected: gateAllowed
 		},
 		{
 			name: 'no gate in hosted mode',
@@ -133,27 +199,20 @@ describe('signup gate', () => {
 			localDev: '',
 			claimSecret: undefined,
 			subject: 'owner',
-			allowed: false
+			expected: gateForbidden
 		}
 	])(
-		'$name: allowed=$allowed',
-		({ secret, pinned, localDev, claimSecret, subject, allowed }) => {
+		'$name',
+		({ secret, pinned, localDev, claimSecret, subject, expected }) => {
 			const gateEnv = {
 				CUPBOARD_SIGNUP_SECRET: secret,
 				CUPBOARD_SIGNUP_SUBJECT: pinned,
 				CUPBOARD_LOCAL_DEV: localDev
 			};
 
-			const call = (): void => {
-				enforceGate(gateEnv, claimSecret, subject);
-			};
-
-			if (allowed) {
-				expect(call).not.toThrow();
-				return;
-			}
-
-			expect(call).toThrow(SignupForbiddenError);
+			expect(gateOutcome(gateEnv, claimSecret, subject)).toStrictEqual(
+				expected
+			);
 		}
 	);
 });
@@ -164,13 +223,26 @@ describe('control plane POST /signup', () => {
 		vi.unstubAllGlobals();
 	});
 
-	it('rejects a subject token that is not a JWT with invalid_grant', async () => {
-		const response = await postSignup({ subject_token: 'not-a-jwt' });
-		const body = await response.json<OAuthError>();
+	it('rejects a subject token that is not a JWT', async () => {
+		const error = await signupError({ subject_token: 'not-a-jwt' });
 
-		expect({ status: response.status, error: body.error }).toStrictEqual({
+		expect(error).toBeInstanceOf(SubjectTokenNotJwtError);
+	});
+
+	it('renders an OAuth error as a no-store envelope', async () => {
+		const response = await postSignup({ subject_token: 'not-a-jwt' });
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
-			error: 'invalid_grant'
+			cacheControl: 'no-store',
+			error: 'invalid_grant',
+			problem: 'subject-token-invalid'
 		});
 	});
 

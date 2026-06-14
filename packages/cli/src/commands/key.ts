@@ -84,7 +84,7 @@ export function registerKeyCommands(
 
 export async function runKeyList(
 	reporter: Reporter,
-	client: KeyClient
+	client: Pick<KeyClient, 'list'>
 ): Promise<void> {
 	const { keys } = await reporter.phase('Listing signing keys', () =>
 		client.list()
@@ -100,7 +100,7 @@ export async function runKeyList(
 
 export async function runKeyRotate(
 	reporter: Reporter,
-	client: KeyClient
+	client: Pick<KeyClient, 'rotate'>
 ): Promise<void> {
 	const { rotated, keys } = await reporter.phase('Rotating signing key', () =>
 		client.rotate()

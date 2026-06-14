@@ -1,10 +1,23 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	checkDomainOption,
 	domainProblem,
 	InvalidDomainError
 } from './domain.ts';
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 describe('domainProblem', () => {
 	it.each([
@@ -16,15 +29,15 @@ describe('domainProblem', () => {
 	});
 
 	it.each([
-		['', 'a domain cannot be empty'],
-		['https://cache.example.com', 'without a scheme or path'],
-		['cache.example.com/path', 'without a scheme or path'],
-		['localhost', 'fully qualified hostname'],
-		['-bad.example.com', 'labels must be letters, digits and inner hyphens'],
-		['bad-.example.com', 'labels must be letters, digits and inner hyphens'],
-		[`${'a'.repeat(254)}.com`, 'at most 253 characters']
-	])('rejects %s', (value, reason) => {
-		expect(domainProblem(value)).toContain(reason);
+		['', 'empty'],
+		['https://cache.example.com', 'scheme-or-path'],
+		['cache.example.com/path', 'scheme-or-path'],
+		['localhost', 'not-fully-qualified'],
+		['-bad.example.com', 'invalid-label'],
+		['bad-.example.com', 'invalid-label'],
+		[`${'a'.repeat(254)}.com`, 'too-long']
+	])('rejects %s', (value, problem) => {
+		expect(domainProblem(value)).toBe(problem);
 	});
 });
 
@@ -34,6 +47,18 @@ describe('checkDomainOption', () => {
 	});
 
 	it('throws the typed error for an invalid domain', () => {
-		expect(() => checkDomainOption('not a domain')).toThrow(InvalidDomainError);
+		const error = z
+			.instanceof(InvalidDomainError)
+			.parse(thrownBy(() => checkDomainOption('not a domain')));
+
+		expect({
+			name: error.name,
+			domain: error.domain,
+			problem: error.problem
+		}).toStrictEqual({
+			name: 'InvalidDomainError',
+			domain: 'not a domain',
+			problem: 'not-fully-qualified'
+		});
 	});
 });

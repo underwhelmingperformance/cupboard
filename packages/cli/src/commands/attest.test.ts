@@ -1,4 +1,4 @@
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -6,6 +6,18 @@ import {
 	parseVerifierThreshold,
 	registerAttestCommands
 } from './attest.ts';
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 describe('parseVerifierThreshold', () => {
 	it.each([
@@ -22,16 +34,34 @@ describe('parseVerifierThreshold', () => {
 	it.each(['', '-1', '+1', '1.5', '1log', 'Infinity'])(
 		'rejects %s',
 		(source) => {
-			expect(() => parseVerifierThreshold('--tlog-threshold')(source)).toThrow(
-				InvalidVerifierThresholdError
+			const error = thrownBy(() =>
+				parseVerifierThreshold('--tlog-threshold')(source)
 			);
+
+			expect(error).toBeInstanceOf(InvalidVerifierThresholdError);
+
+			if (error instanceof InvalidVerifierThresholdError) {
+				expect({ option: error.option, value: error.value }).toStrictEqual({
+					option: '--tlog-threshold',
+					value: source
+				});
+			}
 		}
 	);
 
 	it('rejects unsafe integers', () => {
-		expect(() =>
+		const error = thrownBy(() =>
 			parseVerifierThreshold('--tlog-threshold')('9007199254740992')
-		).toThrow(InvalidVerifierThresholdError);
+		);
+
+		expect(error).toBeInstanceOf(InvalidVerifierThresholdError);
+
+		if (error instanceof InvalidVerifierThresholdError) {
+			expect({ option: error.option, value: error.value }).toStrictEqual({
+				option: '--tlog-threshold',
+				value: '9007199254740992'
+			});
+		}
 	});
 });
 
@@ -49,8 +79,8 @@ describe('attest verify command', () => {
 		});
 		registerAttestCommands(program);
 
-		await expect(
-			program.parseAsync(
+		const result = await program
+			.parseAsync(
 				[
 					'attest',
 					'verify',
@@ -64,8 +94,23 @@ describe('attest verify command', () => {
 				],
 				{ from: 'user' }
 			)
-		).rejects.toThrow(
-			"required option '--predicate-type <type>' not specified"
-		);
+			.then(
+				() => ({ kind: 'parsed' as const }),
+				(error_: unknown) => error_
+			);
+
+		expect(result).toBeInstanceOf(CommanderError);
+
+		if (result instanceof CommanderError) {
+			expect({
+				name: result.name,
+				code: result.code,
+				exitCode: result.exitCode
+			}).toStrictEqual({
+				name: 'CommanderError',
+				code: 'commander.missingMandatoryOptionValue',
+				exitCode: 1
+			});
+		}
 	});
 });

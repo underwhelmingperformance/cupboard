@@ -10,6 +10,7 @@ import {
 } from '@cupboard/protocol/tenants';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	InvalidQuotaBytesError,
@@ -26,6 +27,18 @@ import {
 	runTenantSuspend,
 	type TenantClient
 } from './tenant.ts';
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 function summary(overrides: Partial<TenantSummary>): TenantSummary {
 	return {
@@ -51,20 +64,28 @@ function createBody(): TenantCreateBody {
 	});
 }
 
-function uncalled(): never {
-	throw new Error('client should not be called');
-}
-
 function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 	return {
-		create: uncalled,
-		list: uncalled,
-		suspend: uncalled,
-		resume: uncalled,
-		setReadMode: uncalled,
-		rotateReadCredential: uncalled,
-		clearReadCredential: uncalled,
-		remove: uncalled,
+		list: () => Promise.resolve({ tenants: [] }),
+		create: (input) =>
+			Promise.resolve({
+				id: input.id,
+				status: 'active',
+				readMode: input.readMode,
+				ownerIssuer: input.ownerIssuer,
+				ownerSubject: input.ownerSubject,
+				ownerAudience: input.ownerAudience,
+				configVersion: 1,
+				createdAt: '2026-01-01T00:00:00.000Z'
+			}),
+		suspend: ({ id }) => Promise.resolve({ id, status: 'suspended' }),
+		resume: ({ id }) => Promise.resolve({ id, status: 'active' }),
+		setReadMode: ({ id, readMode }) => Promise.resolve({ id, readMode }),
+		rotateReadCredential: ({ id }) =>
+			Promise.resolve({ id, readMode: 'private' }),
+		clearReadCredential: ({ id }) =>
+			Promise.resolve({ id, readMode: 'private' }),
+		remove: ({ id }) => Promise.resolve({ id, status: 'offboarding' }),
 		...overrides
 	};
 }
@@ -74,16 +95,12 @@ describe('runTenantCreate', () => {
 		const results: ResultRow[][] = [];
 		const calls: TenantCreateBody[] = [];
 
-		await runTenantCreate(
-			createBody(),
-			reporter(results),
-			tenantClient({
-				create(body) {
-					calls.push(body);
-					return Promise.resolve(summary({}));
-				}
-			})
-		);
+		await runTenantCreate(createBody(), reporter(results), {
+			create(body) {
+				calls.push(body);
+				return Promise.resolve(summary({}));
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [createBody()],
@@ -114,16 +131,12 @@ describe('runTenantCreate', () => {
 			read: { user: 'alice', password: 'correct-horse-battery-staple' }
 		});
 
-		await runTenantCreate(
-			body,
-			reporter(results),
-			tenantClient({
-				create(sent) {
-					calls.push(sent);
-					return Promise.resolve(summary({}));
-				}
-			})
-		);
+		await runTenantCreate(body, reporter(results), {
+			create(sent) {
+				calls.push(sent);
+				return Promise.resolve(summary({}));
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [body],
@@ -154,11 +167,11 @@ describe('runTenantCreate', () => {
 		await runTenantCreate(
 			body,
 			reporter(results),
-			tenantClient({
+			{
 				create() {
 					return Promise.resolve(summary({}));
 				}
-			}),
+			},
 			'correct-horse-battery-staple'
 		);
 
@@ -189,10 +202,15 @@ describe('readCredentialFromOptions', () => {
 
 	it('generates a private read password by default', () => {
 		const selection = readCredentialFromOptions({});
+		const generatedPassword = z
+			.string()
+			.regex(/^[A-Za-z0-9_-]{43}$/)
+			.parse(selection.generatedPassword);
 
-		expect(selection.read?.user).toBe('cupboard');
-		expect(selection.read?.password).toBe(selection.generatedPassword);
-		expect(selection.generatedPassword).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect(selection).toStrictEqual({
+			read: { user: 'cupboard', password: generatedPassword },
+			generatedPassword
+		});
 	});
 
 	it('treats auto as explicit generation', () => {
@@ -200,10 +218,15 @@ describe('readCredentialFromOptions', () => {
 			readUser: 'alice',
 			readPassword: 'auto'
 		});
+		const generatedPassword = z
+			.string()
+			.regex(/^[A-Za-z0-9_-]{43}$/)
+			.parse(selection.generatedPassword);
 
-		expect(selection.read?.user).toBe('alice');
-		expect(selection.read?.password).toBe(selection.generatedPassword);
-		expect(selection.generatedPassword).toMatch(/^[A-Za-z0-9_-]{43}$/);
+		expect(selection).toStrictEqual({
+			read: { user: 'alice', password: generatedPassword },
+			generatedPassword
+		});
 	});
 
 	it('does not generate for public tenants', () => {
@@ -221,9 +244,23 @@ describe('readCredentialFromOptions', () => {
 	});
 
 	it('rejects a read user with no read password', () => {
-		expect(() =>
+		const error = thrownBy(() =>
 			readCredentialFromOptions({ readUser: 'alice', readPassword: false })
-		).toThrow(ReadCredentialIncompleteError);
+		);
+
+		expect(error).toBeInstanceOf(ReadCredentialIncompleteError);
+
+		if (error instanceof ReadCredentialIncompleteError) {
+			expect({
+				name: error.name,
+				readUser: error.readUser,
+				readPassword: error.readPassword
+			}).toStrictEqual({
+				name: 'ReadCredentialIncompleteError',
+				readUser: 'alice',
+				readPassword: false
+			});
+		}
 	});
 });
 
@@ -242,14 +279,30 @@ describe('parseQuotaBytes', () => {
 	it.each(['', '-1', '+1', '1.5', '1gb', '100foo', 'Infinity'])(
 		'rejects %s',
 		(source) => {
-			expect(() => parseQuotaBytes(source)).toThrow(InvalidQuotaBytesError);
+			const error = thrownBy(() => parseQuotaBytes(source));
+
+			expect(error).toBeInstanceOf(InvalidQuotaBytesError);
+
+			if (error instanceof InvalidQuotaBytesError) {
+				expect({ name: error.name, value: error.value }).toStrictEqual({
+					name: 'InvalidQuotaBytesError',
+					value: source
+				});
+			}
 		}
 	);
 
 	it('rejects unsafe integers', () => {
-		expect(() => parseQuotaBytes('9007199254740992')).toThrow(
-			InvalidQuotaBytesError
-		);
+		const error = thrownBy(() => parseQuotaBytes('9007199254740992'));
+
+		expect(error).toBeInstanceOf(InvalidQuotaBytesError);
+
+		if (error instanceof InvalidQuotaBytesError) {
+			expect({ name: error.name, value: error.value }).toStrictEqual({
+				name: 'InvalidQuotaBytesError',
+				value: '9007199254740992'
+			});
+		}
 	});
 });
 
@@ -263,10 +316,9 @@ describe('runTenantList', () => {
 			]
 		};
 
-		await runTenantList(
-			reporter(results),
-			tenantClient({ list: () => Promise.resolve(response) })
-		);
+		await runTenantList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
 
 		expect(results).toStrictEqual([
 			[
@@ -363,16 +415,12 @@ describe('runTenantResume', () => {
 		const results: ResultRow[][] = [];
 		const calls: { id: string }[] = [];
 
-		await runTenantResume(
-			'acme',
-			reporter(results),
-			tenantClient({
-				resume(input) {
-					calls.push(input);
-					return Promise.resolve({ id: 'acme', status: 'active' });
-				}
-			})
-		);
+		await runTenantResume('acme', reporter(results), {
+			resume(input) {
+				calls.push(input);
+				return Promise.resolve({ id: 'acme', status: 'active' });
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ id: 'acme' }],
@@ -386,17 +434,12 @@ describe('runTenantReadMode', () => {
 		const results: ResultRow[][] = [];
 		const calls: { id: string; readMode: 'public' | 'private' }[] = [];
 
-		await runTenantReadMode(
-			'acme',
-			'public',
-			reporter(results),
-			tenantClient({
-				setReadMode(input) {
-					calls.push(input);
-					return Promise.resolve({ id: 'acme', readMode: 'public' });
-				}
-			})
-		);
+		await runTenantReadMode('acme', 'public', reporter(results), {
+			setReadMode(input) {
+				calls.push(input);
+				return Promise.resolve({ id: 'acme', readMode: 'public' });
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ id: 'acme', readMode: 'public' }],
@@ -417,12 +460,12 @@ describe('runTenantRotateCredential', () => {
 			'acme',
 			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
 			reporter(results),
-			tenantClient({
+			{
 				rotateReadCredential(input) {
 					calls.push(input);
 					return Promise.resolve({ id: 'acme', readMode: 'private' });
 				}
-			})
+			}
 		);
 
 		expect({ calls, results }).toStrictEqual({
@@ -449,25 +492,30 @@ describe('runTenantRotateCredential', () => {
 			read: { user: string; password: string };
 		}[] = [];
 
-		await runTenantRotateCredential(
-			'acme',
-			{},
-			reporter(results),
-			tenantClient({
-				rotateReadCredential(input) {
-					calls.push(input);
-					return Promise.resolve({ id: 'acme', readMode: 'private' });
-				}
-			})
-		);
+		await runTenantRotateCredential('acme', {}, reporter(results), {
+			rotateReadCredential(input) {
+				calls.push(input);
+				return Promise.resolve({ id: 'acme', readMode: 'private' });
+			}
+		});
+		const [call] = z
+			.tuple([
+				z.object({
+					id: z.string(),
+					read: z.object({
+						user: z.string(),
+						password: z.string().regex(/^[A-Za-z0-9_-]{43}$/)
+					})
+				})
+			])
+			.parse(calls);
 
 		// The generated password is sent to the server and printed to the operator,
 		// so capture what was sent and assert the printed value is exactly it: an
 		// operator shown a different value would hold a password that cannot
 		// authenticate.
-		const sentPassword = calls.at(0)?.read.password;
+		const sentPassword = call.read.password;
 
-		expect(sentPassword).toMatch(/^[A-Za-z0-9_-]{43}$/);
 		expect({ calls, results }).toStrictEqual({
 			calls: [
 				{
@@ -493,11 +541,11 @@ describe('runTenantRotateCredential', () => {
 			'acme',
 			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
 			reporter(results),
-			tenantClient({
+			{
 				rotateReadCredential() {
 					return Promise.resolve({ id: 'acme', readMode: 'public' });
 				}
-			})
+			}
 		);
 
 		expect(results).toStrictEqual([
@@ -520,16 +568,12 @@ describe('runTenantClearCredential', () => {
 		const results: ResultRow[][] = [];
 		const calls: { id: string }[] = [];
 
-		await runTenantClearCredential(
-			'acme',
-			reporter(results),
-			tenantClient({
-				clearReadCredential(input) {
-					calls.push(input);
-					return Promise.resolve({ id: 'acme', readMode: 'private' });
-				}
-			})
-		);
+		await runTenantClearCredential('acme', reporter(results), {
+			clearReadCredential(input) {
+				calls.push(input);
+				return Promise.resolve({ id: 'acme', readMode: 'private' });
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ id: 'acme' }],

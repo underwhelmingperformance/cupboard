@@ -1,5 +1,10 @@
+import {
+	controlKeyListResponseSchema,
+	controlKeyRotateResponseSchema
+} from '@cupboard/protocol/control-keys';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	controlFetch,
@@ -8,6 +13,10 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
+const controlJwksSchema = z.object({
+	keys: z.array(z.object({ kid: z.string() }))
+});
+
 function authed(token: string, method = 'POST'): RequestInit {
 	return { method, headers: { authorization: `Bearer ${token}` } };
 }
@@ -15,7 +24,7 @@ function authed(token: string, method = 'POST'): RequestInit {
 // The kids of the live (non-retired) control keys, from the published JWKS.
 async function liveControlKids(): Promise<string[]> {
 	const response = await controlFetch('/.well-known/jwks.json');
-	const body = await response.json<{ keys: { kid: string }[] }>();
+	const body = controlJwksSchema.parse(await response.json());
 
 	return body.keys.map((key) => key.kid).toSorted();
 }
@@ -46,22 +55,24 @@ describe('control key administration', () => {
 	it('rotates to a new key, retires it, and refuses to retire the last live key', async () => {
 		const token = await issueControlAdminToken();
 		const beforeRotate = await liveControlKids();
-		const firstKid = beforeRotate[0] ?? '';
+		const [firstKid] = z.tuple([z.string()]).parse(beforeRotate);
 
 		const rotateResponse = await controlFetch(
 			'/control/keys/rotate',
 			authed(token)
 		);
-		const rotated = await rotateResponse.json<{ kid: string }>();
+		const rotated = controlKeyRotateResponseSchema.parse(
+			await rotateResponse.json()
+		);
 		const afterRotate = await liveControlKids();
 
 		const listResponse = await controlFetch(
 			'/control/keys',
 			authed(token, 'GET')
 		);
-		const listed = await listResponse.json<{
-			keys: { kid: string; retired: boolean }[];
-		}>();
+		const listed = controlKeyListResponseSchema.parse(
+			await listResponse.json()
+		);
 
 		const retireSecond = await controlFetch(
 			`/control/keys/retire/${rotated.kid}`,
@@ -78,23 +89,29 @@ describe('control key administration', () => {
 		const issuedAfterManualRetire = await issueControlAdminToken();
 
 		expect({
-			beforeRotateCount: beforeRotate.length,
+			beforeRotate,
 			rotateStatus: rotateResponse.status,
 			rotatedToNewKey: rotated.kid !== firstKid,
-			afterRotate: afterRotate.length,
-			listedCount: listed.keys.length,
-			listedAllLive: listed.keys.every((key) => !key.retired),
+			afterRotate,
+			listedKeys: listed.keys
+				.map((key) => ({
+					kid: key.kid,
+					retired: key.retired
+				}))
+				.toSorted((left, right) => left.kid.localeCompare(right.kid)),
 			retireSecondStatus: retireSecond.status,
 			afterRetire,
 			retireLastStatus: retireLast.status,
 			issuedAfterManualRetire: issuedAfterManualRetire.length > 0
 		}).toStrictEqual({
-			beforeRotateCount: 1,
+			beforeRotate: [firstKid],
 			rotateStatus: StatusCodes.OK,
 			rotatedToNewKey: true,
-			afterRotate: 2,
-			listedCount: 2,
-			listedAllLive: true,
+			afterRotate: [firstKid, rotated.kid].toSorted(),
+			listedKeys: [
+				{ kid: firstKid, retired: false },
+				{ kid: rotated.kid, retired: false }
+			].toSorted((left, right) => left.kid.localeCompare(right.kid)),
 			retireSecondStatus: StatusCodes.OK,
 			afterRetire: [firstKid],
 			retireLastStatus: StatusCodes.CONFLICT,

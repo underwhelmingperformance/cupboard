@@ -26,15 +26,15 @@ function summary(overrides: Partial<AuthKeySummary>): AuthKeySummary {
 	};
 }
 
-function uncalled(): never {
-	throw new Error('client should not be called');
-}
-
 function authKeyClient(overrides: Partial<AuthKeyClient>): AuthKeyClient {
 	return {
-		list: uncalled,
-		rotate: uncalled,
-		retire: uncalled,
+		list: () => Promise.resolve({ keys: [] }),
+		rotate: () =>
+			Promise.resolve({
+				rotated: 'kid-1',
+				keys: []
+			}),
+		retire: ({ kid }) => Promise.resolve({ kid, retired: false }),
 		...overrides
 	};
 }
@@ -53,10 +53,9 @@ describe('runAuthKeyList', () => {
 			]
 		};
 
-		await runAuthKeyList(
-			reporter(results),
-			authKeyClient({ list: () => Promise.resolve(response) })
-		);
+		await runAuthKeyList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
 
 		expect(results).toStrictEqual([
 			[
@@ -106,10 +105,9 @@ describe('runAuthKeyRotate', () => {
 			]
 		};
 
-		await runAuthKeyRotate(
-			reporter(results, infos),
-			authKeyClient({ rotate: () => Promise.resolve(response) })
-		);
+		await runAuthKeyRotate(reporter(results, infos), {
+			rotate: () => Promise.resolve(response)
+		});
 
 		expect({ results, infos }).toStrictEqual({
 			results: [

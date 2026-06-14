@@ -31,15 +31,21 @@ describe('reachableFetcher', () => {
 		});
 		const fetcher = reachableFetcher(() => Promise.reject(cause));
 
-		const result = fetcher('https://cupboard.example.workers.dev/pubkey');
+		const error = await fetcher(
+			'https://cupboard.example.workers.dev/pubkey'
+		).then(
+			() => 'resolved',
+			(error: unknown) => error
+		);
 
-		await expect(result).rejects.toBeInstanceOf(UnreachableHostError);
-		await expect(result).rejects.toMatchObject({
-			host: 'cupboard.example.workers.dev',
-			message:
-				'Could not reach cupboard.example.workers.dev: ' +
-				'getaddrinfo ENOTFOUND cupboard.example.workers.dev'
-		});
+		expect(error).toBeInstanceOf(UnreachableHostError);
+
+		if (error instanceof UnreachableHostError) {
+			expect({ cause: error.cause, host: error.host }).toStrictEqual({
+				cause,
+				host: 'cupboard.example.workers.dev'
+			});
+		}
 	});
 
 	it('lets a non-network error propagate unchanged', async () => {

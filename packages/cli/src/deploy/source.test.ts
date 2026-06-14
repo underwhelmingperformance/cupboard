@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	findCheckoutRoot,
@@ -6,6 +7,18 @@ import {
 	planWorkerSource,
 	type RunEnvironment
 } from './source.ts';
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 // A checkout rooted at `/repo`: the workspace marker and the server entry exist
 // under it and nowhere else.
@@ -52,9 +65,20 @@ describe('planWorkerSource', () => {
 	});
 
 	it('throws when run unbuilt outside a checkout', () => {
-		expect(() =>
-			planWorkerSource(environment({ isSea: false, fileExists: noCheckout }))
-		).toThrow(NoCheckoutError);
+		const error = z
+			.instanceof(NoCheckoutError)
+			.parse(
+				thrownBy(() =>
+					planWorkerSource(
+						environment({ isSea: false, fileExists: noCheckout })
+					)
+				)
+			);
+
+		expect({ name: error.name, cwd: error.cwd }).toStrictEqual({
+			name: 'NoCheckoutError',
+			cwd: '/repo/packages/cli'
+		});
 	});
 
 	it('deploys embedded bundles from the released binary outside a checkout', () => {
@@ -68,18 +92,22 @@ describe('planWorkerSource', () => {
 	});
 
 	it('defaults a released binary inside a checkout to embedded with a notice', () => {
-		const plan = planWorkerSource(environment({ isSea: true }));
-
-		expect(plan.mode).toBe('embedded');
-		expect(plan.checkoutRoot).toBe('/repo');
-		expect(plan.notice).toContain('--from-tree');
+		expect(planWorkerSource(environment({ isSea: true }))).toStrictEqual({
+			mode: 'embedded',
+			checkoutRoot: '/repo',
+			notice:
+				'Running the released binary inside a checkout. Deploying its embedded bundles; pass --from-tree, or run `pnpm cli deploy`, to deploy the working tree instead.'
+		});
 	});
 
 	it('rebuilds from the tree when a released binary is given --from-tree', () => {
-		const plan = planWorkerSource(environment({ isSea: true, fromTree: true }));
-
-		expect(plan.mode).toBe('tree');
-		expect(plan.checkoutRoot).toBe('/repo');
-		expect(plan.notice).toContain('/repo');
+		expect(
+			planWorkerSource(environment({ isSea: true, fromTree: true }))
+		).toStrictEqual({
+			mode: 'tree',
+			checkoutRoot: '/repo',
+			notice:
+				'Deploying the Workers from the working tree at /repo, not the bundles embedded in this binary.'
+		});
 	});
 });

@@ -59,13 +59,20 @@ describe('renameResource', () => {
 		);
 
 		expect({
-			producer: renamed.control.queueProducers[0]?.queue,
-			consumer: renamed.control.queueConsumers[0]?.queue,
-			deadLetter: renamed.control.queueConsumers[0]?.deadLetterQueue
+			producers: renamed.control.queueProducers,
+			consumers: renamed.control.queueConsumers
 		}).toStrictEqual({
-			producer: 'chores',
-			consumer: 'chores',
-			deadLetter: 'cupboard-maintenance-dlq'
+			producers: [{ binding: 'Q', queue: 'chores' }],
+			consumers: [
+				{
+					queue: 'chores',
+					deadLetterQueue: 'cupboard-maintenance-dlq',
+					maxBatchSize: undefined,
+					maxBatchTimeout: undefined,
+					maxConcurrency: undefined,
+					maxRetries: undefined
+				}
+			]
 		});
 	});
 

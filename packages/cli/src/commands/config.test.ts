@@ -10,6 +10,18 @@ interface CapturedOutput {
 	readonly infos: string[];
 }
 
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
+
 function capturingReporter(captured: CapturedOutput): Reporter {
 	return {
 		phase(_label, body) {
@@ -166,8 +178,17 @@ describe('cacheSubstituterUrl', () => {
 	});
 
 	it('rejects an invalid cache name', () => {
-		expect(() =>
+		const error = thrownBy(() =>
 			cacheSubstituterUrl('https://cupboard.example.workers.dev', 'Bad!')
-		).toThrow(InvalidCacheNameError);
+		);
+
+		expect(error).toBeInstanceOf(InvalidCacheNameError);
+
+		if (error instanceof InvalidCacheNameError) {
+			expect({ name: error.name, cache: error.cache }).toStrictEqual({
+				name: 'InvalidCacheNameError',
+				cache: 'Bad!'
+			});
+		}
 	});
 });

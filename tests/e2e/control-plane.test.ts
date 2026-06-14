@@ -2,9 +2,11 @@ import { createPublicKey, verify as verifyEd25519 } from 'node:crypto';
 
 import {
 	subjectTokenTypeIdToken,
-	tokenExchangeGrantType
+	tokenExchangeGrantType,
+	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
@@ -15,20 +17,38 @@ import { withTemporaryDirectory } from '../support/filesystem.ts';
 const subjectAudience = 'cupboard-control-client';
 const controlAudience = 'cupboard-control';
 
-interface PublishedKey {
-	readonly kid: string;
-	readonly kty: string;
-	readonly crv: string;
-	readonly x: string;
+const jwtPartsSchema = z.tuple([z.string(), z.string(), z.string()]);
+const jwtHeaderSchema = z.object({ kid: z.string() });
+const jwtClaimsSchema = z.object({
+	iss: z.string(),
+	aud: z.string(),
+	sub: z.string(),
+	scope: z.string()
+});
+const publishedKeySchema = z.object({
+	kid: z.string(),
+	kty: z.string(),
+	crv: z.string(),
+	x: z.string()
+});
+const publishedJwksSchema = z.object({ keys: z.array(publishedKeySchema) });
+
+type PublishedKey = z.infer<typeof publishedKeySchema>;
+
+function decodeJwtClaims(token: string): z.infer<typeof jwtClaimsSchema> {
+	const [, payload] = jwtPartsSchema.parse(token.split('.'));
+
+	return jwtClaimsSchema.parse(decodeJsonPart(payload));
 }
 
-function decodeJwtClaims(token: string): Record<string, unknown> {
-	const payload = token.split('.', 2)[1] ?? '';
+function decodeJsonPart(part: string): unknown {
+	const parsed: unknown = JSON.parse(Buffer.from(part, 'base64url').toString());
 
-	return JSON.parse(Buffer.from(payload, 'base64url').toString()) as Record<
-		string,
-		unknown
-	>;
+	return parsed;
+}
+
+function publishedJwks(body: unknown): z.infer<typeof publishedJwksSchema> {
+	return publishedJwksSchema.parse(body);
 }
 
 // Verifies an Ed25519-signed JWT against a published JWKS, selecting the key by
@@ -39,23 +59,10 @@ function jwtVerifiesAgainst(
 	token: string,
 	keys: readonly PublishedKey[]
 ): boolean {
-	const [headerPart, payloadPart, signaturePart] = token.split('.');
-
-	if (headerPart === undefined) {
-		return false;
-	}
-
-	if (payloadPart === undefined) {
-		return false;
-	}
-
-	if (signaturePart === undefined) {
-		return false;
-	}
-
-	const { kid } = JSON.parse(
-		Buffer.from(headerPart, 'base64url').toString()
-	) as { kid?: string };
+	const [headerPart, payloadPart, signaturePart] = jwtPartsSchema.parse(
+		token.split('.')
+	);
+	const { kid } = jwtHeaderSchema.parse(decodeJsonPart(headerPart));
 	const jwk = keys.find((key) => key.kid === kid);
 
 	if (jwk === undefined) {
@@ -98,11 +105,7 @@ describe('control plane token exchange', () => {
 					}).toString()
 				});
 
-				expect(response.status).toBe(200);
-				const minted = (await response.json()) as {
-					access_token: string;
-					scope: string;
-				};
+				const minted = tokenResponseSchema.parse(await response.json());
 				const claims = decodeJwtClaims(minted.access_token);
 
 				// A control key is published, and the minted token carries the control
@@ -111,9 +114,7 @@ describe('control plane token exchange', () => {
 				const jwksResponse = await fetch(
 					new URL('/.well-known/jwks.json', server.url)
 				);
-				const jwks = (await jwksResponse.json()) as {
-					keys: PublishedKey[];
-				};
+				const jwks = publishedJwks(await jwksResponse.json());
 
 				// The tenant publishes its own, disjoint JWKS under its `/t/<tenant>/`
 				// prefix; the control token must verify against the control keys and be
@@ -121,17 +122,19 @@ describe('control plane token exchange', () => {
 				const tenantJwksResponse = await fetch(
 					server.tenantPath('/.well-known/jwks.json')
 				);
-				const tenantJwks = (await tenantJwksResponse.json()) as {
-					keys: PublishedKey[];
-				};
+				const tenantJwks = publishedJwks(await tenantJwksResponse.json());
 
 				expect({
+					tokenStatus: response.status,
 					responseScope: minted.scope,
+					controlJwksStatus: jwksResponse.status,
+					tenantJwksStatus: tenantJwksResponse.status,
 					iss: claims.iss,
 					aud: claims.aud,
 					sub: claims.sub,
 					scope: claims.scope,
 					controlKeyCount: jwks.keys.length,
+					tenantKeyCount: tenantJwks.keys.length,
 					verifiesAgainstControlKeys: jwtVerifiesAgainst(
 						minted.access_token,
 						jwks.keys
@@ -141,12 +144,16 @@ describe('control plane token exchange', () => {
 						tenantJwks.keys
 					)
 				}).toStrictEqual({
+					tokenStatus: 200,
 					responseScope: 'admin',
+					controlJwksStatus: 200,
+					tenantJwksStatus: 200,
 					iss: server.url.origin,
 					aud: controlAudience,
 					sub: 'global-admin',
 					scope: 'admin',
 					controlKeyCount: 1,
+					tenantKeyCount: 1,
 					verifiesAgainstControlKeys: true,
 					verifiesAgainstTenantKeys: false
 				});

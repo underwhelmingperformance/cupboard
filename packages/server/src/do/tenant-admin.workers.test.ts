@@ -1,3 +1,8 @@
+import {
+	tenantListResponseSchema,
+	tenantMutateResponseSchema,
+	tenantSummarySchema
+} from '@cupboard/protocol/tenants';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -51,26 +56,22 @@ describe('control plane tenant administration', () => {
 			'/control/tenants',
 			authed(token, 'POST', createBody)
 		);
-		const created = await create.json<{
-			id: string;
-			status: string;
-			readMode: string;
-		}>();
+		const created = tenantSummarySchema.parse(await create.json());
 
 		const list = await controlFetch('/control/tenants', authed(token, 'GET'));
-		const listed = await list.json<{ tenants: { id: string }[] }>();
+		const listed = tenantListResponseSchema.parse(await list.json());
 
 		const suspend = await controlFetch(
 			'/control/tenants/acme/suspend',
 			authed(token, 'POST')
 		);
-		const suspended = await suspend.json<{ id: string; status: string }>();
+		const suspended = tenantMutateResponseSchema.parse(await suspend.json());
 
 		const offboard = await controlFetch(
 			'/control/tenants/acme',
 			authed(token, 'DELETE')
 		);
-		const offboarded = await offboard.json<{ id: string; status: string }>();
+		const offboarded = tenantMutateResponseSchema.parse(await offboard.json());
 
 		expect({
 			createStatus: create.status,
@@ -107,10 +108,9 @@ describe('control plane tenant administration', () => {
 			'/control/tenants/acme',
 			authed(token, 'DELETE')
 		);
-		const repeatedBody = await repeatedDelete.json<{
-			id: string;
-			status: string;
-		}>();
+		const repeatedBody = tenantMutateResponseSchema.parse(
+			await repeatedDelete.json()
+		);
 		const suspend = await controlFetch(
 			'/control/tenants/acme/suspend',
 			authed(token, 'POST')

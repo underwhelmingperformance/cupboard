@@ -1,3 +1,4 @@
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { ColdPathTtlConfigurationInvalidError } from '../errors.ts';
@@ -6,6 +7,18 @@ import { coldPathTtlSeconds, resolveRootExpiry } from './cold-path.ts';
 
 const now = new Date('2026-01-01T00:00:00.000Z');
 const pinName = `pin:${'0'.repeat(32)}`;
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 describe('coldPathTtlSeconds', () => {
 	it.each([
@@ -22,9 +35,24 @@ describe('coldPathTtlSeconds', () => {
 		{ name: 'a zero TTL', value: '0' },
 		{ name: 'a fractional TTL', value: '1.5' }
 	])('rejects $name', ({ value }) => {
-		expect(() =>
+		const error = thrownBy(() =>
 			coldPathTtlSeconds({ CUPBOARD_COLD_PATH_TTL_SECONDS: value })
-		).toThrow(ColdPathTtlConfigurationInvalidError);
+		);
+
+		expect(error).toBeInstanceOf(ColdPathTtlConfigurationInvalidError);
+		if (!(error instanceof ColdPathTtlConfigurationInvalidError)) {
+			throw error;
+		}
+
+		expect({
+			name: error.name,
+			status: error.status,
+			value: error.value
+		}).toStrictEqual({
+			name: 'ColdPathTtlConfigurationInvalidError',
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			value
+		});
 	});
 });
 

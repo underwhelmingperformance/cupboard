@@ -1,6 +1,8 @@
+import { controlCheckReportSchema } from '@cupboard/protocol/reports';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -43,7 +45,7 @@ describe('control plane GET /control/check', () => {
 
 		expect({
 			status: response.status,
-			body: await response.json()
+			body: controlCheckReportSchema.parse(await response.json())
 		}).toStrictEqual({
 			status: 200,
 			body: { r2: { result: 'no-tenant' } }
@@ -69,21 +71,35 @@ describe('control plane GET /control/check', () => {
 			const response = await controlFetch('/control/check', {
 				headers: { authorization: `Bearer ${token}` }
 			});
-
-			const probeUrl = new URL(probed[0] ?? '');
+			const [probeUrl] = z.tuple([z.string()]).parse(probed);
+			const signed = new URL(probeUrl);
 
 			expect({
 				status: response.status,
-				body: await response.json(),
-				probes: probed.length,
-				signedR2Probe:
-					probeUrl.hostname.endsWith('.r2.cloudflarestorage.com') &&
-					probeUrl.searchParams.has('X-Amz-Signature')
+				body: controlCheckReportSchema.parse(await response.json()),
+				r2Probe: {
+					protocol: signed.protocol,
+					host: signed.host,
+					pathname: signed.pathname,
+					searchKeys: [...signed.searchParams.keys()].toSorted()
+				}
 			}).toStrictEqual({
 				status: 200,
 				body: { r2: expected },
-				probes: 1,
-				signedR2Probe: true
+				r2Probe: {
+					protocol: 'https:',
+					host: 'test-account-id.r2.cloudflarestorage.com',
+					pathname: '/cupboard-blobs/.cupboard-credential-probe',
+					searchKeys: [
+						'X-Amz-Algorithm',
+						'X-Amz-Content-Sha256',
+						'X-Amz-Credential',
+						'X-Amz-Date',
+						'X-Amz-Expires',
+						'X-Amz-Signature',
+						'X-Amz-SignedHeaders'
+					]
+				}
 			});
 		}
 	);

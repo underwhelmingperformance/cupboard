@@ -145,7 +145,7 @@ export function registerOidcTrustCommands(
 
 export async function runOidcTrustList(
 	reporter: Reporter,
-	client: OidcTrustClient
+	client: Pick<OidcTrustClient, 'list'>
 ): Promise<void> {
 	const { rules } = await reporter.phase('Listing OIDC trust rules', () =>
 		client.list()
@@ -162,7 +162,7 @@ export async function runOidcTrustList(
 export async function runOidcTrustAdd(
 	body: OidcTrustAddBody,
 	reporter: Reporter,
-	client: OidcTrustClient
+	client: Pick<OidcTrustClient, 'add'>
 ): Promise<void> {
 	const summary = await reporter.phase('Adding OIDC trust rule', () =>
 		client.add(body)

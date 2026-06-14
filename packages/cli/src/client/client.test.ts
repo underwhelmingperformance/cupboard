@@ -24,6 +24,18 @@ interface CapturedRequest {
 	readonly body: unknown;
 }
 
+function requestUrl(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
+}
+
 function capturingClient(
 	response: unknown,
 	cachePrefix = ''
@@ -36,13 +48,9 @@ function capturingClient(
 	const client = new CupboardClient(
 		new URL('https://cupboard.test'),
 		(input, init) => {
-			if (!(input instanceof URL)) {
-				throw new TypeError('expected the client to request a URL');
-			}
-
 			const headers = new Headers(init?.headers);
 			captured = {
-				url: input.href,
+				url: requestUrl(input),
 				method: init?.method,
 				authorization: headers.get('authorization') ?? undefined,
 				contentType: headers.get('content-type') ?? undefined,
@@ -55,6 +63,36 @@ function capturingClient(
 	);
 
 	return { client, captured: () => captured };
+}
+
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
+}
+
+function expectCupboardHttpError(
+	error: unknown
+): asserts error is CupboardHttpError {
+	expect(error).toBeInstanceOf(CupboardHttpError);
+}
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
 }
 
 describe('CupboardClient.tokenExchange', () => {
@@ -176,17 +214,22 @@ describe('CupboardClient.signup', () => {
 				new Response('claimed by another principal', { status: 409 })
 			)
 		);
-
-		await expect(
+		const error = await rejectedBy(() =>
 			client.signup({ subject_token: 'subject.jwt' })
-		).rejects.toStrictEqual(
-			new CupboardHttpError(
-				'POST',
-				'/signup',
-				409,
-				'claimed by another principal'
-			)
 		);
+
+		expectCupboardHttpError(error);
+		expect({
+			name: error.name,
+			method: error.method,
+			path: error.path,
+			status: error.status
+		}).toStrictEqual({
+			name: 'CupboardHttpError',
+			method: 'POST',
+			path: '/signup',
+			status: 409
+		});
 	});
 });
 
@@ -336,9 +379,18 @@ describe('CupboardClient cache prefix', () => {
 	});
 
 	it('rejects an invalid cache name when building a scoped client', () => {
-		expect(() =>
+		const error = thrownBy(() =>
 			CupboardClient.fromUrl('https://cupboard.test', 'Bad!')
-		).toThrow(InvalidCacheNameError);
+		);
+
+		expect(error).toBeInstanceOf(InvalidCacheNameError);
+
+		if (error instanceof InvalidCacheNameError) {
+			expect({ name: error.name, cache: error.cache }).toStrictEqual({
+				name: 'InvalidCacheNameError',
+				cache: 'Bad!'
+			});
+		}
 	});
 });
 
@@ -346,12 +398,18 @@ describe('CupboardClient response validation', () => {
 	it('rejects a token response missing a required field', async () => {
 		const { client } = capturingClient({ token_type: 'Bearer' });
 
-		await expect(
+		const error = await rejectedBy(() =>
 			client.tokenExchange(
 				'subject.jwt',
 				'urn:ietf:params:oauth:token-type:id_token'
 			)
-		).rejects.toThrow(ResponseSchemaMismatchError);
+		);
+
+		expect(error).toBeInstanceOf(ResponseSchemaMismatchError);
+
+		if (error instanceof ResponseSchemaMismatchError) {
+			expect(error.path).toBe('/token');
+		}
 	});
 
 	it('rejects a 200 response whose body is not valid JSON', async () => {
@@ -359,11 +417,20 @@ describe('CupboardClient response validation', () => {
 			Promise.resolve(new Response('{ not json', { status: 200 }))
 		);
 
-		await expect(
+		const error = await rejectedBy(() =>
 			client.tokenExchange(
 				'subject.jwt',
 				'urn:ietf:params:oauth:token-type:id_token'
 			)
-		).rejects.toThrow(MalformedResponseError);
+		);
+
+		expect(error).toBeInstanceOf(MalformedResponseError);
+
+		if (error instanceof MalformedResponseError) {
+			expect({ path: error.path, cause: error.cause.name }).toStrictEqual({
+				path: '/token',
+				cause: 'SyntaxError'
+			});
+		}
 	});
 });

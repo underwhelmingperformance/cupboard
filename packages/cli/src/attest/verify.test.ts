@@ -1,9 +1,20 @@
+import { createPublicKey } from 'node:crypto';
+
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
+import { StorePath } from '@cupboard/nix/store-path';
+import type { Signer } from '@sigstore/verify';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
+	AttestationPredicateTypeMismatchError,
+	AttestationSubjectMismatchError,
+	CertificateIdentityModeError,
+	CertificateIssuerModeError,
+	CertificatePolicyModeMismatchError,
 	identityPolicy,
+	RemoteNarInfoStorePathMismatchError,
 	type VerifiedIdentityPolicy,
 	verifyLocalAttestations,
 	verifyRemoteAttestations
@@ -13,6 +24,18 @@ const narHash = 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347';
 const narDigest = [...NixSha256Hash.parse(narHash).digestBytes()]
 	.map((byte) => byte.toString(16).padStart(2, '0'))
 	.join('');
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const bundleDigest = 'a'.repeat(64);
 const sbomBundleDigest = 'b'.repeat(64);
@@ -30,17 +53,141 @@ interface Ed25519KeyPair {
 	readonly publicKey: CryptoKey;
 }
 
+interface JsonWebKey {
+	readonly alg?: string;
+	readonly crv?: string;
+	readonly d?: string;
+	readonly ext?: boolean;
+	readonly key_ops?: string[];
+	readonly kty?: string;
+	readonly x?: string;
+}
+
+interface SigningKeyFixture {
+	readonly privateKey: JsonWebKey;
+	readonly publicKey: JsonWebKey;
+}
+
+const fallbackSigningKeyFixture: SigningKeyFixture = {
+	privateKey: {
+		key_ops: ['sign'],
+		ext: true,
+		alg: 'Ed25519',
+		crv: 'Ed25519',
+		d: '95_cr7rZkd-LXcr6qRbgZKCGFW9gqbIWGxir2o5NYAY',
+		x: '74apN5wWAk7Q7yJ1hzf0EMHdcmIRanVgF1Xqz-VpOl8',
+		kty: 'OKP'
+	},
+	publicKey: {
+		key_ops: ['verify'],
+		ext: true,
+		alg: 'Ed25519',
+		crv: 'Ed25519',
+		x: '74apN5wWAk7Q7yJ1hzf0EMHdcmIRanVgF1Xqz-VpOl8',
+		kty: 'OKP'
+	}
+};
+
+const signingKeyFixtures = [
+	fallbackSigningKeyFixture,
+	{
+		privateKey: {
+			key_ops: ['sign'],
+			ext: true,
+			alg: 'Ed25519',
+			crv: 'Ed25519',
+			d: 'zG6r2ltCQlzKarFboppFA7hKC87ijVwo_FF_zXInf7A',
+			x: '0VP8Lp9S44d-OtJwIqEYWmYwCr0agrgoD5m6Fqi5WVQ',
+			kty: 'OKP'
+		},
+		publicKey: {
+			key_ops: ['verify'],
+			ext: true,
+			alg: 'Ed25519',
+			crv: 'Ed25519',
+			x: '0VP8Lp9S44d-OtJwIqEYWmYwCr0agrgoD5m6Fqi5WVQ',
+			kty: 'OKP'
+		}
+	},
+	{
+		privateKey: {
+			key_ops: ['sign'],
+			ext: true,
+			alg: 'Ed25519',
+			crv: 'Ed25519',
+			d: 'mctC2Wtr6n5TdCCQYzhwYxg7JbUk2XsaPthypOh80z8',
+			x: 'odRFQRtNeZ5sbNo9kRLaVyXXaFXf4Fi9iz5s-JnKpws',
+			kty: 'OKP'
+		},
+		publicKey: {
+			key_ops: ['verify'],
+			ext: true,
+			alg: 'Ed25519',
+			crv: 'Ed25519',
+			x: 'odRFQRtNeZ5sbNo9kRLaVyXXaFXf4Fi9iz5s-JnKpws',
+			kty: 'OKP'
+		}
+	},
+	{
+		privateKey: {
+			key_ops: ['sign'],
+			ext: true,
+			alg: 'Ed25519',
+			crv: 'Ed25519',
+			d: 'XYQdtxKcV4OwRANdraL1_0HXLzVCcML9sqqmUllvXtw',
+			x: 'BQW0MkBrLmMMnQ8GZDx4pA7acN_YSpo2T43bP7mviYc',
+			kty: 'OKP'
+		},
+		publicKey: {
+			key_ops: ['verify'],
+			ext: true,
+			alg: 'Ed25519',
+			crv: 'Ed25519',
+			x: 'BQW0MkBrLmMMnQ8GZDx4pA7acN_YSpo2T43bP7mviYc',
+			kty: 'OKP'
+		}
+	}
+] satisfies readonly SigningKeyFixture[];
+
+let nextSigningKeyFixture = 0;
+
+function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
+	return {
+		key: createPublicKey({
+			key: Buffer.from(
+				'MCowBQYDK2VwAyEA74apN5wWAk7Q7yJ1hzf0EMHdcmIRanVgF1Xqz+VpOl8=',
+				'base64'
+			),
+			format: 'der',
+			type: 'spki'
+		}),
+		identity: {
+			subjectAlternativeName:
+				policy.mode === 'exact' ? policy.identity : policy.identity.source,
+			extensions: {
+				issuer: policy.mode === 'exact' ? policy.issuer : policy.issuer.source
+			}
+		}
+	};
+}
+
 async function generateSigningKeyPair(): Promise<Ed25519KeyPair> {
-	const keyPair = await crypto.subtle.generateKey('Ed25519', true, [
-		'sign',
-		'verify'
+	const fixture = z
+		.custom<SigningKeyFixture>((value) => value !== undefined)
+		.parse(
+			signingKeyFixtures[nextSigningKeyFixture % signingKeyFixtures.length]
+		);
+	nextSigningKeyFixture += 1;
+	const [privateKey, publicKey] = await Promise.all([
+		crypto.subtle.importKey('jwk', fixture.privateKey, 'Ed25519', true, [
+			'sign'
+		]),
+		crypto.subtle.importKey('jwk', fixture.publicKey, 'Ed25519', true, [
+			'verify'
+		])
 	]);
 
-	if (!('privateKey' in keyPair) || !('publicKey' in keyPair)) {
-		throw new Error('expected an Ed25519 key pair');
-	}
-
-	return keyPair;
+	return { privateKey, publicKey };
 }
 
 async function namedPublicKey(keyPair: Ed25519KeyPair): Promise<string> {
@@ -80,28 +227,106 @@ async function signedNarInfo(hash: string = storePathHash): Promise<{
 
 describe('attestation verification policy', () => {
 	it('requires exactly one identity mode', () => {
-		expect(() =>
+		const missing_ = thrownBy(() =>
 			identityPolicy({
 				certificateOidcIssuer: 'https://issuer.test'
 			})
-		).toThrow('Pass exactly one of --certificate-identity');
-
-		expect(() =>
+		);
+		const conflicting_ = thrownBy(() =>
 			identityPolicy({
 				certificateIdentity: 'alice@example.test',
 				certificateIdentityRegex: 'alice@.*',
 				certificateOidcIssuer: 'https://issuer.test'
 			})
-		).toThrow('Pass exactly one of --certificate-identity');
+		);
+
+		expect(missing_).toBeInstanceOf(CertificateIdentityModeError);
+		expect(conflicting_).toBeInstanceOf(CertificateIdentityModeError);
+
+		if (
+			missing_ instanceof CertificateIdentityModeError &&
+			conflicting_ instanceof CertificateIdentityModeError
+		) {
+			expect({
+				missing: { name: missing_.name, identityModes: missing_.identityModes },
+				conflicting: {
+					name: conflicting_.name,
+					identityModes: conflicting_.identityModes
+				}
+			}).toStrictEqual({
+				missing: {
+					name: 'CertificateIdentityModeError',
+					identityModes: []
+				},
+				conflicting: {
+					name: 'CertificateIdentityModeError',
+					identityModes: ['exact', 'regex']
+				}
+			});
+		}
+	});
+
+	it('requires exactly one issuer mode', () => {
+		const missing_ = thrownBy(() =>
+			identityPolicy({
+				certificateIdentity: 'alice@example.test'
+			})
+		);
+		const conflicting_ = thrownBy(() =>
+			identityPolicy({
+				certificateIdentity: 'alice@example.test',
+				certificateOidcIssuer: 'https://issuer.test',
+				certificateOidcIssuerRegex: 'https://issuer[.]test'
+			})
+		);
+
+		expect(missing_).toBeInstanceOf(CertificateIssuerModeError);
+		expect(conflicting_).toBeInstanceOf(CertificateIssuerModeError);
+
+		if (
+			missing_ instanceof CertificateIssuerModeError &&
+			conflicting_ instanceof CertificateIssuerModeError
+		) {
+			expect({
+				missing: { name: missing_.name, issuerModes: missing_.issuerModes },
+				conflicting: {
+					name: conflicting_.name,
+					issuerModes: conflicting_.issuerModes
+				}
+			}).toStrictEqual({
+				missing: {
+					name: 'CertificateIssuerModeError',
+					issuerModes: []
+				},
+				conflicting: {
+					name: 'CertificateIssuerModeError',
+					issuerModes: ['exact', 'regex']
+				}
+			});
+		}
 	});
 
 	it('requires identity and issuer modes to match', () => {
-		expect(() =>
+		const error_ = thrownBy(() =>
 			identityPolicy({
 				certificateIdentity: 'alice@example.test',
 				certificateOidcIssuerRegex: 'https://issuer[.]test'
 			})
-		).toThrow('must both use exact values or both use regex values');
+		);
+
+		expect(error_).toBeInstanceOf(CertificatePolicyModeMismatchError);
+
+		if (error_ instanceof CertificatePolicyModeMismatchError) {
+			expect({
+				name: error_.name,
+				identityMode: error_.identityMode,
+				issuerMode: error_.issuerMode
+			}).toStrictEqual({
+				name: 'CertificatePolicyModeMismatchError',
+				identityMode: 'exact',
+				issuerMode: 'regex'
+			});
+		}
 	});
 
 	it('builds exact and regex policies', () => {
@@ -121,18 +346,10 @@ describe('attestation verification policy', () => {
 			certificateOidcIssuerRegex: 'https://issuer[.]test'
 		});
 
-		if (regex.mode !== 'regex') {
-			throw new Error('expected regex policy');
-		}
-
-		expect({
-			mode: regex.mode,
-			identity: regex.identity.source,
-			issuer: regex.issuer.source
-		}).toStrictEqual({
+		expect(regex).toStrictEqual({
 			mode: 'regex',
-			identity: 'alice@.*',
-			issuer: String.raw`https:\/\/issuer[.]test`
+			identity: /alice@.*/,
+			issuer: /https:\/\/issuer[.]test/
 		});
 	});
 });
@@ -167,13 +384,7 @@ describe('local attestation verification', () => {
 					return Promise.resolve({
 						predicateType,
 						subjectDigests: [narDigest],
-						signer: {
-							key: {} as never,
-							identity: {
-								subjectAlternativeName: policy.identity,
-								extensions: { issuer: policy.issuer }
-							}
-						}
+						signer: verifiedSigner(policy)
 					});
 				}
 			}
@@ -191,49 +402,91 @@ describe('local attestation verification', () => {
 	});
 
 	it('rejects a verified bundle whose subject does not match the NAR hash', async () => {
-		await expect(
-			verifyLocalAttestations(
-				{
-					bundles: ['bundle.sigstore.json'],
-					narHash,
-					predicateType,
-					certificateIdentity: policy.identity,
-					certificateOidcIssuer: policy.issuer
-				},
-				{
-					readFile: () => Promise.resolve(new Uint8Array([1])),
-					verify: () =>
-						Promise.resolve({
-							predicateType,
-							subjectDigests: ['0'.repeat(64)],
-							signer: { key: {} as never }
-						})
-				}
-			)
-		).rejects.toThrow('subject does not match');
+		const outcome = await verifyLocalAttestations(
+			{
+				bundles: ['bundle.sigstore.json'],
+				narHash,
+				predicateType,
+				certificateIdentity: policy.identity,
+				certificateOidcIssuer: policy.issuer
+			},
+			{
+				readFile: () => Promise.resolve(new Uint8Array([1])),
+				verify: () =>
+					Promise.resolve({
+						predicateType,
+						subjectDigests: ['0'.repeat(64)],
+						signer: verifiedSigner(policy)
+					})
+			}
+		).then(
+			(results) => ({ results }),
+			(error_: unknown) => {
+				const error = z
+					.instanceof(AttestationSubjectMismatchError)
+					.parse(error_);
+
+				return {
+					error: {
+						name: error.name,
+						expectedSubjectDigest: error.expectedSubjectDigest,
+						subjectDigests: error.subjectDigests
+					}
+				};
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: AttestationSubjectMismatchError.name,
+				expectedSubjectDigest: narDigest,
+				subjectDigests: ['0'.repeat(64)]
+			}
+		});
 	});
 
 	it('rejects a verified bundle whose predicate type does not match policy', async () => {
-		await expect(
-			verifyLocalAttestations(
-				{
-					bundles: ['bundle.sigstore.json'],
-					narHash,
-					predicateType,
-					certificateIdentity: policy.identity,
-					certificateOidcIssuer: policy.issuer
-				},
-				{
-					readFile: () => Promise.resolve(new Uint8Array([1])),
-					verify: () =>
-						Promise.resolve({
-							predicateType: 'https://example.test/other',
-							subjectDigests: [narDigest],
-							signer: { key: {} as never }
-						})
-				}
-			)
-		).rejects.toThrow('predicate type does not match');
+		const outcome = await verifyLocalAttestations(
+			{
+				bundles: ['bundle.sigstore.json'],
+				narHash,
+				predicateType,
+				certificateIdentity: policy.identity,
+				certificateOidcIssuer: policy.issuer
+			},
+			{
+				readFile: () => Promise.resolve(new Uint8Array([1])),
+				verify: () =>
+					Promise.resolve({
+						predicateType: 'https://example.test/other',
+						subjectDigests: [narDigest],
+						signer: verifiedSigner(policy)
+					})
+			}
+		).then(
+			(results) => ({ results }),
+			(error_: unknown) => {
+				const error = z
+					.instanceof(AttestationPredicateTypeMismatchError)
+					.parse(error_);
+
+				return {
+					error: {
+						name: error.name,
+						expectedPredicateType: error.expectedPredicateType,
+						actualPredicateType: error.actualPredicateType
+					}
+				};
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: AttestationPredicateTypeMismatchError.name,
+				expectedPredicateType: predicateType,
+				actualPredicateType: 'https://example.test/other'
+			}
+		});
 	});
 });
 
@@ -251,10 +504,7 @@ describe('remote attestation verification', () => {
 			readonly url: string;
 			readonly authorisation?: string;
 		}[] = [];
-		const fetcher = ((
-			input: string | URL | Request,
-			init?: RequestInit
-		): Promise<Response> => {
+		const fetcher: typeof fetch = (input, init) => {
 			const url = fetchInputUrl(input);
 			const authorisation = new Headers(init?.headers).get('authorization');
 			recordedCalls.push({
@@ -305,7 +555,7 @@ describe('remote attestation verification', () => {
 			}
 
 			return Promise.resolve(new Response('not found', { status: 404 }));
-		}) as typeof fetch;
+		};
 
 		const results = await verifyRemoteAttestations(
 			{
@@ -333,13 +583,7 @@ describe('remote attestation verification', () => {
 					return Promise.resolve({
 						predicateType,
 						subjectDigests: [narDigest],
-						signer: {
-							key: {} as never,
-							identity: {
-								subjectAlternativeName: policy.identity,
-								extensions: { issuer: policy.issuer }
-							}
-						}
+						signer: verifiedSigner(policy)
 					});
 				}
 			}
@@ -376,37 +620,68 @@ describe('remote attestation verification', () => {
 	});
 
 	it('rejects a remote narinfo whose signed store path has a different hash', async () => {
-		const replayedNarInfo = await signedNarInfo(
-			'11111111111111111111111111111111'
-		);
-		const fetcher = ((input: string | URL | Request): Promise<Response> => {
+		const replayedHash = '11111111111111111111111111111111';
+		const replayedStorePath = `/nix/store/${replayedHash}-app`;
+		const replayedNarInfo = await signedNarInfo(replayedHash);
+		const fetches: string[] = [];
+		const fetcher: typeof fetch = (input) => {
 			const url = fetchInputUrl(input);
+			fetches.push(url);
 
 			if (url === `https://cupboard.test/t/acme/${storePathHash}.narinfo`) {
 				return Promise.resolve(new Response(replayedNarInfo.source));
 			}
 
 			return Promise.resolve(new Response('not found', { status: 404 }));
-		}) as typeof fetch;
+		};
 
-		await expect(
-			verifyRemoteAttestations(
-				{
-					url: 'https://cupboard.test/t/acme',
-					storePathHash,
-					predicateType,
-					trustedPublicKey: replayedNarInfo.publicKey,
-					certificateIdentity: policy.identity,
-					certificateOidcIssuer: policy.issuer
-				},
-				{
-					fetch: fetcher,
-					verify: () => {
-						throw new Error('bundle verifier should not be called');
+		const outcome = await verifyRemoteAttestations(
+			{
+				url: 'https://cupboard.test/t/acme',
+				storePathHash,
+				predicateType,
+				trustedPublicKey: replayedNarInfo.publicKey,
+				certificateIdentity: policy.identity,
+				certificateOidcIssuer: policy.issuer
+			},
+			{
+				fetch: fetcher,
+				verify: () =>
+					Promise.resolve({
+						predicateType,
+						subjectDigests: [narDigest],
+						signer: verifiedSigner(policy)
+					})
+			}
+		).then(
+			(results) => ({ results }),
+			(error_: unknown) => {
+				const error = z
+					.instanceof(RemoteNarInfoStorePathMismatchError)
+					.parse(error_);
+
+				return {
+					error: {
+						name: error.name,
+						expectedStorePathHash: error.expectedStorePathHash,
+						actualStorePathHash: error.actualStorePathHash,
+						storePath: error.storePath
 					}
+				};
+			}
+		);
+
+		expect({ outcome, fetches }).toStrictEqual({
+			outcome: {
+				error: {
+					name: RemoteNarInfoStorePathMismatchError.name,
+					expectedStorePathHash: storePathHash,
+					actualStorePathHash: StorePath.hash(replayedStorePath),
+					storePath: replayedStorePath
 				}
-			)
-		).rejects.toThrow('store path does not match');
+			},
+			fetches: [`https://cupboard.test/t/acme/${storePathHash}.narinfo`]
+		});
 	});
 });
 
@@ -416,7 +691,7 @@ function fetchInputUrl(input: string | URL | Request): string {
 	}
 
 	if (input instanceof URL) {
-		return input.toString();
+		return input.href;
 	}
 
 	return input.url;

@@ -25,20 +25,59 @@ describe('mapDeviceLoginError', () => {
 			);
 
 			expect(mapped).toBeInstanceOf(DeviceGrantNotEnabledError);
+
+			if (mapped instanceof DeviceGrantNotEnabledError) {
+				expect(mapped.cause).toBeInstanceOf(DeviceAuthorizationRequestError);
+
+				if (mapped.cause instanceof DeviceAuthorizationRequestError) {
+					expect({
+						name: mapped.name,
+						causeStatus: mapped.cause.status
+					}).toStrictEqual({
+						name: 'DeviceGrantNotEnabledError',
+						causeStatus: status
+					});
+				}
+			}
 		}
 	);
 
 	it('passes the error through for other clients', () => {
 		const error = new DeviceAuthorizationRequestError(403);
+		const mapped = mapDeviceLoginError(error, 'someone-else');
 
-		expect(mapDeviceLoginError(error, 'someone-else')).toBe(error);
+		expect(mapped).toBeInstanceOf(DeviceAuthorizationRequestError);
+
+		if (mapped instanceof DeviceAuthorizationRequestError) {
+			expect({
+				name: mapped.name,
+				status: mapped.status,
+				passedThrough: mapped === error
+			}).toStrictEqual({
+				name: 'DeviceAuthorizationRequestError',
+				status: 403,
+				passedThrough: true
+			});
+		}
 	});
 
 	it.each([
 		['a server error', new DeviceAuthorizationRequestError(500)],
 		['an unrelated failure', new Error('network down')]
 	])('passes %s through for the built-in client', (_name, error) => {
-		expect(mapDeviceLoginError(error, cloudflareOauthClientId)).toBe(error);
+		const mapped = mapDeviceLoginError(error, cloudflareOauthClientId);
+
+		expect(mapped).toBeInstanceOf(Error);
+
+		if (mapped instanceof Error) {
+			expect({
+				name: mapped.name,
+				passedThrough: mapped === error
+			}).toStrictEqual({
+				name: error.name,
+				passedThrough: true
+			});
+		}
 	});
 });
 
@@ -86,17 +125,16 @@ interface IdTokenWorld {
 
 function idTokenDeps(world: IdTokenWorld): {
 	deps: Parameters<typeof cupboardIdToken>[0];
-	calls: { written: CloudflareGrant[]; logins: number };
+	calls: { logins: CloudflareGrant[]; written: CloudflareGrant[] };
 } {
+	const defaultLoginGrant = grantWith(tokenExpiringAt(now / 1000 + 7200));
+	const logins: CloudflareGrant[] = [];
 	const written: CloudflareGrant[] = [];
-	const counter = { logins: 0 };
 
 	return {
 		calls: {
-			written,
-			get logins() {
-				return counter.logins;
-			}
+			logins,
+			written
 		},
 		deps: {
 			chain: {
@@ -109,13 +147,10 @@ function idTokenDeps(world: IdTokenWorld): {
 				now: () => now
 			},
 			login: () => {
-				counter.logins += 1;
+				const loginGrant = world.loginGrant ?? defaultLoginGrant;
+				logins.push(loginGrant);
 
-				if (world.loginGrant === undefined) {
-					return Promise.reject(new Error('login was not expected'));
-				}
-
-				return Promise.resolve(world.loginGrant);
+				return Promise.resolve(loginGrant);
 			}
 		}
 	};
@@ -128,8 +163,13 @@ describe('cupboardIdToken', () => {
 
 		expect({
 			token: await cupboardIdToken(deps),
-			logins: calls.logins
-		}).toStrictEqual({ token: idToken, logins: 0 });
+			logins: calls.logins,
+			written: calls.written
+		}).toStrictEqual({
+			token: idToken,
+			logins: [],
+			written: []
+		});
 	});
 
 	it('logs in afresh when the cached token is expired and unrefreshable', async () => {
@@ -143,23 +183,76 @@ describe('cupboardIdToken', () => {
 
 		expect({
 			token: await cupboardIdToken(deps),
+			logins: calls.logins,
 			// The new grant is persisted, so the deploy shares the login.
 			written: calls.written
-		}).toStrictEqual({ token: fresh, written: [loginGrant] });
+		}).toStrictEqual({
+			token: fresh,
+			logins: [loginGrant],
+			written: [loginGrant]
+		});
 	});
 
 	it('logs in afresh when no grant is cached', async () => {
 		const fresh = tokenExpiringAt(now / 1000 + 3600);
-		const { deps } = idTokenDeps({ loginGrant: grantWith(fresh) });
+		const loginGrant = grantWith(fresh);
+		const { deps, calls } = idTokenDeps({ loginGrant });
 
-		expect(await cupboardIdToken(deps)).toBe(fresh);
+		expect({
+			token: await cupboardIdToken(deps),
+			logins: calls.logins,
+			written: calls.written
+		}).toStrictEqual({
+			token: fresh,
+			logins: [loginGrant],
+			written: [loginGrant]
+		});
 	});
 
 	it('rejects a login that carried no id_token', async () => {
-		const { deps } = idTokenDeps({ loginGrant: grantWith() });
+		const { deps, calls } = idTokenDeps({ loginGrant: grantWith() });
+		const outcome = await cupboardIdToken(deps).then(
+			(token) => ({ token }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(LoginIdTokenMissingError);
 
-		await expect(cupboardIdToken(deps)).rejects.toBeInstanceOf(
-			LoginIdTokenMissingError
+				const name =
+					error_ instanceof LoginIdTokenMissingError
+						? error_.name
+						: String(error_);
+
+				return { error: { name } };
+			}
 		);
+
+		expect({
+			outcome,
+			logins: calls.logins,
+			written: calls.written
+		}).toStrictEqual({
+			outcome: {
+				error: {
+					name: LoginIdTokenMissingError.name
+				}
+			},
+			logins: [
+				{
+					accessToken: 'access-1',
+					expiresAt: now + 3_600_000,
+					idToken: undefined,
+					refreshToken: 'refresh-1',
+					subject: 'cf-user-1'
+				}
+			],
+			written: [
+				{
+					accessToken: 'access-1',
+					expiresAt: now + 3_600_000,
+					idToken: undefined,
+					refreshToken: 'refresh-1',
+					subject: 'cf-user-1'
+				}
+			]
+		});
 	});
 });

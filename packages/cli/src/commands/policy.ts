@@ -133,7 +133,7 @@ export function registerPolicyCommands(
 
 export async function runPolicyList(
 	reporter: Reporter,
-	client: PolicyClient
+	client: Pick<PolicyClient, 'list'>
 ): Promise<void> {
 	const { policies } = await reporter.phase('Listing retention policies', () =>
 		client.list()
@@ -152,7 +152,7 @@ export async function runPolicyAdd(
 	pattern: string,
 	ttlSeconds: number,
 	reporter: Reporter,
-	client: PolicyClient
+	client: Pick<PolicyClient, 'add'>
 ): Promise<void> {
 	const body: RetentionPolicyAddBody =
 		scope === 'cache'

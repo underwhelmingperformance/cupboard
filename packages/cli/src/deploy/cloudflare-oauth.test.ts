@@ -13,6 +13,34 @@ import {
 
 const tokenEndpoint = 'https://dash.cloudflare.com/oauth2/token';
 
+type ErrorConstructor<T extends Error> = abstract new (
+	...arguments_: never[]
+) => T;
+
+function expectError<T extends Error>(
+	error: unknown,
+	errorClass: ErrorConstructor<T>
+): asserts error is T {
+	expect(error).toBeInstanceOf(errorClass);
+}
+
+async function rejectedBy<T extends Error>(
+	promise: Promise<unknown>,
+	errorClass: ErrorConstructor<T>
+): Promise<T> {
+	let rejection: unknown;
+
+	try {
+		await promise;
+	} catch (error) {
+		rejection = error;
+	}
+
+	expectError(rejection, errorClass);
+
+	return rejection;
+}
+
 /** An unsigned id_token carrying just a `sub`, as the decoder reads it. */
 function idToken(subject: string): string {
 	const header = Buffer.from(JSON.stringify({ alg: 'RS256' })).toString(
@@ -48,11 +76,8 @@ function fakeCloudflare(options: {
 					? input.toString()
 					: input.url;
 
-		if (url !== tokenEndpoint) {
-			throw new Error(`Unexpected fetch: ${url}`);
-		}
-
 		const form = typeof init?.body === 'string' ? init.body : '';
+		expect({ url }).toStrictEqual({ url: tokenEndpoint });
 		tokenRequests.push({ url, form: new URLSearchParams(form) });
 
 		return Promise.resolve(
@@ -108,24 +133,31 @@ describe('cloudflareLogin', () => {
 		});
 
 		const authorize = new URL(authorizeUrl);
-		const exchange = tokenRequests[0];
 
 		expect({
 			clientId: authorize.searchParams.get('client_id'),
 			scope: authorize.searchParams.get('scope'),
 			challengeMethod: authorize.searchParams.get('code_challenge_method'),
-			grantType: exchange?.form.get('grant_type'),
-			code: exchange?.form.get('code'),
-			exchangeClientId: exchange?.form.get('client_id'),
-			redirectUri: exchange?.form.get('redirect_uri')
+			tokenRequests: tokenRequests.map(({ url, form }) => ({
+				url,
+				grantType: form.get('grant_type'),
+				code: form.get('code'),
+				clientId: form.get('client_id'),
+				redirectUri: form.get('redirect_uri')
+			}))
 		}).toStrictEqual({
 			clientId: cloudflareOauthClientId,
 			scope: deployScopes.join(' '),
 			challengeMethod: 'S256',
-			grantType: 'authorization_code',
-			code: 'code-1',
-			exchangeClientId: cloudflareOauthClientId,
-			redirectUri: authorize.searchParams.get('redirect_uri')
+			tokenRequests: [
+				{
+					url: tokenEndpoint,
+					grantType: 'authorization_code',
+					code: 'code-1',
+					clientId: cloudflareOauthClientId,
+					redirectUri: authorize.searchParams.get('redirect_uri')
+				}
+			]
 		});
 	});
 
@@ -149,11 +181,22 @@ describe('cloudflareLogin', () => {
 		expect({
 			subject: grant.subject,
 			idToken: grant.idToken,
-			requestsIdentity: deployScopes.includes('openid')
+			deployScopes
 		}).toStrictEqual({
 			subject: 'cf-user-1',
 			idToken: issued,
-			requestsIdentity: true
+			deployScopes: [
+				'account-settings.write',
+				'd1.write',
+				'offline_access',
+				'openid',
+				'queues.write',
+				'workers-kv-storage.write',
+				'workers-r2.write',
+				'workers-routes.write',
+				'workers-scripts.write',
+				'zone.read'
+			]
 		});
 	});
 
@@ -188,9 +231,12 @@ describe('cloudflareLogin', () => {
 			ports: [0]
 		});
 
-		await expect(login).rejects.toStrictEqual(
-			new CloudflareTokenRequestError(400)
-		);
+		const error = await rejectedBy(login, CloudflareTokenRequestError);
+
+		expect({ name: error.name, status: error.status }).toStrictEqual({
+			name: 'CloudflareTokenRequestError',
+			status: 400
+		});
 	});
 
 	it('rejects with the provider error when authorization is declined', async () => {
@@ -213,9 +259,15 @@ describe('cloudflareLogin', () => {
 			ports: [0]
 		});
 
-		await expect(login).rejects.toStrictEqual(
-			new AuthorizationAccessDeniedError()
-		);
+		const error = await rejectedBy(login, AuthorizationAccessDeniedError);
+
+		expect({
+			name: error.name,
+			providerError: error.providerError
+		}).toStrictEqual({
+			name: 'AuthorizationAccessDeniedError',
+			providerError: 'access_denied'
+		});
 	});
 });
 
@@ -237,8 +289,11 @@ describe('refreshCloudflareGrant', () => {
 
 		expect({
 			grant,
-			grantType: tokenRequests[0]?.form.get('grant_type'),
-			refreshToken: tokenRequests[0]?.form.get('refresh_token')
+			tokenRequests: tokenRequests.map(({ url, form }) => ({
+				url,
+				grantType: form.get('grant_type'),
+				refreshToken: form.get('refresh_token')
+			}))
 		}).toStrictEqual({
 			grant: {
 				accessToken: 'access-4',
@@ -247,8 +302,13 @@ describe('refreshCloudflareGrant', () => {
 				subject: 'cf-user-1',
 				idToken: 'id-token-old'
 			},
-			grantType: 'refresh_token',
-			refreshToken: 'refresh-old'
+			tokenRequests: [
+				{
+					url: tokenEndpoint,
+					grantType: 'refresh_token',
+					refreshToken: 'refresh-old'
+				}
+			]
 		});
 	});
 
@@ -284,8 +344,8 @@ describe('refreshCloudflareGrant', () => {
 				{ ...previous, refreshToken: undefined },
 				fetcher
 			),
-			requests: tokenRequests.length
-		}).toStrictEqual({ grant: undefined, requests: 0 });
+			requests: tokenRequests
+		}).toStrictEqual({ grant: undefined, requests: [] });
 	});
 
 	it('returns undefined when Cloudflare declines the refresh', async () => {

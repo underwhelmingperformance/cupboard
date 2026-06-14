@@ -5,10 +5,92 @@ import {
 	commitBody,
 	type CommitMessage,
 	CommitMessageCheck,
+	type Finding,
 	formatBodyPatch,
 	UnchangedCommitMessageCheckError
 } from './linter.ts';
-import { jsonReport, terminalFailureReport } from './report.ts';
+import {
+	type CommitMessageJsonFinding,
+	jsonReport,
+	terminalFailureReport
+} from './report.ts';
+
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
+}
+
+function expectUnchangedCommitMessageCheckError(
+	error: unknown
+): asserts error is UnchangedCommitMessageCheckError {
+	expect(error).toBeInstanceOf(UnchangedCommitMessageCheckError);
+}
+
+function expectCommitMessageCheck(
+	check: CommitMessageCheck | undefined
+): asserts check is CommitMessageCheck {
+	expect(check).toBeInstanceOf(CommitMessageCheck);
+}
+
+type StructuralFinding =
+	| Omit<Extract<Finding, { readonly kind: 'body-format' }>, 'message'>
+	| Omit<Extract<Finding, { readonly kind: 'rule' }>, 'message'>;
+
+function findingShape(finding: Finding): StructuralFinding {
+	switch (finding.kind) {
+		case 'body-format': {
+			return {
+				kind: finding.kind,
+				actual: finding.actual,
+				expected: finding.expected,
+				fixable: finding.fixable,
+				patch: finding.patch,
+				rule: finding.rule
+			};
+		}
+		case 'rule': {
+			return {
+				kind: finding.kind,
+				fixable: finding.fixable,
+				rule: finding.rule
+			};
+		}
+	}
+
+	const exhaustive: never = finding;
+
+	return exhaustive;
+}
+
+function findingShapes(findings: readonly Finding[]): StructuralFinding[] {
+	return findings.map((finding) => findingShape(finding));
+}
+
+type StructuralJsonFinding = Omit<CommitMessageJsonFinding, 'message'>;
+
+function jsonFindingShape(
+	finding: CommitMessageJsonFinding
+): StructuralJsonFinding {
+	return {
+		fixable: finding.fixable,
+		...(finding.actual === undefined ? {} : { actual: finding.actual }),
+		...(finding.expected === undefined ? {} : { expected: finding.expected }),
+		...(finding.rule === undefined ? {} : { rule: finding.rule })
+	};
+}
+
+function jsonFindingShapes(
+	findings: readonly CommitMessageJsonFinding[]
+): StructuralJsonFinding[] {
+	return findings.map((finding) => jsonFindingShape(finding));
+}
 
 describe('checkCommitMessages', () => {
 	it('accepts a conventional commit with no body', async () => {
@@ -36,11 +118,29 @@ describe('checkCommitMessages', () => {
 	});
 
 	it('throws a concrete error when a passed check is reworded', async () => {
-		await expect(
-			checkCommitMessages([
-				commitMessage('a1b2c3d4e5f6', 'feat: add upload')
-			]).then((checks) => checks[0]?.rewordMessage())
-		).rejects.toBeInstanceOf(UnchangedCommitMessageCheckError);
+		const [check] = await checkCommitMessages([
+			commitMessage('a1b2c3d4e5f6', 'feat: add upload')
+		]);
+		const error = await rejectedBy(() =>
+			Promise.resolve(check?.rewordMessage())
+		);
+
+		expectUnchangedCommitMessageCheckError(error);
+		expect({
+			name: error.name,
+			changed: error.check.changed,
+			status: error.check.status,
+			commitMessage: error.check.commitMessage
+		}).toStrictEqual({
+			name: 'UnchangedCommitMessageCheckError',
+			changed: false,
+			status: 'passed',
+			commitMessage: {
+				label: 'a1b2c3d4e5f6',
+				message: 'feat: add upload',
+				subject: 'feat: add upload'
+			}
+		});
 	});
 
 	it('inserts a blank line before a git trailer glued to the body', async () => {
@@ -141,20 +241,33 @@ describe('checkCommitMessages', () => {
 			)
 		]);
 
-		expect(reports[0]?.findings).toStrictEqual([
+		expect(
+			reports.map((report) => ({
+				changed: report.changed,
+				findings: findingShapes(report.findings),
+				label: report.commitMessage.label,
+				status: report.status
+			}))
+		).toStrictEqual([
 			{
-				kind: 'body-format',
-				actual:
-					'This line is deliberately longer than seventy two columns but still under one hundred.\n',
-				expected:
-					'This line is deliberately longer than seventy two columns but still\nunder one hundred.\n',
-				fixable: true,
-				message: 'body is not wrapped to 72 columns',
-				patch: formatBodyPatch(
-					'This line is deliberately longer than seventy two columns but still under one hundred.\n',
-					'This line is deliberately longer than seventy two columns but still\nunder one hundred.\n'
-				),
-				rule: 'body-format'
+				changed: true,
+				findings: [
+					{
+						kind: 'body-format',
+						actual:
+							'This line is deliberately longer than seventy two columns but still under one hundred.\n',
+						expected:
+							'This line is deliberately longer than seventy two columns but still\nunder one hundred.\n',
+						fixable: true,
+						patch: formatBodyPatch(
+							'This line is deliberately longer than seventy two columns but still under one hundred.\n',
+							'This line is deliberately longer than seventy two columns but still\nunder one hundred.\n'
+						),
+						rule: 'body-format'
+					}
+				],
+				label: 'a1b2c3d4e5f6',
+				status: 'fixable'
 			}
 		]);
 	});
@@ -173,48 +286,59 @@ describe('checkCommitMessages', () => {
 			)
 		]);
 
-		const finding = reports[0]?.findings.find((failure) =>
-			failure.message.startsWith('body is not wrapped')
-		);
-
-		expect(finding).toStrictEqual({
-			kind: 'body-format',
-			actual: [
-				'Short paragraph with trailing spaces.   ',
-				'',
-				'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.',
-				''
-			].join('\n'),
-			expected: [
-				'Short paragraph with trailing spaces.',
-				'',
-				'An unwrapped paragraph with enough words to exceed the configured',
-				'seventy two column width so the reflower must wrap it.',
-				''
-			].join('\n'),
-			fixable: true,
-			message: 'body is not wrapped to 72 columns',
-			patch: formatBodyPatch(
-				[
-					'Short paragraph with trailing spaces.   ',
-					'',
-					'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.',
-					''
-				].join('\n'),
-				[
-					'Short paragraph with trailing spaces.',
-					'',
-					'An unwrapped paragraph with enough words to exceed the configured',
-					'seventy two column width so the reflower must wrap it.',
-					''
-				].join('\n')
-			),
-			rule: 'body-format'
-		});
+		expect(
+			reports.map((report) => ({
+				changed: report.changed,
+				findings: findingShapes(report.findings),
+				label: report.commitMessage.label,
+				status: report.status
+			}))
+		).toStrictEqual([
+			{
+				changed: true,
+				findings: [
+					{
+						kind: 'body-format',
+						actual: [
+							'Short paragraph with trailing spaces.   ',
+							'',
+							'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.',
+							''
+						].join('\n'),
+						expected: [
+							'Short paragraph with trailing spaces.',
+							'',
+							'An unwrapped paragraph with enough words to exceed the configured',
+							'seventy two column width so the reflower must wrap it.',
+							''
+						].join('\n'),
+						fixable: true,
+						patch: formatBodyPatch(
+							[
+								'Short paragraph with trailing spaces.   ',
+								'',
+								'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.',
+								''
+							].join('\n'),
+							[
+								'Short paragraph with trailing spaces.',
+								'',
+								'An unwrapped paragraph with enough words to exceed the configured',
+								'seventy two column width so the reflower must wrap it.',
+								''
+							].join('\n')
+						),
+						rule: 'body-format'
+					}
+				],
+				label: 'a1b2c3d4e5f6',
+				status: 'fixable'
+			}
+		]);
 	});
 
 	it('produces a reworded message that passes the same linter', async () => {
-		const [check] = await checkCommitMessages([
+		const reports = await checkCommitMessages([
 			commitMessage(
 				'a1b2c3d4e5f6',
 				[
@@ -227,14 +351,78 @@ describe('checkCommitMessages', () => {
 			)
 		]);
 
-		const fixedMessage = check?.rewordMessage();
-		const [fixedCheck] = await checkCommitMessages([
-			commitMessage('a1b2c3d4e5f6', fixedMessage ?? '')
+		expect(
+			reports.map((report) => ({
+				changed: report.changed,
+				findings: findingShapes(report.findings),
+				label: report.commitMessage.label,
+				status: report.status
+			}))
+		).toStrictEqual([
+			{
+				changed: true,
+				findings: [
+					{
+						kind: 'body-format',
+						actual: [
+							'Short paragraph with trailing spaces. ',
+							'',
+							'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.',
+							''
+						].join('\n'),
+						expected: [
+							'Short paragraph with trailing spaces.',
+							'',
+							'An unwrapped paragraph with enough words to exceed the configured',
+							'seventy two column width so the reflower must wrap it.',
+							''
+						].join('\n'),
+						fixable: true,
+						patch: formatBodyPatch(
+							[
+								'Short paragraph with trailing spaces. ',
+								'',
+								'An unwrapped paragraph with enough words to exceed the configured seventy two column width so the reflower must wrap it.',
+								''
+							].join('\n'),
+							[
+								'Short paragraph with trailing spaces.',
+								'',
+								'An unwrapped paragraph with enough words to exceed the configured',
+								'seventy two column width so the reflower must wrap it.',
+								''
+							].join('\n')
+						),
+						rule: 'body-format'
+					}
+				],
+				label: 'a1b2c3d4e5f6',
+				status: 'fixable'
+			}
+		]);
+
+		const [check] = reports;
+		expectCommitMessageCheck(check);
+		const fixedMessage = check.rewordMessage();
+		const fixedReports = await checkCommitMessages([
+			commitMessage('a1b2c3d4e5f6', fixedMessage)
 		]);
 
 		expect({
-			fixedMessage,
-			status: fixedCheck?.status
+			fixedMessage: [
+				'docs: explain commit linting',
+				'',
+				'Short paragraph with trailing spaces.',
+				'',
+				'An unwrapped paragraph with enough words to exceed the configured',
+				'seventy two column width so the reflower must wrap it.'
+			].join('\n'),
+			reports: fixedReports.map((report) => ({
+				changed: report.changed,
+				findings: findingShapes(report.findings),
+				label: report.commitMessage.label,
+				status: report.status
+			}))
 		}).toStrictEqual({
 			fixedMessage: [
 				'docs: explain commit linting',
@@ -244,7 +432,14 @@ describe('checkCommitMessages', () => {
 				'An unwrapped paragraph with enough words to exceed the configured',
 				'seventy two column width so the reflower must wrap it.'
 			].join('\n'),
-			status: 'passed'
+			reports: [
+				{
+					changed: false,
+					findings: [],
+					label: 'a1b2c3d4e5f6',
+					status: 'passed'
+				}
+			]
 		});
 	});
 
@@ -265,7 +460,7 @@ describe('checkCommitMessages', () => {
 
 		expect(
 			reports.map((report) => ({
-				failures: report.findings,
+				failures: findingShapes(report.findings),
 				fixedMessage: report.fixedMessage,
 				status: report.status
 			}))
@@ -280,7 +475,6 @@ describe('checkCommitMessages', () => {
 							'This body needs wrapping because it is longer than the configured\n' +
 							'seventy two column width for commit message prose.\n',
 						fixable: true,
-						message: 'body is not wrapped to 72 columns',
 						patch: formatBodyPatch(
 							'This body needs wrapping because it is longer than the configured seventy two column width for commit message prose.\n',
 							'This body needs wrapping because it is longer than the configured\n' +
@@ -318,7 +512,7 @@ describe('checkCommitMessages', () => {
 
 		expect(
 			reports.map((report) => ({
-				failures: report.findings,
+				failures: findingShapes(report.findings),
 				fixedMessage: report.fixedMessage,
 				status: report.status
 			}))
@@ -394,7 +588,7 @@ describe('checkCommitMessages', () => {
 			reports.map((report) => ({
 				failures: report.findings.map((failure) => ({
 					fixable: failure.fixable,
-					message: failure.message,
+					kind: failure.kind,
 					rule: failure.rule
 				})),
 				status: report.status
@@ -404,13 +598,12 @@ describe('checkCommitMessages', () => {
 				failures: [
 					{
 						fixable: false,
-						message: 'body is not wrapped to 72 columns',
+						kind: 'body-format',
 						rule: 'body-format'
 					},
 					{
 						fixable: false,
-						message:
-							'body line 6 MD024/no-duplicate-heading: Multiple headings with the same content [Details]',
+						kind: 'rule',
 						rule: 'MD024'
 					}
 				],
@@ -437,7 +630,7 @@ describe('checkCommitMessages', () => {
 
 		expect(
 			reports.map((report) => ({
-				failures: report.findings,
+				failures: findingShapes(report.findings),
 				status: report.status
 			}))
 		).toStrictEqual([
@@ -462,7 +655,7 @@ describe('checkCommitMessages', () => {
 
 		expect(
 			reports.map((report) => ({
-				failures: report.findings,
+				failures: findingShapes(report.findings),
 				fixedMessage: report.fixedMessage,
 				status: report.status
 			}))
@@ -477,7 +670,6 @@ describe('checkCommitMessages', () => {
 							'Keep the updated *.ts glob, _private marker, and [draft] label intact\n' +
 							'while wrapping this prose paragraph.\n',
 						fixable: true,
-						message: 'body is not wrapped to 72 columns',
 						patch: formatBodyPatch(
 							'Keep the updated *.ts glob, _private marker, and [draft] label intact while wrapping this prose paragraph.\n',
 							'Keep the updated *.ts glob, _private marker, and [draft] label intact\n' +
@@ -505,7 +697,10 @@ describe('checkCommitMessages', () => {
 
 		expect(
 			reports.map((report) => ({
-				failures: report.findings.map((failure) => failure.message),
+				failures: report.findings.map((failure) => ({
+					kind: failure.kind,
+					rule: failure.rule
+				})),
 				label: report.commitMessage.label,
 				subject: report.commitMessage.subject
 			}))
@@ -517,8 +712,14 @@ describe('checkCommitMessages', () => {
 			},
 			{
 				failures: [
-					'subject-empty: subject may not be empty',
-					'type-empty: type may not be empty'
+					{
+						kind: 'rule',
+						rule: 'subject-empty'
+					},
+					{
+						kind: 'rule',
+						rule: 'type-empty'
+					}
 				],
 				label: '222222222222',
 				subject: 'not conventional'
@@ -541,29 +742,35 @@ describe('commitBody', () => {
 
 describe('jsonReport', () => {
 	it('emits only failing commits in the machine-readable report', () => {
-		expect(
-			jsonReport('failed', [
-				new CommitMessageCheck(
-					commitMessage('111111111111', 'feat: add cache check'),
-					'feat: add cache check',
-					'feat: add cache check',
-					[]
-				),
-				new CommitMessageCheck(
-					commitMessage('222222222222', 'not conventional'),
-					'not conventional',
-					'not conventional',
-					[
-						{
-							kind: 'rule',
-							fixable: false,
-							message: 'type-empty: type may not be empty',
-							rule: 'type-empty'
-						}
-					]
-				)
-			])
-		).toStrictEqual({
+		const report = jsonReport('failed', [
+			new CommitMessageCheck(
+				commitMessage('111111111111', 'feat: add cache check'),
+				'feat: add cache check',
+				'feat: add cache check',
+				[]
+			),
+			new CommitMessageCheck(
+				commitMessage('222222222222', 'not conventional'),
+				'not conventional',
+				'not conventional',
+				[
+					{
+						kind: 'rule',
+						fixable: false,
+						message: 'type-empty: type may not be empty',
+						rule: 'type-empty'
+					}
+				]
+			)
+		]);
+
+		expect({
+			...report,
+			failures: report.failures.map((failure) => ({
+				...failure,
+				findings: jsonFindingShapes(failure.findings)
+			}))
+		}).toStrictEqual({
 			event: 'commit-message-lint',
 			failures: [
 				{
@@ -571,7 +778,6 @@ describe('jsonReport', () => {
 					findings: [
 						{
 							fixable: false,
-							message: 'type-empty: type may not be empty',
 							rule: 'type-empty'
 						}
 					],
@@ -586,7 +792,7 @@ describe('jsonReport', () => {
 
 describe('terminalFailureReport', () => {
 	it('includes the failing commit and body diff', () => {
-		const report = terminalFailureReport(
+		const lines = terminalFailureReport(
 			[
 				new CommitMessageCheck(
 					commitMessage('222222222222', 'docs: explain commit linting'),
@@ -606,36 +812,28 @@ describe('terminalFailureReport', () => {
 				)
 			],
 			2
-		);
+		)
+			.replaceAll(
+				new RegExp(String.raw`${String.fromCodePoint(27)}\[[\d;]*m`, 'g'),
+				''
+			)
+			.split('\n');
 
-		expect(stripAnsi(report)).toBe(
-			[
-				'Commit message lint failed for 1 commit message out of 2.',
-				'',
-				'222222222222 docs: explain commit linting',
-				'  x body is not wrapped to 72 columns',
-				'    Index: commit-body.md',
-				'    ===================================================================',
-				'    --- commit-body.md\tactual',
-				'    +++ commit-body.md\tcheck',
-				'    @@ -1,1 +1,1 @@',
-				'    -too long',
-				'    +wrapped'
-			].join('\n')
-		);
+		expect(lines).toStrictEqual([
+			'Commit message lint failed for 1 commit message out of 2.',
+			'',
+			'222222222222 docs: explain commit linting',
+			'  x body is not wrapped to 72 columns',
+			'    Index: commit-body.md',
+			'    ===================================================================',
+			'    --- commit-body.md\tactual',
+			'    +++ commit-body.md\tcheck',
+			'    @@ -1,1 +1,1 @@',
+			'    -too long',
+			'    +wrapped'
+		]);
 	});
 });
-
-const sgrSequence = new RegExp(
-	String.raw`${String.fromCodePoint(0x1b)}\[[\d;]*m`,
-	'g'
-);
-
-// picocolors decides on colour from the ambient environment, so strip the SGR
-// escapes to keep the assertion stable however the test runner is invoked.
-function stripAnsi(value: string): string {
-	return value.replaceAll(sgrSequence, '');
-}
 
 function commitMessage(label: string, message: string): CommitMessage {
 	return {

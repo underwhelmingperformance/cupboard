@@ -24,6 +24,18 @@ function captureStream(): { stream: Writable; lines: () => string[] } {
 	};
 }
 
+function withoutDurations(events: readonly unknown[]): readonly unknown[] {
+	return events.map((event) =>
+		isRecord(event) && typeof event.durationMs === 'number'
+			? { ...event, durationMs: 'number' }
+			: event
+	);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 describe('createReporter (json mode)', () => {
 	it('emits a successful phase with its facts and returns the body value', async () => {
 		const { stream, lines } = captureStream();
@@ -35,17 +47,15 @@ describe('createReporter (json mode)', () => {
 			return 'done';
 		});
 
-		const events = lines().map(
-			(line) => JSON.parse(line) as Record<string, unknown>
-		);
+		const events = lines().map((line): unknown => JSON.parse(line));
 
 		expect(value).toBe('done');
-		expect(events).toStrictEqual([
+		expect(withoutDurations(events)).toStrictEqual([
 			{
 				event: 'phase',
 				label: 'Checking commit messages',
 				status: 'ok',
-				durationMs: expect.any(Number) as number,
+				durationMs: 'number',
 				facts: { messages: '3' }
 			}
 		]);
@@ -62,16 +72,14 @@ describe('createReporter (json mode)', () => {
 			})
 		).rejects.toBe(failure);
 
-		const events = lines().map(
-			(line) => JSON.parse(line) as Record<string, unknown>
-		);
+		const events = lines().map((line): unknown => JSON.parse(line));
 
-		expect(events).toStrictEqual([
+		expect(withoutDurations(events)).toStrictEqual([
 			{
 				event: 'phase',
 				label: 'Rewording commit messages',
 				status: 'failed',
-				durationMs: expect.any(Number) as number,
+				durationMs: 'number',
 				error: 'boom'
 			}
 		]);

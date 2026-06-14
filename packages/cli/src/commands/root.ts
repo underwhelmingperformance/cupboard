@@ -154,7 +154,7 @@ export async function runRootSet(
 	targets: readonly string[],
 	ttlSeconds: number | undefined,
 	reporter: Reporter,
-	client: RootClient
+	client: Pick<RootClient, 'set'>
 ): Promise<void> {
 	const summary = await reporter.phase('Setting retention root', () =>
 		client.set({
@@ -179,7 +179,7 @@ export async function runRootSet(
 export async function runRootList(
 	cacheName: string,
 	reporter: Reporter,
-	client: RootClient
+	client: Pick<RootClient, 'list'>
 ): Promise<void> {
 	const { roots } = await reporter.phase('Listing retention roots', () =>
 		client.list({ cacheName })
