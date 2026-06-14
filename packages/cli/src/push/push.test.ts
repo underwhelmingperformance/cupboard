@@ -16,6 +16,8 @@ import { describe, expect, it } from 'vitest';
 import type { CommitOptions } from '../client/client.ts';
 import {
 	AttestationSubjectNotPushedError,
+	CupboardUploadError,
+	PushIncompleteError,
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError
 } from '../errors.ts';
@@ -1010,23 +1012,115 @@ describe('runPush', () => {
 		});
 	});
 
-	it('propagates a failed commit verdict and records no retention', async () => {
-		await expect(
-			runPush([appPath], reporter([]), {
-				client: {
-					...deferredUpload([]),
-					commit() {
-						return Promise.reject(
-							new UploadVerificationFailedError('upload-app', 'mismatch')
-						);
-					},
-					setRoot() {
-						throw new UnexpectedPushClientCallError('setRoot');
+	it('records a failed commit, skips retention, and fails incomplete', async () => {
+		const result = runPush([appPath], reporter([]), {
+			client: {
+				...deferredUpload([]),
+				commit() {
+					return Promise.reject(
+						new UploadVerificationFailedError('upload-app', 'mismatch')
+					);
+				},
+				setRoot() {
+					throw new UnexpectedPushClientCallError('setRoot');
+				}
+			} satisfies PushClient,
+			...deferredDeps()
+		});
+
+		// The commit failed, so the push fails as a whole (PushIncompleteError,
+		// not the raw verdict) and never records retention (setRoot would throw).
+		await expect(result).rejects.toBeInstanceOf(PushIncompleteError);
+		await expect(result).rejects.toMatchObject({
+			failedPaths: [StorePath.basename(appPath)]
+		});
+	});
+
+	it('uploads what it can, skips retention, and fails when an upload fails', async () => {
+		const uploaded: string[] = [];
+		const committed: string[] = [];
+
+		const result = runPush([appPath, runtimePath], reporter([]), {
+			client: {
+				negotiate() {
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							},
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(runtimePath),
+								narHash: runtimeDigest.narHash.toString(),
+								uploadId: 'upload-runtime',
+								r2Key: `nar/${runtimeDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				prepareUpload(uploadId) {
+					return Promise.resolve({
+						uploadUrl: `https://upload.example/${uploadId}`,
+						uploadHeaders: {
+							'x-amz-checksum-sha256': fileHash.digestBase64()
+						},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					});
+				},
+				async uploadBlob(upload) {
+					await collectReadableStream(upload.body);
+
+					if (upload.r2Key.includes(runtimeDigest.narHash.toString())) {
+						throw new CupboardUploadError(upload.r2Key, 500, 'boom');
 					}
-				} satisfies PushClient,
-				...deferredDeps()
-			})
-		).rejects.toThrow(UploadVerificationFailedError);
+
+					uploaded.push(upload.r2Key);
+				},
+				commit(target) {
+					committed.push(target.uploadId);
+
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						status: 'committed'
+					});
+				},
+				setRoot() {
+					throw new UnexpectedPushClientCallError('setRoot');
+				}
+			} satisfies PushClient,
+			nixStore: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createNarArchive: (storePath) =>
+				new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
+			compressNar(nar, path) {
+				return fakeCompressedNar(nar, path, digestForNar(nar));
+			},
+			readCompressedNar() {
+				return byteStream([Buffer.from('compressed nar')]);
+			},
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		// The good path still uploads and commits; the failed one is reported and
+		// the push fails as a whole, with no retention recorded.
+		await expect(result).rejects.toBeInstanceOf(PushIncompleteError);
+		await expect(result).rejects.toMatchObject({
+			failedPaths: [StorePath.basename(runtimePath)]
+		});
+		expect({ uploaded, committed }).toStrictEqual({
+			uploaded: [`nar/${appDigest.narHash.toString()}.nar.zst`],
+			committed: ['upload-app']
+		});
 	});
 });
 
