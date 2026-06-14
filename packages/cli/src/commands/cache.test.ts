@@ -1,10 +1,13 @@
-import { fakeCliUi } from '@cupboard/cli-ui/testing';
+import {
+	capturingReporter as reporter,
+	fakeCliUi
+} from '@cupboard/cli-ui/testing';
 import type {
 	CacheListResponse,
 	CacheRemoveResponse,
 	CacheSummary
 } from '@cupboard/protocol/caches';
-import type { Reporter, ResultRow } from '@cupboard/reporter';
+import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -14,35 +17,6 @@ import {
 	runCacheList,
 	runCacheRemove
 } from './cache.ts';
-
-function reporter(results: ResultRow[][], infos: string[] = []): Reporter {
-	return {
-		phase(_label, body) {
-			return Promise.resolve(
-				body({
-					fact() {
-						return;
-					}
-				})
-			);
-		},
-		result(payload) {
-			results.push([...payload.rows]);
-		},
-		data() {
-			return;
-		},
-		error() {
-			return;
-		},
-		warn() {
-			return;
-		},
-		info(message) {
-			infos.push(message);
-		}
-	};
-}
 
 function uncalledClient(): never {
 	throw new Error('client should not be called');

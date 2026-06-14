@@ -99,6 +99,8 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 						}
 					})
 				),
+			progress: unexpected('reporter.progress'),
+			steps: unexpected('reporter.steps'),
 			result: unexpected('result'),
 			data: unexpected('reporter.data'),
 			warn: unexpected('reporter.warn'),

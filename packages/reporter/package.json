@@ -2,9 +2,6 @@
 	"name": "@cupboard/reporter",
 	"version": "0.0.0",
 	"dependencies": {
-		"cli-table3": "^0.6.5",
-		"ora": "^9.4.0",
-		"picocolors": "^1.1.1",
 		"pretty-bytes": "^7.1.0"
 	},
 	"devDependencies": {

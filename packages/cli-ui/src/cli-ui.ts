@@ -2,19 +2,23 @@ import { stdin, stdout } from 'node:process';
 
 import { TextPrompt } from '@clack/core';
 import {
+	box,
 	cancel,
 	confirm,
 	intro,
 	isCancel,
+	isCI,
 	log,
 	note,
 	outro,
 	password,
+	progress,
 	S_BAR,
 	S_BAR_END,
 	select,
 	spinner,
 	symbol,
+	taskLog,
 	text
 } from '@clack/prompts';
 import {
@@ -30,7 +34,7 @@ import { type BrowserMessages, openBrowser } from './open-browser.ts';
 export { type BrowserMessages, openBrowser } from './open-browser.ts';
 
 /**
- * Lays out label/value rows with aligned columns, ready for a clack note.
+ * Lays out label/value rows with aligned columns, ready for a clack note or box.
  * Labels are dimmed so the values carry the emphasis.
  */
 export function formatRows(rows: readonly ResultRow[]): string {
@@ -217,12 +221,14 @@ export interface CliUiOptions {
 export function createCliUi(options: CliUiOptions): CliUi {
 	const { mode } = options;
 	const assumeYesDefault = options.assumeYes ?? false;
+	// A continuous-integration run is never interactive, even when it captures a
+	// terminal: there is no human at the keyboard to answer a prompt.
 	const interactive =
-		options.interactive ?? isInteractive({ mode, stdin, stdout });
+		options.interactive ?? (isInteractive({ mode, stdin, stdout }) && !isCI());
 	const newReporter = (): Reporter =>
 		mode === 'terminal'
 			? clackReporter(options.out)
-			: createReporter({ mode, stream: options.stream, out: options.out });
+			: createReporter({ stream: options.stream, out: options.out });
 
 	// A single reporter backs `data`/`info`/`warn` so machine mode emits the same
 	// structured events whether a command calls the UI or its reporter directly.
@@ -429,14 +435,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	return ui;
 }
 
-/**
- * Adapts the {@link Reporter} contract onto clack: each phase is a spinner whose
- * text accumulates the phase's facts, warnings become clack warnings, and the
- * closing result rows become a note. A warning or info raised while a spinner is
- * animating is held until the spinner stops, since interleaving the two corrupts
- * the spinner's redraw.
- */
-/** A result `kind` slug as a note heading: `tenant-list` becomes `Tenant list`. */
+/** A result `kind` slug as a heading: `tenant-list` becomes `Tenant list`. */
 function resultTitle(kind: string): string {
 	const words = kind.replaceAll(/[-_]+/g, ' ').trim();
 	const first = words[0];
@@ -444,6 +443,32 @@ function resultTitle(kind: string): string {
 	return first === undefined ? 'Result' : first.toUpperCase() + words.slice(1);
 }
 
+// The label followed by its accumulated facts, dimmed, for a spinner or bar
+// title. Keyed by fact label, so a repeated fact (an attempt counter, say)
+// updates its entry rather than growing the title unboundedly.
+function renderFacts(
+	label: string,
+	facts: ReadonlyMap<string, string>
+): string {
+	if (facts.size === 0) {
+		return label;
+	}
+
+	const annotations = [...facts.entries()]
+		.map(([factLabel, value]) => `${factLabel} ${value}`)
+		.join(' · ');
+
+	return `${label} ${pc.dim(`· ${annotations}`)}`;
+}
+
+/**
+ * Adapts the {@link Reporter} contract onto clack: a {@link Reporter.phase} is a
+ * spinner whose title accumulates its facts, {@link Reporter.progress} a progress
+ * bar, {@link Reporter.steps} a task log with grouped sub-steps, and a
+ * {@link Reporter.result} a framed card. A warning or info raised while one of
+ * these is animating is held until it stops, since interleaving the two corrupts
+ * the redraw.
+ */
 function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 	let spinning = false;
 	const held: { kind: 'warn' | 'info'; message: string }[] = [];
@@ -473,27 +498,17 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 			indicator.start(label);
 			spinning = true;
 
-			// Keyed by fact label, so a repeated fact (an attempt counter, say)
-			// updates its entry rather than growing the spinner text unboundedly.
 			const facts = new Map<string, string>();
-			const rendered = (): string =>
-				facts.size === 0
-					? label
-					: `${label} ${pc.dim(
-							`· ${[...facts.entries()]
-								.map(([factLabel, value]) => `${factLabel} ${value}`)
-								.join(' · ')}`
-						)}`;
 
 			try {
 				const value = await body({
 					fact(factLabel, factValue) {
 						facts.set(factLabel, String(factValue));
-						indicator.message(rendered());
+						indicator.message(renderFacts(label, facts));
 					}
 				});
 
-				indicator.stop(rendered());
+				indicator.stop(renderFacts(label, facts));
 
 				return value;
 			} catch (error) {
@@ -506,8 +521,78 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 			}
 		},
 
+		async progress(label, options, body) {
+			const bar = progress({ max: options.total });
+			bar.start(label);
+			spinning = true;
+
+			const facts = new Map<string, string>();
+
+			try {
+				const value = await body({
+					advance(step = 1, message) {
+						bar.advance(step, message ?? renderFacts(label, facts));
+					},
+					fact(factLabel, factValue) {
+						facts.set(factLabel, String(factValue));
+						bar.message(renderFacts(label, facts));
+					}
+				});
+
+				bar.stop(renderFacts(label, facts));
+
+				return value;
+			} catch (error) {
+				bar.error(`${label} ${pc.red('failed')}`);
+
+				throw error;
+			} finally {
+				spinning = false;
+				flush();
+			}
+		},
+
+		async steps(label, body) {
+			const task = taskLog({ title: label });
+			spinning = true;
+
+			try {
+				const value = await body({
+					message(message) {
+						task.message(message);
+					},
+					group(name) {
+						const group = task.group(name);
+
+						return {
+							message: (message) => {
+								group.message(message);
+							},
+							success: (message) => {
+								group.success(message);
+							},
+							error: (message) => {
+								group.error(message);
+							}
+						};
+					}
+				});
+
+				task.success(label);
+
+				return value;
+			} catch (error) {
+				task.error(`${label} ${pc.red('failed')}`);
+
+				throw error;
+			} finally {
+				spinning = false;
+				flush();
+			}
+		},
+
 		result(payload) {
-			note(formatRows(payload.rows), resultTitle(payload.kind));
+			box(formatRows(payload.rows), resultTitle(payload.kind));
 		},
 
 		data(text) {
