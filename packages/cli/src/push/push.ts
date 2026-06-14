@@ -92,10 +92,6 @@ export interface PushDependencies {
 
 export const defaultUploadConcurrency = 6;
 
-// How often the upload phase refreshes its progress fact while bytes stream, so
-// a single large blob shows steady movement without redrawing on every chunk.
-const uploadProgressIntervalMs = 100;
-
 /**
  * The client surface a push consumes. The contract-backed conversations
  * (negotiate, prepare, attestations, roots) come from the derived client with
@@ -313,47 +309,33 @@ async function runPushWithTemporaryDirectory(
 		])
 	);
 
-	const uploadedBytes = await reporter.phase(
+	// The bar tracks bytes across every blob; each chunk advances it as it
+	// streams, so a single large NAR shows steady movement while it uploads,
+	// and concurrent uploads each advance the one bar.
+	const totalUploadBytes = uploads.reduce(
+		(sum, upload) => sum + upload.preparedPath.blob.fileSize,
+		0
+	);
+	const uploadedBytes = await reporter.progress(
 		'Uploading missing blobs',
-		async (ctx) => {
-			const startedAt = Date.now();
-			// `completedBytes` is the authoritative total from the blob sizes; while
-			// uploads run, `inFlightBytes` adds the bytes streamed so far for blobs
-			// not yet finished, so a single large NAR moves rather than waiting on
-			// its own completion. The two converge as each upload completes.
+		{ total: totalUploadBytes },
+		async (bar) => {
 			let completedBytes = 0;
-			let inFlightBytes = 0;
 			let done = 0;
-			let lastReportAt = 0;
 
-			const report = (force: boolean): void => {
-				const nowMs = Date.now();
-
-				if (!force && nowMs - lastReportAt < uploadProgressIntervalMs) {
-					return;
-				}
-
-				lastReportAt = nowMs;
-				const shownBytes = completedBytes + inFlightBytes;
-				ctx.fact(
+			const reportBlobs = (): void => {
+				bar.fact(
 					'blobs',
 					`${formatCount(done)}/${formatCount(uploads.length)}`
 				);
-				ctx.fact('uploaded', formatBytes(shownBytes));
-
-				const elapsedSeconds = (nowMs - startedAt) / 1000;
-
-				if (elapsedSeconds > 0 && shownBytes > 0) {
-					ctx.fact('rate', `${formatBytes(shownBytes / elapsedSeconds)}/s`);
-				}
 			};
+
+			reportBlobs();
 
 			await runWithConcurrency(
 				uploads,
 				dependencies.uploadConcurrency ?? defaultUploadConcurrency,
 				async (upload) => {
-					let streamedBytes = 0;
-
 					try {
 						await client.uploadBlob({
 							r2Key: upload.decision.r2Key,
@@ -361,9 +343,7 @@ async function runPushWithTemporaryDirectory(
 							body: countingByteStream(
 								readCompressedNar(upload.preparedPath.compressedPath),
 								(byteLength) => {
-									streamedBytes += byteLength;
-									inFlightBytes += byteLength;
-									report(false);
+									bar.advance(byteLength);
 								}
 							),
 							contentLength: upload.preparedPath.blob.fileSize,
@@ -372,6 +352,7 @@ async function runPushWithTemporaryDirectory(
 
 						completedBytes += upload.preparedPath.blob.fileSize;
 						done += 1;
+						reportBlobs();
 					} catch (error) {
 						// A Ctrl-C aborts the whole push; any other failure is this one
 						// path's, collected so the rest still upload.
@@ -393,14 +374,9 @@ async function runPushWithTemporaryDirectory(
 							'upload failed',
 							`${StorePath.basename(storePath)}: ${failureReason(error)}`
 						);
-					} finally {
-						inFlightBytes -= streamedBytes;
-						report(true);
 					}
 				}
 			);
-
-			report(true);
 
 			return completedBytes;
 		}
@@ -633,128 +609,99 @@ async function attachPushedAttestations(
 		return [];
 	}
 
-	const prepared = await reporter.phase('Reading attestations', async (ctx) => {
-		const bundles = await prepareAttestationBundles(closure, dependencies);
-		ctx.fact('bundles', formatCount(bundles.length));
+	return reporter.steps('Attestations', async (log) => {
+		const readStep = log.group('read');
+		const prepared = await prepareAttestationBundles(closure, dependencies);
+		readStep.success(`${formatCount(prepared.length)} bundle(s)`);
 
-		return bundles;
-	});
-
-	const ready = prepared.filter(
-		(bundle) => !dependencies.pendingStorePathHashes.has(bundle.storePathHash)
-	);
-	const deferred = prepared.length - ready.length;
-
-	if (deferred > 0) {
-		reporter.warn(
-			'pending verification',
-			`${formatCount(deferred)} attestation bundle(s) describe path(s) still awaiting server-side verification; attachment not recorded`
+		const ready = prepared.filter(
+			(bundle) => !dependencies.pendingStorePathHashes.has(bundle.storePathHash)
 		);
-	}
+		const deferred = prepared.length - ready.length;
 
-	if (ready.length === 0) {
-		return attestationResultRows({
-			uploaded: 0,
-			reused: 0,
-			deferred,
-			uploadedBytes: 0
-		});
-	}
+		if (deferred > 0) {
+			reporter.warn(
+				'pending verification',
+				`${formatCount(deferred)} attestation bundle(s) describe path(s) still awaiting server-side verification; attachment not recorded`
+			);
+		}
 
-	const negotiation = await reporter.phase(
-		'Negotiating attestations',
-		async (ctx) => {
-			if (dependencies.client.negotiateAttestations === undefined) {
-				throw new AttestationUploadUnavailableError('negotiateAttestations');
-			}
-
-			const response = await dependencies.client.negotiateAttestations({
-				bundles: ready.map((bundle) => ({
-					storePathHash: bundle.storePathHash,
-					digest: bundle.digest
-				}))
+		if (ready.length === 0) {
+			return attestationResultRows({
+				uploaded: 0,
+				reused: 0,
+				deferred,
+				uploadedBytes: 0
 			});
-			ctx.fact(
-				'upload',
-				formatCount(
-					response.bundles.filter((decision) =>
-						needsAttestationUpload(decision)
-					).length
-				)
-			);
-			ctx.fact(
-				'skip',
-				formatCount(
-					response.bundles.filter((decision) => isAttestationSkip(decision))
-						.length
-				)
-			);
-
-			return response;
 		}
-	);
 
-	const uploaded = await reporter.phase(
-		'Uploading attestation bundles',
-		async (ctx) => {
-			let uploadedBytes = 0;
-
-			for (const decision of negotiation.bundles.filter((item) =>
-				needsAttestationUpload(item)
-			)) {
-				const bundle = findAttestationBundle(ready, decision);
-				if (dependencies.client.prepareAttestation === undefined) {
-					throw new AttestationUploadUnavailableError('prepareAttestation');
-				}
-
-				const preparedUpload = await dependencies.client.prepareAttestation(
-					decision.uploadId
-				);
-
-				await dependencies.client.uploadBlob({
-					r2Key: decision.r2Key,
-					uploadUrl: preparedUpload.uploadUrl,
-					body: byteStream([bundle.bytes]),
-					contentLength: bundle.bytes.byteLength,
-					headers: preparedUpload.uploadHeaders
-				});
-
-				uploadedBytes += bundle.bytes.byteLength;
-				ctx.fact('uploaded', formatBytes(uploadedBytes));
-			}
-
-			return uploadedBytes;
+		const negotiateStep = log.group('negotiate');
+		if (dependencies.client.negotiateAttestations === undefined) {
+			throw new AttestationUploadUnavailableError('negotiateAttestations');
 		}
-	);
 
-	const attached = await reporter.phase(
-		'Attaching attestation descriptors',
-		async (ctx) => {
-			let count = 0;
-
-			for (const decision of negotiation.bundles.filter((item) =>
-				needsAttestationUpload(item)
-			)) {
-				if (dependencies.client.attachAttestation === undefined) {
-					throw new AttestationUploadUnavailableError('attachAttestation');
-				}
-
-				await dependencies.client.attachAttestation(decision.uploadId);
-				count += 1;
-				ctx.fact('attached', formatCount(count));
-			}
-
-			return count;
-		}
-	);
-
-	return attestationResultRows({
-		uploaded: attached,
-		reused: negotiation.bundles.filter((decision) =>
+		const negotiation = await dependencies.client.negotiateAttestations({
+			bundles: ready.map((bundle) => ({
+				storePathHash: bundle.storePathHash,
+				digest: bundle.digest
+			}))
+		});
+		const toUpload = negotiation.bundles.filter((decision) =>
+			needsAttestationUpload(decision)
+		);
+		const reused = negotiation.bundles.filter((decision) =>
 			isAttestationSkip(decision)
-		).length,
-		deferred,
-		uploadedBytes: uploaded
+		).length;
+		negotiateStep.success(
+			`${formatCount(toUpload.length)} to upload, ${formatCount(reused)} reused`
+		);
+
+		const uploadStep = log.group('upload');
+		let uploadedBytes = 0;
+
+		for (const decision of toUpload) {
+			const bundle = findAttestationBundle(ready, decision);
+			if (dependencies.client.prepareAttestation === undefined) {
+				throw new AttestationUploadUnavailableError('prepareAttestation');
+			}
+
+			const preparedUpload = await dependencies.client.prepareAttestation(
+				decision.uploadId
+			);
+
+			await dependencies.client.uploadBlob({
+				r2Key: decision.r2Key,
+				uploadUrl: preparedUpload.uploadUrl,
+				body: byteStream([bundle.bytes]),
+				contentLength: bundle.bytes.byteLength,
+				headers: preparedUpload.uploadHeaders
+			});
+
+			uploadedBytes += bundle.bytes.byteLength;
+		}
+
+		uploadStep.success(formatBytes(uploadedBytes));
+
+		const attachStep = log.group('attach');
+		let attached = 0;
+
+		for (const decision of toUpload) {
+			if (dependencies.client.attachAttestation === undefined) {
+				throw new AttestationUploadUnavailableError('attachAttestation');
+			}
+
+			await dependencies.client.attachAttestation(decision.uploadId);
+			attached += 1;
+		}
+
+		attachStep.success(`${formatCount(attached)} attached`);
+
+		return attestationResultRows({
+			uploaded: attached,
+			reused,
+			deferred,
+			uploadedBytes
+		});
 	});
 }
 
