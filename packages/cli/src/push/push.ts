@@ -320,6 +320,7 @@ async function runPushWithTemporaryDirectory(
 		'Uploading missing blobs',
 		{ total: totalUploadBytes },
 		async (bar) => {
+			const startedAt = Date.now();
 			let completedBytes = 0;
 			let done = 0;
 
@@ -328,6 +329,12 @@ async function runPushWithTemporaryDirectory(
 					'blobs',
 					`${formatCount(done)}/${formatCount(uploads.length)}`
 				);
+
+				const elapsedSeconds = (Date.now() - startedAt) / 1000;
+
+				if (elapsedSeconds > 0 && completedBytes > 0) {
+					bar.fact('rate', `${formatBytes(completedBytes / elapsedSeconds)}/s`);
+				}
 			};
 
 			reportBlobs();
