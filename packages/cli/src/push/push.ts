@@ -418,14 +418,19 @@ async function runPushWithTemporaryDirectory(
 					throw result.reason;
 				}
 
+				const storePath =
+					storePathByHash.get(decision.storePathHash) ?? decision.storePathHash;
+				const reason = failureReason(result.reason);
 				failures.push({
 					storePathHash: decision.storePathHash,
-					storePath:
-						storePathByHash.get(decision.storePathHash) ??
-						decision.storePathHash,
+					storePath,
 					stage: 'commit',
-					reason: failureReason(result.reason)
+					reason
 				});
+				reporter.warn(
+					'commit failed',
+					`${StorePath.basename(storePath)}: ${reason}`
+				);
 				continue;
 			}
 
