@@ -444,8 +444,8 @@ function resultTitle(kind: string): string {
 }
 
 // The label followed by its accumulated facts, dimmed, for a spinner or bar
-// title. Keyed by fact label, so a repeated fact (an attempt counter, say)
-// updates its entry rather than growing the title unboundedly.
+// title. Facts are keyed by label, so a repeated fact (an attempt counter,
+// say) updates its entry and the title stays bounded.
 function renderFacts(
 	label: string,
 	facts: ReadonlyMap<string, string>
