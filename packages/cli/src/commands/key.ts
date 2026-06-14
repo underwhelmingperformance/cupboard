@@ -1,4 +1,4 @@
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import type {
 	KeyListResponse,
 	KeyRetireResponse,
@@ -10,7 +10,7 @@ import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -42,9 +42,7 @@ export function registerKeyCommands(
 		.description('List the signing key set.')
 		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -58,9 +56,7 @@ export function registerKeyCommands(
 		.description('Add a new signing key, opening a rotation window.')
 		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -76,10 +72,7 @@ export function registerKeyCommands(
 		.argument('<id>', "key id: a rotated key's UUID, or 'active'")
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: string, id: string, options: RetireOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

@@ -1,4 +1,4 @@
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import type {
 	RootListResponse,
@@ -14,7 +14,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -87,9 +87,7 @@ export function registerRootCommands(
 				targets: string[],
 				options: RootSetOptions
 			) => {
-				const reporter = createCliUi({
-					mode: reporterModeFromGlobals(program)
-				}).reporter();
+				const reporter = commandUi(program, programOptions).reporter();
 				const rpc = tenantRpc(url, {
 					credential: cachedOwnerProvider(url, {
 						signal: programOptions.signal
@@ -114,9 +112,7 @@ export function registerRootCommands(
 		.argument('<url>', tenantUrlArgument)
 		.option('--cache <name>', 'target a named cache rather than the default')
 		.action(async (url: string, options: RootOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -137,10 +133,7 @@ export function registerRootCommands(
 		.option('--cache <name>', 'target a named cache rather than the default')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, name: string, options: RootOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

@@ -1,10 +1,9 @@
-import { createCliUi } from '@cupboard/cli-ui';
 import type { CheckDiscrepancy, CheckReport } from '@cupboard/protocol/reports';
 import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -31,9 +30,7 @@ export function registerCheckCommand(
 		.argument('<url>', tenantUrlArgument)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
 		.action(async (url: string, options: CheckOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

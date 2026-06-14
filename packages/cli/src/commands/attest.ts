@@ -1,6 +1,5 @@
 import { env } from 'node:process';
 
-import { createCliUi } from '@cupboard/cli-ui';
 import { formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
@@ -8,7 +7,7 @@ import {
 	verifyLocalAttestations,
 	verifyRemoteAttestations
 } from '../attest/verify.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -138,9 +137,7 @@ export function registerAttestCommands(
 			].join('\n')
 		)
 		.action(async (bundles: string[], options: VerifyOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const readUser = options.readUser ?? env.CUPBOARD_READ_USER;
 			const readPassword = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;
 			const common = {

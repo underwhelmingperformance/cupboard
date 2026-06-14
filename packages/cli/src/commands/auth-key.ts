@@ -1,4 +1,4 @@
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import type {
 	AuthKeyListResponse,
 	AuthKeyRetireResponse,
@@ -13,7 +13,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -45,9 +45,7 @@ export function registerAuthKeyCommands(
 		.description('List the auth signing-key set.')
 		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -63,9 +61,7 @@ export function registerAuthKeyCommands(
 		)
 		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -81,10 +77,7 @@ export function registerAuthKeyCommands(
 		.argument('<kid>', 'auth key id')
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: string, kid: string, options: RetireOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
