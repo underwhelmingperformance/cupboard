@@ -72,7 +72,10 @@ export function registerAttestCommands(
 		)
 		.argument('[bundles...]', 'local Sigstore bundle files')
 		.option('--nar-hash <hash>', 'expected NAR hash for local bundle mode')
-		.option('--url <url>', 'remote cupboard cache URL')
+		.option(
+			'--url <url>',
+			'remote tenant URL to verify against (e.g. https://cupboard.example.workers.dev/t/<slug>)'
+		)
 		.option('--store-path-hash <hash>', 'remote store-path hash to inspect')
 		.option('--cache <name>', 'remote named cache')
 		.option('--bundle-digest <digest>', 'remote bundle digest to verify')

@@ -15,6 +15,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RetireOptions {
 	readonly yes?: boolean;
@@ -42,7 +43,7 @@ export function registerAuthKeyCommands(
 	authKey
 		.command('list')
 		.description('List the auth signing-key set.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -60,7 +61,7 @@ export function registerAuthKeyCommands(
 		.description(
 			'Add a new active auth key and schedule the previous one for retirement.'
 		)
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -76,7 +77,7 @@ export function registerAuthKeyCommands(
 	authKey
 		.command('retire')
 		.description('Retire a superseded auth key once its tokens have expired.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<kid>', 'auth key id')
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: string, kid: string, options: RetireOptions) => {

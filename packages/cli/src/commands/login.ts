@@ -151,7 +151,11 @@ export function registerLoginCommand(
 		.description(
 			'Authenticate as the owner via OIDC and cache an admin access token.'
 		)
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument(
+			'<url>',
+			'deployment or tenant URL to sign in to ' +
+				'(e.g. https://cupboard.example.workers.dev or .../t/<slug>)'
+		)
 		.option('--oidc-issuer <issuer>', 'OIDC issuer URL', cloudflareDashIssuer)
 		.option(
 			'--client-id <id>',

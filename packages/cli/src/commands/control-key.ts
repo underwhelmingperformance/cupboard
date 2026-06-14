@@ -15,6 +15,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
+import { deploymentUrlArgument } from '../url-argument.ts';
 
 interface RetireOptions {
 	readonly yes?: boolean;
@@ -31,9 +32,6 @@ export interface ControlKeyClient {
 	retire(input: { kid: string }): Promise<ControlKeyRetireResponse>;
 }
 
-const urlArgument =
-	'deployment URL (e.g. https://cupboard.example.workers.dev)';
-
 export function registerControlKeyCommands(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -47,7 +45,7 @@ export function registerControlKeyCommands(
 	controlKey
 		.command('list')
 		.description('List the control-plane signing-key set.')
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -65,7 +63,7 @@ export function registerControlKeyCommands(
 		.description(
 			'Add a new active control key and schedule the previous one for retirement.'
 		)
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -83,7 +81,7 @@ export function registerControlKeyCommands(
 		.description(
 			'Retire a superseded control key once its tokens have expired.'
 		)
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<kid>', 'control key id')
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: string, kid: string, options: RetireOptions) => {

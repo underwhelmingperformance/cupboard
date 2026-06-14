@@ -11,6 +11,7 @@ import {
 } from '../errors.ts';
 import { runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface PushOptions {
 	readonly githubOidc?: boolean;
@@ -47,7 +48,7 @@ export function registerPushCommand(
 		.description(
 			'Push one or more store paths to the configured cupboard cache.'
 		)
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<paths...>', 'Nix store paths to push')
 		.option(
 			'--github-oidc',
@@ -55,7 +56,7 @@ export function registerPushCommand(
 		)
 		.option(
 			'--audience <audience>',
-			'OIDC audience to request with --github-oidc (default: the Worker URL)'
+			'OIDC audience to request with --github-oidc (default: the tenant URL)'
 		)
 		.option(
 			'--root <name>',

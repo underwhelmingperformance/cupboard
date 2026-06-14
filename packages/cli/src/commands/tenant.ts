@@ -17,6 +17,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
+import { deploymentUrlArgument } from '../url-argument.ts';
 
 /**
  * The slice of the derived control client the tenant commands consume, in the
@@ -142,9 +143,6 @@ export function readCredentialFromOptions(options: {
 	};
 }
 
-const urlArgument =
-	'deployment URL (e.g. https://cupboard.example.workers.dev)';
-
 export function registerTenantCommands(
 	program: Command,
 	programOptions: ProgramOptions = {}
@@ -156,7 +154,7 @@ export function registerTenantCommands(
 	tenant
 		.command('create')
 		.description('Provision a new tenant.')
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.requiredOption('--owner-issuer <issuer>', 'the owner OIDC issuer')
 		.requiredOption('--owner-subject <subject>', 'the owner OIDC subject')
@@ -228,7 +226,7 @@ export function registerTenantCommands(
 	tenant
 		.command('list')
 		.description('List provisioned tenants.')
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -244,7 +242,7 @@ export function registerTenantCommands(
 	tenant
 		.command('suspend')
 		.description('Suspend a tenant: new writes stop, reads stop after the TTL.')
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'suspend without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {
@@ -265,7 +263,7 @@ export function registerTenantCommands(
 		.description(
 			'Resume a suspended tenant: reads and writes are allowed again.'
 		)
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: string, id: string) => {
 			const reporter = createCliUi({
@@ -282,7 +280,7 @@ export function registerTenantCommands(
 	tenant
 		.command('read-mode')
 		.description("Set a tenant's read mode.")
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.argument('<mode>', 'public or private')
 		.action(async (url: string, id: string, mode: string) => {
@@ -307,7 +305,7 @@ export function registerTenantCommands(
 		.description(
 			"Set a private cache's read credential, generating a password by default."
 		)
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.option(
 			'--read-user <user>',
@@ -338,7 +336,7 @@ export function registerTenantCommands(
 		.description(
 			"Clear a tenant's read credential; a private cache then fails closed."
 		)
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: string, id: string) => {
 			const reporter = createCliUi({
@@ -356,7 +354,7 @@ export function registerTenantCommands(
 		.command('remove')
 		.alias('delete')
 		.description('Begin offboarding a tenant.')
-		.argument('<url>', urlArgument)
+		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'offboard without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {

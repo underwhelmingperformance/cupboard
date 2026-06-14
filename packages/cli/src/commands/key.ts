@@ -12,6 +12,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RetireOptions {
 	readonly yes?: boolean;
@@ -39,7 +40,7 @@ export function registerKeyCommands(
 	key
 		.command('list')
 		.description('List the signing key set.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -55,7 +56,7 @@ export function registerKeyCommands(
 	key
 		.command('rotate')
 		.description('Add a new signing key, opening a rotation window.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -71,7 +72,7 @@ export function registerKeyCommands(
 	key
 		.command('retire')
 		.description('Retire a signing key one stage at a time.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<id>', "key id: a rotated key's UUID, or 'active'")
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: string, id: string, options: RetireOptions) => {

@@ -8,6 +8,7 @@ import type { Command } from 'commander';
 
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { InvalidCacheNameError } from '../errors.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 export interface ConfigCredential {
 	readonly user: string;
@@ -78,7 +79,7 @@ export function registerConfigCommand(
 		.description(
 			"Print Nix substituter configuration suitable for a user's nix.conf."
 		)
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<pubkey>', 'Nix trusted-public-keys entry')
 		.option(
 			'--read-user <user>',
