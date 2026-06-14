@@ -270,6 +270,16 @@ function uploadVerificationMessage(status: UploadVerificationStatus): string {
 	}
 }
 
+export class PushIncompleteError extends CliError {
+	constructor(public readonly failedPaths: readonly string[]) {
+		super(
+			`${String(failedPaths.length)} path(s) did not finish; the cache holds ` +
+				`only what committed. Re-run cupboard push to retry: ${failedPaths.join(', ')}`
+		);
+		this.name = 'PushIncompleteError';
+	}
+}
+
 export class CommitSocketProtocolError extends CliError {
 	constructor(
 		public readonly path: string,
