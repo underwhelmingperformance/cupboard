@@ -3,6 +3,7 @@ import type { Command } from 'commander';
 
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 export function registerPubkeyCommand(
 	program: Command,
@@ -13,7 +14,7 @@ export function registerPubkeyCommand(
 		.description(
 			'Print the current public signing key for this cupboard deployment.'
 		)
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)

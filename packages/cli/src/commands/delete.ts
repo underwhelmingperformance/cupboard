@@ -7,6 +7,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface DeleteOptions {
 	readonly cache?: string;
@@ -32,7 +33,7 @@ export function registerDeleteCommand(
 	program
 		.command('delete')
 		.description('Delete a single store path from the cache.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument(
 			'<store-path>',
 			'store path to delete (e.g. /nix/store/<hash>-<name>)'

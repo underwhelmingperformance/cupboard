@@ -6,6 +6,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface StatsOptions {
 	readonly cache?: string;
@@ -18,7 +19,7 @@ export function registerStatsCommand(
 	program
 		.command('stats')
 		.description('Show objects referenced by a cache.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.option('--cache <name>', 'report on a named cache rather than the default')
 		.action(async (url: string, options: StatsOptions) => {
 			const reporter = createCliUi({
@@ -68,7 +69,7 @@ export function registerStatsCommand(
 	program
 		.command('usage')
 		.description('Show tenant-wide charged storage usage.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)

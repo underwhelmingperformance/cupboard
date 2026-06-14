@@ -44,7 +44,7 @@ steps:
   - uses: actions/checkout@v6
   - uses: owner/repo/actions/setup@v1
     with:
-      cache-url: https://cupboard.example.workers.dev
+      cache-url: https://cupboard.example.workers.dev/t/<slug>
       trusted-public-key: cupboard-1:...
 ```
 
@@ -82,7 +82,7 @@ steps:
   - run: nix build .#package
   - uses: owner/repo/actions/push@v1
     with:
-      url: https://cupboard.example.workers.dev
+      url: https://cupboard.example.workers.dev/t/<slug>
       paths: |
         ./result
 ```
@@ -103,7 +103,7 @@ Attestation bundle paths are also newline-delimited:
 ```yaml
 - uses: owner/repo/actions/push@v1
   with:
-    url: https://cupboard.example.workers.dev
+    url: https://cupboard.example.workers.dev/t/<slug>
     paths: |
       ./result
     attestations: |
