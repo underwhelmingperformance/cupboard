@@ -115,7 +115,7 @@ describe('runKeyRotate', () => {
 			keyClient({ rotate: () => Promise.resolve(response) })
 		);
 
-		expect({ results, infoCount: infos.length }).toStrictEqual({
+		expect({ results, infos }).toStrictEqual({
 			results: [
 				[
 					{ label: 'New key', value: uuid },
@@ -123,18 +123,28 @@ describe('runKeyRotate', () => {
 					{ label: 'Published keys', value: '2' }
 				]
 			],
-			infoCount: 1
+			infos: [
+				'Add the new public key to trusted-public-keys on every client, then ' +
+					'`cupboard key retire <id>` the old key once they have updated.'
+			]
 		});
 	});
 });
 
 describe('runKeyRetire', () => {
-	it.each<{ stage: SigningKeyStage; stageValue: string; infoCount: number }>([
-		{ stage: 'publication', stageValue: 'published only', infoCount: 1 },
-		{ stage: 'absent', stageValue: 'removed', infoCount: 0 }
+	it.each<{ stage: SigningKeyStage; stageValue: string; infos: string[] }>([
+		{
+			stage: 'publication',
+			stageValue: 'published only',
+			infos: [
+				'The key no longer signs but stays published. Retire it again once no ' +
+					'client trusts it to remove it entirely.'
+			]
+		},
+		{ stage: 'absent', stageValue: 'removed', infos: [] }
 	])(
 		'retires to $stage once confirmed',
-		async ({ stage, stageValue, infoCount }) => {
+		async ({ stage, stageValue, infos }) => {
 			const calls: { id: string }[] = [];
 			const response: KeyRetireResponse = { id: 'active', stage };
 			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
@@ -153,7 +163,7 @@ describe('runKeyRetire', () => {
 			expect({
 				calls,
 				results: captured.results,
-				infoCount: captured.infos.length
+				infos: captured.infos
 			}).toStrictEqual({
 				calls: [{ id: 'active' }],
 				results: [
@@ -166,7 +176,7 @@ describe('runKeyRetire', () => {
 						]
 					}
 				],
-				infoCount
+				infos
 			});
 		}
 	);
