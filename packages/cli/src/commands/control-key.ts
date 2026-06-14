@@ -106,15 +106,11 @@ export async function runControlKeyList(
 		client.list()
 	);
 
-	if (keys.length === 0) {
-		reporter.info('No control keys.');
-		return;
-	}
-
 	reporter.result({
 		kind: 'control-keys',
 		data: keys,
-		rows: keys.map((key) => controlKeyRow(key))
+		rows: keys.map((key) => controlKeyRow(key)),
+		empty: 'No control keys.'
 	});
 }
 

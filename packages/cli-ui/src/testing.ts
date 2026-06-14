@@ -165,7 +165,15 @@ export function capturingReporter(
 		progress: (_label, _options, body) =>
 			Promise.resolve(body({ advance: noop, fact: noop })),
 		steps: (_label, body) => Promise.resolve(body(silentStepLog)),
-		result: (payload) => results.push([...payload.rows]),
+		result: (payload) => {
+			results.push([...payload.rows]);
+
+			// An empty result renders its `empty` message as an info line in the
+			// terminal, so record it alongside the infos a test asserts on.
+			if (payload.rows.length === 0 && payload.empty !== undefined) {
+				infos.push(payload.empty);
+			}
+		},
 		data: noop,
 		warn: noop,
 		info: (message) => infos.push(message),

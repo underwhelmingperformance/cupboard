@@ -286,7 +286,7 @@ describe('runTenantList', () => {
 		);
 
 		expect({ results, infos }).toStrictEqual({
-			results: [],
+			results: [[]],
 			infos: ['No tenants.']
 		});
 	});

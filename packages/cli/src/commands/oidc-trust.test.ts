@@ -88,7 +88,7 @@ describe('runOidcTrustList', () => {
 		);
 
 		expect({ results, infos }).toStrictEqual({
-			results: [],
+			results: [[]],
 			infos: ['No OIDC trust rules.']
 		});
 	});

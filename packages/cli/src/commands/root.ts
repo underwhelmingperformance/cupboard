@@ -192,15 +192,11 @@ export async function runRootList(
 		client.list({ cacheName })
 	);
 
-	if (roots.length === 0) {
-		reporter.info('No retention roots.');
-		return;
-	}
-
 	reporter.result({
 		kind: 'roots',
 		data: roots,
-		rows: roots.map((root) => rootListRow(root))
+		rows: roots.map((root) => rootListRow(root)),
+		empty: 'No retention roots.'
 	});
 }
 

@@ -146,15 +146,11 @@ export async function runPolicyList(
 		client.list()
 	);
 
-	if (policies.length === 0) {
-		reporter.info('No retention policies.');
-		return;
-	}
-
 	reporter.result({
 		kind: 'retention-policies',
 		data: policies,
-		rows: policies.map((policy) => policyRow(policy))
+		rows: policies.map((policy) => policyRow(policy)),
+		empty: 'No retention policies.'
 	});
 }
 
