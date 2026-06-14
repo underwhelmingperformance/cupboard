@@ -94,6 +94,15 @@ function fakeReporter(): { readonly reporter: Reporter; errors: unknown[] } {
 		errors,
 		reporter: {
 			phase: (_label, body) => Promise.resolve(body({ fact: noop })),
+			progress: (_label, _options, body) =>
+				Promise.resolve(body({ advance: noop, fact: noop })),
+			steps: (_label, body) =>
+				Promise.resolve(
+					body({
+						message: noop,
+						group: () => ({ message: noop, success: noop, error: noop })
+					})
+				),
 			result: noop,
 			data: noop,
 			warn: noop,

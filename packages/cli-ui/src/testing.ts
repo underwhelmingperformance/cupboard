@@ -1,4 +1,10 @@
-import type { Reporter, ResultPayload } from '@cupboard/reporter';
+import type {
+	Reporter,
+	ResultPayload,
+	ResultRow,
+	StepGroup,
+	StepLog
+} from '@cupboard/reporter';
 
 import type {
 	CliUi,
@@ -44,8 +50,19 @@ export interface FakeCliUi {
 	readonly captured: CliUiCapture;
 }
 
-const recordFact = (): void => {
-	/* the fake does not record phase facts */
+const noop = (): void => {
+	/* the fake does not record phase facts or sub-step narration */
+};
+
+// A `StepLog` whose every call is inert: tests run a `steps` body for its
+// effects, not to assert on the sub-step narration.
+const silentStepLog: StepLog = {
+	message: noop,
+	group: (): StepGroup => ({
+		message: noop,
+		success: noop,
+		error: noop
+	})
 };
 
 /**
@@ -70,7 +87,10 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 	};
 
 	const reporter: Reporter = {
-		phase: (_label, body) => Promise.resolve(body({ fact: recordFact })),
+		phase: (_label, body) => Promise.resolve(body({ fact: noop })),
+		progress: (_label, _options, body) =>
+			Promise.resolve(body({ advance: noop, fact: noop })),
+		steps: (_label, body) => Promise.resolve(body(silentStepLog)),
 		result: (payload) => captured.results.push(payload),
 		data: (text) => captured.data.push(text),
 		warn: (label, value) =>
@@ -128,4 +148,27 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 	};
 
 	return { ui, captured };
+}
+
+/**
+ * A {@link Reporter} that runs each phase, progress and steps body straight
+ * through and collects the result rows and info messages, for asserting on a
+ * command's output without a terminal. Warnings and the rest are discarded; a
+ * test that needs them builds a bespoke reporter.
+ */
+export function capturingReporter(
+	results: ResultRow[][],
+	infos: string[] = []
+): Reporter {
+	return {
+		phase: (_label, body) => Promise.resolve(body({ fact: noop })),
+		progress: (_label, _options, body) =>
+			Promise.resolve(body({ advance: noop, fact: noop })),
+		steps: (_label, body) => Promise.resolve(body(silentStepLog)),
+		result: (payload) => results.push([...payload.rows]),
+		data: noop,
+		warn: noop,
+		info: (message) => infos.push(message),
+		error: noop
+	};
 }

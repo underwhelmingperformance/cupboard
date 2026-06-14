@@ -1,10 +1,13 @@
-import { fakeCliUi } from '@cupboard/cli-ui/testing';
+import {
+	capturingReporter as reporter,
+	fakeCliUi
+} from '@cupboard/cli-ui/testing';
 import type {
 	ControlKeyListResponse,
 	ControlKeyRotateResponse,
 	ControlKeySummary
 } from '@cupboard/protocol/control-keys';
-import type { Reporter, ResultRow } from '@cupboard/reporter';
+import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -16,35 +19,6 @@ import {
 
 function summary(overrides: Partial<ControlKeySummary>): ControlKeySummary {
 	return { kid: 'kid-1', retired: false, ...overrides };
-}
-
-function reporter(results: ResultRow[][], infos: string[] = []): Reporter {
-	return {
-		phase(_label, body) {
-			return Promise.resolve(
-				body({
-					fact() {
-						return;
-					}
-				})
-			);
-		},
-		result(payload) {
-			results.push([...payload.rows]);
-		},
-		data() {
-			return;
-		},
-		error() {
-			return;
-		},
-		warn() {
-			return;
-		},
-		info(message) {
-			infos.push(message);
-		}
-	};
 }
 
 function uncalled(): never {

@@ -101,6 +101,36 @@ function scriptedUi(script: ReviewScript): DeployUi {
 						}
 					})
 				),
+			progress: (_label, _options, body) =>
+				Promise.resolve(
+					body({
+						advance: () => {
+							return;
+						},
+						fact: (label, value) => {
+							facts.push(`${label} ${String(value)}`);
+						}
+					})
+				),
+			steps: (_label, body) =>
+				Promise.resolve(
+					body({
+						message: () => {
+							return;
+						},
+						group: () => ({
+							message: () => {
+								return;
+							},
+							success: () => {
+								return;
+							},
+							error: () => {
+								return;
+							}
+						})
+					})
+				),
 			result: () => {
 				facts.push('result');
 			},

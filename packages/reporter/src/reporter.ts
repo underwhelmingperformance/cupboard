@@ -1,11 +1,33 @@
 import { stderr, stdout } from 'node:process';
 
-import Table from 'cli-table3';
-import ora from 'ora';
-import pc from 'picocolors';
-
 export interface PhaseContext {
 	fact(label: string, value: string | number): void;
+}
+
+/** Drives a quantitative progress bar over a known total. */
+export interface ProgressHandle {
+	/** Advance the bar by `step` units (default 1), optionally retitling it. */
+	advance(step?: number, message?: string): void;
+	/** Annotate the bar with a live key/value, like {@link PhaseContext.fact}. */
+	fact(label: string, value: string | number): void;
+}
+
+export interface ProgressOptions {
+	/** The value the bar reaches when the work is complete. */
+	readonly total: number;
+}
+
+/** One named group of sub-steps within a {@link StepLog}. */
+export interface StepGroup {
+	message(message: string): void;
+	success(message: string): void;
+	error(message: string): void;
+}
+
+/** A task whose body reports grouped sub-steps as it runs. */
+export interface StepLog {
+	message(message: string): void;
+	group(name: string): StepGroup;
 }
 
 export interface ResultRow {
@@ -15,7 +37,7 @@ export interface ResultRow {
 
 /**
  * A command's result, carried in both shapes the two modes need. Terminal mode
- * renders `rows` as a table; JSON mode emits `{event:'result', kind, data}`,
+ * renders `rows` as a card; JSON mode emits `{event:'result', kind, data}`,
  * where `kind` is a stable machine name for the result and `data` is the typed
  * value behind it, so a consumer can address it without re-parsing the rows.
  */
@@ -26,10 +48,19 @@ export interface ResultPayload<T = unknown> {
 }
 
 export interface Reporter {
+	/** A unit of work shown as a spinner with live qualitative facts. */
 	phase<T>(
 		label: string,
 		body: (context: PhaseContext) => Promise<T> | T
 	): Promise<T>;
+	/** A unit of work shown as a progress bar over a known total. */
+	progress<T>(
+		label: string,
+		options: ProgressOptions,
+		body: (bar: ProgressHandle) => Promise<T> | T
+	): Promise<T>;
+	/** A unit of work shown as a task with grouped sub-steps. */
+	steps<T>(label: string, body: (log: StepLog) => Promise<T> | T): Promise<T>;
 	result(payload: ResultPayload): void;
 	/**
 	 * Writes a raw payload, followed by a newline, to stdout in both terminal and
@@ -47,16 +78,10 @@ export interface Reporter {
 	error(error: unknown): void;
 }
 
-/** Terminal (spinner) or line-delimited JSON output. */
+/** Terminal (clack) or line-delimited JSON output. */
 export type ReporterMode = 'terminal' | 'json';
 
 export interface ReporterOptions {
-	/**
-	 * Terminal (spinner) or JSON output. When omitted it is chosen from
-	 * `process.stderr.isTTY`, not from an injected `stream`, so an injected
-	 * non-TTY stream should set `mode` explicitly.
-	 */
-	readonly mode?: ReporterMode;
 	/**
 	 * Where progress and diagnostics are written, one line at a time; defaults to
 	 * `process.stderr`. Tests can pass an in-memory `node:stream.Writable` to
@@ -71,106 +96,18 @@ export interface ReporterOptions {
 	readonly out?: NodeJS.WritableStream;
 }
 
+/**
+ * The line-delimited JSON reporter: the machine-readable contract. Terminal
+ * rendering lives in `@cupboard/cli-ui`, which selects it for machine mode.
+ */
 export function createReporter(options: ReporterOptions = {}): Reporter {
-	const stream = options.stream ?? stderr;
-	const out = options.out ?? stdout;
-	const mode = options.mode ?? (stderr.isTTY ? 'terminal' : 'json');
-
-	return mode === 'terminal'
-		? createTerminalReporter(stream, out)
-		: createJsonReporter(stream, out);
+	return createJsonReporter(options.stream ?? stderr, options.out ?? stdout);
 }
 
-function createTerminalReporter(
-	stream: NodeJS.WritableStream,
-	out: NodeJS.WritableStream
-): Reporter {
-	function writeLine(line: string): void {
-		stream.write(`${line}\n`);
-	}
-
-	return {
-		async phase(label, body) {
-			const facts: { label: string; value: string }[] = [];
-			const spinner = ora({ text: label, stream }).start();
-
-			const renderSpinnerText = (): void => {
-				spinner.text =
-					facts.length === 0 ? label : `${label} · ${formatFacts(facts)}`;
-			};
-
-			const startedAt = Date.now();
-
-			try {
-				const value = await body({
-					fact(factLabel, factValue) {
-						facts.push({ label: factLabel, value: String(factValue) });
-						renderSpinnerText();
-					}
-				});
-
-				const elapsed = formatDuration(Date.now() - startedAt);
-				const summary = facts.length === 0 ? '' : ` · ${formatFacts(facts)}`;
-				spinner.succeed(`${label}${summary} ${pc.dim(`(${elapsed})`)}`);
-
-				return value;
-			} catch (error) {
-				const elapsed = formatDuration(Date.now() - startedAt);
-				spinner.fail(`${label} ${pc.red('failed')} ${pc.dim(`(${elapsed})`)}`);
-
-				throw error;
-			}
-		},
-
-		result(payload) {
-			const table = new Table({
-				chars: {
-					top: '',
-					'top-mid': '',
-					'top-left': '',
-					'top-right': '',
-					bottom: '',
-					'bottom-mid': '',
-					'bottom-left': '',
-					'bottom-right': '',
-					left: '',
-					'left-mid': '',
-					right: '',
-					'right-mid': '',
-					mid: '',
-					'mid-mid': '',
-					middle: '  '
-				},
-				style: { 'padding-left': 0, 'padding-right': 0, border: [], head: [] }
-			});
-
-			for (const row of payload.rows) {
-				table.push([pc.dim(row.label), row.value]);
-			}
-
-			writeLine(table.toString());
-		},
-
-		data(text) {
-			out.write(`${text}\n`);
-		},
-
-		warn(label, value) {
-			writeLine(
-				`${pc.yellow('!')} ${pc.yellow(label)}${value === undefined ? '' : ` ${value}`}`
-			);
-		},
-
-		info(message) {
-			writeLine(`${pc.dim('›')} ${message}`);
-		},
-
-		error(error) {
-			const { name, message } = describeError(error);
-
-			writeLine(`${pc.red('✖')} ${pc.red(name)}: ${message}`);
-		}
-	};
+interface StepGroupRecord {
+	readonly name: string;
+	status: 'ok' | 'failed' | 'open';
+	readonly messages: string[];
 }
 
 function createJsonReporter(
@@ -215,6 +152,104 @@ function createJsonReporter(
 			}
 		},
 
+		async progress(label, options, body) {
+			const facts: Record<string, string> = {};
+			const startedAt = Date.now();
+			let completed = 0;
+
+			const finish = (status: 'ok' | 'failed', extra: object): void => {
+				emit({
+					event: 'phase',
+					label,
+					status,
+					durationMs: Date.now() - startedAt,
+					total: options.total,
+					completed,
+					facts,
+					...extra
+				});
+			};
+
+			try {
+				const value = await body({
+					advance(step = 1) {
+						completed += step;
+					},
+					fact(factLabel, factValue) {
+						facts[factLabel] = String(factValue);
+					}
+				});
+
+				finish('ok', {});
+
+				return value;
+			} catch (error) {
+				finish('failed', {
+					error: error instanceof Error ? error.message : String(error)
+				});
+
+				throw error;
+			}
+		},
+
+		async steps(label, body) {
+			const groups: StepGroupRecord[] = [];
+			const startedAt = Date.now();
+
+			const addGroup = (name: string): StepGroup => {
+				const record: StepGroupRecord = { name, status: 'open', messages: [] };
+				groups.push(record);
+
+				return {
+					message(message) {
+						record.messages.push(message);
+					},
+					success(message) {
+						record.messages.push(message);
+						record.status = 'ok';
+					},
+					error(message) {
+						record.messages.push(message);
+						record.status = 'failed';
+					}
+				};
+			};
+
+			const messages: string[] = [];
+
+			try {
+				const value = await body({
+					message(message) {
+						messages.push(message);
+					},
+					group: addGroup
+				});
+
+				emit({
+					event: 'phase',
+					label,
+					status: 'ok',
+					durationMs: Date.now() - startedAt,
+					groups,
+					...(messages.length === 0 ? {} : { messages })
+				});
+
+				return value;
+			} catch (error) {
+				emit({
+					event: 'phase',
+					label,
+					status: 'failed',
+					durationMs: Date.now() - startedAt,
+					groups,
+					...(messages.length === 0 ? {} : { messages }),
+					error: error instanceof Error ? error.message : String(error)
+				});
+
+				throw error;
+			}
+		},
+
 		result(payload) {
 			emit({ event: 'result', kind: payload.kind, data: payload.data });
 		},
@@ -248,14 +283,6 @@ function describeError(error: unknown): { name: string; message: string } {
 	}
 
 	return { name: 'Error', message: String(error) };
-}
-
-function formatFacts(
-	facts: readonly { label: string; value: string }[]
-): string {
-	return facts
-		.map(({ label, value }) => `${label} ${pc.cyan(value)}`)
-		.join(', ');
 }
 
 export function formatDuration(milliseconds: number): string {

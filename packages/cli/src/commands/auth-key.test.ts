@@ -1,10 +1,13 @@
-import { fakeCliUi } from '@cupboard/cli-ui/testing';
+import {
+	capturingReporter as reporter,
+	fakeCliUi
+} from '@cupboard/cli-ui/testing';
 import type {
 	AuthKeyListResponse,
 	AuthKeyRotateResponse,
 	AuthKeySummary
 } from '@cupboard/protocol/keys';
-import type { Reporter, ResultRow } from '@cupboard/reporter';
+import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -20,35 +23,6 @@ function summary(overrides: Partial<AuthKeySummary>): AuthKeySummary {
 		createdAt: '2026-01-01T00:00:00.000Z',
 		active: true,
 		...overrides
-	};
-}
-
-function reporter(results: ResultRow[][], infos: string[] = []): Reporter {
-	return {
-		phase(_label, body) {
-			return Promise.resolve(
-				body({
-					fact() {
-						return;
-					}
-				})
-			);
-		},
-		result(payload) {
-			results.push([...payload.rows]);
-		},
-		data() {
-			return;
-		},
-		error() {
-			return;
-		},
-		warn() {
-			return;
-		},
-		info(message) {
-			infos.push(message);
-		}
 	};
 }
 
