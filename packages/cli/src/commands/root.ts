@@ -17,6 +17,7 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RootSetOptions {
 	readonly ttl?: number;
@@ -60,7 +61,7 @@ export function registerRootCommands(
 	root
 		.command('set')
 		.description('Create or replace a retention root with the given targets.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<name>', 'root name, e.g. github:owner/repo/main')
 		.argument('<store-path...>', 'one or more top-level store paths to retain')
 		.option(
@@ -110,7 +111,7 @@ export function registerRootCommands(
 	root
 		.command('list')
 		.description('List retention roots.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.option('--cache <name>', 'target a named cache rather than the default')
 		.action(async (url: string, options: RootOptions) => {
 			const reporter = createCliUi({
@@ -131,7 +132,7 @@ export function registerRootCommands(
 	root
 		.command('remove')
 		.description('Remove a retention root.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<name>', 'root name to remove')
 		.option('--cache <name>', 'target a named cache rather than the default')
 		.option('-y, --yes', 'remove without the confirmation prompt')

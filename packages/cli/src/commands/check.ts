@@ -6,6 +6,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CheckOptions {
 	readonly deep?: boolean;
@@ -27,7 +28,7 @@ export function registerCheckCommand(
 	program
 		.command('check')
 		.description('Check stored objects against committed metadata.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
 		.action(async (url: string, options: CheckOptions) => {
 			const reporter = createCliUi({

@@ -12,6 +12,7 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface ConfirmableOptions {
 	readonly yes?: boolean;
@@ -66,7 +67,7 @@ export function registerOidcTrustCommands(
 	oidcTrust
 		.command('list')
 		.description('List OIDC trust rules.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -82,7 +83,7 @@ export function registerOidcTrustCommands(
 	oidcTrust
 		.command('add')
 		.description('Add a write-trust rule for a CI OIDC issuer.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
 		.requiredOption('--audience <audience>', 'expected token audience')
 		.option(
@@ -132,7 +133,7 @@ export function registerOidcTrustCommands(
 	oidcTrust
 		.command('remove')
 		.description('Disable an OIDC trust rule by id.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<id>', 'trust rule id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {

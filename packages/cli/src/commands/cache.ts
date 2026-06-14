@@ -12,6 +12,7 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CacheCreateOptions {
 	readonly priority?: number;
@@ -57,7 +58,7 @@ export function registerCacheCommands(
 	cache
 		.command('list')
 		.description('List the caches and their priority and size.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -73,7 +74,7 @@ export function registerCacheCommands(
 	cache
 		.command('create')
 		.description('Create or update a named cache with the given priority.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<name>', 'cache name')
 		.option(
 			'--priority <n>',
@@ -100,7 +101,7 @@ export function registerCacheCommands(
 	cache
 		.command('remove')
 		.description('Remove a named cache.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<name>', 'cache name')
 		.option('--force', 'remove even when the cache still holds store paths')
 		.option('-y, --yes', 'remove without the confirmation prompt')
@@ -120,7 +121,7 @@ export function registerCacheCommands(
 	cache
 		.command('inspect')
 		.description("Show one cache's priority and size.")
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<name>', 'cache name')
 		.action(async (url: string, name: string) => {
 			const reporter = createCliUi({

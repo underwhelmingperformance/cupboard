@@ -15,6 +15,7 @@ import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
 import { InvalidPolicyScopeError } from '../errors.ts';
+import { tenantUrlArgument } from '../url-argument.ts';
 
 interface PolicyAddOptions {
 	readonly ttl: number;
@@ -56,7 +57,7 @@ export function registerPolicyCommands(
 	policy
 		.command('list')
 		.description('List retention policies.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
 			const reporter = createCliUi({
 				mode: reporterModeFromGlobals(program)
@@ -72,7 +73,7 @@ export function registerPolicyCommands(
 	policy
 		.command('add')
 		.description('Add a retention policy.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<scope>', 'cache | root-name-prefix')
 		.argument('<pattern>', 'a cache name, or a root-name prefix')
 		.requiredOption(
@@ -120,7 +121,7 @@ export function registerPolicyCommands(
 	policy
 		.command('remove')
 		.description('Remove a retention policy by id.')
-		.argument('<url>', 'Worker URL (e.g. https://cupboard.example.workers.dev)')
+		.argument('<url>', tenantUrlArgument)
 		.argument('<id>', 'policy id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {
