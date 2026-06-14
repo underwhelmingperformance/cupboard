@@ -4,7 +4,7 @@ import type { Command } from 'commander';
 import { authenticateForPush } from '../auth/auth.ts';
 import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
-import { parseTtl } from '../duration.ts';
+import { parseTtl, parseWaitTimeout } from '../duration.ts';
 import {
 	AttestationsDisabledError,
 	InvalidUploadConcurrencyError
@@ -82,7 +82,7 @@ export function registerPushCommand(
 		.option(
 			'--wait-timeout <duration>',
 			'how long to wait for deferred blobs to become servable (e.g. 10m, 1h); default 10m',
-			parseTtl
+			parseWaitTimeout
 		)
 		.option(
 			'--upload-concurrency <n>',
