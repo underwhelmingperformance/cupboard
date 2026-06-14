@@ -46,7 +46,7 @@ export interface RunEnvironment {
 }
 
 export class NoCheckoutError extends Error {
-	constructor() {
+	constructor(public readonly cwd: string) {
 		super(
 			'Tree mode needs a cupboard checkout, but none was found above the working directory.'
 		);
@@ -101,7 +101,7 @@ export function planWorkerSource(
 
 	if (!environment.isSea) {
 		if (checkoutRoot === undefined) {
-			throw new NoCheckoutError();
+			throw new NoCheckoutError(environment.cwd);
 		}
 
 		return { mode: 'tree', checkoutRoot, notice: undefined };

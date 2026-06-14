@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
 	authorisedFetch,
 	commitUpload,
+	expectSingleUploadDecision,
 	expectStats,
 	initialise,
 	narBytes,
@@ -14,7 +15,6 @@ import {
 	putNarBytes,
 	readStoredNarInfo,
 	resetTestServer,
-	singleDecision,
 	uploadBlobMetadata,
 	uploadMetadata
 } from '../test-support.ts';
@@ -44,13 +44,14 @@ describe('concurrent writes', () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
-		const first = singleDecision(await negotiateUploads(token, [metadata]));
-		const second = singleDecision(await negotiateUploads(token, [metadata]));
-
-		// No blob row exists during negotiation, so both are upload decisions.
-		if (first.action !== 'upload' || second.action !== 'upload') {
-			throw new Error('expected two upload decisions');
-		}
+		const first = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		const second = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
 
 		await prepare(token, first.uploadId, metadata);
 		await putNarBytes(first.r2Key);

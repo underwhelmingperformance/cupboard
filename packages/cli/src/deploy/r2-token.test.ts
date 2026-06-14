@@ -10,36 +10,127 @@ import {
 	scopedR2TokenName
 } from './r2-token.ts';
 
-const unexpected = (member: string) => (): never => {
-	throw new Error(`${member} was not expected`);
-};
+type ApiCall =
+	| { readonly method: keyof CloudflareApi }
+	| {
+			readonly method: 'createApiToken';
+			readonly name: string;
+			readonly policy: TokenPolicyInput;
+	  }
+	| { readonly method: 'rollApiTokenSecret'; readonly tokenId: string };
 
-const baseApi: CloudflareApi = {
-	listAccounts: unexpected('listAccounts'),
-	r2BucketExists: unexpected('r2BucketExists'),
-	ensureR2Bucket: unexpected('ensureR2Bucket'),
-	ensureD1Database: unexpected('ensureD1Database'),
-	ensureKvNamespace: unexpected('ensureKvNamespace'),
-	ensureQueue: unexpected('ensureQueue'),
-	d1Query: unexpected('d1Query'),
-	d1QueryRows: unexpected('d1QueryRows'),
-	getScriptMigrationTag: unexpected('getScriptMigrationTag'),
-	getScriptBindings: unexpected('getScriptBindings'),
-	uploadScript: unexpected('uploadScript'),
-	ensureQueueConsumer: unexpected('ensureQueueConsumer'),
-	ensureSchedules: unexpected('ensureSchedules'),
-	putSecret: unexpected('putSecret'),
-	listScriptSecrets: unexpected('listScriptSecrets'),
-	findZoneId: unexpected('findZoneId'),
-	findCustomDomain: unexpected('findCustomDomain'),
-	ensureCustomDomain: unexpected('ensureCustomDomain'),
-	listTokenPermissionGroups: unexpected('listTokenPermissionGroups'),
-	findApiTokenId: unexpected('findApiTokenId'),
-	createApiToken: unexpected('createApiToken'),
-	rollApiTokenSecret: unexpected('rollApiTokenSecret'),
-	getWorkersDevSubdomain: unexpected('getWorkersDevSubdomain'),
-	enableWorkersDevRoute: unexpected('enableWorkersDevRoute')
-};
+const absentString: string | undefined = undefined;
+const absentBindings: readonly unknown[] | undefined = undefined;
+
+function recordApiCall(apiCalls: ApiCall[], method: keyof CloudflareApi): void {
+	apiCalls.push({ method });
+}
+
+function baseApi(apiCalls: ApiCall[]): CloudflareApi {
+	return {
+		listAccounts: () => {
+			recordApiCall(apiCalls, 'listAccounts');
+			return Promise.resolve([]);
+		},
+		r2BucketExists: () => {
+			recordApiCall(apiCalls, 'r2BucketExists');
+			return Promise.resolve(false);
+		},
+		ensureR2Bucket: () => {
+			recordApiCall(apiCalls, 'ensureR2Bucket');
+			return Promise.resolve();
+		},
+		ensureD1Database: () => {
+			recordApiCall(apiCalls, 'ensureD1Database');
+			return Promise.resolve('database-id');
+		},
+		ensureKvNamespace: () => {
+			recordApiCall(apiCalls, 'ensureKvNamespace');
+			return Promise.resolve('namespace-id');
+		},
+		ensureQueue: () => {
+			recordApiCall(apiCalls, 'ensureQueue');
+			return Promise.resolve('queue-id');
+		},
+		d1Query: () => {
+			recordApiCall(apiCalls, 'd1Query');
+			return Promise.resolve();
+		},
+		d1QueryRows: () => {
+			recordApiCall(apiCalls, 'd1QueryRows');
+			return Promise.resolve([]);
+		},
+		getScriptMigrationTag: () => {
+			recordApiCall(apiCalls, 'getScriptMigrationTag');
+			return Promise.resolve(absentString);
+		},
+		getScriptBindings: () => {
+			recordApiCall(apiCalls, 'getScriptBindings');
+			return Promise.resolve(absentBindings);
+		},
+		uploadScript: () => {
+			recordApiCall(apiCalls, 'uploadScript');
+			return Promise.resolve();
+		},
+		ensureQueueConsumer: () => {
+			recordApiCall(apiCalls, 'ensureQueueConsumer');
+			return Promise.resolve();
+		},
+		ensureSchedules: () => {
+			recordApiCall(apiCalls, 'ensureSchedules');
+			return Promise.resolve();
+		},
+		putSecret: () => {
+			recordApiCall(apiCalls, 'putSecret');
+			return Promise.resolve();
+		},
+		listScriptSecrets: () => {
+			recordApiCall(apiCalls, 'listScriptSecrets');
+			return Promise.resolve([]);
+		},
+		findZoneId: () => {
+			recordApiCall(apiCalls, 'findZoneId');
+			return Promise.resolve(absentString);
+		},
+		findCustomDomain: () => {
+			recordApiCall(apiCalls, 'findCustomDomain');
+			return Promise.resolve(absentString);
+		},
+		ensureCustomDomain: () => {
+			recordApiCall(apiCalls, 'ensureCustomDomain');
+			return Promise.resolve();
+		},
+		listTokenPermissionGroups: () => {
+			recordApiCall(apiCalls, 'listTokenPermissionGroups');
+			return Promise.resolve([]);
+		},
+		findApiTokenId: () => {
+			recordApiCall(apiCalls, 'findApiTokenId');
+			return Promise.resolve(absentString);
+		},
+		createApiToken: () => {
+			apiCalls.push({
+				method: 'createApiToken',
+				name: '',
+				policy: { permissionGroupIds: [], resources: {} }
+			});
+
+			return Promise.resolve({ id: 'token-id', value: 'token-value' });
+		},
+		rollApiTokenSecret: () => {
+			recordApiCall(apiCalls, 'rollApiTokenSecret');
+			return Promise.resolve('token-value');
+		},
+		getWorkersDevSubdomain: () => {
+			recordApiCall(apiCalls, 'getWorkersDevSubdomain');
+			return Promise.resolve(absentString);
+		},
+		enableWorkersDevRoute: () => {
+			recordApiCall(apiCalls, 'enableWorkersDevRoute');
+			return Promise.resolve();
+		}
+	};
+}
 
 const groups = [
 	{ id: 'pg-read', name: 'Workers R2 Storage Bucket Item Read' },
@@ -61,27 +152,36 @@ function sha256(value: string): string {
 
 describe('createScopedR2Key', () => {
 	it('creates a token scoped to the bucket and derives the S3 pair', async () => {
-		const created: { name: string; policy: TokenPolicyInput }[] = [];
+		const apiCalls: ApiCall[] = [];
 
 		const api: CloudflareApi = {
-			...baseApi,
-			findApiTokenId: findIn({}),
-			listTokenPermissionGroups: () => Promise.resolve([...groups]),
+			...baseApi(apiCalls),
+			findApiTokenId: (name) => {
+				apiCalls.push({ method: 'findApiTokenId' });
+				return findIn({})(name);
+			},
+			listTokenPermissionGroups: () => {
+				apiCalls.push({ method: 'listTokenPermissionGroups' });
+				return Promise.resolve([...groups]);
+			},
 			createApiToken: (name, policy) => {
-				created.push({ name, policy });
+				apiCalls.push({ method: 'createApiToken', name, policy });
 				return Promise.resolve({ id: 'token-id', value: 'token-value' });
 			}
 		};
 
 		const credentials = await createScopedR2Key(api, options);
 
-		expect({ credentials, created }).toStrictEqual({
+		expect({ credentials, apiCalls }).toStrictEqual({
 			credentials: {
 				accessKeyId: 'token-id',
 				secretAccessKey: sha256('token-value')
 			},
-			created: [
+			apiCalls: [
+				{ method: 'findApiTokenId' },
+				{ method: 'listTokenPermissionGroups' },
 				{
+					method: 'createApiToken',
 					name: scopedR2TokenName('cupboard-blobs'),
 					policy: {
 						permissionGroupIds: ['pg-read', 'pg-write'],
@@ -95,53 +195,146 @@ describe('createScopedR2Key', () => {
 	});
 
 	it('rolls the existing token on a re-deploy instead of creating another', async () => {
-		const rolled: string[] = [];
+		const apiCalls: ApiCall[] = [];
 
 		const api: CloudflareApi = {
-			...baseApi,
-			findApiTokenId: findIn({
-				[scopedR2TokenName('cupboard-blobs')]: 'existing-id'
-			}),
+			...baseApi(apiCalls),
+			findApiTokenId: (name) => {
+				apiCalls.push({ method: 'findApiTokenId' });
+				return findIn({
+					[scopedR2TokenName('cupboard-blobs')]: 'existing-id'
+				})(name);
+			},
 			rollApiTokenSecret: (tokenId) => {
-				rolled.push(tokenId);
+				apiCalls.push({ method: 'rollApiTokenSecret', tokenId });
 				return Promise.resolve('rolled-value');
 			}
 		};
 
 		const credentials = await createScopedR2Key(api, options);
 
-		expect({ credentials, rolled }).toStrictEqual({
+		expect({ credentials, apiCalls }).toStrictEqual({
 			credentials: {
 				accessKeyId: 'existing-id',
 				secretAccessKey: sha256('rolled-value')
 			},
-			rolled: ['existing-id']
+			apiCalls: [
+				{ method: 'findApiTokenId' },
+				{ method: 'rollApiTokenSecret', tokenId: 'existing-id' }
+			]
 		});
 	});
 
 	it('fails with the missing permission groups named', async () => {
+		const apiCalls: ApiCall[] = [];
 		const api: CloudflareApi = {
-			...baseApi,
-			findApiTokenId: findIn({}),
-			listTokenPermissionGroups: () =>
-				Promise.resolve([{ id: 'pg-other', name: 'Workers Scripts Write' }])
+			...baseApi(apiCalls),
+			findApiTokenId: (name) => {
+				apiCalls.push({ method: 'findApiTokenId' });
+				return findIn({})(name);
+			},
+			listTokenPermissionGroups: () => {
+				apiCalls.push({ method: 'listTokenPermissionGroups' });
+				return Promise.resolve([
+					{ id: 'pg-other', name: 'Workers Scripts Write' }
+				]);
+			}
 		};
 
-		await expect(createScopedR2Key(api, options)).rejects.toBeInstanceOf(
-			R2PermissionGroupsError
+		const outcome = await createScopedR2Key(api, options).then(
+			(credentials) => ({ credentials }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(R2PermissionGroupsError);
+
+				if (error_ instanceof R2PermissionGroupsError) {
+					return {
+						error: {
+							name: error_.name,
+							wanted: error_.wanted
+						}
+					};
+				}
+
+				throw error_;
+			}
 		);
+
+		expect({ outcome, apiCalls }).toStrictEqual({
+			outcome: {
+				error: {
+					name: R2PermissionGroupsError.name,
+					wanted: [
+						'Workers R2 Storage Bucket Item Read',
+						'Workers R2 Storage Bucket Item Write'
+					]
+				}
+			},
+			apiCalls: [
+				{ method: 'findApiTokenId' },
+				{ method: 'listTokenPermissionGroups' }
+			]
+		});
 	});
 
 	it('rejects a token response without a value', async () => {
+		const apiCalls: ApiCall[] = [];
 		const api: CloudflareApi = {
-			...baseApi,
-			findApiTokenId: findIn({}),
-			listTokenPermissionGroups: () => Promise.resolve([...groups]),
-			createApiToken: () => Promise.resolve({ id: 'token-id', value: '' })
+			...baseApi(apiCalls),
+			findApiTokenId: (name) => {
+				apiCalls.push({ method: 'findApiTokenId' });
+				return findIn({})(name);
+			},
+			listTokenPermissionGroups: () => {
+				apiCalls.push({ method: 'listTokenPermissionGroups' });
+				return Promise.resolve([...groups]);
+			},
+			createApiToken: (name, policy) => {
+				apiCalls.push({ method: 'createApiToken', name, policy });
+				return Promise.resolve({ id: 'token-id', value: '' });
+			}
 		};
 
-		await expect(createScopedR2Key(api, options)).rejects.toStrictEqual(
-			new ApiTokenResponseError()
+		const outcome = await createScopedR2Key(api, options).then(
+			(credentials) => ({ credentials }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(ApiTokenResponseError);
+
+				if (error_ instanceof ApiTokenResponseError) {
+					return {
+						error: {
+							name: error_.name,
+							hasId: error_.hasId,
+							hasValue: error_.hasValue
+						}
+					};
+				}
+
+				throw error_;
+			}
 		);
+
+		expect({ outcome, apiCalls }).toStrictEqual({
+			outcome: {
+				error: {
+					name: 'ApiTokenResponseError',
+					hasId: true,
+					hasValue: false
+				}
+			},
+			apiCalls: [
+				{ method: 'findApiTokenId' },
+				{ method: 'listTokenPermissionGroups' },
+				{
+					method: 'createApiToken',
+					name: scopedR2TokenName('cupboard-blobs'),
+					policy: {
+						permissionGroupIds: ['pg-read', 'pg-write'],
+						resources: {
+							'com.cloudflare.edge.r2.bucket.acc-1_default_cupboard-blobs': '*'
+						}
+					}
+				}
+			]
+		});
 	});
 });

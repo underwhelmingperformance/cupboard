@@ -22,7 +22,7 @@ describe('translateRpcError', () => {
 		expect(translated).toBeInstanceOf(expected);
 	});
 
-	it('surfaces the server message in the quota error', () => {
+	it('carries the server detail in the quota error', () => {
 		const translated = translateRpcError(
 			new ORPCError('INSUFFICIENT_STORAGE', {
 				status: 507,
@@ -30,10 +30,17 @@ describe('translateRpcError', () => {
 			})
 		);
 
-		expect((translated as Error).message).toBe(
-			'Cache builds is over its 10 GB quota. ' +
-				'Free space by deleting unused paths or raise the quota.'
-		);
+		expect(translated).toBeInstanceOf(QuotaExceededError);
+
+		if (translated instanceof QuotaExceededError) {
+			expect({
+				name: translated.name,
+				detail: translated.detail
+			}).toStrictEqual({
+				name: 'QuotaExceededError',
+				detail: 'Cache builds is over its 10 GB quota.'
+			});
+		}
 	});
 
 	it('returns an unrecognised oRPC code unchanged', () => {

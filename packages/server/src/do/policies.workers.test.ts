@@ -1,9 +1,13 @@
 import type {
 	RetentionPolicyAddBody,
-	RetentionPolicyListResponse,
-	RetentionPolicyRemoveResponse,
 	RetentionPolicySummary,
 	RootSetResponse
+} from '@cupboard/protocol/retention';
+import {
+	retentionPolicyListResponseSchema,
+	retentionPolicyRemoveResponseSchema,
+	retentionPolicySummarySchema,
+	rootSetResponseSchema
 } from '@cupboard/protocol/retention';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -24,19 +28,23 @@ const storePath = `/nix/store/${storePathHash}-app`;
 async function addPolicy(
 	token: string,
 	body: RetentionPolicyAddBody
-): Promise<RetentionPolicySummary> {
+): Promise<{ readonly status: number; readonly body: RetentionPolicySummary }> {
 	const response = await authorisedFetch('/policies', token, {
 		body: JSON.stringify(body),
 		headers: { 'content-type': 'application/json' },
 		method: 'POST'
 	});
 
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<RetentionPolicySummary>();
+	return {
+		status: response.status,
+		body: retentionPolicySummarySchema.parse(await response.json())
+	};
 }
 
-async function setRoot(token: string, name: string): Promise<RootSetResponse> {
+async function setRoot(
+	token: string,
+	name: string
+): Promise<{ readonly status: number; readonly body: RootSetResponse }> {
 	const response = await authorisedFetch(
 		`/cache/_default/roots/${encodeURIComponent(name)}`,
 		token,
@@ -47,9 +55,10 @@ async function setRoot(token: string, name: string): Promise<RootSetResponse> {
 		}
 	);
 
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<RootSetResponse>();
+	return {
+		status: response.status,
+		body: rootSetResponseSchema.parse(await response.json())
+	};
 }
 
 describe('retention policies', () => {
@@ -64,31 +73,45 @@ describe('retention policies', () => {
 		});
 
 		const listResponse = await authorisedFetch('/policies', token);
-		const list = await listResponse.json<RetentionPolicyListResponse>();
+		const list = retentionPolicyListResponseSchema.parse(
+			await listResponse.json()
+		);
 		const removeResponse = await authorisedFetch(
-			`/policies/${added.id}`,
+			`/policies/${added.body.id}`,
 			token,
 			{
 				method: 'DELETE'
 			}
 		);
-		const removed = await removeResponse.json<RetentionPolicyRemoveResponse>();
+		const removed = retentionPolicyRemoveResponseSchema.parse(
+			await removeResponse.json()
+		);
 		const afterResponse = await authorisedFetch('/policies', token);
-		const after = await afterResponse.json<RetentionPolicyListResponse>();
+		const after = retentionPolicyListResponseSchema.parse(
+			await afterResponse.json()
+		);
 
 		expect({
+			addStatus: added.status,
 			added: {
-				scope: added.scope,
-				pattern: added.pattern,
-				ttlSeconds: added.ttlSeconds
+				scope: added.body.scope,
+				pattern: added.body.pattern,
+				ttlSeconds: added.body.ttlSeconds
 			},
+			listStatus: listResponse.status,
 			listPatterns: list.policies.map((policy) => policy.pattern),
+			removeStatus: removeResponse.status,
 			removed,
+			afterStatus: afterResponse.status,
 			afterPatterns: after.policies.map((policy) => policy.pattern)
 		}).toStrictEqual({
+			addStatus: StatusCodes.OK,
 			added: { scope: 'root-name-prefix', pattern: 'pr-', ttlSeconds: 604_800 },
+			listStatus: StatusCodes.OK,
 			listPatterns: ['pr-'],
-			removed: { id: added.id, removed: true },
+			removeStatus: StatusCodes.OK,
+			removed: { id: added.body.id, removed: true },
+			afterStatus: StatusCodes.OK,
 			afterPatterns: []
 		});
 	});
@@ -104,7 +127,7 @@ describe('retention policies', () => {
 				name: 'app'
 			})
 		);
-		await addPolicy(token, {
+		const policy = await addPolicy(token, {
 			scope: 'root-name-prefix',
 			pattern: 'pr-',
 			ttlSeconds: 604_800
@@ -114,9 +137,18 @@ describe('retention policies', () => {
 		const unmatched = await setRoot(token, 'github:owner/repo/main');
 
 		expect({
-			matchedExpires: matched.expiresAt !== undefined,
-			unmatchedExpires: unmatched.expiresAt !== undefined
-		}).toStrictEqual({ matchedExpires: true, unmatchedExpires: false });
+			policyStatus: policy.status,
+			matchedStatus: matched.status,
+			matchedExpires: matched.body.expiresAt !== undefined,
+			unmatchedStatus: unmatched.status,
+			unmatchedExpires: unmatched.body.expiresAt !== undefined
+		}).toStrictEqual({
+			policyStatus: StatusCodes.OK,
+			matchedStatus: StatusCodes.OK,
+			matchedExpires: true,
+			unmatchedStatus: StatusCodes.OK,
+			unmatchedExpires: false
+		});
 	});
 
 	it('requires admin scope', async () => {

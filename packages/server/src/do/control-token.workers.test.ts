@@ -2,21 +2,60 @@ import {
 	subjectTokenTypeIdToken,
 	tokenExchangeGrantType
 } from '@cupboard/protocol/oidc';
+import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
+import { controlTokenExchange } from '../control/control-plane.ts';
+import {
+	ControlSubjectTokenUntrustedError,
+	SubjectTokenNotJwtError,
+	UnsupportedGrantTypeError,
+	UnsupportedSubjectTokenTypeError
+} from '../errors.ts';
 import {
 	controlFetch,
 	currentOrigin,
 	resetTestServer,
-	seedControlTrust
+	seedControlTrust,
+	testControlEnv
 } from '../test-support.ts';
 
-interface OAuthError {
-	readonly error: string;
-	readonly error_description: string;
+const oauthErrorSchema = z.strictObject({
+	error: z.string(),
+	error_description: z.string().min(1),
+	problem: z.string().optional()
+});
+
+function oauthErrorShape(value: unknown): z.infer<typeof oauthErrorSchema> {
+	return oauthErrorSchema.parse(value);
 }
+
+const jwksResponseSchema = z.strictObject({
+	keys: z.tuple([
+		z.strictObject({
+			kty: z.string(),
+			crv: z.string(),
+			kid: z.string().min(1),
+			alg: z.string(),
+			use: z.string(),
+			x: z.string(),
+			ext: z.boolean(),
+			key_ops: z.tuple([z.string()])
+		})
+	])
+});
+
+const authorizationServerMetadataSchema = z.strictObject({
+	issuer: z.string(),
+	token_endpoint: z.string(),
+	jwks_uri: z.string(),
+	grant_types_supported: z.array(z.string()),
+	scopes_supported: z.array(z.string()),
+	token_endpoint_auth_methods_supported: z.array(z.string())
+});
 
 function postToken(
 	form: Record<string, string>,
@@ -31,6 +70,21 @@ function postToken(
 		},
 		envOverride
 	);
+}
+
+function tokenExchangeRequest(form: Record<string, string>): Request {
+	return new Request(new URL('/token', currentOrigin()), {
+		method: 'POST',
+		headers: { 'content-type': 'application/x-www-form-urlencoded' },
+		body: new URLSearchParams(form).toString()
+	});
+}
+
+function tokenExchangeError(form: Record<string, string>): Promise<unknown> {
+	return controlTokenExchange(
+		tokenExchangeRequest(form),
+		Object.assign({}, env, testControlEnv)
+	).catch((error: unknown) => error);
 }
 
 // A well-formed token for a given issuer/audience. With no control trust rule it
@@ -59,63 +113,71 @@ describe('control plane POST /token', () => {
 		vi.unstubAllGlobals();
 	});
 
+	it('rejects an unsupported subject token type', async () => {
+		const error = await tokenExchangeError({
+			grant_type: tokenExchangeGrantType,
+			subject_token: 'x',
+			subject_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+		});
+
+		expect(error).toBeInstanceOf(UnsupportedSubjectTokenTypeError);
+	});
+
 	it.each([
 		{
 			name: 'an unsupported grant type',
-			form: {
-				grant_type: 'authorization_code',
-				subject_token: 'x',
-				subject_token_type: subjectTokenTypeIdToken
-			},
-			status: StatusCodes.BAD_REQUEST,
-			error: 'unsupported_grant_type'
+			form: () =>
+				Promise.resolve({
+					grant_type: 'authorization_code',
+					subject_token: 'x',
+					subject_token_type: subjectTokenTypeIdToken
+				}),
+			error: UnsupportedGrantTypeError
 		},
 		{
-			name: 'an unsupported subject token type',
-			form: {
-				grant_type: tokenExchangeGrantType,
-				subject_token: 'x',
-				subject_token_type: 'urn:ietf:params:oauth:token-type:access_token'
-			},
-			status: StatusCodes.BAD_REQUEST,
-			error: 'invalid_request'
+			name: 'the subject token is not a JWT',
+			form: () =>
+				Promise.resolve({
+					grant_type: tokenExchangeGrantType,
+					subject_token: 'not-a-jwt',
+					subject_token_type: subjectTokenTypeIdToken
+				}),
+			error: SubjectTokenNotJwtError
 		},
 		{
-			name: 'a subject token that is not a JWT',
-			form: {
+			name: 'no control trust rule matches the subject token',
+			form: async () => ({
 				grant_type: tokenExchangeGrantType,
-				subject_token: 'not-a-jwt',
+				subject_token: await signedToken({
+					issuer: 'https://idp.example.test',
+					audience: 'cupboard-control'
+				}),
 				subject_token_type: subjectTokenTypeIdToken
-			},
-			status: StatusCodes.BAD_REQUEST,
-			error: 'invalid_grant'
+			}),
+			error: ControlSubjectTokenUntrustedError
 		}
-	])('rejects $name', async ({ form, status, error }) => {
-		const response = await postToken(form);
-		const body = await response.json<OAuthError>();
-
-		expect({ status: response.status, error: body.error }).toStrictEqual({
-			status,
-			error
-		});
+	])('rejects when $name', async ({ form, error }) => {
+		expect(await tokenExchangeError(await form())).toBeInstanceOf(error);
 	});
 
-	it('refuses a token matching no control trust rule with invalid_grant', async () => {
-		const subjectToken = await signedToken({
-			issuer: 'https://idp.example.test',
-			audience: 'cupboard-control'
-		});
-
+	it('renders an OAuth error as a no-store envelope', async () => {
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
-			subject_token: subjectToken,
-			subject_token_type: subjectTokenTypeIdToken
+			subject_token: 'x',
+			subject_token_type: 'urn:ietf:params:oauth:token-type:access_token'
 		});
-		const body = await response.json<OAuthError>();
+		const body = oauthErrorShape(await response.json());
 
-		expect({ status: response.status, error: body.error }).toStrictEqual({
+		expect({
+			status: response.status,
+			cacheControl: response.headers.get('cache-control'),
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
-			error: 'invalid_grant'
+			cacheControl: 'no-store',
+			error: 'invalid_request',
+			problem: 'unsupported-subject-token-type'
 		});
 	});
 
@@ -201,38 +263,39 @@ describe('control plane POST /token', () => {
 
 	it('publishes the control JWKS, distinct from any tenant key', async () => {
 		const response = await controlFetch('/.well-known/jwks.json');
-		const body = await response.json<{
-			keys: {
-				kty: string;
-				crv: string;
-				kid: string;
-				alg: string;
-				use: string;
-			}[];
-		}>();
+		const body = jwksResponseSchema.parse(await response.json());
+		const [key] = body.keys;
 
 		expect({
 			status: response.status,
 			cacheControl: response.headers.get('cache-control'),
-			count: body.keys.length,
-			key: {
-				kty: body.keys[0]?.kty,
-				crv: body.keys[0]?.crv,
-				alg: body.keys[0]?.alg,
-				use: body.keys[0]?.use,
-				hasKid: typeof body.keys[0]?.kid === 'string'
-			}
+			keys: [
+				{
+					kty: key.kty,
+					crv: key.crv,
+					alg: key.alg,
+					use: key.use,
+					kid: key.kid,
+					x: key.x,
+					ext: key.ext,
+					key_ops: key.key_ops
+				}
+			]
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			cacheControl: 'no-cache',
-			count: 1,
-			key: {
-				kty: 'OKP',
-				crv: 'Ed25519',
-				alg: 'EdDSA',
-				use: 'sig',
-				hasKid: true
-			}
+			keys: [
+				{
+					kty: 'OKP',
+					crv: 'Ed25519',
+					alg: 'EdDSA',
+					use: 'sig',
+					kid: key.kid,
+					x: key.x,
+					ext: true,
+					key_ops: ['verify']
+				}
+			]
 		});
 	});
 
@@ -241,7 +304,7 @@ describe('control plane POST /token', () => {
 			'/.well-known/oauth-authorization-server'
 		);
 		const origin = currentOrigin();
-		const body = await response.json();
+		const body = authorizationServerMetadataSchema.parse(await response.json());
 
 		expect({ status: response.status, body }).toStrictEqual({
 			status: StatusCodes.OK,

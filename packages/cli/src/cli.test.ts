@@ -161,14 +161,16 @@ function helpFor(path: readonly string[]): string {
 	let command: Command = buildProgram();
 
 	for (const name of path) {
+		const available = command.commands.map((candidate) => ({
+			aliases: candidate.aliases(),
+			name: candidate.name()
+		}));
 		const next = command.commands.find(
 			(candidate) =>
 				candidate.name() === name || candidate.aliases().includes(name)
 		);
 
-		if (next === undefined) {
-			throw new Error(`no such command: ${path.join(' ')}`);
-		}
+		expectCommandFound(next, path, available);
 
 		command = next;
 	}
@@ -184,6 +186,25 @@ function helpFor(path: readonly string[]): string {
 	command.outputHelp();
 
 	return captured;
+}
+
+function expectCommandFound(
+	command: Command | undefined,
+	path: readonly string[],
+	available: readonly {
+		readonly aliases: readonly string[];
+		readonly name: string;
+	}[]
+): asserts command is Command {
+	expect({
+		available,
+		foundType: typeof command?.name(),
+		path
+	}).toStrictEqual({
+		available,
+		foundType: 'string',
+		path
+	});
 }
 
 describe('command help', () => {

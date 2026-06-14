@@ -59,7 +59,14 @@ describe('generateWrapSecret', () => {
 		const first = generateWrapSecret();
 		const second = generateWrapSecret();
 
-		expect(Buffer.from(first, 'base64')).toHaveLength(32);
-		expect(first).not.toBe(second);
+		expect({
+			firstBytes: Buffer.from(first, 'base64').byteLength,
+			secondBytes: Buffer.from(second, 'base64').byteLength,
+			distinct: first !== second
+		}).toStrictEqual({
+			firstBytes: 32,
+			secondBytes: 32,
+			distinct: true
+		});
 	});
 });

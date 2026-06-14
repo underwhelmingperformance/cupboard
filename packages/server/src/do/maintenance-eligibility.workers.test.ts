@@ -9,9 +9,24 @@ import * as schema from '../db/schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import { currentServer, resetTestServer } from '../test-support.ts';
 
-import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
+import {
+	MaintenanceEligibilityService,
+	withMaintenanceEligibility
+} from './maintenance-eligibility-service.ts';
 
 const now = new Date('2026-01-01T00:00:00.000Z');
+
+class MaintenanceProjectionTestError extends Error {
+	constructor(public readonly operation: 'delete' | 'insert') {
+		super(`projection ${operation} failed`);
+	}
+}
+
+function expectMaintenanceProjectionTestError(
+	error: unknown
+): asserts error is MaintenanceProjectionTestError {
+	expect(error).toBeInstanceOf(MaintenanceProjectionTestError);
+}
 
 function eligibilityRow(tenant: string = fixtureTenant) {
 	return drizzleD1(env.CUPBOARD_DB, {
@@ -69,30 +84,45 @@ describe('maintenance eligibility projection', () => {
 	});
 
 	it('can invalidate an idle projection before deferred work is created', async () => {
-		await runInDurableObject(currentServer(), async (instance) => {
-			await new MaintenanceEligibilityService(instance.context).reconcile(now);
-			const server = instance as unknown as {
-				withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
-			};
-			const result = await server.withMaintenanceEligibility(() => {
-				instance.context.db
-					.insert(schema.pendingUploads)
-					.values(
-						pendingUpload(
-							'verify-after-failed-refresh',
-							now.toISOString(),
-							'pending'
-						)
-					)
-					.run();
-				(instance.context as unknown as { d1: unknown }).d1 = {
-					insert() {
-						throw new Error('D1 projection write failed');
-					}
-				};
+		const projectionWriteFailure = new MaintenanceProjectionTestError('insert');
 
-				return Promise.resolve('mutated');
-			});
+		await runInDurableObject(currentServer(), async (instance) => {
+			const maintenanceEligibility = new MaintenanceEligibilityService(
+				instance.context
+			);
+			await maintenanceEligibility.reconcile(now);
+			const result = await withMaintenanceEligibility(
+				maintenanceEligibility,
+				async () => {
+					try {
+						await maintenanceEligibility.reconcile();
+					} catch {
+						// Eligibility is an admission hint; failed reconciliation fails open.
+					}
+				},
+				() => {
+					instance.context.db
+						.insert(schema.pendingUploads)
+						.values(
+							pendingUpload(
+								'verify-after-failed-refresh',
+								now.toISOString(),
+								'pending'
+							)
+						)
+						.run();
+					Object.defineProperty(instance.context, 'd1', {
+						value: {
+							insert() {
+								throw projectionWriteFailure;
+							}
+						},
+						configurable: true
+					});
+
+					return Promise.resolve('mutated');
+				}
+			);
 
 			expect(result).toBe('mutated');
 		});
@@ -101,31 +131,63 @@ describe('maintenance eligibility projection', () => {
 	});
 
 	it('does not run a mutation when eligibility cannot be invalidated', async () => {
+		const projectionDeleteFailure = new MaintenanceProjectionTestError(
+			'delete'
+		);
+
 		const outcome = await runInDurableObject(
 			currentServer(),
 			async (instance) => {
-				const server = instance as unknown as {
-					withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
-				};
-				(instance.context as unknown as { d1: unknown }).d1 = {
-					delete() {
-						throw new Error('D1 projection delete failed');
-					}
-				};
-				let mutated = false;
-				const error = await server
-					.withMaintenanceEligibility(() => {
-						mutated = true;
+				const maintenanceEligibility = new MaintenanceEligibilityService(
+					instance.context
+				);
+				Object.defineProperty(instance.context, 'd1', {
+					value: {
+						delete() {
+							throw projectionDeleteFailure;
+						}
+					},
+					configurable: true
+				});
+				const error = await withMaintenanceEligibility(
+					maintenanceEligibility,
+					async () => {
+						await maintenanceEligibility.reconcile();
+					},
+					() => {
+						instance.context.db
+							.insert(schema.pendingUploads)
+							.values(
+								pendingUpload(
+									'verify-after-failed-invalidation',
+									now.toISOString(),
+									'pending'
+								)
+							)
+							.run();
 
 						return Promise.resolve();
-					})
-					.catch((error_: unknown) => error_);
+					}
+				).catch((error_: unknown) => error_);
 
-				return { failed: error instanceof Error, mutated };
+				expectMaintenanceProjectionTestError(error);
+
+				return {
+					error: { operation: error.operation },
+					pendingUploads: instance.context.db
+						.select({
+							id: schema.pendingUploads.id
+						})
+						.from(schema.pendingUploads)
+						.all()
+				};
 			}
 		);
 
-		expect(outcome).toStrictEqual({ failed: true, mutated: false });
+		expect(outcome).toStrictEqual({
+			error: { operation: 'delete' },
+			pendingUploads: []
+		});
 	});
 
 	it('marks verification and deletion work due immediately', async () => {

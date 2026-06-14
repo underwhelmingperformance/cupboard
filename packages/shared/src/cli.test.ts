@@ -97,7 +97,7 @@ function setIsTty(isTty: boolean): void {
 
 function restoreIsTty(): void {
 	if (originalIsTty === undefined) {
-		delete (stderr as { isTTY?: boolean }).isTTY;
+		Reflect.deleteProperty(stderr, 'isTTY');
 		return;
 	}
 

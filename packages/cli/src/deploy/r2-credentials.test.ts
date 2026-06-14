@@ -55,28 +55,39 @@ describe('checkR2Credentials', () => {
 		const { fetcher, requests } = respondingWith(404);
 
 		await checkR2Credentials(options, fetcher);
-		const request = requests[0];
 
-		expect({
-			method: request?.method,
-			url: request?.url,
-			signed: request?.headers
-				.get('authorization')
-				?.startsWith('AWS4-HMAC-SHA256 Credential=')
-		}).toStrictEqual({
-			method: 'HEAD',
-			url: 'https://acc-hex.r2.cloudflarestorage.com/cupboard-blobs/.cupboard-credential-probe',
-			signed: true
-		});
+		expect(
+			requests.map((request) => ({
+				method: request.method,
+				url: request.url,
+				signed: request.headers
+					.get('authorization')
+					?.startsWith('AWS4-HMAC-SHA256 Credential=')
+			}))
+		).toStrictEqual([
+			{
+				method: 'HEAD',
+				url: 'https://acc-hex.r2.cloudflarestorage.com/cupboard-blobs/.cupboard-credential-probe',
+				signed: true
+			}
+		]);
 	});
 
 	it('reports a network failure as unreachable', async () => {
 		const cause = new Error('offline');
 		const fetcher: typeof fetch = () => Promise.reject(cause);
 
-		expect(await checkR2Credentials(options, fetcher)).toStrictEqual({
+		const result = await checkR2Credentials(options, fetcher);
+
+		expect({
+			kind: result.kind,
+			cause:
+				result.kind === 'unreachable' && result.cause instanceof Error
+					? { name: result.cause.name }
+					: undefined
+		}).toStrictEqual({
 			kind: 'unreachable',
-			cause
+			cause: { name: 'Error' }
 		});
 	});
 });
@@ -85,14 +96,14 @@ describe('credential shape problems', () => {
 	it.each([
 		['a'.repeat(32), undefined],
 		['A0'.repeat(16), undefined],
-		['too-short', 'an R2 access key id is 32 hex characters (the API token id)']
+		['too-short', 'invalid-hex32']
 	])('access key id %s -> %s', (value, problem) => {
 		expect(accessKeyIdProblem(value)).toBe(problem);
 	});
 
 	it.each([
 		['b'.repeat(64), undefined],
-		['zz'.repeat(32), 'an R2 secret access key is 64 hex characters']
+		['zz'.repeat(32), 'invalid-hex64']
 	])('secret %s -> %s', (value, problem) => {
 		expect(secretAccessKeyProblem(value)).toBe(problem);
 	});

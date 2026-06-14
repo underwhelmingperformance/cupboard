@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 // Process exit codes by failure category, so a script can tell a misuse from a
 // missing session from a transient outage. The values follow the BSD sysexits
 // convention where one exists (77 EX_NOPERM, 75 EX_TEMPFAIL); 2 is the usual
@@ -168,7 +170,7 @@ export class ScopeForbiddenError extends CliError {
 }
 
 export class QuotaExceededError extends CliError {
-	constructor(detail: string) {
+	constructor(public readonly detail: string) {
 		const explanation =
 			detail === '' ? 'The cache is over its storage quota.' : detail;
 
@@ -251,11 +253,11 @@ export class MalformedResponseError extends CupboardResponseError {
 export class ResponseSchemaMismatchError extends CupboardResponseError {
 	constructor(
 		path: string,
-		public readonly issues: string
+		public override readonly cause: z.ZodError
 	) {
 		super(
 			path,
-			`Response from ${path} did not match the expected schema:\n${issues}`
+			`Response from ${path} did not match the expected schema:\n${z.prettifyError(cause)}`
 		);
 		this.name = 'ResponseSchemaMismatchError';
 	}

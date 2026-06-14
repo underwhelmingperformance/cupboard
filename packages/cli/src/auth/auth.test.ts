@@ -23,6 +23,18 @@ const githubEnvironment: GithubOidcEnvironment = {
 	requestToken: 'request-bearer'
 };
 
+function requestUrl(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
+}
+
 // A fetcher answering the GitHub OIDC request with a fresh subject token and
 // the cupboard exchange with a write token derived from it, so a refresh yields
 // a distinct token end to end.
@@ -30,11 +42,9 @@ function federatingClient(): CupboardClient {
 	let issued = 0;
 
 	return new CupboardClient(new URL('https://cupboard.test'), (input) => {
-		if (!(input instanceof URL)) {
-			throw new TypeError('expected the client to request a URL');
-		}
+		const url = new URL(requestUrl(input));
 
-		if (input.origin === 'https://actions.example.com') {
+		if (url.origin === 'https://actions.example.com') {
 			issued += 1;
 
 			return Promise.resolve(
@@ -102,9 +112,22 @@ describe('authenticateForPush', () => {
 				audience: 'https://cache.example.workers.dev'
 			});
 
-			await expect(provider.get()).rejects.toBeInstanceOf(
-				OwnerLoginRequiredError
+			const outcome = await provider.get().then(
+				(token) => ({ token }),
+				(error_: unknown) => {
+					expect(error_).toBeInstanceOf(OwnerLoginRequiredError);
+
+					if (!(error_ instanceof OwnerLoginRequiredError)) {
+						return {};
+					}
+
+					return { error: { name: error_.name } };
+				}
 			);
+
+			expect(outcome).toStrictEqual({
+				error: { name: 'OwnerLoginRequiredError' }
+			});
 		}
 	);
 });
@@ -153,9 +176,13 @@ interface SessionHarness extends OwnerSessionDependencies {
 // override the pieces the scenario needs.
 function sessionHarness(initial?: CachedSession): {
 	readonly harness: SessionHarness;
+	readonly clientCalls: () => readonly {
+		readonly method: keyof FakeSessionClient;
+	}[];
 	readonly sessions: () => readonly CachedSession[];
 } {
 	const written: CachedSession[] = [];
+	const clientCalls: { readonly method: keyof FakeSessionClient }[] = [];
 	const stored: {
 		session: CachedSession | undefined;
 		grant: CloudflareGrant | undefined;
@@ -165,10 +192,14 @@ function sessionHarness(initial?: CachedSession): {
 		harness: {
 			client: {
 				tokenRefresh: () => {
-					throw new Error('unexpected tokenRefresh');
+					clientCalls.push({ method: 'tokenRefresh' });
+
+					return Promise.reject(new OwnerLoginRequiredError());
 				},
 				tokenExchange: () => {
-					throw new Error('unexpected tokenExchange');
+					clientCalls.push({ method: 'tokenExchange' });
+
+					return Promise.reject(new OwnerLoginRequiredError());
 				}
 			},
 			grantChain: {
@@ -186,6 +217,7 @@ function sessionHarness(initial?: CachedSession): {
 			},
 			now: () => past * 1000
 		},
+		clientCalls: () => clientCalls,
 		sessions: () => written
 	};
 }
@@ -203,11 +235,21 @@ function cloudflareGrant(idToken: string): CloudflareGrant {
 describe('cachedOwnerProvider', () => {
 	it('returns a fresh cached access token without renewing', async () => {
 		const fresh = accessToken('cached', farFuture);
-		const { harness } = sessionHarness({ accessToken: fresh });
+		const { clientCalls, harness, sessions } = sessionHarness({
+			accessToken: fresh
+		});
 
 		const provider = cachedOwnerProvider(target, harness);
 
-		expect(await provider.get()).toBe(fresh);
+		expect({
+			clientCalls: clientCalls(),
+			token: await provider.get(),
+			sessions: sessions()
+		}).toStrictEqual({
+			clientCalls: [],
+			token: fresh,
+			sessions: []
+		});
 	});
 
 	it('renews an expired access token by rotating the refresh token', async () => {
@@ -282,14 +324,40 @@ describe('cachedOwnerProvider', () => {
 		});
 	});
 
-	it('prompts a login when no silent path can issue', async () => {
-		const { harness } = sessionHarness();
+	it('prompts a login when no silent path can mint', async () => {
+		const { clientCalls, harness, sessions } = sessionHarness();
 
 		const provider = cachedOwnerProvider(target, harness);
+		const outcome = await provider.get().then(
+			(token) => ({ token }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(OwnerLoginRequiredError);
 
-		await expect(provider.get()).rejects.toBeInstanceOf(
-			OwnerLoginRequiredError
+				if (!(error_ instanceof OwnerLoginRequiredError)) {
+					return {};
+				}
+
+				return {
+					error: {
+						name: error_.name
+					}
+				};
+			}
 		);
+
+		expect({
+			outcome,
+			clientCalls: clientCalls(),
+			sessions: sessions()
+		}).toStrictEqual({
+			outcome: {
+				error: {
+					name: OwnerLoginRequiredError.name
+				}
+			},
+			clientCalls: [],
+			sessions: []
+		});
 	});
 
 	it('prompts a login when the exchange refuses the id_token', async () => {
@@ -310,9 +378,22 @@ describe('cachedOwnerProvider', () => {
 			}
 		});
 
-		await expect(provider.refresh()).rejects.toBeInstanceOf(
-			OwnerLoginRequiredError
+		const outcome = await provider.refresh().then(
+			(token) => ({ token }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(OwnerLoginRequiredError);
+
+				if (!(error_ instanceof OwnerLoginRequiredError)) {
+					return {};
+				}
+
+				return { error: { name: error_.name } };
+			}
 		);
+
+		expect(outcome).toStrictEqual({
+			error: { name: 'OwnerLoginRequiredError' }
+		});
 	});
 
 	it('propagates a server failure rather than prompting a login', async () => {
@@ -328,8 +409,25 @@ describe('cachedOwnerProvider', () => {
 				tokenRefresh: () => Promise.reject(failure)
 			}
 		});
+		const error = await provider.get().catch((error_: unknown) => error_);
 
-		await expect(provider.get()).rejects.toBe(failure);
+		expect(error).toBeInstanceOf(CupboardHttpError);
+
+		if (!(error instanceof CupboardHttpError)) {
+			return;
+		}
+
+		expect({
+			name: error.name,
+			method: error.method,
+			path: error.path,
+			status: error.status
+		}).toStrictEqual({
+			name: 'CupboardHttpError',
+			method: 'POST',
+			path: '/token',
+			status: 503
+		});
 	});
 
 	testWithConfigHome('reads the session the login command cached', async () => {

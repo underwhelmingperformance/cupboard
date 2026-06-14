@@ -20,7 +20,7 @@ export async function promptR2CredentialPair(
 
 	const accessKeyEdit = await ui.editText({
 		message: 'R2 access key id',
-		problem: accessKeyIdProblem
+		problem: accessKeyIdProblemText
 	});
 
 	if (accessKeyEdit.kind !== 'set') {
@@ -29,7 +29,7 @@ export async function promptR2CredentialPair(
 
 	const secretAccessKey = await ui.secret(
 		'R2 secret access key',
-		secretAccessKeyProblem
+		secretAccessKeyProblemText
 	);
 
 	if (secretAccessKey === undefined) {
@@ -45,18 +45,57 @@ export type R2CredentialCheck =
 	| { readonly kind: 'rejected'; readonly status: number }
 	| { readonly kind: 'unreachable'; readonly cause: unknown };
 
+export type R2AccessKeyIdProblem = 'invalid-hex32';
+
 /** The access key id is the Cloudflare API token id: 32 hex characters. */
-export function accessKeyIdProblem(value: string): string | undefined {
-	return /^[0-9a-f]{32}$/i.test(value)
-		? undefined
-		: 'an R2 access key id is 32 hex characters (the API token id)';
+export function accessKeyIdProblem(
+	value: string
+): R2AccessKeyIdProblem | undefined {
+	return /^[0-9a-f]{32}$/i.test(value) ? undefined : 'invalid-hex32';
 }
 
+const accessKeyIdProblemMessages: Record<R2AccessKeyIdProblem, string> = {
+	'invalid-hex32': 'an R2 access key id is 32 hex characters (the API token id)'
+};
+
+export function accessKeyIdProblemMessage(
+	problem: R2AccessKeyIdProblem
+): string {
+	return accessKeyIdProblemMessages[problem];
+}
+
+function accessKeyIdProblemText(value: string): string | undefined {
+	const problem = accessKeyIdProblem(value);
+
+	return problem === undefined ? undefined : accessKeyIdProblemMessage(problem);
+}
+
+export type R2SecretAccessKeyProblem = 'invalid-hex64';
+
 /** The secret is the hex SHA-256 of the token value: 64 hex characters. */
-export function secretAccessKeyProblem(value: string): string | undefined {
-	return /^[0-9a-f]{64}$/i.test(value)
+export function secretAccessKeyProblem(
+	value: string
+): R2SecretAccessKeyProblem | undefined {
+	return /^[0-9a-f]{64}$/i.test(value) ? undefined : 'invalid-hex64';
+}
+
+const secretAccessKeyProblemMessages: Record<R2SecretAccessKeyProblem, string> =
+	{
+		'invalid-hex64': 'an R2 secret access key is 64 hex characters'
+	};
+
+export function secretAccessKeyProblemMessage(
+	problem: R2SecretAccessKeyProblem
+): string {
+	return secretAccessKeyProblemMessages[problem];
+}
+
+function secretAccessKeyProblemText(value: string): string | undefined {
+	const problem = secretAccessKeyProblem(value);
+
+	return problem === undefined
 		? undefined
-		: 'an R2 secret access key is 64 hex characters';
+		: secretAccessKeyProblemMessage(problem);
 }
 
 /**

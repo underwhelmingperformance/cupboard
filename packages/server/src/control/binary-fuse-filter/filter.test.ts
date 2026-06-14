@@ -1,8 +1,21 @@
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { BinaryFuseFilterInvalidError } from '../../errors.ts';
 
 import { BinaryFuse8 } from './filter.ts';
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 function slugs(count: number, prefix = 'tenant'): string[] {
 	return Array.from(
@@ -175,9 +188,17 @@ describe('BinaryFuse8', () => {
 			}
 		}
 	])('rejects a serialised filter with $name', ({ bytes }) => {
-		expect(() => BinaryFuse8.deserialise(bytes())).toThrow(
-			BinaryFuseFilterInvalidError
-		);
+		const error = thrownBy(() => BinaryFuse8.deserialise(bytes()));
+
+		expect(error).toBeInstanceOf(BinaryFuseFilterInvalidError);
+		if (!(error instanceof BinaryFuseFilterInvalidError)) {
+			throw error;
+		}
+
+		expect({ name: error.name, status: error.status }).toStrictEqual({
+			name: 'BinaryFuseFilterInvalidError',
+			status: StatusCodes.INTERNAL_SERVER_ERROR
+		});
 	});
 
 	it('builds deterministically for the same key set', () => {

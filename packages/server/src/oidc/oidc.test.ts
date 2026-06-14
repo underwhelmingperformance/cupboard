@@ -23,9 +23,71 @@ import {
 } from './oidc.ts';
 
 const issuer = 'https://accounts.example.com';
+const metadataUrl =
+	'https://accounts.example.com/.well-known/openid-configuration';
 const audience = 'client-id.apps.example.com';
 const now = new Date('2026-01-01T00:00:00.000Z');
 const kid = 'idp-key-1';
+
+function requestUrl(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
+}
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
+
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
+}
+
+function errorShape(error: Error): {
+	readonly name: string;
+	readonly hasCause: boolean;
+} {
+	return {
+		name: error.name,
+		hasCause: error.cause instanceof Error
+	};
+}
+
+function unavailableOidcMetadata(): Promise<Response> {
+	return Promise.reject(new Error('issuer is unavailable'));
+}
+
+function successfulOidcMetadata(): Promise<Response> {
+	return Promise.resolve(
+		Response.json({
+			issuer,
+			jwks_uri: 'https://accounts.example.com/jwks',
+			id_token_signing_alg_values_supported: ['RS256']
+		})
+	);
+}
 
 interface SignOptions {
 	readonly at?: Date;
@@ -112,9 +174,17 @@ describe('decodeInboundClaims', () => {
 	});
 
 	it('rejects a token that is not a JWT', () => {
-		expect(() => decodeInboundClaims('not-a-jwt')).toThrow(
-			OidcTokenDecodeError
-		);
+		const error = thrownBy(() => decodeInboundClaims('not-a-jwt'));
+
+		expect(error).toBeInstanceOf(OidcTokenDecodeError);
+		if (!(error instanceof OidcTokenDecodeError)) {
+			throw error;
+		}
+
+		expect(errorShape(error)).toStrictEqual({
+			name: 'OidcTokenDecodeError',
+			hasCause: true
+		});
 	});
 });
 
@@ -174,9 +244,19 @@ describe('verifyInboundOidcToken', () => {
 		const idp = await inboundIssuer();
 		const token = await idp.sign({ sub: 'owner' });
 
-		await expect(
+		const error = await rejectedBy(() =>
 			verifyInboundOidcToken(createLocalJWKSet(idp.jwks), token, options, at)
-		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+		);
+
+		expect(error).toBeInstanceOf(OidcTokenVerificationError);
+		if (!(error instanceof OidcTokenVerificationError)) {
+			throw error;
+		}
+
+		expect(errorShape(error)).toStrictEqual({
+			name: 'OidcTokenVerificationError',
+			hasCause: true
+		});
 	});
 
 	it('rejects a symmetric algorithm outside the asymmetric allowlist', async () => {
@@ -195,28 +275,48 @@ describe('verifyInboundOidcToken', () => {
 			keys: [{ kty: 'oct', kid, alg: 'HS256', k: 'unused' }]
 		};
 
-		await expect(
+		const error = await rejectedBy(() =>
 			verifyInboundOidcToken(
 				createLocalJWKSet(jwks),
 				token,
 				verifyOptions(),
 				now
 			)
-		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+		);
+
+		expect(error).toBeInstanceOf(OidcTokenVerificationError);
+		if (!(error instanceof OidcTokenVerificationError)) {
+			throw error;
+		}
+
+		expect(errorShape(error)).toStrictEqual({
+			name: 'OidcTokenVerificationError',
+			hasCause: true
+		});
 	});
 
 	it('rejects an inbound token that carries no expiry', async () => {
 		const idp = await inboundIssuer();
 		const token = await idp.signWithoutExpiry({ sub: 'owner' });
 
-		await expect(
+		const error = await rejectedBy(() =>
 			verifyInboundOidcToken(
 				createLocalJWKSet(idp.jwks),
 				token,
 				verifyOptions(),
 				now
 			)
-		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+		);
+
+		expect(error).toBeInstanceOf(OidcTokenVerificationError);
+		if (!(error instanceof OidcTokenVerificationError)) {
+			throw error;
+		}
+
+		expect(errorShape(error)).toStrictEqual({
+			name: 'OidcTokenVerificationError',
+			hasCause: true
+		});
 	});
 
 	it('accepts a token whose issuer carries a trailing slash', async () => {
@@ -237,28 +337,48 @@ describe('verifyInboundOidcToken', () => {
 		const idp = await inboundIssuer();
 		const token = await idp.sign({ sub: 'owner' });
 
-		await expect(
+		const error = await rejectedBy(() =>
 			verifyInboundOidcToken(
 				createLocalJWKSet(idp.jwks),
 				token,
 				{ issuer, audience, algorithms: [] },
 				now
 			)
-		).rejects.toBeInstanceOf(OidcTokenVerificationError);
+		);
+
+		expect(error).toBeInstanceOf(OidcTokenVerificationError);
+		if (!(error instanceof OidcTokenVerificationError)) {
+			throw error;
+		}
+
+		expect(errorShape(error)).toStrictEqual({
+			name: 'OidcTokenVerificationError',
+			hasCause: true
+		});
 	});
 
 	it('surfaces a JWKS retrieval failure as unreachable, not a bad token', async () => {
 		const idp = await inboundIssuer();
 		const token = await idp.sign({ sub: 'owner' });
 
-		await expect(
+		const error = await rejectedBy(() =>
 			verifyInboundOidcToken(
 				() => Promise.reject(new joseErrors.JWKSTimeout()),
 				token,
 				verifyOptions(),
 				now
 			)
-		).rejects.toBeInstanceOf(OidcKeysUnreachableError);
+		);
+
+		expect(error).toBeInstanceOf(OidcKeysUnreachableError);
+		if (!(error instanceof OidcKeysUnreachableError)) {
+			throw error;
+		}
+
+		expect(errorShape(error)).toStrictEqual({
+			name: 'OidcKeysUnreachableError',
+			hasCause: true
+		});
 	});
 });
 
@@ -292,17 +412,10 @@ describe('intersectAlgorithms', () => {
 });
 
 describe('fetchOidcDiscovery', () => {
-	const metadataUrl =
-		'https://accounts.example.com/.well-known/openid-configuration';
-
 	it('reads the jwks_uri and signing algorithms, ignoring a trailing slash', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
-			if (!(input instanceof URL) && typeof input !== 'string') {
-				throw new TypeError('expected a URL');
-			}
-
-			requested.push(String(input));
+			requested.push(requestUrl(input));
 
 			return Promise.resolve(
 				Response.json({
@@ -383,23 +496,50 @@ describe('fetchOidcDiscovery', () => {
 				)
 		}
 	])('throws OidcDiscoveryError on $name', async ({ fetcher }) => {
-		await expect(fetchOidcDiscovery(issuer, fetcher)).rejects.toBeInstanceOf(
-			OidcDiscoveryError
-		);
+		const error = await rejectedBy(() => fetchOidcDiscovery(issuer, fetcher));
+
+		expect(error).toBeInstanceOf(OidcDiscoveryError);
+		if (!(error instanceof OidcDiscoveryError)) {
+			throw error;
+		}
+
+		expect({
+			...errorShape(error),
+			issuer: error.issuer
+		}).toStrictEqual({
+			name: 'OidcDiscoveryError',
+			hasCause: true,
+			issuer
+		});
 	});
 
 	it('rejects an issuer that is not an allowed URL without fetching', async () => {
-		let fetched = false;
-		const fetcher: typeof fetch = () => {
-			fetched = true;
+		const requested: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			requested.push(requestUrl(input));
 
 			return Promise.resolve(Response.json({}));
 		};
 
-		await expect(
+		const error = await rejectedBy(() =>
 			fetchOidcDiscovery('http://accounts.example.com', fetcher)
-		).rejects.toBeInstanceOf(OidcDiscoveryError);
-		expect(fetched).toBe(false);
+		);
+
+		expect(error).toBeInstanceOf(OidcDiscoveryError);
+		if (!(error instanceof OidcDiscoveryError)) {
+			throw error;
+		}
+
+		expect({
+			...errorShape(error),
+			issuer: error.issuer,
+			requested
+		}).toStrictEqual({
+			name: 'OidcDiscoveryError',
+			hasCause: true,
+			issuer: 'http://accounts.example.com',
+			requested: []
+		});
 	});
 });
 
@@ -407,11 +547,7 @@ describe('OidcDiscoveryStore', () => {
 	it('re-runs discovery once a cached entry is older than the cache age', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
-			if (!(input instanceof URL) && typeof input !== 'string') {
-				throw new TypeError('expected a URL');
-			}
-
-			requested.push(String(input));
+			requested.push(requestUrl(input));
 
 			return Promise.resolve(
 				Response.json({
@@ -437,13 +573,9 @@ describe('OidcDiscoveryStore', () => {
 	});
 
 	it('dedupes concurrent first loads into a single discovery fetch', async () => {
-		let fetches = 0;
+		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {
-			if (!(input instanceof URL) && typeof input !== 'string') {
-				throw new TypeError('expected a URL');
-			}
-
-			fetches += 1;
+			requested.push(requestUrl(input));
 
 			return Promise.resolve(
 				Response.json({
@@ -457,33 +589,38 @@ describe('OidcDiscoveryStore', () => {
 
 		await Promise.all([store.resolve(issuer), store.resolve(issuer)]);
 
-		expect(fetches).toBe(1);
+		expect({ requested }).toStrictEqual({ requested: [metadataUrl] });
 	});
 
 	it('evicts failed discovery so the next resolve retries', async () => {
-		let fetches = 0;
-		const fetcher: typeof fetch = () => {
-			fetches += 1;
+		const requested: string[] = [];
+		let nextResponse = unavailableOidcMetadata;
+		const fetcher: typeof fetch = (input) => {
+			requested.push(requestUrl(input));
+			const response = nextResponse();
+			nextResponse = successfulOidcMetadata;
 
-			if (fetches === 1) {
-				return Promise.reject(new Error('issuer is unavailable'));
-			}
-
-			return Promise.resolve(
-				Response.json({
-					issuer,
-					jwks_uri: 'https://accounts.example.com/jwks',
-					id_token_signing_alg_values_supported: ['RS256']
-				})
-			);
+			return response;
 		};
 		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
 
-		await expect(store.resolve(issuer)).rejects.toBeInstanceOf(
-			OidcDiscoveryError
-		);
+		const error = await rejectedBy(() => store.resolve(issuer));
+
+		expect(error).toBeInstanceOf(OidcDiscoveryError);
+		if (!(error instanceof OidcDiscoveryError)) {
+			throw error;
+		}
 		await store.resolve(issuer);
 
-		expect(fetches).toBe(2);
+		expect({
+			...errorShape(error),
+			issuer: error.issuer,
+			requested
+		}).toStrictEqual({
+			name: 'OidcDiscoveryError',
+			hasCause: true,
+			issuer,
+			requested: [metadataUrl, metadataUrl]
+		});
 	});
 });

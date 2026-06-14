@@ -5,7 +5,9 @@ import {
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
@@ -14,6 +16,7 @@ import {
 	TenantNotSuspendedError,
 	TenantRetiredError
 } from '../errors.ts';
+import { hashReadPassword } from '../read/read-auth.ts';
 
 import {
 	clearTenantReadCredential,
@@ -84,6 +87,58 @@ async function provision(body: ParsedTenantCreateBody): Promise<void> {
 	await ensureTenant(database(), body, now);
 }
 
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
+}
+
+function errorFields(error: unknown): {
+	readonly name: string;
+	readonly status: number;
+	readonly id?: string;
+	readonly tenant?: string;
+} {
+	return z
+		.object({
+			name: z.string(),
+			status: z.number(),
+			id: z.string().optional(),
+			tenant: z.string().optional()
+		})
+		.parse(error);
+}
+
+async function storedReadVerifier(id: string): Promise<{
+	readonly readUser: string;
+	readonly readPasswordHash: string;
+	readonly readPasswordSalt: string;
+}> {
+	return z
+		.object({
+			readUser: z.string(),
+			readPasswordHash: z.string(),
+			readPasswordSalt: z.string()
+		})
+		.parse(
+			await database()
+				.select({
+					readUser: d1Schema.tenant.readUser,
+					readPasswordHash: d1Schema.tenant.readPasswordHash,
+					readPasswordSalt: d1Schema.tenant.readPasswordSalt
+				})
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, id))
+				.get()
+		);
+}
+
 describe('tenant registry', () => {
 	it('creates a tenant and returns its summary', async () => {
 		const summary = await ensureTenant(database(), createBody('acme'), now);
@@ -110,33 +165,32 @@ describe('tenant registry', () => {
 	it('refuses a conflicting re-create of the same slug', async () => {
 		await ensureTenant(database(), createBody('acme', 'private'), now);
 
-		await expect(
+		const rejected = await rejectedBy(() =>
 			ensureTenant(database(), createBody('acme', 'public'), now)
-		).rejects.toThrow(TenantAlreadyExistsError);
+		);
+
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'TenantAlreadyExistsError',
+			status: StatusCodes.CONFLICT,
+			id: 'acme'
+		});
 	});
 
 	it('stores only the hashed private-read verifier', async () => {
 		await provision(privateBodyWithRead('acme'));
 
-		const row = await database()
-			.select({
-				readUser: d1Schema.tenant.readUser,
-				readPasswordHash: d1Schema.tenant.readPasswordHash,
-				readPasswordSalt: d1Schema.tenant.readPasswordSalt
-			})
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, 'acme'))
-			.get();
+		const row = await storedReadVerifier('acme');
 
 		expect({
-			user: row?.readUser,
-			passwordHash: typeof row?.readPasswordHash,
-			passwordSalt: typeof row?.readPasswordSalt,
-			hashIsPlaintext: row?.readPasswordHash === 'correct-horse-battery-staple'
+			user: row.readUser,
+			passwordHash: row.readPasswordHash,
+			hashIsPlaintext: row.readPasswordHash === 'correct-horse-battery-staple'
 		}).toStrictEqual({
 			user: 'cupboard',
-			passwordHash: 'string',
-			passwordSalt: 'string',
+			passwordHash: await hashReadPassword(
+				'correct-horse-battery-staple',
+				row.readPasswordSalt
+			),
 			hashIsPlaintext: false
 		});
 	});
@@ -151,9 +205,15 @@ describe('tenant registry', () => {
 	it('refuses a re-create that changes the quota', async () => {
 		await ensureTenant(database(), quotaBody('acme', 1000), now);
 
-		await expect(
+		const rejected = await rejectedBy(() =>
 			ensureTenant(database(), quotaBody('acme', 2000), now)
-		).rejects.toThrow(TenantAlreadyExistsError);
+		);
+
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'TenantAlreadyExistsError',
+			status: StatusCodes.CONFLICT,
+			id: 'acme'
+		});
 	});
 
 	it('rejects a conflicting re-create of a crash residue without writing a usage row', async () => {
@@ -174,9 +234,9 @@ describe('tenant registry', () => {
 
 		// A conflicting re-create (public) is rejected without writing a usage row, so
 		// it cannot poison a later legitimate retry with a wrong-quota row.
-		await expect(
+		const rejected = await rejectedBy(() =>
 			ensureTenant(database(), createBody('acme', 'public'), now)
-		).rejects.toThrow(TenantAlreadyExistsError);
+		);
 		const poisoned = await usageRow('acme');
 
 		await ensureTenant(database(), createBody('acme', 'private'), now);
@@ -186,6 +246,11 @@ describe('tenant registry', () => {
 			poisoned: poisoned !== undefined,
 			recovered: recovered !== undefined
 		}).toStrictEqual({ poisoned: false, recovered: true });
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'TenantAlreadyExistsError',
+			status: StatusCodes.CONFLICT,
+			id: 'acme'
+		});
 	});
 
 	it('creates the usage row on a retry after a crash left only the tenant row', async () => {
@@ -255,9 +320,15 @@ describe('tenant registry', () => {
 	);
 
 	it('throws not found when mutating an unknown tenant', async () => {
-		await expect(
+		const rejected = await rejectedBy(() =>
 			setTenantStatus(database(), 'ghost', 'suspended')
-		).rejects.toThrow(TenantNotFoundError);
+		);
+
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'TenantNotFoundError',
+			status: StatusCodes.NOT_FOUND,
+			id: 'ghost'
+		});
 	});
 
 	it('treats a repeated offboard as terminal while refusing other status moves', async () => {
@@ -269,9 +340,9 @@ describe('tenant registry', () => {
 		// offboarding.
 		const repeated = await setTenantStatus(database(), 'acme', 'offboarding');
 
-		await expect(
+		const rejected = await rejectedBy(() =>
 			setTenantStatus(database(), 'acme', 'suspended')
-		).rejects.toThrow(TenantRetiredError);
+		);
 
 		const stored = await database()
 			.select({ status: d1Schema.tenant.status })
@@ -286,15 +357,26 @@ describe('tenant registry', () => {
 			repeatedStatus: 'offboarded',
 			storedStatus: 'offboarded'
 		});
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'TenantRetiredError',
+			status: StatusCodes.GONE,
+			tenant: 'acme'
+		});
 	});
 
 	it('refuses to re-provision a slug that has begun offboarding', async () => {
 		await provision(createBody('acme', 'private'));
 		await setTenantStatus(database(), 'acme', 'offboarding');
 
-		await expect(
+		const rejected = await rejectedBy(() =>
 			ensureTenant(database(), createBody('acme', 'private'), now)
-		).rejects.toThrow(TenantAlreadyExistsError);
+		);
+
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'TenantAlreadyExistsError',
+			status: StatusCodes.CONFLICT,
+			id: 'acme'
+		});
 	});
 
 	it('finalises a drained tenant into a scrubbed tombstone that re-provisioning refuses', async () => {
@@ -369,7 +451,33 @@ describe('tenant lifecycle operations', () => {
 
 		const resumed = await resumeTenant(database(), 'acme');
 
-		expect(resumed.status).toBe('active');
+		expect({
+			returned: resumed,
+			stored: await listTenants(database())
+		}).toStrictEqual({
+			returned: {
+				id: 'acme',
+				status: 'active',
+				readMode: 'private',
+				ownerIssuer: 'https://idp.test',
+				ownerSubject: 'owner',
+				ownerAudience: 'aud',
+				configVersion: 1,
+				createdAt: now
+			},
+			stored: [
+				{
+					id: 'acme',
+					status: 'active',
+					readMode: 'private',
+					ownerIssuer: 'https://idp.test',
+					ownerSubject: 'owner',
+					ownerAudience: 'aud',
+					configVersion: 1,
+					createdAt: now
+				}
+			]
+		});
 	});
 
 	it.each([
@@ -378,7 +486,12 @@ describe('tenant lifecycle operations', () => {
 			setup: async () => {
 				await ensureTenant(database(), createBody('acme'), now);
 			},
-			error: TenantNotSuspendedError
+			error: TenantNotSuspendedError,
+			fields: {
+				name: 'TenantNotSuspendedError',
+				status: StatusCodes.CONFLICT,
+				tenant: 'acme'
+			}
 		},
 		{
 			name: 'offboarding',
@@ -386,17 +499,29 @@ describe('tenant lifecycle operations', () => {
 				await ensureTenant(database(), createBody('acme'), now);
 				await setTenantStatus(database(), 'acme', 'offboarding');
 			},
-			error: TenantRetiredError
+			error: TenantRetiredError,
+			fields: {
+				name: 'TenantRetiredError',
+				status: StatusCodes.GONE,
+				tenant: 'acme'
+			}
 		},
 		{
 			name: 'missing',
 			setup: () => Promise.resolve(),
-			error: TenantNotFoundError
+			error: TenantNotFoundError,
+			fields: {
+				name: 'TenantNotFoundError',
+				status: StatusCodes.NOT_FOUND,
+				id: 'acme'
+			}
 		}
-	])('refuses to resume a $name tenant', async ({ setup, error }) => {
+	])('refuses to resume a $name tenant', async ({ setup, fields }) => {
 		await setup();
 
-		await expect(resumeTenant(database(), 'acme')).rejects.toThrow(error);
+		const rejected = await rejectedBy(() => resumeTenant(database(), 'acme'));
+
+		expect(errorFields(rejected)).toStrictEqual(fields);
 	});
 
 	it('sets the read mode of a live tenant', async () => {
@@ -404,7 +529,33 @@ describe('tenant lifecycle operations', () => {
 
 		const updated = await setTenantReadMode(database(), 'acme', 'public');
 
-		expect(updated.readMode).toBe('public');
+		expect({
+			returned: updated,
+			stored: await listTenants(database())
+		}).toStrictEqual({
+			returned: {
+				id: 'acme',
+				status: 'active',
+				readMode: 'public',
+				ownerIssuer: 'https://idp.test',
+				ownerSubject: 'owner',
+				ownerAudience: 'aud',
+				configVersion: 1,
+				createdAt: now
+			},
+			stored: [
+				{
+					id: 'acme',
+					status: 'active',
+					readMode: 'public',
+					ownerIssuer: 'https://idp.test',
+					ownerSubject: 'owner',
+					ownerAudience: 'aud',
+					configVersion: 1,
+					createdAt: now
+				}
+			]
+		});
 	});
 
 	it('stores a rotated read credential hashed, not in plaintext', async () => {
@@ -414,26 +565,19 @@ describe('tenant lifecycle operations', () => {
 			user: 'reader',
 			password: 'correct-horse-battery-staple'
 		});
-		const row = await database()
-			.select({
-				readUser: d1Schema.tenant.readUser,
-				readPasswordHash: d1Schema.tenant.readPasswordHash,
-				readPasswordSalt: d1Schema.tenant.readPasswordSalt
-			})
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, 'acme'))
-			.get();
+		const row = await storedReadVerifier('acme');
 
 		expect({
-			user: row?.readUser,
-			hashIsPlaintext: row?.readPasswordHash === 'correct-horse-battery-staple',
-			hashType: typeof row?.readPasswordHash,
-			saltType: typeof row?.readPasswordSalt
+			user: row.readUser,
+			hash: row.readPasswordHash,
+			hashIsPlaintext: row.readPasswordHash === 'correct-horse-battery-staple'
 		}).toStrictEqual({
 			user: 'reader',
-			hashIsPlaintext: false,
-			hashType: 'string',
-			saltType: 'string'
+			hash: await hashReadPassword(
+				'correct-horse-battery-staple',
+				row.readPasswordSalt
+			),
+			hashIsPlaintext: false
 		});
 	});
 
@@ -479,6 +623,12 @@ describe('tenant lifecycle operations', () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await setTenantStatus(database(), 'acme', 'offboarding');
 
-		await expect(run('acme')).rejects.toThrow(TenantRetiredError);
+		const rejected = await rejectedBy(() => run('acme'));
+
+		expect(errorFields(rejected)).toStrictEqual({
+			name: 'TenantRetiredError',
+			status: StatusCodes.GONE,
+			tenant: 'acme'
+		});
 	});
 });

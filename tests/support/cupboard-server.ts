@@ -12,7 +12,8 @@ import type { Duplex } from 'node:stream';
 
 import {
 	subjectTokenTypeIdToken,
-	tokenExchangeGrantType
+	tokenExchangeGrantType,
+	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
@@ -267,9 +268,7 @@ export class CupboardTestServer {
 			);
 		}
 
-		const payload = (await response.json()) as {
-			readonly access_token: string;
-		};
+		const payload = tokenResponseSchema.parse(await response.json());
 
 		return payload.access_token;
 	}
@@ -316,9 +315,7 @@ export class CupboardTestServer {
 			);
 		}
 
-		const payload = (await response.json()) as {
-			readonly access_token: string;
-		};
+		const payload = tokenResponseSchema.parse(await response.json());
 
 		return payload.access_token;
 	}

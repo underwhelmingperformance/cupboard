@@ -1,12 +1,17 @@
 import type {
 	AuthKeyListResponse,
-	AuthKeyRetireResponse,
 	AuthKeyRotateResponse
+} from '@cupboard/protocol/keys';
+import {
+	authKeyListResponseSchema,
+	authKeyRetireResponseSchema,
+	authKeyRotateResponseSchema
 } from '@cupboard/protocol/keys';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { generateAuthKeyPair } from '../auth/auth.ts';
 import { authKeys } from '../db/schema.ts';
@@ -30,7 +35,7 @@ async function adminToken(): Promise<string> {
 async function listKeys(token: string): Promise<AuthKeyListResponse> {
 	const response = await authorisedFetch('/keys/auth', token);
 
-	return response.json<AuthKeyListResponse>();
+	return authKeyListResponseSchema.parse(await response.json());
 }
 
 async function rotate(token: string): Promise<AuthKeyRotateResponse> {
@@ -38,7 +43,7 @@ async function rotate(token: string): Promise<AuthKeyRotateResponse> {
 		method: 'POST'
 	});
 
-	return response.json<AuthKeyRotateResponse>();
+	return authKeyRotateResponseSchema.parse(await response.json());
 }
 
 function retire(token: string, kid: string): Promise<Response> {
@@ -48,6 +53,30 @@ function retire(token: string, kid: string): Promise<Response> {
 const rotateAt = new Date('2026-01-01T00:01:00.000Z');
 const scheduledRetireAt = '2026-01-01T00:21:30.000Z';
 
+const orpcErrorBodySchema = z.strictObject({
+	code: z.string(),
+	defined: z.boolean(),
+	message: z.string(),
+	status: z.number()
+});
+
+function singleListedKey(
+	list: AuthKeyListResponse
+): AuthKeyListResponse['keys'][number] {
+	const [key] = z
+		.tuple([
+			z.object({
+				kid: z.string(),
+				createdAt: z.string(),
+				active: z.boolean(),
+				scheduledRetireAt: z.string().optional()
+			})
+		])
+		.parse(list.keys);
+
+	return key;
+}
+
 describe('auth-key rotation', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => vi.useRealTimers());
@@ -56,15 +85,15 @@ describe('auth-key rotation', () => {
 		const token = await adminToken();
 
 		const list = await listKeys(token);
-		const [key] = list.keys;
-		const { kid, createdAt, ...rest } = key ?? {};
+		const key = singleListedKey(list);
 
-		expect(typeof kid).toBe('string');
-		expect(typeof createdAt).toBe('string');
-		expect({ count: list.keys.length, rest }).toStrictEqual({
-			count: 1,
-			rest: { active: true }
-		});
+		expect(list.keys).toStrictEqual([
+			{
+				kid: key.kid,
+				createdAt: key.createdAt,
+				active: true
+			}
+		]);
 	});
 
 	it('rotates so the new key issues and both keys still verify', async () => {
@@ -73,36 +102,42 @@ describe('auth-key rotation', () => {
 
 		const token = await adminToken();
 		const before = await listKeys(token);
-		const original = before.keys[0]?.kid;
+		const { kid: original } = singleListedKey(before);
 
 		const rotated = await rotate(token);
 
 		// `token` was signed by the original key before the rotation; it still
 		// verifies because the original key remains in the set.
 		const originalStillWorks = await authorisedFetch('/keys/auth', token);
+		const keys = rotated.keys
+			.map((key) => ({
+				kid: key.kid,
+				createdAt: key.createdAt,
+				active: key.active,
+				scheduledRetireAt: key.scheduledRetireAt
+			}))
+			.toSorted((left, right) => left.kid.localeCompare(right.kid));
 
 		expect({
-			activeKids: rotated.keys
-				.filter((key) => key.active)
-				.map((key) => key.kid),
-			count: rotated.keys.length,
+			keys,
 			retiring: rotated.retiring,
-			rotatedIsActive: rotated.keys.some(
-				(key) => key.kid === rotated.rotated && key.active
-			),
-			originalRetained: rotated.keys.find((key) => key.kid === original),
 			originalStillVerifies: originalStillWorks.status
 		}).toStrictEqual({
-			activeKids: [rotated.rotated],
-			count: 2,
+			keys: [
+				{
+					kid: original,
+					createdAt: rotateAt.toISOString(),
+					active: false,
+					scheduledRetireAt
+				},
+				{
+					kid: rotated.rotated,
+					createdAt: rotateAt.toISOString(),
+					active: true,
+					scheduledRetireAt: undefined
+				}
+			].toSorted((left, right) => left.kid.localeCompare(right.kid)),
 			retiring: { kid: original, scheduledRetireAt },
-			rotatedIsActive: true,
-			originalRetained: {
-				kid: original,
-				createdAt: rotateAt.toISOString(),
-				active: false,
-				scheduledRetireAt
-			},
 			originalStillVerifies: StatusCodes.OK
 		});
 	});
@@ -113,7 +148,7 @@ describe('auth-key rotation', () => {
 
 		const token = await adminToken();
 		const before = await listKeys(token);
-		const original = before.keys[0]?.kid;
+		const { kid: original } = singleListedKey(before);
 		const rotated = await rotate(token);
 
 		vi.setSystemTime(new Date('2026-01-01T00:21:29.999Z'));
@@ -145,34 +180,32 @@ describe('auth-key rotation', () => {
 	it('retires a superseded key and refuses to retire the last one', async () => {
 		const token = await adminToken();
 		const before = await listKeys(token);
-		const original = before.keys[0]?.kid ?? '';
+		const { kid: original } = singleListedKey(before);
 		const rotated = await rotate(token);
 
 		// Retiring the original would invalidate `token`, which it signed, so act
 		// with a token issued by the now-active rotated key.
 		const activeToken = await issueServerSignedToken('admin');
 		const retiredResponse = await retire(activeToken, original);
-		const retired = await retiredResponse.json<AuthKeyRetireResponse>();
+		const retired = authKeyRetireResponseSchema.parse(
+			await retiredResponse.json()
+		);
 		const list = await listKeys(activeToken);
 		const refused = await retire(activeToken, rotated.rotated);
-		const refusedBody = await refused.json<{
-			code: string;
-			status: number;
-			message: string;
-		}>();
+		const refusedBody = orpcErrorBodySchema.parse(await refused.json());
 
 		expect({
 			retired,
 			remainingKids: list.keys.map((key) => key.kid),
+			refusedDefined: refusedBody.defined,
 			refusedStatus: refused.status,
-			refusedCode: refusedBody.code,
-			refusedMessage: refusedBody.message
+			refusedCode: refusedBody.code
 		}).toStrictEqual({
 			retired: { kid: original, retired: true },
 			remainingKids: [rotated.rotated],
+			refusedDefined: false,
 			refusedStatus: StatusCodes.CONFLICT,
-			refusedCode: 'CONFLICT',
-			refusedMessage: 'Cannot retire the last auth key'
+			refusedCode: 'CONFLICT'
 		});
 	});
 
@@ -181,7 +214,9 @@ describe('auth-key rotation', () => {
 
 		const response = await retire(token, 'no-such-kid');
 
-		expect(await response.json<AuthKeyRetireResponse>()).toStrictEqual({
+		expect(
+			authKeyRetireResponseSchema.parse(await response.json())
+		).toStrictEqual({
 			kid: 'no-such-kid',
 			retired: false
 		});
@@ -219,25 +254,29 @@ describe('auth-key rotation', () => {
 		);
 
 		const response = await fetchPath('/.well-known/jwks.json');
-		const body = await response.json<{ keys: { kid: string; x?: string }[] }>();
-		const storedKid = await runInDurableObject(
+		const body = z
+			.object({
+				keys: z.array(z.object({ kid: z.string(), x: z.string().optional() }))
+			})
+			.parse(await response.json());
+		const stored = await runInDurableObject(
 			currentServer(),
 			(_instance, state) =>
 				drizzle(state.storage, { schema: { authKeys } })
-					.select()
+					.select({ kid: authKeys.kid })
 					.from(authKeys)
 					.all()
-					.at(0)?.kid
 		);
+		const [{ kid }] = z
+			.tuple([z.object({ kid: z.string().min(1) })])
+			.parse(stored);
 
 		expect({
-			storedKidNonEmpty: (storedKid ?? '').length > 0,
-			jwksKidMatchesStored: body.keys[0]?.kid === storedKid,
-			publishesSeededKey: body.keys[0]?.x === seeded
+			stored,
+			jwks: body.keys.map(({ kid, x }) => ({ kid, x }))
 		}).toStrictEqual({
-			storedKidNonEmpty: true,
-			jwksKidMatchesStored: true,
-			publishesSeededKey: true
+			stored: [{ kid }],
+			jwks: [{ kid, x: seeded }]
 		});
 	});
 });

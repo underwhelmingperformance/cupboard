@@ -1,5 +1,6 @@
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	authorisedFetch,
@@ -13,6 +14,29 @@ import {
 
 const targetMetadata = uploadMetadata({ fileSize: narBytes.byteLength });
 const target = targetMetadata.storePath;
+const orpcErrorBodySchema = z.strictObject({
+	defined: z.boolean(),
+	code: z.string(),
+	status: z.number(),
+	message: z.string(),
+	data: z.unknown().optional()
+});
+
+function orpcErrorBodyShape(body: unknown): {
+	readonly defined: boolean;
+	readonly code: string;
+	readonly status: number;
+	readonly data: unknown;
+} {
+	const parsed = orpcErrorBodySchema.parse(body);
+
+	return {
+		defined: parsed.defined,
+		code: parsed.code,
+		status: parsed.status,
+		data: parsed.data
+	};
+}
 
 function putRoot(token: string, name: string): Promise<Response> {
 	return authorisedFetch(
@@ -87,16 +111,19 @@ describe('cb_roots enforcement at PUT /roots', () => {
 		const token = await issueServerSignedToken('write', 'ci', cbRoots);
 
 		const response = await putRoot(token, root);
-		const body = await response.json<{ code: string; message: string }>();
+		const body = orpcErrorBodyShape(await response.json());
 
 		expect({
 			status: response.status,
-			code: body.code,
-			message: body.message
+			body
 		}).toStrictEqual({
 			status: StatusCodes.FORBIDDEN,
-			code: 'FORBIDDEN',
-			message: 'Token is not permitted to set this root'
+			body: {
+				defined: true,
+				code: 'FORBIDDEN',
+				status: StatusCodes.FORBIDDEN,
+				data: undefined
+			}
 		});
 	});
 

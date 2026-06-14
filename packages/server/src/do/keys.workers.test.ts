@@ -2,6 +2,10 @@ import type {
 	KeyRetireResponse,
 	KeyRotateResponse
 } from '@cupboard/protocol/keys';
+import {
+	keyRetireResponseSchema,
+	keyRotateResponseSchema
+} from '@cupboard/protocol/keys';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -18,24 +22,31 @@ import {
 	verifyNarInfoSignature
 } from '../test-support.ts';
 
-async function rotate(token: string): Promise<KeyRotateResponse> {
+async function rotate(
+	token: string
+): Promise<{ readonly status: number; readonly body: KeyRotateResponse }> {
 	const response = await authorisedFetch('/keys/rotate', token, {
 		method: 'POST'
 	});
 
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<KeyRotateResponse>();
+	return {
+		status: response.status,
+		body: keyRotateResponseSchema.parse(await response.json())
+	};
 }
 
-async function retire(token: string, id: string): Promise<KeyRetireResponse> {
+async function retire(
+	token: string,
+	id: string
+): Promise<{ readonly status: number; readonly body: KeyRetireResponse }> {
 	const response = await authorisedFetch(`/keys/retire/${id}`, token, {
 		method: 'POST'
 	});
 
-	expect(response.status).toBe(StatusCodes.OK);
-
-	return response.json<KeyRetireResponse>();
+	return {
+		status: response.status,
+		body: keyRetireResponseSchema.parse(await response.json())
+	};
 }
 
 async function publishedKeys(): Promise<string[]> {
@@ -57,7 +68,8 @@ describe('signing key rotation', () => {
 		});
 		await pushPath(init.token, before);
 
-		const { rotated } = await rotate(init.token);
+		const rotation = await rotate(init.token);
+		const { rotated } = rotation.body;
 
 		const after = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -73,6 +85,7 @@ describe('signing key rotation', () => {
 		const published = await publishedKeys();
 
 		expect({
+			rotationStatus: rotation.status,
 			rotatedStage: rotated.stage,
 			publishedKeys: published.toSorted(),
 			before: {
@@ -86,6 +99,7 @@ describe('signing key rotation', () => {
 				verifiesUnderNew: await verifyNarInfoSignature(afterNarInfo, newKey)
 			}
 		}).toStrictEqual({
+			rotationStatus: StatusCodes.OK,
 			rotatedStage: 'signing',
 			publishedKeys: [oldKey, newKey].toSorted(),
 			before: { sigs: 1, verifiesUnderOld: true, verifiesUnderNew: false },
@@ -95,7 +109,8 @@ describe('signing key rotation', () => {
 
 	it('retires a key through publication then absent, idempotently', async () => {
 		const init = await bootstrap();
-		const { rotated } = await rotate(init.token);
+		const rotation = await rotate(init.token);
+		const { rotated } = rotation.body;
 
 		const first = await retire(init.token, 'active');
 		const second = await retire(init.token, 'active');
@@ -111,7 +126,9 @@ describe('signing key rotation', () => {
 		const published = await publishedKeys();
 
 		expect({
-			stages: [first.stage, second.stage, third.stage],
+			rotationStatus: rotation.status,
+			retireStatuses: [first.status, second.status, third.status],
+			stages: [first.body.stage, second.body.stage, third.body.stage],
 			publishedKeys: published,
 			sigs: narInfo.sigs.length,
 			verifiesUnderRetired: await verifyNarInfoSignature(
@@ -123,6 +140,8 @@ describe('signing key rotation', () => {
 				rotated.publicKey
 			)
 		}).toStrictEqual({
+			rotationStatus: StatusCodes.OK,
+			retireStatuses: [StatusCodes.OK, StatusCodes.OK, StatusCodes.OK],
 			stages: ['publication', 'absent', 'absent'],
 			publishedKeys: [rotated.publicKey],
 			sigs: 1,

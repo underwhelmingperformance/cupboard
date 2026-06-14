@@ -318,10 +318,7 @@ export class CupboardClient {
 		const result = schema.safeParse(payload);
 
 		if (!result.success) {
-			throw new ResponseSchemaMismatchError(
-				path,
-				z.prettifyError(result.error)
-			);
+			throw new ResponseSchemaMismatchError(path, result.error);
 		}
 
 		return result.data;

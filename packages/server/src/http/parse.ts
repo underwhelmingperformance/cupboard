@@ -1,10 +1,10 @@
 import { z } from 'zod';
 
 import {
-	InvalidRequestError,
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
-	type ServerHttpError
+	type ServerHttpError,
+	TokenRequestBodyInvalidError
 } from '../errors.ts';
 
 /**
@@ -50,7 +50,7 @@ export async function parseFormBody<S extends z.ZodType>(
 	const result = schema.safeParse(Object.fromEntries(parameters));
 
 	if (!result.success) {
-		throw new InvalidRequestError(z.prettifyError(result.error));
+		throw new TokenRequestBodyInvalidError(result.error);
 	}
 
 	return result.data;

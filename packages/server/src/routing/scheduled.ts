@@ -298,11 +298,7 @@ function logInvalidMaintenanceQueueMessage(
 		queue: batch.queue,
 		messageId: message.id,
 		attempts: message.attempts,
-		issues: error.issues.map((issue) => ({
-			code: issue.code,
-			path: issue.path.map(String),
-			message: issue.message
-		}))
+		issues: error.issues
 	});
 }
 

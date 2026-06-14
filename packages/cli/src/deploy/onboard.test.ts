@@ -1,7 +1,9 @@
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
+import type { ProgressHandle, StepLog } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import type { CachedSession } from '../auth/token-store.ts';
 import { CupboardHttpError } from '../errors.ts';
@@ -16,128 +18,345 @@ import {
 	slugProblem
 } from './onboard.ts';
 import { deployerOwner, type OwnerBinding } from './owner.ts';
-import type { DeployUi, TextEdit } from './ui.ts';
+import { type DeployUi, terminalLink, type TextEdit } from './ui.ts';
 
-const unexpected = (member: string) => (): never => {
-	throw new Error(`${member} was not expected`);
-};
+const absentValues: { readonly choice?: never } = {};
 
 interface UiScript {
+	readonly menuChoices?: readonly (string | undefined)[];
 	readonly slugs?: readonly (string | undefined)[];
 	readonly secrets?: readonly (string | undefined)[];
 	readonly textEdits?: readonly TextEdit[];
+	readonly accountChoices?: readonly (string | undefined)[];
+}
+
+interface UiCall {
+	readonly method: string;
 }
 
 interface ScriptedUi {
 	readonly ui: DeployUi;
+	readonly uiCalls: UiCall[];
 	readonly warnings: string[];
 	readonly successes: string[];
 	readonly infos: string[];
 }
 
+const defaultApiCalls: ApiCall[] = [];
+const unscriptedInteractiveCalls: UiCall[] = [];
+
+afterEach(() => {
+	expect({
+		defaultApiCalls,
+		unscriptedInteractiveCalls
+	}).toStrictEqual({
+		defaultApiCalls: [],
+		unscriptedInteractiveCalls: []
+	});
+
+	defaultApiCalls.length = 0;
+	unscriptedInteractiveCalls.length = 0;
+});
+
 /** A UI whose prompts answer from the script and which records what it says. */
 function scriptedUi(script: UiScript = {}): ScriptedUi {
+	const remainingMenuChoices = [...(script.menuChoices ?? [])];
 	const remainingSlugs = [...(script.slugs ?? [])];
 	const remainingSecrets = [...(script.secrets ?? [])];
 	const remainingTextEdits = [...(script.textEdits ?? [])];
+	const remainingAccountChoices = [...(script.accountChoices ?? [])];
+	const uiCalls: UiCall[] = [];
 	const warnings: string[] = [];
 	const successes: string[] = [];
 	const infos: string[] = [];
 	const facts: string[] = [];
 
 	const ui: DeployUi = {
-		intro: unexpected('intro'),
-		outro: unexpected('outro'),
-		cancelled: unexpected('cancelled'),
+		intro: () => {
+			unscriptedInteractiveCalls.push({ method: 'intro' });
+		},
+		outro: () => {
+			unscriptedInteractiveCalls.push({ method: 'outro' });
+		},
+		cancelled: () => {
+			unscriptedInteractiveCalls.push({ method: 'cancelled' });
+		},
 		info: (message) => {
+			uiCalls.push({ method: 'info' });
 			infos.push(message);
 		},
 		success: (message) => {
+			uiCalls.push({ method: 'success' });
 			successes.push(message);
 		},
 		warn: (message) => {
+			uiCalls.push({ method: 'warn' });
 			warnings.push(message);
 		},
-		note: unexpected('note'),
-		menu: unexpected('menu'),
+		note: () => {
+			unscriptedInteractiveCalls.push({ method: 'note' });
+		},
+		menu: (_message, entries) => {
+			uiCalls.push({ method: 'menu' });
+			const [scripted] = z
+				.array(z.string().optional())
+				.length(1)
+				.parse(remainingMenuChoices.splice(0, 1));
+
+			if (scripted === undefined) {
+				return Promise.resolve(absentValues.choice);
+			}
+
+			const choice = z
+				.custom<
+					(typeof entries)[number]['value']
+				>((value) => value === scripted)
+				.parse(entries.find((entry) => entry.value === scripted)?.value);
+
+			return Promise.resolve(choice);
+		},
 		editText: () => {
+			uiCalls.push({ method: 'editText' });
 			const edit = remainingTextEdits.shift();
 
 			if (edit === undefined) {
-				throw new Error('editText asked more often than scripted');
+				unscriptedInteractiveCalls.push({ method: 'editText' });
+
+				return Promise.resolve({ kind: 'cancelled' });
 			}
 
 			return Promise.resolve(edit);
 		},
 		prefixedText: ({ prefix }) => {
-			if (remainingSlugs.length === 0) {
-				throw new Error('prefixedText asked more often than scripted');
-			}
+			uiCalls.push({ method: 'prefixedText' });
+			const [slug] = z
+				.array(z.string().optional())
+				.length(1)
+				.parse(remainingSlugs.splice(0, 1));
+			expect({ prefix }).toStrictEqual({
+				prefix: 'https://cache.example.com/t/'
+			});
 
-			expect(prefix).toBe('https://cache.example.com/t/');
-
-			return Promise.resolve(remainingSlugs.shift());
+			return Promise.resolve(slug);
 		},
 		secret: () => {
-			if (remainingSecrets.length === 0) {
-				throw new Error('secret asked more often than scripted');
-			}
+			uiCalls.push({ method: 'secret' });
+			const [secret] = z
+				.array(z.string().optional())
+				.length(1)
+				.parse(remainingSecrets.splice(0, 1));
 
-			return Promise.resolve(remainingSecrets.shift());
+			return Promise.resolve(secret);
+		},
+		chooseAccount: () => {
+			uiCalls.push({ method: 'chooseAccount' });
+			const [choice] = z
+				.array(z.string().optional())
+				.length(1)
+				.parse(remainingAccountChoices.splice(0, 1));
+
+			return Promise.resolve(choice);
+		},
+		openBrowser: () => {
+			uiCalls.push({ method: 'openBrowser' });
+			unscriptedInteractiveCalls.push({ method: 'openBrowser' });
 		},
 		interactive: true,
-		data: unexpected('data'),
-		confirm: unexpected('confirm'),
-		chooseAccount: unexpected('chooseAccount'),
-		openBrowser: unexpected('openBrowser'),
+		data: () => {
+			unscriptedInteractiveCalls.push({ method: 'data' });
+		},
+		confirm: (options) => {
+			void options;
+			unscriptedInteractiveCalls.push({ method: 'confirm' });
+
+			return Promise.resolve('no');
+		},
 		reporter: () => ({
 			phase: (_label, body) =>
 				Promise.resolve(
 					body({
 						fact: (label, value) => {
+							uiCalls.push({ method: 'fact' });
 							facts.push(`${label} ${String(value)}`);
 						}
 					})
 				),
-			progress: unexpected('reporter.progress'),
-			steps: unexpected('reporter.steps'),
-			result: unexpected('result'),
-			data: unexpected('reporter.data'),
-			warn: unexpected('reporter.warn'),
-			info: unexpected('reporter.info'),
-			error: unexpected('reporter.error')
+			progress: (_label, _options, body) => {
+				uiCalls.push({ method: 'reporter.progress' });
+				const handle: ProgressHandle = {
+					advance: () => {
+						uiCalls.push({ method: 'reporter.progress.advance' });
+					},
+					fact: (label, value) => {
+						uiCalls.push({ method: 'reporter.progress.fact' });
+						facts.push(`${label} ${String(value)}`);
+					}
+				};
+
+				return Promise.resolve(body(handle));
+			},
+			steps: (_label, body) => {
+				uiCalls.push({ method: 'reporter.steps' });
+				const log: StepLog = {
+					message: () => {
+						uiCalls.push({ method: 'reporter.steps.message' });
+					},
+					group: () => ({
+						message: () => {
+							uiCalls.push({ method: 'reporter.steps.group.message' });
+						},
+						success: () => {
+							uiCalls.push({ method: 'reporter.steps.group.success' });
+						},
+						error: () => {
+							uiCalls.push({ method: 'reporter.steps.group.error' });
+						}
+					})
+				};
+
+				return Promise.resolve(body(log));
+			},
+			result: () => {
+				unscriptedInteractiveCalls.push({ method: 'result' });
+			},
+			data: () => {
+				unscriptedInteractiveCalls.push({ method: 'reporter.data' });
+			},
+			warn: (message) => {
+				uiCalls.push({ method: 'reporter.warn' });
+				warnings.push(message);
+			},
+			info: (message) => {
+				uiCalls.push({ method: 'reporter.info' });
+				infos.push(message);
+			},
+			error: () => {
+				unscriptedInteractiveCalls.push({ method: 'reporter.error' });
+			}
 		})
 	};
 
-	return { ui, warnings, successes, infos };
+	return { ui, uiCalls, warnings, successes, infos };
 }
 
-const baseApi: CloudflareApi = {
-	listAccounts: unexpected('listAccounts'),
-	r2BucketExists: unexpected('r2BucketExists'),
-	ensureR2Bucket: unexpected('ensureR2Bucket'),
-	ensureD1Database: unexpected('ensureD1Database'),
-	ensureKvNamespace: unexpected('ensureKvNamespace'),
-	ensureQueue: unexpected('ensureQueue'),
-	d1Query: unexpected('d1Query'),
-	d1QueryRows: unexpected('d1QueryRows'),
-	getScriptMigrationTag: unexpected('getScriptMigrationTag'),
-	getScriptBindings: unexpected('getScriptBindings'),
-	uploadScript: unexpected('uploadScript'),
-	ensureQueueConsumer: unexpected('ensureQueueConsumer'),
-	ensureSchedules: unexpected('ensureSchedules'),
-	putSecret: unexpected('putSecret'),
-	listScriptSecrets: unexpected('listScriptSecrets'),
-	findZoneId: unexpected('findZoneId'),
-	findCustomDomain: unexpected('findCustomDomain'),
-	ensureCustomDomain: unexpected('ensureCustomDomain'),
-	listTokenPermissionGroups: unexpected('listTokenPermissionGroups'),
-	findApiTokenId: unexpected('findApiTokenId'),
-	createApiToken: unexpected('createApiToken'),
-	rollApiTokenSecret: unexpected('rollApiTokenSecret'),
-	getWorkersDevSubdomain: unexpected('getWorkersDevSubdomain'),
-	enableWorkersDevRoute: unexpected('enableWorkersDevRoute')
-};
+type ApiCall =
+	| { readonly method: keyof CloudflareApi }
+	| {
+			readonly method: 'putSecret';
+			readonly scriptName: string;
+			readonly name: string;
+	  }
+	| { readonly method: 'enableWorkersDevRoute'; readonly scriptName: string };
+
+const absentString: string | undefined = undefined;
+const absentBindings: readonly unknown[] | undefined = undefined;
+
+function recordApiCall(apiCalls: ApiCall[], method: keyof CloudflareApi): void {
+	apiCalls.push({ method });
+}
+
+function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
+	return {
+		listAccounts: () => {
+			recordApiCall(apiCalls, 'listAccounts');
+			return Promise.resolve([]);
+		},
+		r2BucketExists: () => {
+			recordApiCall(apiCalls, 'r2BucketExists');
+			return Promise.resolve(false);
+		},
+		ensureR2Bucket: () => {
+			recordApiCall(apiCalls, 'ensureR2Bucket');
+			return Promise.resolve();
+		},
+		ensureD1Database: () => {
+			recordApiCall(apiCalls, 'ensureD1Database');
+			return Promise.resolve('database-id');
+		},
+		ensureKvNamespace: () => {
+			recordApiCall(apiCalls, 'ensureKvNamespace');
+			return Promise.resolve('namespace-id');
+		},
+		ensureQueue: () => {
+			recordApiCall(apiCalls, 'ensureQueue');
+			return Promise.resolve('queue-id');
+		},
+		d1Query: () => {
+			recordApiCall(apiCalls, 'd1Query');
+			return Promise.resolve();
+		},
+		d1QueryRows: () => {
+			recordApiCall(apiCalls, 'd1QueryRows');
+			return Promise.resolve([]);
+		},
+		getScriptMigrationTag: () => {
+			recordApiCall(apiCalls, 'getScriptMigrationTag');
+			return Promise.resolve(absentString);
+		},
+		getScriptBindings: () => {
+			recordApiCall(apiCalls, 'getScriptBindings');
+			return Promise.resolve(absentBindings);
+		},
+		uploadScript: () => {
+			recordApiCall(apiCalls, 'uploadScript');
+			return Promise.resolve();
+		},
+		ensureQueueConsumer: () => {
+			recordApiCall(apiCalls, 'ensureQueueConsumer');
+			return Promise.resolve();
+		},
+		ensureSchedules: () => {
+			recordApiCall(apiCalls, 'ensureSchedules');
+			return Promise.resolve();
+		},
+		putSecret: (scriptName, secret) => {
+			apiCalls.push({ method: 'putSecret', scriptName, name: secret.name });
+
+			return Promise.resolve();
+		},
+		listScriptSecrets: () => {
+			recordApiCall(apiCalls, 'listScriptSecrets');
+			return Promise.resolve([]);
+		},
+		findZoneId: () => {
+			recordApiCall(apiCalls, 'findZoneId');
+			return Promise.resolve(absentString);
+		},
+		findCustomDomain: () => {
+			recordApiCall(apiCalls, 'findCustomDomain');
+			return Promise.resolve(absentString);
+		},
+		ensureCustomDomain: () => {
+			recordApiCall(apiCalls, 'ensureCustomDomain');
+			return Promise.resolve();
+		},
+		listTokenPermissionGroups: () => {
+			recordApiCall(apiCalls, 'listTokenPermissionGroups');
+			return Promise.resolve([]);
+		},
+		findApiTokenId: () => {
+			recordApiCall(apiCalls, 'findApiTokenId');
+			return Promise.resolve(absentString);
+		},
+		createApiToken: () => {
+			recordApiCall(apiCalls, 'createApiToken');
+			return Promise.resolve({ id: 'token-id', value: 'token-value' });
+		},
+		rollApiTokenSecret: () => {
+			recordApiCall(apiCalls, 'rollApiTokenSecret');
+			return Promise.resolve('token-value');
+		},
+		getWorkersDevSubdomain: () => {
+			recordApiCall(apiCalls, 'getWorkersDevSubdomain');
+			return Promise.resolve(absentString);
+		},
+		enableWorkersDevRoute: (scriptName) => {
+			apiCalls.push({ method: 'enableWorkersDevRoute', scriptName });
+
+			return Promise.resolve();
+		}
+	};
+}
 
 /** A subdomain lookup; called with no argument it finds none registered. */
 const subdomainOf = (value?: string) => (): Promise<string | undefined> =>
@@ -172,21 +391,19 @@ function answer<T>(
 	member: string,
 	rejection: (status: number, member: string) => Error = httpRejection
 ): Promise<T> {
-	const next = remaining.shift();
+	const [scripted] = z
+		.tuple([z.custom<Scripted<T>>((value) => value !== undefined)])
+		.parse(remaining.splice(0, 1));
 
-	if (next === undefined) {
-		throw new Error(`${member} called more often than scripted`);
-	}
-
-	if (next === 'offline') {
+	if (scripted === 'offline') {
 		return Promise.reject(new TypeError('fetch failed'));
 	}
 
-	if (typeof next === 'number') {
-		return Promise.reject(rejection(next, member));
+	if (typeof scripted === 'number') {
+		return Promise.reject(rejection(scripted, member));
 	}
 
-	return Promise.resolve(next);
+	return Promise.resolve(scripted);
 }
 
 // The raw endpoints fail as CupboardHttpError; the control procedures arrive
@@ -222,6 +439,7 @@ interface ScriptedClient {
 	readonly urls: string[];
 	readonly signupBodies: unknown[];
 	readonly createdBodies: unknown[];
+	readonly controlCheckTokens: string[];
 	readonly cachedSessions: { session: CachedSession; target: string }[];
 	readonly cacheSession: (
 		session: CachedSession,
@@ -239,12 +457,14 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const urls: string[] = [];
 	const signupBodies: unknown[] = [];
 	const createdBodies: unknown[] = [];
+	const controlCheckTokens: string[] = [];
 	const cachedSessions: { session: CachedSession; target: string }[] = [];
 
 	return {
 		urls,
 		signupBodies,
 		createdBodies,
+		controlCheckTokens,
 		cachedSessions,
 		cacheSession: (session, target) => {
 			cachedSessions.push({ session, target });
@@ -275,9 +495,13 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					createdBodies.push(body);
 					return answer(creates, '/control/tenants', orpcRejection);
 				},
-				controlCheck: async () => ({
-					r2: await answer(controlChecks, '/control/check', orpcRejection)
-				}),
+				controlCheck: async (token) => {
+					controlCheckTokens.push(token);
+
+					return {
+						r2: await answer(controlChecks, '/control/check', orpcRejection)
+					};
+				},
 				publicKey: () => answer(publicKeys, '/pubkey')
 			};
 		}
@@ -293,7 +517,7 @@ const claimedSignup = {
 /** The options every test starts from; spread and override per case. */
 function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 	return {
-		api: baseApi,
+		api: baseApi(defaultApiCalls),
 		ui,
 		controlScriptName: 'cupboard',
 		tenantScriptName: 'cupboard-tenant',
@@ -305,6 +529,49 @@ function baseOptions(ui: DeployUi, client: ScriptedClient): OnboardOptions {
 		clientFactory: client.factory,
 		cacheSession: client.cacheSession,
 		sleep: () => Promise.resolve()
+	};
+}
+
+function claimRefusedShape(outcome: OnboardOutcome): {
+	readonly kind: string;
+	readonly url: string | undefined;
+	readonly status: number | undefined;
+	readonly detail: string;
+} {
+	const refused = z
+		.object({
+			kind: z.literal('claim-refused'),
+			url: z.string(),
+			status: z.number(),
+			detail: z.string()
+		})
+		.parse(outcome);
+
+	return {
+		kind: refused.kind,
+		url: refused.url,
+		status: refused.status,
+		detail: refused.detail
+	};
+}
+
+function unreachableShape(outcome: OnboardOutcome): {
+	readonly kind: string;
+	readonly url: string | undefined;
+	readonly lastProbe: string;
+} {
+	const unreachable = z
+		.object({
+			kind: z.literal('unreachable'),
+			url: z.string(),
+			lastProbe: z.string()
+		})
+		.parse(outcome);
+
+	return {
+		kind: unreachable.kind,
+		url: unreachable.url,
+		lastProbe: unreachable.lastProbe
 	};
 }
 
@@ -359,12 +626,12 @@ describe('slugProblem', () => {
 	});
 
 	it.each([
-		['', 'a slug is required'],
-		['-leading', 'lowercase letters'],
-		['UPPER', 'lowercase letters'],
-		['has space', 'lowercase letters']
-	])('rejects %j', (value, reason) => {
-		expect(slugProblem(value)).toContain(reason);
+		['', 'empty'],
+		['-leading', 'invalid-format'],
+		['UPPER', 'invalid-format'],
+		['has space', 'invalid-format']
+	])('rejects %j', (value, problem) => {
+		expect(slugProblem(value)).toBe(problem);
 	});
 });
 
@@ -429,7 +696,38 @@ describe('onboardDeployment', () => {
 
 		const outcome = await onboardDeployment(baseOptions(ui, client));
 
-		expect(outcome.kind).toBe('ready');
+		expect({
+			outcome,
+			urls: client.urls,
+			signupBodies: client.signupBodies,
+			createdBodies: client.createdBodies,
+			cachedSessions: client.cachedSessions
+		}).toStrictEqual({
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'builds',
+				cacheUrl: 'https://cache.example.com/t/builds',
+				publicKey: 'pk-1'
+			} satisfies OnboardOutcome,
+			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
+			signupBodies: [{ subject_token: 'id-token-1' }],
+			createdBodies: [
+				{
+					id: 'builds',
+					readMode: 'public',
+					ownerIssuer: owner.issuer,
+					ownerSubject: owner.subject,
+					ownerAudience: owner.audience
+				}
+			],
+			cachedSessions: [
+				{
+					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
+					target: 'https://cache.example.com'
+				}
+			]
+		});
 	});
 
 	it('gives up naming the version that kept answering', async () => {
@@ -487,15 +785,21 @@ describe('onboardDeployment', () => {
 		});
 
 		expect({
-			kind: outcome.kind,
+			outcome,
 			signupBodies: client.signupBodies,
-			explained: infos.some((message) =>
-				message.includes('protected by a claim secret')
-			)
+			infos
 		}).toStrictEqual({
-			kind: 'ready',
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'builds',
+				cacheUrl: 'https://cache.example.com/t/builds',
+				publicKey: 'pk-1'
+			} satisfies OnboardOutcome,
 			signupBodies: [{ subject_token: 'id-token-1', claim_secret: 'hunter2' }],
-			explained: true
+			infos: [
+				'This deployment is protected by a claim secret (the CUPBOARD_SIGNUP_SECRET Worker secret), which must be presented to become the admin.'
+			]
 		});
 	});
 
@@ -552,15 +856,39 @@ describe('onboardDeployment', () => {
 			r2: keptR2
 		});
 
-		expect(outcome.kind).toBe('ready');
+		expect({
+			outcome,
+			urls: client.urls,
+			createdBodies: client.createdBodies,
+			controlCheckTokens: client.controlCheckTokens
+		}).toStrictEqual({
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'builds',
+				cacheUrl: 'https://cache.example.com/t/builds',
+				publicKey: 'pk-1'
+			} satisfies OnboardOutcome,
+			urls: ['https://cache.example.com', 'https://cache.example.com/t/builds'],
+			createdBodies: [
+				{
+					id: 'builds',
+					readMode: 'public',
+					ownerIssuer: owner.issuer,
+					ownerSubject: owner.subject,
+					ownerAudience: owner.audience
+				}
+			],
+			controlCheckTokens: ['admin-jwt']
+		});
 	});
 
 	it('replaces a rejected kept pair, looping until R2 accepts one', async () => {
-		const secretsSet: string[] = [];
+		const apiCalls: ApiCall[] = [];
 		const api: CloudflareApi = {
-			...baseApi,
+			...baseApi(apiCalls),
 			putSecret: (scriptName, secret) => {
-				secretsSet.push(`${scriptName}:${secret.name}`);
+				apiCalls.push({ method: 'putSecret', scriptName, name: secret.name });
 				return Promise.resolve();
 			}
 		};
@@ -606,20 +934,35 @@ describe('onboardDeployment', () => {
 		});
 
 		expect({
-			kind: outcome.kind,
+			outcome,
 			probed,
-			secretsSet,
-			rejectionsSaid: warnings.filter((message) =>
-				message.includes('R2 rejected')
-			).length
+			apiCalls,
+			warnings
 		}).toStrictEqual({
-			kind: 'ready',
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'builds',
+				cacheUrl: 'https://cache.example.com/t/builds',
+				publicKey: 'pk-1'
+			} satisfies OnboardOutcome,
 			probed: ['a'.repeat(32), goodKey],
-			secretsSet: [
-				'cupboard-tenant:R2_ACCESS_KEY_ID',
-				'cupboard-tenant:R2_SECRET_ACCESS_KEY'
+			apiCalls: [
+				{
+					method: 'putSecret',
+					scriptName: 'cupboard-tenant',
+					name: 'R2_ACCESS_KEY_ID'
+				},
+				{
+					method: 'putSecret',
+					scriptName: 'cupboard-tenant',
+					name: 'R2_SECRET_ACCESS_KEY'
+				}
 			],
-			rejectionsSaid: 2
+			warnings: [
+				'R2 rejected the credentials on the Worker (HTTP 403), so pushes will fail.',
+				'R2 rejected that pair too (HTTP 403); check the values and try again.'
+			]
 		});
 	});
 
@@ -643,11 +986,25 @@ describe('onboardDeployment', () => {
 		});
 
 		expect({
-			kind: outcome.kind,
-			unchanged: infos.some((message) =>
-				message.includes('credentials are unchanged')
-			)
-		}).toStrictEqual({ kind: 'ready', unchanged: true });
+			outcome,
+			infos
+		}).toStrictEqual({
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'builds',
+				cacheUrl: 'https://cache.example.com/t/builds',
+				publicKey: 'pk-1'
+			} satisfies OnboardOutcome,
+			infos: [
+				'Create an R2 API token (Object Read & Write on the cache bucket) at\n' +
+					terminalLink(
+						'https://dash.cloudflare.com/acc-1/r2/api-tokens',
+						'https://dash.cloudflare.com/acc-1/r2/api-tokens'
+					),
+				'The credentials are unchanged. Re-run `cupboard init` to replace them later.'
+			]
+		});
 	});
 
 	it('re-prompts when the slug is claimed first, and converges on the next', async () => {
@@ -663,12 +1020,16 @@ describe('onboardDeployment', () => {
 		const outcome = await onboardDeployment(baseOptions(ui, client));
 
 		expect({
-			kind: outcome.kind,
-			slug: outcome.kind === 'ready' ? outcome.slug : undefined,
+			outcome,
 			warnings
 		}).toStrictEqual({
-			kind: 'ready',
-			slug: 'builds-2',
+			outcome: {
+				kind: 'ready',
+				url: 'https://cache.example.com',
+				slug: 'builds-2',
+				cacheUrl: 'https://cache.example.com/t/builds-2',
+				publicKey: 'pk-2'
+			} satisfies OnboardOutcome,
 			warnings: ['"builds" is already taken; choose another.']
 		});
 	});
@@ -732,7 +1093,9 @@ describe('onboardDeployment', () => {
 			signup: [403]
 		});
 
-		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
+		expect(
+			claimRefusedShape(await onboardDeployment(baseOptions(ui, client)))
+		).toStrictEqual({
 			kind: 'claim-refused',
 			url: 'https://cache.example.com',
 			status: 403,
@@ -789,12 +1152,15 @@ describe('onboardDeployment', () => {
 	});
 
 	it('enables the workers.dev route when no custom domain is set', async () => {
-		const enabled: string[] = [];
+		const apiCalls: ApiCall[] = [];
 		const api: CloudflareApi = {
-			...baseApi,
-			getWorkersDevSubdomain: subdomainOf('laney'),
+			...baseApi(apiCalls),
+			getWorkersDevSubdomain: () => {
+				apiCalls.push({ method: 'getWorkersDevSubdomain' });
+				return subdomainOf('laney')();
+			},
 			enableWorkersDevRoute: (scriptName) => {
-				enabled.push(scriptName);
+				apiCalls.push({ method: 'enableWorkersDevRoute', scriptName });
 				return Promise.resolve();
 			}
 		};
@@ -808,33 +1174,42 @@ describe('onboardDeployment', () => {
 			admin: { kind: 'none' }
 		});
 
-		expect({ outcome, enabled, urls: client.urls }).toStrictEqual({
+		expect({ outcome, apiCalls, urls: client.urls }).toStrictEqual({
 			outcome: {
 				kind: 'no-admin',
 				url: 'https://cupboard.laney.workers.dev'
 			} satisfies OnboardOutcome,
-			enabled: ['cupboard'],
+			apiCalls: [
+				{ method: 'getWorkersDevSubdomain' },
+				{ method: 'enableWorkersDevRoute', scriptName: 'cupboard' }
+			],
 			urls: ['https://cupboard.laney.workers.dev']
 		});
 	});
 
 	it('reports a missing workers.dev subdomain', async () => {
+		const apiCalls: ApiCall[] = [];
 		const api: CloudflareApi = {
-			...baseApi,
-			getWorkersDevSubdomain: subdomainOf()
+			...baseApi(apiCalls),
+			getWorkersDevSubdomain: () => {
+				apiCalls.push({ method: 'getWorkersDevSubdomain' });
+				return subdomainOf()();
+			}
 		};
 		const { ui } = scriptedUi();
 		const client = scriptedClient({});
 
-		expect(
-			await onboardDeployment({
-				...baseOptions(ui, client),
-				api,
-				domain: undefined,
-				admin: { kind: 'none' },
-				clientFactory: unexpected('clientFactory')
-			})
-		).toStrictEqual({ kind: 'no-subdomain' });
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			api,
+			domain: undefined,
+			admin: { kind: 'none' }
+		});
+
+		expect({ outcome, apiCalls }).toStrictEqual({
+			outcome: { kind: 'no-subdomain' },
+			apiCalls: [{ method: 'getWorkersDevSubdomain' }]
+		});
 	});
 
 	it('gives up when the Worker never comes up', async () => {
@@ -842,10 +1217,12 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({ versions: ['offline', 'offline', 404] });
 
 		expect(
-			await onboardDeployment({
-				...baseOptions(ui, client),
-				attempts: 3
-			})
+			unreachableShape(
+				await onboardDeployment({
+					...baseOptions(ui, client),
+					attempts: 3
+				})
+			)
 		).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com',
@@ -864,10 +1241,12 @@ describe('onboardDeployment', () => {
 		});
 
 		expect(
-			await onboardDeployment({
-				...baseOptions(ui, client),
-				attempts: 2
-			})
+			unreachableShape(
+				await onboardDeployment({
+					...baseOptions(ui, client),
+					attempts: 2
+				})
+			)
 		).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com/t/builds',
@@ -879,8 +1258,31 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({ versions: [403] });
 
-		await expect(
-			onboardDeployment(baseOptions(ui, client))
-		).rejects.toBeInstanceOf(CupboardHttpError);
+		const outcome = await onboardDeployment(baseOptions(ui, client)).then(
+			(value) => ({ value }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(CupboardHttpError);
+
+				if (error_ instanceof CupboardHttpError) {
+					return {
+						error: {
+							method: error_.method,
+							path: error_.path,
+							status: error_.status
+						}
+					};
+				}
+
+				throw error_;
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			error: {
+				method: 'GET',
+				path: '/_version',
+				status: 403
+			}
+		});
 	});
 });

@@ -1,6 +1,7 @@
 import {
 	subjectTokenTypeIdToken,
-	tokenExchangeGrantType
+	tokenExchangeGrantType,
+	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
@@ -36,11 +37,6 @@ describe('control plane signup bootstrap', () => {
 					}),
 					claim_secret: signupSecret
 				});
-				const claim = (await signup.json()) as {
-					issuer: string;
-					subject: string;
-					claimed: boolean;
-				};
 
 				// A wrong claim secret is refused at the gate, even for the principal that
 				// holds the claim.
@@ -71,10 +67,7 @@ describe('control plane signup bootstrap', () => {
 					}),
 					subject_token_type: subjectTokenTypeIdToken
 				});
-				const minted = (await exchange.json()) as {
-					access_token: string;
-					scope: string;
-				};
+				const minted = tokenResponseSchema.parse(await exchange.json());
 
 				// The admin token provisions a tenant.
 				const create = await fetch(new URL('/control/tenants', server.url), {
@@ -91,31 +84,32 @@ describe('control plane signup bootstrap', () => {
 						ownerAudience: signupAudience
 					})
 				});
-				const created = (await create.json()) as {
-					id: string;
-					status: string;
-				};
-
 				expect({
 					signupStatus: signup.status,
-					claim,
 					badGateStatus: badGate.status,
 					intruderStatus: intruder.status,
 					mintedScope: minted.scope,
-					createStatus: create.status,
-					created: { id: created.id, status: created.status }
+					createStatus: create.status
 				}).toStrictEqual({
 					signupStatus: 200,
-					claim: {
-						issuer: server.issuer.issuer,
-						subject: 'founder',
-						claimed: true
-					},
 					badGateStatus: 403,
 					intruderStatus: 409,
 					mintedScope: 'admin',
-					createStatus: 200,
-					created: { id: 'acme', status: 'active' }
+					createStatus: 200
+				});
+				expect(await signup.json()).toStrictEqual({
+					issuer: server.issuer.issuer,
+					subject: 'founder',
+					claimed: true
+				});
+				expect(await create.json()).toMatchObject({
+					id: 'acme',
+					readMode: 'private',
+					ownerIssuer: server.issuer.issuer,
+					ownerSubject: 'owner',
+					ownerAudience: signupAudience,
+					configVersion: 1,
+					status: 'active'
 				});
 			} finally {
 				await server.stop();

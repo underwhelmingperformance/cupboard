@@ -117,7 +117,7 @@ describe('root activation gating', () => {
 
 		expect({
 			whenRooted: original.targets,
-			afterDemote: roots[0]?.targets
+			afterDemote: roots
 		}).toStrictEqual({
 			whenRooted: [
 				{
@@ -128,9 +128,17 @@ describe('root activation gating', () => {
 			],
 			afterDemote: [
 				{
-					storePathHash: metadata.storePathHash,
-					storePath: metadata.storePath,
-					present: false
+					name: 'main',
+					expired: false,
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z',
+					targets: [
+						{
+							storePathHash: metadata.storePathHash,
+							storePath: metadata.storePath,
+							present: false
+						}
+					]
 				}
 			]
 		});

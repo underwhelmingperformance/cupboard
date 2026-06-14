@@ -201,20 +201,39 @@ const defaultAttempts = 30;
 const attemptDelayMs = 4000;
 const conflictStatusCode = 409;
 
+export type SlugProblem = 'empty' | 'invalid-format';
+
 /** Why `value` cannot be a tenant slug, or undefined when it can. */
-export function slugProblem(value: string): string | undefined {
+export function slugProblem(value: string): SlugProblem | undefined {
 	if (value === '') {
-		return 'a slug is required';
+		return 'empty';
 	}
 
 	if (!cacheNamePattern.test(value)) {
-		return (
-			'use lowercase letters, digits, ".", "_" or "-", starting with a ' +
-			'letter or digit (63 characters at most)'
-		);
+		return 'invalid-format';
 	}
 
 	return undefined;
+}
+
+export function slugProblemMessage(problem: SlugProblem): string {
+	switch (problem) {
+		case 'empty': {
+			return 'a slug is required';
+		}
+		case 'invalid-format': {
+			return (
+				'use lowercase letters, digits, ".", "_" or "-", starting with a ' +
+				'letter or digit (63 characters at most)'
+			);
+		}
+	}
+}
+
+export function slugProblemText(value: string): string | undefined {
+	const problem = slugProblem(value);
+
+	return problem === undefined ? undefined : slugProblemMessage(problem);
 }
 
 /**
@@ -736,7 +755,7 @@ async function createFirstTenant(
 		const slug = await ui.prefixedText({
 			message: 'Choose a slug for the first cache',
 			prefix: `${url}/t/`,
-			problem: slugProblem
+			problem: slugProblemText
 		});
 
 		if (slug === undefined) {

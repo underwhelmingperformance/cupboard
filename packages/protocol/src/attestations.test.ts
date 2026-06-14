@@ -18,13 +18,14 @@ describe('attestationNegotiateRequestSchema', () => {
 			)
 		};
 
-		expect(attestationNegotiateRequestSchema.safeParse(value).success).toBe(
-			true
-		);
+		expect(attestationNegotiateRequestSchema.parse(value)).toStrictEqual(value);
 	});
 
 	it.each([
-		{ name: 'an unknown top-level key', value: { bundles: [], extra: 1 } },
+		{
+			name: 'an unknown top-level key',
+			value: { bundles: [], extra: 1 }
+		},
 		{
 			name: 'an unknown key inside a bundle',
 			value: { bundles: [{ ...bundle, surprise: true }] }

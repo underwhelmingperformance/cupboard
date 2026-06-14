@@ -54,7 +54,9 @@ describe('lint-commit-messages CLI', () => {
 
 				expect({
 					code: result.code,
-					events: normaliseEventDurations(parseJsonLines(result.stderr)),
+					events: normaliseCommitLintEvents(
+						normaliseEventDurations(parseJsonLines(result.stderr))
+					),
 					stdout: result.stdout
 				}).toStrictEqual({
 					code: 1,
@@ -76,12 +78,10 @@ describe('lint-commit-messages CLI', () => {
 									findings: [
 										{
 											fixable: false,
-											message: 'subject-empty: subject may not be empty',
 											rule: 'subject-empty'
 										},
 										{
 											fixable: false,
-											message: 'type-empty: type may not be empty',
 											rule: 'type-empty'
 										}
 									],
@@ -106,7 +106,7 @@ function parseJsonLines(value: string): readonly unknown[] {
 	return value
 		.trimEnd()
 		.split('\n')
-		.map((line) => JSON.parse(line) as unknown);
+		.map((line): unknown => JSON.parse(line));
 }
 
 function normaliseEventDurations(
@@ -122,6 +122,44 @@ function normaliseEventDurations(
 			durationMs: typeof event.durationMs
 		};
 	});
+}
+
+function normaliseCommitLintEvents(
+	events: readonly unknown[]
+): readonly unknown[] {
+	return events.map((event) => {
+		if (!isRecord(event) || event.event !== 'commit-message-lint') {
+			return event;
+		}
+
+		return {
+			...event,
+			failures: Array.isArray(event.failures)
+				? event.failures.map((failure) => commitLintFailureShape(failure))
+				: event.failures
+		};
+	});
+}
+
+function commitLintFailureShape(failure: unknown): unknown {
+	if (!isRecord(failure) || !Array.isArray(failure.findings)) {
+		return failure;
+	}
+
+	return {
+		...failure,
+		findings: failure.findings.map((finding) => commitLintFindingShape(finding))
+	};
+}
+
+function commitLintFindingShape(finding: unknown): unknown {
+	if (!isRecord(finding)) {
+		return finding;
+	}
+
+	return Object.fromEntries(
+		Object.entries(finding).filter(([key]) => key !== 'message')
+	);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

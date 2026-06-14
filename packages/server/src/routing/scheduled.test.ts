@@ -2,13 +2,28 @@ import { describe, expect, it } from 'vitest';
 
 import { runScheduledMaintenance } from './scheduled.ts';
 
-const gcError = new Error('gc boom');
-const verifyError = new Error('verify boom');
+class ScheduledMaintenanceTestError extends Error {
+	constructor(public readonly phase: 'gc' | 'verify') {
+		super(`${phase} failed`);
+	}
+}
+
+const gcError = new ScheduledMaintenanceTestError('gc');
+const verifyError = new ScheduledMaintenanceTestError('verify');
+
+function expectScheduledMaintenanceTestError(
+	error: unknown
+): asserts error is ScheduledMaintenanceTestError {
+	expect(error).toBeInstanceOf(ScheduledMaintenanceTestError);
+}
 
 function recorder(): {
 	readonly calls: string[];
 	pass: (label: string) => () => Promise<void>;
-	fail: (label: string, error: Error) => () => Promise<void>;
+	fail: (
+		label: string,
+		error: ScheduledMaintenanceTestError
+	) => () => Promise<void>;
 } {
 	const calls: string[] = [];
 
@@ -44,8 +59,9 @@ describe('runScheduledMaintenance', () => {
 			pass('verify')
 		).catch((error_: unknown) => error_);
 
-		expect({ error, calls }).toStrictEqual({
-			error: gcError,
+		expectScheduledMaintenanceTestError(error);
+		expect({ error: { phase: error.phase }, calls }).toStrictEqual({
+			error: { phase: 'gc' },
 			calls: ['gc', 'verify']
 		});
 	});
@@ -58,17 +74,25 @@ describe('runScheduledMaintenance', () => {
 			fail('verify', verifyError)
 		).catch((error_: unknown) => error_);
 
-		expect({ error, calls }).toStrictEqual({
-			error: verifyError,
+		expectScheduledMaintenanceTestError(error);
+		expect({ error: { phase: error.phase }, calls }).toStrictEqual({
+			error: { phase: 'verify' },
 			calls: ['gc', 'verify']
 		});
 	});
 
 	it('surfaces the sweep failure first when both fail', async () => {
-		const { fail } = recorder();
+		const { calls, fail } = recorder();
 
-		await expect(
-			runScheduledMaintenance(fail('gc', gcError), fail('verify', verifyError))
-		).rejects.toBe(gcError);
+		const error = await runScheduledMaintenance(
+			fail('gc', gcError),
+			fail('verify', verifyError)
+		).catch((error_: unknown) => error_);
+
+		expectScheduledMaintenanceTestError(error);
+		expect({ error: { phase: error.phase }, calls }).toStrictEqual({
+			error: { phase: 'gc' },
+			calls: ['gc', 'verify']
+		});
 	});
 });

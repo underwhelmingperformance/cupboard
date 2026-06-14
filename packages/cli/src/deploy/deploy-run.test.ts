@@ -80,9 +80,18 @@ const silentReporter: Reporter = {
 	error: vi.fn()
 };
 
-const notExpected = (member: string) => (): never => {
-	throw new Error(`${member} was not expected in this test`);
-};
+function recordFallbackApiCall(calls: string[], member: string): void {
+	const call = `unexpected:${member}`;
+	calls.push(call);
+}
+
+function absentString(): string | undefined {
+	return undefined;
+}
+
+function absentRows(): readonly unknown[] | undefined {
+	return undefined;
+}
 
 function recordingApi(): { api: CloudflareApi; calls: string[] } {
 	const calls: string[] = [];
@@ -91,13 +100,34 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 		calls,
 		api: {
 			listAccounts: () => Promise.resolve([{ id: 'acc', name: 'Acme' }]),
-			r2BucketExists: notExpected('r2BucketExists'),
-			listTokenPermissionGroups: notExpected('listTokenPermissionGroups'),
-			findApiTokenId: notExpected('findApiTokenId'),
-			createApiToken: notExpected('createApiToken'),
-			rollApiTokenSecret: notExpected('rollApiTokenSecret'),
-			getWorkersDevSubdomain: notExpected('getWorkersDevSubdomain'),
-			enableWorkersDevRoute: notExpected('enableWorkersDevRoute'),
+			r2BucketExists: () => {
+				recordFallbackApiCall(calls, 'r2BucketExists');
+				return Promise.resolve(false);
+			},
+			listTokenPermissionGroups: () => {
+				recordFallbackApiCall(calls, 'listTokenPermissionGroups');
+				return Promise.resolve([]);
+			},
+			findApiTokenId: () => {
+				recordFallbackApiCall(calls, 'findApiTokenId');
+				return Promise.resolve(absentString());
+			},
+			createApiToken: () => {
+				recordFallbackApiCall(calls, 'createApiToken');
+				return Promise.resolve({ id: '', value: '' });
+			},
+			rollApiTokenSecret: () => {
+				recordFallbackApiCall(calls, 'rollApiTokenSecret');
+				return Promise.resolve('');
+			},
+			getWorkersDevSubdomain: () => {
+				recordFallbackApiCall(calls, 'getWorkersDevSubdomain');
+				return Promise.resolve(absentString());
+			},
+			enableWorkersDevRoute: () => {
+				recordFallbackApiCall(calls, 'enableWorkersDevRoute');
+				return Promise.resolve();
+			},
 			ensureR2Bucket(name) {
 				calls.push(`r2:${name}`);
 				return Promise.resolve();
@@ -118,13 +148,17 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`d1q:${sql.slice(0, 12)}`);
 				return Promise.resolve();
 			},
-			d1QueryRows() {
+			d1QueryRows(_databaseId, sql) {
+				calls.push(`d1qr:${sql.slice(0, 12)}`);
 				return Promise.resolve([]);
 			},
 			getScriptMigrationTag() {
 				return Promise.resolve('v0');
 			},
-			getScriptBindings: notExpected('getScriptBindings'),
+			getScriptBindings: () => {
+				recordFallbackApiCall(calls, 'getScriptBindings');
+				return Promise.resolve(absentRows());
+			},
 			uploadScript(scriptName) {
 				calls.push(`upload:${scriptName}`);
 				return Promise.resolve();
@@ -141,14 +175,18 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`secret:${scriptName}:${secret.name}`);
 				return Promise.resolve();
 			},
-			listScriptSecrets() {
+			listScriptSecrets(scriptName) {
+				calls.push(`secrets:${scriptName}`);
 				return Promise.resolve([]);
 			},
 			findZoneId(name) {
 				calls.push(`zone:${name}`);
 				return Promise.resolve('zone-1');
 			},
-			findCustomDomain: notExpected('findCustomDomain'),
+			findCustomDomain: () => {
+				recordFallbackApiCall(calls, 'findCustomDomain');
+				return Promise.resolve(absentString());
+			},
 			ensureCustomDomain(scriptName, hostname) {
 				calls.push(`domain:${hostname}->${scriptName}`);
 				return Promise.resolve();
@@ -194,6 +232,7 @@ describe('runDeploy', () => {
 			'd1:cupboard',
 			'kv:cupboard-tenant-cache',
 			'd1q:CREATE TABLE',
+			'd1qr:SELECT name ',
 			'd1q:CREATE TABLE',
 			'd1q:INSERT INTO ',
 			'upload:cupboard-tenant',
@@ -252,10 +291,26 @@ describe('runDeploy', () => {
 			}
 		});
 
-		expect({
-			uploads: calls.filter((call) => call.startsWith('upload:')),
-			skipped: skipped.length
-		}).toStrictEqual({ uploads: [], skipped: 2 });
+		expect({ calls, skipped }).toStrictEqual({
+			calls: [
+				'r2:cupboard-blobs',
+				'queue:cupboard-maintenance',
+				'queue:cupboard-maintenance-dlq',
+				'd1:cupboard',
+				'kv:cupboard-tenant-cache',
+				'd1q:CREATE TABLE',
+				'd1qr:SELECT name ',
+				'd1q:CREATE TABLE',
+				'd1q:INSERT INTO ',
+				'queue:cupboard-maintenance',
+				'consumer:qid-cupboard-maintenance->cupboard',
+				'cron:cupboard:0 * * * *'
+			],
+			skipped: [
+				'cupboard-tenant already runs this build and configuration; upload skipped.',
+				'cupboard already runs this build and configuration; upload skipped.'
+			]
+		});
 	});
 
 	it('never skips a dirty build, whose version cannot be trusted', async () => {
@@ -273,9 +328,21 @@ describe('runDeploy', () => {
 			}
 		});
 
-		expect(calls.filter((call) => call.startsWith('upload:'))).toStrictEqual([
+		expect(calls).toStrictEqual([
+			'r2:cupboard-blobs',
+			'queue:cupboard-maintenance',
+			'queue:cupboard-maintenance-dlq',
+			'd1:cupboard',
+			'kv:cupboard-tenant-cache',
+			'd1q:CREATE TABLE',
+			'd1qr:SELECT name ',
+			'd1q:CREATE TABLE',
+			'd1q:INSERT INTO ',
 			'upload:cupboard-tenant',
-			'upload:cupboard'
+			'upload:cupboard',
+			'queue:cupboard-maintenance',
+			'consumer:qid-cupboard-maintenance->cupboard',
+			'cron:cupboard:0 * * * *'
 		]);
 	});
 
@@ -330,16 +397,26 @@ describe('runDeploy', () => {
 			}
 		});
 
-		expect({
-			uploads: calls.filter((call) => call.startsWith('upload:')),
-			warnings: warnings.filter((warning) =>
-				warning.startsWith('CPU limit not applied')
-			).length
-		}).toStrictEqual({
-			// The control worker sets a CPU limit; it is uploaded again without
-			// one. The tenant worker sets none, so it uploads first time.
-			uploads: ['upload:cupboard-tenant', 'upload:cupboard'],
-			warnings: 1
+		expect({ calls, warnings }).toStrictEqual({
+			calls: [
+				'r2:cupboard-blobs',
+				'queue:cupboard-maintenance',
+				'queue:cupboard-maintenance-dlq',
+				'd1:cupboard',
+				'kv:cupboard-tenant-cache',
+				'd1q:CREATE TABLE',
+				'd1qr:SELECT name ',
+				'd1q:CREATE TABLE',
+				'd1q:INSERT INTO ',
+				'upload:cupboard-tenant',
+				'upload:cupboard',
+				'queue:cupboard-maintenance',
+				'consumer:qid-cupboard-maintenance->cupboard',
+				'cron:cupboard:0 * * * *'
+			],
+			warnings: [
+				"CPU limit not applied: cupboard: this plan does not support CPU limits, so the Worker runs within the plan's CPU budget"
+			]
 		});
 	});
 });

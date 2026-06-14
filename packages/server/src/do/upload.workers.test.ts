@@ -7,6 +7,7 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { buildVersion } from '../build-info.generated.ts';
 import {
@@ -31,6 +32,7 @@ import {
 	commitSharedPath,
 	CommitSocketError,
 	commitUpload,
+	commitUploadRejection,
 	commitUploadViaWorker,
 	CommitVerdictError,
 	commitVerifiablePath,
@@ -86,6 +88,109 @@ import {
 	verifyNarInfoSignature,
 	workerFetch
 } from '../test-support.ts';
+
+function publicKeyShape(publicKey: string): {
+	readonly name: string;
+	readonly rawBytes: number;
+} {
+	const [name, encoded] = z
+		.tuple([z.string(), z.string()])
+		.parse(publicKey.split(':'));
+
+	return {
+		name,
+		rawBytes: Uint8Array.from(
+			atob(encoded),
+			(character) => character.codePointAt(0) ?? 0
+		).byteLength
+	};
+}
+
+async function cachedResponseShape(
+	cacheKey: string
+): Promise<{ readonly cached: boolean; readonly status: number | undefined }> {
+	const response = await caches.default.match(cacheKey);
+
+	return {
+		cached: response !== undefined,
+		status: response?.status
+	};
+}
+
+type ErrorConstructor<T extends Error> = abstract new (
+	...arguments_: never[]
+) => T;
+
+function expectError<T extends Error>(
+	error: unknown,
+	errorClass: ErrorConstructor<T>
+): asserts error is T {
+	expect(error).toBeInstanceOf(errorClass);
+}
+
+// Projects an oRPC validation error body down to the fields a schema-mismatch
+// test pins: the code, status, and each issue's code and path. The per-issue
+// message is human-readable and version-dependent, so it is dropped.
+function badRequestBodyShape(body: unknown): {
+	readonly code: unknown;
+	readonly status: unknown;
+	readonly issues: readonly {
+		readonly code: unknown;
+		readonly path: unknown;
+	}[];
+} {
+	if (typeof body !== 'object' || body === null) {
+		throw new TypeError('error body was not an object');
+	}
+
+	const fields: Record<string, unknown> = Object.fromEntries(
+		Object.entries(body)
+	);
+	const data = fields.data;
+
+	if (typeof data !== 'object' || data === null || !('issues' in data)) {
+		throw new TypeError('error body had no data.issues');
+	}
+
+	const { issues } = data;
+
+	if (!Array.isArray(issues)) {
+		throw new TypeError('error body issues was not an array');
+	}
+
+	return {
+		code: fields.code,
+		status: fields.status,
+		issues: issues.map((issue: unknown) => {
+			if (typeof issue !== 'object' || issue === null) {
+				throw new TypeError('issue was not an object');
+			}
+
+			const issueFields: Record<string, unknown> = Object.fromEntries(
+				Object.entries(issue)
+			);
+
+			return { code: issueFields.code, path: issueFields.path };
+		})
+	};
+}
+
+async function rejectedBy<T extends Error>(
+	promise: Promise<unknown>,
+	errorClass: ErrorConstructor<T>
+): Promise<T> {
+	let rejection: unknown;
+
+	try {
+		await promise;
+	} catch (error) {
+		rejection = error;
+	}
+
+	expectError(rejection, errorClass);
+
+	return rejection;
+}
 
 describe('upload flow', () => {
 	beforeEach(async () => {
@@ -148,7 +253,13 @@ describe('upload flow', () => {
 		const body = await fromDurableObject.text();
 		const publicKey = body.trimEnd();
 
-		expect(publicKey).not.toBe('');
+		expect({
+			status: fromDurableObject.status,
+			publicKey: publicKeyShape(publicKey)
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			publicKey: { name: 'cupboard-1', rawBytes: 32 }
+		});
 
 		await expectTextResponse(
 			'/pubkey',
@@ -165,22 +276,44 @@ describe('upload flow', () => {
 	it('bootstraps an admin token and keeps the signing key stable', async () => {
 		const first = await bootstrap();
 		const second = await bootstrap();
-
-		expect(typeof first.token).toBe('string');
-		expect(first.token).not.toBe('');
-		expect(typeof first.publicKey).toBe('string');
-		expect(first.publicKey).not.toBe('');
-
-		expect({ url: first.url, publicKey: first.publicKey }).toStrictEqual({
-			url: currentOrigin(),
-			publicKey: first.publicKey
-		});
+		const firstStats = await authorisedFetch(
+			defaultCacheStatsPath,
+			first.token
+		);
+		const secondStats = await authorisedFetch(
+			defaultCacheStatsPath,
+			second.token
+		);
 
 		// A re-bootstrap issues a fresh token but never rotates the signing key.
-		expect(second.token).not.toBe('');
-		expect({ url: second.url, publicKey: second.publicKey }).toStrictEqual({
-			url: currentOrigin(),
-			publicKey: first.publicKey
+		expect({
+			firstToken: first.token.length > 0,
+			secondToken: second.token.length > 0,
+			stablePublicKey: second.publicKey,
+			first: {
+				url: first.url,
+				publicKey: publicKeyShape(first.publicKey),
+				stats: firstStats.status
+			},
+			second: {
+				url: second.url,
+				publicKey: publicKeyShape(second.publicKey),
+				stats: secondStats.status
+			}
+		}).toStrictEqual({
+			firstToken: true,
+			secondToken: true,
+			stablePublicKey: first.publicKey,
+			first: {
+				url: currentOrigin(),
+				publicKey: { name: 'cupboard-1', rawBytes: 32 },
+				stats: StatusCodes.OK
+			},
+			second: {
+				url: currentOrigin(),
+				publicKey: publicKeyShape(first.publicKey),
+				stats: StatusCodes.OK
+			}
 		});
 
 		await expectTextResponse('/pubkey', {
@@ -216,17 +349,17 @@ describe('upload flow', () => {
 	});
 
 	it('negotiates, commits, serves narinfo and skips uploaded paths', async () => {
-		const token = await initialise();
+		const init = await bootstrap();
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength
 		});
 
-		const negotiate = await negotiateUploads(token, [metadata]);
+		const negotiate = await negotiateUploads(init.token, [metadata]);
 		const upload = expectSingleUploadDecision(negotiate, metadata);
-		await prepareUpload(token, upload, metadata);
+		await prepareUpload(init.token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		const committed = await commitUpload(token, upload.uploadId);
+		const committed = await commitUpload(init.token, upload.uploadId);
 
 		expect(committed).toStrictEqual({
 			storePathHash: metadata.storePathHash,
@@ -234,7 +367,7 @@ describe('upload flow', () => {
 			status: 'committed'
 		});
 
-		await expectStats(token, {
+		await expectStats(init.token, {
 			storePaths: 1,
 			narBlobs: 1,
 			pendingUploads: 0,
@@ -242,6 +375,7 @@ describe('upload flow', () => {
 		});
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		const [signature] = z.tuple([z.string()]).parse(narInfo.sigs);
 
 		expect(narInfo.toFields()).toStrictEqual({
 			storePath: metadata.storePath,
@@ -254,8 +388,11 @@ describe('upload flow', () => {
 			references: metadata.references,
 			deriver: undefined,
 			ca: undefined,
-			sigs: [expect.any(String)]
+			sigs: [signature]
 		});
+		expect({
+			signatureVerified: await verifyNarInfoSignature(narInfo, init.publicKey)
+		}).toStrictEqual({ signatureVerified: true });
 		await expectTextResponse(
 			`/${metadata.storePathHash}.narinfo`,
 			{
@@ -275,7 +412,7 @@ describe('upload flow', () => {
 			readFetch
 		);
 
-		const skip = await negotiateUploads(token, [metadata]);
+		const skip = await negotiateUploads(init.token, [metadata]);
 
 		expect(skip.uploads).toStrictEqual([
 			{
@@ -352,9 +489,15 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		await expect(commitUpload(token, upload.uploadId)).rejects.toStrictEqual(
-			new CommitVerdictError('mismatch')
+		const error = await rejectedBy(
+			commitUpload(token, upload.uploadId),
+			CommitVerdictError
 		);
+
+		expect({ name: error.name, verdict: error.verdict }).toStrictEqual({
+			name: 'CommitVerdictError',
+			verdict: 'mismatch'
+		});
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
@@ -390,9 +533,15 @@ describe('upload flow', () => {
 			fileHash: garbageFileHash
 		});
 
-		await expect(commitUpload(token, upload.uploadId)).rejects.toStrictEqual(
-			new CommitVerdictError('mismatch')
+		const error = await rejectedBy(
+			commitUpload(token, upload.uploadId),
+			CommitVerdictError
 		);
+
+		expect({ name: error.name, verdict: error.verdict }).toStrictEqual({
+			name: 'CommitVerdictError',
+			verdict: 'mismatch'
+		});
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
@@ -421,9 +570,15 @@ describe('upload flow', () => {
 		await prepareUpload(token, bad, badMetadata);
 		await putNarBytes(bad.r2Key, wrong);
 
-		await expect(commitUpload(token, bad.uploadId)).rejects.toStrictEqual(
-			new CommitVerdictError('mismatch')
+		const error = await rejectedBy(
+			commitUpload(token, bad.uploadId),
+			CommitVerdictError
 		);
+
+		expect({ name: error.name, verdict: error.verdict }).toStrictEqual({
+			name: 'CommitVerdictError',
+			verdict: 'mismatch'
+		});
 
 		// The hash is not poisoned: a correct upload of `good` for another store path
 		// still negotiates as an upload, verifies, commits, and is served.
@@ -444,12 +599,17 @@ describe('upload flow', () => {
 
 		const goodCommit = await commitUpload(token, goodUpload.uploadId);
 		const served = await readFetch(`/${goodMetadata.storePathHash}.narinfo`);
+		const blob = await env.BLOBS.head(narObjectKey(good.narHash));
 
-		expect(goodCommit.status).toBe('committed');
-		expect(served.status).toBe(StatusCodes.OK);
-		await expect(
-			env.BLOBS.head(narObjectKey(good.narHash))
-		).resolves.not.toBeNull();
+		expect({
+			commitStatus: goodCommit.status,
+			servedStatus: served.status,
+			blobStored: blob !== null
+		}).toStrictEqual({
+			commitStatus: 'committed',
+			servedStatus: StatusCodes.OK,
+			blobStored: true
+		});
 	});
 
 	it('makes two encodings of one NAR advertise the canonical stored object', async () => {
@@ -502,13 +662,12 @@ describe('upload flow', () => {
 		const firstInfo = await fetchNarInfo(first.storePathHash);
 		const secondInfo = await fetchNarInfo(second.storePathHash);
 		const canonical = await env.BLOBS.head(narObjectKey(compressed.narHash));
-
-		if (canonical?.checksums.sha256 === undefined) {
-			throw new Error('expected a canonical object with a checksum');
-		}
+		const canonicalChecksum = z
+			.instanceof(ArrayBuffer)
+			.parse(canonical?.checksums.sha256);
 
 		const canonicalFileHash = NixSha256Hash.fromDigest(
-			new Uint8Array(canonical.checksums.sha256)
+			new Uint8Array(canonicalChecksum)
 		).toString();
 
 		expect(firstInfo.toFields().fileHash).toBe(compressed.fileHash);
@@ -1184,12 +1343,15 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		await expect(commitUpload(token, upload.uploadId)).rejects.toStrictEqual(
-			new CommitSocketError(
-				StatusCodes.REQUEST_TOO_LONG,
-				'NAR is too large to verify and cannot be served'
-			)
+		const error = await rejectedBy(
+			commitUpload(token, upload.uploadId),
+			CommitSocketError
 		);
+
+		expect({ name: error.name, status: error.status }).toStrictEqual({
+			name: 'CommitSocketError',
+			status: StatusCodes.REQUEST_TOO_LONG
+		});
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
@@ -1305,28 +1467,29 @@ describe('upload flow', () => {
 	});
 
 	it('materialises the signed narinfo to R2 once and never rewrites it', async () => {
-		const token = await initialise();
+		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		const first = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
+			await negotiateUploads(init.token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, first, metadata);
+		await prepareUpload(init.token, first, metadata);
 		await putNarBytes(first.r2Key);
 
 		const second = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
+			await negotiateUploads(init.token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, second, metadata);
+		await prepareUpload(init.token, second, metadata);
 
-		const committed = await commitUpload(token, first.uploadId);
+		const committed = await commitUpload(init.token, first.uploadId);
 
 		expect(committed.status).toBe('committed');
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 		const parsed = NarInfo.parse(stored.body);
+		const [signature] = z.tuple([z.string()]).parse(parsed.sigs);
 
 		expect({
 			contentType: stored.contentType,
@@ -1346,11 +1509,14 @@ describe('upload flow', () => {
 				references: metadata.references,
 				deriver: undefined,
 				ca: undefined,
-				sigs: [expect.any(String)]
+				sigs: [signature]
 			}
 		});
+		expect({
+			signatureVerified: await verifyNarInfoSignature(parsed, init.publicKey)
+		}).toStrictEqual({ signatureVerified: true });
 
-		const recommit = await commitUpload(token, second.uploadId);
+		const recommit = await commitUpload(init.token, second.uploadId);
 
 		expect(recommit.status).toBe('already-present');
 
@@ -1375,7 +1541,9 @@ describe('upload flow', () => {
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 
-		expect(await verifyNarInfoSignature(narInfo, init.publicKey)).toBe(true);
+		expect({
+			signatureVerified: await verifyNarInfoSignature(narInfo, init.publicKey)
+		}).toStrictEqual({ signatureVerified: true });
 	});
 
 	it('returns 404 for a narinfo that has not been committed', async () => {
@@ -1457,9 +1625,10 @@ describe('upload flow', () => {
 		).toString();
 		await readFetch(`/${metadata.storePathHash}.narinfo`);
 
-		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
-			Response
-		);
+		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
+			cached: true,
+			status: StatusCodes.OK
+		});
 
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 		await negotiateUploads(token, [metadata]);
@@ -1552,9 +1721,10 @@ describe('upload flow', () => {
 		).toString();
 		await readFetch(`/${swept.storePathHash}.narinfo`);
 
-		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
-			Response
-		);
+		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
+			cached: true,
+			status: StatusCodes.OK
+		});
 
 		expect(await runGcResult()).toStrictEqual({
 			ok: true,
@@ -1588,9 +1758,10 @@ describe('upload flow', () => {
 		).toString();
 		await readFetch(`/${swept.storePathHash}.narinfo`);
 
-		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
-			Response
-		);
+		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
+			cached: true,
+			status: StatusCodes.OK
+		});
 
 		await runGcFromInternalOrigin();
 
@@ -1599,9 +1770,10 @@ describe('upload flow', () => {
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, swept.storePathHash))
 		).resolves.toBeNull();
-		await expect(caches.default.match(cacheKey)).resolves.toBeInstanceOf(
-			Response
-		);
+		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
+			cached: true,
+			status: StatusCodes.OK
+		});
 	});
 
 	it('spares an in-flight reserved narinfo row from the reachability sweep', async () => {
@@ -1658,11 +1830,17 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		await expect(commitUpload(token, upload.uploadId)).rejects.toMatchObject({
-			name: 'CommitSocketError',
-			status: StatusCodes.BAD_REQUEST
-		});
+		const error = await commitUploadRejection(token, upload.uploadId);
+		expectError(error, CommitSocketError);
 
+		expect({ error: { name: error.name, status: error.status } }).toStrictEqual(
+			{
+				error: {
+					name: CommitSocketError.name,
+					status: StatusCodes.BAD_REQUEST
+				}
+			}
+		);
 		await expectStats(token, {
 			storePaths: 0,
 			narBlobs: 0,
@@ -1712,11 +1890,17 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
-		await expect(commitUpload(token, upload.uploadId)).rejects.toMatchObject({
-			name: 'CommitSocketError',
-			status: StatusCodes.BAD_REQUEST
-		});
+		const error = await commitUploadRejection(token, upload.uploadId);
+		expectError(error, CommitSocketError);
 
+		expect({ error: { name: error.name, status: error.status } }).toStrictEqual(
+			{
+				error: {
+					name: CommitSocketError.name,
+					status: StatusCodes.BAD_REQUEST
+				}
+			}
+		);
 		await expectStats(token, {
 			storePaths: 0,
 			narBlobs: 0,
@@ -1735,11 +1919,17 @@ describe('upload flow', () => {
 		await prepareUpload(token, upload, metadata);
 		await env.BLOBS.put(upload.r2Key, narBytes);
 
-		await expect(commitUpload(token, upload.uploadId)).rejects.toMatchObject({
-			name: 'CommitSocketError',
-			status: StatusCodes.BAD_REQUEST
-		});
+		const error = await commitUploadRejection(token, upload.uploadId);
+		expectError(error, CommitSocketError);
 
+		expect({ error: { name: error.name, status: error.status } }).toStrictEqual(
+			{
+				error: {
+					name: CommitSocketError.name,
+					status: StatusCodes.BAD_REQUEST
+				}
+			}
+		);
 		await expectStats(token, {
 			storePaths: 0,
 			narBlobs: 0,
@@ -1751,15 +1941,17 @@ describe('upload flow', () => {
 	it.each([
 		{
 			name: 'a malformed NAR hash',
-			fields: { narHash: 'sha256:not-a-valid-hash' }
+			fields: { narHash: 'sha256:not-a-valid-hash' },
+			issues: [{ code: 'invalid_format', path: ['paths', 0, 'narHash'] }]
 		},
 		{
 			name: 'a full store path reference',
 			fields: {
 				references: ['/nix/store/11111111111111111111111111111111-first']
-			}
+			},
+			issues: [{ code: 'invalid_format', path: ['paths', 0, 'references', 0] }]
 		}
-	])('rejects upload negotiation with $name', async ({ fields }) => {
+	])('rejects upload negotiation with $name', async ({ fields, issues }) => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
@@ -1774,14 +1966,22 @@ describe('upload flow', () => {
 			method: 'POST'
 		});
 
-		const body = await response.text();
+		const body = badRequestBodyShape(await response.json());
 
 		expect({
 			status: response.status,
-			hasDiagnostics: body.length > 0
+			body: {
+				code: body.code,
+				status: body.status,
+				issues: body.issues
+			}
 		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
-			hasDiagnostics: true
+			body: {
+				code: 'BAD_REQUEST',
+				status: StatusCodes.BAD_REQUEST,
+				issues
+			}
 		});
 
 		await expectStats(token, {
@@ -1795,10 +1995,15 @@ describe('upload flow', () => {
 	it.each([
 		{
 			name: 'a malformed file hash',
-			fields: { fileHash: 'sha256:not-a-valid-hash' }
+			fields: { fileHash: 'sha256:not-a-valid-hash' },
+			issues: [{ code: 'invalid_format', path: ['fileHash'] }]
 		},
-		{ name: 'a non-positive file size', fields: { fileSize: 0 } }
-	])('rejects upload preparation with $name', async ({ fields }) => {
+		{
+			name: 'a non-positive file size',
+			fields: { fileSize: 0 },
+			issues: [{ code: 'too_small', path: ['fileSize'] }]
+		}
+	])('rejects upload preparation with $name', async ({ fields, issues }) => {
 		const token = await initialise();
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength
@@ -1822,14 +2027,22 @@ describe('upload flow', () => {
 			}
 		);
 
-		const body = await response.text();
+		const body = badRequestBodyShape(await response.json());
 
 		expect({
 			status: response.status,
-			hasDiagnostics: body.length > 0
+			body: {
+				code: body.code,
+				status: body.status,
+				issues: body.issues
+			}
 		}).toStrictEqual({
 			status: StatusCodes.BAD_REQUEST,
-			hasDiagnostics: true
+			body: {
+				code: 'BAD_REQUEST',
+				status: StatusCodes.BAD_REQUEST,
+				issues
+			}
 		});
 
 		await expectStats(token, {
@@ -1949,12 +2162,7 @@ describe('upload flow', () => {
 		await prepareUpload(token, firstUpload, first);
 		await putNarBytes(firstUpload.r2Key);
 		await commitUpload(token, firstUpload.uploadId);
-		const secondCommit = expectSingleCommitDecision(
-			await negotiateUploads(token, [second]),
-			second
-		);
-
-		expect(secondCommit.uploadId).not.toBe('');
+		expectSingleCommitDecision(await negotiateUploads(token, [second]), second);
 
 		await expectStats(token, {
 			storePaths: 1,
@@ -2302,14 +2510,20 @@ describe('upload flow', () => {
 
 		// The re-committed row owns a live object, so the stale entry is dropped
 		// without deleting the object.
-		expect(collected.narInfosDeleted).toBe(0);
-		await expect(
-			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
-		).resolves.not.toBeNull();
-
 		const stillServed = await readFetch(`/${metadata.storePathHash}.narinfo`);
 
-		expect(stillServed.status).toBe(StatusCodes.OK);
+		expect({
+			narInfosDeleted: collected.narInfosDeleted,
+			narInfoStored:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+				)) !== null,
+			stillServedStatus: stillServed.status
+		}).toStrictEqual({
+			narInfosDeleted: 0,
+			narInfoStored: true,
+			stillServedStatus: StatusCodes.OK
+		});
 	});
 
 	describe('retention roots', () => {
@@ -2853,10 +3067,13 @@ describe('upload flow', () => {
 
 			// The reaper arms the unreferenced blob; the grace not yet elapsed, the
 			// object stays.
-			expect(await runBlobReaper(env)).toBe(0);
-			await expect(
-				env.BLOBS.head(narObjectKey(cNar.narHash))
-			).resolves.not.toBeNull();
+			expect({
+				deleted: await runBlobReaper(env),
+				stored: (await env.BLOBS.head(narObjectKey(cNar.narHash))) !== null
+			}).toStrictEqual({
+				deleted: 0,
+				stored: true
+			});
 
 			vi.setSystemTime(afterGrace());
 

@@ -2,9 +2,12 @@ import path from 'node:path';
 
 import { StorePath } from '@cupboard/nix/store-path';
 import {
+	uploadActionDecisionSchema,
+	uploadDecisionSchema,
 	type UploadPathMetadataFields,
 	type UploadPathNegotiationFields
 } from '@cupboard/protocol/upload';
+import { expect } from 'vitest';
 
 import { readFileByteStream } from '../../packages/cli/src/io/file-stream.ts';
 import { compressAndHashNarToFile } from '../../packages/cli/src/nix/blob.ts';
@@ -24,6 +27,11 @@ interface PreparedPath {
 	readonly compressedPath: string;
 }
 
+interface UploadIdentity {
+	readonly storePathHash: string;
+	readonly narHash: string;
+}
+
 /**
  * Pushes the given store paths to a cupboard through the full client flow:
  * negotiate, then for each path either prepare-upload-and-commit (PUT to the
@@ -37,21 +45,45 @@ export async function pushStorePaths(
 	const prepared = await Promise.all(
 		storePaths.map((storePath) => preparePath(context, storePath))
 	);
-	const byStorePathHash = new Map(
-		prepared.map((entry) => [entry.metadata.storePathHash, entry])
-	);
-
 	const { uploads } = await context.client.negotiate({
 		paths: prepared.map((entry) => negotiationFields(entry.metadata))
 	});
+	const decisions = uploads.map((decision) =>
+		uploadDecisionSchema.parse(decision)
+	);
+	const preparedByIdentity = new Map(
+		prepared.map((entry) => [uploadIdentityKey(entry.metadata), entry])
+	);
+	const decisionEntries = prepared.flatMap((entry) =>
+		decisions
+			.filter(
+				(decision) =>
+					uploadIdentityKey(decision) === uploadIdentityKey(entry.metadata)
+			)
+			.map((decision) => ({ decision, entry }))
+	);
 
-	for (const decision of uploads) {
-		const entry = byStorePathHash.get(decision.storePathHash);
+	expect(
+		decisions
+			.map((decision) => uploadIdentity(decision))
+			.toSorted(compareUploadIdentities)
+	).toStrictEqual(
+		prepared
+			.map((entry) => uploadIdentity(entry.metadata))
+			.toSorted(compareUploadIdentities)
+	);
 
-		if (entry === undefined) {
-			throw new UnexpectedUploadDecisionError(decision.storePathHash);
-		}
+	expect(
+		decisionEntries
+			.map(({ decision }) => uploadIdentity(decision))
+			.toSorted(compareUploadIdentities)
+	).toStrictEqual(
+		[...preparedByIdentity.values()]
+			.map((entry) => uploadIdentity(entry.metadata))
+			.toSorted(compareUploadIdentities)
+	);
 
+	for (const { decision, entry } of decisionEntries) {
 		if (decision.action === 'upload') {
 			const prepared = await context.client.prepareUpload(decision.uploadId, {
 				fileHash: entry.metadata.fileHash,
@@ -82,6 +114,27 @@ export async function pushStorePaths(
 
 	return new Map(
 		prepared.map((entry) => [entry.metadata.storePathHash, entry.metadata])
+	);
+}
+
+function uploadIdentity(fields: UploadIdentity): UploadIdentity {
+	return {
+		storePathHash: fields.storePathHash,
+		narHash: fields.narHash
+	};
+}
+
+function uploadIdentityKey(fields: UploadIdentity): string {
+	return `${fields.storePathHash}\0${fields.narHash}`;
+}
+
+function compareUploadIdentities(
+	left: UploadIdentity,
+	right: UploadIdentity
+): number {
+	return (
+		left.storePathHash.localeCompare(right.storePathHash) ||
+		left.narHash.localeCompare(right.narHash)
 	);
 }
 
@@ -120,20 +173,21 @@ export async function negotiateUpload(
 	const { uploads } = await context.client.negotiate({
 		paths: [negotiationFields(entry.metadata)]
 	});
-	const [decision] = uploads;
+	const upload = uploadActionDecisionSchema
+		.array()
+		.length(1)
+		.transform(([decision]) => uploadActionDecisionSchema.parse(decision))
+		.parse(uploads);
+	expect(uploadIdentity(upload)).toStrictEqual(uploadIdentity(entry.metadata));
 
-	if (decision?.action !== 'upload') {
-		throw new UnexpectedUploadDecisionError(entry.metadata.storePathHash);
-	}
-
-	const prepared = await context.client.prepareUpload(decision.uploadId, {
+	const prepared = await context.client.prepareUpload(upload.uploadId, {
 		fileHash: entry.metadata.fileHash,
 		fileSize: entry.metadata.fileSize,
 		compression: entry.metadata.compression
 	});
 
 	return {
-		r2Key: decision.r2Key,
+		r2Key: upload.r2Key,
 		uploadUrl: prepared.uploadUrl,
 		uploadHeaders: prepared.uploadHeaders,
 		compressedPath: entry.compressedPath,
@@ -169,11 +223,4 @@ async function preparePath(
 			ca: info.ca
 		}
 	};
-}
-
-export class UnexpectedUploadDecisionError extends Error {
-	constructor(public readonly storePathHash: string) {
-		super(`Unexpected upload decision for store path hash: ${storePathHash}`);
-		this.name = 'UnexpectedUploadDecisionError';
-	}
 }

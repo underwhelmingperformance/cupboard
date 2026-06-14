@@ -18,15 +18,11 @@ import {
 	runPolicyRemove
 } from './policy.ts';
 
-function uncalledClient(): never {
-	throw new Error('client should not be called');
-}
-
 function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 	return {
-		list: uncalledClient,
-		add: uncalledClient,
-		remove: uncalledClient,
+		list: () => Promise.resolve({ policies: [] }),
+		add: (body) => Promise.resolve({ id: 'p1', ...body }),
+		remove: ({ id }) => Promise.resolve({ id, removed: false }),
 		...overrides
 	};
 }
@@ -45,10 +41,9 @@ describe('runPolicyList', () => {
 			]
 		};
 
-		await runPolicyList(
-			reporter(results),
-			policyClient({ list: () => Promise.resolve(response) })
-		);
+		await runPolicyList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
 
 		expect(results).toStrictEqual([
 			[{ label: 'p1', value: 'root-name-prefix pr-; 604,800s' }]
@@ -59,10 +54,9 @@ describe('runPolicyList', () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 
-		await runPolicyList(
-			reporter(results, infos),
-			policyClient({ list: () => Promise.resolve({ policies: [] }) })
-		);
+		await runPolicyList(reporter(results, infos), {
+			list: () => Promise.resolve({ policies: [] })
+		});
 
 		expect({ results, infos }).toStrictEqual({
 			results: [[]],
@@ -82,18 +76,12 @@ describe('runPolicyAdd', () => {
 			ttlSeconds: 1_209_600
 		};
 
-		await runPolicyAdd(
-			'cache',
-			'builds',
-			1_209_600,
-			reporter(results),
-			policyClient({
-				add(body) {
-					calls.push(body);
-					return Promise.resolve(summary);
-				}
-			})
-		);
+		await runPolicyAdd('cache', 'builds', 1_209_600, reporter(results), {
+			add(body) {
+				calls.push(body);
+				return Promise.resolve(summary);
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 }],

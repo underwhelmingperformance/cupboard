@@ -2,10 +2,13 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { NarInfo } from '@cupboard/nix/narinfo';
+import { storePathSchema } from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
+import { CupboardUploadError } from '../../packages/cli/src/errors.ts';
 import { readFileByteStream } from '../../packages/cli/src/io/file-stream.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
 import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
@@ -25,6 +28,48 @@ import {
 
 const root = path.resolve(import.meta.dirname, '../..');
 const contentAddressedFixture = path.join(root, 'tests/fixtures/simple/source');
+
+async function fileExists(file: string): Promise<boolean> {
+	return readFile(file).then(
+		() => true,
+		() => false
+	);
+}
+
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
+}
+
+function expectCupboardUploadError(
+	error: unknown
+): asserts error is CupboardUploadError {
+	expect(error).toBeInstanceOf(CupboardUploadError);
+}
+
+function namedBytesShape(value: string): {
+	readonly name: string;
+	readonly rawBytes: number;
+} {
+	const [name, encoded] = z
+		.tuple([z.string().min(1), z.string()])
+		.parse(value.split(':'));
+
+	return {
+		name,
+		rawBytes: Uint8Array.from(
+			atob(encoded),
+			(character) => character.codePointAt(0) ?? 0
+		).byteLength
+	};
+}
 
 // An input-addressed derivation whose single-file output embeds the path of a
 // `builtins.toFile` dependency, so Nix records that dependency as a reference.
@@ -75,10 +120,15 @@ describe('Nix substitution', () => {
 
 			expect({
 				references: narInfo.references,
-				signatures: narInfo.sigs
+				signatures: narInfo.sigs.map((signature) => namedBytesShape(signature))
 			}).toStrictEqual({
 				references: [StorePath.basename(dependency)],
-				signatures: [expect.any(String)]
+				signatures: [
+					{
+						name: namedBytesShape(harness.publicKey).name,
+						rawBytes: 64
+					}
+				]
 			});
 
 			await harness.target.realise(
@@ -100,9 +150,22 @@ describe('Nix substitution', () => {
 
 			const untrustedKey = await generatePublicKey('cupboard-untrusted-1');
 
-			await expect(
-				harness.target.realise(referrer, signedBy(harness, untrustedKey))
-			).rejects.toThrow();
+			const outcome = await harness.target
+				.realise(referrer, signedBy(harness, untrustedKey))
+				.then(
+					() => ({ realised: true, targetPresent: true }),
+					async () => ({
+						realised: false,
+						targetPresent: await fileExists(
+							harness.target.physicalPath(referrer)
+						)
+					})
+				);
+
+			expect(outcome).toStrictEqual({
+				realised: false,
+				targetPresent: false
+			});
 		}));
 
 	it('rejects a presigned upload whose signature has been tampered with', () =>
@@ -112,7 +175,7 @@ describe('Nix substitution', () => {
 			const tampered = new URL(upload.uploadUrl);
 			tampered.searchParams.set('X-Amz-Signature', '0'.repeat(64));
 
-			await expect(
+			const error = await rejectedBy(() =>
 				harness.client.uploadBlob({
 					r2Key: upload.r2Key,
 					uploadUrl: tampered.toString(),
@@ -120,7 +183,16 @@ describe('Nix substitution', () => {
 					body: readFileByteStream(upload.compressedPath),
 					contentLength: upload.fileSize
 				})
-			).rejects.toThrow();
+			);
+
+			expectCupboardUploadError(error);
+			expect({
+				r2Key: error.r2Key,
+				status: error.status
+			}).toStrictEqual({
+				r2Key: upload.r2Key,
+				status: 403
+			});
 		}));
 });
 
@@ -199,23 +271,7 @@ async function fetchNarInfo(
 }
 
 function singleReference(info: NixPathInfo): string {
-	const [reference, ...rest] = info.references;
-
-	if (reference === undefined || rest.length > 0) {
-		throw new UnexpectedReferenceCountError(info.storePath, info.references);
-	}
+	const [reference] = z.tuple([storePathSchema]).parse(info.references);
 
 	return reference;
-}
-
-class UnexpectedReferenceCountError extends Error {
-	constructor(
-		public readonly storePath: string,
-		public readonly references: readonly string[]
-	) {
-		super(
-			`Expected exactly one reference for ${storePath}, got ${String(references.length)}`
-		);
-		this.name = 'UnexpectedReferenceCountError';
-	}
 }

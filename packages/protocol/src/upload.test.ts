@@ -22,25 +22,27 @@ const negotiationPath = {
 
 describe('uploadNegotiateRequestSchema', () => {
 	it('accepts a well-formed request', () => {
-		expect(
-			uploadNegotiateRequestSchema.safeParse({ paths: [negotiationPath] })
-				.success
-		).toBe(true);
+		const value = { paths: [negotiationPath] };
+
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
 	});
 
 	it.each([
 		{ name: 'a deriver', field: 'deriver' as const },
 		{ name: 'a ca', field: 'ca' as const }
 	])('accepts $name metadata line', ({ field }) => {
-		expect(
-			uploadNegotiateRequestSchema.safeParse({
-				paths: [{ ...negotiationPath, [field]: `${storePath}.drv` }]
-			}).success
-		).toBe(true);
+		const value = {
+			paths: [{ ...negotiationPath, [field]: `${storePath}.drv` }]
+		};
+
+		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
 	});
 
 	it.each([
-		{ name: 'an unknown top-level key', value: { paths: [], extra: 1 } },
+		{
+			name: 'an unknown top-level key',
+			value: { paths: [], extra: 1 }
+		},
 		{
 			name: 'an unknown key inside a path',
 			value: { paths: [{ ...negotiationPath, surprise: true }] }
@@ -107,7 +109,7 @@ describe('uploadDecisionSchema', () => {
 			}
 		}
 	])('parses a $name decision', ({ value }) => {
-		expect(uploadDecisionSchema.safeParse(value).success).toBe(true);
+		expect(uploadDecisionSchema.parse(value)).toStrictEqual(value);
 	});
 
 	it.each([
@@ -126,17 +128,17 @@ describe('uploadDecisionSchema', () => {
 
 describe('response schemas', () => {
 	it('accepts a well-formed stats response', () => {
-		expect(
-			statsResponseSchema.safeParse({
-				storePaths: 1,
-				narBlobs: 1,
-				narFileSize: 1000,
-				casObjects: 1,
-				casFileSize: 234,
-				pendingUploads: 0,
-				totalFileSize: 1234
-			}).success
-		).toBe(true);
+		const value = {
+			storePaths: 1,
+			narBlobs: 1,
+			narFileSize: 1000,
+			casObjects: 1,
+			casFileSize: 234,
+			pendingUploads: 0,
+			totalFileSize: 1234
+		};
+
+		expect(statsResponseSchema.parse(value)).toStrictEqual(value);
 	});
 
 	it('rejects a stats response with a negative count', () => {
@@ -154,16 +156,16 @@ describe('response schemas', () => {
 	});
 
 	it('accepts a well-formed tenant usage response', () => {
-		expect(
-			usageResponseSchema.safeParse({
-				narBlobs: 1,
-				narFileSize: 1000,
-				casObjects: 1,
-				casFileSize: 234,
-				totalFileSize: 1234,
-				quotaBytes: 2000,
-				remainingQuotaBytes: 766
-			}).success
-		).toBe(true);
+		const value = {
+			narBlobs: 1,
+			narFileSize: 1000,
+			casObjects: 1,
+			casFileSize: 234,
+			totalFileSize: 1234,
+			quotaBytes: 2000,
+			remainingQuotaBytes: 766
+		};
+
+		expect(usageResponseSchema.parse(value)).toStrictEqual(value);
 	});
 });

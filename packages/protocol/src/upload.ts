@@ -86,26 +86,41 @@ export type ParsedUploadPrepareResponse = z.output<
 	typeof uploadPrepareResponseSchema
 >;
 
+export const uploadSkipDecisionSchema = z.strictObject({
+	action: z.literal('skip'),
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema
+});
+export type ParsedUploadSkipDecision = z.output<
+	typeof uploadSkipDecisionSchema
+>;
+
+export const uploadCommitDecisionSchema = z.strictObject({
+	action: z.literal('commit'),
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema,
+	uploadId: z.string()
+});
+export type ParsedUploadCommitDecision = z.output<
+	typeof uploadCommitDecisionSchema
+>;
+
+export const uploadActionDecisionSchema = z.strictObject({
+	action: z.literal('upload'),
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema,
+	uploadId: z.string(),
+	r2Key: z.string(),
+	expiresAt: z.string()
+});
+export type ParsedUploadActionDecision = z.output<
+	typeof uploadActionDecisionSchema
+>;
+
 export const uploadDecisionSchema = z.discriminatedUnion('action', [
-	z.strictObject({
-		action: z.literal('skip'),
-		storePathHash: storePathHashSchema,
-		narHash: nixSha256HashSchema
-	}),
-	z.strictObject({
-		action: z.literal('commit'),
-		storePathHash: storePathHashSchema,
-		narHash: nixSha256HashSchema,
-		uploadId: z.string()
-	}),
-	z.strictObject({
-		action: z.literal('upload'),
-		storePathHash: storePathHashSchema,
-		narHash: nixSha256HashSchema,
-		uploadId: z.string(),
-		r2Key: z.string(),
-		expiresAt: z.string()
-	})
+	uploadSkipDecisionSchema,
+	uploadCommitDecisionSchema,
+	uploadActionDecisionSchema
 ]);
 export type ParsedUploadDecision = z.output<typeof uploadDecisionSchema>;
 
@@ -215,6 +230,8 @@ export type UploadNegotiateRequest = z.input<
 >;
 export type UploadPrepareRequest = z.input<typeof uploadPrepareRequestSchema>;
 export type UploadPrepareResponse = z.input<typeof uploadPrepareResponseSchema>;
+export type UploadActionDecision = z.input<typeof uploadActionDecisionSchema>;
+export type UploadCommitDecision = z.input<typeof uploadCommitDecisionSchema>;
 export type UploadDecision = z.input<typeof uploadDecisionSchema>;
 export type UploadNegotiateResponse = z.input<
 	typeof uploadNegotiateResponseSchema

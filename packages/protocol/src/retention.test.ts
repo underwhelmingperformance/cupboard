@@ -12,25 +12,35 @@ const storePath = `/nix/store/${storePathHash}-name`;
 
 describe('rootSetBodySchema', () => {
 	it.each([
-		{ name: 'targets only', value: { targets: [storePath] }, valid: true },
+		{
+			name: 'targets only',
+			value: { targets: [storePath] },
+			expected: { targets: [storePath] }
+		},
 		{
 			name: 'targets and ttl',
 			value: { targets: [storePath], ttlSeconds: 3600 },
-			valid: true
+			expected: { targets: [storePath], ttlSeconds: 3600 }
+		}
+	])('accepts $name', ({ value, expected }) => {
+		expect(rootSetBodySchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
+		{
+			name: 'no targets',
+			value: { targets: [] }
 		},
-		{ name: 'no targets', value: { targets: [] }, valid: false },
 		{
 			name: 'a nested target path',
-			value: { targets: [`${storePath}/x`] },
-			valid: false
+			value: { targets: [`${storePath}/x`] }
 		},
 		{
 			name: 'an out-of-range ttl',
-			value: { targets: [storePath], ttlSeconds: 0 },
-			valid: false
+			value: { targets: [storePath], ttlSeconds: 0 }
 		}
-	])('$name', ({ value, valid }) => {
-		expect(rootSetBodySchema.safeParse(value).success).toBe(valid);
+	])('rejects $name', ({ value }) => {
+		expect(rootSetBodySchema.safeParse(value).success).toBe(false);
 	});
 });
 
@@ -39,12 +49,12 @@ describe('retention policy schemas', () => {
 		{
 			name: 'a cache-scoped policy',
 			value: { scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 },
-			valid: true
+			expected: { scope: 'cache', pattern: 'builds', ttlSeconds: 1_209_600 }
 		},
 		{
 			name: 'a cache-scoped policy targeting the default cache',
 			value: { scope: 'cache', pattern: '', ttlSeconds: 1_209_600 },
-			valid: true
+			expected: { scope: 'cache', pattern: '', ttlSeconds: 1_209_600 }
 		},
 		{
 			name: 'a prefix-scoped policy',
@@ -53,43 +63,48 @@ describe('retention policy schemas', () => {
 				pattern: 'pr-',
 				ttlSeconds: 1_209_600
 			},
-			valid: true
-		},
+			expected: {
+				scope: 'root-name-prefix',
+				pattern: 'pr-',
+				ttlSeconds: 1_209_600
+			}
+		}
+	])('accepts add body: $name', ({ value, expected }) => {
+		expect(retentionPolicyAddBodySchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
 		{
 			name: 'a cache scope with an invalid cache name',
-			value: { scope: 'cache', pattern: 'Bad!', ttlSeconds: 1_209_600 },
-			valid: false
+			value: { scope: 'cache', pattern: 'Bad!', ttlSeconds: 1_209_600 }
 		},
 		{
 			name: 'an unknown scope',
-			value: { scope: 'tag', pattern: 'x', ttlSeconds: 1_209_600 },
-			valid: false
+			value: { scope: 'tag', pattern: 'x', ttlSeconds: 1_209_600 }
 		},
 		{
 			name: 'an out-of-range ttl',
-			value: { scope: 'root-name-prefix', pattern: 'pr-', ttlSeconds: 0 },
-			valid: false
+			value: { scope: 'root-name-prefix', pattern: 'pr-', ttlSeconds: 0 }
 		}
-	])('add body: $name', ({ value, valid }) => {
-		expect(retentionPolicyAddBodySchema.safeParse(value).success).toBe(valid);
+	])('rejects add body: $name', ({ value }) => {
+		expect(retentionPolicyAddBodySchema.safeParse(value).success).toBe(false);
 	});
 
 	it('accepts the list and remove responses', () => {
+		const policy = {
+			id: 'p1',
+			scope: 'root-name-prefix',
+			pattern: 'pr-',
+			ttlSeconds: 1_209_600
+		};
+		const remove = { id: 'p1', removed: true };
+
 		expect({
-			list: retentionPolicyListResponseSchema.safeParse({
-				policies: [
-					{
-						id: 'p1',
-						scope: 'root-name-prefix',
-						pattern: 'pr-',
-						ttlSeconds: 1_209_600
-					}
-				]
-			}).success,
-			remove: retentionPolicyRemoveResponseSchema.safeParse({
-				id: 'p1',
-				removed: true
-			}).success
-		}).toStrictEqual({ list: true, remove: true });
+			list: retentionPolicyListResponseSchema.parse({ policies: [policy] }),
+			remove: retentionPolicyRemoveResponseSchema.parse(remove)
+		}).toStrictEqual({
+			list: { policies: [policy] },
+			remove
+		});
 	});
 });

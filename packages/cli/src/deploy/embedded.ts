@@ -28,7 +28,7 @@ const payloadSchema = z.object({
 });
 
 export class EmbeddedArtifactError extends Error {
-	constructor(detail: string) {
+	constructor(public readonly detail: string) {
 		super(`Could not load the embedded Workers: ${detail}`);
 		this.name = 'EmbeddedArtifactError';
 	}

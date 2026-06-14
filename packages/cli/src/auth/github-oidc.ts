@@ -45,7 +45,7 @@ export class GithubOidcRequestError extends CliError {
 // A 200 response whose body did not carry a token `value`. Distinct from a failed
 // request so it is not reported as "failed with 200".
 export class GithubOidcResponseError extends CliError {
-	constructor() {
+	constructor(public readonly kind: 'missing-token' | 'non-json') {
 		super('GitHub Actions OIDC token response did not carry a token value');
 		this.name = 'GithubOidcResponseError';
 	}
@@ -98,13 +98,13 @@ export async function fetchGithubOidcToken(options: {
 	try {
 		body = await response.json();
 	} catch {
-		throw new GithubOidcResponseError();
+		throw new GithubOidcResponseError('non-json');
 	}
 
 	const parsed = githubOidcResponseSchema.safeParse(body);
 
 	if (!parsed.success) {
-		throw new GithubOidcResponseError();
+		throw new GithubOidcResponseError('missing-token');
 	}
 
 	return parsed.data.value;

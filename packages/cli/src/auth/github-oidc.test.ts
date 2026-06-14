@@ -12,16 +12,24 @@ const environment = {
 	requestToken: 'request-bearer'
 };
 
+function requestUrl(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
+}
+
 describe('fetchGithubOidcToken', () => {
 	it('requests a token for the audience and returns its value', async () => {
 		const requests: { url: string; authorization: string | undefined }[] = [];
 		const fetcher: typeof fetch = (input, init) => {
-			if (!(input instanceof URL)) {
-				throw new TypeError('expected a URL');
-			}
-
 			requests.push({
-				url: input.href,
+				url: requestUrl(input),
 				authorization:
 					new Headers(init?.headers).get('authorization') ?? undefined
 			});
@@ -56,43 +64,108 @@ describe('fetchGithubOidcToken', () => {
 			environment: { ...environment, requestToken: '' }
 		}
 	])('throws when there is $name', async ({ environment: missing }) => {
-		await expect(
-			fetchGithubOidcToken({
-				audience: 'aud',
-				environment: missing,
-				fetcher: () => Promise.reject(new Error('should not be called'))
-			})
-		).rejects.toBeInstanceOf(GithubOidcUnavailableError);
-	});
+		const requests: string[] = [];
+		const outcome = await fetchGithubOidcToken({
+			audience: 'aud',
+			environment: missing,
+			fetcher: (input) => {
+				requests.push(requestUrl(input));
 
-	it('throws when the token request fails', async () => {
-		await expect(
-			fetchGithubOidcToken({
-				audience: 'aud',
-				environment,
-				fetcher: () =>
-					Promise.resolve(new Response('forbidden', { status: 403 }))
-			})
-		).rejects.toBeInstanceOf(GithubOidcRequestError);
+				return Promise.resolve(Response.json({ value: 'unused' }));
+			}
+		}).then(
+			(token) => ({ token }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(GithubOidcUnavailableError);
+
+				if (!(error_ instanceof GithubOidcUnavailableError)) {
+					return {};
+				}
+
+				return { error: { name: error_.name } };
+			}
+		);
+
+		expect({ outcome, requests }).toStrictEqual({
+			outcome: { error: { name: 'GithubOidcUnavailableError' } },
+			requests: []
+		});
 	});
 
 	it('throws when the response carries no token value', async () => {
-		await expect(
-			fetchGithubOidcToken({
-				audience: 'aud',
-				environment,
-				fetcher: () => Promise.resolve(Response.json({ nope: true }))
-			})
-		).rejects.toBeInstanceOf(GithubOidcResponseError);
+		const outcome = await fetchGithubOidcToken({
+			audience: 'aud',
+			environment,
+			fetcher: () => Promise.resolve(Response.json({ nope: true }))
+		}).then(
+			(token) => ({ token }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(GithubOidcResponseError);
+
+				if (!(error_ instanceof GithubOidcResponseError)) {
+					return {};
+				}
+
+				return { error: { name: error_.name, kind: error_.kind } };
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			error: { name: 'GithubOidcResponseError', kind: 'missing-token' }
+		});
 	});
 
 	it('throws when a 200 response is not JSON', async () => {
-		await expect(
-			fetchGithubOidcToken({
-				audience: 'aud',
-				environment,
-				fetcher: () => Promise.resolve(new Response('<html>nope</html>'))
-			})
-		).rejects.toBeInstanceOf(GithubOidcResponseError);
+		const outcome = await fetchGithubOidcToken({
+			audience: 'aud',
+			environment,
+			fetcher: () => Promise.resolve(new Response('<html>nope</html>'))
+		}).then(
+			(token) => ({ token }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(GithubOidcResponseError);
+
+				if (!(error_ instanceof GithubOidcResponseError)) {
+					return {};
+				}
+
+				return { error: { name: error_.name, kind: error_.kind } };
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			error: { name: 'GithubOidcResponseError', kind: 'non-json' }
+		});
+	});
+
+	it('throws when the token request fails', async () => {
+		const outcome = await fetchGithubOidcToken({
+			audience: 'aud',
+			environment,
+			fetcher: () => Promise.resolve(new Response('forbidden', { status: 403 }))
+		}).then(
+			(token) => ({ token }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(GithubOidcRequestError);
+
+				if (!(error_ instanceof GithubOidcRequestError)) {
+					return {};
+				}
+
+				return {
+					error: {
+						name: error_.name,
+						status: error_.status
+					}
+				};
+			}
+		);
+
+		expect(outcome).toStrictEqual({
+			error: {
+				name: GithubOidcRequestError.name,
+				status: 403
+			}
+		});
 	});
 });

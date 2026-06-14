@@ -26,6 +26,68 @@ import {
 	sendQueueMessages
 } from './scheduled.ts';
 
+function aggregateErrorShape(error: unknown): {
+	readonly name: string;
+	readonly errors: readonly unknown[];
+} {
+	if (!(error instanceof AggregateError)) {
+		throw error;
+	}
+
+	return {
+		name: error.name,
+		errors: error.errors
+	};
+}
+
+function queueBatchSendErrorShape(error: unknown): {
+	readonly name: string;
+	readonly errors: readonly unknown[];
+} {
+	if (!(error instanceof QueueBatchSendError)) {
+		throw error;
+	}
+
+	return {
+		name: error.name,
+		errors: error.errors
+	};
+}
+
+// The logged Zod issue carries a human message that varies with the library
+// version; the structural fields are what the test pins, so the message is
+// dropped before asserting.
+function loggedIssueShape(issue: unknown): Readonly<Record<string, unknown>> {
+	if (typeof issue !== 'object' || issue === null) {
+		throw new TypeError('logged issue was not an object');
+	}
+
+	return Object.fromEntries(
+		Object.entries(issue).filter(([key]) => key !== 'message')
+	);
+}
+
+// The rejected-message warning detail, with each issue's version-dependent
+// message dropped so the structural fields can be asserted deterministically.
+function warningDetailShape(
+	details: unknown
+): Readonly<Record<string, unknown>> {
+	if (typeof details !== 'object' || details === null) {
+		throw new TypeError('logged warning detail was not an object');
+	}
+
+	const fields: Record<string, unknown> = Object.fromEntries(
+		Object.entries(details)
+	);
+	const { issues } = fields;
+
+	if (!Array.isArray(issues)) {
+		throw new TypeError('logged warning detail had no issues array');
+	}
+
+	return { ...fields, issues: issues.map((issue) => loggedIssueShape(issue)) };
+}
+
 describe('scheduled tenant pass failure records', () => {
 	beforeEach(resetTestServer);
 
@@ -124,12 +186,18 @@ describe('scheduled tenant pass failure records', () => {
 			messages
 		);
 
-		// The partial send surfaces as the typed error carrying the one failure.
-		await expect(sending).rejects.toBeInstanceOf(QueueBatchSendError);
-		await expect(sending).rejects.toMatchObject({ errors: [rejection] });
+		const outcome = await sending.then(
+			() => ({ sent: true }),
+			(error: unknown) => ({ error: queueBatchSendErrorShape(error) })
+		);
 
 		// The trailing batch was still handed to the queue despite the first failing.
-		expect(attempted).toStrictEqual(messages);
+		expect({ outcome, attempted }).toStrictEqual({
+			outcome: {
+				error: { name: QueueBatchSendError.name, errors: [rejection] }
+			},
+			attempted: messages
+		});
 	});
 
 	it('aggregates a failure from every batch in send order', async () => {
@@ -145,28 +213,37 @@ describe('scheduled tenant pass failure records', () => {
 			new Error('first batch down'),
 			new Error('second batch down')
 		];
+		const attempted: MaintenanceQueueMessage[][] = [];
 		let call = 0;
 
 		const sending = sendQueueMessages(
 			{
-				sendBatch: () => {
-					const failure = failures[call];
+				sendBatch: (batch) => {
+					attempted.push(Array.from(batch, (entry) => entry.body));
+					const failure = failures.at(call);
 					call += 1;
 
-					if (failure === undefined) {
-						throw new Error('unexpected extra batch');
-					}
-
-					return Promise.reject(failure);
+					return failure === undefined
+						? Promise.resolve(queueSendBatchResponse())
+						: Promise.reject(failure);
 				}
 			},
 			messages
 		);
 
+		const outcome = await sending.then(
+			() => ({ sent: true }),
+			(error: unknown) => ({ error: queueBatchSendErrorShape(error) })
+		);
+
 		// Both batches are attempted and their failures are aggregated in send order,
 		// so the accumulation keeps every failure rather than only the last.
-		await expect(sending).rejects.toBeInstanceOf(QueueBatchSendError);
-		await expect(sending).rejects.toMatchObject({ errors: failures });
+		expect({ outcome, attempted }).toStrictEqual({
+			outcome: {
+				error: { name: QueueBatchSendError.name, errors: failures }
+			},
+			attempted: [messages.slice(0, 100), messages.slice(100)]
+		});
 	});
 
 	it('scheduled entrypoint enqueues bounded maintenance jobs', async () => {
@@ -287,32 +364,29 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('acme');
 		await deleteEligibility('acme');
 
-		const decision = await executeMaintenanceQueueMessage(
-			env,
-			{ kind: 'tenant-maintenance', tenant: 'acme' },
-			{
-				maintainTenant: () =>
-					Promise.reject(new Error('queue maintenance failed'))
-			}
+		const decision = await runWithClock('2026-01-02T00:00:00.000Z', () =>
+			executeMaintenanceQueueMessage(
+				env,
+				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{
+					maintainTenant: () =>
+						Promise.reject(new Error('queue maintenance failed'))
+				}
+			)
 		);
 		const outcome = await tenantMaintenanceFailureRow('acme', 'maintenance');
 
 		expect({
 			decision,
-			outcome: {
-				consecutiveFailures: outcome?.consecutiveFailures,
-				lastError: outcome?.lastError,
-				failed: outcome?.lastFailedAt !== undefined,
-				succeeded: outcome?.lastSuccessAt !== undefined
-			},
+			outcome,
 			maintained: await tenantMaintained('acme')
 		}).toStrictEqual({
 			decision: { action: 'ack' },
 			outcome: {
 				consecutiveFailures: 1,
 				lastError: 'Error: queue maintenance failed',
-				failed: true,
-				succeeded: false
+				lastFailedAt: '2026-01-02T00:00:00.000Z',
+				lastSuccessAt: undefined
 			},
 			maintained: true
 		});
@@ -395,11 +469,14 @@ describe('scheduled tenant pass failure records', () => {
 
 	it('queue entrypoint acks, retries, and logs messages independently', async () => {
 		const actions: QueueMessageAction[] = [];
-		const batch = queueBatch([
-			queueMessage('success', { kind: 'control-key-retirement' }, actions),
-			queueMessage('retry', { kind: 'blob-demote' }, actions),
-			queueMessage('invalid', { kind: 'unknown' }, actions)
-		]);
+		const batch = queueBatch(
+			[
+				queueMessage('success', { kind: 'control-key-retirement' }, actions),
+				queueMessage('retry', { kind: 'blob-demote' }, actions),
+				queueMessage('invalid', { kind: 'unknown' }, actions)
+			],
+			actions
+		);
 		const warnings: unknown[][] = [];
 		const errors: unknown[][] = [];
 		const warn = vi
@@ -425,19 +502,68 @@ describe('scheduled tenant pass failure records', () => {
 			warn.mockRestore();
 			error.mockRestore();
 		}
+		const warningLogs = warnings.map(([message, details]) => [
+			message,
+			warningDetailShape(details)
+		]);
 
 		expect({
 			actions,
-			warnings: warnings.length,
-			errors: errors.length
+			warnings: warningLogs,
+			errors
 		}).toStrictEqual({
 			actions: [
-				{ id: 'success', action: 'ack' },
-				{ id: 'retry', action: 'retry', delaySeconds: 60 },
-				{ id: 'invalid', action: 'ack' }
+				{ target: 'message', id: 'success', action: 'ack' },
+				{
+					target: 'message',
+					id: 'retry',
+					action: 'retry',
+					delaySeconds: 60
+				},
+				{ target: 'message', id: 'invalid', action: 'ack' }
 			],
-			warnings: 1,
-			errors: 1
+			warnings: [
+				[
+					'maintenance queue message rejected',
+					{
+						queue: 'cupboard-maintenance',
+						messageId: 'invalid',
+						attempts: 1,
+						issues: [
+							{
+								code: 'invalid_union',
+								discriminator: 'kind',
+								errors: [],
+								note: 'No matching discriminator',
+								options: [
+									'tenant-maintenance',
+									'tenant-verify',
+									'offboard',
+									'blob-reaper',
+									'cas-reaper',
+									'blob-demote',
+									'cas-demote',
+									'control-key-retirement'
+								],
+								path: ['kind']
+							}
+						]
+					}
+				]
+			],
+			errors: [
+				[
+					'maintenance queue message retrying',
+					{
+						queue: 'cupboard-maintenance',
+						messageId: 'retry',
+						attempts: 1,
+						delaySeconds: 60,
+						kind: 'blob-demote',
+						reason: 'Error: kv unavailable'
+					}
+				]
+			]
 		});
 	});
 
@@ -454,14 +580,24 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		await runWithClock('2026-01-01T00:00:00.000Z', () =>
-			runCronSweep(env, 10, (_env, id) => {
-				seen.push(id);
+			runCronSweep(env, 10, (_env, tenant) => {
+				seen.push(tenant);
 
 				return Promise.resolve();
 			})
 		);
 
-		expect(seen).toStrictEqual([]);
+		expect({
+			seen,
+			acme: await tenantMaintained('acme'),
+			beta: await tenantMaintained('beta'),
+			fixture: await tenantMaintained('v1')
+		}).toStrictEqual({
+			seen: [],
+			acme: false,
+			beta: false,
+			fixture: false
+		});
 	});
 
 	it('schedules tenants whose eligibility is missing or stale', async () => {
@@ -541,15 +677,17 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		const firstFailure = new Error('maintenance failed');
-		const error = await runCronSweep(env, 2, (_env, id) => {
-			seen.push(id);
+		const error = await runWithClock('2026-01-02T00:00:00.000Z', () =>
+			runCronSweep(env, 2, (_env, id) => {
+				seen.push(id);
 
-			if (id === 'acme') {
-				return Promise.reject(firstFailure);
-			}
+				if (id === 'acme') {
+					return Promise.reject(firstFailure);
+				}
 
-			return Promise.resolve();
-		}).catch((error_: unknown) => error_);
+				return Promise.resolve();
+			}).catch((error_: unknown) => error_)
+		);
 		const afterFailure = {
 			acme: await tenantMaintenanceFailureRow('acme', 'maintenance'),
 			beta: await tenantMaintenanceFailureRow('beta', 'maintenance'),
@@ -557,52 +695,41 @@ describe('scheduled tenant pass failure records', () => {
 			betaMaintained: await tenantMaintained('beta')
 		};
 
-		await runCronSweep(env, 1, () => Promise.resolve());
+		await runWithClock('2026-01-03T00:00:00.000Z', () =>
+			runCronSweep(env, 1, () => Promise.resolve())
+		);
 		const afterSuccess = await tenantMaintenanceFailureRow(
 			'acme',
 			'maintenance'
 		);
-
 		expect({
-			error: error instanceof AggregateError,
+			error: aggregateErrorShape(error),
 			seen,
 			afterFailure: {
-				acme: {
-					consecutiveFailures: afterFailure.acme?.consecutiveFailures,
-					lastError: afterFailure.acme?.lastError,
-					failed: afterFailure.acme?.lastFailedAt !== undefined,
-					succeeded: afterFailure.acme?.lastSuccessAt !== undefined
-				},
-				beta: {
-					consecutiveFailures: afterFailure.beta?.consecutiveFailures,
-					lastError: afterFailure.beta?.lastError,
-					failed: afterFailure.beta?.lastFailedAt !== undefined,
-					succeeded: afterFailure.beta?.lastSuccessAt !== undefined
-				},
+				acme: afterFailure.acme,
+				beta: afterFailure.beta,
 				acmeMaintained: afterFailure.acmeMaintained,
 				betaMaintained: afterFailure.betaMaintained
 			},
-			afterSuccess: {
-				consecutiveFailures: afterSuccess?.consecutiveFailures,
-				lastError: afterSuccess?.lastError,
-				failed: afterSuccess?.lastFailedAt !== undefined,
-				succeeded: afterSuccess?.lastSuccessAt !== undefined
-			}
+			afterSuccess
 		}).toStrictEqual({
-			error: true,
+			error: {
+				name: 'AggregateError',
+				errors: [firstFailure]
+			},
 			seen: ['acme', 'beta'],
 			afterFailure: {
 				acme: {
 					consecutiveFailures: 1,
 					lastError: 'Error: maintenance failed',
-					failed: true,
-					succeeded: false
+					lastFailedAt: '2026-01-02T00:00:00.000Z',
+					lastSuccessAt: undefined
 				},
 				beta: {
 					consecutiveFailures: 0,
 					lastError: undefined,
-					failed: false,
-					succeeded: true
+					lastFailedAt: undefined,
+					lastSuccessAt: '2026-01-02T00:00:00.000Z'
 				},
 				acmeMaintained: true,
 				betaMaintained: true
@@ -610,8 +737,8 @@ describe('scheduled tenant pass failure records', () => {
 			afterSuccess: {
 				consecutiveFailures: 0,
 				lastError: 'Error: maintenance failed',
-				failed: true,
-				succeeded: true
+				lastFailedAt: '2026-01-02T00:00:00.000Z',
+				lastSuccessAt: '2026-01-03T00:00:00.000Z'
 			}
 		});
 	});
@@ -648,68 +775,61 @@ describe('scheduled tenant pass failure records', () => {
 		await offboardTenant('beta');
 
 		const seen: string[] = [];
-		const error = await runOffboardSweep(env, 2, 1, 1, (_env, id) => {
-			seen.push(id);
+		const firstFailure = new TypeError('offboard failed');
+		const error = await runWithClock('2026-01-02T00:00:00.000Z', () =>
+			runOffboardSweep(env, 2, 1, 1, (_env, id) => {
+				seen.push(id);
 
-			if (id === 'acme') {
-				return Promise.reject(new TypeError('offboard failed'));
-			}
+				if (id === 'acme') {
+					return Promise.reject(firstFailure);
+				}
 
-			return Promise.resolve();
-		}).catch((error_: unknown) => error_);
+				return Promise.resolve();
+			}).catch((error_: unknown) => error_)
+		);
 		const afterFailure = {
 			acme: await tenantMaintenanceFailureRow('acme', 'offboard'),
 			beta: await tenantMaintenanceFailureRow('beta', 'offboard')
 		};
 
-		await runOffboardSweep(env, 1, 1, 1, () => Promise.resolve());
+		await runWithClock('2026-01-03T00:00:00.000Z', () =>
+			runOffboardSweep(env, 1, 1, 1, () => Promise.resolve())
+		);
 		const afterSuccess = await tenantMaintenanceFailureRow('acme', 'offboard');
 
 		expect({
-			error: error instanceof AggregateError,
+			error: aggregateErrorShape(error),
 			seen,
 			afterFailure: {
-				acme: {
-					consecutiveFailures: afterFailure.acme?.consecutiveFailures,
-					lastError: afterFailure.acme?.lastError,
-					failed: afterFailure.acme?.lastFailedAt !== undefined,
-					succeeded: afterFailure.acme?.lastSuccessAt !== undefined
-				},
-				beta: {
-					consecutiveFailures: afterFailure.beta?.consecutiveFailures,
-					lastError: afterFailure.beta?.lastError,
-					failed: afterFailure.beta?.lastFailedAt !== undefined,
-					succeeded: afterFailure.beta?.lastSuccessAt !== undefined
-				}
+				acme: afterFailure.acme,
+				beta: afterFailure.beta
 			},
-			afterSuccess: {
-				consecutiveFailures: afterSuccess?.consecutiveFailures,
-				lastError: afterSuccess?.lastError,
-				failed: afterSuccess?.lastFailedAt !== undefined,
-				succeeded: afterSuccess?.lastSuccessAt !== undefined
-			}
+			afterSuccess
 		}).toStrictEqual({
-			error: true,
+			error: {
+				name: 'AggregateError',
+				errors: [firstFailure]
+			},
 			seen: ['acme', 'beta'],
 			afterFailure: {
 				acme: {
 					consecutiveFailures: 1,
 					lastError: 'TypeError: offboard failed',
-					failed: true,
-					succeeded: false
+					lastFailedAt: '2026-01-02T00:00:00.000Z',
+					lastSuccessAt: undefined
 				},
 				beta: {
 					consecutiveFailures: 0,
 					lastError: undefined,
-					failed: false,
-					succeeded: true
+					lastFailedAt: undefined,
+					lastSuccessAt: '2026-01-02T00:00:00.000Z'
 				}
 			},
 			afterSuccess: {
 				consecutiveFailures: 0,
 				lastError: 'TypeError: offboard failed',
-				failed: true,
-				succeeded: true
+				lastFailedAt: '2026-01-02T00:00:00.000Z',
+				lastSuccessAt: '2026-01-03T00:00:00.000Z'
 			}
 		});
 	});
@@ -771,13 +891,22 @@ async function runWithClock<T>(
 	}
 }
 
-interface QueueMessageAction {
-	readonly id: string;
-	readonly action: 'ack' | 'retry';
-	readonly delaySeconds?: number;
-}
+type QueueMessageAction =
+	| {
+			readonly target: 'message';
+			readonly id: string;
+			readonly action: 'ack' | 'retry';
+			readonly delaySeconds?: number;
+	  }
+	| {
+			readonly target: 'batch';
+			readonly action: 'ack' | 'retry';
+	  };
 
-function queueBatch(messages: readonly Message[]): MessageBatch {
+function queueBatch(
+	messages: readonly Message[],
+	actions: QueueMessageAction[]
+): MessageBatch {
 	return {
 		messages,
 		queue: 'cupboard-maintenance',
@@ -788,10 +917,10 @@ function queueBatch(messages: readonly Message[]): MessageBatch {
 			}
 		},
 		ackAll: () => {
-			throw new Error('ackAll was not expected');
+			actions.push({ target: 'batch', action: 'ack' });
 		},
 		retryAll: () => {
-			throw new Error('retryAll was not expected');
+			actions.push({ target: 'batch', action: 'retry' });
 		}
 	};
 }
@@ -806,9 +935,10 @@ function queueMessage(
 		timestamp: new Date('2026-01-01T00:00:00.000Z'),
 		attempts: 1,
 		body,
-		ack: () => actions.push({ id, action: 'ack' }),
+		ack: () => actions.push({ target: 'message', id, action: 'ack' }),
 		retry: (options) =>
 			actions.push({
+				target: 'message',
 				id,
 				action: 'retry',
 				delaySeconds: options?.delaySeconds

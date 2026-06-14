@@ -1,3 +1,4 @@
+import { keyRotateResponseSchema } from '@cupboard/protocol/keys';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -36,19 +37,24 @@ describe('/pubkey serving', () => {
 		const token = await initialiseViaWorker();
 		const before = await readFetch('/pubkey');
 		const beforeBody = await before.text();
-		const beforeLines = beforeBody.trim().split('\n').length;
+		const beforeKeys = beforeBody.trim().split('\n');
 
 		const rotated = await authorisedWorkerFetch('/keys/rotate', token, {
 			method: 'POST'
 		});
-		expect(rotated.status).toBe(StatusCodes.OK);
+		const rotatedBody = keyRotateResponseSchema.parse(await rotated.json());
 
 		const after = await readFetch('/pubkey');
 		const afterBody = await after.text();
 
 		expect({
-			addedKeys: afterBody.trim().split('\n').length - beforeLines,
+			rotateStatus: rotated.status,
+			keys: afterBody.trim().split('\n'),
 			cacheControl: after.headers.get('cache-control')
-		}).toStrictEqual({ addedKeys: 1, cacheControl: 'no-cache' });
+		}).toStrictEqual({
+			rotateStatus: StatusCodes.OK,
+			keys: [...beforeKeys, rotatedBody.rotated.publicKey],
+			cacheControl: 'no-cache'
+		});
 	});
 });

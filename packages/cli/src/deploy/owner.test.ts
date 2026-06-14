@@ -116,11 +116,11 @@ describe('ownerIssuerProblem', () => {
 	);
 
 	it.each([
-		['not a url', 'must be a URL'],
-		['http://accounts.example.com', 'must use https'],
-		['https://issuer.example.com/?x=1', 'without query or fragment']
-	])('rejects %s', (value, reason) => {
-		expect(ownerIssuerProblem(value)).toContain(reason);
+		['not a url', 'not-url'],
+		['http://accounts.example.com', 'not-https'],
+		['https://issuer.example.com/?x=1', 'not-bare-url']
+	])('rejects %s', (value, problem) => {
+		expect(ownerIssuerProblem(value)).toBe(problem);
 	});
 });
 
@@ -130,10 +130,10 @@ describe('ownerFieldProblem', () => {
 	});
 
 	it.each([
-		['', 'a value is required'],
-		['  ', 'a value is required'],
-		['two words', 'must not contain whitespace']
-	])('rejects %j', (value, reason) => {
-		expect(ownerFieldProblem(value)).toContain(reason);
+		['', 'empty'],
+		['  ', 'empty'],
+		['two words', 'whitespace']
+	])('rejects %j', (value, problem) => {
+		expect(ownerFieldProblem(value)).toBe(problem);
 	});
 });

@@ -2,7 +2,7 @@ import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
 import {
 	DEFAULT_CACHE,
-	type PredicateType,
+	predicateTypeSchema,
 	selectorForCache,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
@@ -14,14 +14,29 @@ import type {
 	RootSetResponse
 } from '@cupboard/protocol/retention';
 import {
+	gcResponseSchema,
+	rootListResponseSchema,
+	rootRemoveResponseSchema,
+	rootSetResponseSchema
+} from '@cupboard/protocol/retention';
+import {
 	type CommitResponse,
 	commitSocketFrameSchema,
 	type DeletePathResponse,
+	deletePathResponseSchema,
 	type ParsedCommitSocketFrame,
 	type StatsResponse,
+	type UploadActionDecision,
+	uploadActionDecisionSchema,
+	type UploadCommitDecision,
+	uploadCommitDecisionSchema,
+	uploadDecisionSchema,
 	type UploadNegotiateResponse,
+	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
-	type UploadStatusResponse
+	uploadPrepareResponseSchema,
+	type UploadStatusResponse,
+	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
 import {
 	createExecutionContext,
@@ -35,6 +50,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { StatusCodes } from 'http-status-codes';
 import { expect, vi } from 'vitest';
+import { z } from 'zod';
 
 import migrations from '../drizzle/migrations.js';
 
@@ -88,7 +104,7 @@ import worker from './worker.ts';
 // test harness mirrors that: these are absent from the Durable Object's env (the
 // pool binds the tenant config) and are supplied only to the control handler when
 // a test drives a bare-host control route.
-const testControlEnv = {
+export const testControlEnv = {
 	CONTROL_KEY_WRAP_SECRET: 'AAcOFRwjKjE4P0ZNVFtiaXB3foWMk5qhqK+2vcTL0tk=',
 	CUPBOARD_CONTROL_AUDIENCE: 'cupboard-control',
 	// The signup issuer points at a host that is never reachable in the workers
@@ -141,14 +157,6 @@ let nextTestServerId = 0;
 let nextProvisionConfigVersion = 1;
 
 export type UploadDecision = UploadNegotiateResponse['uploads'][number];
-export type UploadActionDecision = Extract<
-	UploadDecision,
-	{ readonly action: 'upload' }
->;
-export type CommitActionDecision = Extract<
-	UploadDecision,
-	{ readonly action: 'commit' }
->;
 
 export interface GcResult {
 	readonly ok: true;
@@ -541,19 +549,25 @@ async function activeAuthKeyFor(
 
 	return runInDurableObject(stub, (_instance, state) => {
 		const database = drizzle(state.storage, { schema: { authKeys } });
-		const row = database
-			.select()
-			.from(authKeys)
-			.where(isNull(authKeys.retiredAt))
-			.orderBy(sql`rowid`)
-			.all()
-			.at(-1);
+		const row = z
+			.object({
+				kid: z.string(),
+				privateJwkJson: z.string()
+			})
+			.parse(
+				database
+					.select()
+					.from(authKeys)
+					.where(isNull(authKeys.retiredAt))
+					.orderBy(sql`rowid`)
+					.all()
+					.at(-1)
+			);
 
-		if (row === undefined) {
-			throw new Error('expected an active auth key to issue a scoped token');
-		}
-
-		return { kid: row.kid, privateJwk: parseJwk(row.privateJwkJson) };
+		return {
+			kid: row.kid,
+			privateJwk: parseJwk(row.privateJwkJson)
+		};
 	});
 }
 
@@ -944,8 +958,9 @@ export async function fileAttestationReference(options: {
 			cache: options.cache ?? DEFAULT_CACHE,
 			storePathHash: options.storePathHash,
 			generation: options.generation,
-			predicateType: (options.predicateType ??
-				'https://slsa.dev/provenance/v1') as PredicateType,
+			predicateType: predicateTypeSchema.parse(
+				options.predicateType ?? 'https://slsa.dev/provenance/v1'
+			),
 			digest: measured.digest
 		},
 		measured.size
@@ -1027,24 +1042,36 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 				)
 				.get();
 
-			if (row === undefined) {
-				throw new Error('expected a committed narinfo to queue for deletion');
-			}
+			const deletion = z
+				.object({
+					cache: z.string(),
+					storePathHash: z.string(),
+					narHash: z.string(),
+					generation: z.number()
+				})
+				.parse(row);
+			expect({
+				cache: deletion.cache,
+				storePathHash: deletion.storePathHash
+			}).toStrictEqual({
+				cache: DEFAULT_CACHE,
+				storePathHash: fields.storePathHash
+			});
 
 			tx.delete(narInfos)
 				.where(
 					and(
-						eq(narInfos.cache, row.cache),
-						eq(narInfos.storePathHash, row.storePathHash)
+						eq(narInfos.cache, deletion.cache),
+						eq(narInfos.storePathHash, deletion.storePathHash)
 					)
 				)
 				.run();
 			tx.insert(narInfoDeletions)
 				.values({
-					cache: row.cache,
-					storePathHash: row.storePathHash,
-					narHash: row.narHash,
-					generation: row.generation,
+					cache: deletion.cache,
+					storePathHash: deletion.storePathHash,
+					narHash: deletion.narHash,
+					generation: deletion.generation,
 					createdAt: new Date().toISOString()
 				})
 				.onConflictDoNothing()
@@ -1193,7 +1220,7 @@ export async function negotiateUploads(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<UploadNegotiateResponse>();
+	return uploadNegotiateResponseSchema.parse(await response.json());
 }
 
 export async function negotiateViaWorker(
@@ -1216,7 +1243,7 @@ export async function negotiateViaWorker(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<UploadNegotiateResponse>();
+	return uploadNegotiateResponseSchema.parse(await response.json());
 }
 
 /**
@@ -1278,7 +1305,7 @@ export async function pushPathToTenant(
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
-		await negotiated.json<UploadNegotiateResponse>(),
+		uploadNegotiateResponseSchema.parse(await negotiated.json()),
 		metadata
 	);
 
@@ -1328,7 +1355,7 @@ export async function attemptPushToTenant(
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
-		await negotiated.json<UploadNegotiateResponse>(),
+		uploadNegotiateResponseSchema.parse(await negotiated.json()),
 		metadata
 	);
 
@@ -1399,7 +1426,7 @@ export async function stageDeferredForTenant(
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
 	const decision = expectSingleUploadDecision(
-		await negotiated.json<UploadNegotiateResponse>(),
+		uploadNegotiateResponseSchema.parse(await negotiated.json()),
 		metadata
 	);
 
@@ -1634,13 +1661,20 @@ export async function commitUploadRejection(
 	uploadId: string,
 	cache: string = DEFAULT_CACHE
 ): Promise<unknown> {
-	try {
-		await commitUpload(token, uploadId, cache);
-	} catch (error) {
-		return error;
-	}
+	const result = await commitUpload(token, uploadId, cache).then(
+		(response) => ({ kind: 'committed' as const, response }),
+		(error: unknown) => ({ kind: 'rejected' as const, error })
+	);
 
-	throw new Error(`expected the commit of upload ${uploadId} to be refused`);
+	expect({
+		kind: result.kind,
+		uploadId
+	}).toStrictEqual({
+		kind: 'rejected',
+		uploadId
+	});
+
+	return result.kind === 'rejected' ? result.error : result.response;
 }
 
 /** As {@link commitUpload}, routed through the Worker like a real client. */
@@ -1755,7 +1789,7 @@ export async function deletePath(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<DeletePathResponse>();
+	return deletePathResponseSchema.parse(await response.json());
 }
 
 export async function setRoot(
@@ -1775,7 +1809,7 @@ export async function setRoot(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<RootSetResponse>();
+	return rootSetResponseSchema.parse(await response.json());
 }
 
 export async function listRoots(token: string): Promise<RootListResponse> {
@@ -1786,7 +1820,7 @@ export async function listRoots(token: string): Promise<RootListResponse> {
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<RootListResponse>();
+	return rootListResponseSchema.parse(await response.json());
 }
 
 export async function removeRoot(
@@ -1803,7 +1837,7 @@ export async function removeRoot(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<RootRemoveResponse>();
+	return rootRemoveResponseSchema.parse(await response.json());
 }
 
 export async function runGcResult(): Promise<GcResult> {
@@ -1812,7 +1846,7 @@ export async function runGcResult(): Promise<GcResult> {
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<GcResult>();
+	return gcResponseSchema.parse(await response.json());
 }
 
 /** Runs GC the way the cron does: through the internal origin, which cannot purge the edge cache. */
@@ -2264,7 +2298,7 @@ export async function uploadStatus(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	const body = await response.json<UploadStatusResponse>();
+	const body = uploadStatusResponseSchema.parse(await response.json());
 
 	return body.status;
 }
@@ -2285,7 +2319,7 @@ export async function tenantUploadStatus(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	const body = await response.json<UploadStatusResponse>();
+	const body = uploadStatusResponseSchema.parse(await response.json());
 
 	return body.status;
 }
@@ -2483,13 +2517,9 @@ export async function readStoredNarInfo(storePathHash: string): Promise<{
 	readonly contentType: string | undefined;
 	readonly cacheControl: string | undefined;
 }> {
-	const object = await env.BLOBS.get(
-		narInfoObjectKey(fixtureTenant, storePathHash)
-	);
-
-	if (object === null) {
-		throw new Error(`expected a stored narinfo object for ${storePathHash}`);
-	}
+	const object = z
+		.custom<R2ObjectBody>((value) => value !== null)
+		.parse(await env.BLOBS.get(narInfoObjectKey(fixtureTenant, storePathHash)));
 
 	return {
 		body: await object.text(),
@@ -2552,10 +2582,8 @@ export function expectSingleUploadDecision(
 	response: UploadNegotiateResponse,
 	metadata: UploadPathMetadataFields
 ): UploadActionDecision {
-	const decision = singleDecision(response) as UploadActionDecision;
-	const expiresAt = uploadExpiryFromNow();
-
-	expect(typeof decision.uploadId).toBe('string');
+	const decision = uploadActionDecisionSchema.parse(singleDecision(response));
+	const expectedExpiresAt = uploadExpiryFromNow();
 
 	expect(response.uploads).toStrictEqual([
 		{
@@ -2564,7 +2592,7 @@ export function expectSingleUploadDecision(
 			narHash: metadata.narHash,
 			uploadId: decision.uploadId,
 			r2Key: stagingObjectKey(decision.uploadId),
-			expiresAt
+			expiresAt: expectedExpiresAt
 		}
 	]);
 
@@ -2574,10 +2602,8 @@ export function expectSingleUploadDecision(
 export function expectSingleCommitDecision(
 	response: UploadNegotiateResponse,
 	metadata: UploadPathMetadataFields
-): CommitActionDecision {
-	const decision = singleDecision(response) as CommitActionDecision;
-
-	expect(typeof decision.uploadId).toBe('string');
+): UploadCommitDecision {
+	const decision = uploadCommitDecisionSchema.parse(singleDecision(response));
 
 	expect(response.uploads).toStrictEqual([
 		{
@@ -2594,15 +2620,8 @@ export function expectSingleCommitDecision(
 export function singleDecision(
 	response: UploadNegotiateResponse
 ): UploadDecision {
-	expect(response.uploads).toHaveLength(1);
-
-	const [decision] = response.uploads;
-
-	if (decision === undefined) {
-		throw new Error('expected exactly one upload decision');
-	}
-
-	return decision;
+	const [decision] = z.tuple([uploadDecisionSchema]).parse(response.uploads);
+	return uploadDecisionSchema.parse(decision);
 }
 
 export async function expectPrepareUploadResponse(
@@ -2613,11 +2632,7 @@ export async function expectPrepareUploadResponse(
 ): Promise<void> {
 	expect(response.status).toBe(StatusCodes.OK);
 
-	const body = await response.json<{
-		readonly uploadUrl: string;
-		readonly uploadHeaders: Readonly<Record<string, string>>;
-		readonly expiresAt: string;
-	}>();
+	const body = uploadPrepareResponseSchema.parse(await response.json());
 	const uploadUrl = new URL(body.uploadUrl);
 
 	expect({
@@ -2734,3 +2749,8 @@ export async function seedSigningKeys(
 		return seeded;
 	});
 }
+
+export {
+	type UploadActionDecision,
+	type UploadCommitDecision
+} from '@cupboard/protocol/upload';

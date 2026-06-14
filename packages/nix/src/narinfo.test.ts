@@ -1,5 +1,6 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { MalformedNarInfoLineError } from './errors.ts';
 import {
@@ -9,7 +10,6 @@ import {
 	parseFields,
 	parseNarInfo
 } from './narinfo.ts';
-
 const exampleStorePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example';
 
 function fingerprintWithReferences(references: readonly string[]): string {
@@ -170,14 +170,17 @@ describe('NarInfo', () => {
 		});
 	});
 
-	it('rejects malformed narinfo lines with a typed error', () => {
+	it('rejects a narinfo line without a colon separator', () => {
 		expect(() => parseNarInfo('StorePath /nix/store/example\n')).toThrow(
 			MalformedNarInfoLineError
 		);
 	});
 
 	it.each([
-		{ name: 'a missing required field', source: 'StorePath: /nix/store/x\n' },
+		{
+			name: 'a missing required field',
+			source: 'StorePath: /nix/store/x\n'
+		},
 		{
 			name: 'an unsupported compression',
 			source: narinfoLines()
@@ -239,25 +242,40 @@ describe('NarInfo', () => {
 		},
 		{
 			name: 'reference',
-			fields: { references: ['0123456789abcdfghijklmnpqrsvwxyz-a\nBad: x'] }
+			fields: {
+				references: ['0123456789abcdfghijklmnpqrsvwxyz-a\nBad: x']
+			}
 		},
-		{ name: 'deriver', fields: { deriver: 'bad\nderiver' } },
-		{ name: 'CA', fields: { ca: 'fixed:r:bad\u0007ca' } },
-		{ name: 'signature', fields: { sigs: ['key:bad\nsig'] } }
+		{
+			name: 'deriver',
+			fields: { deriver: 'bad\nderiver' }
+		},
+		{
+			name: 'CA',
+			fields: { ca: 'fixed:r:bad\u0007ca' }
+		},
+		{
+			name: 'signature',
+			fields: { sigs: ['key:bad\nsig'] }
+		}
 	])('rejects line injection while rendering $name', ({ fields }) => {
-		expect(() => narInfoWith(fields).render()).toThrow();
+		expect(() => narInfoWith(fields).render()).toThrow(z.ZodError);
 	});
 
-	it.each(['nope', '123abc', '1e9', '+5', '0x1f', ''])(
-		'rejects the non-integer file size %j',
-		(fileSize) => {
-			expect(
-				narInfoSchema.safeParse(
-					parseFields(narinfoLines({ fileSize }).join('\n'))
-				).success
-			).toBe(false);
-		}
-	);
+	it.each([
+		{ fileSize: 'nope' },
+		{ fileSize: '123abc' },
+		{ fileSize: '1e9' },
+		{ fileSize: '+5' },
+		{ fileSize: '0x1f' },
+		{ fileSize: '' }
+	])('rejects the non-integer file size %j', ({ fileSize }) => {
+		expect(
+			narInfoSchema.safeParse(
+				parseFields(narinfoLines({ fileSize }).join('\n'))
+			).success
+		).toBe(false);
+	});
 
 	it('parses CRLF line endings without a trailing carriage return', () => {
 		const info = parseNarInfo(narinfoLines().join('\r\n'));

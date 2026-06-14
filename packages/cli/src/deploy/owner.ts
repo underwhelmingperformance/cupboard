@@ -98,36 +98,81 @@ export function ownerHint(choice: OwnerChoice): string {
 	return `${host} · ${owner.subject} (${originLabels[origin]})`;
 }
 
+export type OwnerIssuerProblem = 'not-url' | 'not-https' | 'not-bare-url';
+
 /** Why `value` cannot be an owner issuer, or undefined when it can. */
-export function ownerIssuerProblem(value: string): string | undefined {
+export function ownerIssuerProblem(
+	value: string
+): OwnerIssuerProblem | undefined {
 	let url: URL;
 
 	try {
 		url = new URL(value);
 	} catch {
-		return 'the issuer must be a URL';
+		return 'not-url';
 	}
 
 	if (url.protocol !== 'https:') {
-		return 'the issuer must use https';
+		return 'not-https';
 	}
 
 	if (url.search !== '' || url.hash !== '' || url.username !== '') {
-		return 'the issuer must be a bare https URL, without query or fragment';
+		return 'not-bare-url';
 	}
 
 	return undefined;
 }
 
+export function ownerIssuerProblemMessage(problem: OwnerIssuerProblem): string {
+	switch (problem) {
+		case 'not-bare-url': {
+			return 'the issuer must be a bare https URL, without query or fragment';
+		}
+		case 'not-https': {
+			return 'the issuer must use https';
+		}
+		case 'not-url': {
+			return 'the issuer must be a URL';
+		}
+	}
+}
+
+export function ownerIssuerProblemText(value: string): string | undefined {
+	const problem = ownerIssuerProblem(value);
+
+	return problem === undefined ? undefined : ownerIssuerProblemMessage(problem);
+}
+
+export type OwnerFieldProblem = 'empty' | 'whitespace';
+
 /** Why `value` cannot be an owner subject or audience. */
-export function ownerFieldProblem(value: string): string | undefined {
+export function ownerFieldProblem(
+	value: string
+): OwnerFieldProblem | undefined {
 	if (value.trim() === '') {
-		return 'a value is required';
+		return 'empty';
 	}
 
 	if (/\s/.test(value)) {
-		return 'the value must not contain whitespace';
+		return 'whitespace';
 	}
 
 	return undefined;
+}
+
+export function ownerFieldProblemMessage(problem: OwnerFieldProblem): string {
+	switch (problem) {
+		case 'empty': {
+			return 'a value is required';
+		}
+		case 'whitespace': {
+			return 'the value must not contain whitespace';
+		}
+	}
+}
+
+export function ownerFieldProblemText(value: string): string | undefined {
+	const problem = ownerFieldProblem(value);
+
+	return problem === undefined ? undefined : ownerFieldProblemMessage(problem);
 }

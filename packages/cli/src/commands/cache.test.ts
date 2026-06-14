@@ -18,15 +18,17 @@ import {
 	runCacheRemove
 } from './cache.ts';
 
-function uncalledClient(): never {
-	throw new Error('client should not be called');
-}
-
 function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 	return {
-		list: uncalledClient,
-		put: uncalledClient,
-		remove: uncalledClient,
+		list: () => Promise.resolve({ caches: [] }),
+		put: ({ cacheName, priority }) =>
+			Promise.resolve({ name: cacheName, priority, storePaths: 0 }),
+		remove: ({ params }) =>
+			Promise.resolve({
+				name: params.cacheName,
+				removed: false,
+				storePathsRemoved: 0
+			}),
 		...overrides
 	};
 }
@@ -41,10 +43,9 @@ describe('runCacheList', () => {
 			]
 		};
 
-		await runCacheList(
-			reporter(results),
-			cacheClient({ list: () => Promise.resolve(response) })
-		);
+		await runCacheList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
 
 		expect(results).toStrictEqual([
 			[
@@ -80,17 +81,12 @@ describe('runCacheCreate', () => {
 			storePaths: 0
 		};
 
-		await runCacheCreate(
-			'builds',
-			30,
-			reporter(results),
-			cacheClient({
-				put(input) {
-					calls.push(input);
-					return Promise.resolve(summary);
-				}
-			})
-		);
+		await runCacheCreate('builds', 30, reporter(results), {
+			put(input) {
+				calls.push(input);
+				return Promise.resolve(summary);
+			}
+		});
 
 		expect({ calls, results }).toStrictEqual({
 			calls: [{ cacheName: 'builds', priority: 30 }],
@@ -162,16 +158,12 @@ describe('runCacheInspect', () => {
 	it('reports the summary of a named cache', async () => {
 		const results: ResultRow[][] = [];
 
-		await runCacheInspect(
-			'builds',
-			reporter(results),
-			cacheClient({
-				list: () =>
-					Promise.resolve({
-						caches: [{ name: 'builds', priority: 30, storePaths: 5 }]
-					})
-			})
-		);
+		await runCacheInspect('builds', reporter(results), {
+			list: () =>
+				Promise.resolve({
+					caches: [{ name: 'builds', priority: 30, storePaths: 5 }]
+				})
+		});
 
 		expect(results).toStrictEqual([
 			[
@@ -186,11 +178,9 @@ describe('runCacheInspect', () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
 
-		await runCacheInspect(
-			'missing',
-			reporter(results, infos),
-			cacheClient({ list: () => Promise.resolve({ caches: [] }) })
-		);
+		await runCacheInspect('missing', reporter(results, infos), {
+			list: () => Promise.resolve({ caches: [] })
+		});
 
 		expect({ results, infos }).toStrictEqual({
 			results: [],

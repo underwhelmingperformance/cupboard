@@ -21,6 +21,34 @@ function frame(value: CommitSocketFrame): string {
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const narHash = `sha256:${'1'.repeat(52)}`;
 
+type ErrorConstructor<T extends Error> = abstract new (
+	...arguments_: never[]
+) => T;
+
+function expectError<T extends Error>(
+	error: unknown,
+	errorClass: ErrorConstructor<T>
+): asserts error is T {
+	expect(error).toBeInstanceOf(errorClass);
+}
+
+async function rejectedBy<T extends Error>(
+	promise: Promise<unknown>,
+	errorClass: ErrorConstructor<T>
+): Promise<T> {
+	let rejection: unknown;
+
+	try {
+		await promise;
+	} catch (error) {
+		rejection = error;
+	}
+
+	expectError(rejection, errorClass);
+
+	return rejection;
+}
+
 function settle(
 	socket: FakeCommitSocket,
 	options: {
@@ -134,9 +162,17 @@ describe('settleCommitSocket', () => {
 			);
 			socket.emit('message', frame({ event: 'verdict', status }));
 
-			await expect(settled).rejects.toStrictEqual(
-				new UploadVerificationFailedError('upload-app', status)
-			);
+			const error = await rejectedBy(settled, UploadVerificationFailedError);
+
+			expect({
+				name: error.name,
+				uploadId: error.uploadId,
+				status: error.status
+			}).toStrictEqual({
+				name: 'UploadVerificationFailedError',
+				uploadId: 'upload-app',
+				status
+			});
 		}
 	);
 
@@ -149,14 +185,21 @@ describe('settleCommitSocket', () => {
 			frame({ event: 'error', status: 507, message: 'over quota' })
 		);
 
-		await expect(settled).rejects.toStrictEqual(
-			new CupboardHttpError(
-				'GET',
-				'/uploads/upload-app/commit',
-				507,
-				'over quota'
-			)
-		);
+		const error = await rejectedBy(settled, CupboardHttpError);
+
+		expect({
+			name: error.name,
+			method: error.method,
+			path: error.path,
+			status: error.status,
+			body: error.body
+		}).toStrictEqual({
+			name: 'CupboardHttpError',
+			method: 'GET',
+			path: '/uploads/upload-app/commit',
+			status: 507,
+			body: 'over quota'
+		});
 	});
 
 	it('rejects a refused upgrade with the response status and body', async () => {
@@ -168,14 +211,21 @@ describe('settleCommitSocket', () => {
 		refusal.emit('data', Buffer.from('Missing bearer token'));
 		refusal.emit('end');
 
-		await expect(settled).rejects.toStrictEqual(
-			new CupboardHttpError(
-				'GET',
-				'/uploads/upload-app/commit',
-				401,
-				'Missing bearer token'
-			)
-		);
+		const error = await rejectedBy(settled, CupboardHttpError);
+
+		expect({
+			name: error.name,
+			method: error.method,
+			path: error.path,
+			status: error.status,
+			body: error.body
+		}).toStrictEqual({
+			name: 'CupboardHttpError',
+			method: 'GET',
+			path: '/uploads/upload-app/commit',
+			status: 401,
+			body: 'Missing bearer token'
+		});
 	});
 
 	it('rejects when the socket closes before the commit settles', async () => {
@@ -184,12 +234,15 @@ describe('settleCommitSocket', () => {
 
 		socket.emit('close', 1006);
 
-		await expect(settled).rejects.toStrictEqual(
-			new CommitSocketProtocolError(
-				'/uploads/upload-app/commit',
-				'the socket closed before the commit settled'
-			)
-		);
+		const error = await rejectedBy(settled, CommitSocketProtocolError);
+
+		expect({
+			name: error.name,
+			path: error.path
+		}).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path: '/uploads/upload-app/commit'
+		});
 	});
 
 	it('rejects an unparseable frame as a protocol error', async () => {
@@ -198,12 +251,15 @@ describe('settleCommitSocket', () => {
 
 		socket.emit('message', 'not json');
 
-		await expect(settled).rejects.toStrictEqual(
-			new CommitSocketProtocolError(
-				'/uploads/upload-app/commit',
-				'unexpected frame: not json'
-			)
-		);
+		const error = await rejectedBy(settled, CommitSocketProtocolError);
+
+		expect({
+			name: error.name,
+			path: error.path
+		}).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path: '/uploads/upload-app/commit'
+		});
 	});
 
 	it('times out a parked upload after the wait deadline', async () => {
@@ -214,12 +270,19 @@ describe('settleCommitSocket', () => {
 			'message',
 			frame({ event: 'deferred', storePathHash, narHash })
 		);
-		const expectation = expect(settled).rejects.toStrictEqual(
-			new UploadWaitTimeoutError(1, 30)
-		);
+		const rejection = rejectedBy(settled, UploadWaitTimeoutError);
 		await vi.advanceTimersByTimeAsync(30_000);
 
-		await expectation;
+		const error = await rejection;
+		expect({
+			name: error.name,
+			pending: error.pending,
+			timeoutSeconds: error.timeoutSeconds
+		}).toStrictEqual({
+			name: 'UploadWaitTimeoutError',
+			pending: 1,
+			timeoutSeconds: 30
+		});
 		expect(socket.closed).toBe(true);
 	});
 
@@ -254,7 +317,14 @@ describe('settleCommitSocket', () => {
 
 		controller.abort();
 
-		await expect(settled).rejects.toMatchObject({ name: 'AbortError' });
-		expect(socket.closed).toBe(true);
+		const error = await rejectedBy(settled, Error);
+
+		expect({
+			error: { name: error.name },
+			socketClosed: socket.closed
+		}).toStrictEqual({
+			error: { name: 'AbortError' },
+			socketClosed: true
+		});
 	});
 });

@@ -4,7 +4,9 @@ import {
 } from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
+import { decodeInboundClaims } from '../oidc/oidc.ts';
 import {
 	currentOrigin,
 	handlerFetch,
@@ -17,16 +19,13 @@ import {
 
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
-interface TokenClaims {
-	readonly iss?: string;
-	readonly aud?: string;
-}
+const tokenClaimsSchema = z.object({
+	iss: z.string().optional(),
+	aud: z.union([z.string(), z.array(z.string())]).optional()
+});
 
-function decodeClaims(token: string): TokenClaims {
-	const payload = token.split('.', 2)[1] ?? '';
-	const json = atob(payload.replaceAll('-', '+').replaceAll('_', '/'));
-
-	return JSON.parse(json) as TokenClaims;
+function decodeClaims(token: string): z.infer<typeof tokenClaimsSchema> {
+	return tokenClaimsSchema.parse(decodeInboundClaims(token));
 }
 
 function bearer(token: string): RequestInit {
@@ -41,6 +40,15 @@ function writeRequest(): RequestInit {
 	};
 }
 
+const authorizationServerMetadataSchema = z.strictObject({
+	issuer: z.string(),
+	token_endpoint: z.string(),
+	jwks_uri: z.string(),
+	grant_types_supported: z.array(z.string()),
+	scopes_supported: z.array(z.string()),
+	token_endpoint_auth_methods_supported: z.array(z.string())
+});
+
 describe('tenant routing', () => {
 	beforeEach(resetTestServer);
 
@@ -54,7 +62,7 @@ describe('tenant routing', () => {
 
 		expect({
 			status: response.status,
-			body: await response.json()
+			body: authorizationServerMetadataSchema.parse(await response.json())
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			body: {
