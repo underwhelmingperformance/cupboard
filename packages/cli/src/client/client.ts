@@ -205,12 +205,6 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Exchanges an external OIDC subject token for a cupboard access token at the
-	 * OAuth `POST /token` endpoint. The endpoint is unauthenticated — the subject
-	 * token is the credential — and takes a urlencoded body, so it bypasses the
-	 * JSON request path the rest of the client uses.
-	 */
-	/**
 	 * Claims (or idempotently re-claims) global admin of the deployment at the
 	 * bootstrap `POST /signup` endpoint. The endpoint is unauthenticated — the
 	 * external OIDC subject token is the credential, judged against the
@@ -245,6 +239,12 @@ export class CupboardClient {
 		return this.parseJson('/signup', signupResponseSchema, response);
 	}
 
+	/**
+	 * Exchanges an external OIDC subject token for a cupboard access token at the
+	 * OAuth `POST /token` endpoint. The endpoint is unauthenticated — the subject
+	 * token is the credential — and takes a urlencoded body, so it bypasses the
+	 * JSON request path the rest of the client uses.
+	 */
 	async tokenExchange(
 		subjectToken: string,
 		subjectTokenType: string
