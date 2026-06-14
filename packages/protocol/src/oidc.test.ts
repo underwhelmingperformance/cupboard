@@ -16,20 +16,21 @@ describe('tokenExchangeRequestSchema', () => {
 		subject_token_type: 'urn:ietf:params:oauth:token-type:id_token'
 	};
 
+	it('accepts a well-formed exchange request', () => {
+		expect(tokenExchangeRequestSchema.parse(request)).toStrictEqual(request);
+	});
+
 	it.each([
-		{ name: 'a well-formed exchange request', value: request, valid: true },
 		{
 			name: 'a missing subject token',
-			value: { ...request, subject_token: undefined },
-			valid: false
+			value: { ...request, subject_token: undefined }
 		},
 		{
 			name: 'an empty grant type',
-			value: { ...request, grant_type: '' },
-			valid: false
+			value: { ...request, grant_type: '' }
 		}
-	])('$name', ({ value, valid }) => {
-		expect(tokenExchangeRequestSchema.safeParse(value).success).toBe(valid);
+	])('rejects $name', ({ value }) => {
+		expect(tokenExchangeRequestSchema.safeParse(value).success).toBe(false);
 	});
 
 	it('ignores the optional fields RFC 8693 permits', () => {
@@ -52,7 +53,11 @@ describe('tokenResponseSchema', () => {
 	};
 
 	it.each([
-		{ name: 'a token-exchange response', value: clientResponse, valid: true },
+		{
+			name: 'a token-exchange response',
+			value: clientResponse,
+			expected: clientResponse
+		},
 		{
 			name: 'a response carrying issued_token_type',
 			value: {
@@ -60,25 +65,31 @@ describe('tokenResponseSchema', () => {
 				scope: 'write',
 				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
 			},
-			valid: true
-		},
+			expected: {
+				...clientResponse,
+				scope: 'write',
+				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+			}
+		}
+	])('accepts $name', ({ value, expected }) => {
+		expect(tokenResponseSchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
 		{
 			name: 'a non-Bearer token type',
-			value: { ...clientResponse, token_type: 'mac' },
-			valid: false
+			value: { ...clientResponse, token_type: 'mac' }
 		},
 		{
 			name: 'a non-positive expires_in',
-			value: { ...clientResponse, expires_in: 0 },
-			valid: false
+			value: { ...clientResponse, expires_in: 0 }
 		},
 		{
 			name: 'an unknown key',
-			value: { ...clientResponse, surprise: true },
-			valid: false
+			value: { ...clientResponse, surprise: true }
 		}
-	])('$name', ({ value, valid }) => {
-		expect(tokenResponseSchema.safeParse(value).success).toBe(valid);
+	])('rejects $name', ({ value }) => {
+		expect(tokenResponseSchema.safeParse(value).success).toBe(false);
 	});
 });
 
@@ -100,42 +111,46 @@ describe('oidc trust schemas', () => {
 	};
 
 	it.each([
-		{ name: 'a well-formed add body', value: addBody, valid: true },
+		{
+			name: 'a well-formed add body',
+			value: addBody,
+			expected: addBody
+		},
 		{
 			name: 'an add body bound to a loopback issuer over http',
 			value: { ...addBody, issuer: 'http://127.0.0.1:8788' },
-			valid: true
-		},
+			expected: { ...addBody, issuer: 'http://127.0.0.1:8788' }
+		}
+	])('accepts add body: $name', ({ value, expected }) => {
+		expect(oidcTrustAddBodySchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
 		{
 			name: 'an add body with no claims',
-			value: { ...addBody, claims: {} },
-			valid: false
+			value: { ...addBody, claims: {} }
 		},
 		{
 			name: 'a non-URL issuer',
-			value: { ...addBody, issuer: 'not-a-url' },
-			valid: false
+			value: { ...addBody, issuer: 'not-a-url' }
 		},
 		{
 			name: 'a non-loopback issuer over plain http',
 			value: {
 				...addBody,
 				issuer: 'http://token.actions.githubusercontent.com'
-			},
-			valid: false
+			}
 		},
 		{
 			name: 'an empty audience',
-			value: { ...addBody, audience: '' },
-			valid: false
+			value: { ...addBody, audience: '' }
 		},
 		{
 			name: 'an unknown key',
-			value: { ...addBody, surprise: true },
-			valid: false
+			value: { ...addBody, surprise: true }
 		}
-	])('add body: $name', ({ value, valid }) => {
-		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(valid);
+	])('rejects add body: $name', ({ value }) => {
+		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(false);
 	});
 
 	it('normalises a trailing slash off the issuer', () => {
@@ -148,14 +163,17 @@ describe('oidc trust schemas', () => {
 	});
 
 	it('accepts the summary, list and remove responses', () => {
+		const remove = { id: 'r1', removed: true };
+
 		expect({
-			summary: oidcTrustSummarySchema.safeParse(summary).success,
-			list: oidcTrustListResponseSchema.safeParse({ rules: [summary] }).success,
-			remove: oidcTrustRemoveResponseSchema.safeParse({
-				id: 'r1',
-				removed: true
-			}).success
-		}).toStrictEqual({ summary: true, list: true, remove: true });
+			summary: oidcTrustSummarySchema.parse(summary),
+			list: oidcTrustListResponseSchema.parse({ rules: [summary] }),
+			remove: oidcTrustRemoveResponseSchema.parse(remove)
+		}).toStrictEqual({
+			summary,
+			list: { rules: [summary] },
+			remove
+		});
 	});
 
 	it('rejects a summary with an unknown scope', () => {

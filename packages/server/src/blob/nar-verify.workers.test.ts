@@ -1,6 +1,7 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { verifyDecompressedNar } from './nar-verify.ts';
 
@@ -83,12 +84,30 @@ describe('verifyDecompressedNar', () => {
 			narHash,
 			narSize: declaredNarSize
 		});
+		const mismatch = z
+			.object({
+				ok: z.literal(false),
+				reason: z.literal('nar-size-mismatch'),
+				actualNarSize: z.number()
+			})
+			.parse(result);
 
-		if (result.ok || result.reason !== 'nar-size-mismatch') {
-			throw new Error('expected a nar-size-mismatch rejection');
-		}
-
-		expect(result.actualNarSize).toBeGreaterThan(declaredNarSize);
-		expect(result.actualNarSize).toBeLessThan(nar.byteLength);
+		expect({
+			mismatch,
+			bounds: {
+				overDeclared: mismatch.actualNarSize > declaredNarSize,
+				underFullPayload: mismatch.actualNarSize < nar.byteLength
+			}
+		}).toStrictEqual({
+			mismatch: {
+				ok: false,
+				reason: 'nar-size-mismatch',
+				actualNarSize: mismatch.actualNarSize
+			},
+			bounds: {
+				overDeclared: true,
+				underFullPayload: true
+			}
+		});
 	});
 });

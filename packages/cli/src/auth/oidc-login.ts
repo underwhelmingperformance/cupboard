@@ -7,17 +7,66 @@ import { z } from 'zod';
 import { abortable, delayMs, throwIfAborted } from '../abort.ts';
 import { CliError } from '../errors.ts';
 
+export interface OidcLoginErrorOptions {
+	readonly cause?: unknown;
+	readonly issuer?: string;
+	readonly kind?: OidcLoginErrorKind;
+	readonly metadataIssuer?: string;
+	readonly providerError?: string;
+	readonly status?: number;
+}
+
+export type OidcLoginErrorKind =
+	| 'authorization-declined'
+	| 'device-authorization-http'
+	| 'device-authorization-non-json'
+	| 'device-authorization-schema'
+	| 'device-denied'
+	| 'device-expired'
+	| 'device-token-non-json'
+	| 'device-token-response'
+	| 'discovery-http'
+	| 'discovery-non-json'
+	| 'discovery-request'
+	| 'discovery-schema'
+	| 'generic'
+	| 'invalid-issuer'
+	| 'issuer-mismatch'
+	| 'loopback-bind'
+	| 'loopback-timeout'
+	| 'token-http'
+	| 'token-non-json'
+	| 'token-response'
+	| 'unsupported-device-flow';
+
 export class OidcLoginError extends CliError {
-	constructor(message: string, options?: { readonly cause: unknown }) {
-		super(message, options);
+	constructor(message: string, options: OidcLoginErrorOptions = {}) {
+		super(
+			message,
+			options.cause === undefined ? undefined : { cause: options.cause }
+		);
 		this.name = 'OidcLoginError';
+		this.kind = options.kind ?? 'generic';
+		this.issuer = options.issuer;
+		this.metadataIssuer = options.metadataIssuer;
+		this.providerError = options.providerError;
+		this.status = options.status;
 	}
+
+	readonly kind: OidcLoginErrorKind;
+	readonly issuer: string | undefined;
+	readonly metadataIssuer: string | undefined;
+	readonly providerError: string | undefined;
+	readonly status: number | undefined;
 }
 
 /** Base: the authorization server declined the login. */
 export abstract class AuthorizationDeclinedError extends OidcLoginError {
 	protected constructor(public readonly providerError: string) {
-		super(`Authorization failed: ${providerError}`);
+		super(`Authorization failed: ${providerError}`, {
+			kind: 'authorization-declined',
+			providerError
+		});
 	}
 
 	/** The specific error for an RFC 6749 authorize-endpoint error code. */
@@ -63,7 +112,9 @@ export class AuthorizationProviderError extends AuthorizationDeclinedError {
 /** The browser never completed the login within the bounded wait. */
 export class LoginTimeoutError extends OidcLoginError {
 	constructor() {
-		super('Timed out waiting for the browser to complete login');
+		super('Timed out waiting for the browser to complete login', {
+			kind: 'loopback-timeout'
+		});
 		this.name = 'LoginTimeoutError';
 	}
 }
@@ -71,7 +122,10 @@ export class LoginTimeoutError extends OidcLoginError {
 /** The issuer refused to start a device authorization (RFC 8628). */
 export class DeviceAuthorizationRequestError extends OidcLoginError {
 	constructor(public readonly status: number) {
-		super(`Device authorization request failed with HTTP ${String(status)}`);
+		super(`Device authorization request failed with HTTP ${String(status)}`, {
+			kind: 'device-authorization-http',
+			status
+		});
 		this.name = 'DeviceAuthorizationRequestError';
 	}
 }
@@ -82,10 +136,10 @@ export class LoopbackBindError extends OidcLoginError {
 		public readonly ports: readonly number[],
 		options?: { readonly cause: unknown }
 	) {
-		super(
-			`Could not bind the loopback server on port(s) ${ports.join(', ')}`,
-			options
-		);
+		super(`Could not bind the loopback server on port(s) ${ports.join(', ')}`, {
+			...options,
+			kind: 'loopback-bind'
+		});
 		this.name = 'LoopbackBindError';
 	}
 }
@@ -142,11 +196,13 @@ export async function discoverOidcLogin(
 
 	if (issuerUrl === undefined) {
 		throw new OidcLoginError(
-			`Issuer ${issuer} must be an https URL (http only for loopback)`
+			`Issuer ${issuer} must be an https URL (http only for loopback)`,
+			{ issuer, kind: 'invalid-issuer' }
 		);
 	}
 
 	let payload: unknown;
+	let response: Response;
 
 	try {
 		// Do not follow redirects, matching the server's discovery fetch: a
@@ -154,20 +210,32 @@ export async function discoverOidcLogin(
 		// keeps the issuer but points the token endpoint at an attacker, who would
 		// then receive the authorization code and PKCE verifier. A 3xx fails the
 		// `ok` check below.
-		const response = await fetcher(issuerUrl.discoveryUrl, {
+		response = await fetcher(issuerUrl.discoveryUrl, {
 			redirect: 'manual',
 			signal
 		});
+	} catch (error) {
+		throw new OidcLoginError(`Could not read OIDC metadata for ${issuer}`, {
+			kind: 'discovery-request',
+			issuer,
+			cause: error
+		});
+	}
 
-		if (!response.ok) {
-			throw new Error(
-				`discovery responded with HTTP ${String(response.status)}`
-			);
-		}
+	if (!response.ok) {
+		throw new OidcLoginError(`Could not read OIDC metadata for ${issuer}`, {
+			kind: 'discovery-http',
+			issuer,
+			status: response.status
+		});
+	}
 
+	try {
 		payload = await response.json();
 	} catch (error) {
 		throw new OidcLoginError(`Could not read OIDC metadata for ${issuer}`, {
+			kind: 'discovery-non-json',
+			issuer,
 			cause: error
 		});
 	}
@@ -178,6 +246,8 @@ export async function discoverOidcLogin(
 		throw new OidcLoginError(
 			`OIDC metadata for ${issuer} is missing endpoints`,
 			{
+				kind: 'discovery-schema',
+				issuer,
 				cause: parsed.error
 			}
 		);
@@ -185,7 +255,12 @@ export async function discoverOidcLogin(
 
 	if (!issuerUrl.matches(parsed.data.issuer)) {
 		throw new OidcLoginError(
-			`OIDC metadata issuer ${parsed.data.issuer} does not match ${issuer}`
+			`OIDC metadata issuer ${parsed.data.issuer} does not match ${issuer}`,
+			{
+				kind: 'issuer-mismatch',
+				issuer,
+				metadataIssuer: parsed.data.issuer
+			}
 		);
 	}
 
@@ -557,7 +632,9 @@ export async function deviceLogin(
 	const endpoint = options.endpoints.deviceAuthorizationEndpoint;
 
 	if (endpoint === undefined) {
-		throw new OidcLoginError('The issuer does not support the device flow');
+		throw new OidcLoginError('The issuer does not support the device flow', {
+			kind: 'unsupported-device-flow'
+		});
 	}
 
 	const fetcher = options.fetcher ?? fetch;
@@ -591,7 +668,8 @@ export async function deviceLogin(
 
 		if (now() >= deadlineMs) {
 			throw new OidcLoginError(
-				'Device authorization expired before it was approved'
+				'Device authorization expired before it was approved',
+				{ kind: 'device-expired' }
 			);
 		}
 
@@ -613,7 +691,13 @@ export async function deviceLogin(
 		if (outcome.kind === 'slow_down') {
 			intervalMs += deviceSlowDownIncrementMs;
 		} else if (outcome.kind === 'denied') {
-			throw new OidcLoginError(`Device authorization failed: ${outcome.error}`);
+			throw new OidcLoginError(
+				`Device authorization failed: ${outcome.error}`,
+				{
+					kind: 'device-denied',
+					providerError: outcome.error
+				}
+			);
 		}
 	}
 }
@@ -630,10 +714,13 @@ async function requestDeviceCode(
 		throw new DeviceAuthorizationRequestError(response.status);
 	}
 
-	const parsed = deviceAuthorizationSchema.safeParse(await readJson(response));
+	const parsed = deviceAuthorizationSchema.safeParse(
+		await readJson(response, 'device-authorization-non-json')
+	);
 
 	if (!parsed.success) {
 		throw new OidcLoginError('Device authorization response was malformed', {
+			kind: 'device-authorization-schema',
 			cause: parsed.error
 		});
 	}
@@ -657,13 +744,15 @@ async function pollDeviceToken(
 		endpoints.tokenEndpoint,
 		postForm(form, signal)
 	);
-	const payload = await readJson(response);
+	const payload = await readJson(response, 'device-token-non-json');
 
 	if (response.ok) {
 		const parsed = idTokenSchema.safeParse(payload);
 
 		if (!parsed.success) {
-			throw new OidcLoginError('Device token response carried no id_token');
+			throw new OidcLoginError('Device token response carried no id_token', {
+				kind: 'device-token-response'
+			});
 		}
 
 		return { kind: 'token', idToken: parsed.data.id_token };
@@ -688,11 +777,15 @@ async function pollDeviceToken(
 // A token endpoint can return a non-JSON body (an HTML error page, a proxy
 // notice); parse defensively so that surfaces as an `OidcLoginError` rather than
 // a raw `SyntaxError`.
-async function readJson(response: Response): Promise<unknown> {
+async function readJson(
+	response: Response,
+	kind: OidcLoginErrorKind
+): Promise<unknown> {
 	try {
 		return await response.json();
 	} catch (error) {
 		throw new OidcLoginError('OIDC endpoint returned a non-JSON response', {
+			kind,
 			cause: error
 		});
 	}
@@ -711,14 +804,19 @@ async function exchangeCode(
 
 	if (!response.ok) {
 		throw new OidcLoginError(
-			`Token exchange failed with HTTP ${String(response.status)}`
+			`Token exchange failed with HTTP ${String(response.status)}`,
+			{ kind: 'token-http', status: response.status }
 		);
 	}
 
-	const parsed = idTokenSchema.safeParse(await readJson(response));
+	const parsed = idTokenSchema.safeParse(
+		await readJson(response, 'token-non-json')
+	);
 
 	if (!parsed.success) {
-		throw new OidcLoginError('Token response carried no id_token');
+		throw new OidcLoginError('Token response carried no id_token', {
+			kind: 'token-response'
+		});
 	}
 
 	return parsed.data.id_token;

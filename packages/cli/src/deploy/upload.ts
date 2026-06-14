@@ -16,8 +16,11 @@ export interface ResolvedResources {
 }
 
 export class MissingResourceError extends Error {
-	constructor(kind: string, name: string) {
-		super(`No resolved ${kind} for "${name}"`);
+	constructor(
+		public readonly kind: string,
+		public readonly resourceName: string
+	) {
+		super(`No resolved ${kind} for "${resourceName}"`);
 		this.name = 'MissingResourceError';
 	}
 }

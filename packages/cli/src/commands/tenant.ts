@@ -61,7 +61,10 @@ interface CreateOptions {
 }
 
 export class ReadCredentialIncompleteError extends Error {
-	constructor() {
+	constructor(
+		public readonly readUser: string | undefined,
+		public readonly readPassword: string | false | undefined
+	) {
 		super('--read-user requires --read-password');
 		this.name = 'ReadCredentialIncompleteError';
 	}
@@ -108,7 +111,10 @@ export function readCredentialFromOptions(options: {
 }): ReadCredentialSelection {
 	if (options.readPassword === false) {
 		if (options.readUser !== undefined) {
-			throw new ReadCredentialIncompleteError();
+			throw new ReadCredentialIncompleteError(
+				options.readUser,
+				options.readPassword
+			);
 		}
 
 		return { read: undefined, generatedPassword: undefined };
@@ -134,7 +140,10 @@ export function readCredentialFromOptions(options: {
 	const explicitPassword = options.readPassword;
 
 	if (explicitPassword === undefined) {
-		throw new ReadCredentialIncompleteError();
+		throw new ReadCredentialIncompleteError(
+			options.readUser,
+			options.readPassword
+		);
 	}
 
 	return {
@@ -356,7 +365,7 @@ export function registerTenantCommands(
 export async function runTenantCreate(
 	body: TenantCreateBody,
 	reporter: Reporter,
-	client: TenantClient,
+	client: Pick<TenantClient, 'create'>,
 	generatedReadPassword?: string
 ): Promise<void> {
 	const summary = await reporter.phase('Creating tenant', () =>
@@ -395,7 +404,7 @@ export async function runTenantCreate(
 
 export async function runTenantList(
 	reporter: Reporter,
-	client: TenantClient
+	client: Pick<TenantClient, 'list'>
 ): Promise<void> {
 	const { tenants } = await reporter.phase('Listing tenants', () =>
 		client.list()
@@ -439,7 +448,7 @@ export async function runTenantSuspend(
 export async function runTenantResume(
 	id: string,
 	reporter: Reporter,
-	client: TenantClient
+	client: Pick<TenantClient, 'resume'>
 ): Promise<void> {
 	const result = await reporter.phase('Resuming tenant', () =>
 		client.resume({ id })
@@ -456,7 +465,7 @@ export async function runTenantReadMode(
 	id: string,
 	readMode: 'public' | 'private',
 	reporter: Reporter,
-	client: TenantClient
+	client: Pick<TenantClient, 'setReadMode'>
 ): Promise<void> {
 	const result = await reporter.phase('Setting read mode', () =>
 		client.setReadMode({ id, readMode })
@@ -473,7 +482,7 @@ export async function runTenantRotateCredential(
 	id: string,
 	options: RotateCredentialOptions,
 	reporter: Reporter,
-	client: TenantClient
+	client: Pick<TenantClient, 'rotateReadCredential'>
 ): Promise<void> {
 	const user = options.readUser ?? defaultReadUser;
 	const password = options.readPassword ?? generateReadPassword();
@@ -513,7 +522,7 @@ export async function runTenantRotateCredential(
 export async function runTenantClearCredential(
 	id: string,
 	reporter: Reporter,
-	client: TenantClient
+	client: Pick<TenantClient, 'clearReadCredential'>
 ): Promise<void> {
 	const result = await reporter.phase('Clearing read credential', () =>
 		client.clearReadCredential({ id })

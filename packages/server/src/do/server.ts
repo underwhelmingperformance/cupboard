@@ -50,7 +50,10 @@ import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
-import { MaintenanceEligibilityService } from './maintenance-eligibility-service.ts';
+import {
+	MaintenanceEligibilityService,
+	withMaintenanceEligibility
+} from './maintenance-eligibility-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
@@ -658,13 +661,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async withMaintenanceEligibility<T>(
 		body: () => Promise<T>
 	): Promise<T> {
-		await this.maintenanceEligibility.invalidate();
-
-		try {
-			return await body();
-		} finally {
-			await this.reconcileMaintenanceEligibility();
-		}
+		return withMaintenanceEligibility(
+			this.maintenanceEligibility,
+			() => this.reconcileMaintenanceEligibility(),
+			body
+		);
 	}
 
 	private async reconcileMaintenanceEligibility(): Promise<void> {

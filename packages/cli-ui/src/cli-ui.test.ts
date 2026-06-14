@@ -37,6 +37,18 @@ function captureStream(): { stream: Writable; written: () => string } {
 	return { stream, written: () => chunks.join('') };
 }
 
+function withoutDurations(events: readonly unknown[]): readonly unknown[] {
+	return events.map((event) =>
+		isRecord(event) && typeof event.durationMs === 'number'
+			? { ...event, durationMs: 'number' }
+			: event
+	);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 describe('formatRows', () => {
 	it('aligns values to the widest label', () => {
 		const formatted = stripColours(
@@ -190,14 +202,14 @@ describe('createCliUi machine narration', () => {
 		const events = stream()
 			.trim()
 			.split('\n')
-			.map((line) => JSON.parse(line) as Record<string, unknown>);
+			.map((line): unknown => JSON.parse(line));
 
-		expect(events).toStrictEqual([
+		expect(withoutDurations(events)).toStrictEqual([
 			{
 				event: 'phase',
 				label: 'Uploading',
 				status: 'ok',
-				durationMs: expect.any(Number) as number,
+				durationMs: 'number',
 				total: 2,
 				completed: 2,
 				facts: {}
@@ -206,7 +218,7 @@ describe('createCliUi machine narration', () => {
 				event: 'phase',
 				label: 'Attestations',
 				status: 'ok',
-				durationMs: expect.any(Number) as number,
+				durationMs: 'number',
 				groups: [{ name: 'read', status: 'ok', messages: ['1 bundle'] }]
 			}
 		]);

@@ -1,46 +1,75 @@
 import { CliError } from '../errors.ts';
 
+export type DomainProblem =
+	| 'empty'
+	| 'invalid-label'
+	| 'not-fully-qualified'
+	| 'scheme-or-path'
+	| 'too-long';
+
 export class InvalidDomainError extends CliError {
 	constructor(
 		public readonly domain: string,
-		reason: string
+		public readonly problem: DomainProblem
 	) {
-		super(`Invalid --domain ${domain}: ${reason}`);
+		super(`Invalid --domain ${domain}: ${domainProblemMessage(problem)}`);
 		this.name = 'InvalidDomainError';
 	}
 }
 
 const labelPattern = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/i;
 
-/**
- * Why `value` cannot be a custom domain, or undefined when it can. The same
- * verdict drives the `--domain` flag check and the interactive prompt's inline
- * validation, so both paths agree.
- */
-export function domainProblem(value: string): string | undefined {
+/** Why `value` cannot be a custom domain, or undefined when it can. */
+export function domainProblem(value: string): DomainProblem | undefined {
 	if (value.length === 0) {
-		return 'a domain cannot be empty';
+		return 'empty';
 	}
 
 	if (value.length > 253) {
-		return 'a domain must be at most 253 characters';
+		return 'too-long';
 	}
 
 	if (value.includes('://') || value.includes('/')) {
-		return 'use a bare hostname, without a scheme or path';
+		return 'scheme-or-path';
 	}
 
 	const labels = value.split('.');
 
 	if (labels.length < 2) {
-		return 'use a fully qualified hostname (e.g. cache.example.com)';
+		return 'not-fully-qualified';
 	}
 
 	if (!labels.every((label) => labelPattern.test(label))) {
-		return 'hostname labels must be letters, digits and inner hyphens';
+		return 'invalid-label';
 	}
 
 	return undefined;
+}
+
+export function domainProblemMessage(problem: DomainProblem): string {
+	switch (problem) {
+		case 'empty': {
+			return 'a domain cannot be empty';
+		}
+		case 'invalid-label': {
+			return 'hostname labels must be letters, digits and inner hyphens';
+		}
+		case 'not-fully-qualified': {
+			return 'use a fully qualified hostname (e.g. cache.example.com)';
+		}
+		case 'scheme-or-path': {
+			return 'use a bare hostname, without a scheme or path';
+		}
+		case 'too-long': {
+			return 'a domain must be at most 253 characters';
+		}
+	}
+}
+
+export function domainProblemText(value: string): string | undefined {
+	const problem = domainProblem(value);
+
+	return problem === undefined ? undefined : domainProblemMessage(problem);
 }
 
 /** Validates a `--domain` flag value, throwing the typed error when invalid. */

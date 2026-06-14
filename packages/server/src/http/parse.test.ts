@@ -2,10 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
-	InvalidRequestError,
 	MalformedRequestBodyError,
 	RequestBodySchemaMismatchError,
-	StoredUploadMetadataInvalidError
+	StoredUploadMetadataInvalidError,
+	TokenRequestBodyInvalidError
 } from '../errors.ts';
 
 import {
@@ -38,7 +38,7 @@ describe('parseRequestValue', () => {
 		expect(parseRequestValue(z.number(), 1)).toBe(1);
 	});
 
-	it('throws RequestBodySchemaMismatchError on a mismatch', () => {
+	it('rejects a value the schema does not accept', () => {
 		expect(() => parseRequestValue(z.number(), 'nope')).toThrow(
 			RequestBodySchemaMismatchError
 		);
@@ -55,16 +55,16 @@ describe('parseRequestBody', () => {
 		expect(parsed).toStrictEqual({ name: 'a' });
 	});
 
-	it('rejects malformed JSON with MalformedRequestBodyError', async () => {
+	it('rejects a malformed JSON body', async () => {
 		await expect(parseRequestBody(schema, jsonRequest('{'))).rejects.toThrow(
 			MalformedRequestBodyError
 		);
 	});
 
 	it.each([
-		{ name: 'a schema mismatch', body: JSON.stringify({ name: 1 }) },
+		{ name: 'a field of the wrong type', body: JSON.stringify({ name: 1 }) },
 		{ name: 'an unknown key', body: JSON.stringify({ name: 'a', extra: 1 }) }
-	])('rejects $name with RequestBodySchemaMismatchError', async ({ body }) => {
+	])('rejects $name', async ({ body }) => {
 		await expect(parseRequestBody(schema, jsonRequest(body))).rejects.toThrow(
 			RequestBodySchemaMismatchError
 		);
@@ -103,13 +103,10 @@ describe('parseFormBody', () => {
 
 	it.each([
 		{ name: 'a missing field', body: 'grant_type=token-exchange' },
-		{
-			name: 'an unknown field',
-			body: 'grant_type=t&subject_token=a&extra=x'
-		}
-	])('rejects $name with InvalidRequestError', async ({ body }) => {
+		{ name: 'an unknown field', body: 'grant_type=t&subject_token=a&extra=x' }
+	])('rejects $name', async ({ body }) => {
 		await expect(parseFormBody(grant, formRequest(body))).rejects.toThrow(
-			InvalidRequestError
+			TokenRequestBodyInvalidError
 		);
 	});
 });

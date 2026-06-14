@@ -1,11 +1,15 @@
 import type {
 	OidcTrustAddBody,
-	OidcTrustListResponse,
-	OidcTrustRemoveResponse,
 	OidcTrustSummary
+} from '@cupboard/protocol/oidc';
+import {
+	oidcTrustListResponseSchema,
+	oidcTrustRemoveResponseSchema,
+	oidcTrustSummarySchema
 } from '@cupboard/protocol/oidc';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	authorisedFetch,
@@ -31,6 +35,13 @@ const addBody: OidcTrustAddBody = {
 	allowedRoots: ['github:owner/']
 };
 
+const orpcErrorBodySchema = z.strictObject({
+	code: z.string(),
+	defined: z.boolean(),
+	message: z.string(),
+	status: z.number()
+});
+
 async function adminToken(): Promise<string> {
 	await initialise();
 
@@ -39,6 +50,14 @@ async function adminToken(): Promise<string> {
 
 function listRules(token: string): Promise<Response> {
 	return authorisedFetch('/oidc-trust', token);
+}
+
+function rulesById(
+	response: unknown
+): Record<string, z.infer<typeof oidcTrustSummarySchema>> {
+	const { rules } = oidcTrustListResponseSchema.parse(response);
+
+	return Object.fromEntries(rules.map((rule) => [rule.id, rule]));
 }
 
 function addRule(token: string, body: OidcTrustAddBody): Promise<Response> {
@@ -56,31 +75,44 @@ describe('oidc-trust admin API', () => {
 		const token = await adminToken();
 
 		const added = await addRule(token, addBody);
-		const summary = await added.json<OidcTrustSummary>();
-		const { id, ...fields } = summary;
+		const summary = oidcTrustSummarySchema.parse(await added.json());
 		const list = await listRules(token);
+		const id = z.uuid().parse(summary.id);
 
-		expect(typeof id).toBe('string');
-		expect({ status: added.status, fields }).toStrictEqual({
+		expect({
+			status: added.status,
+			summary,
+			rules: rulesById(await list.json())
+		}).toStrictEqual({
 			status: StatusCodes.OK,
-			fields: {
+			summary: {
+				id,
 				issuer: addBody.issuer,
 				audience: addBody.audience,
 				scope: 'write',
 				claims: addBody.claims,
 				allowedRoots: addBody.allowedRoots,
 				disabled: false
+			},
+			rules: {
+				owner: ownerSummary,
+				[id]: {
+					id,
+					issuer: addBody.issuer,
+					audience: addBody.audience,
+					scope: 'write',
+					claims: addBody.claims,
+					allowedRoots: addBody.allowedRoots,
+					disabled: false
+				}
 			}
-		});
-		expect(await list.json<OidcTrustListResponse>()).toStrictEqual({
-			rules: [ownerSummary, summary]
 		});
 	});
 
 	it('soft-disables a rule and reports it disabled in the listing', async () => {
 		const token = await adminToken();
 		const added = await addRule(token, addBody);
-		const { id } = await added.json<OidcTrustSummary>();
+		const { id } = oidcTrustSummarySchema.parse(await added.json());
 
 		const removed = await authorisedFetch(`/oidc-trust/${id}`, token, {
 			method: 'DELETE'
@@ -91,25 +123,23 @@ describe('oidc-trust admin API', () => {
 		const list = await listRules(token);
 
 		expect({
-			removed: await removed.json<OidcTrustRemoveResponse>(),
-			repeat: await repeat.json<OidcTrustRemoveResponse>()
+			removed: oidcTrustRemoveResponseSchema.parse(await removed.json()),
+			repeat: oidcTrustRemoveResponseSchema.parse(await repeat.json())
 		}).toStrictEqual({
 			removed: { id, removed: true },
 			repeat: { id, removed: false }
 		});
-		expect(await list.json<OidcTrustListResponse>()).toStrictEqual({
-			rules: [
-				ownerSummary,
-				{
-					id,
-					issuer: addBody.issuer,
-					audience: addBody.audience,
-					scope: 'write',
-					claims: addBody.claims,
-					allowedRoots: addBody.allowedRoots,
-					disabled: true
-				}
-			]
+		expect(rulesById(await list.json())).toStrictEqual({
+			owner: ownerSummary,
+			[id]: {
+				id,
+				issuer: addBody.issuer,
+				audience: addBody.audience,
+				scope: 'write',
+				claims: addBody.claims,
+				allowedRoots: addBody.allowedRoots,
+				disabled: true
+			}
 		});
 	});
 
@@ -120,7 +150,9 @@ describe('oidc-trust admin API', () => {
 			method: 'DELETE'
 		});
 
-		expect(await response.json<OidcTrustRemoveResponse>()).toStrictEqual({
+		expect(
+			oidcTrustRemoveResponseSchema.parse(await response.json())
+		).toStrictEqual({
 			id: 'missing',
 			removed: false
 		});
@@ -132,20 +164,16 @@ describe('oidc-trust admin API', () => {
 		const response = await authorisedFetch('/oidc-trust/owner', token, {
 			method: 'DELETE'
 		});
-		const body = await response.json<{
-			code: string;
-			status: number;
-			message: string;
-		}>();
+		const body = orpcErrorBodySchema.parse(await response.json());
 
 		expect({
 			status: response.status,
-			code: body.code,
-			message: body.message
+			defined: body.defined,
+			code: body.code
 		}).toStrictEqual({
 			status: StatusCodes.CONFLICT,
-			code: 'CONFLICT',
-			message: 'Cannot change the owner rule; update deploy config instead'
+			defined: false,
+			code: 'CONFLICT'
 		});
 	});
 

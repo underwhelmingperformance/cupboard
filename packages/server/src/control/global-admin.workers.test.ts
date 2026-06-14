@@ -1,5 +1,6 @@
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -107,23 +108,42 @@ describe('claimGlobalAdmin', () => {
 			t0
 		);
 
-		await expect(
-			claimGlobalAdmin(database, { issuer, subject: 'intruder', audience }, t1)
-		).rejects.toThrow(GlobalAdminAlreadyClaimedError);
+		const error = await claimGlobalAdmin(
+			database,
+			{ issuer, subject: 'intruder', audience },
+			t1
+		).then(
+			() => ({ kind: 'claimed' }),
+			(error_: unknown) => error_
+		);
+
+		expect(error).toBeInstanceOf(GlobalAdminAlreadyClaimedError);
+		if (!(error instanceof GlobalAdminAlreadyClaimedError)) {
+			throw error;
+		}
 
 		const state = await adminAndTrust(database);
 
 		// The singleton and the only trust rule still belong to the first claimant.
-		expect(state).toStrictEqual({
-			admin: { issuer, subject: 'owner', claimedAt: t0 },
-			trust: [
-				{
-					id: 'signup',
-					issuer,
-					audience,
-					claimsJson: JSON.stringify({ sub: 'owner' })
-				}
-			]
+		expect({
+			error: { name: error.name, status: error.status },
+			state
+		}).toStrictEqual({
+			error: {
+				name: 'GlobalAdminAlreadyClaimedError',
+				status: StatusCodes.CONFLICT
+			},
+			state: {
+				admin: { issuer, subject: 'owner', claimedAt: t0 },
+				trust: [
+					{
+						id: 'signup',
+						issuer,
+						audience,
+						claimsJson: JSON.stringify({ sub: 'owner' })
+					}
+				]
+			}
 		});
 	});
 });

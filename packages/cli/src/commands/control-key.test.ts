@@ -21,17 +21,19 @@ function summary(overrides: Partial<ControlKeySummary>): ControlKeySummary {
 	return { kid: 'kid-1', retired: false, ...overrides };
 }
 
-function uncalled(): never {
-	throw new Error('client should not be called');
-}
-
 function controlKeyClient(
 	overrides: Partial<ControlKeyClient>
 ): ControlKeyClient {
 	return {
-		list: uncalled,
-		rotate: uncalled,
-		retire: uncalled,
+		list: () => Promise.resolve({ keys: [] }),
+		rotate: () =>
+			Promise.resolve({
+				kid: 'kid-1',
+				publicJwk: {},
+				retiring: undefined,
+				keys: []
+			}),
+		retire: ({ kid }) => Promise.resolve({ kid, retired: false }),
 		...overrides
 	};
 }
@@ -50,10 +52,9 @@ describe('runControlKeyList', () => {
 			]
 		};
 
-		await runControlKeyList(
-			reporter(results),
-			controlKeyClient({ list: () => Promise.resolve(response) })
-		);
+		await runControlKeyList(reporter(results), {
+			list: () => Promise.resolve(response)
+		});
 
 		expect(results).toStrictEqual([
 			[
@@ -92,15 +93,12 @@ describe('runControlKeyRotate', () => {
 			}
 		};
 
-		await runControlKeyRotate(
-			reporter(results, infos),
-			controlKeyClient({
-				rotate() {
-					rotateCalls += 1;
-					return Promise.resolve(response);
-				}
-			})
-		);
+		await runControlKeyRotate(reporter(results, infos), {
+			rotate() {
+				rotateCalls += 1;
+				return Promise.resolve(response);
+			}
+		});
 
 		expect({ rotateCalls, results, infos }).toStrictEqual({
 			rotateCalls: 1,

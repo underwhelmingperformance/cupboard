@@ -1,13 +1,26 @@
-import { type AttestationNegotiateResponse } from '@cupboard/protocol/attestations';
-import { type UploadNegotiateResponse } from '@cupboard/protocol/upload';
+import {
+	attestationAttachResponseSchema,
+	attestationDecisionSchema,
+	attestationListSchema,
+	attestationNegotiateResponseSchema,
+	attestationUploadDecisionSchema,
+	type ParsedAttestationDecision
+} from '@cupboard/protocol/attestations';
+import {
+	uploadActionDecisionSchema,
+	uploadNegotiateResponseSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
+import { AttestationPathNotFoundError } from '../errors.ts';
 import { attestationListObjectKey, casObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -38,8 +51,35 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
+import { AttestationCasService } from './attestation-cas-service.ts';
+import { AttestationsService } from './attestations-service.ts';
+import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+
 const predicateType = 'https://slsa.dev/provenance/v1';
+const orpcErrorBodySchema = z.strictObject({
+	defined: z.boolean(),
+	code: z.string(),
+	status: z.number(),
+	message: z.string(),
+	data: z.unknown().optional()
+});
 let nextStorePathHash = 0;
+
+function orpcErrorBodyShape(body: unknown): {
+	readonly defined: boolean;
+	readonly code: string;
+	readonly status: number;
+	readonly data: unknown;
+} {
+	const parsed = orpcErrorBodySchema.parse(body);
+
+	return {
+		defined: parsed.defined,
+		code: parsed.code,
+		status: parsed.status,
+		data: parsed.data
+	};
+}
 
 describe('attestation attach and reads', () => {
 	beforeEach(async () => {
@@ -59,7 +99,7 @@ describe('attestation attach and reads', () => {
 		expect({
 			attached,
 			listStatus: list.status,
-			listBody: await list.json(),
+			listBody: attestationListSchema.parse(await list.json()),
 			bundleStatus: bundleRead.status,
 			bundleBytes: [...bundleBytes]
 		}).toStrictEqual({
@@ -99,19 +139,22 @@ describe('attestation attach and reads', () => {
 			bundle
 		);
 		const list = await readFetch(`/attestations/${metadata.storePathHash}`);
-		const body = await response.json<{ code: string; message: string }>();
+		const body = orpcErrorBodyShape(await response.json());
 
 		expect({
 			status: response.status,
-			code: body.code,
-			message: body.message,
+			body,
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows(),
 			listStatus: list.status
 		}).toStrictEqual({
 			status: StatusCodes.UNPROCESSABLE_ENTITY,
-			code: 'UNPROCESSABLE_CONTENT',
-			message: 'Attestation subject digest does not match the committed NAR',
+			body: {
+				defined: false,
+				code: 'UNPROCESSABLE_CONTENT',
+				status: StatusCodes.UNPROCESSABLE_ENTITY,
+				data: undefined
+			},
 			refs: [],
 			objects: [],
 			listStatus: StatusCodes.NOT_FOUND
@@ -127,18 +170,21 @@ describe('attestation attach and reads', () => {
 			metadata.storePathHash,
 			garbage
 		);
-		const body = await response.json<{ code: string; message: string }>();
+		const body = orpcErrorBodyShape(await response.json());
 
 		expect({
 			status: response.status,
-			code: body.code,
-			message: body.message,
+			body,
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows()
 		}).toStrictEqual({
 			status: StatusCodes.UNPROCESSABLE_ENTITY,
-			code: 'UNPROCESSABLE_CONTENT',
-			message: 'Attestation bundle is not JSON',
+			body: {
+				defined: false,
+				code: 'UNPROCESSABLE_CONTENT',
+				status: StatusCodes.UNPROCESSABLE_ENTITY,
+				data: undefined
+			},
 			refs: [],
 			objects: []
 		});
@@ -149,30 +195,32 @@ describe('attestation attach and reads', () => {
 		await attachBundle(token, metadata.storePathHash, bundle);
 		const key = attestationListObjectKey(fixtureTenant, metadata.storePathHash);
 		await env.BLOBS.delete(key);
-		const putSpy = vi.spyOn(env.BLOBS, 'put');
-		const deleteSpy = vi.spyOn(env.BLOBS, 'delete');
+		const beforeRead = {
+			refs: await attestationReferenceRows(),
+			objects: await casObjectRows(),
+			descriptorPresent: (await env.BLOBS.head(key)) !== null
+		};
 
-		try {
-			const list = await readFetch(`/attestations/${metadata.storePathHash}`);
-			const head = await readFetch(`/attestations/${metadata.storePathHash}`, {
-				method: 'HEAD'
-			});
+		const list = await readFetch(`/attestations/${metadata.storePathHash}`);
+		const head = await readFetch(`/attestations/${metadata.storePathHash}`, {
+			method: 'HEAD'
+		});
 
-			expect({
-				getStatus: list.status,
-				headStatus: head.status,
-				putCalls: putSpy.mock.calls.length,
-				deleteCalls: deleteSpy.mock.calls.length
-			}).toStrictEqual({
-				getStatus: StatusCodes.NOT_FOUND,
-				headStatus: StatusCodes.NOT_FOUND,
-				putCalls: 0,
-				deleteCalls: 0
-			});
-		} finally {
-			putSpy.mockRestore();
-			deleteSpy.mockRestore();
-		}
+		expect({
+			getStatus: list.status,
+			headStatus: head.status,
+			beforeRead,
+			afterRead: {
+				refs: await attestationReferenceRows(),
+				objects: await casObjectRows(),
+				descriptorPresent: (await env.BLOBS.head(key)) !== null
+			}
+		}).toStrictEqual({
+			getStatus: StatusCodes.NOT_FOUND,
+			headStatus: StatusCodes.NOT_FOUND,
+			beforeRead,
+			afterRead: beforeRead
+		});
 	});
 
 	it('gates descriptor and bundle reads in private mode', async () => {
@@ -235,8 +283,13 @@ describe('attestation attach and reads', () => {
 			metadata.storePathHash,
 			digest
 		);
+		const otherUpload = attestationUploadDecisionSchema.parse(other);
 
-		expect({ own, other }).toStrictEqual({
+		expect({
+			own,
+			other: otherUpload,
+			pending: await pendingAttestationRowsFor('other')
+		}).toStrictEqual({
 			own: {
 				action: 'skip',
 				storePathHash: metadata.storePathHash,
@@ -246,10 +299,17 @@ describe('attestation attach and reads', () => {
 				action: 'upload',
 				storePathHash: metadata.storePathHash,
 				digest,
-				uploadId: expect.any(String) as string,
-				r2Key: expect.any(String) as string,
-				expiresAt: expect.any(String) as string
-			}
+				uploadId: otherUpload.uploadId,
+				r2Key: otherUpload.r2Key,
+				expiresAt: otherUpload.expiresAt
+			},
+			pending: [
+				{
+					id: otherUpload.uploadId,
+					r2Key: otherUpload.r2Key,
+					expiresAt: otherUpload.expiresAt
+				}
+			]
 		});
 	});
 
@@ -275,12 +335,11 @@ describe('attestation attach and reads', () => {
 			bundle
 		);
 
-		const body = await response.json<{ code: string; message: string }>();
+		const body = orpcErrorBodyShape(await response.json());
 
 		expect({
 			status: response.status,
-			code: body.code,
-			message: body.message,
+			body,
 			refs: await attestationReferenceRows(),
 			presence: await tenantCasBlobRows(),
 			objects: await casObjectRows(),
@@ -288,8 +347,12 @@ describe('attestation attach and reads', () => {
 			usage: await tenantUsageRow()
 		}).toStrictEqual({
 			status: StatusCodes.INSUFFICIENT_STORAGE,
-			code: 'INSUFFICIENT_STORAGE',
-			message: 'This tenant is over its storage quota',
+			body: {
+				defined: false,
+				code: 'INSUFFICIENT_STORAGE',
+				status: StatusCodes.INSUFFICIENT_STORAGE,
+				data: undefined
+			},
 			refs: [],
 			presence: [],
 			objects: [],
@@ -308,11 +371,9 @@ describe('attestation attach and reads', () => {
 	it('does not file an attestation against a generation replaced during attach', async () => {
 		const { token, metadata, bundle, digest } = await committedPathBundle();
 		const replacement = await verifiableNar('attestation-race-replacement');
-		const decision = await negotiate(token, metadata.storePathHash, digest);
-
-		if (decision.action !== 'upload') {
-			throw new Error('expected attestation upload decision');
-		}
+		const decision = attestationUploadDecisionSchema.parse(
+			await negotiate(token, metadata.storePathHash, digest)
+		);
 
 		const prepared = await authorisedWorkerFetch(
 			`/cache/_default/attestations/${decision.uploadId}`,
@@ -325,45 +386,50 @@ describe('attestation attach and reads', () => {
 		const error = await runInDurableObject(
 			fixtureWorkerServer(),
 			async (instance) => {
-				const services = instance as unknown as {
-					readonly attestationCas: {
-						measureStagedBundle: (
-							key: string
-						) => ReturnType<typeof instance.measureAttestationBundle>;
-					};
-					readonly attestations: {
-						attach(cache: string, uploadId: string): Promise<unknown>;
-					};
-				};
-				const measure = services.attestationCas.measureStagedBundle.bind(
-					services.attestationCas
-				);
-				services.attestationCas.measureStagedBundle = async (key) => {
-					const measured = await measure(key);
-					instance.context.db
-						.update(schema.narInfos)
-						.set({ narHash: replacement.narHash, generation: 1 })
-						.where(eqStorePath(metadata.storePathHash))
-						.run();
+				class RacingAttestationCasService extends AttestationCasService {
+					override async measureStagedBundle(
+						key: string
+					): ReturnType<typeof instance.measureAttestationBundle> {
+						const measured = await super.measureStagedBundle(key);
+						instance.context.db
+							.update(schema.narInfos)
+							.set({ narHash: replacement.narHash, generation: 1 })
+							.where(eqStorePath(metadata.storePathHash))
+							.run();
 
-					return measured;
-				};
-
-				try {
-					await services.attestations.attach('', decision.uploadId);
-				} catch (error_) {
-					return error_;
+						return measured;
+					}
 				}
+				const attestations = new AttestationsService(
+					instance.context,
+					new RacingAttestationCasService(instance.context),
+					new NarInfoObjectsService(instance.context)
+				);
 
-				throw new Error('expected stale attach to fail');
+				return attestations
+					.attach('', decision.uploadId)
+					.catch((error: unknown) => error);
 			}
 		);
+		expect(error).toBeInstanceOf(AttestationPathNotFoundError);
+		if (!(error instanceof AttestationPathNotFoundError)) {
+			throw error;
+		}
 
-		expect(error).toBeInstanceOf(Error);
 		expect({
+			error: {
+				name: error.name,
+				status: error.status,
+				storePathHash: error.storePathHash
+			},
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows()
 		}).toStrictEqual({
+			error: {
+				name: AttestationPathNotFoundError.name,
+				status: StatusCodes.NOT_FOUND,
+				storePathHash: metadata.storePathHash
+			},
 			refs: [],
 			objects: []
 		});
@@ -373,11 +439,10 @@ describe('attestation attach and reads', () => {
 		vi.useFakeTimers();
 		vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 		const { token, metadata, bundle, digest } = await committedPathBundle();
-		const decision = await negotiate(token, metadata.storePathHash, digest);
-
-		if (decision.action !== 'upload') {
-			throw new Error('expected attestation upload decision');
-		}
+		const existingPending = await pendingAttestationRows();
+		const decision = attestationUploadDecisionSchema.parse(
+			await negotiate(token, metadata.storePathHash, digest)
+		);
 
 		const prepared = await authorisedWorkerFetch(
 			`/cache/_default/attestations/${decision.uploadId}`,
@@ -387,43 +452,23 @@ describe('attestation attach and reads', () => {
 		expect(prepared.status).toBe(StatusCodes.OK);
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
-		expect(await pendingAttestationRows()).toContainEqual({
+		const expiredPending = {
 			id: decision.uploadId,
 			r2Key: decision.r2Key,
 			expiresAt: '2026-01-01T00:15:00.000Z'
-		});
+		};
+		expect(await pendingAttestationRows()).toStrictEqual(
+			[...existingPending, expiredPending].toSorted((left, right) =>
+				left.id > right.id ? 1 : -1
+			)
+		);
 		await expect(env.BLOBS.head(decision.r2Key)).resolves.not.toBeNull();
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 
-		const gc = await runInDurableObject(fixtureWorkerServer(), (instance) => {
-			const server = instance as unknown as {
-				readonly garbageCollection: {
-					collectGarbage(): Promise<{
-						readonly pendingUploadsDeleted: number;
-						readonly pendingAttestationsDeleted: number;
-						readonly rootsExpired: number;
-						readonly pathsSwept: number;
-						readonly narInfosDeleted: number;
-					}>;
-				};
-			};
+		await fixtureWorkerServer().runGarbageCollection();
 
-			return server.garbageCollection.collectGarbage();
-		});
-
-		expect(gc).toStrictEqual({
-			pendingUploadsDeleted: 0,
-			pendingAttestationsDeleted: 1,
-			rootsExpired: 0,
-			pathsSwept: 0,
-			narInfosDeleted: 0
-		});
-		expect(await pendingAttestationRows()).not.toContainEqual({
-			id: decision.uploadId,
-			r2Key: decision.r2Key,
-			expiresAt: '2026-01-01T00:15:00.000Z'
-		});
+		expect(await pendingAttestationRows()).toStrictEqual(existingPending);
 		await expect(env.BLOBS.head(decision.r2Key)).resolves.toBeNull();
 	});
 
@@ -431,11 +476,9 @@ describe('attestation attach and reads', () => {
 		const { token, metadata } = await committedPathBundle();
 		const bundle = new Uint8Array(1024 * 1024 + 1);
 		const digest = await sha256HexBytes(bundle);
-		const decision = await negotiate(token, metadata.storePathHash, digest);
-
-		if (decision.action !== 'upload') {
-			throw new Error('expected attestation upload decision');
-		}
+		const decision = attestationUploadDecisionSchema.parse(
+			await negotiate(token, metadata.storePathHash, digest)
+		);
 
 		const prepared = await authorisedWorkerFetch(
 			`/cache/_default/attestations/${decision.uploadId}`,
@@ -453,20 +496,23 @@ describe('attestation attach and reads', () => {
 
 		const staging = await env.BLOBS.head(decision.r2Key);
 		const pending = await pendingAttestationRows();
-		const body = await response.json<{ code: string; message: string }>();
+		const body = orpcErrorBodyShape(await response.json());
 
 		expect({
 			status: response.status,
-			code: body.code,
-			message: body.message,
+			body,
 			refs: await attestationReferenceRows(),
 			objects: await casObjectRows(),
 			pending: pending.filter((row) => row.id === decision.uploadId),
 			stagingPresent: staging !== null
 		}).toStrictEqual({
 			status: StatusCodes.REQUEST_TOO_LONG,
-			code: 'PAYLOAD_TOO_LARGE',
-			message: 'Attestation bundle is too large',
+			body: {
+				defined: false,
+				code: 'PAYLOAD_TOO_LARGE',
+				status: StatusCodes.REQUEST_TOO_LONG,
+				data: undefined
+			},
 			refs: [],
 			objects: [],
 			pending: [],
@@ -515,7 +561,7 @@ async function attachBundle(
 	const response = await attachBundleResponse(token, pathHash, bundle);
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json();
+	return attestationAttachResponseSchema.parse(await response.json());
 }
 
 async function attachBundleResponse(
@@ -524,11 +570,9 @@ async function attachBundleResponse(
 	bundle: Uint8Array
 ): Promise<Response> {
 	const digest = await sha256HexBytes(bundle);
-	const decision = await negotiate(token, pathHash, digest);
-
-	if (decision.action !== 'upload') {
-		throw new Error('expected attestation upload decision');
-	}
+	const decision = attestationUploadDecisionSchema.parse(
+		await negotiate(token, pathHash, digest)
+	);
 
 	const prepared = await authorisedWorkerFetch(
 		`/cache/_default/attestations/${decision.uploadId}`,
@@ -549,7 +593,7 @@ async function negotiate(
 	token: string,
 	pathHash: string,
 	digest: string
-): Promise<AttestationNegotiateResponse['bundles'][number]> {
+): Promise<ParsedAttestationDecision> {
 	const response = await authorisedWorkerFetch(
 		'/cache/_default/attestations',
 		token,
@@ -560,9 +604,10 @@ async function negotiate(
 		}
 	);
 	expect(response.status).toBe(StatusCodes.OK);
-	const body = await response.json<AttestationNegotiateResponse>();
+	const body = attestationNegotiateResponseSchema.parse(await response.json());
+	const [bundle] = z.tuple([attestationDecisionSchema]).parse(body.bundles);
 
-	return body.bundles[0] ?? failDecision();
+	return bundle;
 }
 
 async function negotiateTenant(
@@ -570,7 +615,7 @@ async function negotiateTenant(
 	token: string,
 	pathHash: string,
 	digest: string
-): Promise<AttestationNegotiateResponse['bundles'][number]> {
+): Promise<ParsedAttestationDecision> {
 	const response = await tenantFetch(
 		tenant,
 		'/cache/_default/attestations',
@@ -582,9 +627,31 @@ async function negotiateTenant(
 		}
 	);
 	expect(response.status).toBe(StatusCodes.OK);
-	const body = await response.json<AttestationNegotiateResponse>();
+	const body = attestationNegotiateResponseSchema.parse(await response.json());
+	const [bundle] = z.tuple([attestationDecisionSchema]).parse(body.bundles);
 
-	return body.bundles[0] ?? failDecision();
+	return bundle;
+}
+
+async function pendingAttestationRowsFor(
+	tenant: string
+): Promise<{ id: string; r2Key: string; expiresAt: string }[]> {
+	const rows = await runInDurableObject(
+		testServerFor(tenant),
+		(_instance, state) =>
+			drizzle(state.storage, {
+				schema: { pendingAttestations: schema.pendingAttestations }
+			})
+				.select({
+					id: schema.pendingAttestations.id,
+					r2Key: schema.pendingAttestations.r2Key,
+					expiresAt: schema.pendingAttestations.expiresAt
+				})
+				.from(schema.pendingAttestations)
+				.all()
+	);
+
+	return rows.toSorted((left, right) => (left.id > right.id ? 1 : -1));
 }
 
 async function pushPathThroughTenant(
@@ -604,12 +671,8 @@ async function pushPathThroughTenant(
 		}
 	);
 	expect(negotiated.status).toBe(StatusCodes.OK);
-	const body = await negotiated.json<UploadNegotiateResponse>();
-	const decision = body.uploads[0] ?? failUploadDecision();
-
-	if (decision.action !== 'upload') {
-		throw new Error('expected upload decision');
-	}
+	const body = uploadNegotiateResponseSchema.parse(await negotiated.json());
+	const [decision] = z.tuple([uploadActionDecisionSchema]).parse(body.uploads);
 
 	const prepared = await tenantFetch(
 		tenant,
@@ -647,12 +710,4 @@ function eqStorePath(storePathHash: string) {
 		eq(schema.narInfos.cache, ''),
 		eq(schema.narInfos.storePathHash, storePathHash)
 	);
-}
-
-function failDecision(): never {
-	throw new Error('expected one attestation decision');
-}
-
-function failUploadDecision(): never {
-	throw new Error('expected one upload decision');
 }

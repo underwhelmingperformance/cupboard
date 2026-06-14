@@ -1,5 +1,6 @@
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
 import { createEsbuildBundler } from './bundle.ts';
@@ -13,11 +14,7 @@ let miniflare: Miniflare;
 let artifact: DeploymentArtifact;
 
 beforeAll(async () => {
-	const checkoutRoot = findCheckoutRoot(process.cwd());
-
-	if (checkoutRoot === undefined) {
-		throw new Error('expected to run inside a checkout');
-	}
+	const checkoutRoot = z.string().parse(findCheckoutRoot(process.cwd()));
 
 	artifact = await buildArtifactFromTree(checkoutRoot, createEsbuildBundler());
 
@@ -67,6 +64,11 @@ it('bundles both Workers into bytes workerd can serve', async () => {
 		'https://cupboard.store/_health'
 	);
 
-	expect(response.status).toBe(200);
-	expect(await response.text()).toBe('ok\n');
+	expect({
+		status: response.status,
+		body: await response.text()
+	}).toStrictEqual({
+		status: 200,
+		body: 'ok\n'
+	});
 }, 30_000);

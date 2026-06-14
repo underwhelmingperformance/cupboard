@@ -1,6 +1,6 @@
 import {
-	type PredicateType,
-	type Sha256HexDigest
+	predicateTypeSchema,
+	sha256HexDigestSchema
 } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -37,7 +37,9 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
-const predicateType = 'https://slsa.dev/provenance/v1' as PredicateType;
+const predicateType = predicateTypeSchema.parse(
+	'https://slsa.dev/provenance/v1'
+);
 const storePathHash = 'a'.repeat(32);
 
 describe('attestation CAS lifecycle', () => {
@@ -80,7 +82,57 @@ describe('attestation CAS lifecycle', () => {
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		const key = casObjectKey(measured.digest);
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
-		const missingObject = JSON.parse('null') as R2Object | null;
+		const originalPut = env.BLOBS.put.bind(env.BLOBS);
+		const missingObject = await originalHead(key);
+		const storedBefore = missingObject !== null;
+		const putAttempts: {
+			readonly key: string;
+			readonly onlyIf: R2Conditional | Headers | undefined;
+		}[] = [];
+		function putLosingConditional(
+			objectKey: string,
+			value:
+				| ReadableStream
+				| ArrayBuffer
+				| ArrayBufferView
+				| string
+				| null
+				| Blob,
+			options: R2PutOptions & { onlyIf: R2Conditional | Headers }
+		): Promise<R2Object | null>;
+		function putLosingConditional(
+			objectKey: string,
+			value:
+				| ReadableStream
+				| ArrayBuffer
+				| ArrayBufferView
+				| string
+				| null
+				| Blob,
+			options?: R2PutOptions
+		): Promise<R2Object>;
+		function putLosingConditional(
+			objectKey: string,
+			value:
+				| ReadableStream
+				| ArrayBuffer
+				| ArrayBufferView
+				| string
+				| null
+				| Blob,
+			options?: R2PutOptions
+		): Promise<R2Object | null> {
+			putAttempts.push({
+				key: objectKey,
+				onlyIf: options?.onlyIf
+			});
+
+			if (objectKey === key && options?.onlyIf !== undefined) {
+				return Promise.resolve(missingObject);
+			}
+
+			return originalPut(objectKey, value, options);
+		}
 		const head = vi.spyOn(env.BLOBS, 'head').mockImplementation((objectKey) => {
 			if (objectKey === key) {
 				return Promise.resolve(missingObject);
@@ -88,44 +140,44 @@ describe('attestation CAS lifecycle', () => {
 
 			return originalHead(objectKey);
 		});
-		const put = vi.spyOn(env.BLOBS, 'put').mockImplementation(((
-			objectKey: string
-		) => {
-			if (objectKey === key) {
-				return Promise.resolve(missingObject as unknown as R2Object);
-			}
-
-			throw new Error(`unexpected put: ${objectKey}`);
-		}) as typeof env.BLOBS.put);
+		const put = vi
+			.spyOn(env.BLOBS, 'put')
+			.mockImplementation(putLosingConditional);
 
 		try {
 			const error = await runInDurableObject(
 				currentServer(),
-				async (instance) => {
-					const service = instance as unknown as {
-						readonly attestationCas: {
-							promoteMeasuredBundle(
-								key: string,
-								bundle: typeof measured
-							): Promise<void>;
-						};
-					};
-
-					return service.attestationCas
-						.promoteMeasuredBundle(stagingKey, measured)
-						.catch((error_: unknown) => error_);
-				}
+				async (instance) =>
+					instance
+						.promoteAttestationBundle(stagingKey, measured)
+						.catch((error_: unknown) => error_)
 			);
+			expect(error).toBeInstanceOf(UploadedObjectNotFoundError);
+			if (!(error instanceof UploadedObjectNotFoundError)) {
+				throw error;
+			}
 
-			expect(error).toMatchObject({
-				name: UploadedObjectNotFoundError.name
+			expect({
+				storedBefore,
+				error: {
+					name: error.name,
+					r2Key: error.r2Key
+				},
+				putAttempts,
+				objects: await casObjectRows()
+			}).toStrictEqual({
+				storedBefore: false,
+				error: {
+					name: UploadedObjectNotFoundError.name,
+					r2Key: key
+				},
+				putAttempts: [{ key, onlyIf: { etagDoesNotMatch: '*' } }],
+				objects: []
 			});
 		} finally {
 			head.mockRestore();
 			put.mockRestore();
 		}
-
-		expect(await casObjectRows()).toStrictEqual([]);
 	});
 
 	it('charges one tenant CAS blob per digest without changing NAR stats', async () => {
@@ -216,7 +268,7 @@ describe('attestation CAS lifecycle', () => {
 			storePathHash: 'd'.repeat(32),
 			generation: 0,
 			predicateType,
-			digest: first.digest as Sha256HexDigest
+			digest: sha256HexDigestSchema.parse(first.digest)
 		});
 		const afterFirst = await tenantUsageRow();
 		await currentServer().removeAttestationReference({
@@ -224,7 +276,7 @@ describe('attestation CAS lifecycle', () => {
 			storePathHash: 'e'.repeat(32),
 			generation: 0,
 			predicateType,
-			digest: first.digest as Sha256HexDigest
+			digest: sha256HexDigestSchema.parse(first.digest)
 		});
 
 		expect({
@@ -302,30 +354,22 @@ describe('attestation CAS lifecycle', () => {
 		});
 		await commitPath(token, metadata, nar);
 		const firstGeneration = await narInfoGeneration(storePathHash);
-		if (firstGeneration === undefined) {
-			throw new Error('expected first committed generation');
-		}
-		expect(firstGeneration).toBe(0);
 		await fileAttestationReference({
 			uploadId: 'delete-gen-0',
 			bytes: new TextEncoder().encode('gen0'),
 			storePathHash,
-			generation: firstGeneration,
+			generation: 0,
 			predicateType
 		});
 
 		const deleted = await deletePath(token, storePathHash);
 		await commitPath(token, metadata, nar);
 		const secondGeneration = await narInfoGeneration(storePathHash);
-		if (secondGeneration === undefined) {
-			throw new Error('expected second committed generation');
-		}
-		expect(secondGeneration).toBe(1);
 		const live = await fileAttestationReference({
 			uploadId: 'delete-gen-1',
 			bytes: new TextEncoder().encode('gen1'),
 			storePathHash,
-			generation: secondGeneration,
+			generation: 1,
 			predicateType
 		});
 		await currentServer().removeAttestationReference({
@@ -333,13 +377,15 @@ describe('attestation CAS lifecycle', () => {
 			storePathHash,
 			generation: 0,
 			predicateType,
-			digest: live.digest as Sha256HexDigest
+			digest: sha256HexDigestSchema.parse(live.digest)
 		});
 
 		expect({
+			generations: [firstGeneration, secondGeneration],
 			deleteStatus: deleted.deleted ? StatusCodes.OK : StatusCodes.NOT_FOUND,
 			refs: await attestationReferenceRows()
 		}).toStrictEqual({
+			generations: [0, 1],
 			deleteStatus: StatusCodes.OK,
 			refs: [
 				{
@@ -362,14 +408,16 @@ describe('attestation CAS lifecycle', () => {
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
 
-		expect(await runCasReaper(env, 10)).toBe(0);
+		const armed = await runCasReaper(env, 10);
 		vi.setSystemTime(new Date(Date.now() + blobReaperGraceMs + 1));
-		expect(await runCasReaper(env, 10)).toBe(1);
+		const collected = await runCasReaper(env, 10);
 
 		expect({
+			armed,
+			collected,
 			rows: await casObjectRows(),
 			stored: (await env.BLOBS.head(casObjectKey(measured.digest))) !== null
-		}).toStrictEqual({ rows: [], stored: false });
+		}).toStrictEqual({ armed: 0, collected: 1, rows: [], stored: false });
 	});
 
 	it('keeps an armed CAS object when a tenant references it again', async () => {
@@ -377,7 +425,7 @@ describe('attestation CAS lifecycle', () => {
 		const stagingKey = await stageAttestationBundle('re-reference-arm', bytes);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
-		expect(await runCasReaper(env, 10)).toBe(0);
+		const armed = await runCasReaper(env, 10);
 
 		await fileAttestationReference({
 			uploadId: 're-reference-bind',
@@ -388,10 +436,17 @@ describe('attestation CAS lifecycle', () => {
 		});
 		vi.setSystemTime(new Date(Date.now() + blobReaperGraceMs + 1));
 
-		expect(await runCasReaper(env, 10)).toBe(0);
-		expect(await casObjectRows()).toStrictEqual([
-			{ digest: measured.digest, size: measured.size, deleteAfter: undefined }
-		]);
+		expect({
+			armed,
+			collected: await runCasReaper(env, 10),
+			rows: await casObjectRows()
+		}).toStrictEqual({
+			armed: 0,
+			collected: 0,
+			rows: [
+				{ digest: measured.digest, size: measured.size, deleteAfter: undefined }
+			]
+		});
 	});
 
 	it('demotes a CAS object fact when the shared R2 object is missing', async () => {

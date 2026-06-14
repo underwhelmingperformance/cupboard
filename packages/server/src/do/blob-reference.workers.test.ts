@@ -216,7 +216,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		const remainingTenantBlobs = await tenantBlobRows();
 		const afterFirstDeleted = {
 			edges: remainingEdges.map((edge) => edge.storePathHash),
-			tenantBlobs: remainingTenantBlobs.length
+			tenantBlobs: remainingTenantBlobs
 		};
 
 		await deletePath(token, second.storePathHash);
@@ -236,7 +236,16 @@ describe('blob_ref / tenant_blob reference edges', () => {
 					}
 				]
 			},
-			afterFirstDeleted: { edges: [second.storePathHash], tenantBlobs: 1 },
+			afterFirstDeleted: {
+				edges: [second.storePathHash],
+				tenantBlobs: [
+					{
+						tenant: 'v1',
+						narHash: nar.narHash,
+						fileSize: nar.narBytes.byteLength
+					}
+				]
+			},
 			afterBothDeleted: { edges: [], tenantBlobs: [] }
 		});
 	});
@@ -309,15 +318,16 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		let edgesAtObjectDelete:
 			| Awaited<ReturnType<typeof blobReferenceRows>>
 			| undefined;
-		const deleteSpy = vi.spyOn(env.BLOBS, 'delete').mockImplementation((async (
-			key: string
-		) => {
+		const deleteWithSnapshot: typeof env.BLOBS.delete = async (key) => {
 			if (key === objectKey) {
 				edgesAtObjectDelete = await blobReferenceRows();
 			}
 
 			return deleteObject(key);
-		}) as typeof env.BLOBS.delete);
+		};
+		const deleteSpy = vi
+			.spyOn(env.BLOBS, 'delete')
+			.mockImplementation(deleteWithSnapshot);
 
 		try {
 			await runGcResult();

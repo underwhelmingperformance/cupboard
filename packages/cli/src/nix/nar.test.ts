@@ -3,6 +3,7 @@ import { chmod, readFile, symlink, writeFile } from 'node:fs/promises';
 import pathModule from 'node:path';
 
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { withTemporaryDirectory } from '../../../../tests/support/filesystem.ts';
 
@@ -16,6 +17,18 @@ import {
 	toNixBase32,
 	toNixSha256
 } from './nar.ts';
+
+function thrownBy(run: () => unknown): unknown {
+	let thrown: unknown;
+
+	try {
+		run();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
 
 describe('narFromPath', () => {
 	it('serialises an empty directory', async () => {
@@ -48,12 +61,43 @@ describe('narFromPath', () => {
 			await chmod(file, 0o755);
 			await symlink('run', pathModule.join(directory, 'link'));
 
-			const text = await narText(directory);
-
-			expect(text).toContain(narString('executable'));
-			expect(text).toContain(narString('symlink'));
-			expect(text).toContain(narString('target'));
-			expect(text).toContain(narString('run'));
+			await expect(narText(directory)).resolves.toBe(
+				[
+					'nix-archive-1',
+					'(',
+					'type',
+					'directory',
+					'entry',
+					'(',
+					'name',
+					'link',
+					'node',
+					'(',
+					'type',
+					'symlink',
+					'target',
+					'run',
+					')',
+					')',
+					'entry',
+					'(',
+					'name',
+					'run',
+					'node',
+					'(',
+					'type',
+					'regular',
+					'executable',
+					'',
+					'contents',
+					'hello',
+					')',
+					')',
+					')'
+				]
+					.map((value) => narString(value))
+					.join('')
+			);
 		});
 	});
 });
@@ -130,15 +174,23 @@ describe('NixSha256Hash', () => {
 	});
 
 	it('rejects invalid hash strings', () => {
-		expect(() => NixSha256Hash.parse('sha256:nope')).toThrow(
-			InvalidNixSha256HashError
-		);
+		const error = thrownBy(() => NixSha256Hash.parse('sha256:nope'));
+
+		expect(error).toBeInstanceOf(InvalidNixSha256HashError);
+		expect(error).toMatchObject({
+			name: 'InvalidNixSha256HashError',
+			value: 'sha256:nope'
+		});
 	});
 
 	it('requires a 32-byte digest', () => {
-		expect(() => toNixSha256(Buffer.alloc(31))).toThrow(
-			InvalidSha256DigestLengthError
-		);
+		const error = thrownBy(() => toNixSha256(Buffer.alloc(31)));
+
+		expect(error).toBeInstanceOf(InvalidSha256DigestLengthError);
+		expect(error).toMatchObject({
+			length: 31,
+			name: 'InvalidSha256DigestLengthError'
+		});
 	});
 });
 
@@ -179,10 +231,13 @@ interface NarFixture {
 	readonly narSha256: string;
 }
 
-interface NarFixtureMetadata {
-	readonly narSize: number;
-	readonly narSha256: string;
-}
+const narFixtureMetadataSchema = z.strictObject({
+	storePath: z.string(),
+	narSize: z.number(),
+	narSha256: z.string()
+});
+
+type NarFixtureMetadata = z.infer<typeof narFixtureMetadataSchema>;
 
 async function readNarFixture(name: string): Promise<NarFixture> {
 	const fixtureDirectory = pathModule.resolve(
@@ -208,23 +263,13 @@ async function readNarFixture(name: string): Promise<NarFixture> {
 }
 
 function parseNarFixtureMetadata(value: unknown): NarFixtureMetadata {
-	if (!isNarFixtureMetadata(value)) {
+	const result = narFixtureMetadataSchema.safeParse(value);
+
+	if (!result.success) {
 		throw new InvalidNarFixtureMetadataError(value);
 	}
 
-	return value;
-}
-
-function isNarFixtureMetadata(value: unknown): value is NarFixtureMetadata {
-	if (typeof value !== 'object' || value === null) {
-		return false;
-	}
-
-	const record = value as Record<string, unknown>;
-
-	return (
-		typeof record.narSize === 'number' && typeof record.narSha256 === 'string'
-	);
+	return result.data;
 }
 
 class InvalidNarFixtureMetadataError extends Error {

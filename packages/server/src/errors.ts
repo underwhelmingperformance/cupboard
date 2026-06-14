@@ -286,29 +286,130 @@ export type OAuthErrorCode =
 	| 'invalid_grant'
 	| 'unsupported_grant_type';
 
-// An OAuth 2.0 error (RFC 6749 §5.2): the `error` code and the message become
-// the `error`/`error_description` of a JSON envelope sent with `no-store`.
+/**
+ * An OAuth 2.0 error (RFC 6749 §5.2). The `error` code and the message become
+ * the `error` and `error_description` of a JSON envelope sent with `no-store`.
+ * A concrete cause may also surface a `problem` that refines the RFC code for
+ * clients that understand it.
+ */
 export abstract class OAuthError extends ServerHttpError {
 	abstract readonly error: OAuthErrorCode;
+	readonly problem?: string;
 }
 
-export class InvalidRequestError extends OAuthError {
+/** `invalid_request`: the request is malformed or missing a parameter. */
+export abstract class InvalidRequestError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_request';
+}
 
-	constructor(description: string) {
-		super(description);
-		this.name = 'InvalidRequestError';
+/** A token-exchange request omitted the required `subject_token`. */
+export class SubjectTokenRequiredError extends InvalidRequestError {
+	readonly problem = 'subject-token-required';
+
+	constructor() {
+		super('subject_token is required');
+		this.name = 'SubjectTokenRequiredError';
 	}
 }
 
-export class InvalidGrantError extends OAuthError {
+/** A token request carried a `subject_token_type` the server does not accept. */
+export class UnsupportedSubjectTokenTypeError extends InvalidRequestError {
+	readonly problem = 'unsupported-subject-token-type';
+
+	constructor(public readonly subjectTokenType: string) {
+		super(`Unsupported subject_token_type: ${subjectTokenType}`);
+		this.name = 'UnsupportedSubjectTokenTypeError';
+	}
+}
+
+/** A refresh-token grant omitted the required `refresh_token`. */
+export class RefreshTokenRequiredError extends InvalidRequestError {
+	readonly problem = 'refresh-token-required';
+
+	constructor() {
+		super('refresh_token is required');
+		this.name = 'RefreshTokenRequiredError';
+	}
+}
+
+/** A token request body failed schema validation. */
+export class TokenRequestBodyInvalidError extends InvalidRequestError {
+	readonly problem = 'schema-mismatch';
+
+	constructor(public override readonly cause: z.ZodError) {
+		super(z.prettifyError(cause));
+		this.name = 'TokenRequestBodyInvalidError';
+	}
+}
+
+/** `invalid_grant`: the supplied grant or token is invalid, expired, or untrusted. */
+export abstract class InvalidGrantError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
 	readonly error = 'invalid_grant';
+}
 
-	constructor(description: string) {
-		super(description);
-		this.name = 'InvalidGrantError';
+/**
+ * A presented refresh token was unknown, mismatched, expired, or tied to a
+ * retired rule. Every refresh failure raises this single error with one
+ * message, so a probe cannot tell which part was wrong.
+ */
+export class StaleRefreshTokenError extends InvalidGrantError {
+	readonly problem = 'stale-refresh-token';
+
+	constructor() {
+		super('Refresh token is invalid or expired');
+		this.name = 'StaleRefreshTokenError';
+	}
+}
+
+/** A subject token was structurally or cryptographically unusable. */
+export abstract class SubjectTokenInvalidError extends InvalidGrantError {
+	readonly problem = 'subject-token-invalid';
+}
+
+/** The subject token was not a well-formed JWT. */
+export class SubjectTokenNotJwtError extends SubjectTokenInvalidError {
+	constructor() {
+		super('Subject token is not a JWT');
+		this.name = 'SubjectTokenNotJwtError';
+	}
+}
+
+/** The subject token's signature or claims failed verification. */
+export class SubjectTokenVerificationFailedError extends SubjectTokenInvalidError {
+	constructor() {
+		super('Subject token failed verification');
+		this.name = 'SubjectTokenVerificationFailedError';
+	}
+}
+
+/** The subject token carried no subject claim. */
+export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
+	constructor() {
+		super('Subject token has no subject');
+		this.name = 'SubjectTokenSubjectMissingError';
+	}
+}
+
+/** No enabled trust rule matched the subject token. */
+export abstract class SubjectTokenUntrustedError extends InvalidGrantError {
+	readonly problem = 'subject-token-untrusted';
+}
+
+/** No tenant trust rule matched the subject token. */
+export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError {
+	constructor() {
+		super('No trust rule matches the subject token');
+		this.name = 'TenantSubjectTokenUntrustedError';
+	}
+}
+
+/** No control trust rule matched the subject token. */
+export class ControlSubjectTokenUntrustedError extends SubjectTokenUntrustedError {
+	constructor() {
+		super('No control trust rule matches the subject token');
+		this.name = 'ControlSubjectTokenUntrustedError';
 	}
 }
 

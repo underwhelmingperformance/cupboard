@@ -1,4 +1,4 @@
-import { bench, describe } from 'vitest';
+import { bench, describe, expect } from 'vitest';
 
 import { BinaryFuse8 } from './filter.ts';
 
@@ -33,9 +33,7 @@ function assertNoFalseNegatives(
 ): void {
 	const missing = members.filter((value) => !filter.has(value));
 
-	if (missing.length > 0) {
-		throw new Error(`${name} had ${String(missing.length)} false negative(s)`);
-	}
+	expect({ name, missing }).toStrictEqual({ name, missing: [] });
 }
 
 function countMatches(

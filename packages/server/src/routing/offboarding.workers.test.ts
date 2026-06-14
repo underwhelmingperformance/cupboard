@@ -88,16 +88,37 @@ async function pushTenantPath(
 	return nar.narHash;
 }
 
-async function tenantEdges(id: string): Promise<number> {
+async function tenantEdges(id: string): Promise<
+	{
+		readonly cache: string;
+		readonly storePathHash: string;
+		readonly generation: number;
+		readonly narHash: string;
+	}[]
+> {
 	const rows = await blobReferenceRows();
 
-	return rows.filter((row) => row.tenant === id).length;
+	return rows
+		.filter((row) => row.tenant === id)
+		.map((row) => ({
+			cache: row.cache,
+			storePathHash: row.storePathHash,
+			generation: row.generation,
+			narHash: row.narHash
+		}));
 }
 
-async function tenantPresence(id: string): Promise<number> {
+async function tenantPresence(id: string): Promise<
+	{
+		readonly narHash: string;
+		readonly fileSize: number;
+	}[]
+> {
 	const rows = await tenantBlobRows();
 
-	return rows.filter((row) => row.tenant === id).length;
+	return rows
+		.filter((row) => row.tenant === id)
+		.map((row) => ({ narHash: row.narHash, fileSize: row.fileSize }));
 }
 
 describe('offboarding drain', () => {
@@ -142,8 +163,8 @@ describe('offboarding drain', () => {
 			narObject: (await env.BLOBS.head(narObjectKey(narHash))) !== null
 		}).toStrictEqual({
 			drained: {
-				edges: 0,
-				presence: 0,
+				edges: [],
+				presence: [],
 				objects: [],
 				row: {
 					status: 'offboarded',
@@ -161,8 +182,18 @@ describe('offboarding drain', () => {
 
 	it('drains a large tenant over successive bounded ticks, finalising only once empty', async () => {
 		const { id, token } = await provisionedWritingTenant();
-		await pushTenantPath(id, token, 'a'.repeat(32), 'offboard-multi-a');
-		await pushTenantPath(id, token, 'b'.repeat(32), 'offboard-multi-b');
+		const narHashA = await pushTenantPath(
+			id,
+			token,
+			'a'.repeat(32),
+			'offboard-multi-a'
+		);
+		const narHashB = await pushTenantPath(
+			id,
+			token,
+			'b'.repeat(32),
+			'offboard-multi-b'
+		);
 
 		await offboardTenant(id);
 
@@ -171,13 +202,11 @@ describe('offboarding drain', () => {
 		await runOffboardSweep(env, 10, 1, 1);
 
 		const midRow = await tenantRow(id);
-		const midEdges = await tenantEdges(id);
-		const midPresence = await tenantPresence(id);
-		const midObjects = await tenantObjectKeys(id);
 		const midDrain = {
 			status: midRow?.status,
-			drained: midEdges === 0 && midPresence === 0,
-			objectsCleared: midObjects.length === 0
+			edges: await tenantEdges(id),
+			presence: await tenantPresence(id),
+			objects: await tenantObjectKeys(id)
 		};
 
 		// Further ticks drain the remainder and finalise the tenant.
@@ -198,13 +227,21 @@ describe('offboarding drain', () => {
 		}).toStrictEqual({
 			midDrain: {
 				status: 'offboarding',
-				drained: false,
-				objectsCleared: false
+				edges: [
+					{
+						cache: '',
+						storePathHash: 'b'.repeat(32),
+						generation: 0,
+						narHash: narHashB
+					}
+				],
+				presence: [{ narHash: narHashA, fileSize: 43 }],
+				objects: [`t/${id}/narinfo/${'b'.repeat(32)}`]
 			},
 			final: {
 				status: 'offboarded',
-				edges: 0,
-				presence: 0,
+				edges: [],
+				presence: [],
 				objects: [],
 				usage: false
 			}
@@ -275,7 +312,12 @@ describe('offboarding drain', () => {
 
 	it('refuses a commit that settles after offboarding began, publishing no edge', async () => {
 		const { id, token } = await provisionedWritingTenant();
-		await pushTenantPath(id, token, 'a'.repeat(32), 'offboard-gate-a');
+		const narHash = await pushTenantPath(
+			id,
+			token,
+			'a'.repeat(32),
+			'offboard-gate-a'
+		);
 
 		// Mark the Durable Object offboarding while leaving the D1 status active, so the
 		// Worker still admits the write: this mimics a commit that passed the write gate
@@ -297,7 +339,14 @@ describe('offboarding drain', () => {
 		// pre-offboarding path's edge remains, so the drain cannot be outrun.
 		expect({ status, edges: await tenantEdges(id) }).toStrictEqual({
 			status: StatusCodes.FORBIDDEN,
-			edges: 1
+			edges: [
+				{
+					cache: '',
+					storePathHash: 'a'.repeat(32),
+					generation: 0,
+					narHash
+				}
+			]
 		});
 	});
 
@@ -348,7 +397,7 @@ describe('offboarding drain', () => {
 			narObject: (await env.BLOBS.head(narObjectKey(narHash))) !== null
 		}).toStrictEqual({
 			status: 'offboarded',
-			edges: 0,
+			edges: [],
 			objects: [],
 			blobState: [],
 			narObject: false

@@ -2,6 +2,7 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { StorePath } from '@cupboard/nix/store-path';
 import type {
 	RootListResponse,
 	RootRemoveResponse,
@@ -22,6 +23,18 @@ import {
 type SetRootInput = Parameters<RootClient['set']>[0];
 
 const target = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+
+class RootClientRefusal extends Error {
+	constructor(public readonly target: string) {
+		super('root target refused');
+	}
+}
+
+function expectRootClientRefusal(
+	error: unknown
+): asserts error is RootClientRefusal {
+	expect(error).toBeInstanceOf(RootClientRefusal);
+}
 
 describe('describeExpiry', () => {
 	it.each([
@@ -82,19 +95,35 @@ describe('runRootSet', () => {
 	});
 
 	it('rejects a target the client refuses', async () => {
-		await expect(
-			runRootSet('_default', 'main', ['/tmp/nope'], undefined, reporter([]), {
-				set() {
-					throw new Error('not a store path');
-				},
-				list() {
-					throw new Error('client should not be called');
-				},
-				remove() {
-					throw new Error('client should not be called');
+		const rejection = new RootClientRefusal('/tmp/nope');
+		const calls: SetRootInput[] = [];
+
+		const error = await runRootSet(
+			'_default',
+			'main',
+			['/tmp/nope'],
+			undefined,
+			reporter([]),
+			{
+				set(input) {
+					calls.push(input);
+
+					return Promise.reject(rejection);
 				}
-			})
-		).rejects.toThrow();
+			}
+		).catch((error_: unknown) => error_);
+
+		expectRootClientRefusal(error);
+		expect({ error: { target: error.target }, calls }).toStrictEqual({
+			error: { target: '/tmp/nope' },
+			calls: [
+				{
+					cacheName: '_default',
+					name: 'main',
+					targets: ['/tmp/nope']
+				}
+			]
+		});
 	});
 });
 
@@ -207,32 +236,20 @@ function summary(overrides: Partial<RootSummary>): RootSummary {
 function setRootClient(
 	response: RootSetResponse,
 	calls: SetRootInput[]
-): RootClient {
+): Pick<RootClient, 'set'> {
 	return {
 		set(input) {
 			calls.push(input);
 
 			return Promise.resolve(response);
-		},
-		list() {
-			throw new Error('client should not be called');
-		},
-		remove() {
-			throw new Error('client should not be called');
 		}
 	};
 }
 
-function listClient(response: RootListResponse): RootClient {
+function listClient(response: RootListResponse): Pick<RootClient, 'list'> {
 	return {
-		set() {
-			throw new Error('client should not be called');
-		},
 		list() {
 			return Promise.resolve(response);
-		},
-		remove() {
-			throw new Error('client should not be called');
 		}
 	};
 }
@@ -242,12 +259,18 @@ function removeClient(
 	calls: { cacheName: string; name: string }[]
 ): RootClient {
 	return {
-		set() {
-			throw new Error('client should not be called');
-		},
-		list() {
-			throw new Error('client should not be called');
-		},
+		set: (input) =>
+			Promise.resolve(
+				summary({
+					name: input.name,
+					targets: input.targets.map((storePath) => ({
+						storePathHash: StorePath.hash(storePath),
+						present: true,
+						storePath
+					}))
+				})
+			),
+		list: () => Promise.resolve({ roots: [] }),
 		remove(input) {
 			calls.push(input);
 

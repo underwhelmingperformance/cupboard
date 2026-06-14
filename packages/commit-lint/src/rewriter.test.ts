@@ -6,6 +6,7 @@ import {
 	checkCommitMessages,
 	type CommitMessage,
 	CommitMessageCheck,
+	type Finding,
 	UnfixableCommitMessageCheckError
 } from './linter.ts';
 import {
@@ -21,6 +22,86 @@ const author = {
 	email: 'test@example.test',
 	name: 'Test Author'
 };
+
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
+}
+
+function expectBackupReferenceExistsError(
+	error: unknown
+): asserts error is BackupReferenceExistsError {
+	expect(error).toBeInstanceOf(BackupReferenceExistsError);
+}
+
+function expectUnfixableCommitMessageCheckError(
+	error: unknown
+): asserts error is UnfixableCommitMessageCheckError {
+	expect(error).toBeInstanceOf(UnfixableCommitMessageCheckError);
+}
+
+function expectMergeCommitRewriteError(
+	error: unknown
+): asserts error is MergeCommitRewriteError {
+	expect(error).toBeInstanceOf(MergeCommitRewriteError);
+}
+
+function expectNonLinearHistoryError(
+	error: unknown
+): asserts error is NonLinearHistoryError {
+	expect(error).toBeInstanceOf(NonLinearHistoryError);
+}
+
+function expectStaleHeadError(error: unknown): asserts error is StaleHeadError {
+	expect(error).toBeInstanceOf(StaleHeadError);
+}
+
+type StructuralFinding =
+	| Omit<Extract<Finding, { readonly kind: 'body-format' }>, 'message'>
+	| Omit<Extract<Finding, { readonly kind: 'rule' }>, 'message'>;
+
+function findingShape(finding: Finding): StructuralFinding {
+	switch (finding.kind) {
+		case 'body-format': {
+			return {
+				kind: finding.kind,
+				actual: finding.actual,
+				expected: finding.expected,
+				fixable: finding.fixable,
+				patch: finding.patch,
+				rule: finding.rule
+			};
+		}
+		case 'rule': {
+			return {
+				kind: finding.kind,
+				fixable: finding.fixable,
+				rule: finding.rule
+			};
+		}
+	}
+
+	const exhaustive: never = finding;
+
+	return exhaustive;
+}
+
+function findingShapes(findings: readonly Finding[]): StructuralFinding[] {
+	return findings.map((finding) => findingShape(finding));
+}
+
+function expectPair<T>(
+	values: readonly T[]
+): asserts values is readonly [T, T] {
+	expect(values).toStrictEqual([expect.anything(), expect.anything()]);
+}
 
 describe('CommitMessageRewriter', () => {
 	it('rewords fixable commit-message checks and preserves final tree state', async () => {
@@ -43,36 +124,61 @@ describe('CommitMessageRewriter', () => {
 			fixture.repo,
 			'refs/backup/commit-message-lint/test'
 		);
-		const newBad = await readCommit(
-			fixture.repo,
-			result.rewritten[0]?.newHash ?? ''
-		);
+
+		expectPair(result.rewritten);
+		const [rewrittenBad, rewrittenDescendant] = result.rewritten;
+		const newBad = await readCommit(fixture.repo, rewrittenBad.newHash);
 		const newDescendant = await readCommit(fixture.repo, result.newHead);
+		const [newBadCheck] = await checkCommitMessages([
+			commitMessage(rewrittenBad.newHash, newBad.message)
+		]);
 
 		expect({
 			backupRef: backupReference,
 			newHead: result.newHead,
 			newHeadRef: newHeadReference,
 			oldHead: result.oldHead,
-			rewritten: result.rewritten.map((commit) => commit.oldHash)
+			rewritten: result.rewritten.map((commit) => ({
+				messageChanged: commit.messageChanged,
+				oldHash: commit.oldHash,
+				newHash: commit.newHash,
+				subject: commit.subject
+			})),
+			rewrittenCheck: {
+				changed: newBadCheck?.changed,
+				findings: newBadCheck?.findings,
+				status: newBadCheck?.status,
+				subject: newBadCheck?.commitMessage.subject
+			}
 		}).toStrictEqual({
 			backupRef: fixture.descendant,
-			newHead: result.rewritten[1]?.newHash,
-			newHeadRef: result.newHead,
+			newHead: rewrittenDescendant.newHash,
+			newHeadRef: rewrittenDescendant.newHash,
 			oldHead: fixture.descendant,
-			rewritten: [fixture.bad, fixture.descendant]
+			rewritten: [
+				{
+					messageChanged: true,
+					newHash: rewrittenBad.newHash,
+					oldHash: fixture.bad,
+					subject: 'fix: explain body wrapping'
+				},
+				{
+					messageChanged: false,
+					newHash: rewrittenDescendant.newHash,
+					oldHash: fixture.descendant,
+					subject: 'docs: add descendant'
+				}
+			],
+			rewrittenCheck: {
+				changed: false,
+				findings: [],
+				status: 'passed',
+				subject: 'fix: explain body wrapping'
+			}
 		});
-		expect(newBad.message).toBe(
-			[
-				'fix: explain body wrapping',
-				'',
-				'This body line is deliberately longer than seventy two columns so the',
-				'commit-message checker can wrap it.'
-			].join('\n')
-		);
 		expect(newDescendant).toStrictEqual({
 			...originalHead,
-			parents: [result.rewritten[0]?.newHash ?? '']
+			parents: [rewrittenBad.newHash]
 		});
 	});
 
@@ -145,7 +251,7 @@ describe('CommitMessageRewriter', () => {
 			]
 		);
 
-		await expect(
+		const error = await rejectedBy(() =>
 			new CommitMessageRewriter({
 				backupRef: 'refs/backup/commit-message-lint/test',
 				baseHash: fixture.base,
@@ -153,7 +259,26 @@ describe('CommitMessageRewriter', () => {
 				expectedHeadHash: fixture.descendant,
 				repo: fixture.repo
 			}).reword([check])
-		).rejects.toBeInstanceOf(UnfixableCommitMessageCheckError);
+		);
+
+		expectUnfixableCommitMessageCheckError(error);
+		expect({
+			name: error.name,
+			changed: error.check.changed,
+			status: error.check.status,
+			findings: findingShapes(error.check.findings)
+		}).toStrictEqual({
+			name: 'UnfixableCommitMessageCheckError',
+			changed: false,
+			status: 'failed',
+			findings: [
+				{
+					kind: 'rule',
+					fixable: false,
+					rule: 'type-empty'
+				}
+			]
+		});
 	});
 
 	it('rejects rewriting when the backup ref already exists', async () => {
@@ -170,7 +295,7 @@ describe('CommitMessageRewriter', () => {
 			}
 		);
 
-		await expect(
+		const error = await rejectedBy(() =>
 			new CommitMessageRewriter({
 				backupRef: 'refs/backup/commit-message-lint/test',
 				baseHash: fixture.base,
@@ -178,9 +303,16 @@ describe('CommitMessageRewriter', () => {
 				expectedHeadHash: fixture.descendant,
 				repo: fixture.repo
 			}).reword(checks)
-		).rejects.toStrictEqual(
-			new BackupReferenceExistsError('refs/backup/commit-message-lint/test')
 		);
+
+		expectBackupReferenceExistsError(error);
+		expect({
+			name: error.name,
+			backupReference: error.backupReference
+		}).toStrictEqual({
+			name: 'BackupReferenceExistsError',
+			backupReference: 'refs/backup/commit-message-lint/test'
+		});
 		await expect(resolveRef(fixture.repo, 'refs/heads/main')).resolves.toBe(
 			fixture.descendant
 		);
@@ -202,7 +334,7 @@ describe('CommitMessageRewriter', () => {
 			message: 'docs: move head'
 		});
 
-		await expect(
+		const error = await rejectedBy(() =>
 			new CommitMessageRewriter({
 				backupRef: 'refs/backup/commit-message-lint/test',
 				baseHash: fixture.base,
@@ -210,7 +342,16 @@ describe('CommitMessageRewriter', () => {
 				expectedHeadHash: fixture.descendant,
 				repo: fixture.repo
 			}).reword(checks)
-		).rejects.toStrictEqual(new StaleHeadError(fixture.descendant));
+		);
+
+		expectStaleHeadError(error);
+		expect({
+			name: error.name,
+			expectedHead: error.expectedHead
+		}).toStrictEqual({
+			name: 'StaleHeadError',
+			expectedHead: fixture.descendant
+		});
 		await expect(resolveRef(fixture.repo, 'refs/heads/main')).resolves.toBe(
 			movedHead
 		);
@@ -223,7 +364,7 @@ describe('CommitMessageRewriter', () => {
 		const fixture = await createMergeFixture();
 		const checks = await checksFor(fixture.repo, [fixture.merge]);
 
-		await expect(
+		const error = await rejectedBy(() =>
 			new CommitMessageRewriter({
 				backupRef: 'refs/backup/commit-message-lint/test',
 				baseHash: fixture.base,
@@ -231,14 +372,23 @@ describe('CommitMessageRewriter', () => {
 				expectedHeadHash: fixture.merge,
 				repo: fixture.repo
 			}).reword(checks)
-		).rejects.toBeInstanceOf(MergeCommitRewriteError);
+		);
+
+		expectMergeCommitRewriteError(error);
+		expect({
+			name: error.name,
+			commit: error.commit
+		}).toStrictEqual({
+			name: 'MergeCommitRewriteError',
+			commit: fixture.merge
+		});
 	});
 
 	it('rejects a non-linear check sequence', async () => {
 		const fixture = await createLinearFixture();
 		const checks = await checksFor(fixture.repo, [fixture.descendant]);
 
-		await expect(
+		const error = await rejectedBy(() =>
 			new CommitMessageRewriter({
 				backupRef: 'refs/backup/commit-message-lint/test',
 				baseHash: fixture.base,
@@ -246,7 +396,20 @@ describe('CommitMessageRewriter', () => {
 				expectedHeadHash: fixture.descendant,
 				repo: fixture.repo
 			}).reword(checks)
-		).rejects.toBeInstanceOf(NonLinearHistoryError);
+		);
+
+		expectNonLinearHistoryError(error);
+		expect({
+			name: error.name,
+			commit: error.commit,
+			expectedParent: error.expectedParent,
+			actualParent: error.actualParent
+		}).toStrictEqual({
+			name: 'NonLinearHistoryError',
+			commit: fixture.descendant,
+			expectedParent: fixture.base,
+			actualParent: fixture.bad
+		});
 	});
 });
 

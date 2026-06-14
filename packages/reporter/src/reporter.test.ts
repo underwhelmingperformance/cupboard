@@ -9,6 +9,18 @@ import {
 	formatTimestamp
 } from './reporter.ts';
 
+class ReporterTestError extends Error {
+	constructor(public readonly code: string) {
+		super('reporter test failure');
+	}
+}
+
+function expectReporterTestError(
+	error: unknown
+): asserts error is ReporterTestError {
+	expect(error).toBeInstanceOf(ReporterTestError);
+}
+
 describe('formatDuration', () => {
 	it.each([
 		[0, '0ms'],
@@ -72,22 +84,35 @@ describe('createReporter', () => {
 
 	it('emits a failed phase and rethrows', async () => {
 		const { events, reporter } = jsonReporter();
+		const failure = new ReporterTestError('build-failed');
 
-		await expect(
-			reporter.phase('Building', () => {
-				throw new Error('boom');
-			})
-		).rejects.toThrow('boom');
+		const error = await reporter
+			.phase('Building', () => Promise.reject(failure))
+			.catch((error_: unknown) => error_);
 
-		expect(withoutDurations(events())).toStrictEqual([
-			{
-				durationMs: 'number',
-				error: 'boom',
-				event: 'phase',
-				label: 'Building',
-				status: 'failed'
-			}
-		]);
+		expectReporterTestError(error);
+		expect({
+			error: { code: error.code },
+			events: withoutDurations(events()).map((event) =>
+				isRecord(event)
+					? {
+							...event,
+							error: event.error === undefined ? undefined : typeof event.error
+						}
+					: event
+			)
+		}).toStrictEqual({
+			error: { code: 'build-failed' },
+			events: [
+				{
+					durationMs: 'number',
+					error: 'string',
+					event: 'phase',
+					label: 'Building',
+					status: 'failed'
+				}
+			]
+		});
 	});
 
 	it('emits a progress phase with its total, completed count and facts', async () => {
@@ -120,26 +145,41 @@ describe('createReporter', () => {
 
 	it('emits a failed progress phase with the bytes completed so far', async () => {
 		const { events, reporter } = jsonReporter();
+		const failure = new ReporterTestError('progress-failed');
 
-		await expect(
-			reporter.progress('Uploading', { total: 100 }, (bar) => {
+		const error = await reporter
+			.progress('Uploading', { total: 100 }, (bar) => {
 				bar.advance(30);
-				throw new Error('connection reset');
+				throw failure;
 			})
-		).rejects.toThrow('connection reset');
+			.catch((error_: unknown) => error_);
 
-		expect(withoutDurations(events())).toStrictEqual([
-			{
-				durationMs: 'number',
-				event: 'phase',
-				label: 'Uploading',
-				status: 'failed',
-				total: 100,
-				completed: 30,
-				facts: {},
-				error: 'connection reset'
-			}
-		]);
+		expectReporterTestError(error);
+		expect({
+			error: { code: error.code },
+			events: withoutDurations(events()).map((event) =>
+				isRecord(event)
+					? {
+							...event,
+							error: event.error === undefined ? undefined : typeof event.error
+						}
+					: event
+			)
+		}).toStrictEqual({
+			error: { code: 'progress-failed' },
+			events: [
+				{
+					durationMs: 'number',
+					event: 'phase',
+					label: 'Uploading',
+					status: 'failed',
+					total: 100,
+					completed: 30,
+					facts: {},
+					error: 'string'
+				}
+			]
+		});
 	});
 
 	it('emits a steps phase with its groups and messages', async () => {
@@ -175,24 +215,39 @@ describe('createReporter', () => {
 
 	it('emits a failed steps phase and rethrows', async () => {
 		const { events, reporter } = jsonReporter();
+		const failure = new ReporterTestError('steps-failed');
 
-		await expect(
-			reporter.steps('Attestations', (log) => {
+		const error = await reporter
+			.steps('Attestations', (log) => {
 				log.group('read').message('opening');
-				throw new Error('boom');
+				throw failure;
 			})
-		).rejects.toThrow('boom');
+			.catch((error_: unknown) => error_);
 
-		expect(withoutDurations(events())).toStrictEqual([
-			{
-				durationMs: 'number',
-				event: 'phase',
-				label: 'Attestations',
-				status: 'failed',
-				groups: [{ name: 'read', status: 'open', messages: ['opening'] }],
-				error: 'boom'
-			}
-		]);
+		expectReporterTestError(error);
+		expect({
+			error: { code: error.code },
+			events: withoutDurations(events()).map((event) =>
+				isRecord(event)
+					? {
+							...event,
+							error: event.error === undefined ? undefined : typeof event.error
+						}
+					: event
+			)
+		}).toStrictEqual({
+			error: { code: 'steps-failed' },
+			events: [
+				{
+					durationMs: 'number',
+					event: 'phase',
+					label: 'Attestations',
+					status: 'failed',
+					groups: [{ name: 'read', status: 'open', messages: ['opening'] }],
+					error: 'string'
+				}
+			]
+		});
 	});
 
 	it('emits result, warn, and info events', () => {
@@ -261,8 +316,7 @@ function jsonReporter(): {
 	const payloads = captureStream();
 
 	return {
-		events: () =>
-			diagnostics.lines().map((line) => JSON.parse(line) as unknown),
+		events: () => diagnostics.lines().map((line): unknown => JSON.parse(line)),
 		payloads: payloads.lines,
 		reporter: createReporter({
 			stream: diagnostics.stream,

@@ -8,9 +8,11 @@ import type { JWTPayload } from 'jose';
 import * as d1Schema from '../db/d1-schema.ts';
 import {
 	ControlNotConfiguredError,
-	InvalidGrantError,
 	IssuerUnavailableError,
-	SignupForbiddenError
+	SignupForbiddenError,
+	SubjectTokenNotJwtError,
+	SubjectTokenSubjectMissingError,
+	SubjectTokenVerificationFailedError
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
 import {
@@ -44,7 +46,7 @@ export async function handleSignup(
 	try {
 		decodeInboundClaims(body.subject_token);
 	} catch {
-		throw new InvalidGrantError('Subject token is not a JWT');
+		throw new SubjectTokenNotJwtError();
 	}
 
 	const verified = await verifySignupToken(
@@ -135,13 +137,13 @@ async function verifySignupToken(
 			throw new IssuerUnavailableError(issuer, { cause: error });
 		}
 
-		throw new InvalidGrantError('Subject token failed verification');
+		throw new SubjectTokenVerificationFailedError();
 	}
 }
 
 function verifiedSubject(verified: JWTPayload): string {
 	if (typeof verified.sub !== 'string' || verified.sub === '') {
-		throw new InvalidGrantError('Subject token has no subject');
+		throw new SubjectTokenSubjectMissingError();
 	}
 
 	return verified.sub;

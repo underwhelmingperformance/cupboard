@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { CliAbortError } from '../errors.ts';
 
@@ -8,6 +9,7 @@ import {
 	createPkce,
 	deviceLogin,
 	discoverOidcLogin,
+	LoginTimeoutError,
 	loopbackLogin,
 	type OidcLoginEndpoints,
 	OidcLoginError
@@ -27,6 +29,55 @@ function pendingPromise(): Promise<never> {
 
 function requestBody(init: RequestInit | undefined): URLSearchParams {
 	return new URLSearchParams(typeof init?.body === 'string' ? init.body : '');
+}
+
+function requestUrl(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
+}
+
+function authorizeParameters(target: string): {
+	readonly redirectUri: string;
+	readonly state: string;
+} {
+	const authorize = new URL(target);
+
+	return z
+		.object({
+			redirectUri: z.string().min(1),
+			state: z.string().min(1)
+		})
+		.parse({
+			redirectUri: authorize.searchParams.get('redirect_uri'),
+			state: authorize.searchParams.get('state')
+		});
+}
+
+async function approveLoopbackBrowser(target: string): Promise<void> {
+	const { redirectUri, state } = authorizeParameters(target);
+	const callback = new URL(redirectUri);
+	callback.searchParams.set('code', 'auth-code');
+	callback.searchParams.set('state', state);
+	await fetch(callback);
+}
+
+async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
+	let rejected: unknown;
+
+	try {
+		await run();
+	} catch (error) {
+		rejected = error;
+	}
+
+	return rejected;
 }
 
 describe('createPkce', () => {
@@ -80,76 +131,188 @@ describe('discoverOidcLogin', () => {
 	});
 
 	it('throws when the metadata lacks endpoints', async () => {
-		await expect(
-			discoverOidcLogin('https://idp.example.com', () =>
-				Promise.resolve(Response.json({}))
-			)
-		).rejects.toBeInstanceOf(OidcLoginError);
-	});
-
-	it('rejects an issuer that is not an allowed URL before fetching', async () => {
-		let fetched = false;
-
-		await expect(
-			discoverOidcLogin('http://idp.example.com', () => {
-				fetched = true;
+		const requests: string[] = [];
+		const caught = await rejectedBy(() =>
+			discoverOidcLogin('https://idp.example.com', (input) => {
+				requests.push(requestUrl(input));
 
 				return Promise.resolve(Response.json({}));
 			})
-		).rejects.toBeInstanceOf(OidcLoginError);
-		expect(fetched).toBe(false);
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name, kind: caught.kind, issuer: caught.issuer },
+			requests
+		}).toStrictEqual({
+			error: {
+				name: 'OidcLoginError',
+				kind: 'discovery-schema',
+				issuer: 'https://idp.example.com'
+			},
+			requests: ['https://idp.example.com/.well-known/openid-configuration']
+		});
+	});
+
+	it('rejects an issuer that is not an allowed URL before fetching', async () => {
+		const requests: string[] = [];
+
+		const caught = await rejectedBy(() =>
+			discoverOidcLogin('http://idp.example.com', (input) => {
+				requests.push(requestUrl(input));
+
+				return Promise.resolve(Response.json({}));
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name, kind: caught.kind, issuer: caught.issuer },
+			requests
+		}).toStrictEqual({
+			error: {
+				name: 'OidcLoginError',
+				kind: 'invalid-issuer',
+				issuer: 'http://idp.example.com'
+			},
+			requests: []
+		});
 	});
 
 	it('rejects metadata whose issuer does not match the requested one', async () => {
-		await expect(
-			discoverOidcLogin('https://idp.example.com', () =>
-				Promise.resolve(
+		const requests: string[] = [];
+		const caught = await rejectedBy(() =>
+			discoverOidcLogin('https://idp.example.com', (input) => {
+				requests.push(requestUrl(input));
+
+				return Promise.resolve(
 					Response.json({
 						issuer: 'https://evil.example.com',
 						authorization_endpoint: endpoints.authorizationEndpoint,
 						token_endpoint: endpoints.tokenEndpoint
 					})
-				)
-			)
-		).rejects.toBeInstanceOf(OidcLoginError);
+				);
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: {
+				name: caught.name,
+				kind: caught.kind,
+				issuer: caught.issuer,
+				metadataIssuer: caught.metadataIssuer
+			},
+			requests
+		}).toStrictEqual({
+			error: {
+				name: 'OidcLoginError',
+				kind: 'issuer-mismatch',
+				issuer: 'https://idp.example.com',
+				metadataIssuer: 'https://evil.example.com'
+			},
+			requests: ['https://idp.example.com/.well-known/openid-configuration']
+		});
 	});
 
 	it('rejects a redirect away from the metadata endpoint', async () => {
-		await expect(
-			discoverOidcLogin('https://idp.example.com', () =>
-				Promise.resolve(
+		const requests: string[] = [];
+		const caught = await rejectedBy(() =>
+			discoverOidcLogin('https://idp.example.com', (input) => {
+				requests.push(requestUrl(input));
+
+				return Promise.resolve(
 					new Response(undefined, {
 						status: 302,
 						headers: { location: 'https://evil.example.com/.well-known' }
 					})
-				)
-			)
-		).rejects.toBeInstanceOf(OidcLoginError);
+				);
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: {
+				name: caught.name,
+				kind: caught.kind,
+				issuer: caught.issuer,
+				status: caught.status
+			},
+			requests
+		}).toStrictEqual({
+			error: {
+				name: 'OidcLoginError',
+				kind: 'discovery-http',
+				issuer: 'https://idp.example.com',
+				status: 302
+			},
+			requests: ['https://idp.example.com/.well-known/openid-configuration']
+		});
 	});
 
 	it('rejects an endpoint served over plain http', async () => {
-		await expect(
-			discoverOidcLogin('https://idp.example.com', () =>
-				Promise.resolve(
+		const requests: string[] = [];
+		const caught = await rejectedBy(() =>
+			discoverOidcLogin('https://idp.example.com', (input) => {
+				requests.push(requestUrl(input));
+
+				return Promise.resolve(
 					Response.json({
 						issuer: 'https://idp.example.com',
 						authorization_endpoint: endpoints.authorizationEndpoint,
 						token_endpoint: 'http://idp.example.com/token',
 						device_authorization_endpoint: endpoints.deviceAuthorizationEndpoint
 					})
-				)
-			)
-		).rejects.toBeInstanceOf(OidcLoginError);
+				);
+			})
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name, kind: caught.kind, issuer: caught.issuer },
+			requests
+		}).toStrictEqual({
+			error: {
+				name: 'OidcLoginError',
+				kind: 'discovery-schema',
+				issuer: 'https://idp.example.com'
+			},
+			requests: ['https://idp.example.com/.well-known/openid-configuration']
+		});
 	});
 });
 
 describe('loopbackLogin', () => {
 	it('completes the PKCE loopback flow and exchanges the code', async () => {
 		let exchange: URLSearchParams | undefined;
+		const tokenRequests: unknown[] = [];
 		const fetcher: typeof fetch = (input, init) => {
-			if (input !== endpoints.tokenEndpoint) {
-				throw new OidcLoginError('unexpected token endpoint call');
-			}
+			tokenRequests.push(input);
 
 			exchange = requestBody(init);
 
@@ -158,30 +321,16 @@ describe('loopbackLogin', () => {
 
 		// The browser stand-in plays the identity provider: it follows the
 		// authorize URL straight back to the loopback redirect with a code.
-		const openBrowser = async (target: string): Promise<void> => {
-			const authorize = new URL(target);
-			const redirect = authorize.searchParams.get('redirect_uri');
-			const state = authorize.searchParams.get('state');
-
-			if (redirect === null || state === null) {
-				throw new OidcLoginError('authorize URL missing parameters');
-			}
-
-			const callback = new URL(redirect);
-			callback.searchParams.set('code', 'auth-code');
-			callback.searchParams.set('state', state);
-			await fetch(callback);
-		};
-
 		const idToken = await loopbackLogin({
 			endpoints,
 			clientId: 'client-123',
-			openBrowser,
+			openBrowser: approveLoopbackBrowser,
 			fetcher
 		});
 
 		expect({
 			idToken,
+			tokenRequests,
 			grantType: exchange?.get('grant_type'),
 			code: exchange?.get('code'),
 			clientId: exchange?.get('client_id'),
@@ -191,6 +340,7 @@ describe('loopbackLogin', () => {
 			)
 		}).toStrictEqual({
 			idToken: 'owner.id.token',
+			tokenRequests: [endpoints.tokenEndpoint],
 			grantType: 'authorization_code',
 			code: 'auth-code',
 			clientId: 'client-123',
@@ -200,32 +350,83 @@ describe('loopbackLogin', () => {
 	});
 
 	it('times out when the browser never completes the login', async () => {
-		await expect(
+		const openedBrowsers: string[] = [];
+		const tokenRequests: string[] = [];
+
+		const caught = await rejectedBy(() =>
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
-				openBrowser: () => Promise.resolve(),
-				fetcher: () => Promise.reject(new Error('should not exchange a code')),
+				openBrowser: (target) => {
+					openedBrowsers.push(target);
+					return Promise.resolve();
+				},
+				fetcher: (input) => {
+					tokenRequests.push(requestUrl(input));
+
+					return Promise.resolve(Response.json({ id_token: 'unused' }));
+				},
 				timeoutMs: 1
 			})
-		).rejects.toBeInstanceOf(OidcLoginError);
+		);
+
+		expect(caught).toBeInstanceOf(LoginTimeoutError);
+
+		if (!(caught instanceof LoginTimeoutError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name },
+			openedBrowsers: openedBrowsers.map((target) => new URL(target).origin),
+			tokenRequests
+		}).toStrictEqual({
+			error: { name: 'LoginTimeoutError' },
+			openedBrowsers: ['https://idp.example.com'],
+			tokenRequests: []
+		});
 	});
 
 	it('aborts while waiting for the browser callback', async () => {
 		const controller = new AbortController();
+		const openedBrowsers: string[] = [];
+		const tokenRequests: string[] = [];
 
-		await expect(
+		const caught = await rejectedBy(() =>
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
-				openBrowser: () => {
+				openBrowser: (target) => {
+					openedBrowsers.push(target);
 					controller.abort(new CliAbortError());
 				},
-				fetcher: () => Promise.reject(new Error('should not exchange a code')),
+				fetcher: (input) => {
+					tokenRequests.push(requestUrl(input));
+
+					return Promise.resolve(Response.json({ id_token: 'unused' }));
+				},
 				timeoutMs: 60_000,
 				signal: controller.signal
 			})
-		).rejects.toBeInstanceOf(CliAbortError);
+		);
+
+		expect(caught).toBeInstanceOf(CliAbortError);
+
+		if (!(caught instanceof CliAbortError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name },
+			openedBrowsers: openedBrowsers.map((target) => new URL(target).origin),
+			tokenRequests,
+			aborted: controller.signal.aborted
+		}).toStrictEqual({
+			error: { name: 'CliAbortError' },
+			openedBrowsers: ['https://idp.example.com'],
+			tokenRequests: [],
+			aborted: true
+		});
 	});
 
 	it('serves a fixed redirect registration when one is given', async () => {
@@ -235,14 +436,11 @@ describe('loopbackLogin', () => {
 			endpoints,
 			clientId: 'client-123',
 			openBrowser: async (target) => {
-				const authorize = new URL(target);
-				redirectUri = authorize.searchParams.get('redirect_uri') ?? '';
+				const parameters = authorizeParameters(target);
+				redirectUri = parameters.redirectUri;
 				const callback = new URL(redirectUri);
 				callback.searchParams.set('code', 'auth-code');
-				callback.searchParams.set(
-					'state',
-					authorize.searchParams.get('state') ?? ''
-				);
+				callback.searchParams.set('state', parameters.state);
 				await fetch(callback);
 			},
 			fetcher: () =>
@@ -259,22 +457,16 @@ describe('loopbackLogin', () => {
 	it('ignores a stray callback and completes on the matching one', async () => {
 		let strayStatus = 0;
 		const openBrowser = async (target: string): Promise<void> => {
-			const authorize = new URL(target);
-			const redirect = authorize.searchParams.get('redirect_uri');
-			const state = authorize.searchParams.get('state');
-
-			if (redirect === null || state === null) {
-				throw new OidcLoginError('authorize URL missing parameters');
-			}
+			const { redirectUri, state } = authorizeParameters(target);
 
 			// A stray request with the wrong state must be answered but ignored.
-			const stray = new URL(redirect);
+			const stray = new URL(redirectUri);
 			stray.searchParams.set('code', 'stray-code');
 			stray.searchParams.set('state', 'not-the-state');
 			const strayResponse = await fetch(stray);
 			strayStatus = strayResponse.status;
 
-			const callback = new URL(redirect);
+			const callback = new URL(redirectUri);
 			callback.searchParams.set('code', 'auth-code');
 			callback.searchParams.set('state', state);
 			await fetch(callback);
@@ -295,30 +487,35 @@ describe('loopbackLogin', () => {
 	});
 
 	it('wraps a non-JSON token response as an OidcLoginError', async () => {
-		const openBrowser = async (target: string): Promise<void> => {
-			const authorize = new URL(target);
-			const redirect = authorize.searchParams.get('redirect_uri');
-			const state = authorize.searchParams.get('state');
-
-			if (redirect === null || state === null) {
-				throw new OidcLoginError('authorize URL missing parameters');
-			}
-
-			const callback = new URL(redirect);
-			callback.searchParams.set('code', 'auth-code');
-			callback.searchParams.set('state', state);
-			await fetch(callback);
-		};
-
-		await expect(
+		const tokenRequests: string[] = [];
+		const caught = await rejectedBy(() =>
 			loopbackLogin({
 				endpoints,
 				clientId: 'client-123',
-				openBrowser,
-				fetcher: () =>
-					Promise.resolve(new Response('<html>nope</html>', { status: 200 }))
+				openBrowser: approveLoopbackBrowser,
+				fetcher: (input) => {
+					tokenRequests.push(requestUrl(input));
+
+					return Promise.resolve(
+						new Response('<html>nope</html>', { status: 200 })
+					);
+				}
 			})
-		).rejects.toBeInstanceOf(OidcLoginError);
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name, kind: caught.kind },
+			tokenRequests
+		}).toStrictEqual({
+			error: { name: 'OidcLoginError', kind: 'token-non-json' },
+			tokenRequests: [endpoints.tokenEndpoint]
+		});
 	});
 });
 
@@ -422,21 +619,46 @@ describe('deviceLogin', () => {
 	});
 
 	it('refuses the device flow when the issuer does not support it', async () => {
-		await expect(
+		const prompts: unknown[] = [];
+		const requests: string[] = [];
+		const caught = await rejectedBy(() =>
 			deviceLogin({
 				endpoints: {
 					authorizationEndpoint: endpoints.authorizationEndpoint,
 					tokenEndpoint: endpoints.tokenEndpoint
 				},
 				clientId: 'client-123',
-				prompt: (verification) => void verification,
-				fetcher: () => Promise.reject(new Error('should not be called'))
+				prompt: (verification) => prompts.push(verification),
+				fetcher: (input) => {
+					requests.push(requestUrl(input));
+
+					return Promise.resolve(Response.json({ id_token: 'unused' }));
+				}
 			})
-		).rejects.toBeInstanceOf(OidcLoginError);
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name, kind: caught.kind },
+			prompts,
+			requests
+		}).toStrictEqual({
+			error: { name: 'OidcLoginError', kind: 'unsupported-device-flow' },
+			prompts: [],
+			requests: []
+		});
 	});
 
 	it('stops polling once the device code has expired', async () => {
+		const requests: string[] = [];
 		const fetcher: typeof fetch = (input) => {
+			requests.push(requestUrl(input));
+
 			if (input === endpoints.deviceAuthorizationEndpoint) {
 				return Promise.resolve(
 					Response.json({
@@ -455,7 +677,7 @@ describe('deviceLogin', () => {
 		};
 		let elapsed = 0;
 
-		await expect(
+		const caught = await rejectedBy(() =>
 			deviceLogin({
 				endpoints,
 				clientId: 'client-123',
@@ -469,20 +691,39 @@ describe('deviceLogin', () => {
 					return current;
 				}
 			})
-		).rejects.toBeInstanceOf(OidcLoginError);
+		);
+
+		expect(caught).toBeInstanceOf(OidcLoginError);
+
+		if (!(caught instanceof OidcLoginError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name, kind: caught.kind },
+			requests
+		}).toStrictEqual({
+			error: { name: 'OidcLoginError', kind: 'device-expired' },
+			requests: [endpoints.deviceAuthorizationEndpoint]
+		});
 	});
 
 	it('aborts while waiting between device token polls', async () => {
 		const controller = new AbortController();
+		const prompts: unknown[] = [];
+		const requests: string[] = [];
 
-		await expect(
+		const caught = await rejectedBy(() =>
 			deviceLogin({
 				endpoints,
 				clientId: 'client-123',
-				prompt: () => {
+				prompt: (verification) => {
+					prompts.push(verification);
 					controller.abort(new CliAbortError());
 				},
 				fetcher: (input) => {
+					requests.push(requestUrl(input));
+
 					if (input === endpoints.deviceAuthorizationEndpoint) {
 						return Promise.resolve(
 							Response.json({
@@ -494,11 +735,35 @@ describe('deviceLogin', () => {
 						);
 					}
 
-					return Promise.reject(new Error('should not poll after abort'));
+					return Promise.resolve(Response.json({ id_token: 'unused' }));
 				},
 				sleep: pendingPromise,
 				signal: controller.signal
 			})
-		).rejects.toBeInstanceOf(CliAbortError);
+		);
+
+		expect(caught).toBeInstanceOf(CliAbortError);
+
+		if (!(caught instanceof CliAbortError)) {
+			return;
+		}
+
+		expect({
+			error: { name: caught.name },
+			prompts,
+			requests,
+			aborted: controller.signal.aborted
+		}).toStrictEqual({
+			error: { name: 'CliAbortError' },
+			prompts: [
+				{
+					userCode: 'WXYZ-1234',
+					verificationUri: 'https://idp.example.com/activate',
+					verificationUriComplete: undefined
+				}
+			],
+			requests: [endpoints.deviceAuthorizationEndpoint],
+			aborted: true
+		});
 	});
 });

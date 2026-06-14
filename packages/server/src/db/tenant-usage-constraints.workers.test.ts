@@ -26,9 +26,14 @@ describe('tenant_usage non-negative constraints', () => {
 	])('rejects a negative $name count, writing no row', async ({ values }) => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		await expect(
-			database.insert(d1Schema.tenantUsage).values(values).run()
-		).rejects.toThrow();
+		const error = await database
+			.insert(d1Schema.tenantUsage)
+			.values(values)
+			.run()
+			.then(
+				() => 'inserted',
+				(error: unknown) => error
+			);
 
 		const rows = await database
 			.select()
@@ -36,6 +41,12 @@ describe('tenant_usage non-negative constraints', () => {
 			.where(eq(d1Schema.tenantUsage.tenant, values.tenant))
 			.all();
 
-		expect(rows).toStrictEqual([]);
+		expect({
+			rejected: error instanceof Error,
+			rows
+		}).toStrictEqual({
+			rejected: true,
+			rows: []
+		});
 	});
 });

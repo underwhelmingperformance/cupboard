@@ -18,40 +18,47 @@ describe('check report schemas', () => {
 	};
 
 	it.each([
-		{ name: 'a missing-nar discrepancy', value: discrepancy, valid: true },
+		{
+			name: 'a missing-nar discrepancy',
+			value: discrepancy,
+			expected: discrepancy
+		},
 		{
 			name: 'a missing-narinfo-object discrepancy',
 			value: { ...discrepancy, kind: 'missing-narinfo-object' },
-			valid: true
+			expected: { ...discrepancy, kind: 'missing-narinfo-object' }
 		},
 		{
 			name: 'a file-hash-mismatch discrepancy',
 			value: { ...discrepancy, kind: 'file-hash-mismatch' },
-			valid: true
-		},
+			expected: { ...discrepancy, kind: 'file-hash-mismatch' }
+		}
+	])('accepts discrepancy: $name', ({ value, expected }) => {
+		expect(checkDiscrepancySchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
 		{
 			name: 'an unknown kind',
-			value: { ...discrepancy, kind: 'surprise' },
-			valid: false
+			value: { ...discrepancy, kind: 'surprise' }
 		},
 		{
 			name: 'an unknown key',
-			value: { ...discrepancy, surprise: true },
-			valid: false
+			value: { ...discrepancy, surprise: true }
 		}
-	])('discrepancy: $name', ({ value, valid }) => {
-		expect(checkDiscrepancySchema.safeParse(value).success).toBe(valid);
+	])('rejects discrepancy: $name', ({ value }) => {
+		expect(checkDiscrepancySchema.safeParse(value).success).toBe(false);
 	});
 
 	it('accepts a complete report with discrepancies', () => {
-		expect(
-			checkReportSchema.safeParse({
-				narInfosChecked: 12,
-				narBlobsChecked: 10,
-				complete: true,
-				discrepancies: [discrepancy]
-			}).success
-		).toBe(true);
+		const value = {
+			narInfosChecked: 12,
+			narBlobsChecked: 10,
+			complete: true,
+			discrepancies: [discrepancy]
+		};
+
+		expect(checkReportSchema.parse(value)).toStrictEqual(value);
 	});
 
 	it('rejects a report with a negative count', () => {
@@ -78,7 +85,14 @@ describe('verifyReportSchema', () => {
 				cursorCache: 'builds',
 				wrapped: false
 			},
-			valid: true
+			expected: {
+				scanned: 100,
+				narInfoObjectsRestored: 2,
+				danglingNarInfosRemoved: 1,
+				cursor: 'a'.repeat(32),
+				cursorCache: 'builds',
+				wrapped: false
+			}
 		},
 		{
 			name: 'a wrapped pass with an empty cursor',
@@ -90,8 +104,20 @@ describe('verifyReportSchema', () => {
 				cursorCache: '',
 				wrapped: true
 			},
-			valid: true
-		},
+			expected: {
+				scanned: 0,
+				narInfoObjectsRestored: 0,
+				danglingNarInfosRemoved: 0,
+				cursor: '',
+				cursorCache: '',
+				wrapped: true
+			}
+		}
+	])('accepts $name', ({ value, expected }) => {
+		expect(verifyReportSchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
 		{
 			name: 'a negative count',
 			value: {
@@ -101,8 +127,7 @@ describe('verifyReportSchema', () => {
 				cursor: '',
 				cursorCache: '',
 				wrapped: true
-			},
-			valid: false
+			}
 		},
 		{
 			name: 'a missing cursor cache',
@@ -112,8 +137,7 @@ describe('verifyReportSchema', () => {
 				danglingNarInfosRemoved: 0,
 				cursor: '',
 				wrapped: true
-			},
-			valid: false
+			}
 		},
 		{
 			name: 'a non-string cursor',
@@ -124,8 +148,7 @@ describe('verifyReportSchema', () => {
 				cursor: 1,
 				cursorCache: '',
 				wrapped: true
-			},
-			valid: false
+			}
 		},
 		{
 			name: 'an unknown key',
@@ -137,10 +160,9 @@ describe('verifyReportSchema', () => {
 				cursorCache: '',
 				wrapped: true,
 				surprise: true
-			},
-			valid: false
+			}
 		}
-	])('$name', ({ value, valid }) => {
-		expect(verifyReportSchema.safeParse(value).success).toBe(valid);
+	])('rejects $name', ({ value }) => {
+		expect(verifyReportSchema.safeParse(value).success).toBe(false);
 	});
 });

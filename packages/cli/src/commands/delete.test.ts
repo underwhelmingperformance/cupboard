@@ -98,14 +98,46 @@ describe('runDelete', () => {
 	});
 
 	it('rejects an argument that is not a store path', async () => {
-		const { ui } = fakeCliUi({ confirm: 'yes' });
+		const calls: Parameters<DeleteClient['remove']>[0][] = [];
+		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
-		await expect(
-			runDelete('_default', '/tmp/not-a-store-path', ui, {
-				remove() {
-					throw new Error('client should not be called');
+		const outcome = await runDelete('_default', '/tmp/not-a-store-path', ui, {
+			remove(input) {
+				calls.push(input);
+
+				return Promise.resolve({
+					storePathHash: input.hash,
+					deleted: false,
+					narScheduledForDeletion: false
+				});
+			}
+		}).then(
+			(value) => ({ value }),
+			(error_: unknown) => {
+				expect(error_).toBeInstanceOf(InvalidStorePathError);
+
+				const name =
+					error_ instanceof InvalidStorePathError
+						? error_.name
+						: String(error_);
+				const storePath =
+					error_ instanceof InvalidStorePathError
+						? error_.storePath
+						: String(error_);
+
+				return { error: { name, storePath } };
+			}
+		);
+
+		expect({ outcome, calls, results: captured.results }).toStrictEqual({
+			outcome: {
+				error: {
+					name: 'InvalidStorePathError',
+					storePath: '/tmp/not-a-store-path'
 				}
-			})
-		).rejects.toThrow(InvalidStorePathError);
+			},
+			calls: [],
+			results: []
+		});
 	});
 });

@@ -1,4 +1,5 @@
 import type { VerifyReport } from '@cupboard/protocol/reports';
+import { verifyReportSchema } from '@cupboard/protocol/reports';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -39,7 +40,7 @@ async function runVerify(token: string, limit?: number): Promise<VerifyReport> {
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<VerifyReport>();
+	return verifyReportSchema.parse(await response.json());
 }
 
 describe('background verification', () => {

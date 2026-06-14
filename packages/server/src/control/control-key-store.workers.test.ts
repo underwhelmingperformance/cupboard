@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { issueAccessJwt, verifyAccessJwt } from '../auth/auth.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -39,6 +41,9 @@ describe('control key store', () => {
 		await ensureControlKey(database, secret, t0);
 
 		const verificationKeys = await controlVerificationKeys(database);
+		const [verificationKey] = z
+			.tuple([z.looseObject({ kid: z.string() })])
+			.parse(verificationKeys);
 		const active = await activeControlKey(database, secret);
 		const token = await issueAccessJwt(
 			active.privateJwk,
@@ -60,12 +65,10 @@ describe('control key store', () => {
 		);
 
 		expect({
-			keyCount: verificationKeys.length,
-			activeIsPublished: verificationKeys.some((key) => key.kid === active.kid),
+			verificationKeys: [{ kid: verificationKey.kid }],
 			claims
 		}).toStrictEqual({
-			keyCount: 1,
-			activeIsPublished: true,
+			verificationKeys: [{ kid: active.kid }],
 			claims: { scope: 'admin', subject: 'admin' }
 		});
 	});
@@ -164,9 +167,25 @@ describe('control key store', () => {
 			remaining: [secondKid],
 			activeAfter: secondKid
 		});
-		await expect(retireControlKey(database, secondKid, t2)).rejects.toThrow(
-			LastControlKeyError
+		const error = await retireControlKey(database, secondKid, t2).then(
+			() => ({ kind: 'retired' }),
+			(error_: unknown) => error_
 		);
+
+		expect(error).toBeInstanceOf(LastControlKeyError);
+		if (!(error instanceof LastControlKeyError)) {
+			throw error;
+		}
+
+		expect({
+			name: error.name,
+			status: error.status,
+			kid: error.kid
+		}).toStrictEqual({
+			name: 'LastControlKeyError',
+			status: StatusCodes.CONFLICT,
+			kid: secondKid
+		});
 	});
 
 	it.each([

@@ -2,7 +2,7 @@ import { readFile as nodeReadFile } from 'node:fs/promises';
 
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
-import { storePathHashOf } from '@cupboard/nix/store-path';
+import { StorePath } from '@cupboard/nix/store-path';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import { bundleFromJSON, isBundleWithDsseEnvelope } from '@sigstore/bundle';
 import { TrustedRoot } from '@sigstore/protobuf-specs';
@@ -103,6 +103,67 @@ interface BundleVerifyOptions extends VerifierOptions {
 	readonly trustedRoot?: string;
 }
 
+export class CertificateIdentityModeError extends Error {
+	constructor(public readonly identityModes: readonly string[]) {
+		super(
+			'Pass exactly one of --certificate-identity or --certificate-identity-regex'
+		);
+		this.name = 'CertificateIdentityModeError';
+	}
+}
+
+export class CertificateIssuerModeError extends Error {
+	constructor(public readonly issuerModes: readonly string[]) {
+		super(
+			'Pass exactly one of --certificate-oidc-issuer or --certificate-oidc-issuer-regex'
+		);
+		this.name = 'CertificateIssuerModeError';
+	}
+}
+
+export class CertificatePolicyModeMismatchError extends Error {
+	constructor(
+		public readonly identityMode: string,
+		public readonly issuerMode: string
+	) {
+		super(
+			'Certificate identity and OIDC issuer must both use exact values or both use regex values'
+		);
+		this.name = 'CertificatePolicyModeMismatchError';
+	}
+}
+
+export class RemoteNarInfoStorePathMismatchError extends Error {
+	constructor(
+		public readonly expectedStorePathHash: string,
+		public readonly actualStorePathHash: string,
+		public readonly storePath: string
+	) {
+		super('Remote narinfo store path does not match the requested hash');
+		this.name = 'RemoteNarInfoStorePathMismatchError';
+	}
+}
+
+export class AttestationSubjectMismatchError extends Error {
+	constructor(
+		public readonly expectedSubjectDigest: string,
+		public readonly subjectDigests: readonly string[]
+	) {
+		super('Verified attestation subject does not match the NAR hash');
+		this.name = 'AttestationSubjectMismatchError';
+	}
+}
+
+export class AttestationPredicateTypeMismatchError extends Error {
+	constructor(
+		public readonly expectedPredicateType: string,
+		public readonly actualPredicateType: string
+	) {
+		super('Verified attestation predicate type does not match policy');
+		this.name = 'AttestationPredicateTypeMismatchError';
+	}
+}
+
 export async function verifyLocalAttestations(
 	options: LocalAttestationVerifyOptions,
 	dependencies: AttestationVerifyDependencies = {}
@@ -147,9 +208,13 @@ export async function verifyRemoteAttestations(
 		throw new Error('Remote narinfo signature did not verify');
 	}
 
-	if (storePathHashOf(narInfo.storePath) !== options.storePathHash) {
-		throw new Error(
-			'Remote narinfo store path does not match the requested hash'
+	const actualStorePathHash = StorePath.hash(narInfo.storePath);
+
+	if (actualStorePathHash !== options.storePathHash) {
+		throw new RemoteNarInfoStorePathMismatchError(
+			options.storePathHash,
+			actualStorePathHash,
+			narInfo.storePath
 		);
 	}
 
@@ -214,24 +279,20 @@ export function identityPolicy(
 	options: IdentityPolicyOptions
 ): VerifiedIdentityPolicy {
 	const identityModes = [
-		options.certificateIdentity,
-		options.certificateIdentityRegex
+		options.certificateIdentity === undefined ? undefined : 'exact',
+		options.certificateIdentityRegex === undefined ? undefined : 'regex'
 	].filter((value) => value !== undefined);
 	const issuerModes = [
-		options.certificateOidcIssuer,
-		options.certificateOidcIssuerRegex
+		options.certificateOidcIssuer === undefined ? undefined : 'exact',
+		options.certificateOidcIssuerRegex === undefined ? undefined : 'regex'
 	].filter((value) => value !== undefined);
 
 	if (identityModes.length !== 1) {
-		throw new Error(
-			'Pass exactly one of --certificate-identity or --certificate-identity-regex'
-		);
+		throw new CertificateIdentityModeError(identityModes);
 	}
 
 	if (issuerModes.length !== 1) {
-		throw new Error(
-			'Pass exactly one of --certificate-oidc-issuer or --certificate-oidc-issuer-regex'
-		);
+		throw new CertificateIssuerModeError(issuerModes);
 	}
 
 	if (
@@ -249,8 +310,9 @@ export function identityPolicy(
 		options.certificateIdentityRegex === undefined ||
 		options.certificateOidcIssuerRegex === undefined
 	) {
-		throw new Error(
-			'Certificate identity and OIDC issuer must both use exact values or both use regex values'
+		throw new CertificatePolicyModeMismatchError(
+			options.certificateIdentity === undefined ? 'regex' : 'exact',
+			options.certificateOidcIssuer === undefined ? 'regex' : 'exact'
 		);
 	}
 
@@ -378,12 +440,16 @@ function resultFor(
 	expectedPredicateType: string
 ): VerifyResult {
 	if (!verified.subjectDigests.includes(expectedSubject)) {
-		throw new Error('Verified attestation subject does not match the NAR hash');
+		throw new AttestationSubjectMismatchError(
+			expectedSubject,
+			verified.subjectDigests
+		);
 	}
 
 	if (verified.predicateType !== expectedPredicateType) {
-		throw new Error(
-			'Verified attestation predicate type does not match policy'
+		throw new AttestationPredicateTypeMismatchError(
+			expectedPredicateType,
+			verified.predicateType
 		);
 	}
 

@@ -14,10 +14,20 @@ describe('abortable', () => {
 		const controller = new AbortController();
 		const pending = pendingPromise();
 		const aborted = abortable(pending, controller.signal);
+		const reason = new CliAbortError();
 
-		controller.abort(new CliAbortError());
+		controller.abort(reason);
 
-		await expect(aborted).rejects.toBeInstanceOf(CliAbortError);
+		const error = await aborted.catch((error_: unknown) => error_);
+
+		expect({
+			error:
+				error instanceof CliAbortError
+					? { name: error.name, reason: error === reason }
+					: undefined
+		}).toStrictEqual({
+			error: { name: 'CliAbortError', reason: true }
+		});
 	});
 
 	it('removes the abort listener after the promise settles', async () => {

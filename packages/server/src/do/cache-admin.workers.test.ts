@@ -1,7 +1,11 @@
 import type {
 	CacheListResponse,
-	CacheRemoveResponse,
 	CacheSummary
+} from '@cupboard/protocol/caches';
+import {
+	cacheListResponseSchema,
+	cacheRemoveResponseSchema,
+	cacheSummarySchema
 } from '@cupboard/protocol/caches';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -13,13 +17,13 @@ import {
 	authorisedFetch,
 	bootstrap,
 	cacheScopedPath,
+	expectSingleUploadDecision,
 	issueServerSignedToken,
 	narBytes,
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
 	resetTestServer,
-	singleDecision,
 	uploadBlobMetadata,
 	uploadMetadata,
 	useTestServer
@@ -38,7 +42,7 @@ async function putCache(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<CacheSummary>();
+	return cacheSummarySchema.parse(await response.json());
 }
 
 async function listCaches(token: string): Promise<CacheListResponse> {
@@ -46,7 +50,7 @@ async function listCaches(token: string): Promise<CacheListResponse> {
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return response.json<CacheListResponse>();
+	return cacheListResponseSchema.parse(await response.json());
 }
 
 describe('cache registry admin', () => {
@@ -86,7 +90,7 @@ describe('cache registry admin', () => {
 				method: 'DELETE'
 			}
 		);
-		const removed = await forced.json<CacheRemoveResponse>();
+		const removed = cacheRemoveResponseSchema.parse(await forced.json());
 		const object = await env.BLOBS.head(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash, 'builds')
 		);
@@ -137,13 +141,10 @@ describe('cache registry admin', () => {
 		await useTestServer('cache-admin-teardown-pending');
 		const init = await bootstrap();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const decision = singleDecision(
-			await negotiateUploads(init.token, [metadata], 'builds')
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(init.token, [metadata], 'builds'),
+			metadata
 		);
-
-		if (decision.action !== 'upload') {
-			throw new Error('expected an upload decision');
-		}
 
 		const prepared = await authorisedFetch(
 			cacheScopedPath('builds', `/uploads/${decision.uploadId}`),

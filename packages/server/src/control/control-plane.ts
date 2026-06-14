@@ -28,12 +28,14 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { type AuthorizationServerMetadata } from '../do/auth-keys-service.ts';
 import {
 	ControlNotConfiguredError,
+	ControlSubjectTokenUntrustedError,
 	InsufficientScopeError,
-	InvalidGrantError,
-	InvalidRequestError,
 	IssuerUnavailableError,
+	SubjectTokenNotJwtError,
+	SubjectTokenVerificationFailedError,
 	UnauthenticatedError,
-	UnsupportedGrantTypeError
+	UnsupportedGrantTypeError,
+	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
 import {
@@ -98,9 +100,7 @@ export async function controlTokenExchange(
 		body.subject_token_type !== subjectTokenTypeIdToken &&
 		body.subject_token_type !== subjectTokenTypeJwt
 	) {
-		throw new InvalidRequestError(
-			`Unsupported subject_token_type: ${body.subject_token_type}`
-		);
+		throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
 	}
 
 	const database = controlDatabase(env);
@@ -110,15 +110,13 @@ export async function controlTokenExchange(
 	try {
 		claims = decodeInboundClaims(body.subject_token);
 	} catch {
-		throw new InvalidGrantError('Subject token is not a JWT');
+		throw new SubjectTokenNotJwtError();
 	}
 
 	const rule = matchOidcTrust(await controlTrustRules(database), claims);
 
 	if (rule === undefined) {
-		throw new InvalidGrantError(
-			'No control trust rule matches the subject token'
-		);
+		throw new ControlSubjectTokenUntrustedError();
 	}
 
 	const verified = await verifyControlInbound(rule, body.subject_token);
@@ -184,7 +182,7 @@ async function verifyControlInbound(
 			throw new IssuerUnavailableError(rule.issuer, { cause: error });
 		}
 
-		throw new InvalidGrantError('Subject token failed verification');
+		throw new SubjectTokenVerificationFailedError();
 	}
 }
 

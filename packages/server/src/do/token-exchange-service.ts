@@ -19,9 +19,12 @@ import {
 import { constantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
-	InvalidGrantError,
-	InvalidRequestError,
-	UnsupportedGrantTypeError
+	RefreshTokenRequiredError,
+	StaleRefreshTokenError,
+	SubjectTokenRequiredError,
+	TenantSubjectTokenUntrustedError,
+	UnsupportedGrantTypeError,
+	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
 import { matchOidcTrust, type OidcTrustRule } from '../oidc/oidc-trust.ts';
@@ -29,10 +32,6 @@ import { matchOidcTrust, type OidcTrustRule } from '../oidc/oidc-trust.ts';
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
 import { type OidcTrustService } from './oidc-trust-service.ts';
-
-// One message for every refresh failure mode (unknown id, wrong secret,
-// expiry, retired rule), so a probe cannot tell which part was wrong.
-const staleRefreshTokenMessage = 'Refresh token is invalid or expired';
 
 export class TokenExchangeService {
 	constructor(
@@ -57,15 +56,15 @@ export class TokenExchangeService {
 
 	private async exchange(body: ParsedTokenRequest): Promise<Response> {
 		if (body.subject_token === undefined) {
-			throw new InvalidRequestError('subject_token is required');
+			throw new SubjectTokenRequiredError();
 		}
 
 		if (
 			body.subject_token_type !== subjectTokenTypeIdToken &&
 			body.subject_token_type !== subjectTokenTypeJwt
 		) {
-			throw new InvalidRequestError(
-				`Unsupported subject_token_type: ${String(body.subject_token_type)}`
+			throw new UnsupportedSubjectTokenTypeError(
+				String(body.subject_token_type)
 			);
 		}
 
@@ -76,7 +75,7 @@ export class TokenExchangeService {
 		const rule = matchOidcTrust(this.oidcTrust.enabledOidcTrustRules(), claims);
 
 		if (rule === undefined) {
-			throw new InvalidGrantError('No trust rule matches the subject token');
+			throw new TenantSubjectTokenUntrustedError();
 		}
 
 		const verified = await this.oidcTrust.verifyInbound(
@@ -95,13 +94,13 @@ export class TokenExchangeService {
 
 	private async refresh(body: ParsedTokenRequest): Promise<Response> {
 		if (body.refresh_token === undefined) {
-			throw new InvalidRequestError('refresh_token is required');
+			throw new RefreshTokenRequiredError();
 		}
 
 		const presented = parseRefreshToken(body.refresh_token);
 
 		if (presented === undefined) {
-			throw new InvalidGrantError(staleRefreshTokenMessage);
+			throw new StaleRefreshTokenError();
 		}
 
 		// Hash the presented secret before touching the row. The hash is the only
@@ -122,7 +121,7 @@ export class TokenExchangeService {
 			row === undefined ||
 			!constantTimeEqual(row.secretHash, presentedHash)
 		) {
-			throw new InvalidGrantError(staleRefreshTokenMessage);
+			throw new StaleRefreshTokenError();
 		}
 
 		// Compare-and-delete: consume the row only while it still carries the
@@ -146,7 +145,7 @@ export class TokenExchangeService {
 			claimed === undefined ||
 			claimed.expiresAt <= new Date().toISOString()
 		) {
-			throw new InvalidGrantError(staleRefreshTokenMessage);
+			throw new StaleRefreshTokenError();
 		}
 
 		const rule = this.oidcTrust
@@ -155,7 +154,7 @@ export class TokenExchangeService {
 
 		// The row is already consumed, so a retired rule simply refuses the grant.
 		if (rule === undefined) {
-			throw new InvalidGrantError(staleRefreshTokenMessage);
+			throw new StaleRefreshTokenError();
 		}
 
 		return this.issuedResponse(rule, claimed.subject, {});

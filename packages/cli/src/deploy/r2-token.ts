@@ -29,7 +29,10 @@ export class R2PermissionGroupsError extends CliError {
 
 /** Cloudflare answered a token request without the id or secret value. */
 export class ApiTokenResponseError extends CliError {
-	constructor() {
+	constructor(
+		public readonly hasId: boolean,
+		public readonly hasValue: boolean
+	) {
 		super('Cloudflare returned an API token without an id or value');
 		this.name = 'ApiTokenResponseError';
 	}
@@ -106,7 +109,7 @@ export async function createScopedR2Key(
  */
 function pairFrom(id: string, value: string): R2Credentials {
 	if (id === '' || value === '') {
-		throw new ApiTokenResponseError();
+		throw new ApiTokenResponseError(id !== '', value !== '');
 	}
 
 	return {

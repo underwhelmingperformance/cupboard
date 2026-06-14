@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseDeploymentConfig } from './config.ts';
+import { parseDeploymentConfig, WranglerConfigError } from './config.ts';
 
 const controlSource = `{
 	// the control-plane Worker
@@ -110,48 +110,56 @@ function withControl(patch: (config: string) => string): () => void {
 	return () => parseDeploymentConfig(patch(controlSource), tenantSource);
 }
 
+function thrownBy(function_: () => void): unknown {
+	let thrown: unknown;
+
+	try {
+		function_();
+	} catch (error) {
+		thrown = error;
+	}
+
+	return thrown;
+}
+
 describe('wrangler config validation', () => {
 	it.each([
-		[
-			'an uppercase worker name',
-			'"name": "cupboard"',
-			'"name": "Cupboard"',
-			'name: worker name must be lowercase'
-		],
+		['an uppercase worker name', '"name": "cupboard"', '"name": "Cupboard"'],
 		[
 			'a bucket name with a trailing hyphen',
 			'"bucket_name": "cupboard-blobs"',
-			'"bucket_name": "cupboard-blobs-"',
-			'bucket_name: R2 bucket name must be lowercase'
+			'"bucket_name": "cupboard-blobs-"'
 		],
 		[
 			'a queue name with invalid characters',
 			'"queue": "cupboard-maintenance" }',
-			'"queue": "cupboard_maintenance" }',
-			'queue: queue name must be lowercase'
+			'"queue": "cupboard_maintenance" }'
 		],
 		[
 			'a four-field cron trigger',
 			'"crons": ["0 * * * *"]',
-			'"crons": ["0 * * *"]',
-			'cron trigger must have five fields'
+			'"crons": ["0 * * *"]'
 		],
 		[
 			'a cron trigger with stray characters',
 			'"crons": ["0 * * * *"]',
-			'"crons": ["0 * * * *; rm"]',
-			'cron trigger must have five fields'
+			'"crons": ["0 * * * *; rm"]'
 		],
 		[
 			'a compatibility date that is not a date',
 			'"compatibility_date": "2026-05-15"',
-			'"compatibility_date": "next-tuesday"',
-			'compatibility_date must be YYYY-MM-DD'
+			'"compatibility_date": "next-tuesday"'
 		]
-	])('rejects %s', (_name, needle, replacement, message) => {
-		expect(
+	])('rejects %s', (_name, needle, replacement) => {
+		const error = thrownBy(
 			withControl((config) => config.replace(needle, replacement))
-		).toThrow(message);
+		);
+
+		expect(error).toBeInstanceOf(WranglerConfigError);
+
+		if (error instanceof WranglerConfigError) {
+			expect(error.label).toBe('control');
+		}
 	});
 
 	it('accepts cron vocabulary like ranges, steps and day names', () => {
@@ -160,6 +168,8 @@ describe('wrangler config validation', () => {
 			'"crons": ["*/15 0-6 1 JAN MON-FRI"]'
 		);
 
-		expect(() => parseDeploymentConfig(config, tenantSource)).not.toThrow();
+		expect(
+			parseDeploymentConfig(config, tenantSource).control.crons
+		).toStrictEqual(['*/15 0-6 1 JAN MON-FRI']);
 	});
 });

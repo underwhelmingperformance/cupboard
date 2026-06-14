@@ -39,76 +39,111 @@ function uploadedObject(
 	return { size: 4, checksums: { sha256: digest.buffer }, ...overrides };
 }
 
-function rejection<E extends Error>(
-	function_: () => void,
-	type: abstract new (...arguments_: never[]) => E
-): E {
+function thrownBy(function_: () => void): unknown {
+	let thrown: unknown;
+
 	try {
 		function_();
 	} catch (error) {
-		expect(error).toBeInstanceOf(type);
-
-		return error as E;
+		thrown = error;
 	}
 
-	throw new Error('expected verifyUploadedObject to throw');
+	return thrown;
+}
+
+function acceptedBy(function_: () => void): { readonly accepted: true } {
+	function_();
+
+	return { accepted: true };
 }
 
 describe('verifyUploadedObject', () => {
 	it('accepts an object that matches the metadata', () => {
-		expect(() => {
-			verifyUploadedObject(uploadedObject(), 4, metadata, r2Key);
-		}).not.toThrow();
+		expect(
+			acceptedBy(() => {
+				verifyUploadedObject(uploadedObject(), 4, metadata, r2Key);
+			})
+		).toStrictEqual({ accepted: true });
 	});
 
 	it('rejects a missing object with its key', () => {
-		const error = rejection(() => {
+		const error = thrownBy(() => {
 			verifyUploadedObject(undefined, 4, metadata, r2Key);
-		}, UploadedObjectNotFoundError);
+		});
 
-		expect(error.r2Key).toBe(r2Key);
+		expect(error).toBeInstanceOf(UploadedObjectNotFoundError);
+		if (!(error instanceof UploadedObjectNotFoundError)) {
+			throw error;
+		}
+		expect({ name: error.name, r2Key: error.r2Key }).toStrictEqual({
+			name: UploadedObjectNotFoundError.name,
+			r2Key
+		});
 	});
 
 	it('rejects a size mismatch with the expected and actual sizes', () => {
-		const error = rejection(() => {
+		const error = thrownBy(() => {
 			verifyUploadedObject(uploadedObject({ size: 9 }), 4, metadata, r2Key);
-		}, UploadedObjectSizeMismatchError);
+		});
 
+		expect(error).toBeInstanceOf(UploadedObjectSizeMismatchError);
+		if (!(error instanceof UploadedObjectSizeMismatchError)) {
+			throw error;
+		}
 		expect({
+			name: error.name,
 			r2Key: error.r2Key,
 			expectedSize: error.expectedSize,
 			actualSize: error.actualSize
-		}).toStrictEqual({ r2Key, expectedSize: 4, actualSize: 9 });
+		}).toStrictEqual({
+			name: UploadedObjectSizeMismatchError.name,
+			r2Key,
+			expectedSize: 4,
+			actualSize: 9
+		});
 	});
 
 	it('rejects an object with no checksum', () => {
-		const error = rejection(() => {
+		const error = thrownBy(() => {
 			verifyUploadedObject(
 				uploadedObject({ checksums: {} }),
 				4,
 				metadata,
 				r2Key
 			);
-		}, UploadedObjectChecksumMissingError);
+		});
 
-		expect(error.r2Key).toBe(r2Key);
+		expect(error).toBeInstanceOf(UploadedObjectChecksumMissingError);
+		if (!(error instanceof UploadedObjectChecksumMissingError)) {
+			throw error;
+		}
+		expect({ name: error.name, r2Key: error.r2Key }).toStrictEqual({
+			name: UploadedObjectChecksumMissingError.name,
+			r2Key
+		});
 	});
 
 	it('rejects a checksum mismatch with the expected and actual hashes', () => {
-		const error = rejection(() => {
+		const error = thrownBy(() => {
 			verifyUploadedObject(
 				uploadedObject({ checksums: { sha256: otherDigest.buffer } }),
 				4,
 				metadata,
 				r2Key
 			);
-		}, UploadedObjectChecksumMismatchError);
+		});
 
+		expect(error).toBeInstanceOf(UploadedObjectChecksumMismatchError);
+		if (!(error instanceof UploadedObjectChecksumMismatchError)) {
+			throw error;
+		}
 		expect({
+			name: error.name,
 			r2Key: error.r2Key,
 			expectedFileHash: error.expectedFileHash,
 			actualFileHash: error.actualFileHash
 		}).toStrictEqual({
+			name: UploadedObjectChecksumMismatchError.name,
 			r2Key,
 			expectedFileHash: fileHash,
 			actualFileHash: NixSha256Hash.fromDigest(otherDigest).toString()
