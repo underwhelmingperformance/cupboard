@@ -45,6 +45,12 @@ export interface ResultPayload<T = unknown> {
 	readonly kind: string;
 	readonly data: T;
 	readonly rows: readonly ResultRow[];
+	/**
+	 * Shown in terminal mode when `rows` is empty, in place of an empty card, so a
+	 * list command can always emit a result (an empty `data` for machine
+	 * consumers) while still reading nicely for a person ("No tenants.").
+	 */
+	readonly empty?: string;
 }
 
 export interface Reporter {

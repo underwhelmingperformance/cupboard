@@ -144,15 +144,11 @@ export async function runCacheList(
 		client.list()
 	);
 
-	if (caches.length === 0) {
-		reporter.info('No caches.');
-		return;
-	}
-
 	reporter.result({
 		kind: 'caches',
 		data: caches,
-		rows: caches.map((summary) => cacheRow(summary))
+		rows: caches.map((summary) => cacheRow(summary)),
+		empty: 'No caches.'
 	});
 }
 

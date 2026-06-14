@@ -80,7 +80,7 @@ describe('runAuthKeyList', () => {
 		);
 
 		expect({ results, infos }).toStrictEqual({
-			results: [],
+			results: [[]],
 			infos: ['No auth keys.']
 		});
 	});

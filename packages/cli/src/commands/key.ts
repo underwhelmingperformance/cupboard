@@ -97,15 +97,11 @@ export async function runKeyList(
 		client.list()
 	);
 
-	if (keys.length === 0) {
-		reporter.info('No signing keys.');
-		return;
-	}
-
 	reporter.result({
 		kind: 'keys',
 		data: keys,
-		rows: keys.map((key) => keyRow(key))
+		rows: keys.map((key) => keyRow(key)),
+		empty: 'No signing keys.'
 	});
 }
 

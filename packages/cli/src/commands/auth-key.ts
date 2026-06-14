@@ -102,15 +102,11 @@ export async function runAuthKeyList(
 		client.list()
 	);
 
-	if (keys.length === 0) {
-		reporter.info('No auth keys.');
-		return;
-	}
-
 	reporter.result({
 		kind: 'auth-keys',
 		data: keys,
-		rows: keys.map((key) => authKeyRow(key))
+		rows: keys.map((key) => authKeyRow(key)),
+		empty: 'No auth keys.'
 	});
 }
 
