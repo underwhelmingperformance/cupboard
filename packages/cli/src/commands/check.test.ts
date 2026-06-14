@@ -26,6 +26,40 @@ function reporter(captured: Captured): Reporter {
 				})
 			);
 		},
+		progress(_label, _options, body) {
+			return Promise.resolve(
+				body({
+					advance() {
+						return;
+					},
+					fact() {
+						return;
+					}
+				})
+			);
+		},
+		steps(_label, body) {
+			return Promise.resolve(
+				body({
+					message() {
+						return;
+					},
+					group() {
+						return {
+							message() {
+								return;
+							},
+							success() {
+								return;
+							},
+							error() {
+								return;
+							}
+						};
+					}
+				})
+			);
+		},
 		result(payload) {
 			captured.results.push([...payload.rows]);
 		},

@@ -64,6 +64,15 @@ const artifact: DeploymentArtifact = {
 
 const silentReporter: Reporter = {
 	phase: (_label, body) => Promise.resolve(body({ fact: vi.fn() })),
+	progress: (_label, _options, body) =>
+		Promise.resolve(body({ advance: vi.fn(), fact: vi.fn() })),
+	steps: (_label, body) =>
+		Promise.resolve(
+			body({
+				message: vi.fn(),
+				group: () => ({ message: vi.fn(), success: vi.fn(), error: vi.fn() })
+			})
+		),
 	result: vi.fn(),
 	data: vi.fn(),
 	warn: vi.fn(),

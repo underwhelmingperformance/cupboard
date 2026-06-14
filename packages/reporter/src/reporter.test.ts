@@ -49,7 +49,7 @@ describe('formatTimestamp', () => {
 	});
 });
 
-describe('createReporter (json mode)', () => {
+describe('createReporter', () => {
 	it('emits a successful phase with its facts and return value', async () => {
 		const { events, reporter } = jsonReporter();
 
@@ -86,6 +86,111 @@ describe('createReporter (json mode)', () => {
 				event: 'phase',
 				label: 'Building',
 				status: 'failed'
+			}
+		]);
+	});
+
+	it('emits a progress phase with its total, completed count and facts', async () => {
+		const { events, reporter } = jsonReporter();
+
+		const value = await reporter.progress(
+			'Uploading',
+			{ total: 100 },
+			(bar) => {
+				bar.advance(40);
+				bar.advance(60);
+				bar.fact('blobs', '2/2');
+				return 'uploaded';
+			}
+		);
+
+		expect(value).toBe('uploaded');
+		expect(withoutDurations(events())).toStrictEqual([
+			{
+				durationMs: 'number',
+				event: 'phase',
+				label: 'Uploading',
+				status: 'ok',
+				total: 100,
+				completed: 100,
+				facts: { blobs: '2/2' }
+			}
+		]);
+	});
+
+	it('emits a failed progress phase with the bytes completed so far', async () => {
+		const { events, reporter } = jsonReporter();
+
+		await expect(
+			reporter.progress('Uploading', { total: 100 }, (bar) => {
+				bar.advance(30);
+				throw new Error('connection reset');
+			})
+		).rejects.toThrow('connection reset');
+
+		expect(withoutDurations(events())).toStrictEqual([
+			{
+				durationMs: 'number',
+				event: 'phase',
+				label: 'Uploading',
+				status: 'failed',
+				total: 100,
+				completed: 30,
+				facts: {},
+				error: 'connection reset'
+			}
+		]);
+	});
+
+	it('emits a steps phase with its groups and messages', async () => {
+		const { events, reporter } = jsonReporter();
+
+		const value = await reporter.steps('Attestations', (log) => {
+			const read = log.group('read');
+			read.message('opening');
+			read.success('3 bundles');
+
+			const upload = log.group('upload');
+			upload.error('network down');
+
+			log.message('done');
+			return 7;
+		});
+
+		expect(value).toBe(7);
+		expect(withoutDurations(events())).toStrictEqual([
+			{
+				durationMs: 'number',
+				event: 'phase',
+				label: 'Attestations',
+				status: 'ok',
+				groups: [
+					{ name: 'read', status: 'ok', messages: ['opening', '3 bundles'] },
+					{ name: 'upload', status: 'failed', messages: ['network down'] }
+				],
+				messages: ['done']
+			}
+		]);
+	});
+
+	it('emits a failed steps phase and rethrows', async () => {
+		const { events, reporter } = jsonReporter();
+
+		await expect(
+			reporter.steps('Attestations', (log) => {
+				log.group('read').message('opening');
+				throw new Error('boom');
+			})
+		).rejects.toThrow('boom');
+
+		expect(withoutDurations(events())).toStrictEqual([
+			{
+				durationMs: 'number',
+				event: 'phase',
+				label: 'Attestations',
+				status: 'failed',
+				groups: [{ name: 'read', status: 'open', messages: ['opening'] }],
+				error: 'boom'
 			}
 		]);
 	});
@@ -130,23 +235,6 @@ describe('createReporter (json mode)', () => {
 	});
 });
 
-describe('createReporter (terminal mode)', () => {
-	it('writes a data payload to stdout and an error marker to stderr', () => {
-		const { lines, payloads, reporter } = terminalReporter();
-
-		reporter.data('netrc contents');
-		reporter.error(new RangeError('too big'));
-
-		expect({
-			payloads: payloads(),
-			errorLine: stripAnsi(lines().join('')).trim()
-		}).toStrictEqual({
-			payloads: ['netrc contents\n'],
-			errorLine: '✖ RangeError: too big'
-		});
-	});
-});
-
 function captureStream(): {
 	readonly lines: () => string[];
 	readonly stream: Writable;
@@ -177,38 +265,10 @@ function jsonReporter(): {
 			diagnostics.lines().map((line) => JSON.parse(line) as unknown),
 		payloads: payloads.lines,
 		reporter: createReporter({
-			mode: 'json',
 			stream: diagnostics.stream,
 			out: payloads.stream
 		})
 	};
-}
-
-function terminalReporter(): {
-	readonly lines: () => string[];
-	readonly payloads: () => string[];
-	readonly reporter: ReturnType<typeof createReporter>;
-} {
-	const diagnostics = captureStream();
-	const payloads = captureStream();
-
-	return {
-		lines: diagnostics.lines,
-		payloads: payloads.lines,
-		reporter: createReporter({
-			mode: 'terminal',
-			stream: diagnostics.stream,
-			out: payloads.stream
-		})
-	};
-}
-
-// Drops SGR colour escapes so a terminal line can be asserted exactly regardless
-// of whether picocolors emitted them in this environment.
-function stripAnsi(value: string): string {
-	const escape = String.fromCodePoint(27);
-
-	return value.replaceAll(new RegExp(String.raw`${escape}\[[0-9;]*m`, 'g'), '');
 }
 
 function withoutDurations(events: readonly unknown[]): readonly unknown[] {

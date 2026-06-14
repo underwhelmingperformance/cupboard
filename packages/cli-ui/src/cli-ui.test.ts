@@ -161,6 +161,42 @@ describe('createCliUi machine narration', () => {
 
 		expect(await ui.menu('Pick', [{ value: 'a', label: 'A' }])).toBeUndefined();
 	});
+
+	it('routes progress and steps through the JSON reporter', async () => {
+		const { ui, stream } = machineUi();
+		const reporter = ui.reporter();
+
+		await reporter.progress('Uploading', { total: 2 }, (bar) => {
+			bar.advance(2);
+		});
+		await reporter.steps('Attestations', (log) => {
+			log.group('read').success('1 bundle');
+		});
+
+		const events = stream()
+			.trim()
+			.split('\n')
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
+
+		expect(events).toStrictEqual([
+			{
+				event: 'phase',
+				label: 'Uploading',
+				status: 'ok',
+				durationMs: expect.any(Number) as number,
+				total: 2,
+				completed: 2,
+				facts: {}
+			},
+			{
+				event: 'phase',
+				label: 'Attestations',
+				status: 'ok',
+				durationMs: expect.any(Number) as number,
+				groups: [{ name: 'read', status: 'ok', messages: ['1 bundle'] }]
+			}
+		]);
+	});
 });
 
 describe('fakeCliUi', () => {
