@@ -19,7 +19,8 @@ import {
 	spinner,
 	symbol,
 	taskLog,
-	text
+	text,
+	updateSettings
 } from '@clack/prompts';
 import {
 	createReporter,
@@ -33,6 +34,10 @@ import pc from 'picocolors';
 import { type BrowserMessages, openBrowser } from './open-browser.ts';
 
 export { type BrowserMessages, openBrowser } from './open-browser.ts';
+
+// British spelling for the cancel marker clack renders when a spinner, bar or
+// task is aborted without an explicit per-call message.
+updateSettings({ messages: { cancel: 'Cancelled' } });
 
 /**
  * Lays out label/value rows with aligned columns, ready for a clack note or box.
@@ -217,6 +222,11 @@ export interface CliUiOptions {
 	readonly stream?: NodeJS.WritableStream;
 	/** Where `data` payloads go; defaults to `process.stdout`. */
 	readonly out?: NodeJS.WritableStream;
+	/**
+	 * Aborts the active spinner, bar or task so an interrupted command (Ctrl-C)
+	 * renders it as cancelled.
+	 */
+	readonly signal?: AbortSignal;
 }
 
 export function createCliUi(options: CliUiOptions): CliUi {
@@ -228,7 +238,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		options.interactive ?? (isInteractive({ mode, stdin, stdout }) && !isCI());
 	const newReporter = (): Reporter =>
 		mode === 'terminal'
-			? clackReporter(options.out)
+			? clackReporter(options.out, options.signal)
 			: createReporter({ stream: options.stream, out: options.out });
 
 	// A single reporter backs `data`/`info`/`warn` so machine mode emits the same
@@ -491,7 +501,10 @@ function withElapsed(message: string, startedAt: number): string {
  * these is animating is held until it stops, since interleaving the two corrupts
  * the redraw.
  */
-function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
+function clackReporter(
+	out: NodeJS.WritableStream = stdout,
+	signal?: AbortSignal
+): Reporter {
 	let spinning = false;
 	const held: { kind: 'warn' | 'info'; message: string }[] = [];
 
@@ -516,7 +529,10 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 
 	return {
 		async phase(label, body) {
-			const indicator = spinner();
+			const indicator = spinner({
+				signal,
+				cancelMessage: `${label} cancelled`
+			});
 			indicator.start(label);
 			spinning = true;
 
@@ -545,7 +561,11 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 		},
 
 		async progress(label, options, body) {
-			const bar = progress({ max: options.total });
+			const bar = progress({
+				max: options.total,
+				signal,
+				cancelMessage: `${label} cancelled`
+			});
 			bar.start(label);
 			spinning = true;
 
@@ -577,7 +597,7 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 		},
 
 		async steps(label, body) {
-			const task = taskLog({ title: label });
+			const task = taskLog({ title: label, signal });
 			spinning = true;
 
 			const startedAt = Date.now();

@@ -1,4 +1,4 @@
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import {
 	type RetentionPolicyAddBody,
 	type RetentionPolicyListResponse,
@@ -11,7 +11,7 @@ import { formatCount, type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
 import { InvalidPolicyScopeError } from '../errors.ts';
@@ -59,9 +59,7 @@ export function registerPolicyCommands(
 		.description('List retention policies.')
 		.argument('<url>', tenantUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -98,9 +96,7 @@ export function registerPolicyCommands(
 				pattern: string,
 				options: PolicyAddOptions
 			) => {
-				const reporter = createCliUi({
-					mode: reporterModeFromGlobals(program)
-				}).reporter();
+				const reporter = commandUi(program, programOptions).reporter();
 				const rpc = tenantRpc(url, {
 					credential: cachedOwnerProvider(url, {
 						signal: programOptions.signal
@@ -125,10 +121,7 @@ export function registerPolicyCommands(
 		.argument('<id>', 'policy id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

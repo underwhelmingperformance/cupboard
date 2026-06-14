@@ -1,4 +1,4 @@
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import type {
 	ControlKeyListResponse,
 	ControlKeyRetireResponse,
@@ -13,7 +13,7 @@ import {
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
@@ -47,9 +47,7 @@ export function registerControlKeyCommands(
 		.description('List the control-plane signing-key set.')
 		.argument('<url>', deploymentUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -65,9 +63,7 @@ export function registerControlKeyCommands(
 		)
 		.argument('<url>', deploymentUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -85,10 +81,7 @@ export function registerControlKeyCommands(
 		.argument('<kid>', 'control key id')
 		.option('-y, --yes', 'retire without the confirmation prompt')
 		.action(async (url: string, kid: string, options: RetireOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal

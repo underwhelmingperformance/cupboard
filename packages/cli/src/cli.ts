@@ -1,4 +1,8 @@
-import { ConfirmationRequiredError } from '@cupboard/cli-ui';
+import {
+	type CliUi,
+	ConfirmationRequiredError,
+	createCliUi
+} from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { resolveReporterMode } from '@cupboard/shared';
 import { Command, CommanderError } from 'commander';
@@ -79,8 +83,26 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	return program;
 }
 
-export function reporterModeFromGlobals(program: Command): ReporterMode {
+function reporterModeFromGlobals(program: Command): ReporterMode {
 	return resolveReporterMode(program.opts<GlobalOptions>().colour);
+}
+
+/**
+ * The {@link CliUi} for a command: terminal or JSON output by the global
+ * `--colour` flag, wired to the program's abort signal so an interrupted
+ * command renders its active spinner, bar or task as cancelled. `assumeYes`
+ * carries a command's `--yes` flag through to confirmations.
+ */
+export function commandUi(
+	program: Command,
+	options: ProgramOptions,
+	extra: { readonly assumeYes?: boolean } = {}
+): CliUi {
+	return createCliUi({
+		mode: reporterModeFromGlobals(program),
+		signal: options.signal,
+		...extra
+	});
 }
 
 /**

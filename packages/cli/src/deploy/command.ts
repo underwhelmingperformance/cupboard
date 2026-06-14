@@ -772,7 +772,7 @@ export async function executeDeploy(
 ): Promise<void> {
 	throwIfAborted(runtimeOptions.signal);
 
-	const ui = createDeployUi();
+	const ui = createDeployUi(runtimeOptions.signal);
 	const interactive = ui.interactive;
 
 	try {

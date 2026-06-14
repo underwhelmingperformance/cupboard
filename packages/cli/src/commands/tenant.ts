@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 
-import { type CliUi, createCliUi } from '@cupboard/cli-ui';
+import type { CliUi } from '@cupboard/cli-ui';
 import {
 	defaultReadUser,
 	type TenantCreateBody,
@@ -15,7 +15,7 @@ import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
-import { type ProgramOptions, reporterModeFromGlobals } from '../cli.ts';
+import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
@@ -193,9 +193,7 @@ export function registerTenantCommands(
 			].join('\n')
 		)
 		.action(async (url: string, id: string, options: CreateOptions) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -228,9 +226,7 @@ export function registerTenantCommands(
 		.description('List provisioned tenants.')
 		.argument('<url>', deploymentUrlArgument)
 		.action(async (url: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -246,10 +242,7 @@ export function registerTenantCommands(
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'suspend without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -266,9 +259,7 @@ export function registerTenantCommands(
 		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: string, id: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -284,9 +275,7 @@ export function registerTenantCommands(
 		.argument('<id>', 'tenant slug')
 		.argument('<mode>', 'public or private')
 		.action(async (url: string, id: string, mode: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -317,9 +306,7 @@ export function registerTenantCommands(
 		)
 		.action(
 			async (url: string, id: string, options: RotateCredentialOptions) => {
-				const reporter = createCliUi({
-					mode: reporterModeFromGlobals(program)
-				}).reporter();
+				const reporter = commandUi(program, programOptions).reporter();
 				const rpc = controlRpc(url, {
 					credential: cachedOwnerProvider(url, {
 						signal: programOptions.signal
@@ -339,9 +326,7 @@ export function registerTenantCommands(
 		.argument('<url>', deploymentUrlArgument)
 		.argument('<id>', 'tenant slug')
 		.action(async (url: string, id: string) => {
-			const reporter = createCliUi({
-				mode: reporterModeFromGlobals(program)
-			}).reporter();
+			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -358,10 +343,7 @@ export function registerTenantCommands(
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'offboard without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {
-			const ui = createCliUi({
-				mode: reporterModeFromGlobals(program),
-				assumeYes: options.yes
-			});
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
