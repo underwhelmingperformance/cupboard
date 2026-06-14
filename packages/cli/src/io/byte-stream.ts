@@ -11,6 +11,25 @@ export function byteStream(source: ByteSource): ReadableStream<Uint8Array> {
 	return asyncIterableByteStream(source);
 }
 
+/**
+ * Wraps a byte stream so `onChunk` sees each chunk's length as the consumer
+ * pulls it through, leaving the bytes themselves untouched. Used to follow an
+ * upload's progress as it is sent rather than only once it completes.
+ */
+export function countingByteStream(
+	source: ReadableStream<Uint8Array>,
+	onChunk: (byteLength: number) => void
+): ReadableStream<Uint8Array> {
+	return source.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			transform(chunk, controller) {
+				onChunk(chunk.byteLength);
+				controller.enqueue(chunk);
+			}
+		})
+	);
+}
+
 function asyncIterableByteStream(
 	source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>
 ): ReadableStream<Uint8Array> {
