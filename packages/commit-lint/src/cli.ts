@@ -3,7 +3,6 @@ import { readFile } from 'node:fs/promises';
 import { stderr } from 'node:process';
 import { promisify } from 'node:util';
 
-import { createReporter, type ReporterMode } from '@cupboard/reporter';
 import { resolveReporterMode } from '@cupboard/shared';
 import { Command, Option } from 'commander';
 import { createGit } from 'just-git';
@@ -22,6 +21,7 @@ import {
 } from './message.ts';
 import { NodeFileSystem } from './node-file-system.ts';
 import { jsonReport, terminalFailureReport } from './report.ts';
+import { createReporter, type ReporterMode } from './reporter.ts';
 import {
 	CommitMessageRewriteError,
 	CommitMessageRewriter,

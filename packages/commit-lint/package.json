@@ -16,10 +16,11 @@
 		"just-git": "^1.7.1",
 		"markdownlint": "^0.40.0",
 		"micromark": "^4.0.2",
-		"micromark-extension-gfm": "^3.0.0"
+		"micromark-extension-gfm": "^3.0.0",
+		"ora": "^9.4.0",
+		"picocolors": "^1.1.1"
 	},
 	"devDependencies": {
-		"@cupboard/reporter": "workspace:*",
 		"@types/node": "^25.9.1",
 		"esbuild": "^0.28.0",
 		"typescript": "^6.0.3",
