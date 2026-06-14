@@ -763,7 +763,7 @@ async function prepareAttestationBundles(
 	dependencies: AttachAttestationsDependencies
 ): Promise<readonly PreparedAttestationBundle[]> {
 	const byNarHash = new Map(
-		closure.map((pathInfo) => [narHashDigestHex(pathInfo.narHash), pathInfo])
+		closure.map((pathInfo) => [pathInfo.narHash.digestHex(), pathInfo])
 	);
 	const prepared: PreparedAttestationBundle[] = [];
 
@@ -1151,12 +1151,6 @@ function parseAttestationBundle(
 			(subject) => subject.digest.sha256
 		)
 	};
-}
-
-function narHashDigestHex(hash: NixValidPathInfo['narHash']): string {
-	return [...hash.digestBytes()]
-		.map((byte) => byte.toString(16).padStart(2, '0'))
-		.join('');
 }
 
 function sha256Hex(bytes: Uint8Array): string {
