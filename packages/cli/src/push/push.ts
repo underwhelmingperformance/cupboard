@@ -35,11 +35,13 @@ import {
 } from '@cupboard/reporter';
 import { z } from 'zod';
 
+import { isAbortError } from '../abort.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationSubjectNotPushedError,
 	AttestationUploadUnavailableError,
+	PushIncompleteError,
 	PushNarMetadataMismatchError,
 	UnexpectedAttestationDecisionError,
 	UnexpectedUploadDecisionError
@@ -154,6 +156,19 @@ interface PreparedUpload {
 	readonly preparedPath: PreparedPushPath;
 	readonly uploadUrl: string;
 	readonly uploadHeaders: Readonly<Record<string, string>>;
+}
+
+// A path that could not be uploaded or committed. The push presses on with the
+// rest, then fails as a whole so nothing downstream treats it as finished.
+interface PushFailure {
+	readonly storePathHash: string;
+	readonly storePath: string;
+	readonly stage: 'upload' | 'commit';
+	readonly reason: string;
+}
+
+function failureReason(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
 }
 
 export async function runPush(
@@ -285,6 +300,19 @@ async function runPushWithTemporaryDirectory(
 		}
 	);
 
+	// A path that fails to upload or commit is collected here rather than
+	// aborting the run, so the paths that can finish do. The push then fails as a
+	// whole (see the end of this function) so the incomplete result is never
+	// mistaken for a finished one.
+	const failures: PushFailure[] = [];
+	const failedUploadIds = new Set<string>();
+	const storePathByHash = new Map(
+		closure.map((pathInfo) => [
+			StorePath.hash(pathInfo.storePath),
+			pathInfo.storePath
+		])
+	);
+
 	const uploadedBytes = await reporter.phase(
 		'Uploading missing blobs',
 		async (ctx) => {
@@ -326,25 +354,49 @@ async function runPushWithTemporaryDirectory(
 				async (upload) => {
 					let streamedBytes = 0;
 
-					await client.uploadBlob({
-						r2Key: upload.decision.r2Key,
-						uploadUrl: upload.uploadUrl,
-						body: countingByteStream(
-							readCompressedNar(upload.preparedPath.compressedPath),
-							(byteLength) => {
-								streamedBytes += byteLength;
-								inFlightBytes += byteLength;
-								report(false);
-							}
-						),
-						contentLength: upload.preparedPath.blob.fileSize,
-						headers: upload.uploadHeaders
-					});
+					try {
+						await client.uploadBlob({
+							r2Key: upload.decision.r2Key,
+							uploadUrl: upload.uploadUrl,
+							body: countingByteStream(
+								readCompressedNar(upload.preparedPath.compressedPath),
+								(byteLength) => {
+									streamedBytes += byteLength;
+									inFlightBytes += byteLength;
+									report(false);
+								}
+							),
+							contentLength: upload.preparedPath.blob.fileSize,
+							headers: upload.uploadHeaders
+						});
 
-					inFlightBytes -= streamedBytes;
-					completedBytes += upload.preparedPath.blob.fileSize;
-					done += 1;
-					report(true);
+						completedBytes += upload.preparedPath.blob.fileSize;
+						done += 1;
+					} catch (error) {
+						// A Ctrl-C aborts the whole push; any other failure is this one
+						// path's, collected so the rest still upload.
+						if (isAbortError(error)) {
+							throw error;
+						}
+
+						const storePath =
+							storePathByHash.get(upload.decision.storePathHash) ??
+							upload.decision.storePathHash;
+						failedUploadIds.add(upload.decision.uploadId);
+						failures.push({
+							storePathHash: upload.decision.storePathHash,
+							storePath,
+							stage: 'upload',
+							reason: failureReason(error)
+						});
+						reporter.warn(
+							'upload failed',
+							`${StorePath.basename(storePath)}: ${failureReason(error)}`
+						);
+					} finally {
+						inFlightBytes -= streamedBytes;
+						report(true);
+					}
 				}
 			);
 
@@ -359,10 +411,10 @@ async function runPushWithTemporaryDirectory(
 	// so committing serially would wait one pass per path. With `--no-wait` a
 	// deferred upload reports `pending` as soon as it is stored.
 	const commit = await reporter.phase('Committing metadata', async (ctx) => {
-		const decisions = negotiation.uploads.filter((decision) =>
-			needsCommit(decision)
-		);
-		const responses = await Promise.all(
+		const decisions = negotiation.uploads
+			.filter((decision) => needsCommit(decision))
+			.filter((decision) => !failedUploadIds.has(decision.uploadId));
+		const settled = await Promise.allSettled(
 			decisions.map((decision) =>
 				client.commit(
 					{
@@ -374,24 +426,71 @@ async function runPushWithTemporaryDirectory(
 				)
 			)
 		);
-		const pending = decisions
-			.filter((_decision, index) => responses[index]?.status === 'pending')
-			.map((decision) => decision.uploadId);
 
-		ctx.fact(
-			'committed',
-			formatCount(responses.filter((row) => row.status !== 'pending').length)
-		);
+		const pending: string[] = [];
+		let committed = 0;
+
+		for (const [index, result] of settled.entries()) {
+			const decision = decisions[index];
+
+			if (decision === undefined) {
+				continue;
+			}
+
+			if (result.status === 'rejected') {
+				if (isAbortError(result.reason)) {
+					throw result.reason;
+				}
+
+				failures.push({
+					storePathHash: decision.storePathHash,
+					storePath:
+						storePathByHash.get(decision.storePathHash) ??
+						decision.storePathHash,
+					stage: 'commit',
+					reason: failureReason(result.reason)
+				});
+				continue;
+			}
+
+			if (result.value.status === 'pending') {
+				pending.push(decision.uploadId);
+			} else {
+				committed += 1;
+			}
+		}
+
+		ctx.fact('committed', formatCount(committed));
 
 		return { pending };
 	});
 
-	const deferRetention = !wait && commit.pending.length > 0;
-	const pendingStorePathHashes = deferRetention
-		? pendingUploadStorePathHashes(negotiation.uploads, commit.pending)
-		: new Set<string>();
+	// Retention is recorded only over a complete, servable push: a failed path
+	// would leave the root pinning a closure that cannot be substituted, and the
+	// `--no-wait` deferred case already withholds it for the same reason.
+	const incomplete = failures.length > 0;
+	const deferRetention = incomplete || (!wait && commit.pending.length > 0);
 
-	if (deferRetention) {
+	// Attestations cannot attach to a path that did not commit, so skip the
+	// failed paths as well as any still awaiting verification.
+	const unservableStorePathHashes = new Set<string>(
+		failures.map((failure) => failure.storePathHash)
+	);
+	if (!wait && commit.pending.length > 0) {
+		for (const hash of pendingUploadStorePathHashes(
+			negotiation.uploads,
+			commit.pending
+		)) {
+			unservableStorePathHashes.add(hash);
+		}
+	}
+
+	if (incomplete) {
+		reporter.warn(
+			'incomplete',
+			`${formatCount(failures.length)} path(s) failed; retention not recorded, re-run cupboard push to finish`
+		);
+	} else if (!wait && commit.pending.length > 0) {
 		reporter.warn(
 			'pending verification',
 			`${formatCount(commit.pending.length)} path(s) await server-side verification; retention not recorded (omit --no-wait to wait and record it)`
@@ -404,7 +503,7 @@ async function runPushWithTemporaryDirectory(
 		sources: dependencies.attestations ?? [],
 		readBundle:
 			dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
-		pendingStorePathHashes
+		pendingStorePathHashes: unservableStorePathHashes
 	});
 
 	const retentionRows = deferRetention
@@ -428,16 +527,27 @@ async function runPushWithTemporaryDirectory(
 
 	reporter.result({
 		kind: 'push-summary',
-		data: { uploadedPaths, reusedBlobs, skipped, uploadedBytes },
+		data: { uploadedPaths, reusedBlobs, skipped, uploadedBytes, failures },
 		rows: [
 			{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
 			{ label: 'Already cached', value: formatCount(reusedBlobs) },
 			{ label: 'Skipped', value: formatCount(skipped) },
 			{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
 			...attestationRows,
-			...retentionRows
+			...retentionRows,
+			...(failures.length > 0
+				? [{ label: 'Failed', value: formatCount(failures.length) }]
+				: [])
 		]
 	});
+
+	// The good paths committed, but the push as a whole did not finish: fail
+	// loudly and non-zero so nothing downstream treats the cache as complete.
+	if (failures.length > 0) {
+		throw new PushIncompleteError(
+			failures.map((failure) => StorePath.basename(failure.storePath))
+		);
+	}
 }
 
 function reportDryRun(
