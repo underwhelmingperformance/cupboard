@@ -10,6 +10,7 @@ import {
 	createCliUi,
 	formatRows,
 	isInteractive,
+	resultTitle,
 	terminalLink
 } from './cli-ui.ts';
 import { fakeCliUi } from './testing.ts';
@@ -54,6 +55,19 @@ describe('formatRows', () => {
 		expect(
 			stripColours(formatRows([{ label: 'Account', value: 'acc-1' }]))
 		).toBe('Account  acc-1');
+	});
+});
+
+describe('resultTitle', () => {
+	it.each([
+		['tenants', 'Tenants'],
+		['auth-keys', 'Auth keys'],
+		['retention-policies', 'Retention policies'],
+		['oidc-trust-rules', 'OIDC trust rules'],
+		['push-summary', 'Push summary'],
+		['', 'Result']
+	])('renders %s as %s', (kind, expected) => {
+		expect(resultTitle(kind)).toBe(expected);
 	});
 });
 

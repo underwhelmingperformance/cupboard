@@ -23,6 +23,7 @@ import {
 } from '@clack/prompts';
 import {
 	createReporter,
+	formatDuration,
 	type Reporter,
 	type ReporterMode,
 	type ResultRow
@@ -435,12 +436,27 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	return ui;
 }
 
-/** A result `kind` slug as a heading: `tenant-list` becomes `Tenant list`. */
-function resultTitle(kind: string): string {
-	const words = kind.replaceAll(/[-_]+/g, ' ').trim();
-	const first = words[0];
+// Slug words that are acronyms, so a result title renders them in capitals
+// (`oidc-trust-rules` becomes `OIDC trust rules`, not `Oidc trust rules`).
+const titleAcronyms = new Set(['oidc']);
 
-	return first === undefined ? 'Result' : first.toUpperCase() + words.slice(1);
+/** A result `kind` slug as a heading: `tenant-list` becomes `Tenant list`. */
+export function resultTitle(kind: string): string {
+	const words = kind.replaceAll(/[-_]+/g, ' ').trim().split(' ');
+	const [first, ...rest] = words;
+
+	if (first === undefined || first === '') {
+		return 'Result';
+	}
+
+	const head = titleAcronyms.has(first)
+		? first.toUpperCase()
+		: first.slice(0, 1).toUpperCase() + first.slice(1);
+	const tail = rest.map((word) =>
+		titleAcronyms.has(word) ? word.toUpperCase() : word
+	);
+
+	return [head, ...tail].join(' ');
 }
 
 // The label followed by its accumulated facts, dimmed, for a spinner or bar
@@ -459,6 +475,12 @@ function renderFacts(
 		.join(' · ');
 
 	return `${label} ${pc.dim(`· ${annotations}`)}`;
+}
+
+// A completion line with its elapsed time appended, dimmed, so every phase,
+// bar and task reports how long it took at a precision that suits the duration.
+function withElapsed(message: string, startedAt: number): string {
+	return `${message} ${pc.dim(`(${formatDuration(Date.now() - startedAt)})`)}`;
 }
 
 /**
@@ -498,6 +520,7 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 			indicator.start(label);
 			spinning = true;
 
+			const startedAt = Date.now();
 			const facts = new Map<string, string>();
 
 			try {
@@ -508,11 +531,11 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 					}
 				});
 
-				indicator.stop(renderFacts(label, facts));
+				indicator.stop(withElapsed(renderFacts(label, facts), startedAt));
 
 				return value;
 			} catch (error) {
-				indicator.error(`${label} ${pc.red('failed')}`);
+				indicator.error(withElapsed(`${label} ${pc.red('failed')}`, startedAt));
 
 				throw error;
 			} finally {
@@ -526,6 +549,7 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 			bar.start(label);
 			spinning = true;
 
+			const startedAt = Date.now();
 			const facts = new Map<string, string>();
 
 			try {
@@ -539,11 +563,11 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 					}
 				});
 
-				bar.stop(renderFacts(label, facts));
+				bar.stop(withElapsed(renderFacts(label, facts), startedAt));
 
 				return value;
 			} catch (error) {
-				bar.error(`${label} ${pc.red('failed')}`);
+				bar.error(withElapsed(`${label} ${pc.red('failed')}`, startedAt));
 
 				throw error;
 			} finally {
@@ -555,6 +579,8 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 		async steps(label, body) {
 			const task = taskLog({ title: label });
 			spinning = true;
+
+			const startedAt = Date.now();
 
 			try {
 				const value = await body({
@@ -578,11 +604,11 @@ function clackReporter(out: NodeJS.WritableStream = stdout): Reporter {
 					}
 				});
 
-				task.success(label);
+				task.success(withElapsed(label, startedAt));
 
 				return value;
 			} catch (error) {
-				task.error(`${label} ${pc.red('failed')}`);
+				task.error(withElapsed(`${label} ${pc.red('failed')}`, startedAt));
 
 				throw error;
 			} finally {
