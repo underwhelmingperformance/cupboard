@@ -8,6 +8,7 @@ import {
 } from '@cupboard/protocol/oidc';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import {
+	type MembershipRebuildResponse,
 	type ParsedTenantCreateBody,
 	type ParsedTenantReadCredential,
 	type TenantListResponse,
@@ -61,6 +62,7 @@ import { controlTrustRules } from './control-trust.ts';
 import {
 	invalidateTenantRow,
 	rebuildMembershipFilter,
+	refreshTenantMembership,
 	writeTenantMember
 } from './tenant-membership.ts';
 import {
@@ -311,6 +313,17 @@ export async function controlKeyRetire(
 
 export async function controlTenantList(env: Env): Promise<TenantListResponse> {
 	return { tenants: await listTenants(controlDatabase(env)) };
+}
+
+// Reasserts every live tenant's admission marker and rebuilds the filter from the
+// registry, reporting how many tenants the gate now carries. The deploy runs this
+// so a change to the admission representation does not leave existing tenants
+// inadmissible until the hourly cron; it is the membership half of a cron tick,
+// with none of the tick's data-touching reclamation.
+export async function controlMembershipRebuild(
+	env: Env
+): Promise<MembershipRebuildResponse> {
+	return { tenants: await refreshTenantMembership(env) };
 }
 
 export async function controlTenantCreate(
