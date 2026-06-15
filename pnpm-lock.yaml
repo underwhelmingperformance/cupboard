@@ -163,10 +163,10 @@ importers:
     dependencies:
       '@aws-sdk/client-s3':
         specifier: ^3.1062.0
-        version: 3.1067.0
+        version: 3.1068.0
       '@aws-sdk/s3-request-presigner':
         specifier: ^3.1062.0
-        version: 3.1067.0
+        version: 3.1068.0
       '@cupboard/nix':
         specifier: workspace:*
         version: link:../nix
@@ -240,8 +240,8 @@ packages:
     resolution: {integrity: sha512-zOXUUnilC6lgCsQtp77p/QNPmRlTES9Xi6tlDwbR6kfC/kz5PCzZckgHWm5z+8DskdwuMAbFDq61x3zr10GEEQ==}
     engines: {node: '>=20.0.0'}
 
-  '@aws-sdk/client-s3@3.1067.0':
-    resolution: {integrity: sha512-3f64o9YWzwJ9WzMIC4JlUQiMOm7R/EtkIDyFdj8yaQXuh8SR9ezz2R32UMpvTlVMtpoPan3Uj8oveAHr2UeExw==}
+  '@aws-sdk/client-s3@3.1068.0':
+    resolution: {integrity: sha512-lFgaIpxZvloNbJvQ337YPdMXhzI2zJdDw13nATVGnkAGNoNPx4ksD84AQAcuW75hsaaMaIuNmXU9sSx6+FTirA==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/core@3.974.20':
@@ -292,8 +292,8 @@ packages:
     resolution: {integrity: sha512-IYJuLpXp2DEILVQpQOy0PMpkftv0AHEOCn52o0atyOaumA0CdWQ3klPyXdViGYLbNpESsVFMVybvHUeZAuiGxA==}
     engines: {node: '>=20.0.0'}
 
-  '@aws-sdk/s3-request-presigner@3.1067.0':
-    resolution: {integrity: sha512-BXoy6vCLR/ns2a09knkFgs18fX+EozyOsxX/eHwEXH3DgRh/w2z24X3bamU0ouc5DAGQRKmLeRcYKd7YasmcpQ==}
+  '@aws-sdk/s3-request-presigner@3.1068.0':
+    resolution: {integrity: sha512-XTUoaBQH3pUlegqdoo7vkrOvlcRhSz/EO0/JYy9qKz4jdsOnPUlPY0p+rKTl27F91Gjgip8OXopiOFxVeN3Yvg==}
     engines: {node: '>=20.0.0'}
 
   '@aws-sdk/signature-v4-multi-region@3.996.34':
@@ -3019,7 +3019,7 @@ snapshots:
       '@smithy/types': 4.14.4
       tslib: 2.8.1
 
-  '@aws-sdk/client-s3@3.1067.0':
+  '@aws-sdk/client-s3@3.1068.0':
     dependencies:
       '@aws-crypto/sha1-browser': 5.2.0
       '@aws-crypto/sha256-browser': 5.2.0
@@ -3158,7 +3158,7 @@ snapshots:
       '@smithy/types': 4.14.4
       tslib: 2.8.1
 
-  '@aws-sdk/s3-request-presigner@3.1067.0':
+  '@aws-sdk/s3-request-presigner@3.1068.0':
     dependencies:
       '@aws-sdk/core': 3.974.20
       '@aws-sdk/signature-v4-multi-region': 3.996.34
