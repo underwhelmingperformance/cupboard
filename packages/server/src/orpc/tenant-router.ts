@@ -92,6 +92,9 @@ export const tenantRouter = os.router({
 		list: os.oidcTrust.list.handler(({ context }) =>
 			context.services.oidcTrust.listRules()
 		),
+		get: os.oidcTrust.get.handler(({ input, context }) =>
+			context.services.oidcTrust.getRule(input.id)
+		),
 		add: os.oidcTrust.add.handler(({ input, context }) =>
 			context.services.oidcTrust.addRule(input)
 		),

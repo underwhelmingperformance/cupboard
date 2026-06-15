@@ -14,6 +14,11 @@ export const oidcTrustContract = {
 		.route({ method: 'GET', path: '/oidc-trust' })
 		.output(oidcTrustListResponseSchema),
 
+	get: adminProcedure
+		.route({ method: 'GET', path: '/oidc-trust/{id}' })
+		.input(z.strictObject({ id: z.string() }))
+		.output(oidcTrustSummarySchema),
+
 	add: adminProcedure
 		.route({ method: 'POST', path: '/oidc-trust' })
 		.input(oidcTrustAddBodySchema)

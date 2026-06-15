@@ -109,6 +109,47 @@ describe('oidc-trust admin API', () => {
 		});
 	});
 
+	it('shows a single rule by id', async () => {
+		const token = await adminToken();
+		const added = await addRule(token, addBody);
+		const { id } = oidcTrustSummarySchema.parse(await added.json());
+
+		const response = await authorisedFetch(`/oidc-trust/${id}`, token);
+
+		expect({
+			status: response.status,
+			summary: oidcTrustSummarySchema.parse(await response.json())
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			summary: {
+				id,
+				issuer: addBody.issuer,
+				audience: addBody.audience,
+				scope: 'write',
+				claims: addBody.claims,
+				allowedRoots: addBody.allowedRoots,
+				disabled: false
+			}
+		});
+	});
+
+	it('reports an unknown rule as not found', async () => {
+		const token = await adminToken();
+
+		const response = await authorisedFetch('/oidc-trust/missing', token);
+		const body = orpcErrorBodySchema.parse(await response.json());
+
+		expect({
+			status: response.status,
+			defined: body.defined,
+			code: body.code
+		}).toStrictEqual({
+			status: StatusCodes.NOT_FOUND,
+			defined: false,
+			code: 'NOT_FOUND'
+		});
+	});
+
 	it('soft-disables a rule and reports it disabled in the listing', async () => {
 		const token = await adminToken();
 		const added = await addRule(token, addBody);
