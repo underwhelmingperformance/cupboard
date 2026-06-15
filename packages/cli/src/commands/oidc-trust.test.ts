@@ -14,7 +14,8 @@ import {
 	type OidcTrustClient,
 	runOidcTrustAdd,
 	runOidcTrustList,
-	runOidcTrustRemove
+	runOidcTrustRemove,
+	runOidcTrustShow
 } from './oidc-trust.ts';
 
 function summary(overrides: Partial<OidcTrustSummary>): OidcTrustSummary {
@@ -33,6 +34,7 @@ function summary(overrides: Partial<OidcTrustSummary>): OidcTrustSummary {
 function trustClient(overrides: Partial<OidcTrustClient>): OidcTrustClient {
 	return {
 		list: () => Promise.resolve({ rules: [] }),
+		get: ({ id }) => Promise.resolve(summary({ id })),
 		add: (body) => Promise.resolve(summary({ ...body, id: 'rule-1' })),
 		remove: ({ id }) => Promise.resolve({ id, removed: false }),
 		...overrides
@@ -95,14 +97,14 @@ describe('runOidcTrustAdd', () => {
 		const body: OidcTrustAddBody = {
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: 'https://cache.example.workers.dev',
-			claims: { repository_owner_id: '5678' },
+			claims: { repository_owner_id: '5678', repository_id: '1234' },
 			allowedRoots: ['github:owner/']
 		};
 
 		await runOidcTrustAdd(body, reporter(results), {
 			add(added) {
 				calls.push(added);
-				return Promise.resolve(summary({ id: 'rule-1' }));
+				return Promise.resolve(summary({ id: 'rule-1', claims: body.claims }));
 			}
 		});
 
@@ -116,6 +118,45 @@ describe('runOidcTrustAdd', () => {
 						value: 'https://token.actions.githubusercontent.com'
 					},
 					{ label: 'Audience', value: 'https://cache.example.workers.dev' },
+					{ label: 'Claims', value: 'repository_owner_id=5678' },
+					{ label: '', value: 'repository_id=1234' },
+					{ label: 'Scope', value: 'write' },
+					{ label: 'Allowed roots', value: 'github:owner/' }
+				]
+			]
+		});
+	});
+});
+
+describe('runOidcTrustShow', () => {
+	it('fetches the rule by id and reports its summary', async () => {
+		const calls: { id: string }[] = [];
+		const results: ResultRow[][] = [];
+
+		await runOidcTrustShow('rule-1', reporter(results), {
+			get(input) {
+				calls.push(input);
+				return Promise.resolve(
+					summary({
+						id: 'rule-1',
+						claims: { repository_owner_id: '5678', repository_id: '1234' }
+					})
+				);
+			}
+		});
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [{ id: 'rule-1' }],
+			results: [
+				[
+					{ label: 'Rule', value: 'rule-1' },
+					{
+						label: 'Issuer',
+						value: 'https://token.actions.githubusercontent.com'
+					},
+					{ label: 'Audience', value: 'https://cache.example.workers.dev' },
+					{ label: 'Claims', value: 'repository_owner_id=5678' },
+					{ label: '', value: 'repository_id=1234' },
 					{ label: 'Scope', value: 'write' },
 					{ label: 'Allowed roots', value: 'github:owner/' }
 				]

@@ -240,6 +240,15 @@ export class OwnerRuleImmutableError extends ServerHttpError {
 	}
 }
 
+export class OidcTrustRuleNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly id: string) {
+		super('No such OIDC trust rule');
+		this.name = 'OidcTrustRuleNotFoundError';
+	}
+}
+
 export class UnauthenticatedError extends ServerHttpError {
 	readonly status = StatusCodes.UNAUTHORIZED;
 
