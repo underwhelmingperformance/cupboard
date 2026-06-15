@@ -6,6 +6,7 @@ import {
 	controlKeyRetire,
 	controlKeyRotate,
 	controlKeys,
+	controlMembershipRebuild,
 	controlTenantClearReadCredential,
 	controlTenantCreate,
 	controlTenantList,
@@ -83,6 +84,11 @@ export const controlRouter = os.router({
 		),
 		remove: os.tenants.remove.handler(({ input, context }) =>
 			controlTenantOffboard(context.env, input.id)
+		)
+	},
+	membership: {
+		rebuild: os.membership.rebuild.handler(({ context }) =>
+			controlMembershipRebuild(context.env)
 		)
 	}
 });

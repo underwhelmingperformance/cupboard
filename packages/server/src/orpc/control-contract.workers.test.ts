@@ -91,6 +91,21 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('rebuilds tenant membership through the derived client', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		await client.tenants.create({
+			id: 'acme',
+			readMode: 'private',
+			ownerIssuer: 'https://idp.test',
+			ownerSubject: 'owner',
+			ownerAudience: 'aud'
+		});
+
+		// The harness provisions the fixture `v1` tenant alongside the created one.
+		expect(await client.membership.rebuild()).toStrictEqual({ tenants: 2 });
+	});
+
 	it('drives resume, read mode and read credential through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 

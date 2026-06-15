@@ -1,5 +1,8 @@
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
-import type { ParsedTenantSummary } from '@cupboard/protocol/tenants';
+import type {
+	ParsedMembershipRebuildResponse,
+	ParsedTenantSummary
+} from '@cupboard/protocol/tenants';
 import type { ProgressHandle, StepLog } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -430,6 +433,7 @@ interface ClientScript {
 	/** What listing tenants answers; the claim flow always lists first. */
 	readonly lists?: Scripted<ParsedTenantSummary[]>[];
 	readonly creates?: Scripted<ParsedTenantSummary>[];
+	readonly rebuilds?: Scripted<ParsedMembershipRebuildResponse>[];
 	readonly controlChecks?: Scripted<ParsedR2CredentialCheck>[];
 	readonly publicKeys?: Scripted<string>[];
 }
@@ -439,6 +443,7 @@ interface ScriptedClient {
 	readonly urls: string[];
 	readonly signupBodies: unknown[];
 	readonly createdBodies: unknown[];
+	readonly membershipRebuildTokens: string[];
 	readonly controlCheckTokens: string[];
 	readonly cachedSessions: { session: CachedSession; target: string }[];
 	readonly cacheSession: (
@@ -452,11 +457,13 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const signups = [...(script.signup ?? [])];
 	const lists = [...(script.lists ?? [])];
 	const creates = [...(script.creates ?? [])];
+	const rebuilds = [...(script.rebuilds ?? [])];
 	const controlChecks = [...(script.controlChecks ?? [])];
 	const publicKeys = [...(script.publicKeys ?? [])];
 	const urls: string[] = [];
 	const signupBodies: unknown[] = [];
 	const createdBodies: unknown[] = [];
+	const membershipRebuildTokens: string[] = [];
 	const controlCheckTokens: string[] = [];
 	const cachedSessions: { session: CachedSession; target: string }[] = [];
 
@@ -464,6 +471,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 		urls,
 		signupBodies,
 		createdBodies,
+		membershipRebuildTokens,
 		controlCheckTokens,
 		cachedSessions,
 		cacheSession: (session, target) => {
@@ -494,6 +502,10 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 				createTenant: (_token, body) => {
 					createdBodies.push(body);
 					return answer(creates, '/control/tenants', orpcRejection);
+				},
+				rebuildMembership: (token) => {
+					membershipRebuildTokens.push(token);
+					return answer(rebuilds, '/control/membership/rebuild', orpcRejection);
 				},
 				controlCheck: async (token) => {
 					controlCheckTokens.push(token);
@@ -1040,12 +1052,17 @@ describe('onboardDeployment', () => {
 			versions: ['v-new'],
 			signup: [{ ...claimedSignup, claimed: false }],
 			lists: [[tenantSummary('laney')]],
+			rebuilds: [{ tenants: 1 }],
 			publicKeys: ['pk-1']
 		});
 
 		const outcome = await onboardDeployment(baseOptions(ui, client));
 
-		expect({ outcome, infos }).toStrictEqual({
+		expect({
+			outcome,
+			infos,
+			membershipRebuildTokens: client.membershipRebuildTokens
+		}).toStrictEqual({
 			outcome: {
 				kind: 'ready',
 				url: 'https://cache.example.com',
@@ -1053,7 +1070,8 @@ describe('onboardDeployment', () => {
 				cacheUrl: 'https://cache.example.com/t/laney',
 				publicKey: 'pk-1'
 			} satisfies OnboardOutcome,
-			infos: ['The cache "laney" already exists; nothing to create.']
+			infos: ['The cache "laney" already exists; nothing to create.'],
+			membershipRebuildTokens: ['admin-jwt']
 		});
 	});
 
@@ -1062,13 +1080,22 @@ describe('onboardDeployment', () => {
 		const client = scriptedClient({
 			versions: ['v-new'],
 			signup: [{ ...claimedSignup, claimed: false }],
-			lists: [[tenantSummary('laney'), tenantSummary('builds')]]
+			lists: [[tenantSummary('laney'), tenantSummary('builds')]],
+			rebuilds: [{ tenants: 2 }]
 		});
 
-		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
-			kind: 'already-initialised',
-			url: 'https://cache.example.com',
-			slugs: ['laney', 'builds']
+		const outcome = await onboardDeployment(baseOptions(ui, client));
+
+		expect({
+			outcome,
+			membershipRebuildTokens: client.membershipRebuildTokens
+		}).toStrictEqual({
+			outcome: {
+				kind: 'already-initialised',
+				url: 'https://cache.example.com',
+				slugs: ['laney', 'builds']
+			} satisfies OnboardOutcome,
+			membershipRebuildTokens: ['admin-jwt']
 		});
 	});
 

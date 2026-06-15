@@ -80,6 +80,20 @@ export type ParsedTenantMutateResponse = z.output<
 >;
 export type TenantMutateResponse = z.input<typeof tenantMutateResponseSchema>;
 
+// The body returned by a deployment-level membership rebuild: how many live
+// tenants the gate now carries. Reasserts every live tenant's marker and
+// rebuilds the filter from the registry, so it repairs admission state without
+// touching any tenant's data.
+export const membershipRebuildResponseSchema = z.strictObject({
+	tenants: z.number().int().nonnegative()
+});
+export type ParsedMembershipRebuildResponse = z.output<
+	typeof membershipRebuildResponseSchema
+>;
+export type MembershipRebuildResponse = z.input<
+	typeof membershipRebuildResponseSchema
+>;
+
 // The body returned by a readMode or read-credential mutation: the slug and its
 // resulting read mode, so the caller can see whether a credential it just set
 // actually gates reads (it is moot for a public cache).

@@ -5,6 +5,7 @@ import type {
 	ParsedR2CredentialCheck
 } from '@cupboard/protocol/reports';
 import type {
+	ParsedMembershipRebuildResponse,
 	ParsedTenantListResponse,
 	ParsedTenantSummary,
 	TenantCreateBody
@@ -140,6 +141,7 @@ export interface OnboardClient extends Pick<
 		token: string,
 		body: TenantCreateBody
 	): Promise<ParsedTenantSummary>;
+	rebuildMembership(token: string): Promise<ParsedMembershipRebuildResponse>;
 	controlCheck(token: string): Promise<ParsedControlCheckReport>;
 }
 
@@ -337,6 +339,20 @@ export async function onboardDeployment(
 			return listed.tenants.filter((tenant) => tenant.status !== 'offboarded');
 		});
 
+	// Existing tenants were provisioned by an earlier build, whose admission
+	// representation a deploy can change, leaving them inadmissible until the
+	// hourly cron reasserts the gate. Reassert it now from the registry so they
+	// stay reachable. A fresh deploy has none yet; the create below establishes
+	// the first tenant's gate itself.
+	if (existing.length > 0) {
+		await ui
+			.reporter()
+			.phase('Refreshing tenant membership', async (context) => {
+				const { tenants } = await client.rebuildMembership(claim.token);
+				context.fact('tenants', tenants);
+			});
+	}
+
 	if (existing.length > 1) {
 		return {
 			kind: 'already-initialised',
@@ -469,6 +485,7 @@ function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
 			raw.tokenExchange(subjectToken, subjectTokenType),
 		listTenants: (token) => control(token).tenants.list(),
 		createTenant: (token, body) => control(token).tenants.create(body),
+		rebuildMembership: (token) => control(token).membership.rebuild(),
 		controlCheck: (token) => control(token).check()
 	};
 }
