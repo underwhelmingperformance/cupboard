@@ -32,12 +32,40 @@ interface OidcTrustAddOptions {
  */
 export interface OidcTrustClient {
 	list(): Promise<OidcTrustListResponse>;
+	get(input: { id: string }): Promise<OidcTrustSummary>;
 	add(input: OidcTrustAddBody): Promise<OidcTrustSummary>;
 	remove(input: { id: string }): Promise<OidcTrustRemoveResponse>;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
 	return [...previous, value];
+}
+
+function claimRows(claims: Record<string, string>): ResultRow[] {
+	const entries = Object.entries(claims);
+
+	if (entries.length === 0) {
+		return [{ label: 'Claims', value: '(none)' }];
+	}
+
+	return entries.map(([key, value], index) => ({
+		label: index === 0 ? 'Claims' : '',
+		value: `${key}=${value}`
+	}));
+}
+
+function summaryRows(summary: OidcTrustSummary): ResultRow[] {
+	return [
+		{ label: 'Rule', value: summary.id },
+		{ label: 'Issuer', value: summary.issuer },
+		{ label: 'Audience', value: summary.audience },
+		...claimRows(summary.claims),
+		{ label: 'Scope', value: summary.scope },
+		{
+			label: 'Allowed roots',
+			value: summary.allowedRoots.join(', ') || '(none)'
+		}
+	];
 }
 
 function parseClaims(pairs: readonly string[]): Record<string, string> {
@@ -76,6 +104,21 @@ export function registerOidcTrustCommands(
 			});
 
 			await runOidcTrustList(reporter, rpc.oidcTrust);
+		});
+
+	oidcTrust
+		.command('show')
+		.description('Show a single OIDC trust rule by id.')
+		.argument('<url>', tenantUrlArgument)
+		.argument('<id>', 'trust rule id')
+		.action(async (url: string, id: string) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				signal: programOptions.signal
+			});
+
+			await runOidcTrustShow(id, reporter, rpc.oidcTrust);
 		});
 
 	oidcTrust
@@ -171,16 +214,23 @@ export async function runOidcTrustAdd(
 	reporter.result({
 		kind: 'oidc-trust-rule',
 		data: summary,
-		rows: [
-			{ label: 'Rule', value: summary.id },
-			{ label: 'Issuer', value: summary.issuer },
-			{ label: 'Audience', value: summary.audience },
-			{ label: 'Scope', value: summary.scope },
-			{
-				label: 'Allowed roots',
-				value: summary.allowedRoots.join(', ') || '(none)'
-			}
-		]
+		rows: summaryRows(summary)
+	});
+}
+
+export async function runOidcTrustShow(
+	id: string,
+	reporter: Reporter,
+	client: Pick<OidcTrustClient, 'get'>
+): Promise<void> {
+	const summary = await reporter.phase('Fetching OIDC trust rule', () =>
+		client.get({ id })
+	);
+
+	reporter.result({
+		kind: 'oidc-trust-rule',
+		data: summary,
+		rows: summaryRows(summary)
 	});
 }
 

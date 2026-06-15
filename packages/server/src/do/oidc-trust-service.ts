@@ -11,6 +11,7 @@ import type { JWTPayload } from 'jose';
 import * as schema from '../db/schema.ts';
 import {
 	IssuerUnavailableError,
+	OidcTrustRuleNotFoundError,
 	OwnerConfigurationInvalidError,
 	OwnerRuleImmutableError,
 	SubjectTokenNotJwtError,
@@ -47,6 +48,20 @@ export class OidcTrustService {
 			.map((row) => oidcTrustSummaryFromRow(row));
 
 		return { rules };
+	}
+
+	getRule(id: string): OidcTrustSummary {
+		const row = this.context.db
+			.select()
+			.from(schema.oidcTrust)
+			.where(eq(schema.oidcTrust.id, id))
+			.get();
+
+		if (row === undefined) {
+			throw new OidcTrustRuleNotFoundError(id);
+		}
+
+		return oidcTrustSummaryFromRow(row);
 	}
 
 	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
