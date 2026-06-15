@@ -8,6 +8,7 @@ import {
 } from '../control-keys.ts';
 import { controlCheckReportSchema } from '../reports.ts';
 import {
+	membershipRebuildResponseSchema,
 	tenantCreateBodySchema,
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
@@ -91,5 +92,15 @@ export const controlContract = {
 			.route({ method: 'DELETE', path: '/tenants/{id}' })
 			.input(z.strictObject({ id: z.string() }))
 			.output(tenantMutateResponseSchema)
+	},
+
+	membership: {
+		// Reassert every live tenant's admission marker and rebuild the filter
+		// from the registry. The deploy runs this so a change to the admission
+		// representation does not leave existing tenants dark until the hourly
+		// cron; it touches only the KV gate, never any tenant's data.
+		rebuild: controlProcedure
+			.route({ method: 'POST', path: '/membership/rebuild' })
+			.output(membershipRebuildResponseSchema)
 	}
 };

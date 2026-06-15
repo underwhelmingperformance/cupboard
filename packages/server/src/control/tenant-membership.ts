@@ -276,8 +276,9 @@ export async function admitTenant(
 // Rebuilds the membership filter from the authoritative registry and reasserts
 // every live tenant's marker, run inline each cron tick. Building the filter as a
 // unit gives it a well-defined as-of; reasserting the markers backstops a
-// create-write that was dropped, so a tier-2 miss stays a sound 404.
-export async function refreshTenantMembership(env: Env): Promise<void> {
+// create-write that was dropped, so a tier-2 miss stays a sound 404. Returns the
+// number of live tenants now carried, so a caller can report what it repaired.
+export async function refreshTenantMembership(env: Env): Promise<number> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const live = await liveTenantSlugs(database);
 
@@ -285,6 +286,8 @@ export async function refreshTenantMembership(env: Env): Promise<void> {
 		live.map((slug) => writeTenantMember(env.TENANT_CACHE, slug))
 	);
 	await publishMembershipFilter(env, live);
+
+	return live.length;
 }
 
 // Rebuilds and republishes just the membership filter from the live registry, the

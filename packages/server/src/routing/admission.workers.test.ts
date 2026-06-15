@@ -60,6 +60,18 @@ describe('layered admission gate', () => {
 		});
 	});
 
+	it('reports how many live tenants the rebuild now carries, excluding offboarded', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await ensureTenant(database(), createBody('beta'), now);
+		await database()
+			.update(d1Schema.tenant)
+			.set({ status: 'offboarded' })
+			.where(eq(d1Schema.tenant.id, 'beta'))
+			.run();
+
+		expect(await refreshTenantMembership(env)).toBe(1);
+	});
+
 	it('keeps a suspended tenant admittable, carrying its status for the caller to gate', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
