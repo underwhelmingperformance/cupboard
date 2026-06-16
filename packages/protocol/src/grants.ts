@@ -292,57 +292,69 @@ const substitutionMapSchema = z
 		message: `at most ${String(maxSubstitutionsPerBinding)} substitutions`
 	});
 
-// A template-or-exact binding for a value validated against `validate` once
-// rendered. Every variable the template references must have a substitution.
-function templatedBindingSchema<Grammar extends string>(
-	validate: Grammar,
-	extra: z.ZodRawShape = {}
-) {
-	return z
-		.strictObject({
-			equalsTemplate: templateSchema.optional(),
-			exact: z.string().min(1).optional(),
-			substitutions: substitutionMapSchema.optional(),
-			validate: z.literal(validate),
-			...extra
-		})
-		.superRefine((value, ctx) => {
-			const choices = [
-				value.equalsTemplate !== undefined,
-				value.exact !== undefined,
-				'equalsResource' in value && value.equalsResource !== undefined
-			].filter(Boolean).length;
+// The fields every binding shares: a template-or-exact source for a value
+// validated against its destination grammar once rendered.
+const bindingShape = {
+	equalsTemplate: templateSchema.optional(),
+	exact: z.string().min(1).optional(),
+	substitutions: substitutionMapSchema.optional()
+};
 
-			if (choices !== 1) {
-				ctx.addIssue({
-					code: 'custom',
-					message:
-						'a binding sets exactly one of equalsTemplate, exact, equalsResource'
-				});
-			}
+// Exactly one source must be set, and every variable a template references must
+// have a substitution. A relational binding sets `equalsResource` instead, so a
+// root may equal the cache its grant resolved.
+function refineBinding(
+	value: {
+		readonly equalsTemplate?: string;
+		readonly exact?: string;
+		readonly substitutions?: Record<string, Substitution>;
+		readonly equalsResource?: 'cache';
+	},
+	ctx: z.RefinementCtx
+): void {
+	const choices = [
+		value.equalsTemplate !== undefined,
+		value.exact !== undefined,
+		value.equalsResource !== undefined
+	].filter(Boolean).length;
 
-			if (value.equalsTemplate === undefined) {
-				return;
-			}
-
-			const provided = new Set(Object.keys(value.substitutions ?? {}));
-
-			for (const variable of templateVariables(value.equalsTemplate)) {
-				if (!provided.has(variable)) {
-					ctx.addIssue({
-						code: 'custom',
-						message: `template variable ${variable} has no substitution`
-					});
-				}
-			}
+	if (choices !== 1) {
+		ctx.addIssue({
+			code: 'custom',
+			message:
+				'a binding sets exactly one of equalsTemplate, exact, equalsResource'
 		});
+	}
+
+	if (value.equalsTemplate === undefined) {
+		return;
+	}
+
+	const provided = new Set(Object.keys(value.substitutions ?? {}));
+
+	for (const variable of templateVariables(value.equalsTemplate)) {
+		if (!provided.has(variable)) {
+			ctx.addIssue({
+				code: 'custom',
+				message: `template variable ${variable} has no substitution`
+			});
+		}
+	}
 }
 
-export const cacheBindingSchema = templatedBindingSchema('cacheName');
-export const rootBindingSchema = templatedBindingSchema('rootName', {
-	equalsResource: z.literal('cache').optional()
-});
-export const tenantBindingSchema = templatedBindingSchema('tenant');
+export const cacheBindingSchema = z
+	.strictObject({ ...bindingShape, validate: z.literal('cacheName') })
+	.superRefine(refineBinding);
+export const rootBindingSchema = z
+	.strictObject({
+		...bindingShape,
+		validate: z.literal('rootName'),
+		equalsResource: z.literal('cache').optional()
+	})
+	.superRefine(refineBinding);
+export const tenantBindingSchema = z
+	.strictObject({ ...bindingShape, validate: z.literal('tenant') })
+	.superRefine(refineBinding);
 
 export const oidcTrustDisplaySchema = z.strictObject({
 	provider: z.string().max(displayFieldMaxLength).optional(),

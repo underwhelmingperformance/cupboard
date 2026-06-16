@@ -23,7 +23,7 @@ const jwtClaimsSchema = z.object({
 	iss: z.string(),
 	aud: z.string(),
 	sub: z.string(),
-	scope: z.string()
+	authorization_details: z.array(z.object({ type: z.string() }))
 });
 const publishedKeySchema = z.object({
 	kid: z.string(),
@@ -110,7 +110,7 @@ describe('control plane token exchange', () => {
 
 				// A control key is published, and the minted token carries the control
 				// identity: the control issuer (the bare-host origin), the control
-				// audience, the admin scope, and the verified external subject.
+				// audience, the wildcard grant, and the verified external subject.
 				const jwksResponse = await fetch(
 					new URL('/.well-known/jwks.json', server.url)
 				);
@@ -126,13 +126,13 @@ describe('control plane token exchange', () => {
 
 				expect({
 					tokenStatus: response.status,
-					responseScope: minted.scope,
+					responseGrants: minted.authorization_details,
 					controlJwksStatus: jwksResponse.status,
 					tenantJwksStatus: tenantJwksResponse.status,
 					iss: claims.iss,
 					aud: claims.aud,
 					sub: claims.sub,
-					scope: claims.scope,
+					grants: claims.authorization_details,
 					controlKeyCount: jwks.keys.length,
 					tenantKeyCount: tenantJwks.keys.length,
 					verifiesAgainstControlKeys: jwtVerifiesAgainst(
@@ -145,13 +145,13 @@ describe('control plane token exchange', () => {
 					)
 				}).toStrictEqual({
 					tokenStatus: 200,
-					responseScope: 'admin',
+					responseGrants: [{ type: 'cupboard_wildcard' }],
 					controlJwksStatus: 200,
 					tenantJwksStatus: 200,
 					iss: server.url.origin,
 					aud: controlAudience,
 					sub: 'global-admin',
-					scope: 'admin',
+					grants: [{ type: 'cupboard_wildcard' }],
 					controlKeyCount: 1,
 					tenantKeyCount: 1,
 					verifiesAgainstControlKeys: true,

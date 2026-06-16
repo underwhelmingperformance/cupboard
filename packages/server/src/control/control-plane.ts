@@ -1,4 +1,3 @@
-import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
@@ -27,6 +26,7 @@ import {
 	issueAccessJwt,
 	verifyAccessJwt
 } from '../auth/auth.ts';
+import { resolveRequestedGrants } from '../authz/issuance.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { type AuthorizationServerMetadata } from '../do/auth-keys-service.ts';
 import {
@@ -131,10 +131,11 @@ export async function controlTokenExchange(
 
 	await ensureControlKey(database, wrappingSecret, now.toISOString());
 	const active = await activeControlKey(database, wrappingSecret);
-	// TODO: evaluate the matched rule's bindings against the verified subject to
-	// issue the narrower grants it permits. Until then every control rule issues a
-	// wildcard, keeping the seeded owner operable.
-	const grants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
+	const grants = resolveRequestedGrants(
+		rule,
+		verified,
+		body.authorization_details
+	);
 	const accessToken = await issueAccessJwt(
 		active.privateJwk,
 		{
@@ -153,7 +154,8 @@ export async function controlTokenExchange(
 			access_token: accessToken,
 			token_type: 'Bearer',
 			expires_in: adminJwtTtlSeconds,
-			issued_token_type: issuedAccessTokenType
+			issued_token_type: issuedAccessTokenType,
+			authorization_details: grants
 		} satisfies TokenResponse,
 		{ headers: { 'cache-control': 'no-store' } }
 	);
@@ -227,7 +229,11 @@ export function controlAsMetadata(
 		token_endpoint: `${origin}/token`,
 		jwks_uri: `${origin}/.well-known/jwks.json`,
 		grant_types_supported: [tokenExchangeGrantType],
-		scopes_supported: ['admin'],
+		authorization_details_types_supported: [
+			'cupboard_tenant',
+			'cupboard_control',
+			'cupboard_wildcard'
+		],
 		token_endpoint_auth_methods_supported: ['none']
 	};
 }

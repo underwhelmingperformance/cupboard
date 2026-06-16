@@ -1,6 +1,10 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { type ResolvedRootTarget } from '@cupboard/nix/store-path';
 import {
+	oidcTrustDisplaySchema,
+	permittedGrantSchema
+} from '@cupboard/protocol/grants';
+import {
 	type SigningKeyStage,
 	type SigningKeySummary
 } from '@cupboard/protocol/keys';
@@ -75,7 +79,7 @@ export const bootstrapKeyName = 'cupboard-1';
 export const ownerRuleId = 'owner';
 
 export const storedClaimsSchema = z.record(z.string(), z.string());
-export const storedAllowedRootsSchema = z.array(z.string());
+export const storedPermittedGrantsSchema = z.array(permittedGrantSchema);
 
 export interface OwnerConfig {
 	readonly issuer: string;
@@ -247,13 +251,17 @@ export function oidcTrustRuleFromRow(
 		id: row.id,
 		issuer: row.issuer,
 		audience: row.audience,
-		scope: row.scope,
 		claims: parseStored(storedClaimsSchema, row.claimsJson, fault),
-		allowedRoots: parseStored(
-			storedAllowedRootsSchema,
-			row.allowedRootsJson,
+		permittedGrants: parseStored(
+			storedPermittedGrantsSchema,
+			row.permittedGrantsJson,
 			fault
-		)
+		),
+		...(row.displayJson === null
+			? {}
+			: {
+					display: parseStored(oidcTrustDisplaySchema, row.displayJson, fault)
+				})
 	};
 }
 
@@ -268,9 +276,9 @@ export function oidcTrustSummaryFromRow(
 		id: rule.id,
 		issuer: rule.issuer,
 		audience: rule.audience,
-		scope: rule.scope,
 		claims: { ...rule.claims },
-		allowedRoots: [...rule.allowedRoots],
+		permittedGrants: [...rule.permittedGrants],
+		...(rule.display === undefined ? {} : { display: rule.display }),
 		disabled: Boolean(row.disabledAt)
 	};
 }
@@ -406,16 +414,4 @@ export function uploadHeadersFor(
 			metadata.fileHash
 		).digestBase64()
 	};
-}
-
-// A `cb_roots` entry permits a root by exact name, or — when the entry ends with
-// `/` — any root beneath that prefix. The trailing slash is the boundary, so
-// `github:owner/` permits `github:owner/repo` while `github:owner` permits only
-// itself, never the sibling `github:owner-evil/repo`.
-export function rootWithinConstraint(rootName: string, entry: string): boolean {
-	if (rootName === entry) {
-		return true;
-	}
-
-	return entry.endsWith('/') && rootName.startsWith(entry);
 }
