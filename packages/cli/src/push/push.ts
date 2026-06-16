@@ -725,26 +725,35 @@ async function prepareAttestationBundles(
 		closure.map((pathInfo) => [pathInfo.narHash.digestHex(), pathInfo])
 	);
 	const prepared: PreparedAttestationBundle[] = [];
+	const seen = new Set<string>();
 
 	for (const source of dependencies.sources) {
 		const bytes = await dependencies.readBundle(source.path);
 		const parsed = parseAttestationBundle(source.path, bytes);
-		const pathInfo = parsed.subjectDigests
-			.map((digest) => byNarHash.get(digest))
-			.find((item) => item !== undefined);
+		const digest = sha256Hex(bytes);
 
-		if (pathInfo === undefined) {
+		const matched = parsed.subjectDigests
+			.map((subjectDigest) => byNarHash.get(subjectDigest))
+			.filter((item) => item !== undefined);
+
+		if (matched.length === 0) {
 			throw new AttestationSubjectNotPushedError(
 				source.path,
 				parsed.subjectDigests
 			);
 		}
 
-		prepared.push({
-			storePathHash: StorePath.hash(pathInfo.storePath),
-			digest: sha256Hex(bytes),
-			bytes
-		});
+		for (const pathInfo of matched) {
+			const storePathHash = StorePath.hash(pathInfo.storePath);
+			const key = `${storePathHash}\0${digest}`;
+
+			if (seen.has(key)) {
+				continue;
+			}
+
+			seen.add(key);
+			prepared.push({ storePathHash, digest, bytes });
+		}
 	}
 
 	return prepared;

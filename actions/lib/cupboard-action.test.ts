@@ -6,11 +6,13 @@ import {
 	buildPushArguments,
 	cachePublicKeyRequestHeaders,
 	cacheUrlFor,
+	narHashToHex,
 	normaliseTrustedPublicKeys,
 	normaliseVersion,
 	parseChecksums,
 	parseLines,
 	releaseApiPath,
+	renderChecksums,
 	renderNixConfig
 } from './cupboard-action.ts';
 
@@ -70,6 +72,50 @@ describe('parseChecksums', () => {
 		).toStrictEqual({
 			'cupboard-v1.2.3-linux-x64.tar.gz':
 				'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+		});
+	});
+});
+
+describe('narHashToHex', () => {
+	it('decodes an SRI sha256 NAR hash to lower-case hex', () => {
+		expect(
+			narHashToHex('sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=')
+		).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+	});
+
+	it.each([
+		['not-a-hash'],
+		['sha256:abc'],
+		['sha512-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=']
+	])('rejects %s', (narHash) => {
+		expect(() => narHashToHex(narHash)).toThrow();
+	});
+});
+
+describe('renderChecksums', () => {
+	it('renders sha256sum lines that parseChecksums round-trips', () => {
+		const rendered = renderChecksums([
+			{
+				storePath: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
+				sha256:
+					'1111111111111111111111111111111111111111111111111111111111111111'
+			},
+			{
+				storePath: '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime',
+				sha256:
+					'2222222222222222222222222222222222222222222222222222222222222222'
+			}
+		]);
+
+		expect(rendered).toBe(
+			'1111111111111111111111111111111111111111111111111111111111111111  0123456789abcdfghijklmnpqrsvwxyz-app\n' +
+				'2222222222222222222222222222222222222222222222222222222222222222  3123456789abcdfghijklmnpqrsvwxyz-runtime\n'
+		);
+		expect(Object.fromEntries(parseChecksums(rendered))).toStrictEqual({
+			'0123456789abcdfghijklmnpqrsvwxyz-app':
+				'1111111111111111111111111111111111111111111111111111111111111111',
+			'3123456789abcdfghijklmnpqrsvwxyz-runtime':
+				'2222222222222222222222222222222222222222222222222222222222222222'
 		});
 	});
 });

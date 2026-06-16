@@ -98,7 +98,8 @@ The default OIDC audience is the `url` input. The default retention root is
 `github:${{ github.repository }}/${{ github.ref_name }}`. `wait` defaults to
 `true` and `wait-timeout` defaults to `10m`.
 
-Attestation bundle paths are also newline-delimited:
+Attestation bundle paths are also newline-delimited. They attach a bundle that
+already exists; `actions/attest` below produces one with the right subjects:
 
 ```yaml
 - uses: owner/repo/actions/push@v1
@@ -109,6 +110,79 @@ Attestation bundle paths are also newline-delimited:
     attestations: |
       ./dist/result.intoto.jsonl
 ```
+
+## `actions/attest`
+
+`actions/push` attaches a bundle but does not create one. cupboard files a
+bundle against a store path only when the bundle's in-toto subject digest equals
+that path's NAR hash. An attestation built over a file's own digest, which is
+what `actions/attest-build-provenance` records by default, therefore does not
+match. `actions/attest` produces a matching bundle: it resolves each path with
+`nix path-info`, records the NAR hashes as subjects, and signs a single SLSA
+build-provenance attestation over all of them.
+
+```yaml
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+
+steps:
+  - uses: actions/checkout@v6
+  - run: nix build .#package
+  - id: attest
+    uses: owner/repo/actions/attest@v1
+    with:
+      paths: |
+        ./result
+```
+
+`paths` is newline-delimited and accepts the same store paths, derivations, and
+installables as `actions/push`. The action outputs `bundle-path`, the signed
+bundle covering every resolved path, alongside `checksums-file` and
+`subject-count`. `id-token: write` lets the action obtain its Sigstore signing
+certificate, and `attestations: write` records the attestation on the
+repository.
+
+Because the bundle carries every path as a subject, a later `cupboard push`
+files it against each matching path in the pushed closure.
+
+## Build, attest, and push
+
+The three actions compose into one job: install cupboard and export read
+configuration, build the outputs, attest them, then push the outputs with the
+bundle attached.
+
+```yaml
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+
+steps:
+  - uses: actions/checkout@v6
+  - uses: owner/repo/actions/setup@v1
+    with:
+      cache-url: https://cupboard.example.workers.dev/t/<slug>
+  - run: nix build .#package
+  - id: attest
+    uses: owner/repo/actions/attest@v1
+    with:
+      paths: |
+        ./result
+  - uses: owner/repo/actions/push@v1
+    with:
+      url: https://cupboard.example.workers.dev/t/<slug>
+      paths: |
+        ./result
+      attestations: ${{ steps.attest.outputs.bundle-path }}
+```
+
+`setup` adds the cache as a substituter for the build, `attest` signs the
+provenance over the built paths' NAR hashes, and `push` uploads the paths and
+files the bundle against them. Pushing needs an `oidc_trust` rule on the tenant
+that accepts this repository's GitHub Actions token, added with
+`cupboard oidc-trust`.
 
 ## Binary Releases
 
