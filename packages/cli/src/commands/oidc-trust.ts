@@ -1,9 +1,12 @@
+import { readFile } from 'node:fs/promises';
+
 import type { CliUi } from '@cupboard/cli-ui';
-import type {
-	OidcTrustAddBody,
-	OidcTrustListResponse,
-	OidcTrustRemoveResponse,
-	OidcTrustSummary
+import {
+	type OidcTrustAddBody,
+	oidcTrustAddBodySchema,
+	type OidcTrustListResponse,
+	type OidcTrustRemoveResponse,
+	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
@@ -14,7 +17,61 @@ import { tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
-import { buildAddBody, buildCacheGrant } from './oidc-trust/rule-builder.ts';
+import {
+	buildAddBody,
+	buildCacheGrant,
+	collectSubstitutions
+} from './oidc-trust/rule-builder.ts';
+
+// Assemble the rule body from flags, or read it whole from a JSON file. The file
+// form is the escape hatch for grants the flags do not spell, such as admin,
+// domain, or control grants.
+async function addBodyFor(
+	options: OidcTrustAddOptions
+): Promise<OidcTrustAddBody> {
+	if (options.fromFile !== undefined) {
+		return loadAddBody(options.fromFile);
+	}
+
+	const substitutions = collectSubstitutions({
+		templateSource: options.templateSource,
+		captures: options.capture
+	});
+
+	return buildAddBody({
+		issuer: options.issuer,
+		audience: options.audience,
+		claims: parseClaims(options.claim),
+		permittedGrants: [
+			buildCacheGrant({
+				cache: options.cache,
+				cacheTemplate: options.cacheTemplate,
+				allow: options.allow,
+				root: options.root,
+				rootTemplate: options.rootTemplate,
+				substitutions
+			})
+		]
+	});
+}
+
+async function loadAddBody(path: string): Promise<OidcTrustAddBody> {
+	let parsed: unknown;
+
+	try {
+		parsed = JSON.parse(await readFile(path, 'utf8'));
+	} catch {
+		throw new InvalidClaimError(`--from-file ${path} is not valid JSON`);
+	}
+
+	const result = oidcTrustAddBodySchema.safeParse(parsed);
+
+	if (!result.success) {
+		throw new InvalidClaimError(result.error.message);
+	}
+
+	return result.data;
+}
 
 interface ConfirmableOptions {
 	readonly yes?: boolean;
@@ -26,7 +83,12 @@ interface OidcTrustAddOptions {
 	readonly claim: readonly string[];
 	readonly allow: readonly string[];
 	readonly cache?: string;
+	readonly cacheTemplate?: string;
 	readonly root?: string;
+	readonly rootTemplate?: string;
+	readonly capture: readonly string[];
+	readonly templateSource?: string;
+	readonly fromFile?: string;
 }
 
 /**
@@ -128,7 +190,7 @@ export function registerOidcTrustCommands(
 ): void {
 	const oidcTrust = program
 		.command('oidc-trust')
-		.description('Manage the CI write-trust rules used by token exchange.');
+		.description('Manage the OIDC trust rules used by token exchange.');
 
 	oidcTrust
 		.command('list')
@@ -161,7 +223,7 @@ export function registerOidcTrustCommands(
 
 	oidcTrust
 		.command('add')
-		.description('Add a write-trust rule for a CI OIDC issuer.')
+		.description('Add a trust rule for a CI OIDC issuer.')
 		.argument('<url>', tenantUrlArgument)
 		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
 		.requiredOption('--audience <audience>', 'expected token audience')
@@ -177,23 +239,46 @@ export function registerOidcTrustCommands(
 			collect,
 			[]
 		)
-		.option('--cache <name>', 'the cache the grant is scoped to')
+		.option('--cache <name>', 'an exact cache the grant is scoped to')
+		.option(
+			'--cache-template <template>',
+			'a cache template such as "pr-{pr}", rendered from captures'
+		)
 		.option(
 			'--root <name>',
 			'a root the grant may set, or "same-as-cache" to tie it to the cache'
+		)
+		.option(
+			'--root-template <template>',
+			'a root template rendered from captures'
+		)
+		.option(
+			'--capture <claim=pattern>',
+			'a named-group capture binding template variables to a claim (repeatable)',
+			collect,
+			[]
+		)
+		.option(
+			'--template-source <name>',
+			'a built-in capture source, e.g. github-pr (binds {pr} from the ref claim)'
+		)
+		.option(
+			'--from-file <path>',
+			'read the rule body (permitted grants and claims) from a JSON file'
 		)
 		.addHelpText(
 			'after',
 			[
 				'',
 				'Example:',
-				'  # Trust a specific reusable workflow to push to a cache,',
-				'  # keyed on the job_workflow_ref claim',
+				'  # Trust a reusable workflow to push to a per-PR cache it cannot',
+				'  # escape, keyed on the job_workflow_ref claim',
 				'  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \\',
 				'    --issuer https://token.actions.githubusercontent.com \\',
 				'    --audience https://cupboard.example.workers.dev/t/acme \\',
 				'    --claim job_workflow_ref=acme/ci/.github/workflows/push.yml@refs/heads/main \\',
-				'    --allow push --allow root --cache acme-ci --root same-as-cache'
+				'    --allow push --allow root --template-source github-pr \\',
+				'    --cache-template pr-{pr} --root same-as-cache'
 			].join('\n')
 		)
 		.action(async (url: string, options: OidcTrustAddOptions) => {
@@ -202,20 +287,8 @@ export function registerOidcTrustCommands(
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
-			const body = buildAddBody({
-				issuer: options.issuer,
-				audience: options.audience,
-				claims: parseClaims(options.claim),
-				permittedGrants: [
-					buildCacheGrant({
-						cache: options.cache,
-						allow: options.allow,
-						root: options.root
-					})
-				]
-			});
 
-			await runOidcTrustAdd(body, reporter, rpc.oidcTrust);
+			await runOidcTrustAdd(await addBodyFor(options), reporter, rpc.oidcTrust);
 		});
 
 	oidcTrust
