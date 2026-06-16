@@ -2,6 +2,7 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	cacheWriteGrants,
 	clearBlobStorage,
 	deleteTestBase,
 	handlerFetch,
@@ -33,7 +34,7 @@ describe('cross-tenant NAR read isolation', () => {
 		const ownerToken = await issueTokenForTenant(
 			testServerFor('acme'),
 			ownerIssuer,
-			'write'
+			cacheWriteGrants()
 		);
 		// A second public tenant that never uploads the hash; it must not be able to
 		// read acme's bytes by naming the content hash under its own prefix.

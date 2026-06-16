@@ -12,7 +12,6 @@ import { and, eq, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 
 import {
 	type AccessClaims,
-	type AccessScope,
 	authJwtAlgorithm,
 	type AuthPublicKey,
 	bearerToken,
@@ -23,7 +22,6 @@ import {
 import { parseJwk } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
-	InsufficientScopeError,
 	LastAuthKeyError,
 	TenantNotConfiguredError,
 	UnauthenticatedError
@@ -340,10 +338,10 @@ export class AuthKeysService {
 		}));
 	}
 
-	async requireScope(
-		request: Request,
-		required: AccessScope
-	): Promise<AccessClaims> {
+	// Authenticate the bearer token and return its claims (subject and grants).
+	// Authorisation against what those grants cover is a separate decision the
+	// router makes via the contract's per-procedure metadata.
+	async authenticate(request: Request): Promise<AccessClaims> {
 		const token = bearerToken(request);
 
 		if (token === undefined) {
@@ -351,10 +349,9 @@ export class AuthKeysService {
 		}
 
 		const keys = await this.authVerificationKeys();
-		let claims: AccessClaims;
 
 		try {
-			claims = await verifyAccessJwt(
+			return await verifyAccessJwt(
 				keys,
 				token,
 				{ issuer: this.authIssuer(), audience: this.authAudience() },
@@ -363,12 +360,5 @@ export class AuthKeysService {
 		} catch {
 			throw new UnauthenticatedError();
 		}
-
-		// admin satisfies any write-gated route; write satisfies only write.
-		if (claims.scope !== 'admin' && claims.scope !== required) {
-			throw new InsufficientScopeError();
-		}
-
-		return claims;
 	}
 }

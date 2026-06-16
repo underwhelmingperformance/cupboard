@@ -7,6 +7,10 @@ import {
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
+import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
 import type {
 	RootListResponse,
 	RootRemoveResponse,
@@ -54,7 +58,7 @@ import { z } from 'zod';
 
 import migrations from '../drizzle/migrations.js';
 
-import { type AccessScope, issueAccessJwt } from './auth/auth.ts';
+import { issueAccessJwt } from './auth/auth.ts';
 import {
 	activeControlKey,
 	ensureControlKey
@@ -464,7 +468,7 @@ export interface InitialisedServer {
  * in for what the old bootstrap exchange returned.
  */
 export async function bootstrap(): Promise<InitialisedServer> {
-	const token = await issueServerSignedToken('admin');
+	const token = await issueServerSignedToken(adminGrants());
 	const response = await fetchPath('/pubkey');
 	const body = await response.text();
 
@@ -473,33 +477,73 @@ export async function bootstrap(): Promise<InitialisedServer> {
 
 /** An admin token against the current per-test server. */
 export function initialise(): Promise<string> {
-	return issueServerSignedToken('admin');
+	return issueServerSignedToken(adminGrants());
 }
 
 /** An admin token against the shared `v1` server the Worker routes to. */
 export function initialiseViaWorker(): Promise<string> {
-	return issueServerSignedTokenFor(fixtureWorkerServer(), 'admin');
+	return issueServerSignedTokenFor(fixtureWorkerServer(), adminGrants());
+}
+
+// The cache operations the old `write` scope (a CI push) carried: upload and
+// attestation. Root writes are granted per root selector so a token can set
+// only the roots its rule named.
+const cacheWriteActions = [
+	'upload:negotiate',
+	'upload:prepare',
+	'upload:status',
+	'upload:commit',
+	'attestation:negotiate',
+	'attestation:prepare',
+	'attestation:attach'
+] as const;
+
+/** The owner's grant set: a single wildcard covering every operation. */
+export function adminGrants(): AuthorizationDetails {
+	return [{ type: 'cupboard_wildcard' }];
 }
 
 /**
- * Issues an access token signed by the active server key for an arbitrary
- * scope, so tests can prove scope enforcement (e.g. a write token refused by
- * an admin route). The active key is the newest one still in service, matching
- * what the server issues with, so a token stays valid across a rotation.
+ * A CI-style write grant set: upload and attestation on one cache, plus
+ * `root:set` on each named root selector. It authorises exactly the push path,
+ * so tests can prove an admin-only route refuses it.
+ */
+export function cacheWriteGrants(
+	roots: readonly string[] = [],
+	cacheSelector: string = WIRE_DEFAULT_CACHE
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: cacheWriteActions,
+			cache: cacheSelector
+		},
+		...roots.map((root) => ({
+			type: 'cupboard_cache',
+			actions: ['root:set'],
+			cache: cacheSelector,
+			root
+		}))
+	]);
+}
+
+/**
+ * Issues an access token signed by the active server key carrying an explicit
+ * grant set, so tests can prove authorisation (e.g. a write grant refused by an
+ * admin route). The active key is the newest one still in service, matching what
+ * the server issues with, so a token stays valid across a rotation.
  */
 export function issueServerSignedToken(
-	scope: AccessScope,
-	subject = 'scope-test',
-	callbackRoots?: readonly string[]
+	grants: AuthorizationDetails,
+	subject = 'grant-test'
 ): Promise<string> {
-	return issueServerSignedTokenFor(server, scope, subject, callbackRoots);
+	return issueServerSignedTokenFor(server, grants, subject);
 }
 
 async function issueServerSignedTokenFor(
 	stub: DurableObjectStub<CupboardServer>,
-	scope: AccessScope,
-	subject = 'scope-test',
-	callbackRoots?: readonly string[]
+	grants: AuthorizationDetails,
+	subject = 'grant-test'
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
 
@@ -509,10 +553,9 @@ async function issueServerSignedTokenFor(
 			issuer: tenantTestIssuer,
 			audience: tenantTestIssuer,
 			subject,
-			scope,
+			grants,
 			kid: key.kid,
-			ttlSeconds: 600,
-			cbRoots: callbackRoots
+			ttlSeconds: 600
 		},
 		new Date()
 	);
@@ -526,14 +569,21 @@ async function issueServerSignedTokenFor(
 export async function issueTokenForTenant(
 	stub: DurableObjectStub<CupboardServer>,
 	issuer: string,
-	scope: AccessScope,
+	grants: AuthorizationDetails,
 	subject = 'route-test'
 ): Promise<string> {
 	const key = await activeAuthKeyFor(stub);
 
 	return issueAccessJwt(
 		key.privateJwk,
-		{ issuer, audience: issuer, subject, scope, kid: key.kid, ttlSeconds: 600 },
+		{
+			issuer,
+			audience: issuer,
+			subject,
+			grants,
+			kid: key.kid,
+			ttlSeconds: 600
+		},
 		new Date()
 	);
 }
@@ -657,7 +707,7 @@ export async function controlWorkerFetch(request: Request): Promise<Response> {
 // active control key for the control issuer (the current origin) and audience.
 export async function issueControlAdminToken(
 	subject = 'global-admin',
-	scope: AccessScope = 'admin'
+	grants: AuthorizationDetails = adminGrants()
 ): Promise<string> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const wrappingSecret = testControlEnv.CONTROL_KEY_WRAP_SECRET;
@@ -671,7 +721,7 @@ export async function issueControlAdminToken(
 			issuer: new URL(origin).origin,
 			audience: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
 			subject,
-			scope,
+			grants,
 			kid: active.kid,
 			ttlSeconds: 600
 		},

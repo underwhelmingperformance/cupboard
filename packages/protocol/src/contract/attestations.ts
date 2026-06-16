@@ -8,15 +8,19 @@ import {
 	attestationPrepareResponseSchema
 } from '../attestations.ts';
 
-import { adminProcedure } from './base.ts';
+import { baseProcedure } from './base.ts';
 
 // The attestation upload conversation: negotiation decides per bundle whether
 // to upload or skip, preparation presigns the staging PUT, and attach
 // verifies and references the staged bundle. The Nix-facing list and bundle
 // reads stay outside the contract.
 export const attestationsContract = {
-	negotiate: adminProcedure
-		.meta({ scope: 'write', maintenance: true })
+	negotiate: baseProcedure
+		.meta({
+			requires: 'attestation:negotiate',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true
+		})
 		.route({ method: 'POST', path: '/cache/{cacheName}/attestations' })
 		.input(
 			z.strictObject({
@@ -26,14 +30,24 @@ export const attestationsContract = {
 		)
 		.output(attestationNegotiateResponseSchema),
 
-	prepare: adminProcedure
-		.meta({ scope: 'write', maintenance: true })
+	prepare: baseProcedure
+		.meta({
+			requires: 'attestation:prepare',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true
+		})
 		.route({ method: 'PUT', path: '/cache/{cacheName}/attestations/{id}' })
 		.input(z.strictObject({ cacheName: cacheSelectorSchema, id: z.string() }))
 		.output(attestationPrepareResponseSchema),
 
-	attach: adminProcedure
-		.meta({ scope: 'write', maintenance: true })
+	// The cache is taken from the pending attestation row the id addresses, not
+	// the path: the bundle was negotiated against that row's cache.
+	attach: baseProcedure
+		.meta({
+			requires: 'attestation:attach',
+			resource: { cache: { pending: true } },
+			maintenance: true
+		})
 		.route({
 			method: 'POST',
 			path: '/cache/{cacheName}/attestations/{id}/attach'

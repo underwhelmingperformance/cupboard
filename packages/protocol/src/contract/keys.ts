@@ -10,20 +10,23 @@ import {
 	keyRotateResponseSchema
 } from '../keys.ts';
 
-import { adminProcedure } from './base.ts';
+import { baseProcedure } from './base.ts';
 
 export const keysContract = {
 	// The narinfo signing keys Nix verifies against.
 	signing: {
-		list: adminProcedure
+		list: baseProcedure
+			.meta({ requires: 'signing-key:list' })
 			.route({ method: 'GET', path: '/keys' })
 			.output(keyListResponseSchema),
 
-		rotate: adminProcedure
+		rotate: baseProcedure
+			.meta({ requires: 'signing-key:rotate' })
 			.route({ method: 'POST', path: '/keys/rotate' })
 			.output(keyRotateResponseSchema),
 
-		retire: adminProcedure
+		retire: baseProcedure
+			.meta({ requires: 'signing-key:retire' })
 			.route({ method: 'POST', path: '/keys/retire/{id}' })
 			.input(z.strictObject({ id: signingKeyIdSchema }))
 			.output(keyRetireResponseSchema)
@@ -31,17 +34,18 @@ export const keysContract = {
 
 	// The auth-token signing keys, rotated independently of the narinfo keys.
 	auth: {
-		list: adminProcedure
+		list: baseProcedure
+			.meta({ requires: 'auth-key:list' })
 			.route({ method: 'GET', path: '/keys/auth' })
 			.output(authKeyListResponseSchema),
 
-		rotate: adminProcedure
-			.meta({ scope: 'admin', maintenance: true })
+		rotate: baseProcedure
+			.meta({ requires: 'auth-key:rotate', maintenance: true })
 			.route({ method: 'POST', path: '/keys/auth/rotate' })
 			.output(authKeyRotateResponseSchema),
 
-		retire: adminProcedure
-			.meta({ scope: 'admin', maintenance: true })
+		retire: baseProcedure
+			.meta({ requires: 'auth-key:retire', maintenance: true })
 			.route({ method: 'POST', path: '/keys/auth/retire/{kid}' })
 			.input(z.strictObject({ kid: z.string() }))
 			.output(authKeyRetireResponseSchema)

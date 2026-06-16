@@ -1,21 +1,21 @@
+import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
 import { importJWK, jwtVerify, SignJWT } from 'jose';
 
-export type AccessScope = 'write' | 'admin';
-
-// Admin tokens (owner) are unconstrained. A write token (CI) carries `cbRoots`,
-// the retention roots it may mutate: each entry matches a root by exact name,
-// or — when it ends with `/` — any root beneath that prefix. A write token with
-// no entries may mutate nothing.
+// A token's authority is its grant set, carried as RFC 9396
+// `authorization_details`. The owner holds a single wildcard grant; a CI token
+// holds the concrete grants its trust rule permitted.
 export interface AccessClaims {
-	readonly scope: AccessScope;
 	readonly subject: string;
-	readonly cbRoots?: readonly string[];
+	readonly grants: AuthorizationDetails;
 }
 
 // The issued-token type per RFC 9068, set in the header and verified on the way
-// back in.
+// back in. The grants ride in the RFC 9396 claim.
 const accessTokenType = 'at+jwt';
-const callbackRootsClaim = 'cb_roots';
+const authorizationDetailsClaim = 'authorization_details';
 
 export const adminJwtTtlSeconds = 10 * 60;
 export const writeJwtTtlSeconds = 15 * 60;
@@ -49,10 +49,9 @@ export interface IssueAccessJwtOptions {
 	readonly issuer: string;
 	readonly audience: string;
 	readonly subject: string;
-	readonly scope: AccessScope;
+	readonly grants: AuthorizationDetails;
 	readonly kid: string;
 	readonly ttlSeconds: number;
-	readonly cbRoots?: readonly string[];
 	readonly auditClaims?: Readonly<Record<string, unknown>>;
 }
 
@@ -72,17 +71,17 @@ export class AccessTokenVerificationError extends AccessTokenError {
 	}
 }
 
-export class MissingScopeError extends AccessTokenError {
+export class MissingGrantsError extends AccessTokenError {
 	constructor() {
-		super('Access token has no scope claim');
-		this.name = 'MissingScopeError';
+		super('Access token has no authorization_details claim');
+		this.name = 'MissingGrantsError';
 	}
 }
 
-export class InvalidScopeError extends AccessTokenError {
-	constructor(public readonly scope: unknown) {
-		super(`Access token scope is not a known scope: ${String(scope)}`);
-		this.name = 'InvalidScopeError';
+export class InvalidGrantsError extends AccessTokenError {
+	constructor(public readonly cause: unknown) {
+		super('Access token authorization_details claim is malformed');
+		this.name = 'InvalidGrantsError';
 	}
 }
 
@@ -90,13 +89,6 @@ export class MissingSubjectError extends AccessTokenError {
 	constructor() {
 		super('Access token has no subject claim');
 		this.name = 'MissingSubjectError';
-	}
-}
-
-export class InvalidRootConstraintError extends AccessTokenError {
-	constructor() {
-		super('Access token cb_roots claim is not an array of strings');
-		this.name = 'InvalidRootConstraintError';
 	}
 }
 
@@ -144,15 +136,11 @@ export async function issueAccessJwt(
 	const key = await importJWK(privateJwk, jwtAlgorithm);
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
-	// Audit claims are spread first so the registered claims and scope/cb_roots
-	// below always win; the registered claims set via the builder cannot be
-	// clobbered by them either.
+	// Audit claims are spread first so the grants claim below always wins; the
+	// registered claims set via the builder cannot be clobbered by them either.
 	return new SignJWT({
 		...options.auditClaims,
-		scope: options.scope,
-		...(options.cbRoots === undefined
-			? {}
-			: { [callbackRootsClaim]: options.cbRoots })
+		[authorizationDetailsClaim]: options.grants
 	})
 		.setProtectedHeader({
 			alg: jwtAlgorithm,
@@ -199,16 +187,6 @@ export async function verifyAccessJwt(
 		throw new AccessTokenVerificationError({ cause: error });
 	});
 
-	const scope = verified.payload.scope;
-
-	if (scope === undefined) {
-		throw new MissingScopeError();
-	}
-
-	if (scope !== 'write' && scope !== 'admin') {
-		throw new InvalidScopeError(scope);
-	}
-
 	const subject = verified.payload.sub;
 
 	if (typeof subject !== 'string' || subject === '') {
@@ -216,23 +194,21 @@ export async function verifyAccessJwt(
 	}
 
 	return {
-		scope,
 		subject,
-		...parseCallbackRoots(verified.payload[callbackRootsClaim])
+		grants: parseGrants(verified.payload[authorizationDetailsClaim])
 	};
 }
 
-function parseCallbackRoots(value: unknown): { cbRoots?: readonly string[] } {
+function parseGrants(value: unknown): AuthorizationDetails {
 	if (value === undefined) {
-		return {};
+		throw new MissingGrantsError();
 	}
 
-	if (
-		!Array.isArray(value) ||
-		!value.every((entry) => typeof entry === 'string')
-	) {
-		throw new InvalidRootConstraintError();
+	const parsed = authorizationDetailsSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidGrantsError(parsed.error);
 	}
 
-	return { cbRoots: value };
+	return parsed.data;
 }

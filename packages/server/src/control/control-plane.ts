@@ -1,3 +1,4 @@
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
@@ -20,6 +21,7 @@ import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import type { JWTPayload } from 'jose';
 
 import {
+	type AccessClaims,
 	adminJwtTtlSeconds,
 	bearerToken,
 	issueAccessJwt,
@@ -30,7 +32,6 @@ import { type AuthorizationServerMetadata } from '../do/auth-keys-service.ts';
 import {
 	ControlNotConfiguredError,
 	ControlSubjectTokenUntrustedError,
-	InsufficientScopeError,
 	IssuerUnavailableError,
 	SubjectTokenNotJwtError,
 	SubjectTokenVerificationFailedError,
@@ -130,13 +131,17 @@ export async function controlTokenExchange(
 
 	await ensureControlKey(database, wrappingSecret, now.toISOString());
 	const active = await activeControlKey(database, wrappingSecret);
+	// TODO: evaluate the matched rule's bindings against the verified subject to
+	// issue the narrower grants it permits. Until then every control rule issues a
+	// wildcard, keeping the seeded owner operable.
+	const grants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
 	const accessToken = await issueAccessJwt(
 		active.privateJwk,
 		{
 			issuer: controlIssuer(request),
 			audience,
 			subject,
-			scope: 'admin',
+			grants,
 			kid: active.kid,
 			ttlSeconds: adminJwtTtlSeconds
 		},
@@ -148,7 +153,6 @@ export async function controlTokenExchange(
 			access_token: accessToken,
 			token_type: 'Bearer',
 			expires_in: adminJwtTtlSeconds,
-			scope: 'admin',
 			issued_token_type: issuedAccessTokenType
 		} satisfies TokenResponse,
 		{ headers: { 'cache-control': 'no-store' } }
@@ -228,14 +232,14 @@ export function controlAsMetadata(
 	};
 }
 
-// Verifies a control admin bearer token: signed by a live control key, carrying
-// the control issuer and audience and the admin scope. Anything else — a missing
-// token, a tenant token, the wrong scope — is rejected, so only a control-issued
-// admin token drives control operations.
-export async function requireControlAdmin(
+// Authenticates a control bearer token: signed by a live control key and
+// carrying the control issuer and audience. Anything else — a missing token, a
+// tenant token, a bad signature — is rejected. The grants it carries decide what
+// it may do; the router authorises each operation against them.
+export async function controlAuthenticate(
 	request: Request,
 	env: Env
-): Promise<void> {
+): Promise<AccessClaims> {
 	const token = bearerToken(request);
 
 	if (token === undefined) {
@@ -244,21 +248,16 @@ export async function requireControlAdmin(
 
 	const audience = controlAudience(env);
 	const keys = await controlVerificationKeys(controlDatabase(env));
-	let scope: string;
 
 	try {
-		({ scope } = await verifyAccessJwt(
+		return await verifyAccessJwt(
 			keys,
 			token,
 			{ issuer: controlIssuer(request), audience },
 			new Date()
-		));
+		);
 	} catch {
 		throw new UnauthenticatedError();
-	}
-
-	if (scope !== 'admin') {
-		throw new InsufficientScopeError();
 	}
 }
 

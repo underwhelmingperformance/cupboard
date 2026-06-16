@@ -6,11 +6,15 @@ import { z } from 'zod';
 
 import { deletePathResponseSchema } from '../upload.ts';
 
-import { adminProcedure } from './base.ts';
+import { baseProcedure } from './base.ts';
 
 export const pathsContract = {
-	remove: adminProcedure
-		.meta({ scope: 'admin', maintenance: true })
+	remove: baseProcedure
+		.meta({
+			requires: 'narinfo:delete',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true
+		})
 		.route({ method: 'DELETE', path: '/cache/{cacheName}/paths/{hash}' })
 		.input(
 			z.strictObject({

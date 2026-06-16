@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { sha256HexBytes } from '../crypto/crypto.ts';
 import {
 	bootstrap,
+	cacheWriteGrants,
 	currentOrigin,
 	currentServer,
 	hexBytes,
@@ -354,7 +355,9 @@ describe('tenant contract round trip', () => {
 	it('refuses a write-scoped token on an admin procedure', async () => {
 		await useTestServer('contract-scope');
 		await bootstrap();
-		const client = tenantClient(await issueServerSignedToken('write'));
+		const client = tenantClient(
+			await issueServerSignedToken(cacheWriteGrants())
+		);
 
 		const [error, data, isDefined] = await safe(client.caches.list());
 		expect({ isDefined, data }).toStrictEqual({

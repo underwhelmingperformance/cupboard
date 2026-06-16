@@ -7,19 +7,22 @@ import {
 	retentionPolicySummarySchema
 } from '../retention.ts';
 
-import { adminProcedure } from './base.ts';
+import { baseProcedure } from './base.ts';
 
 export const policiesContract = {
-	list: adminProcedure
+	list: baseProcedure
+		.meta({ requires: 'policy:list' })
 		.route({ method: 'GET', path: '/policies' })
 		.output(retentionPolicyListResponseSchema),
 
-	add: adminProcedure
+	add: baseProcedure
+		.meta({ requires: 'policy:add' })
 		.route({ method: 'POST', path: '/policies' })
 		.input(retentionPolicyAddBodySchema)
 		.output(retentionPolicySummarySchema),
 
-	remove: adminProcedure
+	remove: baseProcedure
+		.meta({ requires: 'policy:remove' })
 		.route({ method: 'DELETE', path: '/policies/{id}' })
 		.input(z.strictObject({ id: z.string() }))
 		.output(retentionPolicyRemoveResponseSchema)

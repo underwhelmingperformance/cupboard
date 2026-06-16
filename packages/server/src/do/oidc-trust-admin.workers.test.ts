@@ -12,7 +12,9 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	adminGrants,
 	authorisedFetch,
+	cacheWriteGrants,
 	initialise,
 	issueServerSignedToken,
 	resetTestServer
@@ -45,7 +47,7 @@ const orpcErrorBodySchema = z.strictObject({
 async function adminToken(): Promise<string> {
 	await initialise();
 
-	return issueServerSignedToken('admin');
+	return issueServerSignedToken(adminGrants());
 }
 
 function listRules(token: string): Promise<Response> {
@@ -220,7 +222,7 @@ describe('oidc-trust admin API', () => {
 
 	it('refuses a write token', async () => {
 		await initialise();
-		const token = await issueServerSignedToken('write');
+		const token = await issueServerSignedToken(cacheWriteGrants());
 
 		const response = await listRules(token);
 
