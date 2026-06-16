@@ -1,16 +1,29 @@
-import type { OidcTrustScope } from '@cupboard/protocol/oidc';
+import {
+	type OidcTrustDisplay,
+	type PermittedGrant
+} from '@cupboard/protocol/grants';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 
-// A trust rule reduced to what matching needs. The DO reads enabled rows from
-// `oidc_trust`, parses `claims_json`/`allowed_roots_json`, and passes them here;
-// disabled rows are filtered out before matching.
+// A trust rule reduced to what matching and issuance need. The DO reads enabled
+// rows from `oidc_trust`, parses `claims_json`/`permitted_grants_json`, and
+// passes them here; disabled rows are filtered out before matching.
 export interface OidcTrustRule {
 	readonly id: string;
 	readonly issuer: string;
 	readonly audience: string;
-	readonly scope: OidcTrustScope;
 	readonly claims: Readonly<Record<string, string>>;
-	readonly allowedRoots: readonly string[];
+	readonly permittedGrants: readonly PermittedGrant[];
+	readonly display?: OidcTrustDisplay;
+}
+
+// A rule that permits a wildcard is the interactive owner/admin trust class: an
+// exchange may omit `authorization_details` and receive the wildcard, and the
+// session carries a refresh token. Every other rule is claim-bound (CI) and must
+// request the concrete grants it wants.
+export function ruleIsInteractive(rule: OidcTrustRule): boolean {
+	return rule.permittedGrants.some(
+		(grant) => grant.type === 'cupboard_wildcard'
+	);
 }
 
 // The verified claims of an inbound OIDC token, as far as matching reads them.
@@ -54,22 +67,23 @@ function specificity(rule: OidcTrustRule): number {
 	return Object.keys(rule.claims).length;
 }
 
-// The owner's `admin` rule outranks any matching `write` rule. The single admin
-// rule pins the owner's identity, so only the owner's token can match it; a write
-// rule that also matches that token (even a more specific one) must never
-// downgrade the owner to `write`. A CI token cannot match the admin rule, so this
-// never grants a write identity more than it asked for.
-function scopeRank(rule: OidcTrustRule): number {
-	return rule.scope === 'admin' ? 1 : 0;
+// The owner's interactive rule outranks any matching CI rule. The owner rule
+// pins the owner's identity, so only the owner's token can match it; a CI rule
+// that also matches that token (even a more specific one) must never displace it
+// and downgrade the owner. A CI token cannot match the owner rule, so this never
+// grants a CI identity more than it asked for.
+function interactiveRank(rule: OidcTrustRule): number {
+	return ruleIsInteractive(rule) ? 1 : 0;
 }
 
 /**
  * The trust rule whose issuer, audience and configured claims all match the
- * verified token, or `undefined` when none does. Selection prefers `admin` over
- * `write` (so the owner is never downgraded), then the most specific rule, then
- * the lowest id, so the choice is deterministic regardless of the order the rows
- * arrive in. Matching never substitutes for verification: the caller must already
- * have checked the token's signature, issuer, audience and expiry with `jose`.
+ * verified token, or `undefined` when none does. Selection prefers the
+ * interactive owner rule (so the owner is never downgraded), then the most
+ * specific rule, then the lowest id, so the choice is deterministic regardless
+ * of the order the rows arrive in. Matching never substitutes for verification:
+ * the caller must already have checked the token's signature, issuer, audience
+ * and expiry with `jose`.
  */
 export function matchOidcTrust(
 	rules: readonly OidcTrustRule[],
@@ -84,7 +98,7 @@ export function matchOidcTrust(
 		)
 		.toSorted(
 			(left, right) =>
-				scopeRank(right) - scopeRank(left) ||
+				interactiveRank(right) - interactiveRank(left) ||
 				specificity(right) - specificity(left) ||
 				left.id.localeCompare(right.id)
 		)

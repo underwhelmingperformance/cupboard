@@ -67,17 +67,16 @@ export class OidcTrustService {
 	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
 		const id = crypto.randomUUID();
 
-		// Rules added through the API are always `write`; the only `admin` rule is
-		// the owner, seeded from deploy config.
 		this.context.db
 			.insert(schema.oidcTrust)
 			.values({
 				id,
 				issuer: body.issuer,
 				audience: body.audience,
-				scope: 'write',
 				claimsJson: JSON.stringify(body.claims),
-				allowedRootsJson: JSON.stringify(body.allowedRoots),
+				permittedGrantsJson: JSON.stringify(body.permittedGrants),
+				displayJson:
+					body.display === undefined ? undefined : JSON.stringify(body.display),
 				createdAt: new Date().toISOString()
 			})
 			.run();
@@ -86,9 +85,9 @@ export class OidcTrustService {
 			id,
 			issuer: body.issuer,
 			audience: body.audience,
-			scope: 'write',
 			claims: body.claims,
-			allowedRoots: body.allowedRoots,
+			permittedGrants: body.permittedGrants,
+			...(body.display === undefined ? {} : { display: body.display }),
 			disabled: false
 		};
 	}
@@ -100,7 +99,7 @@ export class OidcTrustService {
 			.where(eq(schema.oidcTrust.id, id))
 			.get();
 
-		if (existing?.scope === 'admin') {
+		if (existing !== undefined && id === ownerRuleId) {
 			throw new OwnerRuleImmutableError(id);
 		}
 
@@ -229,15 +228,16 @@ export class OidcTrustService {
 		const fields = {
 			issuer: owner.issuer,
 			audience: owner.audience,
-			claimsJson: JSON.stringify({ sub: owner.subject })
+			claimsJson: JSON.stringify({ sub: owner.subject }),
+			// The owner is the interactive trust class: a single wildcard grant
+			// covers every operation in its domain.
+			permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }])
 		};
 
 		this.context.db
 			.insert(schema.oidcTrust)
 			.values({
 				id: ownerRuleId,
-				scope: 'admin',
-				allowedRootsJson: '[]',
 				createdAt: new Date().toISOString(),
 				...fields
 			})

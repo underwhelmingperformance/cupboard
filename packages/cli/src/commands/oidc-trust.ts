@@ -14,6 +14,8 @@ import { tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import { buildAddBody, buildCacheGrant } from './oidc-trust/rule-builder.ts';
+
 interface ConfirmableOptions {
 	readonly yes?: boolean;
 }
@@ -22,7 +24,9 @@ interface OidcTrustAddOptions {
 	readonly issuer: string;
 	readonly audience: string;
 	readonly claim: readonly string[];
-	readonly allowedRoot: readonly string[];
+	readonly allow: readonly string[];
+	readonly cache?: string;
+	readonly root?: string;
 }
 
 /**
@@ -54,17 +58,51 @@ function claimRows(claims: Record<string, string>): ResultRow[] {
 	}));
 }
 
+function grantRows(grants: OidcTrustSummary['permittedGrants']): ResultRow[] {
+	if (grants.length === 0) {
+		return [{ label: 'Grants', value: '(none)' }];
+	}
+
+	return grants.map((grant, index) => ({
+		label: index === 0 ? 'Grants' : '',
+		value: describeGrant(grant)
+	}));
+}
+
+function describeGrant(
+	grant: OidcTrustSummary['permittedGrants'][number]
+): string {
+	if (grant.type === 'cupboard_wildcard') {
+		return 'wildcard (every operation)';
+	}
+
+	if (grant.type === 'cupboard_cache') {
+		const cache =
+			grant.resources.cache.exact ?? grant.resources.cache.equalsTemplate;
+
+		return `cache ${cache ?? '?'}: ${grant.actions.join(', ')}`;
+	}
+
+	if (grant.type === 'cupboard_tenant') {
+		const tenant =
+			grant.resources.tenant.exact ?? grant.resources.tenant.equalsTemplate;
+
+		return `tenant ${tenant ?? '?'}: ${grant.actions.join(', ')}`;
+	}
+
+	return `${grant.type}: ${grant.actions.join(', ')}`;
+}
+
 function summaryRows(summary: OidcTrustSummary): ResultRow[] {
 	return [
 		{ label: 'Rule', value: summary.id },
 		{ label: 'Issuer', value: summary.issuer },
 		{ label: 'Audience', value: summary.audience },
 		...claimRows(summary.claims),
-		{ label: 'Scope', value: summary.scope },
-		{
-			label: 'Allowed roots',
-			value: summary.allowedRoots.join(', ') || '(none)'
-		}
+		...grantRows(summary.permittedGrants),
+		...(summary.display?.repository === undefined
+			? []
+			: [{ label: 'Repository', value: summary.display.repository }])
 	];
 }
 
@@ -134,23 +172,28 @@ export function registerOidcTrustCommands(
 			[]
 		)
 		.option(
-			'--allowed-root <name>',
-			'a root name or prefix the rule may write (repeatable)',
+			'--allow <action>',
+			'an action set the rule may exchange for: push, attest, or root (repeatable)',
 			collect,
 			[]
+		)
+		.option('--cache <name>', 'the cache the grant is scoped to')
+		.option(
+			'--root <name>',
+			'a root the grant may set, or "same-as-cache" to tie it to the cache'
 		)
 		.addHelpText(
 			'after',
 			[
 				'',
 				'Example:',
-				'  # Trust a specific reusable workflow to push under a root prefix,',
+				'  # Trust a specific reusable workflow to push to a cache,',
 				'  # keyed on the job_workflow_ref claim',
 				'  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \\',
 				'    --issuer https://token.actions.githubusercontent.com \\',
 				'    --audience https://cupboard.example.workers.dev/t/acme \\',
 				'    --claim job_workflow_ref=acme/ci/.github/workflows/push.yml@refs/heads/main \\',
-				'    --allowed-root github:acme/'
+				'    --allow push --allow root --cache acme-ci --root same-as-cache'
 			].join('\n')
 		)
 		.action(async (url: string, options: OidcTrustAddOptions) => {
@@ -159,12 +202,18 @@ export function registerOidcTrustCommands(
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
 			});
-			const body: OidcTrustAddBody = {
+			const body = buildAddBody({
 				issuer: options.issuer,
 				audience: options.audience,
 				claims: parseClaims(options.claim),
-				allowedRoots: [...options.allowedRoot]
-			};
+				permittedGrants: [
+					buildCacheGrant({
+						cache: options.cache,
+						allow: options.allow,
+						root: options.root
+					})
+				]
+			});
 
 			await runOidcTrustAdd(body, reporter, rpc.oidcTrust);
 		});
@@ -266,9 +315,14 @@ export async function runOidcTrustRemove(
 
 function trustRow(rule: OidcTrustSummary): ResultRow {
 	const state = rule.disabled ? ' (disabled)' : '';
+	const grants = rule.permittedGrants.some(
+		(grant) => grant.type === 'cupboard_wildcard'
+	)
+		? 'wildcard'
+		: `${String(rule.permittedGrants.length)} grant(s)`;
 
 	return {
 		label: rule.id,
-		value: `${rule.scope} ${rule.issuer} aud=${rule.audience}${state}`
+		value: `${grants} ${rule.issuer} aud=${rule.audience}${state}`
 	};
 }

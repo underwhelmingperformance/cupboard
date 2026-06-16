@@ -112,8 +112,8 @@ export const authKeys = sqliteTable('auth_key', {
 // SHA-256 is held here, so a copy of this table issues nothing. Presenting the
 // token rotates the row (the spent row is deleted, a successor inserted), which
 // makes each refresh token single-use: a replayed one finds no row and fails as
-// `invalid_grant`. The rule id re-derives the scope and roots at refresh time,
-// so retiring or disabling a trust rule ends its sessions.
+// `invalid_grant`. The rule id re-reads the rule's grants at refresh time, so
+// retiring or disabling a trust rule ends its sessions.
 export const refreshTokens = sqliteTable('refresh_token', {
 	id: text('id').primaryKey(),
 	secretHash: text('secret_hash').notNull(),
@@ -202,20 +202,21 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 	updatedAt: text('updated_at').notNull()
 });
 
-// An OIDC trust rule federates an external identity into a cupboard scope: an
-// inbound token verified against `issuer`'s discovered JWKS, with `audience` and
-// every `claims_json` entry matched exactly, grants `scope`. The issuer's
-// `jwks_uri` and signing algorithms come from its OIDC metadata, not this row. A
-// `write` rule binds the issued token to `allowed_roots_json`; the owner's
-// `admin` rule is seeded from deploy config. `disabled_at` soft-disables a rule
+// An OIDC trust rule federates an external identity into a set of cupboard
+// grants: an inbound token verified against `issuer`'s discovered JWKS, with
+// `audience` and every `claims_json` entry matched exactly, may exchange for the
+// grants `permitted_grants_json` permits. The issuer's `jwks_uri` and signing
+// algorithms come from its OIDC metadata, not this row. The owner's rule is
+// seeded from deploy config with a wildcard grant; `display_json` carries the
+// human-facing provenance a preset pins. `disabled_at` soft-disables a rule
 // without losing the audit row.
 export const oidcTrust = sqliteTable('oidc_trust', {
 	id: text('id').primaryKey(),
 	issuer: text('issuer').notNull(),
 	audience: text('audience').notNull(),
-	scope: text('scope', { enum: ['write', 'admin'] }).notNull(),
 	claimsJson: text('claims_json').notNull().default('{}'),
-	allowedRootsJson: text('allowed_roots_json').notNull().default('[]'),
+	permittedGrantsJson: text('permitted_grants_json').notNull().default('[]'),
+	displayJson: text('display_json'),
 	createdAt: text('created_at').notNull(),
 	disabledAt: text('disabled_at')
 });

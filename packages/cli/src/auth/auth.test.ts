@@ -57,7 +57,6 @@ function federatingClient(): CupboardClient {
 				access_token: `write-${String(issued)}`,
 				token_type: 'Bearer',
 				expires_in: 900,
-				scope: 'write',
 				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
 			} satisfies TokenResponse)
 		);
@@ -144,7 +143,6 @@ function tokenResponse(name: string): ParsedTokenResponse {
 		access_token: accessToken(name, farFuture),
 		token_type: 'Bearer',
 		expires_in: 600,
-		scope: 'admin',
 		refresh_token: `refresh-${name}`
 	};
 }

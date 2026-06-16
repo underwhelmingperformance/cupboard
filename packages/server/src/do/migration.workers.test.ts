@@ -148,9 +148,15 @@ describe('migrations', () => {
 			id: 'r1',
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: 'https://cache.example.workers.dev',
-			scope: 'write' as const,
 			claimsJson: JSON.stringify({ repository_id: '1234' }),
-			allowedRootsJson: JSON.stringify(['github:owner/repo/']),
+			permittedGrantsJson: JSON.stringify([
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+				}
+			]),
+			displayJson: JSON.stringify({ repository: 'owner/repo' }),
 			createdAt: '2026-01-01T00:00:00.000Z',
 			disabledAt: '2026-01-02T00:00:00.000Z'
 		};

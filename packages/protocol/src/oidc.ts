@@ -1,6 +1,11 @@
 import { positiveIntSchema } from '@cupboard/nix/scalars';
 import { z } from 'zod';
 
+import {
+	authorizationDetailsSchema,
+	oidcTrustDisplaySchema,
+	permittedGrantSchema
+} from './grants.ts';
 import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
 
 // RFC 8693 token-exchange issues the first cupboard token of a session. The
@@ -25,13 +30,50 @@ export const subjectTokenTypeIdToken =
 	'urn:ietf:params:oauth:token-type:id_token';
 export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 
+// The `authorization_details` a client requests, the RFC 9396 array as a
+// JSON-encoded form field. Absent, the rule issues the grants its bindings
+// render from the verified claims; present, it narrows to the requested subset
+// and the server verifies each detail against the rule.
+const requestedAuthorizationDetailsSchema = z
+	.string()
+	.min(1)
+	.transform((value, ctx): z.output<typeof authorizationDetailsSchema> => {
+		let parsed: unknown;
+
+		try {
+			parsed = JSON.parse(value);
+		} catch {
+			ctx.addIssue({
+				code: 'custom',
+				message: 'authorization_details is not JSON'
+			});
+
+			return z.NEVER;
+		}
+
+		const result = authorizationDetailsSchema.safeParse(parsed);
+
+		if (!result.success) {
+			ctx.addIssue({
+				code: 'custom',
+				message: 'authorization_details is not a valid grant array'
+			});
+
+			return z.NEVER;
+		}
+
+		return result.data;
+	});
+
 // The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
-// accepted and ignored: the matched trust rule alone fixes the issued scope and
-// audience, so a non-strict object strips them rather than rejecting the request.
+// accepted and ignored: the matched trust rule alone fixes the issued audience,
+// so a non-strict object strips them rather than rejecting the request.
+// `authorization_details` is the one optional field cupboard reads.
 export const tokenExchangeRequestSchema = z.object({
 	grant_type: z.string().min(1),
 	subject_token: z.string().min(1),
-	subject_token_type: z.string().min(1)
+	subject_token_type: z.string().min(1),
+	authorization_details: requestedAuthorizationDetailsSchema.optional()
 });
 export type ParsedTokenExchangeRequest = z.output<
 	typeof tokenExchangeRequestSchema
@@ -45,30 +87,30 @@ export const tokenRequestSchema = z.object({
 	grant_type: z.string().min(1),
 	subject_token: z.string().min(1).optional(),
 	subject_token_type: z.string().min(1).optional(),
-	refresh_token: z.string().min(1).optional()
+	refresh_token: z.string().min(1).optional(),
+	authorization_details: requestedAuthorizationDetailsSchema.optional()
 });
 export type ParsedTokenRequest = z.output<typeof tokenRequestSchema>;
 
 // The token endpoint's success body (RFC 6749 §5.1 / RFC 8693 §2.2.1). The
 // access token is the cupboard JWT; `issued_token_type` is present for the
-// token-exchange grant. A `refresh_token` accompanies an admin session and is
-// rotated on every refresh. Field names are the OAuth wire spelling.
+// token-exchange grant. A `refresh_token` accompanies an interactive session and
+// is rotated on every refresh. `authorization_details` (RFC 9396) reports the
+// grants the token carries. Field names are the OAuth wire spelling.
 export const tokenResponseSchema = z.strictObject({
 	access_token: z.string(),
 	token_type: z.literal('Bearer'),
 	expires_in: positiveIntSchema,
-	scope: z.string().optional(),
 	issued_token_type: z.string().optional(),
-	refresh_token: z.string().optional()
+	refresh_token: z.string().optional(),
+	authorization_details: authorizationDetailsSchema.optional()
 });
 export type ParsedTokenResponse = z.output<typeof tokenResponseSchema>;
 
-// A trust rule federates an external OIDC identity into a cupboard scope. The
-// owner's `admin` rule is seeded from deploy config; `write` rules (CI) are
-// managed through the admin API and bind the issued token to `allowedRoots`.
-export const oidcTrustScopeSchema = z.enum(['write', 'admin']);
-export type OidcTrustScope = z.infer<typeof oidcTrustScopeSchema>;
-
+// A trust rule federates an external OIDC identity into a set of cupboard
+// grants. The owner's rule is seeded from deploy config with a wildcard grant;
+// other rules are managed through the admin API and permit the grants their
+// bindings render. `display` carries the human-facing provenance a preset pins.
 export const oidcTrustAddBodySchema = z.strictObject({
 	issuer: z
 		.url()
@@ -84,7 +126,8 @@ export const oidcTrustAddBodySchema = z.strictObject({
 			(value) => Object.keys(value).length > 0,
 			'at least one claim is required to bind the rule'
 		),
-	allowedRoots: z.array(z.string().min(1))
+	permittedGrants: z.array(permittedGrantSchema).min(1),
+	display: oidcTrustDisplaySchema.optional()
 });
 export type ParsedOidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;
 
@@ -92,9 +135,9 @@ export const oidcTrustSummarySchema = z.strictObject({
 	id: z.string(),
 	issuer: z.string(),
 	audience: z.string(),
-	scope: oidcTrustScopeSchema,
 	claims: z.record(z.string(), z.string()),
-	allowedRoots: z.array(z.string()),
+	permittedGrants: z.array(permittedGrantSchema),
+	display: oidcTrustDisplaySchema.optional(),
 	disabled: z.boolean()
 });
 export type ParsedOidcTrustSummary = z.output<typeof oidcTrustSummarySchema>;
