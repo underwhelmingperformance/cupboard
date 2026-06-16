@@ -18,6 +18,20 @@ export function configDirectory(): string {
 }
 
 /**
+ * The CLI's cache directory: under `$XDG_CACHE_HOME` when set, otherwise
+ * `~/.cache`, always within a `cupboard` subdirectory. Used for content that can
+ * be re-fetched, such as conditional GitHub API responses.
+ */
+export function cacheDirectory(): string {
+	const base =
+		env.XDG_CACHE_HOME !== undefined && env.XDG_CACHE_HOME !== ''
+			? env.XDG_CACHE_HOME
+			: path.join(homedir(), '.cache');
+
+	return path.join(base, 'cupboard');
+}
+
+/**
  * Reads a secret file's contents, or undefined when the file does not exist.
  * Other failures (permissions, I/O) propagate.
  */
