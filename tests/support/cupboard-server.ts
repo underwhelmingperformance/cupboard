@@ -292,12 +292,22 @@ export class CupboardTestServer {
 		);
 	}
 
-	/** Exchanges an issuer-signed id_token for a cupboard access token via `/token`. */
-	async exchangeIdToken(idToken: string): Promise<string> {
+	/**
+	 * Exchanges an issuer-signed id_token for a cupboard access token via
+	 * `/token`. A claim-bound (CI) rule must name the `authorizationDetails` it
+	 * wants; the interactive owner may omit them and receive its wildcard.
+	 */
+	async exchangeIdToken(
+		idToken: string,
+		authorizationDetails?: unknown
+	): Promise<string> {
 		const body = new URLSearchParams({
 			grant_type: tokenExchangeGrantType,
 			subject_token: idToken,
-			subject_token_type: subjectTokenTypeIdToken
+			subject_token_type: subjectTokenTypeIdToken,
+			...(authorizationDetails === undefined
+				? {}
+				: { authorization_details: JSON.stringify(authorizationDetails) })
 		});
 		const response = await fetch(
 			new URL(`/t/${fixtureTenant}/token`, this.url),

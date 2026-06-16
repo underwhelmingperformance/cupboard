@@ -18,14 +18,26 @@ import {
 	runOidcTrustShow
 } from './oidc-trust.ts';
 
+const ciGrant: OidcTrustSummary['permittedGrants'][number] = {
+	type: 'cupboard_cache',
+	actions: [
+		'upload:negotiate',
+		'upload:prepare',
+		'upload:status',
+		'upload:commit'
+	],
+	resources: { cache: { exact: 'owner-ci', validate: 'cacheName' } }
+};
+const ciGrantRow =
+	'cache owner-ci: upload:negotiate, upload:prepare, upload:status, upload:commit';
+
 function summary(overrides: Partial<OidcTrustSummary>): OidcTrustSummary {
 	return {
 		id: 'rule-1',
 		issuer: 'https://token.actions.githubusercontent.com',
 		audience: 'https://cache.example.workers.dev',
-		scope: 'write',
 		claims: { repository_owner_id: '5678' },
-		allowedRoots: ['github:owner/'],
+		permittedGrants: [ciGrant],
 		disabled: false,
 		...overrides
 	};
@@ -48,7 +60,7 @@ describe('runOidcTrustList', () => {
 			rules: [
 				summary({
 					id: 'owner',
-					scope: 'admin',
+					permittedGrants: [{ type: 'cupboard_wildcard' }],
 					issuer: 'https://accounts.google.com'
 				}),
 				summary({ id: 'rule-1', disabled: true })
@@ -64,12 +76,12 @@ describe('runOidcTrustList', () => {
 				{
 					label: 'owner',
 					value:
-						'admin https://accounts.google.com aud=https://cache.example.workers.dev'
+						'wildcard https://accounts.google.com aud=https://cache.example.workers.dev'
 				},
 				{
 					label: 'rule-1',
 					value:
-						'write https://token.actions.githubusercontent.com aud=https://cache.example.workers.dev (disabled)'
+						'1 grant(s) https://token.actions.githubusercontent.com aud=https://cache.example.workers.dev (disabled)'
 				}
 			]
 		]);
@@ -98,7 +110,7 @@ describe('runOidcTrustAdd', () => {
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: 'https://cache.example.workers.dev',
 			claims: { repository_owner_id: '5678', repository_id: '1234' },
-			allowedRoots: ['github:owner/']
+			permittedGrants: [ciGrant]
 		};
 
 		await runOidcTrustAdd(body, reporter(results), {
@@ -120,8 +132,7 @@ describe('runOidcTrustAdd', () => {
 					{ label: 'Audience', value: 'https://cache.example.workers.dev' },
 					{ label: 'Claims', value: 'repository_owner_id=5678' },
 					{ label: '', value: 'repository_id=1234' },
-					{ label: 'Scope', value: 'write' },
-					{ label: 'Allowed roots', value: 'github:owner/' }
+					{ label: 'Grants', value: ciGrantRow }
 				]
 			]
 		});
@@ -157,8 +168,7 @@ describe('runOidcTrustShow', () => {
 					{ label: 'Audience', value: 'https://cache.example.workers.dev' },
 					{ label: 'Claims', value: 'repository_owner_id=5678' },
 					{ label: '', value: 'repository_id=1234' },
-					{ label: 'Scope', value: 'write' },
-					{ label: 'Allowed roots', value: 'github:owner/' }
+					{ label: 'Grants', value: ciGrantRow }
 				]
 			]
 		});

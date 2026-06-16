@@ -2770,14 +2770,21 @@ names either an input field or the stored row the operation resolves.
 The token endpoint issues from a request, not from server-side construction. A
 client presents its OIDC subject token and the `authorization_details` it wants;
 the server verifies the subject token and checks each requested grant against
-the matching trust rule. If any requested grant is not permitted the whole
-request is rejected with `invalid_authorization_details`; the server narrows to
-a granted subset only when the client sets the cupboard-specific
-`partial_authorization_details` request parameter, which RFC 9396 does not
-define, so a client never silently receives less than it asked for. The client
-names the concrete resource it knows from its own context, for example the cache
-`pr-123`, and the server never parses a provider's claim format to build that
-name.
+the matching trust rule. The check is all-or-nothing: if any requested grant is
+not permitted the whole request is rejected with
+`invalid_authorization_details`, so a client never silently receives less than
+it asked for. The client names the concrete resource it knows from its own
+context, for example the cache `pr-123`, and the server never parses a
+provider's claim format to build that name.
+
+A CI exchange must say what it wants: for a claim-bound rule (one that does not
+permit a wildcard), `authorization_details` is required, so the token endpoint
+never reconstructs authority from claims and "what did this job ask for?" stays
+explicit. Missing details on such an exchange is `invalid_request`; an empty
+array, or any detail malformed, unknown, or not permitted by the rule, is
+`invalid_authorization_details`. An interactive owner/admin exchange is the
+other trust class: its rule permits a wildcard, so omitting
+`authorization_details` issues that wildcard, and a request only attenuates it.
 
 A trust rule is data. It permits a requested grant when the operations are
 allowed and each requested resource satisfies the rule's bindings. There are two
@@ -3135,7 +3142,7 @@ for attenuation applies before the new token is issued.
 
 Each step keeps a working deployment.
 
-- [ ] **Grant model and authoriser.** Define the operation and resource types,
+- [x] **Grant model and authoriser.** Define the operation and resource types,
       the grant set, and the covering test. Add the authoriser and route every
       contract procedure, on the tenant DO and the control plane, plus every
       wire-format write path, through it. Replace the `scope` claim with
@@ -3147,14 +3154,20 @@ Each step keeps a working deployment.
       claim bindings on a rule, tenant and control alike. On a token request,
       verify each requested `authorization_details` against the rule, applying
       the generic transform library (exact, capture, slug) and re-validating the
-      bound value against the resource grammar. Reject the whole request with
-      `invalid_authorization_details` unless the client sets the
-      `partial_authorization_details` parameter. Return the granted
+      bound value against the resource grammar. The token endpoint never
+      reconstructs authority from claims: a claim-bound (CI) rule, one that does
+      not permit a wildcard, must send `authorization_details`, and missing
+      details on such an exchange is `invalid_request`. An empty array, or any
+      detail malformed, unknown, or not permitted by the rule, is
+      `invalid_authorization_details`, refusing the whole request rather than
+      narrowing it. The interactive owner/admin class is the exception: its rule
+      permits a wildcard, so omitting `authorization_details` issues the
+      wildcard, and a request only attenuates it. Return the granted
       `authorization_details` in the token response and advertise
       `authorization_details_types_supported` in the authorisation-server
       metadata, dropping `scopes_supported`. Tests for a satisfied binding, a
-      claim that fails the binding, whole-request rejection, and a bound value
-      that would escape a selector.
+      claim that fails the binding, whole-request rejection, a CI exchange that
+      omits details, and a bound value that would escape a selector.
 - [ ] **Attenuation and refresh.** Add the RFC 8693 exchange that narrows a
       presented token to a requested subset of its `authorization_details`,
       refusing any request that is not covered. Refresh tokens are issued only
@@ -3181,9 +3194,8 @@ Each step keeps a working deployment.
   extra grant.
 - A rule issues a token confined to the PR's own cache when the requested cache
   satisfies the claim binding; a request for a grant whose claim does not
-  satisfy the binding is rejected whole with `invalid_authorization_details`
-  unless the client set `partial_authorization_details`; a bound value that
-  fails `cacheNamePattern` is rejected at issue time.
+  satisfy the binding is rejected whole with `invalid_authorization_details`; a
+  bound value that fails `cacheNamePattern` is rejected at issue time.
 - A resource-free grant covers a tenant domain verb such as key rotation, and a
   cache-only grant does not; neither carries a dummy resource field.
 - An attenuated token reaches a strict subset of the presenter's resources and

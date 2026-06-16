@@ -101,7 +101,6 @@ describe('CupboardClient.tokenExchange', () => {
 			access_token: 'write-jwt',
 			token_type: 'Bearer',
 			expires_in: 900,
-			scope: 'write',
 			issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
 		};
 		const { client, captured } = capturingClient(response);
@@ -126,7 +125,6 @@ describe('CupboardClient.tokenExchange', () => {
 			access_token: 'admin-jwt-2',
 			token_type: 'Bearer',
 			expires_in: 600,
-			scope: 'admin',
 			refresh_token: 'refresh-2'
 		};
 		const { client, captured } = capturingClient(response);
@@ -150,7 +148,6 @@ describe('CupboardClient.tokenExchange', () => {
 			access_token: 'write-jwt',
 			token_type: 'Bearer',
 			expires_in: 900,
-			scope: 'write',
 			issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
 		};
 		const client = new CupboardClient(

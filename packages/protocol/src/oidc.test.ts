@@ -42,14 +42,34 @@ describe('tokenExchangeRequestSchema', () => {
 
 		expect(parsed).toStrictEqual(request);
 	});
+
+	it('parses an authorization_details JSON form field', () => {
+		const details = [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+		];
+		const parsed = tokenExchangeRequestSchema.parse({
+			...request,
+			authorization_details: JSON.stringify(details)
+		});
+
+		expect(parsed.authorization_details).toStrictEqual(details);
+	});
+
+	it('rejects an authorization_details field that is not JSON', () => {
+		expect(
+			tokenExchangeRequestSchema.safeParse({
+				...request,
+				authorization_details: 'not json'
+			}).success
+		).toBe(false);
+	});
 });
 
 describe('tokenResponseSchema', () => {
 	const clientResponse = {
 		access_token: 'jwt',
 		token_type: 'Bearer',
-		expires_in: 600,
-		scope: 'admin'
+		expires_in: 600
 	};
 
 	it.each([
@@ -59,16 +79,16 @@ describe('tokenResponseSchema', () => {
 			expected: clientResponse
 		},
 		{
-			name: 'a response carrying issued_token_type',
+			name: 'a response carrying issued_token_type and granted details',
 			value: {
 				...clientResponse,
-				scope: 'write',
-				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+				authorization_details: [{ type: 'cupboard_wildcard' }]
 			},
 			expected: {
 				...clientResponse,
-				scope: 'write',
-				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+				issued_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+				authorization_details: [{ type: 'cupboard_wildcard' }]
 			}
 		}
 	])('accepts $name', ({ value, expected }) => {
@@ -98,15 +118,37 @@ describe('oidc trust schemas', () => {
 		issuer: 'https://token.actions.githubusercontent.com',
 		audience: 'https://cache.example.workers.dev',
 		claims: { repository_id: '1234', repository_owner_id: '5678' },
-		allowedRoots: ['github:owner/repo/']
+		permittedGrants: [
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit', 'root:set'],
+				resources: {
+					cache: {
+						equalsTemplate: 'pr-{ref}',
+						substitutions: {
+							ref: {
+								claim: 'ref',
+								capture: {
+									pattern: '^refs/pull/(?<ref>[0-9]+)/merge$',
+									group: 'ref'
+								}
+							}
+						},
+						validate: 'cacheName'
+					},
+					root: { equalsResource: 'cache', validate: 'rootName' }
+				}
+			}
+		],
+		display: { provider: 'github', repository: 'owner/repo' }
 	};
 	const summary = {
 		id: 'r1',
 		issuer: addBody.issuer,
 		audience: addBody.audience,
-		scope: 'write',
 		claims: addBody.claims,
-		allowedRoots: addBody.allowedRoots,
+		permittedGrants: addBody.permittedGrants,
+		display: addBody.display,
 		disabled: false
 	};
 
@@ -176,9 +218,12 @@ describe('oidc trust schemas', () => {
 		});
 	});
 
-	it('rejects a summary with an unknown scope', () => {
+	it('rejects a summary with an unknown grant type', () => {
 		expect(
-			oidcTrustSummarySchema.safeParse({ ...summary, scope: 'root' }).success
+			oidcTrustSummarySchema.safeParse({
+				...summary,
+				permittedGrants: [{ type: 'cupboard_unknown' }]
+			}).success
 		).toBe(false);
 	});
 });

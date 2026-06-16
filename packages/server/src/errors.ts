@@ -293,6 +293,7 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 export type OAuthErrorCode =
 	| 'invalid_request'
 	| 'invalid_grant'
+	| 'invalid_authorization_details'
 	| 'unsupported_grant_type';
 
 /**
@@ -349,6 +350,38 @@ export class TokenRequestBodyInvalidError extends InvalidRequestError {
 	constructor(public override readonly cause: z.ZodError) {
 		super(z.prettifyError(cause));
 		this.name = 'TokenRequestBodyInvalidError';
+	}
+}
+
+/**
+ * A claim-bound (CI) exchange omitted `authorization_details`. Only the
+ * interactive owner class may exchange without naming the grants it wants, so a
+ * CI rule must say what it asks for rather than have it inferred.
+ */
+export class AuthorizationDetailsRequiredError extends InvalidRequestError {
+	readonly problem = 'authorization-details-required';
+
+	constructor() {
+		super('authorization_details is required for this trust rule');
+		this.name = 'AuthorizationDetailsRequiredError';
+	}
+}
+
+/**
+ * `invalid_authorization_details` (RFC 9396 §5): a requested grant was empty,
+ * malformed, or not permitted by the matching trust rule. The request is refused
+ * whole rather than narrowed, so a client never silently receives less than it
+ * asked for.
+ */
+export class InvalidAuthorizationDetailsError extends OAuthError {
+	readonly status = StatusCodes.BAD_REQUEST;
+	readonly error = 'invalid_authorization_details';
+	readonly problem: string;
+
+	constructor(problem: string) {
+		super('the requested authorization_details are not permitted');
+		this.problem = problem;
+		this.name = 'InvalidAuthorizationDetailsError';
 	}
 }
 

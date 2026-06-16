@@ -53,7 +53,7 @@ const authorizationServerMetadataSchema = z.strictObject({
 	token_endpoint: z.string(),
 	jwks_uri: z.string(),
 	grant_types_supported: z.array(z.string()),
-	scopes_supported: z.array(z.string()),
+	authorization_details_types_supported: z.array(z.string()),
 	token_endpoint_auth_methods_supported: z.array(z.string())
 });
 
@@ -313,7 +313,11 @@ describe('control plane POST /token', () => {
 				token_endpoint: `${origin}/token`,
 				jwks_uri: `${origin}/.well-known/jwks.json`,
 				grant_types_supported: [tokenExchangeGrantType],
-				scopes_supported: ['admin'],
+				authorization_details_types_supported: [
+					'cupboard_tenant',
+					'cupboard_control',
+					'cupboard_wildcard'
+				],
 				token_endpoint_auth_methods_supported: ['none']
 			}
 		});
