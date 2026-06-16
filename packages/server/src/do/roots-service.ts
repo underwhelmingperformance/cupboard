@@ -9,20 +9,12 @@ import {
 } from '@cupboard/protocol/retention';
 import { and, eq } from 'drizzle-orm';
 
-import { type AccessClaims } from '../auth/auth.ts';
 import * as schema from '../db/schema.ts';
-import {
-	RootNotPermittedError,
-	RootTargetsUnavailableError
-} from '../errors.ts';
+import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 
 import { type CacheAdminService } from './cache-admin-service.ts';
-import {
-	type RootSetCommand,
-	rootWithinConstraint,
-	type ServerContext
-} from './context.ts';
+import { type RootSetCommand, type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
@@ -49,13 +41,10 @@ export class RootsService {
 	) {}
 
 	async setRoot(
-		claims: AccessClaims,
 		cache: string,
 		rootName: RootName,
 		body: ParsedRootSetBody
 	): Promise<RootSetResponse> {
-		this.enforceRootConstraint(claims, rootName);
-
 		const requested: RootSetCommand = {
 			name: rootName,
 			targets: resolveRootTargets(body.targets),
@@ -101,23 +90,6 @@ export class RootsService {
 			requested.targets,
 			activation.presence
 		);
-	}
-
-	private enforceRootConstraint(claims: AccessClaims, rootName: string): void {
-		// An admin token (owner) may set any root. A write token (CI) may set only
-		// the roots its `cb_roots` permits; carrying none — absent or empty — it
-		// may set nothing.
-		if (claims.scope === 'admin') {
-			return;
-		}
-
-		const permitted = claims.cbRoots ?? [];
-
-		if (permitted.some((entry) => rootWithinConstraint(rootName, entry))) {
-			return;
-		}
-
-		throw new RootNotPermittedError(rootName);
 	}
 
 	private writeRoot(cache: string, request: RootSetCommand): StoredRoot {

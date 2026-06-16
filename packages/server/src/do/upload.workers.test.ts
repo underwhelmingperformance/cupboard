@@ -27,6 +27,7 @@ import {
 	afterGrace,
 	authorisedFetch,
 	bootstrap,
+	cacheWriteGrants,
 	clearBlobStorage,
 	commitPath,
 	commitSharedPath,
@@ -3120,7 +3121,10 @@ describe('upload flow', () => {
 				admin,
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
 			);
-			const writeToken = await issueServerSignedToken('write', 'ci', ['main']);
+			const writeToken = await issueServerSignedToken(
+				cacheWriteGrants(['main']),
+				'ci'
+			);
 
 			const setRoot = await authorisedFetch(
 				'/cache/_default/roots/main',

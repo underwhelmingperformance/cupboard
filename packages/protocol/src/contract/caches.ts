@@ -8,14 +8,19 @@ import {
 	cacheSummarySchema
 } from '../caches.ts';
 
-import { adminProcedure } from './base.ts';
+import { baseProcedure } from './base.ts';
 
 export const cachesContract = {
-	list: adminProcedure
+	list: baseProcedure
+		.meta({ requires: 'cache:list' })
 		.route({ method: 'GET', path: '/caches' })
 		.output(cacheListResponseSchema),
 
-	put: adminProcedure
+	put: baseProcedure
+		.meta({
+			requires: 'cache:create',
+			resource: { cache: { field: 'cacheName' } }
+		})
 		.route({ method: 'PUT', path: '/caches/{cacheName}' })
 		.input(
 			z.strictObject({
@@ -25,8 +30,12 @@ export const cachesContract = {
 		)
 		.output(cacheSummarySchema),
 
-	remove: adminProcedure
-		.meta({ scope: 'admin', maintenance: true })
+	remove: baseProcedure
+		.meta({
+			requires: 'cache:delete',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true
+		})
 		.route({
 			method: 'DELETE',
 			path: '/caches/{cacheName}',

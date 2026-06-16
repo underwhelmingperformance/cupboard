@@ -7,13 +7,13 @@ import {
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { DurableObject } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
 
 import migrations from '../../drizzle/migrations.js';
-import type { AccessScope } from '../auth/auth.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CommitUpgradeRequiredError,
@@ -26,6 +26,7 @@ import { serverErrorHandler } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
+import { authoriseRequest } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
 
@@ -454,7 +455,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.on(
 			'GET',
 			['/uploads/:id/commit', '/cache/:cacheName/uploads/:id/commit'],
-			this.scoped('write'),
+			this.commitGuard(),
 			(context) =>
 				this.commitSocket(
 					context.req.raw,
@@ -575,8 +576,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// authentication, the maintenance bracket, and the domain services.
 	private rpcServices(): TenantRpcServices {
 		return {
-			requireScope: (request, scope) =>
-				this.authKeys.requireScope(request, scope),
+			authenticate: (request) => this.authKeys.authenticate(request),
+			pendingCache: (id) => this.pendingCache(id),
 			withMaintenanceEligibility: (body) =>
 				this.withMaintenanceEligibility(body),
 			cacheAdmin: this.cacheAdmin,
@@ -595,16 +596,46 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
-	// Authenticates a route against the tenant's auth keys, making the verified
-	// claims available to the handler. Admin tokens satisfy every scope.
-	private scoped(scope: AccessScope) {
+	// Authorises the commit WebSocket, the one write route outside the contract:
+	// `upload:commit` against the cache the pending upload was opened for, read
+	// from its row rather than the path.
+	private commitGuard() {
 		return createMiddleware<TenantHonoEnv>(async (context, next) => {
-			context.set(
-				'claims',
-				await this.authKeys.requireScope(context.req.raw, scope)
+			const claims = await this.authKeys.authenticate(context.req.raw);
+
+			await authoriseRequest(
+				claims,
+				{ requires: 'upload:commit', resource: { cache: { pending: true } } },
+				{ id: context.req.param('id') },
+				(id) => this.pendingCache(id)
 			);
+
 			await next();
 		});
+	}
+
+	// The cache a pending upload or attestation row was opened against, for the
+	// id-only routes the authoriser cannot read a cache from the path. The
+	// durable-SQLite reads are synchronous; the resolver is a promise so the
+	// authoriser can stay uniform across resource sources.
+	private pendingCache(id: string): Promise<string | undefined> {
+		const upload = this.context.db
+			.select({ cache: schema.pendingUploads.cache })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, id))
+			.get();
+
+		if (upload !== undefined) {
+			return Promise.resolve(upload.cache);
+		}
+
+		const attestation = this.context.db
+			.select({ cache: schema.pendingAttestations.cache })
+			.from(schema.pendingAttestations)
+			.where(eq(schema.pendingAttestations.id, id))
+			.get();
+
+		return Promise.resolve(attestation?.cache);
 	}
 
 	private async withMaintenanceEligibility<T>(

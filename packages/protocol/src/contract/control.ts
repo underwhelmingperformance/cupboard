@@ -18,9 +18,12 @@ import {
 	tenantSummarySchema
 } from '../tenants.ts';
 
-// Every control procedure requires a control-issued admin token; there is no
-// scope gradation to declare, so the base carries only the auth failures.
-const controlProcedure = oc.errors({
+import { type AuthzMeta } from './base.ts';
+
+// Control procedures carry the same grant metadata as tenant ones; the control
+// plane just verifies the token against its own issuer and keys first. Each
+// procedure declares the operation it requires.
+const controlProcedure = oc.$meta<AuthzMeta>({}).errors({
 	UNAUTHORIZED: {},
 	FORBIDDEN: {}
 });
@@ -33,19 +36,23 @@ const controlProcedure = oc.errors({
  */
 export const controlContract = {
 	check: controlProcedure
+		.meta({ requires: 'control:check' })
 		.route({ method: 'GET', path: '/check' })
 		.output(controlCheckReportSchema),
 
 	keys: {
 		list: controlProcedure
+			.meta({ requires: 'control-key:list' })
 			.route({ method: 'GET', path: '/keys' })
 			.output(controlKeyListResponseSchema),
 
 		rotate: controlProcedure
+			.meta({ requires: 'control-key:rotate' })
 			.route({ method: 'POST', path: '/keys/rotate' })
 			.output(controlKeyRotateResponseSchema),
 
 		retire: controlProcedure
+			.meta({ requires: 'control-key:retire' })
 			.route({ method: 'POST', path: '/keys/retire/{kid}' })
 			.input(z.strictObject({ kid: z.string() }))
 			.output(controlKeyRetireResponseSchema)
@@ -53,30 +60,51 @@ export const controlContract = {
 
 	tenants: {
 		list: controlProcedure
+			.meta({ requires: 'tenant:list' })
 			.route({ method: 'GET', path: '/tenants' })
 			.output(tenantListResponseSchema),
 
 		create: controlProcedure
+			.meta({
+				requires: 'tenant:create',
+				resource: { tenant: { field: 'id' } }
+			})
 			.route({ method: 'POST', path: '/tenants' })
 			.input(tenantCreateBodySchema)
 			.output(tenantSummarySchema),
 
 		suspend: controlProcedure
+			.meta({
+				requires: 'tenant:suspend',
+				resource: { tenant: { field: 'id' } }
+			})
 			.route({ method: 'POST', path: '/tenants/{id}/suspend' })
 			.input(z.strictObject({ id: z.string() }))
 			.output(tenantMutateResponseSchema),
 
 		resume: controlProcedure
+			.meta({
+				requires: 'tenant:resume',
+				resource: { tenant: { field: 'id' } }
+			})
 			.route({ method: 'POST', path: '/tenants/{id}/resume' })
 			.input(z.strictObject({ id: z.string() }))
 			.output(tenantMutateResponseSchema),
 
 		setReadMode: controlProcedure
+			.meta({
+				requires: 'tenant:set-read-mode',
+				resource: { tenant: { field: 'id' } }
+			})
 			.route({ method: 'POST', path: '/tenants/{id}/read-mode' })
 			.input(z.strictObject({ id: z.string(), readMode: tenantReadModeSchema }))
 			.output(tenantReadModeResponseSchema),
 
 		rotateReadCredential: controlProcedure
+			.meta({
+				requires: 'tenant:rotate-read-credential',
+				resource: { tenant: { field: 'id' } }
+			})
 			.route({ method: 'POST', path: '/tenants/{id}/read-credential' })
 			.input(
 				z.strictObject({ id: z.string(), read: tenantReadCredentialSchema })
@@ -84,11 +112,19 @@ export const controlContract = {
 			.output(tenantReadModeResponseSchema),
 
 		clearReadCredential: controlProcedure
+			.meta({
+				requires: 'tenant:clear-read-credential',
+				resource: { tenant: { field: 'id' } }
+			})
 			.route({ method: 'DELETE', path: '/tenants/{id}/read-credential' })
 			.input(z.strictObject({ id: z.string() }))
 			.output(tenantReadModeResponseSchema),
 
 		remove: controlProcedure
+			.meta({
+				requires: 'tenant:remove',
+				resource: { tenant: { field: 'id' } }
+			})
 			.route({ method: 'DELETE', path: '/tenants/{id}' })
 			.input(z.strictObject({ id: z.string() }))
 			.output(tenantMutateResponseSchema)
@@ -100,6 +136,7 @@ export const controlContract = {
 		// representation does not leave existing tenants dark until the hourly
 		// cron; it touches only the KV gate, never any tenant's data.
 		rebuild: controlProcedure
+			.meta({ requires: 'membership:rebuild' })
 			.route({ method: 'POST', path: '/membership/rebuild' })
 			.output(membershipRebuildResponseSchema)
 	}

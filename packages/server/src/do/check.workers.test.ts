@@ -9,6 +9,7 @@ import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
+	cacheWriteGrants,
 	corruptCommittedNarInfo,
 	initialise,
 	issueServerSignedToken,
@@ -217,7 +218,7 @@ describe('storage check', () => {
 
 	it('requires admin scope', async () => {
 		await initialise();
-		const writeToken = await issueServerSignedToken('write');
+		const writeToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const response = await authorisedFetch('/check', writeToken);
 

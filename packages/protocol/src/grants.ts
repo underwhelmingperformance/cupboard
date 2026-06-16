@@ -1,5 +1,5 @@
 import {
-	cacheNameSchema,
+	cacheSelectorSchema,
 	rootNameSchema,
 	tenantIdSchema
 } from '@cupboard/nix/scalars';
@@ -158,7 +158,7 @@ export const authorizationDetailSchema = z.discriminatedUnion('type', [
 	z.strictObject({
 		type: z.literal('cupboard_cache'),
 		actions: z.array(z.enum(cacheOperations)).min(1),
-		cache: cacheNameSchema,
+		cache: cacheSelectorSchema,
 		root: rootNameSchema.optional()
 	}),
 	z.strictObject({

@@ -15,10 +15,12 @@ import { narInfos } from '../db/schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	adminGrants,
 	authorisedFetch,
 	blobStateCount,
 	bootstrap,
 	cacheScopedPath,
+	cacheWriteGrants,
 	CommitSocketError,
 	commitUpload,
 	commitUploadRejection,
@@ -207,7 +209,7 @@ describe('named caches', () => {
 	it('mirrors the per-route scope under a cache prefix', async () => {
 		await useTestServer('named-cache-scope');
 		await bootstrap();
-		const admin = await issueServerSignedToken('admin', 'owner');
+		const admin = await issueServerSignedToken(adminGrants(), 'owner');
 		// Activation gates on servability, so the target must be committed first.
 		await pushPath(
 			admin,
@@ -218,7 +220,10 @@ describe('named caches', () => {
 			}),
 			'builds'
 		);
-		const writeToken = await issueServerSignedToken('write', 'ci', ['channel']);
+		const writeToken = await issueServerSignedToken(
+			cacheWriteGrants(['channel'], 'builds'),
+			'ci'
+		);
 
 		const rootPut = await authorisedFetch(
 			'/cache/builds/roots/channel',
@@ -262,7 +267,7 @@ describe('named caches', () => {
 		);
 		const malformed = await authorisedFetch(
 			'/cache/Bad_NAME!/stats',
-			await issueServerSignedToken('admin')
+			await issueServerSignedToken(adminGrants())
 		);
 
 		expect({

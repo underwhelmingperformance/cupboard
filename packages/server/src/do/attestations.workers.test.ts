@@ -26,6 +26,7 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	attestationReferenceRows,
 	authorisedWorkerFetch,
+	cacheWriteGrants,
 	casObjectRows,
 	clearBlobStorage,
 	commitUploadViaWorker,
@@ -272,7 +273,7 @@ describe('attestation attach and reads', () => {
 		const otherToken = await issueTokenForTenant(
 			testServerFor('other'),
 			issuer,
-			'write'
+			cacheWriteGrants()
 		);
 		await pushPathThroughTenant('other', otherToken, metadata, nar);
 
