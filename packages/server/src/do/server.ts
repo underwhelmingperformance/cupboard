@@ -23,11 +23,7 @@ import {
 	ZstdUnavailableError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import {
-	internalOrigin,
-	textResponse,
-	verificationBatchSize
-} from '../http/http.ts';
+import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
@@ -68,10 +64,7 @@ import {
 import { TokenExchangeService } from './token-exchange-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
-import {
-	verificationLimitSchema,
-	VerificationService
-} from './verification-service.ts';
+import { VerificationService } from './verification-service.ts';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -454,36 +447,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		// A bounded reconciling pass driven by the cron tick. Its own route, kept
-		// separate from `/gc`, so each can run and be asserted independently.
-		// Interactive runs purge this colo's edge cache via the caller's public
-		// origin; the cron sweep arrives on the internal origin, cannot know the
-		// public URL, and relies on the narinfo TTL and the orphan-blob grace
-		// window instead.
-		this.app.post(
-			'/verify',
-			this.scoped('admin'),
-			this.maintenance(),
-			async (context) => {
-				const { origin } = new URL(context.req.url);
-				const requested = context.req.query('limit');
-				const limit =
-					requested === undefined
-						? verificationBatchSize
-						: Math.min(
-								parseRequestValue(verificationLimitSchema, requested),
-								verificationBatchSize
-							);
-
-				return context.json(
-					await this.verification.verify(
-						origin === internalOrigin ? undefined : origin,
-						limit
-					)
-				);
-			}
-		);
-
 		// The commit endpoint is a WebSocket: the upgrade request carries the
 		// write token, the first frame settles or defers the path, and a
 		// deferred upload's socket parks (hibernating) until verification
@@ -627,7 +590,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			deletionQueue: this.deletionQueue,
 			garbageCollection: this.garbageCollection,
 			uploads: this.uploads,
-			attestations: this.attestations
+			attestations: this.attestations,
+			verification: this.verification
 		};
 	}
 
@@ -640,21 +604,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				await this.authKeys.requireScope(context.req.raw, scope)
 			);
 			await next();
-		});
-	}
-
-	// Brackets a mutating route with the maintenance-eligibility bookkeeping:
-	// invalidated before the work, reconciled after it, failing open if the
-	// reconciliation cannot run.
-	private maintenance() {
-		return createMiddleware<TenantHonoEnv>(async (_context, next) => {
-			await this.maintenanceEligibility.invalidate();
-
-			try {
-				await next();
-			} finally {
-				await this.reconcileMaintenanceEligibility();
-			}
 		});
 	}
 

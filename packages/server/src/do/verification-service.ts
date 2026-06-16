@@ -4,7 +4,6 @@ import {
 	type UploadPathMetadataFields
 } from '@cupboard/protocol/upload';
 import { and, asc, eq, gt, or } from 'drizzle-orm';
-import { z } from 'zod';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
@@ -17,11 +16,6 @@ import { parseStoredUploadMetadata, type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type UploadStateService } from './upload-state-service.ts';
-
-// An optional `?limit` on `POST /verify`: a positive integer, clamped to
-// `verificationBatchSize` so a manual run cannot scan an unbounded batch in one
-// critical section.
-export const verificationLimitSchema = z.coerce.number().int().min(1);
 
 export class VerificationService {
 	constructor(
