@@ -1,5 +1,7 @@
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
 import type { Command } from 'commander';
 
+import { pushAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
@@ -120,7 +122,14 @@ export function registerPushCommand(
 
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
-				audience: options.audience ?? url
+				audience: options.audience ?? url,
+				// A CI exchange must name what it wants; request exactly this push's
+				// cache, with attestation and root operations only when used.
+				authorizationDetails: pushAuthorizationDetails({
+					cacheSelector: selectorForCache(options.cache ?? DEFAULT_CACHE),
+					attest: options.attest !== false,
+					...(options.root === undefined ? {} : { root: options.root })
+				})
 			});
 
 			await runPush(paths, reporter, {
