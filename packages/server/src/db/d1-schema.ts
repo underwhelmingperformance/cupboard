@@ -80,17 +80,24 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 });
 
 // The control-plane trust policy: which external OIDC identity may exchange a
-// subject token for a control admin token. It mirrors a tenant `oidc_trust` rule
-// but is global and always grants the control admin scope — `iss`/`aud` must
-// match and every `claims_json` entry (a pinned `sub` lives here) must match
-// exactly. Seeded by the gated first-signup claim; the control plane is its own
+// subject token for the control grants `permitted_grants_json` permits. It
+// mirrors a tenant `oidc_trust` rule but is global — `iss`/`aud` must match and
+// every `claims_json` entry (a pinned `sub` lives here) must match exactly. The
+// bootstrap owner is seeded with a wildcard by the gated first-signup claim;
+// scoped identities are added through the control admin API. `disabled_at`
+// soft-disables without losing the audit row. The control plane is its own
 // issuer, entirely separate from any tenant's.
 export const controlTrust = sqliteTable('control_trust', {
 	id: text('id').primaryKey(),
 	issuer: text('issuer').notNull(),
 	audience: text('audience').notNull(),
 	claimsJson: text('claims_json').notNull().default('{}'),
-	createdAt: text('created_at').notNull()
+	permittedGrantsJson: text('permitted_grants_json')
+		.notNull()
+		.default('[{"type":"cupboard_wildcard"}]'),
+	displayJson: text('display_json'),
+	createdAt: text('created_at').notNull(),
+	disabledAt: text('disabled_at')
 });
 
 // The tenant registry: one row per provisioned cache, written only by the Worker.
