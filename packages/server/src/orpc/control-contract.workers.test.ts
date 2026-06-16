@@ -61,6 +61,49 @@ describe('control contract round trip', () => {
 		});
 	});
 
+	it('drives the control trust rules through the derived client', async () => {
+		const client = controlClient(await issueControlAdminToken());
+
+		const added = await client.oidcTrust.add({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: 'https://cupboard.example/control',
+			claims: { sub: 'repo:acme/provision:ref:refs/heads/main' },
+			permittedGrants: [
+				{
+					type: 'cupboard_tenant',
+					actions: ['tenant:create'],
+					resources: { tenant: { exact: 'acme', validate: 'tenant' } }
+				}
+			]
+		});
+		const id = z.uuid().parse(added.id);
+		const fetched = await client.oidcTrust.get({ id });
+		const removed = await client.oidcTrust.remove({ id });
+		const listed = await client.oidcTrust.list();
+
+		expect({
+			added: added.permittedGrants.length,
+			fetchedId: fetched.id,
+			removed,
+			disabledInListing: listed.rules.find((rule) => rule.id === id)?.disabled
+		}).toStrictEqual({
+			added: 1,
+			fetchedId: id,
+			removed: { id, removed: true },
+			disabledInListing: true
+		});
+	});
+
+	it('refuses a control trust write from a token scoped away from it', async () => {
+		const scoped = await issueControlAdminToken('writer', cacheWriteGrants());
+		const client = controlClient(scoped);
+
+		const [error] = await safe(client.oidcTrust.list());
+
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({ code: 'FORBIDDEN' });
+	});
+
 	it('drives the tenant registry through the derived client', async () => {
 		const client = controlClient(await issueControlAdminToken());
 

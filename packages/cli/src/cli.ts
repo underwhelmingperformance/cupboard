@@ -18,7 +18,10 @@ import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
-import { registerOidcTrustCommands } from './commands/oidc-trust.ts';
+import {
+	registerControlOidcTrustCommands,
+	registerOidcTrustCommands
+} from './commands/oidc-trust.ts';
 import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
@@ -74,6 +77,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerKeyCommands(program, options);
 	registerAuthKeyCommands(program, options);
 	registerControlKeyCommands(program, options);
+	registerControlOidcTrustCommands(program, options);
 	registerTenantCommands(program, options);
 	registerCacheCommands(program, options);
 	registerPolicyCommands(program, options);
