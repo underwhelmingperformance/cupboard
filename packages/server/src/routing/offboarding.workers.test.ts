@@ -19,6 +19,7 @@ import {
 	attemptPushToTenant,
 	blobReferenceRows,
 	blobStateNarHashes,
+	cacheWriteGrants,
 	clearBlobStorage,
 	deleteTestBase,
 	issueTokenForTenant,
@@ -62,7 +63,11 @@ async function provisionedWritingTenant(): Promise<{
 	nextTenant += 1;
 	const id = `offboard-test-${String(nextTenant)}`;
 	const issuer = await provisionNamedTenant(id);
-	const token = await issueTokenForTenant(testServerFor(id), issuer, 'write');
+	const token = await issueTokenForTenant(
+		testServerFor(id),
+		issuer,
+		cacheWriteGrants()
+	);
 
 	return { id, token };
 }

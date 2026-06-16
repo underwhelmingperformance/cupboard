@@ -3,8 +3,10 @@ import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	adminGrants,
 	blobReferenceRows,
 	blobStateNarHashes,
+	cacheWriteGrants,
 	clearBlobStorage,
 	deleteTestBase,
 	expectStats,
@@ -41,7 +43,11 @@ async function stageDeferredForNewTenant(
 	id: string
 ): Promise<{ readonly token: string; readonly uploadId: string }> {
 	const issuer = await provisionNamedTenant(id);
-	const token = await issueTokenForTenant(testServerFor(id), issuer, 'write');
+	const token = await issueTokenForTenant(
+		testServerFor(id),
+		issuer,
+		cacheWriteGrants()
+	);
 	const nar = await verifiableNar(`sweep-${id}`);
 	const metadata = uploadMetadata({
 		storePathHash: 'a'.repeat(32),
@@ -74,7 +80,7 @@ describe('multi-tenant writes', () => {
 		const token = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
-			'write'
+			cacheWriteGrants()
 		);
 		const nar = await verifiableNar('acme-write');
 		const metadata = uploadMetadata({
@@ -129,7 +135,7 @@ describe('multi-tenant writes', () => {
 		const acmeToken = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
-			'write'
+			cacheWriteGrants()
 		);
 		const fixtureToken = await initialise();
 		const nar = await verifiableNar('shared-write');
@@ -169,7 +175,7 @@ describe('multi-tenant writes', () => {
 		const acmeToken = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
-			'admin'
+			adminGrants()
 		);
 		const fixtureToken = await initialise();
 		const fixtureNar = await verifiableNar('fixture-stats');
@@ -213,7 +219,7 @@ describe('multi-tenant writes', () => {
 		const token = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
-			'write'
+			cacheWriteGrants()
 		);
 		const nar = await verifiableNar('acme-deferred');
 		const metadata = uploadMetadata({

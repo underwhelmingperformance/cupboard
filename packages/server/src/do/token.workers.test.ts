@@ -360,7 +360,7 @@ describe('refresh grant', () => {
 			refreshedHasRefreshToken: typeof refreshedBody.refresh_token,
 			rotated: refreshedBody.refresh_token !== exchanged.refresh_token,
 			subject: claims.sub,
-			scopeClaim: claims.scope,
+			grantsClaim: claims.authorization_details,
 			replayedStatus: replayed.status,
 			replayedError: replayedBody.error,
 			replayedProblem: replayedBody.problem
@@ -374,7 +374,7 @@ describe('refresh grant', () => {
 			refreshedHasRefreshToken: 'string',
 			rotated: true,
 			subject: 'alice',
-			scopeClaim: 'admin',
+			grantsClaim: [{ type: 'cupboard_wildcard' }],
 			replayedStatus: StatusCodes.BAD_REQUEST,
 			replayedError: 'invalid_grant',
 			replayedProblem: 'stale-refresh-token'

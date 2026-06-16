@@ -6,6 +6,7 @@ import { implement } from '@orpc/server';
 
 import { internalOrigin, verificationBatchSize } from '../http/http.ts';
 
+import { authoriseRequest } from './authorise.ts';
 import { type TenantOrpcContext, type TenantRpcServices } from './context.ts';
 import { bridgedError } from './error-bridge.ts';
 
@@ -24,10 +25,14 @@ const os = implement(tenantContract)
 			throw bridgedError(error);
 		}
 	})
-	.use(async ({ context, procedure, next }) => {
-		const claims = await context.services.requireScope(
-			context.request,
-			procedure['~orpc'].meta.scope
+	.use(async ({ context, procedure, next }, input) => {
+		const claims = await context.services.authenticate(context.request);
+
+		await authoriseRequest(
+			claims,
+			procedure['~orpc'].meta,
+			input,
+			context.services.pendingCache
 		);
 
 		return next({ context: { claims } });
@@ -122,7 +127,6 @@ export const tenantRouter = os.router({
 		),
 		set: os.roots.set.handler(({ input, context }) =>
 			context.services.roots.setRoot(
-				context.claims,
 				cacheFromSelector(input.cacheName),
 				input.name,
 				{ targets: input.targets, ttlSeconds: input.ttlSeconds }

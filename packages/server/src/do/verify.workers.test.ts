@@ -12,6 +12,7 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	blobStateCount,
+	cacheWriteGrants,
 	corruptCommittedNarInfo,
 	initialise,
 	issueServerSignedToken,
@@ -304,7 +305,7 @@ describe('background verification', () => {
 
 	it('requires admin scope', async () => {
 		await initialise();
-		const writeToken = await issueServerSignedToken('write');
+		const writeToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const response = await authorisedFetch('/verify', writeToken, {
 			method: 'POST'

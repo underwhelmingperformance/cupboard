@@ -1,15 +1,17 @@
+import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
 import { SignJWT } from 'jose';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-	type AccessScope,
 	AccessTokenVerificationError,
 	type AuthPublicKey,
 	generateAuthKeyPair,
-	InvalidRootConstraintError,
-	InvalidScopeError,
+	InvalidGrantsError,
 	issueAccessJwt,
-	MissingScopeError,
+	MissingGrantsError,
 	MissingSubjectError,
 	verifyAccessJwt
 } from './auth.ts';
@@ -20,6 +22,8 @@ const now = new Date('2026-01-01T00:00:00.000Z');
 const ttlSeconds = 600;
 const kid = 'k-test';
 
+const wildcardGrants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
+
 function keySet(publicJwk: JsonWebKey): AuthPublicKey[] {
 	return [{ kid, publicJwk }];
 }
@@ -28,20 +32,15 @@ function accessErrorShape(
 	error: unknown
 ):
 	| { readonly name: string; readonly hasCause: boolean }
-	| { readonly name: string; readonly scope: unknown }
 	| { readonly name: string } {
 	if (error instanceof AccessTokenVerificationError) {
 		return { name: error.name, hasCause: error.cause instanceof Error };
 	}
 
-	if (error instanceof InvalidScopeError) {
-		return { name: error.name, scope: error.scope };
-	}
-
 	if (
-		error instanceof MissingScopeError ||
-		error instanceof MissingSubjectError ||
-		error instanceof InvalidRootConstraintError
+		error instanceof MissingGrantsError ||
+		error instanceof InvalidGrantsError ||
+		error instanceof MissingSubjectError
 	) {
 		return { name: error.name };
 	}
@@ -63,40 +62,51 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		vi.useRealTimers();
 	});
 
-	it.each(['write', 'admin'] satisfies AccessScope[])(
-		'round-trips a %s token, preserving scope and subject',
-		async (scope) => {
-			const keyPair = await generateAuthKeyPair();
-			const token = await issueAccessJwt(
-				keyPair.privateJwk,
-				{ issuer, audience, subject: 'ci', scope, kid, ttlSeconds },
-				now
-			);
-
-			const claims = await verifyAccessJwt(
-				keySet(keyPair.publicJwk),
-				token,
-				{ issuer, audience },
-				now
-			);
-
-			expect(claims).toStrictEqual({ scope, subject: 'ci' });
+	it.each([
+		{
+			name: 'a wildcard token',
+			grants: wildcardGrants
+		},
+		{
+			name: 'a cache-scoped token with a root selector',
+			grants: authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit', 'root:set'],
+					cache: 'builds',
+					root: 'github:owner/'
+				}
+			])
 		}
-	);
-
-	it('round-trips a write token carrying a cb_roots constraint', async () => {
+	])('round-trips $name, preserving grants and subject', async ({ grants }) => {
 		const keyPair = await generateAuthKeyPair();
-		const callbackRoots = ['github:owner/repo/', 'pin:abc'];
+		const token = await issueAccessJwt(
+			keyPair.privateJwk,
+			{ issuer, audience, subject: 'ci', grants, kid, ttlSeconds },
+			now
+		);
+
+		const claims = await verifyAccessJwt(
+			keySet(keyPair.publicJwk),
+			token,
+			{ issuer, audience },
+			now
+		);
+
+		expect(claims).toStrictEqual({ subject: 'ci', grants });
+	});
+
+	it('preserves audit claims alongside the grants', async () => {
+		const keyPair = await generateAuthKeyPair();
 		const token = await issueAccessJwt(
 			keyPair.privateJwk,
 			{
 				issuer,
 				audience,
 				subject: 'ci',
-				scope: 'write',
+				grants: wildcardGrants,
 				kid,
 				ttlSeconds,
-				cbRoots: callbackRoots,
 				auditClaims: { repository_id: '1234' }
 			},
 			now
@@ -109,11 +119,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			now
 		);
 
-		expect(claims).toStrictEqual({
-			scope: 'write',
-			subject: 'ci',
-			cbRoots: callbackRoots
-		});
+		expect(claims).toStrictEqual({ subject: 'ci', grants: wildcardGrants });
 	});
 
 	it('selects the verification key by kid from a rotated set', async () => {
@@ -125,7 +131,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				issuer,
 				audience,
 				subject: 'ci',
-				scope: 'admin',
+				grants: wildcardGrants,
 				kid: 'k-new',
 				ttlSeconds
 			},
@@ -142,7 +148,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			now
 		);
 
-		expect(claims).toStrictEqual({ scope: 'admin', subject: 'ci' });
+		expect(claims).toStrictEqual({ subject: 'ci', grants: wildcardGrants });
 	});
 
 	it.each([
@@ -154,7 +160,14 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				return issueAccessJwt(
 					foreign.privateJwk,
-					{ issuer, audience, subject: 'ci', scope: 'admin', kid, ttlSeconds },
+					{
+						issuer,
+						audience,
+						subject: 'ci',
+						grants: wildcardGrants,
+						kid,
+						ttlSeconds
+					},
 					now
 				);
 			},
@@ -171,7 +184,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 						issuer,
 						audience,
 						subject: 'ci',
-						scope: 'admin',
+						grants: wildcardGrants,
 						kid: 'other-kid',
 						ttlSeconds
 					},
@@ -190,7 +203,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 						issuer: 'someone-else',
 						audience,
 						subject: 'ci',
-						scope: 'admin',
+						grants: wildcardGrants,
 						kid,
 						ttlSeconds
 					},
@@ -209,7 +222,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 						issuer,
 						audience: 'someone-else',
 						subject: 'ci',
-						scope: 'admin',
+						grants: wildcardGrants,
 						kid,
 						ttlSeconds
 					},
@@ -224,7 +237,14 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			token: async (privateJwk: JsonWebKey) =>
 				issueAccessJwt(
 					privateJwk,
-					{ issuer, audience, subject: 'ci', scope: 'admin', kid, ttlSeconds },
+					{
+						issuer,
+						audience,
+						subject: 'ci',
+						grants: wildcardGrants,
+						kid,
+						ttlSeconds
+					},
 					now
 				),
 			verifyOptions: { issuer, audience },
@@ -238,7 +258,14 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 
 				return issueAccessJwt(
 					privateJwk,
-					{ issuer, audience, subject: 'ci', scope: 'admin', kid, ttlSeconds },
+					{
+						issuer,
+						audience,
+						subject: 'ci',
+						grants: wildcardGrants,
+						kid,
+						ttlSeconds
+					},
 					future
 				);
 			},
@@ -252,7 +279,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
-				return new SignJWT({ scope: 'admin' })
+				return new SignJWT({ authorization_details: wildcardGrants })
 					.setProtectedHeader({ alg: 'EdDSA', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -266,8 +293,8 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			at: now
 		},
 		{
-			name: 'a token without a scope claim',
-			expected: { name: 'MissingScopeError' },
+			name: 'a token without an authorization_details claim',
+			expected: { name: 'MissingGrantsError' },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
@@ -286,13 +313,15 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			at: now
 		},
 		{
-			name: 'a token whose scope claim is not a known scope',
-			expected: { name: 'InvalidScopeError', scope: 'root' },
+			name: 'a token whose authorization_details claim is malformed',
+			expected: { name: 'InvalidGrantsError' },
 			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
-				return new SignJWT({ scope: 'root' })
+				return new SignJWT({
+					authorization_details: [{ type: 'unknown_grant' }]
+				})
 					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -314,7 +343,7 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 					'symmetric-secret-key-of-sufficient-length'
 				);
 
-				return new SignJWT({ scope: 'admin' })
+				return new SignJWT({ authorization_details: wildcardGrants })
 					.setProtectedHeader({ alg: 'HS256', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -334,30 +363,10 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
-				return new SignJWT({ scope: 'admin' })
+				return new SignJWT({ authorization_details: wildcardGrants })
 					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
-					.setIssuedAt(issuedAt)
-					.setNotBefore(issuedAt)
-					.setExpirationTime(issuedAt + ttlSeconds)
-					.sign(signingKey);
-			},
-			verifyOptions: { issuer, audience },
-			at: now
-		},
-		{
-			name: 'a token whose cb_roots claim is not an array of strings',
-			expected: { name: 'InvalidRootConstraintError' },
-			token: async (privateJwk: JsonWebKey, signingKey: CryptoKey) => {
-				void privateJwk;
-				const issuedAt = Math.floor(now.getTime() / 1000);
-
-				return new SignJWT({ scope: 'write', cb_roots: 'github:owner/' })
-					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
-					.setIssuer(issuer)
-					.setAudience(audience)
-					.setSubject('ci')
 					.setIssuedAt(issuedAt)
 					.setNotBefore(issuedAt)
 					.setExpirationTime(issuedAt + ttlSeconds)

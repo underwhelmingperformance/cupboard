@@ -1,3 +1,4 @@
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,
 	type ParsedTokenRequest,
@@ -225,18 +226,20 @@ export class TokenExchangeService {
 	): Promise<string> {
 		const key = await this.authKeys.activeAuthKey();
 
-		// A write token is pinned to the rule's roots via `cb_roots`; an admin
-		// token is unconstrained. The rule id rides along as an audit breadcrumb.
+		// TODO: evaluate the rule's claim and relational bindings against the
+		// verified subject to issue the grants it permits. Until then every rule
+		// issues a wildcard for its domain, keeping owner and CI exchanges working.
+		const grants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
+
 		return issueAccessJwt(
 			key.privateJwk,
 			{
 				issuer: this.authKeys.authIssuer(),
 				audience: this.authKeys.authAudience(),
 				subject,
-				scope: rule.scope,
+				grants,
 				kid: key.kid,
 				ttlSeconds,
-				cbRoots: rule.scope === 'write' ? rule.allowedRoots : undefined,
 				auditClaims: { cb_rule: rule.id }
 			},
 			new Date()

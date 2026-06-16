@@ -9,6 +9,8 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	adminGrants,
+	cacheWriteGrants,
 	controlWorkerFetch,
 	currentOrigin,
 	issueControlAdminToken,
@@ -156,7 +158,7 @@ describe('control contract round trip', () => {
 
 	it('refuses a write-scoped control token as FORBIDDEN', async () => {
 		const client = controlClient(
-			await issueControlAdminToken('writer', 'write')
+			await issueControlAdminToken('writer', cacheWriteGrants())
 		);
 
 		const [error, data, isDefined] = await safe(client.tenants.list());
@@ -176,7 +178,7 @@ describe('control contract round trip', () => {
 	it('refuses a tenant-plane token as UNAUTHORIZED', async () => {
 		// A tenant admin token is signed by the tenant's auth key for the tenant
 		// audience; presented to the control plane it must not verify.
-		const client = controlClient(await issueServerSignedToken('admin'));
+		const client = controlClient(await issueServerSignedToken(adminGrants()));
 
 		const [error, data, isDefined] = await safe(client.tenants.list());
 

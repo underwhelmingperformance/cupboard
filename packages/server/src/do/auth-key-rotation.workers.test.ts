@@ -16,7 +16,9 @@ import { z } from 'zod';
 import { generateAuthKeyPair } from '../auth/auth.ts';
 import { authKeys } from '../db/schema.ts';
 import {
+	adminGrants,
 	authorisedFetch,
+	cacheWriteGrants,
 	currentServer,
 	fetchPath,
 	initialise,
@@ -29,7 +31,7 @@ import {
 async function adminToken(): Promise<string> {
 	await initialise();
 
-	return issueServerSignedToken('admin');
+	return issueServerSignedToken(adminGrants());
 }
 
 async function listKeys(token: string): Promise<AuthKeyListResponse> {
@@ -153,12 +155,12 @@ describe('auth-key rotation', () => {
 
 		vi.setSystemTime(new Date('2026-01-01T00:21:29.999Z'));
 		await currentServer().runAuthKeyRetirement();
-		const earlyToken = await issueServerSignedToken('admin');
+		const earlyToken = await issueServerSignedToken(adminGrants());
 		const early = await listKeys(earlyToken);
 
 		vi.setSystemTime(new Date(scheduledRetireAt));
 		await currentServer().runAuthKeyRetirement();
-		const dueToken = await issueServerSignedToken('admin');
+		const dueToken = await issueServerSignedToken(adminGrants());
 		const due = await listKeys(dueToken);
 
 		await currentServer().runAuthKeyRetirement();
@@ -185,7 +187,7 @@ describe('auth-key rotation', () => {
 
 		// Retiring the original would invalidate `token`, which it signed, so act
 		// with a token issued by the now-active rotated key.
-		const activeToken = await issueServerSignedToken('admin');
+		const activeToken = await issueServerSignedToken(adminGrants());
 		const retiredResponse = await retire(activeToken, original);
 		const retired = authKeyRetireResponseSchema.parse(
 			await retiredResponse.json()
@@ -224,7 +226,7 @@ describe('auth-key rotation', () => {
 
 	it('refuses a write token', async () => {
 		await initialise();
-		const token = await issueServerSignedToken('write');
+		const token = await issueServerSignedToken(cacheWriteGrants());
 
 		const response = await authorisedFetch('/keys/auth', token);
 

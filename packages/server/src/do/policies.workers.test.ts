@@ -14,6 +14,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
 	authorisedFetch,
+	cacheWriteGrants,
 	initialise,
 	issueServerSignedToken,
 	narBytes,
@@ -153,7 +154,7 @@ describe('retention policies', () => {
 
 	it('requires admin scope', async () => {
 		await initialise();
-		const writeToken = await issueServerSignedToken('write');
+		const writeToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const list = await authorisedFetch('/policies', writeToken);
 		const add = await authorisedFetch('/policies', writeToken, {
