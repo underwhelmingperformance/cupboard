@@ -17,11 +17,21 @@ import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
+import { lookupRepository } from './oidc-trust/github.ts';
 import {
 	buildAddBody,
 	buildCacheGrant,
 	collectSubstitutions
 } from './oidc-trust/rule-builder.ts';
+
+const githubActionsIssuer = 'https://token.actions.githubusercontent.com';
+
+interface GithubPrOptions {
+	readonly repo: string;
+	readonly audience?: string;
+	readonly allow: readonly string[];
+	readonly cacheTemplate?: string;
+}
 
 // Assemble the rule body from flags, or read it whole from a JSON file. The file
 // form is the escape hatch for grants the flags do not spell, such as admin,
@@ -191,6 +201,9 @@ interface OidcTrustPlane {
 	readonly name: string;
 	readonly description: string;
 	readonly urlArgument: string;
+	// The GitHub PR preset reads provider-specific claims, so it is offered only
+	// on the tenant plane.
+	readonly githubPr: boolean;
 	readonly clientFor: (
 		url: string,
 		programOptions: ProgramOptions
@@ -201,6 +214,7 @@ const tenantPlane: OidcTrustPlane = {
 	name: 'oidc-trust',
 	description: 'Manage the OIDC trust rules used by token exchange.',
 	urlArgument: tenantUrlArgument,
+	githubPr: true,
 	clientFor: (url, programOptions) =>
 		tenantRpc(url, {
 			credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -212,12 +226,46 @@ const controlPlane: OidcTrustPlane = {
 	name: 'control-oidc-trust',
 	description: 'Manage the control-plane OIDC trust rules (operator only).',
 	urlArgument: deploymentUrlArgument,
+	githubPr: false,
 	clientFor: (url, programOptions) =>
 		controlRpc(url, {
 			credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 			signal: programOptions.signal
 		}).oidcTrust
 };
+
+// Assemble the per-PR rule for a GitHub repository, pinning its immutable
+// numeric ids so a rename never silently changes who is trusted.
+function githubPrAddBody(
+	url: string,
+	identity: {
+		readonly repositoryId: number;
+		readonly repositoryOwnerId: number;
+		readonly fullName: string;
+	},
+	options: GithubPrOptions
+): OidcTrustAddBody {
+	return buildAddBody({
+		issuer: githubActionsIssuer,
+		audience: options.audience ?? url,
+		claims: {
+			repository_id: String(identity.repositoryId),
+			repository_owner_id: String(identity.repositoryOwnerId)
+		},
+		permittedGrants: [
+			buildCacheGrant({
+				cacheTemplate: options.cacheTemplate ?? 'pr-{pr}',
+				allow: options.allow,
+				root: 'same-as-cache',
+				substitutions: collectSubstitutions({
+					templateSource: 'github-pr',
+					captures: []
+				})
+			})
+		],
+		display: { provider: 'github', repository: identity.fullName }
+	});
+}
 
 export function registerOidcTrustCommands(
 	program: Command,
@@ -334,6 +382,42 @@ function buildOidcTrustCommands(
 				plane.clientFor(url, programOptions)
 			);
 		});
+
+	if (plane.githubPr) {
+		oidcTrust
+			.command('add-github-pr')
+			.description(
+				'Add a per-PR trust rule for a GitHub repository, pinning its ids.'
+			)
+			.argument('<url>', plane.urlArgument)
+			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.option(
+				'--audience <audience>',
+				'expected token audience (default: the tenant URL)'
+			)
+			.option(
+				'--allow <action>',
+				'an action set the rule may exchange for (repeatable, default: push)',
+				collect,
+				['push']
+			)
+			.option(
+				'--cache-template <template>',
+				'the per-PR cache template (default: pr-{pr})'
+			)
+			.action(async (url: string, options: GithubPrOptions) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const identity = await reporter.phase('Resolving repository', () =>
+					lookupRepository(options.repo)
+				);
+
+				await runOidcTrustAdd(
+					githubPrAddBody(url, identity, options),
+					reporter,
+					plane.clientFor(url, programOptions)
+				);
+			});
+	}
 
 	oidcTrust
 		.command('remove')
