@@ -6,6 +6,12 @@ import {
 	tokenExchangeRequestSchema,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import {
+	type OidcTrustListResponse,
+	type OidcTrustRemoveResponse,
+	type OidcTrustSummary,
+	type ParsedOidcTrustAddBody
+} from '@cupboard/protocol/oidc';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import {
 	type MembershipRebuildResponse,
@@ -64,7 +70,13 @@ import {
 	retireControlKey,
 	rotateControlKey
 } from './control-key-store.ts';
-import { controlTrustRules } from './control-trust.ts';
+import {
+	addControlTrust,
+	controlTrustRules,
+	getControlTrust,
+	listControlTrust,
+	removeControlTrust
+} from './control-trust.ts';
 import {
 	invalidateTenantRow,
 	rebuildMembershipFilter,
@@ -398,6 +410,31 @@ export async function controlMembershipRebuild(
 	env: Env
 ): Promise<MembershipRebuildResponse> {
 	return { tenants: await refreshTenantMembership(env) };
+}
+
+export function controlOidcTrustList(env: Env): Promise<OidcTrustListResponse> {
+	return listControlTrust(controlDatabase(env));
+}
+
+export function controlOidcTrustGet(
+	env: Env,
+	id: string
+): Promise<OidcTrustSummary> {
+	return getControlTrust(controlDatabase(env), id);
+}
+
+export function controlOidcTrustAdd(
+	env: Env,
+	body: ParsedOidcTrustAddBody
+): Promise<OidcTrustSummary> {
+	return addControlTrust(controlDatabase(env), body, new Date().toISOString());
+}
+
+export function controlOidcTrustRemove(
+	env: Env,
+	id: string
+): Promise<OidcTrustRemoveResponse> {
+	return removeControlTrust(controlDatabase(env), id, new Date().toISOString());
 }
 
 export async function controlTenantCreate(

@@ -80,6 +80,16 @@ export class StoredControlTrustInvalidError extends ServerHttpError {
 	}
 }
 
+/** A control trust rule was submitted without a pinned subject. */
+export class ControlTrustSubjectRequiredError extends ServerHttpError {
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor() {
+		super('A control trust rule must pin a subject claim');
+		this.name = 'ControlTrustSubjectRequiredError';
+	}
+}
+
 export class ControlNotConfiguredError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 

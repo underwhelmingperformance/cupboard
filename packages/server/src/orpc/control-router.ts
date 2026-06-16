@@ -8,6 +8,10 @@ import {
 	controlKeyRotate,
 	controlKeys,
 	controlMembershipRebuild,
+	controlOidcTrustAdd,
+	controlOidcTrustGet,
+	controlOidcTrustList,
+	controlOidcTrustRemove,
 	controlTenantClearReadCredential,
 	controlTenantCreate,
 	controlTenantList,
@@ -103,6 +107,20 @@ export const controlRouter = os.router({
 	membership: {
 		rebuild: os.membership.rebuild.handler(({ context }) =>
 			controlMembershipRebuild(context.env)
+		)
+	},
+	oidcTrust: {
+		list: os.oidcTrust.list.handler(({ context }) =>
+			controlOidcTrustList(context.env)
+		),
+		get: os.oidcTrust.get.handler(({ input, context }) =>
+			controlOidcTrustGet(context.env, input.id)
+		),
+		add: os.oidcTrust.add.handler(({ input, context }) =>
+			controlOidcTrustAdd(context.env, input)
+		),
+		remove: os.oidcTrust.remove.handler(({ input, context }) =>
+			controlOidcTrustRemove(context.env, input.id)
 		)
 	}
 });
