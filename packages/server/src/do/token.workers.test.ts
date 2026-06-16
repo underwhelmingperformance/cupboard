@@ -71,7 +71,7 @@ const authorizationServerMetadataSchema = z.strictObject({
 	token_endpoint: z.string(),
 	jwks_uri: z.string(),
 	grant_types_supported: z.array(z.string()),
-	scopes_supported: z.array(z.string()),
+	authorization_details_types_supported: z.array(z.string()),
 	token_endpoint_auth_methods_supported: z.array(z.string())
 });
 
@@ -225,9 +225,8 @@ describe('POST /token', () => {
 					id: 'ci-rule',
 					issuer: 'https://idp.test',
 					audience: 'cupboard-aud',
-					scope: 'write',
 					claimsJson: JSON.stringify({ sub: 'ci' }),
-					allowedRootsJson: '[]',
+					permittedGrantsJson: JSON.stringify(trustClassGrants.write),
 					createdAt: '2026-01-01T00:00:00.000Z'
 				})
 				.run();
@@ -253,6 +252,24 @@ describe('POST /token', () => {
 // Installs a trust rule for a stub issuer whose discovery and JWKS documents
 // are served from memory, and returns a subject token it signed: a full,
 // successful exchange without any network.
+// An interactive (owner) rule permits a wildcard and may exchange without
+// naming grants; a CI rule permits one cache and must request what it wants.
+const trustClassGrants = {
+	admin: [{ type: 'cupboard_wildcard' }],
+	write: [
+		{
+			type: 'cupboard_cache',
+			actions: [
+				'upload:negotiate',
+				'upload:prepare',
+				'upload:status',
+				'upload:commit'
+			],
+			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+		}
+	]
+} as const;
+
 async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
 	const jwk = await exportJWK(idp.publicKey);
@@ -273,9 +290,8 @@ async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
 				id: `${scope}-rule`,
 				issuer: 'https://idp.test',
 				audience: 'cupboard-aud',
-				scope,
 				claimsJson: JSON.stringify({ sub: 'alice' }),
-				allowedRootsJson: '[]',
+				permittedGrantsJson: JSON.stringify(trustClassGrants[scope]),
 				createdAt: '2026-01-01T00:00:00.000Z'
 			})
 			.run();
@@ -309,17 +325,26 @@ async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
 type SuccessfulTokenExchange = TokenResponse & { readonly status: number };
 
 async function exchange(
-	subjectToken: string
+	subjectToken: string,
+	authorizationDetails?: unknown
 ): Promise<SuccessfulTokenExchange> {
 	const response = await postToken({
 		grant_type: tokenExchangeGrantType,
 		subject_token: subjectToken,
-		subject_token_type: subjectTokenTypeIdToken
+		subject_token_type: subjectTokenTypeIdToken,
+		...(authorizationDetails === undefined
+			? {}
+			: { authorization_details: JSON.stringify(authorizationDetails) })
 	});
 	const body = tokenResponseSchema.parse(await response.json());
 
 	return { ...body, status: response.status };
 }
+
+// The grant a CI rule permits, as a concrete request its exchange can name.
+const ciRequest = [
+	{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'ci' }
+];
 
 function refreshTokenRows(): Promise<{ id: string; expiresAt: string }[]> {
 	return runInDurableObject(currentServer(), (_instance, state) =>
@@ -355,7 +380,7 @@ describe('refresh grant', () => {
 			exchangedHasRefreshToken: typeof exchanged.refresh_token,
 			refreshedStatus: refreshed.status,
 			refreshedCacheControl: refreshed.headers.get('cache-control'),
-			refreshedScope: refreshedBody.scope,
+			refreshedGrants: refreshedBody.authorization_details,
 			refreshedExpiresIn: refreshedBody.expires_in,
 			refreshedHasRefreshToken: typeof refreshedBody.refresh_token,
 			rotated: refreshedBody.refresh_token !== exchanged.refresh_token,
@@ -369,7 +394,7 @@ describe('refresh grant', () => {
 			exchangedHasRefreshToken: 'string',
 			refreshedStatus: StatusCodes.OK,
 			refreshedCacheControl: 'no-store',
-			refreshedScope: 'admin',
+			refreshedGrants: [{ type: 'cupboard_wildcard' }],
 			refreshedExpiresIn: 600,
 			refreshedHasRefreshToken: 'string',
 			rotated: true,
@@ -462,7 +487,7 @@ describe('refresh grant', () => {
 
 	it('issues no refresh token for a write exchange', async () => {
 		const subjectToken = await installTrustedIdp('write');
-		const exchanged = await exchange(subjectToken);
+		const exchanged = await exchange(subjectToken, ciRequest);
 
 		expect({
 			exchangeStatus: exchanged.status,
@@ -617,6 +642,99 @@ describe('refresh grant', () => {
 	});
 });
 
+async function exchangeWith(
+	details: string
+): Promise<{ status: number; body: unknown }> {
+	const subjectToken = await installTrustedIdp('write');
+	const response = await postToken({
+		grant_type: tokenExchangeGrantType,
+		subject_token: subjectToken,
+		subject_token_type: subjectTokenTypeIdToken,
+		authorization_details: details
+	});
+
+	return { status: response.status, body: await response.json() };
+}
+
+describe('request and verify', () => {
+	beforeEach(resetTestServer);
+
+	it('issues a token confined to the requested grant', async () => {
+		const subjectToken = await installTrustedIdp('write');
+		const exchanged = await exchange(subjectToken, ciRequest);
+		const claims = decodeJwt(exchanged.access_token);
+
+		expect({
+			status: exchanged.status,
+			granted: exchanged.authorization_details,
+			tokenGrants: claims.authorization_details,
+			hasRefresh: exchanged.refresh_token
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			granted: ciRequest,
+			tokenGrants: ciRequest,
+			hasRefresh: undefined
+		});
+	});
+
+	it('rejects a CI exchange that names no grants as invalid_request', async () => {
+		const subjectToken = await installTrustedIdp('write');
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		const body = oauthErrorShape(await response.json());
+
+		expect({
+			status: response.status,
+			error: body.error,
+			problem: body.problem
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_request',
+			problem: 'authorization-details-required'
+		});
+	});
+
+	it.each([
+		{
+			name: 'an empty authorization_details array',
+			details: JSON.stringify([]),
+			problem: 'empty'
+		},
+		{
+			name: 'a grant for a cache the rule does not permit',
+			details: JSON.stringify([
+				{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'other' }
+			]),
+			problem: 'not-permitted'
+		},
+		{
+			name: 'an operation the rule does not permit',
+			details: JSON.stringify([
+				{ type: 'cupboard_cache', actions: ['gc:run'], cache: 'ci' }
+			]),
+			problem: 'not-permitted'
+		}
+	])(
+		'rejects $name as invalid_authorization_details',
+		async ({ details, problem }) => {
+			const { status, body } = await exchangeWith(details);
+
+			expect({ status, shape: oauthErrorShape(body) }).toStrictEqual({
+				status: StatusCodes.BAD_REQUEST,
+				shape: {
+					error: 'invalid_authorization_details',
+					error_description:
+						'the requested authorization_details are not permitted',
+					problem
+				}
+			});
+		}
+	);
+});
+
 describe('owner rule seeding', () => {
 	beforeEach(resetTestServer);
 
@@ -638,9 +756,9 @@ describe('owner rule seeding', () => {
 					id: z.string(),
 					issuer: z.string(),
 					audience: z.string(),
-					scope: z.string(),
 					claimsJson: z.string(),
-					allowedRootsJson: z.string(),
+					permittedGrantsJson: z.string(),
+					displayJson: z.null(),
 					createdAt: z.string(),
 					disabledAt: z.null()
 				})
@@ -653,9 +771,9 @@ describe('owner rule seeding', () => {
 					id: 'owner',
 					issuer: 'https://accounts.google.com',
 					audience: 'client-id.apps.googleusercontent.com',
-					scope: 'admin',
 					claimsJson: JSON.stringify({ sub: 'owner-subject' }),
-					allowedRootsJson: '[]',
+					permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }]),
+					displayJson: rule.displayJson,
 					createdAt: rule.createdAt,
 					disabledAt: rule.disabledAt
 				}
@@ -778,7 +896,11 @@ describe('auth discovery endpoints', () => {
 				token_endpoint: `${origin}/t/v1/token`,
 				jwks_uri: `${origin}/t/v1/.well-known/jwks.json`,
 				grant_types_supported: [tokenExchangeGrantType, refreshTokenGrantType],
-				scopes_supported: ['write', 'admin'],
+				authorization_details_types_supported: [
+					'cupboard_cache',
+					'cupboard_domain',
+					'cupboard_wildcard'
+				],
 				token_endpoint_auth_methods_supported: ['none']
 			}
 		});

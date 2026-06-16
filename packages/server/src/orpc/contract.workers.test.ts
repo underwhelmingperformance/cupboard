@@ -181,19 +181,25 @@ describe('tenant contract round trip', () => {
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: 'https://cache.example.workers.dev',
 			claims: { repository_owner_id: '5678' },
-			allowedRoots: ['github:owner/']
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: { cache: { exact: 'ci', validate: 'cacheName' } }
+				}
+			]
 		});
 		const ruleRemoved = await client.oidcTrust.remove({ id: rule.id });
 
 		expect({
 			policyListed: policies.policies.map((entry) => entry.id),
 			policyRemoved,
-			ruleScope: rule.scope,
+			ruleGrants: rule.permittedGrants.length,
 			ruleRemoved
 		}).toStrictEqual({
 			policyListed: [policy.id],
 			policyRemoved: { id: policy.id, removed: true },
-			ruleScope: 'write',
+			ruleGrants: 1,
 			ruleRemoved: { id: rule.id, removed: true }
 		});
 	});

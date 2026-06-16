@@ -88,13 +88,13 @@ describe('control plane signup bootstrap', () => {
 					signupStatus: signup.status,
 					badGateStatus: badGate.status,
 					intruderStatus: intruder.status,
-					mintedScope: minted.scope,
+					mintedGrants: minted.authorization_details,
 					createStatus: create.status
 				}).toStrictEqual({
 					signupStatus: 200,
 					badGateStatus: 403,
 					intruderStatus: 409,
-					mintedScope: 'admin',
+					mintedGrants: [{ type: 'cupboard_wildcard' }],
 					createStatus: 200
 				});
 				expect(await signup.json()).toStrictEqual({

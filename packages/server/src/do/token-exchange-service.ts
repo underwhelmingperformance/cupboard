@@ -17,6 +17,7 @@ import {
 	refreshTokenTtlSeconds,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
+import { resolveRequestedGrants } from '../authz/issuance.ts';
 import { constantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -28,7 +29,12 @@ import {
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
-import { matchOidcTrust, type OidcTrustRule } from '../oidc/oidc-trust.ts';
+import {
+	matchOidcTrust,
+	type OidcClaims,
+	type OidcTrustRule,
+	ruleIsInteractive
+} from '../oidc/oidc-trust.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
@@ -88,9 +94,17 @@ export class TokenExchangeService {
 				? verified.sub
 				: rule.id;
 
-		return this.issuedResponse(rule, subject, {
-			issued_token_type: issuedAccessTokenType
-		});
+		// Bindings are evaluated against the verified payload, never the unverified
+		// claims used only to route the token to a rule.
+		return this.issuedResponse(
+			rule,
+			subject,
+			verified,
+			body.authorization_details,
+			{
+				issued_token_type: issuedAccessTokenType
+			}
+		);
 	}
 
 	private async refresh(body: ParsedTokenRequest): Promise<Response> {
@@ -158,37 +172,47 @@ export class TokenExchangeService {
 			throw new StaleRefreshTokenError();
 		}
 
-		return this.issuedResponse(rule, claimed.subject, {});
+		// A refresh only happens for an interactive session, so the rule still
+		// permits a wildcard and no requested details narrow it; the claims are
+		// unused and an empty set suffices.
+		return this.issuedResponse(rule, claimed.subject, {}, undefined, {});
 	}
 
-	// Issues the access token (and, for an admin session, a successor refresh
-	// token) for a rule, reading the rule's current scope and roots so a
-	// refreshed session never outlives an edit to its rule.
+	// Issues the access token (and, for an interactive session, a successor
+	// refresh token) for a rule, reading the rule's current grants so a refreshed
+	// session never outlives an edit to its rule.
 	private async issuedResponse(
 		rule: OidcTrustRule,
 		subject: string,
+		claims: OidcClaims,
+		requested: AuthorizationDetails | undefined,
 		extra: Pick<TokenResponse, 'issued_token_type'>
 	): Promise<Response> {
-		const ttlSeconds =
-			rule.scope === 'admin' ? adminJwtTtlSeconds : writeJwtTtlSeconds;
-		const accessToken = await this.issueRuleToken(rule, subject, ttlSeconds);
+		const interactive = ruleIsInteractive(rule);
+		const granted = resolveRequestedGrants(rule, claims, requested);
+		const ttlSeconds = interactive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
+		const accessToken = await this.issueRuleToken(
+			rule,
+			subject,
+			granted,
+			ttlSeconds
+		);
 
-		// Only an admin session gets a refresh token: a write exchange (CI)
+		// Only an interactive session gets a refresh token: a CI exchange
 		// federates a fresh subject token per run, so a stored grant would only
 		// accumulate rows.
-		const refreshToken =
-			rule.scope === 'admin'
-				? await this.issueRefreshToken(rule.id, subject)
-				: undefined;
+		const refreshToken = interactive
+			? await this.issueRefreshToken(rule.id, subject)
+			: undefined;
 
 		return Response.json(
 			{
 				access_token: accessToken,
 				token_type: 'Bearer',
 				expires_in: ttlSeconds,
-				scope: rule.scope,
 				...extra,
-				...(refreshToken === undefined ? {} : { refresh_token: refreshToken })
+				...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
+				authorization_details: granted
 			} satisfies TokenResponse,
 			{ headers: { 'cache-control': 'no-store' } }
 		);
@@ -222,14 +246,10 @@ export class TokenExchangeService {
 	private async issueRuleToken(
 		rule: OidcTrustRule,
 		subject: string,
+		grants: AuthorizationDetails,
 		ttlSeconds: number
 	): Promise<string> {
 		const key = await this.authKeys.activeAuthKey();
-
-		// TODO: evaluate the rule's claim and relational bindings against the
-		// verified subject to issue the grants it permits. Until then every rule
-		// issues a wildcard for its domain, keeping owner and CI exchanges working.
-		const grants: AuthorizationDetails = [{ type: 'cupboard_wildcard' }];
 
 		return issueAccessJwt(
 			key.privateJwk,

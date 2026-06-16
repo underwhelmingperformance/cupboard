@@ -5,29 +5,40 @@ import { matchOidcTrust, type OidcTrustRule } from './oidc-trust.ts';
 const github = 'https://token.actions.githubusercontent.com';
 const audience = 'https://cache.example.workers.dev';
 
+const wildcard: OidcTrustRule['permittedGrants'] = [
+	{ type: 'cupboard_wildcard' }
+];
+
+function ciGrant(cache: string): OidcTrustRule['permittedGrants'] {
+	return [
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:commit'],
+			resources: { cache: { exact: cache, validate: 'cacheName' } }
+		}
+	];
+}
+
 const ownerRule: OidcTrustRule = {
 	id: 'owner',
 	issuer: 'https://accounts.google.com',
 	audience: 'client-id.apps.googleusercontent.com',
-	scope: 'admin',
 	claims: { sub: 'owner-subject' },
-	allowedRoots: []
+	permittedGrants: wildcard
 };
 const repoRule: OidcTrustRule = {
 	id: 'repo',
 	issuer: github,
 	audience,
-	scope: 'write',
 	claims: { repository_owner_id: '5678' },
-	allowedRoots: ['github:owner/']
+	permittedGrants: ciGrant('owner-ci')
 };
 const exactRepoRule: OidcTrustRule = {
 	id: 'exact-repo',
 	issuer: github,
 	audience,
-	scope: 'write',
 	claims: { repository_owner_id: '5678', repository_id: '1234' },
-	allowedRoots: ['github:owner/repo/']
+	permittedGrants: ciGrant('owner-repo-ci')
 };
 
 const rules = [ownerRule, repoRule, exactRepoRule];
@@ -125,17 +136,15 @@ describe('matchOidcTrust', () => {
 			id: 'rule-b',
 			issuer: github,
 			audience,
-			scope: 'write',
 			claims: { repository_owner_id: '5678' },
-			allowedRoots: []
+			permittedGrants: ciGrant('ci-b')
 		};
 		const actorClaimRule: OidcTrustRule = {
 			id: 'rule-a',
 			issuer: github,
 			audience,
-			scope: 'write',
 			claims: { actor: 'ci' },
-			allowedRoots: []
+			permittedGrants: ciGrant('ci-a')
 		};
 		const claims = {
 			iss: github,
@@ -150,49 +159,45 @@ describe('matchOidcTrust', () => {
 		}).toStrictEqual({ forward: 'rule-a', reversed: 'rule-a' });
 	});
 
-	it('prefers an admin rule over a same-specificity write rule on a tie', () => {
-		const adminRule: OidcTrustRule = {
-			id: 'zzz-admin',
+	it('prefers an interactive rule over a same-specificity CI rule on a tie', () => {
+		const interactiveRule: OidcTrustRule = {
+			id: 'zzz-owner',
 			issuer: github,
 			audience,
-			scope: 'admin',
 			claims: { sub: 'shared' },
-			allowedRoots: []
+			permittedGrants: wildcard
 		};
-		const writeRule: OidcTrustRule = {
-			id: 'aaa-write',
+		const ciRule: OidcTrustRule = {
+			id: 'aaa-ci',
 			issuer: github,
 			audience,
-			scope: 'write',
 			claims: { actor: 'ci' },
-			allowedRoots: []
+			permittedGrants: ciGrant('ci')
 		};
 		const claims = { iss: github, aud: audience, sub: 'shared', actor: 'ci' };
 
-		// `aaa-write` sorts before `zzz-admin` by id, so only the scope tie-break
-		// keeps the owner token on the admin rule.
+		// `aaa-ci` sorts before `zzz-owner` by id, so only the interactive
+		// tie-break keeps the owner token on the wildcard rule.
 		expect({
-			forward: matchOidcTrust([adminRule, writeRule], claims)?.scope,
-			reversed: matchOidcTrust([writeRule, adminRule], claims)?.scope
-		}).toStrictEqual({ forward: 'admin', reversed: 'admin' });
+			forward: matchOidcTrust([interactiveRule, ciRule], claims)?.id,
+			reversed: matchOidcTrust([ciRule, interactiveRule], claims)?.id
+		}).toStrictEqual({ forward: 'zzz-owner', reversed: 'zzz-owner' });
 	});
 
-	it('prefers the admin rule even over a more specific write rule', () => {
-		const adminRule: OidcTrustRule = {
+	it('prefers the interactive rule even over a more specific CI rule', () => {
+		const interactiveRule: OidcTrustRule = {
 			id: 'owner',
 			issuer: github,
 			audience,
-			scope: 'admin',
 			claims: { sub: 'owner-subject' },
-			allowedRoots: []
+			permittedGrants: wildcard
 		};
-		const specificWriteRule: OidcTrustRule = {
-			id: 'write',
+		const specificCiRule: OidcTrustRule = {
+			id: 'ci',
 			issuer: github,
 			audience,
-			scope: 'write',
 			claims: { sub: 'owner-subject', actor: 'ci' },
-			allowedRoots: []
+			permittedGrants: ciGrant('ci')
 		};
 		const claims = {
 			iss: github,
@@ -201,10 +206,10 @@ describe('matchOidcTrust', () => {
 			actor: 'ci'
 		};
 
-		// The write rule pins two claims to the admin rule's one, so without the
-		// scope preference it would win on specificity and downgrade the owner.
-		expect(matchOidcTrust([adminRule, specificWriteRule], claims)?.scope).toBe(
-			'admin'
+		// The CI rule pins two claims to the owner rule's one, so without the
+		// interactive preference it would win on specificity and downgrade the owner.
+		expect(matchOidcTrust([interactiveRule, specificCiRule], claims)?.id).toBe(
+			'owner'
 		);
 	});
 });

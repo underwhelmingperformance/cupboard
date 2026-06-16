@@ -59,30 +59,49 @@ describe('OIDC federation', () => {
 			});
 
 			expect({
-				ownerRule: rules.map((rule) => ({ id: rule.id, scope: rule.scope })),
+				ownerRule: rules.map((rule) => ({
+					id: rule.id,
+					grantTypes: rule.permittedGrants.map((grant) => grant.type)
+				})),
 				refused: await server.exchangeIdToken(nonOwner).then(
 					() => 'accepted',
 					(error: unknown) =>
 						error instanceof TokenExchangeFailedError ? error.status : 'other'
 				)
 			}).toStrictEqual({
-				ownerRule: [{ id: 'owner', scope: 'admin' }],
+				ownerRule: [{ id: 'owner', grantTypes: ['cupboard_wildcard'] }],
 				refused: 400
 			});
 		}));
 
-	it('federates a CI token into a write token bound to its allowed roots', () =>
+	it('federates a CI token into a grant confined to its cache and root prefix', () =>
 		withFederation('cupboard-e2e-ci-', async ({ server, directory }) => {
 			const adminToken = await server.ownerAdminToken();
 			const rpc = tenantRpc(server.tenantUrl, {
 				credential: adminToken,
 				fetcher: server.uploadFetcher()
 			});
+			// The rule permits a named CI cache and root writes beneath an owner
+			// prefix; the issued grant carries whatever subset the CI requests.
 			await rpc.oidcTrust.add({
 				issuer: server.issuer.issuer,
 				audience: ciAudience,
 				claims: { repository_owner_id: '5678' },
-				allowedRoots: ['github:owner/']
+				permittedGrants: [
+					{
+						type: 'cupboard_cache',
+						actions: [
+							'upload:negotiate',
+							'upload:prepare',
+							'upload:commit',
+							'root:set'
+						],
+						resources: {
+							cache: { exact: 'owner-ci', validate: 'cacheName' },
+							root: { exact: 'github:owner/', validate: 'rootName' }
+						}
+					}
+				]
 			});
 
 			const ciToken = await server.exchangeIdToken(
@@ -90,15 +109,26 @@ describe('OIDC federation', () => {
 					aud: ciAudience,
 					sub: 'repo:owner/repo:ref:refs/heads/main',
 					repository_owner_id: '5678'
-				})
+				}),
+				[
+					{
+						type: 'cupboard_cache',
+						actions: ['root:set'],
+						cache: 'owner-ci',
+						root: 'github:owner/'
+					}
+				]
 			);
 
-			// Root activation gates on servability, so push a real target first.
+			// Root activation gates on servability, so create the CI cache the rule
+			// names and push a real target into it first.
+			await rpc.caches.put({ cacheName: 'owner-ci', priority: 30 });
 			const source = await NixStore.host(path.join(directory, 'source-home'));
 			const target = await source.add(contentAddressedFixture);
 			await pushStorePaths(
 				{
 					client: pushClientFor(server.tenantUrl, adminToken, {
+						cache: 'owner-ci',
 						fetcher: server.uploadFetcher()
 					}),
 					store: source,
@@ -114,16 +144,16 @@ describe('OIDC federation', () => {
 				fetcher: server.uploadFetcher()
 			}).roots;
 			const permitted = await ciRoots.set({
-				cacheName: '_default',
+				cacheName: 'owner-ci',
 				name: 'github:owner/repo',
 				targets: [target]
 			});
 
 			expect({
 				permittedRoot: permitted.name,
-				outsideAllowedRoots: await ciRoots
+				outsidePrefix: await ciRoots
 					.set({
-						cacheName: '_default',
+						cacheName: 'owner-ci',
 						name: 'github:other/repo',
 						targets: [target]
 					})
@@ -133,7 +163,7 @@ describe('OIDC federation', () => {
 					)
 			}).toStrictEqual({
 				permittedRoot: 'github:owner/repo',
-				outsideAllowedRoots: 'refused'
+				outsidePrefix: 'refused'
 			});
 		}));
 
@@ -148,7 +178,13 @@ describe('OIDC federation', () => {
 				issuer: server.issuer.issuer,
 				audience: ciAudience,
 				claims: { repository_owner_id: '5678' },
-				allowedRoots: ['github:owner/']
+				permittedGrants: [
+					{
+						type: 'cupboard_cache',
+						actions: ['upload:commit'],
+						resources: { cache: { exact: 'owner-ci', validate: 'cacheName' } }
+					}
+				]
 			});
 
 			const wrongClaim = server.issuer.sign({

@@ -24,9 +24,8 @@ const ownerSummary: OidcTrustSummary = {
 	id: 'owner',
 	issuer: 'https://accounts.google.com',
 	audience: 'client-id.apps.googleusercontent.com',
-	scope: 'admin',
 	claims: { sub: 'owner-subject' },
-	allowedRoots: [],
+	permittedGrants: [{ type: 'cupboard_wildcard' }],
 	disabled: false
 };
 
@@ -34,8 +33,33 @@ const addBody: OidcTrustAddBody = {
 	issuer: 'https://token.actions.githubusercontent.com',
 	audience: 'https://cache.example.workers.dev',
 	claims: { repository_owner_id: '5678' },
-	allowedRoots: ['github:owner/']
+	permittedGrants: [
+		{
+			type: 'cupboard_cache',
+			actions: [
+				'upload:negotiate',
+				'upload:prepare',
+				'upload:commit',
+				'root:set'
+			],
+			resources: {
+				cache: { exact: 'owner-ci', validate: 'cacheName' },
+				root: { equalsResource: 'cache', validate: 'rootName' }
+			}
+		}
+	]
 };
+
+function addedSummary(id: string, disabled = false): OidcTrustSummary {
+	return {
+		id,
+		issuer: addBody.issuer,
+		audience: addBody.audience,
+		claims: addBody.claims,
+		permittedGrants: addBody.permittedGrants,
+		disabled
+	};
+}
 
 const orpcErrorBodySchema = z.strictObject({
 	code: z.string(),
@@ -87,26 +111,10 @@ describe('oidc-trust admin API', () => {
 			rules: rulesById(await list.json())
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			summary: {
-				id,
-				issuer: addBody.issuer,
-				audience: addBody.audience,
-				scope: 'write',
-				claims: addBody.claims,
-				allowedRoots: addBody.allowedRoots,
-				disabled: false
-			},
+			summary: addedSummary(id),
 			rules: {
 				owner: ownerSummary,
-				[id]: {
-					id,
-					issuer: addBody.issuer,
-					audience: addBody.audience,
-					scope: 'write',
-					claims: addBody.claims,
-					allowedRoots: addBody.allowedRoots,
-					disabled: false
-				}
+				[id]: addedSummary(id)
 			}
 		});
 	});
@@ -123,15 +131,7 @@ describe('oidc-trust admin API', () => {
 			summary: oidcTrustSummarySchema.parse(await response.json())
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			summary: {
-				id,
-				issuer: addBody.issuer,
-				audience: addBody.audience,
-				scope: 'write',
-				claims: addBody.claims,
-				allowedRoots: addBody.allowedRoots,
-				disabled: false
-			}
+			summary: addedSummary(id)
 		});
 	});
 
@@ -174,15 +174,7 @@ describe('oidc-trust admin API', () => {
 		});
 		expect(rulesById(await list.json())).toStrictEqual({
 			owner: ownerSummary,
-			[id]: {
-				id,
-				issuer: addBody.issuer,
-				audience: addBody.audience,
-				scope: 'write',
-				claims: addBody.claims,
-				allowedRoots: addBody.allowedRoots,
-				disabled: true
-			}
+			[id]: addedSummary(id, true)
 		});
 	});
 
