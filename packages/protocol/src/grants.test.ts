@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	type AuthorizationDetail,
+	authorizationDetailCovered,
 	authorizationDetailSchema,
 	type Operation,
 	permittedGrantSchema,
@@ -163,6 +164,54 @@ describe('tokenCovers', () => {
 		]
 	)('%s', (_name, grants, operation, resource, expected) => {
 		expect(tokenCovers(grants, operation, resource)).toBe(expected);
+	});
+});
+
+describe('authorizationDetailCovered', () => {
+	const wildcardOnly = [wildcard];
+	const cacheOnly = [cacheGrant];
+
+	it.each<[string, AuthorizationDetail[], AuthorizationDetail, boolean]>([
+		[
+			'a subset of the presented cache grant is covered',
+			cacheOnly,
+			authorizationDetailSchema.parse({
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: 'pr-123',
+				root: 'pr-123'
+			}),
+			true
+		],
+		[
+			'an operation the presented grant lacks is not covered',
+			cacheOnly,
+			authorizationDetailSchema.parse({
+				type: 'cupboard_cache',
+				actions: ['narinfo:delete'],
+				cache: 'pr-123'
+			}),
+			false
+		],
+		[
+			'another cache is not covered',
+			cacheOnly,
+			authorizationDetailSchema.parse({
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: 'pr-999'
+			}),
+			false
+		],
+		[
+			'a wildcard request needs a presented wildcard',
+			cacheOnly,
+			wildcard,
+			false
+		],
+		['a presented wildcard covers any detail', wildcardOnly, cacheGrant, true]
+	])('%s', (_name, presented, requested, expected) => {
+		expect(authorizationDetailCovered(presented, requested)).toBe(expected);
 	});
 });
 
