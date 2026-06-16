@@ -1,4 +1,5 @@
 import {
+	issuedAccessTokenType,
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
@@ -699,6 +700,16 @@ describe('request and verify', () => {
 
 	it.each([
 		{
+			name: 'a non-JSON authorization_details field',
+			details: 'not-json',
+			problem: 'malformed'
+		},
+		{
+			name: 'a malformed grant array',
+			details: JSON.stringify([{ type: 'cupboard_unknown' }]),
+			problem: 'malformed'
+		},
+		{
 			name: 'an empty authorization_details array',
 			details: JSON.stringify([]),
 			problem: 'empty'
@@ -733,6 +744,124 @@ describe('request and verify', () => {
 			});
 		}
 	);
+});
+
+function attenuate(token: string, details: unknown): Promise<Response> {
+	return postToken({
+		grant_type: tokenExchangeGrantType,
+		subject_token: token,
+		subject_token_type: issuedAccessTokenType,
+		authorization_details: JSON.stringify(details)
+	});
+}
+
+// A wildcard owner token, obtained the real way so it verifies against the
+// tenant's own keys.
+async function ownerToken(): Promise<string> {
+	const subjectToken = await installTrustedIdp('admin');
+	const exchanged = await exchange(subjectToken);
+
+	return exchanged.access_token;
+}
+
+describe('attenuation', () => {
+	beforeEach(resetTestServer);
+
+	it('narrows a self-issued token to a requested subset, with no refresh', async () => {
+		const owner = await ownerToken();
+		const subset = [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+		];
+
+		const response = await attenuate(owner, subset);
+		const body = tokenResponseSchema.parse(await response.json());
+
+		expect({
+			status: response.status,
+			granted: body.authorization_details,
+			hasRefresh: body.refresh_token
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			granted: subset,
+			hasRefresh: undefined
+		});
+	});
+
+	it('refuses a request that exceeds the presented token', async () => {
+		const owner = await ownerToken();
+		const narrowResponse = await attenuate(owner, [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+		]);
+		const narrowed = tokenResponseSchema.parse(await narrowResponse.json());
+
+		// The narrowed token holds only `upload:commit` on `pr-1`; a request for
+		// another cache, or another operation, is not a subset.
+		const otherCache = await attenuate(narrowed.access_token, [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-2' }
+		]);
+		const otherOp = await attenuate(narrowed.access_token, [
+			{ type: 'cupboard_cache', actions: ['gc:run'], cache: 'pr-1' }
+		]);
+
+		expect({
+			otherCache: oauthErrorShape(await otherCache.json()).error,
+			otherCacheStatus: otherCache.status,
+			otherOp: oauthErrorShape(await otherOp.json()).error
+		}).toStrictEqual({
+			otherCache: 'invalid_authorization_details',
+			otherCacheStatus: StatusCodes.BAD_REQUEST,
+			otherOp: 'invalid_authorization_details'
+		});
+	});
+
+	it('does not attenuate a token signed by a foreign key', async () => {
+		// A token carrying the tenant's issuer but signed by another key fails the
+		// self-verification, so it routes to the trust path and is refused rather
+		// than narrowed.
+		const foreign = await generateKeyPair('RS256', { extractable: true });
+		const forged = await new SignJWT({
+			authorization_details: [{ type: 'cupboard_wildcard' }]
+		})
+			.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
+			.setIssuer('https://idp.test')
+			.setAudience('cupboard-aud')
+			.setSubject('mallory')
+			.setIssuedAt()
+			.setExpirationTime('5m')
+			.sign(foreign.privateKey);
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: forged,
+			subject_token_type: subjectTokenTypeJwt,
+			authorization_details: JSON.stringify([{ type: 'cupboard_wildcard' }])
+		});
+
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
+	});
+
+	it('lets a refresh narrow the reissued session', async () => {
+		const subjectToken = await installTrustedIdp('admin');
+		const exchanged = await exchange(subjectToken);
+		const subset = [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+		];
+
+		const refreshed = await postToken({
+			grant_type: refreshTokenGrantType,
+			refresh_token: exchanged.refresh_token ?? '',
+			authorization_details: JSON.stringify(subset)
+		});
+		const body = tokenResponseSchema.parse(await refreshed.json());
+
+		expect({
+			status: refreshed.status,
+			granted: body.authorization_details
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			granted: subset
+		});
+	});
 });
 
 describe('owner rule seeding', () => {

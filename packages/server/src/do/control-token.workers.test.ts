@@ -1,6 +1,8 @@
 import {
+	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
-	tokenExchangeGrantType
+	tokenExchangeGrantType,
+	tokenResponseSchema
 } from '@cupboard/protocol/oidc';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -18,6 +20,7 @@ import {
 import {
 	controlFetch,
 	currentOrigin,
+	issueControlAdminToken,
 	resetTestServer,
 	seedControlTrust,
 	testControlEnv
@@ -178,6 +181,31 @@ describe('control plane POST /token', () => {
 			cacheControl: 'no-store',
 			error: 'invalid_request',
 			problem: 'unsupported-subject-token-type'
+		});
+	});
+
+	it('narrows a self-issued control token to a requested subset', async () => {
+		const presented = await issueControlAdminToken('global-admin');
+		const subset = [
+			{ type: 'cupboard_tenant', actions: ['tenant:suspend'], tenant: 'acme' }
+		];
+
+		const response = await postToken({
+			grant_type: tokenExchangeGrantType,
+			subject_token: presented,
+			subject_token_type: issuedAccessTokenType,
+			authorization_details: JSON.stringify(subset)
+		});
+		const body = tokenResponseSchema.parse(await response.json());
+
+		expect({
+			status: response.status,
+			granted: body.authorization_details,
+			refresh: body.refresh_token
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			granted: subset,
+			refresh: undefined
 		});
 	});
 

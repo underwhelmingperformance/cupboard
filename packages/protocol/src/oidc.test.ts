@@ -43,23 +43,25 @@ describe('tokenExchangeRequestSchema', () => {
 		expect(parsed).toStrictEqual(request);
 	});
 
-	it('parses an authorization_details JSON form field', () => {
-		const details = [
+	it('carries authorization_details as an opaque string for the token service', () => {
+		// The body validator keeps it raw; the token service parses it, so a
+		// malformed value is `invalid_authorization_details`, not `invalid_request`.
+		const raw = JSON.stringify([
 			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
-		];
+		]);
 		const parsed = tokenExchangeRequestSchema.parse({
 			...request,
-			authorization_details: JSON.stringify(details)
+			authorization_details: raw
 		});
 
-		expect(parsed.authorization_details).toStrictEqual(details);
+		expect(parsed.authorization_details).toBe(raw);
 	});
 
-	it('rejects an authorization_details field that is not JSON', () => {
+	it('rejects an empty authorization_details field', () => {
 		expect(
 			tokenExchangeRequestSchema.safeParse({
 				...request,
-				authorization_details: 'not json'
+				authorization_details: ''
 			}).success
 		).toBe(false);
 	});

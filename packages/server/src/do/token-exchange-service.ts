@@ -12,12 +12,18 @@ import {
 import { and, eq } from 'drizzle-orm';
 
 import {
+	type AccessClaims,
 	adminJwtTtlSeconds,
 	issueAccessJwt,
 	refreshTokenTtlSeconds,
+	verifyAccessJwt,
 	writeJwtTtlSeconds
 } from '../auth/auth.ts';
-import { resolveRequestedGrants } from '../authz/issuance.ts';
+import {
+	attenuatedGrants,
+	parseRequestedGrants,
+	resolveRequestedGrants
+} from '../authz/issuance.ts';
 import { constantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -66,6 +72,18 @@ export class TokenExchangeService {
 			throw new SubjectTokenRequiredError();
 		}
 
+		// Attenuation is detected by signature, not the declared token type: a
+		// subject token this tenant itself issued is narrowed to a requested subset
+		// of its own grants rather than routed to a trust rule.
+		const presented = await this.verifySelfIssued(body.subject_token);
+
+		if (presented !== undefined) {
+			return this.attenuatedResponse(
+				presented,
+				parseRequestedGrants(body.authorization_details)
+			);
+		}
+
 		if (
 			body.subject_token_type !== subjectTokenTypeIdToken &&
 			body.subject_token_type !== subjectTokenTypeJwt
@@ -100,10 +118,66 @@ export class TokenExchangeService {
 			rule,
 			subject,
 			verified,
-			body.authorization_details,
+			parseRequestedGrants(body.authorization_details),
+			{ issued_token_type: issuedAccessTokenType }
+		);
+	}
+
+	// Verifies a subject token against this tenant's own auth keys. A token that
+	// verifies is one cupboard issued; anything else (an external OIDC token, a
+	// forgery) returns undefined and falls through to the trust-rule path, so the
+	// branch cannot be chosen by a client-declared type.
+	private async verifySelfIssued(
+		token: string
+	): Promise<AccessClaims | undefined> {
+		const keys = await this.authKeys.authVerificationKeys();
+
+		try {
+			return await verifyAccessJwt(
+				keys,
+				token,
+				{
+					issuer: this.authKeys.authIssuer(),
+					audience: this.authKeys.authAudience()
+				},
+				new Date()
+			);
+		} catch {
+			return undefined;
+		}
+	}
+
+	// Reissues a presented self-token narrowed to a requested subset of its
+	// grants, with no refresh token: attenuation is storage-free and the
+	// presenter already holds a session.
+	private async attenuatedResponse(
+		presented: AccessClaims,
+		requested: AuthorizationDetails | undefined
+	): Promise<Response> {
+		const granted = attenuatedGrants(presented.grants, requested);
+		const key = await this.authKeys.activeAuthKey();
+		const accessToken = await issueAccessJwt(
+			key.privateJwk,
 			{
-				issued_token_type: issuedAccessTokenType
-			}
+				issuer: this.authKeys.authIssuer(),
+				audience: this.authKeys.authAudience(),
+				subject: presented.subject,
+				grants: granted,
+				kid: key.kid,
+				ttlSeconds: writeJwtTtlSeconds
+			},
+			new Date()
+		);
+
+		return Response.json(
+			{
+				access_token: accessToken,
+				token_type: 'Bearer',
+				expires_in: writeJwtTtlSeconds,
+				issued_token_type: issuedAccessTokenType,
+				authorization_details: granted
+			} satisfies TokenResponse,
+			{ headers: { 'cache-control': 'no-store' } }
 		);
 	}
 
@@ -173,9 +247,16 @@ export class TokenExchangeService {
 		}
 
 		// A refresh only happens for an interactive session, so the rule still
-		// permits a wildcard and no requested details narrow it; the claims are
-		// unused and an empty set suffices.
-		return this.issuedResponse(rule, claimed.subject, {}, undefined, {});
+		// permits a wildcard and the claims it would bind against go unused. A
+		// refreshed session may narrow itself by naming `authorization_details`,
+		// verified against the rule the same way an exchange is.
+		return this.issuedResponse(
+			rule,
+			claimed.subject,
+			{},
+			parseRequestedGrants(body.authorization_details),
+			{}
+		);
 	}
 
 	// Issues the access token (and, for an interactive session, a successor

@@ -1,4 +1,8 @@
-import { type AuthorizationDetails } from '@cupboard/protocol/grants';
+import {
+	authorizationDetailCovered,
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
 
 import {
 	AuthorizationDetailsRequiredError,
@@ -11,6 +15,36 @@ import {
 } from '../oidc/oidc-trust.ts';
 
 import { rulePermitsGrant } from './bindings.ts';
+
+/**
+ * Parse the `authorization_details` form field a client sent. It is carried as
+ * an opaque JSON string so that a non-JSON or malformed value is the token
+ * endpoint's `invalid_authorization_details`, not the body validator's
+ * `invalid_request`. Absent, returns undefined.
+ */
+export function parseRequestedGrants(
+	raw: string | undefined
+): AuthorizationDetails | undefined {
+	if (raw === undefined) {
+		return undefined;
+	}
+
+	let value: unknown;
+
+	try {
+		value = JSON.parse(raw);
+	} catch {
+		throw new InvalidAuthorizationDetailsError('malformed');
+	}
+
+	const result = authorizationDetailsSchema.safeParse(value);
+
+	if (!result.success) {
+		throw new InvalidAuthorizationDetailsError('malformed');
+	}
+
+	return result.data;
+}
 
 /**
  * The grants a token request earns from its matched rule and verified claims.
@@ -42,6 +76,34 @@ export function resolveRequestedGrants(
 
 	for (const detail of requested) {
 		if (!rulePermitsGrant(rule.permittedGrants, detail, claims)) {
+			throw new InvalidAuthorizationDetailsError('not-permitted');
+		}
+	}
+
+	return requested;
+}
+
+/**
+ * The grants an attenuation earns: a requested subset of what the presented
+ * self-issued token already carries, never a superset. Omitting
+ * `authorization_details` reissues the presented grants unchanged; a request is
+ * verified against them detail by detail, all-or-nothing, so a narrowed token
+ * can never reach a resource the presenter could not.
+ */
+export function attenuatedGrants(
+	presented: AuthorizationDetails,
+	requested: AuthorizationDetails | undefined
+): AuthorizationDetails {
+	if (requested === undefined) {
+		return presented;
+	}
+
+	if (requested.length === 0) {
+		throw new InvalidAuthorizationDetailsError('empty');
+	}
+
+	for (const detail of requested) {
+		if (!authorizationDetailCovered(presented, detail)) {
 			throw new InvalidAuthorizationDetailsError('not-permitted');
 		}
 	}
