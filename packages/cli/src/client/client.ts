@@ -3,7 +3,9 @@ import {
 	DEFAULT_CACHE,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
+	issuedAccessTokenType,
 	type ParsedTokenResponse,
 	refreshTokenGrantType,
 	tokenExchangeGrantType,
@@ -247,15 +249,36 @@ export class CupboardClient {
 	 */
 	async tokenExchange(
 		subjectToken: string,
-		subjectTokenType: string
+		subjectTokenType: string,
+		authorizationDetails?: AuthorizationDetails
 	): Promise<ParsedTokenResponse> {
 		const response = await this.postTokenForm({
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
-			subject_token_type: subjectTokenType
+			subject_token_type: subjectTokenType,
+			...(authorizationDetails === undefined
+				? {}
+				: { authorization_details: JSON.stringify(authorizationDetails) })
 		});
 
 		return this.parseJson('/token', tokenResponseSchema, response);
+	}
+
+	/**
+	 * Narrows a token this deployment issued to a subset of its grants. The
+	 * presented token is the subject; the server recognises it by signature and
+	 * confines the new token to `authorizationDetails`, refusing anything the
+	 * presenter could not already do.
+	 */
+	async tokenExchangeAttenuate(
+		currentToken: string,
+		authorizationDetails: AuthorizationDetails
+	): Promise<ParsedTokenResponse> {
+		return this.tokenExchange(
+			currentToken,
+			issuedAccessTokenType,
+			authorizationDetails
+		);
 	}
 
 	/**

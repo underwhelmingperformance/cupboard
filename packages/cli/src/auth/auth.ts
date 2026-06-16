@@ -1,3 +1,4 @@
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	type ParsedTokenResponse,
 	subjectTokenTypeIdToken
@@ -179,9 +180,17 @@ function isGrantRefusal(error: unknown): boolean {
 export async function authenticateGithubOidc(
 	client: CupboardClient,
 	audience: string,
-	environment?: GithubOidcEnvironment
+	options: {
+		readonly environment?: GithubOidcEnvironment;
+		readonly authorizationDetails?: AuthorizationDetails;
+	} = {}
 ): Promise<TokenProvider> {
-	const provider = new GithubOidcTokenProvider(client, audience, environment);
+	const provider = new GithubOidcTokenProvider(
+		client,
+		audience,
+		options.authorizationDetails,
+		options.environment
+	);
 	await provider.get();
 
 	return provider;
@@ -191,6 +200,8 @@ export interface PushAuthOptions {
 	readonly githubOidc?: boolean;
 	readonly audience: string;
 	readonly environment?: GithubOidcEnvironment;
+	// The grant the push requests; a CI (claim-bound) exchange must name it.
+	readonly authorizationDetails?: AuthorizationDetails;
 }
 
 /**
@@ -202,11 +213,10 @@ export function authenticateForPush(
 	options: PushAuthOptions
 ): Promise<TokenProvider> {
 	if (options.githubOidc === true) {
-		return authenticateGithubOidc(
-			client,
-			options.audience,
-			options.environment
-		);
+		return authenticateGithubOidc(client, options.audience, {
+			environment: options.environment,
+			authorizationDetails: options.authorizationDetails
+		});
 	}
 
 	return Promise.resolve(cachedOwnerProvider(client.baseUrl.href));
@@ -218,6 +228,7 @@ class GithubOidcTokenProvider implements TokenProvider {
 	constructor(
 		private readonly client: CupboardClient,
 		private readonly audience: string,
+		private readonly authorizationDetails: AuthorizationDetails | undefined,
 		private readonly environment?: GithubOidcEnvironment
 	) {}
 
@@ -240,7 +251,8 @@ class GithubOidcTokenProvider implements TokenProvider {
 		});
 		const { access_token } = await this.client.tokenExchange(
 			subjectToken,
-			subjectTokenTypeIdToken
+			subjectTokenTypeIdToken,
+			this.authorizationDetails
 		);
 
 		return access_token;

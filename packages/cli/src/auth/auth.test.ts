@@ -78,7 +78,7 @@ describe('authenticateGithubOidc', () => {
 		const provider = await authenticateGithubOidc(
 			federatingClient(),
 			'https://cache.example.workers.dev',
-			githubEnvironment
+			{ environment: githubEnvironment }
 		);
 
 		const eager = await provider.get();
