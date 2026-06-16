@@ -270,6 +270,9 @@ importers:
       '@orpc/contract':
         specifier: ^1.14.6
         version: 1.14.6
+      re2js:
+        specifier: ^2.8.3
+        version: 2.8.3
       zod:
         specifier: ^4.4.3
         version: 4.4.3
@@ -3349,6 +3352,10 @@ packages:
   radash@12.1.1:
     resolution: {integrity: sha512-h36JMxKRqrAxVD8201FrCpyeNuUY9Y5zZwujr20fFO77tpUtGa6EZzfKw/3WaiBX95fq7+MpsuMLNdSnORAwSA==}
     engines: {node: '>=14.18.0'}
+
+  re2js@2.8.3:
+    resolution: {integrity: sha512-lUKeXVwMqU302DM/WaOm33XF2hhzjGUZ8CbLg4zSAMpW2PPkJ2+is25AROevNiw+DytFmKU5gsQ92cB1Kxy+fA==}
+    engines: {node: '>=18.0.0'}
 
   regjsparser@0.13.1:
     resolution: {integrity: sha512-dLsljMd9sqwRkby8zhO1gSg3PnJIBFid8f4CQj/sXx+7cKx+E7u0PKhZ+U4wmhx7EfmtvnA318oVaIkAB1lRJw==}
@@ -6456,6 +6463,8 @@ snapshots:
   pure-rand@8.4.0: {}
 
   radash@12.1.1: {}
+
+  re2js@2.8.3: {}
 
   regjsparser@0.13.1:
     dependencies:

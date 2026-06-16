@@ -4,6 +4,7 @@
 	"dependencies": {
 		"@cupboard/nix": "workspace:*",
 		"@orpc/contract": "^1.14.6",
+		"re2js": "^2.8.3",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
@@ -14,8 +15,10 @@
 	"exports": {
 		"./attestations": "./src/attestations.ts",
 		"./caches": "./src/caches.ts",
+		"./capture": "./src/capture.ts",
 		"./contract": "./src/contract/index.ts",
 		"./control-keys": "./src/control-keys.ts",
+		"./grants": "./src/grants.ts",
 		"./keys": "./src/keys.ts",
 		"./oidc": "./src/oidc.ts",
 		"./oidc-issuer": "./src/oidc-issuer.ts",
