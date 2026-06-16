@@ -719,8 +719,11 @@ them, GC against committed narinfo rows would delete anything still reachable
 through substitution, since the cache has no inherent concept of "in use". Roots
 are modelled as named, moving channels (`github:owner/repo/main`, `.../pr-123`),
 each holding a set of top-level store paths that a `push` replaces wholesale,
-with an optional per-root TTL. Reachability GC marks the transitive closure from
-every live channel through `References`. This is built in three increments:
+with an optional per-root TTL. The root name is an operator convention, so a PR
+cache may choose a compact root such as `pr-123` or a repository-qualified name
+as long as the policy binds it consistently. Reachability GC marks the
+transitive closure from every live channel through `References`. This is built
+in three increments:
 
 - [x] Retention root model and admin API: a `retention_root` channel keyed by
       name with an optional `expires_at`, and a `retention_root_target` set of
@@ -2638,6 +2641,574 @@ SBOMs (SPDX or CycloneDX predicate types) attach later through the same store
 and list. Enumerating a path's attestations is reading the list, already
 present, so a separate index is unnecessary. A non-omission guarantee for the
 list, anchoring its digest in the signed narinfo, is a later hardening.
+
+## V7
+
+V7 replaces the two-role access model, on both the tenant Durable Object and the
+control plane, with bearer capabilities carried on the same short-lived access
+token. A token holds a set of grants, encoded as RFC 9396
+`authorization_details`, each naming an operation and the resources it may act
+on. One authoriser evaluates them, the owner becomes a wildcard grant rather
+than an unconstrained code path, and a client requests the grants it needs while
+the server verifies them against a trust rule. The rule binds requested
+resources to verified claims as data, so a CI identity is confined to its own
+resources without provider specifics living in server code. Attenuation lets a
+holder exchange a token for a strictly weaker one without any server state.
+
+Identity stays at the edge. The token endpoint still issues from an OIDC trust
+rule (CI) or an interactive owner login; how a caller first proves itself is
+unchanged. What changes is the shape of the authority the endpoint issues and
+how every write path checks it. V7 covers both planes: the tenant Durable
+Object's write and admin tokens and the control plane's admin tokens. They stay
+separate issuing domains, so the model is shared but the trust boundary is not,
+as the next section sets out.
+
+### Why now
+
+The change is cheapest before a release and while tokens are stateless:
+
+- Access tokens are short-lived and carry no server-side record (V4). Changing
+  their claim shape costs nothing to deploy; outstanding tokens expire within
+  minutes.
+- V5 is a fresh deploy with no field compatibility to keep, so the wire shape of
+  a token and the stored shape of a trust rule are both free to change.
+- The contract already declares each procedure's required authority once, in
+  `meta({ scope })`. V7 enriches that declaration rather than inventing a new
+  one.
+
+Deferring the model and instead adding a second bespoke claim, a `cb_caches`
+sibling to `cb_roots`, would spread enforcement across more sites and carry both
+claims into a released, compatibility-bound token.
+
+### The model
+
+A grant is an operation paired with the resources it may act on:
+
+- **Operations** are the verbs the server gates, one per contract procedure or
+  wire route so that no path is left unguarded. On the tenant Durable Object the
+  push lifecycle is `upload:negotiate`, `upload:prepare`, `upload:status`, and
+  `upload:commit`; the attestation lifecycle is `attestation:negotiate`,
+  `attestation:prepare`, and `attestation:attach`; retention is `root:set`; and
+  the admin verbs cover `cache:create`, `cache:delete`, `narinfo:delete`,
+  signing keys, trust rules, and policy. On the control plane: `tenant:create`,
+  `tenant:suspend`, `tenant:resume`, `tenant:remove`, `tenant:read`,
+  `control-key:rotate`, and `control-key:retire`.
+- **Resources** name what an operation acts on, in three shapes. Tenant-DO cache
+  operations carry a cache (an exact name) and, where the operation sets
+  retention, a root (an exact name or a trailing-slash prefix) nested within
+  that cache. Tenant-DO domain operations, the signing-key, trust-rule, and
+  policy verbs, carry no resource: they are authority over the tenant the issuer
+  has already established. Control operations carry an exact tenant slug where
+  they act on a tenant (a tenant-prefix grammar is deferred, since slugs are
+  single segments with no delimiter to stop a prefix matching `team-a` to
+  `team-alpha`), and no resource for the control-key verbs. A grant lists only
+  the fields its operations need, and a missing required field is never a
+  wildcard: absence denies, and a wildcard must be an explicit selector in the
+  grant. An issued grant carries only concrete selectors. Trust-rule bindings
+  may derive selectors from verified claims, or require relations between the
+  requested selectors, but those derivations and relations never appear in a
+  token. Subset and attenuation containment therefore stay a name and prefix
+  comparison.
+
+A tenant-DO cache write reaches only the caches a grant names: a token
+negotiates, commits, sets roots, and files attestations cache by cache. The
+shared content store deduplicates bytes across caches, but that is a storage
+fact, not an authority a token holds; a push reuses an existing blob without any
+tenant-wide grant. The domain verbs sit outside this boundary, scoped to the
+tenant rather than a cache. That per-cache boundary on writes is exactly what a
+per-repository CI rule needs.
+
+A grant is carried as an RFC 9396 `authorization_details` object with a cupboard
+`type`: its `actions` are the operations and its type-specific fields are the
+resources, following the three shapes. `cupboard_cache` carries a cache and, for
+retention operations, a root selector; `cupboard_tenant` carries a tenant for
+the control lifecycle verbs; and the resource-free types, one for the tenant
+domain verbs and one for the control-key verbs, carry `actions` only. The access
+token carries the granted array, and the same shape is what a client requests. A
+token's authority is the set of its grants; an owner token holds a single
+wildcard grant for its domain, so there is no separate unconstrained path.
+
+### Two domains, one model
+
+The model is shared; the issuing domains are not. The tenant Durable Object and
+the control plane stay separate Worker scripts with separate signing keys and
+the `CONTROL_KEY_WRAP_SECRET` split (V5), so a token is bound to its domain by
+issuer, audience, and signature. A tenant token presented to a control route
+fails verification before its grants are read, and a control token cannot act on
+a tenant DO for the same reason; the two are not interchangeable. The wildcard
+is per domain, because the two issuers sign disjoint token populations and
+neither holds the other's key, so a control wildcard covers only control
+operations and a tenant wildcard only that tenant's. The grant model runs inside
+a domain it never crosses: authorisation is always verify the domain, then
+evaluate grants.
+
+### Authorisation
+
+Each contract procedure declares the operation it needs and, where it has them,
+which input fields name its resources, replacing `meta({ scope })`:
+
+```text
+.meta({ requires: 'root:set', resource: { cache: 'cache', root: 'name' } })
+```
+
+A single authoriser answers one question: does any grant on the token cover this
+operation on these resources? Covering means the operation matches and each
+resource selector contains the request, an exact name, or a trailing-slash
+prefix that admits it. The wire-format write paths outside the contract (the
+commit WebSocket, the presigned upload negotiation) call the same authoriser
+with their operation and resources, so there is one decision point rather than a
+role check in middleware plus a bespoke claim check in a handler.
+
+Some write routes carry only an upload id rather than the cache and store path:
+commit, upload status, and attestation attach address a stored pending row. For
+these the authoriser reads the resources from that pending upload or attestation
+row, not from the request input. The contract `resource` declaration therefore
+names either an input field or the stored row the operation resolves.
+
+### Issuance: request and verify
+
+The token endpoint issues from a request, not from server-side construction. A
+client presents its OIDC subject token and the `authorization_details` it wants;
+the server verifies the subject token and checks each requested grant against
+the matching trust rule. If any requested grant is not permitted the whole
+request is rejected with `invalid_authorization_details`; the server narrows to
+a granted subset only when the client sets the cupboard-specific
+`partial_authorization_details` request parameter, which RFC 9396 does not
+define, so a client never silently receives less than it asked for. The client
+names the concrete resource it knows from its own context, for example the cache
+`pr-123`, and the server never parses a provider's claim format to build that
+name.
+
+A trust rule is data. It permits a requested grant when the operations are
+allowed and each requested resource satisfies the rule's bindings. There are two
+binding kinds:
+
+- Claim bindings derive one requested resource from verified claims through a
+  small library of provider-neutral transforms: exact equality, a named capture
+  from an anchored pattern, or a slug normalisation. The claim name and the
+  transform are the owner's configuration; the server holds no provider-specific
+  code.
+- Relational bindings compare requested resources with each other at issue time,
+  for example requiring the requested root to equal the requested cache. They do
+  not derive authority from claims and cannot add a resource; they only reject a
+  requested grant whose concrete resources do not satisfy the relation.
+
+For a per-PR rule the binding requires the requested cache to equal `pr-`
+followed by, for instance, `slug(claim:ref)`, or the capture `n` from
+`^refs/pull/(?<n>\d+)/merge$` over the `ref` claim. Either keeps the
+GitHub-specific knowledge in the rule the owner wrote. The bound value is
+validated against the resource's grammar, `cacheNamePattern` for a cache, before
+it is trusted, so a request whose claim does not satisfy the binding, or whose
+bound value would escape the namespace, is refused at issue time. The issued
+token can only ever reach the asking PR's own cache, so a build that reaches the
+token is confined to that cache whatever it does with it.
+
+Refresh tokens are only issued for interactive owner/admin sessions. A
+claim-bound CI exchange gets a short-lived access token and, when it needs
+another one, presents a fresh provider OIDC token so the server can re-check the
+current provider claims against the current trust rule. An owner/admin refresh
+re-reads the trust rule and reissues the grants it currently permits, so a rule
+change takes effect on the next refresh, and a refresh may present narrower
+`authorization_details` to step down just as attenuation does.
+
+### CLI UX
+
+The stored grant-and-binding document is the authority model. The normal CLI
+keeps common CI workflows out of hand-written JSON by providing presets that
+expand to the same stored rule shape. The server stores the expanded rule plus
+optional display metadata. Preset names such as `add-github-pr`, `push`,
+`attest`, `root`, and `same-as-cache` are CLI conveniences.
+
+Rules can be added three ways:
+
+- Provider presets cover common workflows.
+- Structured direct flags cover simple generic rules.
+- `--from-file` accepts the full stored rule shape for cases where flags would
+  become unclear.
+
+The first preset is GitHub pull-request caches:
+
+```sh
+cupboard oidc-trust add-github-pr https://cupboard.example/t/acme \
+  --repo owner/repo \
+  --cache-template 'pr-{pull_request_number}' \
+  --root same-as-cache \
+  --allow push \
+  --allow attest \
+  --allow root
+```
+
+`add-github-pr` expands to a rule for GitHub Actions OIDC. The CLI looks up the
+public repository with Octokit, using the GitHub REST API rather than parsing
+HTML or constructing raw fetch calls. The first implementation supports public
+repositories only and unauthenticated lookup is acceptable. Private repository
+support can add authenticated Octokit later without changing the stored rule
+shape.
+
+The lookup records at least:
+
+- repository id
+- repository owner id
+- canonical repository full name, for display
+
+The stored trust rule pins stable ID claims, giving the policy a repository
+identity that survives rename and transfer:
+
+- `repository_id=<looked-up repository id>`
+- `repository_owner_id=<looked-up owner id>`
+
+The owner/repo string from `--repo` is therefore an input to discovery and a
+display label. The stable ID claims form the security boundary.
+
+GitHub lookup uses Octokit REST with a cache-capable fetch implementation rather
+than raw `fetch` calls. The CLI configures Octokit with `make-fetch-happen` as
+its `request.fetch`, using a cupboard-owned cache directory and
+`cache: "no-cache"` for repository lookups so repeated runs perform HTTP
+conditional requests when a cached response exists. The cache implementation
+owns the `ETag`/`If-None-Match` and `304 Not Modified` handling; cupboard
+consumes the same typed Octokit response either way. Rate-limit handling stays
+GitHub-aware: the Octokit client uses `@octokit/plugin-throttling` and
+`@octokit/plugin-retry` with bounded retries, `Retry-After`/rate-reset-aware
+backoff, and clear terminal errors when lookup cannot complete. Avoid layering
+independent retry policies: if `make-fetch-happen` is used only for HTTP
+caching, its generic retry behaviour is disabled or kept subordinate to
+Octokit's GitHub-specific throttling.
+
+The predefined GitHub PR substitutions are deliberately small:
+
+- `{pull_request_number}`: captured from the verified `ref` claim with
+  `^refs/pull/(?<pull_request_number>\d+)/merge$`
+
+Additional substitutions can be added later when there is a concrete use case.
+Repository identity is pinned through exact ID claims. Template substitutions
+are for derived resource names.
+
+Templates use cupboard's small `{name}` substitution syntax. A placeholder is an
+ASCII identifier in braces, such as `{pull_request_number}`. The parser accepts
+that placeholder form exactly. The rendered value is always validated against
+the destination grammar (`cacheNamePattern` for caches, `rootNameSchema` for
+roots) before a grant is issued.
+
+Variable values come from named substitutions. In the stored rule and
+`--from-file` form, a substitution maps a template variable to a verified OIDC
+claim, optionally through a transform. The first supported transforms are:
+
+- `claim`: copy the claim value directly
+- `capture`: match an anchored regular expression against a claim and use a
+  named capture group
+- `slug`: normalise a claim value into a bounded slug, only when the destination
+  grammar allows it
+
+Template expansion applies to template-bearing options. In the first
+implementation those are `--cache-template` and `--root-template`.
+`--root same-as-cache` compiles to a relational binding requiring the requested
+root to equal the requested cache.
+
+`same-as-cache` is CLI shorthand. It compiles to a binding that requires the
+requested root to equal the requested cache exactly:
+
+```json
+{
+  "root": {
+    "equalsResource": "cache"
+  }
+}
+```
+
+For a job whose verified OIDC token has `ref=refs/pull/123/merge`, the
+`add-github-pr` command above permits cache `pr-123` and root `pr-123`, and
+refuses cache `pr-123` with root `main`, or cache `pr-124` with root `pr-124`.
+
+The `--allow` values expand to fine-grained V7 operations:
+
+- `push`: `upload:negotiate`, `upload:prepare`, `upload:status`, `upload:commit`
+- `attest`: `attestation:negotiate`, `attestation:prepare`, `attestation:attach`
+- `root`: `root:set`
+
+A structured generic command can express the same shape with explicit repository
+ids, at the cost of more flags:
+
+```sh
+cupboard oidc-trust add https://cupboard.example/t/acme \
+  --issuer https://token.actions.githubusercontent.com \
+  --audience https://cupboard.example/t/acme \
+  --claim repository_id=123456789 \
+  --claim repository_owner_id=987654321 \
+  --grant cupboard_cache \
+  --allow push \
+  --allow attest \
+  --allow root \
+  --cache-template 'pr-{pull_request_number}' \
+  --capture 'ref=^refs/pull/(?<pull_request_number>\d+)/merge$' \
+  --root same-as-cache
+```
+
+`--capture <claim>=<anchored-pattern>` matches a verified claim and exposes each
+named capture group as a template variable. The CLI splits the value only at the
+first `=`, so the pattern can contain `=`, commas, colons, and additional named
+groups without changing the flag grammar. One capture can therefore define
+several variables from the same claim:
+
+```sh
+cupboard oidc-trust add https://cupboard.example/t/acme \
+  --issuer https://example.com/oidc \
+  --audience https://cupboard.example/t/acme \
+  --claim project_id=abc123 \
+  --grant cupboard_cache \
+  --allow push \
+  --cache-template '{branch}-{platform}' \
+  --capture 'ref=^refs/heads/(?<branch>[a-z0-9-]+)-(?<platform>[a-z0-9-]+)$'
+```
+
+This keeps custom substitutions in the structured surface with the source claim
+and pattern in one shell value, and the variable names inside the regular
+expression where they are already defined.
+
+The GitHub PR source is also available as a named shortcut:
+
+```sh
+cupboard oidc-trust add https://cupboard.example/t/acme \
+  --issuer https://token.actions.githubusercontent.com \
+  --audience https://cupboard.example/t/acme \
+  --claim repository_id=123456789 \
+  --claim repository_owner_id=987654321 \
+  --grant cupboard_cache \
+  --allow push \
+  --allow attest \
+  --allow root \
+  --cache-template 'pr-{pull_request_number}' \
+  --template-source github-pr \
+  --root same-as-cache
+```
+
+`--template-source github-pr` expands to the `ref` capture shown above.
+Repository lookup belongs to `add-github-pr`; this command takes the stable
+`repository_id` and `repository_owner_id` filters explicitly. This is the middle
+tier: exact claim filters, shorthand actions, template options, custom
+substitutions, and named provider substitution sources. Complex resource
+bindings and rules that are clearer as data use `--from-file`.
+
+The preset command above is equivalent to this raw trust-rule file, assuming
+GitHub returned repository id `123456789` and owner id `987654321`:
+
+```json
+{
+  "issuer": "https://token.actions.githubusercontent.com",
+  "audience": "https://cupboard.example/t/acme",
+  "claims": {
+    "repository_id": "123456789",
+    "repository_owner_id": "987654321"
+  },
+  "display": {
+    "provider": "github",
+    "preset": "github-pr",
+    "repository": "owner/repo"
+  },
+  "permittedGrants": [
+    {
+      "type": "cupboard_cache",
+      "actions": [
+        "upload:negotiate",
+        "upload:prepare",
+        "upload:status",
+        "upload:commit",
+        "attestation:negotiate",
+        "attestation:prepare",
+        "attestation:attach",
+        "root:set"
+      ],
+      "resources": {
+        "cache": {
+          "equalsTemplate": "pr-{pull_request_number}",
+          "substitutions": {
+            "pull_request_number": {
+              "claim": "ref",
+              "capture": {
+                "pattern": "^refs/pull/(?<pull_request_number>\\d+)/merge$",
+                "group": "pull_request_number"
+              }
+            }
+          },
+          "validate": "cacheName"
+        },
+        "root": {
+          "equalsResource": "cache",
+          "validate": "rootName"
+        }
+      }
+    }
+  ]
+}
+```
+
+A user can write that rule directly:
+
+```sh
+cupboard oidc-trust add https://cupboard.example/t/acme \
+  --from-file github-pr-cache-rule.json
+```
+
+The file form contains the protocol shape: issuer, audience, exact claim
+filters, permitted grants, and claim/resource bindings. The CLI validates the
+file with the same schema as the server and posts it unchanged. The file form
+may also be used for GitHub rules when the user already knows the stable ids.
+`oidc-trust show` and `oidc-trust list` render the stored rule shape, optionally
+annotated with stored display metadata such as provider, preset, and repository.
+`--json` returns the stored rule shape. Token exchange returns the concrete
+`authorization_details` granted to the caller.
+
+Capture patterns are never evaluated with JavaScript `RegExp`. They are
+evaluated with `re2js`, a pure-JavaScript RE2-compatible engine: RE2 matches in
+linear time, so an admin-supplied pattern cannot trigger catastrophic
+backtracking, and `re2js` needs no native binding or filesystem access to run
+under the Worker runtime.
+
+`capture` is deliberately restricted:
+
+- patterns are compiled and validated when a rule is added
+- patterns must be anchored with `^` and `$`
+- unsupported RE2 features are rejected
+- pattern length, input claim length, number of capture transforms, and rendered
+  template length have explicit schema limits
+- the requested capture group must be named and must be present exactly once
+- each template variable is defined by exactly one capture group across the
+  rule; a name defined twice is rejected when the rule is added, never resolved
+  last-wins
+- rendered resources are still validated against their destination grammar
+
+If `re2js` stops working under workerd or cannot support a required production
+constraint, V7 must fail closed: do not fall back to JavaScript `RegExp`.
+Provider presets can still compile to named built-in transforms such as
+`githubPullRequestNumberFromRef`, implemented with bounded string parsing, and
+raw trust rules can be limited to exact-claim bindings until a linear engine is
+available again.
+
+### Attenuation
+
+A holder may exchange a token for a strictly weaker one. The exchange is an RFC
+8693 token exchange whose subject token is the current access token and whose
+requested `authorization_details` are the narrower grants; the endpoint issues a
+new token with those grants, and only if they are a subset of the presenter's
+grants under the same covering test the authoriser uses. The new token is an
+ordinary short-lived access token with fewer grants.
+
+The exchange touches no storage. Subset is decided from the presented token's
+own grants, so there is no record to consult and none to revoke; the narrower
+token expires on its own schedule like any other. Attenuation is issuer-side:
+the holder calls the token endpoint to narrow, reusing the existing asymmetric
+signing keys and published JWKS. A privileged step narrows before handing a
+token to an untrusted one, and the owner's CLI can drop to a single cache before
+running a script.
+
+Refresh is the stored-session path for interactive owner/admin logins. The
+presence of a `refresh_token` member in the token response is the wire signal
+that a session can refresh; claim-bound CI exchanges omit it. A refresh-token
+grant consumes the presented refresh token, re-reads the current trust rule, and
+issues a new access token only for grants the rule still permits. If the refresh
+request also carries narrower `authorization_details`, the same subset test used
+for attenuation applies before the new token is issued.
+
+### Migration
+
+- The access token's `scope` and `cb_roots` claims become an
+  `authorization_details` claim (RFC 9396). Tokens are stateless, so no issued
+  token needs rewriting.
+- The token response and `.well-known/oauth-authorization-server` metadata, on
+  both the tenant and control issuers, stop reporting `scope`: the response
+  returns the granted `authorization_details`, and the metadata advertises
+  `authorization_details_types_supported`. Scopes are gone from cupboard's own
+  issuers, so `scopes_supported` simply drops out; RFC 9396 asks only that the
+  supported detail types be published, not that they stand in for scopes.
+- A trust rule's `scope` and `allowedRoots` columns, the tenant `oidc_trust`
+  rules and the control rules alike, become a stored set of permitted grants and
+  their claim bindings. V5 is a fresh deploy, so the row shape changes without a
+  data migration.
+- `meta({ scope })` on every contract procedure, control procedures included,
+  becomes `meta({ requires, resource })`. The oRPC middleware reads that
+  metadata, verifies the token, resolves the declared resources from parsed
+  input or stored rows, and calls the shared authoriser. Hono wire-format routes
+  use the same authoriser after they have resolved their concrete resources.
+  Hono remains the routing layer; the capability decision is shared rather than
+  path-specific. An owner rule seeds a single wildcard grant for its domain.
+
+### Implementation sequence
+
+Each step keeps a working deployment.
+
+- [ ] **Grant model and authoriser.** Define the operation and resource types,
+      the grant set, and the covering test. Add the authoriser and route every
+      contract procedure, on the tenant DO and the control plane, plus every
+      wire-format write path, through it. Replace the `scope` claim with
+      `authorization_details`; an owner rule seeds a wildcard grant per domain.
+      Unit tests for covering, including the missing-field-denies rule, the
+      per-domain wildcard, and a token from one domain refused on the other
+      before authorisation.
+- [ ] **Request-and-verify issuance.** Store the permitted grants and their
+      claim bindings on a rule, tenant and control alike. On a token request,
+      verify each requested `authorization_details` against the rule, applying
+      the generic transform library (exact, capture, slug) and re-validating the
+      bound value against the resource grammar. Reject the whole request with
+      `invalid_authorization_details` unless the client sets the
+      `partial_authorization_details` parameter. Return the granted
+      `authorization_details` in the token response and advertise
+      `authorization_details_types_supported` in the authorisation-server
+      metadata, dropping `scopes_supported`. Tests for a satisfied binding, a
+      claim that fails the binding, whole-request rejection, and a bound value
+      that would escape a selector.
+- [ ] **Attenuation and refresh.** Add the RFC 8693 exchange that narrows a
+      presented token to a requested subset of its `authorization_details`,
+      refusing any request that is not covered. Refresh tokens are issued only
+      for interactive owner/admin sessions; claim-bound CI exchanges omit
+      `refresh_token` and re-exchange fresh provider tokens. Refresh reissues
+      the rule's current grants and accepts the same narrowing. Tests for subset
+      acceptance, superset refusal, that a narrowed token cannot reach a
+      resource the presenter could not, that CI exchanges receive no refresh
+      token, and that refresh tracks a changed rule.
+- [ ] **CLI.** `cupboard oidc-trust add` and the control trust commands accept
+      permitted grants and their claim bindings. Add the GitHub PR preset,
+      shorthand action expansion, validated `{name}` template rendering,
+      structured direct flags with custom substitutions and named provider
+      substitution sources, raw `--from-file`, readable show/list output,
+      Octokit public repository id lookup with HTTP caching and rate-limit
+      backoff, and `re2js` capture evaluation under workerd. The push and attest
+      actions request the `authorization_details` they need and attenuate before
+      running a build.
+
+### Verification
+
+- A commit is refused when no grant names the cache; a commit into a cache the
+  grant names succeeds, and reusing a blob another cache already holds needs no
+  extra grant.
+- A rule issues a token confined to the PR's own cache when the requested cache
+  satisfies the claim binding; a request for a grant whose claim does not
+  satisfy the binding is rejected whole with `invalid_authorization_details`
+  unless the client set `partial_authorization_details`; a bound value that
+  fails `cacheNamePattern` is rejected at issue time.
+- A resource-free grant covers a tenant domain verb such as key rotation, and a
+  cache-only grant does not; neither carries a dummy resource field.
+- An attenuated token reaches a strict subset of the presenter's resources and
+  no more; a superset request is refused.
+- An owner token's wildcard grant covers every operation in its domain; removing
+  it leaves a token that can do nothing rather than everything.
+- A control rule scopes an operator to a named tenant; a tenant token is refused
+  on a control route, and a control token on a tenant route, before grants are
+  evaluated.
+
+### Out of scope
+
+cupboard does not become an object-capability system. Tokens are bearer
+credentials, not passable references with their own lifecycle; there is no
+delegation graph, no revocation registry, and no offline caveat chaining.
+Revocation stays expiry plus key rotation. The grant encoding here is a JWT
+claim; Biscuit is a viable alternative encoding of the same model if offline
+attenuation becomes a requirement, since only the issue and authorise code would
+change. Sender-constrained tokens (DPoP or mTLS binding), which would defeat
+token theft rather than only contain it, are a later hardening if the threat
+model calls for them. Control tenant selectors are exact in V7; a tenant-prefix
+grammar for scoped provisioning is deferred until it is needed. Per-cache read
+authorisation is not addressed here: reads stay public or netrc-gated, and PR
+caches are public-read, so the write boundary alone keeps an untrusted build
+from reaching the default cache.
 
 ## Later features
 
