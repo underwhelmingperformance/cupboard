@@ -3150,7 +3150,7 @@ Each step keeps a working deployment.
       Unit tests for covering, including the missing-field-denies rule, the
       per-domain wildcard, and a token from one domain refused on the other
       before authorisation.
-- [ ] **Request-and-verify issuance.** Store the permitted grants and their
+- [x] **Request-and-verify issuance.** Store the permitted grants and their
       claim bindings on a rule, tenant and control alike. On a token request,
       verify each requested `authorization_details` against the rule, applying
       the generic transform library (exact, capture, slug) and re-validating the
@@ -3168,7 +3168,7 @@ Each step keeps a working deployment.
       metadata, dropping `scopes_supported`. Tests for a satisfied binding, a
       claim that fails the binding, whole-request rejection, a CI exchange that
       omits details, and a bound value that would escape a selector.
-- [ ] **Attenuation and refresh.** Add the RFC 8693 exchange that narrows a
+- [x] **Attenuation and refresh.** Add the RFC 8693 exchange that narrows a
       presented token to a requested subset of its `authorization_details`,
       refusing any request that is not covered. Refresh tokens are issued only
       for interactive owner/admin sessions; claim-bound CI exchanges omit

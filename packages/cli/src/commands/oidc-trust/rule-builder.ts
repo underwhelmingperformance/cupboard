@@ -1,6 +1,8 @@
+import { captureGroups } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,
-	permittedGrantSchema
+	permittedGrantSchema,
+	type Substitution
 } from '@cupboard/protocol/grants';
 import {
 	type OidcTrustAddBody,
@@ -28,6 +30,18 @@ const allowExpansions = {
 
 export type AllowShorthand = keyof typeof allowExpansions;
 
+// A named capture source baked into the CLI for a provider, so a common rule
+// needs no hand-written pattern. `github-pr` reads a GitHub Actions `ref` of the
+// form `refs/pull/<n>/merge` and binds the pull-request number to `{pr}`.
+const templateSources = {
+	'github-pr': {
+		claim: 'ref',
+		pattern: '^refs/pull/(?<pr>[0-9]+)/merge$'
+	}
+} as const;
+
+export type TemplateSource = keyof typeof templateSources;
+
 export class UnknownAllowError extends Error {
 	constructor(public readonly value: string) {
 		super(
@@ -37,9 +51,34 @@ export class UnknownAllowError extends Error {
 	}
 }
 
+export class UnknownTemplateSourceError extends Error {
+	constructor(public readonly value: string) {
+		super(
+			`Unknown --template-source '${value}'. Expected one of: ${Object.keys(templateSources).join(', ')}.`
+		);
+		this.name = 'UnknownTemplateSourceError';
+	}
+}
+
+export class InvalidCaptureSpecError extends Error {
+	constructor(public readonly spec: string) {
+		super(`--capture must be <claim>=<pattern>, got '${spec}'.`);
+		this.name = 'InvalidCaptureSpecError';
+	}
+}
+
+export class DuplicateCaptureVariableError extends Error {
+	constructor(public readonly variable: string) {
+		super(
+			`Template variable '${variable}' is defined by more than one capture.`
+		);
+		this.name = 'DuplicateCaptureVariableError';
+	}
+}
+
 export class MissingCacheError extends Error {
 	constructor() {
-		super('A cache grant needs --cache <name>.');
+		super('A cache grant needs --cache <name> or --cache-template <template>.');
 		this.name = 'MissingCacheError';
 	}
 }
@@ -64,44 +103,155 @@ export function expandAllow(values: readonly string[]): {
 	return { cacheActions: [...cacheActions], rootActions: [...rootActions] };
 }
 
+// Each named group in a `<claim>=<pattern>` capture becomes a template variable
+// bound to that claim. `captureGroups` rejects an unanchored pattern or one with
+// no named group, so a malformed capture fails here.
+export function parseCapture(spec: string): Record<string, Substitution> {
+	const separator = spec.indexOf('=');
+
+	if (separator <= 0) {
+		throw new InvalidCaptureSpecError(spec);
+	}
+
+	const claim = spec.slice(0, separator);
+	const pattern = spec.slice(separator + 1);
+	const substitutions: Record<string, Substitution> = {};
+
+	for (const group of captureGroups(pattern)) {
+		substitutions[group] = { claim, capture: { pattern, group } };
+	}
+
+	return substitutions;
+}
+
+// Merge the substitutions from `--template-source` and every `--capture`,
+// rejecting a variable defined more than once so a rule never depends on which
+// flag was read last.
+export function collectSubstitutions(options: {
+	readonly templateSource?: string;
+	readonly captures: readonly string[];
+}): Record<string, Substitution> {
+	const merged: Record<string, Substitution> = {};
+
+	const add = (substitutions: Record<string, Substitution>): void => {
+		for (const [variable, substitution] of Object.entries(substitutions)) {
+			if (variable in merged) {
+				throw new DuplicateCaptureVariableError(variable);
+			}
+
+			merged[variable] = substitution;
+		}
+	};
+
+	if (options.templateSource !== undefined) {
+		if (!(options.templateSource in templateSources)) {
+			throw new UnknownTemplateSourceError(options.templateSource);
+		}
+
+		const source = templateSources[options.templateSource as TemplateSource];
+
+		add(parseCapture(`${source.claim}=${source.pattern}`));
+	}
+
+	for (const capture of options.captures) {
+		add(parseCapture(capture));
+	}
+
+	return merged;
+}
+
+const placeholderPattern = /\{([A-Za-z_][A-Za-z0-9_]*)\}/gu;
+
+// The substitutions a template actually references, so a binding carries no
+// unused entries.
+function referencedSubstitutions(
+	template: string,
+	substitutions: Record<string, Substitution>
+): Record<string, Substitution> {
+	const referenced: Record<string, Substitution> = {};
+
+	for (const match of template.matchAll(placeholderPattern)) {
+		const variable = match[1];
+		const substitution =
+			variable === undefined ? undefined : substitutions[variable];
+
+		if (variable !== undefined && substitution !== undefined) {
+			referenced[variable] = substitution;
+		}
+	}
+
+	return referenced;
+}
+
 export interface CacheGrantOptions {
 	readonly cache?: string;
+	readonly cacheTemplate?: string;
 	readonly allow: readonly string[];
 	readonly root?: string;
+	readonly rootTemplate?: string;
+	readonly substitutions?: Record<string, Substitution>;
 }
 
 // Build the single cache grant a `--allow`/`--cache`/`--root` set describes: an
-// exact cache binding, and a root binding that is either the cache itself
-// (`--root same-as-cache`) or an exact name.
+// exact or templated cache binding, and a root binding that is the cache itself
+// (`--root same-as-cache`), an exact name, or its own template.
 export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 	const { cacheActions, rootActions } = expandAllow(options.allow);
-
-	if (options.cache === undefined) {
-		throw new MissingCacheError();
-	}
-
+	const substitutions = options.substitutions ?? {};
 	const wantsRoot = rootActions.length > 0 || options.root !== undefined;
 
 	return permittedGrantSchema.parse({
 		type: 'cupboard_cache',
 		actions: [...cacheActions, ...rootActions],
 		resources: {
-			cache: { exact: options.cache, validate: 'cacheName' },
-			...(wantsRoot ? { root: rootBinding(options.root) } : {})
+			cache: cacheBinding(options, substitutions),
+			...(wantsRoot ? { root: rootBinding(options, substitutions) } : {})
 		}
 	});
 }
 
-function rootBinding(root: string | undefined): {
-	readonly validate: 'rootName';
-	readonly equalsResource?: 'cache';
-	readonly exact?: string;
-} {
-	if (root === undefined || root === 'same-as-cache') {
+function cacheBinding(
+	options: CacheGrantOptions,
+	substitutions: Record<string, Substitution>
+): Record<string, unknown> {
+	if (options.cacheTemplate !== undefined) {
+		return {
+			equalsTemplate: options.cacheTemplate,
+			substitutions: referencedSubstitutions(
+				options.cacheTemplate,
+				substitutions
+			),
+			validate: 'cacheName'
+		};
+	}
+
+	if (options.cache !== undefined) {
+		return { exact: options.cache, validate: 'cacheName' };
+	}
+
+	throw new MissingCacheError();
+}
+
+function rootBinding(
+	options: CacheGrantOptions,
+	substitutions: Record<string, Substitution>
+): Record<string, unknown> {
+	if (options.rootTemplate !== undefined) {
+		return {
+			equalsTemplate: options.rootTemplate,
+			substitutions: referencedSubstitutions(
+				options.rootTemplate,
+				substitutions
+			),
+			validate: 'rootName'
+		};
+	}
+
+	if (options.root === undefined || options.root === 'same-as-cache') {
 		return { validate: 'rootName', equalsResource: 'cache' };
 	}
 
-	return { validate: 'rootName', exact: root };
+	return { validate: 'rootName', exact: options.root };
 }
 
 export interface AddBodyOptions {
@@ -109,6 +259,7 @@ export interface AddBodyOptions {
 	readonly audience: string;
 	readonly claims: Record<string, string>;
 	readonly permittedGrants: readonly PermittedGrant[];
+	readonly display?: OidcTrustAddBody['display'];
 }
 
 // Validate the assembled rule against the contract schema, so the CLI fails on a
@@ -118,7 +269,8 @@ export function buildAddBody(options: AddBodyOptions): OidcTrustAddBody {
 		issuer: options.issuer,
 		audience: options.audience,
 		claims: options.claims,
-		permittedGrants: options.permittedGrants
+		permittedGrants: options.permittedGrants,
+		...(options.display === undefined ? {} : { display: options.display })
 	});
 
 	if (!parsed.success) {
