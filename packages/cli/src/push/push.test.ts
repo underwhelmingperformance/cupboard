@@ -641,6 +641,143 @@ describe('runPush', () => {
 		]);
 	});
 
+	it('attaches a multi-subject bundle to every matching closure path', async () => {
+		const setRoots: SetRootCall[] = [];
+		const negotiations: AttestationNegotiateRequest[] = [];
+		const uploaded: {
+			readonly r2Key: string;
+			readonly body: Uint8Array;
+			readonly contentLength: number;
+			readonly headers: Readonly<Record<string, string>>;
+		}[] = [];
+		const attached: string[] = [];
+		const preparedAttestations: string[] = [];
+		const clientCalls: unknown[] = [];
+		const results: ResultRow[][] = [];
+		const bundle = sigstoreBundleBytes([
+			narDigestHex(appDigest.narHash),
+			narDigestHex(runtimeDigest.narHash)
+		]);
+		const bundleDigest = sha256Hex(bundle);
+		const attestationUpload: AttestationPrepareResponse = {
+			uploadUrl: 'https://upload.example/attestation',
+			uploadHeaders: { 'x-amz-checksum-sha256': 'attestation-checksum' },
+			expiresAt: '2026-05-18T12:00:00.000Z'
+		};
+
+		await runPush([appPath], reporter(results), {
+			client: {
+				...skipClient(setRoots, clientCalls),
+				negotiateAttestations(body) {
+					negotiations.push(body);
+
+					return Promise.resolve({
+						bundles: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								digest: bundleDigest,
+								uploadId: 'attestation-app',
+								r2Key: 'staging/attestations/attestation-app',
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							},
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(runtimePath),
+								digest: bundleDigest,
+								uploadId: 'attestation-runtime',
+								r2Key: 'staging/attestations/attestation-runtime',
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				prepareAttestation(uploadId) {
+					preparedAttestations.push(uploadId);
+
+					return Promise.resolve(attestationUpload);
+				},
+				async uploadBlob(upload) {
+					uploaded.push({
+						r2Key: upload.r2Key,
+						body: await collectReadableStream(upload.body),
+						contentLength: upload.contentLength,
+						headers: upload.headers
+					});
+				},
+				attachAttestation(uploadId) {
+					attached.push(uploadId);
+
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						digest: bundleDigest,
+						predicateType: 'https://slsa.dev/provenance/v1',
+						status: 'attached'
+					});
+				}
+			} satisfies PushClient,
+			attestations: [{ path: 'build.sigstore.json' }],
+			readAttestationBundle() {
+				return Promise.resolve(bundle);
+			},
+			nixStore: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createTemporaryDirectory() {
+				return Promise.resolve('/tmp/cupboard-test');
+			},
+			removeTemporaryDirectory() {
+				return Promise.resolve();
+			}
+		});
+
+		expect(negotiations).toStrictEqual([
+			{
+				bundles: [
+					{ storePathHash: StorePath.hash(appPath), digest: bundleDigest },
+					{ storePathHash: StorePath.hash(runtimePath), digest: bundleDigest }
+				]
+			}
+		]);
+		expect({ preparedAttestations, attached }).toStrictEqual({
+			preparedAttestations: ['attestation-app', 'attestation-runtime'],
+			attached: ['attestation-app', 'attestation-runtime']
+		});
+		expect(uploaded).toStrictEqual([
+			{
+				r2Key: 'staging/attestations/attestation-app',
+				body: Buffer.from(bundle),
+				contentLength: bundle.byteLength,
+				headers: { 'x-amz-checksum-sha256': 'attestation-checksum' }
+			},
+			{
+				r2Key: 'staging/attestations/attestation-runtime',
+				body: Buffer.from(bundle),
+				contentLength: bundle.byteLength,
+				headers: { 'x-amz-checksum-sha256': 'attestation-checksum' }
+			}
+		]);
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Already cached', value: '0' },
+				{ label: 'Skipped', value: '2' },
+				{ label: 'Bytes uploaded', value: '0 B' },
+				{
+					label: 'Attestations',
+					value: '2 attached, 0 reused, 0 deferred'
+				},
+				{
+					label: 'Attestation upload',
+					value: formatBytes(bundle.byteLength * 2)
+				},
+				{ label: 'Pinned paths', value: '1' },
+				{ label: 'Pin expiry', value: 'permanent' }
+			]
+		]);
+	});
+
 	it('skips attestation work when attachment is disabled', async () => {
 		const setRoots: SetRootCall[] = [];
 		const results: ResultRow[][] = [];
@@ -1656,10 +1793,14 @@ function digest(byte: number, narSize: number): NarDigest {
 	};
 }
 
-function sigstoreBundleBytes(subjectDigest: string): Uint8Array {
+function sigstoreBundleBytes(
+	subjectDigest: string | readonly string[]
+): Uint8Array {
+	const digests =
+		typeof subjectDigest === 'string' ? [subjectDigest] : subjectDigest;
 	const statement = {
 		_type: 'https://in-toto.io/Statement/v1',
-		subject: [{ name: 'nar', digest: { sha256: subjectDigest } }],
+		subject: digests.map((sha256) => ({ name: 'nar', digest: { sha256 } })),
 		predicateType: 'https://slsa.dev/provenance/v1',
 		predicate: { buildDefinition: {}, runDetails: {} }
 	};
