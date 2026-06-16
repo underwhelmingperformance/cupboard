@@ -237,6 +237,42 @@ export function tokenCovers(
 	return grants.some((grant) => grantCovers(grant, operation, resource));
 }
 
+// The concrete resource a requested grant acts on, read straight from its
+// selectors (it carries no bindings).
+function detailResource(detail: AuthorizationDetail): ResourceRequest {
+	switch (detail.type) {
+		case 'cupboard_cache': {
+			return { cache: detail.cache, root: detail.root };
+		}
+		case 'cupboard_tenant': {
+			return { tenant: detail.tenant };
+		}
+		default: {
+			return {};
+		}
+	}
+}
+
+/**
+ * Whether the grant set covers every authority a requested detail carries: each
+ * of its operations on its own resource. The subset test for attenuation and
+ * refresh narrowing, so a narrowed token never reaches anything the presenter
+ * could not. A requested wildcard is covered only by a presented wildcard.
+ */
+export function authorizationDetailCovered(
+	grants: readonly AuthorizationDetail[],
+	detail: AuthorizationDetail
+): boolean {
+	if (detail.type === 'cupboard_wildcard') {
+		return grants.some((grant) => grant.type === 'cupboard_wildcard');
+	}
+
+	const resource = detailResource(detail);
+	const actions: readonly Operation[] = detail.actions;
+
+	return actions.every((operation) => tokenCovers(grants, operation, resource));
+}
+
 // ── Stored trust-rule grants (resources are bindings, not concrete values) ──
 
 export const templateMaxLength = 256;

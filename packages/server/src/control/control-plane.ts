@@ -24,9 +24,14 @@ import {
 	adminJwtTtlSeconds,
 	bearerToken,
 	issueAccessJwt,
-	verifyAccessJwt
+	verifyAccessJwt,
+	writeJwtTtlSeconds
 } from '../auth/auth.ts';
-import { resolveRequestedGrants } from '../authz/issuance.ts';
+import {
+	attenuatedGrants,
+	parseRequestedGrants,
+	resolveRequestedGrants
+} from '../authz/issuance.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { type AuthorizationServerMetadata } from '../do/auth-keys-service.ts';
 import {
@@ -99,14 +104,56 @@ export async function controlTokenExchange(
 		throw new UnsupportedGrantTypeError(body.grant_type);
 	}
 
+	const database = controlDatabase(env);
+	const now = new Date();
+
+	// Attenuation is detected by signature: a subject token this control plane
+	// itself issued is narrowed to a requested subset of its own grants, never
+	// routed to a trust rule.
+	const presented = await verifyControlSelfIssued(
+		request,
+		env,
+		body.subject_token
+	);
+
+	if (presented !== undefined) {
+		await ensureControlKey(database, wrappingSecret, now.toISOString());
+		const active = await activeControlKey(database, wrappingSecret);
+		const granted = attenuatedGrants(
+			presented.grants,
+			parseRequestedGrants(body.authorization_details)
+		);
+		const accessToken = await issueAccessJwt(
+			active.privateJwk,
+			{
+				issuer: controlIssuer(request),
+				audience,
+				subject: presented.subject,
+				grants: granted,
+				kid: active.kid,
+				ttlSeconds: writeJwtTtlSeconds
+			},
+			now
+		);
+
+		return Response.json(
+			{
+				access_token: accessToken,
+				token_type: 'Bearer',
+				expires_in: writeJwtTtlSeconds,
+				issued_token_type: issuedAccessTokenType,
+				authorization_details: granted
+			} satisfies TokenResponse,
+			{ headers: { 'cache-control': 'no-store' } }
+		);
+	}
+
 	if (
 		body.subject_token_type !== subjectTokenTypeIdToken &&
 		body.subject_token_type !== subjectTokenTypeJwt
 	) {
 		throw new UnsupportedSubjectTokenTypeError(body.subject_token_type);
 	}
-
-	const database = controlDatabase(env);
 
 	let claims;
 
@@ -127,14 +174,13 @@ export async function controlTokenExchange(
 		typeof verified.sub === 'string' && verified.sub !== ''
 			? verified.sub
 			: rule.id;
-	const now = new Date();
 
 	await ensureControlKey(database, wrappingSecret, now.toISOString());
 	const active = await activeControlKey(database, wrappingSecret);
 	const grants = resolveRequestedGrants(
 		rule,
 		verified,
-		body.authorization_details
+		parseRequestedGrants(body.authorization_details)
 	);
 	const accessToken = await issueAccessJwt(
 		active.privateJwk,
@@ -159,6 +205,29 @@ export async function controlTokenExchange(
 		} satisfies TokenResponse,
 		{ headers: { 'cache-control': 'no-store' } }
 	);
+}
+
+// Verifies a subject token against the control plane's own keys. A token that
+// verifies is one the control plane issued, so the exchange attenuates it;
+// anything else returns undefined and routes to the trust-rule path, so the
+// branch cannot be chosen by a client-declared type.
+async function verifyControlSelfIssued(
+	request: Request,
+	env: Env,
+	token: string
+): Promise<AccessClaims | undefined> {
+	const keys = await controlVerificationKeys(controlDatabase(env));
+
+	try {
+		return await verifyAccessJwt(
+			keys,
+			token,
+			{ issuer: controlIssuer(request), audience: controlAudience(env) },
+			new Date()
+		);
+	} catch {
+		return undefined;
+	}
 }
 
 async function verifyControlInbound(

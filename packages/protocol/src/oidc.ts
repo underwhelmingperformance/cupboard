@@ -30,40 +30,13 @@ export const subjectTokenTypeIdToken =
 	'urn:ietf:params:oauth:token-type:id_token';
 export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 
-// The `authorization_details` a client requests, the RFC 9396 array as a
-// JSON-encoded form field. Absent, the rule issues the grants its bindings
-// render from the verified claims; present, it narrows to the requested subset
-// and the server verifies each detail against the rule.
-const requestedAuthorizationDetailsSchema = z
-	.string()
-	.min(1)
-	.transform((value, ctx): z.output<typeof authorizationDetailsSchema> => {
-		let parsed: unknown;
-
-		try {
-			parsed = JSON.parse(value);
-		} catch {
-			ctx.addIssue({
-				code: 'custom',
-				message: 'authorization_details is not JSON'
-			});
-
-			return z.NEVER;
-		}
-
-		const result = authorizationDetailsSchema.safeParse(parsed);
-
-		if (!result.success) {
-			ctx.addIssue({
-				code: 'custom',
-				message: 'authorization_details is not a valid grant array'
-			});
-
-			return z.NEVER;
-		}
-
-		return result.data;
-	});
+// The `authorization_details` a client requests: the RFC 9396 array as a
+// JSON-encoded form field, carried as an opaque string here. The token service
+// parses and validates it, so a malformed or unpermitted value answers
+// `invalid_authorization_details` rather than a generic `invalid_request` from
+// the body validator. A claim-bound (CI) rule must send it; an interactive
+// owner may omit it and receive a wildcard.
+const requestedAuthorizationDetailsSchema = z.string().min(1);
 
 // The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
 // accepted and ignored: the matched trust rule alone fixes the issued audience,
