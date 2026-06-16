@@ -6,6 +6,12 @@ import {
 	controlKeyRetireResponseSchema,
 	controlKeyRotateResponseSchema
 } from '../control-keys.ts';
+import {
+	oidcTrustAddBodySchema,
+	oidcTrustListResponseSchema,
+	oidcTrustRemoveResponseSchema,
+	oidcTrustSummarySchema
+} from '../oidc.ts';
 import { controlCheckReportSchema } from '../reports.ts';
 import {
 	membershipRebuildResponseSchema,
@@ -139,5 +145,33 @@ export const controlContract = {
 			.meta({ requires: 'membership:rebuild' })
 			.route({ method: 'POST', path: '/membership/rebuild' })
 			.output(membershipRebuildResponseSchema)
+	},
+
+	// The control plane's own trust rules: which external identity may exchange
+	// for control grants. The bootstrap owner is seeded; scoped control
+	// identities are managed here.
+	oidcTrust: {
+		list: controlProcedure
+			.meta({ requires: 'control-oidc-trust:list' })
+			.route({ method: 'GET', path: '/oidc-trust' })
+			.output(oidcTrustListResponseSchema),
+
+		get: controlProcedure
+			.meta({ requires: 'control-oidc-trust:read' })
+			.route({ method: 'GET', path: '/oidc-trust/{id}' })
+			.input(z.strictObject({ id: z.string() }))
+			.output(oidcTrustSummarySchema),
+
+		add: controlProcedure
+			.meta({ requires: 'control-oidc-trust:add' })
+			.route({ method: 'POST', path: '/oidc-trust' })
+			.input(oidcTrustAddBodySchema)
+			.output(oidcTrustSummarySchema),
+
+		remove: controlProcedure
+			.meta({ requires: 'control-oidc-trust:remove' })
+			.route({ method: 'DELETE', path: '/oidc-trust/{id}' })
+			.input(z.strictObject({ id: z.string() }))
+			.output(oidcTrustRemoveResponseSchema)
 	}
 };

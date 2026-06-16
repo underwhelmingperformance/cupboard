@@ -64,7 +64,13 @@ export async function claimGlobalAdmin(
 						issuer: sql<string>`${principal.issuer}`.as('issuer'),
 						audience: sql<string>`${principal.audience}`.as('audience'),
 						claimsJson: sql<string>`${claimsJson}`.as('claims_json'),
-						createdAt: sql<string>`${now}`.as('created_at')
+						permittedGrantsJson:
+							sql<string>`'[{"type":"cupboard_wildcard"}]'`.as(
+								'permitted_grants_json'
+							),
+						displayJson: sql<string | null>`null`.as('display_json'),
+						createdAt: sql<string>`${now}`.as('created_at'),
+						disabledAt: sql<string | null>`null`.as('disabled_at')
 					})
 					.from(d1Schema.globalAdmin)
 					.where(

@@ -13,9 +13,9 @@ import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { tenantRpc } from '../client/orpc.ts';
+import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
-import { tenantUrlArgument } from '../url-argument.ts';
+import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
 import {
 	buildAddBody,
@@ -184,47 +184,91 @@ function parseClaims(pairs: readonly string[]): Record<string, string> {
 	return claims;
 }
 
+// The tenant and control trust commands differ only in which client they bind
+// and which URL they take; the rule body, output shapes, and run-helpers are
+// shared, so both planes are registered from one builder.
+interface OidcTrustPlane {
+	readonly name: string;
+	readonly description: string;
+	readonly urlArgument: string;
+	readonly clientFor: (
+		url: string,
+		programOptions: ProgramOptions
+	) => OidcTrustClient;
+}
+
+const tenantPlane: OidcTrustPlane = {
+	name: 'oidc-trust',
+	description: 'Manage the OIDC trust rules used by token exchange.',
+	urlArgument: tenantUrlArgument,
+	clientFor: (url, programOptions) =>
+		tenantRpc(url, {
+			credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			signal: programOptions.signal
+		}).oidcTrust
+};
+
+const controlPlane: OidcTrustPlane = {
+	name: 'control-oidc-trust',
+	description: 'Manage the control-plane OIDC trust rules (operator only).',
+	urlArgument: deploymentUrlArgument,
+	clientFor: (url, programOptions) =>
+		controlRpc(url, {
+			credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+			signal: programOptions.signal
+		}).oidcTrust
+};
+
 export function registerOidcTrustCommands(
 	program: Command,
 	programOptions: ProgramOptions = {}
 ): void {
-	const oidcTrust = program
-		.command('oidc-trust')
-		.description('Manage the OIDC trust rules used by token exchange.');
+	buildOidcTrustCommands(program, programOptions, tenantPlane);
+}
+
+export function registerControlOidcTrustCommands(
+	program: Command,
+	programOptions: ProgramOptions = {}
+): void {
+	buildOidcTrustCommands(program, programOptions, controlPlane);
+}
+
+function buildOidcTrustCommands(
+	program: Command,
+	programOptions: ProgramOptions,
+	plane: OidcTrustPlane
+): void {
+	const oidcTrust = program.command(plane.name).description(plane.description);
 
 	oidcTrust
 		.command('list')
 		.description('List OIDC trust rules.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', plane.urlArgument)
 		.action(async (url: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-				signal: programOptions.signal
-			});
 
-			await runOidcTrustList(reporter, rpc.oidcTrust);
+			await runOidcTrustList(reporter, plane.clientFor(url, programOptions));
 		});
 
 	oidcTrust
 		.command('show')
 		.description('Show a single OIDC trust rule by id.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', plane.urlArgument)
 		.argument('<id>', 'trust rule id')
 		.action(async (url: string, id: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-				signal: programOptions.signal
-			});
 
-			await runOidcTrustShow(id, reporter, rpc.oidcTrust);
+			await runOidcTrustShow(
+				id,
+				reporter,
+				plane.clientFor(url, programOptions)
+			);
 		});
 
 	oidcTrust
 		.command('add')
 		.description('Add a trust rule for a CI OIDC issuer.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', plane.urlArgument)
 		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
 		.requiredOption('--audience <audience>', 'expected token audience')
 		.option(
@@ -283,28 +327,24 @@ export function registerOidcTrustCommands(
 		)
 		.action(async (url: string, options: OidcTrustAddOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-				signal: programOptions.signal
-			});
 
-			await runOidcTrustAdd(await addBodyFor(options), reporter, rpc.oidcTrust);
+			await runOidcTrustAdd(
+				await addBodyFor(options),
+				reporter,
+				plane.clientFor(url, programOptions)
+			);
 		});
 
 	oidcTrust
 		.command('remove')
 		.description('Disable an OIDC trust rule by id.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', plane.urlArgument)
 		.argument('<id>', 'trust rule id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
 		.action(async (url: string, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
-			const rpc = tenantRpc(url, {
-				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
-				signal: programOptions.signal
-			});
 
-			await runOidcTrustRemove(id, ui, rpc.oidcTrust);
+			await runOidcTrustRemove(id, ui, plane.clientFor(url, programOptions));
 		});
 }
 
