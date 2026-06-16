@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
+	adminGrants,
 	controlFetch,
 	issueControlAdminToken,
 	issueServerSignedToken,
@@ -43,7 +44,7 @@ describe('control key administration', () => {
 	it('rejects a tenant token at the control surface', async () => {
 		// A tenant admin token is signed by a tenant key, with the tenant issuer and
 		// audience; it must not verify against the control key set.
-		const tenantToken = await issueServerSignedToken('admin');
+		const tenantToken = await issueServerSignedToken(adminGrants());
 		const response = await controlFetch(
 			'/control/keys/rotate',
 			authed(tenantToken)

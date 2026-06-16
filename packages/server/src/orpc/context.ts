@@ -1,4 +1,4 @@
-import type { AccessClaims, AccessScope } from '../auth/auth.ts';
+import type { AccessClaims } from '../auth/auth.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
 import type { CacheAdminService } from '../do/cache-admin-service.ts';
@@ -13,6 +13,8 @@ import type { StatsService } from '../do/stats-service.ts';
 import type { UploadsService } from '../do/uploads-service.ts';
 import type { VerificationService } from '../do/verification-service.ts';
 
+import type { PendingCacheResolver } from './authorise.ts';
+
 /**
  * The capabilities the contract's procedures need from the Durable Object:
  * authentication, the maintenance-eligibility bracket, and the domain
@@ -20,7 +22,8 @@ import type { VerificationService } from '../do/verification-service.ts';
  * context.
  */
 export interface TenantRpcServices {
-	requireScope(request: Request, scope: AccessScope): Promise<AccessClaims>;
+	authenticate(request: Request): Promise<AccessClaims>;
+	pendingCache: PendingCacheResolver;
 	withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
 	readonly cacheAdmin: CacheAdminService;
 	readonly signingKeys: SigningKeysService;

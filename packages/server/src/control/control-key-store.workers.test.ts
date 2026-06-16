@@ -51,7 +51,7 @@ describe('control key store', () => {
 				issuer,
 				audience,
 				subject: 'admin',
-				scope: 'admin',
+				grants: [{ type: 'cupboard_wildcard' }],
 				kid: active.kid,
 				ttlSeconds: 600
 			},
@@ -69,7 +69,10 @@ describe('control key store', () => {
 			claims
 		}).toStrictEqual({
 			verificationKeys: [{ kid: active.kid }],
-			claims: { scope: 'admin', subject: 'admin' }
+			claims: {
+				subject: 'admin',
+				grants: [{ type: 'cupboard_wildcard' }]
+			}
 		});
 	});
 

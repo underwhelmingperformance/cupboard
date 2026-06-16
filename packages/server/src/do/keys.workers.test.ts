@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import {
 	authorisedFetch,
 	bootstrap,
+	cacheWriteGrants,
 	fetchNarInfo,
 	fetchPath,
 	issueServerSignedToken,
@@ -162,7 +163,7 @@ describe('signing key rotation', () => {
 
 	it('rejects rotation and retirement without admin scope', async () => {
 		await bootstrap();
-		const writeToken = await issueServerSignedToken('write');
+		const writeToken = await issueServerSignedToken(cacheWriteGrants());
 
 		const rotateResponse = await authorisedFetch('/keys/rotate', writeToken, {
 			method: 'POST'

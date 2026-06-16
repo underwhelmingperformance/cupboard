@@ -2,6 +2,7 @@ import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
 import {
+	controlAuthenticate,
 	controlCheck,
 	controlKeyRetire,
 	controlKeyRotate,
@@ -14,11 +15,16 @@ import {
 	controlTenantResume,
 	controlTenantRotateReadCredential,
 	controlTenantSetReadMode,
-	controlTenantSuspend,
-	requireControlAdmin
+	controlTenantSuspend
 } from '../control/control-plane.ts';
 
+import { authoriseRequest } from './authorise.ts';
 import { bridgedError } from './error-bridge.ts';
+
+// The control plane has no pending-upload rows; resource resolution never needs
+// a pending-cache lookup, so the resolver always reports absence.
+const noPendingCache = (): Promise<string | undefined> =>
+	Promise.resolve(undefined);
 
 /** What a control procedure needs: the request (for auth and the public origin) and the Worker env. */
 export interface ControlOrpcContext {
@@ -26,8 +32,9 @@ export interface ControlOrpcContext {
 	readonly env: Env;
 }
 
-// Every control procedure runs behind the error bridge and the control-admin
-// gate; only a control-issued admin token reaches a handler.
+// Every control procedure runs behind the error bridge and the grant authoriser:
+// a control-issued token is verified, then the operation the procedure declares
+// is checked against the grants it carries before any handler runs.
 const os = implement(controlContract)
 	.$context<ControlOrpcContext>()
 	.use(async ({ next }) => {
@@ -37,10 +44,17 @@ const os = implement(controlContract)
 			throw bridgedError(error);
 		}
 	})
-	.use(async ({ context, next }) => {
-		await requireControlAdmin(context.request, context.env);
+	.use(async ({ context, procedure, next }, input) => {
+		const claims = await controlAuthenticate(context.request, context.env);
 
-		return next();
+		await authoriseRequest(
+			claims,
+			procedure['~orpc'].meta,
+			input,
+			noPendingCache
+		);
+
+		return next({ context: { claims } });
 	});
 
 export const controlRouter = os.router({

@@ -6,6 +6,7 @@ import { runReaperDemote } from '../routing/scheduled.ts';
 import {
 	blobReferenceRows,
 	blobStateNarHashes,
+	cacheWriteGrants,
 	clearBlobStorage,
 	deleteTestBase,
 	issueTokenForTenant,
@@ -38,7 +39,7 @@ async function committedTenantPath(seed: string) {
 	const token = await issueTokenForTenant(
 		testServerFor(tenant),
 		issuer,
-		'write'
+		cacheWriteGrants()
 	);
 	const nar = await verifiableNar(seed);
 	const metadata = uploadMetadata({

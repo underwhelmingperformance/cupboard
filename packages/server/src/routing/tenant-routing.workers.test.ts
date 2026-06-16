@@ -8,6 +8,7 @@ import { z } from 'zod';
 
 import { decodeInboundClaims } from '../oidc/oidc.ts';
 import {
+	adminGrants,
 	currentOrigin,
 	handlerFetch,
 	issueTokenForTenant,
@@ -82,7 +83,7 @@ describe('tenant routing', () => {
 		const token = await issueTokenForTenant(
 			testServerFor('acme'),
 			acmeIssuer,
-			'admin'
+			adminGrants()
 		);
 		const claims = decodeClaims(token);
 
