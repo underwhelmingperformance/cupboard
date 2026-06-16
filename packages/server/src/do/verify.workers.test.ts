@@ -33,9 +33,10 @@ const healthy = {
 } satisfies VerifyReport;
 
 async function runVerify(token: string, limit?: number): Promise<VerifyReport> {
-	const query = limit === undefined ? '' : `?limit=${String(limit)}`;
-	const response = await authorisedFetch(`/verify${query}`, token, {
-		method: 'POST'
+	const response = await authorisedFetch('/verify', token, {
+		method: 'POST',
+		headers: { 'content-type': 'application/json' },
+		body: JSON.stringify(limit === undefined ? {} : { limit })
 	});
 
 	expect(response.status).toBe(StatusCodes.OK);
