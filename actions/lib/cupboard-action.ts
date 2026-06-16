@@ -53,6 +53,16 @@ interface PushInputs {
 	readonly attestations: readonly string[];
 }
 
+interface AttestInputs {
+	readonly paths: readonly string[];
+	readonly checksumsFile: string;
+}
+
+interface StorePathDigest {
+	readonly storePath: string;
+	readonly sha256: string;
+}
+
 interface InstallCupboardOptions {
 	readonly installDirectory: string;
 	readonly releaseRepository: string;
@@ -627,6 +637,128 @@ function resolveStorePaths(paths: readonly string[]): string[] {
 	return resolved;
 }
 
+export function narHashToHex(narHash: string): string {
+	const sri = /^sha256-(?<base64>[A-Za-z0-9+/=]+)$/u.exec(narHash);
+	const base64 = sri?.groups?.base64;
+
+	if (base64 === undefined) {
+		throw new Error(
+			`expected an SRI sha256 NAR hash (sha256-<base64>), got ${narHash}`
+		);
+	}
+
+	const bytes = Buffer.from(base64, 'base64');
+
+	if (bytes.byteLength !== 32) {
+		throw new Error(`NAR hash did not decode to 32 bytes: ${narHash}`);
+	}
+
+	return bytes.toString('hex');
+}
+
+function pathInfoJson(storePath: string): unknown {
+	const result = spawnSync('nix', ['path-info', '--json', storePath], {
+		encoding: 'utf8'
+	});
+
+	if (result.status !== 0) {
+		throw new Error(`nix path-info failed for ${storePath}`);
+	}
+
+	return parseJson(result.stdout);
+}
+
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+	return Array.isArray(value);
+}
+
+function pathInfoEntries(parsed: unknown): readonly unknown[] {
+	if (isUnknownArray(parsed)) {
+		return parsed;
+	}
+
+	if (isRecord(parsed)) {
+		return Object.entries(parsed).map(([storePath, info]) => ({
+			path: storePath,
+			...(isRecord(info) ? info : {})
+		}));
+	}
+
+	return [];
+}
+
+function resolveStorePathDigests(paths: readonly string[]): StorePathDigest[] {
+	const resolved: StorePathDigest[] = [];
+
+	for (const storePath of paths) {
+		const entries = pathInfoEntries(pathInfoJson(storePath));
+
+		if (entries.length !== 1) {
+			throw new Error(
+				`nix path-info did not resolve exactly one path for ${storePath}`
+			);
+		}
+
+		const entry = entries[0];
+
+		if (
+			!isRecord(entry) ||
+			typeof entry.path !== 'string' ||
+			typeof entry.narHash !== 'string'
+		) {
+			throw new Error(`nix path-info gave no NAR hash for ${storePath}`);
+		}
+
+		resolved.push({
+			storePath: entry.path,
+			sha256: narHashToHex(entry.narHash)
+		});
+	}
+
+	return resolved;
+}
+
+export function renderChecksums(digests: readonly StorePathDigest[]): string {
+	return digests
+		.map((digest) => `${digest.sha256}  ${path.basename(digest.storePath)}`)
+		.join('\n')
+		.concat('\n');
+}
+
+function attestInputs(environment: Environment): AttestInputs {
+	const paths = parseLines(input(environment, 'PATHS'));
+
+	if (paths.length === 0) {
+		throw new Error('paths is required and must contain at least one path');
+	}
+
+	const checksumsFile = input(
+		environment,
+		'CHECKSUMS_FILE',
+		path.join(
+			requireInput(environment.RUNNER_TEMP, 'RUNNER_TEMP'),
+			'cupboard-attestations',
+			'subjects.txt'
+		)
+	);
+
+	return { paths, checksumsFile };
+}
+
+export async function attestAction(
+	environment: Environment = env
+): Promise<void> {
+	const inputs = attestInputs(environment);
+	const digests = resolveStorePathDigests(inputs.paths);
+	const checksumsFile = path.resolve(inputs.checksumsFile);
+
+	await mkdir(path.dirname(checksumsFile), { recursive: true });
+	await writeFile(checksumsFile, renderChecksums(digests));
+
+	await setOutput(environment, 'checksums-file', checksumsFile);
+	await setOutput(environment, 'subject-count', String(digests.length));
+}
+
 function setupInputs(environment: Environment): SetupInputs {
 	const readUser = input(environment, 'READ_USER');
 	const readPassword = input(environment, 'READ_PASSWORD');
@@ -814,7 +946,12 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	throw new Error('expected setup or push');
+	if (command === 'attest') {
+		await attestAction();
+		return;
+	}
+
+	throw new Error('expected setup, push or attest');
 }
 
 function parseJson(value: string): unknown {

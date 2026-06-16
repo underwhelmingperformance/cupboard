@@ -95,8 +95,8 @@ Pass `--colour` or `--no-colour` to force a mode.
 
 ## More
 
-- [docs/github-actions.md](./docs/github-actions.md) sets up pushing from GitHub
-  Actions.
+- [docs/github-actions.md](./docs/github-actions.md) sets up building,
+  attesting, and pushing outputs from GitHub Actions.
 - [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
 - [PLAN.md](./PLAN.md) tracks the feature plan and progress.
 
