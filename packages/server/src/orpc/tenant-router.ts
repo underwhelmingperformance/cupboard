@@ -1,9 +1,10 @@
 import { cacheFromSelector } from '@cupboard/nix/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
+import { type VerifyReport } from '@cupboard/protocol/reports';
 import { type GcResponse } from '@cupboard/protocol/retention';
 import { implement } from '@orpc/server';
 
-import { internalOrigin } from '../http/http.ts';
+import { internalOrigin, verificationBatchSize } from '../http/http.ts';
 
 import { type TenantOrpcContext, type TenantRpcServices } from './context.ts';
 import { bridgedError } from './error-bridge.ts';
@@ -155,6 +156,11 @@ export const tenantRouter = os.router({
 			)
 		)
 	},
+	verify: {
+		run: os.verify.run.handler(({ input, context }) =>
+			runVerify(context.request, context.services, input.limit)
+		)
+	},
 	uploads: {
 		negotiate: os.uploads.negotiate.handler(({ input, context }) =>
 			context.services.uploads.negotiate(
@@ -216,4 +222,20 @@ async function collectGarbage(
 		ok: true,
 		...(await services.garbageCollection.collectGarbage(cache, purgeOrigin))
 	};
+}
+
+// One interactive verification pass. Like `collectGarbage`, an interactive run
+// purges this colo's edge cache via the caller's public origin while the cron's
+// internal origin skips it. The requested limit is clamped to the server's
+// batch ceiling.
+async function runVerify(
+	request: Request,
+	services: TenantRpcServices,
+	limit: number | undefined
+): Promise<VerifyReport> {
+	const { origin } = new URL(request.url);
+	const purgeOrigin = origin === internalOrigin ? undefined : origin;
+	const batch = Math.min(limit ?? verificationBatchSize, verificationBatchSize);
+
+	return services.verification.verify(purgeOrigin, batch);
 }

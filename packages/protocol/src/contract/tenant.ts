@@ -9,6 +9,7 @@ import { checkContract } from './reports.ts';
 import { rootsContract } from './roots.ts';
 import { statsContract } from './stats.ts';
 import { uploadsContract } from './uploads.ts';
+import { verifyContract } from './verify.ts';
 
 /**
  * The tenant admin API: every JSON procedure a tenant deployment answers,
@@ -27,6 +28,7 @@ export const tenantContract = {
 	roots: rootsContract,
 	paths: pathsContract,
 	gc: gcContract,
+	verify: verifyContract,
 	uploads: uploadsContract,
 	attestations: attestationsContract
 };

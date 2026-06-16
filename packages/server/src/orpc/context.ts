@@ -11,6 +11,7 @@ import type { RootsService } from '../do/roots-service.ts';
 import type { SigningKeysService } from '../do/signing-keys-service.ts';
 import type { StatsService } from '../do/stats-service.ts';
 import type { UploadsService } from '../do/uploads-service.ts';
+import type { VerificationService } from '../do/verification-service.ts';
 
 /**
  * The capabilities the contract's procedures need from the Durable Object:
@@ -33,6 +34,7 @@ export interface TenantRpcServices {
 	readonly garbageCollection: GarbageCollectionService;
 	readonly uploads: UploadsService;
 	readonly attestations: AttestationsService;
+	readonly verification: VerificationService;
 }
 
 /** The initial oRPC context for every tenant procedure call. */
