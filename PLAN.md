@@ -3177,7 +3177,7 @@ Each step keeps a working deployment.
       acceptance, superset refusal, that a narrowed token cannot reach a
       resource the presenter could not, that CI exchanges receive no refresh
       token, and that refresh tracks a changed rule.
-- [ ] **CLI.** `cupboard oidc-trust add` and the control trust commands accept
+- [x] **CLI.** `cupboard oidc-trust add` and the control trust commands accept
       permitted grants and their claim bindings. Add the GitHub PR preset,
       shorthand action expansion, validated `{name}` template rendering,
       structured direct flags with custom substitutions and named provider
