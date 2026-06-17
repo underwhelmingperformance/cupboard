@@ -1,1 +1,3 @@
-export const fixtureTenant = 'v1';
+import { tenantIdSchema } from '@cupboard/nix/scalars';
+
+export const fixtureTenant = tenantIdSchema.parse('v1');

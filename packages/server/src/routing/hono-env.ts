@@ -1,3 +1,5 @@
+import { type TenantId } from '@cupboard/nix/scalars';
+
 import { type TenantEntry } from '../control/tenant-membership.ts';
 
 /**
@@ -8,7 +10,7 @@ import { type TenantEntry } from '../control/tenant-membership.ts';
 export interface WorkerHonoEnv {
 	Bindings: Env;
 	Variables: {
-		tenant: string;
+		tenant: TenantId;
 		tenantEntry: TenantEntry;
 		tenantRest: string;
 		cache: string;

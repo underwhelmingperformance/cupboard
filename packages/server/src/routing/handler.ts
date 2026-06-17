@@ -1,3 +1,4 @@
+import { type TenantId } from '@cupboard/nix/scalars';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
@@ -304,7 +305,7 @@ function innerRequest(context: Context<WorkerHonoEnv>): Request {
 async function dispatchTenant(
 	inner: Request,
 	env: Env,
-	tenant: string
+	tenant: TenantId
 ): Promise<Response> {
 	if (!isTenantWrite(inner)) {
 		return tenantServer(env, tenant).fetch(inner);
@@ -340,7 +341,7 @@ function isTenantWrite(inner: Request): boolean {
 // the row is gone, which the caller treats as not-active and fails closed.
 async function tenantStatus(
 	env: Env,
-	tenant: string
+	tenant: TenantId
 ): Promise<string | undefined> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const row = await database

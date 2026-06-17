@@ -1,3 +1,4 @@
+import { type TenantId } from '@cupboard/nix/scalars';
 import { eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -10,7 +11,7 @@ const identityId = 'singleton';
 // serves, the issuer and audience it pins into issued tokens, the owner OIDC triple
 // its admin rule is seeded from, and the monotonic config version that fences it.
 export interface TenantIdentity {
-	readonly tenant: string;
+	readonly tenant: TenantId;
 	readonly issuer: string;
 	readonly audience: string;
 	readonly ownerIssuer: string;

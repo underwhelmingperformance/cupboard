@@ -1,10 +1,10 @@
-import { tenantIdSchema } from '@cupboard/nix/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix/scalars';
 
 const tenantPrefix = '/t/';
 
 // The tenant a path addresses and the tenant-relative remainder of that path.
 export interface TenantRoute {
-	readonly tenant: string;
+	readonly tenant: TenantId;
 	readonly rest: string;
 }
 
@@ -21,12 +21,14 @@ export function parseTenantPath(pathname: string): TenantRoute | undefined {
 	const separator = remainder.indexOf('/');
 	const slug = separator === -1 ? remainder : remainder.slice(0, separator);
 
-	if (!tenantIdSchema.safeParse(slug).success) {
+	const tenant = tenantIdSchema.safeParse(slug);
+
+	if (!tenant.success) {
 		return undefined;
 	}
 
 	return {
-		tenant: slug,
+		tenant: tenant.data,
 		rest: separator === -1 ? '/' : remainder.slice(separator)
 	};
 }

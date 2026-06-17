@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import {
 	issuedAccessTokenType,
 	refreshTokenGrantType,
@@ -917,7 +918,7 @@ describe('owner rule seeding', () => {
 			currentServer(),
 			async (instance, state) => {
 				await instance.configure({
-					tenant: 'v1',
+					tenant: tenantIdSchema.parse('v1'),
 					issuer: 'cupboard',
 					audience: 'cupboard',
 					ownerIssuer: '',
@@ -944,7 +945,7 @@ describe('owner rule seeding', () => {
 			async (instance): Promise<unknown> => {
 				try {
 					await instance.configure({
-						tenant: 'v1',
+						tenant: tenantIdSchema.parse('v1'),
 						issuer: 'cupboard',
 						audience: 'cupboard',
 						ownerIssuer: 'not-a-url',

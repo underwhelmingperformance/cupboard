@@ -1,7 +1,8 @@
 import {
 	type NixSha256HashString,
 	type Sha256HexDigest,
-	type StorePathHash
+	type StorePathHash,
+	type TenantId
 } from '@cupboard/nix/scalars';
 import { sql } from 'drizzle-orm';
 import {
@@ -47,7 +48,7 @@ export const blobState = sqliteTable(
 export const blobReference = sqliteTable(
 	'blob_ref',
 	{
-		tenant: text('tenant').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
@@ -117,7 +118,7 @@ export const controlTrust = sqliteTable('control_trust', {
 export const tenant = sqliteTable(
 	'tenant',
 	{
-		id: text('id').primaryKey(),
+		id: text('id').$type<TenantId>().primaryKey(),
 		status: text('status', {
 			enum: ['active', 'suspended', 'offboarding', 'offboarded']
 		}).notNull(),
@@ -154,7 +155,7 @@ export const tenant = sqliteTable(
 export const tenantMaintenanceFailure = sqliteTable(
 	'tenant_maintenance_failure',
 	{
-		tenant: text('tenant').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
 		pass: text('pass', { enum: ['maintenance', 'offboard'] }).notNull(),
 		consecutiveFailures: integer('consecutive_failures').notNull().default(0),
 		lastError: text('last_error'),
@@ -171,7 +172,7 @@ export const tenantMaintenanceFailure = sqliteTable(
 export const tenantMaintenanceEligibility = sqliteTable(
 	'tenant_maintenance_eligibility',
 	{
-		tenant: text('tenant').primaryKey(),
+		tenant: text('tenant').$type<TenantId>().primaryKey(),
 		pendingVerificationCount: integer('pending_verification_count')
 			.notNull()
 			.default(0),
@@ -220,7 +221,7 @@ export const globalAdmin = sqliteTable('global_admin', {
 export const tenantBlob = sqliteTable(
 	'tenant_blob',
 	{
-		tenant: text('tenant').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		fileSize: integer('file_size').notNull()
 	},
@@ -247,7 +248,7 @@ export const casObject = sqliteTable(
 export const attestationReference = sqliteTable(
 	'attestation_ref',
 	{
-		tenant: text('tenant').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
 		cache: text('cache').notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
@@ -274,7 +275,7 @@ export const attestationReference = sqliteTable(
 export const tenantCasBlob = sqliteTable(
 	'tenant_cas_blob',
 	{
-		tenant: text('tenant').notNull(),
+		tenant: text('tenant').$type<TenantId>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		size: integer('size').notNull()
 	},
@@ -293,7 +294,7 @@ export const tenantCasBlob = sqliteTable(
 export const tenantUsage = sqliteTable(
 	'tenant_usage',
 	{
-		tenant: text('tenant').primaryKey(),
+		tenant: text('tenant').$type<TenantId>().primaryKey(),
 		bytes: integer('bytes').notNull().default(0),
 		narinfos: integer('narinfos').notNull().default(0),
 		blobs: integer('blobs').notNull().default(0),

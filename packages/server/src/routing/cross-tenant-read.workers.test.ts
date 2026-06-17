@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -49,7 +50,12 @@ describe('cross-tenant NAR read isolation', () => {
 			fileHash: nar.fileHash,
 			fileSize: nar.narBytes.byteLength
 		});
-		await pushPathToTenant('acme', ownerToken, metadata, nar);
+		await pushPathToTenant(
+			tenantIdSchema.parse('acme'),
+			ownerToken,
+			metadata,
+			nar
+		);
 
 		const narPath = `/nar/${nar.narHash}.nar.zst`;
 		const ownerGet = await handlerFetch(`/t/acme${narPath}`);

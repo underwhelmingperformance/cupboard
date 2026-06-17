@@ -2,7 +2,8 @@ import {
 	type NixSha256HashString,
 	type Sha256HexDigest,
 	type StorePathHash,
-	type StorePathString
+	type StorePathString,
+	type TenantId
 } from '@cupboard/nix/scalars';
 import {
 	integer,
@@ -138,7 +139,7 @@ export const refreshTokens = sqliteTable('refresh_token', {
 // keyed `singleton`, since one Durable Object backs one tenant.
 export const tenantIdentity = sqliteTable('tenant_identity', {
 	id: text('id').primaryKey(),
-	tenant: text('tenant').notNull(),
+	tenant: text('tenant').$type<TenantId>().notNull(),
 	issuer: text('issuer').notNull(),
 	audience: text('audience').notNull(),
 	ownerIssuer: text('owner_issuer').notNull(),

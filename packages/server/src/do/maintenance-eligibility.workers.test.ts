@@ -1,7 +1,8 @@
 import {
 	nixSha256HashSchema,
 	sha256HexDigestSchema,
-	storePathHashSchema
+	storePathHashSchema,
+	tenantIdSchema
 } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -41,7 +42,12 @@ function eligibilityRow(tenant: string = fixtureTenant) {
 	})
 		.select()
 		.from(d1Schema.tenantMaintenanceEligibility)
-		.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, tenant))
+		.where(
+			eq(
+				d1Schema.tenantMaintenanceEligibility.tenant,
+				tenantIdSchema.parse(tenant)
+			)
+		)
 		.get()
 		.then((row) =>
 			row === undefined

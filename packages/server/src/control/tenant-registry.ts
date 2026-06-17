@@ -1,3 +1,4 @@
+import { type TenantId } from '@cupboard/nix/scalars';
 import type {
 	ParsedTenantCreateBody,
 	ParsedTenantReadCredential,
@@ -194,7 +195,7 @@ async function ensureUsageRow(
 
 async function loadTenant(
 	database: Database,
-	id: string
+	id: TenantId
 ): Promise<TenantRow | undefined> {
 	return database
 		.select()
@@ -205,7 +206,7 @@ async function loadTenant(
 
 async function loadQuota(
 	database: Database,
-	id: string
+	id: TenantId
 ): Promise<number | undefined> {
 	const usage = await database
 		.select({ quotaBytes: d1Schema.tenantUsage.quotaBytes })
@@ -235,7 +236,7 @@ export async function listTenants(
 // new is admitted while its bounded drain (the step 7 state machine) runs.
 export async function setTenantStatus(
 	database: Database,
-	id: string,
+	id: TenantId,
 	status: 'suspended' | 'offboarding'
 ): Promise<ParsedTenantSummary> {
 	// `offboarded` is terminal: the conditional update never moves a tenant out of it,
@@ -274,7 +275,7 @@ export async function setTenantStatus(
 // retired one is gone, so resume never silently no-ops or resurrects a tenant.
 export async function resumeTenant(
 	database: Database,
-	id: string
+	id: TenantId
 ): Promise<ParsedTenantSummary> {
 	const updated = await database
 		.update(d1Schema.tenant)
@@ -306,7 +307,7 @@ export async function resumeTenant(
 // tenant is mutated; a draining or retired one is refused.
 export async function setTenantReadMode(
 	database: Database,
-	id: string,
+	id: TenantId,
 	readMode: 'public' | 'private'
 ): Promise<ParsedTenantSummary> {
 	return updateLiveTenant(database, id, { readMode });
@@ -318,7 +319,7 @@ export async function setTenantReadMode(
 // tenant.
 export async function setTenantReadCredential(
 	database: Database,
-	id: string,
+	id: TenantId,
 	read: ParsedTenantReadCredential
 ): Promise<ParsedTenantSummary> {
 	const readPasswordSalt = generateReadPasswordSalt();
@@ -334,7 +335,7 @@ export async function setTenantReadCredential(
 // no credential then fails closed. Only an active or suspended tenant is mutated.
 export async function clearTenantReadCredential(
 	database: Database,
-	id: string
+	id: TenantId
 ): Promise<ParsedTenantSummary> {
 	return updateLiveTenant(database, id, {
 		readUser: sql`null`,
@@ -348,7 +349,7 @@ export async function clearTenantReadCredential(
 // missing tenant apart from a retired one.
 async function updateLiveTenant(
 	database: Database,
-	id: string,
+	id: TenantId,
 	set: SQLiteUpdateSetSource<typeof d1Schema.tenant>
 ): Promise<ParsedTenantSummary> {
 	const updated = await database
@@ -386,7 +387,7 @@ async function updateLiveTenant(
 // secret.
 export async function finaliseOffboardedTenant(
 	database: Database,
-	id: string
+	id: TenantId
 ): Promise<void> {
 	await database.batch([
 		database

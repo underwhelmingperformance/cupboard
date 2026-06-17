@@ -1,5 +1,5 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
-import { type NixSha256HashString } from '@cupboard/nix/scalars';
+import { type NixSha256HashString, type TenantId } from '@cupboard/nix/scalars';
 import { type ResolvedRootTarget } from '@cupboard/nix/store-path';
 import {
 	oidcTrustDisplaySchema,
@@ -182,7 +182,7 @@ export class ServerContext {
 	// reference edges and R2 narinfo keys. It comes from the assigned identity, so a
 	// route that reaches a write has already passed the 503 guard; an absent row
 	// here is a programming error, surfaced rather than defaulted.
-	requireTenant(): string {
+	requireTenant(): TenantId {
 		const row = this.db
 			.select({ tenant: schema.tenantIdentity.tenant })
 			.from(schema.tenantIdentity)

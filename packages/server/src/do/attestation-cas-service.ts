@@ -2,7 +2,8 @@ import {
 	type PredicateType,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
-	type StorePathHash
+	type StorePathHash,
+	type TenantId
 } from '@cupboard/nix/scalars';
 import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
 
@@ -271,7 +272,7 @@ export class AttestationCasService {
 	}
 
 	private async overQuota(
-		tenant: string,
+		tenant: TenantId,
 		digest: Sha256HexDigest,
 		size: number
 	): Promise<boolean> {
@@ -306,7 +307,7 @@ export class AttestationCasService {
 		return usage.bytes + usage.casBytes + size > usage.quotaBytes;
 	}
 
-	private edgeFilter(tenant: string, reference: AttestationReference) {
+	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
 		return and(
 			eq(d1Schema.attestationReference.tenant, tenant),
 			eq(d1Schema.attestationReference.cache, reference.cache),
@@ -318,7 +319,7 @@ export class AttestationCasService {
 	}
 
 	private async hasReference(
-		tenant: string,
+		tenant: TenantId,
 		reference: AttestationReference
 	): Promise<boolean> {
 		const existing = await this.context.d1
@@ -330,7 +331,7 @@ export class AttestationCasService {
 		return existing !== undefined;
 	}
 
-	private presenceFilter(tenant: string, digest: Sha256HexDigest) {
+	private presenceFilter(tenant: TenantId, digest: Sha256HexDigest) {
 		return and(
 			eq(d1Schema.tenantCasBlob.tenant, tenant),
 			eq(d1Schema.tenantCasBlob.digest, digest)

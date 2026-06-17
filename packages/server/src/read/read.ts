@@ -4,7 +4,8 @@ import {
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	type NixSha256HashString,
-	type StorePathHash
+	type StorePathHash,
+	type TenantId
 } from '@cupboard/nix/scalars';
 import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -99,7 +100,7 @@ export function serveNar(
 	request: Request,
 	env: Env,
 	ctx: ReadContext,
-	tenant: string,
+	tenant: TenantId,
 	narHash: NixSha256HashString,
 	isPrivate: boolean
 ): Promise<Response> {
@@ -119,7 +120,7 @@ export function serveNar(
 // `tenant_blob` ownership check `findReusableBlob` uses on the negotiate path.
 async function tenantReferencesNar(
 	env: Env,
-	tenant: string,
+	tenant: TenantId,
 	narHash: NixSha256HashString
 ): Promise<boolean> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -145,7 +146,7 @@ export function serveNarInfo(
 	request: Request,
 	env: Env,
 	ctx: ReadContext,
-	tenant: string,
+	tenant: TenantId,
 	cache: string,
 	storePathHash: StorePathHash,
 	isPrivate: boolean
@@ -166,7 +167,7 @@ export function serveNarInfo(
 export async function cacheInfoResponse(
 	request: Request,
 	env: Env,
-	tenant: string,
+	tenant: TenantId,
 	cache: string,
 	isPrivate: boolean
 ): Promise<Response> {
@@ -191,7 +192,7 @@ export async function cacheInfoResponse(
 	return new Response(response.body, { status: response.status, headers });
 }
 
-function narCacheKey(tenant: string, narHash: NixSha256HashString): string {
+function narCacheKey(tenant: TenantId, narHash: NixSha256HashString): string {
 	return new URL(
 		`t/${tenant}/${narObjectKey(narHash)}`,
 		'https://cupboard-nar-cache.invalid/'

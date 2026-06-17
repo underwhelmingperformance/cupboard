@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -36,6 +37,8 @@ import {
 } from './scheduled.ts';
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
+const acme = tenantIdSchema.parse('acme');
+
 // Stages a deferred upload for a freshly provisioned tenant, returning the write
 // token and the upload id to poll. Used to seed each tenant with work the cron's
 // background verify pass must reach.
@@ -57,7 +60,12 @@ async function stageDeferredForNewTenant(
 		fileHash: nar.fileHash,
 		fileSize: nar.narBytes.byteLength
 	});
-	const uploadId = await stageDeferredForTenant(id, token, metadata, nar);
+	const uploadId = await stageDeferredForTenant(
+		tenantIdSchema.parse(id),
+		token,
+		metadata,
+		nar
+	);
 
 	return { token, uploadId };
 }
@@ -92,7 +100,7 @@ describe('multi-tenant writes', () => {
 			fileSize: nar.narBytes.byteLength
 		});
 
-		await pushPathToTenant('acme', token, metadata, nar);
+		await pushPathToTenant(acme, token, metadata, nar);
 
 		const served = await handlerFetch(
 			`/t/acme/${metadata.storePathHash}.narinfo`
@@ -152,7 +160,7 @@ describe('multi-tenant writes', () => {
 		// Negotiate is existence-oracle-safe, so the second tenant still uploads; the
 		// promote dedups onto the one shared blob.
 		await pushPath(fixtureToken, metadata, undefined, nar);
-		await pushPathToTenant('acme', acmeToken, metadata, nar);
+		await pushPathToTenant(acme, acmeToken, metadata, nar);
 
 		const presence = await tenantBlobRows();
 		const edges = await blobReferenceRows();
@@ -198,7 +206,7 @@ describe('multi-tenant writes', () => {
 		});
 
 		await pushPath(fixtureToken, fixtureMetadata, undefined, fixtureNar);
-		await pushPathToTenant('acme', acmeToken, acmeMetadata, acmeNar);
+		await pushPathToTenant(acme, acmeToken, acmeMetadata, acmeNar);
 
 		await expectStats(fixtureToken, {
 			storePaths: 1,
@@ -206,7 +214,7 @@ describe('multi-tenant writes', () => {
 			pendingUploads: 0,
 			totalFileSize: fixtureNar.narBytes.byteLength
 		});
-		await expectStatsForTenant('acme', acmeToken, {
+		await expectStatsForTenant(acme, acmeToken, {
 			storePaths: 1,
 			narBlobs: 1,
 			pendingUploads: 0,
@@ -234,14 +242,14 @@ describe('multi-tenant writes', () => {
 		// A deferred upload only becomes servable once the background verify pass runs.
 		// The cron must reach acme's object, not just the fixture tenant's, or acme's
 		// pending uploads would never commit.
-		const uploadId = await stageDeferredForTenant('acme', token, metadata, nar);
-		const whilePending = await tenantUploadStatus('acme', token, uploadId);
+		const uploadId = await stageDeferredForTenant(acme, token, metadata, nar);
+		const whilePending = await tenantUploadStatus(acme, token, uploadId);
 
 		await runQueuedMaintenanceTick();
 
 		// The settled upload leaves no residue, so its status clears and the proof
 		// of the commit is the narinfo serving under acme's prefix.
-		const afterCron = await tenantUploadStatus('acme', token, uploadId);
+		const afterCron = await tenantUploadStatus(acme, token, uploadId);
 		const served = await handlerFetch(
 			`/t/acme/${metadata.storePathHash}.narinfo`
 		);

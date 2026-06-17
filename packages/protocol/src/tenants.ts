@@ -49,7 +49,7 @@ export type TenantCreateBody = z.input<typeof tenantCreateBodySchema>;
 
 // A tenant as the operator admin surface sees it.
 export const tenantSummarySchema = z.strictObject({
-	id: z.string(),
+	id: tenantIdSchema,
 	status: tenantStatusSchema,
 	readMode: tenantReadModeSchema,
 	ownerIssuer: z.string(),
@@ -72,7 +72,7 @@ export type TenantListResponse = z.input<typeof tenantListResponseSchema>;
 // The body returned by a tenant status mutation (suspend / resume / delete): the
 // slug and its resulting status.
 export const tenantMutateResponseSchema = z.strictObject({
-	id: z.string(),
+	id: tenantIdSchema,
 	status: tenantStatusSchema
 });
 export type ParsedTenantMutateResponse = z.output<
@@ -98,7 +98,7 @@ export type MembershipRebuildResponse = z.input<
 // resulting read mode, so the caller can see whether a credential it just set
 // actually gates reads (it is moot for a public cache).
 export const tenantReadModeResponseSchema = z.strictObject({
-	id: z.string(),
+	id: tenantIdSchema,
 	readMode: tenantReadModeSchema
 });
 export type ParsedTenantReadModeResponse = z.output<
