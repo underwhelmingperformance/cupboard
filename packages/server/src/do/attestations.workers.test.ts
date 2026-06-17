@@ -1,4 +1,8 @@
-import { type StorePathHash } from '@cupboard/nix/scalars';
+import {
+	type Sha256HexDigest,
+	sha256HexDigestSchema,
+	type StorePathHash
+} from '@cupboard/nix/scalars';
 import {
 	attestationAttachResponseSchema,
 	attestationDecisionSchema,
@@ -477,7 +481,7 @@ describe('attestation attach and reads', () => {
 	it('rejects an oversized bundle from metadata without filing a CAS object', async () => {
 		const { token, metadata } = await committedPathBundle();
 		const bundle = new Uint8Array(1024 * 1024 + 1);
-		const digest = await sha256HexBytes(bundle);
+		const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
 		const decision = attestationUploadDecisionSchema.parse(
 			await negotiate(token, metadata.storePathHash, digest)
 		);
@@ -528,7 +532,7 @@ async function committedPathBundle(): Promise<{
 	readonly nar: Awaited<ReturnType<typeof verifiableNar>>;
 	readonly metadata: ReturnType<typeof uploadMetadata>;
 	readonly bundle: Uint8Array;
-	readonly digest: string;
+	readonly digest: Sha256HexDigest;
 }> {
 	const token = await initialiseViaWorker();
 	const nar = await verifiableNar('attestation-path');
@@ -542,7 +546,7 @@ async function committedPathBundle(): Promise<{
 	});
 	await pushPathThroughTenant(fixtureTenant, token, metadata, nar);
 	const bundle = sigstoreBundleBytes(narDigestHex(nar.narHash));
-	const digest = await sha256HexBytes(bundle);
+	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
 
 	return { token, nar, metadata, bundle, digest };
 }
@@ -571,7 +575,7 @@ async function attachBundleResponse(
 	pathHash: string,
 	bundle: Uint8Array
 ): Promise<Response> {
-	const digest = await sha256HexBytes(bundle);
+	const digest = sha256HexDigestSchema.parse(await sha256HexBytes(bundle));
 	const decision = attestationUploadDecisionSchema.parse(
 		await negotiate(token, pathHash, digest)
 	);
@@ -594,7 +598,7 @@ async function attachBundleResponse(
 async function negotiate(
 	token: string,
 	pathHash: string,
-	digest: string
+	digest: Sha256HexDigest
 ): Promise<ParsedAttestationDecision> {
 	const response = await authorisedWorkerFetch(
 		'/cache/_default/attestations',
@@ -616,7 +620,7 @@ async function negotiateTenant(
 	tenant: string,
 	token: string,
 	pathHash: string,
-	digest: string
+	digest: Sha256HexDigest
 ): Promise<ParsedAttestationDecision> {
 	const response = await tenantFetch(
 		tenant,

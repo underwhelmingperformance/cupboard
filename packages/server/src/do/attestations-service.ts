@@ -378,7 +378,7 @@ export class AttestationsService {
 	}
 
 	async removeReferencesForDigest(
-		digest: string,
+		digest: Sha256HexDigest,
 		fenceStoredAt: string
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
@@ -476,7 +476,7 @@ export class AttestationsService {
 		cache: string,
 		storePathHash: StorePathHash,
 		generation: number,
-		digest: string
+		digest: Sha256HexDigest
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
 		const reference = await this.context.d1
@@ -498,7 +498,7 @@ export class AttestationsService {
 
 	private async hasOwnBundleReferenceInCache(
 		cache: string,
-		digest: string
+		digest: Sha256HexDigest
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
 		const reference = await this.context.d1
@@ -516,7 +516,7 @@ export class AttestationsService {
 		return reference !== undefined;
 	}
 
-	private async hasAvailableBundle(digest: string): Promise<boolean> {
+	private async hasAvailableBundle(digest: Sha256HexDigest): Promise<boolean> {
 		const row = await this.context.d1
 			.select({ digest: d1Schema.casObject.digest })
 			.from(d1Schema.casObject)
@@ -671,12 +671,10 @@ function parseAttestationBundle(bytes: Uint8Array): ParsedAttestationBundle {
 }
 
 function narHashDigestHex(narHash: NixSha256HashString): Sha256HexDigest {
-	return bytesHex(
-		NixSha256Hash.parse(narHash).digestBytes()
-	) as Sha256HexDigest;
+	return NixSha256Hash.parse(narHash).digestHex();
 }
 
-function hexDigestBase64(digest: string): string {
+function hexDigestBase64(digest: Sha256HexDigest): string {
 	return bytesBase64(hexBytes(digest));
 }
 
@@ -688,10 +686,6 @@ function hexBytes(value: string): Uint8Array {
 	}
 
 	return bytes;
-}
-
-function bytesHex(bytes: Uint8Array): string {
-	return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 function bytesBase64(bytes: Uint8Array): string {

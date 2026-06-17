@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type Sha256HexDigest,
 	type StorePathHash
 } from '@cupboard/nix/scalars';
 import { sql } from 'drizzle-orm';
@@ -232,7 +233,7 @@ export const tenantBlob = sqliteTable(
 export const casObject = sqliteTable(
 	'cas_object',
 	{
-		digest: text('digest').primaryKey(),
+		digest: text('digest').$type<Sha256HexDigest>().primaryKey(),
 		size: integer('size').notNull(),
 		storedAt: text('stored_at').notNull(),
 		deleteAfter: text('delete_after')
@@ -251,7 +252,7 @@ export const attestationReference = sqliteTable(
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
 		predicateType: text('predicate_type').notNull(),
-		digest: text('digest').notNull()
+		digest: text('digest').$type<Sha256HexDigest>().notNull()
 	},
 	(table) => [
 		primaryKey({
@@ -274,7 +275,7 @@ export const tenantCasBlob = sqliteTable(
 	'tenant_cas_blob',
 	{
 		tenant: text('tenant').notNull(),
-		digest: text('digest').notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		size: integer('size').notNull()
 	},
 	(table) => [primaryKey({ columns: [table.tenant, table.digest] })]

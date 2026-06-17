@@ -2,6 +2,8 @@ import {
 	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	type NixSha256HashString,
+	type Sha256HexDigest,
+	sha256HexDigestSchema,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix/scalars';
@@ -56,7 +58,7 @@ export function narObjectKey(narHash: NixSha256HashString): string {
 	return `nar/${narHash}.nar.zst`;
 }
 
-export function casObjectKey(digest: string): string {
+export function casObjectKey(digest: Sha256HexDigest): string {
 	return `cas/${digest}`;
 }
 
@@ -159,12 +161,12 @@ export function parseNarInfoName(name: string): StorePathHash | undefined {
 	return parsed.success ? parsed.data : undefined;
 }
 
-export function parseAttestationDigestName(name: string): string | undefined {
-	if (!/^[0-9a-f]{64}$/.test(name)) {
-		return undefined;
-	}
+export function parseAttestationDigestName(
+	name: string
+): Sha256HexDigest | undefined {
+	const parsed = sha256HexDigestSchema.safeParse(name);
 
-	return name;
+	return parsed.success ? parsed.data : undefined;
 }
 
 export function isNotModified(request: Request, headers: Headers): boolean {

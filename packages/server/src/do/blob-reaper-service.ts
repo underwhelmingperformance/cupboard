@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type Sha256HexDigest,
 	type StorePathHash
 } from '@cupboard/nix/scalars';
 import {
@@ -41,7 +42,11 @@ export interface NarInfoDemoter {
 }
 
 export interface CasReferenceDemoter {
-	demote(tenant: string, digest: string, fenceStoredAt: string): Promise<void>;
+	demote(
+		tenant: string,
+		digest: Sha256HexDigest,
+		fenceStoredAt: string
+	): Promise<void>;
 }
 
 // The demote scan's resume position across cron ticks. It is the last `nar_hash`
@@ -410,7 +415,7 @@ export class BlobReaperService {
 	}
 
 	private async demoteCasObject(
-		digest: string,
+		digest: Sha256HexDigest,
 		storedAt: string
 	): Promise<boolean> {
 		const removed = await this.d1
@@ -430,20 +435,22 @@ export class BlobReaperService {
 	private demoteCasBatch(
 		after: string,
 		limit: number
-	): Promise<{ digest: string; storedAt: string }[]> {
+	): Promise<{ digest: Sha256HexDigest; storedAt: string }[]> {
 		return this.d1
 			.select({
 				digest: d1Schema.casObject.digest,
 				storedAt: d1Schema.casObject.storedAt
 			})
 			.from(d1Schema.casObject)
-			.where(gt(d1Schema.casObject.digest, after))
+			.where(gt(d1Schema.casObject.digest, sql`${after}`))
 			.orderBy(asc(d1Schema.casObject.digest))
 			.limit(limit)
 			.all();
 	}
 
-	private async casReferencingTenants(digest: string): Promise<string[]> {
+	private async casReferencingTenants(
+		digest: Sha256HexDigest
+	): Promise<string[]> {
 		const rows = await this.d1
 			.selectDistinct({ tenant: d1Schema.attestationReference.tenant })
 			.from(d1Schema.attestationReference)
