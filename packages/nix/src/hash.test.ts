@@ -9,6 +9,12 @@ describe('NixSha256Hash', () => {
 
 		expect(hash.digestHex()).toBe('09'.repeat(32));
 	});
+
+	it('percent-encodes the colon for a URL path segment', () => {
+		const hash = NixSha256Hash.fromDigest(new Uint8Array(32).fill(0x09));
+
+		expect(hash.toUrlSegment()).toBe(`sha256%3A${hash.toString().slice(7)}`);
+	});
 });
 
 describe('fromNixBase32', () => {
