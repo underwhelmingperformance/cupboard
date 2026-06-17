@@ -1,5 +1,7 @@
 import {
+	type CachePriority,
 	type NixSha256HashString,
+	type RootName,
 	type Sha256HexDigest,
 	type StorePathHash,
 	type StorePathString,
@@ -161,7 +163,7 @@ export const retentionRoots = sqliteTable(
 	'retention_root',
 	{
 		cache: text('cache').notNull().default(''),
-		name: text('name').notNull(),
+		name: text('name').$type<RootName>().notNull(),
 		expiresAt: text('expires_at'),
 		createdAt: text('created_at').notNull(),
 		updatedAt: text('updated_at').notNull()
@@ -173,7 +175,7 @@ export const retentionRootTargets = sqliteTable(
 	'retention_root_target',
 	{
 		cache: text('cache').notNull().default(''),
-		rootName: text('root_name').notNull(),
+		rootName: text('root_name').$type<RootName>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull()
 	},
@@ -186,7 +188,7 @@ export const retentionRootTargets = sqliteTable(
 
 export const caches = sqliteTable('cache', {
 	name: text('name').primaryKey(),
-	priority: integer('priority').notNull(),
+	priority: integer('priority').$type<CachePriority>().notNull(),
 	createdAt: text('created_at').notNull()
 });
 
