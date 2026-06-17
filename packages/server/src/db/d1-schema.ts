@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type PredicateType,
 	type Sha256HexDigest,
 	type StorePathHash,
 	type TenantId
@@ -252,7 +253,7 @@ export const attestationReference = sqliteTable(
 		cache: text('cache').notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
-		predicateType: text('predicate_type').notNull(),
+		predicateType: text('predicate_type').$type<PredicateType>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull()
 	},
 	(table) => [

@@ -1,5 +1,9 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
-import { type NixSha256HashString, type TenantId } from '@cupboard/nix/scalars';
+import {
+	type NixSha256HashString,
+	type RootName,
+	type TenantId
+} from '@cupboard/nix/scalars';
 import { type ResolvedRootTarget } from '@cupboard/nix/store-path';
 import {
 	oidcTrustDisplaySchema,
@@ -109,7 +113,7 @@ export interface AuthKey {
 }
 
 export interface RootSetCommand {
-	readonly name: string;
+	readonly name: RootName;
 	readonly targets: readonly ResolvedRootTarget[];
 	readonly ttlSeconds: number | undefined;
 }

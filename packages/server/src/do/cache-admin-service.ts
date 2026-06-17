@@ -1,5 +1,10 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
-import { type CacheName, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import {
+	type CacheName,
+	type CachePriority,
+	cachePrioritySchema,
+	DEFAULT_CACHE
+} from '@cupboard/nix/scalars';
 import {
 	type CacheListResponse,
 	type CacheRemoveResponse,
@@ -45,7 +50,7 @@ export class CacheAdminService {
 		return { caches };
 	}
 
-	putCache(cache: CacheName, priority: number): CacheSummary {
+	putCache(cache: CacheName, priority: CachePriority): CacheSummary {
 		this.context.db
 			.insert(schema.caches)
 			.values({
@@ -98,7 +103,7 @@ export class CacheAdminService {
 		return result?.count ?? 0;
 	}
 
-	cacheSummary(cache: string, priority: number): CacheSummary {
+	cacheSummary(cache: string, priority: CachePriority): CacheSummary {
 		return {
 			name: cache,
 			priority,
@@ -117,7 +122,7 @@ export class CacheAdminService {
 			.insert(schema.caches)
 			.values({
 				name: cache,
-				priority: CacheInfo.default.priority,
+				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
 				createdAt: new Date().toISOString()
 			})
 			.onConflictDoNothing()

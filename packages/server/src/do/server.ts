@@ -1,6 +1,7 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import {
 	cacheFromSelector,
+	cachePrioritySchema,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	type NixSha256HashString,
@@ -704,7 +705,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.insert(schema.caches)
 			.values({
 				name: DEFAULT_CACHE,
-				priority: CacheInfo.default.priority,
+				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
 				createdAt: new Date().toISOString()
 			})
 			.onConflictDoNothing()

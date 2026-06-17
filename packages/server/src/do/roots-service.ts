@@ -206,7 +206,7 @@ export class RootsService {
 		return { roots: summaries.toSorted((a, b) => (a.name > b.name ? 1 : -1)) };
 	}
 
-	removeRoot(cache: string, name: string): RootRemoveResponse {
+	removeRoot(cache: string, name: RootName): RootRemoveResponse {
 		return this.context.db.transaction((tx) => {
 			const existing = tx
 				.select()
@@ -242,7 +242,7 @@ export class RootsService {
 
 	private rootTargetRows(
 		cache: string,
-		name: string
+		name: RootName
 	): readonly { storePathHash: StorePathHash; storePath: StorePathString }[] {
 		return this.context.db
 			.select({
@@ -282,7 +282,7 @@ export class RootsService {
 	}
 
 	private rootSummaryFrom(
-		name: string,
+		name: RootName,
 		stored: StoredRoot,
 		now: string,
 		targets: readonly {

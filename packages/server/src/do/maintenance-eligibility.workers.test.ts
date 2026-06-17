@@ -1,5 +1,6 @@
 import {
 	nixSha256HashSchema,
+	rootNameSchema,
 	sha256HexDigestSchema,
 	storePathHashSchema,
 	tenantIdSchema
@@ -225,7 +226,7 @@ describe('maintenance eligibility projection', () => {
 				.insert(schema.retentionRoots)
 				.values({
 					cache: '',
-					name: 'release',
+					name: rootNameSchema.parse('release'),
 					expiresAt: '2026-01-05T00:00:00.000Z',
 					createdAt: '2026-01-01T00:00:00.000Z',
 					updatedAt: '2026-01-01T00:00:00.000Z'
@@ -267,7 +268,7 @@ describe('maintenance eligibility projection', () => {
 				.insert(schema.retentionRoots)
 				.values({
 					cache: '',
-					name: 'release',
+					name: rootNameSchema.parse('release'),
 					expiresAt: '2026-01-03T00:00:00.000Z',
 					createdAt: '2026-01-01T00:00:00.000Z',
 					updatedAt: '2026-01-01T00:00:00.000Z'
