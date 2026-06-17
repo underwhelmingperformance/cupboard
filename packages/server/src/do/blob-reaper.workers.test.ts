@@ -109,7 +109,7 @@ describe('blob reaper', () => {
 		const served = await fetchNarInfo(second.storePathHash);
 
 		expect({
-			narHash: served.narHash,
+			narHash: served.narHash.toString(),
 			blobState: await blobStateNarHashes(),
 			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({
@@ -160,7 +160,7 @@ describe('blob reaper', () => {
 		const served = await fetchNarInfo(second.storePathHash);
 
 		expect({
-			narHash: served.narHash,
+			narHash: served.narHash.toString(),
 			blobState: await blobStateNarHashes(),
 			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({

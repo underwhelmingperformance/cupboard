@@ -39,7 +39,7 @@ describe('named cache reads', () => {
 
 		expect({
 			narinfoStatus: narinfoResponse.status,
-			storePath: narinfo.storePath,
+			storePath: narinfo.storePath.value,
 			narStatus: narResponse.status,
 			narBody: [...narBody]
 		}).toStrictEqual({

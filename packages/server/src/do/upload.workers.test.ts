@@ -822,7 +822,7 @@ describe('upload flow', () => {
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 
-		expect(narInfo.narHash).toBe(metadata.narHash);
+		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.not.toBeNull();
@@ -853,7 +853,7 @@ describe('upload flow', () => {
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		expect(narInfo.narHash).toBe(metadata.narHash);
+		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
 	});
 
 	it('does not reap a committing saga row past its upload TTL before the verify pass runs', async () => {
@@ -881,7 +881,7 @@ describe('upload flow', () => {
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		expect(narInfo.narHash).toBe(metadata.narHash);
+		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
 	});
 
 	it('does not strand a reserved row when an in-flight commit is retried', async () => {
@@ -918,7 +918,7 @@ describe('upload flow', () => {
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		expect(narInfo.narHash).toBe(metadata.narHash);
+		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
 	});
 
 	it('requests a prompt verification pass when an in-flight commit is retried', async () => {
@@ -1001,7 +1001,7 @@ describe('upload flow', () => {
 
 		expect({
 			verdict: await pendingUploadVerdict(loser.uploadId),
-			narHash: narInfo.narHash
+			narHash: narInfo.narHash.toString()
 		}).toStrictEqual({ verdict: undefined, narHash: metadata.narHash });
 	});
 
@@ -1053,7 +1053,7 @@ describe('upload flow', () => {
 
 		// The honest path is unaffected and still serves.
 		const served = await fetchNarInfo(honest.storePathHash);
-		expect(served.narHash).toBe(good.narHash);
+		expect(served.narHash.toString()).toBe(good.narHash);
 	});
 
 	it('does not serve a reserved row just because its blob already exists', async () => {
@@ -1146,7 +1146,7 @@ describe('upload flow', () => {
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		expect(narInfo.narHash).toBe(metadata.narHash);
+		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
 	});
 
 	it('marks a deferred upload servable on commit, and a later delete is not undone', async () => {
@@ -1267,7 +1267,7 @@ describe('upload flow', () => {
 		await currentServer().runGarbageCollection();
 
 		const served = await fetchNarInfo(storePathHash);
-		const winner = served.narHash === narX.narHash ? narX : narY;
+		const winner = served.narHash.toString() === narX.narHash ? narX : narY;
 		const loser = winner === narX ? narY : narX;
 
 		await expect(
@@ -1811,7 +1811,7 @@ describe('upload flow', () => {
 		await currentServer().runVerification();
 		const narInfo = await fetchNarInfo(reserved.storePathHash);
 
-		expect({ result, narHash: narInfo.narHash }).toStrictEqual({
+		expect({ result, narHash: narInfo.narHash.toString() }).toStrictEqual({
 			result: {
 				ok: true,
 				pendingUploadsDeleted: 0,

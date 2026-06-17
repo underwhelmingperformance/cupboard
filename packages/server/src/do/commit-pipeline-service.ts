@@ -1,4 +1,6 @@
+import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
+import { StorePath } from '@cupboard/nix/store-path';
 import {
 	type CommitResponse,
 	type UploadPathMetadataFields
@@ -383,12 +385,12 @@ export class CommitPipelineService {
 		this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
 		const fingerprint = new NarInfo(
-			metadata.storePath,
+			new StorePath(metadata.storePath),
 			narObjectKey(metadata.narHash),
 			metadata.compression,
-			metadata.fileHash,
+			NixSha256Hash.parse(metadata.fileHash),
 			metadata.fileSize,
-			metadata.narHash,
+			NixSha256Hash.parse(metadata.narHash),
 			metadata.narSize,
 			metadata.references,
 			metadata.deriver,

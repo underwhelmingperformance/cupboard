@@ -200,16 +200,17 @@ async function signedNarInfo(hash: string = storePathHash): Promise<{
 	readonly publicKey: string;
 	readonly source: string;
 }> {
-	const unsigned = new NarInfo(
-		`/nix/store/${hash}-app`,
-		'nar/example.nar.zst',
-		'zstd',
-		'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-		123,
+	const unsigned = NarInfo.fromFields({
+		storePath: `/nix/store/${hash}-app`,
+		url: 'nar/example.nar.zst',
+		compression: 'zstd',
+		fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		fileSize: 123,
 		narHash,
-		456,
-		[]
-	);
+		narSize: 456,
+		references: [],
+		sigs: []
+	});
 	const keyPair = await generateSigningKeyPair();
 	const signature = await crypto.subtle.sign(
 		'Ed25519',
