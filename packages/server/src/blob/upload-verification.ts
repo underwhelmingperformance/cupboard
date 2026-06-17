@@ -1,5 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
-import type { UploadPathMetadataFields } from '@cupboard/protocol/upload';
+import { type NixSha256HashString } from '@cupboard/nix/scalars';
+import type { ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 
 import {
 	UploadedObjectChecksumMismatchError,
@@ -19,8 +20,8 @@ export interface UploadedObject {
 // What a stored NAR blob must satisfy: it exists, its size is exact, and its
 // SHA-256 equals the recorded file hash.
 export interface ExpectedNarBlob {
-	readonly narHash: string;
-	readonly fileHash: string;
+	readonly narHash: NixSha256HashString;
+	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;
 }
 
@@ -74,7 +75,7 @@ export function verifyStoredBlob(
 export function verifyUploadedObject(
 	object: UploadedObject | undefined,
 	expectedSize: number,
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	r2Key: string
 ): void {
 	verifyStoredBlob(

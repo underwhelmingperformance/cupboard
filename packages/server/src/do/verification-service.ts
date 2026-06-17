@@ -1,9 +1,9 @@
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import {
-	type ParsedUploadStatusResponse,
-	type UploadPathMetadataFields
+	type ParsedUploadPathMetadata,
+	type ParsedUploadStatusResponse
 } from '@cupboard/protocol/upload';
-import { and, asc, eq, gt, or } from 'drizzle-orm';
+import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
@@ -66,7 +66,7 @@ export class VerificationService {
 						gt(schema.narInfos.cache, fromCache),
 						and(
 							eq(schema.narInfos.cache, fromCache),
-							gt(schema.narInfos.storePathHash, fromHash)
+							gt(schema.narInfos.storePathHash, sql`${fromHash}`)
 						)
 					)
 				)
@@ -324,7 +324,7 @@ export class VerificationService {
 	// rejection.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: UploadPathMetadataFields,
+		metadata: ParsedUploadPathMetadata,
 		generation: number,
 		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {

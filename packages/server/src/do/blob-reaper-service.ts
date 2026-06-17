@@ -1,4 +1,8 @@
 import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix/scalars';
+import {
 	and,
 	asc,
 	eq,
@@ -7,7 +11,8 @@ import {
 	isNotNull,
 	isNull,
 	lte,
-	notInArray
+	notInArray,
+	sql
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -20,7 +25,7 @@ import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
 // objects.
 export interface DemoteTarget {
 	readonly cache: string;
-	readonly storePathHash: string;
+	readonly storePathHash: StorePathHash;
 }
 
 // The port the demote pass reaches a tenant's Durable Object through. The reaper
@@ -30,7 +35,7 @@ export interface DemoteTarget {
 export interface NarInfoDemoter {
 	demote(
 		tenant: string,
-		narHash: string,
+		narHash: NixSha256HashString,
 		targets: readonly DemoteTarget[]
 	): Promise<void>;
 }
@@ -339,7 +344,7 @@ export class BlobReaperService {
 	// If routing to any tenant fails, the fact is left in place and the next pass
 	// re-drives it. Returns whether the fact was demoted.
 	private async demoteBlob(
-		narHash: string,
+		narHash: NixSha256HashString,
 		verifiedAt: string
 	): Promise<boolean> {
 		const targetsByTenant = await this.referencingTargets(narHash);
@@ -363,7 +368,7 @@ export class BlobReaperService {
 	}
 
 	private async referencingTargets(
-		narHash: string
+		narHash: NixSha256HashString
 	): Promise<Map<string, DemoteTarget[]>> {
 		const edges = await this.d1
 			.selectDistinct({
@@ -391,14 +396,14 @@ export class BlobReaperService {
 	private demoteBatch(
 		after: string,
 		limit: number
-	): Promise<{ narHash: string; verifiedAt: string }[]> {
+	): Promise<{ narHash: NixSha256HashString; verifiedAt: string }[]> {
 		return this.d1
 			.select({
 				narHash: d1Schema.blobState.narHash,
 				verifiedAt: d1Schema.blobState.verifiedAt
 			})
 			.from(d1Schema.blobState)
-			.where(gt(d1Schema.blobState.narHash, after))
+			.where(gt(d1Schema.blobState.narHash, sql`${after}`))
 			.orderBy(asc(d1Schema.blobState.narHash))
 			.limit(limit)
 			.all();

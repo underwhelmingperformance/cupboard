@@ -1,4 +1,8 @@
 import { NarInfo } from '@cupboard/nix/narinfo';
+import {
+	type NixSha256HashString,
+	storePathHashSchema
+} from '@cupboard/nix/scalars';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -28,9 +32,9 @@ import {
 // its uploadId, the state every fresh upload reaches before the background pass
 // runs.
 async function stageDeferred(nar: {
-	readonly narHash: string;
+	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
-	readonly fileHash: string;
+	readonly fileHash: NixSha256HashString;
 	readonly narBytes: Uint8Array;
 }): Promise<string> {
 	const metadata = uploadMetadata({
@@ -69,7 +73,9 @@ describe('deferred upload status', () => {
 		const whilePending = await uploadStatus(uploadId);
 		await currentServer().runVerification();
 		const afterVerify = await uploadStatus(uploadId);
-		const stored = await readStoredNarInfo('a'.repeat(32));
+		const stored = await readStoredNarInfo(
+			storePathHashSchema.parse('a'.repeat(32))
+		);
 
 		expect({
 			whilePending,

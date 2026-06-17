@@ -1,4 +1,8 @@
-import { referencesSchema } from '@cupboard/nix/scalars';
+import {
+	referencesSchema,
+	type StorePathHash,
+	storePathHashSchema
+} from '@cupboard/nix/scalars';
 import { and, eq, isNull, lt, lte, or } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -66,7 +70,7 @@ export class GarbageCollectionService {
 		// committed paths that the sweep spares.
 		const visited = new Set<string>();
 		const retainedCommitted = new Set<string>();
-		const queue: string[] = [];
+		const queue: StorePathHash[] = [];
 
 		for (const target of this.context.db
 			.select({ storePathHash: schema.retentionRootTargets.storePathHash })
@@ -75,7 +79,7 @@ export class GarbageCollectionService {
 			.all()) {
 			if (!visited.has(target.storePathHash)) {
 				visited.add(target.storePathHash);
-				queue.push(target.storePathHash);
+				queue.push(storePathHashSchema.parse(target.storePathHash));
 			}
 		}
 
@@ -120,7 +124,7 @@ export class GarbageCollectionService {
 
 				if (!visited.has(referenceHash)) {
 					visited.add(referenceHash);
-					queue.push(referenceHash);
+					queue.push(storePathHashSchema.parse(referenceHash));
 				}
 			}
 		}

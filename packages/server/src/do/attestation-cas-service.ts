@@ -1,6 +1,7 @@
 import {
 	type PredicateType,
-	type Sha256HexDigest
+	type Sha256HexDigest,
+	type StorePathHash
 } from '@cupboard/nix/scalars';
 import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
 
@@ -22,7 +23,7 @@ export interface MeasuredAttestationBundle {
 
 export interface AttestationReference {
 	readonly cache: string;
-	readonly storePathHash: string;
+	readonly storePathHash: StorePathHash;
 	readonly generation: number;
 	readonly predicateType: PredicateType;
 	readonly digest: Sha256HexDigest;

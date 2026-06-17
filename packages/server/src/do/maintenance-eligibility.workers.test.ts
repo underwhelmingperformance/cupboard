@@ -1,3 +1,7 @@
+import {
+	nixSha256HashSchema,
+	storePathHashSchema
+} from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -204,8 +208,8 @@ describe('maintenance eligibility projection', () => {
 				.insert(schema.narInfoDeletions)
 				.values({
 					cache: '',
-					storePathHash: 'a'.repeat(32),
-					narHash: 'sha256:nar',
+					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					generation: 0,
 					createdAt: '2026-01-01T00:00:00.000Z'
 				})
@@ -343,7 +347,7 @@ function pendingUpload(
 	return {
 		id,
 		cache: '',
-		narHash: `sha256:${id}`,
+		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: `staging/${id}`,
 		expectedSize: 0,
 		metadataJson: '{}',
@@ -360,7 +364,7 @@ function pendingAttestation(
 	return {
 		id,
 		cache: '',
-		storePathHash: 'a'.repeat(32),
+		storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 		digest: 'b'.repeat(64),
 		r2Key: `staging/attestations/${id}`,
 		createdAt: '2026-01-01T00:00:00.000Z',

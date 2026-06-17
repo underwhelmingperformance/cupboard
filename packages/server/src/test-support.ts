@@ -2,8 +2,12 @@ import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
 import {
 	DEFAULT_CACHE,
+	nixSha256HashSchema,
+	type NixSha256HashString,
 	predicateTypeSchema,
 	selectorForCache,
+	type StorePathHash,
+	storePathHashSchema,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
@@ -29,6 +33,7 @@ import {
 	type DeletePathResponse,
 	deletePathResponseSchema,
 	type ParsedCommitSocketFrame,
+	type ParsedUploadPathMetadata,
 	type StatsResponse,
 	type UploadActionDecision,
 	uploadActionDecisionSchema,
@@ -38,6 +43,7 @@ import {
 	type UploadNegotiateResponse,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
+	uploadPathMetadataSchema,
 	uploadPrepareResponseSchema,
 	type UploadStatusResponse,
 	uploadStatusResponseSchema
@@ -140,8 +146,9 @@ export const narBytes = new Uint8Array([
 	239, 240, 241, 242, 243, 244, 245, 246, 247, 248, 249, 250, 251, 252, 253,
 	254, 255, 1, 0, 0, 207, 7, 170, 53, 5
 ]);
-export const narHash =
-	'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347';
+export const narHash = nixSha256HashSchema.parse(
+	'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347'
+);
 export const fileHash = NixSha256Hash.parse(
 	'sha256:0wzw5pz9bciz84825admrb4b848maxa2fh1isbsw4547mvra9czv'
 );
@@ -784,7 +791,9 @@ export async function clearBlobStorage(): Promise<void> {
 }
 
 /** The shared `blob_state` rows in D1, sorted by NAR hash for deterministic assertions. */
-export async function blobStateNarHashes(): Promise<{ narHash: string }[]> {
+export async function blobStateNarHashes(): Promise<
+	{ narHash: NixSha256HashString }[]
+> {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
 		.select({ narHash: blobState.narHash })
 		.from(blobState)
@@ -867,9 +876,9 @@ export async function blobReferenceRows(): Promise<
 	{
 		tenant: string;
 		cache: string;
-		storePathHash: string;
+		storePathHash: StorePathHash;
 		generation: number;
-		narHash: string;
+		narHash: NixSha256HashString;
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
@@ -887,7 +896,7 @@ export async function blobReferenceRows(): Promise<
 
 /** The per-tenant blob-presence rows, sorted by NAR hash. */
 export async function tenantBlobRows(): Promise<
-	{ tenant: string; narHash: string; fileSize: number }[]
+	{ tenant: string; narHash: NixSha256HashString; fileSize: number }[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { tenantBlob } })
 		.select()
@@ -920,7 +929,7 @@ export async function attestationReferenceRows(): Promise<
 	{
 		tenant: string;
 		cache: string;
-		storePathHash: string;
+		storePathHash: StorePathHash;
 		generation: number;
 		predicateType: string;
 		digest: string;
@@ -983,7 +992,7 @@ export async function fileAttestationReference(options: {
 	readonly uploadId: string;
 	readonly bytes: Uint8Array;
 	readonly cache?: string;
-	readonly storePathHash: string;
+	readonly storePathHash: StorePathHash;
 	readonly generation: number;
 	readonly predicateType?: string;
 	readonly tenant?: string;
@@ -1068,7 +1077,7 @@ export async function tenantUsagePresent(id: string): Promise<boolean> {
  * did not reach D1, leaving the captured reference edge behind.
  */
 export async function queueUnflushedNarInfoDeletion(fields: {
-	readonly storePathHash: string;
+	readonly storePathHash: StorePathHash;
 }): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		const database = drizzle(state.storage, {
@@ -1095,8 +1104,8 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 			const deletion = z
 				.object({
 					cache: z.string(),
-					storePathHash: z.string(),
-					narHash: z.string(),
+					storePathHash: storePathHashSchema,
+					narHash: nixSha256HashSchema,
 					generation: z.number()
 				})
 				.parse(row);
@@ -1131,8 +1140,8 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 }
 
 export async function seedNarInfoDeletion(fields: {
-	readonly storePathHash: string;
-	readonly narHash: string;
+	readonly storePathHash: StorePathHash;
+	readonly narHash: NixSha256HashString;
 	readonly generation: number;
 }): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
@@ -1155,8 +1164,8 @@ export async function seedNarInfoDeletion(fields: {
 export async function narInfoDeletionRows(): Promise<
 	{
 		cache: string;
-		storePathHash: string;
-		narHash: string;
+		storePathHash: StorePathHash;
+		narHash: NixSha256HashString;
 		generation: number;
 	}[]
 > {
@@ -1179,7 +1188,9 @@ export async function narInfoDeletionRows(): Promise<
 // Deletes a committed narinfo row directly, leaving its D1 edge, shared fact and
 // R2 object behind — the cross-store state a delete leaves after its row
 // transaction but before the repair retires the edge and object.
-export async function deleteNarInfoRow(storePathHash: string): Promise<void> {
+export async function deleteNarInfoRow(
+	storePathHash: StorePathHash
+): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { narInfos } })
 			.delete(narInfos)
@@ -1191,7 +1202,9 @@ export async function deleteNarInfoRow(storePathHash: string): Promise<void> {
 // Deletes a shared blob's `blob_state` fact directly while leaving its R2 object,
 // standing in for the residue a reaper crash leaves between the D1 delete and the
 // R2 delete: an orphan object with no fact, which the next promote must adopt.
-export async function deleteBlobState(narHash: string): Promise<void> {
+export async function deleteBlobState(
+	narHash: NixSha256HashString
+): Promise<void> {
 	await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
 		.delete(blobState)
 		.where(eq(blobState.narHash, narHash))
@@ -1201,7 +1214,7 @@ export async function deleteBlobState(narHash: string): Promise<void> {
 // Retires a D1 reference edge directly, standing in for a delete that retired the
 // edge but crashed before deleting the narinfo object or clearing its marker.
 export async function deleteBlobReferenceEdge(
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	generation: number
 ): Promise<void> {
 	await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
@@ -1217,7 +1230,7 @@ export async function deleteBlobReferenceEdge(
 
 /** The generation stamped on a committed narinfo, or undefined if absent. */
 export async function narInfoGeneration(
-	storePathHash: string
+	storePathHash: StorePathHash
 ): Promise<number | undefined> {
 	return runInDurableObject(currentServer(), (_instance, state) => {
 		const row = drizzle(state.storage, { schema: { narInfos } })
@@ -1251,7 +1264,7 @@ export function cacheScopedPath(cache: string, suffix: string): string {
 
 export async function negotiateUploads(
 	token: string,
-	paths: readonly UploadPathMetadataFields[],
+	paths: readonly ParsedUploadPathMetadata[],
 	cache: string = DEFAULT_CACHE
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedFetch(
@@ -1275,7 +1288,7 @@ export async function negotiateUploads(
 
 export async function negotiateViaWorker(
 	token: string,
-	paths: readonly UploadPathMetadataFields[]
+	paths: readonly ParsedUploadPathMetadata[]
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedWorkerFetch(
 		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
@@ -1303,7 +1316,7 @@ export async function negotiateViaWorker(
  */
 export async function pushPath(
 	token: string,
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	cache: string = DEFAULT_CACHE,
 	nar?: VerifiableNar
 ): Promise<void> {
@@ -1339,7 +1352,7 @@ export async function pushPath(
 export async function pushPathToTenant(
 	tenant: string,
 	token: string,
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<void> {
 	const negotiated = await tenantWorkerFetch(
@@ -1389,7 +1402,7 @@ export async function pushPathToTenant(
 export async function attemptPushToTenant(
 	tenant: string,
 	token: string,
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<number> {
 	const negotiated = await tenantWorkerFetch(
@@ -1460,7 +1473,7 @@ export async function attemptPushToTenant(
 export async function stageDeferredForTenant(
 	tenant: string,
 	token: string,
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<string> {
 	const negotiated = await tenantWorkerFetch(
@@ -1751,7 +1764,7 @@ export async function commitUploadViaWorker(
 export async function prepareUpload(
 	token: string,
 	decision: UploadActionDecision,
-	metadata: UploadPathMetadataFields
+	metadata: ParsedUploadPathMetadata
 ): Promise<void> {
 	const expectedExpiresAt = uploadExpiryFromNow();
 	const response = await authorisedFetch(
@@ -1777,7 +1790,7 @@ export async function prepareUpload(
 export async function prepareUploadViaWorker(
 	token: string,
 	decision: UploadActionDecision,
-	metadata: UploadPathMetadataFields
+	metadata: ParsedUploadPathMetadata
 ): Promise<void> {
 	const expectedExpiresAt = uploadExpiryFromNow();
 	const response = await authorisedWorkerFetch(
@@ -1802,7 +1815,7 @@ export async function prepareUploadViaWorker(
 
 export async function commitPath(
 	token: string,
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
 ): Promise<void> {
 	const upload = expectSingleUploadDecision(
@@ -1816,7 +1829,7 @@ export async function commitPath(
 
 export async function commitSharedPath(
 	token: string,
-	metadata: UploadPathMetadataFields
+	metadata: ParsedUploadPathMetadata
 ): Promise<void> {
 	const decision = expectSingleCommitDecision(
 		await negotiateUploads(token, [metadata]),
@@ -1827,7 +1840,7 @@ export async function commitSharedPath(
 
 export async function deletePath(
 	token: string,
-	storePathHash: string
+	storePathHash: StorePathHash
 ): Promise<DeletePathResponse> {
 	const response = await authorisedFetch(
 		`/cache/${WIRE_DEFAULT_CACHE}/paths/${storePathHash}`,
@@ -1929,7 +1942,9 @@ export async function reapBlobsPastGrace(): Promise<void> {
 	await runBlobReaper(env);
 }
 
-export async function fetchNarInfo(storePathHash: string): Promise<NarInfo> {
+export async function fetchNarInfo(
+	storePathHash: StorePathHash
+): Promise<NarInfo> {
 	const response = await readFetch(`/${storePathHash}.narinfo`);
 
 	expect(response.status).toBe(StatusCodes.OK);
@@ -2137,16 +2152,16 @@ export function statsExpectation(expected: StatsExpectation): StatsResponse {
 
 export interface VerifiableNar {
 	readonly narBytes: Uint8Array;
-	readonly narHash: string;
+	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
-	readonly fileHash: string;
+	readonly fileHash: NixSha256HashString;
 }
 
 const defaultNar: VerifiableNar = {
 	narBytes,
 	narHash,
 	narSize: 1234,
-	fileHash: fileHash.toString()
+	fileHash: fileHash.value
 };
 
 export async function putNarBytes(
@@ -2207,10 +2222,10 @@ export async function verifiableNar(seed: string): Promise<VerifiableNar> {
 	);
 	const narHashValue = NixSha256Hash.fromDigest(
 		new Uint8Array(await crypto.subtle.digest('SHA-256', uncompressed))
-	).toString();
+	).value;
 	const fileHashValue = NixSha256Hash.fromDigest(
 		new Uint8Array(await crypto.subtle.digest('SHA-256', compressed))
-	).toString();
+	).value;
 
 	return {
 		narBytes: compressed,
@@ -2251,7 +2266,7 @@ export function sigstoreBundleBytes(
 }
 
 /** The lowercase hex digest of a `sha256:<base32>` NAR hash. */
-export function narDigestHex(narHash: string): string {
+export function narDigestHex(narHash: NixSha256HashString): string {
 	return [...NixSha256Hash.parse(narHash).digestBytes()]
 		.map((byte) => byte.toString(16).padStart(2, '0'))
 		.join('');
@@ -2310,11 +2325,11 @@ export async function verifiableNarStored(
 		narBytes: frame,
 		narHash: NixSha256Hash.fromDigest(
 			new Uint8Array(await crypto.subtle.digest('SHA-256', uncompressed))
-		).toString(),
+		).value,
 		narSize: uncompressed.byteLength,
 		fileHash: NixSha256Hash.fromDigest(
 			new Uint8Array(await crypto.subtle.digest('SHA-256', frame))
-		).toString()
+		).value
 	};
 }
 
@@ -2381,7 +2396,7 @@ export async function verifiablePath(
 		readonly storePathHash?: string;
 		readonly references?: string[];
 	}
-): Promise<{ metadata: UploadPathMetadataFields; nar: VerifiableNar }> {
+): Promise<{ metadata: ParsedUploadPathMetadata; nar: VerifiableNar }> {
 	const nar = await verifiableNar(seed);
 	const metadata = uploadMetadata({
 		name: fields.name,
@@ -2410,7 +2425,7 @@ export async function commitVerifiablePath(
 		readonly storePathHash?: string;
 		readonly references?: string[];
 	}
-): Promise<UploadPathMetadataFields> {
+): Promise<ParsedUploadPathMetadata> {
 	const { metadata, nar } = await verifiablePath(seed, fields);
 	await commitPath(token, metadata, nar);
 
@@ -2454,7 +2469,7 @@ export async function markUploadCommitting(uploadId: string): Promise<void> {
 // its generation with no D1 edge, no shared fact, and no R2 object. Signatures are
 // a placeholder, since this row only ever exists mid-saga.
 export async function seedReservedNarInfo(
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	generation = 0
 ): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
@@ -2500,9 +2515,9 @@ export async function seedReservedNarInfo(
  * re-derivation can be exercised.
  */
 export async function corruptCommittedNarInfo(
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	fields: Partial<{
-		narHash: string;
+		narHash: NixSha256HashString;
 		narSize: number;
 		deriver: string;
 		ca: string;
@@ -2561,7 +2576,7 @@ function parseNamedBytes(value: string): { readonly bytes: Uint8Array } {
 	};
 }
 
-export async function readStoredNarInfo(storePathHash: string): Promise<{
+export async function readStoredNarInfo(storePathHash: StorePathHash): Promise<{
 	readonly body: string;
 	readonly etag: string;
 	readonly contentType: string | undefined;
@@ -2579,7 +2594,7 @@ export async function readStoredNarInfo(storePathHash: string): Promise<{
 	};
 }
 
-export function uploadBlobMetadata(metadata: UploadPathMetadataFields) {
+export function uploadBlobMetadata(metadata: ParsedUploadPathMetadata) {
 	return {
 		fileHash: metadata.fileHash,
 		fileSize: metadata.fileSize,
@@ -2587,7 +2602,7 @@ export function uploadBlobMetadata(metadata: UploadPathMetadataFields) {
 	};
 }
 
-export function uploadPathNegotiation(metadata: UploadPathMetadataFields) {
+export function uploadPathNegotiation(metadata: ParsedUploadPathMetadata) {
 	return {
 		storePathHash: metadata.storePathHash,
 		storePath: metadata.storePath,
@@ -2605,12 +2620,12 @@ export function uploadMetadata(
 		readonly name?: string;
 		readonly storePathHash?: string;
 	}
-): UploadPathMetadataFields {
+): ParsedUploadPathMetadata {
 	const storePathHash =
 		fields.storePathHash ?? '11111111111111111111111111111111';
 	const name = fields.name ?? 'first';
 
-	return {
+	return uploadPathMetadataSchema.parse({
 		storePathHash,
 		storePath: `/nix/store/${storePathHash}-${name}`,
 		narHash: fields.narHash ?? narHash,
@@ -2621,16 +2636,16 @@ export function uploadMetadata(
 		references: fields.references ?? [`${storePathHash}-${name}`],
 		deriver: fields.deriver,
 		ca: fields.ca
-	};
+	});
 }
 
-export function nixSha256Hash(character: string): string {
-	return `sha256:${character.repeat(52)}`;
+export function nixSha256Hash(character: string): NixSha256HashString {
+	return nixSha256HashSchema.parse(`sha256:${character.repeat(52)}`);
 }
 
 export function expectSingleUploadDecision(
 	response: UploadNegotiateResponse,
-	metadata: UploadPathMetadataFields
+	metadata: ParsedUploadPathMetadata
 ): UploadActionDecision {
 	const decision = uploadActionDecisionSchema.parse(singleDecision(response));
 	const expectedExpiresAt = uploadExpiryFromNow();
@@ -2651,7 +2666,7 @@ export function expectSingleUploadDecision(
 
 export function expectSingleCommitDecision(
 	response: UploadNegotiateResponse,
-	metadata: UploadPathMetadataFields
+	metadata: ParsedUploadPathMetadata
 ): UploadCommitDecision {
 	const decision = uploadCommitDecisionSchema.parse(singleDecision(response));
 
@@ -2676,7 +2691,7 @@ export function singleDecision(
 
 export async function expectPrepareUploadResponse(
 	response: Response,
-	metadata: UploadPathMetadataFields,
+	metadata: ParsedUploadPathMetadata,
 	expiresAt: string,
 	uploadId: string
 ): Promise<void> {

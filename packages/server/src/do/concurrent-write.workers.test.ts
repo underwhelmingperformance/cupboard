@@ -1,5 +1,5 @@
 import { NarInfo } from '@cupboard/nix/narinfo';
-import type { UploadPathMetadataFields } from '@cupboard/protocol/upload';
+import type { ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -22,7 +22,7 @@ import {
 async function prepare(
 	token: string,
 	uploadId: string,
-	metadata: UploadPathMetadataFields
+	metadata: ParsedUploadPathMetadata
 ): Promise<void> {
 	const response = await authorisedFetch(
 		`/cache/_default/uploads/${uploadId}`,
