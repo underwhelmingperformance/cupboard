@@ -1,3 +1,4 @@
+import { type StorePathHash } from '@cupboard/nix/scalars';
 import {
 	attestationAttachResponseSchema,
 	attestationDecisionSchema,
@@ -706,7 +707,7 @@ function tenantFetch(
 	return handlerFetch(`/t/${tenant}${path}`, { ...init, headers });
 }
 
-function eqStorePath(storePathHash: string) {
+function eqStorePath(storePathHash: StorePathHash) {
 	return and(
 		eq(schema.narInfos.cache, ''),
 		eq(schema.narInfos.storePathHash, storePathHash)

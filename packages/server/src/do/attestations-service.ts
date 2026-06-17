@@ -1,9 +1,11 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import {
+	type NixSha256HashString,
 	type PredicateType,
 	predicateTypeSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix/scalars';
 import {
@@ -336,7 +338,10 @@ export class AttestationsService {
 		);
 	}
 
-	async materialiseList(cache: string, storePathHash: string): Promise<void> {
+	async materialiseList(
+		cache: string,
+		storePathHash: StorePathHash
+	): Promise<void> {
 		const row = await this.narInfoObjects.committedNarInfoRow(
 			cache,
 			storePathHash
@@ -420,7 +425,10 @@ export class AttestationsService {
 				continue;
 			}
 
-			await this.materialiseList(cache, storePathHash);
+			await this.materialiseList(
+				cache,
+				storePathHashSchema.parse(storePathHash)
+			);
 		}
 	}
 
@@ -466,7 +474,7 @@ export class AttestationsService {
 
 	private async hasOwnBundleReference(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		generation: number,
 		digest: string
 	): Promise<boolean> {
@@ -524,7 +532,7 @@ export class AttestationsService {
 
 	private async descriptorsFor(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		generation: number
 	): Promise<AttestationDescriptor[]> {
 		const tenant = this.context.requireTenant();
@@ -662,7 +670,7 @@ function parseAttestationBundle(bytes: Uint8Array): ParsedAttestationBundle {
 	};
 }
 
-function narHashDigestHex(narHash: string): Sha256HexDigest {
+function narHashDigestHex(narHash: NixSha256HashString): Sha256HexDigest {
 	return bytesHex(
 		NixSha256Hash.parse(narHash).digestBytes()
 	) as Sha256HexDigest;

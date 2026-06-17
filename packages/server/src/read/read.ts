@@ -2,7 +2,9 @@ import { CacheInfo } from '@cupboard/nix/cache-info';
 import {
 	cacheFromSelector,
 	cacheSelectorSchema,
-	DEFAULT_CACHE
+	DEFAULT_CACHE,
+	type NixSha256HashString,
+	type StorePathHash
 } from '@cupboard/nix/scalars';
 import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -98,7 +100,7 @@ export function serveNar(
 	env: Env,
 	ctx: ReadContext,
 	tenant: string,
-	narHash: string,
+	narHash: NixSha256HashString,
 	isPrivate: boolean
 ): Promise<Response> {
 	return serveR2(
@@ -118,7 +120,7 @@ export function serveNar(
 async function tenantReferencesNar(
 	env: Env,
 	tenant: string,
-	narHash: string
+	narHash: NixSha256HashString
 ): Promise<boolean> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
@@ -145,7 +147,7 @@ export function serveNarInfo(
 	ctx: ReadContext,
 	tenant: string,
 	cache: string,
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	isPrivate: boolean
 ): Promise<Response> {
 	const { origin } = new URL(request.url);
@@ -189,7 +191,7 @@ export async function cacheInfoResponse(
 	return new Response(response.body, { status: response.status, headers });
 }
 
-function narCacheKey(tenant: string, narHash: string): string {
+function narCacheKey(tenant: string, narHash: NixSha256HashString): string {
 	return new URL(
 		`t/${tenant}/${narObjectKey(narHash)}`,
 		'https://cupboard-nar-cache.invalid/'

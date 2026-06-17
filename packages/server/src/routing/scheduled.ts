@@ -1,4 +1,7 @@
-import { tenantIdSchema } from '@cupboard/nix/scalars';
+import {
+	type NixSha256HashString,
+	tenantIdSchema
+} from '@cupboard/nix/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -407,7 +410,7 @@ class TenantNarInfoDemoter implements NarInfoDemoter {
 
 	demote(
 		tenant: string,
-		narHash: string,
+		narHash: NixSha256HashString,
 		targets: readonly DemoteTarget[]
 	): Promise<void> {
 		return tenantServer(this.env, tenant).demoteNarInfoObjects(

@@ -1,5 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
-import type { UploadPathMetadataFields } from '@cupboard/protocol/upload';
+import { nixSha256HashSchema } from '@cupboard/nix/scalars';
+import { uploadPathMetadataSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -16,13 +17,13 @@ import {
 
 const digest = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
 const otherDigest = Uint8Array.from({ length: 32 }, (_, index) => index + 100);
-const fileHash = NixSha256Hash.fromDigest(digest).toString();
-const narHash = `sha256:${'1'.repeat(52)}`;
+const fileHash = NixSha256Hash.fromDigest(digest).value;
+const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 // A staging key, distinct from the canonical nar/<hash> key, to prove the error
 // reports the object actually inspected rather than the canonical default.
 const r2Key = 'staging/upload-1.nar.zst';
 
-const metadata: UploadPathMetadataFields = {
+const metadata = uploadPathMetadataSchema.parse({
 	storePathHash: '0'.repeat(32),
 	storePath: `/nix/store/${'0'.repeat(32)}-app`,
 	narHash,
@@ -31,7 +32,7 @@ const metadata: UploadPathMetadataFields = {
 	fileHash,
 	fileSize: 4,
 	compression: 'zstd'
-};
+});
 
 function uploadedObject(
 	overrides: Partial<UploadedObject> = {}

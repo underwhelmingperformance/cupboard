@@ -1,6 +1,7 @@
 import {
 	predicateTypeSchema,
-	sha256HexDigestSchema
+	sha256HexDigestSchema,
+	storePathHashSchema
 } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -40,7 +41,7 @@ import {
 const predicateType = predicateTypeSchema.parse(
 	'https://slsa.dev/provenance/v1'
 );
-const storePathHash = 'a'.repeat(32);
+const storePathHash = storePathHashSchema.parse('a'.repeat(32));
 
 describe('attestation CAS lifecycle', () => {
 	beforeEach(async () => {
@@ -215,7 +216,7 @@ describe('attestation CAS lifecycle', () => {
 		const first = await fileAttestationReference({
 			uploadId: 'shared-fixture',
 			bytes,
-			storePathHash: 'b'.repeat(32),
+			storePathHash: storePathHashSchema.parse('b'.repeat(32)),
 			generation: 0,
 			predicateType
 		});
@@ -223,7 +224,7 @@ describe('attestation CAS lifecycle', () => {
 			uploadId: 'shared-acme',
 			bytes,
 			tenant: 'acme',
-			storePathHash: 'c'.repeat(32),
+			storePathHash: storePathHashSchema.parse('c'.repeat(32)),
 			generation: 0,
 			predicateType
 		});
@@ -251,21 +252,21 @@ describe('attestation CAS lifecycle', () => {
 		const first = await fileAttestationReference({
 			uploadId: 'tenant-shared-a',
 			bytes,
-			storePathHash: 'd'.repeat(32),
+			storePathHash: storePathHashSchema.parse('d'.repeat(32)),
 			generation: 0,
 			predicateType
 		});
 		await fileAttestationReference({
 			uploadId: 'tenant-shared-b',
 			bytes,
-			storePathHash: 'e'.repeat(32),
+			storePathHash: storePathHashSchema.parse('f'.repeat(32)),
 			generation: 0,
 			predicateType
 		});
 
 		await currentServer().removeAttestationReference({
 			cache: '',
-			storePathHash: 'd'.repeat(32),
+			storePathHash: storePathHashSchema.parse('d'.repeat(32)),
 			generation: 0,
 			predicateType,
 			digest: sha256HexDigestSchema.parse(first.digest)
@@ -273,7 +274,7 @@ describe('attestation CAS lifecycle', () => {
 		const afterFirst = await tenantUsageRow();
 		await currentServer().removeAttestationReference({
 			cache: '',
-			storePathHash: 'e'.repeat(32),
+			storePathHash: storePathHashSchema.parse('f'.repeat(32)),
 			generation: 0,
 			predicateType,
 			digest: sha256HexDigestSchema.parse(first.digest)

@@ -1,3 +1,4 @@
+import { storePathHashSchema } from '@cupboard/nix/scalars';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -253,7 +254,7 @@ describe('per-tenant quota', () => {
 		const bundle = await fileAttestationReference({
 			uploadId: 'quota-cas-consumed',
 			bytes: new TextEncoder().encode('cas quota use'),
-			storePathHash: 'b'.repeat(32),
+			storePathHash: storePathHashSchema.parse('b'.repeat(32)),
 			generation: 0
 		});
 		const nar = await verifiableNar('quota-mixed-cas-nar');

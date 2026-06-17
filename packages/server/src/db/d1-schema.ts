@@ -1,3 +1,7 @@
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix/scalars';
 import { sql } from 'drizzle-orm';
 import {
 	check,
@@ -17,8 +21,8 @@ import {
 export const blobState = sqliteTable(
 	'blob_state',
 	{
-		narHash: text('nar_hash').primaryKey(),
-		fileHash: text('file_hash').notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().primaryKey(),
+		fileHash: text('file_hash').$type<NixSha256HashString>().notNull(),
 		fileSize: integer('file_size').notNull(),
 		compression: text('compression', { enum: ['zstd'] }).notNull(),
 		narSize: integer('nar_size').notNull(),
@@ -44,9 +48,9 @@ export const blobReference = sqliteTable(
 	{
 		tenant: text('tenant').notNull(),
 		cache: text('cache').notNull(),
-		storePathHash: text('store_path_hash').notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
-		narHash: text('nar_hash').notNull()
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull()
 	},
 	(table) => [
 		primaryKey({
@@ -216,7 +220,7 @@ export const tenantBlob = sqliteTable(
 	'tenant_blob',
 	{
 		tenant: text('tenant').notNull(),
-		narHash: text('nar_hash').notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		fileSize: integer('file_size').notNull()
 	},
 	(table) => [primaryKey({ columns: [table.tenant, table.narHash] })]
@@ -244,7 +248,7 @@ export const attestationReference = sqliteTable(
 	{
 		tenant: text('tenant').notNull(),
 		cache: text('cache').notNull(),
-		storePathHash: text('store_path_hash').notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
 		predicateType: text('predicate_type').notNull(),
 		digest: text('digest').notNull()

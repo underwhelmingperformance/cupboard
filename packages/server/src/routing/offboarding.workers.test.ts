@@ -1,4 +1,9 @@
 import {
+	nixSha256HashSchema,
+	type NixSha256HashString,
+	storePathHashSchema
+} from '@cupboard/nix/scalars';
+import {
 	createExecutionContext,
 	waitOnExecutionContext
 } from 'cloudflare:test';
@@ -77,7 +82,7 @@ async function pushTenantPath(
 	token: string,
 	storePathHash: string,
 	seed: string
-): Promise<string> {
+): Promise<NixSha256HashString> {
 	const nar = await verifiableNar(seed);
 	const metadata = uploadMetadata({
 		storePathHash,
@@ -255,7 +260,7 @@ describe('offboarding drain', () => {
 
 	it('bounds NAR edge deletion by exact captured rows', async () => {
 		const { id } = await provisionedWritingTenant();
-		const storePathHash = 'a'.repeat(32);
+		const storePathHash = storePathHashSchema.parse('a'.repeat(32));
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 		await database
@@ -266,21 +271,27 @@ describe('offboarding drain', () => {
 					cache: '',
 					storePathHash,
 					generation: 0,
-					narHash: 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+					narHash: nixSha256HashSchema.parse(
+						'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+					)
 				},
 				{
 					tenant: id,
 					cache: 'builds',
 					storePathHash,
 					generation: 1,
-					narHash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+					narHash: nixSha256HashSchema.parse(
+						'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+					)
 				},
 				{
 					tenant: id,
 					cache: 'tests',
 					storePathHash,
 					generation: 2,
-					narHash: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccc'
+					narHash: nixSha256HashSchema.parse(
+						'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccc'
+					)
 				}
 			])
 			.run();
@@ -303,13 +314,17 @@ describe('offboarding drain', () => {
 					cache: 'builds',
 					storePathHash,
 					generation: 1,
-					narHash: 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+					narHash: nixSha256HashSchema.parse(
+						'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+					)
 				},
 				{
 					cache: 'tests',
 					storePathHash,
 					generation: 2,
-					narHash: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccc'
+					narHash: nixSha256HashSchema.parse(
+						'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccc'
+					)
 				}
 			]
 		});

@@ -1,3 +1,7 @@
+import {
+	nixSha256HashSchema,
+	storePathHashSchema
+} from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -23,8 +27,8 @@ describe('narinfo deletion queue', () => {
 	it('flushes independent pending deletions for one hash across caches', async () => {
 		await useTestServer('narinfo-deletion-caches');
 		const token = await initialise();
-		const hash = '0'.repeat(32);
-		const narHash = 'sha256:nar';
+		const hash = storePathHashSchema.parse('0'.repeat(32));
+		const narHash = nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`);
 		const createdAt = '2026-01-01T00:00:00.000Z';
 
 		await runInDurableObject(

@@ -1,4 +1,9 @@
 import {
+	type NixSha256HashString,
+	type StorePathHash,
+	type StorePathString
+} from '@cupboard/nix/scalars';
+import {
 	integer,
 	primaryKey,
 	sqliteTable,
@@ -9,9 +14,9 @@ export const narInfos = sqliteTable(
 	'narinfo',
 	{
 		cache: text('cache').notNull().default(''),
-		storePathHash: text('store_path_hash').notNull(),
-		storePath: text('store_path').notNull(),
-		narHash: text('nar_hash').notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		storePath: text('store_path').$type<StorePathString>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		narSize: integer('nar_size').notNull(),
 		referencesJson: text('references_json').notNull(),
 		deriver: text('deriver'),
@@ -35,7 +40,7 @@ export const generationSeq = sqliteTable(
 	'generation_seq',
 	{
 		cache: text('cache').notNull().default(''),
-		storePathHash: text('store_path_hash').notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		nextGeneration: integer('next_generation').notNull().default(0)
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -44,7 +49,7 @@ export const generationSeq = sqliteTable(
 export const pendingUploads = sqliteTable('pending_upload', {
 	id: text('id').primaryKey(),
 	cache: text('cache').notNull().default(''),
-	narHash: text('nar_hash').notNull(),
+	narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 	r2Key: text('r2_key').notNull(),
 	expectedSize: integer('expected_size').notNull(),
 	metadataJson: text('metadata_json').notNull(),
@@ -70,7 +75,7 @@ export const pendingUploads = sqliteTable('pending_upload', {
 export const pendingAttestations = sqliteTable('pending_attestation', {
 	id: text('id').primaryKey(),
 	cache: text('cache').notNull().default(''),
-	storePathHash: text('store_path_hash').notNull(),
+	storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 	digest: text('digest').notNull(),
 	r2Key: text('r2_key').notNull(),
 	createdAt: text('created_at').notNull(),
@@ -81,8 +86,8 @@ export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{
 		cache: text('cache').notNull().default(''),
-		storePathHash: text('store_path_hash').notNull(),
-		narHash: text('nar_hash').notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		// The generation of the narinfo version this deletion captured, so the D1
 		// reference edge it retires is targeted by exact `(…, generation)` and a
 		// replayed deletion compares against the live row before acting.

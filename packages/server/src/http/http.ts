@@ -1,4 +1,10 @@
-import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import {
+	DEFAULT_CACHE,
+	nixSha256HashSchema,
+	type NixSha256HashString,
+	type StorePathHash,
+	storePathHashSchema
+} from '@cupboard/nix/scalars';
 import { StatusCodes } from 'http-status-codes';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
@@ -46,7 +52,7 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 // The most blobs the reaper arms or collects in a single bounded pass.
 export const blobReaperBatchSize = 500;
 
-export function narObjectKey(narHash: string): string {
+export function narObjectKey(narHash: NixSha256HashString): string {
 	return `nar/${narHash}.nar.zst`;
 }
 
@@ -56,7 +62,7 @@ export function casObjectKey(digest: string): string {
 
 export function attestationListCachePath(
 	tenant: string,
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	cache: string = DEFAULT_CACHE
 ): string {
 	const suffix =
@@ -69,7 +75,7 @@ export function attestationListCachePath(
 
 export function attestationListObjectKey(
 	tenant: string,
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	cache: string = DEFAULT_CACHE
 ): string {
 	const suffix =
@@ -99,7 +105,7 @@ export function attestationStagingObjectKey(uploadId: string): string {
 // host never collide on the same store-path hash.
 export function narInfoCachePath(
 	tenant: string,
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	cache: string = DEFAULT_CACHE
 ): string {
 	const suffix =
@@ -118,7 +124,7 @@ export function narInfoCachePath(
 // collide.
 export function narInfoObjectKey(
 	tenant: string,
-	storePathHash: string,
+	storePathHash: StorePathHash,
 	cache: string = DEFAULT_CACHE
 ): string {
 	const suffix =
@@ -129,37 +135,28 @@ export function narInfoObjectKey(
 	return `t/${tenant}/${suffix}`;
 }
 
-export function parseNarName(name: string): string | undefined {
-	const prefix = 'sha256:';
+export function parseNarName(name: string): NixSha256HashString | undefined {
 	const suffix = '.nar.zst';
 
-	if (!name.startsWith(prefix) || !name.endsWith(suffix)) {
+	if (!name.endsWith(suffix)) {
 		return undefined;
 	}
 
-	const hash = name.slice(0, -suffix.length);
+	const parsed = nixSha256HashSchema.safeParse(name.slice(0, -suffix.length));
 
-	if (!/^sha256:[0-9a-df-np-sv-z]{52}$/.test(hash)) {
-		return undefined;
-	}
-
-	return hash;
+	return parsed.success ? parsed.data : undefined;
 }
 
-export function parseNarInfoName(name: string): string | undefined {
+export function parseNarInfoName(name: string): StorePathHash | undefined {
 	const suffix = '.narinfo';
 
 	if (!name.endsWith(suffix)) {
 		return undefined;
 	}
 
-	const storePathHash = name.slice(0, -suffix.length);
+	const parsed = storePathHashSchema.safeParse(name.slice(0, -suffix.length));
 
-	if (!/^[0-9a-df-np-sv-z]{32}$/.test(storePathHash)) {
-		return undefined;
-	}
-
-	return storePathHash;
+	return parsed.success ? parsed.data : undefined;
 }
 
 export function parseAttestationDigestName(name: string): string | undefined {

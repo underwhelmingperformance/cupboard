@@ -1,3 +1,4 @@
+import { storePathHashSchema } from '@cupboard/nix/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { isNotModified, narInfoCachePath, narInfoObjectKey } from './http.ts';
@@ -74,7 +75,7 @@ describe('isNotModified', () => {
 });
 
 describe('narInfoObjectKey', () => {
-	const hash = '0123456789abcdfghijklmnpqrsvwxyz';
+	const hash = storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz');
 
 	it('namespaces by tenant, bare for the default cache and nested for a named one', () => {
 		expect({
@@ -88,7 +89,7 @@ describe('narInfoObjectKey', () => {
 });
 
 describe('narInfoCachePath', () => {
-	const hash = '0123456789abcdfghijklmnpqrsvwxyz';
+	const hash = storePathHashSchema.parse('0123456789abcdfghijklmnpqrsvwxyz');
 
 	it('carries the tenant prefix, bare for the default cache and nested for a named one', () => {
 		expect({

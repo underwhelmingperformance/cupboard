@@ -2,7 +2,8 @@ import { CacheInfo } from '@cupboard/nix/cache-info';
 import {
 	cacheFromSelector,
 	cacheSelectorSchema,
-	DEFAULT_CACHE
+	DEFAULT_CACHE,
+	type NixSha256HashString
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
@@ -223,7 +224,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// names the hash and the object is still absent, so the call is idempotent and the
 	// reaper can re-drive it until the `blob_state` row is cleared.
 	async demoteNarInfoObjects(
-		narHash: string,
+		narHash: NixSha256HashString,
 		targets: readonly DemoteTarget[]
 	): Promise<void> {
 		await this.initialise();

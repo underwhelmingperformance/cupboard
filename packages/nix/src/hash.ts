@@ -2,7 +2,7 @@ import {
 	InvalidNixSha256HashError,
 	InvalidSha256DigestLengthError
 } from './errors.ts';
-import { nixSha256HashPattern } from './scalars.ts';
+import { nixSha256HashSchema, type NixSha256HashString } from './scalars.ts';
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const base64Alphabet =
@@ -11,18 +11,20 @@ const nixSha256Base32Length = 52;
 
 export class NixSha256Hash {
 	private constructor(
-		public readonly value: string,
+		public readonly value: NixSha256HashString,
 		private readonly bytes: Uint8Array
 	) {}
 
 	static parse(value: string): NixSha256Hash {
-		if (!nixSha256HashPattern.test(value)) {
+		const parsed = nixSha256HashSchema.safeParse(value);
+
+		if (!parsed.success) {
 			throw new InvalidNixSha256HashError(value);
 		}
 
 		return new NixSha256Hash(
-			value,
-			fromNixBase32(value.slice('sha256:'.length))
+			parsed.data,
+			fromNixBase32(parsed.data.slice('sha256:'.length))
 		);
 	}
 
@@ -33,7 +35,10 @@ export class NixSha256Hash {
 
 		const digest = Uint8Array.from(bytes);
 
-		return new NixSha256Hash(`sha256:${toNixBase32(digest)}`, digest);
+		return new NixSha256Hash(
+			nixSha256HashSchema.parse(`sha256:${toNixBase32(digest)}`),
+			digest
+		);
 	}
 
 	digestBytes(): Uint8Array {

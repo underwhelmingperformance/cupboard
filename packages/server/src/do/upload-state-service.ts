@@ -1,5 +1,6 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
-import { type UploadPathMetadataFields } from '@cupboard/protocol/upload';
+import { type NixSha256HashString } from '@cupboard/nix/scalars';
+import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { and, eq, sql } from 'drizzle-orm';
 
 import { R2Presigner } from '../blob/presign.ts';
@@ -32,7 +33,7 @@ export class UploadStateService {
 	async clearPendingUploadAndStaging(
 		uploadId: string,
 		r2Key: string,
-		narHash: string
+		narHash: NixSha256HashString
 	): Promise<void> {
 		if (r2Key !== narObjectKey(narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);
@@ -69,7 +70,7 @@ export class UploadStateService {
 	async markUploadTerminal(
 		uploadId: string,
 		r2Key: string,
-		narHash: string,
+		narHash: NixSha256HashString,
 		verdict: 'servable' | 'mismatch' | 'over-quota'
 	): Promise<void> {
 		if (r2Key !== narObjectKey(narHash)) {
@@ -90,7 +91,7 @@ export class UploadStateService {
 	}
 
 	async findReusableBlob(
-		narHash: string
+		narHash: NixSha256HashString
 	): Promise<typeof d1Schema.blobState.$inferSelect | undefined> {
 		const tenant = this.context.requireTenant();
 
@@ -156,7 +157,7 @@ export class UploadStateService {
 	// promotion and commit recovers from the surviving staging copy.
 	async promoteStagingBlob(
 		stagingKey: string,
-		metadata: UploadPathMetadataFields
+		metadata: ParsedUploadPathMetadata
 	): Promise<CanonicalBlob> {
 		const canonical = await this.ensureCanonicalObject(stagingKey, metadata);
 
@@ -189,7 +190,7 @@ export class UploadStateService {
 
 	private async ensureCanonicalObject(
 		stagingKey: string,
-		metadata: UploadPathMetadataFields
+		metadata: ParsedUploadPathMetadata
 	): Promise<CanonicalBlob> {
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const existing = await this.context.env.BLOBS.head(canonicalKey);
@@ -230,7 +231,7 @@ export class UploadStateService {
 
 	async presignedPutUrl(
 		key: string,
-		fileHash: string,
+		fileHash: NixSha256HashString,
 		expiresAt: Date
 	): Promise<string> {
 		return this.r2Presigner().presignPutUrl({
