@@ -4,7 +4,10 @@ import { tmpdir } from 'node:os';
 import pathModule from 'node:path';
 
 import { implicitPinName } from '@cupboard/nix/retention';
-import { sha256HexDigestSchema } from '@cupboard/nix/scalars';
+import {
+	type Sha256HexDigest,
+	sha256HexDigestSchema
+} from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import type {
 	AttestationAttachResponse,
@@ -1074,7 +1077,7 @@ const sigstoreBundleSchema = z.object({
 function parseAttestationBundle(
 	path: string,
 	bytes: Uint8Array
-): { readonly subjectDigests: readonly string[] } {
+): { readonly subjectDigests: readonly Sha256HexDigest[] } {
 	let json: unknown;
 
 	try {

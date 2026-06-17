@@ -2,7 +2,12 @@ import {
 	InvalidNixSha256HashError,
 	InvalidSha256DigestLengthError
 } from './errors.ts';
-import { nixSha256HashSchema, type NixSha256HashString } from './scalars.ts';
+import {
+	nixSha256HashSchema,
+	type NixSha256HashString,
+	type Sha256HexDigest,
+	sha256HexDigestSchema
+} from './scalars.ts';
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const base64Alphabet =
@@ -50,10 +55,10 @@ export class NixSha256Hash {
 	}
 
 	/** The raw digest as lowercase hex, the form an in-toto subject uses. */
-	digestHex(): string {
-		return [...this.bytes]
-			.map((byte) => byte.toString(16).padStart(2, '0'))
-			.join('');
+	digestHex(): Sha256HexDigest {
+		return sha256HexDigestSchema.parse(
+			[...this.bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+		);
 	}
 
 	toString(): string {

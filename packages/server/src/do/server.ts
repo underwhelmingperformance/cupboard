@@ -3,7 +3,8 @@ import {
 	cacheFromSelector,
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
-	type NixSha256HashString
+	type NixSha256HashString,
+	type Sha256HexDigest
 } from '@cupboard/nix/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
@@ -269,7 +270,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	async demoteAttestationReferences(
-		digest: string,
+		digest: Sha256HexDigest,
 		fenceStoredAt: string
 	): Promise<void> {
 		await this.initialise();

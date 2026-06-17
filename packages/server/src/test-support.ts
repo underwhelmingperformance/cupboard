@@ -6,6 +6,7 @@ import {
 	type NixSha256HashString,
 	predicateTypeSchema,
 	selectorForCache,
+	type Sha256HexDigest,
 	type StorePathHash,
 	storePathHashSchema,
 	WIRE_DEFAULT_CACHE
@@ -909,7 +910,7 @@ export async function tenantBlobRows(): Promise<
 }
 
 export async function casObjectRows(): Promise<
-	{ digest: string; size: number; deleteAfter: string | undefined }[]
+	{ digest: Sha256HexDigest; size: number; deleteAfter: string | undefined }[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({
@@ -932,7 +933,7 @@ export async function attestationReferenceRows(): Promise<
 		storePathHash: StorePathHash;
 		generation: number;
 		predicateType: string;
-		digest: string;
+		digest: Sha256HexDigest;
 	}[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
@@ -949,7 +950,7 @@ export async function attestationReferenceRows(): Promise<
 }
 
 export async function tenantCasBlobRows(): Promise<
-	{ tenant: string; digest: string; size: number }[]
+	{ tenant: string; digest: Sha256HexDigest; size: number }[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select()
@@ -996,7 +997,7 @@ export async function fileAttestationReference(options: {
 	readonly generation: number;
 	readonly predicateType?: string;
 	readonly tenant?: string;
-}): Promise<{ digest: string; size: number; stagingKey: string }> {
+}): Promise<{ digest: Sha256HexDigest; size: number; stagingKey: string }> {
 	const stagingKey = await stageAttestationBundle(
 		options.uploadId,
 		options.bytes
