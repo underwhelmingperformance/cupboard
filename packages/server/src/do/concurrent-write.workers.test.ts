@@ -80,7 +80,9 @@ describe('concurrent writes', () => {
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 
-		expect(NarInfo.parse(stored.body).narHash).toBe(metadata.narHash);
+		expect(NarInfo.parse(stored.body).narHash.toString()).toBe(
+			metadata.narHash
+		);
 		await expectStats(token, {
 			storePaths: 1,
 			narBlobs: 1,
@@ -99,7 +101,9 @@ describe('concurrent writes', () => {
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 
-		expect(NarInfo.parse(stored.body).narHash).toBe(metadata.narHash);
+		expect(NarInfo.parse(stored.body).narHash.toString()).toBe(
+			metadata.narHash
+		);
 		await expectStats(token, {
 			storePaths: 1,
 			narBlobs: 1,

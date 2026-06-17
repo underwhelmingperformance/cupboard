@@ -13,20 +13,21 @@ import {
 const exampleStorePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example';
 
 function fingerprintWithReferences(references: readonly string[]): string {
-	return new NarInfo(
-		exampleStorePath,
-		'nar/sha256:0123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk.nar.zst',
-		'zstd',
-		'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-		123,
-		'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-		456,
-		references
-	).fingerprint();
+	return NarInfo.fromFields({
+		storePath: exampleStorePath,
+		url: 'nar/sha256:0123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk.nar.zst',
+		compression: 'zstd',
+		fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		fileSize: 123,
+		narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		narSize: 456,
+		references,
+		sigs: []
+	}).fingerprint();
 }
 
 function narInfoWith(overrides: Partial<NarInfoFields>): NarInfo {
-	const fields: NarInfoFields = {
+	return NarInfo.fromFields({
 		storePath: exampleStorePath,
 		url: 'nar/example.nar.zst',
 		compression: 'zstd',
@@ -37,21 +38,7 @@ function narInfoWith(overrides: Partial<NarInfoFields>): NarInfo {
 		references: [],
 		sigs: [],
 		...overrides
-	};
-
-	return new NarInfo(
-		fields.storePath,
-		fields.url,
-		fields.compression,
-		fields.fileHash,
-		fields.fileSize,
-		fields.narHash,
-		fields.narSize,
-		fields.references,
-		fields.deriver,
-		fields.ca,
-		fields.sigs
-	);
+	});
 }
 
 function narinfoLines(
@@ -72,19 +59,17 @@ function narinfoLines(
 
 describe('NarInfo', () => {
 	it('round-trips through the text format', () => {
-		const info = new NarInfo(
-			exampleStorePath,
-			'nar/sha256:0123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk.nar.zst',
-			'zstd',
-			'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			123,
-			'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			456,
-			['0123456789abcdfghijklmnpqrsvwxyz-ref'],
-			undefined,
-			undefined,
-			['cupboard-1:signature']
-		);
+		const info = NarInfo.fromFields({
+			storePath: exampleStorePath,
+			url: 'nar/sha256:0123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk.nar.zst',
+			compression: 'zstd',
+			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			fileSize: 123,
+			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narSize: 456,
+			references: ['0123456789abcdfghijklmnpqrsvwxyz-ref'],
+			sigs: ['cupboard-1:signature']
+		});
 
 		expect(NarInfo.parse(info.render()).toFields()).toStrictEqual(
 			info.toFields()
@@ -92,19 +77,20 @@ describe('NarInfo', () => {
 	});
 
 	it('builds the Nix signing fingerprint', () => {
-		const info = new NarInfo(
-			exampleStorePath,
-			'nar/sha256:0123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk.nar.zst',
-			'zstd',
-			'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			123,
-			'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			456,
-			[
+		const info = NarInfo.fromFields({
+			storePath: exampleStorePath,
+			url: 'nar/sha256:0123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk.nar.zst',
+			compression: 'zstd',
+			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			fileSize: 123,
+			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narSize: 456,
+			references: [
 				'0123456789abcdfghijklmnpqrsvwxyz-first',
 				'1123456789abcdfghijklmnpqrsvwxyz-second'
-			]
-		);
+			],
+			sigs: []
+		});
 
 		expect(info.fingerprint()).toBe(
 			'1;/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example;sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk;456;/nix/store/0123456789abcdfghijklmnpqrsvwxyz-first,/nix/store/1123456789abcdfghijklmnpqrsvwxyz-second'
@@ -126,16 +112,17 @@ describe('NarInfo', () => {
 	});
 
 	it('appends signatures without discarding existing ones', () => {
-		const signed = new NarInfo(
-			exampleStorePath,
-			'nar/example.nar.zst',
-			'zstd',
-			'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			123,
-			'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			456,
-			[]
-		)
+		const signed = NarInfo.fromFields({
+			storePath: exampleStorePath,
+			url: 'nar/example.nar.zst',
+			compression: 'zstd',
+			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			fileSize: 123,
+			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narSize: 456,
+			references: [],
+			sigs: []
+		})
 			.withSignature('cupboard-1:first')
 			.withSignature('cupboard-2:second');
 
@@ -146,19 +133,17 @@ describe('NarInfo', () => {
 	});
 
 	it('round-trips multiple signatures, one Sig line each', () => {
-		const info = new NarInfo(
-			exampleStorePath,
-			'nar/example.nar.zst',
-			'zstd',
-			'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			123,
-			'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
-			456,
-			[],
-			undefined,
-			undefined,
-			['cupboard-1:first', 'cupboard-2:second']
-		);
+		const info = NarInfo.fromFields({
+			storePath: exampleStorePath,
+			url: 'nar/example.nar.zst',
+			compression: 'zstd',
+			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			fileSize: 123,
+			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narSize: 456,
+			references: [],
+			sigs: ['cupboard-1:first', 'cupboard-2:second']
+		});
 		const rendered = info.render();
 
 		expect({
@@ -280,7 +265,7 @@ describe('NarInfo', () => {
 	it('parses CRLF line endings without a trailing carriage return', () => {
 		const info = parseNarInfo(narinfoLines().join('\r\n'));
 
-		expect(info.storePath).toBe(exampleStorePath);
+		expect(info.storePath.value).toBe(exampleStorePath);
 	});
 
 	it('collapses runs of whitespace between references', () => {

@@ -1,5 +1,7 @@
+import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
 import { referencesSchema } from '@cupboard/nix/scalars';
+import { StorePath } from '@cupboard/nix/store-path';
 import { and, eq } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -43,12 +45,12 @@ export class NarInfoObjectsService {
 		}
 
 		return new NarInfo(
-			row.storePath,
+			new StorePath(row.storePath),
 			narObjectKey(row.narHash),
 			blob.compression,
-			blob.fileHash,
+			NixSha256Hash.parse(blob.fileHash),
 			blob.fileSize,
-			row.narHash,
+			NixSha256Hash.parse(row.narHash),
 			row.narSize,
 			parseStored(
 				referencesSchema,
