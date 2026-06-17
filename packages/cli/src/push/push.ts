@@ -305,7 +305,7 @@ async function runPushWithTemporaryDirectory(
 	// mistaken for a finished one.
 	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
-	const storePathByHash = new Map(
+	const storePathByHash = new Map<string, string>(
 		closure.map((pathInfo) => [
 			StorePath.hash(pathInfo.storePath),
 			pathInfo.storePath
