@@ -1,4 +1,4 @@
-import { type RootName } from '@cupboard/nix/scalars';
+import { type RootName, storePathHashSchema } from '@cupboard/nix/scalars';
 import { resolveRootTargets } from '@cupboard/nix/store-path';
 import {
 	type ParsedRootSetBody,
@@ -61,7 +61,10 @@ export class RootsService {
 		const activation = await this.context.ctx.blockConcurrencyWhile(
 			async (): Promise<RootActivation> => {
 				const presence = await this.presence(requested.targets, (hash) =>
-					this.narInfoObjects.isServableLocked(cache, hash)
+					this.narInfoObjects.isServableLocked(
+						cache,
+						storePathHashSchema.parse(hash)
+					)
 				);
 				const unavailable = requested.targets
 					.filter((target) => presence.get(target.storePathHash) !== true)
@@ -181,7 +184,7 @@ export class RootsService {
 		for (const root of roots) {
 			const targets = this.rootTargetRows(cache, root.name);
 			const presence = await this.presence(targets, (hash) =>
-				this.narInfoObjects.isServable(cache, hash)
+				this.narInfoObjects.isServable(cache, storePathHashSchema.parse(hash))
 			);
 
 			summaries.push(

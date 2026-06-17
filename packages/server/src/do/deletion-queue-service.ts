@@ -1,3 +1,7 @@
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
 import { and, eq, exists, sql } from 'drizzle-orm';
 
@@ -22,8 +26,8 @@ export class DeletionQueueService {
 	enqueueNarInfoDeletion(
 		handle: SchemaWriter,
 		cache: string,
-		storePathHash: string,
-		narHash: string,
+		storePathHash: StorePathHash,
+		narHash: NixSha256HashString,
 		generation: number,
 		now: string
 	): void {
@@ -47,9 +51,9 @@ export class DeletionQueueService {
 	// so a newer recommitted edge is never touched.
 	private async retireBlobRefEdge(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		generation: number,
-		narHash: string
+		narHash: NixSha256HashString
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const now = new Date().toISOString();
@@ -153,7 +157,9 @@ export class DeletionQueueService {
 	// any one tenant's narinfos. The reaper does the actual reclamation against
 	// `blob_state.delete_after`; a delete only reports this so a client learns its
 	// NAR became unreferenced.
-	private async blobHashUnreferenced(narHash: string): Promise<boolean> {
+	private async blobHashUnreferenced(
+		narHash: NixSha256HashString
+	): Promise<boolean> {
 		const referenced = await this.context.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
 			.from(d1Schema.blobReference)
@@ -165,7 +171,7 @@ export class DeletionQueueService {
 
 	private clearQueuedNarInfoDeletion(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		generation: number
 	): void {
 		this.context.db
@@ -204,7 +210,7 @@ export class DeletionQueueService {
 	// Runs inside the caller's critical section; must not open its own.
 	async deleteQueuedNarInfo(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		generation: number,
 		origin?: string
 	): Promise<{ objectDeleted: boolean; narScheduledForDeletion: boolean }> {
@@ -292,7 +298,7 @@ export class DeletionQueueService {
 
 	private async retireAttestationRefs(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		generation: number
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
@@ -335,7 +341,7 @@ export class DeletionQueueService {
 
 	deleteStorePath(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		origin: string
 	): Promise<DeletePathResponse> {
 		// One critical section so the row transaction and the opportunistic object

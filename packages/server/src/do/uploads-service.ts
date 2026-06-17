@@ -1,10 +1,10 @@
 import {
 	type ParsedUploadNegotiateRequest,
+	type ParsedUploadPathMetadata,
+	type ParsedUploadPathNegotiation,
 	type ParsedUploadPrepareRequest,
 	type UploadDecision,
 	type UploadNegotiateResponse,
-	type UploadPathMetadataFields,
-	type UploadPathNegotiationFields,
 	type UploadPrepareResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
@@ -132,8 +132,8 @@ export class UploadsService {
 			const now = new Date();
 			const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
 			const pendingMetadata:
-				| UploadPathNegotiationFields
-				| UploadPathMetadataFields =
+				| ParsedUploadPathNegotiation
+				| ParsedUploadPathMetadata =
 				existingBlob === undefined
 					? metadata
 					: {
@@ -160,8 +160,7 @@ export class UploadsService {
 					cache,
 					narHash: metadata.narHash,
 					r2Key,
-					expectedSize:
-						'fileHash' in pendingMetadata ? pendingMetadata.fileSize : 0,
+					expectedSize: existingBlob?.fileSize ?? 0,
 					metadataJson: JSON.stringify(pendingMetadata),
 					createdAt: now.toISOString(),
 					expiresAt: expiresAt.toISOString()

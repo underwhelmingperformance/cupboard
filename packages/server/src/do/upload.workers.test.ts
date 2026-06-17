@@ -1,7 +1,7 @@
 import { CacheInfo } from '@cupboard/nix/cache-info';
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
-import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { DEFAULT_CACHE, storePathHashSchema } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -516,7 +516,7 @@ describe('upload flow', () => {
 		const garbage = new Uint8Array([0, 1, 2, 3, 4, 5, 6, 7]);
 		const garbageFileHash = NixSha256Hash.fromDigest(
 			new Uint8Array(await crypto.subtle.digest('SHA-256', garbage))
-		).toString();
+		).value;
 		const metadata = uploadMetadata({
 			name: 'corrupt',
 			storePathHash: 'f'.repeat(32),
@@ -672,7 +672,7 @@ describe('upload flow', () => {
 
 		const canonicalFileHash = NixSha256Hash.fromDigest(
 			new Uint8Array(canonicalChecksum)
-		).toString();
+		).value;
 
 		expect(firstInfo.toFields().fileHash).toBe(compressed.fileHash);
 		expect(secondInfo.toFields().fileHash).toBe(compressed.fileHash);
@@ -1188,7 +1188,7 @@ describe('upload flow', () => {
 		const garbage = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
 		const garbageFileHash = NixSha256Hash.fromDigest(
 			new Uint8Array(await crypto.subtle.digest('SHA-256', garbage))
-		).toString();
+		).value;
 		const metadata = uploadMetadata({
 			name: 'undecodable',
 			storePathHash: 'f'.repeat(32),
@@ -1224,7 +1224,7 @@ describe('upload flow', () => {
 		const token = await initialise();
 		const narX = await verifiableNar('race-x');
 		const narY = await verifiableNar('race-y');
-		const storePathHash = 'a'.repeat(32);
+		const storePathHash = storePathHashSchema.parse('a'.repeat(32));
 
 		// Defer an upload of path P at narHash X (awaiting background verification).
 		const x = uploadMetadata({
@@ -1957,13 +1957,12 @@ describe('upload flow', () => {
 		}
 	])('rejects upload negotiation with $name', async ({ fields, issues }) => {
 		const token = await initialise();
-		const metadata = uploadMetadata({
-			fileSize: narBytes.byteLength,
-			...fields
-		});
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
 		const response = await authorisedFetch('/cache/_default/uploads', token, {
-			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] }),
+			body: JSON.stringify({
+				paths: [{ ...uploadPathNegotiation(metadata), ...fields }]
+			}),
 			headers: {
 				'content-type': 'application/json'
 			},
@@ -2370,7 +2369,10 @@ describe('upload flow', () => {
 
 	it('is idempotent when deleting an absent store path', async () => {
 		const token = await initialise();
-		const result = await deletePath(token, '33333333333333333333333333333333');
+		const result = await deletePath(
+			token,
+			storePathHashSchema.parse('33333333333333333333333333333333')
+		);
 
 		expect(result).toStrictEqual({
 			storePathHash: '33333333333333333333333333333333',
@@ -2745,9 +2747,9 @@ describe('upload flow', () => {
 			expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 		});
 
-		const hashA = '11111111111111111111111111111111';
-		const hashB = '22222222222222222222222222222222';
-		const hashC = '33333333333333333333333333333333';
+		const hashA = storePathHashSchema.parse('11111111111111111111111111111111');
+		const hashB = storePathHashSchema.parse('22222222222222222222222222222222');
+		const hashC = storePathHashSchema.parse('33333333333333333333333333333333');
 
 		it('sweeps unreachable paths and keeps the rooted closure', async () => {
 			vi.setSystemTime(deleteTestBase);
@@ -2792,7 +2794,9 @@ describe('upload flow', () => {
 
 		it('keeps a transitively-referenced closure a -> b -> c', async () => {
 			vi.setSystemTime(deleteTestBase);
-			const hashD = '44444444444444444444444444444444';
+			const hashD = storePathHashSchema.parse(
+				'44444444444444444444444444444444'
+			);
 
 			const token = await initialise();
 			const a = await commitVerifiablePath(token, 'a', {
@@ -2838,7 +2842,9 @@ describe('upload flow', () => {
 
 		it('keeps a cyclic closure a <-> b and still terminates', async () => {
 			vi.setSystemTime(deleteTestBase);
-			const hashD = '44444444444444444444444444444444';
+			const hashD = storePathHashSchema.parse(
+				'44444444444444444444444444444444'
+			);
 
 			const token = await initialise();
 			const a = await commitVerifiablePath(token, 'a', {

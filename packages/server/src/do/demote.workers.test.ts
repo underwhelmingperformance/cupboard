@@ -1,3 +1,7 @@
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix/scalars';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -58,14 +62,14 @@ async function committedTenantPath(seed: string) {
 
 async function narInfoPresent(
 	tenant: string,
-	storePathHash: string
+	storePathHash: StorePathHash
 ): Promise<boolean> {
 	const object = await env.BLOBS.head(narInfoObjectKey(tenant, storePathHash));
 
 	return object !== null;
 }
 
-async function narPresent(narHash: string): Promise<boolean> {
+async function narPresent(narHash: NixSha256HashString): Promise<boolean> {
 	const object = await env.BLOBS.head(narObjectKey(narHash));
 
 	return object !== null;

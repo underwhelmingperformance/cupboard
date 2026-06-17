@@ -1,9 +1,13 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import {
 	type CommitResponse,
-	type UploadPathMetadataFields
+	type ParsedUploadPathMetadata
 } from '@cupboard/protocol/upload';
 import { and, eq, notExists, sql } from 'drizzle-orm';
 
@@ -50,8 +54,8 @@ export type CommitOutcome =
 	| { readonly kind: 'settled'; readonly response: CommitResponse }
 	| {
 			readonly kind: 'deferred';
-			readonly storePathHash: string;
-			readonly narHash: string;
+			readonly storePathHash: StorePathHash;
+			readonly narHash: NixSha256HashString;
 	  };
 
 export class CommitPipelineService {
@@ -266,7 +270,7 @@ export class CommitPipelineService {
 	private async commitReusedBlob(
 		cache: string,
 		uploadId: string,
-		metadata: UploadPathMetadataFields
+		metadata: ParsedUploadPathMetadata
 	): Promise<CommitOutcome> {
 		this.uploadState.markUploadCommitting(uploadId);
 
@@ -337,7 +341,7 @@ export class CommitPipelineService {
 	private async concedeToWinner(
 		cache: string,
 		uploadId: string,
-		metadata: UploadPathMetadataFields,
+		metadata: ParsedUploadPathMetadata,
 		stagingKey: string
 	): Promise<CommitOutcome> {
 		const winner = await this.narInfoObjects.committedNarInfoRow(
@@ -379,7 +383,7 @@ export class CommitPipelineService {
 	// different version that won the path (`lost`).
 	async reserveNarInfoRow(
 		cache: string,
-		metadata: UploadPathMetadataFields
+		metadata: ParsedUploadPathMetadata
 	): Promise<ReserveOutcome> {
 		const now = new Date().toISOString();
 		this.cacheAdmin.loadOrCreateCache(cache);
@@ -513,7 +517,7 @@ export class CommitPipelineService {
 	// Runs inside the caller's critical section; must not open its own.
 	async materialiseServable(
 		cache: string,
-		metadata: UploadPathMetadataFields,
+		metadata: ParsedUploadPathMetadata,
 		generation: number
 	): Promise<MaterialiseOutcome> {
 		// A commit that passed the Worker's write gate while the tenant was active can
@@ -600,7 +604,7 @@ export class CommitPipelineService {
 	private async reserveEdgeAndCharge(
 		tenant: string,
 		cache: string,
-		metadata: UploadPathMetadataFields,
+		metadata: ParsedUploadPathMetadata,
 		generation: number,
 		blob: { readonly fileSize: number }
 	): Promise<void> {
@@ -677,7 +681,7 @@ export class CommitPipelineService {
 	// within quota. The caller passes the size that will actually be charged.
 	private async overQuota(
 		tenant: string,
-		narHash: string,
+		narHash: NixSha256HashString,
 		fileSize: number
 	): Promise<boolean> {
 		const usage = await this.context.d1
@@ -722,7 +726,7 @@ export class CommitPipelineService {
 	// the advisory pre-check; the authoritative charge reads the canonical size after
 	// the promote.
 	private async chargeSize(
-		narHash: string,
+		narHash: NixSha256HashString,
 		stagedSize: number
 	): Promise<number> {
 		const existing = await this.context.d1
@@ -744,9 +748,9 @@ export class CommitPipelineService {
 	// Runs inside the caller's critical section; must not open its own.
 	async reclaimReservedRow(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		generation: number,
-		narHash: string
+		narHash: NixSha256HashString
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const materialised = await this.context.d1
@@ -786,7 +790,7 @@ export class CommitPipelineService {
 
 	async verifyPendingNar(
 		r2Key: string,
-		metadata: UploadPathMetadataFields
+		metadata: ParsedUploadPathMetadata
 	): Promise<NarVerification> {
 		const object = await this.context.env.BLOBS.get(r2Key);
 

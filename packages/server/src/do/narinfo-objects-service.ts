@@ -1,6 +1,10 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
-import { referencesSchema } from '@cupboard/nix/scalars';
+import {
+	type NixSha256HashString,
+	referencesSchema,
+	type StorePathHash
+} from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import { and, eq } from 'drizzle-orm';
 
@@ -70,7 +74,7 @@ export class NarInfoObjectsService {
 	// Opens its own critical section; callers must be outside one.
 	async ensureNarInfoObject(
 		cache: string,
-		storePathHash: string
+		storePathHash: StorePathHash
 	): Promise<void> {
 		await this.context.ctx.blockConcurrencyWhile(() =>
 			this.materialiseIfRecoverable(cache, storePathHash)
@@ -84,7 +88,7 @@ export class NarInfoObjectsService {
 	// copy.
 	private async materialiseIfRecoverable(
 		cache: string,
-		storePathHash: string
+		storePathHash: StorePathHash
 	): Promise<void> {
 		// A tenant being offboarded must not have its objects re-materialised, or the
 		// drain would chase an object this path recreated behind it.
@@ -135,7 +139,10 @@ export class NarInfoObjectsService {
 	// once re-materialised; a pending, demoted, or unknown path stays unavailable.
 	// Serving, root activation, and root summaries share this so they cannot drift.
 	// Opens its own critical section; callers must be outside one.
-	async isServable(cache: string, storePathHash: string): Promise<boolean> {
+	async isServable(
+		cache: string,
+		storePathHash: StorePathHash
+	): Promise<boolean> {
 		return this.context.ctx.blockConcurrencyWhile(() =>
 			this.isServableLocked(cache, storePathHash)
 		);
@@ -146,7 +153,7 @@ export class NarInfoObjectsService {
 	// with the check rather than racing a delete across an `await`.
 	async isServableLocked(
 		cache: string,
-		storePathHash: string
+		storePathHash: StorePathHash
 	): Promise<boolean> {
 		await this.materialiseIfRecoverable(cache, storePathHash);
 
@@ -181,7 +188,7 @@ export class NarInfoObjectsService {
 
 	async committedNarInfoRow(
 		cache: string,
-		storePathHash: string
+		storePathHash: StorePathHash
 	): Promise<typeof schema.narInfos.$inferSelect | undefined> {
 		const row = this.context.db
 			.select()
@@ -212,8 +219,8 @@ export class NarInfoObjectsService {
 	// Opens its own critical section; callers must be outside one.
 	async demoteUnbacked(
 		cache: string,
-		storePathHash: string,
-		narHash: string
+		storePathHash: StorePathHash,
+		narHash: NixSha256HashString
 	): Promise<void> {
 		await this.context.ctx.blockConcurrencyWhile(() =>
 			this.demoteUnbackedLocked(cache, storePathHash, narHash)
@@ -226,8 +233,8 @@ export class NarInfoObjectsService {
 	// a freshly re-materialised object.
 	private async demoteUnbackedLocked(
 		cache: string,
-		storePathHash: string,
-		narHash: string
+		storePathHash: StorePathHash,
+		narHash: NixSha256HashString
 	): Promise<void> {
 		const row = this.context.db
 			.select({ narHash: schema.narInfos.narHash })
@@ -257,7 +264,7 @@ export class NarInfoObjectsService {
 
 	async putNarInfoObject(
 		cache: string,
-		storePathHash: string,
+		storePathHash: StorePathHash,
 		narInfo: NarInfo
 	): Promise<void> {
 		await this.context.env.BLOBS.put(

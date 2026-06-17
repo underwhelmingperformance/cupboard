@@ -1,4 +1,5 @@
 import { NixSha256Hash } from '@cupboard/nix/hash';
+import { type NixSha256HashString } from '@cupboard/nix/scalars';
 import { type ResolvedRootTarget } from '@cupboard/nix/store-path';
 import {
 	oidcTrustDisplaySchema,
@@ -11,10 +12,10 @@ import {
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { type RetentionPolicySummary } from '@cupboard/protocol/retention';
 import {
-	type UploadBlobMetadataFields,
-	type UploadPathMetadataFields,
+	type ParsedUploadBlobMetadata,
+	type ParsedUploadPathMetadata,
+	type ParsedUploadPathNegotiation,
 	uploadPathMetadataSchema,
-	type UploadPathNegotiationFields,
 	uploadPathNegotiationSchema
 } from '@cupboard/protocol/upload';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -120,7 +121,7 @@ export interface RootSetCommand {
 export type ReserveOutcome =
 	| { kind: 'reserved'; generation: number }
 	| { kind: 'mine'; generation: number }
-	| { kind: 'lost'; narHash: string };
+	| { kind: 'lost'; narHash: NixSha256HashString };
 
 // The outcome of materialising a reserved narinfo: `materialised` on success;
 // `superseded` when a concurrent recommit replaced the reserved version;
@@ -141,7 +142,7 @@ export type MaterialiseOutcome =
 // Read from the object itself so a committed narinfo always advertises the
 // encoding actually stored, regardless of which upload promoted it.
 export interface CanonicalBlob {
-	readonly fileHash: string;
+	readonly fileHash: NixSha256HashString;
 	readonly fileSize: number;
 }
 
@@ -348,9 +349,9 @@ export function nextKeyName(keys: readonly SigningKey[]): string {
 }
 
 export function commitMetadataFromPathAndBlob(
-	path: UploadPathNegotiationFields,
-	blob: UploadBlobMetadataFields
-): UploadPathMetadataFields {
+	path: ParsedUploadPathNegotiation,
+	blob: ParsedUploadBlobMetadata
+): ParsedUploadPathMetadata {
 	return {
 		...path,
 		fileHash: blob.fileHash,
@@ -367,7 +368,7 @@ export function canonicalBlobOf(key: string, object: R2Object): CanonicalBlob {
 	}
 
 	return {
-		fileHash: NixSha256Hash.fromDigest(new Uint8Array(sha256)).toString(),
+		fileHash: NixSha256Hash.fromDigest(new Uint8Array(sha256)).value,
 		fileSize: object.size
 	};
 }
@@ -375,7 +376,7 @@ export function canonicalBlobOf(key: string, object: R2Object): CanonicalBlob {
 export function parseStoredUploadMetadata(
 	uploadId: string,
 	source: string
-): UploadPathMetadataFields {
+): ParsedUploadPathMetadata {
 	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>
 		new StoredUploadMetadataInvalidError(uploadId, cause);
 	const json = parseStoredJson(source, onInvalid);
@@ -398,7 +399,7 @@ export function parseStoredUploadMetadata(
 export function parseStoredUploadPathMetadata(
 	uploadId: string,
 	source: string
-): UploadPathNegotiationFields {
+): ParsedUploadPathNegotiation {
 	return parseStored(
 		uploadPathNegotiationSchema,
 		source,
@@ -407,7 +408,7 @@ export function parseStoredUploadPathMetadata(
 }
 
 export function uploadHeadersFor(
-	metadata: UploadPathMetadataFields
+	metadata: ParsedUploadPathMetadata
 ): Readonly<Record<string, string>> {
 	return {
 		'x-amz-checksum-sha256': NixSha256Hash.parse(
