@@ -9,10 +9,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narInfoCachePath, narInfoObjectKey } from '../http/http.ts';
 
-import {
-	type AttestationCasService,
-	type AttestationReference
-} from './attestation-cas-service.ts';
+import { type AttestationCasService } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 
@@ -322,9 +319,7 @@ export class DeletionQueueService {
 			.all();
 
 		for (const reference of references) {
-			await this.attestationCas.removeCapturedReference(
-				reference as AttestationReference
-			);
+			await this.attestationCas.removeCapturedReference(reference);
 		}
 	}
 

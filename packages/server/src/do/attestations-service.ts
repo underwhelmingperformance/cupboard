@@ -412,7 +412,7 @@ export class AttestationsService {
 
 		for (const reference of references) {
 			await this.attestationCas.removeCapturedReference(
-				reference as AttestationReference,
+				reference,
 				fenceStoredAt
 			);
 			touchedPaths.add(`${reference.cache}\0${reference.storePathHash}`);
