@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type Sha256HexDigest,
 	tenantIdSchema
 } from '@cupboard/nix/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
@@ -423,7 +424,11 @@ class TenantNarInfoDemoter implements NarInfoDemoter {
 class TenantCasReferenceDemoter implements CasReferenceDemoter {
 	constructor(private readonly env: Env) {}
 
-	demote(tenant: string, digest: string, fenceStoredAt: string): Promise<void> {
+	demote(
+		tenant: string,
+		digest: Sha256HexDigest,
+		fenceStoredAt: string
+	): Promise<void> {
 		return tenantServer(this.env, tenant).demoteAttestationReferences(
 			digest,
 			fenceStoredAt

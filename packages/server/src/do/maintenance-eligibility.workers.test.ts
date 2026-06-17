@@ -1,5 +1,6 @@
 import {
 	nixSha256HashSchema,
+	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
@@ -365,7 +366,7 @@ function pendingAttestation(
 		id,
 		cache: '',
 		storePathHash: storePathHashSchema.parse('a'.repeat(32)),
-		digest: 'b'.repeat(64),
+		digest: sha256HexDigestSchema.parse('b'.repeat(64)),
 		r2Key: `staging/attestations/${id}`,
 		createdAt: '2026-01-01T00:00:00.000Z',
 		expiresAt

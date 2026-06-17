@@ -1,6 +1,7 @@
 import {
 	type PredicateType,
 	type Sha256HexDigest,
+	sha256HexDigestSchema,
 	type StorePathHash
 } from '@cupboard/nix/scalars';
 import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
@@ -69,7 +70,7 @@ export class AttestationCasService {
 		}
 
 		return {
-			digest: (await sha256HexBytes(bytes)) as Sha256HexDigest,
+			digest: sha256HexDigestSchema.parse(await sha256HexBytes(bytes)),
 			size: bytes.byteLength,
 			bytes
 		};
@@ -271,7 +272,7 @@ export class AttestationCasService {
 
 	private async overQuota(
 		tenant: string,
-		digest: string,
+		digest: Sha256HexDigest,
 		size: number
 	): Promise<boolean> {
 		const usage = await this.context.d1
@@ -329,7 +330,7 @@ export class AttestationCasService {
 		return existing !== undefined;
 	}
 
-	private presenceFilter(tenant: string, digest: string) {
+	private presenceFilter(tenant: string, digest: Sha256HexDigest) {
 		return and(
 			eq(d1Schema.tenantCasBlob.tenant, tenant),
 			eq(d1Schema.tenantCasBlob.digest, digest)

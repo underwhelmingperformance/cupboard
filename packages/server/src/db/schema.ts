@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type Sha256HexDigest,
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix/scalars';
@@ -76,7 +77,7 @@ export const pendingAttestations = sqliteTable('pending_attestation', {
 	id: text('id').primaryKey(),
 	cache: text('cache').notNull().default(''),
 	storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
-	digest: text('digest').notNull(),
+	digest: text('digest').$type<Sha256HexDigest>().notNull(),
 	r2Key: text('r2_key').notNull(),
 	createdAt: text('created_at').notNull(),
 	expiresAt: text('expires_at').notNull()
