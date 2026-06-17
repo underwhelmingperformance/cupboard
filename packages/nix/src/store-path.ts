@@ -2,6 +2,13 @@ import {
 	InvalidStorePathBasenameError,
 	InvalidStorePathError
 } from './errors.ts';
+import {
+	type StorePathBasename,
+	storePathBasenameSchema,
+	type StorePathHash,
+	storePathHashSchema,
+	type StorePathString
+} from './scalars.ts';
 
 // Pure store-path derivations, kept dependency-free so both the wire schemas
 // and the `StorePath` value object share one implementation. These return
@@ -27,8 +34,8 @@ export function storePathHashOf(path: string): string | undefined {
 }
 
 export interface ResolvedRootTarget {
-	readonly storePathHash: string;
-	readonly storePath: string;
+	readonly storePathHash: StorePathHash;
+	readonly storePath: StorePathString;
 }
 
 /**
@@ -38,20 +45,26 @@ export interface ResolvedRootTarget {
  * hash cannot be derived are dropped.
  */
 export function resolveRootTargets(
-	targets: readonly string[]
+	targets: readonly StorePathString[]
 ): readonly ResolvedRootTarget[] {
 	const resolved: ResolvedRootTarget[] = [];
 	const seen = new Set<string>();
 
 	for (const storePath of targets) {
-		const storePathHash = storePathHashOf(storePath);
+		const hash = storePathHashOf(storePath);
 
-		if (storePathHash === undefined || seen.has(storePathHash)) {
+		if (hash === undefined || seen.has(hash)) {
 			continue;
 		}
 
-		seen.add(storePathHash);
-		resolved.push({ storePathHash, storePath });
+		const storePathHash = storePathHashSchema.safeParse(hash);
+
+		if (!storePathHash.success) {
+			continue;
+		}
+
+		seen.add(hash);
+		resolved.push({ storePathHash: storePathHash.data, storePath });
 	}
 
 	return resolved;
@@ -64,37 +77,45 @@ export class StorePath {
 		}
 	}
 
-	static basename(value: string): string {
+	static basename(value: string): StorePathBasename {
 		return new StorePath(value).basename;
 	}
 
-	static hash(value: string): string {
+	static hash(value: string): StorePathHash {
 		return new StorePath(value).hash;
 	}
 
-	static referenceBasenames(references: readonly string[]): string[] {
+	static referenceBasenames(
+		references: readonly string[]
+	): StorePathBasename[] {
 		return references
 			.map((reference) => StorePath.basename(reference))
 			.toSorted();
 	}
 
-	get basename(): string {
+	get basename(): StorePathBasename {
 		const basename = storePathBasename(this.value);
+		const parsed =
+			basename === undefined
+				? undefined
+				: storePathBasenameSchema.safeParse(basename);
 
-		if (basename === undefined) {
+		if (!parsed?.success) {
 			throw new InvalidStorePathError(this.value);
 		}
 
-		return basename;
+		return parsed.data;
 	}
 
-	get hash(): string {
+	get hash(): StorePathHash {
 		const hash = storePathHashOf(this.value);
+		const parsed =
+			hash === undefined ? undefined : storePathHashSchema.safeParse(hash);
 
-		if (hash === undefined) {
+		if (!parsed?.success) {
 			throw new InvalidStorePathBasenameError(this.basename);
 		}
 
-		return hash;
+		return parsed.data;
 	}
 }
