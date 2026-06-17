@@ -1,4 +1,8 @@
-import { type RootName, storePathHashSchema } from '@cupboard/nix/scalars';
+import {
+	type RootName,
+	type StorePathHash,
+	type StorePathString
+} from '@cupboard/nix/scalars';
 import { resolveRootTargets } from '@cupboard/nix/store-path';
 import {
 	type ParsedRootSetBody,
@@ -61,10 +65,7 @@ export class RootsService {
 		const activation = await this.context.ctx.blockConcurrencyWhile(
 			async (): Promise<RootActivation> => {
 				const presence = await this.presence(requested.targets, (hash) =>
-					this.narInfoObjects.isServableLocked(
-						cache,
-						storePathHashSchema.parse(hash)
-					)
+					this.narInfoObjects.isServableLocked(cache, hash)
 				);
 				const unavailable = requested.targets
 					.filter((target) => presence.get(target.storePathHash) !== true)
@@ -184,7 +185,7 @@ export class RootsService {
 		for (const root of roots) {
 			const targets = this.rootTargetRows(cache, root.name);
 			const presence = await this.presence(targets, (hash) =>
-				this.narInfoObjects.isServable(cache, storePathHashSchema.parse(hash))
+				this.narInfoObjects.isServable(cache, hash)
 			);
 
 			summaries.push(
@@ -242,7 +243,7 @@ export class RootsService {
 	private rootTargetRows(
 		cache: string,
 		name: string
-	): readonly { storePathHash: string; storePath: string }[] {
+	): readonly { storePathHash: StorePathHash; storePath: StorePathString }[] {
 		return this.context.db
 			.select({
 				storePathHash: schema.retentionRootTargets.storePathHash,
@@ -264,8 +265,8 @@ export class RootsService {
 	// while a summary passes the section-opening variant. Both report exactly what
 	// serving would, so the gate and the `present` flag cannot drift.
 	private async presence(
-		targets: readonly { storePathHash: string }[],
-		isServable: (storePathHash: string) => Promise<boolean>
+		targets: readonly { storePathHash: StorePathHash }[],
+		isServable: (storePathHash: StorePathHash) => Promise<boolean>
 	): Promise<ReadonlyMap<string, boolean>> {
 		const presence = new Map<string, boolean>();
 
@@ -284,7 +285,10 @@ export class RootsService {
 		name: string,
 		stored: StoredRoot,
 		now: string,
-		targets: readonly { storePathHash: string; storePath: string }[],
+		targets: readonly {
+			storePathHash: StorePathHash;
+			storePath: StorePathString;
+		}[],
 		presence: ReadonlyMap<string, boolean>
 	): RootSummary {
 		return {

@@ -173,8 +173,8 @@ export const retentionRootTargets = sqliteTable(
 	{
 		cache: text('cache').notNull().default(''),
 		rootName: text('root_name').notNull(),
-		storePathHash: text('store_path_hash').notNull(),
-		storePath: text('store_path').notNull()
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		storePath: text('store_path').$type<StorePathString>().notNull()
 	},
 	(table) => [
 		primaryKey({
