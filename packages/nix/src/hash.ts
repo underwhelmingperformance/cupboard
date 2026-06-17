@@ -54,6 +54,14 @@ export class NixSha256Hash {
 	toString(): string {
 		return this.value;
 	}
+
+	/**
+	 * The hash as a single URL path segment, with the `sha256:` prefix's colon
+	 * percent-encoded. A Nix client requests a NAR over HTTP at this spelling.
+	 */
+	toUrlSegment(): string {
+		return encodeURIComponent(this.value);
+	}
 }
 
 export function toNixSha256(bytes: Uint8Array): NixSha256Hash {
