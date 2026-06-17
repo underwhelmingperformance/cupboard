@@ -2,7 +2,8 @@ import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
 import {
 	type NixSha256HashString,
-	type StorePathHash
+	type StorePathHash,
+	type TenantId
 } from '@cupboard/nix/scalars';
 import { StorePath } from '@cupboard/nix/store-path';
 import {
@@ -244,7 +245,7 @@ export class CommitPipelineService {
 	// pending commit becomes servable in seconds rather than at the next
 	// hourly sweep. Requested, not awaited: the sweep remains the backstop, so
 	// a failed send only delays the promotion and must never fail the commit.
-	private async requestVerification(tenant: string): Promise<void> {
+	private async requestVerification(tenant: TenantId): Promise<void> {
 		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
 
 		try {
@@ -602,7 +603,7 @@ export class CommitPipelineService {
 	// ever stranded over quota. Clearing the reaper grace timer in the same batch
 	// keeps a re-referenced blob alive.
 	private async reserveEdgeAndCharge(
-		tenant: string,
+		tenant: TenantId,
 		cache: string,
 		metadata: ParsedUploadPathMetadata,
 		generation: number,
@@ -680,7 +681,7 @@ export class CommitPipelineService {
 	// tenant already holds (no charge), an absent usage row, or an unset quota are all
 	// within quota. The caller passes the size that will actually be charged.
 	private async overQuota(
-		tenant: string,
+		tenant: TenantId,
 		narHash: NixSha256HashString,
 		fileSize: number
 	): Promise<boolean> {

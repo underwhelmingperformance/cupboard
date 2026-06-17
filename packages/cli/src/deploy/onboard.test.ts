@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type {
 	ParsedMembershipRebuildResponse,
@@ -375,7 +376,7 @@ const claimable = {
 
 function tenantSummary(id: string): ParsedTenantSummary {
 	return {
-		id,
+		id: tenantIdSchema.parse(id),
 		status: 'active',
 		readMode: 'public',
 		ownerIssuer: owner.issuer,

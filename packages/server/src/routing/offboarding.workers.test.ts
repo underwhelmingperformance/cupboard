@@ -1,7 +1,9 @@
 import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
-	storePathHashSchema
+	storePathHashSchema,
+	type TenantId,
+	tenantIdSchema
 } from '@cupboard/nix/scalars';
 import {
 	createExecutionContext,
@@ -55,18 +57,18 @@ let nextTenant = 0;
 
 async function admittable(slug: string): Promise<boolean> {
 	const ctx = createExecutionContext();
-	const entry = await admitTenant(env, ctx, slug);
+	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug));
 	await waitOnExecutionContext(ctx);
 
 	return entry !== undefined;
 }
 
 async function provisionedWritingTenant(): Promise<{
-	id: string;
+	id: TenantId;
 	token: string;
 }> {
 	nextTenant += 1;
-	const id = `offboard-test-${String(nextTenant)}`;
+	const id = tenantIdSchema.parse(`offboard-test-${String(nextTenant)}`);
 	const issuer = await provisionNamedTenant(id);
 	const token = await issueTokenForTenant(
 		testServerFor(id),
@@ -78,7 +80,7 @@ async function provisionedWritingTenant(): Promise<{
 }
 
 async function pushTenantPath(
-	id: string,
+	id: TenantId,
 	token: string,
 	storePathHash: string,
 	seed: string

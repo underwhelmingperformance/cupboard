@@ -1,3 +1,4 @@
+import { type TenantId, tenantIdSchema } from '@cupboard/nix/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -7,7 +8,7 @@ import { oidcTrust, tenantIdentity } from '../db/schema.ts';
 import { currentServer, fetchPath, resetTestServer } from '../test-support.ts';
 
 function identity(configVersion: number): {
-	tenant: string;
+	tenant: TenantId;
 	issuer: string;
 	audience: string;
 	ownerIssuer: string;
@@ -16,7 +17,7 @@ function identity(configVersion: number): {
 	configVersion: number;
 } {
 	return {
-		tenant: 'acme',
+		tenant: tenantIdSchema.parse('acme'),
 		issuer: 'https://host.test/t/acme',
 		audience: 'https://host.test/t/acme',
 		ownerIssuer: 'https://idp.test',
@@ -59,7 +60,7 @@ describe('configure RPC', () => {
 		);
 
 		expect(result).toStrictEqual({
-			tenant: 'acme',
+			tenant: tenantIdSchema.parse('acme'),
 			configVersion: 2,
 			ownerIssuer: 'https://idp.test',
 			ownerClaims: JSON.stringify({ sub: 'owner' })

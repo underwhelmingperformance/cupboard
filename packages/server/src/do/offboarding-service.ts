@@ -1,3 +1,4 @@
+import { type TenantId } from '@cupboard/nix/scalars';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -42,7 +43,7 @@ export class OffboardingService {
 		return { drained: !(await this.hasResidue(tenant)) };
 	}
 
-	private tenantSlug(): string | undefined {
+	private tenantSlug(): TenantId | undefined {
 		const row = this.context.db
 			.select({ tenant: schema.tenantIdentity.tenant })
 			.from(schema.tenantIdentity)
@@ -52,7 +53,7 @@ export class OffboardingService {
 	}
 
 	private async deleteReferenceBatch(
-		tenant: string,
+		tenant: TenantId,
 		limit: number
 	): Promise<void> {
 		const references = await this.context.d1
@@ -91,7 +92,7 @@ export class OffboardingService {
 	}
 
 	private async deletePresenceBatch(
-		tenant: string,
+		tenant: TenantId,
 		limit: number
 	): Promise<void> {
 		const blobs = await this.context.d1
@@ -120,7 +121,7 @@ export class OffboardingService {
 	}
 
 	private async deleteAttestationReferenceBatch(
-		tenant: string,
+		tenant: TenantId,
 		limit: number
 	): Promise<void> {
 		const references = await this.context.d1
@@ -171,7 +172,7 @@ export class OffboardingService {
 	}
 
 	private async deleteCasPresenceBatch(
-		tenant: string,
+		tenant: TenantId,
 		limit: number
 	): Promise<void> {
 		const blobs = await this.context.d1
@@ -199,7 +200,7 @@ export class OffboardingService {
 			.run();
 	}
 
-	private async hasResidue(tenant: string): Promise<boolean> {
+	private async hasResidue(tenant: TenantId): Promise<boolean> {
 		const edge = await this.context.d1
 			.select({ tenant: d1Schema.blobReference.tenant })
 			.from(d1Schema.blobReference)

@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -9,19 +10,45 @@ const updatedAt = '2026-01-01T00:00:00.000Z';
 
 describe('tenant_usage non-negative constraints', () => {
 	it.each([
-		{ name: 'bytes', values: { tenant: 'neg-bytes', bytes: -1, updatedAt } },
+		{
+			name: 'bytes',
+			values: {
+				tenant: tenantIdSchema.parse('neg-bytes'),
+				bytes: -1,
+				updatedAt
+			}
+		},
 		{
 			name: 'narinfos',
-			values: { tenant: 'neg-narinfos', narinfos: -1, updatedAt }
+			values: {
+				tenant: tenantIdSchema.parse('neg-narinfos'),
+				narinfos: -1,
+				updatedAt
+			}
 		},
-		{ name: 'blobs', values: { tenant: 'neg-blobs', blobs: -1, updatedAt } },
+		{
+			name: 'blobs',
+			values: {
+				tenant: tenantIdSchema.parse('neg-blobs'),
+				blobs: -1,
+				updatedAt
+			}
+		},
 		{
 			name: 'cas_bytes',
-			values: { tenant: 'neg-cas-bytes', casBytes: -1, updatedAt }
+			values: {
+				tenant: tenantIdSchema.parse('neg-cas-bytes'),
+				casBytes: -1,
+				updatedAt
+			}
 		},
 		{
 			name: 'cas_blobs',
-			values: { tenant: 'neg-cas-blobs', casBlobs: -1, updatedAt }
+			values: {
+				tenant: tenantIdSchema.parse('neg-cas-blobs'),
+				casBlobs: -1,
+				updatedAt
+			}
 		}
 	])('rejects a negative $name count, writing no row', async ({ values }) => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });

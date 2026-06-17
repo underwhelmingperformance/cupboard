@@ -1,6 +1,7 @@
 import {
 	type NixSha256HashString,
 	type Sha256HexDigest,
+	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
@@ -48,10 +49,10 @@ const casDemoteCursorKey = 'reaper:cas-demote-cursor';
 type CronDatabase = DrizzleD1Database<typeof d1Schema>;
 type TenantCronPass =
 	typeof d1Schema.tenantMaintenanceFailure.$inferSelect.pass;
-type MaintainTenant = (env: Env, id: string) => Promise<void>;
+type MaintainTenant = (env: Env, id: TenantId) => Promise<void>;
 type DrainTenant = (
 	env: Env,
-	id: string,
+	id: TenantId,
 	drainLimit: number,
 	rounds: number
 ) => Promise<void>;
@@ -90,9 +91,9 @@ const maintenanceQueueMessageSchema = z.discriminatedUnion('kind', [
 ]);
 
 export type MaintenanceQueueMessage =
-	| { readonly kind: 'tenant-maintenance'; readonly tenant: string }
-	| { readonly kind: 'tenant-verify'; readonly tenant: string }
-	| { readonly kind: 'offboard'; readonly tenant: string }
+	| { readonly kind: 'tenant-maintenance'; readonly tenant: TenantId }
+	| { readonly kind: 'tenant-verify'; readonly tenant: TenantId }
+	| { readonly kind: 'offboard'; readonly tenant: TenantId }
 	| { readonly kind: 'blob-reaper' }
 	| { readonly kind: 'cas-reaper' }
 	| { readonly kind: 'blob-demote' }
@@ -410,7 +411,7 @@ class TenantNarInfoDemoter implements NarInfoDemoter {
 	constructor(private readonly env: Env) {}
 
 	demote(
-		tenant: string,
+		tenant: TenantId,
 		narHash: NixSha256HashString,
 		targets: readonly DemoteTarget[]
 	): Promise<void> {
@@ -425,7 +426,7 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
 	constructor(private readonly env: Env) {}
 
 	demote(
-		tenant: string,
+		tenant: TenantId,
 		digest: Sha256HexDigest,
 		fenceStoredAt: string
 	): Promise<void> {
@@ -476,7 +477,7 @@ export async function runOffboardSweep(
 function selectOffboardTenants(
 	database: CronDatabase,
 	tenantLimit: number
-): Promise<{ readonly id: string }[]> {
+): Promise<{ readonly id: TenantId }[]> {
 	return database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
@@ -494,7 +495,7 @@ function selectOffboardTenants(
 // the tick within its subrequest budget.
 async function drainTenant(
 	env: Env,
-	id: string,
+	id: TenantId,
 	drainLimit: number,
 	rounds: number
 ): Promise<void> {
@@ -514,7 +515,7 @@ async function drainTenant(
 // (the deleted keys gone) makes progress without a persisted cursor.
 async function deleteTenantObjects(
 	env: Env,
-	id: string,
+	id: TenantId,
 	limit: number
 ): Promise<boolean> {
 	const listed = await env.BLOBS.list({ prefix: `t/${id}/`, limit });
@@ -533,7 +534,7 @@ async function deleteTenantObjects(
 // marker is deleted here, since it tracks `status != 'offboarded'`; the next filter
 // rebuild then drops the slug, and an interrupted finalisation leaves only a
 // harmless tombstone the rebuild reconciles.
-async function finaliseTenant(env: Env, id: string): Promise<void> {
+async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
 	await tenantServer(env, id).purgeStorage();
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -616,7 +617,7 @@ async function settleWithConcurrency<T>(
 	return results;
 }
 
-function maintainTenant(env: Env, id: string): Promise<void> {
+function maintainTenant(env: Env, id: TenantId): Promise<void> {
 	const server = tenantServer(env, id);
 
 	return runScheduledMaintenance(
@@ -626,13 +627,13 @@ function maintainTenant(env: Env, id: string): Promise<void> {
 	);
 }
 
-function verifyTenant(env: Env, id: string): Promise<void> {
+function verifyTenant(env: Env, id: TenantId): Promise<void> {
 	return tenantServer(env, id).runVerification();
 }
 
 async function executeTenantMaintenanceMessage(
 	env: Env,
-	tenant: string,
+	tenant: TenantId,
 	maintain: MaintainTenant
 ): Promise<MaintenanceQueueDecision> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -661,7 +662,7 @@ async function executeTenantMaintenanceMessage(
 
 async function executeOffboardMessage(
 	env: Env,
-	tenant: string,
+	tenant: TenantId,
 	drain: DrainTenant
 ): Promise<MaintenanceQueueDecision> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -690,7 +691,7 @@ async function executeOffboardMessage(
 
 function tenantStatus(
 	database: CronDatabase,
-	tenant: string
+	tenant: TenantId
 ): Promise<typeof d1Schema.tenant.$inferSelect.status | undefined> {
 	return database
 		.select({ status: d1Schema.tenant.status })
@@ -706,7 +707,7 @@ function tenantStatus(
 function overdueActiveTenants(
 	database: CronDatabase,
 	batchSize: number
-): Promise<{ readonly id: string }[]> {
+): Promise<{ readonly id: TenantId }[]> {
 	return database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
@@ -722,7 +723,7 @@ function overdueActiveTenants(
 
 function tenantMaintenanceIsDue(
 	database: CronDatabase,
-	tenant: string
+	tenant: TenantId
 ): Promise<boolean> {
 	return database
 		.select({ id: d1Schema.tenant.id })
@@ -760,7 +761,7 @@ function tenantMaintenanceDueCondition() {
 // this leaves the batch unstamped and reprocesses it.
 async function stampMaintained(
 	database: CronDatabase,
-	batch: readonly { readonly id: string }[]
+	batch: readonly { readonly id: TenantId }[]
 ): Promise<void> {
 	if (batch.length === 0) {
 		return;
@@ -826,7 +827,7 @@ function runControlKeyRetirement(env: Env): Promise<number> {
 async function recordTenantPassOutcomes(
 	database: CronDatabase,
 	pass: TenantCronPass,
-	tenants: readonly { readonly id: string }[],
+	tenants: readonly { readonly id: TenantId }[],
 	results: readonly PromiseSettledResult<unknown>[]
 ): Promise<void> {
 	const now = new Date().toISOString();
@@ -846,7 +847,7 @@ async function recordTenantPassOutcomes(
 
 function recordTenantPassSuccess(
 	database: CronDatabase,
-	tenant: string,
+	tenant: TenantId,
 	pass: TenantCronPass,
 	now: string
 ): Promise<unknown> {
@@ -873,7 +874,7 @@ function recordTenantPassSuccess(
 
 function recordTenantPassFailure(
 	database: CronDatabase,
-	tenant: string,
+	tenant: TenantId,
 	pass: TenantCronPass,
 	error: unknown,
 	now: string

@@ -1,3 +1,4 @@
+import { type TenantId } from '@cupboard/nix/scalars';
 import {
 	issuedAccessTokenType,
 	subjectTokenTypeIdToken,
@@ -476,7 +477,7 @@ export async function controlTenantCreate(
 
 export async function controlTenantSuspend(
 	env: Env,
-	id: string
+	id: TenantId
 ): Promise<TenantMutateResponse> {
 	const database = controlDatabase(env);
 	const summary = await setTenantStatus(database, id, 'suspended');
@@ -487,7 +488,7 @@ export async function controlTenantSuspend(
 
 export async function controlTenantResume(
 	env: Env,
-	id: string
+	id: TenantId
 ): Promise<TenantMutateResponse> {
 	const summary = await resumeTenant(controlDatabase(env), id);
 	await invalidateTenantRow(id);
@@ -497,7 +498,7 @@ export async function controlTenantResume(
 
 export async function controlTenantSetReadMode(
 	env: Env,
-	id: string,
+	id: TenantId,
 	readMode: 'public' | 'private'
 ): Promise<TenantReadModeResponse> {
 	const summary = await setTenantReadMode(controlDatabase(env), id, readMode);
@@ -508,7 +509,7 @@ export async function controlTenantSetReadMode(
 
 export async function controlTenantRotateReadCredential(
 	env: Env,
-	id: string,
+	id: TenantId,
 	read: ParsedTenantReadCredential
 ): Promise<TenantReadModeResponse> {
 	const summary = await setTenantReadCredential(controlDatabase(env), id, read);
@@ -519,7 +520,7 @@ export async function controlTenantRotateReadCredential(
 
 export async function controlTenantClearReadCredential(
 	env: Env,
-	id: string
+	id: TenantId
 ): Promise<TenantReadModeResponse> {
 	const summary = await clearTenantReadCredential(controlDatabase(env), id);
 	await invalidateTenantRow(id);
@@ -529,7 +530,7 @@ export async function controlTenantClearReadCredential(
 
 export async function controlTenantOffboard(
 	env: Env,
-	id: string
+	id: TenantId
 ): Promise<TenantMutateResponse> {
 	const database = controlDatabase(env);
 	const summary = await setTenantStatus(database, id, 'offboarding');
