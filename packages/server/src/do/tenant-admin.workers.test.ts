@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import {
 	tenantListResponseSchema,
 	tenantMutateResponseSchema,
@@ -101,7 +102,7 @@ describe('control plane tenant administration', () => {
 		await controlFetch('/control/tenants/acme', authed(token, 'DELETE'));
 		await finaliseOffboardedTenant(
 			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-			'acme'
+			tenantIdSchema.parse('acme')
 		);
 
 		const repeatedDelete = await controlFetch(

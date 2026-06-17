@@ -1,3 +1,5 @@
+import { type TenantId } from '@cupboard/nix/scalars';
+
 import type { CupboardServer } from '../do/server.ts';
 
 // `CupboardServer` is defined in the separate `cupboard-tenant` script, so
@@ -13,7 +15,7 @@ function tenantNamespace(env: Env): DurableObjectNamespace<CupboardServer> {
 // tenant slug, so its signing/auth keys and metadata live in its own SQLite.
 export function tenantServer(
 	env: Env,
-	tenant: string
+	tenant: TenantId
 ): DurableObjectStub<CupboardServer> {
 	const namespace = tenantNamespace(env);
 

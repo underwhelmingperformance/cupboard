@@ -1,3 +1,4 @@
+import { type TenantId } from '@cupboard/nix/scalars';
 import { eq, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -203,7 +204,7 @@ function entryFromRow(row: {
 async function readTenantEntry(
 	env: Env,
 	ctx: DeferredContext,
-	slug: string
+	slug: TenantId
 ): Promise<TenantEntry | undefined> {
 	const cacheKey = rowCacheKey(slug);
 	const cached = await caches.default.match(cacheKey);
@@ -256,7 +257,7 @@ async function readTenantEntry(
 export async function admitTenant(
 	env: Env,
 	ctx: DeferredContext,
-	slug: string
+	slug: TenantId
 ): Promise<TenantEntry | undefined> {
 	const filter = await loadMembershipFilter(env, ctx);
 

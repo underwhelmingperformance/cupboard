@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
 
@@ -85,7 +86,7 @@ export const controlContract = {
 				resource: { tenant: { field: 'id' } }
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/suspend' })
-			.input(z.strictObject({ id: z.string() }))
+			.input(z.strictObject({ id: tenantIdSchema }))
 			.output(tenantMutateResponseSchema),
 
 		resume: controlProcedure
@@ -94,7 +95,7 @@ export const controlContract = {
 				resource: { tenant: { field: 'id' } }
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/resume' })
-			.input(z.strictObject({ id: z.string() }))
+			.input(z.strictObject({ id: tenantIdSchema }))
 			.output(tenantMutateResponseSchema),
 
 		setReadMode: controlProcedure
@@ -103,7 +104,9 @@ export const controlContract = {
 				resource: { tenant: { field: 'id' } }
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/read-mode' })
-			.input(z.strictObject({ id: z.string(), readMode: tenantReadModeSchema }))
+			.input(
+				z.strictObject({ id: tenantIdSchema, readMode: tenantReadModeSchema })
+			)
 			.output(tenantReadModeResponseSchema),
 
 		rotateReadCredential: controlProcedure
@@ -113,7 +116,7 @@ export const controlContract = {
 			})
 			.route({ method: 'POST', path: '/tenants/{id}/read-credential' })
 			.input(
-				z.strictObject({ id: z.string(), read: tenantReadCredentialSchema })
+				z.strictObject({ id: tenantIdSchema, read: tenantReadCredentialSchema })
 			)
 			.output(tenantReadModeResponseSchema),
 
@@ -123,7 +126,7 @@ export const controlContract = {
 				resource: { tenant: { field: 'id' } }
 			})
 			.route({ method: 'DELETE', path: '/tenants/{id}/read-credential' })
-			.input(z.strictObject({ id: z.string() }))
+			.input(z.strictObject({ id: tenantIdSchema }))
 			.output(tenantReadModeResponseSchema),
 
 		remove: controlProcedure
@@ -132,7 +135,7 @@ export const controlContract = {
 				resource: { tenant: { field: 'id' } }
 			})
 			.route({ method: 'DELETE', path: '/tenants/{id}' })
-			.input(z.strictObject({ id: z.string() }))
+			.input(z.strictObject({ id: tenantIdSchema }))
 			.output(tenantMutateResponseSchema)
 	},
 

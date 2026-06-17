@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import {
 	type ParsedTenantCreateBody,
 	tenantCreateBodySchema
@@ -39,7 +40,7 @@ function createBody(id: string): ParsedTenantCreateBody {
 
 async function admit(slug: string): Promise<TenantEntry | undefined> {
 	const ctx = createExecutionContext();
-	const entry = await admitTenant(env, ctx, slug);
+	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug));
 	await waitOnExecutionContext(ctx);
 
 	return entry;
@@ -66,7 +67,7 @@ describe('layered admission gate', () => {
 		await database()
 			.update(d1Schema.tenant)
 			.set({ status: 'offboarded' })
-			.where(eq(d1Schema.tenant.id, 'beta'))
+			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('beta')))
 			.run();
 
 		expect(await refreshTenantMembership(env)).toBe(1);
@@ -75,7 +76,11 @@ describe('layered admission gate', () => {
 	it('keeps a suspended tenant admittable, carrying its status for the caller to gate', async () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
-		await setTenantStatus(database(), 'acme', 'suspended');
+		await setTenantStatus(
+			database(),
+			tenantIdSchema.parse('acme'),
+			'suspended'
+		);
 
 		expect(await admit('acme')).toStrictEqual({
 			status: 'suspended',
@@ -168,7 +173,7 @@ describe('layered admission gate', () => {
 		await database()
 			.update(d1Schema.tenant)
 			.set({ status: 'offboarded' })
-			.where(eq(d1Schema.tenant.id, 'acme'))
+			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
 			.run();
 
 		expect(await admit('acme')).toBeUndefined();
@@ -180,7 +185,7 @@ describe('layered admission gate', () => {
 		await database()
 			.update(d1Schema.tenant)
 			.set({ status: 'offboarded' })
-			.where(eq(d1Schema.tenant.id, 'acme'))
+			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
 			.run();
 		await refreshTenantMembership(env);
 
@@ -199,7 +204,7 @@ describe('layered admission gate', () => {
 				readPasswordHash: 'hash',
 				readPasswordSalt: 'salt'
 			})
-			.where(eq(d1Schema.tenant.id, 'acme'))
+			.where(eq(d1Schema.tenant.id, tenantIdSchema.parse('acme')))
 			.run();
 		const after = await admit('acme');
 

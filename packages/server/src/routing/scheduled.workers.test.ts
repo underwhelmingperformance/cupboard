@@ -1,3 +1,4 @@
+import { tenantIdSchema } from '@cupboard/nix/scalars';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -128,7 +129,7 @@ describe('scheduled tenant pass failure records', () => {
 			acmeMaintained: await tenantMaintained('acme')
 		}).toStrictEqual({
 			messages: [
-				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{ kind: 'tenant-maintenance', tenant: 'beta' },
 				{ kind: 'offboard', tenant: 'retiring' },
 				{ kind: 'blob-reaper' },
@@ -139,7 +140,7 @@ describe('scheduled tenant pass failure records', () => {
 			],
 			sent: [
 				[
-					{ kind: 'tenant-maintenance', tenant: 'acme' },
+					{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 					{ kind: 'tenant-maintenance', tenant: 'beta' },
 					{ kind: 'offboard', tenant: 'retiring' },
 					{ kind: 'blob-reaper' },
@@ -163,7 +164,7 @@ describe('scheduled tenant pass failure records', () => {
 				{ length: 120 },
 				(_, index): MaintenanceQueueMessage => ({
 					kind: 'tenant-maintenance',
-					tenant: `tenant-${String(index)}`
+					tenant: tenantIdSchema.parse(`tenant-${String(index)}`)
 				})
 			),
 			{ kind: 'blob-reaper' }
@@ -206,7 +207,7 @@ describe('scheduled tenant pass failure records', () => {
 			{ length: 150 },
 			(_, index): MaintenanceQueueMessage => ({
 				kind: 'tenant-maintenance',
-				tenant: `tenant-${String(index)}`
+				tenant: tenantIdSchema.parse(`tenant-${String(index)}`)
 			})
 		);
 		const failures = [
@@ -270,7 +271,7 @@ describe('scheduled tenant pass failure records', () => {
 			retiringOutcome: await tenantMaintenanceFailureRow('retiring', 'offboard')
 		}).toStrictEqual({
 			sent: [
-				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{ kind: 'offboard', tenant: 'retiring' },
 				{ kind: 'blob-reaper' },
 				{ kind: 'cas-reaper' },
@@ -293,7 +294,7 @@ describe('scheduled tenant pass failure records', () => {
 		const decision = await runWithClock('2026-01-01T00:00:00.000Z', () =>
 			executeMaintenanceQueueMessage(
 				env,
-				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{
 					maintainTenant: (_env, id) => {
 						seen.push(id);
@@ -329,7 +330,7 @@ describe('scheduled tenant pass failure records', () => {
 		const decision = await runWithClock('2026-01-01T00:00:00.000Z', () =>
 			executeMaintenanceQueueMessage(
 				env,
-				{ kind: 'tenant-verify', tenant: 'acme' },
+				{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
 				{
 					verifyTenant: (_env, id) => {
 						seen.push(id);
@@ -349,7 +350,7 @@ describe('scheduled tenant pass failure records', () => {
 	it('retries a tenant-verify message whose pass fails', async () => {
 		const decision = await executeMaintenanceQueueMessage(
 			env,
-			{ kind: 'tenant-verify', tenant: 'acme' },
+			{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
 			{ verifyTenant: () => Promise.reject(new Error('verify failed')) }
 		);
 
@@ -367,7 +368,7 @@ describe('scheduled tenant pass failure records', () => {
 		const decision = await runWithClock('2026-01-02T00:00:00.000Z', () =>
 			executeMaintenanceQueueMessage(
 				env,
-				{ kind: 'tenant-maintenance', tenant: 'acme' },
+				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{
 					maintainTenant: () =>
 						Promise.reject(new Error('queue maintenance failed'))
@@ -410,12 +411,12 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('retiring');
 		await finaliseOffboardedTenant(
 			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-			'retiring'
+			tenantIdSchema.parse('retiring')
 		);
 
 		const decision = await executeMaintenanceQueueMessage(env, {
 			kind: 'offboard',
-			tenant: 'retiring'
+			tenant: tenantIdSchema.parse('retiring')
 		});
 
 		expect({
@@ -437,7 +438,7 @@ describe('scheduled tenant pass failure records', () => {
 			['active', 'suspended', 'absent'].map((tenant) =>
 				executeMaintenanceQueueMessage(
 					env,
-					{ kind: 'offboard', tenant },
+					{ kind: 'offboard', tenant: tenantIdSchema.parse(tenant) },
 					{
 						drainTenant: (_env, id) => {
 							seen.push(id);
@@ -848,7 +849,7 @@ async function writeEligibility(
 	})
 		.insert(d1Schema.tenantMaintenanceEligibility)
 		.values({
-			tenant,
+			tenant: tenantIdSchema.parse(tenant),
 			reconciledAt: '2026-01-01T00:00:00.000Z',
 			...fields
 		})
@@ -873,7 +874,12 @@ async function deleteEligibility(tenant: string): Promise<void> {
 		}
 	})
 		.delete(d1Schema.tenantMaintenanceEligibility)
-		.where(eq(d1Schema.tenantMaintenanceEligibility.tenant, tenant))
+		.where(
+			eq(
+				d1Schema.tenantMaintenanceEligibility.tenant,
+				tenantIdSchema.parse(tenant)
+			)
+		)
 		.run();
 }
 

@@ -1,3 +1,4 @@
+import { type TenantId, tenantIdSchema } from '@cupboard/nix/scalars';
 import {
 	type ParsedTenantCreateBody,
 	tenantCreateBodySchema
@@ -30,13 +31,15 @@ import {
 } from './tenant-registry.ts';
 
 const now = '2026-01-01T00:00:00.000Z';
+const acme = tenantIdSchema.parse('acme');
+const ghost = tenantIdSchema.parse('ghost');
 
 function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
 function usageRow(
-	id: string
+	id: TenantId
 ): Promise<{ quotaBytes: number | null } | undefined> {
 	return database()
 		.select({ quotaBytes: d1Schema.tenantUsage.quotaBytes })
@@ -115,7 +118,7 @@ function errorFields(error: unknown): {
 		.parse(error);
 }
 
-async function storedReadVerifier(id: string): Promise<{
+async function storedReadVerifier(id: TenantId): Promise<{
 	readonly readUser: string;
 	readonly readPasswordHash: string;
 	readonly readPasswordSalt: string;
@@ -141,10 +144,10 @@ async function storedReadVerifier(id: string): Promise<{
 
 describe('tenant registry', () => {
 	it('creates a tenant and returns its summary', async () => {
-		const summary = await ensureTenant(database(), createBody('acme'), now);
+		const summary = await ensureTenant(database(), createBody(acme), now);
 
 		expect(summary).toStrictEqual({
-			id: 'acme',
+			id: acme,
 			status: 'active',
 			readMode: 'private',
 			ownerIssuer: 'https://idp.test',
@@ -156,30 +159,30 @@ describe('tenant registry', () => {
 	});
 
 	it('is idempotent for a matching re-create', async () => {
-		await ensureTenant(database(), createBody('acme'), now);
-		const again = await ensureTenant(database(), createBody('acme'), now);
+		await ensureTenant(database(), createBody(acme), now);
+		const again = await ensureTenant(database(), createBody(acme), now);
 
-		expect(again.id).toBe('acme');
+		expect(again.id).toBe(acme);
 	});
 
 	it('refuses a conflicting re-create of the same slug', async () => {
-		await ensureTenant(database(), createBody('acme', 'private'), now);
+		await ensureTenant(database(), createBody(acme, 'private'), now);
 
 		const rejected = await rejectedBy(() =>
-			ensureTenant(database(), createBody('acme', 'public'), now)
+			ensureTenant(database(), createBody(acme, 'public'), now)
 		);
 
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantAlreadyExistsError',
 			status: StatusCodes.CONFLICT,
-			id: 'acme'
+			id: acme
 		});
 	});
 
 	it('stores only the hashed private-read verifier', async () => {
-		await provision(privateBodyWithRead('acme'));
+		await provision(privateBodyWithRead(acme));
 
-		const row = await storedReadVerifier('acme');
+		const row = await storedReadVerifier(acme);
 
 		expect({
 			user: row.readUser,
@@ -196,23 +199,23 @@ describe('tenant registry', () => {
 	});
 
 	it('is idempotent for a re-create with the same quota', async () => {
-		await ensureTenant(database(), quotaBody('acme', 1000), now);
-		const again = await ensureTenant(database(), quotaBody('acme', 1000), now);
+		await ensureTenant(database(), quotaBody(acme, 1000), now);
+		const again = await ensureTenant(database(), quotaBody(acme, 1000), now);
 
-		expect(again.id).toBe('acme');
+		expect(again.id).toBe(acme);
 	});
 
 	it('refuses a re-create that changes the quota', async () => {
-		await ensureTenant(database(), quotaBody('acme', 1000), now);
+		await ensureTenant(database(), quotaBody(acme, 1000), now);
 
 		const rejected = await rejectedBy(() =>
-			ensureTenant(database(), quotaBody('acme', 2000), now)
+			ensureTenant(database(), quotaBody(acme, 2000), now)
 		);
 
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantAlreadyExistsError',
 			status: StatusCodes.CONFLICT,
-			id: 'acme'
+			id: acme
 		});
 	});
 
@@ -221,7 +224,7 @@ describe('tenant registry', () => {
 		await database()
 			.insert(d1Schema.tenant)
 			.values({
-				id: 'acme',
+				id: acme,
 				status: 'active',
 				readMode: 'private',
 				ownerIssuer: 'https://idp.test',
@@ -235,12 +238,12 @@ describe('tenant registry', () => {
 		// A conflicting re-create (public) is rejected without writing a usage row, so
 		// it cannot poison a later legitimate retry with a wrong-quota row.
 		const rejected = await rejectedBy(() =>
-			ensureTenant(database(), createBody('acme', 'public'), now)
+			ensureTenant(database(), createBody(acme, 'public'), now)
 		);
-		const poisoned = await usageRow('acme');
+		const poisoned = await usageRow(acme);
 
-		await ensureTenant(database(), createBody('acme', 'private'), now);
-		const recovered = await usageRow('acme');
+		await ensureTenant(database(), createBody(acme, 'private'), now);
+		const recovered = await usageRow(acme);
 
 		expect({
 			poisoned: poisoned !== undefined,
@@ -249,12 +252,12 @@ describe('tenant registry', () => {
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantAlreadyExistsError',
 			status: StatusCodes.CONFLICT,
-			id: 'acme'
+			id: acme
 		});
 	});
 
 	it('creates the usage row on a retry after a crash left only the tenant row', async () => {
-		const body = quotaBody('acme', 1000);
+		const body = quotaBody(acme, 1000);
 
 		// The residue of a crash between the tenant insert and the usage insert: the
 		// tenant row exists with no usage row.
@@ -282,7 +285,7 @@ describe('tenant registry', () => {
 		// The retry succeeds idempotently and creates the missing usage row, so quota
 		// accounting is not silently absent.
 		expect({ id: summary.id, quotaBytes: usage?.quotaBytes }).toStrictEqual({
-			id: 'acme',
+			id: acme,
 			quotaBytes: 1000
 		});
 	});
@@ -303,13 +306,13 @@ describe('tenant registry', () => {
 	])(
 		'$name a tenant and reflects it in the registry row',
 		async ({ status }) => {
-			await provision(createBody('acme'));
+			await provision(createBody(acme));
 
-			const summary = await setTenantStatus(database(), 'acme', status);
+			const summary = await setTenantStatus(database(), acme, status);
 			const stored = await database()
 				.select({ status: d1Schema.tenant.status })
 				.from(d1Schema.tenant)
-				.where(eq(d1Schema.tenant.id, 'acme'))
+				.where(eq(d1Schema.tenant.id, acme))
 				.get();
 
 			expect({
@@ -321,33 +324,33 @@ describe('tenant registry', () => {
 
 	it('throws not found when mutating an unknown tenant', async () => {
 		const rejected = await rejectedBy(() =>
-			setTenantStatus(database(), 'ghost', 'suspended')
+			setTenantStatus(database(), ghost, 'suspended')
 		);
 
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantNotFoundError',
 			status: StatusCodes.NOT_FOUND,
-			id: 'ghost'
+			id: ghost
 		});
 	});
 
 	it('treats a repeated offboard as terminal while refusing other status moves', async () => {
-		await provision(createBody('acme'));
-		await setTenantStatus(database(), 'acme', 'offboarding');
-		await finaliseOffboardedTenant(database(), 'acme');
+		await provision(createBody(acme));
+		await setTenantStatus(database(), acme, 'offboarding');
+		await finaliseOffboardedTenant(database(), acme);
 
 		// A repeated delete after finalisation must not flip the tombstone back to
 		// offboarding.
-		const repeated = await setTenantStatus(database(), 'acme', 'offboarding');
+		const repeated = await setTenantStatus(database(), acme, 'offboarding');
 
 		const rejected = await rejectedBy(() =>
-			setTenantStatus(database(), 'acme', 'suspended')
+			setTenantStatus(database(), acme, 'suspended')
 		);
 
 		const stored = await database()
 			.select({ status: d1Schema.tenant.status })
 			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, 'acme'))
+			.where(eq(d1Schema.tenant.id, acme))
 			.get();
 
 		expect({
@@ -360,38 +363,38 @@ describe('tenant registry', () => {
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantRetiredError',
 			status: StatusCodes.GONE,
-			tenant: 'acme'
+			tenant: acme
 		});
 	});
 
 	it('refuses to re-provision a slug that has begun offboarding', async () => {
-		await provision(createBody('acme', 'private'));
-		await setTenantStatus(database(), 'acme', 'offboarding');
+		await provision(createBody(acme, 'private'));
+		await setTenantStatus(database(), acme, 'offboarding');
 
 		const rejected = await rejectedBy(() =>
-			ensureTenant(database(), createBody('acme', 'private'), now)
+			ensureTenant(database(), createBody(acme, 'private'), now)
 		);
 
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantAlreadyExistsError',
 			status: StatusCodes.CONFLICT,
-			id: 'acme'
+			id: acme
 		});
 	});
 
 	it('finalises a drained tenant into a scrubbed tombstone that re-provisioning refuses', async () => {
 		await provision(
-			createBody('acme', 'private')
+			createBody(acme, 'private')
 			// A private cache, so the row carries a read verifier to scrub.
 		);
 		await database()
 			.update(d1Schema.tenant)
 			.set({ readUser: 'reader', readPasswordHash: 'hash' })
-			.where(eq(d1Schema.tenant.id, 'acme'))
+			.where(eq(d1Schema.tenant.id, acme))
 			.run();
-		await setTenantStatus(database(), 'acme', 'offboarding');
+		await setTenantStatus(database(), acme, 'offboarding');
 
-		await finaliseOffboardedTenant(database(), 'acme');
+		await finaliseOffboardedTenant(database(), acme);
 
 		const stored = await database()
 			.select({
@@ -403,7 +406,7 @@ describe('tenant registry', () => {
 				ownerAudience: d1Schema.tenant.ownerAudience
 			})
 			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, 'acme'))
+			.where(eq(d1Schema.tenant.id, acme))
 			.get();
 		// A cleared credential reads back as undefined and the owner identity as empty,
 		// so the scrub is asserted without a null literal.
@@ -417,7 +420,7 @@ describe('tenant registry', () => {
 		};
 		const reProvision = await ensureTenant(
 			database(),
-			createBody('acme', 'private'),
+			createBody(acme, 'private'),
 			now
 		).then(
 			() => 'accepted',
@@ -427,7 +430,7 @@ describe('tenant registry', () => {
 
 		expect({
 			row,
-			usage: await usageRow('acme'),
+			usage: await usageRow(acme),
 			reProvision
 		}).toStrictEqual({
 			row: {
@@ -446,17 +449,17 @@ describe('tenant registry', () => {
 
 describe('tenant lifecycle operations', () => {
 	it('resumes a suspended tenant back to active', async () => {
-		await ensureTenant(database(), createBody('acme'), now);
-		await setTenantStatus(database(), 'acme', 'suspended');
+		await ensureTenant(database(), createBody(acme), now);
+		await setTenantStatus(database(), acme, 'suspended');
 
-		const resumed = await resumeTenant(database(), 'acme');
+		const resumed = await resumeTenant(database(), acme);
 
 		expect({
 			returned: resumed,
 			stored: await listTenants(database())
 		}).toStrictEqual({
 			returned: {
-				id: 'acme',
+				id: acme,
 				status: 'active',
 				readMode: 'private',
 				ownerIssuer: 'https://idp.test',
@@ -467,7 +470,7 @@ describe('tenant lifecycle operations', () => {
 			},
 			stored: [
 				{
-					id: 'acme',
+					id: acme,
 					status: 'active',
 					readMode: 'private',
 					ownerIssuer: 'https://idp.test',
@@ -484,26 +487,26 @@ describe('tenant lifecycle operations', () => {
 		{
 			name: 'active',
 			setup: async () => {
-				await ensureTenant(database(), createBody('acme'), now);
+				await ensureTenant(database(), createBody(acme), now);
 			},
 			error: TenantNotSuspendedError,
 			fields: {
 				name: 'TenantNotSuspendedError',
 				status: StatusCodes.CONFLICT,
-				tenant: 'acme'
+				tenant: acme
 			}
 		},
 		{
 			name: 'offboarding',
 			setup: async () => {
-				await ensureTenant(database(), createBody('acme'), now);
-				await setTenantStatus(database(), 'acme', 'offboarding');
+				await ensureTenant(database(), createBody(acme), now);
+				await setTenantStatus(database(), acme, 'offboarding');
 			},
 			error: TenantRetiredError,
 			fields: {
 				name: 'TenantRetiredError',
 				status: StatusCodes.GONE,
-				tenant: 'acme'
+				tenant: acme
 			}
 		},
 		{
@@ -513,28 +516,28 @@ describe('tenant lifecycle operations', () => {
 			fields: {
 				name: 'TenantNotFoundError',
 				status: StatusCodes.NOT_FOUND,
-				id: 'acme'
+				id: acme
 			}
 		}
 	])('refuses to resume a $name tenant', async ({ setup, fields }) => {
 		await setup();
 
-		const rejected = await rejectedBy(() => resumeTenant(database(), 'acme'));
+		const rejected = await rejectedBy(() => resumeTenant(database(), acme));
 
 		expect(errorFields(rejected)).toStrictEqual(fields);
 	});
 
 	it('sets the read mode of a live tenant', async () => {
-		await ensureTenant(database(), createBody('acme', 'private'), now);
+		await ensureTenant(database(), createBody(acme, 'private'), now);
 
-		const updated = await setTenantReadMode(database(), 'acme', 'public');
+		const updated = await setTenantReadMode(database(), acme, 'public');
 
 		expect({
 			returned: updated,
 			stored: await listTenants(database())
 		}).toStrictEqual({
 			returned: {
-				id: 'acme',
+				id: acme,
 				status: 'active',
 				readMode: 'public',
 				ownerIssuer: 'https://idp.test',
@@ -545,7 +548,7 @@ describe('tenant lifecycle operations', () => {
 			},
 			stored: [
 				{
-					id: 'acme',
+					id: acme,
 					status: 'active',
 					readMode: 'public',
 					ownerIssuer: 'https://idp.test',
@@ -559,13 +562,13 @@ describe('tenant lifecycle operations', () => {
 	});
 
 	it('stores a rotated read credential hashed, not in plaintext', async () => {
-		await ensureTenant(database(), createBody('acme'), now);
+		await ensureTenant(database(), createBody(acme), now);
 
-		await setTenantReadCredential(database(), 'acme', {
+		await setTenantReadCredential(database(), acme, {
 			user: 'reader',
 			password: 'correct-horse-battery-staple'
 		});
-		const row = await storedReadVerifier('acme');
+		const row = await storedReadVerifier(acme);
 
 		expect({
 			user: row.readUser,
@@ -582,9 +585,9 @@ describe('tenant lifecycle operations', () => {
 	});
 
 	it('clears a read credential to empty columns', async () => {
-		await ensureTenant(database(), privateBodyWithRead('acme'), now);
+		await ensureTenant(database(), privateBodyWithRead(acme), now);
 
-		await clearTenantReadCredential(database(), 'acme');
+		await clearTenantReadCredential(database(), acme);
 		const row = await database()
 			.select({
 				readUser: d1Schema.tenant.readUser,
@@ -592,7 +595,7 @@ describe('tenant lifecycle operations', () => {
 				readPasswordSalt: d1Schema.tenant.readPasswordSalt
 			})
 			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, 'acme'))
+			.where(eq(d1Schema.tenant.id, acme))
 			.get();
 
 		expect({
@@ -605,11 +608,11 @@ describe('tenant lifecycle operations', () => {
 	it.each([
 		{
 			name: 'read mode',
-			run: (id: string) => setTenantReadMode(database(), id, 'public')
+			run: (id: TenantId) => setTenantReadMode(database(), id, 'public')
 		},
 		{
 			name: 'read credential',
-			run: (id: string) =>
+			run: (id: TenantId) =>
 				setTenantReadCredential(database(), id, {
 					user: 'reader',
 					password: 'correct-horse-battery-staple'
@@ -617,18 +620,18 @@ describe('tenant lifecycle operations', () => {
 		},
 		{
 			name: 'cleared credential',
-			run: (id: string) => clearTenantReadCredential(database(), id)
+			run: (id: TenantId) => clearTenantReadCredential(database(), id)
 		}
 	])('refuses to set the $name of an offboarding tenant', async ({ run }) => {
-		await ensureTenant(database(), createBody('acme'), now);
-		await setTenantStatus(database(), 'acme', 'offboarding');
+		await ensureTenant(database(), createBody(acme), now);
+		await setTenantStatus(database(), acme, 'offboarding');
 
-		const rejected = await rejectedBy(() => run('acme'));
+		const rejected = await rejectedBy(() => run(acme));
 
 		expect(errorFields(rejected)).toStrictEqual({
 			name: 'TenantRetiredError',
 			status: StatusCodes.GONE,
-			tenant: 'acme'
+			tenant: acme
 		});
 	});
 });

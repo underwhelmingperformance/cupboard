@@ -9,6 +9,8 @@ import {
 	type Sha256HexDigest,
 	type StorePathHash,
 	storePathHashSchema,
+	type TenantId,
+	tenantIdSchema,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
@@ -274,12 +276,13 @@ export async function provisionFixtureTenant(
  * test can prove that route 503s rather than serving under a fallback identity.
  */
 export async function provisionNamedTenant(
-	id: string,
+	name: string,
 	options: {
 		readonly readMode?: 'public' | 'private';
 		configure?: boolean;
 	} = {}
 ): Promise<string> {
+	const id = tenantIdSchema.parse(name);
 	const readMode = options.readMode ?? 'public';
 	const issuer = `${origin}/t/${id}`;
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -350,7 +353,7 @@ export async function suspendTenant(id: string): Promise<void> {
 	await database
 		.update(d1Schema.tenant)
 		.set({ status: 'suspended' })
-		.where(eq(d1Schema.tenant.id, id))
+		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(id)))
 		.run();
 	await invalidateTenantRow(id);
 }
@@ -366,10 +369,10 @@ export async function offboardTenant(id: string): Promise<void> {
 	await database
 		.update(d1Schema.tenant)
 		.set({ status: 'offboarding' })
-		.where(eq(d1Schema.tenant.id, id))
+		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(id)))
 		.run();
 	await invalidateTenantRow(id);
-	await tenantServer(env, id).beginOffboard();
+	await tenantServer(env, tenantIdSchema.parse(id)).beginOffboard();
 }
 
 /** A tenant's registry row, for asserting the offboarding lifecycle. */
@@ -390,7 +393,7 @@ export async function tenantRow(id: string): Promise<
 			readPasswordSalt: d1Schema.tenant.readPasswordSalt
 		})
 		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.id, id))
+		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(id)))
 		.get();
 
 	if (row === undefined) {
@@ -456,7 +459,7 @@ export async function useTestServer(name: string): Promise<void> {
 }
 
 export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
-	return tenantServer(env, name);
+	return tenantServer(env, tenantIdSchema.parse(name));
 }
 
 /** The Durable Object stub the harness is currently targeting. */
@@ -824,7 +827,7 @@ export async function tenantMaintained(id: string): Promise<boolean> {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({ lastMaintainedAt: d1Schema.tenant.lastMaintainedAt })
 		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.id, id))
+		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(id)))
 		.get();
 
 	return (row?.lastMaintainedAt ?? undefined) !== undefined;
@@ -854,7 +857,7 @@ export async function tenantMaintenanceFailureRow(
 		.from(d1Schema.tenantMaintenanceFailure)
 		.where(
 			and(
-				eq(d1Schema.tenantMaintenanceFailure.tenant, id),
+				eq(d1Schema.tenantMaintenanceFailure.tenant, tenantIdSchema.parse(id)),
 				eq(d1Schema.tenantMaintenanceFailure.pass, pass)
 			)
 		)
@@ -875,7 +878,7 @@ export async function tenantMaintenanceFailureRow(
 /** The D1 reference edges, sorted for deterministic assertions. */
 export async function blobReferenceRows(): Promise<
 	{
-		tenant: string;
+		tenant: TenantId;
 		cache: string;
 		storePathHash: StorePathHash;
 		generation: number;
@@ -897,7 +900,7 @@ export async function blobReferenceRows(): Promise<
 
 /** The per-tenant blob-presence rows, sorted by NAR hash. */
 export async function tenantBlobRows(): Promise<
-	{ tenant: string; narHash: NixSha256HashString; fileSize: number }[]
+	{ tenant: TenantId; narHash: NixSha256HashString; fileSize: number }[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { tenantBlob } })
 		.select()
@@ -928,7 +931,7 @@ export async function casObjectRows(): Promise<
 
 export async function attestationReferenceRows(): Promise<
 	{
-		tenant: string;
+		tenant: TenantId;
 		cache: string;
 		storePathHash: StorePathHash;
 		generation: number;
@@ -950,7 +953,7 @@ export async function attestationReferenceRows(): Promise<
 }
 
 export async function tenantCasBlobRows(): Promise<
-	{ tenant: string; digest: Sha256HexDigest; size: number }[]
+	{ tenant: TenantId; digest: Sha256HexDigest; size: number }[]
 > {
 	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select()
@@ -1067,7 +1070,7 @@ export async function tenantUsagePresent(id: string): Promise<boolean> {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({ tenant: d1Schema.tenantUsage.tenant })
 		.from(d1Schema.tenantUsage)
-		.where(eq(d1Schema.tenantUsage.tenant, id))
+		.where(eq(d1Schema.tenantUsage.tenant, tenantIdSchema.parse(id)))
 		.get();
 
 	return row !== undefined;
@@ -1351,7 +1354,7 @@ export async function pushPath(
 // under a named tenant's `/t/<tenant>/` prefix, the multi-tenant write path. The
 // token must be a write token issued by that tenant's Durable Object.
 export async function pushPathToTenant(
-	tenant: string,
+	tenant: TenantId,
 	token: string,
 	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
@@ -1401,7 +1404,7 @@ export async function pushPathToTenant(
  * offboarding began).
  */
 export async function attemptPushToTenant(
-	tenant: string,
+	tenant: TenantId,
 	token: string,
 	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
@@ -1472,7 +1475,7 @@ export async function attemptPushToTenant(
 // its uploadId. Lets a test assert the cron fan-out drives a named tenant's
 // background verify pass.
 export async function stageDeferredForTenant(
-	tenant: string,
+	tenant: TenantId,
 	token: string,
 	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
@@ -1513,7 +1516,7 @@ export async function stageDeferredForTenant(
 }
 
 function tenantWorkerFetch(
-	tenant: string,
+	tenant: TenantId,
 	path: string,
 	token: string,
 	init: RequestInit
@@ -1747,7 +1750,7 @@ export async function commitUploadViaWorker(
 	uploadId: string,
 	options: { readonly wait?: boolean; readonly tenant?: string } = {}
 ): Promise<CommitResponse> {
-	const tenant = options.tenant ?? fixtureTenant;
+	const tenant = tenantIdSchema.parse(options.tenant ?? fixtureTenant);
 	const response = await tenantWorkerFetch(
 		tenant,
 		`/uploads/${uploadId}/commit`,
@@ -2110,7 +2113,7 @@ export async function expectStatsViaWorker(
 }
 
 export async function expectStatsForTenant(
-	tenant: string,
+	tenant: TenantId,
 	token: string,
 	expected: StatsExpectation
 ): Promise<void> {
@@ -2372,7 +2375,7 @@ export async function uploadStatus(
 // The status a named tenant's `push --wait` would read, queried through the Worker
 // under that tenant's prefix with its own write token.
 export async function tenantUploadStatus(
-	tenant: string,
+	tenant: TenantId,
 	token: string,
 	uploadId: string
 ): Promise<UploadStatusResponse['status']> {
@@ -2642,6 +2645,10 @@ export function uploadMetadata(
 
 export function nixSha256Hash(character: string): NixSha256HashString {
 	return nixSha256HashSchema.parse(`sha256:${character.repeat(52)}`);
+}
+
+export function tenantId(name: string): TenantId {
+	return tenantIdSchema.parse(name);
 }
 
 export function expectSingleUploadDecision(

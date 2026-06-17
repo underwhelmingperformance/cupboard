@@ -1,6 +1,7 @@
 import {
 	type NixSha256HashString,
-	type StorePathHash
+	type StorePathHash,
+	tenantIdSchema
 } from '@cupboard/nix/scalars';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,7 +39,7 @@ let nextTenant = 0;
 
 async function committedTenantPath(seed: string) {
 	nextTenant += 1;
-	const tenant = `demote-test-${String(nextTenant)}`;
+	const tenant = tenantIdSchema.parse(`demote-test-${String(nextTenant)}`);
 	const issuer = await provisionNamedTenant(tenant);
 	const token = await issueTokenForTenant(
 		testServerFor(tenant),
