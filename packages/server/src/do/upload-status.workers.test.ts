@@ -74,7 +74,7 @@ describe('deferred upload status', () => {
 		expect({
 			whilePending,
 			afterVerify,
-			servedNarHash: NarInfo.parse(stored.body).narHash
+			servedNarHash: NarInfo.parse(stored.body).narHash.toString()
 		}).toStrictEqual({
 			whilePending: 'pending',
 			afterVerify: 'absent',

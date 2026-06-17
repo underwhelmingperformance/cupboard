@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { MalformedNarInfoLineError } from './errors.ts';
+import { NixSha256Hash } from './hash.ts';
 import {
 	compressionSchema,
 	hasControlCharacter,
@@ -8,6 +9,7 @@ import {
 	referencesSchema,
 	storePathSchema
 } from './scalars.ts';
+import { StorePath } from './store-path.ts';
 
 export interface NarInfoFields {
 	readonly storePath: string;
@@ -121,12 +123,12 @@ export function parseNarInfo(source: string): NarInfo {
 
 export class NarInfo {
 	constructor(
-		public readonly storePath: string,
+		public readonly storePath: StorePath,
 		public readonly url: string,
 		public readonly compression: 'zstd',
-		public readonly fileHash: string,
+		public readonly fileHash: NixSha256Hash,
 		public readonly fileSize: number,
-		public readonly narHash: string,
+		public readonly narHash: NixSha256Hash,
 		public readonly narSize: number,
 		public readonly references: readonly string[],
 		public readonly deriver?: string,
@@ -138,12 +140,12 @@ export class NarInfo {
 		const parsed = narInfoFieldsSchema.parse(fields);
 
 		return new NarInfo(
-			parsed.storePath,
+			new StorePath(parsed.storePath),
 			parsed.url,
 			parsed.compression,
-			parsed.fileHash,
+			NixSha256Hash.parse(parsed.fileHash),
 			parsed.fileSize,
-			parsed.narHash,
+			NixSha256Hash.parse(parsed.narHash),
 			parsed.narSize,
 			parsed.references,
 			parsed.deriver,
@@ -175,17 +177,18 @@ export class NarInfo {
 	fingerprint(): string {
 		return [
 			'1',
-			this.storePath,
-			this.narHash,
+			this.storePath.value,
+			this.narHash.toString(),
 			String(this.narSize),
 			this.referenceStorePaths().join(',')
 		].join(';');
 	}
 
 	private referenceStorePaths(): readonly string[] {
-		const separator = this.storePath.lastIndexOf('/');
+		const path = this.storePath.value;
+		const separator = path.lastIndexOf('/');
 		const storeDirectory =
-			separator === -1 ? undefined : this.storePath.slice(0, separator);
+			separator === -1 ? undefined : path.slice(0, separator);
 
 		// Nix's canonical fingerprint sorts the full reference store paths, so the
 		// signature must not depend on the order the references arrive in.
@@ -228,12 +231,12 @@ export class NarInfo {
 
 	toFields(): NarInfoFields {
 		return {
-			storePath: this.storePath,
+			storePath: this.storePath.value,
 			url: this.url,
 			compression: this.compression,
-			fileHash: this.fileHash,
+			fileHash: this.fileHash.toString(),
 			fileSize: this.fileSize,
-			narHash: this.narHash,
+			narHash: this.narHash.toString(),
 			narSize: this.narSize,
 			references: this.references,
 			deriver: this.deriver,

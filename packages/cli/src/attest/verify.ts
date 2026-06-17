@@ -2,7 +2,6 @@ import { readFile as nodeReadFile } from 'node:fs/promises';
 
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
-import { StorePath } from '@cupboard/nix/store-path';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import { bundleFromJSON, isBundleWithDsseEnvelope } from '@sigstore/bundle';
 import { TrustedRoot } from '@sigstore/protobuf-specs';
@@ -208,17 +207,17 @@ export async function verifyRemoteAttestations(
 		throw new Error('Remote narinfo signature did not verify');
 	}
 
-	const actualStorePathHash = StorePath.hash(narInfo.storePath);
+	const actualStorePathHash = narInfo.storePath.hash;
 
 	if (actualStorePathHash !== options.storePathHash) {
 		throw new RemoteNarInfoStorePathMismatchError(
 			options.storePathHash,
 			actualStorePathHash,
-			narInfo.storePath
+			narInfo.storePath.value
 		);
 	}
 
-	const expectedSubject = NixSha256Hash.parse(narInfo.narHash).digestHex();
+	const expectedSubject = narInfo.narHash.digestHex();
 	const descriptors = await fetchAttestationList(
 		fetcher,
 		`${base}/attestations/${options.storePathHash}`,
