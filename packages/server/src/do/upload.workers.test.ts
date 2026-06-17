@@ -425,7 +425,10 @@ describe('upload flow', () => {
 
 		await expectNarResponse(metadata.narHash, 'GET');
 		await expectNarResponse(metadata.narHash, 'HEAD');
-		await expectNarResponse(metadata.narHash.replace(':', '%3A'), 'GET');
+		await expectNarResponse(
+			NixSha256Hash.parse(metadata.narHash).toUrlSegment(),
+			'GET'
+		);
 		await expectConditionalNotModified(
 			`/nar/${metadata.narHash}.nar.zst`,
 			readFetch
