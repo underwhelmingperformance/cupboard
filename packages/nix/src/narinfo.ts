@@ -7,6 +7,7 @@ import {
 	hasControlCharacter,
 	nixSha256HashSchema,
 	referencesSchema,
+	type StorePathBasename,
 	storePathSchema
 } from './scalars.ts';
 import { StorePath } from './store-path.ts';
@@ -130,7 +131,7 @@ export class NarInfo {
 		public readonly fileSize: number,
 		public readonly narHash: NixSha256Hash,
 		public readonly narSize: number,
-		public readonly references: readonly string[],
+		public readonly references: readonly StorePathBasename[],
 		public readonly deriver?: string,
 		public readonly ca?: string,
 		public readonly sigs: readonly string[] = []
