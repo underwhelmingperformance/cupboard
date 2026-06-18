@@ -37,6 +37,11 @@ repos:
           - .github/workflows
           - actions
 
+  - repo: https://github.com/underwhelmingperformance/wrapscallion
+    rev: v0.2.0
+    hooks:
+      - id: wrapscallion-system
+
   - repo: local
     hooks:
       - id: pnpm-check-deps
@@ -122,12 +127,3 @@ repos:
             tests/.+\.(json|ts|tsx)|
             tsconfig(\.base)?\.json
           )$
-
-      - id: pnpm-lint-commit-message
-        name: pnpm lint:commit-messages
-        entry: >-
-          pnpm --config.verify-deps-before-run=false lint:commit-messages
-          --no-colour --edit
-        language: system
-        stages:
-          - commit-msg
