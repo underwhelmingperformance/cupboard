@@ -1,4 +1,4 @@
-import type { Reporter, ResultRow } from '@cupboard/reporter';
+import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError } from 'cloudflare';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 
@@ -31,6 +31,7 @@ function isCpuLimitsUnsupported(error: unknown): boolean {
  */
 async function uploadScriptForPlan(
 	deps: DeployDeps,
+	context: PhaseContext,
 	scriptName: string,
 	metadata: ScriptUpdateParams.Metadata,
 	bundle: WorkerBundle
@@ -42,7 +43,7 @@ async function uploadScriptForPlan(
 			throw error;
 		}
 
-		deps.reporter.warn(
+		context.warn(
 			'CPU limit not applied',
 			`${scriptName}: this plan does not support CPU limits, so the Worker runs within the plan's CPU budget`
 		);
@@ -214,7 +215,7 @@ async function configureTriggers(
 	const { api, reporter, options, artifact } = deps;
 	const control = artifact.config.control;
 
-	await reporter.phase('Configuring triggers', async () => {
+	await reporter.phase('Configuring triggers', async (context) => {
 		for (const consumer of control.queueConsumers) {
 			const queueId = await api.ensureQueue(consumer.queue);
 
@@ -235,7 +236,7 @@ async function configureTriggers(
 			const zoneId = await api.findZoneId(zoneOf(options.domain));
 
 			if (zoneId === undefined) {
-				deps.reporter.warn(
+				context.warn(
 					'No Cloudflare zone for',
 					`${options.domain}; add the domain to this account, then re-run.`
 				);
@@ -327,23 +328,28 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 		collectResources(artifact.config)
 	);
 
-	await reporter.phase('Applying D1 migrations', async (context) => {
-		const databaseId = resources.d1.get(
-			artifact.config.tenant.d1Databases[0]?.databaseName ?? ''
+	const databaseId = resources.d1.get(
+		artifact.config.tenant.d1Databases[0]?.databaseName ?? ''
+	);
+
+	if (databaseId !== undefined) {
+		const applied = await applyD1Migrations(
+			{
+				query: (database, sql) => api.d1Query(database, sql),
+				queryRows: (database, sql) => api.d1QueryRows(database, sql)
+			},
+			databaseId,
+			artifact.d1Migrations
 		);
 
-		if (databaseId !== undefined) {
-			const applied = await applyD1Migrations(
-				{
-					query: (database, sql) => api.d1Query(database, sql),
-					queryRows: (database, sql) => api.d1QueryRows(database, sql)
-				},
-				databaseId,
-				artifact.d1Migrations
+		if (applied.length > 0) {
+			reporter.success(
+				`Applying D1 migrations · applied ${String(applied.length)}`
 			);
-			context.fact('applied', applied.length);
+		} else {
+			reporter.step('Applying D1 migrations · no migrations to apply');
 		}
-	});
+	}
 
 	const tag = await api.getScriptMigrationTag(artifact.config.tenant.name);
 	const migration = computeDurableObjectMigration(
@@ -391,13 +397,14 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 	);
 
 	if (unchanged.tenant) {
-		reporter.info(
+		reporter.step(
 			`${artifact.config.tenant.name} already runs this build and configuration; upload skipped.`
 		);
 	} else {
-		await reporter.phase('Uploading tenant worker', () =>
+		await reporter.phase('Uploading tenant worker', (context) =>
 			uploadScriptForPlan(
 				deps,
+				context,
 				artifact.config.tenant.name,
 				tenantMetadata,
 				artifact.tenantBundle
@@ -406,13 +413,14 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 	}
 
 	if (unchanged.control) {
-		reporter.info(
+		reporter.step(
 			`${artifact.config.control.name} already runs this build and configuration; upload skipped.`
 		);
 	} else {
-		await reporter.phase('Uploading control worker', () =>
+		await reporter.phase('Uploading control worker', (context) =>
 			uploadScriptForPlan(
 				deps,
+				context,
 				artifact.config.control.name,
 				controlMetadata,
 				artifact.controlBundle
@@ -439,6 +447,8 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 
 			context.fact('secrets', secretWork.length);
 		});
+	} else {
+		reporter.step('Setting secrets · no secrets to set');
 	}
 
 	await configureTriggers(deps, resources);

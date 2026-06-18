@@ -188,6 +188,12 @@ describe('createCliUi machine narration', () => {
 		expect(await ui.menu('Pick', [{ value: 'a', label: 'A' }])).toBeUndefined();
 	});
 
+	it('hands out one shared reporter so narration and work units coordinate', () => {
+		const { ui } = machineUi();
+
+		expect(ui.reporter()).toBe(ui.reporter());
+	});
+
 	it('routes progress and steps through the JSON reporter', async () => {
 		const { ui, stream } = machineUi();
 		const reporter = ui.reporter();
@@ -250,6 +256,7 @@ describe('fakeCliUi', () => {
 				cancellations: [],
 				infos: [],
 				successes: [],
+				steps: [],
 				warnings: [],
 				notes: [],
 				data: ['out'],

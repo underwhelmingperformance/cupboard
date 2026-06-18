@@ -70,6 +70,7 @@ function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 		cancelled: recordUiCall(uiCalls, 'cancelled'),
 		info: recordUiCall(uiCalls, 'info'),
 		success: recordUiCall(uiCalls, 'success'),
+		step: recordUiCall(uiCalls, 'step'),
 		warn: recordUiCall(uiCalls, 'warn'),
 		note: recordUiCall(uiCalls, 'note'),
 		data: recordUiCall(uiCalls, 'data'),
@@ -111,12 +112,18 @@ function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 		openBrowser: recordUiCall(uiCalls, 'openBrowser'),
 		reporter: () => ({
 			phase: (_label, body) =>
-				Promise.resolve(body({ fact: recordUiCall(uiCalls, 'fact') })),
+				Promise.resolve(
+					body({
+						fact: recordUiCall(uiCalls, 'fact'),
+						warn: recordUiCall(uiCalls, 'reporter.warn')
+					})
+				),
 			progress: (_label, _options, body) =>
 				Promise.resolve(
 					body({
 						advance: recordUiCall(uiCalls, 'reporter.progress.advance'),
-						fact: recordUiCall(uiCalls, 'reporter.progress.fact')
+						fact: recordUiCall(uiCalls, 'reporter.progress.fact'),
+						warn: recordUiCall(uiCalls, 'reporter.warn')
 					})
 				),
 			steps: (_label, body) =>
@@ -127,13 +134,16 @@ function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 							message: recordUiCall(uiCalls, 'reporter.steps.group.message'),
 							success: recordUiCall(uiCalls, 'reporter.steps.group.success'),
 							error: recordUiCall(uiCalls, 'reporter.steps.group.error')
-						})
+						}),
+						warn: recordUiCall(uiCalls, 'reporter.warn')
 					})
 				),
 			result: recordUiCall(uiCalls, 'result'),
 			data: recordUiCall(uiCalls, 'reporter.data'),
 			warn: recordUiCall(uiCalls, 'reporter.warn'),
 			info: recordUiCall(uiCalls, 'reporter.info'),
+			success: recordUiCall(uiCalls, 'reporter.success'),
+			step: recordUiCall(uiCalls, 'reporter.step'),
 			error: recordUiCall(uiCalls, 'reporter.error')
 		})
 	};
@@ -168,6 +178,9 @@ function scriptedUi(script: ReviewScript): DeployUi {
 					body({
 						fact: (label, value) => {
 							facts.push(`${label} ${String(value)}`);
+						},
+						warn: (label, value) => {
+							warnings.push(value === undefined ? label : `${label}: ${value}`);
 						}
 					})
 				),
@@ -179,6 +192,9 @@ function scriptedUi(script: ReviewScript): DeployUi {
 						},
 						fact: (label, value) => {
 							facts.push(`${label} ${String(value)}`);
+						},
+						warn: (label, value) => {
+							warnings.push(value === undefined ? label : `${label}: ${value}`);
 						}
 					})
 				),
@@ -187,6 +203,9 @@ function scriptedUi(script: ReviewScript): DeployUi {
 					body({
 						message: () => {
 							return;
+						},
+						warn: (label, value) => {
+							warnings.push(value === undefined ? label : `${label}: ${value}`);
 						},
 						group: () => ({
 							message: () => {
@@ -211,6 +230,12 @@ function scriptedUi(script: ReviewScript): DeployUi {
 				warnings.push(message);
 			},
 			info: (message) => {
+				infos.push(message);
+			},
+			success: (message) => {
+				infos.push(message);
+			},
+			step: (message) => {
 				infos.push(message);
 			},
 			error: () => {

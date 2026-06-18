@@ -82,6 +82,48 @@ describe('createReporter', () => {
 		]);
 	});
 
+	it('emits a warning raised inside a phase as its own warn event', async () => {
+		const { events, reporter } = jsonReporter();
+
+		const value = await reporter.phase('Uploading', (phase) => {
+			phase.warn('upload failed', 'abc: timeout');
+			phase.fact('paths', 1);
+			return 'done';
+		});
+
+		expect(value).toBe('done');
+		expect(withoutDurations(events())).toStrictEqual([
+			{ event: 'warn', label: 'upload failed', value: 'abc: timeout' },
+			{
+				durationMs: 'number',
+				event: 'phase',
+				facts: { paths: '1' },
+				label: 'Uploading',
+				status: 'ok'
+			}
+		]);
+	});
+
+	it('emits a warning raised inside a steps task as its own warn event', async () => {
+		const { events, reporter } = jsonReporter();
+
+		await reporter.steps('Attestations', (log) => {
+			log.warn('pending verification');
+			return 0;
+		});
+
+		expect(withoutDurations(events())).toStrictEqual([
+			{ event: 'warn', label: 'pending verification' },
+			{
+				durationMs: 'number',
+				event: 'phase',
+				groups: [],
+				label: 'Attestations',
+				status: 'ok'
+			}
+		]);
+	});
+
 	it('emits a failed phase and rethrows', async () => {
 		const { events, reporter } = jsonReporter();
 		const failure = new ReporterTestError('build-failed');

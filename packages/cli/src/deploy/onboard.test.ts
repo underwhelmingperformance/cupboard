@@ -93,6 +93,10 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 			uiCalls.push({ method: 'success' });
 			successes.push(message);
 		},
+		step: (message) => {
+			uiCalls.push({ method: 'step' });
+			infos.push(message);
+		},
 		warn: (message) => {
 			uiCalls.push({ method: 'warn' });
 			warnings.push(message);
@@ -182,6 +186,10 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 						fact: (label, value) => {
 							uiCalls.push({ method: 'fact' });
 							facts.push(`${label} ${String(value)}`);
+						},
+						warn: (label, value) => {
+							uiCalls.push({ method: 'reporter.warn' });
+							warnings.push(value === undefined ? label : `${label}: ${value}`);
 						}
 					})
 				),
@@ -194,6 +202,10 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 					fact: (label, value) => {
 						uiCalls.push({ method: 'reporter.progress.fact' });
 						facts.push(`${label} ${String(value)}`);
+					},
+					warn: (label, value) => {
+						uiCalls.push({ method: 'reporter.warn' });
+						warnings.push(value === undefined ? label : `${label}: ${value}`);
 					}
 				};
 
@@ -215,7 +227,11 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 						error: () => {
 							uiCalls.push({ method: 'reporter.steps.group.error' });
 						}
-					})
+					}),
+					warn: (label, value) => {
+						uiCalls.push({ method: 'reporter.warn' });
+						warnings.push(value === undefined ? label : `${label}: ${value}`);
+					}
 				};
 
 				return Promise.resolve(body(log));
@@ -232,6 +248,14 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 			},
 			info: (message) => {
 				uiCalls.push({ method: 'reporter.info' });
+				infos.push(message);
+			},
+			success: (message) => {
+				uiCalls.push({ method: 'reporter.success' });
+				successes.push(message);
+			},
+			step: (message) => {
+				uiCalls.push({ method: 'reporter.step' });
 				infos.push(message);
 			},
 			error: () => {

@@ -63,20 +63,24 @@ const artifact: DeploymentArtifact = {
 };
 
 const silentReporter: Reporter = {
-	phase: (_label, body) => Promise.resolve(body({ fact: vi.fn() })),
+	phase: (_label, body) =>
+		Promise.resolve(body({ fact: vi.fn(), warn: vi.fn() })),
 	progress: (_label, _options, body) =>
-		Promise.resolve(body({ advance: vi.fn(), fact: vi.fn() })),
+		Promise.resolve(body({ advance: vi.fn(), fact: vi.fn(), warn: vi.fn() })),
 	steps: (_label, body) =>
 		Promise.resolve(
 			body({
 				message: vi.fn(),
-				group: () => ({ message: vi.fn(), success: vi.fn(), error: vi.fn() })
+				group: () => ({ message: vi.fn(), success: vi.fn(), error: vi.fn() }),
+				warn: vi.fn()
 			})
 		),
 	result: vi.fn(),
 	data: vi.fn(),
 	warn: vi.fn(),
 	info: vi.fn(),
+	success: vi.fn(),
+	step: vi.fn(),
 	error: vi.fn()
 };
 
@@ -249,6 +253,7 @@ describe('runDeploy', () => {
 	it('skips both uploads when the live build and configuration match', async () => {
 		const { api, calls } = recordingApi();
 		const skipped: string[] = [];
+		const succeeded: string[] = [];
 
 		// What the deployed scripts would answer: exactly the bindings this
 		// deploy would upload, plus the secrets the upload keeps but the
@@ -279,7 +284,10 @@ describe('runDeploy', () => {
 			api: convergedApi,
 			reporter: {
 				...silentReporter,
-				info: (message) => {
+				success: (message) => {
+					succeeded.push(message);
+				},
+				step: (message) => {
 					skipped.push(message);
 				}
 			},
@@ -291,7 +299,7 @@ describe('runDeploy', () => {
 			}
 		});
 
-		expect({ calls, skipped }).toStrictEqual({
+		expect({ calls, succeeded, skipped }).toStrictEqual({
 			calls: [
 				'r2:cupboard-blobs',
 				'queue:cupboard-maintenance',
@@ -306,9 +314,11 @@ describe('runDeploy', () => {
 				'consumer:qid-cupboard-maintenance->cupboard',
 				'cron:cupboard:0 * * * *'
 			],
+			succeeded: ['Applying D1 migrations · applied 1'],
 			skipped: [
 				'cupboard-tenant already runs this build and configuration; upload skipped.',
-				'cupboard already runs this build and configuration; upload skipped.'
+				'cupboard already runs this build and configuration; upload skipped.',
+				'Setting secrets · no secrets to set'
 			]
 		});
 	});
@@ -385,9 +395,15 @@ describe('runDeploy', () => {
 			api: planLimitedApi,
 			reporter: {
 				...silentReporter,
-				warn: (label, value) => {
-					warnings.push(`${label}: ${value ?? ''}`);
-				}
+				phase: (_label, body) =>
+					Promise.resolve(
+						body({
+							fact: vi.fn(),
+							warn: (label, value) => {
+								warnings.push(`${label}: ${value ?? ''}`);
+							}
+						})
+					)
 			},
 			options: {
 				domain: undefined,

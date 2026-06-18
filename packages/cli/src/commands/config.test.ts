@@ -29,6 +29,9 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 				body({
 					fact() {
 						return;
+					},
+					warn() {
+						return;
 					}
 				})
 			);
@@ -40,6 +43,9 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 						return;
 					},
 					fact() {
+						return;
+					},
+					warn() {
 						return;
 					}
 				})
@@ -63,6 +69,9 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 								return;
 							}
 						};
+					},
+					warn() {
+						return;
 					}
 				})
 			);
@@ -77,6 +86,12 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 			return;
 		},
 		info(message) {
+			captured.infos.push(message);
+		},
+		success(message) {
+			captured.infos.push(message);
+		},
+		step(message) {
 			captured.infos.push(message);
 		},
 		error() {
