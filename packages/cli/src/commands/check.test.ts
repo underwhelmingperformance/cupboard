@@ -16,13 +16,18 @@ interface Captured {
 }
 
 function reporter(captured: Captured): Reporter {
+	const recordWarn = (label: string, value?: string): void => {
+		captured.warnings.push({ label, value });
+	};
+
 	return {
 		phase(_label, body) {
 			return Promise.resolve(
 				body({
 					fact() {
 						return;
-					}
+					},
+					warn: recordWarn
 				})
 			);
 		},
@@ -34,7 +39,8 @@ function reporter(captured: Captured): Reporter {
 					},
 					fact() {
 						return;
-					}
+					},
+					warn: recordWarn
 				})
 			);
 		},
@@ -56,7 +62,8 @@ function reporter(captured: Captured): Reporter {
 								return;
 							}
 						};
-					}
+					},
+					warn: recordWarn
 				})
 			);
 		},
@@ -69,10 +76,14 @@ function reporter(captured: Captured): Reporter {
 		error() {
 			return;
 		},
-		warn(label, value) {
-			captured.warnings.push({ label, value });
-		},
+		warn: recordWarn,
 		info(message) {
+			captured.infos.push(message);
+		},
+		success(message) {
+			captured.infos.push(message);
+		},
+		step(message) {
 			captured.infos.push(message);
 		}
 	};

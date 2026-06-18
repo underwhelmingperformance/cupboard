@@ -1954,6 +1954,10 @@ function reporter(
 	results: ResultRow[][],
 	warnings: { label: string; value?: string }[] = []
 ): Reporter {
+	const recordWarn = (label: string, value?: string): void => {
+		warnings.push({ label, value });
+	};
+
 	return {
 		phase(_label, body) {
 			return Promise.resolve(
@@ -1961,7 +1965,8 @@ function reporter(
 					fact(label, value) {
 						void label;
 						void value;
-					}
+					},
+					warn: recordWarn
 				})
 			);
 		},
@@ -1973,7 +1978,8 @@ function reporter(
 					},
 					fact() {
 						return;
-					}
+					},
+					warn: recordWarn
 				})
 			);
 		},
@@ -1995,7 +2001,8 @@ function reporter(
 								return;
 							}
 						};
-					}
+					},
+					warn: recordWarn
 				})
 			);
 		},
@@ -2008,10 +2015,14 @@ function reporter(
 		error() {
 			return;
 		},
-		warn(label, value) {
-			warnings.push({ label, value });
-		},
+		warn: recordWarn,
 		info(message) {
+			void message;
+		},
+		success(message) {
+			void message;
+		},
+		step(message) {
 			void message;
 		}
 	};
