@@ -15,6 +15,7 @@ import {
 	progress,
 	S_BAR,
 	S_BAR_END,
+	S_WARN,
 	select,
 	spinner,
 	symbol,
@@ -177,7 +178,10 @@ export interface CliUi {
 	outro(message: string): void;
 	cancelled(message: string): void;
 	info(message: string): void;
+	/** Reports a step that completed its work. */
 	success(message: string): void;
+	/** Reports a step skipped because there was nothing to do. */
+	step(message: string): void;
 	warn(message: string): void;
 	note(title: string, rows: readonly ResultRow[]): void;
 	/** Writes a payload to stdout; delegates to {@link Reporter.data}. */
@@ -236,14 +240,17 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	// terminal: there is no human at the keyboard to answer a prompt.
 	const interactive =
 		options.interactive ?? (isInteractive({ mode, stdin, stdout }) && !isCI());
-	const newReporter = (): Reporter =>
+	// One reporter per UI, shared between the UI's own narration and every
+	// `ui.reporter()` caller. There is a single terminal, so the spinner state and
+	// the queue that holds narration back while a spinner animates have to be
+	// shared: a phase started through `ui.reporter()` and an `info` raised through
+	// the UI are output to the same place and must not corrupt each other's
+	// redraw. In machine mode it also means both paths emit the same structured
+	// events.
+	const reporter: Reporter =
 		mode === 'terminal'
 			? clackReporter(options.out, options.signal)
 			: createReporter({ stream: options.stream, out: options.out });
-
-	// A single reporter backs `data`/`info`/`warn` so machine mode emits the same
-	// structured events whether a command calls the UI or its reporter directly.
-	const narrator = newReporter();
 
 	const browserMessages: BrowserMessages = {
 		info: (message) => {
@@ -275,34 +282,23 @@ export function createCliUi(options: CliUiOptions): CliUi {
 				return;
 			}
 
-			narrator.info(message);
+			reporter.info(message);
 		},
 
 		info(message) {
-			if (mode === 'terminal') {
-				log.info(message);
-				return;
-			}
-
-			narrator.info(message);
+			reporter.info(message);
 		},
 
 		success(message) {
-			if (mode === 'terminal') {
-				log.success(message);
-				return;
-			}
+			reporter.success(message);
+		},
 
-			narrator.info(message);
+		step(message) {
+			reporter.step(message);
 		},
 
 		warn(message) {
-			if (mode === 'terminal') {
-				log.warn(message);
-				return;
-			}
-
-			narrator.warn(message);
+			reporter.warn(message);
 		},
 
 		note(title, rows) {
@@ -312,7 +308,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		data(text) {
-			narrator.data(text);
+			reporter.data(text);
 		},
 
 		async confirm(request) {
@@ -321,7 +317,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			}
 
 			if (request.assumeYes ?? assumeYesDefault) {
-				narrator.info(`${request.message} (proceeding: --yes)`);
+				reporter.info(`${request.message} (proceeding: --yes)`);
 				return 'yes';
 			}
 
@@ -439,7 +435,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		reporter() {
-			return newReporter();
+			return reporter;
 		}
 	};
 
@@ -493,40 +489,52 @@ function withElapsed(message: string, startedAt: number): string {
 	return `${message} ${pc.dim(`(${formatDuration(Date.now() - startedAt)})`)}`;
 }
 
+function warnText(label: string, value?: string): string {
+	return value === undefined ? label : `${label}: ${value}`;
+}
+
+interface UnitNotes {
+	warn: (label: string, value?: string) => void;
+	flush: () => void;
+}
+
+/**
+ * Collects the durable warnings a unit of work raises while it animates. clack
+ * draws one region at a time and a {@link log.warn} written into a live spinner
+ * or task log corrupts its redraw, so the warnings are emitted once the unit
+ * ends, when nothing is animating. A `live` sink, where the unit has a surface
+ * that can show them in place (a task log), previews each one as it arrives.
+ */
+function unitNotes(live?: (message: string) => void): UnitNotes {
+	const pending: string[] = [];
+
+	const warn = (label: string, value?: string): void => {
+		const message = warnText(label, value);
+		live?.(message);
+		pending.push(message);
+	};
+
+	const flush = (): void => {
+		for (const message of pending) {
+			log.warn(message);
+		}
+	};
+
+	return { warn, flush };
+}
+
 /**
  * Adapts the {@link Reporter} contract onto clack: a {@link Reporter.phase} is a
  * spinner whose title accumulates its facts, {@link Reporter.progress} a progress
  * bar, {@link Reporter.steps} a task log with grouped sub-steps, and a
- * {@link Reporter.result} a framed card. A warning or info raised while one of
- * these is animating is held until it stops, since interleaving the two corrupts
- * the redraw.
+ * {@link Reporter.result} a framed card. Narration outside a unit prints straight
+ * away; a durable warning raised inside one is held by {@link unitNotes} and
+ * emitted when the unit stops, so it survives a region that clears on success.
  */
 function clackReporter(
 	out: NodeJS.WritableStream = stdout,
 	signal?: AbortSignal
 ): Reporter {
-	let spinning = false;
-	const held: { kind: 'warn' | 'info'; message: string }[] = [];
-
-	const emit = (kind: 'warn' | 'info', message: string): void => {
-		if (spinning) {
-			held.push({ kind, message });
-			return;
-		}
-
-		if (kind === 'warn') {
-			log.warn(message);
-		} else {
-			log.info(message);
-		}
-	};
-
-	const flush = (): void => {
-		for (const entry of held.splice(0)) {
-			emit(entry.kind, entry.message);
-		}
-	};
-
 	return {
 		async phase(label, body) {
 			const indicator = spinner({
@@ -534,8 +542,8 @@ function clackReporter(
 				cancelMessage: `${label} cancelled`
 			});
 			indicator.start(label);
-			spinning = true;
 
+			const notes = unitNotes();
 			const startedAt = Date.now();
 			const facts = new Map<string, string>();
 
@@ -544,7 +552,8 @@ function clackReporter(
 					fact(factLabel, factValue) {
 						facts.set(factLabel, String(factValue));
 						indicator.message(renderFacts(label, facts));
-					}
+					},
+					warn: notes.warn
 				});
 
 				indicator.stop(withElapsed(renderFacts(label, facts), startedAt));
@@ -555,8 +564,7 @@ function clackReporter(
 
 				throw error;
 			} finally {
-				spinning = false;
-				flush();
+				notes.flush();
 			}
 		},
 
@@ -567,8 +575,8 @@ function clackReporter(
 				cancelMessage: `${label} cancelled`
 			});
 			bar.start(label);
-			spinning = true;
 
+			const notes = unitNotes();
 			const startedAt = Date.now();
 			const facts = new Map<string, string>();
 
@@ -580,7 +588,8 @@ function clackReporter(
 					fact(factLabel, factValue) {
 						facts.set(factLabel, String(factValue));
 						bar.message(renderFacts(label, facts));
-					}
+					},
+					warn: notes.warn
 				});
 
 				bar.stop(withElapsed(renderFacts(label, facts), startedAt));
@@ -591,15 +600,16 @@ function clackReporter(
 
 				throw error;
 			} finally {
-				spinning = false;
-				flush();
+				notes.flush();
 			}
 		},
 
 		async steps(label, body) {
 			const task = taskLog({ title: label, signal });
-			spinning = true;
 
+			const notes = unitNotes((message) => {
+				task.message(`${pc.yellow(S_WARN)} ${message}`);
+			});
 			const startedAt = Date.now();
 
 			try {
@@ -621,7 +631,8 @@ function clackReporter(
 								group.error(message);
 							}
 						};
-					}
+					},
+					warn: notes.warn
 				});
 
 				task.success(withElapsed(label, startedAt));
@@ -632,8 +643,7 @@ function clackReporter(
 
 				throw error;
 			} finally {
-				spinning = false;
-				flush();
+				notes.flush();
 			}
 		},
 
@@ -654,11 +664,19 @@ function clackReporter(
 		},
 
 		warn(label, value) {
-			emit('warn', value === undefined ? label : `${label}: ${value}`);
+			log.warn(warnText(label, value));
 		},
 
 		info(message) {
-			emit('info', message);
+			log.info(message);
+		},
+
+		success(message) {
+			log.success(message);
+		},
+
+		step(message) {
+			log.step(message);
 		},
 
 		error(error) {

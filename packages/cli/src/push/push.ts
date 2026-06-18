@@ -282,18 +282,28 @@ async function runPushWithTemporaryDirectory(
 		return;
 	}
 
-	const uploads = await reporter.phase(
+	const uploadDecisions = negotiation.uploads.filter((item) =>
+		needsUpload(item)
+	);
+	const uploads = await reporter.progress(
 		'Preparing missing NARs',
-		async (ctx) => {
-			const decisions = negotiation.uploads.filter((item) => needsUpload(item));
-			ctx.fact('paths', formatCount(decisions.length));
-			const preparedUploads = await prepareUploads(decisions, closure, {
-				client,
-				createNarArchive,
-				compressNar,
-				temporaryDirectory: dependencies.temporaryDirectory
-			});
-			ctx.fact('nars', formatCount(preparedUploads.length));
+		{ total: uploadDecisions.length },
+		async (bar) => {
+			bar.fact('paths', formatCount(uploadDecisions.length));
+			const preparedUploads = await prepareUploads(
+				uploadDecisions,
+				closure,
+				{
+					client,
+					createNarArchive,
+					compressNar,
+					temporaryDirectory: dependencies.temporaryDirectory
+				},
+				() => {
+					bar.advance(1);
+				}
+			);
+			bar.fact('nars', formatCount(preparedUploads.length));
 
 			return preparedUploads;
 		}
@@ -380,7 +390,7 @@ async function runPushWithTemporaryDirectory(
 							stage: 'upload',
 							reason: failureReason(error)
 						});
-						reporter.warn(
+						bar.warn(
 							'upload failed',
 							`${StorePath.basename(storePath)}: ${failureReason(error)}`
 						);
@@ -396,65 +406,74 @@ async function runPushWithTemporaryDirectory(
 	// their sockets and the server's verification pass settles them together,
 	// so committing serially would wait one pass per path. With `--no-wait` a
 	// deferred upload reports `pending` as soon as it is stored.
-	const commit = await reporter.phase('Committing metadata', async (ctx) => {
-		const decisions = negotiation.uploads
-			.filter((decision) => needsCommit(decision))
-			.filter((decision) => !failedUploadIds.has(decision.uploadId));
-		const settled = await Promise.allSettled(
-			decisions.map((decision) =>
-				client.commit(
-					{
-						uploadId: decision.uploadId,
-						storePathHash: decision.storePathHash,
-						narHash: decision.narHash
-					},
-					{ wait, timeoutSeconds: waitTimeoutSeconds }
+	const commitDecisions = negotiation.uploads
+		.filter((decision) => needsCommit(decision))
+		.filter((decision) => !failedUploadIds.has(decision.uploadId));
+	const commit = await reporter.progress(
+		'Committing metadata',
+		{ total: commitDecisions.length },
+		async (bar) => {
+			const settled = await Promise.allSettled(
+				commitDecisions.map((decision) =>
+					client
+						.commit(
+							{
+								uploadId: decision.uploadId,
+								storePathHash: decision.storePathHash,
+								narHash: decision.narHash
+							},
+							{ wait, timeoutSeconds: waitTimeoutSeconds }
+						)
+						.finally(() => {
+							bar.advance(1);
+						})
 				)
-			)
-		);
+			);
 
-		const pending: string[] = [];
-		let committed = 0;
+			const pending: string[] = [];
+			let committed = 0;
 
-		for (const [index, result] of settled.entries()) {
-			const decision = decisions[index];
+			for (const [index, result] of settled.entries()) {
+				const decision = commitDecisions[index];
 
-			if (decision === undefined) {
-				continue;
-			}
-
-			if (result.status === 'rejected') {
-				if (isAbortError(result.reason)) {
-					throw result.reason;
+				if (decision === undefined) {
+					continue;
 				}
 
-				const storePath =
-					storePathByHash.get(decision.storePathHash) ?? decision.storePathHash;
-				const reason = failureReason(result.reason);
-				failures.push({
-					storePathHash: decision.storePathHash,
-					storePath,
-					stage: 'commit',
-					reason
-				});
-				reporter.warn(
-					'commit failed',
-					`${StorePath.basename(storePath)}: ${reason}`
-				);
-				continue;
+				if (result.status === 'rejected') {
+					if (isAbortError(result.reason)) {
+						throw result.reason;
+					}
+
+					const storePath =
+						storePathByHash.get(decision.storePathHash) ??
+						decision.storePathHash;
+					const reason = failureReason(result.reason);
+					failures.push({
+						storePathHash: decision.storePathHash,
+						storePath,
+						stage: 'commit',
+						reason
+					});
+					bar.warn(
+						'commit failed',
+						`${StorePath.basename(storePath)}: ${reason}`
+					);
+					continue;
+				}
+
+				if (result.value.status === 'pending') {
+					pending.push(decision.uploadId);
+				} else {
+					committed += 1;
+				}
 			}
 
-			if (result.value.status === 'pending') {
-				pending.push(decision.uploadId);
-			} else {
-				committed += 1;
-			}
+			bar.fact('committed', formatCount(committed));
+
+			return { pending };
 		}
-
-		ctx.fact('committed', formatCount(committed));
-
-		return { pending };
-	});
+	);
 
 	// Retention is recorded only over a complete, servable push: a failed path
 	// would leave the root pinning a closure that cannot be substituted, and the
@@ -635,7 +654,7 @@ async function attachPushedAttestations(
 		const deferred = prepared.length - ready.length;
 
 		if (deferred > 0) {
-			reporter.warn(
+			log.warn(
 				'pending verification',
 				`${formatCount(deferred)} attestation bundle(s) describe path(s) still awaiting server-side verification; attachment not recorded`
 			);
@@ -902,7 +921,8 @@ interface PrepareUploadsDependencies extends PreparePushPathDependencies {
 async function prepareUploads(
 	decisions: readonly Extract<UploadDecision, { action: 'upload' }>[],
 	closure: readonly NixValidPathInfo[],
-	dependencies: PrepareUploadsDependencies
+	dependencies: PrepareUploadsDependencies,
+	onPrepared?: () => void
 ): Promise<readonly PreparedUpload[]> {
 	const uploads: PreparedUpload[] = [];
 
@@ -921,6 +941,8 @@ async function prepareUploads(
 			uploadUrl: upload.uploadUrl,
 			uploadHeaders: upload.uploadHeaders
 		});
+
+		onPrepared?.();
 	}
 
 	return uploads;

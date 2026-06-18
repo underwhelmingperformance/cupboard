@@ -23,6 +23,7 @@ export interface CliUiCapture {
 	readonly cancellations: string[];
 	readonly infos: string[];
 	readonly successes: string[];
+	readonly steps: string[];
 	readonly warnings: string[];
 	readonly notes: { readonly title: string; readonly body: string }[];
 	readonly data: string[];
@@ -62,7 +63,8 @@ const silentStepLog: StepLog = {
 		message: noop,
 		success: noop,
 		error: noop
-	})
+	}),
+	warn: noop
 };
 
 /**
@@ -77,6 +79,7 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 		cancellations: [],
 		infos: [],
 		successes: [],
+		steps: [],
 		warnings: [],
 		notes: [],
 		data: [],
@@ -86,18 +89,23 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 		opened: []
 	};
 
+	const recordWarn = (label: string, value?: string): void => {
+		captured.warnings.push(value === undefined ? label : `${label}: ${value}`);
+	};
+
 	const reporter: Reporter = {
-		phase: (_label, body) => Promise.resolve(body({ fact: noop })),
+		phase: (_label, body) =>
+			Promise.resolve(body({ fact: noop, warn: recordWarn })),
 		progress: (_label, _options, body) =>
-			Promise.resolve(body({ advance: noop, fact: noop })),
-		steps: (_label, body) => Promise.resolve(body(silentStepLog)),
+			Promise.resolve(body({ advance: noop, fact: noop, warn: recordWarn })),
+		steps: (_label, body) =>
+			Promise.resolve(body({ ...silentStepLog, warn: recordWarn })),
 		result: (payload) => captured.results.push(payload),
 		data: (text) => captured.data.push(text),
-		warn: (label, value) =>
-			captured.warnings.push(
-				value === undefined ? label : `${label}: ${value}`
-			),
+		warn: recordWarn,
 		info: (message) => captured.infos.push(message),
+		success: (message) => captured.successes.push(message),
+		step: (message) => captured.steps.push(message),
 		error: (error) => captured.errors.push(error)
 	};
 
@@ -109,6 +117,7 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 		cancelled: (message) => captured.cancellations.push(message),
 		info: (message) => captured.infos.push(message),
 		success: (message) => captured.successes.push(message),
+		step: (message) => captured.steps.push(message),
 		warn: (message) => captured.warnings.push(message),
 		note: (title, rows) =>
 			captured.notes.push({
@@ -161,9 +170,9 @@ export function capturingReporter(
 	infos: string[] = []
 ): Reporter {
 	return {
-		phase: (_label, body) => Promise.resolve(body({ fact: noop })),
+		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
 		progress: (_label, _options, body) =>
-			Promise.resolve(body({ advance: noop, fact: noop })),
+			Promise.resolve(body({ advance: noop, fact: noop, warn: noop })),
 		steps: (_label, body) => Promise.resolve(body(silentStepLog)),
 		result: (payload) => {
 			results.push([...payload.rows]);
@@ -177,6 +186,8 @@ export function capturingReporter(
 		data: noop,
 		warn: noop,
 		info: (message) => infos.push(message),
+		success: (message) => infos.push(message),
+		step: (message) => infos.push(message),
 		error: noop
 	};
 }

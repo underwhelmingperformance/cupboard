@@ -2,6 +2,13 @@ import { stderr, stdout } from 'node:process';
 
 export interface PhaseContext {
 	fact(label: string, value: string | number): void;
+	/**
+	 * Raise a durable warning that belongs to this unit of work. It is shown as
+	 * soon as the renderer can do so without disturbing the animation and then
+	 * persisted once the unit ends, so it survives a spinner or task log that
+	 * clears on completion.
+	 */
+	warn(label: string, value?: string): void;
 }
 
 /** Drives a quantitative progress bar over a known total. */
@@ -10,6 +17,8 @@ export interface ProgressHandle {
 	advance(step?: number, message?: string): void;
 	/** Annotate the bar with a live key/value, like {@link PhaseContext.fact}. */
 	fact(label: string, value: string | number): void;
+	/** Raise a durable warning that belongs to this unit; see {@link PhaseContext.warn}. */
+	warn(label: string, value?: string): void;
 }
 
 export interface ProgressOptions {
@@ -28,6 +37,8 @@ export interface StepGroup {
 export interface StepLog {
 	message(message: string): void;
 	group(name: string): StepGroup;
+	/** Raise a durable warning that belongs to this task; see {@link PhaseContext.warn}. */
+	warn(label: string, value?: string): void;
 }
 
 export interface ResultRow {
@@ -78,6 +89,17 @@ export interface Reporter {
 	warn(label: string, value?: string): void;
 	info(message: string): void;
 	/**
+	 * Reports a sub-step that completed its work: a green marker line in terminal
+	 * mode, or one `{event:'success', message}` in JSON mode.
+	 */
+	success(message: string): void;
+	/**
+	 * Reports a sub-step that was skipped because there was nothing to do: a
+	 * neutral marker line in terminal mode, or one `{event:'step', message}` in
+	 * JSON mode.
+	 */
+	step(message: string): void;
+	/**
 	 * Reports a terminal failure: a single red marker line in terminal mode, or
 	 * one `{event:'error', name, message}` in JSON mode.
 	 */
@@ -124,6 +146,14 @@ function createJsonReporter(
 		stream.write(`${JSON.stringify(event)}\n`);
 	}
 
+	function emitWarn(label: string, value?: string): void {
+		emit(
+			value === undefined
+				? { event: 'warn', label }
+				: { event: 'warn', label, value }
+		);
+	}
+
 	return {
 		async phase(label, body) {
 			const facts: Record<string, string> = {};
@@ -133,7 +163,8 @@ function createJsonReporter(
 				const value = await body({
 					fact(factLabel, factValue) {
 						facts[factLabel] = String(factValue);
-					}
+					},
+					warn: emitWarn
 				});
 
 				emit({
@@ -183,7 +214,8 @@ function createJsonReporter(
 					},
 					fact(factLabel, factValue) {
 						facts[factLabel] = String(factValue);
-					}
+					},
+					warn: emitWarn
 				});
 
 				finish('ok', {});
@@ -228,7 +260,8 @@ function createJsonReporter(
 					message(message) {
 						messages.push(message);
 					},
-					group: addGroup
+					group: addGroup,
+					warn: emitWarn
 				});
 
 				emit({
@@ -264,16 +297,18 @@ function createJsonReporter(
 			out.write(`${text}\n`);
 		},
 
-		warn(label, value) {
-			emit(
-				value === undefined
-					? { event: 'warn', label }
-					: { event: 'warn', label, value }
-			);
-		},
+		warn: emitWarn,
 
 		info(message) {
 			emit({ event: 'info', message });
+		},
+
+		success(message) {
+			emit({ event: 'success', message });
+		},
+
+		step(message) {
+			emit({ event: 'step', message });
 		},
 
 		error(error) {
