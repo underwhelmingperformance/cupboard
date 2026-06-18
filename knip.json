@@ -3,7 +3,6 @@
 	"workspaces": {
 		"packages/cli": {},
 		"packages/cli-ui": {},
-		"packages/commit-lint": {},
 		"packages/nix": {},
 		"packages/protocol": {},
 		"packages/reporter": {},
