@@ -121,7 +121,8 @@ async function inboundIssuer(algorithm = 'RS256'): Promise<InboundIssuer> {
 		{ at = now, tokenIssuer = issuer, withExpiry = true }: SignOptions = {}
 	): Promise<string> => {
 		const issuedAt = Math.floor(at.getTime() / 1000);
-		const jwt = new SignJWT(claims)
+		const signJwt = new SignJWT(claims);
+		const jwt = signJwt
 			.setProtectedHeader({ alg: algorithm, kid })
 			.setIssuer(tokenIssuer)
 			.setAudience(audience)
@@ -260,11 +261,11 @@ describe('verifyInboundOidcToken', () => {
 	});
 
 	it('rejects a symmetric algorithm outside the asymmetric allowlist', async () => {
-		const secret = new TextEncoder().encode(
-			'symmetric-secret-key-of-sufficient-length'
-		);
+		const encoder = new TextEncoder();
+		const secret = encoder.encode('symmetric-secret-key-of-sufficient-length');
 		const issuedAt = Math.floor(now.getTime() / 1000);
-		const token = await new SignJWT({ sub: 'owner' })
+		const signJwt = new SignJWT({ sub: 'owner' });
+		const token = await signJwt
 			.setProtectedHeader({ alg: 'HS256', kid })
 			.setIssuer(issuer)
 			.setAudience(audience)

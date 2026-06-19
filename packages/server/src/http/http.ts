@@ -257,7 +257,8 @@ interface TextBodyMetadata {
 }
 
 async function textBodyMetadata(body: string): Promise<TextBodyMetadata> {
-	const bytes = new TextEncoder().encode(body);
+	const encoder = new TextEncoder();
+	const bytes = encoder.encode(body);
 
 	return {
 		etag: `"sha256:${await sha256HexBytes(bytes)}"`,

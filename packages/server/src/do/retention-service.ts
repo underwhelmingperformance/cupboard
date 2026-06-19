@@ -9,7 +9,11 @@ import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 import { mostSpecificPolicy } from '../policy/policy-match.ts';
 
-import { policySummaryFromRow, type ServerContext } from './context.ts';
+import {
+	compareStrings,
+	policySummaryFromRow,
+	type ServerContext
+} from './context.ts';
 
 export class RetentionService {
 	constructor(private readonly context: ServerContext) {}
@@ -20,13 +24,14 @@ export class RetentionService {
 			.from(schema.retentionPolicies)
 			.all()
 			.map((row) => policySummaryFromRow(row))
-			.toSorted((left, right) => (left.id > right.id ? 1 : -1));
+			.toSorted((left, right) => compareStrings(left.id, right.id));
 
 		return { policies };
 	}
 
 	addPolicy(body: ParsedRetentionPolicyAddBody): RetentionPolicySummary {
 		const id = crypto.randomUUID();
+		const now = new Date();
 
 		this.context.db
 			.insert(schema.retentionPolicies)
@@ -35,7 +40,7 @@ export class RetentionService {
 				scope: body.scope,
 				pattern: body.pattern,
 				defaultTtlSeconds: body.ttlSeconds,
-				createdAt: new Date().toISOString()
+				createdAt: now.toISOString()
 			})
 			.run();
 

@@ -35,7 +35,7 @@ type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
 // An absent row is `absent`; a terminal verdict maps straight across; any in-flight
 // or not-yet-committed verdict (null, `pending`, `committing`) is `pending`.
 function uploadStatusOf(
-	pending: { readonly verdict: PendingVerdict } | undefined
+	pending: undefined | { readonly verdict: PendingVerdict }
 ): UploadStatusResponse['status'] {
 	if (pending === undefined) {
 		return 'absent';
@@ -209,7 +209,9 @@ export class UploadsService {
 			throw new UploadCacheMismatchError(uploadId, pending.cache, cache);
 		}
 
-		if (pending.expiresAt < new Date().toISOString()) {
+		const now = new Date();
+
+		if (pending.expiresAt < now.toISOString()) {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
 				pending.r2Key,

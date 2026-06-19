@@ -40,7 +40,7 @@ export interface CacheClient {
 function parsePriority(value: string): number {
 	const priority = Number(value);
 
-	if (!Number.isInteger(priority) || priority < 0) {
+	if (!Number.isSafeInteger(priority) || priority < 0) {
 		throw new InvalidCachePriorityError(value);
 	}
 

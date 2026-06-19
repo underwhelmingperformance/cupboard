@@ -99,12 +99,13 @@ const jwtAlgorithm = authJwtAlgorithm;
 const clockToleranceSeconds = accessJwtClockToleranceSeconds;
 
 export function scheduledAccessKeyRetireAt(rotatedAt: Date): string {
-	return new Date(
+	const retireAt = new Date(
 		rotatedAt.getTime() +
 			Math.max(adminJwtTtlSeconds, writeJwtTtlSeconds) * 1000 +
 			accessJwtClockToleranceSeconds * 1000 +
 			accessJwtRetirementMarginSeconds * 1000
-	).toISOString();
+	);
+	return retireAt.toISOString();
 }
 
 export async function generateAuthKeyPair(): Promise<{
@@ -138,10 +139,11 @@ export async function issueAccessJwt(
 
 	// Audit claims are spread first so the grants claim below always wins; the
 	// registered claims set via the builder cannot be clobbered by them either.
-	return new SignJWT({
+	const jwt = new SignJWT({
 		...options.auditClaims,
 		[authorizationDetailsClaim]: options.grants
-	})
+	});
+	return jwt
 		.setProtectedHeader({
 			alg: jwtAlgorithm,
 			typ: accessTokenType,
@@ -163,29 +165,32 @@ export async function verifyAccessJwt(
 	options: VerifyAccessJwtOptions,
 	now: Date
 ): Promise<AccessClaims> {
-	const verified = await jwtVerify(
-		token,
-		async (header) => {
-			const match = keys.find((entry) => entry.kid === header.kid);
+	let verified: Awaited<ReturnType<typeof jwtVerify>>;
+	try {
+		verified = await jwtVerify(
+			token,
+			async (header) => {
+				const match = keys.find((entry) => entry.kid === header.kid);
 
-			if (match === undefined) {
-				throw new Error('no verification key for the token key id');
+				if (match === undefined) {
+					throw new Error('no verification key for the token key id');
+				}
+
+				return importJWK(match.publicJwk, jwtAlgorithm);
+			},
+			{
+				issuer: options.issuer,
+				audience: options.audience,
+				algorithms: [jwtAlgorithm],
+				typ: accessTokenType,
+				requiredClaims: ['exp', 'nbf'],
+				clockTolerance: clockToleranceSeconds,
+				currentDate: now
 			}
-
-			return importJWK(match.publicJwk, jwtAlgorithm);
-		},
-		{
-			issuer: options.issuer,
-			audience: options.audience,
-			algorithms: [jwtAlgorithm],
-			typ: accessTokenType,
-			requiredClaims: ['exp', 'nbf'],
-			clockTolerance: clockToleranceSeconds,
-			currentDate: now
-		}
-	).catch((error: unknown) => {
+		);
+	} catch (error: unknown) {
 		throw new AccessTokenVerificationError({ cause: error });
-	});
+	}
 
 	const subject = verified.payload.sub;
 

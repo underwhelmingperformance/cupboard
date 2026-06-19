@@ -91,7 +91,7 @@ export function expandAllow(values: readonly string[]): {
 	const rootActions = new Set<string>();
 
 	for (const value of values) {
-		if (!(value in allowExpansions)) {
+		if (!Object.hasOwn(allowExpansions, value)) {
 			throw new UnknownAllowError(value);
 		}
 
@@ -135,7 +135,7 @@ export function collectSubstitutions(options: {
 
 	const add = (substitutions: Record<string, Substitution>): void => {
 		for (const [variable, substitution] of Object.entries(substitutions)) {
-			if (variable in merged) {
+			if (Object.hasOwn(merged, variable)) {
 				throw new DuplicateCaptureVariableError(variable);
 			}
 
@@ -144,7 +144,7 @@ export function collectSubstitutions(options: {
 	};
 
 	if (options.templateSource !== undefined) {
-		if (!(options.templateSource in templateSources)) {
+		if (!Object.hasOwn(templateSources, options.templateSource)) {
 			throw new UnknownTemplateSourceError(options.templateSource);
 		}
 
@@ -205,7 +205,7 @@ export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 		actions: [...cacheActions, ...rootActions],
 		resources: {
 			cache: cacheBinding(options, substitutions),
-			...(wantsRoot ? { root: rootBinding(options, substitutions) } : {})
+			...(wantsRoot && { root: rootBinding(options, substitutions) })
 		}
 	});
 }
@@ -270,7 +270,7 @@ export function buildAddBody(options: AddBodyOptions): OidcTrustAddBody {
 		audience: options.audience,
 		claims: options.claims,
 		permittedGrants: options.permittedGrants,
-		...(options.display === undefined ? {} : { display: options.display })
+		...(options.display !== undefined && { display: options.display })
 	});
 
 	if (!parsed.success) {

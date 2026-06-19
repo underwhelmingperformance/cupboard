@@ -29,18 +29,17 @@ function bindingsFor(
 	worker: WorkerConfig,
 	resources: ResolvedResources
 ): Binding[] {
-	const bindings: Binding[] = [];
-
-	for (const durableObject of worker.durableObjects) {
-		bindings.push({
+	const bindings: Binding[] = Array.from(
+		worker.durableObjects,
+		(durableObject) => ({
 			type: 'durable_object_namespace',
 			name: durableObject.binding,
 			class_name: durableObject.className,
-			...(durableObject.scriptName === undefined
-				? {}
-				: { script_name: durableObject.scriptName })
-		});
-	}
+			...(durableObject.scriptName !== undefined && {
+				script_name: durableObject.scriptName
+			})
+		})
+	);
 
 	for (const bucket of worker.r2Buckets) {
 		bindings.push({
@@ -111,7 +110,7 @@ export function buildScriptMetadata(
 		observability: { enabled: worker.observability },
 		keep_bindings: ['secret_text'],
 		bindings: bindingsFor(worker, resources),
-		...(worker.cpuMs === undefined ? {} : { limits: { cpu_ms: worker.cpuMs } }),
-		...(migration === undefined ? {} : { migrations: migration })
+		...(worker.cpuMs !== undefined && { limits: { cpu_ms: worker.cpuMs } }),
+		...(migration !== undefined && { migrations: migration })
 	};
 }

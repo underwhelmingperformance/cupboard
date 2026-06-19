@@ -22,13 +22,14 @@ describe('R2Presigner', () => {
 
 	it('produces a stable presigned PUT URL', async () => {
 		const presigner = new R2Presigner(options);
-		const url = new URL(
-			await presigner.presignPutUrl({
-				key: options.key,
-				checksumSha256: base64(new Uint8Array(32).fill(7)),
-				expiresSeconds: 900
-			})
-		);
+		const checksumBytes = new Uint8Array(32);
+		checksumBytes.fill(7);
+		const presignedUrl = await presigner.presignPutUrl({
+			key: options.key,
+			checksumSha256: base64(checksumBytes),
+			expiresSeconds: 900
+		});
+		const url = new URL(presignedUrl);
 		const parameters = Object.fromEntries(url.searchParams);
 
 		expect({

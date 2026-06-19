@@ -5,13 +5,17 @@ import { fromNixBase32, NixSha256Hash } from './hash.ts';
 
 describe('NixSha256Hash', () => {
 	it('renders the digest as lowercase hex', () => {
-		const hash = NixSha256Hash.fromDigest(new Uint8Array(32).fill(0x09));
+		const digest = new Uint8Array(32);
+		digest.fill(0x09);
+		const hash = NixSha256Hash.fromDigest(digest);
 
 		expect(hash.digestHex()).toBe('09'.repeat(32));
 	});
 
 	it('percent-encodes the colon for a URL path segment', () => {
-		const hash = NixSha256Hash.fromDigest(new Uint8Array(32).fill(0x09));
+		const digest = new Uint8Array(32);
+		digest.fill(0x09);
+		const hash = NixSha256Hash.fromDigest(digest);
 
 		expect(hash.toUrlSegment()).toBe(`sha256%3A${hash.toString().slice(7)}`);
 	});

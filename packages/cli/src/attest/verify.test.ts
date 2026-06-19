@@ -212,10 +212,11 @@ async function signedNarInfo(hash: string = storePathHash): Promise<{
 		sigs: []
 	});
 	const keyPair = await generateSigningKeyPair();
+	const encoder = new TextEncoder();
 	const signature = await crypto.subtle.sign(
 		'Ed25519',
 		keyPair.privateKey,
-		new TextEncoder().encode(unsigned.fingerprint())
+		encoder.encode(unsigned.fingerprint())
 	);
 
 	return {
@@ -403,26 +404,29 @@ describe('local attestation verification', () => {
 	});
 
 	it('rejects a verified bundle whose subject does not match the NAR hash', async () => {
-		const outcome = await verifyLocalAttestations(
-			{
-				bundles: ['bundle.sigstore.json'],
-				narHash,
-				predicateType,
-				certificateIdentity: policy.identity,
-				certificateOidcIssuer: policy.issuer
-			},
-			{
-				readFile: () => Promise.resolve(new Uint8Array([1])),
-				verify: () =>
-					Promise.resolve({
+		const outcome = await (async () => {
+			try {
+				const results = await verifyLocalAttestations(
+					{
+						bundles: ['bundle.sigstore.json'],
+						narHash,
 						predicateType,
-						subjectDigests: ['0'.repeat(64)],
-						signer: verifiedSigner(policy)
-					})
-			}
-		).then(
-			(results) => ({ results }),
-			(error_: unknown) => {
+						certificateIdentity: policy.identity,
+						certificateOidcIssuer: policy.issuer
+					},
+					{
+						readFile: () => Promise.resolve(new Uint8Array([1])),
+						verify: () =>
+							Promise.resolve({
+								predicateType,
+								subjectDigests: ['0'.repeat(64)],
+								signer: verifiedSigner(policy)
+							})
+					}
+				);
+
+				return { results };
+			} catch (error_: unknown) {
 				const error = z
 					.instanceof(AttestationSubjectMismatchError)
 					.parse(error_);
@@ -435,7 +439,7 @@ describe('local attestation verification', () => {
 					}
 				};
 			}
-		);
+		})();
 
 		expect(outcome).toStrictEqual({
 			error: {
@@ -447,26 +451,29 @@ describe('local attestation verification', () => {
 	});
 
 	it('rejects a verified bundle whose predicate type does not match policy', async () => {
-		const outcome = await verifyLocalAttestations(
-			{
-				bundles: ['bundle.sigstore.json'],
-				narHash,
-				predicateType,
-				certificateIdentity: policy.identity,
-				certificateOidcIssuer: policy.issuer
-			},
-			{
-				readFile: () => Promise.resolve(new Uint8Array([1])),
-				verify: () =>
-					Promise.resolve({
-						predicateType: 'https://example.test/other',
-						subjectDigests: [narDigest],
-						signer: verifiedSigner(policy)
-					})
-			}
-		).then(
-			(results) => ({ results }),
-			(error_: unknown) => {
+		const outcome = await (async () => {
+			try {
+				const results = await verifyLocalAttestations(
+					{
+						bundles: ['bundle.sigstore.json'],
+						narHash,
+						predicateType,
+						certificateIdentity: policy.identity,
+						certificateOidcIssuer: policy.issuer
+					},
+					{
+						readFile: () => Promise.resolve(new Uint8Array([1])),
+						verify: () =>
+							Promise.resolve({
+								predicateType: 'https://example.test/other',
+								subjectDigests: [narDigest],
+								signer: verifiedSigner(policy)
+							})
+					}
+				);
+
+				return { results };
+			} catch (error_: unknown) {
 				const error = z
 					.instanceof(AttestationPredicateTypeMismatchError)
 					.parse(error_);
@@ -479,7 +486,7 @@ describe('local attestation verification', () => {
 					}
 				};
 			}
-		);
+		})();
 
 		expect(outcome).toStrictEqual({
 			error: {
@@ -507,7 +514,8 @@ describe('remote attestation verification', () => {
 		}[] = [];
 		const fetcher: typeof fetch = (input, init) => {
 			const url = fetchInputUrl(input);
-			const authorisation = new Headers(init?.headers).get('authorization');
+			const requestHeaders = new Headers(init?.headers);
+			const authorisation = requestHeaders.get('authorization');
 			recordedCalls.push({
 				url,
 				authorisation: authorisation ?? undefined
@@ -636,27 +644,30 @@ describe('remote attestation verification', () => {
 			return Promise.resolve(new Response('not found', { status: 404 }));
 		};
 
-		const outcome = await verifyRemoteAttestations(
-			{
-				url: 'https://cupboard.test/t/acme',
-				storePathHash,
-				predicateType,
-				trustedPublicKey: replayedNarInfo.publicKey,
-				certificateIdentity: policy.identity,
-				certificateOidcIssuer: policy.issuer
-			},
-			{
-				fetch: fetcher,
-				verify: () =>
-					Promise.resolve({
+		const outcome = await (async () => {
+			try {
+				const results = await verifyRemoteAttestations(
+					{
+						url: 'https://cupboard.test/t/acme',
+						storePathHash,
 						predicateType,
-						subjectDigests: [narDigest],
-						signer: verifiedSigner(policy)
-					})
-			}
-		).then(
-			(results) => ({ results }),
-			(error_: unknown) => {
+						trustedPublicKey: replayedNarInfo.publicKey,
+						certificateIdentity: policy.identity,
+						certificateOidcIssuer: policy.issuer
+					},
+					{
+						fetch: fetcher,
+						verify: () =>
+							Promise.resolve({
+								predicateType,
+								subjectDigests: [narDigest],
+								signer: verifiedSigner(policy)
+							})
+					}
+				);
+
+				return { results };
+			} catch (error_: unknown) {
 				const error = z
 					.instanceof(RemoteNarInfoStorePathMismatchError)
 					.parse(error_);
@@ -670,7 +681,7 @@ describe('remote attestation verification', () => {
 					}
 				};
 			}
-		);
+		})();
 
 		expect({ outcome, fetches }).toStrictEqual({
 			outcome: {

@@ -156,9 +156,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`d1qr:${sql.slice(0, 12)}`);
 				return Promise.resolve([]);
 			},
-			getScriptMigrationTag() {
-				return Promise.resolve('v0');
-			},
+			getScriptMigrationTag: () => Promise.resolve('v0'),
 			getScriptBindings: () => {
 				recordFallbackApiCall(calls, 'getScriptBindings');
 				return Promise.resolve(absentRows());

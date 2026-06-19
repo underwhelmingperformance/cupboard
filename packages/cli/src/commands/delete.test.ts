@@ -101,33 +101,34 @@ describe('runDelete', () => {
 		const calls: Parameters<DeleteClient['remove']>[0][] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
-		const outcome = await runDelete('_default', '/tmp/not-a-store-path', ui, {
-			remove(input) {
-				calls.push(input);
+		let outcome:
+			| { value: Awaited<ReturnType<typeof runDelete>> }
+			| { error: { name: string; storePath: string } };
+		try {
+			await runDelete('_default', '/tmp/not-a-store-path', ui, {
+				remove(input) {
+					calls.push(input);
 
-				return Promise.resolve({
-					storePathHash: input.hash,
-					deleted: false,
-					narScheduledForDeletion: false
-				});
-			}
-		}).then(
-			(value) => ({ value }),
-			(error_: unknown) => {
-				expect(error_).toBeInstanceOf(InvalidStorePathError);
+					return Promise.resolve({
+						storePathHash: input.hash,
+						deleted: false,
+						narScheduledForDeletion: false
+					});
+				}
+			});
+			outcome = { value: undefined };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(InvalidStorePathError);
 
-				const name =
-					error_ instanceof InvalidStorePathError
-						? error_.name
-						: String(error_);
-				const storePath =
-					error_ instanceof InvalidStorePathError
-						? error_.storePath
-						: String(error_);
+			const name =
+				error_ instanceof InvalidStorePathError ? error_.name : String(error_);
+			const storePath =
+				error_ instanceof InvalidStorePathError
+					? error_.storePath
+					: String(error_);
 
-				return { error: { name, storePath } };
-			}
-		);
+			outcome = { error: { name, storePath } };
+		}
 
 		expect({ outcome, calls, results: captured.results }).toStrictEqual({
 			outcome: {

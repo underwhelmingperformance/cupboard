@@ -40,6 +40,16 @@ export type OidcLoginErrorKind =
 	| 'unsupported-device-flow';
 
 export class OidcLoginError extends CliError {
+	readonly kind: OidcLoginErrorKind;
+
+	readonly issuer: string | undefined;
+
+	readonly metadataIssuer: string | undefined;
+
+	readonly providerError: string | undefined;
+
+	readonly status: number | undefined;
+
 	constructor(message: string, options: OidcLoginErrorOptions = {}) {
 		super(
 			message,
@@ -52,12 +62,6 @@ export class OidcLoginError extends CliError {
 		this.providerError = options.providerError;
 		this.status = options.status;
 	}
-
-	readonly kind: OidcLoginErrorKind;
-	readonly issuer: string | undefined;
-	readonly metadataIssuer: string | undefined;
-	readonly providerError: string | undefined;
-	readonly status: number | undefined;
 }
 
 /** Base: the authorization server declined the login. */
@@ -168,8 +172,8 @@ export interface OidcLoginEndpoints {
 }
 
 // The endpoints carry the authorization code, PKCE verifier and device code, so
-// they are held to the same transport rule as the issuer: https, or http only
-// for loopback. A tampered discovery document cannot redirect them to plain http.
+// they are held to the same transport rule as the issuer: HTTPS, or HTTP only
+// for loopback. A tampered discovery document cannot redirect them to plain HTTP.
 const endpointUrl = z.url().refine(isAllowedIssuerUrl);
 
 const endpointsSchema = z.object({
@@ -181,7 +185,7 @@ const endpointsSchema = z.object({
 
 /**
  * Reads an issuer's authorization, token and device endpoints from its OIDC
- * metadata. The issuer must be an https URL (loopback excepted) and the
+ * metadata. The issuer must be an HTTPS URL (loopback excepted) and the
  * document's own `issuer` must match it, so a misconfigured or hostile document
  * cannot send the login flow to another provider's endpoints.
  */
@@ -201,7 +205,6 @@ export async function discoverOidcLogin(
 		);
 	}
 
-	let payload: unknown;
 	let response: Response;
 
 	try {
@@ -229,6 +232,8 @@ export async function discoverOidcLogin(
 			status: response.status
 		});
 	}
+
+	let payload: unknown;
 
 	try {
 		payload = await response.json();
@@ -343,7 +348,7 @@ export function buildAuthorizeUrl(parameters: AuthorizeUrlParameters): string {
 	url.searchParams.set('code_challenge', parameters.challenge);
 	url.searchParams.set('code_challenge_method', 'S256');
 
-	return url.toString();
+	return url.href;
 }
 
 /** Where the loopback redirect is served; defaults match the tenant login. */
@@ -416,11 +421,13 @@ export async function obtainAuthorizationCode(
 		// The redirect can arrive while `openBrowser` is still pending, so the
 		// browser launch and the wait for the code are awaited together: either
 		// failing fails the login, and neither rejection goes unobserved.
+		const openBrowserDeferred = async (): Promise<void> => {
+			await Promise.resolve();
+
+			return options.openBrowser(authorizeUrl);
+		};
 		const [, code] = await Promise.all([
-			abortable(
-				Promise.resolve().then(() => options.openBrowser(authorizeUrl)),
-				options.signal
-			),
+			abortable(openBrowserDeferred(), options.signal),
 			abortable(Promise.race([loopback.code, timeout]), options.signal)
 		]);
 
@@ -827,10 +834,12 @@ export function postForm(
 	form: Readonly<Record<string, string>>,
 	signal?: AbortSignal
 ): RequestInit {
+	const parameters = new URLSearchParams(form);
+
 	return {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams(form).toString(),
+		body: parameters.toString(),
 		signal
 	};
 }

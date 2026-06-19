@@ -115,7 +115,9 @@ export class StatsService {
 function uniqueSizes(
 	rows: readonly { readonly key: string; readonly size: number }[]
 ): number[] {
-	return [...new Map(rows.map((row) => [row.key, row.size])).values()];
+	const sizesByKey = new Map(rows.map((row) => [row.key, row.size]));
+
+	return sizesByKey.values().toArray();
 }
 
 function sum(values: readonly number[]): number {

@@ -11,6 +11,7 @@ import { z } from 'zod';
 import {
 	adminGrants,
 	cacheWriteGrants,
+	compareStrings,
 	controlWorkerFetch,
 	currentOrigin,
 	issueControlAdminToken,
@@ -50,13 +51,13 @@ describe('control contract round trip', () => {
 		expect({
 			listed: listed.keys
 				.map(({ kid, retired }) => ({ kid, retired }))
-				.toSorted((left, right) => (left.kid > right.kid ? 1 : -1)),
+				.toSorted((left, right) => compareStrings(left.kid, right.kid)),
 			retired
 		}).toStrictEqual({
 			listed: [
 				{ kid: retiring.kid, retired: false },
 				{ kid: rotated.kid, retired: false }
-			].toSorted((left, right) => (left.kid > right.kid ? 1 : -1)),
+			].toSorted((left, right) => compareStrings(left.kid, right.kid)),
 			retired: { kid: retiring.kid, retired: true }
 		});
 	});

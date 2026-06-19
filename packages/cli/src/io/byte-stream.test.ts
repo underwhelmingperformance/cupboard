@@ -24,7 +24,9 @@ describe('countingByteStream', () => {
 		const lengths: number[] = [];
 
 		const passed = await collect(
-			countingByteStream(source, (byteLength) => lengths.push(byteLength))
+			countingByteStream(source, (byteLength) => {
+				lengths.push(byteLength);
+			})
 		);
 
 		expect({ lengths, passed: [...passed] }).toStrictEqual({
@@ -37,9 +39,9 @@ describe('countingByteStream', () => {
 		const lengths: number[] = [];
 
 		const passed = await collect(
-			countingByteStream(byteStream([]), (byteLength) =>
-				lengths.push(byteLength)
-			)
+			countingByteStream(byteStream([]), (byteLength) => {
+				lengths.push(byteLength);
+			})
 		);
 
 		expect({ lengths, passed: passed.byteLength }).toStrictEqual({

@@ -24,8 +24,8 @@ function thrownBy(run: () => unknown): unknown {
 
 function capturingReporter(captured: CapturedOutput): Reporter {
 	return {
-		phase(_label, body) {
-			return Promise.resolve(
+		phase: (_label, body) =>
+			Promise.resolve(
 				body({
 					fact() {
 						return;
@@ -34,10 +34,9 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 						return;
 					}
 				})
-			);
-		},
-		progress(_label, _options, body) {
-			return Promise.resolve(
+			),
+		progress: (_label, _options, body) =>
+			Promise.resolve(
 				body({
 					advance() {
 						return;
@@ -49,33 +48,29 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 						return;
 					}
 				})
-			);
-		},
-		steps(_label, body) {
-			return Promise.resolve(
+			),
+		steps: (_label, body) =>
+			Promise.resolve(
 				body({
 					message() {
 						return;
 					},
-					group() {
-						return {
-							message() {
-								return;
-							},
-							success() {
-								return;
-							},
-							error() {
-								return;
-							}
-						};
-					},
+					group: () => ({
+						message() {
+							return;
+						},
+						success() {
+							return;
+						},
+						error() {
+							return;
+						}
+					}),
 					warn() {
 						return;
 					}
 				})
-			);
-		},
+			),
 		result() {
 			return;
 		},

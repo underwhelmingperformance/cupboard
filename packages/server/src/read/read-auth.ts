@@ -90,8 +90,9 @@ export function unauthorisedResponse(): Response {
 function decodeBasic(value: string): string | undefined {
 	try {
 		const binary = atob(value);
+		const decoder = new TextDecoder();
 
-		return new TextDecoder().decode(
+		return decoder.decode(
 			Uint8Array.from(binary, (character) => character.codePointAt(0) ?? 0)
 		);
 	} catch {

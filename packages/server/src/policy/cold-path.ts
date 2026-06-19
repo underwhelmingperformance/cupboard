@@ -51,5 +51,6 @@ export function resolveRootExpiry(input: RootExpiryInput): string | undefined {
 		return undefined;
 	}
 
-	return new Date(input.now.getTime() + ttl * 1000).toISOString();
+	const expiresAt = new Date(input.now.getTime() + ttl * 1000);
+	return expiresAt.toISOString();
 }

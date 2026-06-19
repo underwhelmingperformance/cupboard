@@ -161,7 +161,7 @@ export async function runRootSet(
 			cacheName,
 			name,
 			targets: [...targets],
-			...(ttlSeconds === undefined ? {} : { ttlSeconds })
+			...(ttlSeconds !== undefined && { ttlSeconds })
 		})
 	);
 

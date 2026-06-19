@@ -27,30 +27,36 @@ function postSignup(
 	form: Record<string, string>,
 	envOverride: Readonly<Record<string, string>> = {}
 ): Promise<Response> {
+	const body = new URLSearchParams(form);
 	return controlFetch(
 		'/signup',
 		{
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams(form).toString()
+			body: body.toString()
 		},
 		envOverride
 	);
 }
 
 function signupRequest(form: Record<string, string>): Request {
+	const body = new URLSearchParams(form);
 	return new Request(new URL('/signup', currentOrigin()), {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams(form).toString()
+		body: body.toString()
 	});
 }
 
-function signupError(form: Record<string, string>): Promise<unknown> {
-	return handleSignup(
-		signupRequest(form),
-		Object.assign({}, env, testControlEnv)
-	).catch((error: unknown) => error);
+async function signupError(form: Record<string, string>): Promise<unknown> {
+	try {
+		return await handleSignup(
+			signupRequest(form),
+			Object.assign({}, env, testControlEnv)
+		);
+	} catch (error: unknown) {
+		return error;
+	}
 }
 
 type SignupGateOutcome =
@@ -106,7 +112,8 @@ async function signedToken(options: {
 }): Promise<string> {
 	const { privateKey } = await generateKeyPair('RS256', { extractable: true });
 
-	return new SignJWT({})
+	const jwt = new SignJWT({});
+	return jwt
 		.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 		.setIssuer(options.issuer)
 		.setAudience(options.audience)

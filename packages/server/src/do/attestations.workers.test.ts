@@ -62,6 +62,19 @@ import { AttestationsService } from './attestations-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const predicateType = 'https://slsa.dev/provenance/v1';
+
+// Orders by UTF-16 code unit, matching the default `<`/`>` comparison.
+function compareById(left: { id: string }, right: { id: string }): number {
+	if (left.id < right.id) {
+		return -1;
+	}
+
+	if (left.id > right.id) {
+		return 1;
+	}
+
+	return 0;
+}
 const orpcErrorBodySchema = z.strictObject({
 	defined: z.boolean(),
 	code: z.string(),
@@ -169,7 +182,8 @@ describe('attestation attach and reads', () => {
 
 	it('rejects non-DSSE Sigstore content without filing a CAS object', async () => {
 		const { token, metadata } = await committedPathBundle();
-		const garbage = new TextEncoder().encode('not a sigstore bundle');
+		const encoder = new TextEncoder();
+		const garbage = encoder.encode('not a sigstore bundle');
 
 		const response = await attachBundleResponse(
 			token,
@@ -412,9 +426,11 @@ describe('attestation attach and reads', () => {
 					new NarInfoObjectsService(instance.context)
 				);
 
-				return attestations
-					.attach('', decision.uploadId)
-					.catch((error: unknown) => error);
+				try {
+					return await attestations.attach('', decision.uploadId);
+				} catch (error: unknown) {
+					return error;
+				}
 			}
 		);
 		expect(error).toBeInstanceOf(AttestationPathNotFoundError);
@@ -464,9 +480,7 @@ describe('attestation attach and reads', () => {
 			expiresAt: '2026-01-01T00:15:00.000Z'
 		};
 		expect(await pendingAttestationRows()).toStrictEqual(
-			[...existingPending, expiredPending].toSorted((left, right) =>
-				left.id > right.id ? 1 : -1
-			)
+			[...existingPending, expiredPending].toSorted(compareById)
 		);
 		await expect(env.BLOBS.head(decision.r2Key)).resolves.not.toBeNull();
 
@@ -657,7 +671,7 @@ async function pendingAttestationRowsFor(
 				.all()
 	);
 
-	return rows.toSorted((left, right) => (left.id > right.id ? 1 : -1));
+	return rows.toSorted(compareById);
 }
 
 async function pushPathThroughTenant(

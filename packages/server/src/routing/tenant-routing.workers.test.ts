@@ -20,9 +20,10 @@ import {
 
 import { fixtureTenant } from './tenant-routing.test-support.ts';
 
+const stringArraySchema = z.array(z.string());
 const tokenClaimsSchema = z.object({
 	iss: z.string().optional(),
-	aud: z.union([z.string(), z.array(z.string())]).optional()
+	aud: z.union([z.string(), stringArraySchema]).optional()
 });
 
 function decodeClaims(token: string): z.infer<typeof tokenClaimsSchema> {

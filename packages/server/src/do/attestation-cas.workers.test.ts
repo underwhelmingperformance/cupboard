@@ -38,6 +38,7 @@ import {
 	verifiableNar
 } from '../test-support.ts';
 
+const textEncoder = new TextEncoder();
 const predicateType = predicateTypeSchema.parse(
 	'https://slsa.dev/provenance/v1'
 );
@@ -54,7 +55,7 @@ describe('attestation CAS lifecycle', () => {
 	it('promotes a measured bundle into the shared CAS', async () => {
 		const stagingKey = await stageAttestationBundle(
 			'bundle-promote',
-			new TextEncoder().encode('bundle')
+			textEncoder.encode('bundle')
 		);
 
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
@@ -78,7 +79,7 @@ describe('attestation CAS lifecycle', () => {
 	it('does not record a CAS fact when conditional promotion loses without a winner', async () => {
 		const stagingKey = await stageAttestationBundle(
 			'bundle-no-winner',
-			new TextEncoder().encode('bundle')
+			textEncoder.encode('bundle')
 		);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		const key = casObjectKey(measured.digest);
@@ -148,10 +149,15 @@ describe('attestation CAS lifecycle', () => {
 		try {
 			const error = await runInDurableObject(
 				currentServer(),
-				async (instance) =>
-					instance
-						.promoteAttestationBundle(stagingKey, measured)
-						.catch((error_: unknown) => error_)
+				async (instance): Promise<unknown> => {
+					try {
+						await instance.promoteAttestationBundle(stagingKey, measured);
+
+						return undefined;
+					} catch (error_: unknown) {
+						return error_;
+					}
+				}
 			);
 			expect(error).toBeInstanceOf(UploadedObjectNotFoundError);
 			if (!(error instanceof UploadedObjectNotFoundError)) {
@@ -185,7 +191,7 @@ describe('attestation CAS lifecycle', () => {
 		const token = await initialise();
 		const bundle = await fileAttestationReference({
 			uploadId: 'stats-bundle',
-			bytes: new TextEncoder().encode('bundle'),
+			bytes: textEncoder.encode('bundle'),
 			storePathHash,
 			generation: 0,
 			predicateType
@@ -212,7 +218,7 @@ describe('attestation CAS lifecycle', () => {
 
 	it('deduplicates shared bundles across tenants while charging each tenant once', async () => {
 		await provisionNamedTenant('acme');
-		const bytes = new TextEncoder().encode('shared bundle');
+		const bytes = textEncoder.encode('shared bundle');
 		const first = await fileAttestationReference({
 			uploadId: 'shared-fixture',
 			bytes,
@@ -248,7 +254,7 @@ describe('attestation CAS lifecycle', () => {
 	});
 
 	it('charges one tenant CAS blob until the last reference is removed', async () => {
-		const bytes = new TextEncoder().encode('one tenant shared');
+		const bytes = textEncoder.encode('one tenant shared');
 		const first = await fileAttestationReference({
 			uploadId: 'tenant-shared-a',
 			bytes,
@@ -307,7 +313,7 @@ describe('attestation CAS lifecycle', () => {
 
 	it('rejects an over-quota CAS reference without stranding an edge or charge', async () => {
 		await provisionFixtureTenant({ quotaBytes: 1 });
-		const bytes = new TextEncoder().encode('too large');
+		const bytes = textEncoder.encode('too large');
 		const stagingKey = await stageAttestationBundle('over-quota', bytes);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
@@ -357,7 +363,7 @@ describe('attestation CAS lifecycle', () => {
 		const firstGeneration = await narInfoGeneration(storePathHash);
 		await fileAttestationReference({
 			uploadId: 'delete-gen-0',
-			bytes: new TextEncoder().encode('gen0'),
+			bytes: textEncoder.encode('gen0'),
 			storePathHash,
 			generation: 0,
 			predicateType
@@ -368,7 +374,7 @@ describe('attestation CAS lifecycle', () => {
 		const secondGeneration = await narInfoGeneration(storePathHash);
 		const live = await fileAttestationReference({
 			uploadId: 'delete-gen-1',
-			bytes: new TextEncoder().encode('gen1'),
+			bytes: textEncoder.encode('gen1'),
 			storePathHash,
 			generation: 1,
 			predicateType
@@ -383,7 +389,7 @@ describe('attestation CAS lifecycle', () => {
 
 		expect({
 			generations: [firstGeneration, secondGeneration],
-			deleteStatus: deleted.deleted ? StatusCodes.OK : StatusCodes.NOT_FOUND,
+			deleteStatus: StatusCodes[deleted.deleted ? 'OK' : 'NOT_FOUND'],
 			refs: await attestationReferenceRows()
 		}).toStrictEqual({
 			generations: [0, 1],
@@ -404,7 +410,7 @@ describe('attestation CAS lifecycle', () => {
 	it('collects an unreferenced CAS object after the reaper grace', async () => {
 		const stagingKey = await stageAttestationBundle(
 			'unreferenced',
-			new TextEncoder().encode('orphan')
+			textEncoder.encode('orphan')
 		);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
@@ -422,7 +428,7 @@ describe('attestation CAS lifecycle', () => {
 	});
 
 	it('keeps an armed CAS object when a tenant references it again', async () => {
-		const bytes = new TextEncoder().encode('re-reference');
+		const bytes = textEncoder.encode('re-reference');
 		const stagingKey = await stageAttestationBundle('re-reference-arm', bytes);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
@@ -453,7 +459,7 @@ describe('attestation CAS lifecycle', () => {
 	it('demotes a CAS object fact when the shared R2 object is missing', async () => {
 		const bundle = await fileAttestationReference({
 			uploadId: 'missing-object',
-			bytes: new TextEncoder().encode('missing'),
+			bytes: textEncoder.encode('missing'),
 			storePathHash,
 			generation: 0,
 			predicateType
@@ -484,7 +490,7 @@ describe('attestation CAS lifecycle', () => {
 	it('leaves a present CAS object and its references intact when a demote is routed for it', async () => {
 		const bundle = await fileAttestationReference({
 			uploadId: 'repromoted',
-			bytes: new TextEncoder().encode('repromoted'),
+			bytes: textEncoder.encode('repromoted'),
 			storePathHash,
 			generation: 0,
 			predicateType
@@ -518,7 +524,7 @@ describe('attestation CAS lifecycle', () => {
 	it('aborts a demote whose fence is stale, keeping the re-promoted reference and its charge', async () => {
 		const bundle = await fileAttestationReference({
 			uploadId: 'fence-abort',
-			bytes: new TextEncoder().encode('fence-abort'),
+			bytes: textEncoder.encode('fence-abort'),
 			storePathHash,
 			generation: 0,
 			predicateType
@@ -561,7 +567,7 @@ describe('attestation CAS lifecycle', () => {
 		await provisionNamedTenant('draining');
 		const bundle = await fileAttestationReference({
 			uploadId: 'offboard-cas',
-			bytes: new TextEncoder().encode('offboard'),
+			bytes: textEncoder.encode('offboard'),
 			tenant: 'draining',
 			storePathHash,
 			generation: 0,
@@ -590,7 +596,7 @@ describe('attestation CAS lifecycle', () => {
 		await provisionNamedTenant('draining');
 		await fileAttestationReference({
 			uploadId: 'offboard-ref-0',
-			bytes: new TextEncoder().encode('offboard-ref-0'),
+			bytes: textEncoder.encode('offboard-ref-0'),
 			tenant: 'draining',
 			storePathHash,
 			generation: 0,
@@ -598,7 +604,7 @@ describe('attestation CAS lifecycle', () => {
 		});
 		const second = await fileAttestationReference({
 			uploadId: 'offboard-ref-1',
-			bytes: new TextEncoder().encode('offboard-ref-1'),
+			bytes: textEncoder.encode('offboard-ref-1'),
 			tenant: 'draining',
 			storePathHash,
 			generation: 1,
@@ -606,7 +612,7 @@ describe('attestation CAS lifecycle', () => {
 		});
 		const third = await fileAttestationReference({
 			uploadId: 'offboard-ref-2',
-			bytes: new TextEncoder().encode('offboard-ref-2'),
+			bytes: textEncoder.encode('offboard-ref-2'),
 			tenant: 'draining',
 			storePathHash,
 			generation: 2,

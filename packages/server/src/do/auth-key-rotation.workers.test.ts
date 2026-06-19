@@ -256,10 +256,12 @@ describe('auth-key rotation', () => {
 		);
 
 		const response = await fetchPath('/.well-known/jwks.json');
+		const keySchema = z.object({
+			kid: z.string(),
+			x: z.string().optional()
+		});
 		const body = z
-			.object({
-				keys: z.array(z.object({ kid: z.string(), x: z.string().optional() }))
-			})
+			.object({ keys: z.array(keySchema) })
 			.parse(await response.json());
 		const stored = await runInDurableObject(
 			currentServer(),

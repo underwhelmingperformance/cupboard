@@ -23,6 +23,8 @@ import {
 	verifyNarInfoSignature
 } from '../test-support.ts';
 
+import { compareStrings } from './context.ts';
+
 async function rotate(
 	token: string
 ): Promise<{ readonly status: number; readonly body: KeyRotateResponse }> {
@@ -88,7 +90,7 @@ describe('signing key rotation', () => {
 		expect({
 			rotationStatus: rotation.status,
 			rotatedStage: rotated.stage,
-			publishedKeys: published.toSorted(),
+			publishedKeys: published.toSorted(compareStrings),
 			before: {
 				sigs: beforeNarInfo.sigs.length,
 				verifiesUnderOld: await verifyNarInfoSignature(beforeNarInfo, oldKey),
@@ -102,7 +104,7 @@ describe('signing key rotation', () => {
 		}).toStrictEqual({
 			rotationStatus: StatusCodes.OK,
 			rotatedStage: 'signing',
-			publishedKeys: [oldKey, newKey].toSorted(),
+			publishedKeys: [oldKey, newKey].toSorted(compareStrings),
 			before: { sigs: 1, verifiesUnderOld: true, verifiesUnderNew: false },
 			after: { sigs: 2, verifiesUnderOld: true, verifiesUnderNew: true }
 		});

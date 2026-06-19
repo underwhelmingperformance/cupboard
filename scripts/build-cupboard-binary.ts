@@ -17,10 +17,6 @@ interface Options {
 
 type SeaFormat = 'esm' | 'cjs';
 
-const sentinelFuse = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
-const require = createRequire(import.meta.url);
-const postjectCliPath = require.resolve('postject/dist/cli.js');
-
 const supportedPlatforms = new Map([
 	['darwin', 'macos'],
 	['linux', 'linux']
@@ -38,6 +34,10 @@ const releaseArchitecture = supportedArchitectures.get(arch);
 if (releasePlatform === undefined || releaseArchitecture === undefined) {
 	throw new Error(`unsupported release platform: ${platform}-${arch}`);
 }
+
+const sentinelFuse = 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2';
+const require = createRequire(import.meta.url);
+const postjectCliPath = require.resolve('postject/dist/cli.js');
 
 const outputDirectory = path.resolve(options.outputDirectory);
 const workDirectory = path.join(outputDirectory, 'work');
@@ -161,7 +161,7 @@ async function buildSea(seaFormat: SeaFormat): Promise<void> {
 function seaConfig(bundlePath: string, seaFormat: SeaFormat): object {
 	return {
 		main: bundlePath,
-		...(seaFormat === 'esm' ? { mainFormat: 'module' } : {}),
+		...(seaFormat === 'esm' && { mainFormat: 'module' }),
 		output: blobPath,
 		assets: { [embeddedAssetKey]: embeddedPayloadPath },
 		disableExperimentalSEAWarning: true,
@@ -201,11 +201,12 @@ function parseOptions(arguments_: readonly string[]): Options {
 
 	for (let index = 0; index < arguments_.length; index += 1) {
 		const argument = arguments_[index];
-		const value = arguments_[index + 1];
 
 		if (argument === '--') {
 			continue;
 		}
+
+		const value = arguments_[index + 1];
 
 		if (argument === '--version' && value !== undefined) {
 			parsed.version = value;

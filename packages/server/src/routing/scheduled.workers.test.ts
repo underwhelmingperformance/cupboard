@@ -187,10 +187,13 @@ describe('scheduled tenant pass failure records', () => {
 			messages
 		);
 
-		const outcome = await sending.then(
-			() => ({ sent: true }),
-			(error: unknown) => ({ error: queueBatchSendErrorShape(error) })
-		);
+		let outcome: { sent: boolean } | { error: unknown };
+		try {
+			await sending;
+			outcome = { sent: true };
+		} catch (error: unknown) {
+			outcome = { error: queueBatchSendErrorShape(error) };
+		}
 
 		// The trailing batch was still handed to the queue despite the first failing.
 		expect({ outcome, attempted }).toStrictEqual({
@@ -232,10 +235,13 @@ describe('scheduled tenant pass failure records', () => {
 			messages
 		);
 
-		const outcome = await sending.then(
-			() => ({ sent: true }),
-			(error: unknown) => ({ error: queueBatchSendErrorShape(error) })
-		);
+		let outcome: { sent: boolean } | { error: unknown };
+		try {
+			await sending;
+			outcome = { sent: true };
+		} catch (error: unknown) {
+			outcome = { error: queueBatchSendErrorShape(error) };
+		}
 
 		// Both batches are attempted and their failures are aggregated in send order,
 		// so the accumulation keeps every failure rather than only the last.
@@ -678,17 +684,22 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		const firstFailure = new Error('maintenance failed');
-		const error = await runWithClock('2026-01-02T00:00:00.000Z', () =>
-			runCronSweep(env, 2, (_env, id) => {
-				seen.push(id);
+		const error = await runWithClock('2026-01-02T00:00:00.000Z', async () => {
+			try {
+				await runCronSweep(env, 2, (_env, id) => {
+					seen.push(id);
 
-				if (id === 'acme') {
-					return Promise.reject(firstFailure);
-				}
+					if (id === 'acme') {
+						return Promise.reject(firstFailure);
+					}
 
-				return Promise.resolve();
-			}).catch((error_: unknown) => error_)
-		);
+					return Promise.resolve();
+				});
+				return;
+			} catch (error_: unknown) {
+				return error_;
+			}
+		});
 		const afterFailure = {
 			acme: await tenantMaintenanceFailureRow('acme', 'maintenance'),
 			beta: await tenantMaintenanceFailureRow('beta', 'maintenance'),
@@ -777,17 +788,22 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		const firstFailure = new TypeError('offboard failed');
-		const error = await runWithClock('2026-01-02T00:00:00.000Z', () =>
-			runOffboardSweep(env, 2, 1, 1, (_env, id) => {
-				seen.push(id);
+		const error = await runWithClock('2026-01-02T00:00:00.000Z', async () => {
+			try {
+				await runOffboardSweep(env, 2, 1, 1, (_env, id) => {
+					seen.push(id);
 
-				if (id === 'acme') {
-					return Promise.reject(firstFailure);
-				}
+					if (id === 'acme') {
+						return Promise.reject(firstFailure);
+					}
 
-				return Promise.resolve();
-			}).catch((error_: unknown) => error_)
-		);
+					return Promise.resolve();
+				});
+				return;
+			} catch (error_: unknown) {
+				return error_;
+			}
+		});
 		const afterFailure = {
 			acme: await tenantMaintenanceFailureRow('acme', 'offboard'),
 			beta: await tenantMaintenanceFailureRow('beta', 'offboard')
@@ -941,14 +957,17 @@ function queueMessage(
 		timestamp: new Date('2026-01-01T00:00:00.000Z'),
 		attempts: 1,
 		body,
-		ack: () => actions.push({ target: 'message', id, action: 'ack' }),
-		retry: (options) =>
+		ack: () => {
+			actions.push({ target: 'message', id, action: 'ack' });
+		},
+		retry: (options) => {
 			actions.push({
 				target: 'message',
 				id,
 				action: 'retry',
 				delaySeconds: options?.delaySeconds
-			})
+			});
+		}
 	};
 }
 

@@ -98,20 +98,25 @@ describe('runRootSet', () => {
 		const rejection = new RootClientRefusal('/tmp/nope');
 		const calls: SetRootInput[] = [];
 
-		const error = await runRootSet(
-			'_default',
-			'main',
-			['/tmp/nope'],
-			undefined,
-			reporter([]),
-			{
-				set(input) {
-					calls.push(input);
+		let error: unknown;
+		try {
+			await runRootSet(
+				'_default',
+				'main',
+				['/tmp/nope'],
+				undefined,
+				reporter([]),
+				{
+					set(input) {
+						calls.push(input);
 
-					return Promise.reject(rejection);
+						return Promise.reject(rejection);
+					}
 				}
-			}
-		).catch((error_: unknown) => error_);
+			);
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expectRootClientRefusal(error);
 		expect({ error: { target: error.target }, calls }).toStrictEqual({
@@ -248,9 +253,7 @@ function setRootClient(
 
 function listClient(response: RootListResponse): Pick<RootClient, 'list'> {
 	return {
-		list() {
-			return Promise.resolve(response);
-		}
+		list: () => Promise.resolve(response)
 	};
 }
 

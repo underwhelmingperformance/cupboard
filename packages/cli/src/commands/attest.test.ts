@@ -79,8 +79,9 @@ describe('attest verify command', () => {
 		});
 		registerAttestCommands(program);
 
-		const result = await program
-			.parseAsync(
+		let result: unknown;
+		try {
+			await program.parseAsync(
 				[
 					'attest',
 					'verify',
@@ -93,11 +94,11 @@ describe('attest verify command', () => {
 					'https://issuer.test'
 				],
 				{ from: 'user' }
-			)
-			.then(
-				() => ({ kind: 'parsed' as const }),
-				(error_: unknown) => error_
 			);
+			result = { kind: 'parsed' as const };
+		} catch (error_: unknown) {
+			result = error_;
+		}
 
 		expect(result).toBeInstanceOf(CommanderError);
 

@@ -113,20 +113,7 @@ export class GarbageCollectionService {
 				(cause) => new StoredReferencesInvalidError(storePathHash, cause)
 			);
 
-			for (const reference of references) {
-				const separator = reference.indexOf('-');
-
-				if (separator <= 0) {
-					continue;
-				}
-
-				const referenceHash = reference.slice(0, separator);
-
-				if (!visited.has(referenceHash)) {
-					visited.add(referenceHash);
-					queue.push(storePathHashSchema.parse(referenceHash));
-				}
-			}
+			this.enqueueReachableReferences(references, visited, queue);
 		}
 
 		// Guard: nothing committed is reachable in this cache and no root expired
@@ -142,6 +129,10 @@ export class GarbageCollectionService {
 		// Spare those rows; the verify pass owns them and either materialises or
 		// reclaims them, mirroring how the upload sweep spares their pending rows.
 		const inFlight = new Set<string>();
+		const reservedVerdict = or(
+			eq(schema.pendingUploads.verdict, 'committing'),
+			eq(schema.pendingUploads.verdict, 'pending')
+		);
 
 		for (const upload of this.context.db
 			.select({
@@ -149,15 +140,7 @@ export class GarbageCollectionService {
 				metadataJson: schema.pendingUploads.metadataJson
 			})
 			.from(schema.pendingUploads)
-			.where(
-				and(
-					eq(schema.pendingUploads.cache, cache),
-					or(
-						eq(schema.pendingUploads.verdict, 'committing'),
-						eq(schema.pendingUploads.verdict, 'pending')
-					)
-				)
-			)
+			.where(and(eq(schema.pendingUploads.cache, cache), reservedVerdict))
 			.all()) {
 			try {
 				inFlight.add(
@@ -214,11 +197,38 @@ export class GarbageCollectionService {
 		return { rootsExpired: expiredRoots.length, pathsSwept };
 	}
 
+	// Walks a row's references, enqueuing each not-yet-visited reference hash for
+	// the reachability traversal. Extracted from the traversal loop so the
+	// per-reference skip is a plain early return rather than a nested `continue`.
+	private enqueueReachableReferences(
+		references: readonly string[],
+		visited: Set<string>,
+		queue: StorePathHash[]
+	): void {
+		for (const reference of references) {
+			const separator = reference.indexOf('-');
+
+			if (separator <= 0) {
+				continue;
+			}
+
+			const referenceHash = reference.slice(0, separator);
+
+			if (visited.has(referenceHash)) {
+				continue;
+			}
+
+			visited.add(referenceHash);
+			queue.push(storePathHashSchema.parse(referenceHash));
+		}
+	}
+
 	collectGarbage(
 		cache?: string,
 		purgeOrigin?: string
 	): Promise<GarbageCollectionOutcome> {
-		const now = new Date().toISOString();
+		const startedAt = new Date();
+		const now = startedAt.toISOString();
 
 		return this.context.ctx.blockConcurrencyWhile(async () => {
 			// A `pending` or `committing` upload is a live commit saga (awaiting

@@ -119,15 +119,18 @@ describe('layered admission gate', () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 
-		const outcome = await controlTenantCreate(
-			env,
-			createBody('beta'),
-			'https://cupboard.test',
-			() => Promise.reject(new Error('filter publish failed'))
-		).then(
-			() => 'created',
-			() => 'failed'
-		);
+		let outcome: 'created' | 'failed';
+		try {
+			await controlTenantCreate(
+				env,
+				createBody('beta'),
+				'https://cupboard.test',
+				() => Promise.reject(new Error('filter publish failed'))
+			);
+			outcome = 'created';
+		} catch {
+			outcome = 'failed';
+		}
 
 		// The create reports failure rather than success-but-inadmissible: the stale
 		// filter still excludes beta, so it 404s until the cron rebuild includes it

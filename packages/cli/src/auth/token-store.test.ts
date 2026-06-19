@@ -66,8 +66,9 @@ describe('session cache', () => {
 		async ({ configHome }) => {
 			// The file format before sessions: the access token on its own line.
 			const token = jwt({ iss: tenant, aud: tenant });
+			const tenantUrl = new URL(tenant);
 			const key = createHash('sha256')
-				.update(new URL(tenant).href.replace(/\/+$/, ''))
+				.update(tenantUrl.href.replace(/\/+$/, ''))
 				.digest('hex');
 			await mkdir(tokensDirectory(configHome), { recursive: true });
 			await writeFile(

@@ -243,10 +243,8 @@ function scriptedUi(script: ReviewScript): DeployUi {
 			}
 		}),
 		menu: (_message, entries) => {
-			const [scripted] = z
-				.array(z.string().optional())
-				.length(1)
-				.parse(menuChoices.splice(0, 1));
+			const taken = menuChoices.length > 0 ? [menuChoices.shift()] : [];
+			const [scripted] = z.array(z.string().optional()).length(1).parse(taken);
 
 			if (scripted === undefined) {
 				return Promise.resolve(absentValues.choice);
@@ -268,10 +266,8 @@ function scriptedUi(script: ReviewScript): DeployUi {
 			return Promise.resolve(edit);
 		},
 		secret: () => {
-			const [secret] = z
-				.array(z.string().optional())
-				.length(1)
-				.parse(secrets.splice(0, 1));
+			const taken = secrets.length > 0 ? [secrets.shift()] : [];
+			const [secret] = z.array(z.string().optional()).length(1).parse(taken);
 
 			return Promise.resolve(secret);
 		}
@@ -295,13 +291,19 @@ describe('chooseDeployAccount', () => {
 
 	it('treats a cancelled picker as a cancelled deploy', async () => {
 		const uiCalls: UiCall[] = [];
-		const outcome = await chooseDeployAccount(
-			pickerUi(undefined, uiCalls),
-			accounts,
-			true
-		).then(
-			(choice) => ({ choice }),
-			(error_: unknown) => {
+
+		const resolveOutcome = async (): Promise<
+			{ choice: unknown } | { error: { name: string } }
+		> => {
+			try {
+				const choice = await chooseDeployAccount(
+					pickerUi(undefined, uiCalls),
+					accounts,
+					true
+				);
+
+				return { choice };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(DeployCancelledError);
 
 				if (error_ instanceof DeployCancelledError) {
@@ -310,7 +312,9 @@ describe('chooseDeployAccount', () => {
 
 				throw error_;
 			}
-		);
+		};
+
+		const outcome = await resolveOutcome();
 
 		expect({ outcome, uiCalls }).toStrictEqual({
 			outcome: { error: { name: 'DeployCancelledError' } },
@@ -808,9 +812,8 @@ describe('verifyR2Credentials', () => {
 			ui,
 			attempts: 5,
 			check: () => {
-				const [check] = z
-					.tuple([z.custom<R2CredentialCheck>()])
-					.parse(checks.splice(0, 1));
+				const taken = checks.length > 0 ? [checks.shift()] : [];
+				const [check] = z.tuple([z.custom<R2CredentialCheck>()]).parse(taken);
 
 				return Promise.resolve(check);
 			},
@@ -879,14 +882,19 @@ describe('verifyR2Credentials', () => {
 	it('is fatal without a terminal', async () => {
 		const ui = scriptedUi({});
 
-		const outcome = await verifyR2Credentials({
-			...base,
-			interactive: false,
-			ui,
-			check: () => Promise.resolve({ kind: 'rejected', status: 403 })
-		}).then(
-			(credentials) => ({ credentials }),
-			(error_: unknown) => {
+		const resolveOutcome = async (): Promise<
+			{ credentials: unknown } | { error: { name: string; status: number } }
+		> => {
+			try {
+				const credentials = await verifyR2Credentials({
+					...base,
+					interactive: false,
+					ui,
+					check: () => Promise.resolve({ kind: 'rejected', status: 403 })
+				});
+
+				return { credentials };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(R2CredentialsRejectedError);
 
 				if (error_ instanceof R2CredentialsRejectedError) {
@@ -900,7 +908,9 @@ describe('verifyR2Credentials', () => {
 
 				throw error_;
 			}
-		);
+		};
+
+		const outcome = await resolveOutcome();
 
 		expect(outcome).toStrictEqual({
 			error: {

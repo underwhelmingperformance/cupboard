@@ -113,11 +113,21 @@ export class InvalidNixDaemonHashError extends NixDaemonError {
 
 export class NixDaemonStoreClient implements NixStoreClient {
 	private readonly socketPath: string;
+
 	private readonly connect: NixDaemonConnector;
 
 	constructor(options: NixDaemonStoreClientOptions = {}) {
 		this.socketPath = options.socketPath ?? defaultDaemonSocketPath;
 		this.connect = options.connect ?? connectToNixDaemon;
+	}
+
+	private async openConnection(): Promise<NixDaemonConnection> {
+		const transport = await this.connect(this.socketPath);
+		const connection = new NixDaemonConnection(transport);
+
+		await connection.initialise();
+
+		return connection;
 	}
 
 	async resolveClosure(
@@ -140,15 +150,6 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		} finally {
 			connection.close();
 		}
-	}
-
-	private async openConnection(): Promise<NixDaemonConnection> {
-		const transport = await this.connect(this.socketPath);
-		const connection = new NixDaemonConnection(transport);
-
-		await connection.initialise();
-
-		return connection;
 	}
 }
 
@@ -174,35 +175,6 @@ class NixDaemonConnection {
 	};
 
 	constructor(private readonly transport: NixDaemonTransport) {}
-
-	close(): void {
-		this.transport.close();
-	}
-
-	async initialise(): Promise<void> {
-		await this.handshake();
-		await this.postHandshake();
-		await this.processStderr();
-		await this.setOptions();
-	}
-
-	async queryPathInfo(storePath: string): Promise<NixValidPathInfo> {
-		const pathInfo = await this.queryUnkeyedPathInfo(storePath);
-
-		if (pathInfo === undefined) {
-			throw new NixStorePathNotFoundError(storePath);
-		}
-
-		return {
-			storePath,
-			narHash: pathInfo.narHash,
-			narSize: pathInfo.narSize,
-			references: pathInfo.references,
-			deriver: pathInfo.deriver,
-			ca: pathInfo.ca,
-			signatures: pathInfo.signatures
-		};
-	}
 
 	private async handshake(): Promise<void> {
 		const request = new NixDaemonWriter();
@@ -432,7 +404,8 @@ class NixDaemonConnection {
 			await this.transport.read(padding);
 		}
 
-		return new TextDecoder().decode(bytes);
+		const decoder = new TextDecoder();
+		return decoder.decode(bytes);
 	}
 
 	private async readBoolean(): Promise<boolean> {
@@ -450,6 +423,35 @@ class NixDaemonConnection {
 		}
 
 		return Number(value);
+	}
+
+	close(): void {
+		this.transport.close();
+	}
+
+	async initialise(): Promise<void> {
+		await this.handshake();
+		await this.postHandshake();
+		await this.processStderr();
+		await this.setOptions();
+	}
+
+	async queryPathInfo(storePath: string): Promise<NixValidPathInfo> {
+		const pathInfo = await this.queryUnkeyedPathInfo(storePath);
+
+		if (pathInfo === undefined) {
+			throw new NixStorePathNotFoundError(storePath);
+		}
+
+		return {
+			storePath,
+			narHash: pathInfo.narHash,
+			narSize: pathInfo.narSize,
+			references: pathInfo.references,
+			deriver: pathInfo.deriver,
+			ca: pathInfo.ca,
+			signatures: pathInfo.signatures
+		};
 	}
 }
 
@@ -523,9 +525,13 @@ class SocketNixDaemonTransport implements NixDaemonTransport {
 
 class SocketReader {
 	private readonly chunks: Buffer[] = [];
+
 	private bufferedBytes = 0;
+
 	private pending?: PendingRead;
+
 	private ended = false;
+
 	private failure?: Error;
 
 	constructor(socket: Socket) {
@@ -541,24 +547,6 @@ class SocketReader {
 		socket.once('error', (error) => {
 			this.failure = error;
 			this.resolvePendingRead();
-		});
-	}
-
-	read(byteLength: number): Promise<Uint8Array> {
-		if (this.bufferedBytes >= byteLength) {
-			return Promise.resolve(this.consume(byteLength));
-		}
-
-		if (this.failure !== undefined) {
-			return Promise.reject(this.failure);
-		}
-
-		if (this.ended) {
-			return Promise.reject(new NixDaemonRemoteError('daemon disconnected'));
-		}
-
-		return new Promise((resolve, reject) => {
-			this.pending = { byteLength, resolve, reject };
 		});
 	}
 
@@ -614,6 +602,24 @@ class SocketReader {
 
 		return result;
 	}
+
+	read(byteLength: number): Promise<Uint8Array> {
+		if (this.bufferedBytes >= byteLength) {
+			return Promise.resolve(this.consume(byteLength));
+		}
+
+		if (this.failure !== undefined) {
+			return Promise.reject(this.failure);
+		}
+
+		if (this.ended) {
+			return Promise.reject(new NixDaemonRemoteError('daemon disconnected'));
+		}
+
+		return new Promise((resolve, reject) => {
+			this.pending = { byteLength, resolve, reject };
+		});
+	}
 }
 
 interface PendingRead {
@@ -646,7 +652,9 @@ async function resolveClosureWithConnection(
 		}
 	}
 
-	return [...closure.values()].toSorted((left, right) =>
+	const closureValues = closure.values();
+
+	return [...closureValues].toSorted((left, right) =>
 		left.storePath.localeCompare(right.storePath)
 	);
 }

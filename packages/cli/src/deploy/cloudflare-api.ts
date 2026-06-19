@@ -332,22 +332,22 @@ export function createCloudflareApi(
 				type: 'worker' as const,
 				script_name: scriptName,
 				settings: {
-					...(settings.maxBatchSize === undefined
-						? {}
-						: { batch_size: settings.maxBatchSize }),
-					...(settings.maxBatchTimeout === undefined
-						? {}
-						: { max_wait_time_ms: settings.maxBatchTimeout * 1000 }),
-					...(settings.maxRetries === undefined
-						? {}
-						: { max_retries: settings.maxRetries }),
-					...(settings.maxConcurrency === undefined
-						? {}
-						: { max_concurrency: settings.maxConcurrency })
+					...(settings.maxBatchSize !== undefined && {
+						batch_size: settings.maxBatchSize
+					}),
+					...(settings.maxBatchTimeout !== undefined && {
+						max_wait_time_ms: settings.maxBatchTimeout * 1000
+					}),
+					...(settings.maxRetries !== undefined && {
+						max_retries: settings.maxRetries
+					}),
+					...(settings.maxConcurrency !== undefined && {
+						max_concurrency: settings.maxConcurrency
+					})
 				},
-				...(settings.deadLetterQueue === undefined
-					? {}
-					: { dead_letter_queue: settings.deadLetterQueue })
+				...(settings.deadLetterQueue !== undefined && {
+					dead_letter_queue: settings.deadLetterQueue
+				})
 			};
 
 			const consumers: unknown[] = [];
@@ -522,12 +522,11 @@ export function createCloudflareApi(
 			return { id: created.id ?? '', value: created.value ?? '' };
 		},
 
-		async rollApiTokenSecret(tokenId) {
-			return client.accounts.tokens.value.update(tokenId, {
+		rollApiTokenSecret: async (tokenId) =>
+			client.accounts.tokens.value.update(tokenId, {
 				...account,
 				body: {}
-			});
-		},
+			}),
 
 		async getWorkersDevSubdomain() {
 			try {

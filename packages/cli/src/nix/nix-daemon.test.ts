@@ -124,23 +124,26 @@ describe('NixDaemonStoreClient', () => {
 			connect: () => Promise.resolve(new FakeDaemonTransport({}))
 		});
 
-		const outcome = await client.queryPathInfo(appPath).then(
-			(value) => ({ value }),
-			(error_: unknown) => {
-				expect(error_).toBeInstanceOf(NixStorePathNotFoundError);
+		let outcome:
+			| { value: Awaited<ReturnType<typeof client.queryPathInfo>> }
+			| { error: { name: string; storePath: string } };
+		try {
+			const value = await client.queryPathInfo(appPath);
+			outcome = { value };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(NixStorePathNotFoundError);
 
-				if (error_ instanceof NixStorePathNotFoundError) {
-					return {
-						error: {
-							name: error_.name,
-							storePath: error_.storePath
-						}
-					};
-				}
-
+			if (!(error_ instanceof NixStorePathNotFoundError)) {
 				throw error_;
 			}
-		);
+
+			outcome = {
+				error: {
+					name: error_.name,
+					storePath: error_.storePath
+				}
+			};
+		}
 
 		expect(outcome).toStrictEqual({
 			error: {
@@ -156,23 +159,31 @@ describe('NixDaemonStoreClient', () => {
 				Promise.resolve(new FakeDaemonTransport({}, { protocolMinor: 37 }))
 		});
 
-		const outcome = await client.queryPathInfo(appPath).then(
-			(value) => ({ value }),
-			(error_: unknown) => {
-				expect(error_).toBeInstanceOf(UnsupportedNixDaemonProtocolError);
-
-				if (error_ instanceof UnsupportedNixDaemonProtocolError) {
-					return {
-						error: {
-							name: error_.name,
-							version: error_.version
-						}
+		let outcome:
+			| { value: Awaited<ReturnType<typeof client.queryPathInfo>> }
+			| {
+					error: {
+						name: string;
+						version: UnsupportedNixDaemonProtocolError['version'];
 					};
-				}
+			  };
+		try {
+			const value = await client.queryPathInfo(appPath);
+			outcome = { value };
+		} catch (error_: unknown) {
+			expect(error_).toBeInstanceOf(UnsupportedNixDaemonProtocolError);
 
+			if (!(error_ instanceof UnsupportedNixDaemonProtocolError)) {
 				throw error_;
 			}
-		);
+
+			outcome = {
+				error: {
+					name: error_.name,
+					version: error_.version
+				}
+			};
+		}
 
 		expect(outcome).toStrictEqual({
 			error: {

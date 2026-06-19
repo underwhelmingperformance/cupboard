@@ -65,13 +65,10 @@ export async function lookupRepository(
 	const owner = repository.slice(0, slash);
 	const repo = repository.slice(slash + 1);
 
+	const cachePath = path.join(cacheDirectory(), 'github');
 	const octokit = new ResilientOctokit({
 		request: {
-			fetch:
-				options.fetch ??
-				makeFetchHappen.defaults({
-					cachePath: path.join(cacheDirectory(), 'github')
-				})
+			fetch: options.fetch ?? makeFetchHappen.defaults({ cachePath })
 		},
 		throttle: {
 			onRateLimit: () => false,

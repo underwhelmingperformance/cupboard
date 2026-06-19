@@ -211,9 +211,11 @@ describe('cupboardIdToken', () => {
 
 	it('rejects a login that carried no id_token', async () => {
 		const { deps, calls } = idTokenDeps({ loginGrant: grantWith() });
-		const outcome = await cupboardIdToken(deps).then(
-			(token) => ({ token }),
-			(error_: unknown) => {
+		const outcome = await (async () => {
+			try {
+				const token = await cupboardIdToken(deps);
+				return { token };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(LoginIdTokenMissingError);
 
 				const name =
@@ -223,7 +225,7 @@ describe('cupboardIdToken', () => {
 
 				return { error: { name } };
 			}
-		);
+		})();
 
 		expect({
 			outcome,

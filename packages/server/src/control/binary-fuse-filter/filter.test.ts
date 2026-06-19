@@ -31,11 +31,8 @@ function refreshChecksum(bytes: Uint8Array): Uint8Array {
 		hash = Math.imul(hash ^ (bytes[index] ?? 0), 0x01_00_01_93);
 	}
 
-	new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength).setUint32(
-		0,
-		hash >>> 0,
-		true
-	);
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+	view.setUint32(0, hash >>> 0, true);
 
 	return bytes;
 }
@@ -89,12 +86,12 @@ describe('BinaryFuse8', () => {
 		{
 			name: 'a lone high surrogate',
 			value: `${String.fromCodePoint(0xd8_00)}x`,
-			normalised: '\uFFFDx'
+			normalised: '\u{FFFD}x'
 		},
 		{
 			name: 'a lone low surrogate',
 			value: `${String.fromCodePoint(0xdc_00)}x`,
-			normalised: '\uFFFDx'
+			normalised: '\u{FFFD}x'
 		}
 	])('normalises $name like TextEncoder', ({ value, normalised }) => {
 		expect([...BinaryFuse8.build([value]).serialise()]).toStrictEqual([
@@ -105,7 +102,7 @@ describe('BinaryFuse8', () => {
 	it('reports every Unicode key as present', () => {
 		const members = [
 			'tenant-é',
-			'tenant-e\u0301',
+			'tenant-e\u{301}',
 			'tenant-雪',
 			'tenant-💾',
 			'tenant-مرحبا'
@@ -144,11 +141,12 @@ describe('BinaryFuse8', () => {
 			name: 'inconsistent geometry',
 			bytes: () => {
 				const bytes = BinaryFuse8.build(slugs(500)).serialise();
-				new DataView(
+				const view = new DataView(
 					bytes.buffer,
 					bytes.byteOffset,
 					bytes.byteLength
-				).setUint32(24, 1, true);
+				);
+				view.setUint32(24, 1, true);
 
 				return refreshChecksum(bytes);
 			}
@@ -157,11 +155,12 @@ describe('BinaryFuse8', () => {
 			name: 'inconsistent key count',
 			bytes: () => {
 				const bytes = BinaryFuse8.build(slugs(500)).serialise();
-				new DataView(
+				const view = new DataView(
 					bytes.buffer,
 					bytes.byteOffset,
 					bytes.byteLength
-				).setUint32(20, 1, true);
+				);
+				view.setUint32(20, 1, true);
 
 				return refreshChecksum(bytes);
 			}

@@ -76,13 +76,10 @@ export const controlRouter = os.router({
 		list: os.tenants.list.handler(({ context }) =>
 			controlTenantList(context.env)
 		),
-		create: os.tenants.create.handler(({ input, context }) =>
-			controlTenantCreate(
-				context.env,
-				input,
-				new URL(context.request.url).origin
-			)
-		),
+		create: os.tenants.create.handler(({ input, context }) => {
+			const requestUrl = new URL(context.request.url);
+			return controlTenantCreate(context.env, input, requestUrl.origin);
+		}),
 		suspend: os.tenants.suspend.handler(({ input, context }) =>
 			controlTenantSuspend(context.env, input.id)
 		),

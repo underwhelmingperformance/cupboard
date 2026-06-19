@@ -195,9 +195,8 @@ function slot(
 	const shifted =
 		index === 0
 			? 0
-			: index === 1
-				? shiftRightLow(high, low, 18) & geometry.segmentLengthMask
-				: low & geometry.segmentLengthMask;
+			: (index === 1 ? shiftRightLow(high, low, 18) : low) &
+				geometry.segmentLengthMask;
 
 	return (base + index * geometry.segmentLength) ^ shifted;
 }
@@ -236,7 +235,7 @@ function validateGeometry(
 }
 
 function assertConstructionIndex(length: number, index: number): void {
-	if (!Number.isInteger(index) || index < 0 || index >= length) {
+	if (!Number.isSafeInteger(index) || index < 0 || index >= length) {
 		throw new BinaryFuseConstructionIndexOutOfBoundsError();
 	}
 }
@@ -371,48 +370,6 @@ export class BinaryFuse8 {
 	) {}
 
 	/**
-	 * Returns whether a value is probably in the built set.
-	 */
-	has(value: string): boolean {
-		if (this.keyCount === 0) {
-			return false;
-		}
-
-		return hasValue(
-			value,
-			this.seedHigh,
-			this.seedLow,
-			this.geometry,
-			this.fingerprints,
-			this.keyScratch,
-			this.hashHighScratch,
-			this.hashLowScratch
-		);
-	}
-
-	/**
-	 * Encodes the filter into the local checked binary format.
-	 */
-	serialise(): Uint8Array {
-		const buffer = new Uint8Array(headerBytes + this.fingerprints.length);
-		const view = new DataView(buffer.buffer);
-		view.setUint32(4, magic, true);
-		view.setUint32(8, version, true);
-		view.setUint32(12, this.seedLow, true);
-		view.setUint32(16, this.seedHigh, true);
-		view.setUint32(20, this.keyCount, true);
-		view.setUint32(24, this.geometry.segmentLength, true);
-		view.setUint32(28, this.geometry.segmentLengthMask, true);
-		view.setUint32(32, this.geometry.segmentCount, true);
-		view.setUint32(36, this.geometry.segmentCountLength, true);
-		view.setUint32(40, this.geometry.arrayLength, true);
-		buffer.set(this.fingerprints, headerBytes);
-		view.setUint32(0, bodyChecksum(buffer), true);
-
-		return buffer;
-	}
-
-	/**
 	 * Restores a filter produced by {@link BinaryFuse8.serialise}.
 	 */
 	static deserialise(bytes: Uint8Array): BinaryFuse8 {
@@ -482,6 +439,48 @@ export class BinaryFuse8 {
 		}
 
 		throw new BinaryFuseConstructionFailedError();
+	}
+
+	/**
+	 * Returns whether a value is probably in the built set.
+	 */
+	has(value: string): boolean {
+		if (this.keyCount === 0) {
+			return false;
+		}
+
+		return hasValue(
+			value,
+			this.seedHigh,
+			this.seedLow,
+			this.geometry,
+			this.fingerprints,
+			this.keyScratch,
+			this.hashHighScratch,
+			this.hashLowScratch
+		);
+	}
+
+	/**
+	 * Encodes the filter into the local checked binary format.
+	 */
+	serialise(): Uint8Array {
+		const buffer = new Uint8Array(headerBytes + this.fingerprints.length);
+		const view = new DataView(buffer.buffer);
+		view.setUint32(4, magic, true);
+		view.setUint32(8, version, true);
+		view.setUint32(12, this.seedLow, true);
+		view.setUint32(16, this.seedHigh, true);
+		view.setUint32(20, this.keyCount, true);
+		view.setUint32(24, this.geometry.segmentLength, true);
+		view.setUint32(28, this.geometry.segmentLengthMask, true);
+		view.setUint32(32, this.geometry.segmentCount, true);
+		view.setUint32(36, this.geometry.segmentCountLength, true);
+		view.setUint32(40, this.geometry.arrayLength, true);
+		buffer.set(this.fingerprints, headerBytes);
+		view.setUint32(0, bodyChecksum(buffer), true);
+
+		return buffer;
 	}
 }
 
@@ -558,13 +557,13 @@ function tryBuild(
 		}
 
 		const state = readConstructionWord(slotState, position);
-		const hashHigh = readConstructionWord(slotHashHigh, position);
-		const hashLow = readConstructionWord(slotHashLow, position);
 
 		if (state >> 2 !== 1) {
 			continue;
 		}
 
+		const hashHigh = readConstructionWord(slotHashHigh, position);
+		const hashLow = readConstructionWord(slotHashLow, position);
 		const slotIndex = state & 3;
 		stackHashHigh[stackSize] = hashHigh;
 		stackHashLow[stackSize] = hashLow;
@@ -573,9 +572,9 @@ function tryBuild(
 
 		// Remove the peeled key from its other two slots, which may leave them
 		// alone in turn. The peeled slot itself is finalised, so it is left.
-		for (let index = 0; index < 3; index += 1) {
+		const peelOtherSlot = (index: number): void => {
 			if (index === slotIndex) {
-				continue;
+				return;
 			}
 
 			const other = slot(index, hashHigh, hashLow, geometry);
@@ -591,6 +590,10 @@ function tryBuild(
 			if (nextState >> 2 === 1) {
 				alone.push(other);
 			}
+		};
+
+		for (let index = 0; index < 3; index += 1) {
+			peelOtherSlot(index);
 		}
 	}
 

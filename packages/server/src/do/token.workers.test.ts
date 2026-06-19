@@ -53,19 +53,19 @@ function oauthErrorShape(value: unknown): z.infer<typeof oauthErrorSchema> {
 	return oauthErrorSchema.parse(value);
 }
 
+const jwksKeySchema = z.strictObject({
+	kty: z.string(),
+	crv: z.string(),
+	alg: z.string(),
+	use: z.string(),
+	kid: z.string(),
+	x: z.string(),
+	ext: z.boolean(),
+	key_ops: z.tuple([z.string()])
+});
+
 const jwksResponseSchema = z.strictObject({
-	keys: z.tuple([
-		z.strictObject({
-			kty: z.string(),
-			crv: z.string(),
-			alg: z.string(),
-			use: z.string(),
-			kid: z.string(),
-			x: z.string(),
-			ext: z.boolean(),
-			key_ops: z.tuple([z.string()])
-		})
-	])
+	keys: z.tuple([jwksKeySchema])
 });
 
 const authorizationServerMetadataSchema = z.strictObject({
@@ -78,10 +78,12 @@ const authorizationServerMetadataSchema = z.strictObject({
 });
 
 function postToken(form: Record<string, string>): Promise<Response> {
+	const body = new URLSearchParams(form);
+
 	return fetchPath('/token', {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams(form).toString()
+		body: body.toString()
 	});
 }
 
@@ -90,8 +92,9 @@ function postToken(form: Record<string, string>): Promise<Response> {
 // touched in these tests.
 async function untrustedToken(): Promise<string> {
 	const { privateKey } = await generateKeyPair('RS256', { extractable: true });
+	const signer = new SignJWT({});
 
-	return new SignJWT({})
+	return signer
 		.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 		.setIssuer('https://evil.example.com')
 		.setAudience('cupboard')
@@ -110,15 +113,19 @@ function tokenExchangeError(body: Record<string, string>): Promise<unknown> {
 			new OidcTrustService(instance.context, tenantIdentity)
 		);
 
-		return service
-			.handleToken(
-				new Request(new URL('/token', currentOrigin()), {
-					method: 'POST',
-					headers: { 'content-type': 'application/x-www-form-urlencoded' },
-					body: new URLSearchParams(body).toString()
-				})
-			)
-			.catch((error: unknown) => error);
+		const url = new URL('/token', currentOrigin());
+		const parameters = new URLSearchParams(body);
+		const request = new Request(url, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: parameters.toString()
+		});
+
+		try {
+			return await service.handleToken(request);
+		} catch (error: unknown) {
+			return error;
+		}
 	});
 }
 
@@ -211,7 +218,8 @@ describe('POST /token', () => {
 
 	it('reports 503, not invalid_grant, when the issuer cannot be reached', async () => {
 		const idp = await generateKeyPair('RS256', { extractable: true });
-		const subjectToken = await new SignJWT({ sub: 'ci' })
+		const signer = new SignJWT({ sub: 'ci' });
+		const subjectToken = await signer
 			.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 			.setIssuer('https://idp.test')
 			.setAudience('cupboard-aud')
@@ -275,7 +283,8 @@ const trustClassGrants = {
 async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
 	const jwk = await exportJWK(idp.publicKey);
-	const subjectToken = await new SignJWT({})
+	const signer = new SignJWT({});
+	const subjectToken = await signer
 		.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 		.setIssuer('https://idp.test')
 		.setAudience('cupboard-aud')
@@ -334,9 +343,9 @@ async function exchange(
 		grant_type: tokenExchangeGrantType,
 		subject_token: subjectToken,
 		subject_token_type: subjectTokenTypeIdToken,
-		...(authorizationDetails === undefined
-			? {}
-			: { authorization_details: JSON.stringify(authorizationDetails) })
+		...(authorizationDetails !== undefined && {
+			authorization_details: JSON.stringify(authorizationDetails)
+		})
 	});
 	const body = tokenResponseSchema.parse(await response.json());
 
@@ -412,15 +421,19 @@ describe('refresh grant', () => {
 		const subjectToken = await installTrustedIdp('admin');
 		const exchanged = await exchange(subjectToken);
 		const refreshToken = exchanged.refresh_token ?? '';
-		const present = (): Request =>
-			new Request(new URL('/token', currentOrigin()), {
+		const present = (): Request => {
+			const url = new URL('/token', currentOrigin());
+			const parameters = new URLSearchParams({
+				grant_type: refreshTokenGrantType,
+				refresh_token: refreshToken
+			});
+
+			return new Request(url, {
 				method: 'POST',
 				headers: { 'content-type': 'application/x-www-form-urlencoded' },
-				body: new URLSearchParams({
-					grant_type: refreshTokenGrantType,
-					refresh_token: refreshToken
-				}).toString()
+				body: parameters.toString()
 			});
+		};
 
 		const outcomes = await runInDurableObject(
 			currentServer(),
@@ -820,9 +833,10 @@ describe('attenuation', () => {
 		// self-verification, so it routes to the trust path and is refused rather
 		// than narrowed.
 		const foreign = await generateKeyPair('RS256', { extractable: true });
-		const forged = await new SignJWT({
+		const signer = new SignJWT({
 			authorization_details: [{ type: 'cupboard_wildcard' }]
-		})
+		});
+		const forged = await signer
 			.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 			.setIssuer('https://idp.test')
 			.setAudience('cupboard-aud')

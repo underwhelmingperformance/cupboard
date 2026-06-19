@@ -1623,10 +1623,11 @@ describe('upload flow', () => {
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId);
 
-		const cacheKey = new URL(
+		const cacheKeyUrl = new URL(
 			narInfoCachePath(fixtureTenant, metadata.storePathHash),
 			currentOrigin()
-		).toString();
+		);
+		const cacheKey = cacheKeyUrl.href;
 		await readFetch(`/${metadata.storePathHash}.narinfo`);
 
 		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
@@ -1719,10 +1720,11 @@ describe('upload flow', () => {
 		await commitPath(token, kept);
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
-		const cacheKey = new URL(
+		const cacheKeyUrl = new URL(
 			narInfoCachePath(fixtureTenant, swept.storePathHash),
 			currentOrigin()
-		).toString();
+		);
+		const cacheKey = cacheKeyUrl.href;
 		await readFetch(`/${swept.storePathHash}.narinfo`);
 
 		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
@@ -1756,10 +1758,11 @@ describe('upload flow', () => {
 		await commitPath(token, kept);
 		await setRoot(token, { name: 'main', targets: [kept.storePath] });
 
-		const cacheKey = new URL(
+		const cacheKeyUrl = new URL(
 			narInfoCachePath(fixtureTenant, swept.storePathHash),
 			currentOrigin()
-		).toString();
+		);
+		const cacheKey = cacheKeyUrl.href;
 		await readFetch(`/${swept.storePathHash}.narinfo`);
 
 		await expect(cachedResponseShape(cacheKey)).resolves.toStrictEqual({
@@ -2547,12 +2550,11 @@ describe('upload flow', () => {
 				targets: [committed.storePath],
 				ttlSeconds: 604_800
 			});
+			const expiresAt = new Date(deleteTestBase.getTime() + 604_800 * 1000);
 
 			expect(summary).toStrictEqual({
 				name: 'github:owner/repo/main',
-				expiresAt: new Date(
-					deleteTestBase.getTime() + 604_800 * 1000
-				).toISOString(),
+				expiresAt: expiresAt.toISOString(),
 				expired: false,
 				createdAt: deleteTestBase.toISOString(),
 				updatedAt: deleteTestBase.toISOString(),
@@ -2676,6 +2678,7 @@ describe('upload flow', () => {
 
 			vi.setSystemTime(new Date(deleteTestBase.getTime() + 120 * 1000));
 			const { roots } = await listRoots(token);
+			const pr9ExpiresAt = new Date(deleteTestBase.getTime() + 60_000);
 
 			expect(
 				roots.map((root) => ({
@@ -2688,7 +2691,7 @@ describe('upload flow', () => {
 				{
 					name: 'pr-9',
 					expired: true,
-					expiresAt: new Date(deleteTestBase.getTime() + 60_000).toISOString()
+					expiresAt: pr9ExpiresAt.toISOString()
 				}
 			]);
 		});
@@ -3212,8 +3215,9 @@ describe('upload flow', () => {
 async function foreignKeyToken(scope: 'write' | 'admin'): Promise<string> {
 	const { privateKey } = await generateKeyPair('EdDSA', { extractable: true });
 	const issuedAt = Math.floor(Date.now() / 1000);
+	const signer = new SignJWT({ scope });
 
-	return new SignJWT({ scope })
+	return signer
 		.setProtectedHeader({ alg: 'EdDSA' })
 		.setIssuer('cupboard')
 		.setAudience('cupboard')

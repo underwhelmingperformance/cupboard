@@ -10,6 +10,11 @@ import {
 
 import { baseProcedure } from './base.ts';
 
+// The force flag is a query parameter on the cache removal route.
+const forceQuerySchema = z
+	.strictObject({ force: z.boolean().default(false) })
+	.default({ force: false });
+
 export const cachesContract = {
 	list: baseProcedure
 		.meta({ requires: 'cache:list' })
@@ -47,9 +52,7 @@ export const cachesContract = {
 			// stays open; the parts we consume are strict.
 			z.object({
 				params: z.strictObject({ cacheName: cacheNameSchema }),
-				query: z
-					.strictObject({ force: z.boolean().default(false) })
-					.default({ force: false })
+				query: forceQuerySchema
 			})
 		)
 		.errors({

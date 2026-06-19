@@ -230,7 +230,8 @@ async function readBody(body: RequestInit['body']): Promise<Uint8Array> {
 		return new Uint8Array();
 	}
 
-	return new Uint8Array(await new Response(body).arrayBuffer());
+	const response = new Response(body);
+	return new Uint8Array(await response.arrayBuffer());
 }
 
 function textResponse(status: number, message: string): Response {

@@ -270,7 +270,7 @@ function createJsonReporter(
 					status: 'ok',
 					durationMs: Date.now() - startedAt,
 					groups,
-					...(messages.length === 0 ? {} : { messages })
+					...(messages.length > 0 && { messages })
 				});
 
 				return value;
@@ -281,7 +281,7 @@ function createJsonReporter(
 					status: 'failed',
 					durationMs: Date.now() - startedAt,
 					groups,
-					...(messages.length === 0 ? {} : { messages }),
+					...(messages.length > 0 && { messages }),
 					error: error instanceof Error ? error.message : String(error)
 				});
 

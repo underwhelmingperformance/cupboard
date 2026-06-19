@@ -78,8 +78,10 @@ export async function pushStorePaths(
 			.map(({ decision }) => uploadIdentity(decision))
 			.toSorted(compareUploadIdentities)
 	).toStrictEqual(
-		[...preparedByIdentity.values()]
+		preparedByIdentity
+			.values()
 			.map((entry) => uploadIdentity(entry.metadata))
+			.toArray()
 			.toSorted(compareUploadIdentities)
 	);
 

@@ -38,7 +38,13 @@ export { type BrowserMessages, openBrowser } from './open-browser.ts';
 
 // British spelling for the cancel marker clack renders when a spinner, bar or
 // task is aborted without an explicit per-call message.
-updateSettings({ messages: { cancel: 'Cancelled' } });
+function applyClackSettings(): true {
+	updateSettings({ messages: { cancel: 'Cancelled' } });
+	return true;
+}
+
+const clackSettingsApplied = applyClackSettings();
+void clackSettingsApplied;
 
 /**
  * Lays out label/value rows with aligned columns, ready for a clack note or box.
@@ -334,7 +340,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 				options: entries.map((entry) => ({
 					value: entry.value,
 					label: entry.label,
-					...(entry.hint === undefined ? {} : { hint: entry.hint })
+					...(entry.hint !== undefined && { hint: entry.hint })
 				}))
 			});
 
@@ -354,9 +360,9 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			const answer = await text({
 				message: options.message,
 				initialValue: options.initial ?? '',
-				...(options.placeholder === undefined
-					? {}
-					: { placeholder: options.placeholder }),
+				...(options.placeholder !== undefined && {
+					placeholder: options.placeholder
+				}),
 				validate: (value = '') => {
 					if (value === '') {
 						return options.emptyClears === true
@@ -434,9 +440,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			openBrowser(url, browserMessages);
 		},
 
-		reporter() {
-			return reporter;
-		}
+		reporter: () => reporter
 	};
 
 	return ui;
@@ -476,7 +480,7 @@ function renderFacts(
 		return label;
 	}
 
-	const annotations = [...facts.entries()]
+	const annotations = [...facts]
 		.map(([factLabel, value]) => `${factLabel} ${value}`)
 		.join(' · ');
 

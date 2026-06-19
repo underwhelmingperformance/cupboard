@@ -53,20 +53,6 @@ export class TokenExchangeService {
 		private readonly oidcTrust: OidcTrustService
 	) {}
 
-	async handleToken(request: Request): Promise<Response> {
-		const body = await parseFormBody(tokenRequestSchema, request);
-
-		if (body.grant_type === tokenExchangeGrantType) {
-			return this.exchange(body);
-		}
-
-		if (body.grant_type === refreshTokenGrantType) {
-			return this.refresh(body);
-		}
-
-		throw new UnsupportedGrantTypeError(body.grant_type);
-	}
-
 	private async exchange(body: ParsedTokenRequest): Promise<Response> {
 		if (body.subject_token === undefined) {
 			throw new SubjectTokenRequiredError();
@@ -230,10 +216,10 @@ export class TokenExchangeService {
 		const claimed = consumed.at(0);
 
 		// Lost the consume race, or the row was expired (reclaimed on touch): refused.
-		if (
-			claimed === undefined ||
-			claimed.expiresAt <= new Date().toISOString()
-		) {
+		const now = new Date();
+		const nowIso = now.toISOString();
+
+		if (claimed === undefined || claimed.expiresAt <= nowIso) {
 			throw new StaleRefreshTokenError();
 		}
 
@@ -292,7 +278,7 @@ export class TokenExchangeService {
 				token_type: 'Bearer',
 				expires_in: ttlSeconds,
 				...extra,
-				...(refreshToken === undefined ? {} : { refresh_token: refreshToken }),
+				...(refreshToken !== undefined && { refresh_token: refreshToken }),
 				authorization_details: granted
 			} satisfies TokenResponse,
 			{ headers: { 'cache-control': 'no-store' } }
@@ -306,6 +292,7 @@ export class TokenExchangeService {
 		const id = crypto.randomUUID();
 		const secret = randomSecretHex();
 		const now = new Date();
+		const expiresAt = new Date(now.getTime() + refreshTokenTtlSeconds * 1000);
 
 		this.context.db
 			.insert(schema.refreshTokens)
@@ -315,9 +302,7 @@ export class TokenExchangeService {
 				ruleId,
 				subject,
 				createdAt: now.toISOString(),
-				expiresAt: new Date(
-					now.getTime() + refreshTokenTtlSeconds * 1000
-				).toISOString()
+				expiresAt: expiresAt.toISOString()
 			})
 			.run();
 
@@ -346,13 +331,27 @@ export class TokenExchangeService {
 			new Date()
 		);
 	}
+
+	async handleToken(request: Request): Promise<Response> {
+		const body = await parseFormBody(tokenRequestSchema, request);
+
+		if (body.grant_type === tokenExchangeGrantType) {
+			return this.exchange(body);
+		}
+
+		if (body.grant_type === refreshTokenGrantType) {
+			return this.refresh(body);
+		}
+
+		throw new UnsupportedGrantTypeError(body.grant_type);
+	}
 }
 
 // The wire form is `<id>.<secret>`: the id addresses the row, the secret
 // proves possession against the stored hash.
 function parseRefreshToken(
 	token: string
-): { id: string; secret: string } | undefined {
+): undefined | { id: string; secret: string } {
 	const separator = token.indexOf('.');
 
 	if (separator <= 0 || separator === token.length - 1) {
@@ -370,10 +369,8 @@ function randomSecretHex(): string {
 }
 
 async function sha256Hex(value: string): Promise<string> {
-	const digest = await crypto.subtle.digest(
-		'SHA-256',
-		new TextEncoder().encode(value)
-	);
+	const encoder = new TextEncoder();
+	const digest = await crypto.subtle.digest('SHA-256', encoder.encode(value));
 
 	return bytesToHex(new Uint8Array(digest));
 }

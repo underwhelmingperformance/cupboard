@@ -138,14 +138,16 @@ describe('private-read mode', () => {
 		await pushPath(init.token, privatePath);
 		await pushPath(init.token, publicPath);
 
-		const privateKey = new URL(
+		const privateUrl = new URL(
 			narInfoCachePath(fixtureTenant, privatePath.storePathHash),
 			currentOrigin()
-		).toString();
-		const publicKey = new URL(
+		);
+		const privateKey = privateUrl.href;
+		const publicUrl = new URL(
 			narInfoCachePath(fixtureTenant, publicPath.storePathHash),
 			currentOrigin()
-		).toString();
+		);
+		const publicKey = publicUrl.href;
 
 		await makePrivate();
 		await readFetch(`/${privatePath.storePathHash}.narinfo`, authorised());

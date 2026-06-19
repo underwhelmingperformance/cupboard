@@ -152,7 +152,7 @@ describe('wrangler config validation', () => {
 		]
 	])('rejects %s', (_name, needle, replacement) => {
 		const error = thrownBy(
-			withControl((config) => config.replace(needle, replacement))
+			withControl((config) => config.replace(needle, () => replacement))
 		);
 
 		expect(error).toBeInstanceOf(WranglerConfigError);

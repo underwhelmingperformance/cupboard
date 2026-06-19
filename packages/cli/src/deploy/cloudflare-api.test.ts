@@ -21,18 +21,23 @@ function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 	const requests: Recorded[] = [];
 
 	const fetcher: typeof fetch = (input, init) => {
-		const url = new URL(
-			typeof input === 'string'
-				? input
-				: input instanceof URL
-					? input.toString()
-					: input.url
-		);
+		let rawUrl: string;
+
+		if (typeof input === 'string') {
+			rawUrl = input;
+		} else if (input instanceof URL) {
+			rawUrl = input.href;
+		} else {
+			rawUrl = input.url;
+		}
+
+		const url = new URL(rawUrl);
 		const method = init?.method ?? 'GET';
 		const path = url.pathname.replace('/client/v4', '');
 		requests.push({ method, path });
 
-		const body = routes[`${method} ${path}`];
+		const routeKey = `${method} ${path}`;
+		const body = routes[routeKey];
 
 		if (body === undefined) {
 			return Promise.resolve(

@@ -250,11 +250,12 @@ async function verifyControlInbound(
 	// Reaching the issuer is an upstream condition, not a bad token, so a discovery
 	// or JWKS-fetch failure is a retryable 503 rather than a permanent
 	// `invalid_grant`.
-	const issuer = await discovery
-		.resolve(rule.issuer)
-		.catch((error: unknown) => {
-			throw new IssuerUnavailableError(rule.issuer, { cause: error });
-		});
+	let issuer;
+	try {
+		issuer = await discovery.resolve(rule.issuer);
+	} catch (error: unknown) {
+		throw new IssuerUnavailableError(rule.issuer, { cause: error });
+	}
 
 	try {
 		return await verifyInboundOidcToken(
@@ -282,10 +283,11 @@ export async function controlJwks(env: Env): Promise<{
 }> {
 	const database = controlDatabase(env);
 
+	const now = new Date();
 	await ensureControlKey(
 		database,
 		controlWrappingSecret(env),
-		new Date().toISOString()
+		now.toISOString()
 	);
 
 	const verificationKeys = await controlVerificationKeys(database);
@@ -378,10 +380,11 @@ export async function controlKeys(
 }
 
 export function controlKeyRotate(env: Env): Promise<ControlKeyRotation> {
+	const now = new Date();
 	return rotateControlKey(
 		controlDatabase(env),
 		controlWrappingSecret(env),
-		new Date().toISOString()
+		now.toISOString()
 	);
 }
 
@@ -389,10 +392,11 @@ export async function controlKeyRetire(
 	env: Env,
 	kid: string
 ): Promise<{ kid: string; retired: boolean }> {
+	const now = new Date();
 	const retired = await retireControlKey(
 		controlDatabase(env),
 		kid,
-		new Date().toISOString()
+		now.toISOString()
 	);
 
 	return { kid, retired };
@@ -428,14 +432,16 @@ export function controlOidcTrustAdd(
 	env: Env,
 	body: ParsedOidcTrustAddBody
 ): Promise<OidcTrustSummary> {
-	return addControlTrust(controlDatabase(env), body, new Date().toISOString());
+	const now = new Date();
+	return addControlTrust(controlDatabase(env), body, now.toISOString());
 }
 
 export function controlOidcTrustRemove(
 	env: Env,
 	id: string
 ): Promise<OidcTrustRemoveResponse> {
-	return removeControlTrust(controlDatabase(env), id, new Date().toISOString());
+	const now = new Date();
+	return removeControlTrust(controlDatabase(env), id, now.toISOString());
 }
 
 export async function controlTenantCreate(
@@ -450,7 +456,8 @@ export async function controlTenantCreate(
 	// write the tenant's membership marker, then publish the rebuilt filter. Each
 	// step is idempotent, so a retry after a mid-provision failure replays cleanly
 	// rather than stranding an admitted-but-unconfigured tenant.
-	const summary = await ensureTenant(database, body, new Date().toISOString());
+	const now = new Date();
+	const summary = await ensureTenant(database, body, now.toISOString());
 	const issuer = `${origin}/t/${summary.id}`;
 
 	await tenantServer(env, summary.id).configure({
@@ -558,7 +565,8 @@ function controlDatabase(env: Env): Database {
 // tenant's path-based issuer, so a control token can never cross-verify as a
 // tenant token or the reverse.
 function controlIssuer(request: Request): string {
-	return new URL(request.url).origin;
+	const url = new URL(request.url);
+	return url.origin;
 }
 
 // The token-issuing configuration. The generated Env types these as `string`,

@@ -196,6 +196,8 @@ export function registerAttestCommands(
 				});
 			});
 
+			const predicateTypes = new Set(results.map((item) => item.predicateType));
+
 			reporter.result({
 				kind: 'attestation-verification',
 				data: results,
@@ -203,9 +205,7 @@ export function registerAttestCommands(
 					{ label: 'Verified bundles', value: formatCount(results.length) },
 					{
 						label: 'Predicate types',
-						value: formatCount(
-							new Set(results.map((item) => item.predicateType)).size
-						)
+						value: formatCount(predicateTypes.size)
 					}
 				]
 			});

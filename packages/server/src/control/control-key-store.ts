@@ -149,7 +149,7 @@ export async function controlKeySummaries(
 		return {
 			kid: row.kid,
 			retired: row.retiredAt !== null,
-			...(scheduledRetireAt === undefined ? {} : { scheduledRetireAt })
+			...(scheduledRetireAt !== undefined && { scheduledRetireAt })
 		};
 	});
 }

@@ -34,9 +34,9 @@ export function sessionFromTokenResponse(
 ): CachedSession {
 	return {
 		accessToken: response.access_token,
-		...(response.refresh_token === undefined
-			? {}
-			: { refreshToken: response.refresh_token })
+		...(response.refresh_token !== undefined && {
+			refreshToken: response.refresh_token
+		})
 	};
 }
 
@@ -46,7 +46,9 @@ export function sessionFromTokenResponse(
  * tenant issues regardless of how the URL was typed.
  */
 export function normaliseTarget(target: string): string {
-	return new URL(target).href.replace(/\/+$/, '');
+	const url = new URL(target);
+
+	return url.href.replace(/\/+$/, '');
 }
 
 function tokenFilePath(normalisedTarget: string): string {
@@ -122,9 +124,11 @@ function parseSession(contents: string): CachedSession | undefined {
 	return session.success ? session.data : undefined;
 }
 
+const stringArraySchema = z.array(z.string());
+
 const jwtClaimsSchema = z.object({
 	iss: z.string().optional(),
-	aud: z.union([z.string(), z.array(z.string())]).optional()
+	aud: z.union([z.string(), stringArraySchema]).optional()
 });
 
 // Whether a token's signed claims bind it to this target. The issuer is the
@@ -155,13 +159,13 @@ function audienceAdmits(
 
 	return (
 		audiences.includes(target) ||
-		!audiences.some((audience) => isHttpUrl(audience))
+		audiences.every((audience) => !isHttpUrl(audience))
 	);
 }
 
 function decodeJwtClaims(
 	token: string
-): { iss?: string; aud?: string | string[] } | undefined {
+): undefined | { iss?: string; aud?: string | string[] } {
 	const segment = token.split('.', 2).at(1);
 
 	if (segment === undefined) {

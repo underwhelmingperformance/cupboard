@@ -127,6 +127,20 @@ export const testControlEnv = {
 	CUPBOARD_SIGNUP_AUDIENCE: 'cupboard-control-client'
 } as const;
 
+// Stable comparator that orders strings by UTF-16 code unit, matching the
+// default `Array#sort()` ordering without sorting numbers as strings.
+export function compareStrings(left: string, right: string): number {
+	if (left < right) {
+		return -1;
+	}
+
+	if (left > right) {
+		return 1;
+	}
+
+	return 0;
+}
+
 // A real zstd frame: it decompresses to a 1234-byte payload (the bytes
 // `i % 256`), so the server's verify-before-serve decompress-and-rehash accepts
 // it. `narHash`/`fileHash` are that payload's and this frame's Nix SHA-256s.
@@ -377,13 +391,13 @@ export async function offboardTenant(id: string): Promise<void> {
 
 /** A tenant's registry row, for asserting the offboarding lifecycle. */
 export async function tenantRow(id: string): Promise<
+	| undefined
 	| {
 			status: string;
 			readUser: string | undefined;
 			readPasswordHash: string | undefined;
 			readPasswordSalt: string | undefined;
 	  }
-	| undefined
 > {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({
@@ -414,7 +428,7 @@ export async function tenantRow(id: string): Promise<
 export async function tenantObjectKeys(id: string): Promise<string[]> {
 	const listed = await env.BLOBS.list({ prefix: `t/${id}/` });
 
-	return listed.objects.map((object) => object.key).toSorted();
+	return listed.objects.map((object) => object.key).toSorted(compareStrings);
 }
 
 /** The origin the harness is currently targeting. */
@@ -723,13 +737,15 @@ export async function issueControlAdminToken(
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	const wrappingSecret = testControlEnv.CONTROL_KEY_WRAP_SECRET;
 
-	await ensureControlKey(database, wrappingSecret, new Date().toISOString());
+	const ensureAt = new Date();
+	await ensureControlKey(database, wrappingSecret, ensureAt.toISOString());
 	const active = await activeControlKey(database, wrappingSecret);
 
+	const originUrl = new URL(origin);
 	return issueAccessJwt(
 		active.privateJwk,
 		{
-			issuer: new URL(origin).origin,
+			issuer: originUrl.origin,
 			audience: testControlEnv.CUPBOARD_CONTROL_AUDIENCE,
 			subject,
 			grants,
@@ -747,6 +763,7 @@ export async function seedControlTrust(fields: {
 	readonly audience: string;
 	readonly claims?: Readonly<Record<string, string>>;
 }): Promise<void> {
+	const createdAt = new Date();
 	await drizzleD1(env.CUPBOARD_DB, { schema: { controlTrust } })
 		.insert(controlTrust)
 		.values({
@@ -754,7 +771,7 @@ export async function seedControlTrust(fields: {
 			issuer: fields.issuer,
 			audience: fields.audience,
 			claimsJson: JSON.stringify(fields.claims ?? {}),
-			createdAt: new Date().toISOString()
+			createdAt: createdAt.toISOString()
 		})
 		.run();
 }
@@ -804,7 +821,7 @@ export async function blobStateNarHashes(): Promise<
 		.all();
 
 	return rows.toSorted((left, right) =>
-		left.narHash > right.narHash ? 1 : -1
+		compareStrings(left.narHash, right.narHash)
 	);
 }
 
@@ -838,14 +855,15 @@ export async function tenantMaintenanceFailureRow(
 	id: string,
 	pass: typeof d1Schema.tenantMaintenanceFailure.$inferSelect.pass
 ): Promise<
+	| undefined
 	| {
 			consecutiveFailures: number;
 			lastError: string | undefined;
 			lastFailedAt: string | undefined;
 			lastSuccessAt: string | undefined;
 	  }
-	| undefined
 > {
+	const tenant = tenantIdSchema.parse(id);
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({
 			consecutiveFailures:
@@ -857,7 +875,7 @@ export async function tenantMaintenanceFailureRow(
 		.from(d1Schema.tenantMaintenanceFailure)
 		.where(
 			and(
-				eq(d1Schema.tenantMaintenanceFailure.tenant, tenantIdSchema.parse(id)),
+				eq(d1Schema.tenantMaintenanceFailure.tenant, tenant),
 				eq(d1Schema.tenantMaintenanceFailure.pass, pass)
 			)
 		)
@@ -908,7 +926,7 @@ export async function tenantBlobRows(): Promise<
 		.all();
 
 	return rows.toSorted((left, right) =>
-		left.narHash > right.narHash ? 1 : -1
+		compareStrings(left.narHash, right.narHash)
 	);
 }
 
@@ -926,7 +944,7 @@ export async function casObjectRows(): Promise<
 
 	return rows
 		.map((row) => ({ ...row, deleteAfter: row.deleteAfter ?? undefined }))
-		.toSorted((left, right) => (left.digest > right.digest ? 1 : -1));
+		.toSorted((left, right) => compareStrings(left.digest, right.digest));
 }
 
 export async function attestationReferenceRows(): Promise<
@@ -945,10 +963,10 @@ export async function attestationReferenceRows(): Promise<
 		.all();
 
 	return rows.toSorted((left, right) =>
-		`${left.storePathHash}:${String(left.generation)}:${left.predicateType}` >
-		`${right.storePathHash}:${String(right.generation)}:${right.predicateType}`
-			? 1
-			: -1
+		compareStrings(
+			`${left.storePathHash}:${String(left.generation)}:${left.predicateType}`,
+			`${right.storePathHash}:${String(right.generation)}:${right.predicateType}`
+		)
 	);
 }
 
@@ -960,7 +978,11 @@ export async function tenantCasBlobRows(): Promise<
 		.from(d1Schema.tenantCasBlob)
 		.all();
 
-	return rows.toSorted((left, right) => (left.digest > right.digest ? 1 : -1));
+	return rows.toSorted(
+		(left, right) =>
+			compareStrings(left.digest, right.digest) ||
+			compareStrings(left.tenant, right.tenant)
+	);
 }
 
 export async function pendingAttestationRows(): Promise<
@@ -979,7 +1001,7 @@ export async function pendingAttestationRows(): Promise<
 				.all()
 	);
 
-	return rows.toSorted((left, right) => (left.id > right.id ? 1 : -1));
+	return rows.toSorted((left, right) => compareStrings(left.id, right.id));
 }
 
 export async function stageAttestationBundle(
@@ -1005,14 +1027,13 @@ export async function fileAttestationReference(options: {
 		options.uploadId,
 		options.bytes
 	);
-	const measured = await testServerFor(options.tenant ?? fixtureTenant)
-		.measureAttestationBundle(stagingKey)
-		.then(async (bundle) => {
-			await testServerFor(
-				options.tenant ?? fixtureTenant
-			).promoteAttestationBundle(stagingKey, bundle);
-			return bundle;
-		});
+	const measured = await testServerFor(
+		options.tenant ?? fixtureTenant
+	).measureAttestationBundle(stagingKey);
+	await testServerFor(options.tenant ?? fixtureTenant).promoteAttestationBundle(
+		stagingKey,
+		measured
+	);
 
 	await testServerFor(
 		options.tenant ?? fixtureTenant
@@ -1034,6 +1055,7 @@ export async function fileAttestationReference(options: {
 
 /** The fixture tenant's usage counters and quota, for asserting charge and credit. */
 export async function tenantUsageRow(): Promise<
+	| undefined
 	| {
 			bytes: number;
 			narinfos: number;
@@ -1042,7 +1064,6 @@ export async function tenantUsageRow(): Promise<
 			casBlobs: number;
 			quotaBytes: number | undefined;
 	  }
-	| undefined
 > {
 	const row = await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
 		.select({
@@ -1129,13 +1150,14 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 					)
 				)
 				.run();
+			const createdAt = new Date();
 			tx.insert(narInfoDeletions)
 				.values({
 					cache: deletion.cache,
 					storePathHash: deletion.storePathHash,
 					narHash: deletion.narHash,
 					generation: deletion.generation,
-					createdAt: new Date().toISOString()
+					createdAt: createdAt.toISOString()
 				})
 				.onConflictDoNothing()
 				.run();
@@ -1148,6 +1170,7 @@ export async function seedNarInfoDeletion(fields: {
 	readonly narHash: NixSha256HashString;
 	readonly generation: number;
 }): Promise<void> {
+	const createdAt = new Date();
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { narInfoDeletions } })
 			.insert(narInfoDeletions)
@@ -1156,7 +1179,7 @@ export async function seedNarInfoDeletion(fields: {
 				storePathHash: fields.storePathHash,
 				narHash: fields.narHash,
 				generation: fields.generation,
-				createdAt: new Date().toISOString()
+				createdAt: createdAt.toISOString()
 			})
 			.onConflictDoNothing()
 			.run();
@@ -1184,7 +1207,7 @@ export async function narInfoDeletionRows(): Promise<
 			.from(narInfoDeletions)
 			.all()
 			.toSorted((left, right) =>
-				left.storePathHash > right.storePathHash ? 1 : -1
+				compareStrings(left.storePathHash, right.storePathHash)
 			)
 	);
 }
@@ -1589,7 +1612,9 @@ export function commitSocketFromResponse(response: Response): {
 		}
 	});
 	socket.addEventListener('close', () => {
-		for (const waiter of waiters.splice(0)) {
+		const pending = [...waiters];
+		waiters.length = 0;
+		for (const waiter of pending) {
 			waiter.reject(
 				new CommitSocketProtocolError('the socket closed before the frame')
 			);
@@ -1728,10 +1753,17 @@ export async function commitUploadRejection(
 	uploadId: string,
 	cache: string = DEFAULT_CACHE
 ): Promise<unknown> {
-	const result = await commitUpload(token, uploadId, cache).then(
-		(response) => ({ kind: 'committed' as const, response }),
-		(error: unknown) => ({ kind: 'rejected' as const, error })
-	);
+	let result:
+		| { kind: 'committed'; response: Awaited<ReturnType<typeof commitUpload>> }
+		| { kind: 'rejected'; error: unknown };
+	try {
+		result = {
+			kind: 'committed',
+			response: await commitUpload(token, uploadId, cache)
+		};
+	} catch (error: unknown) {
+		result = { kind: 'rejected', error };
+	}
 
 	expect({
 		kind: result.kind,
@@ -1741,7 +1773,11 @@ export async function commitUploadRejection(
 		uploadId
 	});
 
-	return result.kind === 'rejected' ? result.error : result.response;
+	if (result.kind === 'rejected') {
+		return result.error;
+	}
+
+	return result.response;
 }
 
 /** As {@link commitUpload}, routed through the Worker like a real client. */
@@ -1861,7 +1897,7 @@ export async function deletePath(
 
 export async function setRoot(
 	token: string,
-	fields: { readonly name: string } & RootSetBody
+	fields: RootSetBody & { readonly name: string }
 ): Promise<RootSetResponse> {
 	const { name, ...body } = fields;
 	const response = await authorisedFetch(
@@ -2065,6 +2101,7 @@ export async function expectTextResponse(
 ): Promise<void> {
 	const response = await fetcher(pathname, { method: expected.method });
 	const body = await response.text();
+	const encoder = new TextEncoder();
 
 	expect({
 		status: response.status,
@@ -2081,7 +2118,7 @@ export async function expectTextResponse(
 		status: StatusCodes.OK,
 		body: expected.method === 'HEAD' ? '' : expected.body,
 		cacheControl: expected.cacheControl,
-		contentLength: String(new TextEncoder().encode(expected.body).length),
+		contentLength: String(encoder.encode(expected.body).length),
 		contentType: expected.contentType,
 		etag: 'string',
 		lastModified: pathname.endsWith('.narinfo') ? 'string' : undefined
@@ -2216,20 +2253,19 @@ function singleChunkStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * per path with this rather than fabricating unrelated hashes.
  */
 export async function verifiableNar(seed: string): Promise<VerifiableNar> {
-	const uncompressed = new TextEncoder().encode(
-		`cupboard-nar:${seed}\n`.repeat(64)
+	const encoder = new TextEncoder();
+	const uncompressed = encoder.encode(`cupboard-nar:${seed}\n`.repeat(64));
+	const compressedStream = singleChunkStream(uncompressed).pipeThrough(
+		zstdCompressionStream()
 	);
-	const compressed = new Uint8Array(
-		await new Response(
-			singleChunkStream(uncompressed).pipeThrough(zstdCompressionStream())
-		).arrayBuffer()
-	);
-	const narHashValue = NixSha256Hash.fromDigest(
-		new Uint8Array(await crypto.subtle.digest('SHA-256', uncompressed))
-	).value;
-	const fileHashValue = NixSha256Hash.fromDigest(
-		new Uint8Array(await crypto.subtle.digest('SHA-256', compressed))
-	).value;
+	const compressedResponse = new Response(compressedStream);
+	const compressed = new Uint8Array(await compressedResponse.arrayBuffer());
+	const narDigest = await crypto.subtle.digest('SHA-256', uncompressed);
+	const narHash = NixSha256Hash.fromDigest(new Uint8Array(narDigest));
+	const narHashValue = narHash.value;
+	const fileDigest = await crypto.subtle.digest('SHA-256', compressed);
+	const fileHash = NixSha256Hash.fromDigest(new Uint8Array(fileDigest));
+	const fileHashValue = fileHash.value;
 
 	return {
 		narBytes: compressed,
@@ -2266,7 +2302,8 @@ export function sigstoreBundleBytes(
 		}
 	};
 
-	return new TextEncoder().encode(JSON.stringify(bundle));
+	const encoder = new TextEncoder();
+	return encoder.encode(JSON.stringify(bundle));
 }
 
 /** The lowercase hex digest of a `sha256:<base32>` NAR hash. */
@@ -2320,20 +2357,20 @@ function storedZstdFrame(payload: Uint8Array): Uint8Array {
 export async function verifiableNarStored(
 	seed: string
 ): Promise<VerifiableNar> {
-	const uncompressed = new TextEncoder().encode(
-		`cupboard-nar:${seed}\n`.repeat(64)
-	);
+	const encoder = new TextEncoder();
+	const uncompressed = encoder.encode(`cupboard-nar:${seed}\n`.repeat(64));
 	const frame = storedZstdFrame(uncompressed);
+
+	const narDigest = await crypto.subtle.digest('SHA-256', uncompressed);
+	const narHash = NixSha256Hash.fromDigest(new Uint8Array(narDigest));
+	const fileDigest = await crypto.subtle.digest('SHA-256', frame);
+	const fileHash = NixSha256Hash.fromDigest(new Uint8Array(fileDigest));
 
 	return {
 		narBytes: frame,
-		narHash: NixSha256Hash.fromDigest(
-			new Uint8Array(await crypto.subtle.digest('SHA-256', uncompressed))
-		).value,
+		narHash: narHash.value,
 		narSize: uncompressed.byteLength,
-		fileHash: NixSha256Hash.fromDigest(
-			new Uint8Array(await crypto.subtle.digest('SHA-256', frame))
-		).value
+		fileHash: fileHash.value
 	};
 }
 
@@ -2451,7 +2488,8 @@ export async function markUploadPendingVerification(
 			.set({ verdict: 'pending' })
 			.where(eq(pendingUploads.id, uploadId))
 			.run();
-		return new MaintenanceEligibilityService(instance.context).reconcile();
+		const service = new MaintenanceEligibilityService(instance.context);
+		return service.reconcile();
 	});
 }
 
@@ -2552,7 +2590,8 @@ export async function verifyNarInfoSignature(
 		false,
 		['verify']
 	);
-	const fingerprint = new TextEncoder().encode(narInfo.fingerprint());
+	const encoder = new TextEncoder();
+	const fingerprint = encoder.encode(narInfo.fingerprint());
 
 	const verifications = await Promise.all(
 		narInfo.sigs.map((signature) =>
@@ -2732,7 +2771,8 @@ export async function expectPrepareUploadResponse(
 }
 
 export function uploadExpiryFromNow(): string {
-	return new Date(Date.now() + 15 * 60 * 1000).toISOString();
+	const expiry = new Date(Date.now() + 15 * 60 * 1000);
+	return expiry.toISOString();
 }
 
 /** The highest migration index registered in `drizzle/migrations.js`. */
@@ -2750,7 +2790,7 @@ function migrationsThrough(throughIndex: number) {
 		},
 		migrations: Object.fromEntries(
 			Object.entries(migrations.migrations).filter(
-				([key]) => Number.parseInt(key.slice(1), 10) <= throughIndex
+				([key]) => Math.trunc(Number(key.slice(1))) <= throughIndex
 			)
 		)
 	};
@@ -2799,6 +2839,7 @@ export async function seedSigningKeys(
 
 		for (const seed of seeds) {
 			const generated = await generateSigningKey(seed.name);
+			const createdAt = new Date();
 
 			database
 				.insert(signingKeys)
@@ -2808,7 +2849,7 @@ export async function seedSigningKeys(
 					publicKey: generated.publicKey,
 					signing: seed.signing,
 					published: seed.published,
-					createdAt: new Date().toISOString()
+					createdAt: createdAt.toISOString()
 				})
 				.run();
 

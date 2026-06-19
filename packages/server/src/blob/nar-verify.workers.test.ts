@@ -26,7 +26,8 @@ describe('verifyDecompressedNar', () => {
 	// ~3 MB so the stream cycles the bridge's chunk queue rather than passing in
 	// one piece; a true multi-hundred-MB bounded-memory check belongs in the
 	// runtime benchmark, not the unit suite.
-	const nar = new TextEncoder().encode('nar payload '.repeat(250_000));
+	const encoder = new TextEncoder();
+	const nar = encoder.encode('nar payload '.repeat(250_000));
 
 	it('accepts a blob whose decompressed bytes match the claimed hash and size', async () => {
 		const narHash = await nixNarHash(nar);
@@ -40,9 +41,8 @@ describe('verifyDecompressedNar', () => {
 	});
 
 	it('rejects a hash mismatch and reports the recomputed hash', async () => {
-		const claimed = await nixNarHash(
-			new TextEncoder().encode('something else')
-		);
+		const encoder = new TextEncoder();
+		const claimed = await nixNarHash(encoder.encode('something else'));
 		const actualNarHash = await nixNarHash(nar);
 
 		const result = await verifyDecompressedNar(compressedStream(nar), {

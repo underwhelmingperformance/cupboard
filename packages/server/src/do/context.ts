@@ -154,6 +154,7 @@ export interface CanonicalBlob {
 // global D1 handle, the runtime environment, the DO state (for critical
 // sections), the inbound-OIDC discovery store, and the lazy R2 presigner.
 export class ServerContext {
+	private presigner: R2Presigner | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
 	env: RuntimeEnv;
@@ -165,7 +166,6 @@ export class ServerContext {
 	// gate, so the only caller to guard is an in-flight commit settling on this warm
 	// instance, which sees the flag set by the same instance's offboard RPC.
 	offboarding = false;
-	private presigner: R2Presigner | undefined;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
@@ -262,11 +262,9 @@ export function oidcTrustRuleFromRow(
 			row.permittedGrantsJson,
 			fault
 		),
-		...(row.displayJson === null
-			? {}
-			: {
-					display: parseStored(oidcTrustDisplaySchema, row.displayJson, fault)
-				})
+		...(row.displayJson !== null && {
+			display: parseStored(oidcTrustDisplaySchema, row.displayJson, fault)
+		})
 	};
 }
 
@@ -283,7 +281,7 @@ export function oidcTrustSummaryFromRow(
 		audience: rule.audience,
 		claims: { ...rule.claims },
 		permittedGrants: [...rule.permittedGrants],
-		...(rule.display === undefined ? {} : { display: rule.display }),
+		...(rule.display !== undefined && { display: rule.display }),
 		disabled: Boolean(row.disabledAt)
 	};
 }
@@ -336,6 +334,20 @@ export function keySummary(key: SigningKey): SigningKeySummary {
 	};
 }
 
+// Orders strings by UTF-16 code unit, matching the default `<`/`>` comparison
+// used across the service layer's deterministic listings.
+export function compareStrings(left: string, right: string): number {
+	if (left < right) {
+		return -1;
+	}
+
+	if (left > right) {
+		return 1;
+	}
+
+	return 0;
+}
+
 const keyNamePattern = /^cupboard-(\d+)$/;
 
 // Each key needs a distinct Nix key name so old and new keys can coexist in a
@@ -345,7 +357,7 @@ export function nextKeyName(keys: readonly SigningKey[]): string {
 	const indices = keys.flatMap((key) => {
 		const match = keyNamePattern.exec(key.name);
 
-		return match === null ? [] : [Number.parseInt(match[1] ?? '0', 10)];
+		return match === null ? [] : [Math.trunc(Number(match[1] ?? '0'))];
 	});
 	const next = indices.length === 0 ? 1 : Math.max(...indices) + 1;
 

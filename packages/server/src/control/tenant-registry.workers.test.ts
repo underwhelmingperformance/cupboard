@@ -40,7 +40,7 @@ function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 
 function usageRow(
 	id: TenantId
-): Promise<{ quotaBytes: number | null } | undefined> {
+): Promise<undefined | { quotaBytes: number | null }> {
 	return database()
 		.select({ quotaBytes: d1Schema.tenantUsage.quotaBytes })
 		.from(d1Schema.tenantUsage)
@@ -418,15 +418,14 @@ describe('tenant registry', () => {
 			ownerSubject: stored?.ownerSubject,
 			ownerAudience: stored?.ownerAudience
 		};
-		const reProvision = await ensureTenant(
-			database(),
-			createBody(acme, 'private'),
-			now
-		).then(
-			() => 'accepted',
-			(error: unknown) =>
-				error instanceof TenantAlreadyExistsError ? 'refused' : 'other'
-		);
+		let reProvision: string;
+		try {
+			await ensureTenant(database(), createBody(acme, 'private'), now);
+			reProvision = 'accepted';
+		} catch (error: unknown) {
+			reProvision =
+				error instanceof TenantAlreadyExistsError ? 'refused' : 'other';
+		}
 
 		expect({
 			row,

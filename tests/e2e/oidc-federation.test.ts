@@ -58,16 +58,21 @@ describe('OIDC federation', () => {
 				sub: 'not-the-owner'
 			});
 
+			let refused: number | string;
+			try {
+				await server.exchangeIdToken(nonOwner);
+				refused = 'accepted';
+			} catch (error: unknown) {
+				refused =
+					error instanceof TokenExchangeFailedError ? error.status : 'other';
+			}
+
 			expect({
 				ownerRule: rules.map((rule) => ({
 					id: rule.id,
 					grantTypes: rule.permittedGrants.map((grant) => grant.type)
 				})),
-				refused: await server.exchangeIdToken(nonOwner).then(
-					() => 'accepted',
-					(error: unknown) =>
-						error instanceof TokenExchangeFailedError ? error.status : 'other'
-				)
+				refused
 			}).toStrictEqual({
 				ownerRule: [{ id: 'owner', grantTypes: ['cupboard_wildcard'] }],
 				refused: 400
@@ -149,18 +154,21 @@ describe('OIDC federation', () => {
 				targets: [target]
 			});
 
+			let outsidePrefix: string;
+			try {
+				await ciRoots.set({
+					cacheName: 'owner-ci',
+					name: 'github:other/repo',
+					targets: [target]
+				});
+				outsidePrefix = 'accepted';
+			} catch {
+				outsidePrefix = 'refused';
+			}
+
 			expect({
 				permittedRoot: permitted.name,
-				outsidePrefix: await ciRoots
-					.set({
-						cacheName: 'owner-ci',
-						name: 'github:other/repo',
-						targets: [target]
-					})
-					.then(
-						() => 'accepted',
-						() => 'refused'
-					)
+				outsidePrefix
 			}).toStrictEqual({
 				permittedRoot: 'github:owner/repo',
 				outsidePrefix: 'refused'
@@ -198,15 +206,25 @@ describe('OIDC federation', () => {
 				repository_owner_id: '5678'
 			});
 
+			let wrongClaimResult: string;
+			try {
+				await server.exchangeIdToken(wrongClaim);
+				wrongClaimResult = 'accepted';
+			} catch {
+				wrongClaimResult = 'refused';
+			}
+
+			let wrongAudienceResult: string;
+			try {
+				await server.exchangeIdToken(wrongAudience);
+				wrongAudienceResult = 'accepted';
+			} catch {
+				wrongAudienceResult = 'refused';
+			}
+
 			expect({
-				wrongClaim: await server.exchangeIdToken(wrongClaim).then(
-					() => 'accepted',
-					() => 'refused'
-				),
-				wrongAudience: await server.exchangeIdToken(wrongAudience).then(
-					() => 'accepted',
-					() => 'refused'
-				)
+				wrongClaim: wrongClaimResult,
+				wrongAudience: wrongAudienceResult
 			}).toStrictEqual({ wrongClaim: 'refused', wrongAudience: 'refused' });
 		}));
 });

@@ -15,34 +15,6 @@ import { type ServerContext } from './context.ts';
 export class OffboardingService {
 	constructor(private readonly context: ServerContext) {}
 
-	// Marks this tenant offboarding so the verify-restore path stops re-materialising
-	// its objects. Called when offboarding begins and again on every drain pass.
-	begin(): void {
-		this.context.offboarding = true;
-	}
-
-	// Deletes a bounded batch of this tenant's reference edges and presence rows,
-	// reporting whether any remain so the Worker can drive the drain to completion. A
-	// Durable Object whose identity is already gone has been purged by an interrupted
-	// finalisation; it is reported drained so the Worker re-runs finalisation and the
-	// stuck tenant converges.
-	async drain(limit: number): Promise<{ drained: boolean }> {
-		this.begin();
-
-		const tenant = this.tenantSlug();
-
-		if (tenant === undefined) {
-			return { drained: true };
-		}
-
-		await this.deleteReferenceBatch(tenant, limit);
-		await this.deleteAttestationReferenceBatch(tenant, limit);
-		await this.deletePresenceBatch(tenant, limit);
-		await this.deleteCasPresenceBatch(tenant, limit);
-
-		return { drained: !(await this.hasResidue(tenant)) };
-	}
-
 	private tenantSlug(): TenantId | undefined {
 		const row = this.context.db
 			.select({ tenant: schema.tenantIdentity.tenant })
@@ -106,15 +78,14 @@ export class OffboardingService {
 			return;
 		}
 
+		const narHashes = blobs.map((blob) => blob.narHash);
+
 		await this.context.d1
 			.delete(d1Schema.tenantBlob)
 			.where(
 				and(
 					eq(d1Schema.tenantBlob.tenant, tenant),
-					inArray(
-						d1Schema.tenantBlob.narHash,
-						blobs.map((blob) => blob.narHash)
-					)
+					inArray(d1Schema.tenantBlob.narHash, narHashes)
 				)
 			)
 			.run();
@@ -186,15 +157,14 @@ export class OffboardingService {
 			return;
 		}
 
+		const digests = blobs.map((blob) => blob.digest);
+
 		await this.context.d1
 			.delete(d1Schema.tenantCasBlob)
 			.where(
 				and(
 					eq(d1Schema.tenantCasBlob.tenant, tenant),
-					inArray(
-						d1Schema.tenantCasBlob.digest,
-						blobs.map((blob) => blob.digest)
-					)
+					inArray(d1Schema.tenantCasBlob.digest, digests)
 				)
 			)
 			.run();
@@ -242,5 +212,33 @@ export class OffboardingService {
 			.get();
 
 		return casPresence !== undefined;
+	}
+
+	// Marks this tenant offboarding so the verify-restore path stops re-materialising
+	// its objects. Called when offboarding begins and again on every drain pass.
+	begin(): void {
+		this.context.offboarding = true;
+	}
+
+	// Deletes a bounded batch of this tenant's reference edges and presence rows,
+	// reporting whether any remain so the Worker can drive the drain to completion. A
+	// Durable Object whose identity is already gone has been purged by an interrupted
+	// finalisation; it is reported drained so the Worker re-runs finalisation and the
+	// stuck tenant converges.
+	async drain(limit: number): Promise<{ drained: boolean }> {
+		this.begin();
+
+		const tenant = this.tenantSlug();
+
+		if (tenant === undefined) {
+			return { drained: true };
+		}
+
+		await this.deleteReferenceBatch(tenant, limit);
+		await this.deleteAttestationReferenceBatch(tenant, limit);
+		await this.deletePresenceBatch(tenant, limit);
+		await this.deleteCasPresenceBatch(tenant, limit);
+
+		return { drained: !(await this.hasResidue(tenant)) };
 	}
 }

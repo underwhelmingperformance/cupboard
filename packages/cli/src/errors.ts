@@ -116,8 +116,7 @@ export class UnreachableHostError extends CliError {
 		cause: Error
 	) {
 		const underlying = cause.cause;
-		const detail =
-			underlying instanceof Error ? underlying.message : cause.message;
+		const detail = (underlying instanceof Error ? underlying : cause).message;
 
 		super(`Could not reach ${host}: ${detail}`);
 		this.name = 'UnreachableHostError';

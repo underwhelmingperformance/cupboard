@@ -93,7 +93,8 @@ export function ownerHint(choice: OwnerChoice): string {
 	}
 
 	const { owner, origin } = choice;
-	const host = new URL(owner.issuer).hostname;
+	const issuerUrl = new URL(owner.issuer);
+	const host = issuerUrl.hostname;
 
 	return `${host} · ${owner.subject} (${originLabels[origin]})`;
 }

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { issueAccessJwt, verifyAccessJwt } from '../auth/auth.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { LastControlKeyError } from '../errors.ts';
+import { compareStrings } from '../test-support.ts';
 
 import {
 	activeControlKey,
@@ -18,7 +19,9 @@ import {
 	rotateControlKey
 } from './control-key-store.ts';
 
-const secret = btoa(String.fromCodePoint(...new Uint8Array(32).fill(7)));
+const secretBytes = new Uint8Array(32);
+secretBytes.fill(7);
+const secret = btoa(String.fromCodePoint(...secretBytes));
 const issuer = 'https://cupboard.test';
 const audience = 'cupboard-control';
 const t0 = '2026-01-01T00:00:00.000Z';
@@ -86,7 +89,9 @@ describe('control key store', () => {
 		const secondKid = second.kid;
 		const active = await activeControlKey(database, secret);
 		const verificationKeys = await controlVerificationKeys(database);
-		const publishedKids = verificationKeys.map((key) => key.kid).toSorted();
+		const publishedKids = verificationKeys
+			.map((key) => key.kid)
+			.toSorted(compareStrings);
 		const summaries = await controlKeySummaries(database);
 
 		expect({
@@ -98,7 +103,7 @@ describe('control key store', () => {
 		}).toStrictEqual({
 			activeKid: secondKid,
 			rotated: true,
-			publishedKids: [firstKid, secondKid].toSorted(),
+			publishedKids: [firstKid, secondKid].toSorted(compareStrings),
 			retiring: { kid: firstKid, scheduledRetireAt: t1RetireAt },
 			summaries: [
 				{ kid: firstKid, retired: false, scheduledRetireAt: t1RetireAt },
@@ -170,10 +175,13 @@ describe('control key store', () => {
 			remaining: [secondKid],
 			activeAfter: secondKid
 		});
-		const error = await retireControlKey(database, secondKid, t2).then(
-			() => ({ kind: 'retired' }),
-			(error_: unknown) => error_
-		);
+		let error: unknown;
+		try {
+			await retireControlKey(database, secondKid, t2);
+			error = { kind: 'retired' };
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expect(error).toBeInstanceOf(LastControlKeyError);
 		if (!(error instanceof LastControlKeyError)) {

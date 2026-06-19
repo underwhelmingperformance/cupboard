@@ -39,7 +39,7 @@ export interface ReadContext {
 // prefix is present but malformed or names an invalid cache.
 export function cacheScope(
 	pathname: string
-): { cache: string; rest: string } | undefined {
+): undefined | { cache: string; rest: string } {
 	const prefix = '/cache/';
 
 	if (!pathname.startsWith(prefix)) {
@@ -193,10 +193,11 @@ export async function cacheInfoResponse(
 }
 
 function narCacheKey(tenant: TenantId, narHash: NixSha256HashString): string {
-	return new URL(
+	const cacheKeyUrl = new URL(
 		`t/${tenant}/${narObjectKey(narHash)}`,
 		'https://cupboard-nar-cache.invalid/'
-	).toString();
+	);
+	return cacheKeyUrl.href;
 }
 
 // `authorize`, when provided, gates access to a shared object. It runs before

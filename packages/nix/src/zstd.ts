@@ -64,9 +64,7 @@ function zstdTransformStream(
 	});
 
 	const writable = new WritableStream<Uint8Array>({
-		write(chunk) {
-			return writeChunk(zstd, chunk);
-		},
+		write: (chunk) => writeChunk(zstd, chunk),
 		close() {
 			zstd.end();
 		},

@@ -76,111 +76,23 @@ export class BlobReaperService {
 		private readonly casDemoter: CasReferenceDemoter
 	) {}
 
-	// Returns how many shared blobs it collected.
-	async reapBlobs(now: Date, limit: number): Promise<number> {
-		await this.armUnreferencedBlobs(now, limit);
-
-		return this.collectExpiredBlobs(now, limit);
-	}
-
-	async reapCasObjects(now: Date, limit: number): Promise<number> {
-		await this.armUnreferencedCasObjects(now, limit);
-
-		return this.collectExpiredCasObjects(now, limit);
-	}
-
-	// Walks a bounded batch of `blob_state` from the persisted cursor, removing the
-	// fact and de-materialising the referencing narinfos of any shared blob whose
-	// canonical object is gone (an "available but no object" gap a crash can leave).
-	// Reads serve from a tenant's narinfo object, never `blob_state`, so clearing the
-	// fact alone would stop no read; the narinfos are de-materialised first, through
-	// each owning tenant's Durable Object, and the `blob_state` row is deleted last so
-	// it stays the durable marker that re-drives an interrupted demote on the next
-	// pass. Returns how many shared facts it demoted.
-	async demoteMissingBlobs(
-		limit: number,
-		cursor: DemoteCursor
-	): Promise<number> {
-		const after = await cursor.read();
-		const batch = await this.demoteBatch(after, limit);
-
-		// A short page means the scan reached the end of the hash order, so wrap to the
-		// start; otherwise resume after the last hash scanned. Advanced before
-		// processing, so a per-blob failure does not wedge the scan.
-		const next = batch.length < limit ? '' : (batch.at(-1)?.narHash ?? '');
-		await cursor.advance(next);
-
-		let demoted = 0;
-
-		for (const blob of batch) {
-			const present =
-				(await this.blobs.head(narObjectKey(blob.narHash))) !== null;
-
-			if (present) {
-				continue;
-			}
-
-			if (await this.demoteBlob(blob.narHash, blob.verifiedAt)) {
-				demoted += 1;
-			}
-		}
-
-		return demoted;
-	}
-
-	async demoteMissingCasObjects(
-		limit: number,
-		cursor: DemoteCursor
-	): Promise<number> {
-		const after = await cursor.read();
-		const batch = await this.demoteCasBatch(after, limit);
-		const next = batch.length < limit ? '' : (batch.at(-1)?.digest ?? '');
-		await cursor.advance(next);
-
-		let demoted = 0;
-
-		for (const object of batch) {
-			const present =
-				(await this.blobs.head(casObjectKey(object.digest))) !== null;
-
-			if (present) {
-				continue;
-			}
-
-			const tenants = await this.casReferencingTenants(object.digest);
-
-			for (const tenant of tenants) {
-				await this.casDemoter.demote(tenant, object.digest, object.storedAt);
-			}
-
-			if (await this.demoteCasObject(object.digest, object.storedAt)) {
-				demoted += 1;
-			}
-		}
-
-		return demoted;
-	}
-
 	// Arms unreferenced shared blobs with a grace timer. The cross-tenant
 	// "referenced anywhere" probe is on `blob_ref.nar_hash` (its dedicated index),
 	// not any one tenant's narinfos. Bounded: only a batch is armed per pass, and a
 	// commit that re-references a hash clears the timer it set.
 	private async armUnreferencedBlobs(now: Date, limit: number): Promise<void> {
-		const deleteAfter = new Date(
-			now.getTime() + blobReaperGraceMs
-		).toISOString();
+		const graceDeadline = new Date(now.getTime() + blobReaperGraceMs);
+		const deleteAfter = graceDeadline.toISOString();
+		const referencedHashes = this.d1
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference);
 		const candidates = await this.d1
 			.select({ narHash: d1Schema.blobState.narHash })
 			.from(d1Schema.blobState)
 			.where(
 				and(
 					isNull(d1Schema.blobState.deleteAfter),
-					notInArray(
-						d1Schema.blobState.narHash,
-						this.d1
-							.select({ narHash: d1Schema.blobReference.narHash })
-							.from(d1Schema.blobReference)
-					)
+					notInArray(d1Schema.blobState.narHash, referencedHashes)
 				)
 			)
 			.limit(limit)
@@ -190,15 +102,14 @@ export class BlobReaperService {
 			return;
 		}
 
+		const candidateHashes = candidates.map((candidate) => candidate.narHash);
+
 		await this.d1
 			.update(d1Schema.blobState)
 			.set({ deleteAfter })
 			.where(
 				and(
-					inArray(
-						d1Schema.blobState.narHash,
-						candidates.map((candidate) => candidate.narHash)
-					),
+					inArray(d1Schema.blobState.narHash, candidateHashes),
 					isNull(d1Schema.blobState.deleteAfter)
 				)
 			)
@@ -226,6 +137,9 @@ export class BlobReaperService {
 		let collected = 0;
 
 		for (const blob of expired) {
+			const referencedHashes = this.d1
+				.select({ narHash: d1Schema.blobReference.narHash })
+				.from(d1Schema.blobReference);
 			const removed = await this.d1
 				.delete(d1Schema.blobState)
 				.where(
@@ -233,12 +147,7 @@ export class BlobReaperService {
 						eq(d1Schema.blobState.narHash, blob.narHash),
 						isNotNull(d1Schema.blobState.deleteAfter),
 						lte(d1Schema.blobState.deleteAfter, nowIso),
-						notInArray(
-							d1Schema.blobState.narHash,
-							this.d1
-								.select({ narHash: d1Schema.blobReference.narHash })
-								.from(d1Schema.blobReference)
-						)
+						notInArray(d1Schema.blobState.narHash, referencedHashes)
 					)
 				)
 				.returning({ narHash: d1Schema.blobState.narHash })
@@ -257,21 +166,18 @@ export class BlobReaperService {
 		now: Date,
 		limit: number
 	): Promise<void> {
-		const deleteAfter = new Date(
-			now.getTime() + blobReaperGraceMs
-		).toISOString();
+		const graceDeadline = new Date(now.getTime() + blobReaperGraceMs);
+		const deleteAfter = graceDeadline.toISOString();
+		const referencedDigests = this.d1
+			.select({ digest: d1Schema.attestationReference.digest })
+			.from(d1Schema.attestationReference);
 		const candidates = await this.d1
 			.select({ digest: d1Schema.casObject.digest })
 			.from(d1Schema.casObject)
 			.where(
 				and(
 					isNull(d1Schema.casObject.deleteAfter),
-					notInArray(
-						d1Schema.casObject.digest,
-						this.d1
-							.select({ digest: d1Schema.attestationReference.digest })
-							.from(d1Schema.attestationReference)
-					)
+					notInArray(d1Schema.casObject.digest, referencedDigests)
 				)
 			)
 			.limit(limit)
@@ -281,15 +187,14 @@ export class BlobReaperService {
 			return;
 		}
 
+		const candidateDigests = candidates.map((candidate) => candidate.digest);
+
 		await this.d1
 			.update(d1Schema.casObject)
 			.set({ deleteAfter })
 			.where(
 				and(
-					inArray(
-						d1Schema.casObject.digest,
-						candidates.map((candidate) => candidate.digest)
-					),
+					inArray(d1Schema.casObject.digest, candidateDigests),
 					isNull(d1Schema.casObject.deleteAfter)
 				)
 			)
@@ -315,6 +220,9 @@ export class BlobReaperService {
 		let collected = 0;
 
 		for (const object of expired) {
+			const referencedDigests = this.d1
+				.select({ digest: d1Schema.attestationReference.digest })
+				.from(d1Schema.attestationReference);
 			const removed = await this.d1
 				.delete(d1Schema.casObject)
 				.where(
@@ -322,12 +230,7 @@ export class BlobReaperService {
 						eq(d1Schema.casObject.digest, object.digest),
 						isNotNull(d1Schema.casObject.deleteAfter),
 						lte(d1Schema.casObject.deleteAfter, nowIso),
-						notInArray(
-							d1Schema.casObject.digest,
-							this.d1
-								.select({ digest: d1Schema.attestationReference.digest })
-								.from(d1Schema.attestationReference)
-						)
+						notInArray(d1Schema.casObject.digest, referencedDigests)
 					)
 				)
 				.returning({ digest: d1Schema.casObject.digest })
@@ -458,5 +361,90 @@ export class BlobReaperService {
 			.all();
 
 		return rows.map((row) => row.tenant);
+	}
+
+	// Returns how many shared blobs it collected.
+	async reapBlobs(now: Date, limit: number): Promise<number> {
+		await this.armUnreferencedBlobs(now, limit);
+
+		return this.collectExpiredBlobs(now, limit);
+	}
+
+	async reapCasObjects(now: Date, limit: number): Promise<number> {
+		await this.armUnreferencedCasObjects(now, limit);
+
+		return this.collectExpiredCasObjects(now, limit);
+	}
+
+	// Walks a bounded batch of `blob_state` from the persisted cursor, removing the
+	// fact and de-materialising the referencing narinfos of any shared blob whose
+	// canonical object is gone (an "available but no object" gap a crash can leave).
+	// Reads serve from a tenant's narinfo object, never `blob_state`, so clearing the
+	// fact alone would stop no read; the narinfos are de-materialised first, through
+	// each owning tenant's Durable Object, and the `blob_state` row is deleted last so
+	// it stays the durable marker that re-drives an interrupted demote on the next
+	// pass. Returns how many shared facts it demoted.
+	async demoteMissingBlobs(
+		limit: number,
+		cursor: DemoteCursor
+	): Promise<number> {
+		const after = await cursor.read();
+		const batch = await this.demoteBatch(after, limit);
+
+		// A short page means the scan reached the end of the hash order, so wrap to the
+		// start; otherwise resume after the last hash scanned. Advanced before
+		// processing, so a per-blob failure does not wedge the scan.
+		const next = batch.length < limit ? '' : (batch.at(-1)?.narHash ?? '');
+		await cursor.advance(next);
+
+		let demoted = 0;
+
+		for (const blob of batch) {
+			const present =
+				(await this.blobs.head(narObjectKey(blob.narHash))) !== null;
+
+			if (present) {
+				continue;
+			}
+
+			if (await this.demoteBlob(blob.narHash, blob.verifiedAt)) {
+				demoted += 1;
+			}
+		}
+
+		return demoted;
+	}
+
+	async demoteMissingCasObjects(
+		limit: number,
+		cursor: DemoteCursor
+	): Promise<number> {
+		const after = await cursor.read();
+		const batch = await this.demoteCasBatch(after, limit);
+		const next = batch.length < limit ? '' : (batch.at(-1)?.digest ?? '');
+		await cursor.advance(next);
+
+		let demoted = 0;
+
+		for (const object of batch) {
+			const present =
+				(await this.blobs.head(casObjectKey(object.digest))) !== null;
+
+			if (present) {
+				continue;
+			}
+
+			const tenants = await this.casReferencingTenants(object.digest);
+
+			for (const tenant of tenants) {
+				await this.casDemoter.demote(tenant, object.digest, object.storedAt);
+			}
+
+			if (await this.demoteCasObject(object.digest, object.storedAt)) {
+				demoted += 1;
+			}
+		}
+
+		return demoted;
 	}
 }

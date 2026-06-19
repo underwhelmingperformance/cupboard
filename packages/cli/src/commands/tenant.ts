@@ -93,8 +93,8 @@ export function parseQuotaBytes(value: string): number {
 
 interface ReadCredentialSelection {
 	readonly read:
-		| { readonly user: string; readonly password: string }
-		| undefined;
+		| undefined
+		| { readonly user: string; readonly password: string };
 	readonly generatedPassword: string | undefined;
 }
 
@@ -214,12 +214,10 @@ export function registerTenantCommands(
 				ownerIssuer: options.ownerIssuer,
 				ownerSubject: options.ownerSubject,
 				ownerAudience: options.ownerAudience,
-				...(readSelection.read === undefined
-					? {}
-					: { read: readSelection.read }),
-				...(options.quotaBytes === undefined
-					? {}
-					: { quotaBytes: options.quotaBytes })
+				...(readSelection.read !== undefined && { read: readSelection.read }),
+				...(options.quotaBytes !== undefined && {
+					quotaBytes: options.quotaBytes
+				})
 			});
 
 			await runTenantCreate(

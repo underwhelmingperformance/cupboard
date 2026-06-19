@@ -11,7 +11,7 @@ const outputPath = path.join(
 );
 
 // `pnpm check` runs this script (through `cf:typegen` and the server tests) while
-// eslint and tsc read the output. Write to a unique temp file and rename it into
+// ESLint and tsc read the output. Write to a unique temp file and rename it into
 // place: the rename is atomic, so a reader sees either the complete old file or
 // the complete new one, never an empty or half-written file.
 const temporaryPath = `${outputPath}.${String(process.pid)}.tmp`;

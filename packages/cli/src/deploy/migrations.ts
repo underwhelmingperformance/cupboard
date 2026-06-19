@@ -122,9 +122,7 @@ export function computeDurableObjectMigration(
 
 	return {
 		new_tag: latest.tag,
-		...(deployedTag === undefined ? {} : { old_tag: deployedTag }),
-		...(newSqliteClasses.length > 0
-			? { new_sqlite_classes: newSqliteClasses }
-			: {})
+		...(deployedTag !== undefined && { old_tag: deployedTag }),
+		...(newSqliteClasses.length > 0 && { new_sqlite_classes: newSqliteClasses })
 	};
 }

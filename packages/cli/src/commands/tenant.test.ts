@@ -168,9 +168,7 @@ describe('runTenantCreate', () => {
 			body,
 			reporter(results),
 			{
-				create() {
-					return Promise.resolve(summary({}));
-				}
+				create: () => Promise.resolve(summary({}))
 			},
 			'correct-horse-battery-staple'
 		);
@@ -498,17 +496,12 @@ describe('runTenantRotateCredential', () => {
 				return Promise.resolve({ id: 'acme', readMode: 'private' });
 			}
 		});
-		const [call] = z
-			.tuple([
-				z.object({
-					id: z.string(),
-					read: z.object({
-						user: z.string(),
-						password: z.string().regex(/^[A-Za-z0-9_-]{43}$/)
-					})
-				})
-			])
-			.parse(calls);
+		const readSchema = z.object({
+			user: z.string(),
+			password: z.string().regex(/^[A-Za-z0-9_-]{43}$/)
+		});
+		const grantSchema = z.object({ id: z.string(), read: readSchema });
+		const [call] = z.tuple([grantSchema]).parse(calls);
 
 		// The generated password is sent to the server and printed to the operator,
 		// so capture what was sent and assert the printed value is exactly it: an
@@ -542,9 +535,8 @@ describe('runTenantRotateCredential', () => {
 			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
 			reporter(results),
 			{
-				rotateReadCredential() {
-					return Promise.resolve({ id: 'acme', readMode: 'public' });
-				}
+				rotateReadCredential: () =>
+					Promise.resolve({ id: 'acme', readMode: 'public' })
 			}
 		);
 

@@ -279,7 +279,8 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
-				return new SignJWT({ authorization_details: wildcardGrants })
+				const jwt = new SignJWT({ authorization_details: wildcardGrants });
+				return jwt
 					.setProtectedHeader({ alg: 'EdDSA', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -299,7 +300,8 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
-				return new SignJWT({})
+				const jwt = new SignJWT({});
+				return jwt
 					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -319,9 +321,10 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
-				return new SignJWT({
+				const jwt = new SignJWT({
 					authorization_details: [{ type: 'unknown_grant' }]
-				})
+				});
+				return jwt
 					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -339,11 +342,13 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			expected: { name: 'AccessTokenVerificationError', hasCause: true },
 			token: async () => {
 				const issuedAt = Math.floor(now.getTime() / 1000);
-				const symmetricKey = new TextEncoder().encode(
+				const encoder = new TextEncoder();
+				const symmetricKey = encoder.encode(
 					'symmetric-secret-key-of-sufficient-length'
 				);
 
-				return new SignJWT({ authorization_details: wildcardGrants })
+				const jwt = new SignJWT({ authorization_details: wildcardGrants });
+				return jwt
 					.setProtectedHeader({ alg: 'HS256', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -363,7 +368,8 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 				void privateJwk;
 				const issuedAt = Math.floor(now.getTime() / 1000);
 
-				return new SignJWT({ authorization_details: wildcardGrants })
+				const jwt = new SignJWT({ authorization_details: wildcardGrants });
+				return jwt
 					.setProtectedHeader({ alg: 'EdDSA', typ: 'at+jwt', kid })
 					.setIssuer(issuer)
 					.setAudience(audience)
@@ -380,15 +386,19 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 		const signingKey = await importPrivateKey(keyPair.privateJwk);
 		const issued = await token(keyPair.privateJwk, signingKey);
 
-		const rejected = await verifyAccessJwt(
-			keySet(keyPair.publicJwk),
-			issued,
-			verifyOptions,
-			at
-		).then(
-			(value) => ({ value }),
-			(error_: unknown) => accessErrorShape(error_)
-		);
+		let rejected: ReturnType<typeof accessErrorShape> | { value: unknown };
+		try {
+			rejected = {
+				value: await verifyAccessJwt(
+					keySet(keyPair.publicJwk),
+					issued,
+					verifyOptions,
+					at
+				)
+			};
+		} catch (error_: unknown) {
+			rejected = accessErrorShape(error_);
+		}
 
 		expect(rejected).toStrictEqual(expected);
 	});
@@ -396,15 +406,19 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 	it('rejects a structurally invalid token with a verification error', async () => {
 		const keyPair = await generateAuthKeyPair();
 
-		const error = await verifyAccessJwt(
-			keySet(keyPair.publicJwk),
-			'not-a-jwt',
-			{ issuer, audience },
-			now
-		).then(
-			(value) => ({ value }),
-			(error_: unknown) => accessErrorShape(error_)
-		);
+		let error: ReturnType<typeof accessErrorShape> | { value: unknown };
+		try {
+			error = {
+				value: await verifyAccessJwt(
+					keySet(keyPair.publicJwk),
+					'not-a-jwt',
+					{ issuer, audience },
+					now
+				)
+			};
+		} catch (error_: unknown) {
+			error = accessErrorShape(error_);
+		}
 
 		expect(error).toStrictEqual({
 			name: 'AccessTokenVerificationError',

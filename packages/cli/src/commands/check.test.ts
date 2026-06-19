@@ -21,18 +21,17 @@ function reporter(captured: Captured): Reporter {
 	};
 
 	return {
-		phase(_label, body) {
-			return Promise.resolve(
+		phase: (_label, body) =>
+			Promise.resolve(
 				body({
 					fact() {
 						return;
 					},
 					warn: recordWarn
 				})
-			);
-		},
-		progress(_label, _options, body) {
-			return Promise.resolve(
+			),
+		progress: (_label, _options, body) =>
+			Promise.resolve(
 				body({
 					advance() {
 						return;
@@ -42,31 +41,27 @@ function reporter(captured: Captured): Reporter {
 					},
 					warn: recordWarn
 				})
-			);
-		},
-		steps(_label, body) {
-			return Promise.resolve(
+			),
+		steps: (_label, body) =>
+			Promise.resolve(
 				body({
 					message() {
 						return;
 					},
-					group() {
-						return {
-							message() {
-								return;
-							},
-							success() {
-								return;
-							},
-							error() {
-								return;
-							}
-						};
-					},
+					group: () => ({
+						message() {
+							return;
+						},
+						success() {
+							return;
+						},
+						error() {
+							return;
+						}
+					}),
 					warn: recordWarn
 				})
-			);
-		},
+			),
 		result(payload) {
 			captured.results.push([...payload.rows]);
 		},

@@ -6,6 +6,7 @@ import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
+	compareStrings,
 	controlFetch,
 	issueControlAdminToken,
 	resetTestServer
@@ -16,7 +17,11 @@ function requestUrl(input: RequestInfo | URL): string {
 		return input;
 	}
 
-	return input instanceof URL ? input.href : input.url;
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
 }
 
 describe('control plane GET /control/check', () => {
@@ -73,6 +78,7 @@ describe('control plane GET /control/check', () => {
 			});
 			const [probeUrl] = z.tuple([z.string()]).parse(probed);
 			const signed = new URL(probeUrl);
+			const searchKeys = Iterator.from(signed.searchParams.keys()).toArray();
 
 			expect({
 				status: response.status,
@@ -81,7 +87,7 @@ describe('control plane GET /control/check', () => {
 					protocol: signed.protocol,
 					host: signed.host,
 					pathname: signed.pathname,
-					searchKeys: [...signed.searchParams.keys()].toSorted()
+					searchKeys: searchKeys.toSorted(compareStrings)
 				}
 			}).toStrictEqual({
 				status: 200,

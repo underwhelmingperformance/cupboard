@@ -128,9 +128,12 @@ describe('createReporter', () => {
 		const { events, reporter } = jsonReporter();
 		const failure = new ReporterTestError('build-failed');
 
-		const error = await reporter
-			.phase('Building', () => Promise.reject(failure))
-			.catch((error_: unknown) => error_);
+		let error: unknown;
+		try {
+			await reporter.phase('Building', () => Promise.reject(failure));
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expectReporterTestError(error);
 		expect({
@@ -189,12 +192,15 @@ describe('createReporter', () => {
 		const { events, reporter } = jsonReporter();
 		const failure = new ReporterTestError('progress-failed');
 
-		const error = await reporter
-			.progress('Uploading', { total: 100 }, (bar) => {
+		let error: unknown;
+		try {
+			await reporter.progress('Uploading', { total: 100 }, (bar) => {
 				bar.advance(30);
 				throw failure;
-			})
-			.catch((error_: unknown) => error_);
+			});
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expectReporterTestError(error);
 		expect({
@@ -259,12 +265,15 @@ describe('createReporter', () => {
 		const { events, reporter } = jsonReporter();
 		const failure = new ReporterTestError('steps-failed');
 
-		const error = await reporter
-			.steps('Attestations', (log) => {
+		let error: unknown;
+		try {
+			await reporter.steps('Attestations', (log) => {
 				log.group('read').message('opening');
 				throw failure;
-			})
-			.catch((error_: unknown) => error_);
+			});
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expectReporterTestError(error);
 		expect({

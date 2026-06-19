@@ -24,69 +24,6 @@ import { type ServerContext } from './context.ts';
 export class IntegrityCheckService {
 	constructor(private readonly context: ServerContext) {}
 
-	async check(deep: boolean): Promise<CheckReport> {
-		const total =
-			this.context.db.select({ count: count() }).from(schema.narInfos).get()
-				?.count ?? 0;
-		const rows = this.context.db
-			.select()
-			.from(schema.narInfos)
-			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
-			.limit(checkBatchSize)
-			.all();
-
-		const discrepancies: CheckDiscrepancy[] = [];
-
-		// NAR blobs are content-addressed and shared, so check each distinct hash
-		// once but attribute a fault to every narinfo that depends on it: the
-		// operator sees each affected store path.
-		const blobVerdicts = new Map<
-			string,
-			CheckDiscrepancy['kind'] | undefined
-		>();
-		let narBlobsChecked = 0;
-
-		const tenant = this.context.requireTenant();
-
-		for (const row of rows) {
-			const narInfoObject = await this.context.env.BLOBS.head(
-				narInfoObjectKey(tenant, row.storePathHash, row.cache)
-			);
-
-			if (narInfoObject === null) {
-				discrepancies.push({
-					kind: 'missing-narinfo-object',
-					cache: row.cache,
-					storePathHash: row.storePathHash,
-					narHash: row.narHash
-				});
-			}
-
-			if (!blobVerdicts.has(row.narHash)) {
-				blobVerdicts.set(row.narHash, await this.checkNarBlob(row, deep));
-				narBlobsChecked += 1;
-			}
-
-			const blobVerdict = blobVerdicts.get(row.narHash);
-
-			if (blobVerdict !== undefined) {
-				discrepancies.push({
-					kind: blobVerdict,
-					cache: row.cache,
-					storePathHash: row.storePathHash,
-					narHash: row.narHash
-				});
-			}
-		}
-
-		return {
-			narInfosChecked: rows.length,
-			narBlobsChecked,
-			complete: rows.length === total,
-			discrepancies
-		};
-	}
-
 	private async checkNarBlob(
 		row: typeof schema.narInfos.$inferSelect,
 		deep: boolean
@@ -154,5 +91,68 @@ export class IntegrityCheckService {
 		}
 
 		return undefined;
+	}
+
+	async check(deep: boolean): Promise<CheckReport> {
+		const total =
+			this.context.db.select({ count: count() }).from(schema.narInfos).get()
+				?.count ?? 0;
+		const rows = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
+			.limit(checkBatchSize)
+			.all();
+
+		const discrepancies: CheckDiscrepancy[] = [];
+
+		// NAR blobs are content-addressed and shared, so check each distinct hash
+		// once but attribute a fault to every narinfo that depends on it: the
+		// operator sees each affected store path.
+		const blobVerdicts = new Map<
+			string,
+			CheckDiscrepancy['kind'] | undefined
+		>();
+		let narBlobsChecked = 0;
+
+		const tenant = this.context.requireTenant();
+
+		for (const row of rows) {
+			const narInfoObject = await this.context.env.BLOBS.head(
+				narInfoObjectKey(tenant, row.storePathHash, row.cache)
+			);
+
+			if (narInfoObject === null) {
+				discrepancies.push({
+					kind: 'missing-narinfo-object',
+					cache: row.cache,
+					storePathHash: row.storePathHash,
+					narHash: row.narHash
+				});
+			}
+
+			if (!blobVerdicts.has(row.narHash)) {
+				blobVerdicts.set(row.narHash, await this.checkNarBlob(row, deep));
+				narBlobsChecked += 1;
+			}
+
+			const blobVerdict = blobVerdicts.get(row.narHash);
+
+			if (blobVerdict !== undefined) {
+				discrepancies.push({
+					kind: blobVerdict,
+					cache: row.cache,
+					storePathHash: row.storePathHash,
+					narHash: row.narHash
+				});
+			}
+		}
+
+		return {
+			narInfosChecked: rows.length,
+			narBlobsChecked,
+			complete: rows.length === total,
+			discrepancies
+		};
 	}
 }

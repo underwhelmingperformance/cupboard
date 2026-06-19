@@ -54,10 +54,12 @@ describe('runScheduledMaintenance', () => {
 	it('runs the verify and then reports the failure when the sweep fails', async () => {
 		const { calls, pass, fail } = recorder();
 
-		const error = await runScheduledMaintenance(
-			fail('gc', gcError),
-			pass('verify')
-		).catch((error_: unknown) => error_);
+		let error: unknown;
+		try {
+			await runScheduledMaintenance(fail('gc', gcError), pass('verify'));
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expectScheduledMaintenanceTestError(error);
 		expect({ error: { phase: error.phase }, calls }).toStrictEqual({
@@ -69,10 +71,12 @@ describe('runScheduledMaintenance', () => {
 	it('does not mask the sweep when the verify fails', async () => {
 		const { calls, pass, fail } = recorder();
 
-		const error = await runScheduledMaintenance(
-			pass('gc'),
-			fail('verify', verifyError)
-		).catch((error_: unknown) => error_);
+		let error: unknown;
+		try {
+			await runScheduledMaintenance(pass('gc'), fail('verify', verifyError));
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expectScheduledMaintenanceTestError(error);
 		expect({ error: { phase: error.phase }, calls }).toStrictEqual({
@@ -84,10 +88,15 @@ describe('runScheduledMaintenance', () => {
 	it('surfaces the sweep failure first when both fail', async () => {
 		const { calls, fail } = recorder();
 
-		const error = await runScheduledMaintenance(
-			fail('gc', gcError),
-			fail('verify', verifyError)
-		).catch((error_: unknown) => error_);
+		let error: unknown;
+		try {
+			await runScheduledMaintenance(
+				fail('gc', gcError),
+				fail('verify', verifyError)
+			);
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expectScheduledMaintenanceTestError(error);
 		expect({ error: { phase: error.phase }, calls }).toStrictEqual({

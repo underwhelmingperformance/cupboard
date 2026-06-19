@@ -19,6 +19,8 @@ import {
 	verifyNarInfoSignature
 } from '../test-support.ts';
 
+import { compareStrings } from './context.ts';
+
 function namedBytesName(value: string): string {
 	const [name] = z
 		.tuple([z.string().min(1), z.string()])
@@ -42,7 +44,7 @@ describe('signing with a key set', () => {
 		]);
 		const publishedText = seeded
 			.map((key) => key.publicKey)
-			.toSorted()
+			.toSorted(compareStrings)
 			.join('\n');
 
 		const init = await bootstrap();
@@ -67,7 +69,9 @@ describe('signing with a key set', () => {
 		await commitUpload(init.token, upload.uploadId);
 
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
-		const sigNames = narInfo.sigs.map((sig) => namedBytesName(sig)).toSorted();
+		const sigNames = narInfo.sigs
+			.map((sig) => namedBytesName(sig))
+			.toSorted(compareStrings);
 		const verifiesUnderEachKey = await Promise.all(
 			seeded.map((key) => verifyNarInfoSignature(narInfo, key.publicKey))
 		);

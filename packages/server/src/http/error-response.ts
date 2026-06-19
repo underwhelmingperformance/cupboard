@@ -11,7 +11,7 @@ function errorResponse(error: unknown): Response | undefined {
 			{
 				error: error.error,
 				error_description: error.message,
-				...(error.problem === undefined ? {} : { problem: error.problem })
+				...(error.problem !== undefined && { problem: error.problem })
 			},
 			{ status: error.status, headers: { 'Cache-Control': 'no-store' } }
 		);

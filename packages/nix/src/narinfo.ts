@@ -10,7 +10,7 @@ import {
 	type StorePathBasename,
 	storePathSchema
 } from './scalars.ts';
-import { StorePath } from './store-path.ts';
+import { byCodeUnit, StorePath } from './store-path.ts';
 
 export interface NarInfoFields {
 	readonly storePath: string;
@@ -59,7 +59,7 @@ function single<S extends z.ZodType>(value: S) {
 
 const narInfoInteger = z
 	.tuple([z.string().regex(/^\d+$/)])
-	.transform(([digits]) => Number.parseInt(digits, 10))
+	.transform(([digits]) => Math.trunc(Number(digits)))
 	.refine(Number.isSafeInteger);
 
 const references = z
@@ -159,6 +159,23 @@ export class NarInfo {
 		return parseNarInfo(source);
 	}
 
+	private referenceStorePaths(): readonly string[] {
+		const path = this.storePath.value;
+		const separator = path.lastIndexOf('/');
+		const storeDirectory =
+			separator === -1 ? undefined : path.slice(0, separator);
+
+		// Nix's canonical fingerprint sorts the full reference store paths, so the
+		// signature must not depend on the order the references arrive in.
+		return this.references
+			.map((reference) =>
+				storeDirectory === undefined
+					? reference
+					: `${storeDirectory}/${reference}`
+			)
+			.toSorted(byCodeUnit);
+	}
+
 	withSignature(signature: string): NarInfo {
 		return new NarInfo(
 			this.storePath,
@@ -183,23 +200,6 @@ export class NarInfo {
 			String(this.narSize),
 			this.referenceStorePaths().join(',')
 		].join(';');
-	}
-
-	private referenceStorePaths(): readonly string[] {
-		const path = this.storePath.value;
-		const separator = path.lastIndexOf('/');
-		const storeDirectory =
-			separator === -1 ? undefined : path.slice(0, separator);
-
-		// Nix's canonical fingerprint sorts the full reference store paths, so the
-		// signature must not depend on the order the references arrive in.
-		return this.references
-			.map((reference) =>
-				storeDirectory === undefined
-					? reference
-					: `${storeDirectory}/${reference}`
-			)
-			.toSorted();
 	}
 
 	render(): string {

@@ -18,7 +18,12 @@ describe('abortable', () => {
 
 		controller.abort(reason);
 
-		const error = await aborted.catch((error_: unknown) => error_);
+		let error: unknown;
+		try {
+			error = await aborted;
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expect({
 			error:

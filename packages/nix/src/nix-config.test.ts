@@ -4,9 +4,8 @@ import { NixConfig, renderNetrc } from './nix-config.ts';
 
 describe('NixConfig', () => {
 	it('renders a nix.conf snippet', () => {
-		expect(
-			new NixConfig('https://cache.example', 'cupboard-1:key').render()
-		).toBe(
+		const config = new NixConfig('https://cache.example', 'cupboard-1:key');
+		expect(config.render()).toBe(
 			[
 				'substituters = https://cache.example',
 				'trusted-public-keys = cupboard-1:key',
@@ -16,12 +15,11 @@ describe('NixConfig', () => {
 	});
 
 	it('renders newline-separated rotation keys as one space-separated line', () => {
-		expect(
-			new NixConfig(
-				'https://cache.example',
-				'cupboard-1:one\ncupboard-2:two'
-			).render()
-		).toBe(
+		const config = new NixConfig(
+			'https://cache.example',
+			'cupboard-1:one\ncupboard-2:two'
+		);
+		expect(config.render()).toBe(
 			[
 				'substituters = https://cache.example',
 				'trusted-public-keys = cupboard-1:one cupboard-2:two',

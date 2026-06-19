@@ -18,6 +18,51 @@ import {
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
 
+	private async ensureCanonicalObject(
+		stagingKey: string,
+		metadata: ParsedUploadPathMetadata
+	): Promise<CanonicalBlob> {
+		const canonicalKey = narObjectKey(metadata.narHash);
+		const existing = await this.context.env.BLOBS.head(canonicalKey);
+
+		if (existing !== null) {
+			return canonicalBlobOf(canonicalKey, existing);
+		}
+
+		const staged = await this.context.env.BLOBS.get(stagingKey);
+
+		if (staged === null) {
+			throw new UploadedObjectNotFoundError(stagingKey);
+		}
+
+		const written = await this.context.env.BLOBS.put(
+			canonicalKey,
+			staged.body,
+			{
+				sha256: NixSha256Hash.parse(metadata.fileHash).digestBytes(),
+				onlyIf: { etagDoesNotMatch: '*' }
+			}
+		);
+
+		if (written !== null) {
+			return { fileHash: metadata.fileHash, fileSize: metadata.fileSize };
+		}
+
+		// A concurrent promotion won between the head and the conditional put: adopt
+		// the stored encoding so this narinfo matches the object that is served.
+		const winner = await this.context.env.BLOBS.head(canonicalKey);
+
+		if (winner === null) {
+			throw new UploadedObjectNotFoundError(canonicalKey);
+		}
+
+		return canonicalBlobOf(canonicalKey, winner);
+	}
+
+	private r2Presigner(): R2Presigner {
+		return this.context.r2Presigner();
+	}
+
 	clearPendingUpload(uploadId: string): void {
 		this.context.db
 			.delete(schema.pendingUploads)
@@ -80,11 +125,13 @@ export class UploadStateService {
 		// Refresh the observation window so the terminal verdict reliably outlives
 		// the verify pass that recorded it (the pass may run at or past the original
 		// upload TTL); GC reaps it once this window passes.
+		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({
 				verdict,
-				expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+				expiresAt: expiresAt.toISOString()
 			})
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
@@ -160,6 +207,8 @@ export class UploadStateService {
 		metadata: ParsedUploadPathMetadata
 	): Promise<CanonicalBlob> {
 		const canonical = await this.ensureCanonicalObject(stagingKey, metadata);
+		const now = new Date();
+		const verifiedAt = now.toISOString();
 
 		// Record the shared fact together with the object, so `blob_state` exists
 		// exactly when the canonical R2 object does. The first writer for a hash
@@ -173,7 +222,7 @@ export class UploadStateService {
 				fileSize: canonical.fileSize,
 				compression: metadata.compression,
 				narSize: metadata.narSize,
-				verifiedAt: new Date().toISOString()
+				verifiedAt
 			})
 			.onConflictDoUpdate({
 				target: d1Schema.blobState.narHash,
@@ -181,52 +230,11 @@ export class UploadStateService {
 				// reaper may have collected) makes it the optimistic-concurrency token the
 				// demote pass fences its delete on: a demote that scanned the old row will
 				// not delete the freshly re-promoted one.
-				set: { deleteAfter: sql`null`, verifiedAt: new Date().toISOString() }
+				set: { deleteAfter: sql`null`, verifiedAt }
 			})
 			.run();
 
 		return canonical;
-	}
-
-	private async ensureCanonicalObject(
-		stagingKey: string,
-		metadata: ParsedUploadPathMetadata
-	): Promise<CanonicalBlob> {
-		const canonicalKey = narObjectKey(metadata.narHash);
-		const existing = await this.context.env.BLOBS.head(canonicalKey);
-
-		if (existing !== null) {
-			return canonicalBlobOf(canonicalKey, existing);
-		}
-
-		const staged = await this.context.env.BLOBS.get(stagingKey);
-
-		if (staged === null) {
-			throw new UploadedObjectNotFoundError(stagingKey);
-		}
-
-		const written = await this.context.env.BLOBS.put(
-			canonicalKey,
-			staged.body,
-			{
-				sha256: NixSha256Hash.parse(metadata.fileHash).digestBytes(),
-				onlyIf: { etagDoesNotMatch: '*' }
-			}
-		);
-
-		if (written !== null) {
-			return { fileHash: metadata.fileHash, fileSize: metadata.fileSize };
-		}
-
-		// A concurrent promotion won between the head and the conditional put: adopt
-		// the stored encoding so this narinfo matches the object that is served.
-		const winner = await this.context.env.BLOBS.head(canonicalKey);
-
-		if (winner === null) {
-			throw new UploadedObjectNotFoundError(canonicalKey);
-		}
-
-		return canonicalBlobOf(canonicalKey, winner);
 	}
 
 	async presignedPutUrl(
@@ -234,17 +242,16 @@ export class UploadStateService {
 		fileHash: NixSha256HashString,
 		expiresAt: Date
 	): Promise<string> {
+		const checksumSha256 = NixSha256Hash.parse(fileHash).digestBase64();
+		const expiresSeconds = Math.max(
+			1,
+			Math.floor((expiresAt.getTime() - Date.now()) / 1000)
+		);
+
 		return this.r2Presigner().presignPutUrl({
 			key,
-			checksumSha256: NixSha256Hash.parse(fileHash).digestBase64(),
-			expiresSeconds: Math.max(
-				1,
-				Math.floor((expiresAt.getTime() - Date.now()) / 1000)
-			)
+			checksumSha256,
+			expiresSeconds
 		});
-	}
-
-	private r2Presigner(): R2Presigner {
-		return this.context.r2Presigner();
 	}
 }

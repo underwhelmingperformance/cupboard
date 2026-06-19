@@ -39,7 +39,7 @@ export function domainProblem(value: string): DomainProblem | undefined {
 		return 'not-fully-qualified';
 	}
 
-	if (!labels.every((label) => labelPattern.test(label))) {
+	if (labels.some((label) => !labelPattern.test(label))) {
 		return 'invalid-label';
 	}
 

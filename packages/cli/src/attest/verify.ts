@@ -17,15 +17,17 @@ import { z } from 'zod';
 const inTotoPayloadType = 'application/vnd.in-toto+json';
 const inTotoStatementType = 'https://in-toto.io/Statement/v1';
 
+const inTotoDigestSchema = z.object({
+	sha256: z.string().regex(/^[0-9a-f]{64}$/)
+});
+
+const inTotoSubjectSchema = z.object({
+	digest: inTotoDigestSchema
+});
+
 const inTotoStatementSchema = z.object({
 	_type: z.literal(inTotoStatementType),
-	subject: z.array(
-		z.object({
-			digest: z.object({
-				sha256: z.string().regex(/^[0-9a-f]{64}$/)
-			})
-		})
-	),
+	subject: z.array(inTotoSubjectSchema),
 	predicateType: z.string(),
 	predicate: z.unknown()
 });
@@ -281,14 +283,15 @@ export function identityPolicy(
 		options.certificateIdentity === undefined ? undefined : 'exact',
 		options.certificateIdentityRegex === undefined ? undefined : 'regex'
 	].filter((value) => value !== undefined);
-	const issuerModes = [
-		options.certificateOidcIssuer === undefined ? undefined : 'exact',
-		options.certificateOidcIssuerRegex === undefined ? undefined : 'regex'
-	].filter((value) => value !== undefined);
 
 	if (identityModes.length !== 1) {
 		throw new CertificateIdentityModeError(identityModes);
 	}
+
+	const issuerModes = [
+		options.certificateOidcIssuer === undefined ? undefined : 'exact',
+		options.certificateOidcIssuerRegex === undefined ? undefined : 'regex'
+	].filter((value) => value !== undefined);
 
 	if (issuerModes.length !== 1) {
 		throw new CertificateIssuerModeError(issuerModes);
@@ -381,18 +384,18 @@ function bundleVerifyOptions(
 	options: AttestationPolicyOptions
 ): BundleVerifyOptions {
 	return {
-		...(options.trustedRoot === undefined
-			? {}
-			: { trustedRoot: options.trustedRoot }),
-		...(options.tlogThreshold === undefined
-			? {}
-			: { tlogThreshold: options.tlogThreshold }),
-		...(options.ctlogThreshold === undefined
-			? {}
-			: { ctlogThreshold: options.ctlogThreshold }),
-		...(options.timestampThreshold === undefined
-			? {}
-			: { timestampThreshold: options.timestampThreshold })
+		...(options.trustedRoot !== undefined && {
+			trustedRoot: options.trustedRoot
+		}),
+		...(options.tlogThreshold !== undefined && {
+			tlogThreshold: options.tlogThreshold
+		}),
+		...(options.ctlogThreshold !== undefined && {
+			ctlogThreshold: options.ctlogThreshold
+		}),
+		...(options.timestampThreshold !== undefined && {
+			timestampThreshold: options.timestampThreshold
+		})
 	};
 }
 
@@ -409,7 +412,8 @@ async function trustedRoot(options: BundleVerifyOptions): Promise<TrustedRoot> {
 function parseBundle(bytes: Uint8Array): Omit<VerifiedBundle, 'signer'> & {
 	readonly bundle: ReturnType<typeof bundleFromJSON>;
 } {
-	const bundle = bundleFromJSON(JSON.parse(new TextDecoder().decode(bytes)));
+	const decoder = new TextDecoder();
+	const bundle = bundleFromJSON(JSON.parse(decoder.decode(bytes)));
 
 	if (!isBundleWithDsseEnvelope(bundle)) {
 		throw new Error('Attestation bundle is not a Sigstore DSSE bundle');
@@ -557,7 +561,8 @@ async function verifyNarInfoSignature(
 		return false;
 	}
 
-	const fingerprint = new TextEncoder().encode(narInfo.fingerprint());
+	const encoder = new TextEncoder();
+	const fingerprint = encoder.encode(narInfo.fingerprint());
 
 	for (const publicKey of publicKeys) {
 		const key = parseNamedBytes(publicKey);
@@ -614,7 +619,7 @@ function cacheUrl(url: string, cache: string | undefined): string {
 			? basePath
 			: `${basePath}/cache/${cache}`;
 
-	return trimRight(parsed.toString());
+	return trimRight(parsed.href);
 }
 
 function trimRight(value: string): string {

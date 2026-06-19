@@ -28,10 +28,10 @@ describe('fetchGithubOidcToken', () => {
 	it('requests a token for the audience and returns its value', async () => {
 		const requests: { url: string; authorization: string | undefined }[] = [];
 		const fetcher: typeof fetch = (input, init) => {
+			const headers = new Headers(init?.headers);
 			requests.push({
 				url: requestUrl(input),
-				authorization:
-					new Headers(init?.headers).get('authorization') ?? undefined
+				authorization: headers.get('authorization') ?? undefined
 			});
 
 			return Promise.resolve(Response.json({ value: 'github.oidc.jwt' }));
@@ -65,17 +65,19 @@ describe('fetchGithubOidcToken', () => {
 		}
 	])('throws when there is $name', async ({ environment: missing }) => {
 		const requests: string[] = [];
-		const outcome = await fetchGithubOidcToken({
-			audience: 'aud',
-			environment: missing,
-			fetcher: (input) => {
-				requests.push(requestUrl(input));
+		const outcome = await (async () => {
+			try {
+				const token = await fetchGithubOidcToken({
+					audience: 'aud',
+					environment: missing,
+					fetcher: (input) => {
+						requests.push(requestUrl(input));
 
-				return Promise.resolve(Response.json({ value: 'unused' }));
-			}
-		}).then(
-			(token) => ({ token }),
-			(error_: unknown) => {
+						return Promise.resolve(Response.json({ value: 'unused' }));
+					}
+				});
+				return { token };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(GithubOidcUnavailableError);
 
 				if (!(error_ instanceof GithubOidcUnavailableError)) {
@@ -84,7 +86,7 @@ describe('fetchGithubOidcToken', () => {
 
 				return { error: { name: error_.name } };
 			}
-		);
+		})();
 
 		expect({ outcome, requests }).toStrictEqual({
 			outcome: { error: { name: 'GithubOidcUnavailableError' } },
@@ -93,13 +95,15 @@ describe('fetchGithubOidcToken', () => {
 	});
 
 	it('throws when the response carries no token value', async () => {
-		const outcome = await fetchGithubOidcToken({
-			audience: 'aud',
-			environment,
-			fetcher: () => Promise.resolve(Response.json({ nope: true }))
-		}).then(
-			(token) => ({ token }),
-			(error_: unknown) => {
+		const outcome = await (async () => {
+			try {
+				const token = await fetchGithubOidcToken({
+					audience: 'aud',
+					environment,
+					fetcher: () => Promise.resolve(Response.json({ nope: true }))
+				});
+				return { token };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(GithubOidcResponseError);
 
 				if (!(error_ instanceof GithubOidcResponseError)) {
@@ -108,7 +112,7 @@ describe('fetchGithubOidcToken', () => {
 
 				return { error: { name: error_.name, kind: error_.kind } };
 			}
-		);
+		})();
 
 		expect(outcome).toStrictEqual({
 			error: { name: 'GithubOidcResponseError', kind: 'missing-token' }
@@ -116,13 +120,15 @@ describe('fetchGithubOidcToken', () => {
 	});
 
 	it('throws when a 200 response is not JSON', async () => {
-		const outcome = await fetchGithubOidcToken({
-			audience: 'aud',
-			environment,
-			fetcher: () => Promise.resolve(new Response('<html>nope</html>'))
-		}).then(
-			(token) => ({ token }),
-			(error_: unknown) => {
+		const outcome = await (async () => {
+			try {
+				const token = await fetchGithubOidcToken({
+					audience: 'aud',
+					environment,
+					fetcher: () => Promise.resolve(new Response('<html>nope</html>'))
+				});
+				return { token };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(GithubOidcResponseError);
 
 				if (!(error_ instanceof GithubOidcResponseError)) {
@@ -131,7 +137,7 @@ describe('fetchGithubOidcToken', () => {
 
 				return { error: { name: error_.name, kind: error_.kind } };
 			}
-		);
+		})();
 
 		expect(outcome).toStrictEqual({
 			error: { name: 'GithubOidcResponseError', kind: 'non-json' }
@@ -139,13 +145,16 @@ describe('fetchGithubOidcToken', () => {
 	});
 
 	it('throws when the token request fails', async () => {
-		const outcome = await fetchGithubOidcToken({
-			audience: 'aud',
-			environment,
-			fetcher: () => Promise.resolve(new Response('forbidden', { status: 403 }))
-		}).then(
-			(token) => ({ token }),
-			(error_: unknown) => {
+		const outcome = await (async () => {
+			try {
+				const token = await fetchGithubOidcToken({
+					audience: 'aud',
+					environment,
+					fetcher: () =>
+						Promise.resolve(new Response('forbidden', { status: 403 }))
+				});
+				return { token };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(GithubOidcRequestError);
 
 				if (!(error_ instanceof GithubOidcRequestError)) {
@@ -159,7 +168,7 @@ describe('fetchGithubOidcToken', () => {
 					}
 				};
 			}
-		);
+		})();
 
 		expect(outcome).toStrictEqual({
 			error: {

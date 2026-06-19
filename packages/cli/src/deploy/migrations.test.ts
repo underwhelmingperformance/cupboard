@@ -43,9 +43,7 @@ function fakeApi(alreadyApplied: readonly string[]): {
 				queries.push(sql);
 				return Promise.resolve();
 			},
-			queryRows() {
-				return Promise.resolve([...applied]);
-			}
+			queryRows: () => Promise.resolve([...applied])
 		}
 	};
 }
