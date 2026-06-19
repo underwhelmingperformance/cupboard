@@ -78,10 +78,11 @@ describe('named cache reads', () => {
 		const namedBody = await named.text();
 		const bare = await readFetch('/nix-cache-info');
 		const bareBody = await bare.text();
+		const expectedNamedInfo = new CacheInfo('/nix/store', true, 30);
 
 		expect({ namedStatus: named.status, namedBody, bareBody }).toStrictEqual({
 			namedStatus: StatusCodes.OK,
-			namedBody: new CacheInfo('/nix/store', true, 30).render(),
+			namedBody: expectedNamedInfo.render(),
 			bareBody: CacheInfo.default.render()
 		});
 	});

@@ -141,6 +141,40 @@ const cronExpression = z.string().refine((value) => {
 	);
 }, 'cron trigger must have five fields: minute hour day month weekday');
 
+const durableObjectBinding = z.object({
+	name: z.string(),
+	class_name: z.string(),
+	script_name: z.string().optional()
+});
+
+const r2BucketBinding = z.object({
+	binding: z.string(),
+	bucket_name: bucketName
+});
+
+const kvNamespaceBinding = z.object({ binding: z.string(), id: z.string() });
+
+const d1DatabaseBinding = z.object({
+	binding: z.string(),
+	database_name: databaseName
+});
+
+const queueProducer = z.object({ binding: z.string(), queue: queueName });
+
+const queueConsumer = z.object({
+	queue: queueName,
+	max_batch_size: z.number().optional(),
+	max_batch_timeout: z.number().optional(),
+	max_retries: z.number().optional(),
+	max_concurrency: z.number().optional(),
+	dead_letter_queue: queueName.optional()
+});
+
+const migration = z.object({
+	tag: z.string(),
+	new_sqlite_classes: z.array(z.string()).default([])
+});
+
 const rawWranglerSchema = z.object({
 	name: workerName,
 	compatibility_date: z
@@ -151,53 +185,19 @@ const rawWranglerSchema = z.object({
 	limits: z.object({ cpu_ms: z.number() }).partial().optional(),
 	observability: z.object({ enabled: z.boolean() }).optional(),
 	durable_objects: z
-		.object({
-			bindings: z.array(
-				z.object({
-					name: z.string(),
-					class_name: z.string(),
-					script_name: z.string().optional()
-				})
-			)
-		})
+		.object({ bindings: z.array(durableObjectBinding) })
 		.optional(),
-	r2_buckets: z
-		.array(z.object({ binding: z.string(), bucket_name: bucketName }))
-		.default([]),
-	kv_namespaces: z
-		.array(z.object({ binding: z.string(), id: z.string() }))
-		.default([]),
-	d1_databases: z
-		.array(z.object({ binding: z.string(), database_name: databaseName }))
-		.default([]),
+	r2_buckets: z.array(r2BucketBinding).default([]),
+	kv_namespaces: z.array(kvNamespaceBinding).default([]),
+	d1_databases: z.array(d1DatabaseBinding).default([]),
 	queues: z
 		.object({
-			producers: z
-				.array(z.object({ binding: z.string(), queue: queueName }))
-				.default([]),
-			consumers: z
-				.array(
-					z.object({
-						queue: queueName,
-						max_batch_size: z.number().optional(),
-						max_batch_timeout: z.number().optional(),
-						max_retries: z.number().optional(),
-						max_concurrency: z.number().optional(),
-						dead_letter_queue: queueName.optional()
-					})
-				)
-				.default([])
+			producers: z.array(queueProducer).default([]),
+			consumers: z.array(queueConsumer).default([])
 		})
 		.optional(),
 	triggers: z.object({ crons: z.array(cronExpression).default([]) }).optional(),
-	migrations: z
-		.array(
-			z.object({
-				tag: z.string(),
-				new_sqlite_classes: z.array(z.string()).default([])
-			})
-		)
-		.default([])
+	migrations: z.array(migration).default([])
 });
 
 type RawWrangler = z.infer<typeof rawWranglerSchema>;

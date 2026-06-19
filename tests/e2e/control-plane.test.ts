@@ -19,11 +19,12 @@ const controlAudience = 'cupboard-control';
 
 const jwtPartsSchema = z.tuple([z.string(), z.string(), z.string()]);
 const jwtHeaderSchema = z.object({ kid: z.string() });
+const authorizationDetailSchema = z.object({ type: z.string() });
 const jwtClaimsSchema = z.object({
 	iss: z.string(),
 	aud: z.string(),
 	sub: z.string(),
-	authorization_details: z.array(z.object({ type: z.string() }))
+	authorization_details: z.array(authorizationDetailSchema)
 });
 const publishedKeySchema = z.object({
 	kid: z.string(),
@@ -95,14 +96,15 @@ describe('control plane token exchange', () => {
 					aud: subjectAudience,
 					sub: 'global-admin'
 				});
+				const body = new URLSearchParams({
+					grant_type: tokenExchangeGrantType,
+					subject_token: subjectToken,
+					subject_token_type: subjectTokenTypeIdToken
+				});
 				const response = await fetch(new URL('/token', server.url), {
 					method: 'POST',
 					headers: { 'content-type': 'application/x-www-form-urlencoded' },
-					body: new URLSearchParams({
-						grant_type: tokenExchangeGrantType,
-						subject_token: subjectToken,
-						subject_token_type: subjectTokenTypeIdToken
-					}).toString()
+					body: body.toString()
 				});
 
 				const minted = tokenResponseSchema.parse(await response.json());

@@ -79,10 +79,13 @@ describe('Nix substitution from a private-read cache', () => {
 						path.join(directory, 'target-unauth'),
 						path.join(directory, 'target-unauth-home')
 					);
-					const withoutCredential = await unauthorised
-						.realise(storePath, base)
-						.then(() => 'substituted')
-						.catch(() => 'refused');
+					let withoutCredential: string;
+					try {
+						await unauthorised.realise(storePath, base);
+						withoutCredential = 'substituted';
+					} catch {
+						withoutCredential = 'refused';
+					}
 
 					expect({
 						withCredential: await readFile(

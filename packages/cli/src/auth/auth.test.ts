@@ -111,9 +111,11 @@ describe('authenticateForPush', () => {
 				audience: 'https://cache.example.workers.dev'
 			});
 
-			const outcome = await provider.get().then(
-				(token) => ({ token }),
-				(error_: unknown) => {
+			const outcome = await (async () => {
+				try {
+					const token = await provider.get();
+					return { token };
+				} catch (error_: unknown) {
 					expect(error_).toBeInstanceOf(OwnerLoginRequiredError);
 
 					if (!(error_ instanceof OwnerLoginRequiredError)) {
@@ -122,7 +124,7 @@ describe('authenticateForPush', () => {
 
 					return { error: { name: error_.name } };
 				}
-			);
+			})();
 
 			expect(outcome).toStrictEqual({
 				error: { name: 'OwnerLoginRequiredError' }
@@ -326,9 +328,11 @@ describe('cachedOwnerProvider', () => {
 		const { clientCalls, harness, sessions } = sessionHarness();
 
 		const provider = cachedOwnerProvider(target, harness);
-		const outcome = await provider.get().then(
-			(token) => ({ token }),
-			(error_: unknown) => {
+		const outcome = await (async () => {
+			try {
+				const token = await provider.get();
+				return { token };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(OwnerLoginRequiredError);
 
 				if (!(error_ instanceof OwnerLoginRequiredError)) {
@@ -341,7 +345,7 @@ describe('cachedOwnerProvider', () => {
 					}
 				};
 			}
-		);
+		})();
 
 		expect({
 			outcome,
@@ -376,9 +380,11 @@ describe('cachedOwnerProvider', () => {
 			}
 		});
 
-		const outcome = await provider.refresh().then(
-			(token) => ({ token }),
-			(error_: unknown) => {
+		const outcome = await (async () => {
+			try {
+				const token = await provider.refresh();
+				return { token };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(OwnerLoginRequiredError);
 
 				if (!(error_ instanceof OwnerLoginRequiredError)) {
@@ -387,7 +393,7 @@ describe('cachedOwnerProvider', () => {
 
 				return { error: { name: error_.name } };
 			}
-		);
+		})();
 
 		expect(outcome).toStrictEqual({
 			error: { name: 'OwnerLoginRequiredError' }
@@ -407,7 +413,13 @@ describe('cachedOwnerProvider', () => {
 				tokenRefresh: () => Promise.reject(failure)
 			}
 		});
-		const error = await provider.get().catch((error_: unknown) => error_);
+		const error = await (async () => {
+			try {
+				return await provider.get();
+			} catch (error_: unknown) {
+				return error_;
+			}
+		})();
 
 		expect(error).toBeInstanceOf(CupboardHttpError);
 

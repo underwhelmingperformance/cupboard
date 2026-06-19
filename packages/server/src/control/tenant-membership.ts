@@ -151,16 +151,11 @@ async function loadMembershipFilter(
 		return undefined;
 	}
 
-	ctx.waitUntil(
-		caches.default.put(
-			cacheKey,
-			new Response(bytes, {
-				headers: {
-					'cache-control': `max-age=${String(filterCacheTtlSeconds)}`
-				}
-			})
-		)
-	);
+	const cacheControl = `max-age=${String(filterCacheTtlSeconds)}`;
+	const cachedResponse = new Response(bytes, {
+		headers: { 'cache-control': cacheControl }
+	});
+	ctx.waitUntil(caches.default.put(cacheKey, cachedResponse));
 
 	return deserialiseFilter(new Uint8Array(bytes));
 }
@@ -237,14 +232,11 @@ async function readTenantEntry(
 	const entry = entryFromRow(row);
 
 	if (entry.readMode === 'public') {
-		ctx.waitUntil(
-			caches.default.put(
-				cacheKey,
-				Response.json(entry, {
-					headers: { 'cache-control': `max-age=${String(rowCacheTtlSeconds)}` }
-				})
-			)
-		);
+		const cacheControl = `max-age=${String(rowCacheTtlSeconds)}`;
+		const cachedResponse = Response.json(entry, {
+			headers: { 'cache-control': cacheControl }
+		});
+		ctx.waitUntil(caches.default.put(cacheKey, cachedResponse));
 	}
 
 	return entry;

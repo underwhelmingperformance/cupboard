@@ -284,7 +284,11 @@ export function bindingsEqual(
 }
 
 function canonicalise(bindings: readonly unknown[]): string[] {
-	return bindings.map((binding) => canonicalJson(binding)).toSorted();
+	// Both sides of the equality check run through this same comparator, so the
+	// absolute order does not matter — only that it is a consistent total order.
+	return bindings
+		.map((binding) => canonicalJson(binding))
+		.toSorted((a, b) => a.localeCompare(b));
 }
 
 function isSecretBinding(binding: unknown): boolean {

@@ -11,10 +11,9 @@
 export { CupboardServer } from './do/server.ts';
 
 export default {
-	fetch(): Response {
-		return new Response('Not found\n', {
+	fetch: (): Response =>
+		new Response('Not found\n', {
 			status: 404,
 			headers: { 'content-type': 'text/plain; charset=utf-8' }
-		});
-	}
+		})
 } satisfies ExportedHandler<TenantEnv>;

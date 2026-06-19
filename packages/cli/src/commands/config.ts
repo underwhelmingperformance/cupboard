@@ -40,7 +40,7 @@ export function cacheSubstituterUrl(
 	const basePath = substituter.pathname.replace(/\/+$/, '');
 	substituter.pathname = `${basePath}/cache/${cache}`;
 
-	return substituter.toString();
+	return substituter.href;
 }
 
 export function runConfig(
@@ -52,7 +52,8 @@ export function runConfig(
 	// The nix.conf snippet is the command's payload, so it goes to stdout and
 	// `cupboard config <url> <pubkey> >> nix.conf` works. The netrc lines belong in
 	// a different file, so they stay on stderr as guidance.
-	reporter.data(new NixConfig(url, publicKey).render().trimEnd());
+	const nixConfig = new NixConfig(url, publicKey);
+	reporter.data(nixConfig.render().trimEnd());
 
 	if (credential === undefined) {
 		return;

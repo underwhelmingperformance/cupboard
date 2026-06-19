@@ -16,14 +16,17 @@ const workerBundleSchema = z.object({
 	code: z.string()
 });
 
+const d1MigrationSchema = z.object({
+	name: z.string(),
+	statements: z.array(z.string())
+});
+
 const payloadSchema = z.object({
 	controlSource: z.string(),
 	tenantSource: z.string(),
 	controlBundle: workerBundleSchema,
 	tenantBundle: workerBundleSchema,
-	d1Migrations: z.array(
-		z.object({ name: z.string(), statements: z.array(z.string()) })
-	),
+	d1Migrations: z.array(d1MigrationSchema),
 	buildVersion: z.string()
 });
 

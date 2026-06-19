@@ -46,7 +46,7 @@ export function pushAuthorizationDetails(
 			type: 'cupboard_cache',
 			actions,
 			cache: intent.cacheSelector,
-			...(intent.root === undefined ? {} : { root: intent.root })
+			...(intent.root !== undefined && { root: intent.root })
 		}
 	]);
 }

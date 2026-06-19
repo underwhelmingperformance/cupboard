@@ -26,6 +26,93 @@ import { type ServerContext, storedSignaturesSchema } from './context.ts';
 export class NarInfoObjectsService {
 	constructor(private readonly context: ServerContext) {}
 
+	// Re-materialises a lost narinfo object when the row, the matching reference
+	// edge, and the shared blob are still present. The caller must already hold the
+	// DO critical section: running against a freshly read row inside one is what
+	// stops a concurrent delete from being undone by re-materialising from a stale
+	// copy.
+	private async materialiseIfRecoverable(
+		cache: string,
+		storePathHash: StorePathHash
+	): Promise<void> {
+		// A tenant being offboarded must not have its objects re-materialised, or the
+		// drain would chase an object this path recreated behind it.
+		if (this.context.offboarding) {
+			return;
+		}
+
+		const row = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		if (row === undefined || !(await this.hasCommittedReference(cache, row))) {
+			await this.context.env.BLOBS.delete(
+				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+			);
+			return;
+		}
+
+		const existing = await this.context.env.BLOBS.head(
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+		);
+
+		if (existing !== null) {
+			return;
+		}
+
+		const narInfo = await this.narInfoFromRow(row);
+
+		// No shared fact means the blob was demoted; leave the path non-servable
+		// until a re-upload re-promotes it rather than render an unbacked object.
+		if (narInfo === undefined) {
+			return;
+		}
+
+		await this.putNarInfoObject(cache, storePathHash, narInfo);
+	}
+
+	// {@link demoteUnbacked}'s body, run inside the critical section so the
+	// object-absence check and the delete cannot interleave with a concurrent commit
+	// materialising the path between them, which would otherwise let the demote delete
+	// a freshly re-materialised object.
+	private async demoteUnbackedLocked(
+		cache: string,
+		storePathHash: StorePathHash,
+		narHash: NixSha256HashString
+	): Promise<void> {
+		const row = this.context.db
+			.select({ narHash: schema.narInfos.narHash })
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		if (row?.narHash !== narHash) {
+			return;
+		}
+
+		const blob = await this.context.env.BLOBS.head(narObjectKey(narHash));
+
+		if (blob !== null) {
+			return;
+		}
+
+		await this.context.env.BLOBS.delete(
+			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+		);
+	}
+
 	// Renders a narinfo by joining the tenant row (identity, uncompressed NarHash/
 	// NarSize, references, signature) with the canonical compressed metadata in
 	// `blob_state` — the narinfo row holds no compressed fields of its own. Returns
@@ -79,58 +166,6 @@ export class NarInfoObjectsService {
 		await this.context.ctx.blockConcurrencyWhile(() =>
 			this.materialiseIfRecoverable(cache, storePathHash)
 		);
-	}
-
-	// Re-materialises a lost narinfo object when the row, the matching reference
-	// edge, and the shared blob are still present. The caller must already hold the
-	// DO critical section: running against a freshly read row inside one is what
-	// stops a concurrent delete from being undone by re-materialising from a stale
-	// copy.
-	private async materialiseIfRecoverable(
-		cache: string,
-		storePathHash: StorePathHash
-	): Promise<void> {
-		// A tenant being offboarded must not have its objects re-materialised, or the
-		// drain would chase an object this path recreated behind it.
-		if (this.context.offboarding) {
-			return;
-		}
-
-		const row = this.context.db
-			.select()
-			.from(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.cache, cache),
-					eq(schema.narInfos.storePathHash, storePathHash)
-				)
-			)
-			.get();
-
-		if (row === undefined || !(await this.hasCommittedReference(cache, row))) {
-			await this.context.env.BLOBS.delete(
-				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
-			);
-			return;
-		}
-
-		const existing = await this.context.env.BLOBS.head(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
-		);
-
-		if (existing !== null) {
-			return;
-		}
-
-		const narInfo = await this.narInfoFromRow(row);
-
-		// No shared fact means the blob was demoted; leave the path non-servable
-		// until a re-upload re-promotes it rather than render an unbacked object.
-		if (narInfo === undefined) {
-			return;
-		}
-
-		await this.putNarInfoObject(cache, storePathHash, narInfo);
 	}
 
 	// The availability predicate the read path serves on: a materialised tenant
@@ -224,41 +259,6 @@ export class NarInfoObjectsService {
 	): Promise<void> {
 		await this.context.ctx.blockConcurrencyWhile(() =>
 			this.demoteUnbackedLocked(cache, storePathHash, narHash)
-		);
-	}
-
-	// {@link demoteUnbacked}'s body, run inside the critical section so the
-	// object-absence check and the delete cannot interleave with a concurrent commit
-	// materialising the path between them, which would otherwise let the demote delete
-	// a freshly re-materialised object.
-	private async demoteUnbackedLocked(
-		cache: string,
-		storePathHash: StorePathHash,
-		narHash: NixSha256HashString
-	): Promise<void> {
-		const row = this.context.db
-			.select({ narHash: schema.narInfos.narHash })
-			.from(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.cache, cache),
-					eq(schema.narInfos.storePathHash, storePathHash)
-				)
-			)
-			.get();
-
-		if (row?.narHash !== narHash) {
-			return;
-		}
-
-		const blob = await this.context.env.BLOBS.head(narObjectKey(narHash));
-
-		if (blob !== null) {
-			return;
-		}
-
-		await this.context.env.BLOBS.delete(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
 		);
 	}
 

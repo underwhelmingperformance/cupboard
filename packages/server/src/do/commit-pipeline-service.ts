@@ -68,6 +68,303 @@ export class CommitPipelineService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
+	// Asks for a prompt verification pass over the maintenance queue, so a
+	// pending commit becomes servable in seconds rather than at the next
+	// hourly sweep. Requested, not awaited: the sweep remains the backstop, so
+	// a failed send only delays the promotion and must never fail the commit.
+	private async requestVerification(tenant: TenantId): Promise<void> {
+		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
+
+		try {
+			await this.context.env.MAINTENANCE_QUEUE.send(message);
+		} catch (error) {
+			console.warn('verification request not enqueued', {
+				tenant,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
+	}
+
+	// Commits a fresh inline upload row-first: mark the saga in progress, reserve the
+	// not-yet-servable row, verify the staged bytes (never serving them unverified,
+	// even when `blob_state` already holds the hash), promote into the shared CAS,
+	// then materialise the servable object. A concurrent commit that already holds
+	// the path is conceded to; a verification failure reclaims the reserved row and
+	// rejects.
+	// Commits a reuse of a blob already in the verified CAS: reserve the row, then
+	// materialise from the existing canonical object and `blob_state`. If the shared
+	// blob was reaped between negotiate and now, reclaim the row and report it gone so
+	// the client re-uploads, rather than serve a narinfo with no backing object.
+	private async commitReusedBlob(
+		cache: string,
+		uploadId: string,
+		metadata: ParsedUploadPathMetadata
+	): Promise<CommitOutcome> {
+		this.uploadState.markUploadCommitting(uploadId);
+
+		const canonicalKey = narObjectKey(metadata.narHash);
+		const reserved = await this.reserveNarInfoRow(cache, metadata);
+
+		if (reserved.kind !== 'reserved') {
+			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
+		}
+
+		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
+			this.materialiseServable(cache, metadata, reserved.generation)
+		);
+
+		if (outcome === 'materialised') {
+			// A reuse commit settles synchronously, so its upload row is cleared
+			// rather than retained for observation.
+			this.uploadState.clearPendingUpload(uploadId);
+
+			return {
+				kind: 'settled',
+				response: {
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					status: 'committed'
+				}
+			};
+		}
+
+		if (outcome === 'superseded') {
+			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
+		}
+
+		if (outcome === 'tenant-inactive') {
+			await this.context.ctx.blockConcurrencyWhile(() =>
+				this.reclaimReservedRow(
+					cache,
+					metadata.storePathHash,
+					reserved.generation,
+					metadata.narHash
+				)
+			);
+			this.uploadState.clearPendingUpload(uploadId);
+
+			throw new TenantWritesStoppedError(
+				this.context.requireTenant(),
+				'inactive'
+			);
+		}
+
+		await this.context.ctx.blockConcurrencyWhile(() =>
+			this.reclaimReservedRow(
+				cache,
+				metadata.storePathHash,
+				reserved.generation,
+				metadata.narHash
+			)
+		);
+		this.uploadState.clearPendingUpload(uploadId);
+
+		throw new UploadedObjectNotFoundError(canonicalKey);
+	}
+
+	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
+	// winner's object is materialised, reclaims this upload's staging object, and
+	// reports already-present with the winner's narHash. Any blob this upload
+	// promoted but no edge now references is left for the reaper to collect.
+	private async concedeToWinner(
+		cache: string,
+		uploadId: string,
+		metadata: ParsedUploadPathMetadata,
+		stagingKey: string
+	): Promise<CommitOutcome> {
+		const winner = await this.narInfoObjects.committedNarInfoRow(
+			cache,
+			metadata.storePathHash
+		);
+
+		if (winner !== undefined) {
+			await this.narInfoObjects.ensureNarInfoObject(
+				cache,
+				winner.storePathHash
+			);
+		}
+
+		await this.uploadState.clearPendingUploadAndStaging(
+			uploadId,
+			stagingKey,
+			metadata.narHash
+		);
+
+		return {
+			kind: 'settled',
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: winner?.narHash ?? metadata.narHash,
+				status: 'already-present'
+			}
+		};
+	}
+
+	// The authoritative active check the edge/object publish is gated on: the Worker's
+	// write gate read this status before dispatch, but a commit can settle here after a
+	// suspend or offboard, so it is re-read in the critical section. A missing row reads
+	// as not-active and fails closed.
+	private async tenantActive(): Promise<boolean> {
+		const row = await this.context.d1
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, this.context.requireTenant()))
+			.get();
+
+		return row?.status === 'active';
+	}
+
+	// Writes the reference edge and per-tenant presence and charges usage, all in one
+	// atomic D1 batch. The counters are charged before the inserts and gated on the
+	// rows not yet existing, so a replay (the edge/presence already present) neither
+	// double-charges nor double-references, and an over-quota bytes charge fails the
+	// `tenant_usage` CHECK and rolls the whole batch back: no edge and no charge are
+	// ever stranded over quota. Clearing the reaper grace timer in the same batch
+	// keeps a re-referenced blob alive.
+	private async reserveEdgeAndCharge(
+		tenant: TenantId,
+		cache: string,
+		metadata: ParsedUploadPathMetadata,
+		generation: number,
+		blob: { readonly fileSize: number }
+	): Promise<void> {
+		const clock = new Date();
+		const now = clock.toISOString();
+		const edgeFilter = and(
+			eq(d1Schema.blobReference.tenant, tenant),
+			eq(d1Schema.blobReference.cache, cache),
+			eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
+			eq(d1Schema.blobReference.generation, generation)
+		);
+		const edgeMissing = notExists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.blobReference)
+				.where(edgeFilter)
+		);
+		const presenceFilter = and(
+			eq(d1Schema.tenantBlob.tenant, tenant),
+			eq(d1Schema.tenantBlob.narHash, metadata.narHash)
+		);
+		const presenceMissing = notExists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantBlob)
+				.where(presenceFilter)
+		);
+		const creditNarInfoFilter = and(
+			eq(d1Schema.tenantUsage.tenant, tenant),
+			edgeMissing
+		);
+		const creditBytesFilter = and(
+			eq(d1Schema.tenantUsage.tenant, tenant),
+			presenceMissing
+		);
+
+		// The `requireQuota` pre-check in the same critical section is the clean
+		// over-quota rejection. The `tenant_usage` CHECK constraint backs it as a
+		// database-level invariant: should a charge ever reach here over quota, the
+		// batch fails and rolls back, so no edge or charge is stranded even though the
+		// pre-check is the expected guard.
+		await this.context.d1.batch([
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1`,
+					updatedAt: now
+				})
+				.where(creditNarInfoFilter),
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					bytes: sql`${d1Schema.tenantUsage.bytes} + ${blob.fileSize}`,
+					blobs: sql`${d1Schema.tenantUsage.blobs} + 1`,
+					updatedAt: now
+				})
+				.where(creditBytesFilter),
+			this.context.d1
+				.insert(d1Schema.blobReference)
+				.values({
+					tenant,
+					cache,
+					storePathHash: metadata.storePathHash,
+					generation,
+					narHash: metadata.narHash
+				})
+				.onConflictDoNothing(),
+			this.context.d1
+				.insert(d1Schema.tenantBlob)
+				.values({ tenant, narHash: metadata.narHash, fileSize: blob.fileSize })
+				.onConflictDoNothing(),
+			this.context.d1
+				.update(d1Schema.blobState)
+				.set({ deleteAfter: sql`null` })
+				.where(eq(d1Schema.blobState.narHash, metadata.narHash))
+		]);
+	}
+
+	// Whether charging this hash would take the tenant over its quota. A hash the
+	// tenant already holds (no charge), an absent usage row, or an unset quota are all
+	// within quota. The caller passes the size that will actually be charged.
+	private async overQuota(
+		tenant: TenantId,
+		narHash: NixSha256HashString,
+		fileSize: number
+	): Promise<boolean> {
+		const usage = await this.context.d1
+			.select({
+				bytes: d1Schema.tenantUsage.bytes,
+				casBytes: d1Schema.tenantUsage.casBytes,
+				quotaBytes: d1Schema.tenantUsage.quotaBytes
+			})
+			.from(d1Schema.tenantUsage)
+			.where(eq(d1Schema.tenantUsage.tenant, tenant))
+			.get();
+
+		if (usage === undefined) {
+			return false;
+		}
+
+		if (usage.quotaBytes === null) {
+			return false;
+		}
+
+		const owned = await this.context.d1
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					eq(d1Schema.tenantBlob.narHash, narHash)
+				)
+			)
+			.get();
+
+		if (owned !== undefined) {
+			return false;
+		}
+
+		return usage.bytes + usage.casBytes + fileSize > usage.quotaBytes;
+	}
+
+	// The size a commit of this hash will be charged: the canonical compressed size
+	// already recorded for the hash if one exists (the promote adopts that encoding),
+	// otherwise this upload's staged size, which becomes the canonical size. Used by
+	// the advisory pre-check; the authoritative charge reads the canonical size after
+	// the promote.
+	private async chargeSize(
+		narHash: NixSha256HashString,
+		stagedSize: number
+	): Promise<number> {
+		const existing = await this.context.d1
+			.select({ fileSize: d1Schema.blobState.fileSize })
+			.from(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, narHash))
+			.get();
+
+		return existing?.fileSize ?? stagedSize;
+	}
+
 	async commit(cache: string, uploadId: string): Promise<CommitOutcome> {
 		// A commit settling after offboarding began must publish nothing: refuse
 		// before deferring, so the writer hears a stopped write rather than a
@@ -93,7 +390,10 @@ export class CommitPipelineService {
 			throw new UploadCacheMismatchError(uploadId, pending.cache, cache);
 		}
 
-		if (pending.expiresAt < new Date().toISOString()) {
+		const clock = new Date();
+		const nowIso = clock.toISOString();
+
+		if (pending.expiresAt < nowIso) {
 			await this.uploadState.clearPendingUploadAndStaging(
 				uploadId,
 				pending.r2Key,
@@ -103,10 +403,12 @@ export class CommitPipelineService {
 			throw new UploadExpiredError(uploadId);
 		}
 
+		const renewedExpiry = new Date(Date.now() + 15 * 60 * 1000);
+
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({
-				expiresAt: new Date(Date.now() + 15 * 60 * 1000).toISOString()
+				expiresAt: renewedExpiry.toISOString()
 			})
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
@@ -241,138 +543,6 @@ export class CommitPipelineService {
 		};
 	}
 
-	// Asks for a prompt verification pass over the maintenance queue, so a
-	// pending commit becomes servable in seconds rather than at the next
-	// hourly sweep. Requested, not awaited: the sweep remains the backstop, so
-	// a failed send only delays the promotion and must never fail the commit.
-	private async requestVerification(tenant: TenantId): Promise<void> {
-		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
-
-		try {
-			await this.context.env.MAINTENANCE_QUEUE.send(message);
-		} catch (error) {
-			console.warn('verification request not enqueued', {
-				tenant,
-				error: error instanceof Error ? error.message : String(error)
-			});
-		}
-	}
-
-	// Commits a fresh inline upload row-first: mark the saga in progress, reserve the
-	// not-yet-servable row, verify the staged bytes (never serving them unverified,
-	// even when `blob_state` already holds the hash), promote into the shared CAS,
-	// then materialise the servable object. A concurrent commit that already holds
-	// the path is conceded to; a verification failure reclaims the reserved row and
-	// rejects.
-	// Commits a reuse of a blob already in the verified CAS: reserve the row, then
-	// materialise from the existing canonical object and `blob_state`. If the shared
-	// blob was reaped between negotiate and now, reclaim the row and report it gone so
-	// the client re-uploads, rather than serve a narinfo with no backing object.
-	private async commitReusedBlob(
-		cache: string,
-		uploadId: string,
-		metadata: ParsedUploadPathMetadata
-	): Promise<CommitOutcome> {
-		this.uploadState.markUploadCommitting(uploadId);
-
-		const canonicalKey = narObjectKey(metadata.narHash);
-		const reserved = await this.reserveNarInfoRow(cache, metadata);
-
-		if (reserved.kind !== 'reserved') {
-			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
-		}
-
-		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
-			this.materialiseServable(cache, metadata, reserved.generation)
-		);
-
-		if (outcome === 'materialised') {
-			// A reuse commit settles synchronously, so its upload row is cleared
-			// rather than retained for observation.
-			this.uploadState.clearPendingUpload(uploadId);
-
-			return {
-				kind: 'settled',
-				response: {
-					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash,
-					status: 'committed'
-				}
-			};
-		}
-
-		if (outcome === 'superseded') {
-			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
-		}
-
-		if (outcome === 'tenant-inactive') {
-			await this.context.ctx.blockConcurrencyWhile(() =>
-				this.reclaimReservedRow(
-					cache,
-					metadata.storePathHash,
-					reserved.generation,
-					metadata.narHash
-				)
-			);
-			this.uploadState.clearPendingUpload(uploadId);
-
-			throw new TenantWritesStoppedError(
-				this.context.requireTenant(),
-				'inactive'
-			);
-		}
-
-		await this.context.ctx.blockConcurrencyWhile(() =>
-			this.reclaimReservedRow(
-				cache,
-				metadata.storePathHash,
-				reserved.generation,
-				metadata.narHash
-			)
-		);
-		this.uploadState.clearPendingUpload(uploadId);
-
-		throw new UploadedObjectNotFoundError(canonicalKey);
-	}
-
-	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
-	// winner's object is materialised, reclaims this upload's staging object, and
-	// reports already-present with the winner's narHash. Any blob this upload
-	// promoted but no edge now references is left for the reaper to collect.
-	private async concedeToWinner(
-		cache: string,
-		uploadId: string,
-		metadata: ParsedUploadPathMetadata,
-		stagingKey: string
-	): Promise<CommitOutcome> {
-		const winner = await this.narInfoObjects.committedNarInfoRow(
-			cache,
-			metadata.storePathHash
-		);
-
-		if (winner !== undefined) {
-			await this.narInfoObjects.ensureNarInfoObject(
-				cache,
-				winner.storePathHash
-			);
-		}
-
-		await this.uploadState.clearPendingUploadAndStaging(
-			uploadId,
-			stagingKey,
-			metadata.narHash
-		);
-
-		return {
-			kind: 'settled',
-			response: {
-				storePathHash: metadata.storePathHash,
-				narHash: winner?.narHash ?? metadata.narHash,
-				status: 'already-present'
-			}
-		};
-	}
-
 	// Reserves the narinfo row for a commit before its bytes are verified, the
 	// row-first half of the row-first/edge-last saga. It signs the fingerprint —
 	// over the uncompressed `NarHash`/`NarSize`/references only, so it is independent
@@ -386,10 +556,11 @@ export class CommitPipelineService {
 		cache: string,
 		metadata: ParsedUploadPathMetadata
 	): Promise<ReserveOutcome> {
-		const now = new Date().toISOString();
+		const clock = new Date();
+		const now = clock.toISOString();
 		this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
-		const fingerprint = new NarInfo(
+		const narInfo = new NarInfo(
 			new StorePath(metadata.storePath),
 			narObjectKey(metadata.narHash),
 			metadata.compression,
@@ -400,7 +571,8 @@ export class CommitPipelineService {
 			metadata.references,
 			metadata.deriver,
 			metadata.ca
-		).fingerprint();
+		);
+		const fingerprint = narInfo.fingerprint();
 		const sigs = await Promise.all(
 			signingKeys.map((key) =>
 				signNixFingerprint(key.privateJwk, fingerprint, key.name)
@@ -492,20 +664,6 @@ export class CommitPipelineService {
 		});
 	}
 
-	// The authoritative active check the edge/object publish is gated on: the Worker's
-	// write gate read this status before dispatch, but a commit can settle here after a
-	// suspend or offboard, so it is re-read in the critical section. A missing row reads
-	// as not-active and fails closed.
-	private async tenantActive(): Promise<boolean> {
-		const row = await this.context.d1
-			.select({ status: d1Schema.tenant.status })
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, this.context.requireTenant()))
-			.get();
-
-		return row?.status === 'active';
-	}
-
 	// Makes a reserved narinfo servable, the edge-last half of the saga and the only
 	// place that writes the reference edge and the served object or clears the
 	// pending upload. It requires the shared blob to be present — the `available`
@@ -593,150 +751,6 @@ export class CommitPipelineService {
 		// row (it returns `committed` synchronously), while a deferred commit records a
 		// terminal `servable` verdict for `push --wait` to observe.
 		return 'materialised';
-	}
-
-	// Writes the reference edge and per-tenant presence and charges usage, all in one
-	// atomic D1 batch. The counters are charged before the inserts and gated on the
-	// rows not yet existing, so a replay (the edge/presence already present) neither
-	// double-charges nor double-references, and an over-quota bytes charge fails the
-	// `tenant_usage` CHECK and rolls the whole batch back: no edge and no charge are
-	// ever stranded over quota. Clearing the reaper grace timer in the same batch
-	// keeps a re-referenced blob alive.
-	private async reserveEdgeAndCharge(
-		tenant: TenantId,
-		cache: string,
-		metadata: ParsedUploadPathMetadata,
-		generation: number,
-		blob: { readonly fileSize: number }
-	): Promise<void> {
-		const now = new Date().toISOString();
-		const edgeMissing = notExists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.blobReference)
-				.where(
-					and(
-						eq(d1Schema.blobReference.tenant, tenant),
-						eq(d1Schema.blobReference.cache, cache),
-						eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
-						eq(d1Schema.blobReference.generation, generation)
-					)
-				)
-		);
-		const presenceMissing = notExists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantBlob)
-				.where(
-					and(
-						eq(d1Schema.tenantBlob.tenant, tenant),
-						eq(d1Schema.tenantBlob.narHash, metadata.narHash)
-					)
-				)
-		);
-
-		// The `requireQuota` pre-check in the same critical section is the clean
-		// over-quota rejection. The `tenant_usage` CHECK constraint backs it as a
-		// database-level invariant: should a charge ever reach here over quota, the
-		// batch fails and rolls back, so no edge or charge is stranded even though the
-		// pre-check is the expected guard.
-		await this.context.d1.batch([
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1`,
-					updatedAt: now
-				})
-				.where(and(eq(d1Schema.tenantUsage.tenant, tenant), edgeMissing)),
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					bytes: sql`${d1Schema.tenantUsage.bytes} + ${blob.fileSize}`,
-					blobs: sql`${d1Schema.tenantUsage.blobs} + 1`,
-					updatedAt: now
-				})
-				.where(and(eq(d1Schema.tenantUsage.tenant, tenant), presenceMissing)),
-			this.context.d1
-				.insert(d1Schema.blobReference)
-				.values({
-					tenant,
-					cache,
-					storePathHash: metadata.storePathHash,
-					generation,
-					narHash: metadata.narHash
-				})
-				.onConflictDoNothing(),
-			this.context.d1
-				.insert(d1Schema.tenantBlob)
-				.values({ tenant, narHash: metadata.narHash, fileSize: blob.fileSize })
-				.onConflictDoNothing(),
-			this.context.d1
-				.update(d1Schema.blobState)
-				.set({ deleteAfter: sql`null` })
-				.where(eq(d1Schema.blobState.narHash, metadata.narHash))
-		]);
-	}
-
-	// Whether charging this hash would take the tenant over its quota. A hash the
-	// tenant already holds (no charge), an absent usage row, or an unset quota are all
-	// within quota. The caller passes the size that will actually be charged.
-	private async overQuota(
-		tenant: TenantId,
-		narHash: NixSha256HashString,
-		fileSize: number
-	): Promise<boolean> {
-		const usage = await this.context.d1
-			.select({
-				bytes: d1Schema.tenantUsage.bytes,
-				casBytes: d1Schema.tenantUsage.casBytes,
-				quotaBytes: d1Schema.tenantUsage.quotaBytes
-			})
-			.from(d1Schema.tenantUsage)
-			.where(eq(d1Schema.tenantUsage.tenant, tenant))
-			.get();
-
-		if (usage === undefined) {
-			return false;
-		}
-
-		if (usage.quotaBytes === null) {
-			return false;
-		}
-
-		const owned = await this.context.d1
-			.select({ narHash: d1Schema.tenantBlob.narHash })
-			.from(d1Schema.tenantBlob)
-			.where(
-				and(
-					eq(d1Schema.tenantBlob.tenant, tenant),
-					eq(d1Schema.tenantBlob.narHash, narHash)
-				)
-			)
-			.get();
-
-		if (owned !== undefined) {
-			return false;
-		}
-
-		return usage.bytes + usage.casBytes + fileSize > usage.quotaBytes;
-	}
-
-	// The size a commit of this hash will be charged: the canonical compressed size
-	// already recorded for the hash if one exists (the promote adopts that encoding),
-	// otherwise this upload's staged size, which becomes the canonical size. Used by
-	// the advisory pre-check; the authoritative charge reads the canonical size after
-	// the promote.
-	private async chargeSize(
-		narHash: NixSha256HashString,
-		stagedSize: number
-	): Promise<number> {
-		const existing = await this.context.d1
-			.select({ fileSize: d1Schema.blobState.fileSize })
-			.from(d1Schema.blobState)
-			.where(eq(d1Schema.blobState.narHash, narHash))
-			.get();
-
-		return existing?.fileSize ?? stagedSize;
 	}
 
 	// Removes a reserved narinfo row whose commit failed verification, leaving its

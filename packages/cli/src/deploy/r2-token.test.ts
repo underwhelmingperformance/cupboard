@@ -241,9 +241,15 @@ describe('createScopedR2Key', () => {
 			}
 		};
 
-		const outcome = await createScopedR2Key(api, options).then(
-			(credentials) => ({ credentials }),
-			(error_: unknown) => {
+		const resolveOutcome = async (): Promise<
+			| { credentials: unknown }
+			| { error: { name: string; wanted: readonly string[] } }
+		> => {
+			try {
+				const credentials = await createScopedR2Key(api, options);
+
+				return { credentials };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(R2PermissionGroupsError);
 
 				if (error_ instanceof R2PermissionGroupsError) {
@@ -257,7 +263,9 @@ describe('createScopedR2Key', () => {
 
 				throw error_;
 			}
-		);
+		};
+
+		const outcome = await resolveOutcome();
 
 		expect({ outcome, apiCalls }).toStrictEqual({
 			outcome: {
@@ -294,9 +302,15 @@ describe('createScopedR2Key', () => {
 			}
 		};
 
-		const outcome = await createScopedR2Key(api, options).then(
-			(credentials) => ({ credentials }),
-			(error_: unknown) => {
+		const resolveOutcome = async (): Promise<
+			| { credentials: unknown }
+			| { error: { name: string; hasId: boolean; hasValue: boolean } }
+		> => {
+			try {
+				const credentials = await createScopedR2Key(api, options);
+
+				return { credentials };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(ApiTokenResponseError);
 
 				if (error_ instanceof ApiTokenResponseError) {
@@ -311,7 +325,9 @@ describe('createScopedR2Key', () => {
 
 				throw error_;
 			}
-		);
+		};
+
+		const outcome = await resolveOutcome();
 
 		expect({ outcome, apiCalls }).toStrictEqual({
 			outcome: {

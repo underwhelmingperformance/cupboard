@@ -15,6 +15,19 @@ import {
 // `undefined` rather than throwing; callers that want a hard failure layer
 // their own typed error on top.
 
+// Order strings by UTF-16 code unit, matching the default `Array#sort` order.
+export function byCodeUnit(a: string, b: string): number {
+	if (a < b) {
+		return -1;
+	}
+
+	if (a > b) {
+		return 1;
+	}
+
+	return 0;
+}
+
 export function storePathBasename(path: string): string | undefined {
 	const basename = path.split('/').at(-1);
 
@@ -78,19 +91,21 @@ export class StorePath {
 	}
 
 	static basename(value: string): StorePathBasename {
-		return new StorePath(value).basename;
+		const storePath = new StorePath(value);
+		return storePath.basename;
 	}
 
 	static hash(value: string): StorePathHash {
-		return new StorePath(value).hash;
+		const storePath = new StorePath(value);
+		return storePath.hash;
 	}
 
 	static referenceBasenames(
 		references: readonly string[]
 	): StorePathBasename[] {
 		return references
-			.map((reference) => StorePath.basename(reference))
-			.toSorted();
+			.map((reference) => this.basename(reference))
+			.toSorted(byCodeUnit);
 	}
 
 	get basename(): StorePathBasename {

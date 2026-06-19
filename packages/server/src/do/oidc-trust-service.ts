@@ -39,137 +39,6 @@ export class OidcTrustService {
 		private readonly tenantIdentity: TenantIdentityService
 	) {}
 
-	listRules(): OidcTrustListResponse {
-		const rules = this.context.db
-			.select()
-			.from(schema.oidcTrust)
-			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
-			.all()
-			.map((row) => oidcTrustSummaryFromRow(row));
-
-		return { rules };
-	}
-
-	getRule(id: string): OidcTrustSummary {
-		const row = this.context.db
-			.select()
-			.from(schema.oidcTrust)
-			.where(eq(schema.oidcTrust.id, id))
-			.get();
-
-		if (row === undefined) {
-			throw new OidcTrustRuleNotFoundError(id);
-		}
-
-		return oidcTrustSummaryFromRow(row);
-	}
-
-	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
-		const id = crypto.randomUUID();
-
-		this.context.db
-			.insert(schema.oidcTrust)
-			.values({
-				id,
-				issuer: body.issuer,
-				audience: body.audience,
-				claimsJson: JSON.stringify(body.claims),
-				permittedGrantsJson: JSON.stringify(body.permittedGrants),
-				displayJson:
-					body.display === undefined ? undefined : JSON.stringify(body.display),
-				createdAt: new Date().toISOString()
-			})
-			.run();
-
-		return {
-			id,
-			issuer: body.issuer,
-			audience: body.audience,
-			claims: body.claims,
-			permittedGrants: body.permittedGrants,
-			...(body.display === undefined ? {} : { display: body.display }),
-			disabled: false
-		};
-	}
-
-	removeRule(id: string): OidcTrustRemoveResponse {
-		const existing = this.context.db
-			.select()
-			.from(schema.oidcTrust)
-			.where(eq(schema.oidcTrust.id, id))
-			.get();
-
-		if (existing !== undefined && id === ownerRuleId) {
-			throw new OwnerRuleImmutableError(id);
-		}
-
-		// Soft-disable so the audit row survives; `removed` reports whether this
-		// call is what disabled an enabled rule.
-		const removed = existing !== undefined && !existing.disabledAt;
-
-		if (removed) {
-			this.context.db
-				.update(schema.oidcTrust)
-				.set({ disabledAt: new Date().toISOString() })
-				.where(eq(schema.oidcTrust.id, id))
-				.run();
-		}
-
-		return { id, removed };
-	}
-
-	decodeInbound(token: string): OidcClaims {
-		try {
-			return decodeInboundClaims(token);
-		} catch {
-			throw new SubjectTokenNotJwtError();
-		}
-	}
-
-	async verifyInbound(rule: OidcTrustRule, token: string): Promise<JWTPayload> {
-		// Discovery resolves the issuer's JWKS and its accepted algorithms. Failing
-		// to reach the issuer is an upstream condition, not a bad token, so it is a
-		// retryable 503 rather than a permanent `invalid_grant`.
-		const issuer = await this.context.discovery
-			.resolve(rule.issuer)
-			.catch((error: unknown) => {
-				throw new IssuerUnavailableError(rule.issuer, { cause: error });
-			});
-
-		try {
-			// The signature is checked against the discovered keys, with issuer and
-			// audience pinned.
-			return await verifyInboundOidcToken(
-				issuer.resolver,
-				token,
-				{
-					issuer: rule.issuer,
-					audience: rule.audience,
-					algorithms: issuer.algorithms
-				},
-				new Date()
-			);
-		} catch (error) {
-			// A JWKS fetch that fails (rather than the token failing verification)
-			// is the same transient upstream condition as a discovery failure.
-			if (error instanceof OidcKeysUnreachableError) {
-				throw new IssuerUnavailableError(rule.issuer, { cause: error });
-			}
-
-			throw new SubjectTokenVerificationFailedError();
-		}
-	}
-
-	enabledOidcTrustRules(): OidcTrustRule[] {
-		return this.context.db
-			.select()
-			.from(schema.oidcTrust)
-			.where(isNull(schema.oidcTrust.disabledAt))
-			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
-			.all()
-			.map((row) => oidcTrustRuleFromRow(row));
-	}
-
 	private ownerConfig(): OwnerConfig | undefined {
 		// The assigned identity is the sole owner source: an unconfigured Durable
 		// Object has no owner rule to seed (and 503s before it serves anyway).
@@ -208,6 +77,143 @@ export class OidcTrustService {
 		return { issuer: issuerUrl.value, subject, audience };
 	}
 
+	listRules(): OidcTrustListResponse {
+		const rules = this.context.db
+			.select()
+			.from(schema.oidcTrust)
+			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
+			.all()
+			.map((row) => oidcTrustSummaryFromRow(row));
+
+		return { rules };
+	}
+
+	getRule(id: string): OidcTrustSummary {
+		const row = this.context.db
+			.select()
+			.from(schema.oidcTrust)
+			.where(eq(schema.oidcTrust.id, id))
+			.get();
+
+		if (row === undefined) {
+			throw new OidcTrustRuleNotFoundError(id);
+		}
+
+		return oidcTrustSummaryFromRow(row);
+	}
+
+	addRule(body: ParsedOidcTrustAddBody): OidcTrustSummary {
+		const id = crypto.randomUUID();
+		const now = new Date();
+		const createdAt = now.toISOString();
+
+		this.context.db
+			.insert(schema.oidcTrust)
+			.values({
+				id,
+				issuer: body.issuer,
+				audience: body.audience,
+				claimsJson: JSON.stringify(body.claims),
+				permittedGrantsJson: JSON.stringify(body.permittedGrants),
+				displayJson:
+					body.display === undefined ? undefined : JSON.stringify(body.display),
+				createdAt
+			})
+			.run();
+
+		return {
+			id,
+			issuer: body.issuer,
+			audience: body.audience,
+			claims: body.claims,
+			permittedGrants: body.permittedGrants,
+			...(body.display !== undefined && { display: body.display }),
+			disabled: false
+		};
+	}
+
+	removeRule(id: string): OidcTrustRemoveResponse {
+		const existing = this.context.db
+			.select()
+			.from(schema.oidcTrust)
+			.where(eq(schema.oidcTrust.id, id))
+			.get();
+
+		if (existing !== undefined && id === ownerRuleId) {
+			throw new OwnerRuleImmutableError(id);
+		}
+
+		// Soft-disable so the audit row survives; `removed` reports whether this
+		// call is what disabled an enabled rule.
+		const removed = existing !== undefined && !existing.disabledAt;
+
+		if (removed) {
+			const now = new Date();
+			const disabledAt = now.toISOString();
+
+			this.context.db
+				.update(schema.oidcTrust)
+				.set({ disabledAt })
+				.where(eq(schema.oidcTrust.id, id))
+				.run();
+		}
+
+		return { id, removed };
+	}
+
+	decodeInbound(token: string): OidcClaims {
+		try {
+			return decodeInboundClaims(token);
+		} catch {
+			throw new SubjectTokenNotJwtError();
+		}
+	}
+
+	async verifyInbound(rule: OidcTrustRule, token: string): Promise<JWTPayload> {
+		// Discovery resolves the issuer's JWKS and its accepted algorithms. Failing
+		// to reach the issuer is an upstream condition, not a bad token, so it is a
+		// retryable 503 rather than a permanent `invalid_grant`.
+		let issuer;
+		try {
+			issuer = await this.context.discovery.resolve(rule.issuer);
+		} catch (error: unknown) {
+			throw new IssuerUnavailableError(rule.issuer, { cause: error });
+		}
+
+		try {
+			// The signature is checked against the discovered keys, with issuer and
+			// audience pinned.
+			return await verifyInboundOidcToken(
+				issuer.resolver,
+				token,
+				{
+					issuer: rule.issuer,
+					audience: rule.audience,
+					algorithms: issuer.algorithms
+				},
+				new Date()
+			);
+		} catch (error) {
+			// A JWKS fetch that fails (rather than the token failing verification)
+			// is the same transient upstream condition as a discovery failure.
+			if (error instanceof OidcKeysUnreachableError) {
+				throw new IssuerUnavailableError(rule.issuer, { cause: error });
+			}
+
+			throw new SubjectTokenVerificationFailedError();
+		}
+	}
+
+	enabledOidcTrustRules(): OidcTrustRule[] {
+		return this.context.db
+			.select()
+			.from(schema.oidcTrust)
+			.where(isNull(schema.oidcTrust.disabledAt))
+			.orderBy(asc(schema.oidcTrust.createdAt), asc(schema.oidcTrust.id))
+			.all()
+			.map((row) => oidcTrustRuleFromRow(row));
+	}
+
 	seedOwnerRule(): void {
 		const owner = this.ownerConfig();
 
@@ -233,12 +239,14 @@ export class OidcTrustService {
 			// covers every operation in its domain.
 			permittedGrantsJson: JSON.stringify([{ type: 'cupboard_wildcard' }])
 		};
+		const now = new Date();
+		const createdAt = now.toISOString();
 
 		this.context.db
 			.insert(schema.oidcTrust)
 			.values({
 				id: ownerRuleId,
-				createdAt: new Date().toISOString(),
+				createdAt,
 				...fields
 			})
 			.onConflictDoUpdate({

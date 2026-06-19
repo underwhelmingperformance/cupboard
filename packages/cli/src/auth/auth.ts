@@ -232,16 +232,6 @@ class GithubOidcTokenProvider implements TokenProvider {
 		private readonly environment?: GithubOidcEnvironment
 	) {}
 
-	async get(): Promise<string> {
-		return (this.#token ??= await this.exchange());
-	}
-
-	async refresh(): Promise<string> {
-		this.#token = await this.exchange();
-
-		return this.#token;
-	}
-
 	private async exchange(): Promise<string> {
 		const subjectToken = await fetchGithubOidcToken({
 			audience: this.audience,
@@ -256,5 +246,15 @@ class GithubOidcTokenProvider implements TokenProvider {
 		);
 
 		return access_token;
+	}
+
+	async get(): Promise<string> {
+		return (this.#token ??= await this.exchange());
+	}
+
+	async refresh(): Promise<string> {
+		this.#token = await this.exchange();
+
+		return this.#token;
 	}
 }

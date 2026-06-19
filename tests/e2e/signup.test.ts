@@ -13,10 +13,11 @@ import {
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 
 function postForm(url: URL, form: Record<string, string>): Promise<Response> {
+	const body = new URLSearchParams(form);
 	return fetch(url, {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams(form).toString()
+		body: body.toString()
 	});
 }
 

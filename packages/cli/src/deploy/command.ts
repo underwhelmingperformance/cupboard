@@ -257,7 +257,9 @@ export function planMenuEntries(state: PlanState): MenuEntry<PlanChoice>[] {
 }
 
 function cronsListProblem(value: string): string | undefined {
-	for (const part of value.split(',').map((cron) => cron.trim())) {
+	const parts = value.split(',').map((cron) => cron.trim());
+
+	for (const part of parts) {
 		const problem = cronProblem(part);
 
 		if (problem !== undefined) {
@@ -425,11 +427,12 @@ async function applyPlanEdit(
 
 	const separator = choice.indexOf(':');
 	const kind = choice.slice(0, separator);
-	const name = choice.slice(separator + 1);
 
 	if (kind !== 'bucket' && kind !== 'database' && kind !== 'queue') {
 		return state;
 	}
+
+	const name = choice.slice(separator + 1);
 
 	const edit = await ui.editText({
 		message: `Rename ${resourceLabels[kind]} ${name} to`,
@@ -1109,9 +1112,10 @@ async function deployFlow(
 					accountId: agreed.accountId,
 					bucketName: agreedBucket
 				}),
-				...(alreadySet && bucketRenamed
-					? { keep: { previousBucket: bucketNameOf(artifact.config) } }
-					: {})
+				...(alreadySet &&
+					bucketRenamed && {
+						keep: { previousBucket: bucketNameOf(artifact.config) }
+					})
 			});
 
 			if (settlement.kind === 'cancelled') {
@@ -1244,24 +1248,22 @@ async function deployFlow(
 				: { kind: 'fresh' },
 		// Only a grant-backed credential can reissue an id_token; raw API
 		// tokens carry no identity to begin with.
-		...(credentialSource === 'cached login' ||
-		credentialSource === 'browser login'
-			? {
-					freshIdToken: () =>
-						freshIdToken({
-							readGrant: readCachedGrant,
-							writeGrant: writeCachedGrant,
-							refreshGrant: (previous) =>
-								refreshCloudflareGrant(
-									previous,
-									fetch,
-									Date.now,
-									runtimeOptions.signal
-								),
-							now: Date.now
-						})
-				}
-			: {})
+		...((credentialSource === 'cached login' ||
+			credentialSource === 'browser login') && {
+			freshIdToken: () =>
+				freshIdToken({
+					readGrant: readCachedGrant,
+					writeGrant: writeCachedGrant,
+					refreshGrant: (previous) =>
+						refreshCloudflareGrant(
+							previous,
+							fetch,
+							Date.now,
+							runtimeOptions.signal
+						),
+					now: Date.now
+				})
+		})
 	});
 
 	switch (outcome.kind) {
@@ -1362,14 +1364,17 @@ async function deployFlow(
 		}
 
 		case 'ready': {
+			const nixConfig = new NixConfig(outcome.cacheUrl, outcome.publicKey);
+			const nixConfigLines = nixConfig
+				.render()
+				.trimEnd()
+				.split('\n')
+				.map((line) => ({ label: '', value: line }));
+
 			ui.note('Add to your nix.conf (e.g. /etc/nix/nix.conf)', [
 				{ label: 'Cache URL', value: outcome.cacheUrl },
 				{ label: '', value: '' },
-				...new NixConfig(outcome.cacheUrl, outcome.publicKey)
-					.render()
-					.trimEnd()
-					.split('\n')
-					.map((line) => ({ label: '', value: line }))
+				...nixConfigLines
 			]);
 
 			ui.outro(

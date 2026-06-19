@@ -46,7 +46,8 @@ function hostOf(input: Parameters<typeof fetch>[0]): string {
 
 function safeHost(value: string): string {
 	try {
-		return new URL(value).host;
+		const url = new URL(value);
+		return url.host;
 	} catch {
 		return value;
 	}

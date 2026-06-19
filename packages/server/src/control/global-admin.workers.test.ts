@@ -20,7 +20,7 @@ function controlDatabase(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 async function adminAndTrust(
 	database: ReturnType<typeof controlDatabase>
 ): Promise<{
-	admin: { issuer: string; subject: string; claimedAt: string } | undefined;
+	admin: undefined | { issuer: string; subject: string; claimedAt: string };
 	trust: { id: string; issuer: string; audience: string; claimsJson: string }[];
 }> {
 	const admin = await database
@@ -108,14 +108,17 @@ describe('claimGlobalAdmin', () => {
 			t0
 		);
 
-		const error = await claimGlobalAdmin(
-			database,
-			{ issuer, subject: 'intruder', audience },
-			t1
-		).then(
-			() => ({ kind: 'claimed' }),
-			(error_: unknown) => error_
-		);
+		let error: unknown;
+		try {
+			await claimGlobalAdmin(
+				database,
+				{ issuer, subject: 'intruder', audience },
+				t1
+			);
+			error = { kind: 'claimed' };
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expect(error).toBeInstanceOf(GlobalAdminAlreadyClaimedError);
 		if (!(error instanceof GlobalAdminAlreadyClaimedError)) {

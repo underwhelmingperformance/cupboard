@@ -16,7 +16,7 @@ import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 
-import { type ServerContext } from './context.ts';
+import { compareStrings, type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 
 export class CacheAdminService {
@@ -45,18 +45,20 @@ export class CacheAdminService {
 		const registered = this.context.db.select().from(schema.caches).all();
 		const caches = registered
 			.map((row) => this.cacheSummary(row.name, row.priority))
-			.toSorted((left, right) => (left.name > right.name ? 1 : -1));
+			.toSorted((left, right) => compareStrings(left.name, right.name));
 
 		return { caches };
 	}
 
 	putCache(cache: CacheName, priority: CachePriority): CacheSummary {
+		const now = new Date();
+
 		this.context.db
 			.insert(schema.caches)
 			.values({
 				name: cache,
 				priority,
-				createdAt: new Date().toISOString()
+				createdAt: now.toISOString()
 			})
 			.onConflictDoUpdate({
 				target: schema.caches.name,
@@ -73,17 +75,17 @@ export class CacheAdminService {
 		origin: string
 	): Promise<CacheRemoveResponse> {
 		const committedCount = this.cacheStorePathCount(cache);
+
+		if (committedCount > 0 && !force) {
+			throw new CacheNotEmptyError(cache);
+		}
+
 		const registered =
 			this.context.db
 				.select()
 				.from(schema.caches)
 				.where(eq(schema.caches.name, cache))
 				.get() !== undefined;
-
-		if (committedCount > 0 && !force) {
-			throw new CacheNotEmptyError(cache);
-		}
-
 		const storePathsRemoved = await this.tearDownCache(cache, origin);
 
 		return {
@@ -118,12 +120,14 @@ export class CacheAdminService {
 			return;
 		}
 
+		const now = new Date();
+
 		this.context.db
 			.insert(schema.caches)
 			.values({
 				name: cache,
 				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: new Date().toISOString()
+				createdAt: now.toISOString()
 			})
 			.onConflictDoNothing()
 			.run();
@@ -135,7 +139,8 @@ export class CacheAdminService {
 	// shared blobs. Returns the number of store paths removed.
 	tearDownCache(cache: string, origin: string): Promise<number> {
 		return this.context.ctx.blockConcurrencyWhile(async () => {
-			const now = new Date().toISOString();
+			const timestamp = new Date();
+			const now = timestamp.toISOString();
 			const committed = this.context.db
 				.select({
 					storePathHash: schema.narInfos.storePathHash,

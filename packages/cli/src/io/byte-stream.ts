@@ -52,23 +52,27 @@ function asyncIterableByteStream(
 	});
 }
 
+function isAsyncIterable(
+	source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>
+): source is AsyncIterable<Uint8Array> {
+	return (
+		typeof (source as AsyncIterable<Uint8Array>)[Symbol.asyncIterator] ===
+		'function'
+	);
+}
+
 function byteIterator(
 	source: Iterable<Uint8Array> | AsyncIterable<Uint8Array>
 ): AsyncIterator<Uint8Array> {
-	if (Symbol.asyncIterator in source) {
+	if (isAsyncIterable(source)) {
 		return source[Symbol.asyncIterator]();
 	}
 
 	const iterator = source[Symbol.iterator]();
 
 	return {
-		next() {
-			return Promise.resolve(iterator.next());
-		},
-		return() {
-			return Promise.resolve(
-				iterator.return?.() ?? { done: true, value: undefined }
-			);
-		}
+		next: () => Promise.resolve(iterator.next()),
+		return: () =>
+			Promise.resolve(iterator.return?.() ?? { done: true, value: undefined })
 	};
 }

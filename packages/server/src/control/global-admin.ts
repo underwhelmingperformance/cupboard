@@ -45,6 +45,30 @@ export async function claimGlobalAdmin(
 ): Promise<ClaimOutcome> {
 	const claimsJson = JSON.stringify({ sub: principal.subject });
 
+	const bootstrapTrustColumns = {
+		id: sql<string>`${bootstrapTrustId}`.as('id'),
+		issuer: sql<string>`${principal.issuer}`.as('issuer'),
+		audience: sql<string>`${principal.audience}`.as('audience'),
+		claimsJson: sql<string>`${claimsJson}`.as('claims_json'),
+		permittedGrantsJson: sql<string>`'[{"type":"cupboard_wildcard"}]'`.as(
+			'permitted_grants_json'
+		),
+		displayJson: sql<string | null>`null`.as('display_json'),
+		createdAt: sql<string>`${now}`.as('created_at'),
+		disabledAt: sql<string | null>`null`.as('disabled_at')
+	};
+
+	const bootstrapTrustWhere = and(
+		eq(d1Schema.globalAdmin.id, singletonId),
+		eq(d1Schema.globalAdmin.issuer, principal.issuer),
+		eq(d1Schema.globalAdmin.subject, principal.subject)
+	);
+
+	const bootstrapTrustSelect = database
+		.select(bootstrapTrustColumns)
+		.from(d1Schema.globalAdmin)
+		.where(bootstrapTrustWhere);
+
 	await database.batch([
 		database
 			.insert(d1Schema.globalAdmin)
@@ -57,30 +81,7 @@ export async function claimGlobalAdmin(
 			.onConflictDoNothing(),
 		database
 			.insert(d1Schema.controlTrust)
-			.select(
-				database
-					.select({
-						id: sql<string>`${bootstrapTrustId}`.as('id'),
-						issuer: sql<string>`${principal.issuer}`.as('issuer'),
-						audience: sql<string>`${principal.audience}`.as('audience'),
-						claimsJson: sql<string>`${claimsJson}`.as('claims_json'),
-						permittedGrantsJson:
-							sql<string>`'[{"type":"cupboard_wildcard"}]'`.as(
-								'permitted_grants_json'
-							),
-						displayJson: sql<string | null>`null`.as('display_json'),
-						createdAt: sql<string>`${now}`.as('created_at'),
-						disabledAt: sql<string | null>`null`.as('disabled_at')
-					})
-					.from(d1Schema.globalAdmin)
-					.where(
-						and(
-							eq(d1Schema.globalAdmin.id, singletonId),
-							eq(d1Schema.globalAdmin.issuer, principal.issuer),
-							eq(d1Schema.globalAdmin.subject, principal.subject)
-						)
-					)
-			)
+			.select(bootstrapTrustSelect)
 			.onConflictDoNothing()
 	]);
 

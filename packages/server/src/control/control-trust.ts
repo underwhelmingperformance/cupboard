@@ -50,11 +50,9 @@ function ruleFromRow(row: ControlTrustRow): OidcTrustRule {
 			row.permittedGrantsJson,
 			fault
 		),
-		...(row.displayJson === null
-			? {}
-			: {
-					display: parseStored(oidcTrustDisplaySchema, row.displayJson, fault)
-				})
+		...(row.displayJson !== null && {
+			display: parseStored(oidcTrustDisplaySchema, row.displayJson, fault)
+		})
 	};
 }
 
@@ -67,7 +65,7 @@ function summaryFromRow(row: ControlTrustRow): OidcTrustSummary {
 		audience: rule.audience,
 		claims: { ...rule.claims },
 		permittedGrants: [...rule.permittedGrants],
-		...(rule.display === undefined ? {} : { display: rule.display }),
+		...(rule.display !== undefined && { display: rule.display }),
 		disabled: Boolean(row.disabledAt)
 	};
 }
@@ -152,7 +150,7 @@ export async function addControlTrust(
 		audience: body.audience,
 		claims: body.claims,
 		permittedGrants: body.permittedGrants,
-		...(body.display === undefined ? {} : { display: body.display }),
+		...(body.display !== undefined && { display: body.display }),
 		disabled: false
 	};
 }

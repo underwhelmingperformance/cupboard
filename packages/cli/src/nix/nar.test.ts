@@ -245,11 +245,11 @@ async function readNarFixture(name: string): Promise<NarFixture> {
 		'../../../../tests/fixtures',
 		name
 	);
-	const metadata = parseNarFixtureMetadata(
-		JSON.parse(
-			await readFile(pathModule.join(fixtureDirectory, 'metadata.json'), 'utf8')
-		)
+	const metadataJson = await readFile(
+		pathModule.join(fixtureDirectory, 'metadata.json'),
+		'utf8'
 	);
+	const metadata = parseNarFixtureMetadata(JSON.parse(metadataJson));
 	const narBytes = await readFile(
 		pathModule.join(fixtureDirectory, 'source.nar')
 	);

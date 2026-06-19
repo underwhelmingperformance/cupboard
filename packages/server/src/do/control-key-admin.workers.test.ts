@@ -14,8 +14,11 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
+import { compareStrings } from './context.ts';
+
+const controlKeySchema = z.object({ kid: z.string() });
 const controlJwksSchema = z.object({
-	keys: z.array(z.object({ kid: z.string() }))
+	keys: z.array(controlKeySchema)
 });
 
 function authed(token: string, method = 'POST'): RequestInit {
@@ -27,7 +30,7 @@ async function liveControlKids(): Promise<string[]> {
 	const response = await controlFetch('/.well-known/jwks.json');
 	const body = controlJwksSchema.parse(await response.json());
 
-	return body.keys.map((key) => key.kid).toSorted();
+	return body.keys.map((key) => key.kid).toSorted(compareStrings);
 }
 
 describe('control key administration', () => {
@@ -108,7 +111,7 @@ describe('control key administration', () => {
 			beforeRotate: [firstKid],
 			rotateStatus: StatusCodes.OK,
 			rotatedToNewKey: true,
-			afterRotate: [firstKid, rotated.kid].toSorted(),
+			afterRotate: [firstKid, rotated.kid].toSorted(compareStrings),
 			listedKeys: [
 				{ kid: firstKid, retired: false },
 				{ kid: rotated.kid, retired: false }

@@ -77,20 +77,6 @@ export class CupboardClient {
 		);
 	}
 
-	// The route renders the key set with a trailing newline; the keys
-	// themselves carry none, so it is returned without it.
-	publicKey(): Promise<string> {
-		return this.fetchText('/pubkey');
-	}
-
-	/**
-	 * The build version the deployment answers on its unauthenticated
-	 * `/_version` route, without the trailing newline the route renders.
-	 */
-	version(): Promise<string> {
-		return this.fetchText('/_version');
-	}
-
 	private async fetchText(path: string): Promise<string> {
 		throwIfAborted(this.signal);
 
@@ -128,6 +114,79 @@ export class CupboardClient {
 		url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
 
 		return url;
+	}
+
+	private socketUrl(path: string): URL {
+		const url = this.resolve(path);
+		url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
+
+		return url;
+	}
+
+	private async postTokenForm(
+		form: Readonly<Record<string, string>>
+	): Promise<Response> {
+		throwIfAborted(this.signal);
+
+		const url = this.resolve('/token');
+		const parameters = new URLSearchParams(form);
+		const response = await this.fetcher(url, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: parameters.toString(),
+			signal: this.signal
+		});
+
+		if (!response.ok) {
+			throw new CupboardHttpError(
+				'POST',
+				'/token',
+				response.status,
+				await response.text()
+			);
+		}
+
+		return response;
+	}
+
+	private async parseJson<S extends z.ZodType>(
+		path: string,
+		schema: S,
+		response: Response
+	): Promise<z.output<S>> {
+		let payload: unknown;
+
+		try {
+			payload = await response.json();
+		} catch (error) {
+			if (error instanceof SyntaxError) {
+				throw new MalformedResponseError(path, error);
+			}
+
+			throw error;
+		}
+
+		const result = schema.safeParse(payload);
+
+		if (!result.success) {
+			throw new ResponseSchemaMismatchError(path, result.error);
+		}
+
+		return result.data;
+	}
+
+	// The route renders the key set with a trailing newline; the keys
+	// themselves carry none, so it is returned without it.
+	publicKey(): Promise<string> {
+		return this.fetchText('/pubkey');
+	}
+
+	/**
+	 * The build version the deployment answers on its unauthenticated
+	 * `/_version` route, without the trailing newline the route renders.
+	 */
+	version(): Promise<string> {
+		return this.fetchText('/_version');
 	}
 
 	/**
@@ -174,13 +233,6 @@ export class CupboardClient {
 		}
 	}
 
-	private socketUrl(path: string): URL {
-		const url = this.resolve(path);
-		url.protocol = url.protocol === 'http:' ? 'ws:' : 'wss:';
-
-		return url;
-	}
-
 	async uploadBlob(upload: CupboardBlobUpload): Promise<void> {
 		throwIfAborted(this.signal);
 
@@ -218,9 +270,9 @@ export class CupboardClient {
 		const url = this.resolve('/signup');
 		const body = new URLSearchParams({
 			subject_token: request.subject_token,
-			...(request.claim_secret === undefined
-				? {}
-				: { claim_secret: request.claim_secret })
+			...(request.claim_secret !== undefined && {
+				claim_secret: request.claim_secret
+			})
 		});
 		const response = await this.fetcher(url, {
 			method: 'POST',
@@ -256,9 +308,9 @@ export class CupboardClient {
 			grant_type: tokenExchangeGrantType,
 			subject_token: subjectToken,
 			subject_token_type: subjectTokenType,
-			...(authorizationDetails === undefined
-				? {}
-				: { authorization_details: JSON.stringify(authorizationDetails) })
+			...(authorizationDetails !== undefined && {
+				authorization_details: JSON.stringify(authorizationDetails)
+			})
 		});
 
 		return this.parseJson('/token', tokenResponseSchema, response);
@@ -294,57 +346,6 @@ export class CupboardClient {
 		});
 
 		return this.parseJson('/token', tokenResponseSchema, response);
-	}
-
-	private async postTokenForm(
-		form: Readonly<Record<string, string>>
-	): Promise<Response> {
-		throwIfAborted(this.signal);
-
-		const url = this.resolve('/token');
-		const response = await this.fetcher(url, {
-			method: 'POST',
-			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams(form).toString(),
-			signal: this.signal
-		});
-
-		if (!response.ok) {
-			throw new CupboardHttpError(
-				'POST',
-				'/token',
-				response.status,
-				await response.text()
-			);
-		}
-
-		return response;
-	}
-
-	private async parseJson<S extends z.ZodType>(
-		path: string,
-		schema: S,
-		response: Response
-	): Promise<z.output<S>> {
-		let payload: unknown;
-
-		try {
-			payload = await response.json();
-		} catch (error) {
-			if (error instanceof SyntaxError) {
-				throw new MalformedResponseError(path, error);
-			}
-
-			throw error;
-		}
-
-		const result = schema.safeParse(payload);
-
-		if (!result.success) {
-			throw new ResponseSchemaMismatchError(path, result.error);
-		}
-
-		return result.data;
 	}
 }
 

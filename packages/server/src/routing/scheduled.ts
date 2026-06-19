@@ -642,12 +642,15 @@ async function executeTenantMaintenanceMessage(
 		return { action: 'ack' };
 	}
 
-	const result = await Promise.resolve()
-		.then(() => maintain(env, tenant))
-		.then(
-			() => ({ status: 'fulfilled', value: undefined }) as const,
-			(error: unknown) => ({ status: 'rejected', reason: error }) as const
-		);
+	let result:
+		| { readonly status: 'fulfilled'; readonly value: undefined }
+		| { readonly status: 'rejected'; readonly reason: unknown };
+	try {
+		await maintain(env, tenant);
+		result = { status: 'fulfilled', value: undefined };
+	} catch (error: unknown) {
+		result = { status: 'rejected', reason: error };
+	}
 
 	await recordTenantPassOutcomes(
 		database,
@@ -669,12 +672,15 @@ async function executeOffboardMessage(
 	const status = await tenantStatus(database, tenant);
 
 	if (status === 'offboarding') {
-		const result = await Promise.resolve()
-			.then(() => drain(env, tenant, offboardDrainChunk, offboardRoundsPerTick))
-			.then(
-				() => ({ status: 'fulfilled', value: undefined }) as const,
-				(error: unknown) => ({ status: 'rejected', reason: error }) as const
-			);
+		let result:
+			| { readonly status: 'fulfilled'; readonly value: undefined }
+			| { readonly status: 'rejected'; readonly reason: unknown };
+		try {
+			await drain(env, tenant, offboardDrainChunk, offboardRoundsPerTick);
+			result = { status: 'fulfilled', value: undefined };
+		} catch (error: unknown) {
+			result = { status: 'rejected', reason: error };
+		}
 
 		await recordTenantPassOutcomes(
 			database,
@@ -689,16 +695,17 @@ async function executeOffboardMessage(
 	return { action: 'ack' };
 }
 
-function tenantStatus(
+async function tenantStatus(
 	database: CronDatabase,
 	tenant: TenantId
 ): Promise<typeof d1Schema.tenant.$inferSelect.status | undefined> {
-	return database
+	const row = await database
 		.select({ status: d1Schema.tenant.status })
 		.from(d1Schema.tenant)
 		.where(eq(d1Schema.tenant.id, tenant))
-		.get()
-		.then((row) => row?.status);
+		.get();
+
+	return row?.status;
 }
 
 // The most-overdue active tenants. NULL `last_maintained_at` (never maintained) sorts
@@ -721,11 +728,11 @@ function overdueActiveTenants(
 		.all();
 }
 
-function tenantMaintenanceIsDue(
+async function tenantMaintenanceIsDue(
 	database: CronDatabase,
 	tenant: TenantId
 ): Promise<boolean> {
-	return database
+	const row = await database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
 		.leftJoin(
@@ -734,16 +741,16 @@ function tenantMaintenanceIsDue(
 		)
 		.where(and(tenantMaintenanceDueCondition(), eq(d1Schema.tenant.id, tenant)))
 		.limit(1)
-		.get()
-		.then((row) => row !== undefined);
+		.get();
+
+	return row !== undefined;
 }
 
 function tenantMaintenanceDueCondition() {
 	const now = new Date();
 	const nowIso = now.toISOString();
-	const staleBefore = new Date(
-		now.getTime() - maintenanceEligibilityStaleMs
-	).toISOString();
+	const staleDate = new Date(now.getTime() - maintenanceEligibilityStaleMs);
+	const staleBefore = staleDate.toISOString();
 
 	return and(
 		eq(d1Schema.tenant.status, 'active'),
@@ -767,9 +774,12 @@ async function stampMaintained(
 		return;
 	}
 
+	const maintainedDate = new Date();
+	const maintainedAt = maintainedDate.toISOString();
+
 	await database
 		.update(d1Schema.tenant)
-		.set({ lastMaintainedAt: new Date().toISOString() })
+		.set({ lastMaintainedAt: maintainedAt })
 		.where(
 			inArray(
 				d1Schema.tenant.id,
@@ -794,33 +804,43 @@ export async function runScheduledMaintenance(
 		runGarbageCollection(),
 		runVerification()
 	]);
-	const authKeyRetirement =
-		runAuthKeyRetirement === undefined
-			? ({ status: 'fulfilled', value: undefined } as const)
-			: await Promise.resolve()
-					.then(runAuthKeyRetirement)
-					.then(
-						() => ({ status: 'fulfilled', value: undefined }) as const,
-						(error: unknown) => ({ status: 'rejected', reason: error }) as const
-					);
+	const authKeyRetirement = await settleAuthKeyRetirement(runAuthKeyRetirement);
 
-	if (gc.status === 'rejected') {
-		throw gc.reason;
+	// Surface a garbage-collection failure first (its cleanup is the more
+	// time-sensitive pass), then verification, then key retirement.
+	for (const result of [gc, verify, authKeyRetirement]) {
+		if (result.status === 'rejected') {
+			throw result.reason;
+		}
+	}
+}
+
+// Runs the optional key-retirement pass after collection and verification have
+// settled, capturing its outcome as a settled result so the caller can surface
+// it alongside the other passes rather than letting it short-circuit them. An
+// absent pass settles as a fulfilled no-op.
+async function settleAuthKeyRetirement(
+	runAuthKeyRetirement: (() => Promise<void>) | undefined
+): Promise<PromiseSettledResult<void>> {
+	if (runAuthKeyRetirement === undefined) {
+		return { status: 'fulfilled', value: undefined };
 	}
 
-	if (verify.status === 'rejected') {
-		throw verify.reason;
-	}
-
-	if (authKeyRetirement.status === 'rejected') {
-		throw authKeyRetirement.reason;
+	try {
+		await runAuthKeyRetirement();
+		return { status: 'fulfilled', value: undefined };
+	} catch (error) {
+		return { status: 'rejected', reason: error };
 	}
 }
 
 function runControlKeyRetirement(env: Env): Promise<number> {
+	const retireDate = new Date();
+	const now = retireDate.toISOString();
+
 	return retireScheduledControlKeys(
 		drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
-		new Date().toISOString()
+		now
 	);
 }
 
@@ -830,7 +850,8 @@ async function recordTenantPassOutcomes(
 	tenants: readonly { readonly id: TenantId }[],
 	results: readonly PromiseSettledResult<unknown>[]
 ): Promise<void> {
-	const now = new Date().toISOString();
+	const timestamp = new Date();
+	const now = timestamp.toISOString();
 
 	await Promise.all(
 		tenants.map(({ id }, index) => {

@@ -31,12 +31,13 @@ describe('reachableFetcher', () => {
 		});
 		const fetcher = reachableFetcher(() => Promise.reject(cause));
 
-		const error = await fetcher(
-			'https://cupboard.example.workers.dev/pubkey'
-		).then(
-			() => 'resolved',
-			(error: unknown) => error
-		);
+		let error: unknown;
+		try {
+			await fetcher('https://cupboard.example.workers.dev/pubkey');
+			error = 'resolved';
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		expect(error).toBeInstanceOf(UnreachableHostError);
 

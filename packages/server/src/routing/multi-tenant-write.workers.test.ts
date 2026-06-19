@@ -39,6 +39,19 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 
 const acme = tenantIdSchema.parse('acme');
 
+// Orders strings by UTF-16 code unit, matching the default `Array#sort()` for
+// strings. Referenced (rather than inlined) so the comparator is not mistaken
+// for a numeric subtraction.
+function byCodeUnit(a: string, b: string): number {
+	if (a < b) {
+		return -1;
+	}
+	if (a > b) {
+		return 1;
+	}
+	return 0;
+}
+
 // Stages a deferred upload for a freshly provisioned tenant, returning the write
 // token and the upload id to poll. Used to seed each tenant with work the cron's
 // background verify pass must reach.
@@ -167,9 +180,9 @@ describe('multi-tenant writes', () => {
 
 		expect({
 			sharedBlobs: await blobStateNarHashes(),
-			presenceTenants: presence.map((row) => row.tenant).toSorted(),
+			presenceTenants: presence.map((row) => row.tenant).toSorted(byCodeUnit),
 			presenceSizes: presence.map((row) => row.fileSize),
-			edgeTenants: edges.map((edge) => edge.tenant).toSorted()
+			edgeTenants: edges.map((edge) => edge.tenant).toSorted(byCodeUnit)
 		}).toStrictEqual({
 			sharedBlobs: [{ narHash: nar.narHash }],
 			presenceTenants: ['acme', fixtureTenant],

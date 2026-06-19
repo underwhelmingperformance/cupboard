@@ -40,7 +40,8 @@ export interface ProgramOptions {
 }
 
 export function buildProgram(options: ProgramOptions = {}): Command {
-	const program = new Command()
+	const command = new Command();
+	const program = command
 		.name('cupboard')
 		.description(
 			'Operate a multi-tenant Nix binary cache hosted on Cloudflare Workers: ' +

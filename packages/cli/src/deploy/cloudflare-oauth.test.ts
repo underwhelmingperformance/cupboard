@@ -69,12 +69,15 @@ function fakeCloudflare(options: {
 	const tokenRequests: RecordedRequest[] = [];
 
 	const fetcher: typeof fetch = (input, init) => {
-		const url =
-			typeof input === 'string'
-				? input
-				: input instanceof URL
-					? input.toString()
-					: input.url;
+		let url: string;
+
+		if (typeof input === 'string') {
+			url = input;
+		} else if (input instanceof URL) {
+			url = input.href;
+		} else {
+			url = input.url;
+		}
 
 		const form = typeof init?.body === 'string' ? init.body : '';
 		expect({ url }).toStrictEqual({ url: tokenEndpoint });

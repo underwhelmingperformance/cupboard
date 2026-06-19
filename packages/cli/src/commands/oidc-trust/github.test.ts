@@ -7,16 +7,23 @@ import {
 	RepositoryNotFoundError
 } from './github.ts';
 
+function requestUrl(input: RequestInfo | URL): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
+}
+
 // A fetch that answers the one repository URL under test, standing in for the
 // GitHub API without a network or a mock-server dependency.
 function stubFetch(url: string, response: Response): typeof fetch {
 	return (input) => {
-		const requested =
-			typeof input === 'string'
-				? input
-				: input instanceof URL
-					? input.href
-					: input.url;
+		const requested = requestUrl(input);
 
 		if (requested !== url) {
 			return Promise.reject(new Error(`unexpected request: ${requested}`));
@@ -49,8 +56,10 @@ describe('lookupRepository', () => {
 	});
 
 	it('rejects a malformed repository before any request', async () => {
+		const fetch = stubFetch('', new Response());
+
 		await expect(
-			lookupRepository('no-slash', { fetch: stubFetch('', new Response()) })
+			lookupRepository('no-slash', { fetch })
 		).rejects.toBeInstanceOf(InvalidRepositoryError);
 	});
 

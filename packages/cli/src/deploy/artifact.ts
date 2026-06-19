@@ -57,7 +57,7 @@ const migrationsDirectory = `${serverDirectory}/drizzle-d1`;
 
 // The server entrypoints import `build-info.generated.ts`, which is produced by
 // `scripts/build-info.ts` and not committed. Regenerate it from the current
-// git state before bundling: the onboarding compares this version against the
+// Git state before bundling: the onboarding compares this version against the
 // live `/_version` to know the new deployment is serving, so a stale file
 // (matching what is already deployed) would defeat that comparison. Returns
 // the version the bundle will embed.

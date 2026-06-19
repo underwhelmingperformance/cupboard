@@ -414,20 +414,20 @@ async function runPushWithTemporaryDirectory(
 		{ total: commitDecisions.length },
 		async (bar) => {
 			const settled = await Promise.allSettled(
-				commitDecisions.map((decision) =>
-					client
-						.commit(
+				commitDecisions.map(async (decision) => {
+					try {
+						return await client.commit(
 							{
 								uploadId: decision.uploadId,
 								storePathHash: decision.storePathHash,
 								narHash: decision.narHash
 							},
 							{ wait, timeoutSeconds: waitTimeoutSeconds }
-						)
-						.finally(() => {
-							bar.advance(1);
-						})
-				)
+						);
+					} finally {
+						bar.advance(1);
+					}
+				})
 			);
 
 			const pending: string[] = [];
@@ -669,11 +669,11 @@ async function attachPushedAttestations(
 			});
 		}
 
-		const negotiateStep = log.group('negotiate');
 		if (dependencies.client.negotiateAttestations === undefined) {
 			throw new AttestationUploadUnavailableError('negotiateAttestations');
 		}
 
+		const negotiateStep = log.group('negotiate');
 		const negotiation = await dependencies.client.negotiateAttestations({
 			bundles: ready.map((bundle) => ({
 				storePathHash: bundle.storePathHash,
@@ -694,11 +694,11 @@ async function attachPushedAttestations(
 		let uploadedBytes = 0;
 
 		for (const decision of toUpload) {
-			const bundle = findAttestationBundle(ready, decision);
 			if (dependencies.client.prepareAttestation === undefined) {
 				throw new AttestationUploadUnavailableError('prepareAttestation');
 			}
 
+			const bundle = findAttestationBundle(ready, decision);
 			const preparedUpload = await dependencies.client.prepareAttestation(
 				decision.uploadId
 			);
@@ -766,19 +766,29 @@ async function prepareAttestationBundles(
 		}
 
 		for (const pathInfo of matched) {
-			const storePathHash = StorePath.hash(pathInfo.storePath);
-			const key = `${storePathHash}\0${digest}`;
-
-			if (seen.has(key)) {
-				continue;
-			}
-
-			seen.add(key);
-			prepared.push({ storePathHash, digest, bytes });
+			recordPreparedBundle(pathInfo, digest, bytes, seen, prepared);
 		}
 	}
 
 	return prepared;
+}
+
+function recordPreparedBundle(
+	pathInfo: NixValidPathInfo,
+	digest: string,
+	bytes: Uint8Array,
+	seen: Set<string>,
+	prepared: PreparedAttestationBundle[]
+): void {
+	const storePathHash = StorePath.hash(pathInfo.storePath);
+	const key = `${storePathHash}\0${digest}`;
+
+	if (seen.has(key)) {
+		return;
+	}
+
+	seen.add(key);
+	prepared.push({ storePathHash, digest, bytes });
 }
 
 function attestationResultRows(
@@ -891,11 +901,23 @@ function formatExpiry(summary: RootSummary): string {
 		: `expires ${summary.expiresAt}`;
 }
 
+function compareStrings(left: string, right: string): number {
+	if (left < right) {
+		return -1;
+	}
+
+	if (left > right) {
+		return 1;
+	}
+
+	return 0;
+}
+
 function describePinExpiry(summaries: readonly RootSummary[]): string {
 	const expiries = summaries
 		.map((summary) => summary.expiresAt)
 		.filter((expiresAt) => expiresAt !== undefined)
-		.toSorted();
+		.toSorted(compareStrings);
 	const earliest = expiries.at(0);
 	const latest = expiries.at(-1);
 
@@ -1103,7 +1125,8 @@ function parseAttestationBundle(
 	let json: unknown;
 
 	try {
-		json = JSON.parse(new TextDecoder().decode(bytes));
+		const decoder = new TextDecoder();
+		json = JSON.parse(decoder.decode(bytes));
 	} catch {
 		throw new AttestationBundleInvalidError(path, 'bundle is not JSON');
 	}

@@ -35,8 +35,8 @@ function expectMaintenanceProjectionTestError(
 	expect(error).toBeInstanceOf(MaintenanceProjectionTestError);
 }
 
-function eligibilityRow(tenant: string = fixtureTenant) {
-	return drizzleD1(env.CUPBOARD_DB, {
+async function eligibilityRow(tenant: string = fixtureTenant) {
+	const row = await drizzleD1(env.CUPBOARD_DB, {
 		schema: {
 			tenantMaintenanceEligibility: d1Schema.tenantMaintenanceEligibility
 		}
@@ -49,29 +49,32 @@ function eligibilityRow(tenant: string = fixtureTenant) {
 				tenantIdSchema.parse(tenant)
 			)
 		)
-		.get()
-		.then((row) =>
-			row === undefined
-				? undefined
-				: {
-						tenant: row.tenant,
-						pendingVerificationCount: row.pendingVerificationCount,
-						earliestUploadExpiry: row.earliestUploadExpiry ?? undefined,
-						queuedNarInfoDeletionCount: row.queuedNarInfoDeletionCount,
-						earliestRootExpiry: row.earliestRootExpiry ?? undefined,
-						nextMaintenanceAt: row.nextMaintenanceAt ?? undefined,
-						reconciledAt: row.reconciledAt
-					}
-		);
+		.get();
+
+	if (row === undefined) {
+		return;
+	}
+
+	return {
+		tenant: row.tenant,
+		pendingVerificationCount: row.pendingVerificationCount,
+		earliestUploadExpiry: row.earliestUploadExpiry ?? undefined,
+		queuedNarInfoDeletionCount: row.queuedNarInfoDeletionCount,
+		earliestRootExpiry: row.earliestRootExpiry ?? undefined,
+		nextMaintenanceAt: row.nextMaintenanceAt ?? undefined,
+		reconciledAt: row.reconciledAt
+	};
 }
 
 describe('maintenance eligibility projection', () => {
 	beforeEach(resetTestServer);
 
 	it('records an idle tenant with no next maintenance time', async () => {
-		const snapshot = await runInDurableObject(currentServer(), (instance) =>
-			new MaintenanceEligibilityService(instance.context).reconcile(now)
-		);
+		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
+		});
 
 		expect({ snapshot, row: await eligibilityRow() }).toStrictEqual({
 			snapshot: {
@@ -161,26 +164,32 @@ describe('maintenance eligibility projection', () => {
 					},
 					configurable: true
 				});
-				const error = await withMaintenanceEligibility(
-					maintenanceEligibility,
-					async () => {
-						await maintenanceEligibility.reconcile();
-					},
-					() => {
-						instance.context.db
-							.insert(schema.pendingUploads)
-							.values(
-								pendingUpload(
-									'verify-after-failed-invalidation',
-									now.toISOString(),
-									'pending'
-								)
-							)
-							.run();
+				let error: unknown;
 
-						return Promise.resolve();
-					}
-				).catch((error_: unknown) => error_);
+				try {
+					await withMaintenanceEligibility(
+						maintenanceEligibility,
+						async () => {
+							await maintenanceEligibility.reconcile();
+						},
+						() => {
+							instance.context.db
+								.insert(schema.pendingUploads)
+								.values(
+									pendingUpload(
+										'verify-after-failed-invalidation',
+										now.toISOString(),
+										'pending'
+									)
+								)
+								.run();
+
+							return Promise.resolve();
+						}
+					);
+				} catch (error_: unknown) {
+					error = error_;
+				}
 
 				expectMaintenanceProjectionTestError(error);
 
@@ -233,7 +242,9 @@ describe('maintenance eligibility projection', () => {
 				})
 				.run();
 
-			return new MaintenanceEligibilityService(instance.context).reconcile(now);
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
 		});
 
 		expect({ snapshot, row: await eligibilityRow() }).toStrictEqual({
@@ -275,7 +286,9 @@ describe('maintenance eligibility projection', () => {
 				})
 				.run();
 
-			return new MaintenanceEligibilityService(instance.context).reconcile(now);
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
 		});
 
 		expect(snapshot).toStrictEqual({
@@ -298,7 +311,9 @@ describe('maintenance eligibility projection', () => {
 				)
 				.run();
 
-			return new MaintenanceEligibilityService(instance.context).reconcile(now);
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
 		});
 
 		expect(snapshot).toStrictEqual({
@@ -332,7 +347,9 @@ describe('maintenance eligibility projection', () => {
 				])
 				.run();
 
-			return new MaintenanceEligibilityService(instance.context).reconcile(now);
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
 		});
 
 		expect(snapshot).toStrictEqual({

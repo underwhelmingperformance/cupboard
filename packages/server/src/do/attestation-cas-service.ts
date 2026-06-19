@@ -39,65 +39,6 @@ export type AttestationReferenceOutcome =
 export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}
 
-	async measureStagedBundle(
-		stagingKey: string
-	): Promise<MeasuredAttestationBundle> {
-		const metadata = await this.context.env.BLOBS.head(stagingKey);
-
-		if (metadata === null) {
-			throw new UploadedObjectNotFoundError(stagingKey);
-		}
-
-		if (metadata.size > maxAttestationBundleBytes) {
-			throw new AttestationBundleTooLargeError(
-				metadata.size,
-				maxAttestationBundleBytes
-			);
-		}
-
-		const object = await this.context.env.BLOBS.get(stagingKey);
-
-		if (object === null) {
-			throw new UploadedObjectNotFoundError(stagingKey);
-		}
-
-		const bytes = new Uint8Array(await object.arrayBuffer());
-
-		if (bytes.byteLength > maxAttestationBundleBytes) {
-			throw new AttestationBundleTooLargeError(
-				bytes.byteLength,
-				maxAttestationBundleBytes
-			);
-		}
-
-		return {
-			digest: sha256HexDigestSchema.parse(await sha256HexBytes(bytes)),
-			size: bytes.byteLength,
-			bytes
-		};
-	}
-
-	async promoteMeasuredBundle(
-		_stagingKey: string,
-		bundle: MeasuredAttestationBundle
-	): Promise<void> {
-		await this.ensureCasObject(bundle);
-
-		const now = new Date().toISOString();
-		await this.context.d1
-			.insert(d1Schema.casObject)
-			.values({
-				digest: bundle.digest,
-				size: bundle.size,
-				storedAt: now
-			})
-			.onConflictDoUpdate({
-				target: d1Schema.casObject.digest,
-				set: { deleteAfter: sql`null`, storedAt: now }
-			})
-			.run();
-	}
-
 	private async ensureCasObject(
 		bundle: MeasuredAttestationBundle
 	): Promise<void> {
@@ -122,153 +63,6 @@ export class AttestationCasService {
 		if (winner === null) {
 			throw new UploadedObjectNotFoundError(key);
 		}
-	}
-
-	async reserveReferenceAndCharge(
-		reference: AttestationReference,
-		size: number
-	): Promise<AttestationReferenceOutcome> {
-		const tenant = this.context.requireTenant();
-
-		if (await this.hasReference(tenant, reference)) {
-			return 'already-present';
-		}
-
-		if (await this.overQuota(tenant, reference.digest, size)) {
-			return 'over-quota';
-		}
-
-		const now = new Date().toISOString();
-		const presenceMissing = notExists(
-			this.context.d1
-				.select({ one: sql`1` })
-				.from(d1Schema.tenantCasBlob)
-				.where(this.presenceFilter(tenant, reference.digest))
-		);
-
-		await this.context.d1.batch([
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					casBytes: sql`${d1Schema.tenantUsage.casBytes} + ${size}`,
-					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} + 1`,
-					updatedAt: now
-				})
-				.where(and(eq(d1Schema.tenantUsage.tenant, tenant), presenceMissing)),
-			this.context.d1
-				.insert(d1Schema.attestationReference)
-				.values({ tenant, ...reference })
-				.onConflictDoNothing(),
-			this.context.d1
-				.insert(d1Schema.tenantCasBlob)
-				.values({ tenant, digest: reference.digest, size })
-				.onConflictDoNothing(),
-			this.context.d1
-				.update(d1Schema.casObject)
-				.set({ deleteAfter: sql`null` })
-				.where(eq(d1Schema.casObject.digest, reference.digest))
-		]);
-
-		return 'referenced';
-	}
-
-	async wouldExceedQuota(
-		digest: Sha256HexDigest,
-		size: number
-	): Promise<boolean> {
-		return this.overQuota(this.context.requireTenant(), digest, size);
-	}
-
-	async hasCapturedReference(
-		reference: AttestationReference
-	): Promise<boolean> {
-		return this.hasReference(this.context.requireTenant(), reference);
-	}
-
-	async removeCapturedReference(
-		reference: AttestationReference,
-		fenceStoredAt?: string
-	): Promise<void> {
-		const tenant = this.context.requireTenant();
-		const now = new Date().toISOString();
-
-		// On the reaper demote path, fence every destructive step on the shared object
-		// generation the reaper observed gone. A re-promote bumps cas_object.storedAt,
-		// so a row carrying a different one means the object is live again and its
-		// reference, presence and quota must all stand together; a row gone (or still
-		// carrying the observed value) lets the demote proceed. A direct removal passes
-		// no fence. Fencing the edge delete keeps it consistent with the credit: a
-		// re-promoted reference is neither stripped nor its charge credited away.
-		const notRepromoted =
-			fenceStoredAt === undefined
-				? undefined
-				: notExists(
-						this.context.d1
-							.select({ one: sql`1` })
-							.from(d1Schema.casObject)
-							.where(
-								and(
-									eq(d1Schema.casObject.digest, reference.digest),
-									ne(d1Schema.casObject.storedAt, fenceStoredAt)
-								)
-							)
-					);
-
-		await this.context.d1
-			.delete(d1Schema.attestationReference)
-			.where(and(this.edgeFilter(tenant, reference), notRepromoted));
-
-		const stillReferenced = await this.context.d1
-			.select({ digest: d1Schema.attestationReference.digest })
-			.from(d1Schema.attestationReference)
-			.where(
-				and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.digest, reference.digest)
-				)
-			)
-			.get();
-
-		if (stillReferenced !== undefined) {
-			return;
-		}
-
-		const presence = await this.context.d1
-			.select({ size: d1Schema.tenantCasBlob.size })
-			.from(d1Schema.tenantCasBlob)
-			.where(this.presenceFilter(tenant, reference.digest))
-			.get();
-
-		if (presence === undefined) {
-			return;
-		}
-
-		const presenceFilter = this.presenceFilter(tenant, reference.digest);
-
-		await this.context.d1.batch([
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					casBytes: sql`${d1Schema.tenantUsage.casBytes} - ${presence.size}`,
-					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} - 1`,
-					updatedAt: now
-				})
-				.where(
-					and(
-						eq(d1Schema.tenantUsage.tenant, tenant),
-						exists(
-							this.context.d1
-								.select({ one: sql`1` })
-								.from(d1Schema.tenantCasBlob)
-								.where(presenceFilter)
-						),
-						notRepromoted
-					)
-				),
-			this.context.d1
-				.delete(d1Schema.tenantCasBlob)
-				.where(and(presenceFilter, notRepromoted))
-		]);
 	}
 
 	private async overQuota(
@@ -336,5 +130,220 @@ export class AttestationCasService {
 			eq(d1Schema.tenantCasBlob.tenant, tenant),
 			eq(d1Schema.tenantCasBlob.digest, digest)
 		);
+	}
+
+	async measureStagedBundle(
+		stagingKey: string
+	): Promise<MeasuredAttestationBundle> {
+		const metadata = await this.context.env.BLOBS.head(stagingKey);
+
+		if (metadata === null) {
+			throw new UploadedObjectNotFoundError(stagingKey);
+		}
+
+		if (metadata.size > maxAttestationBundleBytes) {
+			throw new AttestationBundleTooLargeError(
+				metadata.size,
+				maxAttestationBundleBytes
+			);
+		}
+
+		const object = await this.context.env.BLOBS.get(stagingKey);
+
+		if (object === null) {
+			throw new UploadedObjectNotFoundError(stagingKey);
+		}
+
+		const bytes = new Uint8Array(await object.arrayBuffer());
+
+		if (bytes.byteLength > maxAttestationBundleBytes) {
+			throw new AttestationBundleTooLargeError(
+				bytes.byteLength,
+				maxAttestationBundleBytes
+			);
+		}
+
+		return {
+			digest: sha256HexDigestSchema.parse(await sha256HexBytes(bytes)),
+			size: bytes.byteLength,
+			bytes
+		};
+	}
+
+	async promoteMeasuredBundle(
+		_stagingKey: string,
+		bundle: MeasuredAttestationBundle
+	): Promise<void> {
+		await this.ensureCasObject(bundle);
+
+		const clock = new Date();
+		const now = clock.toISOString();
+		await this.context.d1
+			.insert(d1Schema.casObject)
+			.values({
+				digest: bundle.digest,
+				size: bundle.size,
+				storedAt: now
+			})
+			.onConflictDoUpdate({
+				target: d1Schema.casObject.digest,
+				set: { deleteAfter: sql`null`, storedAt: now }
+			})
+			.run();
+	}
+
+	async reserveReferenceAndCharge(
+		reference: AttestationReference,
+		size: number
+	): Promise<AttestationReferenceOutcome> {
+		const tenant = this.context.requireTenant();
+
+		if (await this.hasReference(tenant, reference)) {
+			return 'already-present';
+		}
+
+		if (await this.overQuota(tenant, reference.digest, size)) {
+			return 'over-quota';
+		}
+
+		const clock = new Date();
+		const now = clock.toISOString();
+		const presenceMissing = notExists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantCasBlob)
+				.where(this.presenceFilter(tenant, reference.digest))
+		);
+		const chargeFilter = and(
+			eq(d1Schema.tenantUsage.tenant, tenant),
+			presenceMissing
+		);
+
+		await this.context.d1.batch([
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					casBytes: sql`${d1Schema.tenantUsage.casBytes} + ${size}`,
+					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} + 1`,
+					updatedAt: now
+				})
+				.where(chargeFilter),
+			this.context.d1
+				.insert(d1Schema.attestationReference)
+				.values({ tenant, ...reference })
+				.onConflictDoNothing(),
+			this.context.d1
+				.insert(d1Schema.tenantCasBlob)
+				.values({ tenant, digest: reference.digest, size })
+				.onConflictDoNothing(),
+			this.context.d1
+				.update(d1Schema.casObject)
+				.set({ deleteAfter: sql`null` })
+				.where(eq(d1Schema.casObject.digest, reference.digest))
+		]);
+
+		return 'referenced';
+	}
+
+	async wouldExceedQuota(
+		digest: Sha256HexDigest,
+		size: number
+	): Promise<boolean> {
+		return this.overQuota(this.context.requireTenant(), digest, size);
+	}
+
+	async hasCapturedReference(
+		reference: AttestationReference
+	): Promise<boolean> {
+		return this.hasReference(this.context.requireTenant(), reference);
+	}
+
+	async removeCapturedReference(
+		reference: AttestationReference,
+		fenceStoredAt?: string
+	): Promise<void> {
+		const tenant = this.context.requireTenant();
+		const clock = new Date();
+		const now = clock.toISOString();
+
+		// On the reaper demote path, fence every destructive step on the shared object
+		// generation the reaper observed gone. A re-promote bumps cas_object.storedAt,
+		// so a row carrying a different one means the object is live again and its
+		// reference, presence and quota must all stand together; a row gone (or still
+		// carrying the observed value) lets the demote proceed. A direct removal passes
+		// no fence. Fencing the edge delete keeps it consistent with the credit: a
+		// re-promoted reference is neither stripped nor its charge credited away.
+		const repromotedFilter =
+			fenceStoredAt === undefined
+				? undefined
+				: and(
+						eq(d1Schema.casObject.digest, reference.digest),
+						ne(d1Schema.casObject.storedAt, fenceStoredAt)
+					);
+		const notRepromoted =
+			repromotedFilter === undefined
+				? undefined
+				: notExists(
+						this.context.d1
+							.select({ one: sql`1` })
+							.from(d1Schema.casObject)
+							.where(repromotedFilter)
+					);
+
+		await this.context.d1
+			.delete(d1Schema.attestationReference)
+			.where(and(this.edgeFilter(tenant, reference), notRepromoted));
+
+		const stillReferenced = await this.context.d1
+			.select({ digest: d1Schema.attestationReference.digest })
+			.from(d1Schema.attestationReference)
+			.where(
+				and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					eq(d1Schema.attestationReference.digest, reference.digest)
+				)
+			)
+			.get();
+
+		if (stillReferenced !== undefined) {
+			return;
+		}
+
+		const presence = await this.context.d1
+			.select({ size: d1Schema.tenantCasBlob.size })
+			.from(d1Schema.tenantCasBlob)
+			.where(this.presenceFilter(tenant, reference.digest))
+			.get();
+
+		if (presence === undefined) {
+			return;
+		}
+
+		const presenceFilter = this.presenceFilter(tenant, reference.digest);
+		const presenceExists = exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantCasBlob)
+				.where(presenceFilter)
+		);
+		const creditFilter = and(
+			eq(d1Schema.tenantUsage.tenant, tenant),
+			presenceExists,
+			notRepromoted
+		);
+
+		await this.context.d1.batch([
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					casBytes: sql`${d1Schema.tenantUsage.casBytes} - ${presence.size}`,
+					casBlobs: sql`${d1Schema.tenantUsage.casBlobs} - 1`,
+					updatedAt: now
+				})
+				.where(creditFilter),
+			this.context.d1
+				.delete(d1Schema.tenantCasBlob)
+				.where(and(presenceFilter, notRepromoted))
+		]);
 	}
 }

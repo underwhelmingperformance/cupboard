@@ -81,7 +81,7 @@ export function settleCommitSocket(
 ): Promise<CommitResponse> {
 	return new Promise<CommitResponse>((resolve, reject) => {
 		let done = false;
-		let deferred: { storePathHash: string; narHash: string } | undefined;
+		let deferred: undefined | { storePathHash: string; narHash: string };
 		let keepalive: NodeJS.Timeout | undefined;
 		let deadline: NodeJS.Timeout | undefined;
 

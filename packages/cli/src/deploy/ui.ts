@@ -21,15 +21,14 @@ export function createDeployUi(signal?: AbortSignal): DeployUi {
 	return {
 		...ui,
 
-		chooseAccount(accounts) {
-			return ui.menu(
+		chooseAccount: (accounts) =>
+			ui.menu(
 				'Which Cloudflare account?',
 				accounts.map((account) => ({
 					value: account.id,
 					label: account.name,
 					hint: account.id
 				}))
-			);
-		}
+			)
 	};
 }

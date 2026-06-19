@@ -51,13 +51,14 @@ export const tenantRouter = os.router({
 		put: os.caches.put.handler(({ input, context }) =>
 			context.services.cacheAdmin.putCache(input.cacheName, input.priority)
 		),
-		remove: os.caches.remove.handler(({ input, context }) =>
-			context.services.cacheAdmin.removeCache(
+		remove: os.caches.remove.handler(({ input, context }) => {
+			const requestUrl = new URL(context.request.url);
+			return context.services.cacheAdmin.removeCache(
 				input.params.cacheName,
 				input.query.force,
-				new URL(context.request.url).origin
-			)
-		)
+				requestUrl.origin
+			);
+		})
 	},
 	keys: {
 		signing: {
@@ -140,13 +141,14 @@ export const tenantRouter = os.router({
 		)
 	},
 	paths: {
-		remove: os.paths.remove.handler(({ input, context }) =>
-			context.services.deletionQueue.deleteStorePath(
+		remove: os.paths.remove.handler(({ input, context }) => {
+			const requestUrl = new URL(context.request.url);
+			return context.services.deletionQueue.deleteStorePath(
 				cacheFromSelector(input.cacheName),
 				input.hash,
-				new URL(context.request.url).origin
-			)
-		)
+				requestUrl.origin
+			);
+		})
 	},
 	gc: {
 		runAll: os.gc.runAll.handler(({ context }) =>
@@ -166,13 +168,14 @@ export const tenantRouter = os.router({
 		)
 	},
 	uploads: {
-		negotiate: os.uploads.negotiate.handler(({ input, context }) =>
-			context.services.uploads.negotiate(
+		negotiate: os.uploads.negotiate.handler(({ input, context }) => {
+			const requestUrl = new URL(context.request.url);
+			return context.services.uploads.negotiate(
 				cacheFromSelector(input.cacheName),
 				{ paths: input.paths },
-				new URL(context.request.url).origin
-			)
-		),
+				requestUrl.origin
+			);
+		}),
 		prepare: os.uploads.prepare.handler(({ input, context }) =>
 			context.services.uploads.prepareUpload(
 				cacheFromSelector(input.cacheName),

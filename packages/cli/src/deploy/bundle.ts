@@ -54,15 +54,19 @@ export function createEsbuildBundler(): Bundler {
 		async bundle(entryPath, mainModule) {
 			const { build } = await import('esbuild');
 
-			const result = await build({
-				...baseOptions,
-				entryPoints: [entryPath]
-			}).catch((error: unknown) => {
+			let result;
+
+			try {
+				result = await build({
+					...baseOptions,
+					entryPoints: [entryPath]
+				});
+			} catch (error: unknown) {
 				throw new WorkerBundleError(
 					entryPath,
 					error instanceof Error ? error.message : String(error)
 				);
-			});
+			}
 
 			const output = result.outputFiles?.[0];
 

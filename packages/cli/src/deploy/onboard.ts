@@ -705,20 +705,20 @@ async function claimAdmin(
 	cacheSession: (session: CachedSession, target: string) => Promise<void>
 ): Promise<ClaimResult> {
 	let claim:
+		| undefined
 		| {
 				readonly claimed: boolean;
 				readonly subject: string;
 				readonly token: string;
-		  }
-		| undefined;
+		  };
 
 	try {
 		claim = await ui.reporter().phase('Setting up admin access', async () => {
 			const signup = await client.signup({
 				subject_token: proof.idToken,
-				...(proof.claimSecret === undefined
-					? {}
-					: { claim_secret: proof.claimSecret })
+				...(proof.claimSecret !== undefined && {
+					claim_secret: proof.claimSecret
+				})
 			});
 			const exchanged = await client.tokenExchange(
 				proof.idToken,
@@ -811,7 +811,7 @@ async function pollProbe<T>(
 	| { readonly kind: 'ready'; readonly value: T }
 	| { readonly kind: 'gave-up'; readonly lastProbe: string }
 > {
-	let ready: { value: T } | undefined;
+	let ready: undefined | { value: T };
 	let lastProbe = 'no answer';
 
 	await ui.reporter().phase(label, async (context) => {

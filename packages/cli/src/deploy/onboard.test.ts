@@ -106,10 +106,9 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 		},
 		menu: (_message, entries) => {
 			uiCalls.push({ method: 'menu' });
-			const [scripted] = z
-				.array(z.string().optional())
-				.length(1)
-				.parse(remainingMenuChoices.splice(0, 1));
+			const taken =
+				remainingMenuChoices.length > 0 ? [remainingMenuChoices.shift()] : [];
+			const [scripted] = z.array(z.string().optional()).length(1).parse(taken);
 
 			if (scripted === undefined) {
 				return Promise.resolve(absentValues.choice);
@@ -137,10 +136,8 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 		},
 		prefixedText: ({ prefix }) => {
 			uiCalls.push({ method: 'prefixedText' });
-			const [slug] = z
-				.array(z.string().optional())
-				.length(1)
-				.parse(remainingSlugs.splice(0, 1));
+			const taken = remainingSlugs.length > 0 ? [remainingSlugs.shift()] : [];
+			const [slug] = z.array(z.string().optional()).length(1).parse(taken);
 			expect({ prefix }).toStrictEqual({
 				prefix: 'https://cache.example.com/t/'
 			});
@@ -149,19 +146,19 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 		},
 		secret: () => {
 			uiCalls.push({ method: 'secret' });
-			const [secret] = z
-				.array(z.string().optional())
-				.length(1)
-				.parse(remainingSecrets.splice(0, 1));
+			const taken =
+				remainingSecrets.length > 0 ? [remainingSecrets.shift()] : [];
+			const [secret] = z.array(z.string().optional()).length(1).parse(taken);
 
 			return Promise.resolve(secret);
 		},
 		chooseAccount: () => {
 			uiCalls.push({ method: 'chooseAccount' });
-			const [choice] = z
-				.array(z.string().optional())
-				.length(1)
-				.parse(remainingAccountChoices.splice(0, 1));
+			const taken =
+				remainingAccountChoices.length > 0
+					? [remainingAccountChoices.shift()]
+					: [];
+			const [choice] = z.array(z.string().optional()).length(1).parse(taken);
 
 			return Promise.resolve(choice);
 		},
@@ -419,9 +416,10 @@ function answer<T>(
 	member: string,
 	rejection: (status: number, member: string) => Error = httpRejection
 ): Promise<T> {
+	const taken = remaining.length > 0 ? [remaining.shift()] : [];
 	const [scripted] = z
 		.tuple([z.custom<Scripted<T>>((value) => value !== undefined)])
-		.parse(remaining.splice(0, 1));
+		.parse(taken);
 
 	if (scripted === 'offline') {
 		return Promise.reject(new TypeError('fetch failed'));
@@ -1145,9 +1143,10 @@ describe('onboardDeployment', () => {
 			signup: [403]
 		});
 
-		expect(
-			claimRefusedShape(await onboardDeployment(baseOptions(ui, client)))
-		).toStrictEqual({
+		const options = baseOptions(ui, client);
+		const outcome = await onboardDeployment(options);
+
+		expect(claimRefusedShape(outcome)).toStrictEqual({
 			kind: 'claim-refused',
 			url: 'https://cache.example.com',
 			status: 403,
@@ -1268,14 +1267,12 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({ versions: ['offline', 'offline', 404] });
 
-		expect(
-			unreachableShape(
-				await onboardDeployment({
-					...baseOptions(ui, client),
-					attempts: 3
-				})
-			)
-		).toStrictEqual({
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			attempts: 3
+		});
+
+		expect(unreachableShape(outcome)).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com',
 			lastProbe: 'HTTP 404: computer says no'
@@ -1292,14 +1289,12 @@ describe('onboardDeployment', () => {
 			publicKeys: [503, 503]
 		});
 
-		expect(
-			unreachableShape(
-				await onboardDeployment({
-					...baseOptions(ui, client),
-					attempts: 2
-				})
-			)
-		).toStrictEqual({
+		const outcome = await onboardDeployment({
+			...baseOptions(ui, client),
+			attempts: 2
+		});
+
+		expect(unreachableShape(outcome)).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com/t/builds',
 			lastProbe: 'HTTP 503: computer says no'
@@ -1310,9 +1305,15 @@ describe('onboardDeployment', () => {
 		const { ui } = scriptedUi();
 		const client = scriptedClient({ versions: [403] });
 
-		const outcome = await onboardDeployment(baseOptions(ui, client)).then(
-			(value) => ({ value }),
-			(error_: unknown) => {
+		const resolveOutcome = async (): Promise<
+			| { value: unknown }
+			| { error: { method: string; path: string; status: number } }
+		> => {
+			try {
+				const value = await onboardDeployment(baseOptions(ui, client));
+
+				return { value };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(CupboardHttpError);
 
 				if (error_ instanceof CupboardHttpError) {
@@ -1327,7 +1328,9 @@ describe('onboardDeployment', () => {
 
 				throw error_;
 			}
-		);
+		};
+
+		const outcome = await resolveOutcome();
 
 		expect(outcome).toStrictEqual({
 			error: {

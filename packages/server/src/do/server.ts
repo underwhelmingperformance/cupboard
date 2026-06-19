@@ -72,7 +72,6 @@ import { VerificationService } from './verification-service.ts';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
-	readonly context: ServerContext;
 	private migrationPromise: Promise<void> | undefined;
 
 	private readonly authKeys: AuthKeysService;
@@ -96,6 +95,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly roots: RootsService;
 	private readonly offboarding: OffboardingService;
 	private readonly maintenanceEligibility: MaintenanceEligibilityService;
+	readonly context: ServerContext;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		super(ctx, env);
@@ -169,6 +169,352 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 
 		this.routes();
+	}
+
+	private routes(): void {
+		this.app.onError(serverErrorHandler);
+
+		// An unconfigured Durable Object has no identity to issue, verify or advertise
+		// under, so it serves nothing rather than falling back to a default. This is
+		// input-gated: the control plane's `configure` RPC, which assigns the
+		// identity, is a method and so is not gated here.
+		this.app.use(async (_context, next) => {
+			if (this.tenantIdentity.current() === undefined) {
+				throw new TenantNotConfiguredError();
+			}
+
+			await next();
+		});
+
+		// The contract procedures answer first: the oRPC handler serves every
+		// JSON admin route declared in @cupboard/protocol/contract, and anything
+		// it does not match falls through to the wire-format routes below.
+		this.app.use(async (context, next) => {
+			const { matched, response } = await tenantOrpcHandler.handle(
+				context.req.raw,
+				{
+					context: { request: context.req.raw, services: this.rpcServices() }
+				}
+			);
+
+			if (matched) {
+				return response;
+			}
+
+			await next();
+		});
+
+		// Every request addresses a cache: the default one unless a
+		// `/cache/:cacheName/` prefix names another, validated here so the routes
+		// under the prefix always see a well-formed name. The `_default` wire
+		// alias maps back to the default cache's stored name.
+		this.app.use(async (context, next) => {
+			context.set('cache', DEFAULT_CACHE);
+			await next();
+		});
+		this.app.use('/cache/:cacheName/*', async (context, next) => {
+			const selector = parseRequestValue(
+				cacheSelectorSchema,
+				context.req.param('cacheName')
+			);
+
+			context.set('cache', cacheFromSelector(selector));
+			await next();
+		});
+
+		this.app.get('/pubkey', async (context) =>
+			// Served uncached so a rotation is visible across colos at once; the
+			// strong ETag still lets Nix revalidate conditionally.
+			textResponse(
+				context.req.raw,
+				await this.signingKeys.publishedKeysBody(),
+				{
+					'content-type': 'text/plain; charset=utf-8',
+					'cache-control': 'no-cache'
+				}
+			)
+		);
+
+		// A named cache's nix-cache-info is rendered from its registry priority;
+		// the Worker forwards it here (the default cache's is rendered at the edge).
+		this.app.get('/cache/:cacheName/nix-cache-info', (context) =>
+			textResponse(
+				context.req.raw,
+				this.cacheAdmin.cacheInfoBody(context.get('cache')),
+				{
+					'content-type': 'text/x-nix-cache-info; charset=utf-8'
+				}
+			)
+		);
+
+		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
+		// the tokens it issues. `/token` is unauthenticated: the subject token is
+		// itself the credential. The Worker proxies `/.well-known/jwks.json` here.
+		this.app.post('/token', (context) =>
+			this.tokenExchange.handleToken(context.req.raw)
+		);
+		// Both key documents are served uncached so a rotation is visible across
+		// colos at once.
+		this.app.get('/.well-known/jwks.json', async (context) =>
+			context.json({ keys: await this.authKeys.authPublicJwks() }, 200, {
+				'cache-control': 'no-cache'
+			})
+		);
+		this.app.get('/.well-known/oauth-authorization-server', (context) => {
+			const requestUrl = new URL(context.req.url);
+
+			return context.json(
+				this.authKeys.authorizationServerMetadata(requestUrl.origin)
+			);
+		});
+
+		// The commit endpoint is a WebSocket: the upgrade request carries the
+		// write token, the first frame settles or defers the path, and a
+		// deferred upload's socket parks (hibernating) until verification
+		// answers with the terminal verdict.
+		this.app.on(
+			'GET',
+			['/uploads/:id/commit', '/cache/:cacheName/uploads/:id/commit'],
+			this.commitGuard(),
+			(context) =>
+				this.commitSocket(
+					context.req.raw,
+					context.get('cache'),
+					context.req.param('id')
+				)
+		);
+		// The serve routes stream stored objects with conditional-request
+		// handling, so they keep their Response-shaped handlers.
+		this.app.on(
+			'GET',
+			['/attestations/:hash', '/cache/:cacheName/attestations/:hash'],
+			(context) =>
+				this.attestations.handleServeList(
+					context.req.raw,
+					context.get('cache'),
+					context.req.param('hash')
+				)
+		);
+		this.app.on(
+			'GET',
+			[
+				'/attestation-bundles/:digest',
+				'/cache/:cacheName/attestation-bundles/:digest'
+			],
+			(context) =>
+				this.attestations.handleServeBundle(
+					context.req.raw,
+					context.get('cache'),
+					context.req.param('digest')
+				)
+		);
+	}
+
+	// Upgrades a commit request, parks the socket through the hibernation API
+	// (tagged by upload id, so verification can find every waiter even after
+	// this object was evicted), and runs the commit transition once the 101 is
+	// on its way. The scoped('write') middleware authenticates the upgrade
+	// request as plain HTTP before any socket exists.
+	private commitSocket(
+		request: Request,
+		cache: string,
+		uploadId: string
+	): Response {
+		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
+			throw new CommitUpgradeRequiredError();
+		}
+
+		const pair = new WebSocketPair();
+		const client = pair[0];
+		const server = pair[1];
+
+		this.ctx.acceptWebSocket(server, [uploadId]);
+		this.ctx.waitUntil(this.runSocketCommit(server, cache, uploadId));
+
+		return new Response(undefined, { status: 101, webSocket: client });
+	}
+
+	private async runSocketCommit(
+		socket: WebSocket,
+		cache: string,
+		uploadId: string
+	): Promise<void> {
+		try {
+			const outcome = await this.withMaintenanceEligibility(() =>
+				this.commitPipeline.commit(cache, uploadId)
+			);
+
+			if (outcome.kind === 'settled') {
+				sendCommitFrame(socket, {
+					event: 'result',
+					response: outcome.response
+				});
+				socket.close(1000, 'settled');
+
+				return;
+			}
+
+			sendCommitFrame(socket, {
+				event: 'deferred',
+				storePathHash: outcome.storePathHash,
+				narHash: outcome.narHash
+			});
+			// The socket stays parked; verification closes it with the verdict.
+		} catch (error) {
+			// A ServerHttpError carries a client-facing message; anything else is an
+			// internal fault whose detail must not leak over the socket, matching the
+			// platform 500 the HTTP error handler rethrows to.
+			const known = error instanceof ServerHttpError;
+
+			sendCommitFrame(socket, {
+				event: 'error',
+				status: known ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
+				message: known ? error.message : 'internal error'
+			});
+			socket.close(1000, 'failed');
+		}
+	}
+
+	// The capabilities the contract procedures reach through the oRPC context:
+	// authentication, the maintenance bracket, and the domain services.
+	private rpcServices(): TenantRpcServices {
+		return {
+			authenticate: (request) => this.authKeys.authenticate(request),
+			pendingCache: (id) => this.pendingCache(id),
+			withMaintenanceEligibility: (body) =>
+				this.withMaintenanceEligibility(body),
+			cacheAdmin: this.cacheAdmin,
+			signingKeys: this.signingKeys,
+			authKeys: this.authKeys,
+			retention: this.retention,
+			oidcTrust: this.oidcTrust,
+			stats: this.stats,
+			integrityCheck: this.integrityCheck,
+			roots: this.roots,
+			deletionQueue: this.deletionQueue,
+			garbageCollection: this.garbageCollection,
+			uploads: this.uploads,
+			attestations: this.attestations,
+			verification: this.verification
+		};
+	}
+
+	// Authorises the commit WebSocket, the one write route outside the contract:
+	// `upload:commit` against the cache the pending upload was opened for, read
+	// from its row rather than the path.
+	private commitGuard() {
+		return createMiddleware<TenantHonoEnv>(async (context, next) => {
+			const claims = await this.authKeys.authenticate(context.req.raw);
+
+			await authoriseRequest(
+				claims,
+				{ requires: 'upload:commit', resource: { cache: { pending: true } } },
+				{ id: context.req.param('id') },
+				(id) => this.pendingCache(id)
+			);
+
+			await next();
+		});
+	}
+
+	// The cache a pending upload or attestation row was opened against, for the
+	// id-only routes the authoriser cannot read a cache from the path. The
+	// durable-SQLite reads are synchronous; the resolver is a promise so the
+	// authoriser can stay uniform across resource sources.
+	private pendingCache(id: string): Promise<string | undefined> {
+		const upload = this.context.db
+			.select({ cache: schema.pendingUploads.cache })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, id))
+			.get();
+
+		if (upload !== undefined) {
+			return Promise.resolve(upload.cache);
+		}
+
+		const attestation = this.context.db
+			.select({ cache: schema.pendingAttestations.cache })
+			.from(schema.pendingAttestations)
+			.where(eq(schema.pendingAttestations.id, id))
+			.get();
+
+		return Promise.resolve(attestation?.cache);
+	}
+
+	private async withMaintenanceEligibility<T>(
+		body: () => Promise<T>
+	): Promise<T> {
+		return withMaintenanceEligibility(
+			this.maintenanceEligibility,
+			() => this.reconcileMaintenanceEligibility(),
+			body
+		);
+	}
+
+	private async reconcileMaintenanceEligibility(): Promise<void> {
+		try {
+			await this.maintenanceEligibility.reconcile();
+		} catch {
+			// Eligibility is an admission hint. If it cannot be refreshed, cron fails
+			// open through a missing or stale row rather than failing the mutation.
+		}
+	}
+
+	private initialise(): Promise<void> {
+		this.migrationPromise ??= this.migrateAndSeed();
+
+		return this.migrationPromise;
+	}
+
+	// Fail loudly at initialisation if the runtime lacks native zstd, rather than
+	// as an opaque per-request stream error at the first verified commit.
+	private async assertZstdAvailable(): Promise<void> {
+		const frame = new Uint8Array([
+			40, 181, 47, 253, 32, 8, 65, 0, 0, 42, 7, 42, 7, 42, 7, 42, 7
+		]);
+		const expected = new Uint8Array([42, 7, 42, 7, 42, 7, 42, 7]);
+
+		let restored: Uint8Array;
+
+		try {
+			const frameResponse = new Response(frame);
+			const decompressed = frameResponse.body?.pipeThrough(
+				zstdDecompressionStream()
+			);
+			const decompressedResponse = new Response(decompressed);
+			restored = new Uint8Array(await decompressedResponse.arrayBuffer());
+		} catch (error) {
+			throw new ZstdUnavailableError({ cause: error });
+		}
+
+		const matches =
+			restored.length === expected.length &&
+			expected.every((byte, index) => restored[index] === byte);
+
+		if (!matches) {
+			throw new ZstdUnavailableError();
+		}
+	}
+
+	private async migrateAndSeed(): Promise<void> {
+		await migrate(this.context.db, migrations);
+		await this.assertZstdAvailable();
+
+		const now = new Date();
+
+		// The default cache always exists in the registry so its priority is
+		// resolved the same way as a named cache's. Idempotent across restarts.
+		this.context.db
+			.insert(schema.caches)
+			.values({
+				name: DEFAULT_CACHE,
+				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
+				createdAt: now.toISOString()
+			})
+			.onConflictDoNothing()
+			.run();
+
+		this.oidcTrust.seedOwnerRule();
 	}
 
 	// Test seam: the inbound-OIDC discovery store lives on the context so a test
@@ -354,210 +700,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.reconcileMaintenanceEligibility();
 	}
 
-	private routes(): void {
-		this.app.onError(serverErrorHandler);
-
-		// An unconfigured Durable Object has no identity to issue, verify or advertise
-		// under, so it serves nothing rather than falling back to a default. This is
-		// input-gated: the control plane's `configure` RPC, which assigns the
-		// identity, is a method and so is not gated here.
-		this.app.use(async (_context, next) => {
-			if (this.tenantIdentity.current() === undefined) {
-				throw new TenantNotConfiguredError();
-			}
-
-			await next();
-		});
-
-		// The contract procedures answer first: the oRPC handler serves every
-		// JSON admin route declared in @cupboard/protocol/contract, and anything
-		// it does not match falls through to the wire-format routes below.
-		this.app.use(async (context, next) => {
-			const { matched, response } = await tenantOrpcHandler.handle(
-				context.req.raw,
-				{
-					context: { request: context.req.raw, services: this.rpcServices() }
-				}
-			);
-
-			if (matched) {
-				return response;
-			}
-
-			await next();
-		});
-
-		// Every request addresses a cache: the default one unless a
-		// `/cache/:cacheName/` prefix names another, validated here so the routes
-		// under the prefix always see a well-formed name. The `_default` wire
-		// alias maps back to the default cache's stored name.
-		this.app.use(async (context, next) => {
-			context.set('cache', DEFAULT_CACHE);
-			await next();
-		});
-		this.app.use('/cache/:cacheName/*', async (context, next) => {
-			context.set(
-				'cache',
-				cacheFromSelector(
-					parseRequestValue(cacheSelectorSchema, context.req.param('cacheName'))
-				)
-			);
-			await next();
-		});
-
-		this.app.get('/pubkey', async (context) =>
-			// Served uncached so a rotation is visible across colos at once; the
-			// strong ETag still lets Nix revalidate conditionally.
-			textResponse(
-				context.req.raw,
-				await this.signingKeys.publishedKeysBody(),
-				{
-					'content-type': 'text/plain; charset=utf-8',
-					'cache-control': 'no-cache'
-				}
-			)
-		);
-
-		// A named cache's nix-cache-info is rendered from its registry priority;
-		// the Worker forwards it here (the default cache's is rendered at the edge).
-		this.app.get('/cache/:cacheName/nix-cache-info', (context) =>
-			textResponse(
-				context.req.raw,
-				this.cacheAdmin.cacheInfoBody(context.get('cache')),
-				{
-					'content-type': 'text/x-nix-cache-info; charset=utf-8'
-				}
-			)
-		);
-
-		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
-		// the tokens it issues. `/token` is unauthenticated: the subject token is
-		// itself the credential. The Worker proxies `/.well-known/jwks.json` here.
-		this.app.post('/token', (context) =>
-			this.tokenExchange.handleToken(context.req.raw)
-		);
-		// Both key documents are served uncached so a rotation is visible across
-		// colos at once.
-		this.app.get('/.well-known/jwks.json', async (context) =>
-			context.json({ keys: await this.authKeys.authPublicJwks() }, 200, {
-				'cache-control': 'no-cache'
-			})
-		);
-		this.app.get('/.well-known/oauth-authorization-server', (context) =>
-			context.json(
-				this.authKeys.authorizationServerMetadata(
-					new URL(context.req.url).origin
-				)
-			)
-		);
-
-		// The commit endpoint is a WebSocket: the upgrade request carries the
-		// write token, the first frame settles or defers the path, and a
-		// deferred upload's socket parks (hibernating) until verification
-		// answers with the terminal verdict.
-		this.app.on(
-			'GET',
-			['/uploads/:id/commit', '/cache/:cacheName/uploads/:id/commit'],
-			this.commitGuard(),
-			(context) =>
-				this.commitSocket(
-					context.req.raw,
-					context.get('cache'),
-					context.req.param('id')
-				)
-		);
-		// The serve routes stream stored objects with conditional-request
-		// handling, so they keep their Response-shaped handlers.
-		this.app.on(
-			'GET',
-			['/attestations/:hash', '/cache/:cacheName/attestations/:hash'],
-			(context) =>
-				this.attestations.handleServeList(
-					context.req.raw,
-					context.get('cache'),
-					context.req.param('hash')
-				)
-		);
-		this.app.on(
-			'GET',
-			[
-				'/attestation-bundles/:digest',
-				'/cache/:cacheName/attestation-bundles/:digest'
-			],
-			(context) =>
-				this.attestations.handleServeBundle(
-					context.req.raw,
-					context.get('cache'),
-					context.req.param('digest')
-				)
-		);
-	}
-
-	// Upgrades a commit request, parks the socket through the hibernation API
-	// (tagged by upload id, so verification can find every waiter even after
-	// this object was evicted), and runs the commit transition once the 101 is
-	// on its way. The scoped('write') middleware authenticates the upgrade
-	// request as plain HTTP before any socket exists.
-	private commitSocket(
-		request: Request,
-		cache: string,
-		uploadId: string
-	): Response {
-		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
-			throw new CommitUpgradeRequiredError();
-		}
-
-		const pair = new WebSocketPair();
-		const client = pair[0];
-		const server = pair[1];
-
-		this.ctx.acceptWebSocket(server, [uploadId]);
-		this.ctx.waitUntil(this.runSocketCommit(server, cache, uploadId));
-
-		return new Response(undefined, { status: 101, webSocket: client });
-	}
-
-	private async runSocketCommit(
-		socket: WebSocket,
-		cache: string,
-		uploadId: string
-	): Promise<void> {
-		try {
-			const outcome = await this.withMaintenanceEligibility(() =>
-				this.commitPipeline.commit(cache, uploadId)
-			);
-
-			if (outcome.kind === 'settled') {
-				sendCommitFrame(socket, {
-					event: 'result',
-					response: outcome.response
-				});
-				socket.close(1000, 'settled');
-
-				return;
-			}
-
-			sendCommitFrame(socket, {
-				event: 'deferred',
-				storePathHash: outcome.storePathHash,
-				narHash: outcome.narHash
-			});
-			// The socket stays parked; verification closes it with the verdict.
-		} catch (error) {
-			// A ServerHttpError carries a client-facing message; anything else is an
-			// internal fault whose detail must not leak over the socket, matching the
-			// platform 500 the HTTP error handler rethrows to.
-			const known = error instanceof ServerHttpError;
-
-			sendCommitFrame(socket, {
-				event: 'error',
-				status: known ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
-				message: known ? error.message : 'internal error'
-			});
-			socket.close(1000, 'failed');
-		}
-	}
-
 	// The commit protocol is server-to-client: the only client frames are the
 	// keepalive pings the auto-response answers without waking this object, so
 	// anything that reaches the handler is a protocol violation.
@@ -573,144 +715,5 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	webSocketError(socket: WebSocket): void {
 		socket.close(1011, 'socket error');
-	}
-
-	// The capabilities the contract procedures reach through the oRPC context:
-	// authentication, the maintenance bracket, and the domain services.
-	private rpcServices(): TenantRpcServices {
-		return {
-			authenticate: (request) => this.authKeys.authenticate(request),
-			pendingCache: (id) => this.pendingCache(id),
-			withMaintenanceEligibility: (body) =>
-				this.withMaintenanceEligibility(body),
-			cacheAdmin: this.cacheAdmin,
-			signingKeys: this.signingKeys,
-			authKeys: this.authKeys,
-			retention: this.retention,
-			oidcTrust: this.oidcTrust,
-			stats: this.stats,
-			integrityCheck: this.integrityCheck,
-			roots: this.roots,
-			deletionQueue: this.deletionQueue,
-			garbageCollection: this.garbageCollection,
-			uploads: this.uploads,
-			attestations: this.attestations,
-			verification: this.verification
-		};
-	}
-
-	// Authorises the commit WebSocket, the one write route outside the contract:
-	// `upload:commit` against the cache the pending upload was opened for, read
-	// from its row rather than the path.
-	private commitGuard() {
-		return createMiddleware<TenantHonoEnv>(async (context, next) => {
-			const claims = await this.authKeys.authenticate(context.req.raw);
-
-			await authoriseRequest(
-				claims,
-				{ requires: 'upload:commit', resource: { cache: { pending: true } } },
-				{ id: context.req.param('id') },
-				(id) => this.pendingCache(id)
-			);
-
-			await next();
-		});
-	}
-
-	// The cache a pending upload or attestation row was opened against, for the
-	// id-only routes the authoriser cannot read a cache from the path. The
-	// durable-SQLite reads are synchronous; the resolver is a promise so the
-	// authoriser can stay uniform across resource sources.
-	private pendingCache(id: string): Promise<string | undefined> {
-		const upload = this.context.db
-			.select({ cache: schema.pendingUploads.cache })
-			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, id))
-			.get();
-
-		if (upload !== undefined) {
-			return Promise.resolve(upload.cache);
-		}
-
-		const attestation = this.context.db
-			.select({ cache: schema.pendingAttestations.cache })
-			.from(schema.pendingAttestations)
-			.where(eq(schema.pendingAttestations.id, id))
-			.get();
-
-		return Promise.resolve(attestation?.cache);
-	}
-
-	private async withMaintenanceEligibility<T>(
-		body: () => Promise<T>
-	): Promise<T> {
-		return withMaintenanceEligibility(
-			this.maintenanceEligibility,
-			() => this.reconcileMaintenanceEligibility(),
-			body
-		);
-	}
-
-	private async reconcileMaintenanceEligibility(): Promise<void> {
-		try {
-			await this.maintenanceEligibility.reconcile();
-		} catch {
-			// Eligibility is an admission hint. If it cannot be refreshed, cron fails
-			// open through a missing or stale row rather than failing the mutation.
-		}
-	}
-
-	private initialise(): Promise<void> {
-		this.migrationPromise ??= this.migrateAndSeed();
-
-		return this.migrationPromise;
-	}
-
-	// Fail loudly at initialisation if the runtime lacks native zstd, rather than
-	// as an opaque per-request stream error at the first verified commit.
-	private async assertZstdAvailable(): Promise<void> {
-		const frame = new Uint8Array([
-			40, 181, 47, 253, 32, 8, 65, 0, 0, 42, 7, 42, 7, 42, 7, 42, 7
-		]);
-		const expected = new Uint8Array([42, 7, 42, 7, 42, 7, 42, 7]);
-
-		let restored: Uint8Array;
-
-		try {
-			restored = new Uint8Array(
-				await new Response(
-					new Response(frame).body?.pipeThrough(zstdDecompressionStream())
-				).arrayBuffer()
-			);
-		} catch (error) {
-			throw new ZstdUnavailableError({ cause: error });
-		}
-
-		const matches =
-			restored.length === expected.length &&
-			expected.every((byte, index) => restored[index] === byte);
-
-		if (!matches) {
-			throw new ZstdUnavailableError();
-		}
-	}
-
-	private async migrateAndSeed(): Promise<void> {
-		await migrate(this.context.db, migrations);
-		await this.assertZstdAvailable();
-
-		// The default cache always exists in the registry so its priority is
-		// resolved the same way as a named cache's. Idempotent across restarts.
-		this.context.db
-			.insert(schema.caches)
-			.values({
-				name: DEFAULT_CACHE,
-				priority: cachePrioritySchema.parse(CacheInfo.default.priority),
-				createdAt: new Date().toISOString()
-			})
-			.onConflictDoNothing()
-			.run();
-
-		this.oidcTrust.seedOwnerRule();
 	}
 }

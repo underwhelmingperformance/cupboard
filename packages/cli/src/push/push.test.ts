@@ -138,9 +138,7 @@ describe('runPush', () => {
 						status: 'committed'
 					});
 				},
-				setRoot(name, body) {
-					return Promise.resolve(rootSummary({ name, ...body }));
-				}
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
@@ -148,17 +146,14 @@ describe('runPush', () => {
 			}),
 			createNarArchive: (storePath) =>
 				new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
-			compressNar(nar, path) {
-				return fakeCompressedNar(nar, path, digestForNar(nar));
-			},
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
 			readCompressedNar(path) {
 				readRequests.push(path);
 
 				return byteStream([uploadBody]);
 			},
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory(path) {
 				removedTemporaryDirectories.push(path);
 
@@ -361,18 +356,11 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar(nar, path) {
-				return fakeCompressedNar(nar, path, digestForNar(nar));
-			},
-			readCompressedNar() {
-				return byteStream([Buffer.from('compressed nar')]);
-			},
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, results, warnings }).toStrictEqual({
@@ -465,12 +453,8 @@ describe('runPush', () => {
 					appDigest
 				);
 			},
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, results }).toStrictEqual({
@@ -570,12 +554,8 @@ describe('runPush', () => {
 				return Promise.resolve(bundle);
 			},
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect(negotiations).toStrictEqual([
@@ -717,19 +697,13 @@ describe('runPush', () => {
 				}
 			} satisfies PushClient,
 			attestations: [{ path: 'build.sigstore.json' }],
-			readAttestationBundle() {
-				return Promise.resolve(bundle);
-			},
+			readAttestationBundle: () => Promise.resolve(bundle),
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect(negotiations).toStrictEqual([
@@ -788,12 +762,8 @@ describe('runPush', () => {
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, results }).toStrictEqual({
@@ -826,24 +796,22 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 		const readBundles: string[] = [];
 
-		const outcome = await runPush([appPath], reporter([]), {
-			client: skipClient([], clientCalls),
-			attestations: [{ path: 'other.sigstore.json' }],
-			readAttestationBundle(path) {
-				readBundles.push(path);
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([]), {
+					client: skipClient([], clientCalls),
+					attestations: [{ path: 'other.sigstore.json' }],
+					readAttestationBundle(path) {
+						readBundles.push(path);
 
-				return Promise.resolve(bundle);
-			},
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
-		}).then(
-			() => ({ pushed: true }),
-			(error_: unknown) => {
+						return Promise.resolve(bundle);
+					},
+					nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+					createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+					removeTemporaryDirectory: () => Promise.resolve()
+				});
+				return { pushed: true };
+			} catch (error_: unknown) {
 				const error = z
 					.instanceof(AttestationSubjectNotPushedError)
 					.parse(error_);
@@ -856,7 +824,7 @@ describe('runPush', () => {
 					}
 				};
 			}
-		);
+		})();
 
 		expect({ outcome, clientCalls, readBundles }).toStrictEqual({
 			outcome: {
@@ -876,8 +844,8 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
-				negotiate() {
-					return Promise.resolve({
+				negotiate: () =>
+					Promise.resolve({
 						uploads: [
 							{
 								action: 'upload',
@@ -888,28 +856,21 @@ describe('runPush', () => {
 								expiresAt: '2026-05-18T12:00:00.000Z'
 							}
 						]
-					});
-				},
-				prepareUpload() {
-					return Promise.resolve({
+					}),
+				prepareUpload: () =>
+					Promise.resolve({
 						uploadUrl: 'https://upload.example/app',
 						uploadHeaders: {},
 						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				uploadBlob() {
-					return Promise.resolve();
-				},
-				commit() {
-					return Promise.resolve({
+					}),
+				uploadBlob: () => Promise.resolve(),
+				commit: () =>
+					Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
 						status: 'committed'
-					});
-				},
-				setRoot(name, body) {
-					return Promise.resolve(rootSummary({ name, ...body }));
-				}
+					}),
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [])
@@ -920,15 +881,9 @@ describe('runPush', () => {
 
 				return archive;
 			},
-			compressNar(nar, path) {
-				return fakeCompressedNar(nar, path, appDigest);
-			},
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			compressNar: (nar, path) => fakeCompressedNar(nar, path, appDigest),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect(archives.map((archive) => archive.iterations)).toStrictEqual([1]);
@@ -943,7 +898,7 @@ describe('runPush', () => {
 			digest(8, 999)
 		);
 
-		const outcome = await runPush([appPath], reporter([]), {
+		const options = {
 			client: {
 				negotiate(body) {
 					clientCalls.push({
@@ -989,18 +944,15 @@ describe('runPush', () => {
 				[appPath]: expectedPathInfo
 			}),
 			createNarArchive: () => new FakeNarArchive(digest(8, 999)),
-			compressNar(nar, path) {
-				return fakeCompressedNar(nar, path, digest(8, 999));
-			},
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
-		}).then(
-			() => ({ pushed: true }),
-			(error_: unknown) => {
+			compressNar: (nar, path) => fakeCompressedNar(nar, path, digest(8, 999)),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		} satisfies PushDependencies;
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([]), options);
+				return { pushed: true };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(PushNarMetadataMismatchError);
 
 				if (error_ instanceof PushNarMetadataMismatchError) {
@@ -1018,7 +970,7 @@ describe('runPush', () => {
 
 				return { pushed: true };
 			}
-		);
+		})();
 
 		expect({ outcome, clientCalls }).toStrictEqual({
 			outcome: {
@@ -1044,12 +996,8 @@ describe('runPush', () => {
 			client: skipClient(setRoots, clientCalls),
 			root: 'main',
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, setRoots, results }).toStrictEqual({
@@ -1081,12 +1029,8 @@ describe('runPush', () => {
 			root: 'main',
 			ttlSeconds: 1_209_600,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, setRoots, results }).toStrictEqual({
@@ -1127,12 +1071,8 @@ describe('runPush', () => {
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, setRoots, results }).toStrictEqual({
@@ -1186,12 +1126,8 @@ describe('runPush', () => {
 			client: skipClient(setRoots, clientCalls),
 			ttlSeconds: 604_800,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, setRoots, results }).toStrictEqual({
@@ -1234,12 +1170,8 @@ describe('runPush', () => {
 		const dependencies = {
 			client: skipClient(setRoots, clientCalls),
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		};
 
 		await runPush([appPath], reporter([]), dependencies);
@@ -1333,18 +1265,10 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar(nar, path) {
-				return fakeCompressedNar(nar, path, appDigest);
-			},
-			readCompressedNar() {
-				return byteStream([Buffer.from('compressed nar')]);
-			},
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			compressNar: (nar, path) => fakeCompressedNar(nar, path, appDigest),
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect(events).toStrictEqual([
@@ -1408,12 +1332,8 @@ describe('runPush', () => {
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
-			createTemporaryDirectory() {
-				return Promise.resolve('/tmp/cupboard-test');
-			},
-			removeTemporaryDirectory() {
-				return Promise.resolve();
-			}
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
 		expect({ clientCalls, results }).toStrictEqual({
@@ -1493,7 +1413,7 @@ describe('runPush', () => {
 		const warnings: { label: string; value?: string }[] = [];
 		const events: string[] = [];
 
-		const outcome = await runPush([appPath], reporter([], warnings), {
+		const options = {
 			client: {
 				...deferredUpload(events),
 				commit() {
@@ -1510,9 +1430,12 @@ describe('runPush', () => {
 				}
 			} satisfies PushClient,
 			...deferredDeps()
-		}).then(
-			() => ({ pushed: true }),
-			(error_: unknown) => {
+		} satisfies PushDependencies;
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([], warnings), options);
+				return { pushed: true };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(PushIncompleteError);
 
 				if (error_ instanceof PushIncompleteError) {
@@ -1526,7 +1449,7 @@ describe('runPush', () => {
 
 				return { pushed: true };
 			}
-		);
+		})();
 
 		expect({ outcome, events }).toStrictEqual({
 			outcome: {
@@ -1556,10 +1479,10 @@ describe('runPush', () => {
 		const committed: string[] = [];
 		const setRoots: RootSetBody[] = [];
 
-		const outcome = await runPush([appPath, runtimePath], reporter([]), {
+		const options = {
 			client: {
-				negotiate() {
-					return Promise.resolve({
+				negotiate: () =>
+					Promise.resolve({
 						uploads: [
 							{
 								action: 'upload',
@@ -1578,17 +1501,15 @@ describe('runPush', () => {
 								expiresAt: '2026-05-18T12:00:00.000Z'
 							}
 						]
-					});
-				},
-				prepareUpload(uploadId) {
-					return Promise.resolve({
+					}),
+				prepareUpload: (uploadId) =>
+					Promise.resolve({
 						uploadUrl: `https://upload.example/${uploadId}`,
 						uploadHeaders: {
 							'x-amz-checksum-sha256': fileHash.digestBase64()
 						},
 						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
+					}),
 				async uploadBlob(upload) {
 					await collectReadableStream(upload.body);
 
@@ -1619,17 +1540,17 @@ describe('runPush', () => {
 			}),
 			createNarArchive: (storePath) =>
 				new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
-			compressNar(nar, path) {
-				return fakeCompressedNar(nar, path, digestForNar(nar));
-			},
-			readCompressedNar() {
-				return byteStream([Buffer.from('compressed nar')]);
-			},
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
-		}).then(
-			() => ({ pushed: true }),
-			(error_: unknown) => {
+		} satisfies PushDependencies;
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath, runtimePath], reporter([]), options);
+				return { pushed: true };
+			} catch (error_: unknown) {
 				expect(error_).toBeInstanceOf(PushIncompleteError);
 
 				if (error_ instanceof PushIncompleteError) {
@@ -1643,7 +1564,7 @@ describe('runPush', () => {
 
 				return { pushed: true };
 			}
-		);
+		})();
 
 		expect({ outcome, uploaded, committed, setRoots }).toStrictEqual({
 			outcome: {
@@ -1730,22 +1651,21 @@ class FakeNarArchive {
 	}
 }
 
-function fakeCompressedNar(
+async function fakeCompressedNar(
 	nar: PushNarArchive,
 	path: string,
 	narDigest: NarDigest
 ): Promise<CompressedAndHashedNarFile> {
-	return drain(nar).then(
-		() =>
-			({
-				compressed: new CompressedNarFile(path, {
-					fileHash,
-					fileSize: 456,
-					compression: 'zstd'
-				}),
-				narDigest
-			}) satisfies CompressedAndHashedNarFile
-	);
+	await drain(nar);
+
+	return {
+		compressed: new CompressedNarFile(path, {
+			fileHash,
+			fileSize: 456,
+			compression: 'zstd'
+		}),
+		narDigest
+	} satisfies CompressedAndHashedNarFile;
 }
 
 async function drain(source: PushNarArchive): Promise<void> {
@@ -1817,7 +1737,8 @@ function sigstoreBundleBytes(
 		}
 	};
 
-	return new TextEncoder().encode(JSON.stringify(bundle));
+	const encoder = new TextEncoder();
+	return encoder.encode(JSON.stringify(bundle));
 }
 
 function narDigestHex(hash: NixSha256Hash): string {
@@ -1868,9 +1789,8 @@ function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 				[...closure].map((storePath) => knownPathInfo(paths, storePath))
 			);
 		},
-		queryPathInfo(storePath) {
-			return Promise.resolve(knownPathInfo(paths, storePath));
-		}
+		queryPathInfo: (storePath) =>
+			Promise.resolve(knownPathInfo(paths, storePath))
 	};
 }
 
@@ -1900,7 +1820,7 @@ function rootSummary(
 	return { ...base, expiresAt };
 }
 
-type SetRootFields = { readonly name: string } & RootSetBody;
+type SetRootFields = RootSetBody & { readonly name: string };
 
 interface SetRootCall {
 	readonly fields: SetRootFields;
@@ -1959,8 +1879,8 @@ function reporter(
 	};
 
 	return {
-		phase(_label, body) {
-			return Promise.resolve(
+		phase: (_label, body) =>
+			Promise.resolve(
 				body({
 					fact(label, value) {
 						void label;
@@ -1968,10 +1888,9 @@ function reporter(
 					},
 					warn: recordWarn
 				})
-			);
-		},
-		progress(_label, _options, body) {
-			return Promise.resolve(
+			),
+		progress: (_label, _options, body) =>
+			Promise.resolve(
 				body({
 					advance() {
 						return;
@@ -1981,31 +1900,27 @@ function reporter(
 					},
 					warn: recordWarn
 				})
-			);
-		},
-		steps(_label, body) {
-			return Promise.resolve(
+			),
+		steps: (_label, body) =>
+			Promise.resolve(
 				body({
 					message() {
 						return;
 					},
-					group() {
-						return {
-							message() {
-								return;
-							},
-							success() {
-								return;
-							},
-							error() {
-								return;
-							}
-						};
-					},
+					group: () => ({
+						message() {
+							return;
+						},
+						success() {
+							return;
+						},
+						error() {
+							return;
+						}
+					}),
 					warn: recordWarn
 				})
-			);
-		},
+			),
 		result(payload) {
 			results.push([...payload.rows]);
 		},

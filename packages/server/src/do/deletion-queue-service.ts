@@ -20,28 +20,6 @@ export class DeletionQueueService {
 		private readonly attestations: AttestationsService
 	) {}
 
-	enqueueNarInfoDeletion(
-		handle: SchemaWriter,
-		cache: string,
-		storePathHash: StorePathHash,
-		narHash: NixSha256HashString,
-		generation: number,
-		now: string
-	): void {
-		handle
-			.insert(schema.narInfoDeletions)
-			.values({ cache, storePathHash, narHash, generation, createdAt: now })
-			.onConflictDoUpdate({
-				target: [
-					schema.narInfoDeletions.cache,
-					schema.narInfoDeletions.storePathHash,
-					schema.narInfoDeletions.generation
-				],
-				set: { narHash, createdAt: now }
-			})
-			.run();
-	}
-
 	// Retires the D1 reference edge for one captured narinfo version, then drops the
 	// tenant's `tenant_blob` presence once it holds no more edges for the hash. The
 	// edge delete targets the exact `(tenant, cache, store_path_hash, generation)`,
@@ -53,7 +31,8 @@ export class DeletionQueueService {
 		narHash: NixSha256HashString
 	): Promise<void> {
 		const tenant = this.context.requireTenant();
-		const now = new Date().toISOString();
+		const clock = new Date();
+		const now = clock.toISOString();
 
 		// Retire the captured edge and credit a narinfo back in one atomic batch. The
 		// credit is gated on the edge still existing, so a replayed retirement (the edge
@@ -65,6 +44,16 @@ export class DeletionQueueService {
 			eq(d1Schema.blobReference.storePathHash, storePathHash),
 			eq(d1Schema.blobReference.generation, generation)
 		);
+		const edgeExists = exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.blobReference)
+				.where(edgeFilter)
+		);
+		const creditNarInfoFilter = and(
+			eq(d1Schema.tenantUsage.tenant, tenant),
+			edgeExists
+		);
 
 		await this.context.d1.batch([
 			this.context.d1
@@ -73,17 +62,7 @@ export class DeletionQueueService {
 					narinfos: sql`${d1Schema.tenantUsage.narinfos} - 1`,
 					updatedAt: now
 				})
-				.where(
-					and(
-						eq(d1Schema.tenantUsage.tenant, tenant),
-						exists(
-							this.context.d1
-								.select({ one: sql`1` })
-								.from(d1Schema.blobReference)
-								.where(edgeFilter)
-						)
-					)
-				),
+				.where(creditNarInfoFilter),
 			this.context.d1.delete(d1Schema.blobReference).where(edgeFilter)
 		]);
 
@@ -126,6 +105,17 @@ export class DeletionQueueService {
 			eq(d1Schema.tenantBlob.narHash, narHash)
 		);
 
+		const presenceExists = exists(
+			this.context.d1
+				.select({ one: sql`1` })
+				.from(d1Schema.tenantBlob)
+				.where(presenceFilter)
+		);
+		const creditBytesFilter = and(
+			eq(d1Schema.tenantUsage.tenant, tenant),
+			presenceExists
+		);
+
 		await this.context.d1.batch([
 			this.context.d1
 				.update(d1Schema.tenantUsage)
@@ -134,17 +124,7 @@ export class DeletionQueueService {
 					blobs: sql`${d1Schema.tenantUsage.blobs} - 1`,
 					updatedAt: now
 				})
-				.where(
-					and(
-						eq(d1Schema.tenantUsage.tenant, tenant),
-						exists(
-							this.context.d1
-								.select({ one: sql`1` })
-								.from(d1Schema.tenantBlob)
-								.where(presenceFilter)
-						)
-					)
-				),
+				.where(creditBytesFilter),
 			this.context.d1.delete(d1Schema.tenantBlob).where(presenceFilter)
 		]);
 	}
@@ -180,6 +160,69 @@ export class DeletionQueueService {
 					eq(schema.narInfoDeletions.generation, generation)
 				)
 			)
+			.run();
+	}
+
+	private async retireAttestationRefs(
+		cache: string,
+		storePathHash: StorePathHash,
+		generation: number
+	): Promise<void> {
+		const tenant = this.context.requireTenant();
+		const references = await this.context.d1
+			.select({
+				cache: d1Schema.attestationReference.cache,
+				storePathHash: d1Schema.attestationReference.storePathHash,
+				generation: d1Schema.attestationReference.generation,
+				predicateType: d1Schema.attestationReference.predicateType,
+				digest: d1Schema.attestationReference.digest
+			})
+			.from(d1Schema.attestationReference)
+			.where(
+				and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					eq(d1Schema.attestationReference.cache, cache),
+					eq(d1Schema.attestationReference.storePathHash, storePathHash),
+					eq(d1Schema.attestationReference.generation, generation)
+				)
+			)
+			.all();
+
+		for (const reference of references) {
+			await this.attestationCas.removeCapturedReference(reference);
+		}
+	}
+
+	private async purgeCachedNarInfo(url: string): Promise<void> {
+		// Best-effort and colo-local: recovery correctness rests on the R2 delete
+		// and row cleanup, so a failed edge purge must not abort them. Other colos
+		// serve the stale narinfo until its TTL expires.
+		try {
+			await caches.default.delete(url);
+		} catch {
+			/* edge purge is best-effort */
+		}
+	}
+
+	enqueueNarInfoDeletion(
+		handle: SchemaWriter,
+		cache: string,
+		storePathHash: StorePathHash,
+		narHash: NixSha256HashString,
+		generation: number,
+		now: string
+	): void {
+		handle
+			.insert(schema.narInfoDeletions)
+			.values({ cache, storePathHash, narHash, generation, createdAt: now })
+			.onConflictDoUpdate({
+				target: [
+					schema.narInfoDeletions.cache,
+					schema.narInfoDeletions.storePathHash,
+					schema.narInfoDeletions.generation
+				],
+				set: { narHash, createdAt: now }
+			})
 			.run();
 	}
 
@@ -293,47 +336,6 @@ export class DeletionQueueService {
 		return { objectDeleted: true, narScheduledForDeletion };
 	}
 
-	private async retireAttestationRefs(
-		cache: string,
-		storePathHash: StorePathHash,
-		generation: number
-	): Promise<void> {
-		const tenant = this.context.requireTenant();
-		const references = await this.context.d1
-			.select({
-				cache: d1Schema.attestationReference.cache,
-				storePathHash: d1Schema.attestationReference.storePathHash,
-				generation: d1Schema.attestationReference.generation,
-				predicateType: d1Schema.attestationReference.predicateType,
-				digest: d1Schema.attestationReference.digest
-			})
-			.from(d1Schema.attestationReference)
-			.where(
-				and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
-					eq(d1Schema.attestationReference.storePathHash, storePathHash),
-					eq(d1Schema.attestationReference.generation, generation)
-				)
-			)
-			.all();
-
-		for (const reference of references) {
-			await this.attestationCas.removeCapturedReference(reference);
-		}
-	}
-
-	private async purgeCachedNarInfo(url: string): Promise<void> {
-		// Best-effort and colo-local: recovery correctness rests on the R2 delete
-		// and row cleanup, so a failed edge purge must not abort them. Other colos
-		// serve the stale narinfo until its TTL expires.
-		try {
-			await caches.default.delete(url);
-		} catch {
-			/* edge purge is best-effort */
-		}
-	}
-
 	deleteStorePath(
 		cache: string,
 		storePathHash: StorePathHash,
@@ -366,7 +368,8 @@ export class DeletionQueueService {
 			// The narinfo object cleanup, and with it the NAR scheduling, runs
 			// afterwards and is best-effort; the grace clock for the NAR only starts
 			// once the object is actually removed.
-			const now = new Date().toISOString();
+			const clock = new Date();
+			const now = clock.toISOString();
 
 			this.context.db.transaction((tx) => {
 				tx.delete(schema.narInfos)
@@ -425,7 +428,8 @@ export class DeletionQueueService {
 		row: typeof schema.narInfos.$inferSelect,
 		origin?: string
 	): Promise<void> {
-		const now = new Date().toISOString();
+		const clock = new Date();
+		const now = clock.toISOString();
 
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.narInfos)

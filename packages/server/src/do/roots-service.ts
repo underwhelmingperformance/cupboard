@@ -18,7 +18,11 @@ import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 
 import { type CacheAdminService } from './cache-admin-service.ts';
-import { type RootSetCommand, type ServerContext } from './context.ts';
+import {
+	compareStrings,
+	type RootSetCommand,
+	type ServerContext
+} from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
@@ -43,58 +47,6 @@ export class RootsService {
 		private readonly retention: RetentionService,
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
-
-	async setRoot(
-		cache: string,
-		rootName: RootName,
-		body: ParsedRootSetBody
-	): Promise<RootSetResponse> {
-		const requested: RootSetCommand = {
-			name: rootName,
-			targets: resolveRootTargets(body.targets),
-			ttlSeconds: body.ttlSeconds
-		};
-
-		// Activation gates on the serve predicate so a root never advertises a path
-		// that is not yet substitutable. The check (repairing a merely-lost object)
-		// and the write share one critical section, so a concurrent delete cannot
-		// remove a target between them and leave a root over an unservable path; an
-		// unavailable target rejects without writing, leaving the existing root
-		// untouched. The rejection is thrown after the section so a validation error
-		// does not reset the Durable Object.
-		const activation = await this.context.ctx.blockConcurrencyWhile(
-			async (): Promise<RootActivation> => {
-				const presence = await this.presence(requested.targets, (hash) =>
-					this.narInfoObjects.isServableLocked(cache, hash)
-				);
-				const unavailable = requested.targets
-					.filter((target) => presence.get(target.storePathHash) !== true)
-					.map((target) => target.storePath);
-
-				if (unavailable.length > 0) {
-					return { kind: 'rejected', unavailable };
-				}
-
-				return {
-					kind: 'written',
-					stored: this.writeRoot(cache, requested),
-					presence
-				};
-			}
-		);
-
-		if (activation.kind === 'rejected') {
-			throw new RootTargetsUnavailableError(rootName, activation.unavailable);
-		}
-
-		return this.rootSummaryFrom(
-			rootName,
-			activation.stored,
-			activation.stored.updatedAt,
-			requested.targets,
-			activation.presence
-		);
-	}
 
 	private writeRoot(cache: string, request: RootSetCommand): StoredRoot {
 		const now = new Date();
@@ -172,74 +124,6 @@ export class RootsService {
 		return { expiresAt, createdAt, updatedAt: nowIso };
 	}
 
-	async listRoots(cache: string): Promise<RootListResponse> {
-		const now = new Date().toISOString();
-		const roots = this.context.db
-			.select()
-			.from(schema.retentionRoots)
-			.where(eq(schema.retentionRoots.cache, cache))
-			.all();
-
-		const summaries: RootSummary[] = [];
-
-		for (const root of roots) {
-			const targets = this.rootTargetRows(cache, root.name);
-			const presence = await this.presence(targets, (hash) =>
-				this.narInfoObjects.isServable(cache, hash)
-			);
-
-			summaries.push(
-				this.rootSummaryFrom(
-					root.name,
-					{
-						expiresAt: root.expiresAt ?? undefined,
-						createdAt: root.createdAt,
-						updatedAt: root.updatedAt
-					},
-					now,
-					targets,
-					presence
-				)
-			);
-		}
-
-		return { roots: summaries.toSorted((a, b) => (a.name > b.name ? 1 : -1)) };
-	}
-
-	removeRoot(cache: string, name: RootName): RootRemoveResponse {
-		return this.context.db.transaction((tx) => {
-			const existing = tx
-				.select()
-				.from(schema.retentionRoots)
-				.where(
-					and(
-						eq(schema.retentionRoots.cache, cache),
-						eq(schema.retentionRoots.name, name)
-					)
-				)
-				.get();
-
-			tx.delete(schema.retentionRootTargets)
-				.where(
-					and(
-						eq(schema.retentionRootTargets.cache, cache),
-						eq(schema.retentionRootTargets.rootName, name)
-					)
-				)
-				.run();
-			tx.delete(schema.retentionRoots)
-				.where(
-					and(
-						eq(schema.retentionRoots.cache, cache),
-						eq(schema.retentionRoots.name, name)
-					)
-				)
-				.run();
-
-			return { name, removed: existing !== undefined };
-		});
-	}
-
 	private rootTargetRows(
 		cache: string,
 		name: RootName
@@ -293,9 +177,7 @@ export class RootsService {
 	): RootSummary {
 		return {
 			name,
-			...(stored.expiresAt === undefined
-				? {}
-				: { expiresAt: stored.expiresAt }),
+			...(stored.expiresAt !== undefined && { expiresAt: stored.expiresAt }),
 			expired: stored.expiresAt !== undefined && stored.expiresAt <= now,
 			createdAt: stored.createdAt,
 			updatedAt: stored.updatedAt,
@@ -305,7 +187,130 @@ export class RootsService {
 					storePath: target.storePath,
 					present: presence.get(target.storePathHash) === true
 				}))
-				.toSorted((a, b) => (a.storePathHash > b.storePathHash ? 1 : -1))
+				.toSorted((a, b) => compareStrings(a.storePathHash, b.storePathHash))
 		};
+	}
+
+	async setRoot(
+		cache: string,
+		rootName: RootName,
+		body: ParsedRootSetBody
+	): Promise<RootSetResponse> {
+		const requested: RootSetCommand = {
+			name: rootName,
+			targets: resolveRootTargets(body.targets),
+			ttlSeconds: body.ttlSeconds
+		};
+
+		// Activation gates on the serve predicate so a root never advertises a path
+		// that is not yet substitutable. The check (repairing a merely-lost object)
+		// and the write share one critical section, so a concurrent delete cannot
+		// remove a target between them and leave a root over an unservable path; an
+		// unavailable target rejects without writing, leaving the existing root
+		// untouched. The rejection is thrown after the section so a validation error
+		// does not reset the Durable Object.
+		const activation = await this.context.ctx.blockConcurrencyWhile(
+			async (): Promise<RootActivation> => {
+				const presence = await this.presence(requested.targets, (hash) =>
+					this.narInfoObjects.isServableLocked(cache, hash)
+				);
+				const unavailable = requested.targets
+					.filter((target) => presence.get(target.storePathHash) !== true)
+					.map((target) => target.storePath);
+
+				if (unavailable.length > 0) {
+					return { kind: 'rejected', unavailable };
+				}
+
+				return {
+					kind: 'written',
+					stored: this.writeRoot(cache, requested),
+					presence
+				};
+			}
+		);
+
+		if (activation.kind === 'rejected') {
+			throw new RootTargetsUnavailableError(rootName, activation.unavailable);
+		}
+
+		return this.rootSummaryFrom(
+			rootName,
+			activation.stored,
+			activation.stored.updatedAt,
+			requested.targets,
+			activation.presence
+		);
+	}
+
+	async listRoots(cache: string): Promise<RootListResponse> {
+		const nowDate = new Date();
+		const now = nowDate.toISOString();
+		const roots = this.context.db
+			.select()
+			.from(schema.retentionRoots)
+			.where(eq(schema.retentionRoots.cache, cache))
+			.all();
+
+		const summaries: RootSummary[] = [];
+
+		for (const root of roots) {
+			const targets = this.rootTargetRows(cache, root.name);
+			const presence = await this.presence(targets, (hash) =>
+				this.narInfoObjects.isServable(cache, hash)
+			);
+
+			summaries.push(
+				this.rootSummaryFrom(
+					root.name,
+					{
+						expiresAt: root.expiresAt ?? undefined,
+						createdAt: root.createdAt,
+						updatedAt: root.updatedAt
+					},
+					now,
+					targets,
+					presence
+				)
+			);
+		}
+
+		return {
+			roots: summaries.toSorted((a, b) => compareStrings(a.name, b.name))
+		};
+	}
+
+	removeRoot(cache: string, name: RootName): RootRemoveResponse {
+		return this.context.db.transaction((tx) => {
+			const existing = tx
+				.select()
+				.from(schema.retentionRoots)
+				.where(
+					and(
+						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.name, name)
+					)
+				)
+				.get();
+
+			tx.delete(schema.retentionRootTargets)
+				.where(
+					and(
+						eq(schema.retentionRootTargets.cache, cache),
+						eq(schema.retentionRootTargets.rootName, name)
+					)
+				)
+				.run();
+			tx.delete(schema.retentionRoots)
+				.where(
+					and(
+						eq(schema.retentionRoots.cache, cache),
+						eq(schema.retentionRoots.name, name)
+					)
+				)
+				.run();
+
+			return { name, removed: existing !== undefined };
+		});
 	}
 }

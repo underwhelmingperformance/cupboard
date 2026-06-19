@@ -69,10 +69,12 @@ export type GcResponse = z.input<typeof gcResponseSchema>;
 export const retentionPolicyScopeSchema = z.enum(['cache', 'root-name-prefix']);
 export type RetentionPolicyScope = z.infer<typeof retentionPolicyScopeSchema>;
 
+const cachePatternSchema = z.union([z.literal(DEFAULT_CACHE), cacheNameSchema]);
+
 export const retentionPolicyAddBodySchema = z.discriminatedUnion('scope', [
 	z.strictObject({
 		scope: z.literal('cache'),
-		pattern: z.union([z.literal(DEFAULT_CACHE), cacheNameSchema]),
+		pattern: cachePatternSchema,
 		ttlSeconds: ttlSecondsSchema
 	}),
 	z.strictObject({

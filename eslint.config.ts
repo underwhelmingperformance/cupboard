@@ -10,6 +10,16 @@ import ts from 'typescript-eslint';
 
 const gitignorePath = fileURLToPath(new URL('.gitignore', import.meta.url));
 
+// `unicorn/prefer-uint8array-base64` rewrites `btoa`/`atob`/`Buffer` base64
+// conversions to the TC39 Stage 3 `Uint8Array#toBase64`/`Uint8Array.fromBase64`
+// API. workerd ships it, but our Node runtime (24 LTS) does not, so adopting it
+// breaks the CLI and every Node-run test. We keep the `Buffer`/`btoa` fallbacks
+// and disable the rule *only while the linting runtime lacks the API*. The day
+// Node ships it, this flips back to `error` and the rule fires loudly on every
+// fallback, forcing the migration.
+const nodeHasUint8ArrayBase64 =
+	'toBase64' in Uint8Array.prototype && 'fromBase64' in Uint8Array;
+
 const nodeBuiltInImports = [
 	'assert',
 	'async_hooks',
@@ -73,6 +83,13 @@ export default defineConfig(
 					}
 				}
 			]
+		}
+	},
+	{
+		rules: {
+			'unicorn/prefer-uint8array-base64': nodeHasUint8ArrayBase64
+				? 'error'
+				: 'off'
 		}
 	},
 	eslintConfigPrettier,
@@ -168,7 +185,7 @@ export default defineConfig(
 	},
 	{
 		// Tests deliberately exercise plain-http issuers and IdP endpoints (for
-		// example asserting that http issuers are rejected), so the https
+		// example asserting that HTTP issuers are rejected), so the HTTPS
 		// preference does not apply to fixture URLs here.
 		files: ['**/*.test.ts'],
 		rules: {

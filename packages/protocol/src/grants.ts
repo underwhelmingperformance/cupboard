@@ -154,25 +154,30 @@ export const grantTypes = [
 	'cupboard_wildcard'
 ] as const;
 
+const cacheActionsSchema = z.array(z.enum(cacheOperations)).min(1);
+const domainActionsSchema = z.array(z.enum(domainOperations)).min(1);
+const tenantActionsSchema = z.array(z.enum(tenantOperations)).min(1);
+const controlActionsSchema = z.array(z.enum(controlOperations)).min(1);
+
 export const authorizationDetailSchema = z.discriminatedUnion('type', [
 	z.strictObject({
 		type: z.literal('cupboard_cache'),
-		actions: z.array(z.enum(cacheOperations)).min(1),
+		actions: cacheActionsSchema,
 		cache: cacheSelectorSchema,
 		root: rootNameSchema.optional()
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_domain'),
-		actions: z.array(z.enum(domainOperations)).min(1)
+		actions: domainActionsSchema
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_tenant'),
-		actions: z.array(z.enum(tenantOperations)).min(1),
+		actions: tenantActionsSchema,
 		tenant: tenantIdSchema
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_control'),
-		actions: z.array(z.enum(controlOperations)).min(1)
+		actions: controlActionsSchema
 	}),
 	z.strictObject({ type: z.literal('cupboard_wildcard') })
 ]);
@@ -399,27 +404,30 @@ export const oidcTrustDisplaySchema = z.strictObject({
 });
 export type OidcTrustDisplay = z.infer<typeof oidcTrustDisplaySchema>;
 
+const cacheResourcesSchema = z.strictObject({
+	cache: cacheBindingSchema,
+	root: rootBindingSchema.optional()
+});
+const tenantResourcesSchema = z.strictObject({ tenant: tenantBindingSchema });
+
 export const permittedGrantSchema = z.discriminatedUnion('type', [
 	z.strictObject({
 		type: z.literal('cupboard_cache'),
-		actions: z.array(z.enum(cacheOperations)).min(1),
-		resources: z.strictObject({
-			cache: cacheBindingSchema,
-			root: rootBindingSchema.optional()
-		})
+		actions: cacheActionsSchema,
+		resources: cacheResourcesSchema
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_domain'),
-		actions: z.array(z.enum(domainOperations)).min(1)
+		actions: domainActionsSchema
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_tenant'),
-		actions: z.array(z.enum(tenantOperations)).min(1),
-		resources: z.strictObject({ tenant: tenantBindingSchema })
+		actions: tenantActionsSchema,
+		resources: tenantResourcesSchema
 	}),
 	z.strictObject({
 		type: z.literal('cupboard_control'),
-		actions: z.array(z.enum(controlOperations)).min(1)
+		actions: controlActionsSchema
 	}),
 	z.strictObject({ type: z.literal('cupboard_wildcard') })
 ]);

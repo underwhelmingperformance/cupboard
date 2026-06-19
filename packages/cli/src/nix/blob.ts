@@ -81,10 +81,11 @@ export async function compressAndHashNarToFile(
 }
 
 class HashingByteTransform {
-	readonly stream: TransformStream<Uint8Array, Uint8Array>;
-
 	private readonly hash = createHash('sha256');
+
 	private size = 0;
+
+	readonly stream: TransformStream<Uint8Array, Uint8Array>;
 
 	constructor() {
 		this.stream = new TransformStream<Uint8Array, Uint8Array>({

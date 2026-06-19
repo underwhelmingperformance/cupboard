@@ -3,7 +3,7 @@ import { and, asc, count, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
-import { type ServerContext } from './context.ts';
+import { compareStrings, type ServerContext } from './context.ts';
 
 export interface MaintenanceEligibilitySnapshot {
 	readonly tenant: string;
@@ -17,62 +17,6 @@ export interface MaintenanceEligibilitySnapshot {
 
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
-
-	async invalidate(): Promise<void> {
-		await this.context.d1
-			.delete(d1Schema.tenantMaintenanceEligibility)
-			.where(
-				eq(
-					d1Schema.tenantMaintenanceEligibility.tenant,
-					this.context.requireTenant()
-				)
-			)
-			.run();
-	}
-
-	reconcile(now: Date = new Date()): Promise<MaintenanceEligibilitySnapshot> {
-		const tenant = this.context.requireTenant();
-		const reconciledAt = now.toISOString();
-		const pendingVerificationCount = this.pendingVerificationCount();
-		const earliestUploadExpiry = this.earliestUploadExpiry();
-		const queuedNarInfoDeletionCount = this.queuedNarInfoDeletionCount();
-		const earliestRootExpiry = this.earliestRootExpiry();
-		const earliestAuthKeyRetirement = this.earliestAuthKeyRetirement();
-		const nextMaintenanceAt = this.nextMaintenanceAt({
-			now: reconciledAt,
-			pendingVerificationCount,
-			earliestUploadExpiry,
-			queuedNarInfoDeletionCount,
-			earliestRootExpiry,
-			earliestAuthKeyRetirement
-		});
-		const snapshot = {
-			tenant,
-			pendingVerificationCount,
-			earliestUploadExpiry,
-			queuedNarInfoDeletionCount,
-			earliestRootExpiry,
-			nextMaintenanceAt,
-			reconciledAt
-		} satisfies MaintenanceEligibilitySnapshot;
-
-		return this.context.d1
-			.insert(d1Schema.tenantMaintenanceEligibility)
-			.values(snapshot)
-			.onConflictDoUpdate({
-				target: d1Schema.tenantMaintenanceEligibility.tenant,
-				set: {
-					pendingVerificationCount,
-					earliestUploadExpiry: earliestUploadExpiry ?? sql`null`,
-					queuedNarInfoDeletionCount,
-					earliestRootExpiry: earliestRootExpiry ?? sql`null`,
-					nextMaintenanceAt: nextMaintenanceAt ?? sql`null`,
-					reconciledAt
-				}
-			})
-			.run()
-			.then(() => snapshot);
-	}
 
 	private pendingVerificationCount(): number {
 		const row = this.context.db
@@ -105,7 +49,7 @@ export class MaintenanceEligibilityService {
 
 		return [pendingUploadExpiry, pendingAttestationExpiry]
 			.filter((value) => value !== undefined)
-			.toSorted()[0];
+			.toSorted(compareStrings)[0];
 	}
 
 	private queuedNarInfoDeletionCount(): number {
@@ -167,7 +111,66 @@ export class MaintenanceEligibilityService {
 			input.earliestAuthKeyRetirement
 		]
 			.filter((value) => value !== undefined)
-			.toSorted()[0];
+			.toSorted(compareStrings)[0];
+	}
+
+	async invalidate(): Promise<void> {
+		await this.context.d1
+			.delete(d1Schema.tenantMaintenanceEligibility)
+			.where(
+				eq(
+					d1Schema.tenantMaintenanceEligibility.tenant,
+					this.context.requireTenant()
+				)
+			)
+			.run();
+	}
+
+	async reconcile(
+		now: Date = new Date()
+	): Promise<MaintenanceEligibilitySnapshot> {
+		const tenant = this.context.requireTenant();
+		const reconciledAt = now.toISOString();
+		const pendingVerificationCount = this.pendingVerificationCount();
+		const earliestUploadExpiry = this.earliestUploadExpiry();
+		const queuedNarInfoDeletionCount = this.queuedNarInfoDeletionCount();
+		const earliestRootExpiry = this.earliestRootExpiry();
+		const earliestAuthKeyRetirement = this.earliestAuthKeyRetirement();
+		const nextMaintenanceAt = this.nextMaintenanceAt({
+			now: reconciledAt,
+			pendingVerificationCount,
+			earliestUploadExpiry,
+			queuedNarInfoDeletionCount,
+			earliestRootExpiry,
+			earliestAuthKeyRetirement
+		});
+		const snapshot = {
+			tenant,
+			pendingVerificationCount,
+			earliestUploadExpiry,
+			queuedNarInfoDeletionCount,
+			earliestRootExpiry,
+			nextMaintenanceAt,
+			reconciledAt
+		} satisfies MaintenanceEligibilitySnapshot;
+
+		await this.context.d1
+			.insert(d1Schema.tenantMaintenanceEligibility)
+			.values(snapshot)
+			.onConflictDoUpdate({
+				target: d1Schema.tenantMaintenanceEligibility.tenant,
+				set: {
+					pendingVerificationCount,
+					earliestUploadExpiry: earliestUploadExpiry ?? sql`null`,
+					queuedNarInfoDeletionCount,
+					earliestRootExpiry: earliestRootExpiry ?? sql`null`,
+					nextMaintenanceAt: nextMaintenanceAt ?? sql`null`,
+					reconciledAt
+				}
+			})
+			.run();
+
+		return snapshot;
 	}
 }
 

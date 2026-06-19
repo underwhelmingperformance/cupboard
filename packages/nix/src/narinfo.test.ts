@@ -201,20 +201,20 @@ describe('NarInfo', () => {
 		{
 			name: 'a reference containing a control character',
 			source: narinfoLines({
-				references: '0123456789abcdfghijklmnpqrsvwxyz-a\u0007'
+				references: '0123456789abcdfghijklmnpqrsvwxyz-a\u{7}'
 			}).join('\n')
 		},
 		{
 			name: 'a deriver containing a control character',
-			source: [...narinfoLines(), 'Deriver: bad\u0007deriver'].join('\n')
+			source: [...narinfoLines(), 'Deriver: bad\u{7}deriver'].join('\n')
 		},
 		{
 			name: 'a CA containing a control character',
-			source: [...narinfoLines(), 'CA: fixed:r:bad\u007Fca'].join('\n')
+			source: [...narinfoLines(), 'CA: fixed:r:bad\u{7F}ca'].join('\n')
 		},
 		{
 			name: 'a signature containing a control character',
-			source: [...narinfoLines(), 'Sig: key:bad\u0007sig'].join('\n')
+			source: [...narinfoLines(), 'Sig: key:bad\u{7}sig'].join('\n')
 		}
 	])('rejects $name', ({ source }) => {
 		expect(narInfoSchema.safeParse(parseFields(source)).success).toBe(false);
@@ -237,7 +237,7 @@ describe('NarInfo', () => {
 		},
 		{
 			name: 'CA',
-			fields: { ca: 'fixed:r:bad\u0007ca' }
+			fields: { ca: 'fixed:r:bad\u{7}ca' }
 		},
 		{
 			name: 'signature',
@@ -255,11 +255,8 @@ describe('NarInfo', () => {
 		{ fileSize: '0x1f' },
 		{ fileSize: '' }
 	])('rejects the non-integer file size %j', ({ fileSize }) => {
-		expect(
-			narInfoSchema.safeParse(
-				parseFields(narinfoLines({ fileSize }).join('\n'))
-			).success
-		).toBe(false);
+		const source = narinfoLines({ fileSize }).join('\n');
+		expect(narInfoSchema.safeParse(parseFields(source)).success).toBe(false);
 	});
 
 	it('parses CRLF line endings without a trailing carriage return', () => {
@@ -296,11 +293,12 @@ describe('NarInfo', () => {
 	});
 
 	it('parses generated narinfos with reordered fields and blank lines', () => {
+		const blankLinesArbitrary = fc.array(fc.constant(''), { maxLength: 3 });
 		fc.assert(
 			fc.property(
 				narInfoFieldsArbitrary,
 				narInfoFieldOrderArbitrary,
-				fc.array(fc.constant(''), { maxLength: 3 }),
+				blankLinesArbitrary,
 				(fields, order, blankLines) => {
 					const source = [
 						...blankLines,

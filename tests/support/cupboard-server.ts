@@ -73,23 +73,6 @@ export class CupboardTestServer {
 		private readonly server: Server
 	) {}
 
-	/**
-	 * The fixture tenant's base URL — the `/t/<tenant>/` prefix every tenant route
-	 * (token exchange, uploads, narinfo and NAR reads) lives under. The bare
-	 * {@link url} is the deployment/control surface.
-	 */
-	get tenantUrl(): URL {
-		return new URL(`/t/${fixtureTenant}`, this.url);
-	}
-
-	/** Resolves a tenant-relative path (e.g. `/x.narinfo`) under {@link tenantUrl}. */
-	tenantPath(path: string): URL {
-		const url = this.tenantUrl;
-		url.pathname = `${url.pathname}${path}`;
-
-		return url;
-	}
-
 	static async start(
 		directory: string,
 		options: {
@@ -205,6 +188,53 @@ export class CupboardTestServer {
 		return instance;
 	}
 
+	// Mints a control admin token at the bare-host `/token`, the control issuer,
+	// exchanging the harness admin's external subject token.
+	private async exchangeControlAdminToken(): Promise<string> {
+		const subjectToken = this.issuer.sign({
+			aud: signupAudience,
+			sub: harnessAdminSubject
+		});
+		const body = new URLSearchParams({
+			grant_type: tokenExchangeGrantType,
+			subject_token: subjectToken,
+			subject_token_type: subjectTokenTypeIdToken
+		});
+		const response = await fetch(new URL('/token', this.url), {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body: body.toString()
+		});
+
+		if (!response.ok) {
+			throw new TokenExchangeFailedError(
+				response.status,
+				await response.text()
+			);
+		}
+
+		const payload = tokenResponseSchema.parse(await response.json());
+
+		return payload.access_token;
+	}
+
+	/**
+	 * The fixture tenant's base URL — the `/t/<tenant>/` prefix every tenant route
+	 * (token exchange, uploads, narinfo and NAR reads) lives under. The bare
+	 * {@link URL} is the deployment/control surface.
+	 */
+	get tenantUrl(): URL {
+		return new URL(`/t/${fixtureTenant}`, this.url);
+	}
+
+	/** Resolves a tenant-relative path (e.g. `/x.narinfo`) under {@link tenantUrl}. */
+	tenantPath(path: string): URL {
+		const url = this.tenantUrl;
+		url.pathname = `${url.pathname}${path}`;
+
+		return url;
+	}
+
 	/**
 	 * Provisions the fixture tenant the way an operator would: it seeds the control
 	 * trust policy, mints a control admin token, and creates the tenant through the
@@ -225,7 +255,7 @@ export class CupboardTestServer {
 			ownerIssuer: this.issuer.issuer,
 			ownerSubject,
 			ownerAudience,
-			...(spec.read === undefined ? {} : { read: spec.read })
+			...(spec.read !== undefined && { read: spec.read })
 		};
 		const response = await fetch(new URL('/control/tenants', this.url), {
 			method: 'POST',
@@ -242,35 +272,6 @@ export class CupboardTestServer {
 				await response.text()
 			);
 		}
-	}
-
-	// Mints a control admin token at the bare-host `/token`, the control issuer,
-	// exchanging the harness admin's external subject token.
-	private async exchangeControlAdminToken(): Promise<string> {
-		const subjectToken = this.issuer.sign({
-			aud: signupAudience,
-			sub: harnessAdminSubject
-		});
-		const response = await fetch(new URL('/token', this.url), {
-			method: 'POST',
-			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams({
-				grant_type: tokenExchangeGrantType,
-				subject_token: subjectToken,
-				subject_token_type: subjectTokenTypeIdToken
-			}).toString()
-		});
-
-		if (!response.ok) {
-			throw new TokenExchangeFailedError(
-				response.status,
-				await response.text()
-			);
-		}
-
-		const payload = tokenResponseSchema.parse(await response.json());
-
-		return payload.access_token;
 	}
 
 	/**
@@ -305,9 +306,9 @@ export class CupboardTestServer {
 			grant_type: tokenExchangeGrantType,
 			subject_token: idToken,
 			subject_token_type: subjectTokenTypeIdToken,
-			...(authorizationDetails === undefined
-				? {}
-				: { authorization_details: JSON.stringify(authorizationDetails) })
+			...(authorizationDetails !== undefined && {
+				authorization_details: JSON.stringify(authorizationDetails)
+			})
 		});
 		const response = await fetch(
 			new URL(`/t/${fixtureTenant}/token`, this.url),
@@ -340,6 +341,7 @@ export class CupboardTestServer {
 		readonly claims?: Readonly<Record<string, string>>;
 	}): Promise<void> {
 		const d1 = await this.worker.getD1Database('CUPBOARD_DB', 'cupboard');
+		const now = new Date();
 
 		await d1
 			.prepare(
@@ -350,7 +352,7 @@ export class CupboardTestServer {
 				rule.issuer,
 				rule.audience,
 				JSON.stringify(rule.claims ?? {}),
-				new Date().toISOString()
+				now.toISOString()
 			)
 			.run();
 	}
@@ -384,6 +386,19 @@ export class TenantProvisionFailedError extends Error {
 	}
 }
 
+// Order filenames by UTF-16 code unit, matching the default `Array#sort` order.
+function byCodeUnit(a: string, b: string): number {
+	if (a < b) {
+		return -1;
+	}
+
+	if (a > b) {
+		return 1;
+	}
+
+	return 0;
+}
+
 // Applies the D1 migrations the way `wrangler d1 migrations apply` would for a
 // deployment, so the e2e worker starts with the shared-blob schema in place.
 // drizzle names migrations with a zero-padded numeric prefix, so filename order
@@ -394,7 +409,7 @@ async function applyD1Migrations(
 	const directory = path.join(root, 'packages/server/drizzle-d1');
 	const files = readdirSync(directory)
 		.filter((name) => name.endsWith('.sql'))
-		.toSorted();
+		.toSorted(byCodeUnit);
 
 	for (const file of files) {
 		const sql = readFileSync(path.join(directory, file), 'utf8');
@@ -507,10 +522,8 @@ async function forwardToWorker(
 			init.body = body;
 		}
 
-		const workerResponse = await worker.dispatchFetch(
-			new URL(request.url ?? '/', localOrigin(request)).toString(),
-			init
-		);
+		const requestUrl = new URL(request.url ?? '/', localOrigin(request));
+		const workerResponse = await worker.dispatchFetch(requestUrl.href, init);
 		const bytes = new Uint8Array(await workerResponse.arrayBuffer());
 
 		response.writeHead(
@@ -541,10 +554,11 @@ async function forwardUpgradeToWorker(
 	head: Buffer
 ): Promise<void> {
 	try {
-		const response = await worker.dispatchFetch(
-			new URL(request.url ?? '/', localOrigin(request)).toString(),
-			{ headers: requestHeaders(request), method: 'GET' }
-		);
+		const requestUrl = new URL(request.url ?? '/', localOrigin(request));
+		const response = await worker.dispatchFetch(requestUrl.href, {
+			headers: requestHeaders(request),
+			method: 'GET'
+		});
 		const workerSocket = response.webSocket;
 
 		if (workerSocket === null) {
@@ -735,7 +749,7 @@ class LocalServerAddressUnavailableError extends Error {
 
 class InvalidLocalUrlError extends Error {
 	constructor(public readonly url: URL) {
-		super(`Invalid local server URL: ${url.toString()}`);
+		super(`Invalid local server URL: ${url.href}`);
 		this.name = 'InvalidLocalUrlError';
 	}
 }

@@ -51,6 +51,115 @@ export class AuthKeysService {
 		private readonly tenantIdentity: TenantIdentityService
 	) {}
 
+	// Identity is the sole source for the issuer and audience the tenant issues and
+	// verifies under. An unconfigured Durable Object has no identity and cannot issue
+	// or verify, so it fails as not configured rather than falling back to a default.
+	private requireIdentity(): TenantIdentity {
+		const identity = this.tenantIdentity.current();
+
+		if (identity === undefined) {
+			throw new TenantNotConfiguredError();
+		}
+
+		return identity;
+	}
+
+	private authKeys(): Promise<readonly AuthKey[]> {
+		// A shared in-flight promise so concurrent first requests against an
+		// empty DO generate and insert the bootstrap key exactly once. A failed
+		// attempt clears the cache so a later request can create it.
+		this.authKeysPromise ??= this.loadAuthKeysClearingCacheOnFailure();
+
+		return this.authKeysPromise;
+	}
+
+	private async loadAuthKeysClearingCacheOnFailure(): Promise<
+		readonly AuthKey[]
+	> {
+		try {
+			return await this.loadOrCreateAuthKeys();
+		} catch (error: unknown) {
+			this.authKeysPromise = undefined;
+			throw error;
+		}
+	}
+
+	private async loadOrCreateAuthKeys(): Promise<readonly AuthKey[]> {
+		// Insertion order (rowid) decides which key is active, so a rotation always
+		// supersedes the previous key regardless of timestamp resolution.
+		const rows = this.context.db
+			.select()
+			.from(schema.authKeys)
+			.orderBy(sql`rowid`)
+			.all();
+
+		if (rows.length > 0) {
+			return rows.map((row) => this.authKeyFromRow(row));
+		}
+
+		const generated = await generateAuthKeyPair();
+		const kid = crypto.randomUUID();
+		const createdAt = new Date();
+		const createdAtIso = createdAt.toISOString();
+
+		this.context.db
+			.insert(schema.authKeys)
+			.values({
+				id: 'active',
+				kid,
+				privateJwkJson: JSON.stringify(generated.privateJwk),
+				publicJwkJson: JSON.stringify(generated.publicJwk),
+				createdAt: createdAtIso
+			})
+			.run();
+
+		return [{ kid, ...generated, createdAt: createdAtIso, retired: false }];
+	}
+
+	private authKeyFromRow(row: typeof schema.authKeys.$inferSelect): AuthKey {
+		// A pre-rotation row predates `kid`; give it one on first load so every
+		// key the verifier and JWKS see is addressable.
+		const kid = row.kid === '' ? this.backfillAuthKeyKid(row.id) : row.kid;
+
+		return {
+			kid,
+			privateJwk: parseJwk(row.privateJwkJson),
+			publicJwk: parseJwk(row.publicJwkJson),
+			createdAt: row.createdAt,
+			scheduledRetireAt: row.scheduledRetireAt ?? undefined,
+			retired: Boolean(row.retiredAt)
+		};
+	}
+
+	private backfillAuthKeyKid(id: string): string {
+		const kid = crypto.randomUUID();
+
+		this.context.db
+			.update(schema.authKeys)
+			.set({ kid })
+			.where(eq(schema.authKeys.id, id))
+			.run();
+
+		return kid;
+	}
+
+	private async authKeySummaries(): Promise<AuthKeySummary[]> {
+		const active = await this.activeAuthKey();
+		const keys = await this.authKeys();
+
+		// Listed in insertion order, the same order that decides the active key.
+		return keys
+			.filter((key) => !key.retired)
+			.map((key) => ({
+				kid: key.kid,
+				createdAt: key.createdAt,
+				active: key.kid === active.kid,
+				...(key.scheduledRetireAt !== undefined && {
+					scheduledRetireAt: key.scheduledRetireAt
+				})
+			}));
+	}
+
 	// RFC 8414 authorization-server metadata. Served from the Durable Object (not the
 	// edge) so an unconfigured tenant 503s through the fetch guard rather than
 	// advertising an identity it has not been assigned. The endpoints are built from
@@ -85,91 +194,6 @@ export class AuthKeysService {
 		return this.requireIdentity().audience;
 	}
 
-	// Identity is the sole source for the issuer and audience the tenant issues and
-	// verifies under. An unconfigured Durable Object has no identity and cannot issue
-	// or verify, so it fails as not configured rather than falling back to a default.
-	private requireIdentity(): TenantIdentity {
-		const identity = this.tenantIdentity.current();
-
-		if (identity === undefined) {
-			throw new TenantNotConfiguredError();
-		}
-
-		return identity;
-	}
-
-	private authKeys(): Promise<readonly AuthKey[]> {
-		// A shared in-flight promise so concurrent first requests against an
-		// empty DO generate and insert the bootstrap key exactly once. A failed
-		// attempt clears the cache so a later request can create it.
-		this.authKeysPromise ??= this.loadOrCreateAuthKeys().catch(
-			(error: unknown) => {
-				this.authKeysPromise = undefined;
-				throw error;
-			}
-		);
-
-		return this.authKeysPromise;
-	}
-
-	private async loadOrCreateAuthKeys(): Promise<readonly AuthKey[]> {
-		// Insertion order (rowid) decides which key is active, so a rotation always
-		// supersedes the previous key regardless of timestamp resolution.
-		const rows = this.context.db
-			.select()
-			.from(schema.authKeys)
-			.orderBy(sql`rowid`)
-			.all();
-
-		if (rows.length > 0) {
-			return rows.map((row) => this.authKeyFromRow(row));
-		}
-
-		const generated = await generateAuthKeyPair();
-		const kid = crypto.randomUUID();
-		const createdAt = new Date().toISOString();
-
-		this.context.db
-			.insert(schema.authKeys)
-			.values({
-				id: 'active',
-				kid,
-				privateJwkJson: JSON.stringify(generated.privateJwk),
-				publicJwkJson: JSON.stringify(generated.publicJwk),
-				createdAt
-			})
-			.run();
-
-		return [{ kid, ...generated, createdAt, retired: false }];
-	}
-
-	private authKeyFromRow(row: typeof schema.authKeys.$inferSelect): AuthKey {
-		// A pre-rotation row predates `kid`; give it one on first load so every
-		// key the verifier and JWKS see is addressable.
-		const kid = row.kid === '' ? this.backfillAuthKeyKid(row.id) : row.kid;
-
-		return {
-			kid,
-			privateJwk: parseJwk(row.privateJwkJson),
-			publicJwk: parseJwk(row.publicJwkJson),
-			createdAt: row.createdAt,
-			scheduledRetireAt: row.scheduledRetireAt ?? undefined,
-			retired: Boolean(row.retiredAt)
-		};
-	}
-
-	private backfillAuthKeyKid(id: string): string {
-		const kid = crypto.randomUUID();
-
-		this.context.db
-			.update(schema.authKeys)
-			.set({ kid })
-			.where(eq(schema.authKeys.id, id))
-			.run();
-
-		return kid;
-	}
-
 	resetAuthKeyCache(): void {
 		this.authKeysPromise = undefined;
 	}
@@ -196,23 +220,6 @@ export class AuthKeysService {
 		return keys
 			.filter((key) => !key.retired)
 			.map((key) => ({ kid: key.kid, publicJwk: key.publicJwk }));
-	}
-
-	private async authKeySummaries(): Promise<AuthKeySummary[]> {
-		const active = await this.activeAuthKey();
-		const keys = await this.authKeys();
-
-		// Listed in insertion order, the same order that decides the active key.
-		return keys
-			.filter((key) => !key.retired)
-			.map((key) => ({
-				kid: key.kid,
-				createdAt: key.createdAt,
-				active: key.kid === active.kid,
-				...(key.scheduledRetireAt === undefined
-					? {}
-					: { scheduledRetireAt: key.scheduledRetireAt })
-			}));
 	}
 
 	rotateAuthKey(): Promise<AuthKeyRotateResponse> {
@@ -269,9 +276,11 @@ export class AuthKeysService {
 					return { refused: true };
 				}
 
+				const retiredAt = new Date();
+
 				this.context.db
 					.update(schema.authKeys)
-					.set({ retiredAt: new Date().toISOString() })
+					.set({ retiredAt: retiredAt.toISOString() })
 					.where(eq(schema.authKeys.kid, kid))
 					.run();
 				this.resetAuthKeyCache();

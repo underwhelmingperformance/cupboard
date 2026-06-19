@@ -47,18 +47,17 @@ describe('compressAndHashNarToFile', () => {
 			);
 			const bytes = await readFile(output);
 
+			const fileDigest = createHash('sha256').update(bytes).digest();
+			const narDigest = createHash('sha256').update(input).digest();
+
 			expect(compressed).toStrictEqual({
 				compressed: new CompressedNarFile(output, {
-					fileHash: NixSha256Hash.fromDigest(
-						createHash('sha256').update(bytes).digest()
-					),
+					fileHash: NixSha256Hash.fromDigest(fileDigest),
 					fileSize: bytes.byteLength,
 					compression: 'zstd'
 				}),
 				narDigest: {
-					narHash: NixSha256Hash.fromDigest(
-						createHash('sha256').update(input).digest()
-					),
+					narHash: NixSha256Hash.fromDigest(narDigest),
 					narSize: input.byteLength
 				}
 			});

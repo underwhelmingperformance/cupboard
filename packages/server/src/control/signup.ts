@@ -58,10 +58,11 @@ export async function handleSignup(
 
 	enforceGate(env, body.claim_secret, subject);
 
+	const now = new Date();
 	const { claimed } = await claimGlobalAdmin(
 		controlDatabase(env),
 		{ issuer, subject, audience },
-		new Date().toISOString()
+		now.toISOString()
 	);
 
 	return Response.json({ issuer, subject, claimed } satisfies SignupResponse, {
@@ -121,9 +122,12 @@ async function verifySignupToken(
 	audience: string,
 	token: string
 ): Promise<JWTPayload> {
-	const resolved = await discovery.resolve(issuer).catch((error: unknown) => {
+	let resolved;
+	try {
+		resolved = await discovery.resolve(issuer);
+	} catch (error: unknown) {
 		throw new IssuerUnavailableError(issuer, { cause: error });
-	});
+	}
 
 	try {
 		return await verifyInboundOidcToken(

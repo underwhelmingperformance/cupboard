@@ -32,12 +32,18 @@ export class SigningKeysService {
 		// A shared in-flight promise so concurrent first requests against an
 		// empty DO generate and insert the bootstrap key exactly once. A failed
 		// attempt clears the cache so a later request can create it.
-		this.keysPromise ??= this.loadOrCreateKeys().catch((error: unknown) => {
-			this.keysPromise = undefined;
-			throw error;
-		});
+		this.keysPromise ??= this.loadOrCreateKeysTracked();
 
 		return this.keysPromise;
+	}
+
+	private async loadOrCreateKeysTracked(): Promise<readonly SigningKey[]> {
+		try {
+			return await this.loadOrCreateKeys();
+		} catch (error: unknown) {
+			this.keysPromise = undefined;
+			throw error;
+		}
 	}
 
 	private async loadOrCreateKeys(): Promise<readonly SigningKey[]> {
@@ -48,7 +54,8 @@ export class SigningKeysService {
 		}
 
 		const generated = await generateSigningKey(bootstrapKeyName);
-		const createdAt = new Date().toISOString();
+		const now = new Date();
+		const createdAt = now.toISOString();
 
 		this.context.db
 			.insert(schema.signingKeys)
@@ -75,6 +82,18 @@ export class SigningKeysService {
 		];
 	}
 
+	private async publishedKeys(): Promise<readonly SigningKey[]> {
+		const keys = await this.loadedKeys();
+
+		return keys.filter((key) => key.published);
+	}
+
+	private async publishedKeysText(): Promise<string> {
+		const keys = await this.publishedKeys();
+
+		return keys.map((key) => key.publicKey).join('\n');
+	}
+
 	resetKeyCaches(): void {
 		this.keysPromise = undefined;
 		this.publicKeyBody = undefined;
@@ -88,6 +107,7 @@ export class SigningKeysService {
 			const existing = await this.loadedKeys();
 			const generated = await generateSigningKey(nextKeyName(existing));
 			const id = crypto.randomUUID();
+			const rotationCreatedAt = new Date();
 
 			this.context.db
 				.insert(schema.signingKeys)
@@ -97,7 +117,7 @@ export class SigningKeysService {
 					publicKey: generated.publicKey,
 					signing: true,
 					published: true,
-					createdAt: new Date().toISOString()
+					createdAt: rotationCreatedAt.toISOString()
 				})
 				.run();
 
@@ -177,18 +197,6 @@ export class SigningKeysService {
 		const keys = await this.loadedKeys();
 
 		return keys.filter((key) => key.signing);
-	}
-
-	private async publishedKeys(): Promise<readonly SigningKey[]> {
-		const keys = await this.loadedKeys();
-
-		return keys.filter((key) => key.published);
-	}
-
-	private async publishedKeysText(): Promise<string> {
-		const keys = await this.publishedKeys();
-
-		return keys.map((key) => key.publicKey).join('\n');
 	}
 
 	async publishedKeysBody(): Promise<TextBody> {

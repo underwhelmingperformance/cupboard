@@ -251,9 +251,10 @@ describe('per-tenant quota', () => {
 
 	it('rejects a NAR commit when CAS usage has consumed the quota', async () => {
 		const token = await initialise();
+		const encoder = new TextEncoder();
 		const bundle = await fileAttestationReference({
 			uploadId: 'quota-cas-consumed',
-			bytes: new TextEncoder().encode('cas quota use'),
+			bytes: encoder.encode('cas quota use'),
 			storePathHash: storePathHashSchema.parse('b'.repeat(32)),
 			generation: 0
 		});

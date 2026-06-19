@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { CacheInfo } from '@cupboard/nix/cache-info';
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
@@ -81,16 +82,19 @@ describe('Nix substitution from a named cache', () => {
 						query: { force: true }
 					});
 					const afterRemoval = await rpc.caches.list();
+					const expectedCacheInfo = new CacheInfo('/nix/store', true, 30);
 
 					expect({
 						substituted: await readFile(target.physicalPath(storePath), 'utf8'),
 						cacheInfo: cacheInfoBody,
 						sharedNarBlobs: stats.narBlobs,
-						caches: listed.caches.map((cache) => cache.name).toSorted(),
+						caches: listed.caches
+							.map((cache) => cache.name)
+							.toSorted(byCodeUnit),
 						afterRemoval: afterRemoval.caches.map((cache) => cache.name)
 					}).toStrictEqual({
 						substituted: 'named',
-						cacheInfo: new CacheInfo('/nix/store', true, 30).render(),
+						cacheInfo: expectedCacheInfo.render(),
 						sharedNarBlobs: 1,
 						caches: ['', 'builds'],
 						afterRemoval: ['']

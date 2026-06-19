@@ -100,31 +100,60 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 			Promise.resolve(body({ advance: noop, fact: noop, warn: recordWarn })),
 		steps: (_label, body) =>
 			Promise.resolve(body({ ...silentStepLog, warn: recordWarn })),
-		result: (payload) => captured.results.push(payload),
-		data: (text) => captured.data.push(text),
+		result: (payload) => {
+			captured.results.push(payload);
+		},
+		data: (text) => {
+			captured.data.push(text);
+		},
 		warn: recordWarn,
-		info: (message) => captured.infos.push(message),
-		success: (message) => captured.successes.push(message),
-		step: (message) => captured.steps.push(message),
-		error: (error) => captured.errors.push(error)
+		info: (message) => {
+			captured.infos.push(message);
+		},
+		success: (message) => {
+			captured.successes.push(message);
+		},
+		step: (message) => {
+			captured.steps.push(message);
+		},
+		error: (error) => {
+			captured.errors.push(error);
+		}
 	};
 
 	const ui: CliUi = {
 		interactive: script.interactive ?? false,
 
-		intro: (title) => captured.intros.push(title),
-		outro: (message) => captured.outros.push(message),
-		cancelled: (message) => captured.cancellations.push(message),
-		info: (message) => captured.infos.push(message),
-		success: (message) => captured.successes.push(message),
-		step: (message) => captured.steps.push(message),
-		warn: (message) => captured.warnings.push(message),
-		note: (title, rows) =>
+		intro: (title) => {
+			captured.intros.push(title);
+		},
+		outro: (message) => {
+			captured.outros.push(message);
+		},
+		cancelled: (message) => {
+			captured.cancellations.push(message);
+		},
+		info: (message) => {
+			captured.infos.push(message);
+		},
+		success: (message) => {
+			captured.successes.push(message);
+		},
+		step: (message) => {
+			captured.steps.push(message);
+		},
+		warn: (message) => {
+			captured.warnings.push(message);
+		},
+		note: (title, rows) => {
 			captured.notes.push({
 				title,
 				body: rows.map((row) => `${row.label}\t${row.value}`).join('\n')
-			}),
-		data: (text) => captured.data.push(text),
+			});
+		},
+		data: (text) => {
+			captured.data.push(text);
+		},
 
 		confirm: (options: ConfirmOptions): Promise<ConfirmOutcome> => {
 			captured.confirms.push(options);
@@ -151,7 +180,9 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 			_problem: (value: string) => string | undefined
 		): Promise<string | undefined> => Promise.resolve(script.secret),
 
-		openBrowser: (url) => captured.opened.push(url),
+		openBrowser: (url) => {
+			captured.opened.push(url);
+		},
 
 		reporter: () => reporter
 	};
@@ -185,9 +216,15 @@ export function capturingReporter(
 		},
 		data: noop,
 		warn: noop,
-		info: (message) => infos.push(message),
-		success: (message) => infos.push(message),
-		step: (message) => infos.push(message),
+		info: (message) => {
+			infos.push(message);
+		},
+		success: (message) => {
+			infos.push(message);
+		},
+		step: (message) => {
+			infos.push(message);
+		},
 		error: noop
 	};
 }

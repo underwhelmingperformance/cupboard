@@ -30,10 +30,12 @@ const root = path.resolve(import.meta.dirname, '../..');
 const contentAddressedFixture = path.join(root, 'tests/fixtures/simple/source');
 
 async function fileExists(file: string): Promise<boolean> {
-	return readFile(file).then(
-		() => true,
-		() => false
-	);
+	try {
+		await readFile(file);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
@@ -150,17 +152,16 @@ describe('Nix substitution', () => {
 
 			const untrustedKey = await generatePublicKey('cupboard-untrusted-1');
 
-			const outcome = await harness.target
-				.realise(referrer, signedBy(harness, untrustedKey))
-				.then(
-					() => ({ realised: true, targetPresent: true }),
-					async () => ({
-						realised: false,
-						targetPresent: await fileExists(
-							harness.target.physicalPath(referrer)
-						)
-					})
-				);
+			let outcome: { realised: boolean; targetPresent: boolean };
+			try {
+				await harness.target.realise(referrer, signedBy(harness, untrustedKey));
+				outcome = { realised: true, targetPresent: true };
+			} catch {
+				outcome = {
+					realised: false,
+					targetPresent: await fileExists(harness.target.physicalPath(referrer))
+				};
+			}
 
 			expect(outcome).toStrictEqual({
 				realised: false,
@@ -178,7 +179,7 @@ describe('Nix substitution', () => {
 			const error = await rejectedBy(() =>
 				harness.client.uploadBlob({
 					r2Key: upload.r2Key,
-					uploadUrl: tampered.toString(),
+					uploadUrl: tampered.href,
 					headers: upload.uploadHeaders,
 					body: readFileByteStream(upload.compressedPath),
 					contentLength: upload.fileSize

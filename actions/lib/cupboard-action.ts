@@ -235,7 +235,7 @@ export function buildPushArguments(
 		...options.paths,
 		'--github-oidc'
 	];
-	const audience = options.audience === '' ? options.url : options.audience;
+	const audience = options[options.audience === '' ? 'url' : 'audience'];
 
 	arguments_.push('--audience', audience);
 
@@ -491,7 +491,7 @@ function verifyArtifactAttestation(
 		{
 			env: {
 				...env,
-				...(githubToken === '' ? {} : { GH_TOKEN: githubToken })
+				...(githubToken !== '' && { GH_TOKEN: githubToken })
 			},
 			stdio: 'inherit'
 		}
@@ -528,7 +528,7 @@ async function configureNix(inputs: ConfigureNixInputs): Promise<void> {
 	const nixConfig = renderNixConfig({
 		substituter,
 		trustedPublicKey,
-		...(netrcFile === undefined ? {} : { netrcFile })
+		...(netrcFile !== undefined && { netrcFile })
 	});
 	const generatedConfigFile = path.join(
 		runnerTemporaryDirectory,
@@ -590,7 +590,8 @@ async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 		throw new Error('read-user is required when read-password is supplied');
 	}
 
-	const host = new URL(options.cacheUrl).host;
+	const cacheUrl = new URL(options.cacheUrl);
+	const host = cacheUrl.host;
 	const netrcFile = path.join(
 		options.runnerTemporaryDirectory,
 		'cupboard-netrc'
@@ -680,7 +681,7 @@ function pathInfoEntries(parsed: unknown): readonly unknown[] {
 	if (isRecord(parsed)) {
 		return Object.entries(parsed).map(([storePath, info]) => ({
 			path: storePath,
-			...(isRecord(info) ? info : {})
+			...(isRecord(info) && info)
 		}));
 	}
 
@@ -797,11 +798,12 @@ function setupInputs(environment: Environment): SetupInputs {
 
 function pushInputs(environment: Environment): PushInputs {
 	const url = input(environment, 'URL');
-	const paths = parseLines(input(environment, 'PATHS'));
 
 	if (url === '') {
 		throw new Error('url is required');
 	}
+
+	const paths = parseLines(input(environment, 'PATHS'));
 
 	if (paths.length === 0) {
 		throw new Error('paths is required and must contain at least one path');
@@ -842,7 +844,8 @@ function pushInputs(environment: Environment): PushInputs {
 }
 
 function input(environment: Environment, name: string, fallback = ''): string {
-	const value = environment[`INPUT_${name}`] ?? environment[name] ?? fallback;
+	const prefixedName = 'INPUT_' + name;
+	const value = environment[prefixedName] ?? environment[name] ?? fallback;
 
 	return value.trim();
 }

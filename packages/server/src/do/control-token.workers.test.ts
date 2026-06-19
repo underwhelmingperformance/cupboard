@@ -36,19 +36,19 @@ function oauthErrorShape(value: unknown): z.infer<typeof oauthErrorSchema> {
 	return oauthErrorSchema.parse(value);
 }
 
+const jwkSchema = z.strictObject({
+	kty: z.string(),
+	crv: z.string(),
+	kid: z.string().min(1),
+	alg: z.string(),
+	use: z.string(),
+	x: z.string(),
+	ext: z.boolean(),
+	key_ops: z.tuple([z.string()])
+});
+
 const jwksResponseSchema = z.strictObject({
-	keys: z.tuple([
-		z.strictObject({
-			kty: z.string(),
-			crv: z.string(),
-			kid: z.string().min(1),
-			alg: z.string(),
-			use: z.string(),
-			x: z.string(),
-			ext: z.boolean(),
-			key_ops: z.tuple([z.string()])
-		})
-	])
+	keys: z.tuple([jwkSchema])
 });
 
 const authorizationServerMetadataSchema = z.strictObject({
@@ -64,30 +64,38 @@ function postToken(
 	form: Record<string, string>,
 	envOverride: Readonly<Record<string, string>> = {}
 ): Promise<Response> {
+	const body = new URLSearchParams(form);
 	return controlFetch(
 		'/token',
 		{
 			method: 'POST',
 			headers: { 'content-type': 'application/x-www-form-urlencoded' },
-			body: new URLSearchParams(form).toString()
+			body: body.toString()
 		},
 		envOverride
 	);
 }
 
 function tokenExchangeRequest(form: Record<string, string>): Request {
+	const body = new URLSearchParams(form);
 	return new Request(new URL('/token', currentOrigin()), {
 		method: 'POST',
 		headers: { 'content-type': 'application/x-www-form-urlencoded' },
-		body: new URLSearchParams(form).toString()
+		body: body.toString()
 	});
 }
 
-function tokenExchangeError(form: Record<string, string>): Promise<unknown> {
-	return controlTokenExchange(
-		tokenExchangeRequest(form),
-		Object.assign({}, env, testControlEnv)
-	).catch((error: unknown) => error);
+async function tokenExchangeError(
+	form: Record<string, string>
+): Promise<unknown> {
+	try {
+		return await controlTokenExchange(
+			tokenExchangeRequest(form),
+			Object.assign({}, env, testControlEnv)
+		);
+	} catch (error: unknown) {
+		return error;
+	}
 }
 
 // A well-formed token for a given issuer/audience. With no control trust rule it
@@ -100,7 +108,8 @@ async function signedToken(options: {
 }): Promise<string> {
 	const { privateKey } = await generateKeyPair('RS256', { extractable: true });
 
-	return new SignJWT({})
+	const jwt = new SignJWT({});
+	return jwt
 		.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
 		.setIssuer(options.issuer)
 		.setAudience(options.audience)

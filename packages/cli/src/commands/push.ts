@@ -111,14 +111,15 @@ export function registerPushCommand(
 			].join('\n')
 		)
 		.action(async (url: string, paths: string[], options: PushOptions) => {
+			if (options.attest === false && options.attestation.length > 0) {
+				throw new AttestationsDisabledError();
+			}
+
 			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
 				cache: options.cache,
 				signal: programOptions.signal
 			});
-			if (options.attest === false && options.attestation.length > 0) {
-				throw new AttestationsDisabledError();
-			}
 
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
@@ -128,7 +129,7 @@ export function registerPushCommand(
 				authorizationDetails: pushAuthorizationDetails({
 					cacheSelector: selectorForCache(options.cache ?? DEFAULT_CACHE),
 					attest: options.attest !== false,
-					...(options.root === undefined ? {} : { root: options.root })
+					...(options.root !== undefined && { root: options.root })
 				})
 			});
 
@@ -141,15 +142,15 @@ export function registerPushCommand(
 				signal: programOptions.signal,
 				attest: options.attest,
 				attestations: options.attestation.map((path) => ({ path })),
-				...(options.root === undefined ? {} : { root: options.root }),
-				...(options.ttl === undefined ? {} : { ttlSeconds: options.ttl }),
-				...(options.waitTimeout === undefined
-					? {}
-					: { waitTimeoutSeconds: options.waitTimeout }),
-				...(options.uploadConcurrency === undefined
-					? {}
-					: { uploadConcurrency: options.uploadConcurrency }),
-				...(options.dryRun === undefined ? {} : { dryRun: options.dryRun })
+				...(options.root !== undefined && { root: options.root }),
+				...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+				...(options.waitTimeout !== undefined && {
+					waitTimeoutSeconds: options.waitTimeout
+				}),
+				...(options.uploadConcurrency !== undefined && {
+					uploadConcurrency: options.uploadConcurrency
+				}),
+				...(options.dryRun !== undefined && { dryRun: options.dryRun })
 			});
 		});
 }

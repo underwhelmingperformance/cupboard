@@ -23,6 +23,10 @@ const jwksCacheMaxAgeMs = 10 * 60 * 1000;
 const jwksCooldownMs = 30 * 1000;
 const jwksTimeoutMs = 5 * 1000;
 
+// `customFetch` is jose's `unique symbol`; widen it to `symbol` so it can be
+// used as a computed property key without tripping the unsafe-key lint.
+const customFetchKey: symbol = customFetch;
+
 export class OidcTokenDecodeError extends Error {
 	constructor(options: { readonly cause: unknown }) {
 		super('Subject token is not a decodable JWT', { cause: options.cause });
@@ -261,12 +265,46 @@ export interface OidcDiscoveryStoreOptions {
  */
 export class OidcDiscoveryStore {
 	private readonly issuers = new Map<string, CachedIssuer>();
+
 	private readonly now: () => number;
+
 	private readonly fetcher: typeof fetch;
 
 	constructor(options: OidcDiscoveryStoreOptions = {}) {
 		this.now = options.now ?? (() => Date.now());
 		this.fetcher = options.fetcher ?? ((input, init) => fetch(input, init));
+	}
+
+	private async forgetIfFailed(
+		issuer: string,
+		entry: CachedIssuer
+	): Promise<void> {
+		try {
+			await entry.resolved;
+		} catch {
+			// Evict only if this exact entry is still cached, so a newer
+			// in-flight attempt is never dropped.
+			if (this.issuers.get(issuer) === entry) {
+				this.issuers.delete(issuer);
+			}
+		}
+	}
+
+	private async discover(issuer: string): Promise<ResolvedIssuer> {
+		const discovery = await fetchOidcDiscovery(issuer, this.fetcher);
+
+		return {
+			resolver: createRemoteJWKSet(new URL(discovery.jwksUri), {
+				cacheMaxAge: jwksCacheMaxAgeMs,
+				cooldownDuration: jwksCooldownMs,
+				[customFetchKey]: this.fetcher,
+				timeoutDuration: jwksTimeoutMs
+			}),
+			algorithms: intersectAlgorithms(
+				discovery.signingAlgValues,
+				inboundAlgorithmAllowlist
+			)
+		};
 	}
 
 	resolve(issuer: string): Promise<ResolvedIssuer> {
@@ -280,38 +318,13 @@ export class OidcDiscoveryStore {
 			return cached.resolved;
 		}
 
-		const resolved = this.discoverCached(issuer);
-		this.issuers.set(issuer, { resolved, fetchedAtMs: nowMs });
-
-		return resolved;
-	}
-
-	private discoverCached(issuer: string): Promise<ResolvedIssuer> {
-		const resolved = this.discover(issuer).catch((error: unknown) => {
-			if (this.issuers.get(issuer)?.resolved === resolved) {
-				this.issuers.delete(issuer);
-			}
-
-			throw error;
-		});
-
-		return resolved;
-	}
-
-	private async discover(issuer: string): Promise<ResolvedIssuer> {
-		const discovery = await fetchOidcDiscovery(issuer, this.fetcher);
-
-		return {
-			resolver: createRemoteJWKSet(new URL(discovery.jwksUri), {
-				cacheMaxAge: jwksCacheMaxAgeMs,
-				cooldownDuration: jwksCooldownMs,
-				[customFetch]: this.fetcher,
-				timeoutDuration: jwksTimeoutMs
-			}),
-			algorithms: intersectAlgorithms(
-				discovery.signingAlgValues,
-				inboundAlgorithmAllowlist
-			)
+		const entry: CachedIssuer = {
+			resolved: this.discover(issuer),
+			fetchedAtMs: nowMs
 		};
+		this.issuers.set(issuer, entry);
+		void this.forgetIfFailed(issuer, entry);
+
+		return entry.resolved;
 	}
 }

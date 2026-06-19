@@ -79,7 +79,7 @@ export function defaultCredentialChain(
 		writeGrant: writeCachedGrant,
 		refreshGrant: (previous) =>
 			refreshCloudflareGrant(previous, fetch, Date.now, options.signal),
-		...(options.wrangler ? { readWranglerToken } : {}),
+		...(options.wrangler && { readWranglerToken }),
 		login: () =>
 			cloudflareLogin({
 				openBrowser: options.openBrowser,

@@ -27,9 +27,22 @@ const migrationsDirectory = path.resolve(
 	'packages/server/drizzle-d1'
 );
 
+// Order filenames by UTF-16 code unit, matching the default `Array#sort` order.
+function byCodeUnit(a: string, b: string): number {
+	if (a < b) {
+		return -1;
+	}
+
+	if (a > b) {
+		return 1;
+	}
+
+	return 0;
+}
+
 const files = readdirSync(migrationsDirectory)
 	.filter((file) => file.endsWith('.sql'))
-	.toSorted();
+	.toSorted(byCodeUnit);
 
 const database = new DatabaseSync(':memory:');
 

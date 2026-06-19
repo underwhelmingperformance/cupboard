@@ -378,7 +378,10 @@ describe('loopbackLogin', () => {
 
 		expect({
 			error: { name: caught.name },
-			openedBrowsers: openedBrowsers.map((target) => new URL(target).origin),
+			openedBrowsers: openedBrowsers.map((target) => {
+				const url = new URL(target);
+				return url.origin;
+			}),
 			tokenRequests
 		}).toStrictEqual({
 			error: { name: 'LoginTimeoutError' },
@@ -418,7 +421,10 @@ describe('loopbackLogin', () => {
 
 		expect({
 			error: { name: caught.name },
-			openedBrowsers: openedBrowsers.map((target) => new URL(target).origin),
+			openedBrowsers: openedBrowsers.map((target) => {
+				const url = new URL(target);
+				return url.origin;
+			}),
 			tokenRequests,
 			aborted: controller.signal.aborted
 		}).toStrictEqual({
@@ -448,9 +454,11 @@ describe('loopbackLogin', () => {
 			loopback: { ports: [0], host: 'localhost', path: '/oauth/callback' }
 		});
 
+		const redirectUrl = new URL(redirectUri);
+
 		expect({
-			host: new URL(redirectUri).hostname,
-			path: new URL(redirectUri).pathname
+			host: redirectUrl.hostname,
+			path: redirectUrl.pathname
 		}).toStrictEqual({ host: 'localhost', path: '/oauth/callback' });
 	});
 
@@ -559,7 +567,9 @@ describe('deviceLogin', () => {
 		const idToken = await deviceLogin({
 			endpoints,
 			clientId: 'client-123',
-			prompt: (verification) => prompts.push(verification),
+			prompt: (verification) => {
+				prompts.push(verification);
+			},
 			fetcher,
 			sleep: () => Promise.resolve()
 		});
@@ -603,7 +613,9 @@ describe('deviceLogin', () => {
 		await deviceLogin({
 			endpoints,
 			clientId: 'client-123',
-			prompt: (verification) => prompts.push(verification),
+			prompt: (verification) => {
+				prompts.push(verification);
+			},
 			fetcher,
 			sleep: () => Promise.resolve()
 		});
@@ -628,7 +640,9 @@ describe('deviceLogin', () => {
 					tokenEndpoint: endpoints.tokenEndpoint
 				},
 				clientId: 'client-123',
-				prompt: (verification) => prompts.push(verification),
+				prompt: (verification) => {
+					prompts.push(verification);
+				},
 				fetcher: (input) => {
 					requests.push(requestUrl(input));
 

@@ -61,12 +61,12 @@ export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 export async function writeCachedGrant(grant: CloudflareGrant): Promise<void> {
 	const stored: z.infer<typeof storedGrantSchema> = {
 		access_token: grant.accessToken,
-		...(grant.refreshToken === undefined
-			? {}
-			: { refresh_token: grant.refreshToken }),
+		...(grant.refreshToken !== undefined && {
+			refresh_token: grant.refreshToken
+		}),
 		expires_at: grant.expiresAt,
-		...(grant.subject === undefined ? {} : { subject: grant.subject }),
-		...(grant.idToken === undefined ? {} : { id_token: grant.idToken })
+		...(grant.subject !== undefined && { subject: grant.subject }),
+		...(grant.idToken !== undefined && { id_token: grant.idToken })
 	};
 
 	await writeSecretFile(grantFilePath(), `${JSON.stringify(stored)}\n`);

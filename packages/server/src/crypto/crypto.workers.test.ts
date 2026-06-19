@@ -45,11 +45,12 @@ describe('crypto', () => {
 			false,
 			['verify']
 		);
+		const encoder = new TextEncoder();
 		const verified = await crypto.subtle.verify(
 			'Ed25519',
 			importedPublicKey,
 			signatureBytes.bytes,
-			new TextEncoder().encode(fingerprint)
+			encoder.encode(fingerprint)
 		);
 
 		expect({

@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { NarInfo } from '@cupboard/nix/narinfo';
-import { StorePath } from '@cupboard/nix/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix/store-path';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
@@ -131,7 +131,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 						windowSigs: 2,
 						postSigs: 1,
 						rotatedKeyCount: 2,
-						publishedInWindow: [oldKey, newKey].toSorted(),
+						publishedInWindow: [oldKey, newKey].toSorted(byCodeUnit),
 						publishedAfterRetire: [newKey],
 						before: 'before',
 						windowUnderOldKey: 'window',
@@ -161,5 +161,5 @@ async function publishedKeys(server: CupboardTestServer): Promise<string[]> {
 	const response = await fetch(server.tenantPath('/pubkey'));
 	const body = await response.text();
 
-	return body.trim().split('\n').toSorted();
+	return body.trim().split('\n').toSorted(byCodeUnit);
 }

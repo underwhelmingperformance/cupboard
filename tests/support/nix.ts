@@ -50,6 +50,15 @@ export class NixStore {
 		);
 	}
 
+	private run(
+		command: string,
+		arguments_: readonly string[]
+	): ReturnType<typeof runCommand> {
+		return runCommand(command, [...this.storeArguments, ...arguments_], {
+			env: this.environment
+		});
+	}
+
 	async add(source: string): Promise<string> {
 		const { stdout } = await this.run('nix-store', ['--add', source]);
 
@@ -107,15 +116,6 @@ export class NixStore {
 				? []
 				: ['--option', 'netrc-file', options.netrcFile])
 		]);
-	}
-
-	private run(
-		command: string,
-		arguments_: readonly string[]
-	): ReturnType<typeof runCommand> {
-		return runCommand(command, [...this.storeArguments, ...arguments_], {
-			env: this.environment
-		});
 	}
 }
 

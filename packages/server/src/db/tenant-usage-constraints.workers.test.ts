@@ -53,14 +53,13 @@ describe('tenant_usage non-negative constraints', () => {
 	])('rejects a negative $name count, writing no row', async ({ values }) => {
 		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-		const error = await database
-			.insert(d1Schema.tenantUsage)
-			.values(values)
-			.run()
-			.then(
-				() => 'inserted',
-				(error: unknown) => error
-			);
+		let error: unknown;
+		try {
+			await database.insert(d1Schema.tenantUsage).values(values).run();
+			error = 'inserted';
+		} catch (error_: unknown) {
+			error = error_;
+		}
 
 		const rows = await database
 			.select()

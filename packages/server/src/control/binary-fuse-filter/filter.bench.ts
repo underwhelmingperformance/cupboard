@@ -56,7 +56,7 @@ const largeMembers = slugs(10_000);
 const unicodeMembers = [
 	...slugs(1000),
 	'tenant-é',
-	'tenant-e\u0301',
+	'tenant-e\u{301}',
 	'tenant-雪',
 	'tenant-💾',
 	'tenant-مرحبا'
