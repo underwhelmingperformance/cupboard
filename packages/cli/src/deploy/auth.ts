@@ -1,3 +1,9 @@
+import path from 'node:path';
+
+import type {
+	AuthConfigStorage,
+	UserAuthConfig
+} from '@cloudflare/workers-auth';
 import Cloudflare from 'cloudflare';
 
 import { CliError } from '../errors.ts';
@@ -90,14 +96,43 @@ export function defaultCredentialChain(
 	};
 }
 
-// Reuse wrangler's stored OAuth token when one is available. The package is
+type WorkersUtilities = typeof import('@cloudflare/workers-utils');
+
+// Locate and read wrangler's global auth config the same way wrangler does:
+// `<global config dir>/config/<env>.toml`, parsed as the user auth config.
+// `readStoredAuthState` only exercises `read`; the rest satisfy the storage
+// interface but are never called, as cupboard never mutates wrangler's config.
+function wranglerAuthStorage(utilities: WorkersUtilities): AuthConfigStorage {
+	const environment = utilities.getCloudflareApiEnvironmentFromEnv();
+	const file =
+		environment === 'production' ? 'default.toml' : `${environment}.toml`;
+	const configPath = path.join(utilities.getGlobalConfigPath(), 'config', file);
+
+	return {
+		read: () =>
+			utilities.parseTOML(utilities.readFileSync(configPath)) as UserAuthConfig,
+		write: () => {
+			throw new Error('cupboard does not write wrangler auth config');
+		},
+		clear: () => false,
+		path: () => configPath
+	};
+}
+
+// Reuse wrangler's stored OAuth token when one is available. The packages are
 // internal to workers-sdk, so failures here are non-fatal.
 async function readWranglerToken(): Promise<string | undefined> {
 	try {
-		const { readAuthConfigFile } = await import('@cloudflare/workers-auth');
-		const config = readAuthConfigFile();
+		const [{ readStoredAuthState }, utilities] = await Promise.all([
+			import('@cloudflare/workers-auth'),
+			import('@cloudflare/workers-utils')
+		]);
 
-		return config.oauth_token === '' ? undefined : config.oauth_token;
+		const { accessToken } = readStoredAuthState({
+			storage: wranglerAuthStorage(utilities)
+		});
+
+		return accessToken?.value;
 	} catch {
 		return undefined;
 	}

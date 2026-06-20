@@ -6,6 +6,7 @@
 	},
 	"dependencies": {
 		"@cloudflare/workers-auth": "^0.3.0",
+		"@cloudflare/workers-utils": "^0.23.2",
 		"@cupboard/cli-ui": "workspace:*",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
