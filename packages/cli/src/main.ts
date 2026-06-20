@@ -1,5 +1,5 @@
 #!/usr/bin/env -S node --experimental-transform-types --disable-warning=ExperimentalWarning
-import { createCliUi } from '@cupboard/cli-ui';
+import { configureClackUi, createCliUi } from '@cupboard/cli-ui';
 
 import {
 	buildProgram,
@@ -27,6 +27,8 @@ const abortSigterm = (): void => {
 
 process.once('SIGINT', abortSigint);
 process.once('SIGTERM', abortSigterm);
+
+configureClackUi();
 
 const program = buildProgram({ signal: controller.signal });
 

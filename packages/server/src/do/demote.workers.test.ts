@@ -35,12 +35,17 @@ import {
 // data: the harness rotates the fixture tenant's object id per test, so the
 // fixture slug would route the reaper to an empty object instead.
 
-const tenantCursor = { next: 0 };
+function* countFromOne(): Generator<number, never> {
+	for (let value = 1; ; value++) {
+		yield value;
+	}
+}
+
+const tenantNumbers = countFromOne();
 
 async function committedTenantPath(seed: string) {
-	tenantCursor.next += 1;
 	const tenant = tenantIdSchema.parse(
-		`demote-test-${String(tenantCursor.next)}`
+		`demote-test-${String(tenantNumbers.next().value)}`
 	);
 	const issuer = await provisionNamedTenant(tenant);
 	const token = await issueTokenForTenant(

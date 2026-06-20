@@ -506,7 +506,6 @@ function narInfoLines(
 
 	for (const field of order) {
 		const values = byField.get(field) ?? [];
-
 		for (const value of values) {
 			lines.push(`${field}: ${value}`);
 		}
