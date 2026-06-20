@@ -5,7 +5,7 @@
 		"cupboard": "./src/main.ts"
 	},
 	"dependencies": {
-		"@cloudflare/workers-auth": "^0.1.1",
+		"@cloudflare/workers-auth": "^0.3.0",
 		"@cupboard/cli-ui": "workspace:*",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
