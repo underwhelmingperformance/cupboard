@@ -158,13 +158,13 @@ export async function runCacheCreate(
 
 export async function runCacheRemove(
 	name: string,
-	force: boolean,
+	shouldForce: boolean,
 	ui: CliUi,
 	client: CacheClient
 ): Promise<void> {
 	const outcome = await ui.confirm({
 		message: `Remove cache ${cacheLabel(name)}?`,
-		detail: force
+		detail: shouldForce
 			? 'With --force this removes the cache and every store path it holds.'
 			: 'The cache must be empty; pass --force to remove one that still holds paths.'
 	});
@@ -176,7 +176,10 @@ export async function runCacheRemove(
 
 	const reporter = ui.reporter();
 	const result = await reporter.phase('Removing cache', () =>
-		client.remove({ params: { cacheName: name }, query: { force } })
+		client.remove({
+			params: { cacheName: name },
+			query: { force: shouldForce }
+		})
 	);
 
 	reporter.result({

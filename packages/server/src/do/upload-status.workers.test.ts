@@ -8,7 +8,6 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	clearBlobStorage,
 	currentServer,
-	deleteTestBase,
 	expectSingleUploadDecision,
 	initialise,
 	markUploadPendingVerification,
@@ -18,6 +17,7 @@ import {
 	putNarBytes,
 	readStoredNarInfo,
 	resetTestServer,
+	testBase,
 	uploadMetadata,
 	uploadStatus,
 	verifiableNar
@@ -61,7 +61,7 @@ async function stageDeferred(nar: {
 describe('deferred upload status', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 		await clearBlobStorage();
 	});

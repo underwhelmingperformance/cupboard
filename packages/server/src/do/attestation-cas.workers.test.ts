@@ -86,7 +86,7 @@ describe('attestation CAS lifecycle', () => {
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		const originalPut = env.BLOBS.put.bind(env.BLOBS);
 		const missingObject = await originalHead(key);
-		const storedBefore = missingObject !== null;
+		const isStoredBefore = missingObject !== null;
 		const putAttempts: {
 			readonly key: string;
 			readonly onlyIf: R2Conditional | Headers | undefined;
@@ -165,7 +165,7 @@ describe('attestation CAS lifecycle', () => {
 			}
 
 			expect({
-				storedBefore,
+				storedBefore: isStoredBefore,
 				error: {
 					name: error.name,
 					r2Key: error.r2Key

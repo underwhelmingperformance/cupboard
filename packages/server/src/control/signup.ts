@@ -59,15 +59,18 @@ export async function handleSignup(
 	enforceGate(env, body.claim_secret, subject);
 
 	const now = new Date();
-	const { claimed } = await claimGlobalAdmin(
+	const { claimed: isClaimed } = await claimGlobalAdmin(
 		controlDatabase(env),
 		{ issuer, subject, audience },
 		now.toISOString()
 	);
 
-	return Response.json({ issuer, subject, claimed } satisfies SignupResponse, {
-		headers: { 'cache-control': 'no-store' }
-	});
+	return Response.json(
+		{ issuer, subject, claimed: isClaimed } satisfies SignupResponse,
+		{
+			headers: { 'cache-control': 'no-store' }
+		}
+	);
 }
 
 // The deployment gate configuration the claim consults: a single-use claim secret,
@@ -93,7 +96,10 @@ export function enforceGate(
 	const secret = env.CUPBOARD_SIGNUP_SECRET ?? '';
 
 	if (secret !== '') {
-		if (claimSecret === undefined || !constantTimeEquals(claimSecret, secret)) {
+		if (
+			claimSecret === undefined ||
+			!isConstantTimeEqual(claimSecret, secret)
+		) {
 			throw new SignupForbiddenError();
 		}
 
@@ -153,7 +159,7 @@ function verifiedSubject(verified: JWTPayload): string {
 	return verified.sub;
 }
 
-function constantTimeEquals(a: string, b: string): boolean {
+function isConstantTimeEqual(a: string, b: string): boolean {
 	const encoder = new TextEncoder();
 	const aBytes = encoder.encode(a);
 	const bBytes = encoder.encode(b);

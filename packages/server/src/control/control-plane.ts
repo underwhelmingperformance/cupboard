@@ -393,13 +393,13 @@ export async function controlKeyRetire(
 	kid: string
 ): Promise<{ kid: string; retired: boolean }> {
 	const now = new Date();
-	const retired = await retireControlKey(
+	const isRetired = await retireControlKey(
 		controlDatabase(env),
 		kid,
 		now.toISOString()
 	);
 
-	return { kid, retired };
+	return { kid, retired: isRetired };
 }
 
 export async function controlTenantList(env: Env): Promise<TenantListResponse> {

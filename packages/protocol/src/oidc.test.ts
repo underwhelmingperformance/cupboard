@@ -116,7 +116,7 @@ describe('tokenResponseSchema', () => {
 });
 
 describe('oidc trust schemas', () => {
-	const addBody = {
+	const additionBody = {
 		issuer: 'https://token.actions.githubusercontent.com',
 		audience: 'https://cache.example.workers.dev',
 		claims: { repository_id: '1234', repository_owner_id: '5678' },
@@ -146,24 +146,24 @@ describe('oidc trust schemas', () => {
 	};
 	const summary = {
 		id: 'r1',
-		issuer: addBody.issuer,
-		audience: addBody.audience,
-		claims: addBody.claims,
-		permittedGrants: addBody.permittedGrants,
-		display: addBody.display,
+		issuer: additionBody.issuer,
+		audience: additionBody.audience,
+		claims: additionBody.claims,
+		permittedGrants: additionBody.permittedGrants,
+		display: additionBody.display,
 		disabled: false
 	};
 
 	it.each([
 		{
 			name: 'a well-formed add body',
-			value: addBody,
-			expected: addBody
+			value: additionBody,
+			expected: additionBody
 		},
 		{
 			name: 'an add body bound to a loopback issuer over http',
-			value: { ...addBody, issuer: 'http://127.0.0.1:8788' },
-			expected: { ...addBody, issuer: 'http://127.0.0.1:8788' }
+			value: { ...additionBody, issuer: 'http://127.0.0.1:8788' },
+			expected: { ...additionBody, issuer: 'http://127.0.0.1:8788' }
 		}
 	])('accepts add body: $name', ({ value, expected }) => {
 		expect(oidcTrustAddBodySchema.parse(value)).toStrictEqual(expected);
@@ -172,26 +172,26 @@ describe('oidc trust schemas', () => {
 	it.each([
 		{
 			name: 'an add body with no claims',
-			value: { ...addBody, claims: {} }
+			value: { ...additionBody, claims: {} }
 		},
 		{
 			name: 'a non-URL issuer',
-			value: { ...addBody, issuer: 'not-a-url' }
+			value: { ...additionBody, issuer: 'not-a-url' }
 		},
 		{
 			name: 'a non-loopback issuer over plain http',
 			value: {
-				...addBody,
+				...additionBody,
 				issuer: 'http://token.actions.githubusercontent.com'
 			}
 		},
 		{
 			name: 'an empty audience',
-			value: { ...addBody, audience: '' }
+			value: { ...additionBody, audience: '' }
 		},
 		{
 			name: 'an unknown key',
-			value: { ...addBody, surprise: true }
+			value: { ...additionBody, surprise: true }
 		}
 	])('rejects add body: $name', ({ value }) => {
 		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(false);
@@ -199,7 +199,7 @@ describe('oidc trust schemas', () => {
 
 	it('normalises a trailing slash off the issuer', () => {
 		const parsed = oidcTrustAddBodySchema.parse({
-			...addBody,
+			...additionBody,
 			issuer: 'https://token.actions.githubusercontent.com/'
 		});
 

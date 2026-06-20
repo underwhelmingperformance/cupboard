@@ -56,7 +56,7 @@ function publishedJwks(body: unknown): z.infer<typeof publishedJwksSchema> {
 // the token header's `kid`. Returns false when no published key matches, so a
 // control token (signed by a control key) cannot be verified against a tenant's
 // key set even though both publish a JWKS at the same shape of path.
-function jwtVerifiesAgainst(
+function isJwtVerifiedAgainst(
 	token: string,
 	keys: readonly PublishedKey[]
 ): boolean {
@@ -137,11 +137,11 @@ describe('control plane token exchange', () => {
 					grants: claims.authorization_details,
 					controlKeyCount: jwks.keys.length,
 					tenantKeyCount: tenantJwks.keys.length,
-					verifiesAgainstControlKeys: jwtVerifiesAgainst(
+					verifiesAgainstControlKeys: isJwtVerifiedAgainst(
 						minted.access_token,
 						jwks.keys
 					),
-					verifiesAgainstTenantKeys: jwtVerifiesAgainst(
+					verifiesAgainstTenantKeys: isJwtVerifiedAgainst(
 						minted.access_token,
 						tenantJwks.keys
 					)

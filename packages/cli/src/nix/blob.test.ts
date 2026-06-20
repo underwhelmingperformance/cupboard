@@ -81,11 +81,11 @@ async function collect(
 	const chunks: Uint8Array[] = [];
 
 	try {
-		let done = false;
+		let isDone = false;
 
-		while (!done) {
+		while (!isDone) {
 			const next = await reader.read();
-			done = next.done;
+			isDone = next.done;
 
 			if (next.done) {
 				continue;

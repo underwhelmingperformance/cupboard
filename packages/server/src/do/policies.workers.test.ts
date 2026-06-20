@@ -77,7 +77,7 @@ describe('retention policies', () => {
 		const list = retentionPolicyListResponseSchema.parse(
 			await listResponse.json()
 		);
-		const removeResponse = await authorisedFetch(
+		const removalResponse = await authorisedFetch(
 			`/policies/${added.body.id}`,
 			token,
 			{
@@ -85,7 +85,7 @@ describe('retention policies', () => {
 			}
 		);
 		const removed = retentionPolicyRemoveResponseSchema.parse(
-			await removeResponse.json()
+			await removalResponse.json()
 		);
 		const afterResponse = await authorisedFetch('/policies', token);
 		const after = retentionPolicyListResponseSchema.parse(
@@ -101,7 +101,7 @@ describe('retention policies', () => {
 			},
 			listStatus: listResponse.status,
 			listPatterns: list.policies.map((policy) => policy.pattern),
-			removeStatus: removeResponse.status,
+			removeStatus: removalResponse.status,
 			removed,
 			afterStatus: afterResponse.status,
 			afterPatterns: after.policies.map((policy) => policy.pattern)

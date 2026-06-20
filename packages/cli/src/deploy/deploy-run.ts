@@ -262,7 +262,7 @@ function zoneOf(hostname: string): string {
  * field the API reports included) reads as a mismatch, which costs at most a
  * redundant upload.
  */
-export function bindingsEqual(
+export function hasMatchingBindings(
 	planned: readonly unknown[] | undefined,
 	live: readonly unknown[] | undefined
 ): boolean {
@@ -394,8 +394,8 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 			return {
 				tenant:
 					migration === undefined &&
-					bindingsEqual(tenantMetadata.bindings, tenantLive),
-				control: bindingsEqual(controlMetadata.bindings, controlLive)
+					hasMatchingBindings(tenantMetadata.bindings, tenantLive),
+				control: hasMatchingBindings(controlMetadata.bindings, controlLive)
 			};
 		}
 	);

@@ -14,7 +14,7 @@ import { countSchema } from './internal/counts.ts';
 
 // Parsed schema outputs are branded; buildable wire inputs are unbranded.
 
-const storePathHashMatchesPath = (value: {
+const isStorePathHashForPath = (value: {
 	readonly storePathHash: string;
 	readonly storePath: string;
 }): boolean => storePathHashOf(value.storePath) === value.storePathHash;
@@ -40,7 +40,7 @@ const uploadBlobMetadataShape = {
 
 export const uploadPathNegotiationSchema = z
 	.strictObject(uploadPathNegotiationShape)
-	.refine(storePathHashMatchesPath, storePathHashMismatchMessage);
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
 export type ParsedUploadPathNegotiation = z.output<
 	typeof uploadPathNegotiationSchema
 >;
@@ -55,7 +55,7 @@ export const uploadPathMetadataSchema = z
 		...uploadPathNegotiationShape,
 		...uploadBlobMetadataShape
 	})
-	.refine(storePathHashMatchesPath, storePathHashMismatchMessage);
+	.refine(isStorePathHashForPath, storePathHashMismatchMessage);
 export type ParsedUploadPathMetadata = z.output<
 	typeof uploadPathMetadataSchema
 >;
@@ -208,13 +208,13 @@ export const usageResponseSchema = z.strictObject({
 });
 export type ParsedUsageResponse = z.output<typeof usageResponseSchema>;
 
-export const deletePathResponseSchema = z.strictObject({
+export const pathDeletionResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	deleted: z.boolean(),
 	narScheduledForDeletion: z.boolean()
 });
 export type ParsedDeletePathResponse = z.output<
-	typeof deletePathResponseSchema
+	typeof pathDeletionResponseSchema
 >;
 
 // Buildable wire shapes: schema inputs are unbranded, so callers construct
@@ -239,4 +239,4 @@ export type UploadNegotiateResponse = z.input<
 export type CommitResponse = z.input<typeof commitResponseSchema>;
 export type StatsResponse = z.input<typeof statsResponseSchema>;
 export type UsageResponse = z.input<typeof usageResponseSchema>;
-export type DeletePathResponse = z.input<typeof deletePathResponseSchema>;
+export type DeletePathResponse = z.input<typeof pathDeletionResponseSchema>;

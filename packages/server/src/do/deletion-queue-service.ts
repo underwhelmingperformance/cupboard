@@ -232,14 +232,14 @@ export class DeletionQueueService {
 		let deleted = 0;
 
 		for (const entry of queued) {
-			const { objectDeleted } = await this.deleteQueuedNarInfo(
+			const { objectDeleted: isObjectDeleted } = await this.deleteQueuedNarInfo(
 				entry.cache,
 				entry.storePathHash,
 				entry.generation,
 				origin
 			);
 
-			if (objectDeleted) {
+			if (isObjectDeleted) {
 				deleted += 1;
 			}
 		}
@@ -283,10 +283,10 @@ export class DeletionQueueService {
 				)
 			)
 			.get();
-		const newerCommitted =
+		const wasNewerCommitted =
 			current !== undefined && current.generation !== queued.generation;
 
-		if (newerCommitted) {
+		if (wasNewerCommitted) {
 			await this.retireBlobRefEdge(
 				cache,
 				storePathHash,
@@ -296,11 +296,14 @@ export class DeletionQueueService {
 			await this.retireAttestationRefs(cache, storePathHash, queued.generation);
 			await this.attestations.materialiseList(cache, storePathHash);
 
-			const narScheduledForDeletion = await this.blobHashUnreferenced(
+			const isNarScheduledForDeletion = await this.blobHashUnreferenced(
 				queued.narHash
 			);
 			this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
-			return { objectDeleted: false, narScheduledForDeletion };
+			return {
+				objectDeleted: false,
+				narScheduledForDeletion: isNarScheduledForDeletion
+			};
 		}
 
 		const tenant = this.context.requireTenant();
@@ -327,13 +330,16 @@ export class DeletionQueueService {
 		// Report whether the NAR is now unreferenced (the reaper will reclaim it).
 		// Re-check against the live edges: a path may have committed the same NAR
 		// since the row was removed.
-		const narScheduledForDeletion = await this.blobHashUnreferenced(
+		const isNarScheduledForDeletion = await this.blobHashUnreferenced(
 			queued.narHash
 		);
 
 		this.clearQueuedNarInfoDeletion(cache, storePathHash, generation);
 
-		return { objectDeleted: true, narScheduledForDeletion };
+		return {
+			objectDeleted: true,
+			narScheduledForDeletion: isNarScheduledForDeletion
+		};
 	}
 
 	deleteStorePath(
@@ -390,20 +396,25 @@ export class DeletionQueueService {
 				);
 			});
 
-			let narScheduledForDeletion = false;
+			let isNarScheduledForDeletion = false;
 
 			try {
-				({ narScheduledForDeletion } = await this.deleteQueuedNarInfo(
-					row.cache,
-					storePathHash,
-					row.generation,
-					origin
-				));
+				({ narScheduledForDeletion: isNarScheduledForDeletion } =
+					await this.deleteQueuedNarInfo(
+						row.cache,
+						storePathHash,
+						row.generation,
+						origin
+					));
 			} catch {
 				// the durable queue row remains for GC to retry
 			}
 
-			return { storePathHash, deleted: true, narScheduledForDeletion };
+			return {
+				storePathHash,
+				deleted: true,
+				narScheduledForDeletion: isNarScheduledForDeletion
+			};
 		});
 	}
 

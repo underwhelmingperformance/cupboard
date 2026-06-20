@@ -17,7 +17,7 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-const createBody = {
+const creationBody = {
 	id: 'acme',
 	readMode: 'private',
 	ownerIssuer: 'https://idp.test',
@@ -44,7 +44,7 @@ describe('control plane tenant administration', () => {
 		const response = await controlFetch('/control/tenants', {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify(createBody)
+			body: JSON.stringify(creationBody)
 		});
 
 		expect(response.status).toBe(StatusCodes.UNAUTHORIZED);
@@ -55,7 +55,7 @@ describe('control plane tenant administration', () => {
 
 		const create = await controlFetch(
 			'/control/tenants',
-			authed(token, 'POST', createBody)
+			authed(token, 'POST', creationBody)
 		);
 		const created = tenantSummarySchema.parse(await create.json());
 
@@ -98,7 +98,7 @@ describe('control plane tenant administration', () => {
 	it('treats repeated delete of an offboarded tenant as idempotent', async () => {
 		const token = await issueControlAdminToken();
 
-		await controlFetch('/control/tenants', authed(token, 'POST', createBody));
+		await controlFetch('/control/tenants', authed(token, 'POST', creationBody));
 		await controlFetch('/control/tenants/acme', authed(token, 'DELETE'));
 		await finaliseOffboardedTenant(
 			drizzleD1(env.CUPBOARD_DB, { schema: d1Schema }),
@@ -133,15 +133,15 @@ describe('control plane tenant administration', () => {
 
 		const first = await controlFetch(
 			'/control/tenants',
-			authed(token, 'POST', createBody)
+			authed(token, 'POST', creationBody)
 		);
 		const same = await controlFetch(
 			'/control/tenants',
-			authed(token, 'POST', createBody)
+			authed(token, 'POST', creationBody)
 		);
 		const conflicting = await controlFetch(
 			'/control/tenants',
-			authed(token, 'POST', { ...createBody, readMode: 'public' })
+			authed(token, 'POST', { ...creationBody, readMode: 'public' })
 		);
 
 		expect({

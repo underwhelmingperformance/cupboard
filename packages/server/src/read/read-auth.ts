@@ -1,6 +1,6 @@
 import { StatusCodes } from 'http-status-codes';
 
-import { constantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
+import { isConstantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
 
 const textEncoder = new TextEncoder();
 const readPasswordHashDomain = 'cupboard-read-password-v1';
@@ -59,13 +59,13 @@ export async function authoriseRead(
 
 	const passwordHash = await hashReadPassword(password, verifier.passwordSalt);
 
-	const userMatches = constantTimeEqual(user, verifier.user);
-	const passwordMatches = constantTimeEqual(
+	const isUserMatching = isConstantTimeEqual(user, verifier.user);
+	const isPasswordMatching = isConstantTimeEqual(
 		passwordHash,
 		verifier.passwordHash
 	);
 
-	return userMatches && passwordMatches;
+	return isUserMatching && isPasswordMatching;
 }
 
 function base64Url(bytes: Uint8Array): string {

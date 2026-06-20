@@ -15,11 +15,6 @@ const base64Alphabet =
 const nixSha256Base32Length = 52;
 
 export class NixSha256Hash {
-	private constructor(
-		public readonly value: NixSha256HashString,
-		private readonly bytes: Uint8Array
-	) {}
-
 	static parse(value: string): NixSha256Hash {
 		const parsed = nixSha256HashSchema.safeParse(value);
 
@@ -45,6 +40,11 @@ export class NixSha256Hash {
 			digest
 		);
 	}
+
+	private constructor(
+		public readonly value: NixSha256HashString,
+		private readonly bytes: Uint8Array
+	) {}
 
 	digestBytes(): Uint8Array {
 		return Uint8Array.from(this.bytes);

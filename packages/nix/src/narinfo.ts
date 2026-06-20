@@ -123,20 +123,6 @@ export function parseNarInfo(source: string): NarInfo {
 }
 
 export class NarInfo {
-	constructor(
-		public readonly storePath: StorePath,
-		public readonly url: string,
-		public readonly compression: 'zstd',
-		public readonly fileHash: NixSha256Hash,
-		public readonly fileSize: number,
-		public readonly narHash: NixSha256Hash,
-		public readonly narSize: number,
-		public readonly references: readonly StorePathBasename[],
-		public readonly deriver?: string,
-		public readonly ca?: string,
-		public readonly sigs: readonly string[] = []
-	) {}
-
 	static fromFields(fields: NarInfoFields): NarInfo {
 		const parsed = narInfoFieldsSchema.parse(fields);
 
@@ -158,6 +144,20 @@ export class NarInfo {
 	static parse(source: string): NarInfo {
 		return parseNarInfo(source);
 	}
+
+	constructor(
+		public readonly storePath: StorePath,
+		public readonly url: string,
+		public readonly compression: 'zstd',
+		public readonly fileHash: NixSha256Hash,
+		public readonly fileSize: number,
+		public readonly narHash: NixSha256Hash,
+		public readonly narSize: number,
+		public readonly references: readonly StorePathBasename[],
+		public readonly deriver?: string,
+		public readonly ca?: string,
+		public readonly sigs: readonly string[] = []
+	) {}
 
 	private referenceStorePaths(): readonly string[] {
 		const path = this.storePath.value;

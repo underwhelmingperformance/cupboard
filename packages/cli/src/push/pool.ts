@@ -9,10 +9,10 @@ export async function runWithConcurrency<T>(
 	worker: (item: T) => Promise<void>
 ): Promise<void> {
 	let next = 0;
-	let failed = false;
+	let hasFailed = false;
 
 	const runner = async (): Promise<void> => {
-		while (next < items.length && !failed) {
+		while (next < items.length && !hasFailed) {
 			const item = items[next];
 			next += 1;
 
@@ -23,7 +23,7 @@ export async function runWithConcurrency<T>(
 			try {
 				await worker(item);
 			} catch (error) {
-				failed = true;
+				hasFailed = true;
 				throw error;
 			}
 		}

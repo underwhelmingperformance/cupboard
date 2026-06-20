@@ -24,7 +24,7 @@ import {
 	parseRequestedGrants,
 	resolveRequestedGrants
 } from '../authz/issuance.ts';
-import { constantTimeEqual } from '../crypto/crypto.ts';
+import { isConstantTimeEqual } from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import {
 	RefreshTokenRequiredError,
@@ -36,10 +36,10 @@ import {
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
 import {
+	isRuleInteractive,
 	matchOidcTrust,
 	type OidcClaims,
-	type OidcTrustRule,
-	ruleIsInteractive
+	type OidcTrustRule
 } from '../oidc/oidc-trust.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
@@ -194,7 +194,7 @@ export class TokenExchangeService {
 
 		if (
 			row === undefined ||
-			!constantTimeEqual(row.secretHash, presentedHash)
+			!isConstantTimeEqual(row.secretHash, presentedHash)
 		) {
 			throw new StaleRefreshTokenError();
 		}
@@ -255,9 +255,9 @@ export class TokenExchangeService {
 		requested: AuthorizationDetails | undefined,
 		extra: Pick<TokenResponse, 'issued_token_type'>
 	): Promise<Response> {
-		const interactive = ruleIsInteractive(rule);
+		const isInteractive = isRuleInteractive(rule);
 		const granted = resolveRequestedGrants(rule, claims, requested);
-		const ttlSeconds = interactive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
+		const ttlSeconds = isInteractive ? adminJwtTtlSeconds : writeJwtTtlSeconds;
 		const accessToken = await this.issueRuleToken(
 			rule,
 			subject,
@@ -268,7 +268,7 @@ export class TokenExchangeService {
 		// Only an interactive session gets a refresh token: a CI exchange
 		// federates a fresh subject token per run, so a stored grant would only
 		// accumulate rows.
-		const refreshToken = interactive
+		const refreshToken = isInteractive
 			? await this.issueRefreshToken(rule.id, subject)
 			: undefined;
 

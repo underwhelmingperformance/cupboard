@@ -83,7 +83,7 @@ async function handlePresignedPut(
 		secretAccessKey: credentials.secretAccessKey
 	});
 
-	if (!signatureMatches(expected, actual)) {
+	if (!isSignatureMatch(expected, actual)) {
 		return textResponse(403, 'SigV4 signature mismatch');
 	}
 
@@ -198,7 +198,7 @@ function awsUriEncode(value: string): string {
 		.join('');
 }
 
-function signatureMatches(expected: string, actual: string): boolean {
+function isSignatureMatch(expected: string, actual: string): boolean {
 	const expectedBytes = Buffer.from(expected, 'utf8');
 	const actualBytes = Buffer.from(actual, 'utf8');
 

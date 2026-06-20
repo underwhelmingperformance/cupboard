@@ -149,7 +149,7 @@ const signingKeyFixtures = [
 	}
 ] satisfies readonly SigningKeyFixture[];
 
-let nextSigningKeyFixture = 0;
+const signingKeyFixtureCursor = { next: 0 };
 
 function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 	return {
@@ -175,9 +175,11 @@ async function generateSigningKeyPair(): Promise<Ed25519KeyPair> {
 	const fixture = z
 		.custom<SigningKeyFixture>((value) => value !== undefined)
 		.parse(
-			signingKeyFixtures[nextSigningKeyFixture % signingKeyFixtures.length]
+			signingKeyFixtures[
+				signingKeyFixtureCursor.next % signingKeyFixtures.length
+			]
 		);
-	nextSigningKeyFixture += 1;
+	signingKeyFixtureCursor.next += 1;
 	const [privateKey, publicKey] = await Promise.all([
 		crypto.subtle.importKey('jwk', fixture.privateKey, 'Ed25519', true, [
 			'sign'

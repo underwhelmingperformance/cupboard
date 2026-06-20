@@ -10,7 +10,7 @@ export async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
 	return hex(new Uint8Array(digest));
 }
 
-export function constantTimeEqual(left: string, right: string): boolean {
+export function isConstantTimeEqual(left: string, right: string): boolean {
 	const leftBytes = textEncoder.encode(left);
 	const rightBytes = textEncoder.encode(right);
 	const size = Math.max(leftBytes.byteLength, rightBytes.byteLength);

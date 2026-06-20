@@ -61,7 +61,7 @@ export class NoCheckoutError extends Error {
  */
 export function findCheckoutRoot(
 	start: string,
-	fileExists: (filePath: string) => boolean = existsSync
+	hasPath: (filePath: string) => boolean = existsSync
 ): string | undefined {
 	let directory = start;
 
@@ -69,7 +69,7 @@ export function findCheckoutRoot(
 		const marker = path.join(directory, 'pnpm-workspace.yaml');
 		const serverEntry = path.join(directory, controlWorker.entryFile);
 
-		if (fileExists(marker) && fileExists(serverEntry)) {
+		if (hasPath(marker) && hasPath(serverEntry)) {
 			return directory;
 		}
 

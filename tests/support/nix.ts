@@ -32,12 +32,6 @@ export interface RealiseOptions {
  * target store needs.
  */
 export class NixStore {
-	private constructor(
-		private readonly fsRoot: string,
-		private readonly storeArguments: readonly string[],
-		private readonly environment: NodeJS.ProcessEnv
-	) {}
-
 	static async host(home: string): Promise<NixStore> {
 		return new NixStore('/', [], await isolatedEnvironment(home));
 	}
@@ -49,6 +43,12 @@ export class NixStore {
 			await isolatedEnvironment(home)
 		);
 	}
+
+	private constructor(
+		private readonly fsRoot: string,
+		private readonly storeArguments: readonly string[],
+		private readonly environment: NodeJS.ProcessEnv
+	) {}
 
 	private run(
 		command: string,

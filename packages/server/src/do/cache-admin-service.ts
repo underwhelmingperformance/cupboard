@@ -34,7 +34,7 @@ export class CacheAdminService {
 			.get();
 		const info = new CacheInfo(
 			CacheInfo.default.storeDirectory,
-			CacheInfo.default.wantMassQuery,
+			CacheInfo.default.hasMassQuery,
 			row?.priority ?? CacheInfo.default.priority
 		);
 
@@ -71,16 +71,16 @@ export class CacheAdminService {
 
 	async removeCache(
 		cache: CacheName,
-		force: boolean,
+		shouldForce: boolean,
 		origin: string
 	): Promise<CacheRemoveResponse> {
 		const committedCount = this.cacheStorePathCount(cache);
 
-		if (committedCount > 0 && !force) {
+		if (committedCount > 0 && !shouldForce) {
 			throw new CacheNotEmptyError(cache);
 		}
 
-		const registered =
+		const isRegistered =
 			this.context.db
 				.select()
 				.from(schema.caches)
@@ -90,7 +90,7 @@ export class CacheAdminService {
 
 		return {
 			name: cache,
-			removed: registered || committedCount > 0,
+			removed: isRegistered || committedCount > 0,
 			storePathsRemoved
 		};
 	}

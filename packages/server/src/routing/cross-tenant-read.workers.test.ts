@@ -5,12 +5,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
 	cacheWriteGrants,
 	clearBlobStorage,
-	deleteTestBase,
 	handlerFetch,
 	issueTokenForTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
 	resetTestServer,
+	testBase,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar
@@ -25,7 +25,7 @@ import {
 describe('cross-tenant NAR read isolation', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 		await clearBlobStorage();
 	});

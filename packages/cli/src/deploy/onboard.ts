@@ -71,12 +71,12 @@ export function onboardAdminFor(
 	}
 
 	const own = deployerOwner(deployer.subject);
-	const matches =
+	const isMatch =
 		choice.owner.issuer === own.issuer &&
 		choice.owner.subject === own.subject &&
 		choice.owner.audience === own.audience;
 
-	return matches
+	return isMatch
 		? { kind: 'claimable', owner: choice.owner, idToken: deployer.idToken }
 		: { kind: 'other', owner: choice.owner };
 }
@@ -847,7 +847,7 @@ async function attemptProbe<T>(
 		return await probe();
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
-			if (retryableStatus(error.status)) {
+			if (isRetryableStatus(error.status)) {
 				return { kind: 'retry', detail: httpDetail(error) };
 			}
 
@@ -863,7 +863,7 @@ async function attemptProbe<T>(
 	}
 }
 
-function retryableStatus(status: number): boolean {
+function isRetryableStatus(status: number): boolean {
 	return status === 404 || status === 408 || status === 429 || status >= 500;
 }
 

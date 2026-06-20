@@ -142,21 +142,21 @@ function renderTenant(
 }
 
 // A requested root is within a granted root selector: an exact name, or any name
-// beneath a trailing-slash prefix. The same containment `tokenCovers` applies.
-function rootWithin(requested: string, granted: string): boolean {
+// beneath a trailing-slash prefix. The same containment `isCoveredByToken` applies.
+function isRootWithin(requested: string, granted: string): boolean {
 	return granted.endsWith('/')
 		? requested.startsWith(granted)
 		: requested === granted;
 }
 
-function actionsSubset(
+function isActionsSubset(
 	requested: readonly Operation[],
 	permitted: readonly Operation[]
 ): boolean {
 	return requested.every((action) => permitted.includes(action));
 }
 
-function grantPermits(
+function isGrantPermitted(
 	permitted: PermittedGrant,
 	requested: AuthorizationDetail,
 	claims: Record<string, string>
@@ -169,7 +169,7 @@ function grantPermits(
 		return false;
 	}
 
-	if (!actionsSubset(requested.actions, permitted.actions)) {
+	if (!isActionsSubset(requested.actions, permitted.actions)) {
 		return false;
 	}
 
@@ -209,7 +209,7 @@ function grantPermits(
 
 			const root = renderRoot(permitted.resources.root, cache, claims);
 
-			return root !== undefined && rootWithin(requested.root, root);
+			return root !== undefined && isRootWithin(requested.root, root);
 		}
 	}
 }
@@ -220,7 +220,7 @@ function grantPermits(
  * permitted grant's, and each requested resource must fall within what that
  * grant's bindings render. A wildcard permitted grant permits anything.
  */
-export function rulePermitsGrant(
+export function isGrantPermittedByRule(
 	permittedGrants: readonly PermittedGrant[],
 	requested: AuthorizationDetail,
 	claims: OidcClaims
@@ -228,6 +228,6 @@ export function rulePermitsGrant(
 	const rendered = stringClaims(claims);
 
 	return permittedGrants.some((permitted) =>
-		grantPermits(permitted, requested, rendered)
+		isGrantPermitted(permitted, requested, rendered)
 	);
 }

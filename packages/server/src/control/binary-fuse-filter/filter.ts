@@ -357,18 +357,6 @@ function hasValue(
  * built keys and an expected false-positive rate of about 1/256.
  */
 export class BinaryFuse8 {
-	private readonly keyScratch: Word64Scratch = { high: 0, low: 0 };
-	private readonly hashHighScratch: Uint32Array = new Uint32Array(1);
-	private readonly hashLowScratch: Uint32Array = new Uint32Array(1);
-
-	private constructor(
-		private readonly seedHigh: number,
-		private readonly seedLow: number,
-		private readonly geometry: Geometry,
-		private readonly fingerprints: Uint8Array,
-		private readonly keyCount: number
-	) {}
-
 	/**
 	 * Restores a filter produced by {@link BinaryFuse8.serialise}.
 	 */
@@ -440,6 +428,18 @@ export class BinaryFuse8 {
 
 		throw new BinaryFuseConstructionFailedError();
 	}
+
+	private readonly keyScratch: Word64Scratch = { high: 0, low: 0 };
+	private readonly hashHighScratch: Uint32Array = new Uint32Array(1);
+	private readonly hashLowScratch: Uint32Array = new Uint32Array(1);
+
+	private constructor(
+		private readonly seedHigh: number,
+		private readonly seedLow: number,
+		private readonly geometry: Geometry,
+		private readonly fingerprints: Uint8Array,
+		private readonly keyCount: number
+	) {}
 
 	/**
 	 * Returns whether a value is probably in the built set.

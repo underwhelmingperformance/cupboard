@@ -13,11 +13,11 @@ import {
 	blobStateNarHashes,
 	cacheWriteGrants,
 	clearBlobStorage,
-	deleteTestBase,
 	issueTokenForTenant,
 	provisionNamedTenant,
 	pushPathToTenant,
 	resetTestServer,
+	testBase,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar
@@ -35,11 +35,13 @@ import {
 // data: the harness rotates the fixture tenant's object id per test, so the
 // fixture slug would route the reaper to an empty object instead.
 
-let nextTenant = 0;
+const tenantCursor = { next: 0 };
 
 async function committedTenantPath(seed: string) {
-	nextTenant += 1;
-	const tenant = tenantIdSchema.parse(`demote-test-${String(nextTenant)}`);
+	tenantCursor.next += 1;
+	const tenant = tenantIdSchema.parse(
+		`demote-test-${String(tenantCursor.next)}`
+	);
 	const issuer = await provisionNamedTenant(tenant);
 	const token = await issueTokenForTenant(
 		testServerFor(tenant),
@@ -85,7 +87,7 @@ async function edgeCount(): Promise<number> {
 describe('reaper demote pass', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 
 		await clearBlobStorage();

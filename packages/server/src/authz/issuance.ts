@@ -1,7 +1,7 @@
 import {
-	authorizationDetailCovered,
 	type AuthorizationDetails,
-	authorizationDetailsSchema
+	authorizationDetailsSchema,
+	isAuthorizationDetailCovered
 } from '@cupboard/protocol/grants';
 
 import {
@@ -9,12 +9,12 @@ import {
 	InvalidAuthorizationDetailsError
 } from '../errors.ts';
 import {
+	isRuleInteractive,
 	type OidcClaims,
-	type OidcTrustRule,
-	ruleIsInteractive
+	type OidcTrustRule
 } from '../oidc/oidc-trust.ts';
 
-import { rulePermitsGrant } from './bindings.ts';
+import { isGrantPermittedByRule } from './bindings.ts';
 
 /**
  * Parse the `authorization_details` form field a client sent. It is carried as
@@ -63,7 +63,7 @@ export function resolveRequestedGrants(
 	requested: AuthorizationDetails | undefined
 ): AuthorizationDetails {
 	if (requested === undefined) {
-		if (ruleIsInteractive(rule)) {
+		if (isRuleInteractive(rule)) {
 			return [{ type: 'cupboard_wildcard' }];
 		}
 
@@ -75,7 +75,7 @@ export function resolveRequestedGrants(
 	}
 
 	for (const detail of requested) {
-		if (!rulePermitsGrant(rule.permittedGrants, detail, claims)) {
+		if (!isGrantPermittedByRule(rule.permittedGrants, detail, claims)) {
 			throw new InvalidAuthorizationDetailsError('not-permitted');
 		}
 	}
@@ -103,7 +103,7 @@ export function attenuatedGrants(
 	}
 
 	for (const detail of requested) {
-		if (!authorizationDetailCovered(presented, detail)) {
+		if (!isAuthorizationDetailCovered(presented, detail)) {
 			throw new InvalidAuthorizationDetailsError('not-permitted');
 		}
 	}

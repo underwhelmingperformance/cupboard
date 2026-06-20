@@ -786,7 +786,7 @@ function setupInputs(environment: Environment): SetupInputs {
 				'cupboard-bin'
 			)
 		),
-		addToPath: inputBoolean(environment, 'ADD_TO_PATH', true),
+		addToPath: isInputEnabled(environment, 'ADD_TO_PATH', true),
 		cacheUrl: input(environment, 'CACHE_URL'),
 		cache: input(environment, 'CACHE'),
 		trustedPublicKey: input(environment, 'TRUSTED_PUBLIC_KEY'),
@@ -837,7 +837,7 @@ function pushInputs(environment: Environment): PushInputs {
 			`github:${requireInput(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY')}/${requireInput(environment.GITHUB_REF_NAME, 'GITHUB_REF_NAME')}`
 		),
 		ttl: input(environment, 'TTL'),
-		wait: inputBoolean(environment, 'WAIT', true),
+		wait: isInputEnabled(environment, 'WAIT', true),
 		waitTimeout: input(environment, 'WAIT_TIMEOUT', '10m'),
 		attestations: parseLines(input(environment, 'ATTESTATIONS'))
 	};
@@ -850,15 +850,15 @@ function input(environment: Environment, name: string, fallback = ''): string {
 	return value.trim();
 }
 
-function inputBoolean(
+function isInputEnabled(
 	environment: Environment,
 	name: string,
-	fallback: boolean
+	isEnabledByDefault: boolean
 ): boolean {
 	const value = input(
 		environment,
 		name,
-		fallback ? 'true' : 'false'
+		isEnabledByDefault ? 'true' : 'false'
 	).toLowerCase();
 
 	if (value === 'true') {

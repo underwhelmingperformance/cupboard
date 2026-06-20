@@ -3,14 +3,14 @@ export class CacheInfo {
 
 	constructor(
 		public readonly storeDirectory: string,
-		public readonly wantMassQuery: boolean,
+		public readonly hasMassQuery: boolean,
 		public readonly priority: number
 	) {}
 
 	render(): string {
 		return [
 			`StoreDir: ${this.storeDirectory}`,
-			`WantMassQuery: ${this.wantMassQuery ? '1' : '0'}`,
+			`WantMassQuery: ${this.hasMassQuery ? '1' : '0'}`,
 			`Priority: ${String(this.priority)}`,
 			''
 		].join('\n');

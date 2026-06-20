@@ -82,7 +82,7 @@ export class BlobReaperService {
 	// commit that re-references a hash clears the timer it set.
 	private async armUnreferencedBlobs(now: Date, limit: number): Promise<void> {
 		const graceDeadline = new Date(now.getTime() + blobReaperGraceMs);
-		const deleteAfter = graceDeadline.toISOString();
+		const deletionTime = graceDeadline.toISOString();
 		const referencedHashes = this.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
 			.from(d1Schema.blobReference);
@@ -106,7 +106,7 @@ export class BlobReaperService {
 
 		await this.d1
 			.update(d1Schema.blobState)
-			.set({ deleteAfter })
+			.set({ deleteAfter: deletionTime })
 			.where(
 				and(
 					inArray(d1Schema.blobState.narHash, candidateHashes),
@@ -167,7 +167,7 @@ export class BlobReaperService {
 		limit: number
 	): Promise<void> {
 		const graceDeadline = new Date(now.getTime() + blobReaperGraceMs);
-		const deleteAfter = graceDeadline.toISOString();
+		const deletionTime = graceDeadline.toISOString();
 		const referencedDigests = this.d1
 			.select({ digest: d1Schema.attestationReference.digest })
 			.from(d1Schema.attestationReference);
@@ -191,7 +191,7 @@ export class BlobReaperService {
 
 		await this.d1
 			.update(d1Schema.casObject)
-			.set({ deleteAfter })
+			.set({ deleteAfter: deletionTime })
 			.where(
 				and(
 					inArray(d1Schema.casObject.digest, candidateDigests),
@@ -400,10 +400,10 @@ export class BlobReaperService {
 		let demoted = 0;
 
 		for (const blob of batch) {
-			const present =
+			const isPresent =
 				(await this.blobs.head(narObjectKey(blob.narHash))) !== null;
 
-			if (present) {
+			if (isPresent) {
 				continue;
 			}
 
@@ -427,10 +427,10 @@ export class BlobReaperService {
 		let demoted = 0;
 
 		for (const object of batch) {
-			const present =
+			const isPresent =
 				(await this.blobs.head(casObjectKey(object.digest))) !== null;
 
-			if (present) {
+			if (isPresent) {
 				continue;
 			}
 

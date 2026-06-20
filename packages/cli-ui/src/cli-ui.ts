@@ -38,13 +38,15 @@ export { type BrowserMessages, openBrowser } from './open-browser.ts';
 
 // British spelling for the cancel marker clack renders when a spinner, bar or
 // task is aborted without an explicit per-call message.
-function applyClackSettings(): true {
-	updateSettings({ messages: { cancel: 'Cancelled' } });
-	return true;
+function applyClackSettings(): { messages: { cancel: string } } {
+	const settings = { messages: { cancel: 'Cancelled' } };
+	updateSettings(settings);
+
+	return settings;
 }
 
-const clackSettingsApplied = applyClackSettings();
-void clackSettingsApplied;
+const clackSettings = applyClackSettings();
+void clackSettings;
 
 /**
  * Lays out label/value rows with aligned columns, ready for a clack note or box.
@@ -241,10 +243,10 @@ export interface CliUiOptions {
 
 export function createCliUi(options: CliUiOptions): CliUi {
 	const { mode } = options;
-	const assumeYesDefault = options.assumeYes ?? false;
+	const isAssumeYesDefault = options.assumeYes ?? false;
 	// A continuous-integration run is never interactive, even when it captures a
 	// terminal: there is no human at the keyboard to answer a prompt.
-	const interactive =
+	const isInteractiveRun =
 		options.interactive ?? (isInteractive({ mode, stdin, stdout }) && !isCI());
 	// One reporter per UI, shared between the UI's own narration and every
 	// `ui.reporter()` caller. There is a single terminal, so the spinner state and
@@ -268,7 +270,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	};
 
 	const ui: CliUi = {
-		interactive,
+		interactive: isInteractiveRun,
 
 		intro(title) {
 			if (mode === 'terminal') {
@@ -318,11 +320,11 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		async confirm(request) {
-			if (interactive) {
+			if (isInteractiveRun) {
 				return confirmInteractive(request);
 			}
 
-			if (request.assumeYes ?? assumeYesDefault) {
+			if (request.assumeYes ?? isAssumeYesDefault) {
 				reporter.info(`${request.message} (proceeding: --yes)`);
 				return 'yes';
 			}
@@ -331,7 +333,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		async menu(message, entries) {
-			if (!interactive) {
+			if (!isInteractiveRun) {
 				return;
 			}
 
@@ -353,7 +355,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		async editText(options) {
-			if (!interactive) {
+			if (!isInteractiveRun) {
 				return { kind: 'cancelled' };
 			}
 
@@ -382,7 +384,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		async prefixedText(options) {
-			if (!interactive) {
+			if (!isInteractiveRun) {
 				return;
 			}
 
@@ -424,7 +426,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 		},
 
 		async secret(message, problem) {
-			if (!interactive) {
+			if (!isInteractiveRun) {
 				return;
 			}
 

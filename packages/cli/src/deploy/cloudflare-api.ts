@@ -102,10 +102,10 @@ export interface CloudflareApi {
 
 async function firstMatch<T>(
 	page: AsyncIterable<T>,
-	matches: (item: T) => boolean
+	isMatch: (item: T) => boolean
 ): Promise<T | undefined> {
 	for await (const item of page) {
-		if (matches(item)) {
+		if (isMatch(item)) {
 			return item;
 		}
 	}
@@ -142,7 +142,7 @@ const liveConsumerSchema = z.object({
  * would write. Settings the config leaves undefined are the platform's to
  * default, so they do not count against a match.
  */
-function consumerSettled(
+function isConsumerSettled(
 	existing: {
 		readonly settings?: {
 			readonly batch_size?: number;
@@ -154,21 +154,21 @@ function consumerSettled(
 	},
 	desired: QueueConsumerSettings
 ): boolean {
-	const settled = (
+	const isSettled = (
 		want: number | undefined,
 		live: number | undefined
 	): boolean => want === undefined || want === live;
 
 	return (
-		settled(desired.maxBatchSize, existing.settings?.batch_size) &&
-		settled(
+		isSettled(desired.maxBatchSize, existing.settings?.batch_size) &&
+		isSettled(
 			desired.maxBatchTimeout === undefined
 				? undefined
 				: desired.maxBatchTimeout * 1000,
 			existing.settings?.max_wait_time_ms
 		) &&
-		settled(desired.maxRetries, existing.settings?.max_retries) &&
-		settled(desired.maxConcurrency, existing.settings?.max_concurrency) &&
+		isSettled(desired.maxRetries, existing.settings?.max_retries) &&
+		isSettled(desired.maxConcurrency, existing.settings?.max_concurrency) &&
 		(desired.deadLetterQueue === undefined ||
 			desired.deadLetterQueue === existing.dead_letter_queue)
 	);
@@ -185,7 +185,7 @@ export function createCloudflareApi(
 ): CloudflareApi {
 	const account = { account_id: accountId };
 
-	const bucketExists = async (name: string): Promise<boolean> => {
+	const hasBucket = async (name: string): Promise<boolean> => {
 		const list = await client.r2.buckets.list(account);
 
 		return (list.buckets ?? []).some((bucket) => bucket.name === name);
@@ -202,10 +202,10 @@ export function createCloudflareApi(
 			return accounts;
 		},
 
-		r2BucketExists: bucketExists,
+		r2BucketExists: hasBucket,
 
 		async ensureR2Bucket(name) {
-			if (await bucketExists(name)) {
+			if (await hasBucket(name)) {
 				return;
 			}
 
@@ -273,7 +273,8 @@ export function createCloudflareApi(
 			const rows: string[] = [];
 
 			for (const result of response.result) {
-				for (const record of result.results ?? []) {
+				const records = result.results ?? [];
+				for (const record of records) {
 					const value = (record as Record<string, unknown>).name;
 
 					if (typeof value === 'string') {
@@ -376,7 +377,7 @@ export function createCloudflareApi(
 				return;
 			}
 
-			if (consumerSettled(existing, settings)) {
+			if (isConsumerSettled(existing, settings)) {
 				return;
 			}
 

@@ -12,9 +12,9 @@ import type { ReporterMode } from '@cupboard/reporter';
  * appear here: it desaturates the terminal output (picocolors honours it) rather
  * than switching to JSON.
  */
-export function resolveReporterMode(colour?: boolean): ReporterMode {
-	if (colour !== undefined) {
-		return colour ? 'terminal' : 'json';
+export function resolveReporterMode(hasColour?: boolean): ReporterMode {
+	if (hasColour !== undefined) {
+		return hasColour ? 'terminal' : 'json';
 	}
 
 	if (

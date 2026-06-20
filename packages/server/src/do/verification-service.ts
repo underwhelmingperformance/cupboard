@@ -235,11 +235,11 @@ export class VerificationService {
 				// not abort the batch and leave the cursor parked on it forever; log it
 				// and advance, mirroring verifyPendingUploads.
 				try {
-					const narPresent =
+					const isNarPresent =
 						(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !==
 						null;
 
-					if (!narPresent) {
+					if (!isNarPresent) {
 						await this.deletionQueue.reconcileMissingNar(row, origin);
 						danglingNarInfosRemoved += 1;
 						continue;
@@ -276,10 +276,11 @@ export class VerificationService {
 
 			// A short batch means the scan reached the end; clear the cursor so the
 			// next pass starts again from the first cache's lowest hash.
-			const wrapped = rows.length < limit;
+			const hasWrapped = rows.length < limit;
 			const last = rows.at(-1);
-			const nextCache = wrapped || last === undefined ? '' : last.cache;
-			const nextHash = wrapped || last === undefined ? '' : last.storePathHash;
+			const nextCache = hasWrapped || last === undefined ? '' : last.cache;
+			const nextHash =
+				hasWrapped || last === undefined ? '' : last.storePathHash;
 			const clock = new Date();
 			const now = clock.toISOString();
 
@@ -303,7 +304,7 @@ export class VerificationService {
 				danglingNarInfosRemoved,
 				cursor: nextHash,
 				cursorCache: nextCache,
-				wrapped
+				wrapped: hasWrapped
 			} satisfies VerifyReport;
 		});
 	}

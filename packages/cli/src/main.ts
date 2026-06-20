@@ -11,10 +11,10 @@ import { translateRpcError } from './client/rpc-errors.ts';
 import { CliAbortError } from './errors.ts';
 
 const controller = new AbortController();
-let abortExitCode = 130;
+const abortState = { exitCode: 130 };
 
 function abort(exitCode: number): void {
-	abortExitCode = exitCode;
+	abortState.exitCode = exitCode;
 	controller.abort(new CliAbortError());
 }
 
@@ -39,7 +39,7 @@ try {
 	}).reporter();
 
 	reportCliFailure(reporter, failure);
-	process.exit(cliExitCode(failure, abortExitCode));
+	process.exit(cliExitCode(failure, abortState.exitCode));
 } finally {
 	process.removeListener('SIGINT', abortSigint);
 	process.removeListener('SIGTERM', abortSigterm);

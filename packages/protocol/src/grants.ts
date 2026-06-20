@@ -6,7 +6,7 @@ import {
 import { z } from 'zod';
 
 // Capability model. A token carries a set of grants as RFC 9396
-// `authorization_details`; the authoriser asks one question, `tokenCovers`,
+// `authorization_details`; the authoriser asks one question, `isCoveredByToken`,
 // against the operation a route declares and the concrete resource it acts on.
 // A trust rule stores grants whose resources are bindings (templates, captures,
 // relations) that resolve to those concrete selectors at issue time.
@@ -187,13 +187,13 @@ export const authorizationDetailsSchema = z.array(authorizationDetailSchema);
 export type AuthorizationDetails = z.infer<typeof authorizationDetailsSchema>;
 
 /** A requested root is within a granted root selector: exact, or prefix. */
-function rootWithin(requested: string, granted: string): boolean {
+function isRootWithin(requested: string, granted: string): boolean {
 	return granted.endsWith('/')
 		? requested.startsWith(granted)
 		: requested === granted;
 }
 
-function grantCovers(
+function isCoveredByGrant(
 	grant: AuthorizationDetail,
 	operation: Operation,
 	resource: ResourceRequest
@@ -214,7 +214,7 @@ function grantCovers(
 				resource.cache !== undefined &&
 				resource.cache === grant.cache &&
 				(resource.root === undefined ||
-					(grant.root !== undefined && rootWithin(resource.root, grant.root)))
+					(grant.root !== undefined && isRootWithin(resource.root, grant.root)))
 			);
 		}
 		case 'cupboard_tenant': {
@@ -234,12 +234,12 @@ function grantCovers(
  * single authorisation decision, shared by the server (after token
  * verification) and the CLI (when constructing requested grants).
  */
-export function tokenCovers(
+export function isCoveredByToken(
 	grants: readonly AuthorizationDetail[],
 	operation: Operation,
 	resource: ResourceRequest
 ): boolean {
-	return grants.some((grant) => grantCovers(grant, operation, resource));
+	return grants.some((grant) => isCoveredByGrant(grant, operation, resource));
 }
 
 // The concrete resource a requested grant acts on, read straight from its
@@ -264,7 +264,7 @@ function detailResource(detail: AuthorizationDetail): ResourceRequest {
  * refresh narrowing, so a narrowed token never reaches anything the presenter
  * could not. A requested wildcard is covered only by a presented wildcard.
  */
-export function authorizationDetailCovered(
+export function isAuthorizationDetailCovered(
 	grants: readonly AuthorizationDetail[],
 	detail: AuthorizationDetail
 ): boolean {
@@ -275,7 +275,9 @@ export function authorizationDetailCovered(
 	const resource = detailResource(detail);
 	const actions: readonly Operation[] = detail.actions;
 
-	return actions.every((operation) => tokenCovers(grants, operation, resource));
+	return actions.every((operation) =>
+		isCoveredByToken(grants, operation, resource)
+	);
 }
 
 // ── Stored trust-rule grants (resources are bindings, not concrete values) ──

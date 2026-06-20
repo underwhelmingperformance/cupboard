@@ -8,7 +8,6 @@ import {
 	authorisedFetch,
 	clearBlobStorage,
 	deleteBlobState,
-	deleteTestBase,
 	expectSingleUploadDecision,
 	initialise,
 	listRoots,
@@ -20,6 +19,7 @@ import {
 	putNarBytes,
 	resetTestServer,
 	setRoot,
+	testBase,
 	uploadMetadata
 } from '../test-support.ts';
 
@@ -31,7 +31,7 @@ import {
 describe('root activation gating', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 		await clearBlobStorage();
 	});

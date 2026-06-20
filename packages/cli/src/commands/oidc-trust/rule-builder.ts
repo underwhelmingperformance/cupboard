@@ -95,7 +95,8 @@ export function expandAllow(values: readonly string[]): {
 			throw new UnknownAllowError(value);
 		}
 
-		for (const action of allowExpansions[value as AllowShorthand]) {
+		const actions = allowExpansions[value as AllowShorthand];
+		for (const action of actions) {
 			(value === 'root' ? rootActions : cacheActions).add(action);
 		}
 	}
@@ -198,14 +199,14 @@ export interface CacheGrantOptions {
 export function buildCacheGrant(options: CacheGrantOptions): PermittedGrant {
 	const { cacheActions, rootActions } = expandAllow(options.allow);
 	const substitutions = options.substitutions ?? {};
-	const wantsRoot = rootActions.length > 0 || options.root !== undefined;
+	const hasRoot = rootActions.length > 0 || options.root !== undefined;
 
 	return permittedGrantSchema.parse({
 		type: 'cupboard_cache',
 		actions: [...cacheActions, ...rootActions],
 		resources: {
 			cache: cacheBinding(options, substitutions),
-			...(wantsRoot && { root: rootBinding(options, substitutions) })
+			...(hasRoot && { root: rootBinding(options, substitutions) })
 		}
 	});
 }

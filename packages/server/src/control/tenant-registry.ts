@@ -67,14 +67,14 @@ async function sameConfig(
 	row: TenantRow,
 	body: ParsedTenantCreateBody
 ): Promise<boolean> {
-	const readMatches = await sameReadVerifier(row, body.read);
+	const isReadMatching = await sameReadVerifier(row, body.read);
 
 	return (
 		row.readMode === body.readMode &&
 		row.ownerIssuer === body.ownerIssuer &&
 		row.ownerSubject === body.ownerSubject &&
 		row.ownerAudience === body.ownerAudience &&
-		readMatches
+		isReadMatching
 	);
 }
 

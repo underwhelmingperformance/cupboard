@@ -175,7 +175,7 @@ export function isNotModified(request: Request, headers: Headers): boolean {
 	// RFC 7232: when If-None-Match is present it alone decides the result;
 	// If-Modified-Since is only consulted in its absence.
 	if (ifNoneMatch !== null) {
-		return ifNoneMatchSatisfied(ifNoneMatch, headers.get('etag'));
+		return isIfNoneMatchSatisfied(ifNoneMatch, headers.get('etag'));
 	}
 
 	const lastModified = headers.get('last-modified');
@@ -188,7 +188,7 @@ export function isNotModified(request: Request, headers: Headers): boolean {
 	return Date.parse(ifModifiedSince) >= Date.parse(lastModified);
 }
 
-function ifNoneMatchSatisfied(
+function isIfNoneMatchSatisfied(
 	ifNoneMatch: string,
 	etag: string | null
 ): boolean {

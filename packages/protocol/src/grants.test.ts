@@ -2,12 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	type AuthorizationDetail,
-	authorizationDetailCovered,
 	authorizationDetailSchema,
+	isAuthorizationDetailCovered,
+	isCoveredByToken,
 	type Operation,
 	permittedGrantSchema,
-	type ResourceRequest,
-	tokenCovers
+	type ResourceRequest
 } from './grants.ts';
 
 // Fixtures are parsed through the schema so the branded cache/root/tenant
@@ -44,7 +44,7 @@ const controlGrant = authorizationDetailSchema.parse({
 
 const wildcard = authorizationDetailSchema.parse({ type: 'cupboard_wildcard' });
 
-describe('tokenCovers', () => {
+describe('isCoveredByToken', () => {
 	it.each<[string, AuthorizationDetail[], Operation, ResourceRequest, boolean]>(
 		[
 			[
@@ -163,11 +163,11 @@ describe('tokenCovers', () => {
 			['no grants covers nothing', [], 'upload:commit', { cache: 'x' }, false]
 		]
 	)('%s', (_name, grants, operation, resource, expected) => {
-		expect(tokenCovers(grants, operation, resource)).toBe(expected);
+		expect(isCoveredByToken(grants, operation, resource)).toBe(expected);
 	});
 });
 
-describe('authorizationDetailCovered', () => {
+describe('isAuthorizationDetailCovered', () => {
 	const wildcardOnly = [wildcard];
 	const cacheOnly = [cacheGrant];
 
@@ -211,7 +211,7 @@ describe('authorizationDetailCovered', () => {
 		],
 		['a presented wildcard covers any detail', wildcardOnly, cacheGrant, true]
 	])('%s', (_name, presented, requested, expected) => {
-		expect(authorizationDetailCovered(presented, requested)).toBe(expected);
+		expect(isAuthorizationDetailCovered(presented, requested)).toBe(expected);
 	});
 });
 

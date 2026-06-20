@@ -80,7 +80,7 @@ export function settleCommitSocket(
 	options: CommitSettleOptions
 ): Promise<CommitResponse> {
 	return new Promise<CommitResponse>((resolve, reject) => {
-		let done = false;
+		let isDone = false;
 		let deferred: undefined | { storePathHash: string; narHash: string };
 		let keepalive: NodeJS.Timeout | undefined;
 		let deadline: NodeJS.Timeout | undefined;
@@ -92,11 +92,11 @@ export function settleCommitSocket(
 		};
 
 		const finish = (settle: () => void): void => {
-			if (done) {
+			if (isDone) {
 				return;
 			}
 
-			done = true;
+			isDone = true;
 			clearInterval(keepalive);
 			clearTimeout(deadline);
 			options.signal?.removeEventListener('abort', onAbort);

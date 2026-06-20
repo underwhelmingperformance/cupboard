@@ -166,11 +166,11 @@ export async function removeControlTrust(
 		.where(eq(d1Schema.controlTrust.id, id))
 		.get();
 
-	// Soft-disable so the audit row survives; `removed` reports whether this call
-	// is what disabled an enabled rule.
-	const removed = existing?.disabledAt === null;
+	// Soft-disable so the audit row survives; `wasRemoved` reports whether this
+	// call is what disabled an enabled rule.
+	const wasRemoved = existing?.disabledAt === null;
 
-	if (removed) {
+	if (wasRemoved) {
 		await database
 			.update(d1Schema.controlTrust)
 			.set({ disabledAt: now })
@@ -178,5 +178,5 @@ export async function removeControlTrust(
 			.run();
 	}
 
-	return { id, removed };
+	return { id, removed: wasRemoved };
 }

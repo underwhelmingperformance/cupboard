@@ -87,9 +87,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
-		const read = context.req.method === 'GET' || context.req.method === 'HEAD';
+		const isRead =
+			context.req.method === 'GET' || context.req.method === 'HEAD';
 
-		if (read && entry.status !== 'active') {
+		if (isRead && entry.status !== 'active') {
 			return notFoundResponse();
 		}
 
@@ -99,7 +100,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 		// A read may carry a `/cache/<name>/` prefix selecting a named cache; the
 		// bare root is the default cache. An unrecognised prefix is a 404.
-		if (read) {
+		if (isRead) {
 			const scope = cacheScope(route.rest);
 
 			if (scope === undefined) {

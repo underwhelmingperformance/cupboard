@@ -41,7 +41,6 @@ import {
 	currentServer,
 	defaultCacheStatsPath,
 	deletePath,
-	deleteTestBase,
 	expectConditionalNotModified,
 	expectDateConditionalNotModified,
 	expectNarResponse,
@@ -79,6 +78,7 @@ import {
 	runGcResult,
 	seedReservedNarInfo,
 	setRoot,
+	testBase,
 	uploadBlobMetadata,
 	uploadMetadata,
 	uploadPathNegotiation,
@@ -2289,7 +2289,7 @@ describe('upload flow', () => {
 	});
 
 	it('deletes a store path and defers the NAR deletion past the grace', async () => {
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2333,7 +2333,7 @@ describe('upload flow', () => {
 	});
 
 	it('retains a NAR still referenced by another store path', async () => {
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 
 		const token = await initialise();
 		const first = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2385,7 +2385,7 @@ describe('upload flow', () => {
 	});
 
 	it('does not collect an armed NAR before its grace elapses', async () => {
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2396,7 +2396,7 @@ describe('upload flow', () => {
 		await runBlobReaper(env);
 
 		// A later reaper pass before the grace elapses must not collect it.
-		vi.setSystemTime(new Date(deleteTestBase.getTime() + 16 * 60 * 1000));
+		vi.setSystemTime(new Date(testBase.getTime() + 16 * 60 * 1000));
 		await runBlobReaper(env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
@@ -2434,7 +2434,7 @@ describe('upload flow', () => {
 	});
 
 	it('recovers an interrupted narinfo deletion through GC', async () => {
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2494,7 +2494,7 @@ describe('upload flow', () => {
 	});
 
 	it('retains a re-pushed path left dangling by an interrupted deletion', async () => {
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2539,7 +2539,7 @@ describe('upload flow', () => {
 		const absentPath = '/nix/store/22222222222222222222222222222222-absent';
 
 		it('creates a root with TTL expiry over a servable target', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2550,14 +2550,14 @@ describe('upload flow', () => {
 				targets: [committed.storePath],
 				ttlSeconds: 604_800
 			});
-			const expiresAt = new Date(deleteTestBase.getTime() + 604_800 * 1000);
+			const expiresAt = new Date(testBase.getTime() + 604_800 * 1000);
 
 			expect(summary).toStrictEqual({
 				name: 'github:owner/repo/main',
 				expiresAt: expiresAt.toISOString(),
 				expired: false,
-				createdAt: deleteTestBase.toISOString(),
-				updatedAt: deleteTestBase.toISOString(),
+				createdAt: testBase.toISOString(),
+				updatedAt: testBase.toISOString(),
 				targets: [
 					{
 						storePathHash: committed.storePathHash,
@@ -2569,7 +2569,7 @@ describe('upload flow', () => {
 		});
 
 		it('refuses to activate a root with an unservable target, leaving any existing root intact', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2599,7 +2599,7 @@ describe('upload flow', () => {
 		});
 
 		it('replaces the target set wholesale and resets the expiry', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const first = await commitVerifiablePath(token, 'replace-a', {
@@ -2617,7 +2617,7 @@ describe('upload flow', () => {
 				ttlSeconds: 604_800
 			});
 
-			const later = new Date(deleteTestBase.getTime() + 3600 * 1000);
+			const later = new Date(testBase.getTime() + 3600 * 1000);
 			vi.setSystemTime(later);
 			const summary = await setRoot(await initialise(), {
 				name: 'pr-1',
@@ -2627,7 +2627,7 @@ describe('upload flow', () => {
 			expect(summary).toStrictEqual({
 				name: 'pr-1',
 				expired: false,
-				createdAt: deleteTestBase.toISOString(),
+				createdAt: testBase.toISOString(),
 				updatedAt: later.toISOString(),
 				targets: [
 					{
@@ -2663,7 +2663,7 @@ describe('upload flow', () => {
 		});
 
 		it('lists roots sorted by name and flags expired ones', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const committed = uploadMetadata({
@@ -2676,9 +2676,9 @@ describe('upload flow', () => {
 			await setRoot(token, { name: 'pr-9', targets: [path], ttlSeconds: 60 });
 			await setRoot(token, { name: 'main', targets: [path] });
 
-			vi.setSystemTime(new Date(deleteTestBase.getTime() + 120 * 1000));
+			vi.setSystemTime(new Date(testBase.getTime() + 120 * 1000));
 			const { roots } = await listRoots(token);
-			const pr9ExpiresAt = new Date(deleteTestBase.getTime() + 60_000);
+			const pr9ExpiresAt = new Date(testBase.getTime() + 60_000);
 
 			expect(
 				roots.map((root) => ({
@@ -2755,7 +2755,7 @@ describe('upload flow', () => {
 		const hashC = storePathHashSchema.parse('33333333333333333333333333333333');
 
 		it('sweeps unreachable paths and keeps the rooted closure', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const a = await commitVerifiablePath(token, 'a', {
@@ -2796,7 +2796,7 @@ describe('upload flow', () => {
 		});
 
 		it('keeps a transitively-referenced closure a -> b -> c', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 			const hashD = storePathHashSchema.parse(
 				'44444444444444444444444444444444'
 			);
@@ -2844,7 +2844,7 @@ describe('upload flow', () => {
 		});
 
 		it('keeps a cyclic closure a <-> b and still terminates', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 			const hashD = storePathHashSchema.parse(
 				'44444444444444444444444444444444'
 			);
@@ -2933,7 +2933,7 @@ describe('upload flow', () => {
 		});
 
 		it('sweeps a path freed by an expired root while a live root remains', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const a = await commitVerifiablePath(token, 'a', {
@@ -2953,7 +2953,7 @@ describe('upload flow', () => {
 				ttlSeconds: 60
 			});
 
-			vi.setSystemTime(new Date(deleteTestBase.getTime() + 120_000));
+			vi.setSystemTime(new Date(testBase.getTime() + 120_000));
 
 			expect(await runGcResult()).toStrictEqual({
 				ok: true,
@@ -2976,7 +2976,7 @@ describe('upload flow', () => {
 		});
 
 		it('sweeps a path freed by the last expired root', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const b = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -2987,7 +2987,7 @@ describe('upload flow', () => {
 				ttlSeconds: 60
 			});
 
-			vi.setSystemTime(new Date(deleteTestBase.getTime() + 120_000));
+			vi.setSystemTime(new Date(testBase.getTime() + 120_000));
 
 			expect(await runGcResult()).toStrictEqual({
 				ok: true,
@@ -3007,7 +3007,7 @@ describe('upload flow', () => {
 		});
 
 		it('keeps a NAR shared with a retained path', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const a = uploadMetadata({
@@ -3049,7 +3049,7 @@ describe('upload flow', () => {
 		});
 
 		it('defers a swept path NAR until the grace elapses', async () => {
-			vi.setSystemTime(deleteTestBase);
+			vi.setSystemTime(testBase);
 
 			const token = await initialise();
 			const a = uploadMetadata({
@@ -3107,7 +3107,7 @@ describe('upload flow', () => {
 				uploadMetadata({ fileSize: narBytes.byteLength, name: 'a' })
 			);
 			const stats = await authorisedFetch(defaultCacheStatsPath, token);
-			const setRootResponse = await authorisedFetch(
+			const rootResponse = await authorisedFetch(
 				'/cache/_default/roots/main',
 				token,
 				{
@@ -3119,7 +3119,7 @@ describe('upload flow', () => {
 				}
 			);
 
-			expect([stats.status, setRootResponse.status]).toStrictEqual([
+			expect([stats.status, rootResponse.status]).toStrictEqual([
 				StatusCodes.OK,
 				StatusCodes.OK
 			]);
@@ -3138,7 +3138,7 @@ describe('upload flow', () => {
 				'ci'
 			);
 
-			const setRoot = await authorisedFetch(
+			const rootResponse = await authorisedFetch(
 				'/cache/_default/roots/main',
 				writeToken,
 				{
@@ -3156,7 +3156,7 @@ describe('upload flow', () => {
 			const gc = await authorisedFetch('/gc', writeToken, { method: 'POST' });
 
 			expect({
-				setRoot: setRoot.status,
+				setRoot: rootResponse.status,
 				stats: stats.status,
 				deletePath: removed.status,
 				gc: gc.status

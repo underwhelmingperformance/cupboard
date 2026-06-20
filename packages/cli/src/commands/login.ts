@@ -174,7 +174,7 @@ export function registerLoginCommand(
 			// cupboard's own client has exact-match registered redirect URLs, so
 			// the loopback server must bind one of them; any other client keeps
 			// the ephemeral-port default.
-			const usesCupboardClient = options.clientId === cloudflareOauthClientId;
+			const isCupboardClient = options.clientId === cloudflareOauthClientId;
 			const scope = loginScopeForClient(options.clientId);
 
 			const browserPrompt = (target: string): void => {
@@ -189,7 +189,7 @@ export function registerLoginCommand(
 				// cached grant: silent while a cached login can be renewed, the
 				// browser only as a last resort.
 				if (
-					usesCupboardClient &&
+					isCupboardClient &&
 					options.oidcIssuer === cloudflareDashIssuer &&
 					options.headless !== true
 				) {
@@ -235,7 +235,7 @@ export function registerLoginCommand(
 					clientId: options.clientId,
 					scope,
 					openBrowser: browserPrompt,
-					loopback: usesCupboardClient ? cloudflareLoopback : undefined,
+					loopback: isCupboardClient ? cloudflareLoopback : undefined,
 					signal: programOptions.signal
 				});
 			})();

@@ -102,12 +102,12 @@ export class UploadsService {
 				const object = await this.context.env.BLOBS.head(
 					narObjectKey(existingNarInfo.narHash)
 				);
-				const committed = await this.narInfoObjects.hasCommittedReference(
+				const isCommitted = await this.narInfoObjects.hasCommittedReference(
 					cache,
 					existingNarInfo
 				);
 
-				if (object !== null && committed) {
+				if (object !== null && isCommitted) {
 					await this.narInfoObjects.ensureNarInfoObject(
 						cache,
 						existingNarInfo.storePathHash
@@ -120,7 +120,7 @@ export class UploadsService {
 					continue;
 				}
 
-				if (committed) {
+				if (isCommitted) {
 					await this.deletionQueue.removeStaleNarInfo(existingNarInfo, origin);
 				}
 			}

@@ -575,14 +575,14 @@ async function verifyNarInfoSignature(
 		);
 
 		for (const signature of narInfo.sigs) {
-			const verified = await crypto.subtle.verify(
+			const isVerified = await crypto.subtle.verify(
 				'Ed25519',
 				imported,
 				toArrayBuffer(parseNamedBytes(signature).bytes),
 				fingerprint
 			);
 
-			if (verified) {
+			if (isVerified) {
 				return true;
 			}
 		}
