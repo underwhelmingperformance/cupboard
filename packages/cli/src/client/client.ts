@@ -52,17 +52,6 @@ export interface CupboardBlobUpload {
 }
 
 export class CupboardClient {
-	constructor(
-		public readonly baseUrl: URL,
-		public readonly fetcher: typeof fetch = fetch,
-		// Prepended to path-scoped routes for a named cache (e.g. `/cache/builds`);
-		// empty for the default cache. Not baked into `baseUrl`, so resolving an
-		// absolute path against the base never discards it.
-		public readonly cachePrefix = '',
-		public readonly signal?: AbortSignal,
-		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
-	) {}
-
 	static fromUrl(
 		value: string,
 		options: string | CupboardClientOptions = DEFAULT_CACHE
@@ -76,6 +65,17 @@ export class CupboardClient {
 			resolved.signal
 		);
 	}
+
+	constructor(
+		public readonly baseUrl: URL,
+		public readonly fetcher: typeof fetch = fetch,
+		// Prepended to path-scoped routes for a named cache (e.g. `/cache/builds`);
+		// empty for the default cache. Not baked into `baseUrl`, so resolving an
+		// absolute path against the base never discards it.
+		public readonly cachePrefix = '',
+		public readonly signal?: AbortSignal,
+		private readonly connectSocket: CommitSocketConnect = connectCommitSocket
+	) {}
 
 	private async fetchText(path: string): Promise<string> {
 		throwIfAborted(this.signal);

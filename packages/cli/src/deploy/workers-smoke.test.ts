@@ -2,7 +2,7 @@ import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
+import { buildArtifactFromTree } from './artifact.ts';
 import { createEsbuildBundler } from './bundle.ts';
 import { findCheckoutRoot } from './source.ts';
 
@@ -10,15 +10,25 @@ import { findCheckoutRoot } from './source.ts';
 // proof that the esbuild config produces deployable bytes: the heavy server
 // dependencies (the AWS SDK under `nodejs_compat`, the Durable Object's inlined
 // `.sql` migrations) must survive bundling and run.
-let miniflare: Miniflare;
-let artifact: DeploymentArtifact;
+const state: { miniflare?: Miniflare } = {};
+
+function activeMiniflare(): Miniflare {
+	if (state.miniflare === undefined) {
+		throw new Error('Miniflare was not started.');
+	}
+
+	return state.miniflare;
+}
 
 beforeAll(async () => {
 	const checkoutRoot = z.string().parse(findCheckoutRoot(process.cwd()));
 
-	artifact = await buildArtifactFromTree(checkoutRoot, createEsbuildBundler());
+	const artifact = await buildArtifactFromTree(
+		checkoutRoot,
+		createEsbuildBundler()
+	);
 
-	miniflare = new Miniflare({
+	state.miniflare = new Miniflare({
 		workers: [
 			{
 				name: 'cupboard',
@@ -54,13 +64,13 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-	await miniflare.dispose();
+	await state.miniflare?.dispose();
 });
 
 it('bundles both Workers into bytes workerd can serve', async () => {
 	// The first dispatch boots workerd with both bundled Workers and the
 	// Durable Object, which can run past the default 5s under load.
-	const response = await miniflare.dispatchFetch(
+	const response = await activeMiniflare().dispatchFetch(
 		'https://cupboard.store/_health'
 	);
 

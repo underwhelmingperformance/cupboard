@@ -22,14 +22,14 @@ export function zstdDecompressionStream(): ByteTransformPair {
 
 function zstdTransformStream(
 	createTransform: ZstdFactory,
-	tagDecodeErrors = false
+	shouldTagDecodeErrors = false
 ): ByteTransformPair {
 	const zstd = createTransform();
 	const queue: Uint8Array[] = [];
 	let controller: ReadableStreamDefaultController<Uint8Array> | undefined;
-	let closed = false;
+	let isClosed = false;
 	let failed: unknown;
-	let destroyedExternally = false;
+	let wasDestroyedExternally = false;
 
 	const readable = new ReadableStream<Uint8Array>({
 		start(readableController) {
@@ -39,7 +39,7 @@ function zstdTransformStream(
 				drain();
 			});
 			zstd.once('end', () => {
-				closed = true;
+				isClosed = true;
 				drain();
 			});
 			zstd.once('error', (error) => {
@@ -48,7 +48,7 @@ function zstdTransformStream(
 				// through destroyZstd carrying the source's own error, which must stay
 				// untagged so the caller can treat it as a transient read fault.
 				failed =
-					tagDecodeErrors && !destroyedExternally
+					shouldTagDecodeErrors && !wasDestroyedExternally
 						? new ZstdDecodeError({ cause: error })
 						: error;
 				drain();
@@ -58,7 +58,7 @@ function zstdTransformStream(
 			drain();
 		},
 		cancel(reason) {
-			destroyedExternally = true;
+			wasDestroyedExternally = true;
 			destroyZstd(zstd, reason);
 		}
 	});
@@ -69,7 +69,7 @@ function zstdTransformStream(
 			zstd.end();
 		},
 		abort(reason) {
-			destroyedExternally = true;
+			wasDestroyedExternally = true;
 			destroyZstd(zstd, reason);
 		}
 	});
@@ -102,7 +102,7 @@ function zstdTransformStream(
 			zstd.resume();
 		}
 
-		if (closed && queue.length === 0) {
+		if (isClosed && queue.length === 0) {
 			controller.close();
 		}
 	}
@@ -112,36 +112,36 @@ function zstdTransformStream(
 
 function writeChunk(stream: Transform, chunk: Uint8Array): Promise<void> {
 	return new Promise((resolve, reject) => {
-		let written = false;
-		let ready = false;
+		let wasWritten = false;
+		let isReady = false;
 
 		// Resolve only once the write has completed AND the transform can take
 		// more. Waiting for the callback means a late write error is still
 		// reported; waiting for `drain` when the buffer is full honours write-side
 		// backpressure.
 		const settle = (): void => {
-			if (written && ready) {
+			if (wasWritten && isReady) {
 				resolve();
 			}
 		};
 
-		ready = stream.write(chunk, (error?: Error | null) => {
+		isReady = stream.write(chunk, (error?: Error | null) => {
 			if (error !== undefined && error !== null) {
 				reject(error);
 				return;
 			}
 
-			written = true;
+			wasWritten = true;
 			settle();
 		});
 
-		if (ready) {
+		if (isReady) {
 			settle();
 			return;
 		}
 
 		stream.once('drain', () => {
-			ready = true;
+			isReady = true;
 			settle();
 		});
 	});

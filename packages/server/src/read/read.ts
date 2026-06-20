@@ -211,7 +211,7 @@ async function serveR2(
 	key: string,
 	cacheKey: string,
 	headersFor: (object: R2Object) => Headers,
-	usePublicCache: boolean,
+	isPublicCache: boolean,
 	authorize?: () => Promise<boolean>
 ): Promise<Response> {
 	if (request.method === 'HEAD') {
@@ -225,7 +225,7 @@ async function serveR2(
 			return notFoundResponse();
 		}
 
-		const headers = privatise(headersFor(object), usePublicCache);
+		const headers = privatise(headersFor(object), isPublicCache);
 
 		return isNotModified(request, headers)
 			? notModified(headers)
@@ -234,7 +234,7 @@ async function serveR2(
 
 	const cache = caches.default;
 
-	if (usePublicCache) {
+	if (isPublicCache) {
 		const cached = await cache.match(cacheKey);
 
 		if (cached !== undefined) {
@@ -254,7 +254,7 @@ async function serveR2(
 		return notFoundResponse();
 	}
 
-	const headers = privatise(headersFor(object), usePublicCache);
+	const headers = privatise(headersFor(object), isPublicCache);
 
 	if (isNotModified(request, headers)) {
 		return notModified(headers);
@@ -262,7 +262,7 @@ async function serveR2(
 
 	const response = new Response(object.body, { headers });
 
-	if (usePublicCache) {
+	if (isPublicCache) {
 		ctx.waitUntil(cache.put(cacheKey, response.clone()));
 	}
 
@@ -272,8 +272,8 @@ async function serveR2(
 // In private mode the response body is served only after Basic auth, so it must
 // not be retained by any shared or intermediary cache: force `no-store`,
 // overriding the public read headers.
-function privatise(headers: Headers, usePublicCache: boolean): Headers {
-	if (!usePublicCache) {
+function privatise(headers: Headers, isPublicCache: boolean): Headers {
+	if (!isPublicCache) {
 		headers.set('cache-control', 'no-store');
 	}
 

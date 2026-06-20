@@ -1,9 +1,9 @@
 import { cacheSelectorSchema, selectorForCache } from '@cupboard/nix/scalars';
 import { type AuthzMeta, type ResourceSpec } from '@cupboard/protocol/contract';
 import {
+	isCoveredByToken,
 	type Operation,
-	type ResourceRequest,
-	tokenCovers
+	type ResourceRequest
 } from '@cupboard/protocol/grants';
 
 import { type AccessClaims } from '../auth/auth.ts';
@@ -93,7 +93,7 @@ async function resolveResource(
 // which one. The fallback for a benign read whose pending row has settled away:
 // the holder of the operation may still poll it, but a token that never held it
 // cannot.
-function holdsOperation(
+function hasOperation(
 	grants: AccessClaims['grants'],
 	operation: Operation
 ): boolean {
@@ -128,7 +128,7 @@ export async function authoriseRequest(
 	if (pendingMissing !== false) {
 		if (
 			pendingMissing.missingDenies ||
-			!holdsOperation(claims.grants, meta.requires)
+			!hasOperation(claims.grants, meta.requires)
 		) {
 			throw new InsufficientScopeError();
 		}
@@ -136,7 +136,7 @@ export async function authoriseRequest(
 		return;
 	}
 
-	if (!tokenCovers(claims.grants, meta.requires, resource)) {
+	if (!isCoveredByToken(claims.grants, meta.requires, resource)) {
 		throw new InsufficientScopeError();
 	}
 }

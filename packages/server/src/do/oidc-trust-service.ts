@@ -145,9 +145,9 @@ export class OidcTrustService {
 
 		// Soft-disable so the audit row survives; `removed` reports whether this
 		// call is what disabled an enabled rule.
-		const removed = existing !== undefined && !existing.disabledAt;
+		const wasRemoved = existing !== undefined && !existing.disabledAt;
 
-		if (removed) {
+		if (wasRemoved) {
 			const now = new Date();
 			const disabledAt = now.toISOString();
 
@@ -158,7 +158,7 @@ export class OidcTrustService {
 				.run();
 		}
 
-		return { id, removed };
+		return { id, removed: wasRemoved };
 	}
 
 	decodeInbound(token: string): OidcClaims {

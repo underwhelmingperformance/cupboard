@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import { type OidcClaims } from '../oidc/oidc-trust.ts';
 
-import { rulePermitsGrant } from './bindings.ts';
+import { isGrantPermittedByRule } from './bindings.ts';
 
 function grant(value: unknown): PermittedGrant {
 	return permittedGrantSchema.parse(value);
@@ -56,7 +56,7 @@ const prClaims: OidcClaims = {
 	ref: 'refs/pull/123/merge'
 };
 
-describe('rulePermitsGrant', () => {
+describe('isGrantPermittedByRule', () => {
 	it.each([
 		{
 			name: 'a wildcard permits any cache request',
@@ -195,7 +195,7 @@ describe('rulePermitsGrant', () => {
 			expected: false
 		}
 	])('$name', ({ permitted, requested, claims, expected }) => {
-		expect(rulePermitsGrant(permitted, request(requested), claims)).toBe(
+		expect(isGrantPermittedByRule(permitted, request(requested), claims)).toBe(
 			expected
 		);
 	});
@@ -217,7 +217,7 @@ describe('rulePermitsGrant', () => {
 		});
 
 		expect(
-			rulePermitsGrant(
+			isGrantPermittedByRule(
 				[verbatimGrant],
 				request({
 					type: 'cupboard_cache',

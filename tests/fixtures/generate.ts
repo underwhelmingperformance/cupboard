@@ -22,13 +22,13 @@ await withTemporaryDirectory(
 	'cupboard-fixtures-',
 	async (directory) => {
 		const storeRoot = path.join(directory, 'store');
-		const addResult = await runCommand('nix-store', [
+		const additionResult = await runCommand('nix-store', [
 			'--store',
 			`local?root=${storeRoot}`,
 			'--add',
 			sourceDirectory
 		]);
-		const storePath = addResult.stdout.trim();
+		const storePath = additionResult.stdout.trim();
 
 		if (!storePathPattern.test(storePath)) {
 			throw new InvalidStorePathError(storePath);

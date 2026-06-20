@@ -500,10 +500,12 @@ async function drainTenant(
 	rounds: number
 ): Promise<void> {
 	for (let round = 0; round < rounds; round += 1) {
-		const { drained } = await tenantServer(env, id).runOffboard(drainLimit);
-		const objectsRemain = await deleteTenantObjects(env, id, drainLimit);
+		const { drained: isDrained } = await tenantServer(env, id).runOffboard(
+			drainLimit
+		);
+		const hasRemainingObjects = await deleteTenantObjects(env, id, drainLimit);
 
-		if (drained && !objectsRemain) {
+		if (isDrained && !hasRemainingObjects) {
 			await finaliseTenant(env, id);
 			return;
 		}

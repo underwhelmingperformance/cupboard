@@ -22,9 +22,9 @@ import {
 	verifiablePath
 } from '../test-support.ts';
 
-async function runCheck(token: string, deep = false): Promise<CheckReport> {
+async function runCheck(token: string, isDeep = false): Promise<CheckReport> {
 	const response = await authorisedFetch(
-		deep ? '/check?deep=true' : '/check',
+		isDeep ? '/check?deep=true' : '/check',
 		token
 	);
 

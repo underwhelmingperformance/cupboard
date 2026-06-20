@@ -84,12 +84,6 @@ export function resolveRootTargets(
 }
 
 export class StorePath {
-	constructor(public readonly value: string) {
-		if (!value.startsWith('/nix/store/')) {
-			throw new InvalidStorePathError(value);
-		}
-	}
-
 	static basename(value: string): StorePathBasename {
 		const storePath = new StorePath(value);
 		return storePath.basename;
@@ -106,6 +100,12 @@ export class StorePath {
 		return references
 			.map((reference) => this.basename(reference))
 			.toSorted(byCodeUnit);
+	}
+
+	constructor(public readonly value: string) {
+		if (!value.startsWith('/nix/store/')) {
+			throw new InvalidStorePathError(value);
+		}
 	}
 
 	get basename(): StorePathBasename {

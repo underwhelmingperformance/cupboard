@@ -30,8 +30,6 @@ export function isAllowedIssuerUrl(value: string): boolean {
  * (OpenID Connect Discovery §4.3) is slash-insensitive.
  */
 export class IssuerUrl {
-	private constructor(readonly value: string) {}
-
 	static parse(raw: string): IssuerUrl | undefined {
 		if (!isAllowedIssuerUrl(raw)) {
 			return undefined;
@@ -56,6 +54,8 @@ export class IssuerUrl {
 		// since OpenID Connect compares the issuer as a case-sensitive string.
 		return new IssuerUrl(raw.endsWith('/') ? raw.slice(0, -1) : raw);
 	}
+
+	private constructor(readonly value: string) {}
 
 	get discoveryUrl(): string {
 		return `${this.value}/.well-known/openid-configuration`;

@@ -4,7 +4,7 @@ import {
 } from '@cupboard/nix/scalars';
 import { z } from 'zod';
 
-import { deletePathResponseSchema } from '../upload.ts';
+import { pathDeletionResponseSchema } from '../upload.ts';
 
 import { baseProcedure } from './base.ts';
 
@@ -22,5 +22,5 @@ export const pathsContract = {
 				hash: storePathHashSchema
 			})
 		)
-		.output(deletePathResponseSchema)
+		.output(pathDeletionResponseSchema)
 };

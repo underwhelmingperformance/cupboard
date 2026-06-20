@@ -72,11 +72,13 @@ export class GarbageCollectionService {
 		const retainedCommitted = new Set<string>();
 		const queue: StorePathHash[] = [];
 
-		for (const target of this.context.db
+		const rootTargets = this.context.db
 			.select({ storePathHash: schema.retentionRootTargets.storePathHash })
 			.from(schema.retentionRootTargets)
 			.where(eq(schema.retentionRootTargets.cache, cache))
-			.all()) {
+			.all();
+
+		for (const target of rootTargets) {
 			if (!visited.has(target.storePathHash)) {
 				visited.add(target.storePathHash);
 				queue.push(storePathHashSchema.parse(target.storePathHash));
@@ -134,14 +136,16 @@ export class GarbageCollectionService {
 			eq(schema.pendingUploads.verdict, 'pending')
 		);
 
-		for (const upload of this.context.db
+		const reservedUploads = this.context.db
 			.select({
 				id: schema.pendingUploads.id,
 				metadataJson: schema.pendingUploads.metadataJson
 			})
 			.from(schema.pendingUploads)
 			.where(and(eq(schema.pendingUploads.cache, cache), reservedVerdict))
-			.all()) {
+			.all();
+
+		for (const upload of reservedUploads) {
 			try {
 				inFlight.add(
 					parseStoredUploadMetadata(upload.id, upload.metadataJson)

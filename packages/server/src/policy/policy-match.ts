@@ -11,7 +11,7 @@ interface RootTarget {
 	readonly name: string;
 }
 
-function matches(policy: RetentionPolicy, root: RootTarget): boolean {
+function isMatch(policy: RetentionPolicy, root: RootTarget): boolean {
 	return policy.scope === 'cache'
 		? policy.pattern === root.cache
 		: root.name.startsWith(policy.pattern);
@@ -33,7 +33,7 @@ export function mostSpecificPolicy(
 	root: RootTarget
 ): RetentionPolicy | undefined {
 	return policies
-		.filter((policy) => matches(policy, root))
+		.filter((policy) => isMatch(policy, root))
 		.toSorted((left, right) => specificity(right) - specificity(left))
 		.at(0);
 }

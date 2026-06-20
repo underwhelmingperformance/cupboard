@@ -148,12 +148,12 @@ function bucketNameOf(config: DeploymentConfig): string {
 }
 
 async function resolveArtifact(
-	fromTree: boolean
+	isFromTree: boolean
 ): Promise<{ artifact: DeploymentArtifact; notice: string | undefined }> {
 	const plan = planWorkerSource({
 		isSea: isSea(),
 		cwd: process.cwd(),
-		fromTree,
+		fromTree: isFromTree,
 		fileExists: existsSync
 	});
 
@@ -180,9 +180,9 @@ async function resolveArtifact(
 export async function chooseDeployAccount(
 	ui: DeployUi,
 	accounts: readonly { id: string; name: string }[],
-	interactive: boolean
+	isInteractive: boolean
 ): Promise<string> {
-	if (!interactive) {
+	if (!isInteractive) {
 		throw new AccountOptionRequiredError(accounts);
 	}
 
@@ -635,7 +635,7 @@ async function r2KeyCreationFor(options: {
 		return { kind: 'unavailable' };
 	}
 
-	const bucketExists = await ui
+	const hasBucket = await ui
 		.reporter()
 		.phase(`Checking R2 bucket ${bucketName}`, () =>
 			api.r2BucketExists(bucketName)
@@ -643,9 +643,9 @@ async function r2KeyCreationFor(options: {
 
 	return {
 		kind: 'available',
-		bucketExists,
+		bucketExists: hasBucket,
 		create: async () => {
-			if (!bucketExists) {
+			if (!hasBucket) {
 				await ui
 					.reporter()
 					.phase(`Creating R2 bucket ${bucketName}`, () =>
@@ -778,10 +778,10 @@ export async function executeDeploy(
 	throwIfAborted(runtimeOptions.signal);
 
 	const ui = createDeployUi(runtimeOptions.signal);
-	const interactive = ui.interactive;
+	const isInteractive = ui.interactive;
 
 	try {
-		await deployFlow(cliOptions, ui, interactive, runtimeOptions);
+		await deployFlow(cliOptions, ui, isInteractive, runtimeOptions);
 	} catch (error) {
 		if (!(error instanceof APIError)) {
 			throw error;
@@ -805,7 +805,7 @@ export async function executeDeploy(
 async function deployFlow(
 	cliOptions: DeployCliOptions,
 	ui: DeployUi,
-	interactive: boolean,
+	isInteractive: boolean,
 	runtimeOptions: DeployRuntimeOptions
 ): Promise<void> {
 	throwIfAborted(runtimeOptions.signal);
@@ -865,7 +865,7 @@ async function deployFlow(
 		return;
 	}
 
-	if (!interactive && cliOptions.yes !== true) {
+	if (!isInteractive && cliOptions.yes !== true) {
 		throw new ConfirmationRequiredError();
 	}
 
@@ -880,13 +880,13 @@ async function deployFlow(
 		({ client, api, accountId, credentialSource, subject, idToken } =
 			await resolveCloudflare(
 				cliOptions.account,
-				(accounts) => chooseDeployAccount(ui, accounts, interactive),
+				(accounts) => chooseDeployAccount(ui, accounts, isInteractive),
 				defaultCredentialChain({
 					openBrowser: (url) => {
 						ui.openBrowser(url);
 					},
 					wrangler: cliOptions.wrangler ?? true,
-					interactive,
+					interactive: isInteractive,
 					signal: runtimeOptions.signal
 				})
 			));
@@ -1089,18 +1089,18 @@ async function deployFlow(
 	}
 
 	const agreedBucket = bucketNameOf(agreed.config);
-	const bucketRenamed = agreedBucket !== bucketNameOf(artifact.config);
-	let createdNow = false;
+	const isBucketRenamed = agreedBucket !== bucketNameOf(artifact.config);
+	let wasCreatedNow = false;
 
 	if (r2Credentials === undefined) {
-		const alreadySet = await r2AlreadySetFor(agreed);
+		const isAlreadySet = await r2AlreadySetFor(agreed);
 
-		if (alreadySet && !bucketRenamed) {
+		if (isAlreadySet && !isBucketRenamed) {
 			// The Worker keeps the pair it already holds. The values cannot be
 			// read back, so the onboarding asks the deployment to prove them
 			// once a cache exists to ask through.
 			ui.info('Keeping the R2 credentials already set on the Worker.');
-		} else if (interactive) {
+		} else if (isInteractive) {
 			const settlement = await obtainR2Credentials({
 				ui,
 				accountId: agreed.accountId,
@@ -1112,8 +1112,8 @@ async function deployFlow(
 					accountId: agreed.accountId,
 					bucketName: agreedBucket
 				}),
-				...(alreadySet &&
-					bucketRenamed && {
+				...(isAlreadySet &&
+					isBucketRenamed && {
 						keep: { previousBucket: bucketNameOf(artifact.config) }
 					})
 			});
@@ -1125,10 +1125,10 @@ async function deployFlow(
 
 			if (settlement.kind === 'settled') {
 				r2Credentials = settlement.credentials;
-				createdNow = settlement.created;
+				wasCreatedNow = settlement.created;
 			}
 		} else {
-			if (!alreadySet) {
+			if (!isAlreadySet) {
 				throw new R2CredentialsRequiredError();
 			}
 
@@ -1143,11 +1143,11 @@ async function deployFlow(
 	if (r2Credentials !== undefined) {
 		const verified = await verifyR2Credentials({
 			ui,
-			interactive,
+			interactive: isInteractive,
 			accountId: agreed.accountId,
 			bucketName: agreedBucket,
 			initial: r2Credentials,
-			attempts: createdNow ? propagationAttempts : 1,
+			attempts: wasCreatedNow ? propagationAttempts : 1,
 			signal: runtimeOptions.signal
 		});
 

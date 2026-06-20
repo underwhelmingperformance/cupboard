@@ -107,7 +107,7 @@ async function readWranglerToken(): Promise<string | undefined> {
 // survive the whole deploy, not just the first request.
 const expiryMarginMs = 60 * 1000;
 
-function usable(grant: CloudflareGrant, now: number): boolean {
+function isUsable(grant: CloudflareGrant, now: number): boolean {
 	return now < grant.expiresAt - expiryMarginMs;
 }
 
@@ -133,7 +133,7 @@ export async function resolveCredential(
 
 	const cached = await chain.readGrant();
 
-	if (cached !== undefined && usable(cached, chain.now())) {
+	if (cached !== undefined && isUsable(cached, chain.now())) {
 		if (cached.subject !== undefined && cached.idToken !== undefined) {
 			return {
 				token: cached.accessToken,

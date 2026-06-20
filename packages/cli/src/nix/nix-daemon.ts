@@ -270,9 +270,9 @@ class NixDaemonConnection {
 		await this.transport.write(request.bytes());
 		await this.processStderr();
 
-		const valid = await this.readBoolean();
+		const isValid = await this.readBoolean();
 
-		if (!valid) {
+		if (!isValid) {
 			return undefined;
 		}
 
@@ -464,8 +464,8 @@ class NixDaemonWriter {
 		this.chunks.push(bytes);
 	}
 
-	writeBoolean(value: boolean): void {
-		this.writeInteger(value ? 1 : 0);
+	writeBoolean(isSet: boolean): void {
+		this.writeInteger(isSet ? 1 : 0);
 	}
 
 	writeString(value: string): void {

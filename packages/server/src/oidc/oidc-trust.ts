@@ -20,7 +20,7 @@ export interface OidcTrustRule {
 // exchange may omit `authorization_details` and receive the wildcard, and the
 // session carries a refresh token. Every other rule is claim-bound (CI) and must
 // request the concrete grants it wants.
-export function ruleIsInteractive(rule: OidcTrustRule): boolean {
+export function isRuleInteractive(rule: OidcTrustRule): boolean {
 	return rule.permittedGrants.some(
 		(grant) => grant.type === 'cupboard_wildcard'
 	);
@@ -38,14 +38,14 @@ export interface OidcClaims {
 // The rule's issuer is normalised at ingress; the token's `iss` is normalised
 // the same way before comparison, so a trailing slash on either side does not
 // stop a genuine match. A non-URL `iss` normalises to nothing and never matches.
-function issuerMatches(rule: OidcTrustRule, claims: OidcClaims): boolean {
+function hasMatchingIssuer(rule: OidcTrustRule, claims: OidcClaims): boolean {
 	return (
 		typeof claims.iss === 'string' &&
 		IssuerUrl.parse(claims.iss)?.value === rule.issuer
 	);
 }
 
-function audienceMatches(rule: OidcTrustRule, claims: OidcClaims): boolean {
+function hasMatchingAudience(rule: OidcTrustRule, claims: OidcClaims): boolean {
 	const { aud } = claims;
 
 	return typeof aud === 'string'
@@ -55,7 +55,7 @@ function audienceMatches(rule: OidcTrustRule, claims: OidcClaims): boolean {
 
 // Every configured claim must be present and exactly equal — strings only, so a
 // numeric or structured claim never satisfies a configured value by coincidence.
-function claimsMatch(rule: OidcTrustRule, claims: OidcClaims): boolean {
+function hasMatchingClaims(rule: OidcTrustRule, claims: OidcClaims): boolean {
 	return Object.entries(rule.claims).every(
 		([name, expected]) => claims[name] === expected
 	);
@@ -73,7 +73,7 @@ function specificity(rule: OidcTrustRule): number {
 // and downgrade the owner. A CI token cannot match the owner rule, so this never
 // grants a CI identity more than it asked for.
 function interactiveRank(rule: OidcTrustRule): number {
-	return ruleIsInteractive(rule) ? 1 : 0;
+	return isRuleInteractive(rule) ? 1 : 0;
 }
 
 /**
@@ -92,9 +92,9 @@ export function matchOidcTrust(
 	return rules
 		.filter(
 			(rule) =>
-				issuerMatches(rule, claims) &&
-				audienceMatches(rule, claims) &&
-				claimsMatch(rule, claims)
+				hasMatchingIssuer(rule, claims) &&
+				hasMatchingAudience(rule, claims) &&
+				hasMatchingClaims(rule, claims)
 		)
 		.toSorted(
 			(left, right) =>

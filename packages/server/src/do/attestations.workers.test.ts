@@ -82,7 +82,7 @@ const orpcErrorBodySchema = z.strictObject({
 	message: z.string(),
 	data: z.unknown().optional()
 });
-let nextStorePathHash = 0;
+const storePathHashCursor = { next: 0 };
 
 function orpcErrorBodyShape(body: unknown): {
 	readonly defined: boolean;
@@ -567,8 +567,8 @@ async function committedPathBundle(): Promise<{
 
 function uniqueStorePathHash(): string {
 	const digit =
-		'0123456789abcdfghijklmnpqrsvwxyz'[nextStorePathHash % 32] ?? '0';
-	nextStorePathHash += 1;
+		'0123456789abcdfghijklmnpqrsvwxyz'[storePathHashCursor.next % 32] ?? '0';
+	storePathHashCursor.next += 1;
 
 	return digit.repeat(32);
 }

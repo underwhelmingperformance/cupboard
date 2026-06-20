@@ -190,14 +190,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// JSON admin route declared in @cupboard/protocol/contract, and anything
 		// it does not match falls through to the wire-format routes below.
 		this.app.use(async (context, next) => {
-			const { matched, response } = await tenantOrpcHandler.handle(
+			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				context.req.raw,
 				{
 					context: { request: context.req.raw, services: this.rpcServices() }
 				}
 			);
 
-			if (matched) {
+			if (isMatched) {
 				return response;
 			}
 
@@ -364,12 +364,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// A ServerHttpError carries a client-facing message; anything else is an
 			// internal fault whose detail must not leak over the socket, matching the
 			// platform 500 the HTTP error handler rethrows to.
-			const known = error instanceof ServerHttpError;
+			const isKnown = error instanceof ServerHttpError;
 
 			sendCommitFrame(socket, {
 				event: 'error',
-				status: known ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
-				message: known ? error.message : 'internal error'
+				status: isKnown ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
+				message: isKnown ? error.message : 'internal error'
 			});
 			socket.close(1000, 'failed');
 		}
@@ -487,11 +487,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			throw new ZstdUnavailableError({ cause: error });
 		}
 
-		const matches =
+		const isMatch =
 			restored.length === expected.length &&
 			expected.every((byte, index) => restored[index] === byte);
 
-		if (!matches) {
+		if (!isMatch) {
 			throw new ZstdUnavailableError();
 		}
 	}

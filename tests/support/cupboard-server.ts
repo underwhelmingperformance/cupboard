@@ -65,14 +65,6 @@ type MiniflareRequestInit = NonNullable<
  * which Miniflare does not serve.
  */
 export class CupboardTestServer {
-	private constructor(
-		readonly url: URL,
-		readonly issuer: StubOidcIssuer,
-		private readonly worker: Miniflare,
-		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
-		private readonly server: Server
-	) {}
-
 	static async start(
 		directory: string,
 		options: {
@@ -187,6 +179,14 @@ export class CupboardTestServer {
 
 		return instance;
 	}
+
+	private constructor(
+		readonly url: URL,
+		readonly issuer: StubOidcIssuer,
+		private readonly worker: Miniflare,
+		private readonly bucket: Awaited<ReturnType<Miniflare['getR2Bucket']>>,
+		private readonly server: Server
+	) {}
 
 	// Mints a control admin token at the bare-host `/token`, the control issuer,
 	// exchanging the harness admin's external subject token.
@@ -461,11 +461,11 @@ async function bundleEntry(
 	outputDirectory: string,
 	entry: string,
 	name: string,
-	emptyOutDirectory: boolean
+	shouldEmptyOutDirectory: boolean
 ): Promise<void> {
 	await build({
 		build: {
-			emptyOutDir: emptyOutDirectory,
+			emptyOutDir: shouldEmptyOutDirectory,
 			lib: {
 				entry: path.join(root, entry),
 				fileName: name,

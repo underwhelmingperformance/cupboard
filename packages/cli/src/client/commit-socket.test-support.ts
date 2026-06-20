@@ -34,7 +34,9 @@ class FakeEmitter<Events extends Record<keyof Events, readonly unknown[]>> {
 	}
 
 	emit<E extends keyof Events>(event: E, ...eventArguments: Events[E]): void {
-		for (const listener of this.listeners[event]) {
+		const listeners = this.listeners[event];
+
+		for (const listener of listeners) {
 			listener(...eventArguments);
 		}
 	}

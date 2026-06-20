@@ -241,7 +241,7 @@ async function runPushWithTemporaryDirectory(
 		createNarArchive,
 		compressNar,
 		readCompressedNar,
-		wait,
+		wait: shouldWait,
 		waitTimeoutSeconds
 	} = dependencies;
 	const closure = await reporter.phase(
@@ -262,7 +262,7 @@ async function runPushWithTemporaryDirectory(
 				paths: closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
 			});
 			const uploadCount = response.uploads.filter((decision) =>
-				needsUpload(decision)
+				isUpload(decision)
 			).length;
 
 			ctx.fact('upload', formatCount(uploadCount));
@@ -282,9 +282,7 @@ async function runPushWithTemporaryDirectory(
 		return;
 	}
 
-	const uploadDecisions = negotiation.uploads.filter((item) =>
-		needsUpload(item)
-	);
+	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
 	const uploads = await reporter.progress(
 		'Preparing missing NARs',
 		{ total: uploadDecisions.length },
@@ -407,7 +405,7 @@ async function runPushWithTemporaryDirectory(
 	// so committing serially would wait one pass per path. With `--no-wait` a
 	// deferred upload reports `pending` as soon as it is stored.
 	const commitDecisions = negotiation.uploads
-		.filter((decision) => needsCommit(decision))
+		.filter((decision) => isCommittable(decision))
 		.filter((decision) => !failedUploadIds.has(decision.uploadId));
 	const commit = await reporter.progress(
 		'Committing metadata',
@@ -422,7 +420,7 @@ async function runPushWithTemporaryDirectory(
 								storePathHash: decision.storePathHash,
 								narHash: decision.narHash
 							},
-							{ wait, timeoutSeconds: waitTimeoutSeconds }
+							{ wait: shouldWait, timeoutSeconds: waitTimeoutSeconds }
 						);
 					} finally {
 						bar.advance(1);
@@ -478,15 +476,16 @@ async function runPushWithTemporaryDirectory(
 	// Retention is recorded only over a complete, servable push: a failed path
 	// would leave the root pinning a closure that cannot be substituted, and the
 	// `--no-wait` deferred case already withholds it for the same reason.
-	const incomplete = failures.length > 0;
-	const deferRetention = incomplete || (!wait && commit.pending.length > 0);
+	const isIncomplete = failures.length > 0;
+	const shouldDeferRetention =
+		isIncomplete || (!shouldWait && commit.pending.length > 0);
 
 	// Attestations cannot attach to a path that did not commit, so skip the
 	// failed paths as well as any still awaiting verification.
 	const unservableStorePathHashes = new Set<string>(
 		failures.map((failure) => failure.storePathHash)
 	);
-	if (!wait && commit.pending.length > 0) {
+	if (!shouldWait && commit.pending.length > 0) {
 		for (const hash of pendingUploadStorePathHashes(
 			negotiation.uploads,
 			commit.pending
@@ -495,12 +494,12 @@ async function runPushWithTemporaryDirectory(
 		}
 	}
 
-	if (incomplete) {
+	if (isIncomplete) {
 		reporter.warn(
 			'incomplete',
 			`${formatCount(failures.length)} path(s) failed; retention not recorded, re-run cupboard push to finish`
 		);
-	} else if (!wait && commit.pending.length > 0) {
+	} else if (!shouldWait && commit.pending.length > 0) {
 		reporter.warn(
 			'pending verification',
 			`${formatCount(commit.pending.length)} path(s) await server-side verification; retention not recorded (omit --no-wait to wait and record it)`
@@ -516,7 +515,7 @@ async function runPushWithTemporaryDirectory(
 		pendingStorePathHashes: unservableStorePathHashes
 	});
 
-	const retentionRows = deferRetention
+	const retentionRows = shouldDeferRetention
 		? []
 		: await reporter.phase(
 				retention.kind === 'pins'
@@ -526,10 +525,10 @@ async function runPushWithTemporaryDirectory(
 			);
 
 	const uploadedPaths = negotiation.uploads.filter((decision) =>
-		needsUpload(decision)
+		isUpload(decision)
 	).length;
 	const reusedBlobs = negotiation.uploads.filter((decision) =>
-		needsReusedBlobCommit(decision)
+		isReusedBlobCommit(decision)
 	).length;
 	const skipped = negotiation.uploads.filter((decision) =>
 		isSkip(decision)
@@ -566,10 +565,10 @@ function reportDryRun(
 	retention: RetentionPlan
 ): void {
 	const wouldUpload = negotiation.uploads.filter((decision) =>
-		needsUpload(decision)
+		isUpload(decision)
 	).length;
 	const reusedBlobs = negotiation.uploads.filter((decision) =>
-		needsReusedBlobCommit(decision)
+		isReusedBlobCommit(decision)
 	).length;
 	const skipped = negotiation.uploads.filter((decision) =>
 		isSkip(decision)
@@ -681,7 +680,7 @@ async function attachPushedAttestations(
 			}))
 		});
 		const toUpload = negotiation.bundles.filter((decision) =>
-			needsAttestationUpload(decision)
+			isAttestationUpload(decision)
 		);
 		const reused = negotiation.bundles.filter((decision) =>
 			isAttestationSkip(decision)
@@ -814,7 +813,7 @@ function pendingUploadStorePathHashes(
 	const storePathHashes = new Set<string>();
 
 	for (const decision of decisions) {
-		if (!needsCommit(decision) || !pending.has(decision.uploadId)) {
+		if (!isCommittable(decision) || !pending.has(decision.uploadId)) {
 			continue;
 		}
 
@@ -1043,25 +1042,25 @@ function isSkip(
 	return decision.action === 'skip';
 }
 
-function needsUpload(
+function isUpload(
 	decision: UploadDecision
 ): decision is Extract<UploadDecision, { action: 'upload' }> {
 	return decision.action === 'upload';
 }
 
-function needsCommit(
+function isCommittable(
 	decision: UploadDecision
 ): decision is Extract<UploadDecision, { action: 'commit' | 'upload' }> {
 	return decision.action !== 'skip';
 }
 
-function needsReusedBlobCommit(
+function isReusedBlobCommit(
 	decision: UploadDecision
 ): decision is Extract<UploadDecision, { action: 'commit' }> {
 	return decision.action === 'commit';
 }
 
-function needsAttestationUpload(
+function isAttestationUpload(
 	decision: AttestationDecision
 ): decision is Extract<AttestationDecision, { action: 'upload' }> {
 	return decision.action === 'upload';

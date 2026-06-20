@@ -16,12 +16,6 @@ const kid = 'stub-issuer-key-1';
  * rather than a mock. The worker reaches it over loopback.
  */
 export class StubOidcIssuer {
-	private constructor(
-		readonly issuer: string,
-		private readonly server: Server,
-		private readonly privateKey: KeyObject
-	) {}
-
 	static async start(): Promise<StubOidcIssuer> {
 		const { publicKey, privateKey } = generateKeyPairSync('rsa', {
 			modulusLength: 2048
@@ -42,6 +36,12 @@ export class StubOidcIssuer {
 
 		return new StubOidcIssuer(url, server, privateKey);
 	}
+
+	private constructor(
+		readonly issuer: string,
+		private readonly server: Server,
+		private readonly privateKey: KeyObject
+	) {}
 
 	/** Signs an RS256 JWT from this issuer; `iss` and timestamps are filled in. */
 	sign(claims: Readonly<Record<string, unknown>>): string {

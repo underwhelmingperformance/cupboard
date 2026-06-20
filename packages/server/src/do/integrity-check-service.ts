@@ -26,7 +26,7 @@ export class IntegrityCheckService {
 
 	private async checkNarBlob(
 		row: typeof schema.narInfos.$inferSelect,
-		deep: boolean
+		isDeep: boolean
 	): Promise<CheckDiscrepancy['kind'] | undefined> {
 		const object =
 			(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) ??
@@ -36,7 +36,7 @@ export class IntegrityCheckService {
 			return 'missing-nar';
 		}
 
-		if (!deep) {
+		if (!isDeep) {
 			return undefined;
 		}
 
@@ -93,7 +93,7 @@ export class IntegrityCheckService {
 		return undefined;
 	}
 
-	async check(deep: boolean): Promise<CheckReport> {
+	async check(isDeep: boolean): Promise<CheckReport> {
 		const total =
 			this.context.db.select({ count: count() }).from(schema.narInfos).get()
 				?.count ?? 0;
@@ -132,7 +132,7 @@ export class IntegrityCheckService {
 			}
 
 			if (!blobVerdicts.has(row.narHash)) {
-				blobVerdicts.set(row.narHash, await this.checkNarBlob(row, deep));
+				blobVerdicts.set(row.narHash, await this.checkNarBlob(row, isDeep));
 				narBlobsChecked += 1;
 			}
 

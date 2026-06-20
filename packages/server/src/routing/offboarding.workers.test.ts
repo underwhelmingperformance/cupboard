@@ -28,7 +28,6 @@ import {
 	blobStateNarHashes,
 	cacheWriteGrants,
 	clearBlobStorage,
-	deleteTestBase,
 	issueTokenForTenant,
 	offboardTenant,
 	provisionNamedTenant,
@@ -38,6 +37,7 @@ import {
 	tenantObjectKeys,
 	tenantRow,
 	tenantUsagePresent,
+	testBase,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar
@@ -53,7 +53,7 @@ import { runBlobReaper, runCronTick, runOffboardSweep } from './scheduled.ts';
 // tombstone admission no longer admits, and the shared blobs it released are
 // collected by the global reaper.
 
-let nextTenant = 0;
+const tenantCounter = { next: 0 };
 
 async function admittable(slug: string): Promise<boolean> {
 	const ctx = createExecutionContext();
@@ -67,8 +67,10 @@ async function provisionedWritingTenant(): Promise<{
 	id: TenantId;
 	token: string;
 }> {
-	nextTenant += 1;
-	const id = tenantIdSchema.parse(`offboard-test-${String(nextTenant)}`);
+	tenantCounter.next += 1;
+	const id = tenantIdSchema.parse(
+		`offboard-test-${String(tenantCounter.next)}`
+	);
 	const issuer = await provisionNamedTenant(id);
 	const token = await issueTokenForTenant(
 		testServerFor(id),
@@ -136,7 +138,7 @@ async function tenantPresence(id: string): Promise<
 describe('offboarding drain', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 
 		await clearBlobStorage();
@@ -384,12 +386,15 @@ describe('offboarding drain', () => {
 		);
 		// The row read fails closed on the tombstone, so the slug 404s at once despite
 		// the stale filter; the next rebuild then drops it from the filter too.
-		const before = await admittable(id);
+		const isBefore = await admittable(id);
 
 		await refreshTenantMembership(env);
-		const after = await admittable(id);
+		const isAfter = await admittable(id);
 
-		expect({ before, after }).toStrictEqual({ before: false, after: false });
+		expect({ before: isBefore, after: isAfter }).toStrictEqual({
+			before: false,
+			after: false
+		});
 	});
 
 	it('finalises an offboarding tenant within the cron tick and frees its blob, never resurrecting it', async () => {

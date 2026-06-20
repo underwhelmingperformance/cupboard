@@ -7,8 +7,8 @@ export class ProtocolWriter {
 		this.chunks.push(bytes);
 	}
 
-	writeBoolean(value: boolean): void {
-		this.writeInteger(value ? 1 : 0);
+	writeBoolean(isSet: boolean): void {
+		this.writeInteger(isSet ? 1 : 0);
 	}
 
 	writeString(value: string): void {

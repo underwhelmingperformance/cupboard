@@ -26,7 +26,7 @@ function buildControlApp() {
 	// the /control prefix. Their responses carry admin state, so they are never
 	// cached.
 	app.use('/control/*', async (context, next) => {
-		const { matched, response } = await controlOrpcHandler.handle(
+		const { matched: isMatched, response } = await controlOrpcHandler.handle(
 			context.req.raw,
 			{
 				prefix: '/control',
@@ -34,7 +34,7 @@ function buildControlApp() {
 			}
 		);
 
-		if (matched) {
+		if (isMatched) {
 			response.headers.set('cache-control', 'no-store');
 			return response;
 		}

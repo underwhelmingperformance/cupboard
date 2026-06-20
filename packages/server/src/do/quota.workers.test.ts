@@ -15,7 +15,6 @@ import {
 	CommitVerdictError,
 	currentServer,
 	deletePath,
-	deleteTestBase,
 	expectSingleUploadDecision,
 	fileAttestationReference,
 	initialise,
@@ -29,6 +28,7 @@ import {
 	seedCanonicalBlob,
 	tenantBlobRows,
 	tenantUsageRow,
+	testBase,
 	uploadMetadata,
 	type VerifiableNar,
 	verifiableNar,
@@ -72,7 +72,7 @@ function expectCommitVerdictError(
 describe('per-tenant quota', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 
 		await clearBlobStorage();

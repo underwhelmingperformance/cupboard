@@ -41,12 +41,12 @@ export function registerCheckCommand(
 }
 
 export async function runCheck(
-	deep: boolean,
+	isDeep: boolean,
 	reporter: Reporter,
 	client: CheckClient
 ): Promise<void> {
 	const report = await reporter.phase('Checking cupboard', () =>
-		client.run({ deep })
+		client.run({ deep: isDeep })
 	);
 
 	reporter.result({

@@ -648,7 +648,7 @@ export class CommitPipelineService {
 			// A row already holds the path. Treat it as this same commit only when
 			// every signed and rendered field matches; any difference means a
 			// different narinfo version won, and this upload must not adopt its row.
-			const mine =
+			const isMine =
 				existing?.narHash === metadata.narHash &&
 				existing.narSize === metadata.narSize &&
 				existing.storePath === metadata.storePath &&
@@ -656,7 +656,7 @@ export class CommitPipelineService {
 				(existing.deriver ?? undefined) === metadata.deriver &&
 				(existing.ca ?? undefined) === metadata.ca;
 
-			if (mine) {
+			if (isMine) {
 				return { kind: 'mine', generation: existing.generation };
 			}
 
@@ -697,11 +697,11 @@ export class CommitPipelineService {
 			.from(d1Schema.blobState)
 			.where(eq(d1Schema.blobState.narHash, metadata.narHash))
 			.get();
-		const canonicalPresent =
+		const isCanonicalPresent =
 			(await this.context.env.BLOBS.head(narObjectKey(metadata.narHash))) !==
 			null;
 
-		if (blob === undefined || !canonicalPresent) {
+		if (blob === undefined || !isCanonicalPresent) {
 			return 'blob-gone';
 		}
 

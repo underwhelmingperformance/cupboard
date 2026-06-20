@@ -11,10 +11,10 @@ import {
 	commitPath,
 	deleteBlobState,
 	deletePath,
-	deleteTestBase,
 	fetchNarInfo,
 	initialise,
 	resetTestServer,
+	testBase,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -27,7 +27,7 @@ import {
 describe('blob reaper', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 
 		await clearBlobStorage();

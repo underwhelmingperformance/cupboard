@@ -29,7 +29,7 @@ const ownerSummary: OidcTrustSummary = {
 	disabled: false
 };
 
-const addBody: OidcTrustAddBody = {
+const additionBody: OidcTrustAddBody = {
 	issuer: 'https://token.actions.githubusercontent.com',
 	audience: 'https://cache.example.workers.dev',
 	claims: { repository_owner_id: '5678' },
@@ -50,14 +50,14 @@ const addBody: OidcTrustAddBody = {
 	]
 };
 
-function addedSummary(id: string, disabled = false): OidcTrustSummary {
+function addedSummary(id: string, isDisabled = false): OidcTrustSummary {
 	return {
 		id,
-		issuer: addBody.issuer,
-		audience: addBody.audience,
-		claims: addBody.claims,
-		permittedGrants: addBody.permittedGrants,
-		disabled
+		issuer: additionBody.issuer,
+		audience: additionBody.audience,
+		claims: additionBody.claims,
+		permittedGrants: additionBody.permittedGrants,
+		disabled: isDisabled
 	};
 }
 
@@ -100,7 +100,7 @@ describe('oidc-trust admin API', () => {
 	it('adds a write rule and lists it alongside the seeded owner rule', async () => {
 		const token = await adminToken();
 
-		const added = await addRule(token, addBody);
+		const added = await addRule(token, additionBody);
 		const summary = oidcTrustSummarySchema.parse(await added.json());
 		const list = await listRules(token);
 		const id = z.uuid().parse(summary.id);
@@ -121,7 +121,7 @@ describe('oidc-trust admin API', () => {
 
 	it('shows a single rule by id', async () => {
 		const token = await adminToken();
-		const added = await addRule(token, addBody);
+		const added = await addRule(token, additionBody);
 		const { id } = oidcTrustSummarySchema.parse(await added.json());
 
 		const response = await authorisedFetch(`/oidc-trust/${id}`, token);
@@ -154,7 +154,7 @@ describe('oidc-trust admin API', () => {
 
 	it('soft-disables a rule and reports it disabled in the listing', async () => {
 		const token = await adminToken();
-		const added = await addRule(token, addBody);
+		const added = await addRule(token, additionBody);
 		const { id } = oidcTrustSummarySchema.parse(await added.json());
 
 		const removed = await authorisedFetch(`/oidc-trust/${id}`, token, {
@@ -224,11 +224,14 @@ describe('oidc-trust admin API', () => {
 	it.each([
 		{
 			name: 'a rule with no claims to bind it',
-			body: { ...addBody, claims: {} }
+			body: { ...additionBody, claims: {} }
 		},
 		{
 			name: 'a rule whose issuer is not https',
-			body: { ...addBody, issuer: 'http://token.actions.githubusercontent.com' }
+			body: {
+				...additionBody,
+				issuer: 'http://token.actions.githubusercontent.com'
+			}
 		}
 	])('refuses $name', async ({ body }) => {
 		const token = await adminToken();

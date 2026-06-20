@@ -17,7 +17,7 @@ const gitignorePath = fileURLToPath(new URL('.gitignore', import.meta.url));
 // and disable the rule *only while the linting runtime lacks the API*. The day
 // Node ships it, this flips back to `error` and the rule fires loudly on every
 // fallback, forcing the migration.
-const nodeHasUint8ArrayBase64 =
+const hasNativeUint8ArrayBase64 =
 	'toBase64' in Uint8Array.prototype && 'fromBase64' in Uint8Array;
 
 const nodeBuiltInImports = [
@@ -87,7 +87,7 @@ export default defineConfig(
 	},
 	{
 		rules: {
-			'unicorn/prefer-uint8array-base64': nodeHasUint8ArrayBase64
+			'unicorn/prefer-uint8array-base64': hasNativeUint8ArrayBase64
 				? 'error'
 				: 'off'
 		}

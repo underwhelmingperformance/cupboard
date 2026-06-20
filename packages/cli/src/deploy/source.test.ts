@@ -22,26 +22,26 @@ function thrownBy(run: () => unknown): unknown {
 
 // A checkout rooted at `/repo`: the workspace marker and the server entry exist
 // under it and nowhere else.
-function inCheckout(filePath: string): boolean {
+function isInCheckout(filePath: string): boolean {
 	return (
 		filePath === '/repo/pnpm-workspace.yaml' ||
 		filePath === '/repo/packages/server/src/worker.ts'
 	);
 }
 
-function noCheckout(): boolean {
+function hasNoCheckout(): boolean {
 	return false;
 }
 
 describe('findCheckoutRoot', () => {
 	it('walks up to the workspace root', () => {
-		expect(findCheckoutRoot('/repo/packages/cli/src', inCheckout)).toBe(
+		expect(findCheckoutRoot('/repo/packages/cli/src', isInCheckout)).toBe(
 			'/repo'
 		);
 	});
 
 	it('returns undefined outside a checkout', () => {
-		expect(findCheckoutRoot('/somewhere/else', noCheckout)).toBeUndefined();
+		expect(findCheckoutRoot('/somewhere/else', hasNoCheckout)).toBeUndefined();
 	});
 });
 
@@ -50,7 +50,7 @@ function environment(overrides: Partial<RunEnvironment>): RunEnvironment {
 		isSea: false,
 		cwd: '/repo/packages/cli',
 		fromTree: false,
-		fileExists: inCheckout,
+		fileExists: isInCheckout,
 		...overrides
 	};
 }
@@ -70,7 +70,7 @@ describe('planWorkerSource', () => {
 			.parse(
 				thrownBy(() =>
 					planWorkerSource(
-						environment({ isSea: false, fileExists: noCheckout })
+						environment({ isSea: false, fileExists: hasNoCheckout })
 					)
 				)
 			);
@@ -83,7 +83,7 @@ describe('planWorkerSource', () => {
 
 	it('deploys embedded bundles from the released binary outside a checkout', () => {
 		expect(
-			planWorkerSource(environment({ isSea: true, fileExists: noCheckout }))
+			planWorkerSource(environment({ isSea: true, fileExists: hasNoCheckout }))
 		).toStrictEqual({
 			mode: 'embedded',
 			checkoutRoot: undefined,

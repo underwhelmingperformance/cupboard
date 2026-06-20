@@ -131,7 +131,7 @@ describe('durable object state', () => {
 		const stats = await authorisedFetch(defaultCacheStatsPath, second.token);
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
-		const committedVerifies = await verifyNarInfoSignature(
+		const isCommittedVerified = await verifyNarInfoSignature(
 			NarInfo.parse(stored.body),
 			init.publicKey
 		);
@@ -139,7 +139,7 @@ describe('durable object state', () => {
 		expect({
 			pubkeyMatches: pubkey === `${init.publicKey}\n`,
 			secondTokenAccepted: stats.ok,
-			committedVerifies
+			committedVerifies: isCommittedVerified
 		}).toStrictEqual({
 			pubkeyMatches: true,
 			secondTokenAccepted: true,

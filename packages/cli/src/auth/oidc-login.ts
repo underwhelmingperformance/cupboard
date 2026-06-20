@@ -66,13 +66,6 @@ export class OidcLoginError extends CliError {
 
 /** Base: the authorization server declined the login. */
 export abstract class AuthorizationDeclinedError extends OidcLoginError {
-	protected constructor(public readonly providerError: string) {
-		super(`Authorization failed: ${providerError}`, {
-			kind: 'authorization-declined',
-			providerError
-		});
-	}
-
 	/** The specific error for an RFC 6749 authorize-endpoint error code. */
 	static fromProviderCode(code: string): AuthorizationDeclinedError {
 		switch (code) {
@@ -86,6 +79,13 @@ export abstract class AuthorizationDeclinedError extends OidcLoginError {
 				return new AuthorizationProviderError(code);
 			}
 		}
+	}
+
+	protected constructor(public readonly providerError: string) {
+		super(`Authorization failed: ${providerError}`, {
+			kind: 'authorization-declined',
+			providerError
+		});
 	}
 }
 

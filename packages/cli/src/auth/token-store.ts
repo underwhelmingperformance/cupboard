@@ -77,7 +77,7 @@ export async function readCachedSession(
 	// access token's issuer must be that target, and its audience must admit
 	// it. This stops a session cached for one tenant being sent to another on
 	// the same host.
-	return tokenBoundToTarget(session.accessToken, normalised)
+	return isTokenBoundToTarget(session.accessToken, normalised)
 		? session
 		: undefined;
 }
@@ -137,17 +137,17 @@ const jwtClaimsSchema = z.object({
 // cross-target reuse. The audience must also admit the target: a tenant token's
 // audience is the target URL, while a control token's audience is a configured
 // client id rather than a URL, so a non-URL audience is accepted too.
-function tokenBoundToTarget(token: string, target: string): boolean {
+function isTokenBoundToTarget(token: string, target: string): boolean {
 	const claims = decodeJwtClaims(token);
 
 	if (claims?.iss !== target) {
 		return false;
 	}
 
-	return audienceAdmits(claims.aud, target);
+	return isAudienceAdmitted(claims.aud, target);
 }
 
-function audienceAdmits(
+function isAudienceAdmitted(
 	aud: string | readonly string[] | undefined,
 	target: string
 ): boolean {

@@ -483,7 +483,7 @@ describe('runPush', () => {
 	});
 
 	it('attaches attestation bundles to the matching pushed closure path', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const negotiations: AttestationNegotiateRequest[] = [];
 		const uploaded: {
 			readonly r2Key: string;
@@ -506,7 +506,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: {
-				...skipClient(setRoots, clientCalls),
+				...skipClient(roots, clientCalls),
 				negotiateAttestations(body) {
 					negotiations.push(body);
 
@@ -572,7 +572,7 @@ describe('runPush', () => {
 			preparedAttestations: ['attestation-app'],
 			readBundles: ['app.sigstore.json']
 		});
-		expect({ clientCalls, setRoots }).toStrictEqual({
+		expect({ clientCalls, roots }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
 				{
@@ -583,7 +583,7 @@ describe('runPush', () => {
 					}
 				}
 			],
-			setRoots: [
+			roots: [
 				{
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
@@ -622,7 +622,7 @@ describe('runPush', () => {
 	});
 
 	it('attaches a multi-subject bundle to every matching closure path', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const negotiations: AttestationNegotiateRequest[] = [];
 		const uploaded: {
 			readonly r2Key: string;
@@ -647,7 +647,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: {
-				...skipClient(setRoots, clientCalls),
+				...skipClient(roots, clientCalls),
 				negotiateAttestations(body) {
 					negotiations.push(body);
 
@@ -753,12 +753,12 @@ describe('runPush', () => {
 	});
 
 	it('skips attestation work when attachment is disabled', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots, clientCalls),
+			client: skipClient(roots, clientCalls),
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -988,24 +988,24 @@ describe('runPush', () => {
 	});
 
 	it('sets a named channel to the pushed paths with --root', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots, clientCalls),
+			client: skipClient(roots, clientCalls),
 			root: 'main',
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
-		expect({ clientCalls, setRoots, results }).toStrictEqual({
+		expect({ clientCalls, roots, results }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
 				{ method: 'setRoot', fields: { name: 'main', targets: [appPath] } }
 			],
-			setRoots: [{ fields: { name: 'main', targets: [appPath] } }],
+			roots: [{ fields: { name: 'main', targets: [appPath] } }],
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '0' },
@@ -1020,12 +1020,12 @@ describe('runPush', () => {
 	});
 
 	it('sets an expiring channel with --root and --ttl', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots, clientCalls),
+			client: skipClient(roots, clientCalls),
 			root: 'main',
 			ttlSeconds: 1_209_600,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
@@ -1033,7 +1033,7 @@ describe('runPush', () => {
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
-		expect({ clientCalls, setRoots, results }).toStrictEqual({
+		expect({ clientCalls, roots, results }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
 				{
@@ -1041,7 +1041,7 @@ describe('runPush', () => {
 					fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 }
 				}
 			],
-			setRoots: [
+			roots: [
 				{ fields: { name: 'main', targets: [appPath], ttlSeconds: 1_209_600 } }
 			],
 			results: [
@@ -1061,12 +1061,12 @@ describe('runPush', () => {
 	});
 
 	it('pins each pushed path when no root is given', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath, runtimePath], reporter(results), {
-			client: skipClient(setRoots, clientCalls),
+			client: skipClient(roots, clientCalls),
 			nixStore: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
@@ -1075,7 +1075,7 @@ describe('runPush', () => {
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
-		expect({ clientCalls, setRoots, results }).toStrictEqual({
+		expect({ clientCalls, roots, results }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath, runtimePath] },
 				{
@@ -1093,7 +1093,7 @@ describe('runPush', () => {
 					}
 				}
 			],
-			setRoots: [
+			roots: [
 				{
 					fields: { name: `pin:${StorePath.hash(appPath)}`, targets: [appPath] }
 				},
@@ -1118,19 +1118,19 @@ describe('runPush', () => {
 	});
 
 	it('applies --ttl to implicit pins when no root is given', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 
 		await runPush([appPath], reporter(results), {
-			client: skipClient(setRoots, clientCalls),
+			client: skipClient(roots, clientCalls),
 			ttlSeconds: 604_800,
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
 
-		expect({ clientCalls, setRoots, results }).toStrictEqual({
+		expect({ clientCalls, roots, results }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
 				{
@@ -1142,7 +1142,7 @@ describe('runPush', () => {
 					}
 				}
 			],
-			setRoots: [
+			roots: [
 				{
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
@@ -1165,10 +1165,10 @@ describe('runPush', () => {
 	});
 
 	it('derives a stable pin name when the same path is pushed again', async () => {
-		const setRoots: SetRootCall[] = [];
+		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const dependencies = {
-			client: skipClient(setRoots, clientCalls),
+			client: skipClient(roots, clientCalls),
 			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
@@ -1177,7 +1177,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter([]), dependencies);
 		await runPush([appPath], reporter([]), dependencies);
 
-		expect({ clientCalls, setRoots }).toStrictEqual({
+		expect({ clientCalls, roots }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
 				{
@@ -1196,7 +1196,7 @@ describe('runPush', () => {
 					}
 				}
 			],
-			setRoots: [
+			roots: [
 				{
 					fields: {
 						name: `pin:${StorePath.hash(appPath)}`,
@@ -1477,7 +1477,7 @@ describe('runPush', () => {
 	it('uploads what it can, skips retention, and fails when an upload fails', async () => {
 		const uploaded: string[] = [];
 		const committed: string[] = [];
-		const setRoots: RootSetBody[] = [];
+		const roots: RootSetBody[] = [];
 
 		const options = {
 			client: {
@@ -1529,7 +1529,7 @@ describe('runPush', () => {
 					});
 				},
 				setRoot(_name, body) {
-					setRoots.push(body);
+					roots.push(body);
 
 					return Promise.resolve(rootSummary({ name: '', ...body }));
 				}
@@ -1566,7 +1566,7 @@ describe('runPush', () => {
 			}
 		})();
 
-		expect({ outcome, uploaded, committed, setRoots }).toStrictEqual({
+		expect({ outcome, uploaded, committed, roots }).toStrictEqual({
 			outcome: {
 				error: {
 					name: PushIncompleteError.name,
@@ -1575,7 +1575,7 @@ describe('runPush', () => {
 			},
 			uploaded: [`nar/${appDigest.narHash.toString()}.nar.zst`],
 			committed: ['upload-app'],
-			setRoots: []
+			roots: []
 		});
 	});
 });
@@ -1679,11 +1679,11 @@ async function collectReadableStream(
 	const chunks: Uint8Array[] = [];
 
 	try {
-		let done = false;
+		let isDone = false;
 
-		while (!done) {
+		while (!isDone) {
 			const next = await reader.read();
-			done = next.done;
+			isDone = next.done;
 
 			if (next.done) {
 				continue;
@@ -1780,7 +1780,9 @@ function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 			const closure = new Set(storePaths);
 
 			for (const storePath of storePaths) {
-				for (const reference of paths[storePath]?.references ?? []) {
+				const references = paths[storePath]?.references ?? [];
+
+				for (const reference of references) {
 					closure.add(reference);
 				}
 			}
@@ -1826,10 +1828,7 @@ interface SetRootCall {
 	readonly fields: SetRootFields;
 }
 
-function skipClient(
-	setRoots: SetRootCall[],
-	clientCalls: unknown[]
-): PushClient {
+function skipClient(roots: SetRootCall[], clientCalls: unknown[]): PushClient {
 	return {
 		negotiate(body) {
 			clientCalls.push({
@@ -1863,7 +1862,7 @@ function skipClient(
 		setRoot(name, body) {
 			const fields = { name, ...body };
 			clientCalls.push({ method: 'setRoot', fields });
-			setRoots.push({ fields });
+			roots.push({ fields });
 
 			return Promise.resolve(rootSummary(fields));
 		}

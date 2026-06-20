@@ -46,7 +46,7 @@ describe('crypto', () => {
 			['verify']
 		);
 		const encoder = new TextEncoder();
-		const verified = await crypto.subtle.verify(
+		const isVerified = await crypto.subtle.verify(
 			'Ed25519',
 			importedPublicKey,
 			signatureBytes.bytes,
@@ -62,7 +62,7 @@ describe('crypto', () => {
 				name: signatureBytes.name,
 				length: signatureBytes.bytes.byteLength
 			},
-			verified
+			verified: isVerified
 		}).toStrictEqual({
 			publicKey: {
 				name: 'cupboard-1',

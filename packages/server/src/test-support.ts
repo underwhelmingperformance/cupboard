@@ -34,9 +34,9 @@ import {
 	type CommitResponse,
 	commitSocketFrameSchema,
 	type DeletePathResponse,
-	deletePathResponseSchema,
 	type ParsedCommitSocketFrame,
 	type ParsedUploadPathMetadata,
+	pathDeletionResponseSchema,
 	type StatsResponse,
 	type UploadActionDecision,
 	uploadActionDecisionSchema,
@@ -169,7 +169,7 @@ export const narHash = nixSha256HashSchema.parse(
 export const fileHash = NixSha256Hash.parse(
 	'sha256:0wzw5pz9bciz84825admrb4b848maxa2fh1isbsw4547mvra9czv'
 );
-export const deleteTestBase = new Date('2026-01-01T00:00:00.000Z');
+export const testBase = new Date('2026-01-01T00:00:00.000Z');
 
 // The owner identity the fixture tenant is provisioned with, matching the
 // triple the admin-token and trust-rule tests issue their subject tokens for.
@@ -179,10 +179,12 @@ export const fixtureOwner = {
 	audience: 'client-id.apps.googleusercontent.com'
 } as const;
 
-let origin = 'https://cupboard.test';
-let server = testServerFor('initial');
-let nextTestServerId = 0;
-let nextProvisionConfigVersion = 1;
+const harness = {
+	origin: 'https://cupboard.test',
+	server: testServerFor('initial'),
+	nextTestServerId: 0,
+	nextProvisionConfigVersion: 1
+};
 
 export type UploadDecision = UploadNegotiateResponse['uploads'][number];
 
@@ -201,11 +203,11 @@ export interface GcResult {
  * DO name share the same counter so the URL and the stub agree.
  */
 export async function resetTestServer(): Promise<void> {
-	origin = `https://cupboard-${String(nextTestServerId)}.test`;
-	server = testServerFor(`test-${String(nextTestServerId)}`);
-	nextTestServerId += 1;
+	harness.origin = `https://cupboard-${String(harness.nextTestServerId)}.test`;
+	harness.server = testServerFor(`test-${String(harness.nextTestServerId)}`);
+	harness.nextTestServerId += 1;
 
-	await configureFixtureTenant(server);
+	await configureFixtureTenant(harness.server);
 	await configureFixtureTenant(fixtureWorkerServer());
 	await provisionFixtureTenant();
 }
@@ -237,7 +239,7 @@ export async function provisionFixtureTenant(
 			readPasswordSalt
 		);
 	}
-	const now = deleteTestBase.toISOString();
+	const now = testBase.toISOString();
 
 	await database
 		.insert(d1Schema.tenant)
@@ -298,13 +300,13 @@ export async function provisionNamedTenant(
 ): Promise<string> {
 	const id = tenantIdSchema.parse(name);
 	const readMode = options.readMode ?? 'public';
-	const issuer = `${origin}/t/${id}`;
+	const issuer = `${harness.origin}/t/${id}`;
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	// The workers pool keeps a Durable Object warm across tests, so a fixed-name
 	// tenant starts from empty private state before receiving this test's identity.
-	nextProvisionConfigVersion += 1;
-	const configVersion = nextProvisionConfigVersion;
+	harness.nextProvisionConfigVersion += 1;
+	const configVersion = harness.nextProvisionConfigVersion;
 	const stub = tenantServer(env, id);
 	await stub.purgeStorage();
 
@@ -318,7 +320,7 @@ export async function provisionNamedTenant(
 			ownerSubject: '',
 			ownerAudience: '',
 			configVersion,
-			createdAt: deleteTestBase.toISOString()
+			createdAt: testBase.toISOString()
 		})
 		.onConflictDoUpdate({
 			target: d1Schema.tenant.id,
@@ -333,7 +335,7 @@ export async function provisionNamedTenant(
 			bytes: 0,
 			narinfos: 0,
 			blobs: 0,
-			updatedAt: deleteTestBase.toISOString()
+			updatedAt: testBase.toISOString()
 		})
 		.onConflictDoNothing()
 		.run();
@@ -433,7 +435,7 @@ export async function tenantObjectKeys(id: string): Promise<string[]> {
 
 /** The origin the harness is currently targeting. */
 export function currentOrigin(): string {
-	return origin;
+	return harness.origin;
 }
 
 // The issuer and audience the Durable Object is configured with and issues under in
@@ -465,10 +467,10 @@ async function configureFixtureTenant(
  * distinct DO from the one {@link resetTestServer} assigned, configuring it.
  */
 export async function useTestServer(name: string): Promise<void> {
-	origin = `https://cupboard-${name}.test`;
-	server = testServerFor(name);
+	harness.origin = `https://cupboard-${name}.test`;
+	harness.server = testServerFor(name);
 
-	await configureFixtureTenant(server);
+	await configureFixtureTenant(harness.server);
 	await provisionFixtureTenant();
 }
 
@@ -478,7 +480,7 @@ export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
 
 /** The Durable Object stub the harness is currently targeting. */
 export function currentServer(): DurableObjectStub<CupboardServer> {
-	return server;
+	return harness.server;
 }
 
 export interface InitialisedServer {
@@ -497,7 +499,7 @@ export async function bootstrap(): Promise<InitialisedServer> {
 	const response = await fetchPath('/pubkey');
 	const body = await response.text();
 
-	return { url: origin, publicKey: body.trim(), token };
+	return { url: harness.origin, publicKey: body.trim(), token };
 }
 
 /** An admin token against the current per-test server. */
@@ -562,7 +564,7 @@ export function issueServerSignedToken(
 	grants: AuthorizationDetails,
 	subject = 'grant-test'
 ): Promise<string> {
-	return issueServerSignedTokenFor(server, grants, subject);
+	return issueServerSignedTokenFor(harness.server, grants, subject);
 }
 
 async function issueServerSignedTokenFor(
@@ -618,7 +620,9 @@ async function activeAuthKeyFor(
 ): Promise<{ kid: string; privateJwk: JsonWebKey }> {
 	// The auth key is created on first use; a JWKS request creates it without
 	// issuing anything, so reading it straight after always finds a key.
-	const jwks = await stub.fetch(new URL('/.well-known/jwks.json', origin));
+	const jwks = await stub.fetch(
+		new URL('/.well-known/jwks.json', harness.origin)
+	);
 	expect(jwks.status).toBe(StatusCodes.OK);
 	await jwks.text();
 
@@ -658,14 +662,14 @@ export function fetchPath(
 	pathname: string,
 	init?: RequestInit
 ): Promise<Response> {
-	return server.fetch(new URL(pathname, origin), init);
+	return harness.server.fetch(new URL(pathname, harness.origin), init);
 }
 
 export function workerFetch(
 	pathname: string,
 	init?: RequestInit
 ): Promise<Response> {
-	return fixtureWorkerServer().fetch(new URL(pathname, origin), init);
+	return fixtureWorkerServer().fetch(new URL(pathname, harness.origin), init);
 }
 
 export function readFetch(
@@ -683,7 +687,7 @@ export async function handlerFetch(
 ): Promise<Response> {
 	const ctx = createExecutionContext();
 	const request = new Request<unknown, IncomingRequestCfProperties>(
-		new URL(pathname, origin),
+		new URL(pathname, harness.origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
 	const response = await worker.fetch(request, env, ctx);
@@ -701,7 +705,7 @@ export async function controlFetch(
 ): Promise<Response> {
 	const ctx = createExecutionContext();
 	const request = new Request<unknown, IncomingRequestCfProperties>(
-		new URL(pathname, origin),
+		new URL(pathname, harness.origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
 	const response = await worker.fetch(
@@ -741,7 +745,7 @@ export async function issueControlAdminToken(
 	await ensureControlKey(database, wrappingSecret, ensureAt.toISOString());
 	const active = await activeControlKey(database, wrappingSecret);
 
-	const originUrl = new URL(origin);
+	const originUrl = new URL(harness.origin);
 	return issueAccessJwt(
 		active.privateJwk,
 		{
@@ -1892,7 +1896,7 @@ export async function deletePath(
 
 	expect(response.status).toBe(StatusCodes.OK);
 
-	return deletePathResponseSchema.parse(await response.json());
+	return pathDeletionResponseSchema.parse(await response.json());
 }
 
 export async function setRoot(
@@ -1955,7 +1959,7 @@ export async function runGcResult(): Promise<GcResult> {
 /** Runs GC the way the cron does: through the internal origin, which cannot purge the edge cache. */
 export async function runGcFromInternalOrigin(): Promise<void> {
 	const token = await initialise();
-	const response = await server.fetch(new URL('/gc', internalOrigin), {
+	const response = await harness.server.fetch(new URL('/gc', internalOrigin), {
 		headers: { authorization: `Bearer ${token}` },
 		method: 'POST'
 	});
@@ -1965,12 +1969,12 @@ export async function runGcFromInternalOrigin(): Promise<void> {
 }
 
 export function afterGrace(): Date {
-	return new Date(deleteTestBase.getTime() + blobReaperGraceMs + 60_000);
+	return new Date(testBase.getTime() + blobReaperGraceMs + 60_000);
 }
 
 // Runs the reaper to completion against the current server: a first GC pass arms
 // the unreferenced shared blobs, then time advances past the grace and a second
-// pass collects them. Tests anchored at `deleteTestBase` use this to assert blob
+// pass collects them. Tests anchored at `testBase` use this to assert blob
 // reclamation under the two-pass grace model. Requires fake timers.
 export async function reapBlobsPastGrace(): Promise<void> {
 	// Repair pass first: the owning Durable Object flushes any delete markers and
@@ -2231,7 +2235,7 @@ export async function seedCanonicalBlob(nar: VerifiableNar): Promise<void> {
 			fileSize: nar.narBytes.byteLength,
 			compression: 'zstd',
 			narSize: nar.narSize,
-			verifiedAt: deleteTestBase.toISOString()
+			verifiedAt: testBase.toISOString()
 		})
 		.onConflictDoNothing()
 		.run();
@@ -2831,7 +2835,7 @@ export interface SeededSigningKey {
 export async function seedSigningKeys(
 	seeds: readonly SigningKeySeed[]
 ): Promise<SeededSigningKey[]> {
-	return runInDurableObject(server, async (_instance, state) => {
+	return runInDurableObject(harness.server, async (_instance, state) => {
 		await migrateThrough(state, latestMigrationIndex);
 
 		const database = drizzle(state.storage, { schema: { signingKeys } });

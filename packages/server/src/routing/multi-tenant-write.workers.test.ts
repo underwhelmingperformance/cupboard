@@ -9,7 +9,6 @@ import {
 	blobStateNarHashes,
 	cacheWriteGrants,
 	clearBlobStorage,
-	deleteTestBase,
 	expectStats,
 	expectStatsForTenant,
 	handlerFetch,
@@ -24,6 +23,7 @@ import {
 	tenantBlobRows,
 	tenantMaintained,
 	tenantUploadStatus,
+	testBase,
 	testServerFor,
 	uploadMetadata,
 	verifiableNar
@@ -91,7 +91,7 @@ async function stageDeferredForNewTenant(
 describe('multi-tenant writes', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
-		vi.setSystemTime(deleteTestBase);
+		vi.setSystemTime(testBase);
 		await resetTestServer();
 		await clearBlobStorage();
 	});
