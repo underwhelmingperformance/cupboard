@@ -37,16 +37,12 @@ import { type BrowserMessages, openBrowser } from './open-browser.ts';
 export { type BrowserMessages, openBrowser } from './open-browser.ts';
 
 // British spelling for the cancel marker clack renders when a spinner, bar or
-// task is aborted without an explicit per-call message.
-function applyClackSettings(): { messages: { cancel: string } } {
-	const settings = { messages: { cancel: 'Cancelled' } };
-	updateSettings(settings);
-
-	return settings;
+// task is aborted without an explicit per-call message. Clack only exposes this
+// as a global mutation, so the CLI entrypoint calls this once at startup, before
+// any prompt renders.
+export function configureClackUi(): void {
+	updateSettings({ messages: { cancel: 'Cancelled' } });
 }
-
-const clackSettings = applyClackSettings();
-void clackSettings;
 
 /**
  * Lays out label/value rows with aligned columns, ready for a clack note or box.

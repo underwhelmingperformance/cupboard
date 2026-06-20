@@ -1781,7 +1781,6 @@ function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 
 			for (const storePath of storePaths) {
 				const references = paths[storePath]?.references ?? [];
-
 				for (const reference of references) {
 					closure.add(reference);
 				}

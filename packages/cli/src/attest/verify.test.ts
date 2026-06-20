@@ -149,7 +149,17 @@ const signingKeyFixtures = [
 	}
 ] satisfies readonly SigningKeyFixture[];
 
-const signingKeyFixtureCursor = { next: 0 };
+function* cycleSigningKeyFixtures(): Generator<SigningKeyFixture, never> {
+	for (let index = 0; ; index = (index + 1) % signingKeyFixtures.length) {
+		const fixture = signingKeyFixtures[index];
+
+		if (fixture !== undefined) {
+			yield fixture;
+		}
+	}
+}
+
+const signingKeyFixtureSequence = cycleSigningKeyFixtures();
 
 function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 	return {
@@ -172,14 +182,7 @@ function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 }
 
 async function generateSigningKeyPair(): Promise<Ed25519KeyPair> {
-	const fixture = z
-		.custom<SigningKeyFixture>((value) => value !== undefined)
-		.parse(
-			signingKeyFixtures[
-				signingKeyFixtureCursor.next % signingKeyFixtures.length
-			]
-		);
-	signingKeyFixtureCursor.next += 1;
+	const fixture = signingKeyFixtureSequence.next().value;
 	const [privateKey, publicKey] = await Promise.all([
 		crypto.subtle.importKey('jwk', fixture.privateKey, 'Ed25519', true, [
 			'sign'
