@@ -86,6 +86,9 @@ importers:
       '@cloudflare/workers-auth':
         specifier: ^0.3.0
         version: 0.3.1(vitest@4.1.8(@types/node@25.9.1)(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
+      '@cloudflare/workers-utils':
+        specifier: ^0.23.2
+        version: 0.23.2(vitest@4.1.8(@types/node@25.9.1)(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
       '@cupboard/cli-ui':
         specifier: workspace:*
         version: link:../cli-ui
