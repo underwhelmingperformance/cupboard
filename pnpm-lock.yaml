@@ -297,7 +297,7 @@ importers:
         version: 0.45.2(@cloudflare/workers-types@4.20260605.1)
       hono:
         specifier: ^4.12.23
-        version: 4.12.25
+        version: 4.12.26
       http-status-codes:
         specifier: ^2.3.0
         version: 2.3.0
@@ -2599,8 +2599,8 @@ packages:
     resolution: {integrity: sha512-T2UbfbBEF32wiepXIsMlTW9+dDYC6wMh/t/vYA4tuOMKqWz/n3vr1NFSxQiyP+zk2mXsoMA/i/7qV6LKut1t1A==}
     engines: {node: '>= 0.4'}
 
-  hono@4.12.25:
-    resolution: {integrity: sha512-2NFaIyNVgJmBs/ecmtGzlmluTFs5cHEWGTdu0t1HBwYzoGXOL5nUQBRMXsXWla5i4KkG//QMzVP88m1+I3fdAQ==}
+  hono@4.12.26:
+    resolution: {integrity: sha512-uyZtpnYxM9CmQ7QsQknM4zN8EftNqhON1qYeIKM0Se67CCEe2c44xyGURwB0axX2fBDu1dqHrHAc1hmNT8ITkw==}
     engines: {node: '>=16.9.0'}
 
   http-cache-semantics@4.2.0:
@@ -5557,7 +5557,7 @@ snapshots:
     dependencies:
       function-bind: 1.1.2
 
-  hono@4.12.25: {}
+  hono@4.12.26: {}
 
   http-cache-semantics@4.2.0: {}
 
