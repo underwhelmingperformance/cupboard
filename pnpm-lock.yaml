@@ -143,6 +143,9 @@ importers:
       commander:
         specifier: ^15.0.0
         version: 15.0.0
+      http-status-codes:
+        specifier: ^2.3.0
+        version: 2.3.0
       json5:
         specifier: ^2.2.3
         version: 2.2.3

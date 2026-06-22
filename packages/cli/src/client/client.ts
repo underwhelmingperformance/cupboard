@@ -89,7 +89,8 @@ export class CupboardClient {
 				'GET',
 				path,
 				response.status,
-				await response.text()
+				await response.text(),
+				rayOf(response)
 			);
 		}
 
@@ -142,7 +143,8 @@ export class CupboardClient {
 				'POST',
 				'/token',
 				response.status,
-				await response.text()
+				await response.text(),
+				rayOf(response)
 			);
 		}
 
@@ -286,7 +288,8 @@ export class CupboardClient {
 				'POST',
 				'/signup',
 				response.status,
-				await response.text()
+				await response.text(),
+				rayOf(response)
 			);
 		}
 
@@ -377,6 +380,12 @@ const defaultCommitWaitSeconds = 600;
 
 const connectCommitSocket: CommitSocketConnect = (url, headers) =>
 	new WebSocket(url, { headers: { ...headers } });
+
+// Cloudflare stamps every response with a `cf-ray` at the edge, so a server-side
+// failure can be tied to its log line. Absent off Cloudflare (a local server).
+function rayOf(response: Response): string | undefined {
+	return response.headers.get('cf-ray') ?? undefined;
+}
 
 export function cachePrefixFor(cache: string): string {
 	if (cache === DEFAULT_CACHE) {
