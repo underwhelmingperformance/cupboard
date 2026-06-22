@@ -108,6 +108,8 @@ export type OnboardOutcome =
 			readonly status: number;
 			/** The failing call and the server's own words. */
 			readonly detail: string;
+			/** Cloudflare's ray id for the failed request, when present. */
+			readonly ray?: string;
 	  }
 	| { readonly kind: 'claim-cancelled'; readonly url: string }
 	| { readonly kind: 'cancelled'; readonly url: string }
@@ -325,7 +327,8 @@ export async function onboardDeployment(
 			kind: 'claim-refused',
 			url,
 			status: claim.status,
-			detail: claim.detail
+			detail: claim.detail,
+			...(claim.ray !== undefined && { ray: claim.ray })
 		};
 	}
 
@@ -496,6 +499,7 @@ type ClaimResult =
 			readonly kind: 'refused';
 			readonly status: number;
 			readonly detail: string;
+			readonly ray?: string;
 	  };
 
 function describeR2Check(check: ParsedR2CredentialCheck): string {
@@ -738,7 +742,8 @@ async function claimAdmin(
 			return {
 				kind: 'refused',
 				status: error.status,
-				detail: `${error.method} ${error.path} answered ${httpDetail(error)}`
+				detail: `${error.method} ${error.path} answered ${httpDetail(error)}`,
+				...(error.ray !== undefined && { ray: error.ray })
 			};
 		}
 

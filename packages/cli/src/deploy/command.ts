@@ -4,6 +4,7 @@ import { isSea } from 'node:sea';
 import { NixConfig } from '@cupboard/nix/nix-config';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
+import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
 import { CupboardClient } from '../client/client.ts';
@@ -145,6 +146,67 @@ export interface DeployRuntimeOptions {
 
 function bucketNameOf(config: DeploymentConfig): string {
 	return config.tenant.r2Buckets[0]?.bucketName ?? 'cupboard-blobs';
+}
+
+/**
+ * Why the server refused the admin claim, by status class: an ownership or
+ * claim-secret mismatch, a server-side fault to read in the logs, or (the one
+ * case re-running signs in again for) a likely-stale login.
+ */
+export type ClaimRefusalReason =
+	| 'ownership-or-secret'
+	| 'server-error'
+	| 'stale-login';
+
+// http-status-codes exposes its codes as an enum; widen the two compared
+// against a response's numeric status so the comparisons stay number to number.
+const forbidden: number = StatusCodes.FORBIDDEN;
+const serverError: number = StatusCodes.INTERNAL_SERVER_ERROR;
+
+export function claimRefusalReason(status: number): ClaimRefusalReason {
+	if (status === forbidden) {
+		return 'ownership-or-secret';
+	}
+
+	if (status >= serverError) {
+		return 'server-error';
+	}
+
+	return 'stale-login';
+}
+
+// The operator-facing advice for a refusal. A server error names the exact
+// `wrangler tail` command for the control Worker and the ray to search for.
+function claimRefusalAdvice(
+	status: number,
+	ray: string | undefined,
+	controlScript: string
+): string {
+	switch (claimRefusalReason(status)) {
+		case 'ownership-or-secret': {
+			return (
+				'The deployment may already belong to a different identity, or its ' +
+				'claim secret did not match.'
+			);
+		}
+
+		case 'server-error': {
+			const forRay = ray === undefined ? '' : ` for ray ${ray}`;
+
+			return (
+				'This is a server-side error. Read the logged exception' +
+				`${forRay} with \`wrangler tail ${controlScript} --format json\`, ` +
+				'or in the dashboard Logs tab, then re-run `cupboard init`.'
+			);
+		}
+
+		case 'stale-login': {
+			return (
+				'Your Cloudflare login may have gone stale; re-running ' +
+				'`cupboard init` signs in again.'
+			);
+		}
+	}
 }
 
 async function resolveArtifact(
@@ -1321,11 +1383,11 @@ async function deployFlow(
 		case 'claim-refused': {
 			ui.warn(
 				`The server did not accept you as the admin: ${outcome.detail}. ` +
-					(outcome.status === 403
-						? 'The deployment may already belong to a different ' +
-							'identity, or its claim secret did not match.'
-						: 'Your Cloudflare login may have gone stale; re-running ' +
-							'`cupboard init` signs in again.')
+					claimRefusalAdvice(
+						outcome.status,
+						outcome.ray,
+						agreed.config.control.name
+					)
 			);
 			ui.outro('Deployed.');
 			return;

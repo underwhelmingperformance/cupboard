@@ -1,9 +1,11 @@
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
 	AccountOptionRequiredError,
 	chooseDeployAccount,
+	claimRefusalReason,
 	DeployCancelledError,
 	envR2Credentials,
 	obtainR2Credentials,
@@ -918,5 +920,18 @@ describe('verifyR2Credentials', () => {
 				status: 403
 			}
 		});
+	});
+});
+
+describe('claimRefusalReason', () => {
+	it.each([
+		{ status: StatusCodes.FORBIDDEN, expected: 'ownership-or-secret' },
+		{ status: StatusCodes.INTERNAL_SERVER_ERROR, expected: 'server-error' },
+		{ status: StatusCodes.BAD_GATEWAY, expected: 'server-error' },
+		{ status: StatusCodes.SERVICE_UNAVAILABLE, expected: 'server-error' },
+		{ status: StatusCodes.UNAUTHORIZED, expected: 'stale-login' },
+		{ status: StatusCodes.BAD_REQUEST, expected: 'stale-login' }
+	])('classifies $status as $expected', ({ status, expected }) => {
+		expect(claimRefusalReason(status)).toBe(expected);
 	});
 });
