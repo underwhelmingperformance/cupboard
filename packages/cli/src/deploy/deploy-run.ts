@@ -457,9 +457,23 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 
 	await configureTriggers(deps, resources);
 
+	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
+	const d1Database =
+		databaseId === undefined || d1Name === undefined
+			? undefined
+			: { name: d1Name, id: databaseId };
+
 	const rows: ResultRow[] = [
 		{ label: 'Control worker', value: artifact.config.control.name },
 		{ label: 'Tenant worker', value: artifact.config.tenant.name },
+		...(d1Database === undefined
+			? []
+			: [
+					{
+						label: 'D1 database',
+						value: `${d1Database.name} · ${d1Database.id}`
+					}
+				]),
 		...(options.domain === undefined
 			? []
 			: [{ label: 'Cache URL', value: `https://${options.domain}` }])
@@ -470,6 +484,7 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 		data: {
 			controlWorker: artifact.config.control.name,
 			tenantWorker: artifact.config.tenant.name,
+			d1Database,
 			cacheUrl:
 				options.domain === undefined ? undefined : `https://${options.domain}`
 		},
