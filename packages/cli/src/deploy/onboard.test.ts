@@ -779,7 +779,29 @@ describe('onboardDeployment', () => {
 		).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com',
-			lastProbe: 'still serving v-old'
+			lastProbe: 'still serving v-old',
+			worker: 'cupboard'
+		});
+	});
+
+	it('carries the cache status and tenant Worker when pubkey errors', async () => {
+		const { ui } = scriptedUi({ slugs: ['builds'] });
+		const client = scriptedClient({
+			versions: ['v-new'],
+			signup: [claimedSignup],
+			lists: [[]],
+			creates: [tenantSummary('builds')],
+			publicKeys: [500, 500]
+		});
+
+		expect(
+			await onboardDeployment({ ...baseOptions(ui, client), attempts: 2 })
+		).toStrictEqual({
+			kind: 'unreachable',
+			url: 'https://cache.example.com/t/builds',
+			lastProbe: 'HTTP 500: computer says no',
+			lastStatus: 500,
+			worker: 'cupboard-tenant'
 		});
 	});
 

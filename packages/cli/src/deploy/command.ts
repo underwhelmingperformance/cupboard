@@ -176,28 +176,16 @@ export function claimRefusalReason(status: number): ClaimRefusalReason {
 	return 'stale-login';
 }
 
-// The operator-facing advice for a refusal. A server error names the exact
-// `wrangler tail` command for the control Worker and the ray to search for.
+// The operator-facing advice for a refusal that is not a server error; a server
+// error is surfaced through `showServerFault` instead, which reads the log.
 function claimRefusalAdvice(
-	status: number,
-	ray: string | undefined,
-	controlScript: string
+	reason: Exclude<ClaimRefusalReason, 'server-error'>
 ): string {
-	switch (claimRefusalReason(status)) {
+	switch (reason) {
 		case 'ownership-or-secret': {
 			return (
 				'The deployment may already belong to a different identity, or its ' +
 				'claim secret did not match.'
-			);
-		}
-
-		case 'server-error': {
-			const forRay = ray === undefined ? '' : ` for ray ${ray}`;
-
-			return (
-				'This is a server-side error. Read the logged exception' +
-				`${forRay} with \`wrangler tail ${controlScript} --format json\`, ` +
-				'or in the dashboard Logs tab, then re-run `cupboard init`.'
 			);
 		}
 
@@ -208,6 +196,50 @@ function claimRefusalAdvice(
 			);
 		}
 	}
+}
+
+/**
+ * Surface a server-side fault a deploy probe hit: read the exception the Worker
+ * logged for the failing request (by its cf-ray) and show it inline, falling
+ * back to the exact command that reads the log when it cannot be fetched yet.
+ */
+async function showServerFault(deps: {
+	readonly ui: DeployUi;
+	readonly api: CloudflareApi;
+	readonly ray: string | undefined;
+	readonly worker: string;
+	readonly signal: AbortSignal | undefined;
+	readonly lead: string;
+}): Promise<void> {
+	const { ui, ray, worker, lead } = deps;
+
+	const logged =
+		ray === undefined
+			? []
+			: await fetchClaimFailureLogs({
+					api: deps.api,
+					ray,
+					now: Date.now,
+					sleep: (ms) => delayMs(ms, { signal: deps.signal }),
+					signal: deps.signal
+				});
+
+	if (logged.length > 0) {
+		ui.warn(`${lead} The Worker logged:`);
+		ui.note(
+			'Logged exception',
+			logged.map((line) => ({ label: '', value: line }))
+		);
+		ui.info('Fix the cause, then re-run `cupboard init`.');
+
+		return;
+	}
+
+	const forRay = ray === undefined ? '' : ` (ray ${ray})`;
+	ui.warn(
+		`${lead} Read it${forRay} with \`wrangler tail ${worker} --format json\`, ` +
+			'or the dashboard Logs tab, then re-run `cupboard init`.'
+	);
 }
 
 async function resolveArtifact(
@@ -1341,11 +1373,34 @@ async function deployFlow(
 		}
 
 		case 'unreachable': {
+			// A status means the host answered, so it is reachable and erroring,
+			// not absent: surface it as a server fault rather than blaming DNS.
+			if (
+				outcome.lastStatus !== undefined &&
+				outcome.lastStatus >= serverError
+			) {
+				await showServerFault({
+					ui,
+					api: apiFor(agreed.accountId),
+					ray: outcome.lastRay,
+					worker: outcome.worker,
+					signal: runtimeOptions.signal,
+					lead: `Deployed, but ${outcome.url} is returning a server error (HTTP ${String(outcome.lastStatus)}).`
+				});
+				ui.outro('Deployed.');
+				return;
+			}
+
+			// Only a genuinely new custom domain warrants the DNS caveat.
+			const dnsNote =
+				agreed.domain !== undefined && currentDomain !== agreed.domain
+					? ' A freshly added custom domain can take a while to resolve in DNS.'
+					: '';
+
 			ui.warn(
 				`Deployed, but ${outcome.url} did not come online in time ` +
-					`(last answer: ${outcome.lastProbe}). A fresh custom domain can ` +
-					'take a while in DNS. Once it responds, re-run `cupboard init` ' +
-					'to finish setting up.'
+					`(last answer: ${outcome.lastProbe}).${dnsNote} Once it responds, ` +
+					're-run `cupboard init` to finish setting up.'
 			);
 			ui.outro('Deployed.');
 			return;
@@ -1383,30 +1438,19 @@ async function deployFlow(
 
 		case 'claim-refused': {
 			const base = `The server did not accept you as the admin: ${outcome.detail}.`;
+			const reason = claimRefusalReason(outcome.status);
 
-			const logged =
-				claimRefusalReason(outcome.status) === 'server-error' &&
-				outcome.ray !== undefined
-					? await fetchClaimFailureLogs({
-							api: apiFor(agreed.accountId),
-							ray: outcome.ray,
-							now: Date.now,
-							sleep: (ms) => delayMs(ms, { signal: runtimeOptions.signal }),
-							signal: runtimeOptions.signal
-						})
-					: [];
-
-			if (logged.length > 0) {
-				ui.warn(`${base} This is a server-side error; the worker logged:`);
-				ui.note(
-					'Logged exception',
-					logged.map((line) => ({ label: '', value: line }))
-				);
-				ui.info('Fix the cause, then re-run `cupboard init`.');
+			if (reason === 'server-error') {
+				await showServerFault({
+					ui,
+					api: apiFor(agreed.accountId),
+					ray: outcome.ray,
+					worker: agreed.config.control.name,
+					signal: runtimeOptions.signal,
+					lead: `${base} This is a server-side error.`
+				});
 			} else {
-				ui.warn(
-					`${base} ${claimRefusalAdvice(outcome.status, outcome.ray, agreed.config.control.name)}`
-				);
+				ui.warn(`${base} ${claimRefusalAdvice(reason)}`);
 			}
 
 			ui.outro('Deployed.');
