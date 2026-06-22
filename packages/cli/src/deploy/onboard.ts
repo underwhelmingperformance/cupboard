@@ -33,7 +33,13 @@ import type { DeployUi } from './ui.ts';
 /** What a single probe of the deployment concluded. */
 type Probe<T> =
 	| { readonly kind: 'ready'; readonly value: T }
-	| { readonly kind: 'retry'; readonly detail: string };
+	| {
+			readonly kind: 'retry';
+			readonly detail: string;
+			/** The HTTP status the host answered, when it answered at all. */
+			readonly status?: number;
+			readonly ray?: string;
+	  };
 
 /** How the agreed admin binding relates to the person deploying. */
 export type OnboardAdmin =
@@ -124,6 +130,11 @@ export type OnboardOutcome =
 			readonly url: string;
 			/** What the final probe saw, e.g. `HTTP 404` or `unreachable`. */
 			readonly lastProbe: string;
+			/** The status the host answered, when it answered at all (vs DNS). */
+			readonly lastStatus?: number;
+			readonly lastRay?: string;
+			/** The Worker script behind `url`, for pointing at its logs. */
+			readonly worker: string;
 	  }
 	| { readonly kind: 'no-subdomain' };
 
@@ -291,7 +302,14 @@ export async function onboardDeployment(
 	);
 
 	if (up.kind === 'gave-up') {
-		return { kind: 'unreachable', url, lastProbe: up.lastProbe };
+		return {
+			kind: 'unreachable',
+			url,
+			lastProbe: up.lastProbe,
+			worker: options.controlScriptName,
+			...(up.lastStatus !== undefined && { lastStatus: up.lastStatus }),
+			...(up.lastRay !== undefined && { lastRay: up.lastRay })
+		};
 	}
 
 	if (admin.kind === 'none') {
@@ -416,7 +434,14 @@ export async function onboardDeployment(
 	);
 
 	if (key.kind === 'gave-up') {
-		return { kind: 'unreachable', url: cacheUrl, lastProbe: key.lastProbe };
+		return {
+			kind: 'unreachable',
+			url: cacheUrl,
+			lastProbe: key.lastProbe,
+			worker: options.tenantScriptName,
+			...(key.lastStatus !== undefined && { lastStatus: key.lastStatus }),
+			...(key.lastRay !== undefined && { lastRay: key.lastRay })
+		};
 	}
 
 	return {
@@ -814,10 +839,18 @@ async function pollProbe<T>(
 	probe: () => Promise<Probe<T>>
 ): Promise<
 	| { readonly kind: 'ready'; readonly value: T }
-	| { readonly kind: 'gave-up'; readonly lastProbe: string }
+	| {
+			readonly kind: 'gave-up';
+			readonly lastProbe: string;
+			/** The status the host last answered, undefined if it never did. */
+			readonly lastStatus: number | undefined;
+			readonly lastRay: string | undefined;
+	  }
 > {
 	let ready: undefined | { value: T };
 	let lastProbe = 'no answer';
+	let lastStatus: number | undefined;
+	let lastRay: string | undefined;
 
 	await ui.reporter().phase(label, async (context) => {
 		for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -831,6 +864,8 @@ async function pollProbe<T>(
 			}
 
 			lastProbe = probed.detail;
+			lastStatus = probed.status;
+			lastRay = probed.ray;
 
 			if (attempt < attempts) {
 				context.fact('attempt', attempt);
@@ -841,7 +876,7 @@ async function pollProbe<T>(
 	});
 
 	return ready === undefined
-		? { kind: 'gave-up', lastProbe }
+		? { kind: 'gave-up', lastProbe, lastStatus, lastRay }
 		: { kind: 'ready', value: ready.value };
 }
 
@@ -853,7 +888,12 @@ async function attemptProbe<T>(
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
 			if (isRetryableStatus(error.status)) {
-				return { kind: 'retry', detail: httpDetail(error) };
+				return {
+					kind: 'retry',
+					detail: httpDetail(error),
+					status: error.status,
+					...(error.ray !== undefined && { ray: error.ray })
+				};
 			}
 
 			throw error;
