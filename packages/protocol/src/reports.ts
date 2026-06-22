@@ -59,9 +59,22 @@ export const r2CredentialCheckSchema = z.discriminatedUnion('result', [
 ]);
 export type ParsedR2CredentialCheck = z.output<typeof r2CredentialCheckSchema>;
 
+// Whether the control database answers a trivial read. The bare-host control
+// surface can serve `/_version` from a previous Worker version before the new
+// version's D1 binding is live, so a deploy proves readiness through this rather
+// than the version probe alone.
+export const controlDatabaseCheckSchema = z.discriminatedUnion('result', [
+	z.strictObject({ result: z.literal('ok') }),
+	z.strictObject({ result: z.literal('error') })
+]);
+export type ParsedControlDatabaseCheck = z.output<
+	typeof controlDatabaseCheckSchema
+>;
+
 // The admin-gated deployment check served by the control plane. Future
 // deployment diagnostics join the report as further fields.
 export const controlCheckReportSchema = z.strictObject({
+	db: controlDatabaseCheckSchema,
 	r2: r2CredentialCheckSchema
 });
 export type ParsedControlCheckReport = z.output<

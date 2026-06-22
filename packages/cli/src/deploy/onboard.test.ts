@@ -534,6 +534,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 					controlCheckTokens.push(token);
 
 					return {
+						db: { result: 'ok' },
 						r2: await answer(controlChecks, '/control/check', orpcRejection)
 					};
 				},
