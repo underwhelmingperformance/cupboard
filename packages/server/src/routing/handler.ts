@@ -44,7 +44,10 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	// Deployment-level endpoints answer at the bare host regardless of tenancy: a
 	// liveness probe and the build version. They carry no tenant or cache prefix.
-	app.get('/_health', (context) =>
+	// `/healthz` is the conventional spelling; `/_health` is kept alongside it.
+	// Liveness checks no dependencies, so it stays public; the database readiness
+	// check lives behind admin auth on the control `check` procedure.
+	app.on('GET', ['/_health', '/healthz'], (context) =>
 		textResponse(context.req.raw, healthBody, {
 			'content-type': 'text/plain; charset=utf-8',
 			'cache-control': 'no-store'

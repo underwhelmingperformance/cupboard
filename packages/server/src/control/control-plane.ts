@@ -351,17 +351,23 @@ export async function controlAuthenticate(
 	}
 }
 
-// The admin-gated deployment check: diagnostics only the deployment itself
-// can perform, starting with whether its R2 credentials sign requests R2
-// accepts. The credentials live on the tenant script, so a tenant's Durable
-// Object answers; the bindings are script-wide, so any live tenant's object
-// speaks for the deployment, and with none there is nowhere to run the probe.
-// The admin-gated deployment check: diagnostics only the deployment itself
-// can perform, starting with whether its R2 credentials sign requests R2
-// accepts. The credentials live on the tenant script, so a tenant's Durable
-// Object answers; the bindings are script-wide, so any live tenant's object
-// speaks for the deployment, and with none there is nowhere to run the probe.
+// The admin-gated deployment check: diagnostics only the deployment itself can
+// perform. Readiness comes first: whether the control database answers, since a
+// deploy cannot trust the version probe alone (a prior Worker version may serve
+// it before the new version's D1 binding is live). Then whether the R2
+// credentials sign requests R2 accepts. The credentials live on the tenant
+// script, so a tenant's Durable Object answers; the bindings are script-wide, so
+// any live tenant's object speaks for the deployment, and with none there is
+// nowhere to run the probe.
 export async function controlCheck(env: Env): Promise<ControlCheckReport> {
+	const databaseCheck = await controlDatabaseCheck(env);
+
+	// Without a working control database there is no tenant registry to read, so
+	// the R2 probe has nowhere to run; the database verdict stands alone.
+	if (databaseCheck.result === 'error') {
+		return { db: databaseCheck, r2: { result: 'no-tenant' } };
+	}
+
 	const tenants = await listTenants(controlDatabase(env));
 	const live = tenants.find((tenant) => tenant.status !== 'offboarded');
 
@@ -370,7 +376,21 @@ export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 			? ({ result: 'no-tenant' } as const)
 			: await tenantServer(env, live.id).checkR2();
 
-	return { r2 };
+	return { db: databaseCheck, r2 };
+}
+
+// Whether the control database answers a trivial read against a core table, so a
+// reachable-but-unmigrated binding reads as not ready rather than ready.
+async function controlDatabaseCheck(
+	env: Env
+): Promise<ControlCheckReport['db']> {
+	try {
+		await env.CUPBOARD_DB.prepare('SELECT 1 FROM global_admin LIMIT 1').first();
+
+		return { result: 'ok' };
+	} catch {
+		return { result: 'error' };
+	}
 }
 
 export async function controlKeys(

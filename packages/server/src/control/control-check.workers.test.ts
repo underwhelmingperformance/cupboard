@@ -53,7 +53,7 @@ describe('control plane GET /control/check', () => {
 			body: controlCheckReportSchema.parse(await response.json())
 		}).toStrictEqual({
 			status: 200,
-			body: { r2: { result: 'no-tenant' } }
+			body: { db: { result: 'ok' }, r2: { result: 'no-tenant' } }
 		});
 	});
 
@@ -91,7 +91,7 @@ describe('control plane GET /control/check', () => {
 				}
 			}).toStrictEqual({
 				status: 200,
-				body: { r2: expected },
+				body: { db: { result: 'ok' }, r2: expected },
 				r2Probe: {
 					protocol: 'https:',
 					host: 'test-account-id.r2.cloudflarestorage.com',
