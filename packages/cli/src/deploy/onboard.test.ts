@@ -784,19 +784,20 @@ describe('onboardDeployment', () => {
 		});
 	});
 
-	it('carries the cache status and tenant Worker when pubkey errors', async () => {
+	it('stops at the first 500 from the cache, naming the tenant Worker', async () => {
 		const { ui } = scriptedUi({ slugs: ['builds'] });
+		// A single scripted 500 with the default 30 attempts: a retry would run
+		// the script dry and throw, so reaching the outcome proves it gave up at
+		// once rather than retrying a terminal error.
 		const client = scriptedClient({
 			versions: ['v-new'],
 			signup: [claimedSignup],
 			lists: [[]],
 			creates: [tenantSummary('builds')],
-			publicKeys: [500, 500]
+			publicKeys: [500]
 		});
 
-		expect(
-			await onboardDeployment({ ...baseOptions(ui, client), attempts: 2 })
-		).toStrictEqual({
+		expect(await onboardDeployment(baseOptions(ui, client))).toStrictEqual({
 			kind: 'unreachable',
 			url: 'https://cache.example.com/t/builds',
 			lastProbe: 'HTTP 500: computer says no',

@@ -11,6 +11,7 @@ import type {
 	TenantCreateBody
 } from '@cupboard/protocol/tenants';
 import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, throwIfAborted } from '../abort.ts';
 import {
@@ -38,6 +39,14 @@ type Probe<T> =
 			readonly detail: string;
 			/** The HTTP status the host answered, when it answered at all. */
 			readonly status?: number;
+			readonly ray?: string;
+	  }
+	/** A terminal answer: the host responded with an error it will not recover
+	 * from, so polling stops at once rather than running out the attempts. */
+	| {
+			readonly kind: 'stop';
+			readonly detail: string;
+			readonly status: number;
 			readonly ray?: string;
 	  };
 
@@ -867,6 +876,11 @@ async function pollProbe<T>(
 			lastStatus = probed.status;
 			lastRay = probed.ray;
 
+			// A terminal answer will not change on a retry, so give up at once.
+			if (probed.kind === 'stop') {
+				return;
+			}
+
 			if (attempt < attempts) {
 				context.fact('attempt', attempt);
 				context.fact('last answer', probed.detail);
@@ -887,13 +901,20 @@ async function attemptProbe<T>(
 		return await probe();
 	} catch (error) {
 		if (error instanceof CupboardHttpError) {
+			const answer = {
+				detail: httpDetail(error),
+				status: error.status,
+				...(error.ray !== undefined && { ray: error.ray })
+			};
+
 			if (isRetryableStatus(error.status)) {
-				return {
-					kind: 'retry',
-					detail: httpDetail(error),
-					status: error.status,
-					...(error.ray !== undefined && { ray: error.ray })
-				};
+				return { kind: 'retry', ...answer };
+			}
+
+			// A non-retryable 5xx is the server's own fault; stop and surface it,
+			// rather than retry it or throw it as if the request were malformed.
+			if (error.status >= serverErrorStatus) {
+				return { kind: 'stop', ...answer };
 			}
 
 			throw error;
@@ -908,8 +929,24 @@ async function attemptProbe<T>(
 	}
 }
 
+// The statuses worth waiting out: a route or DNS not yet live (404), the host
+// busy (408, 429), or a transient gateway condition (502, 503, 504). A bare 500
+// is the server's own fault, which retrying will not mend, so it is terminal.
+const retryableStatuses = new Set<number>([
+	StatusCodes.NOT_FOUND,
+	StatusCodes.REQUEST_TIMEOUT,
+	StatusCodes.TOO_MANY_REQUESTS,
+	StatusCodes.BAD_GATEWAY,
+	StatusCodes.SERVICE_UNAVAILABLE,
+	StatusCodes.GATEWAY_TIMEOUT
+]);
+
+// Widened from the enum so the comparison against a numeric status stays number
+// to number.
+const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
+
 function isRetryableStatus(status: number): boolean {
-	return status === 404 || status === 408 || status === 429 || status >= 500;
+	return retryableStatuses.has(status);
 }
 
 // The status with the server's own words, compacted to one short line so it
