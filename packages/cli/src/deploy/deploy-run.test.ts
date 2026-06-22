@@ -132,6 +132,7 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				recordFallbackApiCall(calls, 'enableWorkersDevRoute');
 				return Promise.resolve();
 			},
+			queryWorkerLogs: () => Promise.resolve([]),
 			ensureR2Bucket(name) {
 				calls.push(`r2:${name}`);
 				return Promise.resolve();

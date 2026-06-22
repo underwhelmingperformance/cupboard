@@ -128,7 +128,8 @@ function baseApi(apiCalls: ApiCall[]): CloudflareApi {
 		enableWorkersDevRoute: () => {
 			recordApiCall(apiCalls, 'enableWorkersDevRoute');
 			return Promise.resolve();
-		}
+		},
+		queryWorkerLogs: () => Promise.resolve([])
 	};
 }
 
