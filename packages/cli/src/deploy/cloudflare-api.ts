@@ -39,6 +39,22 @@ export interface CreatedApiToken {
 	readonly value: string;
 }
 
+/** A full-text query over a Worker's recent log events. */
+export interface WorkerLogQuery {
+	/** The text to match across each event (e.g. a request's cf-ray). */
+	readonly needle: string;
+	readonly fromMs: number;
+	readonly toMs: number;
+	readonly limit: number;
+}
+
+/** One matched log event, reduced to the fields a deploy surfaces. */
+export interface WorkerLogEvent {
+	readonly message: string | undefined;
+	readonly error: string | undefined;
+	readonly source: string;
+}
+
 /**
  * The Cloudflare operations the deploy pipeline performs, as a narrow seam over
  * the official SDK so the orchestration is testable against a fake. Every method
@@ -98,6 +114,13 @@ export interface CloudflareApi {
 	/** The account's workers.dev subdomain, or undefined when unregistered. */
 	getWorkersDevSubdomain(): Promise<string | undefined>;
 	enableWorkersDevRoute(scriptName: string): Promise<void>;
+
+	/**
+	 * Recent Workers Observability log events matching a full-text needle in a
+	 * time window. Empty when observability is off for the script or nothing
+	 * matches yet, since ingestion lags the request by a few seconds.
+	 */
+	queryWorkerLogs(query: WorkerLogQuery): Promise<readonly WorkerLogEvent[]>;
 }
 
 async function firstMatch<T>(
@@ -548,6 +571,26 @@ export function createCloudflareApi(
 				...account,
 				enabled: true
 			});
+		},
+
+		async queryWorkerLogs(query) {
+			const response = await client.workers.observability.telemetry.query({
+				...account,
+				queryId: 'cupboard-claim-failure',
+				view: 'events',
+				limit: query.limit,
+				timeframe: { from: query.fromMs, to: query.toMs },
+				parameters: { needle: { value: query.needle, matchCase: false } }
+			});
+
+			return (response.events?.events ?? []).map((event) => ({
+				message: event.$metadata.message,
+				error: event.$metadata.error,
+				source:
+					typeof event.source === 'string'
+						? event.source
+						: JSON.stringify(event.source)
+			}));
 		}
 	};
 }

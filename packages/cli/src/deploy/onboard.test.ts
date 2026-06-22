@@ -379,7 +379,8 @@ function baseApi(apiCalls: ApiCall[] = []): CloudflareApi {
 			apiCalls.push({ method: 'enableWorkersDevRoute', scriptName });
 
 			return Promise.resolve();
-		}
+		},
+		queryWorkerLogs: () => Promise.resolve([])
 	};
 }
 

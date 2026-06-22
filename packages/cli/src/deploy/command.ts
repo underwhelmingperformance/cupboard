@@ -18,6 +18,7 @@ import {
 	resolveCloudflare
 } from './auth.ts';
 import { createEsbuildBundler } from './bundle.ts';
+import { fetchClaimFailureLogs } from './claim-logs.ts';
 import { type CloudflareApi, createCloudflareApi } from './cloudflare-api.ts';
 import {
 	cloudflareOauthClientId,
@@ -1381,14 +1382,33 @@ async function deployFlow(
 		}
 
 		case 'claim-refused': {
-			ui.warn(
-				`The server did not accept you as the admin: ${outcome.detail}. ` +
-					claimRefusalAdvice(
-						outcome.status,
-						outcome.ray,
-						agreed.config.control.name
-					)
-			);
+			const base = `The server did not accept you as the admin: ${outcome.detail}.`;
+
+			const logged =
+				claimRefusalReason(outcome.status) === 'server-error' &&
+				outcome.ray !== undefined
+					? await fetchClaimFailureLogs({
+							api: apiFor(agreed.accountId),
+							ray: outcome.ray,
+							now: Date.now,
+							sleep: (ms) => delayMs(ms, { signal: runtimeOptions.signal }),
+							signal: runtimeOptions.signal
+						})
+					: [];
+
+			if (logged.length > 0) {
+				ui.warn(`${base} This is a server-side error; the worker logged:`);
+				ui.note(
+					'Logged exception',
+					logged.map((line) => ({ label: '', value: line }))
+				);
+				ui.info('Fix the cause, then re-run `cupboard init`.');
+			} else {
+				ui.warn(
+					`${base} ${claimRefusalAdvice(outcome.status, outcome.ray, agreed.config.control.name)}`
+				);
+			}
+
 			ui.outro('Deployed.');
 			return;
 		}
