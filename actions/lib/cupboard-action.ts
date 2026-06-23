@@ -11,6 +11,13 @@ import path from 'node:path';
 import { arch, env, platform } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
+import {
+	identityPolicy,
+	resultFor,
+	type VerifiedIdentityPolicy,
+	verifyBundle
+} from '@cupboard/shared/attestation';
+
 type Environment = Readonly<Record<string, string | undefined>>;
 
 interface ReleaseAsset {
@@ -268,20 +275,59 @@ export function buildPushArguments(
 	return arguments_;
 }
 
-export function buildAttestationVerifyArguments(
-	archivePath: string,
-	releaseRepository: string,
-	tagName: string
-): readonly string[] {
-	return [
-		'attestation',
-		'verify',
-		archivePath,
-		'--repo',
-		releaseRepository,
-		'--source-ref',
-		`refs/tags/${tagName}`
-	];
+const provenancePredicateType = 'https://slsa.dev/provenance/v1';
+const githubOidcIssuer = 'https://token.actions.githubusercontent.com';
+const releaseWorkflowPath = '.github/workflows/release.yml';
+
+interface VerifyReleaseDependencies {
+	readonly fetch?: typeof fetch;
+	readonly verify?: typeof verifyBundle;
+}
+
+/**
+ * The Fulcio SAN a release attestation is signed under: the release workflow's
+ * path in the release repository. A regex (anchored, with a trailing `@`) so it
+ * matches whichever ref the workflow ran on, since the build runs on the
+ * default branch before the tag exists.
+ */
+export function releaseWorkflowIdentityRegex(
+	releaseRepository: string
+): string {
+	const identity = `https://github.com/${releaseRepository}/${releaseWorkflowPath}`;
+
+	return `^${escapeRegex(identity)}@`;
+}
+
+/**
+ * The source commit the SLSA provenance was built from, taken from the first
+ * resolved dependency that records a git commit.
+ */
+export function provenanceSourceCommit(predicate: unknown): string | undefined {
+	if (!isRecord(predicate) || !isRecord(predicate.buildDefinition)) {
+		return undefined;
+	}
+
+	const dependencies = predicate.buildDefinition.resolvedDependencies;
+
+	if (!Array.isArray(dependencies)) {
+		return undefined;
+	}
+
+	for (const dependency of dependencies) {
+		if (isRecord(dependency) && isRecord(dependency.digest)) {
+			const gitCommit = dependency.digest.gitCommit;
+
+			if (typeof gitCommit === 'string') {
+				return gitCommit;
+			}
+		}
+	}
+
+	return undefined;
+}
+
+function escapeRegex(value: string): string {
+	return value.replaceAll(/[$()*+.?[\\\]^{|}]/gu, String.raw`\$&`);
 }
 
 export async function setupAction(
@@ -379,12 +425,7 @@ async function installCupboard(
 	}
 
 	await verifyChecksum(archivePath, expectedChecksum);
-	verifyArtifactAttestation(
-		archivePath,
-		options.releaseRepository,
-		release.tagName,
-		options.githubToken
-	);
+	await verifyReleaseAttestation(options, archivePath, release.tagName);
 	run('tar', ['-xzf', archivePath, '-C', options.installDirectory]);
 	await chmod(binaryPath, 0o755);
 	run(binaryPath, ['--version']);
@@ -483,31 +524,155 @@ async function verifyChecksum(
 	}
 }
 
-function verifyArtifactAttestation(
+export async function verifyReleaseAttestation(
+	options: Omit<InstallCupboardOptions, 'installDirectory'>,
 	archivePath: string,
-	releaseRepository: string,
 	tagName: string,
-	githubToken: string
-): void {
-	const result = spawnSync(
-		'gh',
-		buildAttestationVerifyArguments(archivePath, releaseRepository, tagName),
-		{
-			env: {
-				...env,
-				...(githubToken !== '' && { GH_TOKEN: githubToken })
-			},
-			stdio: 'inherit'
-		}
+	dependencies: VerifyReleaseDependencies = {}
+): Promise<void> {
+	const fetcher = dependencies.fetch ?? fetch;
+	const verify = dependencies.verify ?? verifyBundle;
+	const archiveName = path.basename(archivePath);
+	const subjectDigest = createHash('sha256')
+		.update(await readFile(archivePath))
+		.digest('hex');
+	const bundles = await fetchAttestationBundles(
+		options,
+		subjectDigest,
+		fetcher
 	);
 
-	if (result.status === 0) {
-		return;
+	if (bundles.length === 0) {
+		throw new Error(`no attestation was found for ${archiveName}`);
+	}
+
+	const tagCommit = await fetchTagCommit(options, tagName, fetcher);
+	const policy = identityPolicy({
+		certificateIdentityRegex: releaseWorkflowIdentityRegex(
+			options.releaseRepository
+		),
+		certificateOidcIssuerRegex: `^${escapeRegex(githubOidcIssuer)}$`
+	});
+	const failures: string[] = [];
+
+	for (const bundle of bundles) {
+		try {
+			await verifyOneReleaseBundle({
+				bundle,
+				policy,
+				verify,
+				archiveName,
+				subjectDigest,
+				tagName,
+				tagCommit
+			});
+
+			console.warn(
+				`Verified ${archiveName}: built by the ${options.releaseRepository} release workflow from ${tagCommit}.`
+			);
+
+			return;
+		} catch (error) {
+			failures.push(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	throw new Error(
-		`gh attestation verify failed with status ${String(result.status)}`
+		`could not verify the attestation for ${archiveName}: ${failures.join('; ')}`
 	);
+}
+
+async function verifyOneReleaseBundle(arguments_: {
+	readonly bundle: Uint8Array;
+	readonly policy: VerifiedIdentityPolicy;
+	readonly verify: typeof verifyBundle;
+	readonly archiveName: string;
+	readonly subjectDigest: string;
+	readonly tagName: string;
+	readonly tagCommit: string;
+}): Promise<void> {
+	const verified = await arguments_.verify(
+		arguments_.bundle,
+		arguments_.policy,
+		{}
+	);
+
+	resultFor(
+		arguments_.archiveName,
+		verified,
+		arguments_.subjectDigest,
+		provenancePredicateType
+	);
+
+	const sourceCommit = provenanceSourceCommit(verified.predicate);
+
+	if (sourceCommit !== arguments_.tagCommit) {
+		throw new Error(
+			`built from ${String(sourceCommit)}, but tag ${arguments_.tagName} points at ${arguments_.tagCommit}`
+		);
+	}
+}
+
+async function fetchAttestationBundles(
+	options: Omit<InstallCupboardOptions, 'installDirectory'>,
+	subjectDigest: string,
+	fetcher: typeof fetch
+): Promise<Uint8Array[]> {
+	const apiUrl = new URL(
+		`/repos/${options.releaseRepository}/attestations/sha256:${subjectDigest}`,
+		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
+	);
+	const response = await fetcher(apiUrl, {
+		headers: requestHeaders(options.githubToken)
+	});
+
+	if (!response.ok) {
+		throw new Error(`failed to fetch attestations: ${String(response.status)}`);
+	}
+
+	const body: unknown = await response.json();
+
+	if (!isRecord(body) || !Array.isArray(body.attestations)) {
+		throw new Error('GitHub attestations response had an unexpected shape');
+	}
+
+	const encoder = new TextEncoder();
+
+	return body.attestations.map((attestation) => {
+		if (!isRecord(attestation) || attestation.bundle === undefined) {
+			throw new Error('GitHub attestation had no bundle');
+		}
+
+		return encoder.encode(JSON.stringify(attestation.bundle));
+	});
+}
+
+async function fetchTagCommit(
+	options: Omit<InstallCupboardOptions, 'installDirectory'>,
+	tagName: string,
+	fetcher: typeof fetch
+): Promise<string> {
+	const apiUrl = new URL(
+		`/repos/${options.releaseRepository}/commits/${tagName}`,
+		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
+	);
+	const response = await fetcher(apiUrl, {
+		headers: requestHeaders(options.githubToken)
+	});
+
+	if (!response.ok) {
+		throw new Error(
+			`could not resolve the commit for tag ${tagName}: ${String(response.status)}`
+		);
+	}
+
+	const body: unknown = await response.json();
+
+	if (!isRecord(body) || typeof body.sha !== 'string') {
+		throw new Error(`could not resolve the commit for tag ${tagName}`);
+	}
+
+	return body.sha;
 }
 
 async function configureNix(inputs: ConfigureNixInputs): Promise<void> {
