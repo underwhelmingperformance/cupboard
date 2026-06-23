@@ -7,6 +7,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -19,33 +23,16 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install actionlint
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          tmp="$(mktemp -d)"
-          gh release download v1.7.12 \
-            --repo rhysd/actionlint \
-            --pattern actionlint_1.7.12_checksums.txt \
-            --pattern actionlint_1.7.12_linux_amd64.tar.gz \
-            --dir "$tmp"
-
-          (
-            cd "$tmp"
-            grep ' actionlint_1.7.12_linux_amd64.tar.gz$' actionlint_1.7.12_checksums.txt | sha256sum -c -
-          )
-
-          tar -xzf "$tmp/actionlint_1.7.12_linux_amd64.tar.gz" -C "$tmp"
-          install -m 0755 "$tmp/actionlint" "$RUNNER_TEMP/actionlint"
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-
-      - run: actionlint -no-color
+      - uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        with:
+          args: -color
 
   zizmor:
     name: zizmor
     runs-on: ubuntu-24.04
+    env:
+      # renovate: datasource=pypi depName=zizmor
+      ZIZMOR_VERSION: '1.26.1'
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -56,4 +43,5 @@ jobs:
           advanced-security: false
           annotations: true
           inputs: .github/workflows actions
-          version: 1.26.1
+          persona: pedantic
+          version: ${{ env.ZIZMOR_VERSION }}
