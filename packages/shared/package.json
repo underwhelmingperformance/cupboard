@@ -2,7 +2,10 @@
 	"name": "@cupboard/shared",
 	"version": "0.0.0",
 	"dependencies": {
-		"@cupboard/reporter": "workspace:*"
+		"@cupboard/reporter": "workspace:*",
+		"@octokit/plugin-retry": "^8.1.0",
+		"@octokit/plugin-throttling": "^11.0.3",
+		"@octokit/rest": "^22.0.1"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",
@@ -10,7 +13,8 @@
 		"vitest": "^4.1.8"
 	},
 	"exports": {
-		".": "./src/cli.ts"
+		".": "./src/cli.ts",
+		"./octokit": "./src/octokit.ts"
 	},
 	"license": "AGPL-3.0-or-later",
 	"private": true,

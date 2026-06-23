@@ -1,8 +1,6 @@
 import path from 'node:path';
 
-import { retry } from '@octokit/plugin-retry';
-import { throttling } from '@octokit/plugin-throttling';
-import { Octokit } from '@octokit/rest';
+import { createOctokitClient } from '@cupboard/shared/octokit';
 import makeFetchHappen from 'make-fetch-happen';
 
 import { cacheDirectory } from '../../auth/secret-file.ts';
@@ -36,10 +34,6 @@ export class GithubRateLimitError extends Error {
 	}
 }
 
-// Octokit with the single retry policy for the project: throttling backs off on
-// the documented rate-limit responses and retry handles transient failures.
-const ResilientOctokit = Octokit.plugin(throttling, retry);
-
 export interface LookupRepositoryOptions {
 	// Injected in tests; defaults to a caching `make-fetch-happen` over the real
 	// GitHub API.
@@ -66,14 +60,8 @@ export async function lookupRepository(
 	const repo = repository.slice(slash + 1);
 
 	const cachePath = path.join(cacheDirectory(), 'github');
-	const octokit = new ResilientOctokit({
-		request: {
-			fetch: options.fetch ?? makeFetchHappen.defaults({ cachePath })
-		},
-		throttle: {
-			onRateLimit: () => false,
-			onSecondaryRateLimit: () => false
-		}
+	const octokit = createOctokitClient({
+		request: { fetch: options.fetch ?? makeFetchHappen.defaults({ cachePath }) }
 	});
 
 	try {
