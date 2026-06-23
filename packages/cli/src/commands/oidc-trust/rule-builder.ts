@@ -6,11 +6,32 @@ import {
 	type Substitution
 } from '@cupboard/protocol/grants';
 import {
+	type ClaimMatch,
 	type OidcTrustAddBody,
 	oidcTrustAddBodySchema
 } from '@cupboard/protocol/oidc';
 
 import { InvalidClaimError } from '../../errors.ts';
+
+// RE2 metacharacters, escaped so a literal path becomes a literal pattern.
+function escapeRe2(value: string): string {
+	return value.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
+}
+
+/**
+ * The match for a `job_workflow_ref` claim value of the form
+ * `owner/repo/path@ref`. When the value carries an `@ref` it is matched exactly;
+ * without one it becomes a pattern matching that workflow file at any ref, which
+ * is the shape a reusable workflow needs since its ref is the file's own, not
+ * the branch that triggered the run.
+ */
+export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
+	if (value.includes('@')) {
+		return value;
+	}
+
+	return { pattern: `^${escapeRe2(value)}@.+$` };
+}
 
 // The cache operations each `--allow` shorthand expands to. `push` and `attest`
 // are the upload and attestation conversations; `root` is a retention-root write.
@@ -254,7 +275,7 @@ function rootBinding(
 export interface AddBodyOptions {
 	readonly issuer: string;
 	readonly audience: string;
-	readonly claims: Record<string, string>;
+	readonly claims: Record<string, ClaimMatch>;
 	readonly permittedGrants: readonly PermittedGrant[];
 	readonly display?: OidcTrustAddBody['display'];
 }

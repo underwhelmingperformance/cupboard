@@ -1,7 +1,9 @@
+import { isPatternMatch } from '@cupboard/protocol/capture';
 import {
 	type OidcTrustDisplay,
 	type PermittedGrant
 } from '@cupboard/protocol/grants';
+import { type ClaimMatch } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 
 // A trust rule reduced to what matching and issuance need. The DO reads enabled
@@ -11,7 +13,7 @@ export interface OidcTrustRule {
 	readonly id: string;
 	readonly issuer: string;
 	readonly audience: string;
-	readonly claims: Readonly<Record<string, string>>;
+	readonly claims: Readonly<Record<string, ClaimMatch>>;
 	readonly permittedGrants: readonly PermittedGrant[];
 	readonly display?: OidcTrustDisplay;
 }
@@ -53,12 +55,21 @@ function hasMatchingAudience(rule: OidcTrustRule, claims: OidcClaims): boolean {
 		: Array.isArray(aud) && aud.includes(rule.audience);
 }
 
-// Every configured claim must be present and exactly equal — strings only, so a
-// numeric or structured claim never satisfies a configured value by coincidence.
+// Every configured claim must be present and match its exact value or pattern.
+// Either way the token's claim must be a string, so a numeric or structured
+// claim never satisfies a configured value by coincidence.
 function hasMatchingClaims(rule: OidcTrustRule, claims: OidcClaims): boolean {
-	return Object.entries(rule.claims).every(
-		([name, expected]) => claims[name] === expected
-	);
+	return Object.entries(rule.claims).every(([name, expected]) => {
+		const actual = claims[name];
+
+		if (typeof actual !== 'string') {
+			return false;
+		}
+
+		return typeof expected === 'string'
+			? actual === expected
+			: isPatternMatch(expected.pattern, actual);
+	});
 }
 
 // More pinned claims is a tighter rule, so it wins over a looser one for the

@@ -195,38 +195,42 @@ grant those, the whole exchange is refused, not narrowed.
 A good rule pins identity on two axes. The repository is pinned by its immutable
 numeric ids (`repository_id` and `repository_owner_id`), so a rename cannot
 silently transfer trust and nobody reusing the freed-up name inherits it. The
-code that ran is pinned by `job_workflow_ref`, which names the exact workflow
-file and the ref it ran at. The two compose: pin both and only that workflow, on
-that repository, can exchange a token.
+trigger is pinned by the `ref` claim, which is the branch (or pull request) that
+started the run, so only that branch's pushes are accepted. Optionally the
+workflow file is pinned too, by `job_workflow_ref`, as a further restriction.
 
 The `add-github-pr` and `add-github-branch` commands assemble these rules for
 the common cases. `add-github-pr` trusts pull-request builds and routes each one
 to its own short-lived cache (`pr-<number>`) and matching retention root
 (`github:<owner>/<repo>/pr-<number>/`), both keyed on the pull-request number,
-so one PR cannot reach another's paths. `add-github-branch` trusts a branch's
-pushes and publishes to the tenant's default cache under the retention root the
-push action writes by default, `github:<owner>/<repo>/<branch>/`. Both look up
-the repository's ids for you, grant the push and the retention root, and grant
-attestation by default; pass `--no-attest` to withhold it, or `--root-template`
-to override the root.
+so one PR cannot reach another's paths. `add-github-branch` trusts pushes to one
+branch and publishes to the tenant's default cache under the retention root the
+push action writes by default, `github:<owner>/<repo>/<branch>/`; it pins the
+branch through the `ref` claim, so a sibling branch sharing a reusable workflow
+cannot match. Both look up the repository's ids for you, grant the push and the
+retention root, and grant attestation by default; pass `--no-attest` to withhold
+it, or `--root-template` to override the root.
 
 ```bash
 # Per-PR rule: build the pull request, push to its own pr-<n> cache.
 cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \
   --repo acme/infra
 
-# Branch rule: pushes to main, run through a reusable publish workflow,
+# Branch rule: pushes to main, requiring the reusable publish workflow,
 # publish to the default cache.
 cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
   --repo acme/infra --branch main \
-  --workflow .github/workflows/cupboard-publish.yml
+  --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main
 ```
 
-`--workflow` is the workflow file's path inside the repository; the command
-builds the full `job_workflow_ref` from it and the repository name. A reusable
-workflow is pinned at the ref it is called with, which is not always the branch
-being built, so `--workflow-ref` overrides the ref when they differ (it defaults
-to `--branch`).
+`--job-workflow-ref` is optional on both presets and restricts the rule further
+to the `job_workflow_ref` claim, the workflow file that minted the token,
+written `owner/repo/path@ref`. Give it with an `@ref` to match exactly, or
+without one to match that file at any ref; the latter is what a reusable
+workflow needs, since its ref is the file's own location rather than the branch
+being built, and the branch is already pinned by `ref`. It is named after the
+claim on purpose: `job_workflow_ref` is a different claim from `workflow` (the
+workflow's name) and `workflow_ref` (the calling workflow).
 
 For an issuer or claim shape the presets do not cover, the general
 `cupboard oidc-trust add` takes the issuer, audience, claims and grants

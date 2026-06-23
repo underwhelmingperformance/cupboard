@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 
 import type { CliUi } from '@cupboard/cli-ui';
 import {
+	type ClaimMatch,
 	type OidcTrustAddBody,
 	oidcTrustAddBodySchema,
 	type OidcTrustListResponse,
@@ -24,7 +25,8 @@ import {
 import {
 	buildAddBody,
 	buildCacheGrant,
-	collectSubstitutions
+	collectSubstitutions,
+	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
 } from './oidc-trust/rule-builder.ts';
 
 const githubActionsIssuer = 'https://token.actions.githubusercontent.com';
@@ -34,6 +36,7 @@ interface GithubPrOptions {
 	readonly audience?: string;
 	readonly cacheTemplate?: string;
 	readonly rootTemplate?: string;
+	readonly jobWorkflowRef?: string;
 	// Commander's `--no-attest` leaves this `true` unless the flag is passed.
 	readonly attest?: boolean;
 }
@@ -41,8 +44,7 @@ interface GithubPrOptions {
 interface GithubBranchOptions {
 	readonly repo: string;
 	readonly branch: string;
-	readonly workflow: string;
-	readonly workflowRef?: string;
+	readonly jobWorkflowRef?: string;
 	readonly audience?: string;
 	readonly attest?: boolean;
 }
@@ -144,16 +146,17 @@ function collect(value: string, previous: readonly string[]): string[] {
 	return [...previous, value];
 }
 
-function claimRows(claims: Record<string, string>): ResultRow[] {
+function claimRows(claims: Record<string, ClaimMatch>): ResultRow[] {
 	const entries = Object.entries(claims);
 
 	if (entries.length === 0) {
 		return [{ label: 'Claims', value: '(none)' }];
 	}
 
-	return entries.map(([key, value], index) => ({
+	return entries.map(([key, match], index) => ({
 		label: index === 0 ? 'Claims' : '',
-		value: `${key}=${value}`
+		value:
+			typeof match === 'string' ? `${key}=${match}` : `${key}=~${match.pattern}`
 	}));
 }
 
@@ -211,8 +214,8 @@ function summaryRows(summary: OidcTrustSummary): ResultRow[] {
 export function claimsForAdd(
 	claimPairs: readonly string[],
 	jobWorkflowReference: string | undefined
-): Record<string, string> {
-	const claims = parseClaims(claimPairs);
+): Record<string, ClaimMatch> {
+	const claims: Record<string, ClaimMatch> = parseClaims(claimPairs);
 
 	if (jobWorkflowReference === undefined) {
 		return claims;
@@ -224,7 +227,10 @@ export function claimsForAdd(
 		);
 	}
 
-	return { ...claims, job_workflow_ref: jobWorkflowReference };
+	return {
+		...claims,
+		job_workflow_ref: jobWorkflowReferenceClaim(jobWorkflowReference)
+	};
 }
 
 function parseClaims(pairs: readonly string[]): Record<string, string> {
@@ -297,13 +303,21 @@ export function githubPrAddBody(
 ): OidcTrustAddBody {
 	const cacheTemplate = options.cacheTemplate ?? 'pr-{pr}';
 
+	const claims: Record<string, ClaimMatch> = {
+		repository_id: String(identity.repositoryId),
+		repository_owner_id: String(identity.repositoryOwnerId)
+	};
+
+	// Pinning the workflow is an optional extra restriction; the pull-request
+	// event is already gated by the `{pr}` capture on the bindings below.
+	if (options.jobWorkflowRef !== undefined) {
+		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
+	}
+
 	return buildAddBody({
 		issuer: githubActionsIssuer,
 		audience: options.audience ?? url,
-		claims: {
-			repository_id: String(identity.repositoryId),
-			repository_owner_id: String(identity.repositoryOwnerId)
-		},
+		claims,
 		permittedGrants: [
 			buildCacheGrant({
 				cacheTemplate,
@@ -323,28 +337,31 @@ export function githubPrAddBody(
 	});
 }
 
-// Assemble the branch rule for a GitHub repository: a reusable or direct
-// workflow on `branch` publishes to the tenant's default cache, scoped to the
-// retention root the push action writes by default,
-// `github:<owner>/<repo>/<branch>/`. The repository's immutable ids and the
-// `job_workflow_ref` of the workflow file are pinned, so only that workflow on
-// that branch can exchange a token.
+// Assemble the branch rule for a GitHub repository: pushes to `branch` publish
+// to the tenant's default cache, scoped to the retention root the push action
+// writes by default, `github:<owner>/<repo>/<branch>/`. The trigger branch is
+// pinned through the `ref` claim, so a sibling branch sharing a reusable
+// workflow cannot match. Pinning the workflow file with `--workflow` is an
+// optional extra restriction on top of that.
 export function githubBranchAddBody(
 	url: string,
 	identity: RepositoryIdentity,
 	options: GithubBranchOptions
 ): OidcTrustAddBody {
-	const workflowReference = options.workflowRef ?? options.branch;
-	const workflow = options.workflow.replace(/^\/+/u, '');
+	const claims: Record<string, ClaimMatch> = {
+		repository_id: String(identity.repositoryId),
+		repository_owner_id: String(identity.repositoryOwnerId),
+		ref: `refs/heads/${options.branch}`
+	};
+
+	if (options.jobWorkflowRef !== undefined) {
+		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
+	}
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
 		audience: options.audience ?? url,
-		claims: {
-			repository_id: String(identity.repositoryId),
-			repository_owner_id: String(identity.repositoryOwnerId),
-			job_workflow_ref: `${identity.fullName}/${workflow}@refs/heads/${workflowReference}`
-		},
+		claims,
 		permittedGrants: [
 			buildCacheGrant({
 				allow: withAttest(['push', 'root'], options.attest),
@@ -503,6 +520,10 @@ function buildOidcTrustCommands(
 				'the per-PR retention root (default: github:<owner>/<repo>/pr-{pr}/)'
 			)
 			.option(
+				'--job-workflow-ref <value>',
+				'also require the job_workflow_ref claim (owner/repo/path@ref); without @ref it matches the file at any ref'
+			)
+			.option(
 				'--no-attest',
 				'do not let the workflow attach build attestations'
 			)
@@ -541,13 +562,9 @@ function buildOidcTrustCommands(
 				'--branch <name>',
 				'the branch whose pushes may publish, e.g. main'
 			)
-			.requiredOption(
-				'--workflow <path>',
-				'the workflow file allowed to push, e.g. .github/workflows/publish.yml'
-			)
 			.option(
-				'--workflow-ref <ref>',
-				'the ref the workflow file is pinned at (default: the branch)'
+				'--job-workflow-ref <value>',
+				'also require the job_workflow_ref claim (owner/repo/path@ref); without @ref it matches the file at any ref'
 			)
 			.option(
 				'--audience <audience>',
@@ -562,11 +579,11 @@ function buildOidcTrustCommands(
 				[
 					'',
 					'Example:',
-					'  # Trust pushes to main, run through a reusable publish workflow, to',
-					'  # publish to the default cache under github:<repo>/main/',
+					'  # Trust pushes to main, requiring the reusable publish workflow',
+					'  # that mints the token, and publish to the default cache',
 					'  cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \\',
 					'    --repo acme/infra --branch main \\',
-					'    --workflow .github/workflows/cupboard-publish.yml'
+					'    --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main'
 				].join('\n')
 			)
 			.action(async (url: string, options: GithubBranchOptions) => {

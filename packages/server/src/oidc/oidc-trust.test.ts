@@ -121,6 +121,37 @@ describe('matchOidcTrust', () => {
 		).toBeUndefined();
 	});
 
+	it('matches a claim against a configured pattern', () => {
+		const patternRule: OidcTrustRule = {
+			id: 'pattern',
+			issuer: github,
+			audience,
+			claims: {
+				job_workflow_ref: { pattern: '^acme/infra/.+@.+$' }
+			},
+			permittedGrants: ciGrant('acme-ci')
+		};
+		const base = { iss: github, aud: audience };
+
+		expect({
+			match: matchOidcTrust([patternRule], {
+				...base,
+				job_workflow_ref:
+					'acme/infra/.github/workflows/publish.yml@refs/heads/main'
+			})?.id,
+			noMatch: matchOidcTrust([patternRule], {
+				...base,
+				job_workflow_ref:
+					'other/repo/.github/workflows/publish.yml@refs/heads/main'
+			})?.id,
+			absent: matchOidcTrust([patternRule], base)?.id
+		}).toStrictEqual({
+			match: 'pattern',
+			noMatch: undefined,
+			absent: undefined
+		});
+	});
+
 	it('matches when only the token iss carries a trailing slash', () => {
 		expect(
 			matchOidcTrust(rules, {

@@ -22,27 +22,57 @@ export class SubstitutionError extends Error {
 }
 
 /**
+ * Compile an anchored RE2 pattern. Throws {@link InvalidCapturePatternError} for
+ * an unanchored pattern or one RE2 cannot compile. RE2's `matches` requires the
+ * whole input to match; the `^`/`$` anchors are mandatory for clarity.
+ */
+export function compilePattern(pattern: string): RE2JS {
+	if (!pattern.startsWith('^') || !pattern.endsWith('$')) {
+		throw new InvalidCapturePatternError(
+			'pattern must be anchored with ^ and $'
+		);
+	}
+
+	try {
+		return RE2JS.compile(pattern);
+	} catch (error) {
+		throw new InvalidCapturePatternError(
+			`pattern is not a valid RE2 expression: ${String(error)}`
+		);
+	}
+}
+
+/** Whether a pattern is an anchored expression RE2 can compile. */
+export function isAnchoredRe2(pattern: string): boolean {
+	try {
+		compilePattern(pattern);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether `value` matches the anchored pattern in full. Fails closed: a pattern
+ * that does not compile yields `false` rather than throwing, so claim matching
+ * never faults a token exchange.
+ */
+export function isPatternMatch(pattern: string, value: string): boolean {
+	try {
+		return compilePattern(pattern).matcher(value).matches();
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Compile a capture pattern, requiring it to be anchored and to define at least
  * one named group (each named group becomes a template variable). Throws
  * {@link InvalidCapturePatternError} for an unanchored pattern, a pattern RE2
  * cannot compile, or one with no named group.
  */
 export function compileCapture(pattern: string): RE2JS {
-	if (!pattern.startsWith('^') || !pattern.endsWith('$')) {
-		throw new InvalidCapturePatternError(
-			'capture pattern must be anchored with ^ and $'
-		);
-	}
-
-	let compiled: RE2JS;
-
-	try {
-		compiled = RE2JS.compile(pattern);
-	} catch (error) {
-		throw new InvalidCapturePatternError(
-			`capture pattern is not a valid RE2 expression: ${String(error)}`
-		);
-	}
+	const compiled = compilePattern(pattern);
 
 	if (Object.keys(compiled.namedGroups()).length === 0) {
 		throw new InvalidCapturePatternError(

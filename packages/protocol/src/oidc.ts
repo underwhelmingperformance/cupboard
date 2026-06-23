@@ -1,12 +1,30 @@
 import { positiveIntSchema } from '@cupboard/nix/scalars';
 import { z } from 'zod';
 
+import { isAnchoredRe2 } from './capture.ts';
 import {
 	authorizationDetailsSchema,
+	capturePatternMaxLength,
 	oidcTrustDisplaySchema,
 	permittedGrantSchema
 } from './grants.ts';
 import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
+
+// A configured claim is matched either exactly (the token's claim must equal the
+// string) or against an anchored RE2 pattern (the claim must match it in full).
+// The pattern form lets a rule pin part of a claim and leave the rest open, for
+// example a workflow file at any ref.
+export const claimMatchSchema = z.union([
+	z.string(),
+	z.strictObject({
+		pattern: z
+			.string()
+			.min(1)
+			.max(capturePatternMaxLength)
+			.refine(isAnchoredRe2, 'pattern must be an anchored RE2 expression')
+	})
+]);
+export type ClaimMatch = z.infer<typeof claimMatchSchema>;
 
 // RFC 8693 token-exchange issues the first cupboard token of a session. The
 // subject token is an external OIDC JWT — the owner's `id_token` or a CI GitHub
@@ -94,7 +112,7 @@ export const oidcTrustAddBodySchema = z.strictObject({
 		.transform((value) => IssuerUrl.parse(value)?.value ?? value),
 	audience: z.string().min(1),
 	claims: z
-		.record(z.string().min(1), z.string())
+		.record(z.string().min(1), claimMatchSchema)
 		.refine(
 			(value) => Object.keys(value).length > 0,
 			'at least one claim is required to bind the rule'
@@ -108,7 +126,7 @@ export const oidcTrustSummarySchema = z.strictObject({
 	id: z.string(),
 	issuer: z.string(),
 	audience: z.string(),
-	claims: z.record(z.string(), z.string()),
+	claims: z.record(z.string(), claimMatchSchema),
 	permittedGrants: z.array(permittedGrantSchema),
 	display: oidcTrustDisplaySchema.optional(),
 	disabled: z.boolean()

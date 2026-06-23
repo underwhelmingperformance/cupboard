@@ -5,8 +5,31 @@ import {
 	captureGroups,
 	compileCapture,
 	InvalidCapturePatternError,
+	isAnchoredRe2,
+	isPatternMatch,
 	SubstitutionError
 } from './capture.ts';
+
+describe('isPatternMatch', () => {
+	it.each([
+		{ pattern: '^a/b@.+$', value: 'a/b@refs/heads/main', expected: true },
+		{ pattern: '^a/b@.+$', value: 'a/c@refs/heads/main', expected: false },
+		{ pattern: '^a/b@.+$', value: 'xa/b@refs/heads/main', expected: false },
+		{ pattern: 'a/b@.+', value: 'a/b@x', expected: false }
+	])('$pattern against $value is $expected', ({ pattern, value, expected }) => {
+		expect(isPatternMatch(pattern, value)).toBe(expected);
+	});
+});
+
+describe('isAnchoredRe2', () => {
+	it.each([
+		{ pattern: '^a@.+$', expected: true },
+		{ pattern: 'a@.+', expected: false },
+		{ pattern: '^(unterminated$', expected: false }
+	])('$pattern is $expected', ({ pattern, expected }) => {
+		expect(isAnchoredRe2(pattern)).toBe(expected);
+	});
+});
 
 const prReferencePattern = String.raw`^refs/pull/(?<pull_request_number>\d+)/merge$`;
 

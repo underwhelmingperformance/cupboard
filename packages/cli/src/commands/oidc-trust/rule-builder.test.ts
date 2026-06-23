@@ -6,10 +6,27 @@ import {
 	DuplicateCaptureVariableError,
 	expandAllow,
 	InvalidCaptureSpecError,
+	jobWorkflowReferenceClaim,
 	parseCapture,
 	UnknownAllowError,
 	UnknownTemplateSourceError
 } from './rule-builder.ts';
+
+describe('jobWorkflowReferenceClaim', () => {
+	it('matches the workflow file at any ref when the value carries no @ref', () => {
+		expect(
+			jobWorkflowReferenceClaim('acme/infra/.github/workflows/publish.yml')
+		).toStrictEqual({
+			pattern: String.raw`^acme/infra/\.github/workflows/publish\.yml@.+$`
+		});
+	});
+
+	it('matches exactly when the value carries an @ref', () => {
+		const value = 'acme/infra/.github/workflows/publish.yml@refs/heads/main';
+
+		expect(jobWorkflowReferenceClaim(value)).toBe(value);
+	});
+});
 
 describe('expandAllow', () => {
 	it('expands the shorthands into cache and root actions', () => {
