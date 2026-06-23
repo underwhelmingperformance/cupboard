@@ -324,12 +324,12 @@ describe('githubPrAddBody', () => {
 });
 
 describe('githubBranchAddBody', () => {
-	it('pins the workflow and publishes to the default cache under the branch root', () => {
+	it('gates the branch via the ref claim and matches the workflow file at any ref', () => {
 		expect(
 			githubBranchAddBody(tenantUrl, identity, {
 				repo: 'acme/infra',
 				branch: 'main',
-				workflow: '.github/workflows/cupboard-publish.yml'
+				jobWorkflowRef: 'acme/infra/.github/workflows/cupboard-publish.yml'
 			})
 		).toStrictEqual({
 			issuer: 'https://token.actions.githubusercontent.com',
@@ -337,8 +337,10 @@ describe('githubBranchAddBody', () => {
 			claims: {
 				repository_id: '1234',
 				repository_owner_id: '5678',
-				job_workflow_ref:
-					'acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main'
+				ref: 'refs/heads/main',
+				job_workflow_ref: {
+					pattern: String.raw`^acme/infra/\.github/workflows/cupboard-publish\.yml@.+$`
+				}
 			},
 			permittedGrants: [
 				{
@@ -357,18 +359,19 @@ describe('githubBranchAddBody', () => {
 		});
 	});
 
-	it('pins the workflow ref independently of the branch when given', () => {
+	it('matches the job_workflow_ref exactly when the value carries an @ref', () => {
 		const body = githubBranchAddBody(tenantUrl, identity, {
 			repo: 'acme/infra',
 			branch: 'release',
-			workflow: '.github/workflows/cupboard-publish.yml',
-			workflowRef: 'main',
+			jobWorkflowRef:
+				'acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main',
 			attest: false
 		});
 
 		expect(body.claims).toStrictEqual({
 			repository_id: '1234',
 			repository_owner_id: '5678',
+			ref: 'refs/heads/release',
 			job_workflow_ref:
 				'acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main'
 		});
@@ -382,5 +385,68 @@ describe('githubBranchAddBody', () => {
 				}
 			}
 		]);
+	});
+
+	it('gates only the branch when no job_workflow_ref is given', () => {
+		const body = githubBranchAddBody(tenantUrl, identity, {
+			repo: 'acme/infra',
+			branch: 'main'
+		});
+
+		expect(body.claims).toStrictEqual({
+			repository_id: '1234',
+			repository_owner_id: '5678',
+			ref: 'refs/heads/main'
+		});
+	});
+});
+
+describe('claim rendering', () => {
+	it('renders an exact claim with = and a pattern claim with =~', async () => {
+		const results: ResultRow[][] = [];
+
+		await runOidcTrustShow('rule-1', reporter(results), {
+			get: () =>
+				Promise.resolve(
+					summary({
+						claims: {
+							repository_id: '1234',
+							job_workflow_ref: { pattern: '^acme/infra/.+@.+$' }
+						}
+					})
+				)
+		});
+
+		expect(results[0]).toContainEqual({
+			label: 'Claims',
+			value: 'repository_id=1234'
+		});
+		expect(results[0]).toContainEqual({
+			label: '',
+			value: 'job_workflow_ref=~^acme/infra/.+@.+$'
+		});
+	});
+});
+
+describe('githubPrAddBody job_workflow_ref', () => {
+	it('adds the claim as a pattern or exact match, mirroring the value', () => {
+		const anyReference = githubPrAddBody(tenantUrl, identity, {
+			repo: 'acme/infra',
+			jobWorkflowRef: 'acme/infra/.github/workflows/publish.yml'
+		});
+		const exactReference = githubPrAddBody(tenantUrl, identity, {
+			repo: 'acme/infra',
+			jobWorkflowRef: 'acme/infra/.github/workflows/publish.yml@refs/heads/main'
+		});
+
+		expect({
+			anyRef: anyReference.claims.job_workflow_ref,
+			exactRef: exactReference.claims.job_workflow_ref
+		}).toStrictEqual({
+			anyRef: {
+				pattern: String.raw`^acme/infra/\.github/workflows/publish\.yml@.+$`
+			},
+			exactRef: 'acme/infra/.github/workflows/publish.yml@refs/heads/main'
+		});
 	});
 });

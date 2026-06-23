@@ -164,6 +164,17 @@ describe('oidc trust schemas', () => {
 			name: 'an add body bound to a loopback issuer over http',
 			value: { ...additionBody, issuer: 'http://127.0.0.1:8788' },
 			expected: { ...additionBody, issuer: 'http://127.0.0.1:8788' }
+		},
+		{
+			name: 'an add body with a pattern claim',
+			value: {
+				...additionBody,
+				claims: { job_workflow_ref: { pattern: '^owner/repo/.+@.+$' } }
+			},
+			expected: {
+				...additionBody,
+				claims: { job_workflow_ref: { pattern: '^owner/repo/.+@.+$' } }
+			}
 		}
 	])('accepts add body: $name', ({ value, expected }) => {
 		expect(oidcTrustAddBodySchema.parse(value)).toStrictEqual(expected);
@@ -192,6 +203,13 @@ describe('oidc trust schemas', () => {
 		{
 			name: 'an unknown key',
 			value: { ...additionBody, surprise: true }
+		},
+		{
+			name: 'a claim with an unanchored pattern',
+			value: {
+				...additionBody,
+				claims: { job_workflow_ref: { pattern: 'owner/repo/.+@.+' } }
+			}
 		}
 	])('rejects add body: $name', ({ value }) => {
 		expect(oidcTrustAddBodySchema.safeParse(value).success).toBe(false);
