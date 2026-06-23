@@ -23,6 +23,11 @@ import {
 	renderNixConfig,
 	verifyReleaseAttestation
 } from './cupboard-action.ts';
+import {
+	AttestationError,
+	InvalidInputError,
+	UnsupportedPlatformError
+} from './errors.ts';
 
 describe('normaliseVersion', () => {
 	it.each([
@@ -348,7 +353,7 @@ describe('verifyReleaseAttestation', () => {
 				verify: () =>
 					Promise.resolve(verifiedAs(archive.digest, 'b'.repeat(40)))
 			})
-		).rejects.toThrow();
+		).rejects.toThrow(AttestationError);
 	});
 
 	it('rejects when there is no attestation', async () => {
@@ -358,6 +363,18 @@ describe('verifyReleaseAttestation', () => {
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
 				fetch: stubAttestationFetch(archive.digest, [])
 			})
-		).rejects.toThrow();
+		).rejects.toThrow(AttestationError);
+	});
+});
+
+describe('action input errors', () => {
+	it('rejects an empty version as a usage error', () => {
+		expect(() => normaliseVersion('  ')).toThrow(InvalidInputError);
+	});
+
+	it('rejects an unsupported platform', () => {
+		expect(() => assetNameFor('v1.2.3', 'sunos', 'sparc')).toThrow(
+			UnsupportedPlatformError
+		);
 	});
 });

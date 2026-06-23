@@ -17,6 +17,20 @@ import {
 	type VerifiedIdentityPolicy,
 	verifyBundle
 } from '@cupboard/shared/attestation';
+import { CodedError, genericExitCode } from '@cupboard/shared/errors';
+
+import {
+	AttestationError,
+	ChecksumError,
+	CommandFailedError,
+	GithubApiError,
+	InvalidInputError,
+	MalformedResponseError,
+	MissingInputError,
+	NixError,
+	UnknownCommandError,
+	UnsupportedPlatformError
+} from './errors.ts';
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -139,7 +153,10 @@ export function normaliseVersion(version: string): string {
 	const trimmed = version.trim();
 
 	if (trimmed === '') {
-		throw new Error('cupboard-version must not be empty');
+		throw new InvalidInputError(
+			'cupboard-version',
+			'cupboard-version must not be empty'
+		);
 	}
 
 	if (trimmed === 'latest') {
@@ -168,9 +185,7 @@ export function assetNameFor(
 	const releaseArchitecture = releaseArchitectures.get(runtimeArchitecture);
 
 	if (releasePlatform === undefined || releaseArchitecture === undefined) {
-		throw new Error(
-			`unsupported release platform: ${runtimePlatform}-${runtimeArchitecture}`
-		);
+		throw new UnsupportedPlatformError(runtimePlatform, runtimeArchitecture);
 	}
 
 	return `cupboard-${tagName}-${releasePlatform}-${releaseArchitecture}.tar.gz`;
@@ -192,7 +207,7 @@ export function parseChecksums(value: string): Map<string, string> {
 		const name = match?.groups?.name;
 
 		if (sha256 === undefined || name === undefined) {
-			throw new Error(`invalid checksum line: ${line}`);
+			throw new ChecksumError(`invalid checksum line: ${line}`);
 		}
 
 		checksums.set(name, sha256.toLowerCase());
@@ -421,7 +436,7 @@ async function installCupboard(
 	const expectedChecksum = checksums.get(assetName);
 
 	if (expectedChecksum === undefined) {
-		throw new Error(`checksums.txt does not contain ${assetName}`);
+		throw new ChecksumError(`checksums.txt does not contain ${assetName}`);
 	}
 
 	await verifyChecksum(archivePath, expectedChecksum);
@@ -446,7 +461,9 @@ async function fetchRelease(
 	const response = await fetchJson(apiUrl, options.githubToken);
 
 	if (!isReleaseResponse(response)) {
-		throw new Error('GitHub release response had an unexpected shape');
+		throw new MalformedResponseError(
+			'GitHub release response had an unexpected shape'
+		);
 	}
 
 	return {
@@ -482,7 +499,9 @@ function findReleaseAsset(release: Release, name: string): ReleaseAsset {
 	const asset = release.assets.find((candidate) => candidate.name === name);
 
 	if (asset === undefined) {
-		throw new Error(`GitHub release ${release.tagName} has no ${name} asset`);
+		throw new MalformedResponseError(
+			`GitHub release ${release.tagName} has no ${name} asset`
+		);
 	}
 
 	return asset;
@@ -500,7 +519,7 @@ async function downloadAsset(
 	});
 
 	if (!response.ok) {
-		throw new Error(
+		throw new GithubApiError(
 			`failed to download ${asset.name}: ${String(response.status)}`
 		);
 	}
@@ -518,7 +537,7 @@ async function verifyChecksum(
 		.digest('hex');
 
 	if (actualChecksum !== expectedChecksum) {
-		throw new Error(
+		throw new ChecksumError(
 			`checksum mismatch for ${path.basename(checksumPath)}: expected ${expectedChecksum}, got ${actualChecksum}`
 		);
 	}
@@ -543,7 +562,7 @@ export async function verifyReleaseAttestation(
 	);
 
 	if (bundles.length === 0) {
-		throw new Error(`no attestation was found for ${archiveName}`);
+		throw new AttestationError(`no attestation was found for ${archiveName}`);
 	}
 
 	const tagCommit = await fetchTagCommit(options, tagName, fetcher);
@@ -577,7 +596,7 @@ export async function verifyReleaseAttestation(
 		}
 	}
 
-	throw new Error(
+	throw new AttestationError(
 		`could not verify the attestation for ${archiveName}: ${failures.join('; ')}`
 	);
 }
@@ -607,7 +626,7 @@ async function verifyOneReleaseBundle(arguments_: {
 	const sourceCommit = provenanceSourceCommit(verified.predicate);
 
 	if (sourceCommit !== arguments_.tagCommit) {
-		throw new Error(
+		throw new AttestationError(
 			`built from ${String(sourceCommit)}, but tag ${arguments_.tagName} points at ${arguments_.tagCommit}`
 		);
 	}
@@ -627,20 +646,24 @@ async function fetchAttestationBundles(
 	});
 
 	if (!response.ok) {
-		throw new Error(`failed to fetch attestations: ${String(response.status)}`);
+		throw new GithubApiError(
+			`failed to fetch attestations: ${String(response.status)}`
+		);
 	}
 
 	const body: unknown = await response.json();
 
 	if (!isRecord(body) || !Array.isArray(body.attestations)) {
-		throw new Error('GitHub attestations response had an unexpected shape');
+		throw new MalformedResponseError(
+			'GitHub attestations response had an unexpected shape'
+		);
 	}
 
 	const encoder = new TextEncoder();
 
 	return body.attestations.map((attestation) => {
 		if (!isRecord(attestation) || attestation.bundle === undefined) {
-			throw new Error('GitHub attestation had no bundle');
+			throw new MalformedResponseError('GitHub attestation had no bundle');
 		}
 
 		return encoder.encode(JSON.stringify(attestation.bundle));
@@ -661,7 +684,7 @@ async function fetchTagCommit(
 	});
 
 	if (!response.ok) {
-		throw new Error(
+		throw new GithubApiError(
 			`could not resolve the commit for tag ${tagName}: ${String(response.status)}`
 		);
 	}
@@ -669,7 +692,9 @@ async function fetchTagCommit(
 	const body: unknown = await response.json();
 
 	if (!isRecord(body) || typeof body.sha !== 'string') {
-		throw new Error(`could not resolve the commit for tag ${tagName}`);
+		throw new MalformedResponseError(
+			`could not resolve the commit for tag ${tagName}`
+		);
 	}
 
 	return body.sha;
@@ -735,7 +760,7 @@ async function fetchTrustedPublicKey(
 	});
 
 	if (!response.ok) {
-		throw new Error(
+		throw new GithubApiError(
 			`failed to fetch cache public key: ${String(response.status)}`
 		);
 	}
@@ -744,7 +769,7 @@ async function fetchTrustedPublicKey(
 	const trimmedPublicKey = publicKey.trim();
 
 	if (trimmedPublicKey === '') {
-		throw new Error('cache public key response was empty');
+		throw new MalformedResponseError('cache public key response was empty');
 	}
 
 	console.warn(
@@ -756,7 +781,10 @@ async function fetchTrustedPublicKey(
 
 async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 	if (options.readUser === '') {
-		throw new Error('read-user is required when read-password is supplied');
+		throw new InvalidInputError(
+			'read-user',
+			'read-user is required when read-password is supplied'
+		);
 	}
 
 	const cacheUrl = new URL(options.cacheUrl);
@@ -785,7 +813,7 @@ function resolveStorePaths(paths: readonly string[]): string[] {
 		});
 
 		if (result.status !== 0) {
-			throw new Error(`nix path-info failed for ${storePath}`);
+			throw new NixError(`nix path-info failed for ${storePath}`);
 		}
 
 		const parsed = parseJson(result.stdout);
@@ -796,7 +824,7 @@ function resolveStorePaths(paths: readonly string[]): string[] {
 				: [];
 
 		if (storePaths.length !== 1 || typeof storePaths[0] !== 'string') {
-			throw new Error(
+			throw new NixError(
 				`nix path-info did not resolve exactly one path for ${storePath}`
 			);
 		}
@@ -812,7 +840,7 @@ export function narHashToHex(narHash: string): string {
 	const base64 = sri?.groups?.base64;
 
 	if (base64 === undefined) {
-		throw new Error(
+		throw new NixError(
 			`expected an SRI sha256 NAR hash (sha256-<base64>), got ${narHash}`
 		);
 	}
@@ -820,7 +848,7 @@ export function narHashToHex(narHash: string): string {
 	const bytes = Buffer.from(base64, 'base64');
 
 	if (bytes.byteLength !== 32) {
-		throw new Error(`NAR hash did not decode to 32 bytes: ${narHash}`);
+		throw new NixError(`NAR hash did not decode to 32 bytes: ${narHash}`);
 	}
 
 	return bytes.toString('hex');
@@ -832,7 +860,7 @@ function pathInfoJson(storePath: string): unknown {
 	});
 
 	if (result.status !== 0) {
-		throw new Error(`nix path-info failed for ${storePath}`);
+		throw new NixError(`nix path-info failed for ${storePath}`);
 	}
 
 	return parseJson(result.stdout);
@@ -864,7 +892,7 @@ function resolveStorePathDigests(paths: readonly string[]): StorePathDigest[] {
 		const entries = pathInfoEntries(pathInfoJson(storePath));
 
 		if (entries.length !== 1) {
-			throw new Error(
+			throw new NixError(
 				`nix path-info did not resolve exactly one path for ${storePath}`
 			);
 		}
@@ -876,7 +904,7 @@ function resolveStorePathDigests(paths: readonly string[]): StorePathDigest[] {
 			typeof entry.path !== 'string' ||
 			typeof entry.narHash !== 'string'
 		) {
-			throw new Error(`nix path-info gave no NAR hash for ${storePath}`);
+			throw new NixError(`nix path-info gave no NAR hash for ${storePath}`);
 		}
 
 		resolved.push({
@@ -899,7 +927,10 @@ function attestInputs(environment: Environment): AttestInputs {
 	const paths = parseLines(input(environment, 'PATHS'));
 
 	if (paths.length === 0) {
-		throw new Error('paths is required and must contain at least one path');
+		throw new InvalidInputError(
+			'paths',
+			'paths is required and must contain at least one path'
+		);
 	}
 
 	const checksumsFile = input(
@@ -934,7 +965,10 @@ function setupInputs(environment: Environment): SetupInputs {
 	const readPassword = input(environment, 'READ_PASSWORD');
 
 	if (readUser !== '' && readPassword === '') {
-		throw new Error('read-password is required when read-user is supplied');
+		throw new InvalidInputError(
+			'read-password',
+			'read-password is required when read-user is supplied'
+		);
 	}
 
 	return {
@@ -969,13 +1003,16 @@ function pushInputs(environment: Environment): PushInputs {
 	const url = input(environment, 'URL');
 
 	if (url === '') {
-		throw new Error('url is required');
+		throw new MissingInputError('url');
 	}
 
 	const paths = parseLines(input(environment, 'PATHS'));
 
 	if (paths.length === 0) {
-		throw new Error('paths is required and must contain at least one path');
+		throw new InvalidInputError(
+			'paths',
+			'paths is required and must contain at least one path'
+		);
 	}
 
 	return {
@@ -1038,14 +1075,15 @@ function isInputEnabled(
 		return false;
 	}
 
-	throw new Error(
+	throw new InvalidInputError(
+		name.toLowerCase().replaceAll('_', '-'),
 		`${name.toLowerCase().replaceAll('_', '-')} must be true or false`
 	);
 }
 
 function requireInput(value: string | undefined, name: string): string {
 	if (value === undefined || value === '') {
-		throw new Error(`${name} is required`);
+		throw new MissingInputError(name);
 	}
 
 	return value;
@@ -1070,7 +1108,9 @@ async function fetchJson(url: URL, githubToken: string): Promise<unknown> {
 	});
 
 	if (!response.ok) {
-		throw new Error(`GitHub API request failed: ${String(response.status)}`);
+		throw new GithubApiError(
+			`GitHub API request failed: ${String(response.status)}`
+		);
 	}
 
 	return response.json();
@@ -1102,7 +1142,7 @@ function run(command: string, arguments_: readonly string[]): void {
 		return;
 	}
 
-	throw new Error(`${command} failed with status ${String(result.status)}`);
+	throw new CommandFailedError(command, result.status);
 }
 
 async function main(): Promise<void> {
@@ -1123,7 +1163,7 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	throw new Error('expected setup, push or attest');
+	throw new UnknownCommandError(command ?? '');
 }
 
 function parseJson(value: string): unknown {
@@ -1138,5 +1178,15 @@ if (
 	process.argv[1] !== undefined &&
 	import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-	await main();
+	try {
+		await main();
+	} catch (error: unknown) {
+		if (error instanceof CodedError) {
+			console.error(error.message);
+			process.exitCode = error.exitCode;
+		} else {
+			console.error(error);
+			process.exitCode = genericExitCode;
+		}
+	}
 }
