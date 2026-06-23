@@ -184,6 +184,68 @@ files the bundle against them. Pushing needs an `oidc_trust` rule on the tenant
 that accepts this repository's GitHub Actions token, added with
 `cupboard oidc-trust`.
 
+## Trust rules
+
+A push from CI exchanges its GitHub Actions OIDC token for a cupboard token. The
+exchange succeeds only when a trust rule on the tenant both recognises the token
+and permits everything the push asks for. The exchange is all-or-nothing: if the
+push wants to attach attestations or set a retention root and the rule does not
+grant those, the whole exchange is refused, not narrowed.
+
+A good rule pins identity on two axes. The repository is pinned by its immutable
+numeric ids (`repository_id` and `repository_owner_id`), so a rename cannot
+silently transfer trust and nobody reusing the freed-up name inherits it. The
+code that ran is pinned by `job_workflow_ref`, which names the exact workflow
+file and the ref it ran at. The two compose: pin both and only that workflow, on
+that repository, can exchange a token.
+
+The `add-github-pr` and `add-github-branch` commands assemble these rules for
+the common cases. `add-github-pr` trusts pull-request builds and routes each one
+to its own short-lived cache (`pr-<number>`) and matching retention root
+(`github:<owner>/<repo>/pr-<number>/`), both keyed on the pull-request number,
+so one PR cannot reach another's paths. `add-github-branch` trusts a branch's
+pushes and publishes to the tenant's default cache under the retention root the
+push action writes by default, `github:<owner>/<repo>/<branch>/`. Both look up
+the repository's ids for you, grant the push and the retention root, and grant
+attestation by default; pass `--no-attest` to withhold it, or `--root-template`
+to override the root.
+
+```bash
+# Per-PR rule: build the pull request, push to its own pr-<n> cache.
+cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \
+  --repo acme/infra
+
+# Branch rule: pushes to main, run through a reusable publish workflow,
+# publish to the default cache.
+cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
+  --repo acme/infra --branch main \
+  --workflow .github/workflows/cupboard-publish.yml
+```
+
+`--workflow` is the workflow file's path inside the repository; the command
+builds the full `job_workflow_ref` from it and the repository name. A reusable
+workflow is pinned at the ref it is called with, which is not always the branch
+being built, so `--workflow-ref` overrides the ref when they differ (it defaults
+to `--branch`).
+
+For an issuer or claim shape the presets do not cover, the general
+`cupboard oidc-trust add` takes the issuer, audience, claims and grants
+directly. `--job-workflow-ref` sets the `job_workflow_ref` claim without
+spelling out `--claim`, and omitting `--cache` scopes the grant to the tenant's
+default cache:
+
+```bash
+cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
+  --issuer https://token.actions.githubusercontent.com \
+  --audience https://cupboard.example.workers.dev/t/acme \
+  --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main \
+  --allow push --allow attest --allow root \
+  --root github:acme/infra/main/
+```
+
+The trailing slash on the root makes it a prefix, so one grant covers every
+per-system root beneath it.
+
 ## Binary Releases
 
 The release workflow publishes these assets for each version tag:

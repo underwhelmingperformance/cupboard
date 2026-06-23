@@ -17,7 +17,10 @@ import { controlRpc, tenantRpc } from '../client/orpc.ts';
 import { InvalidClaimError } from '../errors.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
-import { lookupRepository } from './oidc-trust/github.ts';
+import {
+	lookupRepository,
+	type RepositoryIdentity
+} from './oidc-trust/github.ts';
 import {
 	buildAddBody,
 	buildCacheGrant,
@@ -29,8 +32,31 @@ const githubActionsIssuer = 'https://token.actions.githubusercontent.com';
 interface GithubPrOptions {
 	readonly repo: string;
 	readonly audience?: string;
-	readonly allow: readonly string[];
 	readonly cacheTemplate?: string;
+	readonly rootTemplate?: string;
+	// Commander's `--no-attest` leaves this `true` unless the flag is passed.
+	readonly attest?: boolean;
+}
+
+interface GithubBranchOptions {
+	readonly repo: string;
+	readonly branch: string;
+	readonly workflow: string;
+	readonly workflowRef?: string;
+	readonly audience?: string;
+	readonly attest?: boolean;
+}
+
+// Attestation is a dedicated toggle on the GitHub presets rather than an
+// `--allow` value, and it is granted by default; `--no-attest` is authoritative,
+// so it wins even if `attest` was named some other way.
+function withAttest(
+	allow: readonly string[],
+	attest: boolean | undefined
+): string[] {
+	const base = allow.filter((action) => action !== 'attest');
+
+	return attest === false ? base : [...base, 'attest'];
 }
 
 // Assemble the rule body from flags, or read it whole from a JSON file. The file
@@ -51,7 +77,7 @@ async function addBodyFor(
 	return buildAddBody({
 		issuer: options.issuer,
 		audience: options.audience,
-		claims: parseClaims(options.claim),
+		claims: claimsForAdd(options.claim, options.jobWorkflowRef),
 		permittedGrants: [
 			buildCacheGrant({
 				cache: options.cache,
@@ -99,6 +125,7 @@ interface OidcTrustAddOptions {
 	readonly capture: readonly string[];
 	readonly templateSource?: string;
 	readonly fromFile?: string;
+	readonly jobWorkflowRef?: string;
 }
 
 /**
@@ -178,6 +205,28 @@ function summaryRows(summary: OidcTrustSummary): ResultRow[] {
 	];
 }
 
+// Merge the `--claim` pairs with the `--job-workflow-ref` shorthand, refusing to
+// set `job_workflow_ref` twice so a rule never depends on which flag was read
+// last.
+export function claimsForAdd(
+	claimPairs: readonly string[],
+	jobWorkflowReference: string | undefined
+): Record<string, string> {
+	const claims = parseClaims(claimPairs);
+
+	if (jobWorkflowReference === undefined) {
+		return claims;
+	}
+
+	if (Object.hasOwn(claims, 'job_workflow_ref')) {
+		throw new InvalidClaimError(
+			'job_workflow_ref is set by both --job-workflow-ref and --claim'
+		);
+	}
+
+	return { ...claims, job_workflow_ref: jobWorkflowReference };
+}
+
 function parseClaims(pairs: readonly string[]): Record<string, string> {
 	const claims: Record<string, string> = {};
 
@@ -212,7 +261,8 @@ interface OidcTrustPlane {
 
 const tenantPlane: OidcTrustPlane = {
 	name: 'oidc-trust',
-	description: 'Manage the OIDC trust rules used by token exchange.',
+	description:
+		'Manage the rules that let CI authenticate to this tenant with a short-lived OIDC token instead of a stored secret.',
 	urlArgument: tenantUrlArgument,
 	githubPr: true,
 	clientFor: (url, programOptions) =>
@@ -224,7 +274,8 @@ const tenantPlane: OidcTrustPlane = {
 
 const controlPlane: OidcTrustPlane = {
 	name: 'control-oidc-trust',
-	description: 'Manage the control-plane OIDC trust rules (operator only).',
+	description:
+		'Manage the rules that let CI authenticate to the control plane with a short-lived OIDC token instead of a stored secret (operator only).',
 	urlArgument: deploymentUrlArgument,
 	githubPr: false,
 	clientFor: (url, programOptions) =>
@@ -235,16 +286,17 @@ const controlPlane: OidcTrustPlane = {
 };
 
 // Assemble the per-PR rule for a GitHub repository, pinning its immutable
-// numeric ids so a rename never silently changes who is trusted.
-function githubPrAddBody(
+// numeric ids so a rename never silently changes who is trusted. A build of pull
+// request <n> pushes to its own `pr-<n>` cache and writes the matching retention
+// root `github:<owner>/<repo>/pr-<n>/`, both keyed on the pull-request number
+// captured from the `ref` claim, so one PR cannot reach another's paths.
+export function githubPrAddBody(
 	url: string,
-	identity: {
-		readonly repositoryId: number;
-		readonly repositoryOwnerId: number;
-		readonly fullName: string;
-	},
+	identity: RepositoryIdentity,
 	options: GithubPrOptions
 ): OidcTrustAddBody {
+	const cacheTemplate = options.cacheTemplate ?? 'pr-{pr}';
+
 	return buildAddBody({
 		issuer: githubActionsIssuer,
 		audience: options.audience ?? url,
@@ -254,13 +306,49 @@ function githubPrAddBody(
 		},
 		permittedGrants: [
 			buildCacheGrant({
-				cacheTemplate: options.cacheTemplate ?? 'pr-{pr}',
-				allow: options.allow,
-				root: 'same-as-cache',
+				cacheTemplate,
+				// The PR's root nests its cache name under the repository, so the
+				// captured `{pr}` resolves in both bindings.
+				rootTemplate:
+					options.rootTemplate ??
+					`github:${identity.fullName}/${cacheTemplate}/`,
+				allow: withAttest(['push', 'root'], options.attest),
 				substitutions: collectSubstitutions({
 					templateSource: 'github-pr',
 					captures: []
 				})
+			})
+		],
+		display: { provider: 'github', repository: identity.fullName }
+	});
+}
+
+// Assemble the branch rule for a GitHub repository: a reusable or direct
+// workflow on `branch` publishes to the tenant's default cache, scoped to the
+// retention root the push action writes by default,
+// `github:<owner>/<repo>/<branch>/`. The repository's immutable ids and the
+// `job_workflow_ref` of the workflow file are pinned, so only that workflow on
+// that branch can exchange a token.
+export function githubBranchAddBody(
+	url: string,
+	identity: RepositoryIdentity,
+	options: GithubBranchOptions
+): OidcTrustAddBody {
+	const workflowReference = options.workflowRef ?? options.branch;
+	const workflow = options.workflow.replace(/^\/+/u, '');
+
+	return buildAddBody({
+		issuer: githubActionsIssuer,
+		audience: options.audience ?? url,
+		claims: {
+			repository_id: String(identity.repositoryId),
+			repository_owner_id: String(identity.repositoryOwnerId),
+			job_workflow_ref: `${identity.fullName}/${workflow}@refs/heads/${workflowReference}`
+		},
+		permittedGrants: [
+			buildCacheGrant({
+				allow: withAttest(['push', 'root'], options.attest),
+				root: `github:${identity.fullName}/${options.branch}/`
 			})
 		],
 		display: { provider: 'github', repository: identity.fullName }
@@ -290,7 +378,7 @@ function buildOidcTrustCommands(
 
 	oidcTrust
 		.command('list')
-		.description('List OIDC trust rules.')
+		.description('List the configured trust rules and what each one trusts.')
 		.argument('<url>', plane.urlArgument)
 		.action(async (url: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
@@ -300,7 +388,9 @@ function buildOidcTrustCommands(
 
 	oidcTrust
 		.command('show')
-		.description('Show a single OIDC trust rule by id.')
+		.description(
+			'Show one trust rule in full: the token it accepts and the access it grants.'
+		)
 		.argument('<url>', plane.urlArgument)
 		.argument('<id>', 'trust rule id')
 		.action(async (url: string, id: string) => {
@@ -315,7 +405,9 @@ function buildOidcTrustCommands(
 
 	oidcTrust
 		.command('add')
-		.description('Add a trust rule for a CI OIDC issuer.')
+		.description(
+			'Add a trust rule by hand: the issuer and claims a token must carry, and the access to grant.'
+		)
 		.argument('<url>', plane.urlArgument)
 		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
 		.requiredOption('--audience <audience>', 'expected token audience')
@@ -326,12 +418,19 @@ function buildOidcTrustCommands(
 			[]
 		)
 		.option(
+			'--job-workflow-ref <ref>',
+			'pin the job_workflow_ref claim: the workflow file and ref allowed to push'
+		)
+		.option(
 			'--allow <action>',
 			'an action set the rule may exchange for: push, attest, or root (repeatable)',
 			collect,
 			[]
 		)
-		.option('--cache <name>', 'an exact cache the grant is scoped to')
+		.option(
+			'--cache <name>',
+			'an exact cache the grant is scoped to (default: the tenant default cache)'
+		)
 		.option(
 			'--cache-template <template>',
 			'a cache template such as "pr-{pr}", rendered from captures'
@@ -368,7 +467,7 @@ function buildOidcTrustCommands(
 				'  cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \\',
 				'    --issuer https://token.actions.githubusercontent.com \\',
 				'    --audience https://cupboard.example.workers.dev/t/acme \\',
-				'    --claim job_workflow_ref=acme/ci/.github/workflows/push.yml@refs/heads/main \\',
+				'    --job-workflow-ref acme/ci/.github/workflows/push.yml@refs/heads/main \\',
 				'    --allow push --allow root --template-source github-pr \\',
 				'    --cache-template pr-{pr} --root same-as-cache'
 			].join('\n')
@@ -387,7 +486,7 @@ function buildOidcTrustCommands(
 		oidcTrust
 			.command('add-github-pr')
 			.description(
-				'Add a per-PR trust rule for a GitHub repository, pinning its ids.'
+				"Trust a GitHub repository's pull-request builds to push to a short-lived cache of their own, one per pull request."
 			)
 			.argument('<url>', plane.urlArgument)
 			.requiredOption('--repo <owner/name>', 'the GitHub repository')
@@ -396,14 +495,27 @@ function buildOidcTrustCommands(
 				'expected token audience (default: the tenant URL)'
 			)
 			.option(
-				'--allow <action>',
-				'an action set the rule may exchange for (repeatable, default: push)',
-				collect,
-				['push']
-			)
-			.option(
 				'--cache-template <template>',
 				'the per-PR cache template (default: pr-{pr})'
+			)
+			.option(
+				'--root-template <template>',
+				'the per-PR retention root (default: github:<owner>/<repo>/pr-{pr}/)'
+			)
+			.option(
+				'--no-attest',
+				'do not let the workflow attach build attestations'
+			)
+			.addHelpText(
+				'after',
+				[
+					'',
+					'Example:',
+					"  # Trust this repository's pull-request builds to push to their own",
+					'  # pr-<number> cache, which they cannot escape',
+					'  cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \\',
+					'    --repo acme/infra'
+				].join('\n')
 			)
 			.action(async (url: string, options: GithubPrOptions) => {
 				const reporter = commandUi(program, programOptions).reporter();
@@ -417,11 +529,65 @@ function buildOidcTrustCommands(
 					plane.clientFor(url, programOptions)
 				);
 			});
+
+		oidcTrust
+			.command('add-github-branch')
+			.description(
+				"Trust pushes to one branch of a GitHub repository to publish to this tenant's default cache."
+			)
+			.argument('<url>', plane.urlArgument)
+			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.requiredOption(
+				'--branch <name>',
+				'the branch whose pushes may publish, e.g. main'
+			)
+			.requiredOption(
+				'--workflow <path>',
+				'the workflow file allowed to push, e.g. .github/workflows/publish.yml'
+			)
+			.option(
+				'--workflow-ref <ref>',
+				'the ref the workflow file is pinned at (default: the branch)'
+			)
+			.option(
+				'--audience <audience>',
+				'expected token audience (default: the tenant URL)'
+			)
+			.option(
+				'--no-attest',
+				'do not let the workflow attach build attestations'
+			)
+			.addHelpText(
+				'after',
+				[
+					'',
+					'Example:',
+					'  # Trust pushes to main, run through a reusable publish workflow, to',
+					'  # publish to the default cache under github:<repo>/main/',
+					'  cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \\',
+					'    --repo acme/infra --branch main \\',
+					'    --workflow .github/workflows/cupboard-publish.yml'
+				].join('\n')
+			)
+			.action(async (url: string, options: GithubBranchOptions) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const identity = await reporter.phase('Resolving repository', () =>
+					lookupRepository(options.repo)
+				);
+
+				await runOidcTrustAdd(
+					githubBranchAddBody(url, identity, options),
+					reporter,
+					plane.clientFor(url, programOptions)
+				);
+			});
 	}
 
 	oidcTrust
 		.command('remove')
-		.description('Disable an OIDC trust rule by id.')
+		.description(
+			'Disable a trust rule by id, so the CI it trusts can no longer authenticate.'
+		)
 		.argument('<url>', plane.urlArgument)
 		.argument('<id>', 'trust rule id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
