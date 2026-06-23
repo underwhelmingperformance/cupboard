@@ -1,0 +1,10 @@
+{
+	"name": "@cupboard/action",
+	"version": "0.0.0",
+	"dependencies": {
+		"@cupboard/shared": "workspace:*"
+	},
+	"license": "AGPL-3.0-or-later",
+	"private": true,
+	"type": "module"
+}
