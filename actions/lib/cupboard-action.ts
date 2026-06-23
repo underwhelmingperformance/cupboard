@@ -181,12 +181,14 @@ export function parseChecksums(value: string): Map<string, string> {
 
 	for (const line of parseLines(value)) {
 		const match = /^(?<sha256>[a-f\d]{64})\s+\*?(?<name>.+)$/iu.exec(line);
+		const sha256 = match?.groups?.sha256;
+		const name = match?.groups?.name;
 
-		if (match?.groups === undefined) {
+		if (sha256 === undefined || name === undefined) {
 			throw new Error(`invalid checksum line: ${line}`);
 		}
 
-		checksums.set(match.groups.name, match.groups.sha256.toLowerCase());
+		checksums.set(name, sha256.toLowerCase());
 	}
 
 	return checksums;
@@ -393,7 +395,9 @@ async function installCupboard(
 	};
 }
 
-async function fetchRelease(options: InstallCupboardOptions): Promise<Release> {
+async function fetchRelease(
+	options: Omit<InstallCupboardOptions, 'installDirectory'>
+): Promise<Release> {
 	const apiUrl = new URL(
 		releaseApiPath(options.releaseRepository, options.version),
 		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
