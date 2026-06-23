@@ -19,6 +19,8 @@ jobs:
   build:
     name: build ${{ matrix.asset-platform }} ${{ matrix.asset-arch }}
     runs-on: ${{ matrix.runner }}
+    outputs:
+      version: ${{ steps.build.outputs.version }}
     permissions:
       contents: read
       id-token: write # OIDC token for the build provenance attestation
@@ -111,7 +113,7 @@ jobs:
 
       - name: Create or update draft release
         env:
-          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ needs.build.outputs.version }}
           INPUT_DIRECTORY: dist/assets
           INPUT_COMMITISH: ${{ github.sha }}
           INPUT_GITHUB_TOKEN: ${{ github.token }}

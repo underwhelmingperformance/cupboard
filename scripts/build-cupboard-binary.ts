@@ -66,7 +66,12 @@ run('tar', ['-czf', assetPath, '-C', binaryDirectory, 'cupboard']);
 if (process.env.GITHUB_OUTPUT !== undefined) {
 	await writeFile(
 		process.env.GITHUB_OUTPUT,
-		[`asset-name=${assetName}`, `asset-path=${assetPath}`, ''].join('\n'),
+		[
+			`asset-name=${assetName}`,
+			`asset-path=${assetPath}`,
+			`version=${options.version}`,
+			''
+		].join('\n'),
 		{
 			flag: 'a'
 		}
@@ -222,7 +227,7 @@ function parseOptions(arguments_: readonly string[]): Options {
 		throw new Error(`unknown or incomplete argument: ${argument ?? ''}`);
 	}
 
-	if (parsed.version === undefined || parsed.version === '') {
+	if (parsed.version === undefined || parsed.version.trim() === '') {
 		throw new Error('--version is required');
 	}
 
@@ -237,5 +242,7 @@ function parseOptions(arguments_: readonly string[]): Options {
 }
 
 function normaliseReleaseVersion(version: string): string {
-	return version.startsWith('v') ? version : `v${version}`;
+	const trimmed = version.trim();
+
+	return trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
 }
