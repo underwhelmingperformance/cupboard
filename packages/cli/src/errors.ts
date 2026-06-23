@@ -1,20 +1,17 @@
+import {
+	CodedError,
+	genericExitCode,
+	usageExitCode
+} from '@cupboard/shared/errors';
 import { z } from 'zod';
 
-// Process exit codes by failure category, so a script can tell a misuse from a
-// missing session from a transient outage. The values follow the BSD sysexits
-// convention where one exists (77 EX_NOPERM, 75 EX_TEMPFAIL); 2 is the usual
-// shell convention for a usage error, and 1 is the catch-all.
-export const genericExitCode = 1;
-export const usageExitCode = 2;
+// The CLI's own failure categories, layered on the shared generic (1) and usage
+// (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
+// EX_TEMPFAIL).
 export const authExitCode = 77;
 export const transientExitCode = 75;
 
-export abstract class CliError extends Error {
-	/** The process exit code this failure should produce. */
-	get exitCode(): number {
-		return genericExitCode;
-	}
-}
+export abstract class CliError extends CodedError {}
 
 /** A misuse of the CLI: a bad flag value or an unsupported combination. */
 export abstract class CliUsageError extends CliError {

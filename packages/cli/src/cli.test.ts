@@ -1,5 +1,6 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import type { Reporter } from '@cupboard/reporter';
+import { usageExitCode } from '@cupboard/shared/errors';
 import { type Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
@@ -11,8 +12,7 @@ import {
 	InvalidCacheNameError,
 	OwnerLoginRequiredError,
 	transientExitCode,
-	UploadWaitTimeoutError,
-	usageExitCode
+	UploadWaitTimeoutError
 } from './errors.ts';
 
 const abortExitCode = 130;

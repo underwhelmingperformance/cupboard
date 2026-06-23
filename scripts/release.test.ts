@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	assertCanonicalVersion,
 	assetContentType,
 	checksumTargets,
 	createDraftBody,
-	normaliseVersion,
+	MissingInputError,
+	NonCanonicalVersionError,
 	renderChecksums,
 	selectDraftRelease,
 	updateDraftBody
@@ -46,17 +48,19 @@ const otherDraft = {
 	assets: []
 };
 
-describe('normaliseVersion', () => {
-	it.each([
-		['1.2.3', 'v1.2.3'],
-		['v1.2.3', 'v1.2.3'],
-		[' 1.2.3 ', 'v1.2.3']
-	])('normalises %s', (version, expected) => {
-		expect(normaliseVersion(version)).toBe(expected);
+describe('assertCanonicalVersion', () => {
+	it('returns a canonical version unchanged', () => {
+		expect(assertCanonicalVersion('v1.2.3')).toBe('v1.2.3');
 	});
 
 	it('rejects an empty version', () => {
-		expect(() => normaliseVersion('  ')).toThrow('version must not be empty');
+		expect(() => assertCanonicalVersion('')).toThrow(MissingInputError);
+	});
+
+	it('rejects a version without the v prefix', () => {
+		expect(() => assertCanonicalVersion('1.2.3')).toThrow(
+			NonCanonicalVersionError
+		);
 	});
 });
 
@@ -65,7 +69,7 @@ describe('selectDraftRelease', () => {
 		expect(
 			selectDraftRelease(
 				[draftOne, draftTwo, publishedRelease, otherDraft],
-				'1.2.3'
+				'v1.2.3'
 			)
 		).toStrictEqual({
 			existing: draftOne,
@@ -87,7 +91,7 @@ describe('createDraftBody', () => {
 	it('requests a draft with generated notes pinned to the build commit', () => {
 		expect(
 			createDraftBody({
-				version: '1.2.3',
+				version: 'v1.2.3',
 				commitish: 'abc123',
 				name: 'v1.2.3'
 			})

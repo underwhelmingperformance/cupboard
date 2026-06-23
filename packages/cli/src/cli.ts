@@ -5,6 +5,7 @@ import {
 } from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { resolveReporterMode } from '@cupboard/shared';
+import { usageExitCode } from '@cupboard/shared/errors';
 import { Command, CommanderError } from 'commander';
 
 import { isAbortError } from './abort.ts';
@@ -28,7 +29,7 @@ import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
-import { CliError, usageExitCode } from './errors.ts';
+import { CliError } from './errors.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {
