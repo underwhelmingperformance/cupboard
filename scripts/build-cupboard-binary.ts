@@ -143,6 +143,14 @@ async function main(): Promise<void> {
 		);
 
 		await build({
+			// The single-executable runs the bundle through the bare `node` binary, so
+			// the `--disable-warning` shebang in `main.ts` never applies and SEA takes no
+			// node CLI flags. Silence deprecation warnings here, as `--no-deprecation`
+			// would, to keep transitive dependencies' noise (such as the `punycode`
+			// DEP0040 warning) out of the released binary's output.
+			banner: {
+				js: 'process.noDeprecation = true;'
+			},
 			bundle: true,
 			define: {
 				CUPBOARD_VERSION: JSON.stringify(options.version)
