@@ -4,6 +4,11 @@ import path from 'node:path';
 import { env } from 'node:process';
 import { pathToFileURL } from 'node:url';
 
+import {
+	CodedError,
+	genericExitCode,
+	UsageError
+} from '@cupboard/shared/errors';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 
 type Environment = Readonly<Record<string, string | undefined>>;
@@ -76,37 +81,80 @@ interface PublishInputs {
 
 const fallbackReleaseRepository = 'cupboard/cupboard';
 
-export function normaliseVersion(version: string): string {
-	const trimmed = version.trim();
+export class MissingInputError extends UsageError {
+	constructor(public readonly input: string) {
+		super(`${input} is required`);
+		this.name = 'MissingInputError';
+	}
+}
 
-	if (trimmed === '') {
-		throw new Error('version must not be empty');
+export class NonCanonicalVersionError extends UsageError {
+	constructor(public readonly version: string) {
+		super(
+			`version must be canonical (v<major>.<minor>.<patch>), got '${version}'`
+		);
+		this.name = 'NonCanonicalVersionError';
+	}
+}
+
+class MalformedRepositoryError extends UsageError {
+	constructor(public readonly value: string) {
+		super(`repository must be <owner>/<name>, got '${value}'`);
+		this.name = 'MalformedRepositoryError';
+	}
+}
+
+class UnknownCommandError extends UsageError {
+	constructor(public readonly command: string) {
+		super(`expected 'checksums' or 'publish', got '${command}'`);
+		this.name = 'UnknownCommandError';
+	}
+}
+
+class PublishedReleaseExistsError extends CodedError {
+	constructor(public readonly version: string) {
+		super(`a published release for ${version} already exists`);
+		this.name = 'PublishedReleaseExistsError';
+	}
+}
+
+/**
+ * Assert a version is already in the canonical `v<major>.<minor>.<patch>` form
+ * the build step resolves it to, returning it unchanged. Canonicalisation lives
+ * in the build script alone; the rest of the pipeline only checks the shape.
+ */
+export function assertCanonicalVersion(version: string): string {
+	if (version === '') {
+		throw new MissingInputError('version');
 	}
 
-	return trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
+	if (!version.startsWith('v')) {
+		throw new NonCanonicalVersionError(version);
+	}
+
+	return version;
 }
 
 export function selectDraftRelease(
 	releases: readonly ReleaseSummary[],
 	version: string
 ): DraftReleaseSelection {
-	const normalised = normaliseVersion(version);
 	const drafts = releases.filter(
-		(release) => release.draft && release.tagName === normalised
+		(release) => release.draft && release.tagName === version
 	);
 
 	return {
 		existing: drafts[0],
 		duplicates: drafts.slice(1),
 		published: releases.find(
-			(release) => !release.draft && release.tagName === normalised
+			(release) => !release.draft && release.tagName === version
 		)
 	};
 }
 
 export function createDraftBody(options: CreateDraftOptions): CreateDraftBody {
 	return {
-		tag_name: normaliseVersion(options.version),
+		tag_name: options.version,
 		target_commitish: options.commitish,
 		name: options.name,
 		draft: true,
@@ -175,6 +223,8 @@ export async function checksumsAction(
 
 	await writeFile(checksumsFile, renderChecksums(entries));
 	await setOutput(environment, 'checksums-file', checksumsFile);
+
+	log(`Wrote checksums for ${String(entries.length)} archive(s)`);
 }
 
 export async function publishAction(
@@ -184,16 +234,22 @@ export async function publishAction(
 	const octokit = createOctokitClient(
 		inputs.githubToken === '' ? {} : { auth: inputs.githubToken }
 	);
+
+	log(
+		`Publishing ${inputs.version} to ${inputs.repository.owner}/${inputs.repository.repo}`
+	);
+
 	const selection = selectDraftRelease(
 		await listReleases(octokit, inputs.repository),
 		inputs.version
 	);
 
 	if (selection.published !== undefined) {
-		throw new Error(`a published release for ${inputs.version} already exists`);
+		throw new PublishedReleaseExistsError(inputs.version);
 	}
 
 	for (const duplicate of selection.duplicates) {
+		log(`Removing duplicate draft release #${String(duplicate.id)}`);
 		await octokit.rest.repos.deleteRelease({
 			...inputs.repository,
 			release_id: duplicate.id
@@ -210,6 +266,8 @@ export async function publishAction(
 
 	await setOutput(environment, 'release-id', String(release.id));
 	await setOutput(environment, 'release-url', release.htmlUrl);
+
+	log(`Draft release ready: ${release.htmlUrl}`);
 }
 
 async function listReleases(
@@ -230,6 +288,7 @@ async function upsertDraft(
 	existing: ReleaseSummary | undefined
 ): Promise<ReleaseSummary> {
 	if (existing === undefined) {
+		log(`Creating draft release ${inputs.version}`);
 		const { data } = await octokit.rest.repos.createRelease({
 			...inputs.repository,
 			...createDraftBody({
@@ -242,6 +301,7 @@ async function upsertDraft(
 		return toReleaseSummary(data);
 	}
 
+	log(`Updating draft release ${inputs.version} (#${String(existing.id)})`);
 	const { data } = await octokit.rest.repos.updateRelease({
 		...inputs.repository,
 		release_id: existing.id,
@@ -267,6 +327,10 @@ async function uploadReleaseAsset(
 			asset_id: existingAsset.id
 		});
 	}
+
+	log(
+		`${existingAsset === undefined ? 'Uploading' : 'Replacing'} ${assetName}`
+	);
 
 	const data = await readFile(path.join(inputs.directory, assetName));
 
@@ -296,9 +360,7 @@ function toReleaseSummary(release: {
 }
 
 function publishInputs(environment: Environment): PublishInputs {
-	const version = normaliseVersion(
-		requireInput(input(environment, 'VERSION'), 'version')
-	);
+	const version = assertCanonicalVersion(input(environment, 'VERSION'));
 
 	return {
 		version,
@@ -325,7 +387,7 @@ function parseRepository(value: string): Repository {
 	const slash = value.indexOf('/');
 
 	if (slash <= 0 || slash === value.length - 1) {
-		throw new Error(`repository must be <owner>/<name>, got '${value}'`);
+		throw new MalformedRepositoryError(value);
 	}
 
 	return { owner: value.slice(0, slash), repo: value.slice(slash + 1) };
@@ -339,7 +401,7 @@ function input(environment: Environment, name: string, fallback = ''): string {
 
 function requireInput(value: string, name: string): string {
 	if (value === '') {
-		throw new Error(`${name} is required`);
+		throw new MissingInputError(name);
 	}
 
 	return value;
@@ -359,6 +421,10 @@ async function setOutput(
 	await appendFile(filePath, `${name}=${value}\n`);
 }
 
+function log(message: string): void {
+	console.log(message);
+}
+
 async function main(): Promise<void> {
 	const command = process.argv[2];
 
@@ -372,12 +438,22 @@ async function main(): Promise<void> {
 		return;
 	}
 
-	throw new Error('expected checksums or publish');
+	throw new UnknownCommandError(command ?? '');
 }
 
 if (
 	process.argv[1] !== undefined &&
 	import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
-	await main();
+	try {
+		await main();
+	} catch (error: unknown) {
+		if (error instanceof CodedError) {
+			console.error(error.message);
+			process.exitCode = error.exitCode;
+		} else {
+			console.error(error);
+			process.exitCode = genericExitCode;
+		}
+	}
 }
