@@ -1,9 +1,16 @@
 name: release
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, such as 1.4.0 or v1.4.0.
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.version }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -14,8 +21,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
-      id-token: write
-      attestations: write
+      id-token: write # OIDC token for the build provenance attestation
+      attestations: write # write the build provenance attestation
     strategy:
       fail-fast: false
       matrix:
@@ -33,21 +40,9 @@ jobs:
             asset-platform: macos
             asset-arch: arm64
     steps:
-      - id: version
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME}"
-
-          if [[ "$version" != v* ]]; then
-            version="v$version"
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          ref: ${{ steps.version.outputs.version }}
 
       - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
 
@@ -60,7 +55,7 @@ jobs:
 
       - id: build
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ inputs.version }}
         run: >
           pnpm build:binary -- --version "$VERSION" --out-dir dist/release
 
@@ -75,45 +70,51 @@ jobs:
           path: ${{ steps.build.outputs.asset-path }}
           if-no-files-found: error
 
-  publish:
-    name: publish release
+  draft:
+    name: assemble draft release
     needs: build
     runs-on: ubuntu-24.04
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: write # create and update the draft GitHub release
+      id-token: write # OIDC token for the checksums attestation
+      attestations: write # write the checksums attestation
     steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version-file: package.json
+          package-manager-cache: false
+
+      - run: pnpm install --frozen-lockfile
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist/assets
           merge-multiple: true
 
-      - id: version
-        shell: bash
-        run: |
-          version="${GITHUB_REF_NAME}"
-
-          if [[ "$version" != v* ]]; then
-            version="v$version"
-          fi
-
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-
       - name: Write checksums
-        shell: bash
-        working-directory: dist/assets
-        run: shasum -a 256 cupboard-*.tar.gz > checksums.txt
+        env:
+          INPUT_DIRECTORY: dist/assets
+        run: >
+          node --experimental-transform-types
+          --disable-warning=ExperimentalWarning scripts/release.ts checksums
 
       - name: Generate checksums attestation
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: dist/assets/checksums.txt
 
-      - name: Publish GitHub release
+      - name: Create or update draft release
         env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.version.outputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_DIRECTORY: dist/assets
+          INPUT_COMMITISH: ${{ github.sha }}
+          INPUT_GITHUB_TOKEN: ${{ github.token }}
         run: >
-          gh release create "$VERSION" dist/assets/* --verify-tag --title
-          "$VERSION"
+          node --experimental-transform-types
+          --disable-warning=ExperimentalWarning scripts/release.ts publish

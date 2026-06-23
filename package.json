@@ -4,6 +4,7 @@
 	"devDependencies": {
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
+		"@cupboard/shared": "workspace:*",
 		"@eslint/js": "10.0.1",
 		"@types/node": "^25.9.1",
 		"@types/ws": "^8.18.1",
@@ -47,7 +48,7 @@
 		"check:knip": "knip --include dependencies,unlisted --no-progress",
 		"check:lint": "eslint .",
 		"check:migrations": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/check-d1-migrations.ts",
-		"check:test": "pnpm -r run test && pnpm test:actions",
+		"check:test": "pnpm -r run test && pnpm test:actions && pnpm test:release",
 		"check:types": "pnpm -r run check:types",
 		"check:types:tests": "tsc -p tests/e2e/tsconfig.json",
 		"cli": "pnpm --filter @cupboard/cli cli",
@@ -59,6 +60,7 @@
 		"fix:lint": "eslint . --fix",
 		"fixtures:generate": "node tests/fixtures/generate.ts",
 		"test:actions": "vitest run actions/lib/cupboard-action.test.ts",
+		"test:release": "vitest run scripts/release.test.ts",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts"
 	},
 	"type": "module"
