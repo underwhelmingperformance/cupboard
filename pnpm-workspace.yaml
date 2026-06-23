@@ -1,5 +1,6 @@
 packages:
   - 'packages/*'
+  - 'actions'
 
 allowBuilds:
   esbuild: true

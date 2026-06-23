@@ -1,8 +1,13 @@
+import { createHash, createPublicKey } from 'node:crypto';
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
+import type { VerifiedBundle } from '@cupboard/shared/attestation';
 import { describe, expect, it } from 'vitest';
 
 import {
 	assetNameFor,
-	buildAttestationVerifyArguments,
 	buildPushArguments,
 	cachePublicKeyRequestHeaders,
 	cacheUrlFor,
@@ -11,9 +16,12 @@ import {
 	normaliseVersion,
 	parseChecksums,
 	parseLines,
+	provenanceSourceCommit,
 	releaseApiPath,
+	releaseWorkflowIdentityRegex,
 	renderChecksums,
-	renderNixConfig
+	renderNixConfig,
+	verifyReleaseAttestation
 } from './cupboard-action.ts';
 
 describe('normaliseVersion', () => {
@@ -204,22 +212,152 @@ describe('buildPushArguments', () => {
 	});
 });
 
-describe('buildAttestationVerifyArguments', () => {
-	it('scopes verification to the release repository and tag', () => {
+describe('releaseWorkflowIdentityRegex', () => {
+	it('matches the release workflow on any ref but no other workflow', () => {
+		const regex = new RegExp(releaseWorkflowIdentityRegex('owner/repo'));
+		const base = 'https://github.com/owner/repo/.github/workflows';
+
+		expect({
+			main: regex.test(`${base}/release.yml@refs/heads/main`),
+			tag: regex.test(`${base}/release.yml@refs/tags/v1.0.0`),
+			other: regex.test(`${base}/evil.yml@refs/heads/main`)
+		}).toStrictEqual({ main: true, tag: true, other: false });
+	});
+});
+
+describe('provenanceSourceCommit', () => {
+	it('reads the git commit from the resolved dependencies', () => {
 		expect(
-			buildAttestationVerifyArguments(
-				'/tmp/cupboard-v1.2.3-linux-x64.tar.gz',
-				'owner/repo',
-				'v1.2.3'
-			)
-		).toStrictEqual([
-			'attestation',
-			'verify',
-			'/tmp/cupboard-v1.2.3-linux-x64.tar.gz',
-			'--repo',
-			'owner/repo',
-			'--source-ref',
-			'refs/tags/v1.2.3'
-		]);
+			provenanceSourceCommit({
+				buildDefinition: {
+					resolvedDependencies: [
+						{
+							uri: 'git+https://github.com/owner/repo',
+							digest: { gitCommit: 'abc123' }
+						}
+					]
+				}
+			})
+		).toBe('abc123');
+	});
+
+	it.each([
+		{ name: 'an empty predicate', predicate: {} },
+		{ name: 'a non-object predicate', predicate: 'nope' }
+	])('returns undefined for $name', ({ predicate }) => {
+		expect(provenanceSourceCommit(predicate)).toBeUndefined();
+	});
+});
+
+const attestationTagCommit = 'a'.repeat(40);
+const attestationOptions = {
+	releaseRepository: 'owner/repo',
+	version: 'v1.0.0',
+	githubToken: '',
+	environment: {}
+};
+
+function attestationInputUrl(input: string | URL | Request): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	if (input instanceof URL) {
+		return input.href;
+	}
+
+	return input.url;
+}
+
+async function writeArchive(): Promise<{
+	readonly path: string;
+	readonly digest: string;
+}> {
+	const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+	const archivePath = path.join(directory, 'cupboard.tar.gz');
+	const bytes = new Uint8Array([1, 2, 3]);
+
+	await writeFile(archivePath, bytes);
+
+	return {
+		path: archivePath,
+		digest: createHash('sha256').update(bytes).digest('hex')
+	};
+}
+
+function stubAttestationFetch(
+	digest: string,
+	attestations: unknown[]
+): typeof fetch {
+	return (input) => {
+		const url = attestationInputUrl(input);
+
+		if (url.endsWith('/commits/v1.0.0')) {
+			return Promise.resolve(Response.json({ sha: attestationTagCommit }));
+		}
+
+		if (url.includes(`/attestations/sha256:${digest}`)) {
+			return Promise.resolve(Response.json({ attestations }));
+		}
+
+		return Promise.resolve(new Response('not found', { status: 404 }));
+	};
+}
+
+function verifiedAs(digest: string, commit: string): VerifiedBundle {
+	return {
+		signer: {
+			key: createPublicKey({
+				key: Buffer.from(
+					'MCowBQYDK2VwAyEA74apN5wWAk7Q7yJ1hzf0EMHdcmIRanVgF1Xqz+VpOl8=',
+					'base64'
+				),
+				format: 'der',
+				type: 'spki'
+			})
+		},
+		predicateType: 'https://slsa.dev/provenance/v1',
+		subjectDigests: [digest],
+		predicate: {
+			buildDefinition: {
+				resolvedDependencies: [{ digest: { gitCommit: commit } }]
+			}
+		}
+	};
+}
+
+describe('verifyReleaseAttestation', () => {
+	it('accepts a bundle built by the release workflow from the tag commit', async () => {
+		const archive = await writeArchive();
+
+		await expect(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch(archive.digest, [{ bundle: {} }]),
+				verify: () =>
+					Promise.resolve(verifiedAs(archive.digest, attestationTagCommit))
+			})
+		).resolves.toBeUndefined();
+	});
+
+	it('rejects a bundle built from a different commit', async () => {
+		const archive = await writeArchive();
+
+		await expect(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch(archive.digest, [{ bundle: {} }]),
+				verify: () =>
+					Promise.resolve(verifiedAs(archive.digest, 'b'.repeat(40)))
+			})
+		).rejects.toThrow();
+	});
+
+	it('rejects when there is no attestation', async () => {
+		const archive = await writeArchive();
+
+		await expect(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch(archive.digest, [])
+			})
+		).rejects.toThrow();
 	});
 });

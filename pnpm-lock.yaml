@@ -84,6 +84,12 @@ importers:
         specifier: ^4.4.3
         version: 4.4.3
 
+  actions:
+    dependencies:
+      '@cupboard/shared':
+        specifier: workspace:*
+        version: link:../packages/shared
+
   packages/cli:
     dependencies:
       '@cloudflare/workers-auth':
