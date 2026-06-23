@@ -5,7 +5,12 @@
 		"@cupboard/reporter": "workspace:*",
 		"@octokit/plugin-retry": "^8.1.0",
 		"@octokit/plugin-throttling": "^11.0.3",
-		"@octokit/rest": "^22.0.1"
+		"@octokit/rest": "^22.0.1",
+		"@sigstore/bundle": "^5.0.0",
+		"@sigstore/protobuf-specs": "^0.5.1",
+		"@sigstore/tuf": "^5.0.0",
+		"@sigstore/verify": "^4.0.0",
+		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",
@@ -14,6 +19,7 @@
 	},
 	"exports": {
 		".": "./src/cli.ts",
+		"./attestation": "./src/attestation.ts",
 		"./errors": "./src/errors.ts",
 		"./octokit": "./src/octokit.ts"
 	},
