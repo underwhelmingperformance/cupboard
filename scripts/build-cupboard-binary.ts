@@ -102,10 +102,9 @@ async function buildSea(seaFormat: SeaFormat): Promise<void> {
 			: {
 					stdin: {
 						contents: [
-							"import { buildProgram } from './packages/cli/src/cli.ts';",
-							'buildProgram().parseAsync().catch((error: unknown) => {',
-							'\tconsole.error(error);',
-							'\tprocess.exitCode = 1;',
+							"import { runCli } from './packages/cli/src/run.ts';",
+							'runCli().then((exitCode: number) => {',
+							'\tprocess.exitCode = exitCode;',
 							'});'
 						].join('\n'),
 						loader: 'ts',
