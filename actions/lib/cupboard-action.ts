@@ -270,8 +270,7 @@ export function buildPushArguments(
 
 export function buildAttestationVerifyArguments(
 	archivePath: string,
-	releaseRepository: string,
-	tagName: string
+	releaseRepository: string
 ): readonly string[] {
 	return [
 		'attestation',
@@ -279,9 +278,55 @@ export function buildAttestationVerifyArguments(
 		archivePath,
 		'--repo',
 		releaseRepository,
-		'--source-ref',
-		`refs/tags/${tagName}`
+		'--signer-workflow',
+		`${releaseRepository}/.github/workflows/release.yml`,
+		'--format',
+		'json'
 	];
+}
+
+/**
+ * Read the source commit (`sourceRepositoryDigest`) from the JSON
+ * `gh attestation verify --format json` prints. The release builds run on the
+ * default branch before the tag exists, so the commit is what ties an artifact
+ * to a tag, not the ref recorded in the attestation.
+ */
+export function attestationSourceDigest(output: string): string {
+	const attestations = parseJson(output);
+
+	if (!Array.isArray(attestations) || attestations.length === 0) {
+		throw new Error('gh attestation verify returned no attestations');
+	}
+
+	const digest = digString(attestations[0], [
+		'verificationResult',
+		'signature',
+		'certificate',
+		'sourceRepositoryDigest'
+	]);
+
+	if (digest === undefined) {
+		throw new Error('gh attestation verify output had no source commit');
+	}
+
+	return digest;
+}
+
+function digString(
+	value: unknown,
+	keys: readonly string[]
+): string | undefined {
+	let current = value;
+
+	for (const key of keys) {
+		if (!isRecord(current)) {
+			return undefined;
+		}
+
+		current = current[key];
+	}
+
+	return typeof current === 'string' ? current : undefined;
 }
 
 export async function setupAction(
@@ -379,10 +424,11 @@ async function installCupboard(
 	}
 
 	await verifyChecksum(archivePath, expectedChecksum);
+	const tagCommit = await fetchTagCommit(options, release.tagName);
 	verifyArtifactAttestation(
 		archivePath,
 		options.releaseRepository,
-		release.tagName,
+		tagCommit,
 		options.githubToken
 	);
 	run('tar', ['-xzf', archivePath, '-C', options.installDirectory]);
@@ -486,28 +532,55 @@ async function verifyChecksum(
 function verifyArtifactAttestation(
 	archivePath: string,
 	releaseRepository: string,
-	tagName: string,
+	expectedCommit: string,
 	githubToken: string
 ): void {
 	const result = spawnSync(
 		'gh',
-		buildAttestationVerifyArguments(archivePath, releaseRepository, tagName),
+		buildAttestationVerifyArguments(archivePath, releaseRepository),
 		{
 			env: {
 				...env,
 				...(githubToken !== '' && { GH_TOKEN: githubToken })
 			},
-			stdio: 'inherit'
+			encoding: 'utf8'
 		}
 	);
 
-	if (result.status === 0) {
-		return;
+	if (result.status !== 0) {
+		throw new Error(
+			`gh attestation verify failed with status ${String(result.status)}: ${result.stderr}`
+		);
 	}
 
-	throw new Error(
-		`gh attestation verify failed with status ${String(result.status)}`
+	const sourceCommit = attestationSourceDigest(result.stdout);
+
+	if (sourceCommit !== expectedCommit) {
+		throw new Error(
+			`${path.basename(archivePath)} was built from ${sourceCommit}, but its tag points at ${expectedCommit}`
+		);
+	}
+
+	console.warn(
+		`Verified ${path.basename(archivePath)}: built by the ${releaseRepository} release workflow from ${expectedCommit}.`
 	);
+}
+
+async function fetchTagCommit(
+	options: Omit<InstallCupboardOptions, 'installDirectory'>,
+	tagName: string
+): Promise<string> {
+	const apiUrl = new URL(
+		`/repos/${options.releaseRepository}/commits/${tagName}`,
+		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
+	);
+	const response = await fetchJson(apiUrl, options.githubToken);
+
+	if (!isRecord(response) || typeof response.sha !== 'string') {
+		throw new Error(`could not resolve the commit for tag ${tagName}`);
+	}
+
+	return response.sha;
 }
 
 async function configureNix(inputs: ConfigureNixInputs): Promise<void> {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	assetNameFor,
+	attestationSourceDigest,
 	buildAttestationVerifyArguments,
 	buildPushArguments,
 	cachePublicKeyRequestHeaders,
@@ -205,12 +206,11 @@ describe('buildPushArguments', () => {
 });
 
 describe('buildAttestationVerifyArguments', () => {
-	it('scopes verification to the release repository and tag', () => {
+	it('binds verification to the repository and release workflow', () => {
 		expect(
 			buildAttestationVerifyArguments(
 				'/tmp/cupboard-v1.2.3-linux-x64.tar.gz',
-				'owner/repo',
-				'v1.2.3'
+				'owner/repo'
 			)
 		).toStrictEqual([
 			'attestation',
@@ -218,8 +218,33 @@ describe('buildAttestationVerifyArguments', () => {
 			'/tmp/cupboard-v1.2.3-linux-x64.tar.gz',
 			'--repo',
 			'owner/repo',
-			'--source-ref',
-			'refs/tags/v1.2.3'
+			'--signer-workflow',
+			'owner/repo/.github/workflows/release.yml',
+			'--format',
+			'json'
 		]);
+	});
+});
+
+describe('attestationSourceDigest', () => {
+	it('reads the source commit from gh attestation verify output', () => {
+		const output = JSON.stringify([
+			{
+				verificationResult: {
+					signature: {
+						certificate: { sourceRepositoryDigest: 'abc123' }
+					}
+				}
+			}
+		]);
+
+		expect(attestationSourceDigest(output)).toBe('abc123');
+	});
+
+	it.each([
+		{ name: 'no attestations', output: '[]' },
+		{ name: 'a missing source commit', output: '[{}]' }
+	])('rejects $name', ({ output }) => {
+		expect(() => attestationSourceDigest(output)).toThrow();
 	});
 });
