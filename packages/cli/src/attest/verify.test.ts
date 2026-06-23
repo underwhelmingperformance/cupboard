@@ -3,19 +3,17 @@ import { createPublicKey } from 'node:crypto';
 import { NixSha256Hash } from '@cupboard/nix/hash';
 import { NarInfo } from '@cupboard/nix/narinfo';
 import { StorePath } from '@cupboard/nix/store-path';
+import {
+	AttestationPredicateTypeMismatchError,
+	AttestationSubjectMismatchError,
+	type VerifiedIdentityPolicy
+} from '@cupboard/shared/attestation';
 import type { Signer } from '@sigstore/verify';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
-	AttestationPredicateTypeMismatchError,
-	AttestationSubjectMismatchError,
-	CertificateIdentityModeError,
-	CertificateIssuerModeError,
-	CertificatePolicyModeMismatchError,
-	identityPolicy,
 	RemoteNarInfoStorePathMismatchError,
-	type VerifiedIdentityPolicy,
 	verifyLocalAttestations,
 	verifyRemoteAttestations
 } from './verify.ts';
@@ -25,17 +23,6 @@ const narDigest = [...NixSha256Hash.parse(narHash).digestBytes()]
 	.map((byte) => byte.toString(16).padStart(2, '0'))
 	.join('');
 
-function thrownBy(run: () => unknown): unknown {
-	let thrown: unknown;
-
-	try {
-		run();
-	} catch (error) {
-		thrown = error;
-	}
-
-	return thrown;
-}
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const bundleDigest = 'a'.repeat(64);
 const sbomBundleDigest = 'b'.repeat(64);
@@ -231,135 +218,6 @@ async function signedNarInfo(hash: string = storePathHash): Promise<{
 			.render()
 	};
 }
-
-describe('attestation verification policy', () => {
-	it('requires exactly one identity mode', () => {
-		const missing_ = thrownBy(() =>
-			identityPolicy({
-				certificateOidcIssuer: 'https://issuer.test'
-			})
-		);
-		const conflicting_ = thrownBy(() =>
-			identityPolicy({
-				certificateIdentity: 'alice@example.test',
-				certificateIdentityRegex: 'alice@.*',
-				certificateOidcIssuer: 'https://issuer.test'
-			})
-		);
-
-		expect(missing_).toBeInstanceOf(CertificateIdentityModeError);
-		expect(conflicting_).toBeInstanceOf(CertificateIdentityModeError);
-
-		if (
-			missing_ instanceof CertificateIdentityModeError &&
-			conflicting_ instanceof CertificateIdentityModeError
-		) {
-			expect({
-				missing: { name: missing_.name, identityModes: missing_.identityModes },
-				conflicting: {
-					name: conflicting_.name,
-					identityModes: conflicting_.identityModes
-				}
-			}).toStrictEqual({
-				missing: {
-					name: 'CertificateIdentityModeError',
-					identityModes: []
-				},
-				conflicting: {
-					name: 'CertificateIdentityModeError',
-					identityModes: ['exact', 'regex']
-				}
-			});
-		}
-	});
-
-	it('requires exactly one issuer mode', () => {
-		const missing_ = thrownBy(() =>
-			identityPolicy({
-				certificateIdentity: 'alice@example.test'
-			})
-		);
-		const conflicting_ = thrownBy(() =>
-			identityPolicy({
-				certificateIdentity: 'alice@example.test',
-				certificateOidcIssuer: 'https://issuer.test',
-				certificateOidcIssuerRegex: 'https://issuer[.]test'
-			})
-		);
-
-		expect(missing_).toBeInstanceOf(CertificateIssuerModeError);
-		expect(conflicting_).toBeInstanceOf(CertificateIssuerModeError);
-
-		if (
-			missing_ instanceof CertificateIssuerModeError &&
-			conflicting_ instanceof CertificateIssuerModeError
-		) {
-			expect({
-				missing: { name: missing_.name, issuerModes: missing_.issuerModes },
-				conflicting: {
-					name: conflicting_.name,
-					issuerModes: conflicting_.issuerModes
-				}
-			}).toStrictEqual({
-				missing: {
-					name: 'CertificateIssuerModeError',
-					issuerModes: []
-				},
-				conflicting: {
-					name: 'CertificateIssuerModeError',
-					issuerModes: ['exact', 'regex']
-				}
-			});
-		}
-	});
-
-	it('requires identity and issuer modes to match', () => {
-		const error_ = thrownBy(() =>
-			identityPolicy({
-				certificateIdentity: 'alice@example.test',
-				certificateOidcIssuerRegex: 'https://issuer[.]test'
-			})
-		);
-
-		expect(error_).toBeInstanceOf(CertificatePolicyModeMismatchError);
-
-		if (error_ instanceof CertificatePolicyModeMismatchError) {
-			expect({
-				name: error_.name,
-				identityMode: error_.identityMode,
-				issuerMode: error_.issuerMode
-			}).toStrictEqual({
-				name: 'CertificatePolicyModeMismatchError',
-				identityMode: 'exact',
-				issuerMode: 'regex'
-			});
-		}
-	});
-
-	it('builds exact and regex policies', () => {
-		expect(
-			identityPolicy({
-				certificateIdentity: 'alice@example.test',
-				certificateOidcIssuer: 'https://issuer.test'
-			})
-		).toStrictEqual({
-			mode: 'exact',
-			identity: 'alice@example.test',
-			issuer: 'https://issuer.test'
-		});
-
-		const regex = identityPolicy({
-			certificateIdentityRegex: 'alice@.*',
-			certificateOidcIssuerRegex: 'https://issuer[.]test'
-		});
-
-		expect(regex).toStrictEqual({
-			mode: 'regex',
-			identity: /alice@.*/,
-			issuer: /https:\/\/issuer[.]test/
-		});
-	});
-});
 
 describe('local attestation verification', () => {
 	const policy: VerifiedIdentityPolicy = {
