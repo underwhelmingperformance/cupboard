@@ -1,3 +1,4 @@
+import { WIRE_DEFAULT_CACHE } from '@cupboard/nix/scalars';
 import { captureGroups } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,
@@ -73,13 +74,6 @@ export class DuplicateCaptureVariableError extends Error {
 			`Template variable '${variable}' is defined by more than one capture.`
 		);
 		this.name = 'DuplicateCaptureVariableError';
-	}
-}
-
-export class MissingCacheError extends Error {
-	constructor() {
-		super('A cache grant needs --cache <name> or --cache-template <template>.');
-		this.name = 'MissingCacheError';
 	}
 }
 
@@ -230,7 +224,9 @@ function cacheBinding(
 		return { exact: options.cache, validate: 'cacheName' };
 	}
 
-	throw new MissingCacheError();
+	// Omitting the cache scopes the grant to the tenant's default cache. The
+	// wire alias for it is never something a user has to type.
+	return { exact: WIRE_DEFAULT_CACHE, validate: 'cacheName' };
 }
 
 function rootBinding(

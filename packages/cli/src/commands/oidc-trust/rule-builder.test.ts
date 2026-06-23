@@ -117,6 +117,19 @@ describe('buildCacheGrant', () => {
 		});
 	});
 
+	it('defaults to the tenant default cache when none is named', () => {
+		expect(buildCacheGrant({ allow: ['push'] })).toStrictEqual({
+			type: 'cupboard_cache',
+			actions: [
+				'upload:negotiate',
+				'upload:prepare',
+				'upload:status',
+				'upload:commit'
+			],
+			resources: { cache: { exact: '_default', validate: 'cacheName' } }
+		});
+	});
+
 	it('builds an exact cache grant', () => {
 		expect(
 			buildCacheGrant({ cache: 'acme-ci', allow: ['push'] })

@@ -10,13 +10,53 @@ import type {
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
+import { InvalidClaimError } from '../errors.ts';
+
 import {
+	claimsForAdd,
+	githubBranchAddBody,
+	githubPrAddBody,
 	type OidcTrustClient,
 	runOidcTrustAdd,
 	runOidcTrustList,
 	runOidcTrustRemove,
 	runOidcTrustShow
 } from './oidc-trust.ts';
+import { type RepositoryIdentity } from './oidc-trust/github.ts';
+
+const identity: RepositoryIdentity = {
+	repositoryId: 1234,
+	repositoryOwnerId: 5678,
+	fullName: 'acme/infra'
+};
+const tenantUrl = 'https://cache.example.workers.dev/t/acme';
+const uploadActions = [
+	'upload:negotiate',
+	'upload:prepare',
+	'upload:status',
+	'upload:commit'
+];
+const attestActions = [
+	'attestation:negotiate',
+	'attestation:prepare',
+	'attestation:attach'
+];
+const prSubstitutions = {
+	pr: {
+		claim: 'ref',
+		capture: { pattern: '^refs/pull/(?<pr>[0-9]+)/merge$', group: 'pr' }
+	}
+};
+const prCacheBinding = {
+	equalsTemplate: 'pr-{pr}',
+	substitutions: prSubstitutions,
+	validate: 'cacheName'
+};
+const prRootBinding = {
+	equalsTemplate: 'github:acme/infra/pr-{pr}/',
+	substitutions: prSubstitutions,
+	validate: 'rootName'
+};
 
 const ciGrant: OidcTrustSummary['permittedGrants'][number] = {
 	type: 'cupboard_cache',
@@ -213,5 +253,134 @@ describe('runOidcTrustRemove', () => {
 			results: [],
 			cancellations: ['The trust rule was left in place.']
 		});
+	});
+});
+
+describe('claimsForAdd', () => {
+	const jobWorkflowReference =
+		'acme/ci/.github/workflows/push.yml@refs/heads/main';
+
+	it('merges the job_workflow_ref shorthand with the claim pairs', () => {
+		expect(
+			claimsForAdd(['repository_id=1234'], jobWorkflowReference)
+		).toStrictEqual({
+			repository_id: '1234',
+			job_workflow_ref: jobWorkflowReference
+		});
+	});
+
+	it('returns the claim pairs unchanged when no shorthand is given', () => {
+		expect(claimsForAdd(['repository_id=1234'], undefined)).toStrictEqual({
+			repository_id: '1234'
+		});
+	});
+
+	it('rejects job_workflow_ref set by both the shorthand and a claim', () => {
+		expect(() =>
+			claimsForAdd(['job_workflow_ref=other'], jobWorkflowReference)
+		).toThrow(InvalidClaimError);
+	});
+});
+
+describe('githubPrAddBody', () => {
+	it('grants push, root and attestation by default, scoped to the per-PR cache and root', () => {
+		expect(
+			githubPrAddBody(tenantUrl, identity, { repo: 'acme/infra' })
+		).toStrictEqual({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenantUrl,
+			claims: { repository_id: '1234', repository_owner_id: '5678' },
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: [...uploadActions, ...attestActions, 'root:set'],
+					resources: { cache: prCacheBinding, root: prRootBinding }
+				}
+			],
+			display: { provider: 'github', repository: 'acme/infra' }
+		});
+	});
+
+	it('omits attestation operations when --no-attest is given', () => {
+		expect(
+			githubPrAddBody(tenantUrl, identity, {
+				repo: 'acme/infra',
+				attest: false
+			})
+		).toStrictEqual({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenantUrl,
+			claims: { repository_id: '1234', repository_owner_id: '5678' },
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: [...uploadActions, 'root:set'],
+					resources: { cache: prCacheBinding, root: prRootBinding }
+				}
+			],
+			display: { provider: 'github', repository: 'acme/infra' }
+		});
+	});
+});
+
+describe('githubBranchAddBody', () => {
+	it('pins the workflow and publishes to the default cache under the branch root', () => {
+		expect(
+			githubBranchAddBody(tenantUrl, identity, {
+				repo: 'acme/infra',
+				branch: 'main',
+				workflow: '.github/workflows/cupboard-publish.yml'
+			})
+		).toStrictEqual({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenantUrl,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				job_workflow_ref:
+					'acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main'
+			},
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: [...uploadActions, ...attestActions, 'root:set'],
+					resources: {
+						cache: { exact: '_default', validate: 'cacheName' },
+						root: {
+							validate: 'rootName',
+							exact: 'github:acme/infra/main/'
+						}
+					}
+				}
+			],
+			display: { provider: 'github', repository: 'acme/infra' }
+		});
+	});
+
+	it('pins the workflow ref independently of the branch when given', () => {
+		const body = githubBranchAddBody(tenantUrl, identity, {
+			repo: 'acme/infra',
+			branch: 'release',
+			workflow: '.github/workflows/cupboard-publish.yml',
+			workflowRef: 'main',
+			attest: false
+		});
+
+		expect(body.claims).toStrictEqual({
+			repository_id: '1234',
+			repository_owner_id: '5678',
+			job_workflow_ref:
+				'acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main'
+		});
+		expect(body.permittedGrants).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: [...uploadActions, 'root:set'],
+				resources: {
+					cache: { exact: '_default', validate: 'cacheName' },
+					root: { validate: 'rootName', exact: 'github:acme/infra/release/' }
+				}
+			}
+		]);
 	});
 });
