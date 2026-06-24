@@ -88,6 +88,11 @@ interface StorePathDigest {
 	readonly sha256: string;
 }
 
+interface NixPathInfo {
+	readonly storePath: string;
+	readonly narHash: string;
+}
+
 interface InstallCupboardOptions {
 	readonly installDirectory: string;
 	readonly releaseRepository: string;
@@ -806,7 +811,7 @@ async function fetchTrustedPublicKey(
 	return trimmedPublicKey;
 }
 
-async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
+export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 	const cacheUrl = new URL(options.cacheUrl);
 	const host = cacheUrl.host;
 	const netrcFile = path.join(
@@ -824,39 +829,63 @@ async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 	return netrcFile;
 }
 
-function resolveStorePaths(paths: readonly string[]): string[] {
-	const resolved = [];
-
-	for (const storePath of paths) {
-		const result = spawnSync(
-			'nix',
-			['path-info', '--json', '--json-format', '1', storePath],
-			{
-				encoding: 'utf8'
-			}
-		);
-
-		if (result.status !== 0) {
-			throw new NixError(`nix path-info failed for ${storePath}`);
-		}
-
-		const parsed = parseJson(result.stdout);
-		const storePaths = Array.isArray(parsed)
-			? parsed
-			: isRecord(parsed)
-				? Object.keys(parsed)
-				: [];
-
-		if (storePaths.length !== 1 || typeof storePaths[0] !== 'string') {
-			throw new NixError(
-				`nix path-info did not resolve exactly one path for ${storePath}`
-			);
-		}
-
-		resolved.push(storePaths[0]);
+function pathInfoEntries(parsed: unknown): readonly unknown[] {
+	if (Array.isArray(parsed)) {
+		return parsed;
 	}
 
-	return resolved;
+	if (isRecord(parsed)) {
+		return Object.entries(parsed).map(([storePath, info]) => ({
+			path: storePath,
+			...(isRecord(info) && info)
+		}));
+	}
+
+	return [];
+}
+
+function nixPathInfo(storePath: string): NixPathInfo {
+	const result = spawnSync(
+		'nix',
+		['path-info', '--json', '--json-format', '1', storePath],
+		{ encoding: 'utf8' }
+	);
+
+	if (result.error !== undefined) {
+		throw new NixError(
+			`nix path-info could not run for ${storePath}: ${result.error.message}`
+		);
+	}
+
+	if (result.status !== 0) {
+		const detail = result.stderr.trim();
+
+		throw new NixError(
+			`nix path-info failed for ${storePath}${detail === '' ? '' : `: ${detail}`}`
+		);
+	}
+
+	const [entry, ...rest] = pathInfoEntries(parseJson(result.stdout));
+
+	if (entry === undefined || rest.length > 0) {
+		throw new NixError(
+			`nix path-info did not resolve exactly one path for ${storePath}`
+		);
+	}
+
+	if (
+		!isRecord(entry) ||
+		typeof entry.path !== 'string' ||
+		typeof entry.narHash !== 'string'
+	) {
+		throw new NixError(`nix path-info gave no NAR hash for ${storePath}`);
+	}
+
+	return { storePath: entry.path, narHash: entry.narHash };
+}
+
+function resolveStorePaths(paths: readonly string[]): string[] {
+	return paths.map((storePath) => nixPathInfo(storePath).storePath);
 }
 
 export function narHashToHex(narHash: string): string {
@@ -878,70 +907,12 @@ export function narHashToHex(narHash: string): string {
 	return bytes.toString('hex');
 }
 
-function pathInfoJson(storePath: string): unknown {
-	const result = spawnSync(
-		'nix',
-		['path-info', '--json', '--json-format', '1', storePath],
-		{
-			encoding: 'utf8'
-		}
-	);
-
-	if (result.status !== 0) {
-		throw new NixError(`nix path-info failed for ${storePath}`);
-	}
-
-	return parseJson(result.stdout);
-}
-
-function isUnknownArray(value: unknown): value is readonly unknown[] {
-	return Array.isArray(value);
-}
-
-function pathInfoEntries(parsed: unknown): readonly unknown[] {
-	if (isUnknownArray(parsed)) {
-		return parsed;
-	}
-
-	if (isRecord(parsed)) {
-		return Object.entries(parsed).map(([storePath, info]) => ({
-			path: storePath,
-			...(isRecord(info) && info)
-		}));
-	}
-
-	return [];
-}
-
 function resolveStorePathDigests(paths: readonly string[]): StorePathDigest[] {
-	const resolved: StorePathDigest[] = [];
+	return paths.map((storePath) => {
+		const info = nixPathInfo(storePath);
 
-	for (const storePath of paths) {
-		const entries = pathInfoEntries(pathInfoJson(storePath));
-
-		if (entries.length !== 1) {
-			throw new NixError(
-				`nix path-info did not resolve exactly one path for ${storePath}`
-			);
-		}
-
-		const entry = entries[0];
-
-		if (
-			!isRecord(entry) ||
-			typeof entry.path !== 'string' ||
-			typeof entry.narHash !== 'string'
-		) {
-			throw new NixError(`nix path-info gave no NAR hash for ${storePath}`);
-		}
-
-		resolved.push({
-			storePath: entry.path,
-			sha256: narHashToHex(entry.narHash)
-		});
-	}
-
-	return resolved;
+		return { storePath: info.storePath, sha256: narHashToHex(info.narHash) };
+	});
 }
 
 export function renderChecksums(digests: readonly StorePathDigest[]): string {
@@ -1180,22 +1151,20 @@ function run(command: string, arguments_: readonly string[]): void {
 	throw new CommandFailedError(command, result.status);
 }
 
-async function main(): Promise<void> {
-	const command = process.argv[2];
-
+export async function dispatch(
+	command: string | undefined,
+	environment: Environment = env
+): Promise<void> {
 	if (command === 'setup') {
-		await setupAction();
-		return;
+		return setupAction(environment);
 	}
 
 	if (command === 'push') {
-		await pushAction();
-		return;
+		return pushAction(environment);
 	}
 
 	if (command === 'attest') {
-		await attestAction();
-		return;
+		return attestAction(environment);
 	}
 
 	throw new UnknownCommandError(command ?? '');
@@ -1214,7 +1183,7 @@ if (
 	import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
 	try {
-		await main();
+		await dispatch(process.argv[2]);
 	} catch (error: unknown) {
 		if (error instanceof CodedError) {
 			console.error(error.message);
