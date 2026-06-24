@@ -29,9 +29,11 @@ import {
 	CommandFailedError,
 	GithubApiError,
 	InvalidInputError,
-	MalformedResponseError,
+	MalformedReleaseResponseError,
 	MissingInputError,
 	NixError,
+	NoReleaseFoundError,
+	ReleaseAssetNotFoundError,
 	UnknownCommandError,
 	UnsupportedPlatformError
 } from './errors.ts';
@@ -50,6 +52,7 @@ interface Release {
 
 interface SetupInputs {
 	readonly version: string;
+	readonly includePrereleases: boolean;
 	readonly githubToken: string;
 	readonly releaseRepository: string;
 	readonly installDirectory: string;
@@ -64,6 +67,7 @@ interface SetupInputs {
 
 interface PushInputs {
 	readonly version: string;
+	readonly includePrereleases: boolean;
 	readonly githubToken: string;
 	readonly releaseRepository: string;
 	readonly installDirectory: string;
@@ -97,6 +101,7 @@ interface InstallCupboardOptions {
 	readonly installDirectory: string;
 	readonly releaseRepository: string;
 	readonly version: string;
+	readonly includePrereleases: boolean;
 	readonly githubToken: string;
 	readonly environment: Environment;
 }
@@ -347,6 +352,7 @@ export async function setupAction(
 		installDirectory,
 		releaseRepository: inputs.releaseRepository,
 		version: inputs.version,
+		includePrereleases: inputs.includePrereleases,
 		githubToken: inputs.githubToken,
 		environment
 	});
@@ -380,6 +386,7 @@ export async function pushAction(
 		installDirectory,
 		releaseRepository: inputs.releaseRepository,
 		version: inputs.version,
+		includePrereleases: inputs.includePrereleases,
 		githubToken: inputs.githubToken,
 		environment
 	});
@@ -408,6 +415,7 @@ async function installCupboard(
 	const release = await fetchRelease({
 		releaseRepository: options.releaseRepository,
 		version: options.version,
+		includePrereleases: options.includePrereleases,
 		githubToken: options.githubToken,
 		environment: options.environment
 	});
@@ -441,21 +449,80 @@ async function installCupboard(
 	};
 }
 
-async function fetchRelease(
-	options: Omit<InstallCupboardOptions, 'installDirectory'>
+export async function fetchRelease(
+	options: Omit<InstallCupboardOptions, 'installDirectory'>,
+	fetcher: typeof fetch = fetch
 ): Promise<Release> {
-	const apiUrl = new URL(
-		releaseApiPath(options.releaseRepository, options.version),
-		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
-	);
-	const response = await fetchJson(apiUrl, options.githubToken);
-
-	if (!isReleaseResponse(response)) {
-		throw new MalformedResponseError(
-			'GitHub release response had an unexpected shape'
-		);
+	if (
+		normaliseVersion(options.version) === 'latest' &&
+		options.includePrereleases
+	) {
+		return fetchNewestRelease(options, fetcher);
 	}
 
+	const apiUrl = releaseApiUrl(
+		options,
+		releaseApiPath(options.releaseRepository, options.version)
+	);
+	const response = await fetchJson(apiUrl, options.githubToken, fetcher);
+
+	if (!isReleaseResponse(response)) {
+		throw new MalformedReleaseResponseError();
+	}
+
+	return releaseFromResponse(response);
+}
+
+// `GET /releases/latest` only returns the latest stable release, so the newest
+// prerelease is found by listing releases (newest first) and taking the first
+// published one.
+async function fetchNewestRelease(
+	options: Omit<InstallCupboardOptions, 'installDirectory'>,
+	fetcher: typeof fetch
+): Promise<Release> {
+	const apiUrl = releaseApiUrl(
+		options,
+		`/repos/${options.releaseRepository}/releases?per_page=20`
+	);
+	const response = await fetchJson(apiUrl, options.githubToken, fetcher);
+
+	if (!isUnknownArray(response)) {
+		throw new MalformedReleaseResponseError();
+	}
+
+	const release = response.find(
+		(item) => isRecord(item) && item.draft !== true && isReleaseResponse(item)
+	);
+
+	if (release === undefined) {
+		throw new NoReleaseFoundError(options.releaseRepository);
+	}
+
+	if (!isReleaseResponse(release)) {
+		throw new MalformedReleaseResponseError();
+	}
+
+	return releaseFromResponse(release);
+}
+
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+	return Array.isArray(value);
+}
+
+function releaseApiUrl(
+	options: Pick<InstallCupboardOptions, 'environment'>,
+	apiPath: string
+): URL {
+	return new URL(
+		apiPath,
+		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
+	);
+}
+
+function releaseFromResponse(response: {
+	readonly tag_name: string;
+	readonly assets: readonly ReleaseAsset[];
+}): Release {
 	return {
 		tagName: response.tag_name,
 		assets: response.assets.map((asset) => ({
@@ -489,9 +556,7 @@ function findReleaseAsset(release: Release, name: string): ReleaseAsset {
 	const asset = release.assets.find((candidate) => candidate.name === name);
 
 	if (asset === undefined) {
-		throw new MalformedResponseError(
-			`GitHub release ${release.tagName} has no ${name} asset`
-		);
+		throw new ReleaseAssetNotFoundError(release.tagName, name);
 	}
 
 	return asset;
@@ -979,6 +1044,11 @@ function setupInputs(environment: Environment): SetupInputs {
 
 	return {
 		version: normaliseVersion(input(environment, 'CUPBOARD_VERSION', 'latest')),
+		includePrereleases: isInputEnabled(
+			environment,
+			'INCLUDE_PRERELEASES',
+			true
+		),
 		githubToken: input(environment, 'GITHUB_TOKEN'),
 		releaseRepository: input(
 			environment,
@@ -1023,6 +1093,11 @@ function pushInputs(environment: Environment): PushInputs {
 
 	return {
 		version: normaliseVersion(input(environment, 'CUPBOARD_VERSION', 'latest')),
+		includePrereleases: isInputEnabled(
+			environment,
+			'INCLUDE_PRERELEASES',
+			true
+		),
 		githubToken: input(environment, 'GITHUB_TOKEN'),
 		releaseRepository: input(
 			environment,
@@ -1108,8 +1183,12 @@ function requestHeaders(
 	return headers;
 }
 
-async function fetchJson(url: URL, githubToken: string): Promise<unknown> {
-	const response = await fetch(url, {
+async function fetchJson(
+	url: URL,
+	githubToken: string,
+	fetcher: typeof fetch = fetch
+): Promise<unknown> {
+	const response = await fetcher(url, {
 		headers: requestHeaders(githubToken)
 	});
 
