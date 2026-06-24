@@ -8,6 +8,7 @@ import {
 	verifyRemoteAttestations
 } from '../attest/verify.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { CliUsageError } from '../errors.ts';
 
 interface VerifyOptions {
 	readonly narHash?: string;
@@ -30,13 +31,20 @@ interface VerifyOptions {
 	readonly timestampThreshold?: number;
 }
 
-export class InvalidVerifierThresholdError extends Error {
+export class InvalidVerifierThresholdError extends CliUsageError {
 	constructor(
 		public readonly option: string,
 		public readonly value: string
 	) {
-		super(`Invalid ${option} (expected a non-negative integer): ${value}`);
+		super(`Invalid ${option} (expected a positive integer): ${value}`);
 		this.name = 'InvalidVerifierThresholdError';
+	}
+}
+
+export class AttestVerifyModeError extends CliUsageError {
+	constructor(detail: string) {
+		super(detail);
+		this.name = 'AttestVerifyModeError';
 	}
 }
 
@@ -158,14 +166,16 @@ export function registerAttestCommands(
 			const results = await reporter.phase('Verifying attestations', () => {
 				if (options.url !== undefined || options.storePathHash !== undefined) {
 					if (bundles.length > 0) {
-						throw new Error('Remote verification does not take bundle paths');
+						throw new AttestVerifyModeError(
+							'Remote verification does not take bundle paths'
+						);
 					}
 
 					if (
 						options.url === undefined ||
 						options.storePathHash === undefined
 					) {
-						throw new Error(
+						throw new AttestVerifyModeError(
 							'Remote verification requires --url and --store-path-hash'
 						);
 					}
@@ -185,11 +195,15 @@ export function registerAttestCommands(
 				}
 
 				if (options.narHash === undefined) {
-					throw new Error('Local verification requires --nar-hash');
+					throw new AttestVerifyModeError(
+						'Local verification requires --nar-hash'
+					);
 				}
 
 				if (bundles.length === 0) {
-					throw new Error('Local verification requires at least one bundle');
+					throw new AttestVerifyModeError(
+						'Local verification requires at least one bundle'
+					);
 				}
 
 				return verifyLocalAttestations({
