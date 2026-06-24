@@ -22,7 +22,7 @@ export function registerDeployCommand(
 		)
 		.option('--dry-run', 'show the plan without making any changes')
 		.option('--from-tree', 'bundle the working tree even from a built binary')
-		.option('--yes', 'skip the confirmation prompt')
+		.option('-y, --yes', 'skip the confirmation prompt')
 		.action(async (cliOptions: DeployCliOptions) => {
 			// Loaded on demand so the deploy stack (the Cloudflare SDK, esbuild) stays
 			// out of the released binary's startup and the other commands' cost.
