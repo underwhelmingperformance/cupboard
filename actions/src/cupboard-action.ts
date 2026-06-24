@@ -20,6 +20,7 @@ import {
 import { slsaSourceCommit } from '@cupboard/shared/slsa';
 import semverValid from 'semver/functions/valid.js';
 
+import * as annotations from './annotations.ts';
 import {
 	AttestationError,
 	CachePublicKeyError,
@@ -627,7 +628,7 @@ export async function verifyReleaseAttestation(
 				sourceRepository: options.releaseRepository
 			});
 
-			console.warn(
+			annotations.notice(
 				`Verified ${archiveName}: built by the ${options.releaseRepository} release workflow from ${tagCommit}.`
 			);
 
@@ -847,7 +848,7 @@ async function fetchTrustedPublicKey(
 		throw new CachePublicKeyError('cache public key response was empty');
 	}
 
-	console.warn(
+	annotations.warning(
 		'No trusted-public-key was supplied; trusting the cache signing key from /pubkey for this run.'
 	);
 
