@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
-import { isAbortError, throwIfAborted } from '../abort.ts';
+import { throwIfAborted } from '../abort.ts';
+import { decodeJwtPayload } from '../auth/jwt.ts';
 import { obtainAuthorizationCode, postForm } from '../auth/oidc-login.ts';
 import { CliError } from '../errors.ts';
 
@@ -105,24 +106,6 @@ const tokenResponseSchema = z.object({
 
 const idTokenClaimsSchema = z.object({ sub: z.string().min(1) });
 const idTokenExpirySchema = z.object({ exp: z.number() });
-
-function decodeJwtPayload(token: string): unknown {
-	const segment = token.split('.', 2).at(1);
-
-	if (segment === undefined) {
-		return undefined;
-	}
-
-	try {
-		return JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
-	} catch (error) {
-		if (isAbortError(error)) {
-			throw error;
-		}
-
-		return undefined;
-	}
-}
 
 // The `sub` of an id_token, or undefined when the token does not parse. The
 // claim is read unverified: it only seeds a default the user reviews in the
