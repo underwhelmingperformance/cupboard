@@ -21,6 +21,8 @@ import {
 	releaseWorkflowIdentityRegex,
 	renderChecksums,
 	renderNixConfig,
+	setupAction,
+	splitRepository,
 	verifyReleaseAttestation
 } from './cupboard-action.ts';
 import {
@@ -33,9 +35,35 @@ describe('normaliseVersion', () => {
 	it.each([
 		['latest', 'latest'],
 		['1.2.3', 'v1.2.3'],
-		['v1.2.3', 'v1.2.3']
+		['v1.2.3', 'v1.2.3'],
+		['v1.2.3-rc.1', 'v1.2.3-rc.1'],
+		[' v1.2.3 ', 'v1.2.3']
 	])('normalises %s', (version, expected) => {
 		expect(normaliseVersion(version)).toBe(expected);
+	});
+
+	it.each([['  '], ['v'], ['v1'], ['1.2'], ['garbage'], ['v01.2.3']])(
+		'rejects %s',
+		(version) => {
+			expect(() => normaliseVersion(version)).toThrow(InvalidInputError);
+		}
+	);
+});
+
+describe('splitRepository', () => {
+	it('splits a single owner and name', () => {
+		expect(splitRepository('owner/repo')).toStrictEqual(['owner', 'repo']);
+	});
+
+	it.each([
+		['owner/repo/extra'],
+		['owner repo'],
+		['owner/'],
+		['/repo'],
+		['ownerrepo'],
+		['https://github.com/owner/repo']
+	])('rejects %s', (repository) => {
+		expect(() => splitRepository(repository)).toThrow(InvalidInputError);
 	});
 });
 
@@ -314,7 +342,12 @@ function verifiedAs(digest: string, commit: string): VerifiedBundle {
 		subjectDigests: [digest],
 		predicate: {
 			buildDefinition: {
-				resolvedDependencies: [{ digest: { gitCommit: commit } }]
+				resolvedDependencies: [
+					{
+						uri: 'git+https://github.com/owner/repo@refs/heads/main',
+						digest: { gitCommit: commit }
+					}
+				]
 			}
 		}
 	};
@@ -357,13 +390,16 @@ describe('verifyReleaseAttestation', () => {
 });
 
 describe('action input errors', () => {
-	it('rejects an empty version as a usage error', () => {
-		expect(() => normaliseVersion('  ')).toThrow(InvalidInputError);
-	});
-
 	it('rejects an unsupported platform', () => {
 		expect(() => assetNameFor('v1.2.3', 'sunos', 'sparc')).toThrow(
 			UnsupportedPlatformError
 		);
+	});
+
+	it.each([
+		['read-user is supplied without read-password', { READ_USER: 'ci' }],
+		['read-password is supplied without read-user', { READ_PASSWORD: 'secret' }]
+	])('rejects when %s', async (_name, environment) => {
+		await expect(setupAction(environment)).rejects.toThrow(InvalidInputError);
 	});
 });

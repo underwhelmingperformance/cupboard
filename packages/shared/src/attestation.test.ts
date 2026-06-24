@@ -134,19 +134,31 @@ describe('verificationPolicy', () => {
 	});
 });
 
+function provenance(dependencies: readonly unknown[]): Record<string, unknown> {
+	return { buildDefinition: { resolvedDependencies: dependencies } };
+}
+
 describe('slsaSourceCommit', () => {
-	it('reads the git commit from the resolved dependencies', () => {
+	const sourceRepository = 'owner/repo';
+
+	it.each([
+		['the source repository exactly', 'git+https://github.com/owner/repo'],
+		[
+			'the source repository with a ref',
+			'git+https://github.com/owner/repo@refs/heads/main'
+		]
+	])('reads the commit from the dependency matching %s', (_name, uri) => {
 		expect(
-			slsaSourceCommit({
-				buildDefinition: {
-					resolvedDependencies: [
-						{
-							uri: 'git+https://github.com/owner/repo',
-							digest: { gitCommit: 'abc123' }
-						}
-					]
-				}
-			})
+			slsaSourceCommit(
+				provenance([
+					{
+						uri: 'git+https://github.com/other/dep',
+						digest: { gitCommit: 'wrong' }
+					},
+					{ uri, digest: { gitCommit: 'abc123' } }
+				]),
+				sourceRepository
+			)
 		).toBe('abc123');
 	});
 
@@ -154,10 +166,43 @@ describe('slsaSourceCommit', () => {
 		{ name: 'an empty predicate', predicate: {} },
 		{ name: 'a non-object predicate', predicate: 'nope' },
 		{
-			name: 'a dependency without a commit',
-			predicate: { buildDefinition: { resolvedDependencies: [{ digest: {} }] } }
+			name: 'no dependency matches the source repository',
+			predicate: provenance([
+				{
+					uri: 'git+https://github.com/other/dep',
+					digest: { gitCommit: 'abc123' }
+				}
+			])
+		},
+		{
+			name: 'a dependency shares a prefix but is a different repository',
+			predicate: provenance([
+				{
+					uri: 'git+https://github.com/owner/repository',
+					digest: { gitCommit: 'abc123' }
+				}
+			])
+		},
+		{
+			name: 'more than one dependency matches',
+			predicate: provenance([
+				{
+					uri: 'git+https://github.com/owner/repo@refs/heads/main',
+					digest: { gitCommit: 'abc123' }
+				},
+				{
+					uri: 'git+https://github.com/owner/repo@refs/tags/v1',
+					digest: { gitCommit: 'def456' }
+				}
+			])
+		},
+		{
+			name: 'the matching dependency records no commit',
+			predicate: provenance([
+				{ uri: 'git+https://github.com/owner/repo', digest: {} }
+			])
 		}
-	])('returns undefined for $name', ({ predicate }) => {
-		expect(slsaSourceCommit(predicate)).toBeUndefined();
+	])('returns undefined when $name', ({ predicate }) => {
+		expect(slsaSourceCommit(predicate, sourceRepository)).toBeUndefined();
 	});
 });
