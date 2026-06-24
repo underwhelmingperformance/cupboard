@@ -4,7 +4,6 @@ import {
 	createCliUi
 } from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
-import { resolveReporterMode } from '@cupboard/shared';
 import { usageExitCode } from '@cupboard/shared/errors';
 import { Command, CommanderError } from 'commander';
 
@@ -30,6 +29,7 @@ import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
 import { CliError } from './errors.ts';
+import { resolveReporterMode } from './reporter-mode.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {

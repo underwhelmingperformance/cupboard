@@ -2,7 +2,7 @@ import { stderr } from 'node:process';
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { resolveReporterMode } from './cli.ts';
+import { resolveReporterMode } from './reporter-mode.ts';
 
 const originalPreCommit = process.env.PRE_COMMIT;
 const originalForceColor = process.env.FORCE_COLOR;
