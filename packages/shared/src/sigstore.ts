@@ -1,6 +1,5 @@
 import { readFile as nodeReadFile } from 'node:fs/promises';
 
-import { bundleFromJSON, isBundleWithDsseEnvelope } from '@sigstore/bundle';
 import { TrustedRoot } from '@sigstore/protobuf-specs';
 import { getTrustedRoot } from '@sigstore/tuf';
 import type {
@@ -9,73 +8,13 @@ import type {
 	VerifierOptions
 } from '@sigstore/verify';
 import { toSignedEntity, toTrustMaterial, Verifier } from '@sigstore/verify';
-import { z } from 'zod';
 
-const inTotoPayloadType = 'application/vnd.in-toto+json';
-const inTotoStatementType = 'https://in-toto.io/Statement/v1';
-
-const inTotoDigestSchema = z.object({
-	sha256: z.string().regex(/^[0-9a-f]{64}$/)
-});
-
-const inTotoSubjectSchema = z.object({
-	digest: inTotoDigestSchema
-});
-
-const inTotoStatementSchema = z
-	.object({
-		_type: z.literal(inTotoStatementType),
-		subject: z.array(inTotoSubjectSchema),
-		predicateType: z.string(),
-		predicate: z.unknown()
-	})
-	.transform((statement) => ({
-		predicateType: statement.predicateType,
-		subjectDigests: statement.subject.map((subject) => subject.digest.sha256),
-		predicate: statement.predicate
-	}));
-
-const slsaDependencySchema = z.object({
-	uri: z.string().optional(),
-	digest: z.object({ gitCommit: z.string().optional() }).optional()
-});
-
-const slsaProvenanceSchema = z.object({
-	buildDefinition: z
-		.object({ resolvedDependencies: z.array(slsaDependencySchema).optional() })
-		.optional()
-});
-
-function sourceCommitSchema(sourceRepository: string) {
-	const sourceUri = `git+https://github.com/${sourceRepository}`;
-
-	return slsaProvenanceSchema.transform((provenance) => {
-		const sources = (
-			provenance.buildDefinition?.resolvedDependencies ?? []
-		).filter(
-			(dependency) =>
-				dependency.uri === sourceUri ||
-				dependency.uri?.startsWith(`${sourceUri}@`)
-		);
-
-		return sources.length === 1 ? sources[0]?.digest?.gitCommit : undefined;
-	});
-}
-
-/**
- * The git commit a SLSA provenance predicate was built from, taken from the
- * resolved dependency whose URI is the given source repository on GitHub.
- * Returns undefined when the predicate is not SLSA provenance, or does not
- * record exactly one such dependency carrying a commit.
- */
-export function slsaSourceCommit(
-	predicate: unknown,
-	sourceRepository: string
-): string | undefined {
-	const parsed = sourceCommitSchema(sourceRepository).safeParse(predicate);
-
-	return parsed.success ? parsed.data : undefined;
-}
+import {
+	decodeDsseStatement,
+	defaultInTotoLeaves,
+	DsseDecodeError,
+	inTotoStatementSchema
+} from './in-toto.ts';
 
 export interface IdentityPolicyOptions {
 	readonly certificateIdentity?: string;
@@ -349,50 +288,27 @@ async function trustedRoot(options: BundleVerifyOptions): Promise<TrustedRoot> {
 	);
 }
 
-function bundleShapeDetail(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
+const bundleStatementSchema = inTotoStatementSchema(
+	defaultInTotoLeaves
+).transform((statement) => ({
+	predicateType: statement.predicateType,
+	subjectDigests: statement.subject.map((subject) => subject.digest.sha256),
+	predicate: statement.predicate
+}));
 
-function parseSigstoreBundle(
-	bytes: Uint8Array
-): ReturnType<typeof bundleFromJSON> {
+function parseBundle(bytes: Uint8Array) {
 	try {
-		return bundleFromJSON(JSON.parse(new TextDecoder().decode(bytes)));
+		const { bundle, statement } = decodeDsseStatement(
+			bytes,
+			bundleStatementSchema
+		);
+
+		return { bundle, ...statement };
 	} catch (error) {
-		throw new AttestationBundleShapeError(
-			`could not be parsed: ${bundleShapeDetail(error)}`
-		);
+		if (error instanceof DsseDecodeError) {
+			throw new AttestationBundleShapeError(error.detail);
+		}
+
+		throw error;
 	}
-}
-
-function parseInTotoStatement(
-	payload: Uint8Array
-): z.infer<typeof inTotoStatementSchema> {
-	try {
-		return inTotoStatementSchema.parse(
-			JSON.parse(Buffer.from(payload).toString('utf8'))
-		);
-	} catch (error) {
-		throw new AttestationBundleShapeError(
-			`has an invalid in-toto statement: ${bundleShapeDetail(error)}`
-		);
-	}
-}
-
-function parseBundle(bytes: Uint8Array): Omit<VerifiedBundle, 'signer'> & {
-	readonly bundle: ReturnType<typeof bundleFromJSON>;
-} {
-	const bundle = parseSigstoreBundle(bytes);
-
-	if (!isBundleWithDsseEnvelope(bundle)) {
-		throw new AttestationBundleShapeError('is not a Sigstore DSSE bundle');
-	}
-
-	const envelope = bundle.content.dsseEnvelope;
-
-	if (envelope.payloadType !== inTotoPayloadType) {
-		throw new AttestationBundleShapeError('DSSE payload is not in-toto');
-	}
-
-	return { bundle, ...parseInTotoStatement(envelope.payload) };
 }

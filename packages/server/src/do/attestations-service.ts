@@ -17,10 +17,13 @@ import {
 	type AttestationPrepareResponse,
 	type ParsedAttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
-import { bundleFromJSON, isBundleWithDsseEnvelope } from '@sigstore/bundle';
+import {
+	decodeDsseStatement,
+	DsseDecodeError,
+	inTotoStatementSchema
+} from '@cupboard/shared/in-toto';
 import { and, eq } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
-import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -52,22 +55,6 @@ import {
 } from './attestation-cas-service.ts';
 import { type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
-
-const inTotoPayloadType = 'application/vnd.in-toto+json';
-const inTotoStatementType = 'https://in-toto.io/Statement/v1';
-
-const inTotoSubjectSchema = z.object({
-	digest: z.object({
-		sha256: sha256HexDigestSchema
-	})
-});
-
-const inTotoStatementSchema = z.object({
-	_type: z.literal(inTotoStatementType),
-	subject: z.array(inTotoSubjectSchema).min(1),
-	predicateType: predicateTypeSchema,
-	predicate: z.record(z.string(), z.unknown())
-});
 
 interface ParsedAttestationBundle {
 	readonly predicateType: PredicateType;
@@ -626,62 +613,24 @@ export class AttestationsService {
 	}
 }
 
+const attestationStatementSchema = inTotoStatementSchema({
+	sha256: sha256HexDigestSchema,
+	predicateType: predicateTypeSchema
+}).transform((statement) => ({
+	predicateType: statement.predicateType,
+	subjectDigests: statement.subject.map((subject) => subject.digest.sha256)
+}));
+
 function parseAttestationBundle(bytes: Uint8Array): ParsedAttestationBundle {
-	const decoder = new TextDecoder();
-	let json: unknown;
-
 	try {
-		json = JSON.parse(decoder.decode(bytes));
-	} catch {
-		throw new AttestationBundleInvalidError('Attestation bundle is not JSON');
+		return decodeDsseStatement(bytes, attestationStatementSchema).statement;
+	} catch (error) {
+		if (error instanceof DsseDecodeError) {
+			throw new AttestationBundleInvalidError();
+		}
+
+		throw error;
 	}
-
-	let bundle: ReturnType<typeof bundleFromJSON>;
-
-	try {
-		bundle = bundleFromJSON(json);
-	} catch {
-		throw new AttestationBundleInvalidError();
-	}
-
-	if (!isBundleWithDsseEnvelope(bundle)) {
-		throw new AttestationBundleInvalidError(
-			'Attestation bundle must carry a DSSE envelope'
-		);
-	}
-
-	const envelope = bundle.content.dsseEnvelope;
-
-	if (envelope.payloadType !== inTotoPayloadType) {
-		throw new AttestationBundleInvalidError(
-			'Attestation bundle DSSE payload type is not in-toto'
-		);
-	}
-
-	let statementJson: unknown;
-
-	try {
-		statementJson = JSON.parse(decoder.decode(envelope.payload));
-	} catch {
-		throw new AttestationBundleInvalidError(
-			'Attestation bundle DSSE payload is not JSON'
-		);
-	}
-
-	const statement = inTotoStatementSchema.safeParse(statementJson);
-
-	if (!statement.success) {
-		throw new AttestationBundleInvalidError(
-			'Attestation bundle does not contain a supported in-toto statement'
-		);
-	}
-
-	return {
-		predicateType: statement.data.predicateType,
-		subjectDigests: statement.data.subject.map(
-			(subject) => subject.digest.sha256
-		)
-	};
 }
 
 function narHashDigestHex(narHash: NixSha256HashString): Sha256HexDigest {

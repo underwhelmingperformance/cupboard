@@ -18,9 +18,11 @@
 		"vitest": "^4.1.8"
 	},
 	"exports": {
-		"./attestation": "./src/attestation.ts",
 		"./errors": "./src/errors.ts",
-		"./octokit": "./src/octokit.ts"
+		"./in-toto": "./src/in-toto.ts",
+		"./octokit": "./src/octokit.ts",
+		"./sigstore": "./src/sigstore.ts",
+		"./slsa": "./src/slsa.ts"
 	},
 	"license": "AGPL-3.0-or-later",
 	"private": true,

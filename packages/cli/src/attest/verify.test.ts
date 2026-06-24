@@ -7,7 +7,7 @@ import {
 	AttestationPredicateTypeMismatchError,
 	AttestationSubjectMismatchError,
 	type VerifiedIdentityPolicy
-} from '@cupboard/shared/attestation';
+} from '@cupboard/shared/sigstore';
 import type { Signer } from '@sigstore/verify';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';

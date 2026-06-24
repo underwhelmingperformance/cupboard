@@ -278,6 +278,9 @@ importers:
       '@cupboard/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@cupboard/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@orpc/json-schema':
         specifier: ^1.14.6
         version: 1.14.6(ws@8.21.0)
@@ -290,9 +293,6 @@ importers:
       '@orpc/zod':
         specifier: ^1.14.6
         version: 1.14.6(@orpc/contract@1.14.6)(@orpc/server@1.14.6(ws@8.21.0))(ws@8.21.0)(zod@4.4.3)
-      '@sigstore/bundle':
-        specifier: ^5.0.0
-        version: 5.0.0
       drizzle-orm:
         specifier: ^0.45.2
         version: 0.45.2(@cloudflare/workers-types@4.20260605.1)
