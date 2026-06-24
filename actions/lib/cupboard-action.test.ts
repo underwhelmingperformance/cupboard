@@ -16,7 +16,6 @@ import {
 	normaliseVersion,
 	parseChecksums,
 	parseLines,
-	provenanceSourceCommit,
 	releaseApiPath,
 	releaseWorkflowIdentityRegex,
 	renderChecksums,
@@ -230,30 +229,6 @@ describe('releaseWorkflowIdentityRegex', () => {
 	});
 });
 
-describe('provenanceSourceCommit', () => {
-	it('reads the git commit from the resolved dependencies', () => {
-		expect(
-			provenanceSourceCommit({
-				buildDefinition: {
-					resolvedDependencies: [
-						{
-							uri: 'git+https://github.com/owner/repo',
-							digest: { gitCommit: 'abc123' }
-						}
-					]
-				}
-			})
-		).toBe('abc123');
-	});
-
-	it.each([
-		{ name: 'an empty predicate', predicate: {} },
-		{ name: 'a non-object predicate', predicate: 'nope' }
-	])('returns undefined for $name', ({ predicate }) => {
-		expect(provenanceSourceCommit(predicate)).toBeUndefined();
-	});
-});
-
 const attestationTagCommit = 'a'.repeat(40);
 const attestationOptions = {
 	releaseRepository: 'owner/repo',
@@ -290,18 +265,15 @@ async function writeArchive(): Promise<{
 	};
 }
 
-function stubAttestationFetch(
-	digest: string,
-	attestations: unknown[]
-): typeof fetch {
+function stubAttestationFetch(attestations: unknown[]): typeof fetch {
 	return (input) => {
 		const url = attestationInputUrl(input);
 
-		if (url.endsWith('/commits/v1.0.0')) {
+		if (url.includes('/commits/v1.0.0')) {
 			return Promise.resolve(Response.json({ sha: attestationTagCommit }));
 		}
 
-		if (url.includes(`/attestations/sha256:${digest}`)) {
+		if (url.includes('/attestations/')) {
 			return Promise.resolve(Response.json({ attestations }));
 		}
 
@@ -337,7 +309,7 @@ describe('verifyReleaseAttestation', () => {
 
 		await expect(
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
-				fetch: stubAttestationFetch(archive.digest, [{ bundle: {} }]),
+				fetch: stubAttestationFetch([{ bundle: {} }]),
 				verify: () =>
 					Promise.resolve(verifiedAs(archive.digest, attestationTagCommit))
 			})
@@ -349,7 +321,7 @@ describe('verifyReleaseAttestation', () => {
 
 		await expect(
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
-				fetch: stubAttestationFetch(archive.digest, [{ bundle: {} }]),
+				fetch: stubAttestationFetch([{ bundle: {} }]),
 				verify: () =>
 					Promise.resolve(verifiedAs(archive.digest, 'b'.repeat(40)))
 			})
@@ -361,7 +333,7 @@ describe('verifyReleaseAttestation', () => {
 
 		await expect(
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
-				fetch: stubAttestationFetch(archive.digest, [])
+				fetch: stubAttestationFetch([])
 			})
 		).rejects.toThrow(AttestationError);
 	});
