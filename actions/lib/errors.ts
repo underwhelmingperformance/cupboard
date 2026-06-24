@@ -62,6 +62,13 @@ export class AttestationError extends CodedError {
 	}
 }
 
+export class CachePublicKeyError extends CodedError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'CachePublicKeyError';
+	}
+}
+
 export class NixError extends CodedError {
 	constructor(message: string) {
 		super(message);
