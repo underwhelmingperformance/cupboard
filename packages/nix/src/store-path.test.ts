@@ -24,8 +24,18 @@ describe('StorePath', () => {
 		});
 	});
 
-	it('rejects a path outside the store', () => {
-		expect(() => new StorePath('/tmp/example')).toThrow(InvalidStorePathError);
+	it.each([
+		{ name: 'a path outside the store', value: '/tmp/example' },
+		{
+			name: 'a store path with too short a hash',
+			value: '/nix/store/short-app'
+		},
+		{
+			name: 'a store path with no name',
+			value: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz'
+		}
+	])('rejects $name on construction', ({ value }) => {
+		expect(() => new StorePath(value)).toThrow(InvalidStorePathError);
 	});
 });
 
