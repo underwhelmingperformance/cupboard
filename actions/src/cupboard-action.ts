@@ -239,6 +239,16 @@ export function cachePublicKeyUrl(cacheUrl: string): string {
 	return `${cacheUrl.replace(/\/+$/u, '')}/pubkey`;
 }
 
+function isHttpUrl(value: string): boolean {
+	try {
+		const url = new URL(value);
+
+		return url.protocol === 'http:' || url.protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
 export function renderNixConfig(options: NixConfigOptions): string {
 	const lines = [
 		`substituters = ${options.substituter}`,
@@ -1010,6 +1020,15 @@ function setupInputs(environment: Environment): SetupInputs {
 		);
 	}
 
+	const cacheUrl = input(environment, 'CACHE_URL');
+
+	if (cacheUrl !== '' && !isHttpUrl(cacheUrl)) {
+		throw new InvalidInputError(
+			'cache-url',
+			`cache-url must be an http(s) URL, got '${cacheUrl}'`
+		);
+	}
+
 	return {
 		version: normaliseVersion(input(environment, 'CUPBOARD_VERSION', 'latest')),
 		includePrereleases: isInputEnabled(
@@ -1034,7 +1053,7 @@ function setupInputs(environment: Environment): SetupInputs {
 			)
 		),
 		addToPath: isInputEnabled(environment, 'ADD_TO_PATH', true),
-		cacheUrl: input(environment, 'CACHE_URL'),
+		cacheUrl,
 		cache: input(environment, 'CACHE'),
 		trustedPublicKey: input(environment, 'TRUSTED_PUBLIC_KEY'),
 		readUser,
