@@ -1173,6 +1173,10 @@ async function setOutput(
 function run(command: string, arguments_: readonly string[]): void {
 	const result = spawnSync(command, [...arguments_], { stdio: 'inherit' });
 
+	if (result.error !== undefined) {
+		throw new CommandFailedError(command, result.status, result.error.message);
+	}
+
 	if (result.status === 0) {
 		return;
 	}
