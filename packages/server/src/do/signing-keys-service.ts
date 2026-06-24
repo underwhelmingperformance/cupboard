@@ -12,15 +12,15 @@ import * as schema from '../db/schema.ts';
 import { LastSigningKeyError } from '../errors.ts';
 import { TextBody } from '../http/http.ts';
 
+import { type ServerContext } from './context.ts';
 import {
 	bootstrapKeyName,
 	byPublicKey,
 	keySummary,
 	nextKeyName,
-	type ServerContext,
 	type SigningKey,
 	signingKeyFromRow
-} from './context.ts';
+} from './signing-keys.ts';
 
 export class SigningKeysService {
 	private keysPromise: Promise<readonly SigningKey[]> | undefined;

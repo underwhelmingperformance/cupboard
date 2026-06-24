@@ -1,4 +1,3 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
 import {
 	type NixSha256HashString,
 	type RootName,
@@ -9,19 +8,8 @@ import {
 	oidcTrustDisplaySchema,
 	permittedGrantSchema
 } from '@cupboard/protocol/grants';
-import {
-	type SigningKeyStage,
-	type SigningKeySummary
-} from '@cupboard/protocol/keys';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { type RetentionPolicySummary } from '@cupboard/protocol/retention';
-import {
-	type ParsedUploadBlobMetadata,
-	type ParsedUploadPathMetadata,
-	type ParsedUploadPathNegotiation,
-	uploadPathMetadataSchema,
-	uploadPathNegotiationSchema
-} from '@cupboard/protocol/upload';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
@@ -29,20 +17,14 @@ import {
 } from 'drizzle-orm/durable-sqlite';
 import { z } from 'zod';
 
-import { R2Presigner } from '../blob/presign.ts';
-import { parseJwk } from '../crypto/crypto.ts';
+import { r2PresignConfiguration, R2Presigner } from '../blob/presign.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
-	type R2PresignBindingName,
-	R2PresignConfigurationMissingError,
 	StoredOidcTrustInvalidError,
-	StoredUploadMetadataInvalidError,
-	TenantNotConfiguredError,
-	UploadedObjectChecksumMissingError,
-	UploadNotPreparedError
+	TenantNotConfiguredError
 } from '../errors.ts';
-import { parseStored, parseStoredJson } from '../http/parse.ts';
+import { parseStored } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { type OidcTrustRule } from '../oidc/oidc-trust.ts';
 
@@ -64,20 +46,6 @@ export type SchemaDatabase = DrizzleSqliteDODatabase<typeof schema>;
 export type SchemaWriter =
 	| SchemaDatabase
 	| Parameters<Parameters<SchemaDatabase['transaction']>[0]>[0];
-
-export const storedSignaturesSchema = z.array(z.string());
-
-export interface SigningKey {
-	readonly id: string;
-	readonly name: string;
-	readonly privateJwk: JsonWebKey;
-	readonly publicKey: string;
-	readonly signing: boolean;
-	readonly published: boolean;
-	readonly createdAt: string;
-}
-
-export const bootstrapKeyName = 'cupboard-1';
 
 // The owner's admin trust rule is seeded under a fixed id from deploy config;
 // the admin CRUD uses generated ids, so it never collides with this one.
@@ -142,14 +110,6 @@ export type MaterialiseOutcome =
 	| 'over-quota'
 	| 'tenant-inactive';
 
-// The compressed metadata of the one canonical object served for a NAR hash.
-// Read from the object itself so a committed narinfo always advertises the
-// encoding actually stored, regardless of which upload promoted it.
-export interface CanonicalBlob {
-	readonly fileHash: NixSha256HashString;
-	readonly fileSize: number;
-}
-
 // The shared state every service is constructed with: the DO SQLite handle, the
 // global D1 handle, the runtime environment, the DO state (for critical
 // sections), the inbound-OIDC discovery store, and the lazy R2 presigner.
@@ -200,52 +160,6 @@ export class ServerContext {
 	}
 }
 
-interface R2PresignConfiguration {
-	readonly accountId: string;
-	readonly accessKeyId: string;
-	readonly bucketName: string;
-	readonly secretAccessKey: string;
-}
-
-// The generated env types say `string`, but a secret never put has no binding
-// at all and reads as undefined; both spellings of "missing" must count.
-interface R2PresignEnv {
-	readonly R2_ACCOUNT_ID: string | undefined;
-	readonly R2_ACCESS_KEY_ID: string | undefined;
-	readonly R2_BUCKET_NAME: string | undefined;
-	readonly R2_SECRET_ACCESS_KEY: string | undefined;
-}
-
-function r2PresignConfiguration(env: R2PresignEnv): R2PresignConfiguration {
-	const missingBindings: R2PresignBindingName[] = [];
-	const accountId = env.R2_ACCOUNT_ID ?? '';
-	const accessKeyId = env.R2_ACCESS_KEY_ID ?? '';
-	const bucketName = env.R2_BUCKET_NAME ?? '';
-	const secretAccessKey = env.R2_SECRET_ACCESS_KEY ?? '';
-
-	if (accountId === '') {
-		missingBindings.push('R2_ACCOUNT_ID');
-	}
-
-	if (accessKeyId === '') {
-		missingBindings.push('R2_ACCESS_KEY_ID');
-	}
-
-	if (bucketName === '') {
-		missingBindings.push('R2_BUCKET_NAME');
-	}
-
-	if (secretAccessKey === '') {
-		missingBindings.push('R2_SECRET_ACCESS_KEY');
-	}
-
-	if (missingBindings.length > 0) {
-		throw new R2PresignConfigurationMissingError(missingBindings);
-	}
-
-	return { accountId, accessKeyId, bucketName, secretAccessKey };
-}
-
 export function oidcTrustRuleFromRow(
 	row: typeof schema.oidcTrust.$inferSelect
 ): OidcTrustRule {
@@ -294,127 +208,5 @@ export function policySummaryFromRow(
 		scope: row.scope,
 		pattern: row.pattern,
 		ttlSeconds: row.defaultTtlSeconds
-	};
-}
-
-export function signingKeyFromRow(
-	row: typeof schema.signingKeys.$inferSelect
-): SigningKey {
-	return {
-		id: row.id,
-		name: row.publicKey.slice(0, row.publicKey.indexOf(':')),
-		privateJwk: parseJwk(row.privateJwkJson),
-		publicKey: row.publicKey,
-		signing: row.signing,
-		published: row.published,
-		createdAt: row.createdAt
-	};
-}
-
-// A stable order keeps the rendered `/pubkey` body and the narinfo `Sig:`
-// lines deterministic, so a re-materialised narinfo hashes identically.
-export function byPublicKey(left: SigningKey, right: SigningKey): number {
-	return left.publicKey > right.publicKey ? 1 : -1;
-}
-
-function keyStage(key: SigningKey): SigningKeyStage {
-	if (key.signing) {
-		return 'signing';
-	}
-
-	return key.published ? 'publication' : 'absent';
-}
-
-export function keySummary(key: SigningKey): SigningKeySummary {
-	return {
-		id: key.id,
-		publicKey: key.publicKey,
-		stage: keyStage(key),
-		createdAt: key.createdAt
-	};
-}
-
-const keyNamePattern = /^cupboard-(\d+)$/;
-
-// Each key needs a distinct Nix key name so old and new keys can coexist in a
-// client's trusted set during a rotation. Names follow `cupboard-<n>`; the next
-// rotation takes the highest existing index plus one.
-export function nextKeyName(keys: readonly SigningKey[]): string {
-	const indices = keys.flatMap((key) => {
-		const match = keyNamePattern.exec(key.name);
-
-		return match === null ? [] : [Math.trunc(Number(match[1] ?? '0'))];
-	});
-	const next = indices.length === 0 ? 1 : Math.max(...indices) + 1;
-
-	return `cupboard-${String(next)}`;
-}
-
-export function commitMetadataFromPathAndBlob(
-	path: ParsedUploadPathNegotiation,
-	blob: ParsedUploadBlobMetadata
-): ParsedUploadPathMetadata {
-	return {
-		...path,
-		fileHash: blob.fileHash,
-		fileSize: blob.fileSize,
-		compression: blob.compression
-	};
-}
-
-export function canonicalBlobOf(key: string, object: R2Object): CanonicalBlob {
-	const sha256 = object.checksums.sha256;
-
-	if (sha256 === undefined) {
-		throw new UploadedObjectChecksumMissingError(key);
-	}
-
-	return {
-		fileHash: NixSha256Hash.fromDigest(new Uint8Array(sha256)).value,
-		fileSize: object.size
-	};
-}
-
-export function parseStoredUploadMetadata(
-	uploadId: string,
-	source: string
-): ParsedUploadPathMetadata {
-	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>
-		new StoredUploadMetadataInvalidError(uploadId, cause);
-	const json = parseStoredJson(source, onInvalid);
-	const prepared = uploadPathMetadataSchema.safeParse(json);
-
-	if (prepared.success) {
-		return prepared.data;
-	}
-
-	// Negotiation stores the path metadata alone until the upload is prepared
-	// with its blob details. A well-formed path-only record means the client
-	// committed before preparing, not that the stored state is corrupt.
-	if (uploadPathNegotiationSchema.safeParse(json).success) {
-		throw new UploadNotPreparedError(uploadId);
-	}
-
-	throw onInvalid(prepared.error);
-}
-
-export function parseStoredUploadPathMetadata(
-	uploadId: string,
-	source: string
-): ParsedUploadPathNegotiation {
-	return parseStored(
-		uploadPathNegotiationSchema,
-		source,
-		(cause) => new StoredUploadMetadataInvalidError(uploadId, cause)
-	);
-}
-
-export function uploadHeadersFor(
-	metadata: ParsedUploadPathMetadata
-): Readonly<Record<string, string>> {
-	return {
-		'x-amz-checksum-sha256': NixSha256Hash.parse(
-			metadata.fileHash
-		).digestBase64()
 	};
 }

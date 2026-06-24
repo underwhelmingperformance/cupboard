@@ -21,7 +21,8 @@ import {
 } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
-import { type ServerContext, storedSignaturesSchema } from './context.ts';
+import { type ServerContext } from './context.ts';
+import { storedSignaturesSchema } from './signing-keys.ts';
 
 export class NarInfoObjectsService {
 	constructor(private readonly context: ServerContext) {}
