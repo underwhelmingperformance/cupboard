@@ -21,7 +21,6 @@ function thrownBy(run: () => unknown): unknown {
 
 describe('parseVerifierThreshold', () => {
 	it.each([
-		{ source: '0', expected: 0 },
 		{ source: '1', expected: 1 },
 		{
 			source: String(Number.MAX_SAFE_INTEGER),
@@ -31,7 +30,7 @@ describe('parseVerifierThreshold', () => {
 		expect(parseVerifierThreshold('--tlog-threshold')(source)).toBe(expected);
 	});
 
-	it.each(['', '-1', '+1', '1.5', '1log', 'Infinity'])(
+	it.each(['', '0', '-1', '+1', '1.5', '1log', 'Infinity'])(
 		'rejects %s',
 		(source) => {
 			const error = thrownBy(() =>
