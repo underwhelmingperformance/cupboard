@@ -14,13 +14,6 @@ export class InvalidStorePathError extends ProtocolError {
 	}
 }
 
-export class InvalidStorePathBasenameError extends ProtocolError {
-	constructor(public readonly basename: string) {
-		super(`Invalid store path basename: ${basename}`);
-		this.name = 'InvalidStorePathBasenameError';
-	}
-}
-
 export class InvalidNixSha256HashError extends ProtocolError {
 	constructor(public readonly value: string) {
 		super(`Invalid Nix SHA-256 hash: ${value}`);

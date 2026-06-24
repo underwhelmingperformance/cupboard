@@ -1,7 +1,4 @@
-import {
-	InvalidStorePathBasenameError,
-	InvalidStorePathError
-} from './errors.ts';
+import { InvalidStorePathError } from './errors.ts';
 import {
 	type StorePathBasename,
 	storePathBasenameSchema,
@@ -102,35 +99,34 @@ export class StorePath {
 			.toSorted(byCodeUnit);
 	}
 
-	constructor(public readonly value: string) {
+	readonly value: string;
+	readonly basename: StorePathBasename;
+	readonly hash: StorePathHash;
+
+	// A `StorePath` is valid by construction: it parses its basename and hash up
+	// front and rejects anything that is not `/nix/store/<hash>-<name>`, so every
+	// instance carries those derived values rather than re-deriving them lazily.
+	constructor(value: string) {
 		if (!value.startsWith('/nix/store/')) {
 			throw new InvalidStorePathError(value);
 		}
-	}
 
-	get basename(): StorePathBasename {
-		const basename = storePathBasename(this.value);
-		const parsed =
-			basename === undefined
+		const candidate = storePathBasename(value);
+		const basename =
+			candidate === undefined
 				? undefined
-				: storePathBasenameSchema.safeParse(basename);
+				: storePathBasenameSchema.safeParse(candidate);
 
-		if (!parsed?.success) {
-			throw new InvalidStorePathError(this.value);
+		if (!basename?.success) {
+			throw new InvalidStorePathError(value);
 		}
 
-		return parsed.data;
-	}
-
-	get hash(): StorePathHash {
-		const hash = storePathHashOf(this.value);
-		const parsed =
-			hash === undefined ? undefined : storePathHashSchema.safeParse(hash);
-
-		if (!parsed?.success) {
-			throw new InvalidStorePathBasenameError(this.basename);
-		}
-
-		return parsed.data;
+		this.value = value;
+		this.basename = basename.data;
+		// A validated basename is `<32-char hash>-<name>`, so its leading hash
+		// always satisfies the hash schema.
+		this.hash = storePathHashSchema.parse(
+			basename.data.slice(0, basename.data.indexOf('-'))
+		);
 	}
 }
