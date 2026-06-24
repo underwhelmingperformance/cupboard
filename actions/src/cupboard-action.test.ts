@@ -564,7 +564,11 @@ describe('action input errors', () => {
 
 	it.each([
 		['read-user is supplied without read-password', { READ_USER: 'ci' }],
-		['read-password is supplied without read-user', { READ_PASSWORD: 'secret' }]
+		[
+			'read-password is supplied without read-user',
+			{ READ_PASSWORD: 'secret' }
+		],
+		['cache-url is not an http(s) URL', { CACHE_URL: 'not a url' }]
 	])('rejects when %s', async (_name, environment) => {
 		await expect(setupAction(environment)).rejects.toThrow(InvalidInputError);
 	});
