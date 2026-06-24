@@ -19,14 +19,14 @@ import {
 } from '../errors.ts';
 import { narObjectKey, stagingObjectKey } from '../http/http.ts';
 
+import { type ServerContext } from './context.ts';
+import { type DeletionQueueService } from './deletion-queue-service.ts';
+import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	commitMetadataFromPathAndBlob,
 	parseStoredUploadPathMetadata,
-	type ServerContext,
 	uploadHeadersFor
-} from './context.ts';
-import { type DeletionQueueService } from './deletion-queue-service.ts';
-import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+} from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];

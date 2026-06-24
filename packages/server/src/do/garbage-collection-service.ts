@@ -12,10 +12,10 @@ import { parseStored } from '../http/parse.ts';
 
 import {
 	type GarbageCollectionOutcome,
-	parseStoredUploadMetadata,
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
+import { parseStoredUploadMetadata } from './upload-metadata.ts';
 
 export class GarbageCollectionService {
 	constructor(

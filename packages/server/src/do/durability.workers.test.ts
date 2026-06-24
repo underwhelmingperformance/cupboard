@@ -23,7 +23,7 @@ import {
 	verifyNarInfoSignature
 } from '../test-support.ts';
 
-import { storedSignaturesSchema } from './context.ts';
+import { storedSignaturesSchema } from './signing-keys.ts';
 
 function signatureShape(signature: string): {
 	readonly keyName: string;

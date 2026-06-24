@@ -37,12 +37,12 @@ import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type MaterialiseOutcome,
-	parseStoredUploadMetadata,
 	type ReserveOutcome,
 	type ServerContext
 } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
+import { parseStoredUploadMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 /**

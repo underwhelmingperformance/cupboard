@@ -1,5 +1,10 @@
 import { AwsClient } from 'aws4fetch';
 
+import {
+	type R2PresignBindingName,
+	R2PresignConfigurationMissingError
+} from '../errors.ts';
+
 export interface R2PresignOptions {
 	readonly key: string;
 	readonly checksumSha256: string;
@@ -67,4 +72,45 @@ export class R2Presigner {
 
 		return signed.url;
 	}
+}
+
+// The generated env types say `string`, but a secret never put has no binding
+// at all and reads as undefined; both spellings of "missing" must count.
+export interface R2PresignEnv {
+	readonly R2_ACCOUNT_ID: string | undefined;
+	readonly R2_ACCESS_KEY_ID: string | undefined;
+	readonly R2_BUCKET_NAME: string | undefined;
+	readonly R2_SECRET_ACCESS_KEY: string | undefined;
+}
+
+export function r2PresignConfiguration(
+	env: R2PresignEnv
+): R2PresignerConfiguration {
+	const missingBindings: R2PresignBindingName[] = [];
+	const accountId = env.R2_ACCOUNT_ID ?? '';
+	const accessKeyId = env.R2_ACCESS_KEY_ID ?? '';
+	const bucketName = env.R2_BUCKET_NAME ?? '';
+	const secretAccessKey = env.R2_SECRET_ACCESS_KEY ?? '';
+
+	if (accountId === '') {
+		missingBindings.push('R2_ACCOUNT_ID');
+	}
+
+	if (accessKeyId === '') {
+		missingBindings.push('R2_ACCESS_KEY_ID');
+	}
+
+	if (bucketName === '') {
+		missingBindings.push('R2_BUCKET_NAME');
+	}
+
+	if (secretAccessKey === '') {
+		missingBindings.push('R2_SECRET_ACCESS_KEY');
+	}
+
+	if (missingBindings.length > 0) {
+		throw new R2PresignConfigurationMissingError(missingBindings);
+	}
+
+	return { accountId, accessKeyId, bucketName, secretAccessKey };
 }

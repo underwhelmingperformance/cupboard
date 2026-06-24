@@ -12,9 +12,10 @@ import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitFrame } from './commit-socket.ts';
-import { parseStoredUploadMetadata, type ServerContext } from './context.ts';
+import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { parseStoredUploadMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 export class VerificationService {
