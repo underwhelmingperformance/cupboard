@@ -183,6 +183,45 @@ export class VerificationService {
 		this.notifyWaiters(pending.id, verdict);
 	}
 
+	// Restore a missing narinfo object, re-confirming the NAR inside the critical
+	// section first so a delete during the probe phase cannot leave the object
+	// pointing at a removed NAR. Returns 1 when it restored the object, else 0.
+	private async restoreNarInfoObject(
+		row: typeof schema.narInfos.$inferSelect
+	): Promise<number> {
+		const isNarPresent =
+			(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !== null;
+
+		if (!isNarPresent) {
+			return 0;
+		}
+
+		const narInfo = await this.narInfoObjects.narInfoFromRow(row);
+
+		if (narInfo === undefined) {
+			return 0;
+		}
+
+		await this.narInfoObjects.putNarInfoObject(
+			row.cache,
+			row.storePathHash,
+			narInfo
+		);
+
+		return 1;
+	}
+
+	private warnSkippedRow(
+		row: typeof schema.narInfos.$inferSelect,
+		error: unknown
+	): void {
+		console.warn('verification skipped a narinfo row', {
+			cache: row.cache,
+			storePathHash: row.storePathHash,
+			error: error instanceof Error ? error.message : String(error)
+		});
+	}
+
 	// One interactive verify pass: settle deferred uploads first, then run a
 	// bounded reconciling batch and report it.
 	async verify(
@@ -194,83 +233,112 @@ export class VerificationService {
 		return this.verifyBatch(purgeOrigin, limit);
 	}
 
-	verifyBatch(
+	async verifyBatch(
 		origin: string | undefined,
 		limit: number
 	): Promise<VerifyReport> {
-		// The whole batch runs in one critical section: the cursor read, the
-		// per-row re-materialise/reconcile, and the cursor advance must not
-		// interleave with a commit or a delete.
-		return this.context.ctx.blockConcurrencyWhile(async () => {
-			const cursor = this.context.db
-				.select()
-				.from(schema.verificationCursor)
-				.where(eq(schema.verificationCursor.id, 'active'))
-				.get();
-			// An empty cursor starts (or restarts) at the lowest (cache, hash): the
-			// empty string sorts before every cache name and every 32-character hash.
-			const fromCache = cursor?.cache ?? '';
-			const fromHash = cursor?.lastStorePathHash ?? '';
+		// Snapshot the cursor and the batch synchronously. Synchronous SQLite on
+		// the single-threaded DO cannot interleave with anything, so this is an
+		// atomic read without a critical section.
+		const cursor = this.context.db
+			.select()
+			.from(schema.verificationCursor)
+			.where(eq(schema.verificationCursor.id, 'active'))
+			.get();
+		// An empty cursor starts (or restarts) at the lowest (cache, hash): the
+		// empty string sorts before every cache name and every 32-character hash.
+		const fromCache = cursor?.cache ?? '';
+		const fromHash = cursor?.lastStorePathHash ?? '';
 
-			// Verification spans every cache, walking the (cache, store_path_hash)
-			// space in order and resuming after the composite cursor. drizzle has no
-			// tuple form of `gt`, so the row-value comparison is spelt out.
-			const sameCache = eq(schema.narInfos.cache, fromCache);
-			const afterHash = gt(schema.narInfos.storePathHash, sql`${fromHash}`);
-			const rows = this.context.db
-				.select()
-				.from(schema.narInfos)
-				.where(
-					or(gt(schema.narInfos.cache, fromCache), and(sameCache, afterHash))
-				)
-				.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
-				.limit(limit)
-				.all();
+		// Verification spans every cache, walking the (cache, store_path_hash)
+		// space in order and resuming after the composite cursor. drizzle has no
+		// tuple form of `gt`, so the row-value comparison is spelt out.
+		const sameCache = eq(schema.narInfos.cache, fromCache);
+		const afterHash = gt(schema.narInfos.storePathHash, sql`${fromHash}`);
+		const rows = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				or(gt(schema.narInfos.cache, fromCache), and(sameCache, afterHash))
+			)
+			.orderBy(asc(schema.narInfos.cache), asc(schema.narInfos.storePathHash))
+			.limit(limit)
+			.all();
 
-			let narInfoObjectsRestored = 0;
-			let danglingNarInfosRemoved = 0;
-
-			for (const row of rows) {
-				// One row's failure (an unrenderable narinfo, a transient R2 fault) must
-				// not abort the batch and leave the cursor parked on it forever; log it
-				// and advance, mirroring verifyPendingUploads.
+		// Probe R2 for every row outside any critical section, so the batch's
+		// round-trips never block a concurrent commit or delete. One row's
+		// transient R2 fault drops it from this pass rather than aborting the batch.
+		const tenant = this.context.requireTenant();
+		const observations = await Promise.all(
+			rows.map(async (row) => {
 				try {
 					const isNarPresent =
 						(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !==
 						null;
+					const isObjectPresent =
+						isNarPresent &&
+						(await this.context.env.BLOBS.head(
+							narInfoObjectKey(tenant, row.storePathHash, row.cache)
+						)) !== null;
 
-					if (!isNarPresent) {
-						await this.deletionQueue.reconcileMissingNar(row, origin);
-						danglingNarInfosRemoved += 1;
-						continue;
-					}
+					return {
+						row,
+						narPresent: isNarPresent,
+						objectPresent: isObjectPresent
+					};
+				} catch (error) {
+					this.warnSkippedRow(row, error);
 
-					const narInfoObject = await this.context.env.BLOBS.head(
-						narInfoObjectKey(
-							this.context.requireTenant(),
-							row.storePathHash,
-							row.cache
+					return;
+				}
+			})
+		);
+
+		// Apply the reconciles and advance the cursor in one short critical section.
+		// The generation re-check rejects any row a commit or delete changed during
+		// the probe, so a reconcile never acts on stale state. What remains inside
+		// the gate is fast synchronous SQLite plus the rare write for an unhealthy
+		// row, instead of every row's R2 round-trips.
+		return this.context.ctx.blockConcurrencyWhile(async () => {
+			let narInfoObjectsRestored = 0;
+			let danglingNarInfosRemoved = 0;
+
+			for (const observation of observations) {
+				if (observation === undefined) {
+					continue;
+				}
+
+				const {
+					row,
+					narPresent: isNarPresent,
+					objectPresent: isObjectPresent
+				} = observation;
+				const current = this.context.db
+					.select()
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cache, row.cache),
+							eq(schema.narInfos.storePathHash, row.storePathHash)
 						)
-					);
+					)
+					.get();
 
-					if (narInfoObject === null) {
-						const narInfo = await this.narInfoObjects.narInfoFromRow(row);
+				// A NAR only reappears through a commit, which bumps the generation, so
+				// a generation match means the probe still holds for this row.
+				if (current?.generation !== row.generation) {
+					continue;
+				}
 
-						if (narInfo !== undefined) {
-							await this.narInfoObjects.putNarInfoObject(
-								row.cache,
-								row.storePathHash,
-								narInfo
-							);
-							narInfoObjectsRestored += 1;
-						}
+				try {
+					if (!isNarPresent) {
+						await this.deletionQueue.reconcileMissingNar(current, origin);
+						danglingNarInfosRemoved += 1;
+					} else if (!isObjectPresent) {
+						narInfoObjectsRestored += await this.restoreNarInfoObject(current);
 					}
 				} catch (error) {
-					console.warn('verification skipped a narinfo row', {
-						cache: row.cache,
-						storePathHash: row.storePathHash,
-						error: error instanceof Error ? error.message : String(error)
-					});
+					this.warnSkippedRow(row, error);
 				}
 			}
 
@@ -281,8 +349,7 @@ export class VerificationService {
 			const nextCache = hasWrapped || last === undefined ? '' : last.cache;
 			const nextHash =
 				hasWrapped || last === undefined ? '' : last.storePathHash;
-			const clock = new Date();
-			const now = clock.toISOString();
+			const now = new Date().toISOString();
 
 			this.context.db
 				.insert(schema.verificationCursor)
