@@ -187,7 +187,9 @@ export class CupboardHttpError extends CliError {
 		// handle that ties a client-side failure to its server log line.
 		public readonly ray?: string
 	) {
-		super(`${method} ${path} failed with ${String(status)}: ${body}`);
+		const rayNote = ray === undefined ? '' : ` (Cloudflare ray ${ray})`;
+
+		super(`${method} ${path} failed with ${String(status)}: ${body}${rayNote}`);
 		this.name = 'CupboardHttpError';
 	}
 
