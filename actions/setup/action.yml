@@ -89,4 +89,4 @@ runs:
       run: >
         node --experimental-transform-types
         --disable-warning=ExperimentalWarning
-        "$GITHUB_ACTION_PATH/../lib/cupboard-action.ts" setup
+        "$GITHUB_ACTION_PATH/../src/main.ts" setup
