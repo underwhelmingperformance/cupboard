@@ -23,7 +23,7 @@ describe('prepareStorePathMetadata', () => {
 				},
 				{
 					fileHash: NixSha256Hash.parse(
-						'sha256:5123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk'
+						'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk'
 					),
 					fileSize: 456,
 					compression: 'zstd'
@@ -35,7 +35,7 @@ describe('prepareStorePathMetadata', () => {
 				storePath: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app',
 				narHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 				narSize: 123,
-				fileHash: 'sha256:5123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+				fileHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 				fileSize: 456,
 				compression: 'zstd',
 				references: [
