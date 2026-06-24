@@ -1,9 +1,10 @@
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import { and, asc, count, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
-import { compareStrings, type ServerContext } from './context.ts';
+import { type ServerContext } from './context.ts';
 
 export interface MaintenanceEligibilitySnapshot {
 	readonly tenant: string;
@@ -49,7 +50,7 @@ export class MaintenanceEligibilityService {
 
 		return [pendingUploadExpiry, pendingAttestationExpiry]
 			.filter((value) => value !== undefined)
-			.toSorted(compareStrings)[0];
+			.toSorted(byCodeUnit)[0];
 	}
 
 	private queuedNarInfoDeletionCount(): number {
@@ -111,7 +112,7 @@ export class MaintenanceEligibilityService {
 			input.earliestAuthKeyRetirement
 		]
 			.filter((value) => value !== undefined)
-			.toSorted(compareStrings)[0];
+			.toSorted(byCodeUnit)[0];
 	}
 
 	async invalidate(): Promise<void> {

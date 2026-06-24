@@ -1,3 +1,4 @@
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
@@ -18,8 +19,6 @@ import {
 	uploadMetadata,
 	verifyNarInfoSignature
 } from '../test-support.ts';
-
-import { compareStrings } from './context.ts';
 
 function namedBytesName(value: string): string {
 	const [name] = z
@@ -44,7 +43,7 @@ describe('signing with a key set', () => {
 		]);
 		const publishedText = seeded
 			.map((key) => key.publicKey)
-			.toSorted(compareStrings)
+			.toSorted(byCodeUnit)
 			.join('\n');
 
 		const init = await bootstrap();
@@ -71,7 +70,7 @@ describe('signing with a key set', () => {
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 		const sigNames = narInfo.sigs
 			.map((sig) => namedBytesName(sig))
-			.toSorted(compareStrings);
+			.toSorted(byCodeUnit);
 		const verifiesUnderEachKey = await Promise.all(
 			seeded.map((key) => verifyNarInfoSignature(narInfo, key.publicKey))
 		);

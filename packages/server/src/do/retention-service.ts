@@ -1,3 +1,4 @@
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import {
 	type ParsedRetentionPolicyAddBody,
 	type RetentionPolicyListResponse,
@@ -9,11 +10,7 @@ import { eq } from 'drizzle-orm';
 import * as schema from '../db/schema.ts';
 import { mostSpecificPolicy } from '../policy/policy-match.ts';
 
-import {
-	compareStrings,
-	policySummaryFromRow,
-	type ServerContext
-} from './context.ts';
+import { policySummaryFromRow, type ServerContext } from './context.ts';
 
 export class RetentionService {
 	constructor(private readonly context: ServerContext) {}
@@ -24,7 +21,7 @@ export class RetentionService {
 			.from(schema.retentionPolicies)
 			.all()
 			.map((row) => policySummaryFromRow(row))
-			.toSorted((left, right) => compareStrings(left.id, right.id));
+			.toSorted((left, right) => byCodeUnit(left.id, right.id));
 
 		return { policies };
 	}
