@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import type { VerifiedBundle } from '@cupboard/shared/attestation';
+import { createOctokitClient } from '@cupboard/shared/octokit';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -19,7 +20,6 @@ import {
 	normaliseVersion,
 	parseChecksums,
 	parseLines,
-	releaseApiPath,
 	releaseWorkflowIdentityRegex,
 	renderChecksums,
 	renderNixConfig,
@@ -70,16 +70,6 @@ describe('splitRepository', () => {
 		['https://github.com/owner/repo']
 	])('rejects %s', (repository) => {
 		expect(() => splitRepository(repository)).toThrow(InvalidInputError);
-	});
-});
-
-describe('releaseApiPath', () => {
-	it.each([
-		['latest', '/repos/cupboard/cupboard/releases/latest'],
-		['1.2.3', '/repos/cupboard/cupboard/releases/tags/v1.2.3'],
-		['v1.2.3', '/repos/cupboard/cupboard/releases/tags/v1.2.3']
-	])('builds the release path for %s', (version, expected) => {
-		expect(releaseApiPath('cupboard/cupboard', version)).toBe(expected);
 	});
 });
 
@@ -444,25 +434,24 @@ describe('verifyReleaseAttestation', () => {
 	});
 });
 
-function releaseFetcher(handler: (url: URL) => unknown): typeof fetch {
-	return (input) => {
+function octokitFor(
+	handler: (url: URL) => unknown
+): ReturnType<typeof createOctokitClient> {
+	const fetcher: typeof fetch = (input) => {
 		const url = new URL(attestationInputUrl(input));
 
 		return Promise.resolve(Response.json(handler(url)));
 	};
+
+	return createOctokitClient({ request: { fetch: fetcher } });
 }
 
 describe('fetchRelease', () => {
-	const base = {
-		releaseRepository: 'owner/repo',
-		githubToken: '',
-		environment: {}
-	};
+	const base = { releaseRepository: 'owner/repo' };
 
 	it('installs the newest non-draft release when prereleases are allowed', async () => {
 		const release = await fetchRelease(
-			{ ...base, version: 'latest', includePrereleases: true },
-			releaseFetcher((url) => {
+			octokitFor((url) => {
 				expect(url.pathname).toBe('/repos/owner/repo/releases');
 
 				return [
@@ -473,7 +462,8 @@ describe('fetchRelease', () => {
 						assets: [{ name: 'a', url: 'u' }]
 					}
 				];
-			})
+			}),
+			{ ...base, version: 'latest', includePrereleases: true }
 		);
 
 		expect(release).toStrictEqual({
@@ -484,12 +474,12 @@ describe('fetchRelease', () => {
 
 	it('installs the stable release when prereleases are excluded', async () => {
 		const release = await fetchRelease(
-			{ ...base, version: 'latest', includePrereleases: false },
-			releaseFetcher((url) => {
+			octokitFor((url) => {
 				expect(url.pathname).toBe('/repos/owner/repo/releases/latest');
 
 				return { tag_name: 'v1.0.0', assets: [] };
-			})
+			}),
+			{ ...base, version: 'latest', includePrereleases: false }
 		);
 
 		expect(release.tagName).toBe('v1.0.0');
@@ -497,12 +487,12 @@ describe('fetchRelease', () => {
 
 	it('installs a specific tag regardless of the prerelease setting', async () => {
 		const release = await fetchRelease(
-			{ ...base, version: 'v1.2.3', includePrereleases: true },
-			releaseFetcher((url) => {
+			octokitFor((url) => {
 				expect(url.pathname).toBe('/repos/owner/repo/releases/tags/v1.2.3');
 
 				return { tag_name: 'v1.2.3', assets: [] };
-			})
+			}),
+			{ ...base, version: 'v1.2.3', includePrereleases: true }
 		);
 
 		expect(release.tagName).toBe('v1.2.3');
@@ -511,8 +501,8 @@ describe('fetchRelease', () => {
 	it('rejects when only draft releases exist', async () => {
 		await expect(
 			fetchRelease(
-				{ ...base, version: 'latest', includePrereleases: true },
-				releaseFetcher(() => [{ draft: true, tag_name: 'v1', assets: [] }])
+				octokitFor(() => [{ draft: true, tag_name: 'v1', assets: [] }]),
+				{ ...base, version: 'latest', includePrereleases: true }
 			)
 		).rejects.toThrow(NoReleaseFoundError);
 	});
@@ -520,8 +510,12 @@ describe('fetchRelease', () => {
 	it('rejects a malformed release response', async () => {
 		await expect(
 			fetchRelease(
-				{ ...base, version: 'v1.2.3', includePrereleases: false },
-				releaseFetcher(() => ({ unexpected: true }))
+				octokitFor(() => ({ unexpected: true })),
+				{
+					...base,
+					version: 'v1.2.3',
+					includePrereleases: false
+				}
 			)
 		).rejects.toThrow(MalformedReleaseResponseError);
 	});
