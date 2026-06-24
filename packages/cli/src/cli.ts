@@ -5,7 +5,8 @@ import {
 } from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
-import { Command, CommanderError } from 'commander';
+import { Command, CommanderError, InvalidArgumentError } from 'commander';
+import { z } from 'zod';
 
 import { isAbortError } from './abort.ts';
 import { registerAttestCommands } from './commands/attest.ts';
@@ -33,7 +34,27 @@ import { resolveReporterMode } from './reporter-mode.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {
+	readonly outputMode?: ReporterMode;
 	readonly colour?: boolean;
+}
+
+const reporterModeSchema = z.enum([
+	'terminal',
+	'json'
+]) satisfies z.ZodType<ReporterMode>;
+
+// Parse `--output-mode` into a `ReporterMode` at the flag boundary, so the rest
+// of the CLI never handles the raw string. A bad value is a usage error.
+function parseOutputMode(value: string): ReporterMode {
+	const parsed = reporterModeSchema.safeParse(value);
+
+	if (!parsed.success) {
+		throw new InvalidArgumentError(
+			`Output mode must be one of: ${reporterModeSchema.options.join(', ')}.`
+		);
+	}
+
+	return parsed.data;
 }
 
 export interface ProgramOptions {
@@ -49,8 +70,13 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 				'push store paths, manage tenants and keys, and configure Nix clients.'
 		)
 		.version(cupboardVersion)
-		.option('--colour', 'force interactive spinner and colour output')
-		.option('--no-colour', 'force plain line-delimited JSON output')
+		.option(
+			'--output-mode <mode>',
+			'force the output mode: terminal (spinner) or json (line-delimited)',
+			parseOutputMode
+		)
+		.option('--colour', 'force ANSI colour output')
+		.option('--no-colour', 'disable ANSI colour output')
 		.addHelpText(
 			'after',
 			'\nMost commands act on a deployment and need a session first: ' +
@@ -90,14 +116,19 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 }
 
 function reporterModeFromGlobals(program: Command): ReporterMode {
-	return resolveReporterMode(program.opts<GlobalOptions>().colour);
+	return resolveReporterMode(program.opts<GlobalOptions>().outputMode);
+}
+
+export function colourFromGlobals(program: Command): boolean | undefined {
+	return program.opts<GlobalOptions>().colour;
 }
 
 /**
- * The {@link CliUi} for a command: terminal or JSON output by the global
- * `--colour` flag, wired to the program's abort signal so an interrupted
- * command renders its active spinner, bar or task as cancelled. `assumeYes`
- * carries a command's `--yes` flag through to confirmations.
+ * The {@link CliUi} for a command: the output mode comes from `--output-mode`
+ * and the environment, the colour from `--colour`/`--no-colour`, wired to the
+ * program's abort signal so an interrupted command renders its active spinner,
+ * bar or task as cancelled. `assumeYes` carries a command's `--yes` flag through
+ * to confirmations.
  */
 export function commandUi(
 	program: Command,
@@ -106,20 +137,33 @@ export function commandUi(
 ): CliUi {
 	return createCliUi({
 		mode: reporterModeFromGlobals(program),
+		colour: colourFromGlobals(program),
 		signal: options.signal,
 		...extra
 	});
 }
 
 /**
- * The reporter mode for a top-level failure. The `--colour` flag wins when it
- * parsed; a failure before parsing finished falls back to the environment.
+ * The reporter mode for a top-level failure. The `--output-mode` flag wins when
+ * it parsed; a failure before parsing finished falls back to the environment.
  */
 export function failureReporterMode(program: Command): ReporterMode {
 	try {
 		return reporterModeFromGlobals(program);
 	} catch {
 		return resolveReporterMode();
+	}
+}
+
+/**
+ * The colour preference for a top-level failure, or undefined when the flag did
+ * not parse, so the reporter falls back to picocolors' own detection.
+ */
+export function failureColour(program: Command): boolean | undefined {
+	try {
+		return colourFromGlobals(program);
+	} catch {
+		return undefined;
 	}
 }
 

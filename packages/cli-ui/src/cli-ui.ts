@@ -34,6 +34,9 @@ import pc from 'picocolors';
 
 import { type BrowserMessages, openBrowser } from './open-browser.ts';
 
+/** A picocolors palette with its colour enablement fixed at creation. */
+type Colours = ReturnType<typeof pc.createColors>;
+
 export { type BrowserMessages, openBrowser } from './open-browser.ts';
 
 // British spelling for the cancel marker clack renders when a spinner, bar or
@@ -48,14 +51,17 @@ export function configureClackUi(): void {
  * Lays out label/value rows with aligned columns, ready for a clack note or box.
  * Labels are dimmed so the values carry the emphasis.
  */
-export function formatRows(rows: readonly ResultRow[]): string {
+export function formatRows(
+	rows: readonly ResultRow[],
+	colours: Colours = pc
+): string {
 	const width = Math.max(...rows.map((row) => row.label.length));
 
 	return rows
 		.map((row) =>
 			row.label === '' && row.value === ''
 				? ''
-				: `${pc.dim(row.label.padEnd(width))}  ${row.value}`
+				: `${colours.dim(row.label.padEnd(width))}  ${row.value}`
 		)
 		.join('\n');
 }
@@ -219,6 +225,11 @@ export interface CliUi {
 
 export interface CliUiOptions {
 	readonly mode: ReporterMode;
+	/**
+	 * Whether to emit ANSI colour (the `--colour`/`--no-colour` flag). Defaults to
+	 * picocolors' own detection over `NO_COLOR`, `FORCE_COLOR` and the TTY.
+	 */
+	readonly colour?: boolean;
 	/** Treat confirmations as already accepted (the `--yes` flag). */
 	readonly assumeYes?: boolean;
 	/**
@@ -239,6 +250,7 @@ export interface CliUiOptions {
 
 export function createCliUi(options: CliUiOptions): CliUi {
 	const { mode } = options;
+	const colours = pc.createColors(options.colour ?? pc.isColorSupported);
 	const isAssumeYesDefault = options.assumeYes ?? false;
 	// A continuous-integration run is never interactive, even when it captures a
 	// terminal: there is no human at the keyboard to answer a prompt.
@@ -253,7 +265,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	// events.
 	const reporter: Reporter =
 		mode === 'terminal'
-			? clackReporter(options.out, options.signal)
+			? clackReporter(colours, options.out, options.signal)
 			: createReporter({ stream: options.stream, out: options.out });
 
 	const browserMessages: BrowserMessages = {
@@ -270,7 +282,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 		intro(title) {
 			if (mode === 'terminal') {
-				intro(pc.bold(title));
+				intro(colours.bold(title));
 			}
 		},
 
@@ -307,7 +319,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 		note(title, rows) {
 			if (mode === 'terminal') {
-				note(formatRows(rows), title);
+				note(formatRows(rows, colours), title);
 			}
 		},
 
@@ -387,28 +399,28 @@ export function createCliUi(options: CliUiOptions): CliUi {
 			const prompt: TextPrompt = new TextPrompt({
 				validate: (value = '') => options.problem(value),
 				render: () => {
-					const title = `${pc.gray(S_BAR)}\n${symbol(prompt.state)}  ${options.message}\n`;
-					const typed = `${pc.dim(options.prefix)}${prompt.userInputWithCursor}`;
+					const title = `${colours.gray(S_BAR)}\n${symbol(prompt.state)}  ${options.message}\n`;
+					const typed = `${colours.dim(options.prefix)}${prompt.userInputWithCursor}`;
 					const settled = options.prefix + (prompt.value ?? '');
 
 					switch (prompt.state) {
 						case 'submit': {
-							return `${title}${pc.gray(S_BAR)}  ${pc.dim(settled)}`;
+							return `${title}${colours.gray(S_BAR)}  ${colours.dim(settled)}`;
 						}
 
 						case 'cancel': {
-							return `${title}${pc.gray(S_BAR)}  ${pc.strikethrough(pc.dim(settled))}\n${pc.gray(S_BAR)}`;
+							return `${title}${colours.gray(S_BAR)}  ${colours.strikethrough(colours.dim(settled))}\n${colours.gray(S_BAR)}`;
 						}
 
 						case 'error': {
 							const detail =
-								prompt.error === '' ? '' : `  ${pc.yellow(prompt.error)}`;
+								prompt.error === '' ? '' : `  ${colours.yellow(prompt.error)}`;
 
-							return `${title.trim()}\n${pc.yellow(S_BAR)}  ${typed}\n${pc.yellow(S_BAR_END)}${detail}\n`;
+							return `${title.trim()}\n${colours.yellow(S_BAR)}  ${typed}\n${colours.yellow(S_BAR_END)}${detail}\n`;
 						}
 
 						default: {
-							return `${title}${pc.cyan(S_BAR)}  ${typed}\n${pc.cyan(S_BAR_END)}\n`;
+							return `${title}${colours.cyan(S_BAR)}  ${typed}\n${colours.cyan(S_BAR_END)}\n`;
 						}
 					}
 				}
@@ -472,7 +484,8 @@ export function resultTitle(kind: string): string {
 // say) updates its entry and the title stays bounded.
 function renderFacts(
 	label: string,
-	facts: ReadonlyMap<string, string>
+	facts: ReadonlyMap<string, string>,
+	colours: Colours
 ): string {
 	if (facts.size === 0) {
 		return label;
@@ -482,13 +495,17 @@ function renderFacts(
 		.map(([factLabel, value]) => `${factLabel} ${value}`)
 		.join(' · ');
 
-	return `${label} ${pc.dim(`· ${annotations}`)}`;
+	return `${label} ${colours.dim(`· ${annotations}`)}`;
 }
 
 // A completion line with its elapsed time appended, dimmed, so every phase,
 // bar and task reports how long it took at a precision that suits the duration.
-function withElapsed(message: string, startedAt: number): string {
-	return `${message} ${pc.dim(`(${formatDuration(Date.now() - startedAt)})`)}`;
+function withElapsed(
+	message: string,
+	startedAt: number,
+	colours: Colours
+): string {
+	return `${message} ${colours.dim(`(${formatDuration(Date.now() - startedAt)})`)}`;
 }
 
 function warnText(label: string, value?: string): string {
@@ -534,6 +551,7 @@ function unitNotes(live?: (message: string) => void): UnitNotes {
  * emitted when the unit stops, so it survives a region that clears on success.
  */
 function clackReporter(
+	colours: Colours,
 	out: NodeJS.WritableStream = stdout,
 	signal?: AbortSignal
 ): Reporter {
@@ -553,16 +571,20 @@ function clackReporter(
 				const value = await body({
 					fact(factLabel, factValue) {
 						facts.set(factLabel, String(factValue));
-						indicator.message(renderFacts(label, facts));
+						indicator.message(renderFacts(label, facts, colours));
 					},
 					warn: notes.warn
 				});
 
-				indicator.stop(withElapsed(renderFacts(label, facts), startedAt));
+				indicator.stop(
+					withElapsed(renderFacts(label, facts, colours), startedAt, colours)
+				);
 
 				return value;
 			} catch (error) {
-				indicator.error(withElapsed(`${label} ${pc.red('failed')}`, startedAt));
+				indicator.error(
+					withElapsed(`${label} ${colours.red('failed')}`, startedAt, colours)
+				);
 
 				throw error;
 			} finally {
@@ -585,20 +607,24 @@ function clackReporter(
 			try {
 				const value = await body({
 					advance(step = 1, message) {
-						bar.advance(step, message ?? renderFacts(label, facts));
+						bar.advance(step, message ?? renderFacts(label, facts, colours));
 					},
 					fact(factLabel, factValue) {
 						facts.set(factLabel, String(factValue));
-						bar.message(renderFacts(label, facts));
+						bar.message(renderFacts(label, facts, colours));
 					},
 					warn: notes.warn
 				});
 
-				bar.stop(withElapsed(renderFacts(label, facts), startedAt));
+				bar.stop(
+					withElapsed(renderFacts(label, facts, colours), startedAt, colours)
+				);
 
 				return value;
 			} catch (error) {
-				bar.error(withElapsed(`${label} ${pc.red('failed')}`, startedAt));
+				bar.error(
+					withElapsed(`${label} ${colours.red('failed')}`, startedAt, colours)
+				);
 
 				throw error;
 			} finally {
@@ -610,7 +636,7 @@ function clackReporter(
 			const task = taskLog({ title: label, signal });
 
 			const notes = unitNotes((message) => {
-				task.message(`${pc.yellow(S_WARN)} ${message}`);
+				task.message(`${colours.yellow(S_WARN)} ${message}`);
 			});
 			const startedAt = Date.now();
 
@@ -637,11 +663,13 @@ function clackReporter(
 					warn: notes.warn
 				});
 
-				task.success(withElapsed(label, startedAt));
+				task.success(withElapsed(label, startedAt, colours));
 
 				return value;
 			} catch (error) {
-				task.error(withElapsed(`${label} ${pc.red('failed')}`, startedAt));
+				task.error(
+					withElapsed(`${label} ${colours.red('failed')}`, startedAt, colours)
+				);
 
 				throw error;
 			} finally {
@@ -658,7 +686,7 @@ function clackReporter(
 				return;
 			}
 
-			box(formatRows(payload.rows), resultTitle(payload.kind));
+			box(formatRows(payload.rows, colours), resultTitle(payload.kind));
 		},
 
 		data(text) {

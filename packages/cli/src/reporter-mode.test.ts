@@ -21,12 +21,12 @@ describe('resolveReporterMode', () => {
 		restoreIsTty();
 	});
 
-	it('lets explicit colour flags override the environment', () => {
+	it('lets an explicit output mode override the environment', () => {
 		process.env.PRE_COMMIT = '1';
 		setIsTty(false);
 
-		expect(resolveReporterMode(true)).toBe('terminal');
-		expect(resolveReporterMode(false)).toBe('json');
+		expect(resolveReporterMode('terminal')).toBe('terminal');
+		expect(resolveReporterMode('json')).toBe('json');
 	});
 
 	it('uses JSON output when running under pre-commit', () => {
@@ -45,15 +45,14 @@ describe('resolveReporterMode', () => {
 	});
 
 	it.each([
-		{ name: 'an explicit --no-colour', value: '1', colour: false },
-		{ name: 'FORCE_COLOR=0', value: '0', colour: undefined },
-		{ name: 'an empty FORCE_COLOR', value: '', colour: undefined }
-	] as const)('does not force the spinner for $name', ({ value, colour }) => {
+		{ name: 'FORCE_COLOR=0', value: '0' },
+		{ name: 'an empty FORCE_COLOR', value: '' }
+	] as const)('does not force the spinner for $name', ({ value }) => {
 		process.env.FORCE_COLOR = value;
 		delete process.env.PRE_COMMIT;
 		setIsTty(false);
 
-		expect(resolveReporterMode(colour)).toBe('json');
+		expect(resolveReporterMode()).toBe('json');
 	});
 
 	it.each([

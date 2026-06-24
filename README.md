@@ -90,11 +90,13 @@ output can be parsed or redirected:
 
 ```sh
 cupboard pubkey https://cupboard.example.workers.dev/t/acme > key.pub
-cupboard --no-colour tenant list https://cupboard.example.workers.dev \
+cupboard --output-mode json tenant list https://cupboard.example.workers.dev \
   2>&1 | jq -c 'select(.event == "result").data'
 ```
 
-Pass `--colour` or `--no-colour` to force a mode.
+Pass `--output-mode terminal` or `--output-mode json` to force the mode. Colour
+is a separate choice: `--colour` and `--no-colour` force ANSI on or off, and
+`NO_COLOR` is honoured otherwise.
 
 ## More
 
