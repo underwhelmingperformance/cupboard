@@ -20,6 +20,7 @@ import {
 } from '@cupboard/shared/attestation';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { createOctokitClient } from '@cupboard/shared/octokit';
+import semverValid from 'semver/functions/valid.js';
 
 import {
 	AttestationError,
@@ -155,18 +156,20 @@ const cacheHeaders: Readonly<Record<string, string>> = {
 export function normaliseVersion(version: string): string {
 	const trimmed = version.trim();
 
-	if (trimmed === '') {
-		throw new InvalidInputError(
-			'cupboard-version',
-			'cupboard-version must not be empty'
-		);
-	}
-
 	if (trimmed === 'latest') {
 		return 'latest';
 	}
 
-	return trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
+	const normalised = trimmed.startsWith('v') ? trimmed : `v${trimmed}`;
+
+	if (semverValid(normalised) === null) {
+		throw new InvalidInputError(
+			'cupboard-version',
+			`cupboard-version must be 'latest' or a release tag like v1.2.3, got '${version}'`
+		);
+	}
+
+	return normalised;
 }
 
 export function releaseApiPath(repository: string, version: string): string {
@@ -572,7 +575,8 @@ export async function verifyReleaseAttestation(
 				archiveName,
 				subjectDigest,
 				tagName,
-				tagCommit
+				tagCommit,
+				sourceRepository: options.releaseRepository
 			});
 
 			console.warn(
@@ -590,7 +594,7 @@ export async function verifyReleaseAttestation(
 	);
 }
 
-async function verifyOneReleaseBundle(arguments_: {
+interface ReleaseBundleVerification {
 	readonly bundle: Uint8Array;
 	readonly policy: VerifiedIdentityPolicy;
 	readonly verify: typeof verifyBundle;
@@ -598,25 +602,29 @@ async function verifyOneReleaseBundle(arguments_: {
 	readonly subjectDigest: string;
 	readonly tagName: string;
 	readonly tagCommit: string;
-}): Promise<void> {
-	const verified = await arguments_.verify(
-		arguments_.bundle,
-		arguments_.policy,
-		{}
-	);
+	readonly sourceRepository: string;
+}
+
+async function verifyOneReleaseBundle(
+	options: ReleaseBundleVerification
+): Promise<void> {
+	const verified = await options.verify(options.bundle, options.policy, {});
 
 	resultFor(
-		arguments_.archiveName,
+		options.archiveName,
 		verified,
-		arguments_.subjectDigest,
+		options.subjectDigest,
 		provenancePredicateType
 	);
 
-	const sourceCommit = slsaSourceCommit(verified.predicate);
+	const sourceCommit = slsaSourceCommit(
+		verified.predicate,
+		options.sourceRepository
+	);
 
-	if (sourceCommit !== arguments_.tagCommit) {
+	if (sourceCommit !== options.tagCommit) {
 		throw new AttestationError(
-			`built from ${String(sourceCommit)}, but tag ${arguments_.tagName} points at ${arguments_.tagCommit}`
+			`built from ${String(sourceCommit)}, but tag ${options.tagName} points at ${options.tagCommit}`
 		);
 	}
 }
@@ -691,20 +699,23 @@ async function fetchTagCommit(
 	}
 }
 
-function splitRepository(releaseRepository: string): readonly [string, string] {
-	const slash = releaseRepository.indexOf('/');
+const repositoryPattern = /^([\w.-]+)\/([\w.-]+)$/u;
 
-	if (slash <= 0 || slash === releaseRepository.length - 1) {
+export function splitRepository(
+	releaseRepository: string
+): readonly [string, string] {
+	const match = repositoryPattern.exec(releaseRepository);
+	const owner = match?.[1];
+	const name = match?.[2];
+
+	if (owner === undefined || name === undefined) {
 		throw new InvalidInputError(
 			'release-repository',
 			`release-repository must be <owner>/<name>, got '${releaseRepository}'`
 		);
 	}
 
-	return [
-		releaseRepository.slice(0, slash),
-		releaseRepository.slice(slash + 1)
-	];
+	return [owner, name];
 }
 
 function isStatus(error: unknown, status: number): boolean {
@@ -796,13 +807,6 @@ async function fetchTrustedPublicKey(
 }
 
 async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
-	if (options.readUser === '') {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user is required when read-password is supplied'
-		);
-	}
-
 	const cacheUrl = new URL(options.cacheUrl);
 	const host = cacheUrl.host;
 	const netrcFile = path.join(
@@ -992,6 +996,13 @@ function setupInputs(environment: Environment): SetupInputs {
 		throw new InvalidInputError(
 			'read-password',
 			'read-password is required when read-user is supplied'
+		);
+	}
+
+	if (readPassword !== '' && readUser === '') {
+		throw new InvalidInputError(
+			'read-user',
+			'read-user is required when read-password is supplied'
 		);
 	}
 
