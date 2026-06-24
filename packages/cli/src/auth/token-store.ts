@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { ParsedTokenResponse } from '@cupboard/protocol/oidc';
 import { z } from 'zod';
 
+import { decodeJwtPayload } from './jwt.ts';
 import {
 	configDirectory,
 	readSecretFile,
@@ -166,21 +167,7 @@ function isAudienceAdmitted(
 function decodeJwtClaims(
 	token: string
 ): undefined | { iss?: string; aud?: string | string[] } {
-	const segment = token.split('.', 2).at(1);
-
-	if (segment === undefined) {
-		return undefined;
-	}
-
-	let payload: unknown;
-
-	try {
-		payload = JSON.parse(Buffer.from(segment, 'base64url').toString('utf8'));
-	} catch {
-		return undefined;
-	}
-
-	const result = jwtClaimsSchema.safeParse(payload);
+	const result = jwtClaimsSchema.safeParse(decodeJwtPayload(token));
 
 	return result.success ? result.data : undefined;
 }
