@@ -7,23 +7,7 @@ allowBuilds:
   sharp: false
   workerd: true
 
-minimumReleaseAgeExclude:
-  - cloudflare@6.4.0
-  - '@orpc/client@1.14.6'
-  - '@orpc/contract@1.14.6'
-  - '@orpc/shared@1.14.6'
-  - '@orpc/standard-server-fetch@1.14.6'
-  - '@orpc/standard-server-peer@1.14.6'
-  - '@orpc/standard-server@1.14.6'
-  - '@orpc/interop@1.14.6'
-  - '@orpc/json-schema@1.14.6'
-  - '@orpc/openapi-client@1.14.6'
-  - '@orpc/openapi@1.14.6'
-  - '@orpc/server@1.14.6'
-  - '@orpc/standard-server-aws-lambda@1.14.6'
-  - '@orpc/standard-server-fastify@1.14.6'
-  - '@orpc/standard-server-node@1.14.6'
-  - '@orpc/zod@1.14.6'
+minimumReleaseAge: 1440
 
 onlyBuiltDependencies:
   - esbuild
