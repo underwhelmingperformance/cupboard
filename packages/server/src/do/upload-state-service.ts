@@ -9,11 +9,8 @@ import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 
-import {
-	type CanonicalBlob,
-	canonicalBlobOf,
-	type ServerContext
-} from './context.ts';
+import { type ServerContext } from './context.ts';
+import { type CanonicalBlob, canonicalBlobOf } from './upload-metadata.ts';
 
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
