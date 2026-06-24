@@ -13,7 +13,7 @@ import {
 	type VerifiedIdentityPolicy,
 	verifyBundle,
 	type VerifyResult
-} from '@cupboard/shared/attestation';
+} from '@cupboard/shared/sigstore';
 
 export interface LocalAttestationVerifyOptions extends AttestationPolicyOptions {
 	readonly bundles: readonly string[];

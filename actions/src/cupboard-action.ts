@@ -10,14 +10,14 @@ import {
 import path from 'node:path';
 import { arch, env, platform } from 'node:process';
 
+import { createOctokitClient } from '@cupboard/shared/octokit';
 import {
 	identityPolicy,
 	resultFor,
-	slsaSourceCommit,
 	type VerifiedIdentityPolicy,
 	verifyBundle
-} from '@cupboard/shared/attestation';
-import { createOctokitClient } from '@cupboard/shared/octokit';
+} from '@cupboard/shared/sigstore';
+import { slsaSourceCommit } from '@cupboard/shared/slsa';
 import semverValid from 'semver/functions/valid.js';
 
 import {
