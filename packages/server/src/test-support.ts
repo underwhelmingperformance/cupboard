@@ -13,6 +13,7 @@ import {
 	tenantIdSchema,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import { zstdCompressionStream } from '@cupboard/nix/zstd';
 import {
 	type AuthorizationDetails,
@@ -126,20 +127,6 @@ export const testControlEnv = {
 	CUPBOARD_SIGNUP_ISSUER: 'https://signup.example.test',
 	CUPBOARD_SIGNUP_AUDIENCE: 'cupboard-control-client'
 } as const;
-
-// Stable comparator that orders strings by UTF-16 code unit, matching the
-// default `Array#sort()` ordering without sorting numbers as strings.
-export function compareStrings(left: string, right: string): number {
-	if (left < right) {
-		return -1;
-	}
-
-	if (left > right) {
-		return 1;
-	}
-
-	return 0;
-}
 
 // A real zstd frame: it decompresses to a 1234-byte payload (the bytes
 // `i % 256`), so the server's verify-before-serve decompress-and-rehash accepts
@@ -430,7 +417,7 @@ export async function tenantRow(id: string): Promise<
 export async function tenantObjectKeys(id: string): Promise<string[]> {
 	const listed = await env.BLOBS.list({ prefix: `t/${id}/` });
 
-	return listed.objects.map((object) => object.key).toSorted(compareStrings);
+	return listed.objects.map((object) => object.key).toSorted(byCodeUnit);
 }
 
 /** The origin the harness is currently targeting. */
@@ -825,7 +812,7 @@ export async function blobStateNarHashes(): Promise<
 		.all();
 
 	return rows.toSorted((left, right) =>
-		compareStrings(left.narHash, right.narHash)
+		byCodeUnit(left.narHash, right.narHash)
 	);
 }
 
@@ -930,7 +917,7 @@ export async function tenantBlobRows(): Promise<
 		.all();
 
 	return rows.toSorted((left, right) =>
-		compareStrings(left.narHash, right.narHash)
+		byCodeUnit(left.narHash, right.narHash)
 	);
 }
 
@@ -948,7 +935,7 @@ export async function casObjectRows(): Promise<
 
 	return rows
 		.map((row) => ({ ...row, deleteAfter: row.deleteAfter ?? undefined }))
-		.toSorted((left, right) => compareStrings(left.digest, right.digest));
+		.toSorted((left, right) => byCodeUnit(left.digest, right.digest));
 }
 
 export async function attestationReferenceRows(): Promise<
@@ -967,7 +954,7 @@ export async function attestationReferenceRows(): Promise<
 		.all();
 
 	return rows.toSorted((left, right) =>
-		compareStrings(
+		byCodeUnit(
 			`${left.storePathHash}:${String(left.generation)}:${left.predicateType}`,
 			`${right.storePathHash}:${String(right.generation)}:${right.predicateType}`
 		)
@@ -984,8 +971,8 @@ export async function tenantCasBlobRows(): Promise<
 
 	return rows.toSorted(
 		(left, right) =>
-			compareStrings(left.digest, right.digest) ||
-			compareStrings(left.tenant, right.tenant)
+			byCodeUnit(left.digest, right.digest) ||
+			byCodeUnit(left.tenant, right.tenant)
 	);
 }
 
@@ -1005,7 +992,7 @@ export async function pendingAttestationRows(): Promise<
 				.all()
 	);
 
-	return rows.toSorted((left, right) => compareStrings(left.id, right.id));
+	return rows.toSorted((left, right) => byCodeUnit(left.id, right.id));
 }
 
 export async function stageAttestationBundle(
@@ -1211,7 +1198,7 @@ export async function narInfoDeletionRows(): Promise<
 			.from(narInfoDeletions)
 			.all()
 			.toSorted((left, right) =>
-				compareStrings(left.storePathHash, right.storePathHash)
+				byCodeUnit(left.storePathHash, right.storePathHash)
 			)
 	);
 }

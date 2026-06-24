@@ -334,20 +334,6 @@ export function keySummary(key: SigningKey): SigningKeySummary {
 	};
 }
 
-// Orders strings by UTF-16 code unit, matching the default `<`/`>` comparison
-// used across the service layer's deterministic listings.
-export function compareStrings(left: string, right: string): number {
-	if (left < right) {
-		return -1;
-	}
-
-	if (left > right) {
-		return 1;
-	}
-
-	return 0;
-}
-
 const keyNamePattern = /^cupboard-(\d+)$/;
 
 // Each key needs a distinct Nix key name so old and new keys can coexist in a
