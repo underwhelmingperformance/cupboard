@@ -22,14 +22,21 @@ const inTotoSubjectSchema = z.object({
 	digest: inTotoDigestSchema
 });
 
-const inTotoStatementSchema = z.object({
-	_type: z.literal(inTotoStatementType),
-	subject: z.array(inTotoSubjectSchema),
-	predicateType: z.string(),
-	predicate: z.unknown()
-});
+const inTotoStatementSchema = z
+	.object({
+		_type: z.literal(inTotoStatementType),
+		subject: z.array(inTotoSubjectSchema),
+		predicateType: z.string(),
+		predicate: z.unknown()
+	})
+	.transform((statement) => ({
+		predicateType: statement.predicateType,
+		subjectDigests: statement.subject.map((subject) => subject.digest.sha256),
+		predicate: statement.predicate
+	}));
 
 const slsaDependencySchema = z.object({
+	uri: z.string().optional(),
 	digest: z.object({ gitCommit: z.string().optional() }).optional()
 });
 
@@ -39,27 +46,35 @@ const slsaProvenanceSchema = z.object({
 		.optional()
 });
 
+function sourceCommitSchema(sourceRepository: string) {
+	const sourceUri = `git+https://github.com/${sourceRepository}`;
+
+	return slsaProvenanceSchema.transform((provenance) => {
+		const sources = (
+			provenance.buildDefinition?.resolvedDependencies ?? []
+		).filter(
+			(dependency) =>
+				dependency.uri === sourceUri ||
+				dependency.uri?.startsWith(`${sourceUri}@`)
+		);
+
+		return sources.length === 1 ? sources[0]?.digest?.gitCommit : undefined;
+	});
+}
+
 /**
  * The git commit a SLSA provenance predicate was built from, taken from the
- * first resolved dependency that records one. Returns undefined when the
- * predicate is not SLSA provenance or records no commit.
+ * resolved dependency whose URI is the given source repository on GitHub.
+ * Returns undefined when the predicate is not SLSA provenance, or does not
+ * record exactly one such dependency carrying a commit.
  */
-export function slsaSourceCommit(predicate: unknown): string | undefined {
-	const parsed = slsaProvenanceSchema.safeParse(predicate);
+export function slsaSourceCommit(
+	predicate: unknown,
+	sourceRepository: string
+): string | undefined {
+	const parsed = sourceCommitSchema(sourceRepository).safeParse(predicate);
 
-	if (!parsed.success) {
-		return undefined;
-	}
-
-	const dependencies = parsed.data.buildDefinition?.resolvedDependencies ?? [];
-
-	for (const dependency of dependencies) {
-		if (dependency.digest?.gitCommit !== undefined) {
-			return dependency.digest.gitCommit;
-		}
-	}
-
-	return undefined;
+	return parsed.success ? parsed.data : undefined;
 }
 
 export interface IdentityPolicyOptions {
@@ -334,11 +349,40 @@ async function trustedRoot(options: BundleVerifyOptions): Promise<TrustedRoot> {
 	);
 }
 
+function bundleShapeDetail(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function parseSigstoreBundle(
+	bytes: Uint8Array
+): ReturnType<typeof bundleFromJSON> {
+	try {
+		return bundleFromJSON(JSON.parse(new TextDecoder().decode(bytes)));
+	} catch (error) {
+		throw new AttestationBundleShapeError(
+			`could not be parsed: ${bundleShapeDetail(error)}`
+		);
+	}
+}
+
+function parseInTotoStatement(
+	payload: Uint8Array
+): z.infer<typeof inTotoStatementSchema> {
+	try {
+		return inTotoStatementSchema.parse(
+			JSON.parse(Buffer.from(payload).toString('utf8'))
+		);
+	} catch (error) {
+		throw new AttestationBundleShapeError(
+			`has an invalid in-toto statement: ${bundleShapeDetail(error)}`
+		);
+	}
+}
+
 function parseBundle(bytes: Uint8Array): Omit<VerifiedBundle, 'signer'> & {
 	readonly bundle: ReturnType<typeof bundleFromJSON>;
 } {
-	const decoder = new TextDecoder();
-	const bundle = bundleFromJSON(JSON.parse(decoder.decode(bytes)));
+	const bundle = parseSigstoreBundle(bytes);
 
 	if (!isBundleWithDsseEnvelope(bundle)) {
 		throw new AttestationBundleShapeError('is not a Sigstore DSSE bundle');
@@ -350,14 +394,5 @@ function parseBundle(bytes: Uint8Array): Omit<VerifiedBundle, 'signer'> & {
 		throw new AttestationBundleShapeError('DSSE payload is not in-toto');
 	}
 
-	const statement = inTotoStatementSchema.parse(
-		JSON.parse(Buffer.from(envelope.payload).toString('utf8'))
-	);
-
-	return {
-		bundle,
-		predicateType: statement.predicateType,
-		subjectDigests: statement.subject.map((subject) => subject.digest.sha256),
-		predicate: statement.predicate
-	};
+	return { bundle, ...parseInTotoStatement(envelope.payload) };
 }
