@@ -34,6 +34,9 @@ These commands address the tenant, so their URL carries the tenant slug:
   and what is kept.
 - `cupboard key` and `cupboard auth-key` rotate the tenant's signing keys.
 - `cupboard oidc-trust` configures which CI workflows may push.
+- `cupboard stats` reports a cache's objects and the tenant's charged storage,
+  `cupboard delete` removes a single store path, and `cupboard check` audits
+  stored objects against their committed metadata.
 
 ## URL forms
 
@@ -88,7 +91,7 @@ output can be parsed or redirected:
 ```sh
 cupboard pubkey https://cupboard.example.workers.dev/t/acme > key.pub
 cupboard --no-colour tenant list https://cupboard.example.workers.dev \
-  | jq -c 'select(.event == "result").data'
+  2>&1 | jq -c 'select(.event == "result").data'
 ```
 
 Pass `--colour` or `--no-colour` to force a mode.
