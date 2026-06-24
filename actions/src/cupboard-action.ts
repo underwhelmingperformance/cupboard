@@ -9,7 +9,6 @@ import {
 } from 'node:fs/promises';
 import path from 'node:path';
 import { arch, env, platform } from 'node:process';
-import { pathToFileURL } from 'node:url';
 
 import {
 	identityPolicy,
@@ -18,7 +17,6 @@ import {
 	type VerifiedIdentityPolicy,
 	verifyBundle
 } from '@cupboard/shared/attestation';
-import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import semverValid from 'semver/functions/valid.js';
 
@@ -1255,21 +1253,4 @@ function parseJson(value: string): unknown {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === 'object' && value !== null;
-}
-
-if (
-	process.argv[1] !== undefined &&
-	import.meta.url === pathToFileURL(process.argv[1]).href
-) {
-	try {
-		await dispatch(process.argv[2]);
-	} catch (error: unknown) {
-		if (error instanceof CodedError) {
-			console.error(error.message);
-			process.exitCode = error.exitCode;
-		} else {
-			console.error(error);
-			process.exitCode = genericExitCode;
-		}
-	}
 }
