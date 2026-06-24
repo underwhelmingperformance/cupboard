@@ -1,0 +1,64 @@
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import { createOctokitClient } from './octokit.ts';
+
+function countingFetch(status: number): {
+	readonly fetch: typeof fetch;
+	calls: () => number;
+} {
+	let calls = 0;
+
+	return {
+		fetch: () => {
+			calls += 1;
+
+			return Promise.resolve(
+				new Response('{}', {
+					status,
+					headers: { 'content-type': 'application/json' }
+				})
+			);
+		},
+		calls: () => calls
+	};
+}
+
+async function fetchCountFor(status: number): Promise<number> {
+	const counter = countingFetch(status);
+	const octokit = createOctokitClient({ request: { fetch: counter.fetch } });
+
+	try {
+		await octokit.request('GET /repos/{owner}/{repo}', {
+			owner: 'o',
+			repo: 'r'
+		});
+	} catch {
+		// The stub always fails; the call count is what matters.
+	}
+
+	return counter.calls();
+}
+
+describe('createOctokitClient', () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it.each([
+		['a rate-limit response', 429],
+		['a forbidden response', 403],
+		['a not-found response', 404],
+		['a bad-request response', 400]
+	])('fails fast on %s', async (_name, status) => {
+		expect(await fetchCountFor(status)).toBe(1);
+	});
+
+	it('retries a transient server error', async () => {
+		vi.useFakeTimers();
+
+		const pending = fetchCountFor(500);
+		await vi.runAllTimersAsync();
+
+		expect(await pending).toBe(4);
+	});
+});

@@ -356,6 +356,9 @@ importers:
       '@sigstore/verify':
         specifier: ^4.0.0
         version: 4.0.0
+      http-status-codes:
+        specifier: ^2.3.0
+        version: 2.3.0
       zod:
         specifier: ^4.4.3
         version: 4.4.3

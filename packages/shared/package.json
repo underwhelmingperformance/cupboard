@@ -10,6 +10,7 @@
 		"@sigstore/protobuf-specs": "^0.5.1",
 		"@sigstore/tuf": "^5.0.0",
 		"@sigstore/verify": "^4.0.0",
+		"http-status-codes": "^2.3.0",
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
