@@ -1,6 +1,6 @@
 import type { Command } from 'commander';
 
-import type { ProgramOptions } from '../cli.ts';
+import { colourFromGlobals, type ProgramOptions } from '../cli.ts';
 import type { DeployCliOptions } from '../deploy/command.ts';
 
 export function registerDeployCommand(
@@ -28,6 +28,9 @@ export function registerDeployCommand(
 			// out of the released binary's startup and the other commands' cost.
 			const { executeDeploy } = await import('../deploy/command.ts');
 
-			await executeDeploy(cliOptions, { signal: programOptions.signal });
+			await executeDeploy(cliOptions, {
+				signal: programOptions.signal,
+				colour: colourFromGlobals(program)
+			});
 		});
 }

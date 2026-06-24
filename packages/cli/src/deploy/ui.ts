@@ -15,8 +15,18 @@ export interface DeployUi extends CliUi {
 	): Promise<string | undefined>;
 }
 
-export function createDeployUi(signal?: AbortSignal): DeployUi {
-	const ui = createCliUi({ mode: 'terminal', signal });
+export interface DeployUiOptions {
+	readonly signal?: AbortSignal;
+	/** ANSI colour preference from `--colour`/`--no-colour`. */
+	readonly colour?: boolean;
+}
+
+export function createDeployUi(options: DeployUiOptions = {}): DeployUi {
+	const ui = createCliUi({
+		mode: 'terminal',
+		colour: options.colour,
+		signal: options.signal
+	});
 
 	return {
 		...ui,

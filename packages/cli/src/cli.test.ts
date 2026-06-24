@@ -95,6 +95,19 @@ describe('buildProgram', () => {
 			buildProgram().parseAsync(['node', 'cupboard', 'bogus'])
 		).rejects.toBeInstanceOf(CommanderError);
 	});
+
+	it('rejects an unknown --output-mode as a usage error', async () => {
+		await expect(
+			buildProgram().parseAsync([
+				'node',
+				'cupboard',
+				'--output-mode',
+				'fancy',
+				'pubkey',
+				'https://cupboard.example'
+			])
+		).rejects.toBeInstanceOf(CommanderError);
+	});
 });
 
 const noop = (): void => {
