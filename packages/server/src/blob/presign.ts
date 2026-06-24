@@ -1,9 +1,4 @@
-import {
-	HeadObjectCommand,
-	PutObjectCommand,
-	S3Client
-} from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { AwsClient } from 'aws4fetch';
 
 export interface R2PresignOptions {
 	readonly key: string;
@@ -19,39 +14,44 @@ export interface R2PresignerConfiguration {
 }
 
 export class R2Presigner {
-	private readonly client: S3Client;
+	private readonly client: AwsClient;
+	private readonly endpoint: string;
 
 	constructor(private readonly configuration: R2PresignerConfiguration) {
-		this.client = new S3Client({
-			credentials: {
-				accessKeyId: configuration.accessKeyId,
-				secretAccessKey: configuration.secretAccessKey
-			},
-			endpoint: `https://${configuration.accountId}.r2.cloudflarestorage.com`,
-			forcePathStyle: true,
+		this.client = new AwsClient({
+			accessKeyId: configuration.accessKeyId,
+			secretAccessKey: configuration.secretAccessKey,
+			service: 's3',
 			region: 'auto'
 		});
+		this.endpoint = `https://${configuration.accountId}.r2.cloudflarestorage.com`;
 	}
 
-	presignPutUrl(options: R2PresignOptions): Promise<string> {
-		return getSignedUrl(
-			this.client,
-			new PutObjectCommand({
-				Bucket: this.configuration.bucketName,
-				Key: options.key,
-				ChecksumSHA256: options.checksumSha256
-			}),
+	private objectUrl(key: string, expiresSeconds: number): string {
+		const url = new URL(
+			`${this.endpoint}/${this.configuration.bucketName}/${key}`
+		);
+		url.searchParams.set('X-Amz-Expires', String(expiresSeconds));
+
+		return url.href;
+	}
+
+	async presignPutUrl(options: R2PresignOptions): Promise<string> {
+		// R2 ignores a query-hoisted checksum (no integrity check) and rejects an
+		// unsigned x-amz-checksum-sha256 header, so the checksum stays a signed
+		// header: a `signQuery` sign leaves the passed headers in SignedHeaders
+		// rather than hoisting them, so the uploader sends the header and R2
+		// verifies both the signature and the body.
+		const signed = await this.client.sign(
+			this.objectUrl(options.key, options.expiresSeconds),
 			{
-				expiresIn: options.expiresSeconds,
-				// The presigner hoists headers into the query by default, but R2
-				// ignores a query-hoisted checksum (no integrity check) and then
-				// rejects the upload outright when the uploader sends the
-				// x-amz-checksum-sha256 header unsigned (SigV4 requires every
-				// x-amz-* header on the request to be signed). Keeping it a
-				// signed header makes R2 verify both the signature and the body.
-				unhoistableHeaders: new Set(['x-amz-checksum-sha256'])
+				method: 'PUT',
+				headers: { 'x-amz-checksum-sha256': options.checksumSha256 },
+				aws: { signQuery: true }
 			}
 		);
+
+		return signed.url;
 	}
 
 	/**
@@ -59,14 +59,12 @@ export class R2Presigner {
 	 * credentials sign requests R2 accepts (a missing object still answers
 	 * 404 with a valid signature; a bad pair answers 401 or 403).
 	 */
-	presignHeadUrl(key: string, expiresSeconds: number): Promise<string> {
-		return getSignedUrl(
-			this.client,
-			new HeadObjectCommand({
-				Bucket: this.configuration.bucketName,
-				Key: key
-			}),
-			{ expiresIn: expiresSeconds }
-		);
+	async presignHeadUrl(key: string, expiresSeconds: number): Promise<string> {
+		const signed = await this.client.sign(this.objectUrl(key, expiresSeconds), {
+			method: 'HEAD',
+			aws: { signQuery: true }
+		});
+
+		return signed.url;
 	}
 }
