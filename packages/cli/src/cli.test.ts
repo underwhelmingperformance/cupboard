@@ -75,6 +75,20 @@ describe('cliExitCode', () => {
 	});
 });
 
+describe('CupboardHttpError', () => {
+	it('appends the Cloudflare ray to the message when present', () => {
+		expect(
+			new CupboardHttpError('POST', '/commit', 503, 'busy', 'abc123').message
+		).toBe('POST /commit failed with 503: busy (Cloudflare ray abc123)');
+	});
+
+	it('omits the ray note when no ray is present', () => {
+		expect(new CupboardHttpError('GET', '/x', 404, 'gone').message).toBe(
+			'GET /x failed with 404: gone'
+		);
+	});
+});
+
 describe('buildProgram', () => {
 	it('throws a commander usage error for an unknown command', async () => {
 		await expect(
