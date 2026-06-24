@@ -4,6 +4,8 @@ import {
 } from '@cupboard/protocol/grants';
 import { importJWK, jwtVerify, SignJWT } from 'jose';
 
+import { generateEd25519KeyPair } from '../crypto/crypto.ts';
+
 // A token's authority is its grant set, carried as RFC 9396
 // `authorization_details`. The owner holds a single wildcard grant; a CI token
 // holds the concrete grants its trust rule permitted.
@@ -112,10 +114,7 @@ export async function generateAuthKeyPair(): Promise<{
 	readonly privateJwk: JsonWebKey;
 	readonly publicJwk: JsonWebKey;
 }> {
-	const keyPair = (await crypto.subtle.generateKey('Ed25519', true, [
-		'sign',
-		'verify'
-	])) as CryptoKeyPair;
+	const keyPair = await generateEd25519KeyPair();
 
 	return {
 		privateJwk: (await crypto.subtle.exportKey(
