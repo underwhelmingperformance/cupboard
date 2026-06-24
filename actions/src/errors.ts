@@ -96,9 +96,14 @@ export class NixError extends CodedError {
 export class CommandFailedError extends CodedError {
 	constructor(
 		public readonly command: string,
-		public readonly status: number | null
+		public readonly status: number | null,
+		detail?: string
 	) {
-		super(`${command} failed with status ${String(status)}`);
+		super(
+			detail === undefined
+				? `${command} failed with status ${String(status)}`
+				: `${command} could not run: ${detail}`
+		);
 		this.name = 'CommandFailedError';
 	}
 }

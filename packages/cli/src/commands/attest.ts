@@ -48,7 +48,10 @@ export function parseVerifierThreshold(option: string) {
 
 		const parsed = Number(value);
 
-		if (!Number.isSafeInteger(parsed)) {
+		// A threshold of zero would tell the Sigstore verifier to require no
+		// transparency-log, certificate-transparency or timestamp entries, which
+		// silently disables that part of verification.
+		if (!Number.isSafeInteger(parsed) || parsed < 1) {
 			throw new InvalidVerifierThresholdError(option, value);
 		}
 
