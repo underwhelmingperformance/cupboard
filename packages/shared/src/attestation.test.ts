@@ -3,9 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
 	CertificateIdentityModeError,
 	CertificateIssuerModeError,
-	CertificatePolicyModeMismatchError,
 	identityPolicy,
-	slsaSourceCommit
+	slsaSourceCommit,
+	verificationPolicy
 } from './attestation.ts';
 
 function thrownBy(run: () => unknown): unknown {
@@ -73,32 +73,13 @@ describe('identityPolicy', () => {
 		}
 	});
 
-	it('requires identity and issuer modes to match', () => {
-		const error = thrownBy(() =>
-			identityPolicy({
-				certificateIdentity: 'alice@example.test',
-				certificateOidcIssuerRegex: 'https://issuer[.]test'
-			})
-		);
-
-		expect(error).toBeInstanceOf(CertificatePolicyModeMismatchError);
-
-		if (error instanceof CertificatePolicyModeMismatchError) {
-			expect({
-				identityMode: error.identityMode,
-				issuerMode: error.issuerMode
-			}).toStrictEqual({ identityMode: 'exact', issuerMode: 'regex' });
-		}
-	});
-
-	it('builds exact and regex policies', () => {
+	it('resolves each term independently, allowing mixed forms', () => {
 		expect(
 			identityPolicy({
 				certificateIdentity: 'alice@example.test',
 				certificateOidcIssuer: 'https://issuer.test'
 			})
 		).toStrictEqual({
-			mode: 'exact',
 			identity: 'alice@example.test',
 			issuer: 'https://issuer.test'
 		});
@@ -106,13 +87,50 @@ describe('identityPolicy', () => {
 		expect(
 			identityPolicy({
 				certificateIdentityRegex: 'alice@.*',
-				certificateOidcIssuerRegex: 'https://issuer[.]test'
+				certificateOidcIssuer: 'https://issuer.test'
 			})
 		).toStrictEqual({
-			mode: 'regex',
 			identity: /alice@.*/,
-			issuer: /https:\/\/issuer[.]test/
+			issuer: 'https://issuer.test'
 		});
+	});
+});
+
+describe('verificationPolicy', () => {
+	const exactIdentity =
+		'https://github.com/o/r/.github/workflows/release.yml@refs/heads/main';
+
+	it('anchors and escapes an exact identity so a superset SAN is rejected', () => {
+		const { subjectAlternativeName } = verificationPolicy({
+			identity: exactIdentity,
+			issuer: 'https://token.actions.githubusercontent.com'
+		});
+		const san = new RegExp(subjectAlternativeName ?? '');
+
+		expect({
+			exact: san.test(exactIdentity),
+			suffix: san.test(`${exactIdentity}.attacker.example/x`),
+			prefix: san.test(`https://evil.example/${exactIdentity}`),
+			wildcardDot: san.test(exactIdentity.replace('release.yml', 'releaseXyml'))
+		}).toStrictEqual({
+			exact: true,
+			suffix: false,
+			prefix: false,
+			wildcardDot: false
+		});
+	});
+
+	it('pins an exact issuer and omits a regex issuer', () => {
+		expect(
+			verificationPolicy({ identity: /release/, issuer: 'https://issuer.test' })
+		).toStrictEqual({
+			subjectAlternativeName: 'release',
+			extensions: { issuer: 'https://issuer.test' }
+		});
+
+		expect(
+			verificationPolicy({ identity: /release/, issuer: /issuer/ })
+		).toStrictEqual({ subjectAlternativeName: 'release' });
 	});
 });
 

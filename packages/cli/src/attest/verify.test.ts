@@ -148,6 +148,10 @@ function* cycleSigningKeyFixtures(): Generator<SigningKeyFixture, never> {
 
 const signingKeyFixtureSequence = cycleSigningKeyFixtures();
 
+function termText(term: string | RegExp): string {
+	return typeof term === 'string' ? term : term.source;
+}
+
 function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 	return {
 		key: createPublicKey({
@@ -159,11 +163,8 @@ function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 			type: 'spki'
 		}),
 		identity: {
-			subjectAlternativeName:
-				policy.mode === 'exact' ? policy.identity : policy.identity.source,
-			extensions: {
-				issuer: policy.mode === 'exact' ? policy.issuer : policy.issuer.source
-			}
+			subjectAlternativeName: termText(policy.identity),
+			extensions: { issuer: termText(policy.issuer) }
 		}
 	};
 }
@@ -220,11 +221,10 @@ async function signedNarInfo(hash: string = storePathHash): Promise<{
 }
 
 describe('local attestation verification', () => {
-	const policy: VerifiedIdentityPolicy = {
-		mode: 'exact',
+	const policy = {
 		identity: 'alice@example.test',
 		issuer: 'https://issuer.test'
-	};
+	} satisfies VerifiedIdentityPolicy;
 
 	it('returns verified bundle summaries when the subject matches the NAR hash', async () => {
 		const results = await verifyLocalAttestations(
@@ -362,11 +362,10 @@ describe('local attestation verification', () => {
 });
 
 describe('remote attestation verification', () => {
-	const policy: VerifiedIdentityPolicy = {
-		mode: 'exact',
+	const policy = {
 		identity: 'alice@example.test',
 		issuer: 'https://issuer.test'
-	};
+	} satisfies VerifiedIdentityPolicy;
 
 	it('verifies remote bundles through the cache read surface', async () => {
 		const narInfo = await signedNarInfo();
