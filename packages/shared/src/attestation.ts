@@ -29,6 +29,39 @@ const inTotoStatementSchema = z.object({
 	predicate: z.unknown()
 });
 
+const slsaDependencySchema = z.object({
+	digest: z.object({ gitCommit: z.string().optional() }).optional()
+});
+
+const slsaProvenanceSchema = z.object({
+	buildDefinition: z
+		.object({ resolvedDependencies: z.array(slsaDependencySchema).optional() })
+		.optional()
+});
+
+/**
+ * The git commit a SLSA provenance predicate was built from, taken from the
+ * first resolved dependency that records one. Returns undefined when the
+ * predicate is not SLSA provenance or records no commit.
+ */
+export function slsaSourceCommit(predicate: unknown): string | undefined {
+	const parsed = slsaProvenanceSchema.safeParse(predicate);
+
+	if (!parsed.success) {
+		return undefined;
+	}
+
+	const dependencies = parsed.data.buildDefinition?.resolvedDependencies ?? [];
+
+	for (const dependency of dependencies) {
+		if (dependency.digest?.gitCommit !== undefined) {
+			return dependency.digest.gitCommit;
+		}
+	}
+
+	return undefined;
+}
+
 export interface IdentityPolicyOptions {
 	readonly certificateIdentity?: string;
 	readonly certificateIdentityRegex?: string;

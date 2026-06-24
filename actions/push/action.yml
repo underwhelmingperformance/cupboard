@@ -87,5 +87,6 @@ runs:
         INPUT_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
         INPUT_ATTESTATIONS: ${{ inputs.attestations }}
       run: >
-        node --experimental-strip-types --disable-warning=ExperimentalWarning
+        node --experimental-transform-types
+        --disable-warning=ExperimentalWarning
         "$GITHUB_ACTION_PATH/../lib/cupboard-action.ts" push
