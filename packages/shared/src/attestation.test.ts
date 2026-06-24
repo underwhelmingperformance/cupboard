@@ -4,7 +4,8 @@ import {
 	CertificateIdentityModeError,
 	CertificateIssuerModeError,
 	CertificatePolicyModeMismatchError,
-	identityPolicy
+	identityPolicy,
+	slsaSourceCommit
 } from './attestation.ts';
 
 function thrownBy(run: () => unknown): unknown {
@@ -112,5 +113,33 @@ describe('identityPolicy', () => {
 			identity: /alice@.*/,
 			issuer: /https:\/\/issuer[.]test/
 		});
+	});
+});
+
+describe('slsaSourceCommit', () => {
+	it('reads the git commit from the resolved dependencies', () => {
+		expect(
+			slsaSourceCommit({
+				buildDefinition: {
+					resolvedDependencies: [
+						{
+							uri: 'git+https://github.com/owner/repo',
+							digest: { gitCommit: 'abc123' }
+						}
+					]
+				}
+			})
+		).toBe('abc123');
+	});
+
+	it.each([
+		{ name: 'an empty predicate', predicate: {} },
+		{ name: 'a non-object predicate', predicate: 'nope' },
+		{
+			name: 'a dependency without a commit',
+			predicate: { buildDefinition: { resolvedDependencies: [{ digest: {} }] } }
+		}
+	])('returns undefined for $name', ({ predicate }) => {
+		expect(slsaSourceCommit(predicate)).toBeUndefined();
 	});
 });

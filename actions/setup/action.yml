@@ -80,5 +80,6 @@ runs:
         INPUT_READ_PASSWORD: ${{ inputs.read-password }}
         INPUT_NIX_CONFIG_FILE: ${{ inputs.nix-config-file }}
       run: >
-        node --experimental-strip-types --disable-warning=ExperimentalWarning
+        node --experimental-transform-types
+        --disable-warning=ExperimentalWarning
         "$GITHUB_ACTION_PATH/../lib/cupboard-action.ts" setup

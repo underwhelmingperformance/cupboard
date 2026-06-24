@@ -14,10 +14,12 @@ import { pathToFileURL } from 'node:url';
 import {
 	identityPolicy,
 	resultFor,
+	slsaSourceCommit,
 	type VerifiedIdentityPolicy,
 	verifyBundle
 } from '@cupboard/shared/attestation';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
+import { createOctokitClient } from '@cupboard/shared/octokit';
 
 import {
 	AttestationError,
@@ -294,6 +296,8 @@ const provenancePredicateType = 'https://slsa.dev/provenance/v1';
 const githubOidcIssuer = 'https://token.actions.githubusercontent.com';
 const releaseWorkflowPath = '.github/workflows/release.yml';
 
+type Octokit = ReturnType<typeof createOctokitClient>;
+
 interface VerifyReleaseDependencies {
 	readonly fetch?: typeof fetch;
 	readonly verify?: typeof verifyBundle;
@@ -310,39 +314,7 @@ export function releaseWorkflowIdentityRegex(
 ): string {
 	const identity = `https://github.com/${releaseRepository}/${releaseWorkflowPath}`;
 
-	return `^${escapeRegex(identity)}@`;
-}
-
-/**
- * The source commit the SLSA provenance was built from, taken from the first
- * resolved dependency that records a git commit.
- */
-export function provenanceSourceCommit(predicate: unknown): string | undefined {
-	if (!isRecord(predicate) || !isRecord(predicate.buildDefinition)) {
-		return undefined;
-	}
-
-	const dependencies = predicate.buildDefinition.resolvedDependencies;
-
-	if (!Array.isArray(dependencies)) {
-		return undefined;
-	}
-
-	for (const dependency of dependencies) {
-		if (isRecord(dependency) && isRecord(dependency.digest)) {
-			const gitCommit = dependency.digest.gitCommit;
-
-			if (typeof gitCommit === 'string') {
-				return gitCommit;
-			}
-		}
-	}
-
-	return undefined;
-}
-
-function escapeRegex(value: string): string {
-	return value.replaceAll(/[$()*+.?[\\\]^{|}]/gu, String.raw`\$&`);
+	return `^${RegExp.escape(identity)}@`;
 }
 
 export async function setupAction(
@@ -549,28 +521,35 @@ export async function verifyReleaseAttestation(
 	tagName: string,
 	dependencies: VerifyReleaseDependencies = {}
 ): Promise<void> {
-	const fetcher = dependencies.fetch ?? fetch;
+	const octokit = createOctokitClient({
+		...(options.githubToken !== '' && { auth: options.githubToken }),
+		...(dependencies.fetch !== undefined && {
+			request: { fetch: dependencies.fetch }
+		})
+	});
 	const verify = dependencies.verify ?? verifyBundle;
+	const [owner, repo] = splitRepository(options.releaseRepository);
 	const archiveName = path.basename(archivePath);
 	const subjectDigest = createHash('sha256')
 		.update(await readFile(archivePath))
 		.digest('hex');
 	const bundles = await fetchAttestationBundles(
-		options,
-		subjectDigest,
-		fetcher
+		octokit,
+		owner,
+		repo,
+		subjectDigest
 	);
 
 	if (bundles.length === 0) {
 		throw new AttestationError(`no attestation was found for ${archiveName}`);
 	}
 
-	const tagCommit = await fetchTagCommit(options, tagName, fetcher);
+	const tagCommit = await fetchTagCommit(octokit, owner, repo, tagName);
 	const policy = identityPolicy({
 		certificateIdentityRegex: releaseWorkflowIdentityRegex(
 			options.releaseRepository
 		),
-		certificateOidcIssuerRegex: `^${escapeRegex(githubOidcIssuer)}$`
+		certificateOidcIssuerRegex: `^${RegExp.escape(githubOidcIssuer)}$`
 	});
 	const failures: string[] = [];
 
@@ -623,7 +602,7 @@ async function verifyOneReleaseBundle(arguments_: {
 		provenancePredicateType
 	);
 
-	const sourceCommit = provenanceSourceCommit(verified.predicate);
+	const sourceCommit = slsaSourceCommit(verified.predicate);
 
 	if (sourceCommit !== arguments_.tagCommit) {
 		throw new AttestationError(
@@ -633,71 +612,99 @@ async function verifyOneReleaseBundle(arguments_: {
 }
 
 async function fetchAttestationBundles(
-	options: Omit<InstallCupboardOptions, 'installDirectory'>,
-	subjectDigest: string,
-	fetcher: typeof fetch
+	octokit: Octokit,
+	owner: string,
+	repo: string,
+	subjectDigest: string
 ): Promise<Uint8Array[]> {
-	const apiUrl = new URL(
-		`/repos/${options.releaseRepository}/attestations/sha256:${subjectDigest}`,
-		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
+	const attestations = await listAttestations(
+		octokit,
+		owner,
+		repo,
+		subjectDigest
 	);
-	const response = await fetcher(apiUrl, {
-		headers: requestHeaders(options.githubToken)
-	});
-
-	if (!response.ok) {
-		throw new GithubApiError(
-			`failed to fetch attestations: ${String(response.status)}`
-		);
-	}
-
-	const body: unknown = await response.json();
-
-	if (!isRecord(body) || !Array.isArray(body.attestations)) {
-		throw new MalformedResponseError(
-			'GitHub attestations response had an unexpected shape'
-		);
-	}
-
 	const encoder = new TextEncoder();
+	const bundles: Uint8Array[] = [];
 
-	return body.attestations.map((attestation) => {
-		if (!isRecord(attestation) || attestation.bundle === undefined) {
-			throw new MalformedResponseError('GitHub attestation had no bundle');
+	for (const attestation of attestations) {
+		if (attestation.bundle !== undefined) {
+			bundles.push(encoder.encode(JSON.stringify(attestation.bundle)));
+		}
+	}
+
+	return bundles;
+}
+
+async function listAttestations(
+	octokit: Octokit,
+	owner: string,
+	repo: string,
+	subjectDigest: string
+): Promise<readonly { readonly bundle?: unknown }[]> {
+	try {
+		const { data } = await octokit.rest.repos.listAttestations({
+			owner,
+			repo,
+			subject_digest: `sha256:${subjectDigest}`
+		});
+
+		return data.attestations ?? [];
+	} catch (error) {
+		if (isStatus(error, 404)) {
+			return [];
 		}
 
-		return encoder.encode(JSON.stringify(attestation.bundle));
-	});
+		throw new GithubApiError(
+			`failed to fetch attestations: ${errorStatusText(error)}`
+		);
+	}
 }
 
 async function fetchTagCommit(
-	options: Omit<InstallCupboardOptions, 'installDirectory'>,
-	tagName: string,
-	fetcher: typeof fetch
+	octokit: Octokit,
+	owner: string,
+	repo: string,
+	tagName: string
 ): Promise<string> {
-	const apiUrl = new URL(
-		`/repos/${options.releaseRepository}/commits/${tagName}`,
-		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
-	);
-	const response = await fetcher(apiUrl, {
-		headers: requestHeaders(options.githubToken)
-	});
+	try {
+		const { data } = await octokit.rest.repos.getCommit({
+			owner,
+			repo,
+			ref: tagName
+		});
 
-	if (!response.ok) {
+		return data.sha;
+	} catch (error) {
 		throw new GithubApiError(
-			`could not resolve the commit for tag ${tagName}: ${String(response.status)}`
+			`could not resolve the commit for tag ${tagName}: ${errorStatusText(error)}`
+		);
+	}
+}
+
+function splitRepository(releaseRepository: string): readonly [string, string] {
+	const slash = releaseRepository.indexOf('/');
+
+	if (slash <= 0 || slash === releaseRepository.length - 1) {
+		throw new InvalidInputError(
+			'release-repository',
+			`release-repository must be <owner>/<name>, got '${releaseRepository}'`
 		);
 	}
 
-	const body: unknown = await response.json();
+	return [
+		releaseRepository.slice(0, slash),
+		releaseRepository.slice(slash + 1)
+	];
+}
 
-	if (!isRecord(body) || typeof body.sha !== 'string') {
-		throw new MalformedResponseError(
-			`could not resolve the commit for tag ${tagName}`
-		);
-	}
+function isStatus(error: unknown, status: number): boolean {
+	return isRecord(error) && error.status === status;
+}
 
-	return body.sha;
+function errorStatusText(error: unknown): string {
+	return isRecord(error) && typeof error.status === 'number'
+		? String(error.status)
+		: 'an unknown error';
 }
 
 async function configureNix(inputs: ConfigureNixInputs): Promise<void> {
