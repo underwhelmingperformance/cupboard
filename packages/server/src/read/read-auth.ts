@@ -1,3 +1,4 @@
+import { base64ToBytes, bytesToBase64Url } from '@cupboard/nix/encoding';
 import { StatusCodes } from 'http-status-codes';
 
 import { isConstantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';
@@ -28,7 +29,7 @@ export function generateReadPasswordSalt(): string {
 	const bytes = new Uint8Array(16);
 	crypto.getRandomValues(bytes);
 
-	return base64Url(bytes);
+	return bytesToBase64Url(bytes);
 }
 
 /**
@@ -68,15 +69,6 @@ export async function authoriseRead(
 	return isUserMatching && isPasswordMatching;
 }
 
-function base64Url(bytes: Uint8Array): string {
-	const binary = String.fromCodePoint(...bytes);
-
-	return btoa(binary)
-		.replaceAll('+', '-')
-		.replaceAll('/', '_')
-		.replace(/=+$/, '');
-}
-
 export function unauthorisedResponse(): Response {
 	return new Response('Unauthorised\n', {
 		status: StatusCodes.UNAUTHORIZED,
@@ -89,12 +81,7 @@ export function unauthorisedResponse(): Response {
 
 function decodeBasic(value: string): string | undefined {
 	try {
-		const binary = atob(value);
-		const decoder = new TextDecoder();
-
-		return decoder.decode(
-			Uint8Array.from(binary, (character) => character.codePointAt(0) ?? 0)
-		);
+		return new TextDecoder().decode(base64ToBytes(value));
 	} catch {
 		return undefined;
 	}

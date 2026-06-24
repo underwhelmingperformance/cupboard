@@ -1,3 +1,5 @@
+import { base64ToBytes, bytesToBase64 } from '@cupboard/nix/encoding';
+
 import { parseJwk } from '../crypto/crypto.ts';
 import {
 	ControlWrappedKeyMalformedError,
@@ -48,7 +50,7 @@ export async function wrapControlPrivateJwk(
 		textEncoder.encode(JSON.stringify(privateJwk))
 	);
 
-	return `${base64(iv)}.${base64(new Uint8Array(ciphertext))}`;
+	return `${bytesToBase64(iv)}.${bytesToBase64(new Uint8Array(ciphertext))}`;
 }
 
 // Recovers a control private JWK wrapped by {@link wrapControlPrivateJwk}. A wrong
@@ -78,15 +80,4 @@ export async function unwrapControlPrivateJwk(
 	}
 
 	return parseJwk(textDecoder.decode(plaintext));
-}
-
-function base64(bytes: Uint8Array): string {
-	return btoa(String.fromCodePoint(...bytes));
-}
-
-function base64ToBytes(value: string): Uint8Array {
-	return Uint8Array.from(
-		atob(value),
-		(character) => character.codePointAt(0) ?? 0
-	);
 }

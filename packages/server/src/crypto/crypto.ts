@@ -1,3 +1,5 @@
+import { bytesToBase64, bytesToHex } from '@cupboard/nix/encoding';
+
 const textEncoder = new TextEncoder();
 
 export async function sha256Hex(value: string): Promise<string> {
@@ -7,7 +9,7 @@ export async function sha256Hex(value: string): Promise<string> {
 export async function sha256HexBytes(bytes: Uint8Array): Promise<string> {
 	const digest = await crypto.subtle.digest('SHA-256', bytes);
 
-	return hex(new Uint8Array(digest));
+	return bytesToHex(new Uint8Array(digest));
 }
 
 export function isConstantTimeEqual(left: string, right: string): boolean {
@@ -42,7 +44,7 @@ export async function generateSigningKey(name: string): Promise<{
 
 	return {
 		privateJwk,
-		publicKey: `${name}:${base64(new Uint8Array(publicRaw))}`
+		publicKey: `${name}:${bytesToBase64(new Uint8Array(publicRaw))}`
 	};
 }
 
@@ -87,13 +89,5 @@ export async function signNixFingerprint(
 		textEncoder.encode(fingerprint)
 	);
 
-	return `${name}:${base64(new Uint8Array(signature))}`;
-}
-
-function base64(bytes: Uint8Array): string {
-	return btoa(String.fromCodePoint(...bytes));
-}
-
-function hex(bytes: Uint8Array): string {
-	return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+	return `${name}:${bytesToBase64(new Uint8Array(signature))}`;
 }
