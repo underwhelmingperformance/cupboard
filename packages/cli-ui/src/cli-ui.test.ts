@@ -1,6 +1,7 @@
 import { Writable } from 'node:stream';
 
 import type { ReporterMode } from '@cupboard/reporter';
+import pc from 'picocolors';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -16,13 +17,7 @@ import {
 import { fakeCliUi } from './testing.ts';
 
 const escape = String.fromCodePoint(27);
-
-function stripColours(value: string): string {
-	return value
-		.split(escape)
-		.map((part, index) => (index === 0 ? part : part.replace(/^\[\d+m/, '')))
-		.join('');
-}
+const plain = pc.createColors(false);
 
 /** Collects everything written to an in-memory stream. */
 function captureStream(): { stream: Writable; written: () => string } {
@@ -51,11 +46,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 describe('formatRows', () => {
 	it('aligns values to the widest label', () => {
-		const formatted = stripColours(
-			formatRows([
+		const formatted = formatRows(
+			[
 				{ label: 'Account', value: 'acc-1' },
 				{ label: 'Custom domain', value: 'cache.example.com' }
-			])
+			],
+			plain
 		);
 
 		expect(formatted).toBe(
@@ -64,9 +60,18 @@ describe('formatRows', () => {
 	});
 
 	it('renders a single row without padding beyond its own label', () => {
-		expect(
-			stripColours(formatRows([{ label: 'Account', value: 'acc-1' }]))
-		).toBe('Account  acc-1');
+		expect(formatRows([{ label: 'Account', value: 'acc-1' }], plain)).toBe(
+			'Account  acc-1'
+		);
+	});
+
+	it('dims the label with ANSI when colour is enabled', () => {
+		const coloured = formatRows(
+			[{ label: 'Account', value: 'acc-1' }],
+			pc.createColors(true)
+		);
+
+		expect(coloured).toBe(`${pc.createColors(true).dim('Account')}  acc-1`);
 	});
 });
 

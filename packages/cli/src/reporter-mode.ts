@@ -3,18 +3,17 @@ import { env, stderr } from 'node:process';
 import type { ReporterMode } from '@cupboard/reporter';
 
 /**
- * Resolve a CLI's reporter mode from its `--colour` flag and the environment.
- * The precedence is `--colour`/`--no-colour` > `FORCE_COLOR` > `PRE_COMMIT` >
- * whether stderr is a TTY: `--colour` forces the spinner and `--no-colour`
- * forces line-delimited JSON; `FORCE_COLOR` forces the spinner even with no TTY
- * (a CI that captures a terminal); pre-commit hooks default to JSON because
- * pre-commit captures hook output even when stderr is a TTY. `NO_COLOR` does not
- * appear here: it desaturates the terminal output (picocolors honours it) rather
- * than switching to JSON.
+ * Resolve a CLI's reporter mode from its `--output-mode` flag and the
+ * environment. An explicit `--output-mode` wins; otherwise the precedence is
+ * `FORCE_COLOR` > `PRE_COMMIT` > whether stderr is a TTY. `FORCE_COLOR` forces
+ * the spinner even with no TTY (a CI that captures a terminal); pre-commit hooks
+ * default to JSON because pre-commit captures hook output even when stderr is a
+ * TTY. Colour saturation is a separate axis, chosen by `--colour`/`--no-colour`
+ * and `NO_COLOR`; it does not select the mode here.
  */
-export function resolveReporterMode(hasColour?: boolean): ReporterMode {
-	if (hasColour !== undefined) {
-		return hasColour ? 'terminal' : 'json';
+export function resolveReporterMode(mode?: ReporterMode): ReporterMode {
+	if (mode !== undefined) {
+		return mode;
 	}
 
 	if (

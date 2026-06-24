@@ -143,6 +143,8 @@ export interface DeployCliOptions {
 
 export interface DeployRuntimeOptions {
 	readonly signal?: AbortSignal;
+	/** ANSI colour preference from `--colour`/`--no-colour`. */
+	readonly colour?: boolean;
 }
 
 function bucketNameOf(config: DeploymentConfig): string {
@@ -872,7 +874,10 @@ export async function executeDeploy(
 ): Promise<void> {
 	throwIfAborted(runtimeOptions.signal);
 
-	const ui = createDeployUi(runtimeOptions.signal);
+	const ui = createDeployUi({
+		signal: runtimeOptions.signal,
+		colour: runtimeOptions.colour
+	});
 	const isInteractive = ui.interactive;
 
 	try {
