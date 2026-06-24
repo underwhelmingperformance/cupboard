@@ -10,6 +10,7 @@ import {
 	assetNameFor,
 	buildPushArguments,
 	cachePublicKeyRequestHeaders,
+	cachePublicKeyUrl,
 	cacheUrlFor,
 	narHashToHex,
 	normaliseTrustedPublicKeys,
@@ -138,6 +139,22 @@ describe('cacheUrlFor', () => {
 		['https://cache.example.test', 'ci', 'https://cache.example.test/cache/ci']
 	])('builds a substituter URL', (baseUrl, cache, expected) => {
 		expect(cacheUrlFor(baseUrl, cache)).toBe(expected);
+	});
+});
+
+describe('cachePublicKeyUrl', () => {
+	it.each([
+		[
+			'https://cache.example.test/t/acme',
+			'https://cache.example.test/t/acme/pubkey'
+		],
+		[
+			'https://cache.example.test/t/acme/',
+			'https://cache.example.test/t/acme/pubkey'
+		],
+		['https://cache.example.test', 'https://cache.example.test/pubkey']
+	])('keeps the tenant path for %s', (cacheUrl, expected) => {
+		expect(cachePublicKeyUrl(cacheUrl)).toBe(expected);
 	});
 });
 

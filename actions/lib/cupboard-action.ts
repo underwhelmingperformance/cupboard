@@ -23,6 +23,7 @@ import { createOctokitClient } from '@cupboard/shared/octokit';
 
 import {
 	AttestationError,
+	CachePublicKeyError,
 	ChecksumError,
 	CommandFailedError,
 	GithubApiError,
@@ -226,6 +227,15 @@ export function cacheUrlFor(baseUrl: string, cache: string): string {
 	}
 
 	return `${trimmedBaseUrl}/cache/${encodeURIComponent(cache.trim())}`;
+}
+
+/**
+ * The cache's signing-key URL for a cache base URL. The base URL carries the
+ * tenant path (`/t/<slug>`), so the key path is appended to the whole URL to
+ * keep that path.
+ */
+export function cachePublicKeyUrl(cacheUrl: string): string {
+	return `${cacheUrl.replace(/\/+$/u, '')}/pubkey`;
 }
 
 export function renderNixConfig(options: NixConfigOptions): string {
@@ -761,13 +771,12 @@ function environmentFileBlock(name: string, value: string): string {
 async function fetchTrustedPublicKey(
 	inputs: ConfigureNixInputs
 ): Promise<string> {
-	const pubkeyUrl = new URL('/pubkey', inputs.cacheUrl);
-	const response = await fetch(pubkeyUrl, {
+	const response = await fetch(cachePublicKeyUrl(inputs.cacheUrl), {
 		headers: cachePublicKeyRequestHeaders()
 	});
 
 	if (!response.ok) {
-		throw new GithubApiError(
+		throw new CachePublicKeyError(
 			`failed to fetch cache public key: ${String(response.status)}`
 		);
 	}
@@ -776,7 +785,7 @@ async function fetchTrustedPublicKey(
 	const trimmedPublicKey = publicKey.trim();
 
 	if (trimmedPublicKey === '') {
-		throw new MalformedResponseError('cache public key response was empty');
+		throw new CachePublicKeyError('cache public key response was empty');
 	}
 
 	console.warn(
