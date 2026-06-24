@@ -1,3 +1,4 @@
+import { bytesToBase64, bytesToHex } from './encoding.ts';
 import {
 	InvalidNixSha256HashError,
 	InvalidSha256DigestLengthError
@@ -10,8 +11,6 @@ import {
 } from './scalars.ts';
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
-const base64Alphabet =
-	'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
 const nixSha256Base32Length = 52;
 
 export class NixSha256Hash {
@@ -56,9 +55,7 @@ export class NixSha256Hash {
 
 	/** The raw digest as lowercase hex, the form an in-toto subject uses. */
 	digestHex(): Sha256HexDigest {
-		return sha256HexDigestSchema.parse(
-			[...this.bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')
-		);
+		return sha256HexDigestSchema.parse(bytesToHex(this.bytes));
 	}
 
 	toString(): string {
@@ -131,26 +128,4 @@ export function fromNixBase32(value: string): Uint8Array {
 	}
 
 	return bytes;
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-	let result = '';
-
-	for (let index = 0; index < bytes.byteLength; index += 3) {
-		const first = bytes[index] ?? 0;
-		const second = bytes[index + 1];
-		const third = bytes[index + 2];
-		const combined = (first << 16) | ((second ?? 0) << 8) | (third ?? 0);
-
-		result += base64Alphabet[(combined >> 18) & 0x3f] ?? '';
-		result += base64Alphabet[(combined >> 12) & 0x3f] ?? '';
-		result +=
-			second === undefined
-				? '='
-				: (base64Alphabet[(combined >> 6) & 0x3f] ?? '');
-		result +=
-			third === undefined ? '=' : (base64Alphabet[combined & 0x3f] ?? '');
-	}
-
-	return result;
 }

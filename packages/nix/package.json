@@ -12,6 +12,7 @@
 	},
 	"exports": {
 		"./cache-info": "./src/cache-info.ts",
+		"./encoding": "./src/encoding.ts",
 		"./errors": "./src/errors.ts",
 		"./hash": "./src/hash.ts",
 		"./narinfo": "./src/narinfo.ts",
