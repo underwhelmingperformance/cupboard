@@ -3,7 +3,7 @@ import {
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix/scalars';
-import { resolveRootTargets } from '@cupboard/nix/store-path';
+import { byCodeUnit, resolveRootTargets } from '@cupboard/nix/store-path';
 import {
 	type ParsedRootSetBody,
 	type RootListResponse,
@@ -18,11 +18,7 @@ import { RootTargetsUnavailableError } from '../errors.ts';
 import { coldPathTtlSeconds, resolveRootExpiry } from '../policy/cold-path.ts';
 
 import { type CacheAdminService } from './cache-admin-service.ts';
-import {
-	compareStrings,
-	type RootSetCommand,
-	type ServerContext
-} from './context.ts';
+import { type RootSetCommand, type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
 
@@ -187,7 +183,7 @@ export class RootsService {
 					storePath: target.storePath,
 					present: presence.get(target.storePathHash) === true
 				}))
-				.toSorted((a, b) => compareStrings(a.storePathHash, b.storePathHash))
+				.toSorted((a, b) => byCodeUnit(a.storePathHash, b.storePathHash))
 		};
 	}
 
@@ -276,7 +272,7 @@ export class RootsService {
 		}
 
 		return {
-			roots: summaries.toSorted((a, b) => compareStrings(a.name, b.name))
+			roots: summaries.toSorted((a, b) => byCodeUnit(a.name, b.name))
 		};
 	}
 

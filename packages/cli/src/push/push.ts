@@ -8,7 +8,7 @@ import {
 	type Sha256HexDigest,
 	sha256HexDigestSchema
 } from '@cupboard/nix/scalars';
-import { StorePath } from '@cupboard/nix/store-path';
+import { byCodeUnit, StorePath } from '@cupboard/nix/store-path';
 import type {
 	AttestationAttachResponse,
 	AttestationDecision,
@@ -900,23 +900,11 @@ function formatExpiry(summary: RootSummary): string {
 		: `expires ${summary.expiresAt}`;
 }
 
-function compareStrings(left: string, right: string): number {
-	if (left < right) {
-		return -1;
-	}
-
-	if (left > right) {
-		return 1;
-	}
-
-	return 0;
-}
-
 function describePinExpiry(summaries: readonly RootSummary[]): string {
 	const expiries = summaries
 		.map((summary) => summary.expiresAt)
 		.filter((expiresAt) => expiresAt !== undefined)
-		.toSorted(compareStrings);
+		.toSorted(byCodeUnit);
 	const earliest = expiries.at(0);
 	const latest = expiries.at(-1);
 

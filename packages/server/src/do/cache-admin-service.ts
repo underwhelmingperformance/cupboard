@@ -5,6 +5,7 @@ import {
 	cachePrioritySchema,
 	DEFAULT_CACHE
 } from '@cupboard/nix/scalars';
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import {
 	type CacheListResponse,
 	type CacheRemoveResponse,
@@ -16,7 +17,7 @@ import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 
-import { compareStrings, type ServerContext } from './context.ts';
+import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 
 export class CacheAdminService {
@@ -45,7 +46,7 @@ export class CacheAdminService {
 		const registered = this.context.db.select().from(schema.caches).all();
 		const caches = registered
 			.map((row) => this.cacheSummary(row.name, row.priority))
-			.toSorted((left, right) => compareStrings(left.name, right.name));
+			.toSorted((left, right) => byCodeUnit(left.name, right.name));
 
 		return { caches };
 	}

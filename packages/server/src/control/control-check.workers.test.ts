@@ -6,7 +6,6 @@ import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import {
-	compareStrings,
 	controlFetch,
 	issueControlAdminToken,
 	resetTestServer
@@ -89,7 +88,7 @@ describe('control plane GET /control/check', () => {
 					protocol: signed.protocol,
 					host: signed.host,
 					pathname: signed.pathname,
-					searchKeys: searchKeys.toSorted(compareStrings)
+					searchKeys
 				}
 			}).toStrictEqual({
 				status: 200,

@@ -1,3 +1,4 @@
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -7,7 +8,6 @@ import { z } from 'zod';
 import { issueAccessJwt, verifyAccessJwt } from '../auth/auth.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { LastControlKeyError } from '../errors.ts';
-import { compareStrings } from '../test-support.ts';
 
 import {
 	activeControlKey,
@@ -91,7 +91,7 @@ describe('control key store', () => {
 		const verificationKeys = await controlVerificationKeys(database);
 		const publishedKids = verificationKeys
 			.map((key) => key.kid)
-			.toSorted(compareStrings);
+			.toSorted(byCodeUnit);
 		const summaries = await controlKeySummaries(database);
 
 		expect({
@@ -103,7 +103,7 @@ describe('control key store', () => {
 		}).toStrictEqual({
 			activeKid: secondKid,
 			rotated: true,
-			publishedKids: [firstKid, secondKid].toSorted(compareStrings),
+			publishedKids: [firstKid, secondKid].toSorted(byCodeUnit),
 			retiring: { kid: firstKid, scheduledRetireAt: t1RetireAt },
 			summaries: [
 				{ kid: firstKid, retired: false, scheduledRetireAt: t1RetireAt },

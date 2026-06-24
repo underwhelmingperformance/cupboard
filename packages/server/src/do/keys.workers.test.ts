@@ -1,3 +1,4 @@
+import { byCodeUnit } from '@cupboard/nix/store-path';
 import type {
 	KeyRetireResponse,
 	KeyRotateResponse
@@ -22,8 +23,6 @@ import {
 	uploadMetadata,
 	verifyNarInfoSignature
 } from '../test-support.ts';
-
-import { compareStrings } from './context.ts';
 
 async function rotate(
 	token: string
@@ -90,7 +89,7 @@ describe('signing key rotation', () => {
 		expect({
 			rotationStatus: rotation.status,
 			rotatedStage: rotated.stage,
-			publishedKeys: published.toSorted(compareStrings),
+			publishedKeys: published.toSorted(byCodeUnit),
 			before: {
 				sigs: beforeNarInfo.sigs.length,
 				verifiesUnderOld: await verifyNarInfoSignature(beforeNarInfo, oldKey),
@@ -104,7 +103,7 @@ describe('signing key rotation', () => {
 		}).toStrictEqual({
 			rotationStatus: StatusCodes.OK,
 			rotatedStage: 'signing',
-			publishedKeys: [oldKey, newKey].toSorted(compareStrings),
+			publishedKeys: [oldKey, newKey].toSorted(byCodeUnit),
 			before: { sigs: 1, verifiesUnderOld: true, verifiesUnderNew: false },
 			after: { sigs: 2, verifiesUnderOld: true, verifiesUnderNew: true }
 		});
