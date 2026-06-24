@@ -15,6 +15,12 @@ inputs:
       or v1.2.3.
     required: false
     default: latest
+  include-prereleases:
+    description:
+      When resolving latest, consider prereleases and install the newest release
+      of any kind.
+    required: false
+    default: 'true'
   github-token:
     description: GitHub token used for release API calls.
     required: false
@@ -75,6 +81,7 @@ runs:
         INPUT_URL: ${{ inputs.url }}
         INPUT_PATHS: ${{ inputs.paths }}
         INPUT_CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
+        INPUT_INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
         INPUT_GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
         INPUT_RELEASE_REPOSITORY:
           ${{ inputs.release-repository || github.action_repository }}

@@ -41,10 +41,27 @@ export class GithubApiError extends CodedError {
 	}
 }
 
-export class MalformedResponseError extends CodedError {
-	constructor(message: string) {
-		super(message);
-		this.name = 'MalformedResponseError';
+export class MalformedReleaseResponseError extends CodedError {
+	constructor() {
+		super('the GitHub release API returned an unexpected response');
+		this.name = 'MalformedReleaseResponseError';
+	}
+}
+
+export class NoReleaseFoundError extends CodedError {
+	constructor(public readonly releaseRepository: string) {
+		super(`no published release was found in ${releaseRepository}`);
+		this.name = 'NoReleaseFoundError';
+	}
+}
+
+export class ReleaseAssetNotFoundError extends CodedError {
+	constructor(
+		public readonly tag: string,
+		public readonly assetName: string
+	) {
+		super(`release ${tag} has no ${assetName} asset`);
+		this.name = 'ReleaseAssetNotFoundError';
 	}
 }
 

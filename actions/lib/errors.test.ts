@@ -8,9 +8,11 @@ import {
 	CommandFailedError,
 	GithubApiError,
 	InvalidInputError,
-	MalformedResponseError,
+	MalformedReleaseResponseError,
 	MissingInputError,
 	NixError,
+	NoReleaseFoundError,
+	ReleaseAssetNotFoundError,
 	UnknownCommandError,
 	UnsupportedPlatformError
 } from './errors.ts';
@@ -31,8 +33,18 @@ describe('action errors', () => {
 		['UnknownCommandError', new UnknownCommandError('frob'), usageExitCode],
 		['GithubApiError', new GithubApiError('boom'), genericExitCode],
 		[
-			'MalformedResponseError',
-			new MalformedResponseError('boom'),
+			'MalformedReleaseResponseError',
+			new MalformedReleaseResponseError(),
+			genericExitCode
+		],
+		[
+			'NoReleaseFoundError',
+			new NoReleaseFoundError('owner/repo'),
+			genericExitCode
+		],
+		[
+			'ReleaseAssetNotFoundError',
+			new ReleaseAssetNotFoundError('v1.2.3', 'cupboard.tar.gz'),
 			genericExitCode
 		],
 		['ChecksumError', new ChecksumError('boom'), genericExitCode],

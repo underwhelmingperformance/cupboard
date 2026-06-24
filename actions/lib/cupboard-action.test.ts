@@ -13,6 +13,7 @@ import {
 	cachePublicKeyUrl,
 	cacheUrlFor,
 	dispatch,
+	fetchRelease,
 	narHashToHex,
 	normaliseTrustedPublicKeys,
 	normaliseVersion,
@@ -30,6 +31,8 @@ import {
 import {
 	AttestationError,
 	InvalidInputError,
+	MalformedReleaseResponseError,
+	NoReleaseFoundError,
 	UnknownCommandError,
 	UnsupportedPlatformError
 } from './errors.ts';
@@ -281,6 +284,7 @@ const attestationTagCommit = 'a'.repeat(40);
 const attestationOptions = {
 	releaseRepository: 'owner/repo',
 	version: 'v1.0.0',
+	includePrereleases: false,
 	githubToken: '',
 	environment: {}
 };
@@ -437,6 +441,89 @@ describe('verifyReleaseAttestation', () => {
 					})
 			})
 		).rejects.toThrow(AttestationError);
+	});
+});
+
+function releaseFetcher(handler: (url: URL) => unknown): typeof fetch {
+	return (input) => {
+		const url = new URL(attestationInputUrl(input));
+
+		return Promise.resolve(Response.json(handler(url)));
+	};
+}
+
+describe('fetchRelease', () => {
+	const base = {
+		releaseRepository: 'owner/repo',
+		githubToken: '',
+		environment: {}
+	};
+
+	it('installs the newest non-draft release when prereleases are allowed', async () => {
+		const release = await fetchRelease(
+			{ ...base, version: 'latest', includePrereleases: true },
+			releaseFetcher((url) => {
+				expect(url.pathname).toBe('/repos/owner/repo/releases');
+
+				return [
+					{ draft: true, tag_name: 'v9.9.9-draft', assets: [] },
+					{
+						draft: false,
+						tag_name: 'v0.0.2',
+						assets: [{ name: 'a', url: 'u' }]
+					}
+				];
+			})
+		);
+
+		expect(release).toStrictEqual({
+			tagName: 'v0.0.2',
+			assets: [{ name: 'a', url: 'u' }]
+		});
+	});
+
+	it('installs the stable release when prereleases are excluded', async () => {
+		const release = await fetchRelease(
+			{ ...base, version: 'latest', includePrereleases: false },
+			releaseFetcher((url) => {
+				expect(url.pathname).toBe('/repos/owner/repo/releases/latest');
+
+				return { tag_name: 'v1.0.0', assets: [] };
+			})
+		);
+
+		expect(release.tagName).toBe('v1.0.0');
+	});
+
+	it('installs a specific tag regardless of the prerelease setting', async () => {
+		const release = await fetchRelease(
+			{ ...base, version: 'v1.2.3', includePrereleases: true },
+			releaseFetcher((url) => {
+				expect(url.pathname).toBe('/repos/owner/repo/releases/tags/v1.2.3');
+
+				return { tag_name: 'v1.2.3', assets: [] };
+			})
+		);
+
+		expect(release.tagName).toBe('v1.2.3');
+	});
+
+	it('rejects when only draft releases exist', async () => {
+		await expect(
+			fetchRelease(
+				{ ...base, version: 'latest', includePrereleases: true },
+				releaseFetcher(() => [{ draft: true, tag_name: 'v1', assets: [] }])
+			)
+		).rejects.toThrow(NoReleaseFoundError);
+	});
+
+	it('rejects a malformed release response', async () => {
+		await expect(
+			fetchRelease(
+				{ ...base, version: 'v1.2.3', includePrereleases: false },
+				releaseFetcher(() => ({ unexpected: true }))
+			)
+		).rejects.toThrow(MalformedReleaseResponseError);
 	});
 });
 
