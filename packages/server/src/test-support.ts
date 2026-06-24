@@ -2675,7 +2675,10 @@ export function uploadMetadata(
 }
 
 export function nixSha256Hash(character: string): NixSha256HashString {
-	return nixSha256HashSchema.parse(`sha256:${character.repeat(52)}`);
+	// The most-significant base32 digit must leave the digest's overflow bits
+	// zero, so pin it to '0' and fill the rest with the marker character to keep
+	// each fixture canonical and distinct.
+	return nixSha256HashSchema.parse(`sha256:0${character.repeat(51)}`);
 }
 
 export function tenantId(name: string): TenantId {

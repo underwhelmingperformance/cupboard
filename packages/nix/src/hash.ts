@@ -118,11 +118,19 @@ export function fromNixBase32(value: string): Uint8Array {
 
 		for (let bit = 0; bit < 5; bit += 1) {
 			const sourceBit = index * 5 + bit;
+			const bitValue = (digit >> bit) & 1;
 
-			if (sourceBit < bytes.byteLength * 8) {
+			if (sourceBit >= bytes.byteLength * 8) {
+				// The most-significant base32 digit spans more bits than a 256-bit
+				// digest holds. A canonical encoding leaves those overflow bits zero,
+				// so reject a value that sets them instead of silently dropping them.
+				if (bitValue === 1) {
+					throw new InvalidNixSha256HashError(value);
+				}
+			} else {
 				const byteIndex = Math.floor(sourceBit / 8);
 				bytes[byteIndex] =
-					(bytes[byteIndex] ?? 0) | (((digit >> bit) & 1) << (sourceBit % 8));
+					(bytes[byteIndex] ?? 0) | (bitValue << (sourceBit % 8));
 			}
 		}
 	}
