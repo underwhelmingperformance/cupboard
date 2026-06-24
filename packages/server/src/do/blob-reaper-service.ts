@@ -288,15 +288,17 @@ export class BlobReaperService {
 			.where(eq(d1Schema.blobReference.narHash, narHash))
 			.all();
 
-		const byTenant = new Map<string, DemoteTarget[]>();
+		const edgesByTenant = Map.groupBy(edges, (edge) => edge.tenant);
 
-		for (const edge of edges) {
-			const targets = byTenant.get(edge.tenant) ?? [];
-			targets.push({ cache: edge.cache, storePathHash: edge.storePathHash });
-			byTenant.set(edge.tenant, targets);
-		}
-
-		return byTenant;
+		return new Map(
+			edgesByTenant.entries().map(([tenant, group]) => [
+				tenant,
+				group.map((edge) => ({
+					cache: edge.cache,
+					storePathHash: edge.storePathHash
+				}))
+			])
+		);
 	}
 
 	// One keyset page of `blob_state` after the cursor, the Drizzle cursor-pagination

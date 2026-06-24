@@ -88,6 +88,11 @@ export function captureGroups(pattern: string): string[] {
 	return Object.keys(compileCapture(pattern).namedGroups());
 }
 
+/** Quote text for literal interpolation into an RE2 pattern. */
+export function quotePatternLiteral(value: string): string {
+	return RE2JS.quote(value);
+}
+
 /**
  * Resolve a substitution to a concrete string from the verified claims. Throws
  * {@link SubstitutionError} when the claim is absent or a capture does not match.

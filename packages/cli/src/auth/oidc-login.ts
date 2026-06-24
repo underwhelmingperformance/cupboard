@@ -485,12 +485,11 @@ function bindLoopbackServer(
 	const callbackPath = options.path ?? '/callback';
 
 	return new Promise((resolveServer, rejectServer) => {
-		let resolveCode!: (code: string) => void;
-		let rejectCode!: (error: Error) => void;
-		const code = new Promise<string>((resolve, reject) => {
-			resolveCode = resolve;
-			rejectCode = reject;
-		});
+		const {
+			promise: code,
+			resolve: resolveCode,
+			reject: rejectCode
+		} = Promise.withResolvers<string>();
 
 		const server = createServer((request, response) => {
 			const url = new URL(request.url ?? '/', 'http://127.0.0.1');
