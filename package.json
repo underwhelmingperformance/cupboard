@@ -60,7 +60,7 @@
 		"fix:format": "prettier --write .",
 		"fix:lint": "eslint . --fix",
 		"fixtures:generate": "node tests/fixtures/generate.ts",
-		"test:actions": "vitest run actions/lib/cupboard-action.test.ts",
+		"test:actions": "vitest run actions/lib",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts",
 		"test:release": "vitest run scripts/release.test.ts"
 	},

@@ -1,5 +1,5 @@
 import { createHash, createPublicKey } from 'node:crypto';
-import { mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -12,6 +12,7 @@ import {
 	cachePublicKeyRequestHeaders,
 	cachePublicKeyUrl,
 	cacheUrlFor,
+	dispatch,
 	narHashToHex,
 	normaliseTrustedPublicKeys,
 	normaliseVersion,
@@ -23,11 +24,13 @@ import {
 	renderNixConfig,
 	setupAction,
 	splitRepository,
-	verifyReleaseAttestation
+	verifyReleaseAttestation,
+	writeNetrc
 } from './cupboard-action.ts';
 import {
 	AttestationError,
 	InvalidInputError,
+	UnknownCommandError,
 	UnsupportedPlatformError
 } from './errors.ts';
 
@@ -386,6 +389,88 @@ describe('verifyReleaseAttestation', () => {
 				fetch: stubAttestationFetch([])
 			})
 		).rejects.toThrow(AttestationError);
+	});
+
+	it('accepts a later bundle after an earlier one fails to verify', async () => {
+		const archive = await writeArchive();
+		let calls = 0;
+
+		await expect(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch([
+					{ bundle: { n: 1 } },
+					{ bundle: { n: 2 } }
+				]),
+				verify: () => {
+					calls += 1;
+
+					return calls === 1
+						? Promise.reject(new Error('untrusted signer'))
+						: Promise.resolve(verifiedAs(archive.digest, attestationTagCommit));
+				}
+			})
+		).resolves.toBeUndefined();
+	});
+
+	it('rejects a bundle whose subject does not match the archive', async () => {
+		const archive = await writeArchive();
+
+		await expect(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch([{ bundle: {} }]),
+				verify: () =>
+					Promise.resolve(verifiedAs('f'.repeat(64), attestationTagCommit))
+			})
+		).rejects.toThrow(AttestationError);
+	});
+
+	it('rejects a bundle with the wrong predicate type', async () => {
+		const archive = await writeArchive();
+
+		await expect(
+			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
+				fetch: stubAttestationFetch([{ bundle: {} }]),
+				verify: () =>
+					Promise.resolve({
+						...verifiedAs(archive.digest, attestationTagCommit),
+						predicateType: 'https://example.test/other'
+					})
+			})
+		).rejects.toThrow(AttestationError);
+	});
+});
+
+describe('dispatch', () => {
+	it.each([['frobnicate'], ['']])(
+		'rejects the unknown command %p',
+		async (command) => {
+			await expect(dispatch(command, {})).rejects.toThrow(UnknownCommandError);
+		}
+	);
+
+	it('rejects a missing command', async () => {
+		await expect(dispatch(undefined, {})).rejects.toThrow(UnknownCommandError);
+	});
+});
+
+describe('writeNetrc', () => {
+	it('writes a private netrc file scoped to the cache host', async () => {
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-netrc-'));
+		const netrcFile = await writeNetrc({
+			cacheUrl: 'https://cache.example.test/t/acme',
+			readUser: 'ci',
+			readPassword: 'secret',
+			runnerTemporaryDirectory: directory
+		});
+		const stats = await stat(netrcFile);
+
+		expect({
+			contents: await readFile(netrcFile, 'utf8'),
+			mode: stats.mode & 0o777
+		}).toStrictEqual({
+			contents: 'machine cache.example.test login ci password secret\n',
+			mode: 0o600
+		});
 	});
 });
 
