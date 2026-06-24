@@ -1633,9 +1633,10 @@ export function commitSocketFromResponse(response: Response): {
 			return Promise.resolve(queued);
 		}
 
-		return new Promise((resolve, reject) => {
-			waiters.push({ resolve, reject });
-		});
+		const waiter = Promise.withResolvers<ParsedCommitSocketFrame>();
+		waiters.push(waiter);
+
+		return waiter.promise;
 	};
 
 	return { socket, nextFrame };

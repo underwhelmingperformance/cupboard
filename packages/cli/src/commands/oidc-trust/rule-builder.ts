@@ -1,5 +1,5 @@
 import { WIRE_DEFAULT_CACHE } from '@cupboard/nix/scalars';
-import { captureGroups } from '@cupboard/protocol/capture';
+import { captureGroups, quotePatternLiteral } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,
 	permittedGrantSchema,
@@ -13,11 +13,6 @@ import {
 
 import { InvalidClaimError } from '../../errors.ts';
 
-// RE2 metacharacters, escaped so a literal path becomes a literal pattern.
-function escapeRe2(value: string): string {
-	return value.replaceAll(/[.*+?^${}()|[\]\\]/gu, String.raw`\$&`);
-}
-
 /**
  * The match for a `job_workflow_ref` claim value of the form
  * `owner/repo/path@ref`. When the value carries an `@ref` it is matched exactly;
@@ -30,7 +25,7 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 		return value;
 	}
 
-	return { pattern: `^${escapeRe2(value)}@.+$` };
+	return { pattern: `^${quotePatternLiteral(value)}@.+$` };
 }
 
 // The cache operations each `--allow` shorthand expands to. `push` and `attest`
