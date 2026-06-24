@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { MalformedNarInfoLineError } from './errors.ts';
+import { toNixBase32 } from './hash.ts';
 import {
 	NarInfo,
 	type NarInfoFields,
@@ -19,7 +20,7 @@ function fingerprintWithReferences(references: readonly string[]): string {
 		compression: 'zstd',
 		fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		fileSize: 123,
-		narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		narSize: 456,
 		references,
 		sigs: []
@@ -33,7 +34,7 @@ function narInfoWith(overrides: Partial<NarInfoFields>): NarInfo {
 		compression: 'zstd',
 		fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		fileSize: 123,
-		narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		narSize: 456,
 		references: [],
 		sigs: [],
@@ -50,7 +51,7 @@ function narinfoLines(
 		'Compression: zstd',
 		'FileHash: sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		`FileSize: ${overrides.fileSize ?? '123'}`,
-		'NarHash: sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+		'NarHash: sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 		'NarSize: 456',
 		`References: ${overrides.references ?? ''}`,
 		''
@@ -65,7 +66,7 @@ describe('NarInfo', () => {
 			compression: 'zstd',
 			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			fileSize: 123,
-			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			narSize: 456,
 			references: ['0123456789abcdfghijklmnpqrsvwxyz-ref'],
 			sigs: ['cupboard-1:signature']
@@ -83,7 +84,7 @@ describe('NarInfo', () => {
 			compression: 'zstd',
 			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			fileSize: 123,
-			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			narSize: 456,
 			references: [
 				'0123456789abcdfghijklmnpqrsvwxyz-first',
@@ -93,7 +94,7 @@ describe('NarInfo', () => {
 		});
 
 		expect(info.fingerprint()).toBe(
-			'1;/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example;sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk;456;/nix/store/0123456789abcdfghijklmnpqrsvwxyz-first,/nix/store/1123456789abcdfghijklmnpqrsvwxyz-second'
+			'1;/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example;sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk;456;/nix/store/0123456789abcdfghijklmnpqrsvwxyz-first,/nix/store/1123456789abcdfghijklmnpqrsvwxyz-second'
 		);
 	});
 
@@ -118,7 +119,7 @@ describe('NarInfo', () => {
 			compression: 'zstd',
 			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			fileSize: 123,
-			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			narSize: 456,
 			references: [],
 			sigs: []
@@ -139,7 +140,7 @@ describe('NarInfo', () => {
 			compression: 'zstd',
 			fileHash: 'sha256:1123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			fileSize: 123,
-			narHash: 'sha256:2123456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
+			narHash: 'sha256:1023456789abcdfghijklmnpqrsvwxyz0123456789abcdfghijk',
 			narSize: 456,
 			references: [],
 			sigs: ['cupboard-1:first', 'cupboard-2:second']
@@ -408,9 +409,12 @@ function fixedCharacters(
 }
 
 const storePathHashArbitrary = fixedCharacters(nixBase32Characters, 32);
-const nixSha256HashArbitrary = fixedCharacters(nixBase32Characters, 52).map(
-	(value) => `sha256:${value}`
-);
+// A SHA-256 digest is 32 bytes, so a canonical Nix base32 hash comes from those
+// bytes: generating the 52 characters freely would set the top digit's overflow
+// bits that no real digest carries.
+const nixSha256HashArbitrary = fc
+	.uint8Array({ minLength: 32, maxLength: 32 })
+	.map((bytes) => `sha256:${toNixBase32(bytes)}`);
 const safeNameArbitrary = fc
 	.array(fc.constantFrom(...safeNameCharacters), {
 		minLength: 1,
