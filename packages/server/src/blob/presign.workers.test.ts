@@ -1,3 +1,4 @@
+import { bytesToBase64 } from '@cupboard/nix/encoding';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { R2Presigner } from './presign.ts';
@@ -6,9 +7,12 @@ const options = {
 	accountId: 'test-account-id',
 	accessKeyId: 'test-access-key-id',
 	secretAccessKey: 'test-secret-access-key',
-	bucketName: 'cupboard-blobs',
-	key: 'nar/sha256:1m5g07jiajz7135sj3ap8h30s0n24nc6a2q3gsraqj3pfi0jw65l.nar.zst'
+	bucketName: 'cupboard-blobs'
 };
+const key =
+	'nar/sha256:1m5g07jiajz7135sj3ap8h30s0n24nc6a2q3gsraqj3pfi0jw65l.nar.zst';
+const objectPath =
+	'/cupboard-blobs/nar/sha256:1m5g07jiajz7135sj3ap8h30s0n24nc6a2q3gsraqj3pfi0jw65l.nar.zst';
 
 describe('R2Presigner', () => {
 	beforeEach(() => {
@@ -20,45 +24,56 @@ describe('R2Presigner', () => {
 		vi.useRealTimers();
 	});
 
-	it('produces a stable presigned PUT URL', async () => {
-		const presigner = new R2Presigner(options);
-		const checksumBytes = new Uint8Array(32);
-		checksumBytes.fill(7);
-		const presignedUrl = await presigner.presignPutUrl({
-			key: options.key,
-			checksumSha256: base64(checksumBytes),
-			expiresSeconds: 900
-		});
-		const url = new URL(presignedUrl);
-		const parameters = Object.fromEntries(url.searchParams);
+	// The signed-header and not-hoisted assertions are the R2 contract: R2 ignores
+	// a query-hoisted checksum and rejects an unsigned one. The pinned signature is
+	// the deterministic SigV4 output for these fixed inputs, so a change in how the
+	// URL is signed fails here.
+	it('signs a PUT with the checksum as a signed header, not hoisted', async () => {
+		const checksum = new Uint8Array(32).fill(7);
+		const url = new URL(
+			await new R2Presigner(options).presignPutUrl({
+				key,
+				checksumSha256: bytesToBase64(checksum),
+				expiresSeconds: 900
+			})
+		);
 
 		expect({
 			host: url.host,
 			pathname: url.pathname,
-			parameters: {
-				'X-Amz-Algorithm': parameters['X-Amz-Algorithm'],
-				'X-Amz-Credential': parameters['X-Amz-Credential'],
-				'X-Amz-Expires': parameters['X-Amz-Expires'],
-				'X-Amz-SignedHeaders': parameters['X-Amz-SignedHeaders'],
-				'x-amz-checksum-sha256': parameters['x-amz-checksum-sha256']
-			},
-			hasSignature: url.searchParams.has('X-Amz-Signature')
+			algorithm: url.searchParams.get('X-Amz-Algorithm'),
+			credential: url.searchParams.get('X-Amz-Credential'),
+			expires: url.searchParams.get('X-Amz-Expires'),
+			signedHeaders: url.searchParams.get('X-Amz-SignedHeaders'),
+			checksumHoisted: url.searchParams.has('x-amz-checksum-sha256'),
+			signature: url.searchParams.get('X-Amz-Signature')
 		}).toStrictEqual({
 			host: 'test-account-id.r2.cloudflarestorage.com',
-			pathname:
-				'/cupboard-blobs/nar/sha256%3A1m5g07jiajz7135sj3ap8h30s0n24nc6a2q3gsraqj3pfi0jw65l.nar.zst',
-			parameters: {
-				'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
-				'X-Amz-Credential': 'test-access-key-id/20260528/auto/s3/aws4_request',
-				'X-Amz-Expires': '900',
-				'X-Amz-SignedHeaders': 'host;x-amz-checksum-sha256',
-				'x-amz-checksum-sha256': undefined
-			},
-			hasSignature: true
+			pathname: objectPath,
+			algorithm: 'AWS4-HMAC-SHA256',
+			credential: 'test-access-key-id/20260528/auto/s3/aws4_request',
+			expires: '900',
+			signedHeaders: 'host;x-amz-checksum-sha256',
+			checksumHoisted: false,
+			signature:
+				'494e9aaa0d137e6c80a31f55fce61f7e3a7c9263e025c2e84053d2afb5dc839b'
+		});
+	});
+
+	it('signs a HEAD probe', async () => {
+		const url = new URL(await new R2Presigner(options).presignHeadUrl(key, 60));
+
+		expect({
+			pathname: url.pathname,
+			expires: url.searchParams.get('X-Amz-Expires'),
+			signedHeaders: url.searchParams.get('X-Amz-SignedHeaders'),
+			signature: url.searchParams.get('X-Amz-Signature')
+		}).toStrictEqual({
+			pathname: objectPath,
+			expires: '60',
+			signedHeaders: 'host',
+			signature:
+				'26a3877f794d7610e72cab0cb72483700cc51b2142d68a45927e7d7b539f9c08'
 		});
 	});
 });
-
-function base64(bytes: Uint8Array): string {
-	return btoa(String.fromCodePoint(...bytes));
-}

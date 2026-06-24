@@ -78,7 +78,9 @@ describe('control plane GET /control/check', () => {
 			});
 			const [probeUrl] = z.tuple([z.string()]).parse(probed);
 			const signed = new URL(probeUrl);
-			const searchKeys = Iterator.from(signed.searchParams.keys()).toArray();
+			const searchKeys = Iterator.from(signed.searchParams.keys())
+				.toArray()
+				.toSorted((a, b) => a.localeCompare(b));
 
 			expect({
 				status: response.status,
@@ -98,7 +100,6 @@ describe('control plane GET /control/check', () => {
 					pathname: '/cupboard-blobs/.cupboard-credential-probe',
 					searchKeys: [
 						'X-Amz-Algorithm',
-						'X-Amz-Content-Sha256',
 						'X-Amz-Credential',
 						'X-Amz-Date',
 						'X-Amz-Expires',
