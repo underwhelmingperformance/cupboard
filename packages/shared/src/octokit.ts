@@ -29,20 +29,23 @@ type OctokitClientConstructorOptions = NonNullable<
 
 export interface OctokitClientOptions {
 	readonly auth?: string;
+	readonly baseUrl?: string;
 	readonly request?: OctokitClientConstructorOptions['request'];
 }
 
 /**
  * Build an Octokit client with the project's shared resilience policy: the
  * throttling plugin fails fast on rate limits and the retry plugin handles
- * transient failures. Pass `auth` to authenticate and `request` to supply
- * transport options such as a caching or stubbed `fetch`.
+ * transient failures. Pass `auth` to authenticate, `baseUrl` to target a
+ * GitHub Enterprise host, and `request` to supply transport options such as a
+ * caching or stubbed `fetch`.
  */
 export function createOctokitClient(
 	options: OctokitClientOptions = {}
 ): InstanceType<typeof OctokitClient> {
 	return new OctokitClient({
 		...(options.auth !== undefined && { auth: options.auth }),
+		...(options.baseUrl !== undefined && { baseUrl: options.baseUrl }),
 		...(options.request !== undefined && { request: options.request }),
 		throttle: {
 			onRateLimit: () => false,

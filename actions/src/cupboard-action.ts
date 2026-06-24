@@ -180,16 +180,6 @@ export function normaliseVersion(version: string): string {
 	return normalised;
 }
 
-export function releaseApiPath(repository: string, version: string): string {
-	const normalised = normaliseVersion(version);
-
-	if (normalised === 'latest') {
-		return `/repos/${repository}/releases/latest`;
-	}
-
-	return `/repos/${repository}/releases/tags/${normalised}`;
-}
-
 export function assetNameFor(
 	tagName: string,
 	runtimePlatform: string = platform,
@@ -319,6 +309,19 @@ const releaseWorkflowPath = '.github/workflows/release.yml';
 
 type Octokit = ReturnType<typeof createOctokitClient>;
 
+function buildOctokit(
+	options: Pick<InstallCupboardOptions, 'githubToken' | 'environment'>,
+	fetcher?: typeof fetch
+): Octokit {
+	return createOctokitClient({
+		...(options.githubToken !== '' && { auth: options.githubToken }),
+		...(options.environment.GITHUB_API_URL !== undefined && {
+			baseUrl: options.environment.GITHUB_API_URL
+		}),
+		...(fetcher !== undefined && { request: { fetch: fetcher } })
+	});
+}
+
 interface VerifyReleaseDependencies {
 	readonly fetch?: typeof fetch;
 	readonly verify?: typeof verifyBundle;
@@ -410,13 +413,7 @@ export async function pushAction(
 async function installCupboard(
 	options: InstallCupboardOptions
 ): Promise<InstalledCupboard> {
-	const release = await fetchRelease({
-		releaseRepository: options.releaseRepository,
-		version: options.version,
-		includePrereleases: options.includePrereleases,
-		githubToken: options.githubToken,
-		environment: options.environment
-	});
+	const release = await fetchRelease(buildOctokit(options), options);
 	const assetName = assetNameFor(release.tagName);
 	const binaryPath = path.join(options.installDirectory, 'cupboard');
 
@@ -448,73 +445,51 @@ async function installCupboard(
 }
 
 export async function fetchRelease(
-	options: Omit<InstallCupboardOptions, 'installDirectory'>,
-	fetcher: typeof fetch = fetch
+	octokit: Octokit,
+	options: Pick<
+		InstallCupboardOptions,
+		'releaseRepository' | 'version' | 'includePrereleases'
+	>
 ): Promise<Release> {
-	if (
-		normaliseVersion(options.version) === 'latest' &&
-		options.includePrereleases
-	) {
-		return fetchNewestRelease(options, fetcher);
+	const [owner, repo] = splitRepository(options.releaseRepository);
+	const version = normaliseVersion(options.version);
+
+	if (version === 'latest' && options.includePrereleases) {
+		return fetchNewestRelease(octokit, owner, repo);
 	}
 
-	const apiUrl = releaseApiUrl(
-		options,
-		releaseApiPath(options.releaseRepository, options.version)
-	);
-	const response = await fetchJson(apiUrl, options.githubToken, fetcher);
+	const { data } =
+		version === 'latest'
+			? await octokit.rest.repos.getLatestRelease({ owner, repo })
+			: await octokit.rest.repos.getReleaseByTag({ owner, repo, tag: version });
 
-	if (!isReleaseResponse(response)) {
+	if (!isReleaseResponse(data)) {
 		throw new MalformedReleaseResponseError();
 	}
 
-	return releaseFromResponse(response);
+	return releaseFromResponse(data);
 }
 
 // `GET /releases/latest` only returns the latest stable release, so the newest
 // prerelease is found by listing releases (newest first) and taking the first
 // published one.
 async function fetchNewestRelease(
-	options: Omit<InstallCupboardOptions, 'installDirectory'>,
-	fetcher: typeof fetch
+	octokit: Octokit,
+	owner: string,
+	repo: string
 ): Promise<Release> {
-	const apiUrl = releaseApiUrl(
-		options,
-		`/repos/${options.releaseRepository}/releases?per_page=20`
-	);
-	const response = await fetchJson(apiUrl, options.githubToken, fetcher);
-
-	if (!isUnknownArray(response)) {
-		throw new MalformedReleaseResponseError();
-	}
-
-	const release = response.find(
-		(item) => isRecord(item) && item.draft !== true && isReleaseResponse(item)
-	);
+	const { data } = await octokit.rest.repos.listReleases({
+		owner,
+		repo,
+		per_page: 20
+	});
+	const release = data.find((item) => !item.draft && isReleaseResponse(item));
 
 	if (release === undefined) {
-		throw new NoReleaseFoundError(options.releaseRepository);
-	}
-
-	if (!isReleaseResponse(release)) {
-		throw new MalformedReleaseResponseError();
+		throw new NoReleaseFoundError(`${owner}/${repo}`);
 	}
 
 	return releaseFromResponse(release);
-}
-
-function isUnknownArray(value: unknown): value is readonly unknown[] {
-	return Array.isArray(value);
-}
-
-function releaseApiUrl(
-	options: Pick<InstallCupboardOptions, 'environment'>,
-	apiPath: string
-): URL {
-	return new URL(
-		apiPath,
-		`${options.environment.GITHUB_API_URL ?? 'https://api.github.com'}/`
-	);
 }
 
 function releaseFromResponse(response: {
@@ -602,12 +577,7 @@ export async function verifyReleaseAttestation(
 	tagName: string,
 	dependencies: VerifyReleaseDependencies = {}
 ): Promise<void> {
-	const octokit = createOctokitClient({
-		...(options.githubToken !== '' && { auth: options.githubToken }),
-		...(dependencies.fetch !== undefined && {
-			request: { fetch: dependencies.fetch }
-		})
-	});
+	const octokit = buildOctokit(options, dependencies.fetch);
 	const verify = dependencies.verify ?? verifyBundle;
 	const [owner, repo] = splitRepository(options.releaseRepository);
 	const archiveName = path.basename(archivePath);
@@ -1179,24 +1149,6 @@ function requestHeaders(
 	}
 
 	return headers;
-}
-
-async function fetchJson(
-	url: URL,
-	githubToken: string,
-	fetcher: typeof fetch = fetch
-): Promise<unknown> {
-	const response = await fetcher(url, {
-		headers: requestHeaders(githubToken)
-	});
-
-	if (!response.ok) {
-		throw new GithubApiError(
-			`GitHub API request failed: ${String(response.status)}`
-		);
-	}
-
-	return response.json();
 }
 
 async function appendEnvironmentFile(
