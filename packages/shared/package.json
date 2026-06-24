@@ -2,7 +2,6 @@
 	"name": "@cupboard/shared",
 	"version": "0.0.0",
 	"dependencies": {
-		"@cupboard/reporter": "workspace:*",
 		"@octokit/plugin-retry": "^8.1.0",
 		"@octokit/plugin-throttling": "^11.0.3",
 		"@octokit/rest": "^22.0.1",
@@ -19,7 +18,6 @@
 		"vitest": "^4.1.8"
 	},
 	"exports": {
-		".": "./src/cli.ts",
 		"./attestation": "./src/attestation.ts",
 		"./errors": "./src/errors.ts",
 		"./octokit": "./src/octokit.ts"
