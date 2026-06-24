@@ -549,7 +549,7 @@ export async function verifyReleaseAttestation(
 		certificateIdentityRegex: releaseWorkflowIdentityRegex(
 			options.releaseRepository
 		),
-		certificateOidcIssuerRegex: `^${RegExp.escape(githubOidcIssuer)}$`
+		certificateOidcIssuer: githubOidcIssuer
 	});
 	const failures: string[] = [];
 

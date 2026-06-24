@@ -85,17 +85,14 @@ export interface VerifyResult {
 	readonly signerIssuer?: string;
 }
 
-export type VerifiedIdentityPolicy =
-	| {
-			readonly mode: 'exact';
-			readonly identity: string;
-			readonly issuer: string;
-	  }
-	| {
-			readonly mode: 'regex';
-			readonly identity: RegExp;
-			readonly issuer: RegExp;
-	  };
+/**
+ * A resolved signer-identity policy. A string term is matched exactly; a
+ * regular expression is matched as a pattern.
+ */
+export interface VerifiedIdentityPolicy {
+	readonly identity: string | RegExp;
+	readonly issuer: string | RegExp;
+}
 
 export interface VerifiedBundle {
 	readonly signer: Signer;
@@ -126,18 +123,6 @@ export class CertificateIssuerModeError extends Error {
 	}
 }
 
-export class CertificatePolicyModeMismatchError extends Error {
-	constructor(
-		public readonly identityMode: string,
-		public readonly issuerMode: string
-	) {
-		super(
-			'Certificate identity and OIDC issuer must both use exact values or both use regex values'
-		);
-		this.name = 'CertificatePolicyModeMismatchError';
-	}
-}
-
 export class AttestationSubjectMismatchError extends Error {
 	constructor(
 		public readonly expectedSubjectDigest: string,
@@ -165,56 +150,69 @@ export class AttestationBundleShapeError extends Error {
 	}
 }
 
+function resolveCertificateTerm(
+	exact: string | undefined,
+	pattern: string | undefined,
+	modeError: (modes: readonly string[]) => never
+): string | RegExp {
+	if (exact !== undefined && pattern !== undefined) {
+		modeError(['exact', 'regex']);
+	}
+
+	if (exact !== undefined) {
+		return exact;
+	}
+
+	if (pattern !== undefined) {
+		return new RegExp(pattern);
+	}
+
+	return modeError([]);
+}
+
 /**
- * Resolve identity-policy inputs into an exact or regex policy. Identity and
- * issuer must both be exact or both be regex; mixing them is rejected.
+ * Resolve identity-policy inputs into a signer-identity policy. Exactly one of
+ * the exact or regex form must be given for the identity and for the issuer;
+ * the two terms may use different forms.
  */
 export function identityPolicy(
 	options: IdentityPolicyOptions
 ): VerifiedIdentityPolicy {
-	const identityModes = [
-		options.certificateIdentity === undefined ? undefined : 'exact',
-		options.certificateIdentityRegex === undefined ? undefined : 'regex'
-	].filter((value) => value !== undefined);
-
-	if (identityModes.length !== 1) {
-		throw new CertificateIdentityModeError(identityModes);
-	}
-
-	const issuerModes = [
-		options.certificateOidcIssuer === undefined ? undefined : 'exact',
-		options.certificateOidcIssuerRegex === undefined ? undefined : 'regex'
-	].filter((value) => value !== undefined);
-
-	if (issuerModes.length !== 1) {
-		throw new CertificateIssuerModeError(issuerModes);
-	}
-
-	if (
-		options.certificateIdentity !== undefined &&
-		options.certificateOidcIssuer !== undefined
-	) {
-		return {
-			mode: 'exact',
-			identity: options.certificateIdentity,
-			issuer: options.certificateOidcIssuer
-		};
-	}
-
-	if (
-		options.certificateIdentityRegex === undefined ||
-		options.certificateOidcIssuerRegex === undefined
-	) {
-		throw new CertificatePolicyModeMismatchError(
-			options.certificateIdentity === undefined ? 'regex' : 'exact',
-			options.certificateOidcIssuer === undefined ? 'regex' : 'exact'
-		);
-	}
-
 	return {
-		mode: 'regex',
-		identity: new RegExp(options.certificateIdentityRegex),
-		issuer: new RegExp(options.certificateOidcIssuerRegex)
+		identity: resolveCertificateTerm(
+			options.certificateIdentity,
+			options.certificateIdentityRegex,
+			(modes) => {
+				throw new CertificateIdentityModeError(modes);
+			}
+		),
+		issuer: resolveCertificateTerm(
+			options.certificateOidcIssuer,
+			options.certificateOidcIssuerRegex,
+			(modes) => {
+				throw new CertificateIssuerModeError(modes);
+			}
+		)
+	};
+}
+
+/**
+ * Express an identity policy as a Sigstore verification policy. An exact term
+ * is anchored and escaped so the verifier's regex match on the subject
+ * alternative name becomes an exact comparison; a regex issuer is omitted
+ * because the verifier matches certificate extensions by exact value only.
+ */
+export function verificationPolicy(
+	policy: VerifiedIdentityPolicy
+): VerificationPolicy {
+	return {
+		subjectAlternativeName:
+			typeof policy.identity === 'string'
+				? `^${RegExp.escape(policy.identity)}$`
+				: policy.identity.source,
+		...(typeof policy.issuer === 'string' && {
+			extensions: { issuer: policy.issuer }
+		})
 	};
 }
 
@@ -231,30 +229,19 @@ export async function verifyBundle(
 	const parsed = parseBundle(bytes);
 	const trustMaterial = toTrustMaterial(await trustedRoot(options));
 	const verifier = new Verifier(trustMaterial, verifierOptions(options));
-	const verificationPolicy: VerificationPolicy | undefined =
-		policy.mode === 'exact'
-			? {
-					subjectAlternativeName: policy.identity,
-					extensions: { issuer: policy.issuer }
-				}
-			: undefined;
 	const signer = verifier.verify(
 		toSignedEntity(parsed.bundle),
-		verificationPolicy
+		verificationPolicy(policy)
 	);
 
-	if (policy.mode === 'regex') {
-		const signerIdentity = signer.identity?.subjectAlternativeName;
+	// The verifier matches certificate extensions by exact value, so a regex
+	// issuer cannot be expressed as a policy and is enforced here.
+	if (policy.issuer instanceof RegExp) {
 		const signerIssuer = signer.identity?.extensions?.issuer;
 
-		if (
-			signerIdentity === undefined ||
-			signerIssuer === undefined ||
-			!policy.identity.test(signerIdentity) ||
-			!policy.issuer.test(signerIssuer)
-		) {
+		if (signerIssuer === undefined || !policy.issuer.test(signerIssuer)) {
 			throw new AttestationBundleShapeError(
-				'signer identity did not match policy'
+				'signer issuer did not match policy'
 			);
 		}
 	}
