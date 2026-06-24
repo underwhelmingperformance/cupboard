@@ -824,9 +824,13 @@ function resolveStorePaths(paths: readonly string[]): string[] {
 	const resolved = [];
 
 	for (const storePath of paths) {
-		const result = spawnSync('nix', ['path-info', '--json', storePath], {
-			encoding: 'utf8'
-		});
+		const result = spawnSync(
+			'nix',
+			['path-info', '--json', '--json-format', '1', storePath],
+			{
+				encoding: 'utf8'
+			}
+		);
 
 		if (result.status !== 0) {
 			throw new NixError(`nix path-info failed for ${storePath}`);
@@ -871,9 +875,13 @@ export function narHashToHex(narHash: string): string {
 }
 
 function pathInfoJson(storePath: string): unknown {
-	const result = spawnSync('nix', ['path-info', '--json', storePath], {
-		encoding: 'utf8'
-	});
+	const result = spawnSync(
+		'nix',
+		['path-info', '--json', '--json-format', '1', storePath],
+		{
+			encoding: 'utf8'
+		}
+	);
 
 	if (result.status !== 0) {
 		throw new NixError(`nix path-info failed for ${storePath}`);
