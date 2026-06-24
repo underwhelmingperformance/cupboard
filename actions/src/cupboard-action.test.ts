@@ -3,8 +3,8 @@ import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import type { VerifiedBundle } from '@cupboard/shared/attestation';
 import { createOctokitClient } from '@cupboard/shared/octokit';
+import type { VerifiedBundle } from '@cupboard/shared/sigstore';
 import { describe, expect, it } from 'vitest';
 
 import {

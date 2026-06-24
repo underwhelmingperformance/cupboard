@@ -6,17 +6,22 @@ See [PLAN.md](./PLAN.md) for the feature plan and current progress.
 
 ## Layout
 
-This is a pnpm workspace with two packages:
+This is a pnpm workspace.
 
-- `packages/cli` - the `cupboard` CLI used to push store paths and print Nix
-  configuration.
-- `packages/server` - the Worker entrypoint and `CupboardServer` Durable Object
-  that backs the binary cache. There is one DO per deployment; it holds all
-  persisted state via DO SQLite, and the R2 bucket holds NAR bytes.
-
-Shared utilities (NAR/narinfo parsing, hashing) will live in a third package
-when both sides need them; for now keep that code in whichever package consumes
-it.
+- `packages/cli` - the `cupboard` CLI used to push store paths, manage tenants
+  and keys, and print Nix configuration.
+- `packages/server` - the Worker entrypoint and the `CupboardServer` Durable
+  Object that backs the binary cache. There is one DO per tenant; it holds the
+  tenant's persisted state via DO SQLite, the control plane uses D1, and R2
+  holds the NAR and attestation bytes.
+- `packages/nix` - the Nix domain layer: NAR/narinfo parsing, store paths,
+  hashes, and the branded scalars.
+- `packages/protocol` - the contract-first oRPC declarations for the JSON admin
+  API plus the domain schemas they share.
+- `packages/shared` - attestation verification (`in-toto`, `sigstore`, `slsa`),
+  the shared Octokit client, and typed errors.
+- `packages/reporter` and `packages/cli-ui` - terminal/JSON output.
+- `actions/` - the composite GitHub Action (`setup`, `push`, `attest`).
 
 ## Conventions
 
