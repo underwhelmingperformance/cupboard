@@ -966,7 +966,7 @@ export function renderChecksums(digests: readonly StorePathDigest[]): string {
 		.concat('\n');
 }
 
-function attestInputs(environment: Environment): AttestInputs {
+export function attestInputs(environment: Environment): AttestInputs {
 	const paths = parseLines(input(environment, 'PATHS'));
 
 	if (paths.length === 0) {
@@ -976,9 +976,7 @@ function attestInputs(environment: Environment): AttestInputs {
 		);
 	}
 
-	const checksumsFile = input(
-		environment,
-		'CHECKSUMS_FILE',
+	const checksumsFile = input(environment, 'CHECKSUMS_FILE', () =>
 		path.join(
 			requireInput(environment.RUNNER_TEMP, 'RUNNER_TEMP'),
 			'cupboard-attestations',
@@ -1003,7 +1001,7 @@ export async function attestAction(
 	await setOutput(environment, 'subject-count', String(digests.length));
 }
 
-function setupInputs(environment: Environment): SetupInputs {
+export function setupInputs(environment: Environment): SetupInputs {
 	const readUser = input(environment, 'READ_USER');
 	const readPassword = input(environment, 'READ_PASSWORD');
 
@@ -1045,9 +1043,7 @@ function setupInputs(environment: Environment): SetupInputs {
 				environment.GITHUB_REPOSITORY ??
 				fallbackReleaseRepository
 		),
-		installDirectory: input(
-			environment,
-			'INSTALL_DIR',
+		installDirectory: input(environment, 'INSTALL_DIR', () =>
 			path.join(
 				requireInput(environment.RUNNER_TEMP, 'RUNNER_TEMP'),
 				'cupboard-bin'
@@ -1063,7 +1059,7 @@ function setupInputs(environment: Environment): SetupInputs {
 	};
 }
 
-function pushInputs(environment: Environment): PushInputs {
+export function pushInputs(environment: Environment): PushInputs {
 	const url = input(environment, 'URL');
 
 	if (url === '') {
@@ -1094,9 +1090,7 @@ function pushInputs(environment: Environment): PushInputs {
 				environment.GITHUB_REPOSITORY ??
 				fallbackReleaseRepository
 		),
-		installDirectory: input(
-			environment,
-			'INSTALL_DIR',
+		installDirectory: input(environment, 'INSTALL_DIR', () =>
 			path.join(
 				requireInput(environment.RUNNER_TEMP, 'RUNNER_TEMP'),
 				'cupboard-bin'
@@ -1109,7 +1103,8 @@ function pushInputs(environment: Environment): PushInputs {
 		root: input(
 			environment,
 			'ROOT',
-			`github:${requireInput(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY')}/${requireInput(environment.GITHUB_REF_NAME, 'GITHUB_REF_NAME')}`
+			() =>
+				`github:${requireInput(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY')}/${requireInput(environment.GITHUB_REF_NAME, 'GITHUB_REF_NAME')}`
 		),
 		ttl: input(environment, 'TTL'),
 		wait: isInputEnabled(environment, 'WAIT', true),
@@ -1118,11 +1113,21 @@ function pushInputs(environment: Environment): PushInputs {
 	};
 }
 
-function input(environment: Environment, name: string, fallback = ''): string {
-	const prefixedName = 'INPUT_' + name;
-	const value = environment[prefixedName] ?? environment[name] ?? fallback;
+type InputFallback = string | (() => string);
 
-	return value.trim();
+function input(
+	environment: Environment,
+	name: string,
+	fallback: InputFallback = ''
+): string {
+	const prefixedName = 'INPUT_' + name;
+	const value = (environment[prefixedName] ?? environment[name] ?? '').trim();
+
+	if (value !== '') {
+		return value;
+	}
+
+	return typeof fallback === 'function' ? fallback() : fallback;
 }
 
 function isInputEnabled(

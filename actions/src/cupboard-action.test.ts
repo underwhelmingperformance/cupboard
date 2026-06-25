@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	assetNameFor,
+	attestInputs,
 	buildPushArguments,
 	cachePublicKeyRequestHeaders,
 	cachePublicKeyUrl,
@@ -20,10 +21,12 @@ import {
 	normaliseVersion,
 	parseChecksums,
 	parseLines,
+	pushInputs,
 	releaseWorkflowIdentityRegex,
 	renderChecksums,
 	renderNixConfig,
 	setupAction,
+	setupInputs,
 	splitRepository,
 	verifyReleaseAttestation,
 	writeNetrc
@@ -32,6 +35,7 @@ import {
 	AttestationError,
 	InvalidInputError,
 	MalformedReleaseResponseError,
+	MissingInputError,
 	NoReleaseFoundError,
 	UnknownCommandError,
 	UnsupportedPlatformError
@@ -571,5 +575,171 @@ describe('action input errors', () => {
 		['cache-url is not an http(s) URL', { CACHE_URL: 'not a url' }]
 	])('rejects when %s', async (_name, environment) => {
 		await expect(setupAction(environment)).rejects.toThrow(InvalidInputError);
+	});
+});
+
+describe('attestInputs', () => {
+	const paths = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo';
+
+	it('defaults the checksums file under RUNNER_TEMP when none is given', () => {
+		const inputs = attestInputs({
+			INPUT_PATHS: paths,
+			INPUT_CHECKSUMS_FILE: '',
+			RUNNER_TEMP: '/runner/temp'
+		});
+
+		expect(inputs).toStrictEqual({
+			paths: [paths],
+			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt'
+		});
+	});
+
+	it('honours an explicit checksums file', () => {
+		const inputs = attestInputs({
+			INPUT_PATHS: paths,
+			INPUT_CHECKSUMS_FILE: '/somewhere/subjects.txt',
+			RUNNER_TEMP: '/runner/temp'
+		});
+
+		expect(inputs).toStrictEqual({
+			paths: [paths],
+			checksumsFile: '/somewhere/subjects.txt'
+		});
+	});
+
+	it('requires at least one path', () => {
+		expect(() =>
+			attestInputs({ INPUT_PATHS: '', RUNNER_TEMP: '/runner/temp' })
+		).toThrow(InvalidInputError);
+	});
+
+	it('does not require RUNNER_TEMP when the checksums file is explicit', () => {
+		const inputs = attestInputs({
+			INPUT_PATHS: paths,
+			INPUT_CHECKSUMS_FILE: '/explicit/subjects.txt'
+		});
+
+		expect(inputs.checksumsFile).toBe('/explicit/subjects.txt');
+	});
+});
+
+describe('setupInputs', () => {
+	const baseEnvironment = {
+		RUNNER_TEMP: '/runner/temp',
+		GITHUB_ACTION_REPOSITORY: 'owner/cupboard'
+	};
+
+	const defaults = {
+		version: 'latest',
+		includePrereleases: true,
+		githubToken: '',
+		releaseRepository: 'owner/cupboard',
+		installDirectory: '/runner/temp/cupboard-bin',
+		addToPath: true,
+		cacheUrl: '',
+		cache: '',
+		trustedPublicKey: '',
+		readUser: '',
+		readPassword: '',
+		nixConfigFile: ''
+	};
+
+	it('applies defaults when optional inputs are absent', () => {
+		expect(setupInputs(baseEnvironment)).toStrictEqual(defaults);
+	});
+
+	it('treats blank inputs as unset and applies the defaults', () => {
+		const blanked = {
+			...baseEnvironment,
+			INPUT_CUPBOARD_VERSION: '  ',
+			INPUT_INSTALL_DIR: '',
+			INPUT_INCLUDE_PRERELEASES: '',
+			INPUT_ADD_TO_PATH: ' '
+		};
+
+		expect(setupInputs(blanked)).toStrictEqual(defaults);
+	});
+
+	it('does not require RUNNER_TEMP when install-dir is explicit', () => {
+		const inputs = setupInputs({
+			GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+			INPUT_INSTALL_DIR: '/opt/cupboard'
+		});
+
+		expect(inputs.installDirectory).toBe('/opt/cupboard');
+	});
+});
+
+describe('pushInputs', () => {
+	const url = 'https://cupboard.example/t/acme';
+	const storePath = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo';
+
+	const baseEnvironment = {
+		INPUT_URL: url,
+		INPUT_PATHS: storePath,
+		GITHUB_REPOSITORY: 'owner/repo',
+		GITHUB_REF_NAME: 'main',
+		GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+		RUNNER_TEMP: '/runner/temp'
+	};
+
+	const defaults = {
+		version: 'latest',
+		includePrereleases: true,
+		githubToken: '',
+		releaseRepository: 'owner/cupboard',
+		installDirectory: '/runner/temp/cupboard-bin',
+		url,
+		paths: [storePath],
+		cache: '',
+		audience: url,
+		root: 'github:owner/repo/main',
+		ttl: '',
+		wait: true,
+		waitTimeout: '10m',
+		attestations: []
+	};
+
+	it('applies defaults when optional inputs are absent', () => {
+		expect(pushInputs(baseEnvironment)).toStrictEqual(defaults);
+	});
+
+	it('treats blank inputs as unset and applies the defaults', () => {
+		const blanked = {
+			...baseEnvironment,
+			INPUT_AUDIENCE: '',
+			INPUT_ROOT: ' ',
+			INPUT_WAIT: '',
+			INPUT_WAIT_TIMEOUT: '  '
+		};
+
+		expect(pushInputs(blanked)).toStrictEqual(defaults);
+	});
+
+	it('does not require git refs when root is explicit', () => {
+		const inputs = pushInputs({
+			INPUT_URL: url,
+			INPUT_PATHS: storePath,
+			INPUT_ROOT: 'github:explicit/root',
+			GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+			RUNNER_TEMP: '/runner/temp'
+		});
+
+		expect(inputs.root).toBe('github:explicit/root');
+	});
+
+	it.each([
+		[
+			'url is missing',
+			{ INPUT_PATHS: storePath, RUNNER_TEMP: '/runner/temp' },
+			MissingInputError
+		],
+		[
+			'paths is empty',
+			{ INPUT_URL: url, INPUT_PATHS: '  ', RUNNER_TEMP: '/runner/temp' },
+			InvalidInputError
+		]
+	])('rejects when %s', (_name, environment, error) => {
+		expect(() => pushInputs(environment)).toThrow(error);
 	});
 });
