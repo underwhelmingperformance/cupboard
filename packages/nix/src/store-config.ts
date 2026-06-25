@@ -3,7 +3,14 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { env } from 'node:process';
 
+import { RE2JS } from 're2js';
+
 import { NixConfigIncludeError } from './nix-store.ts';
+
+// RE2 (linear time, no backtracking) so a crafted `nix.conf` line cannot make
+// the include parse run slow; `\s+` and `.+` overlap, which is polynomial under
+// the JavaScript engine. Group 1 is the optional `!`, group 2 the target.
+const includeLine = RE2JS.compile(String.raw`(!?)include\s+(.+)`);
 
 /**
  * The resolved subset of Nix's settings that decides which store backend to open
@@ -204,14 +211,19 @@ function applyInclude(
 }
 
 function matchInclude(line: string): ConfigInclude | undefined {
-	const match = /^(?<bang>!?)include\s+(?<target>.+)$/u.exec(line);
-	const target = match?.groups?.target;
+	const matcher = includeLine.matcher(line);
 
-	if (target === undefined) {
+	if (!matcher.matches()) {
 		return undefined;
 	}
 
-	return { target: target.trim(), optional: match?.groups?.bang === '!' };
+	const target = matcher.group(2);
+
+	if (target === null) {
+		return undefined;
+	}
+
+	return { target: target.trim(), optional: matcher.group(1) === '!' };
 }
 
 function stripComment(line: string): string {
