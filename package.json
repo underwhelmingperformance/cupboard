@@ -60,9 +60,9 @@
 		"fix:format": "prettier --write .",
 		"fix:lint": "eslint . --fix",
 		"fixtures:generate": "node tests/fixtures/generate.ts",
-		"test:actions": "vitest run actions/src",
+		"test:actions": "vitest run actions/src --exclude '**/.claude/**'",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts",
-		"test:release": "vitest run scripts/release.test.ts"
+		"test:release": "vitest run scripts/release.test.ts --exclude '**/.claude/**'"
 	},
 	"type": "module"
 }
