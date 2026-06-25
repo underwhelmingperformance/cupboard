@@ -223,6 +223,15 @@ export class ControlWrappingKeyInvalidError extends ServerHttpError {
 	}
 }
 
+export class S3EncryptionKeyInvalidError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly byteLength: number) {
+		super('S3 credential encryption secret is not a 32-byte base64 key');
+		this.name = 'S3EncryptionKeyInvalidError';
+	}
+}
+
 export class ControlWrappedKeyMalformedError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
