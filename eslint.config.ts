@@ -130,7 +130,7 @@ export default defineConfig(
 	{
 		files: [
 			'packages/server/src/**/*.{ts,js}',
-			'packages/nix/src/**/*.{ts,js}',
+			'packages/nix-store/src/**/*.{ts,js}',
 			'packages/protocol/src/**/*.{ts,js}'
 		],
 		rules: {
@@ -171,7 +171,7 @@ export default defineConfig(
 		// Compression Streams offer no zstd — so this one audited module is the
 		// sanctioned Node boundary for the server-side NAR verifier. The ban on
 		// `node:*` in server and shared code stays in force everywhere else.
-		files: ['packages/nix/src/zstd.ts'],
+		files: ['packages/nix-store/src/zstd.ts'],
 		rules: {
 			'no-restricted-imports': 'off'
 		}

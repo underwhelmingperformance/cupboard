@@ -4,7 +4,7 @@ import {
 	type Sha256HexDigest,
 	type StorePathHash,
 	type TenantId
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { sql } from 'drizzle-orm';
 import {
 	check,

@@ -1,4 +1,4 @@
-import { positiveIntSchema } from '@cupboard/nix/scalars';
+import { positiveIntSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { isAnchoredRe2 } from './capture.ts';

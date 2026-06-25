@@ -2,7 +2,7 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import { StorePath } from '@cupboard/nix/store-path';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
 	RootListResponse,
 	RootRemoveResponse,

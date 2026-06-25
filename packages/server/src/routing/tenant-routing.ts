@@ -1,4 +1,4 @@
-import { type TenantId, tenantIdSchema } from '@cupboard/nix/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 
 const tenantPrefix = '/t/';
 

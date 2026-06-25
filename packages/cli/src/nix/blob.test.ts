@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pathModule from 'node:path';
 
-import { zstdDecompressionStream } from '@cupboard/nix/zstd';
+import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import { describe, expect, it } from 'vitest';
 
 import { withTemporaryDirectory } from '../../../../tests/support/filesystem.ts';

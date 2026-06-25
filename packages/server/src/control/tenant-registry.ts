@@ -1,4 +1,4 @@
-import { type TenantId } from '@cupboard/nix/scalars';
+import { type TenantId } from '@cupboard/nix-store/scalars';
 import type {
 	ParsedTenantCreateBody,
 	ParsedTenantReadCredential,

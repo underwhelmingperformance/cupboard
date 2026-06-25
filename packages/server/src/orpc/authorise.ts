@@ -1,4 +1,7 @@
-import { cacheSelectorSchema, selectorForCache } from '@cupboard/nix/scalars';
+import {
+	cacheSelectorSchema,
+	selectorForCache
+} from '@cupboard/nix-store/scalars';
 import { type AuthzMeta, type ResourceSpec } from '@cupboard/protocol/contract';
 import {
 	isCoveredByToken,

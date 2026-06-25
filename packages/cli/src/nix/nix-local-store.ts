@@ -2,7 +2,7 @@ import path from 'node:path';
 import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
 
-import { NixSha256Hash } from '@cupboard/nix/hash';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 
 import {
 	type NixStoreClient,

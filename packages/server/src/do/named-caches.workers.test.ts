@@ -1,4 +1,4 @@
-import { selectorForCache } from '@cupboard/nix/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import {
 	type StatsResponse,
 	statsResponseSchema,

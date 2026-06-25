@@ -1,7 +1,7 @@
 import process from 'node:process';
 import type { DatabaseSync } from 'node:sqlite';
 
-import { NixSha256Hash } from '@cupboard/nix/hash';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { describe, expect, it, vi } from 'vitest';
 
 import {

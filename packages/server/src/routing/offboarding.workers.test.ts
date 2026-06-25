@@ -4,7 +4,7 @@ import {
 	storePathHashSchema,
 	type TenantId,
 	tenantIdSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import {
 	createExecutionContext,
 	waitOnExecutionContext

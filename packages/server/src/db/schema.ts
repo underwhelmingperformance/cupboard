@@ -6,7 +6,7 @@ import {
 	type StorePathHash,
 	type StorePathString,
 	type TenantId
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import {
 	integer,
 	primaryKey,

@@ -1,4 +1,4 @@
-import { tenantIdSchema } from '@cupboard/nix/scalars';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import type {
 	ParsedMembershipRebuildResponse,

@@ -1,4 +1,4 @@
-import { tenantIdSchema } from '@cupboard/nix/scalars';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

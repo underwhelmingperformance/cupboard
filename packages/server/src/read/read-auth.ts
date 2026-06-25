@@ -1,4 +1,4 @@
-import { base64ToBytes, bytesToBase64Url } from '@cupboard/nix/encoding';
+import { base64ToBytes, bytesToBase64Url } from '@cupboard/nix-store/encoding';
 import { StatusCodes } from 'http-status-codes';
 
 import { isConstantTimeEqual, sha256HexBytes } from '../crypto/crypto.ts';

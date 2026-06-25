@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import type { Command } from 'commander';
 
 import { pushAuthorizationDetails } from '../auth/attenuate.ts';

@@ -2,7 +2,7 @@ import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
 	WIRE_DEFAULT_CACHE
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import {
 	issuedAccessTokenType,

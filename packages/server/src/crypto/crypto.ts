@@ -1,4 +1,4 @@
-import { bytesToBase64, bytesToHex } from '@cupboard/nix/encoding';
+import { bytesToBase64, bytesToHex } from '@cupboard/nix-store/encoding';
 
 const textEncoder = new TextEncoder();
 

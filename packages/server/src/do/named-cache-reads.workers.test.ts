@@ -1,5 +1,5 @@
-import { CacheInfo } from '@cupboard/nix/cache-info';
-import { NarInfo } from '@cupboard/nix/narinfo';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 

@@ -3,12 +3,12 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import pathModule from 'node:path';
 
-import { implicitPinName } from '@cupboard/nix/retention';
+import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
 	type Sha256HexDigest,
 	sha256HexDigestSchema
-} from '@cupboard/nix/scalars';
-import { byCodeUnit, StorePath } from '@cupboard/nix/store-path';
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import type {
 	AttestationAttachResponse,
 	AttestationDecision,

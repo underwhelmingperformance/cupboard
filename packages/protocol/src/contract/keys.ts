@@ -1,4 +1,4 @@
-import { signingKeyIdSchema } from '@cupboard/nix/scalars';
+import { signingKeyIdSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {

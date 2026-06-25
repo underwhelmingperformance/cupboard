@@ -1,4 +1,4 @@
-import { tenantIdSchema } from '@cupboard/nix/scalars';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
 

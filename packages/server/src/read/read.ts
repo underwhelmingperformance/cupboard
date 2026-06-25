@@ -1,4 +1,4 @@
-import { CacheInfo } from '@cupboard/nix/cache-info';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	cacheFromSelector,
 	cacheSelectorSchema,
@@ -6,7 +6,7 @@ import {
 	type NixSha256HashString,
 	type StorePathHash,
 	type TenantId
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { and, eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';

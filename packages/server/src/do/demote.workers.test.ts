@@ -2,7 +2,7 @@ import {
 	type NixSha256HashString,
 	type StorePathHash,
 	tenantIdSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 

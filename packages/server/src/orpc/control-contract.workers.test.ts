@@ -1,4 +1,4 @@
-import { byCodeUnit } from '@cupboard/nix/store-path';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { controlContract } from '@cupboard/protocol/contract';
 import { createORPCClient, ORPCError, safe } from '@orpc/client';
 import type { ContractRouterClient } from '@orpc/contract';

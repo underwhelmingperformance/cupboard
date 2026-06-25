@@ -3,7 +3,7 @@ import {
 	type Sha256HexDigest,
 	type TenantId,
 	tenantIdSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';

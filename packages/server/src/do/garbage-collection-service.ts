@@ -2,7 +2,7 @@ import {
 	referencesSchema,
 	type StorePathHash,
 	storePathHashSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { and, eq, isNull, lt, lte, or } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';

@@ -1,4 +1,7 @@
-import { rootTtlMaxSeconds, rootTtlMinSeconds } from '@cupboard/nix/scalars';
+import {
+	rootTtlMaxSeconds,
+	rootTtlMinSeconds
+} from '@cupboard/nix-store/scalars';
 
 import {
 	InvalidDurationError,

@@ -1,7 +1,7 @@
 import {
 	cacheSelectorSchema,
 	storePathHashSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { pathDeletionResponseSchema } from '../upload.ts';

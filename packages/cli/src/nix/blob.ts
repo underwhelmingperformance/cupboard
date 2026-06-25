@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { stat } from 'node:fs/promises';
 
-import { zstdCompressionStream } from '@cupboard/nix/zstd';
+import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 
 import { type ByteSource, byteStream } from '../io/byte-stream.ts';
 import { writeFileByteStream } from '../io/file-stream.ts';

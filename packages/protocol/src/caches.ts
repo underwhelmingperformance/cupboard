@@ -1,4 +1,4 @@
-import { cachePrioritySchema } from '@cupboard/nix/scalars';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';

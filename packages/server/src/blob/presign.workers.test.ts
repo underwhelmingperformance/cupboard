@@ -1,4 +1,4 @@
-import { bytesToBase64 } from '@cupboard/nix/encoding';
+import { bytesToBase64 } from '@cupboard/nix-store/encoding';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { R2Presigner } from './presign.ts';

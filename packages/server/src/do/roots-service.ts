@@ -2,8 +2,8 @@ import {
 	type RootName,
 	type StorePathHash,
 	type StorePathString
-} from '@cupboard/nix/scalars';
-import { byCodeUnit, resolveRootTargets } from '@cupboard/nix/store-path';
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedRootSetBody,
 	type RootListResponse,

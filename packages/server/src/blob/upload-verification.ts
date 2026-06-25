@@ -1,5 +1,5 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { type NixSha256HashString } from '@cupboard/nix/scalars';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import type { ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 
 import {

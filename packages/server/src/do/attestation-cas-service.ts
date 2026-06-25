@@ -4,7 +4,7 @@ import {
 	sha256HexDigestSchema,
 	type StorePathHash,
 	type TenantId
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { and, eq, exists, ne, notExists, sql } from 'drizzle-orm';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';

@@ -14,7 +14,7 @@ This is a pnpm workspace.
   Object that backs the binary cache. There is one DO per tenant; it holds the
   tenant's persisted state via DO SQLite, the control plane uses D1, and R2
   holds the NAR and attestation bytes.
-- `packages/nix` - the Nix domain layer: NAR/narinfo parsing, store paths,
+- `packages/nix-store` - the Nix domain layer: NAR/narinfo parsing, store paths,
   hashes, and the branded scalars.
 - `packages/protocol` - the contract-first oRPC declarations for the JSON admin
   API plus the domain schemas they share.

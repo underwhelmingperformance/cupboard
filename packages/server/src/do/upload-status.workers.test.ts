@@ -1,8 +1,8 @@
-import { NarInfo } from '@cupboard/nix/narinfo';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
 	storePathHashSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {

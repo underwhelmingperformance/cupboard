@@ -1,7 +1,7 @@
 import { env } from 'node:process';
 
-import { NixConfig, renderNetrc } from '@cupboard/nix/nix-config';
-import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
+import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 

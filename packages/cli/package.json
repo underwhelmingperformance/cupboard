@@ -8,7 +8,7 @@
 		"@cloudflare/workers-auth": "^0.3.0",
 		"@cloudflare/workers-utils": "^0.24.0",
 		"@cupboard/cli-ui": "workspace:*",
-		"@cupboard/nix": "workspace:*",
+		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",

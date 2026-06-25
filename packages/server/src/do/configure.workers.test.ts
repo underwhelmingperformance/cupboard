@@ -1,4 +1,4 @@
-import { type TenantId, tenantIdSchema } from '@cupboard/nix/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';

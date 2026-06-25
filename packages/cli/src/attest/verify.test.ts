@@ -1,8 +1,8 @@
 import { createPublicKey } from 'node:crypto';
 
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { NarInfo } from '@cupboard/nix/narinfo';
-import { StorePath } from '@cupboard/nix/store-path';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	AttestationPredicateTypeMismatchError,
 	AttestationSubjectMismatchError,
