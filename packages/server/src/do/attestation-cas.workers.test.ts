@@ -2,7 +2,7 @@ import {
 	predicateTypeSchema,
 	sha256HexDigestSchema,
 	storePathHashSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';

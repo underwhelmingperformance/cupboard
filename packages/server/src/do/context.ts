@@ -2,8 +2,8 @@ import {
 	type NixSha256HashString,
 	type RootName,
 	type TenantId
-} from '@cupboard/nix/scalars';
-import { type ResolvedRootTarget } from '@cupboard/nix/store-path';
+} from '@cupboard/nix-store/scalars';
+import { type ResolvedRootTarget } from '@cupboard/nix-store/store-path';
 import {
 	oidcTrustDisplaySchema,
 	permittedGrantSchema

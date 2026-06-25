@@ -1,7 +1,7 @@
 import {
 	type NixSha256HashString,
 	type StorePathHash
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
 import { and, eq, exists, sql } from 'drizzle-orm';
 

@@ -1,5 +1,5 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { zstdCompressionStream } from '@cupboard/nix/zstd';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 

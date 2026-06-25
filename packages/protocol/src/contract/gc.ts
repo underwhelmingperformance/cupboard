@@ -1,4 +1,4 @@
-import { cacheSelectorSchema } from '@cupboard/nix/scalars';
+import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { gcResponseSchema } from '../retention.ts';

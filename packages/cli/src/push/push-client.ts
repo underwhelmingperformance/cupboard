@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 
 import { cachePrefixFor, CupboardClient } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';

@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import type { CheckReport } from '@cupboard/protocol/reports';
 import { checkReportSchema } from '@cupboard/protocol/reports';
 import { env } from 'cloudflare:workers';

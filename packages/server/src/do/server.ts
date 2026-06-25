@@ -1,4 +1,4 @@
-import { CacheInfo } from '@cupboard/nix/cache-info';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	cacheFromSelector,
 	cachePrioritySchema,
@@ -6,8 +6,8 @@ import {
 	DEFAULT_CACHE,
 	type NixSha256HashString,
 	type Sha256HexDigest
-} from '@cupboard/nix/scalars';
-import { zstdDecompressionStream } from '@cupboard/nix/zstd';
+} from '@cupboard/nix-store/scalars';
+import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { DurableObject } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';

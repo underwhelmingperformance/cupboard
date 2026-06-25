@@ -1,4 +1,4 @@
-import { tenantIdSchema } from '@cupboard/nix/scalars';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 export const tenantReadModeSchema = z.enum(['public', 'private']);

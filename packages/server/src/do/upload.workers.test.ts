@@ -1,7 +1,10 @@
-import { CacheInfo } from '@cupboard/nix/cache-info';
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { NarInfo } from '@cupboard/nix/narinfo';
-import { DEFAULT_CACHE, storePathHashSchema } from '@cupboard/nix/scalars';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
+import {
+	DEFAULT_CACHE,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';

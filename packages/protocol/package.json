@@ -2,7 +2,7 @@
 	"name": "@cupboard/protocol",
 	"version": "0.0.0",
 	"dependencies": {
-		"@cupboard/nix": "workspace:*",
+		"@cupboard/nix-store": "workspace:*",
 		"@orpc/contract": "^1.14.6",
 		"re2js": "^2.8.3",
 		"zod": "^4.4.3"

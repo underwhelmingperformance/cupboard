@@ -1,4 +1,4 @@
-import { byCodeUnit } from '@cupboard/nix/store-path';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { and, asc, count, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';

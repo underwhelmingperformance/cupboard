@@ -6,7 +6,7 @@ import {
 	sha256HexDigestSchema,
 	type StorePathHash,
 	storePathHashSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';

@@ -1,5 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { CacheInfo } from '@cupboard/nix/cache-info';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import type {
 	CacheListResponse,
 	CacheRemoveResponse,

@@ -1,5 +1,5 @@
 {
-	"name": "@cupboard/nix",
+	"name": "@cupboard/nix-store",
 	"version": "0.0.0",
 	"dependencies": {
 		"zod": "^4.4.3"

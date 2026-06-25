@@ -1,4 +1,4 @@
-import { type TenantId } from '@cupboard/nix/scalars';
+import { type TenantId } from '@cupboard/nix-store/scalars';
 import { and, asc, eq, inArray } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';

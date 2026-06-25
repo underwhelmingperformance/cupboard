@@ -1,4 +1,4 @@
-import { NarInfo } from '@cupboard/nix/narinfo';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import type { ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';

@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { CacheInfo } from '@cupboard/nix/cache-info';
-import { byCodeUnit } from '@cupboard/nix/store-path';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';

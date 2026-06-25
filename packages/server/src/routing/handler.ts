@@ -1,4 +1,4 @@
-import { type TenantId } from '@cupboard/nix/scalars';
+import { type TenantId } from '@cupboard/nix-store/scalars';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';

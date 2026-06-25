@@ -1,11 +1,11 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { NarInfo } from '@cupboard/nix/narinfo';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
 	referencesSchema,
 	type StorePathHash
-} from '@cupboard/nix/scalars';
-import { StorePath } from '@cupboard/nix/store-path';
+} from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import { and, eq } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';

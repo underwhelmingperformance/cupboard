@@ -1,4 +1,4 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type NixSha256HashString,
 	type PredicateType,
@@ -7,7 +7,7 @@ import {
 	sha256HexDigestSchema,
 	type StorePathHash,
 	storePathHashSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import {
 	type AttestationAttachResponse,
 	type AttestationDecision,

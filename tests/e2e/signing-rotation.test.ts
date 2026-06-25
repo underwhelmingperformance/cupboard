@@ -1,8 +1,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { NarInfo } from '@cupboard/nix/narinfo';
-import { byCodeUnit, StorePath } from '@cupboard/nix/store-path';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';

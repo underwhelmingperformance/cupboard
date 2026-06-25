@@ -1,4 +1,4 @@
-import { storePathHashSchema } from '@cupboard/nix/scalars';
+import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { isNotModified, narInfoCachePath, narInfoObjectKey } from './http.ts';

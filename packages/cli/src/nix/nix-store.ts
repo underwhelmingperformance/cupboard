@@ -1,4 +1,4 @@
-import { StorePath } from '@cupboard/nix/store-path';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
 	UploadPathMetadataFields,
 	UploadPathNegotiationFields

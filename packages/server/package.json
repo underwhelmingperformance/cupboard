@@ -2,7 +2,7 @@
 	"name": "@cupboard/server",
 	"version": "0.0.0",
 	"dependencies": {
-		"@cupboard/nix": "workspace:*",
+		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
 		"@cupboard/shared": "workspace:*",
 		"@orpc/json-schema": "^1.14.6",

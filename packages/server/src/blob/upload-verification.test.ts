@@ -1,5 +1,5 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { nixSha256HashSchema } from '@cupboard/nix/scalars';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
 import { uploadPathMetadataSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 

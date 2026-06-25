@@ -1,5 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import type {
 	RootListResponse,
 	RootRemoveResponse,

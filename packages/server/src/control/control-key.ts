@@ -1,4 +1,4 @@
-import { base64ToBytes, bytesToBase64 } from '@cupboard/nix/encoding';
+import { base64ToBytes, bytesToBase64 } from '@cupboard/nix-store/encoding';
 
 import { parseJwk } from '../crypto/crypto.ts';
 import {

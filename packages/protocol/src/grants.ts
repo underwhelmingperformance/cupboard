@@ -2,7 +2,7 @@ import {
 	cacheSelectorSchema,
 	rootNameSchema,
 	tenantIdSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 // Capability model. A token carries a set of grants as RFC 9396

@@ -1,6 +1,6 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix/scalars';
-import { StorePath } from '@cupboard/nix/store-path';
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import type { Command } from 'commander';
 

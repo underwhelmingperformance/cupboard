@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { attestationUploadDecisionSchema } from '@cupboard/protocol/attestations';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { uploadActionDecisionSchema } from '@cupboard/protocol/upload';

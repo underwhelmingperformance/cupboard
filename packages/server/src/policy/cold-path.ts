@@ -1,5 +1,5 @@
-import { isImplicitPinName } from '@cupboard/nix/retention';
-import { ttlSecondsSchema } from '@cupboard/nix/scalars';
+import { isImplicitPinName } from '@cupboard/nix-store/retention';
+import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 
 import { ColdPathTtlConfigurationInvalidError } from '../errors.ts';
 

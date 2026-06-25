@@ -6,8 +6,8 @@ import {
 	referencesSchema,
 	storePathHashSchema,
 	storePathSchema
-} from '@cupboard/nix/scalars';
-import { storePathHashOf } from '@cupboard/nix/store-path';
+} from '@cupboard/nix-store/scalars';
+import { storePathHashOf } from '@cupboard/nix-store/store-path';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';

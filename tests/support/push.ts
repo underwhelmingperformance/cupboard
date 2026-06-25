@@ -1,6 +1,6 @@
 import path from 'node:path';
 
-import { StorePath } from '@cupboard/nix/store-path';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	uploadActionDecisionSchema,
 	uploadDecisionSchema,

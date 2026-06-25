@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { renderNetrc } from '@cupboard/nix/nix-config';
+import { renderNetrc } from '@cupboard/nix-store/nix-config';
 import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';

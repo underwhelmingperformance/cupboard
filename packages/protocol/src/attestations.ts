@@ -3,7 +3,7 @@ import {
 	predicateTypeSchema,
 	sha256HexDigestSchema,
 	storePathHashSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 export const attestationDescriptorSchema = z.strictObject({

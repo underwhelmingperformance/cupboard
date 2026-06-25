@@ -1,4 +1,4 @@
-import { cacheFromSelector } from '@cupboard/nix/scalars';
+import { cacheFromSelector } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import { type GcResponse } from '@cupboard/protocol/retention';

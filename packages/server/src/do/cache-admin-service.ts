@@ -1,11 +1,11 @@
-import { CacheInfo } from '@cupboard/nix/cache-info';
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type CacheName,
 	type CachePriority,
 	cachePrioritySchema,
 	DEFAULT_CACHE
-} from '@cupboard/nix/scalars';
-import { byCodeUnit } from '@cupboard/nix/store-path';
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type CacheListResponse,
 	type CacheRemoveResponse,

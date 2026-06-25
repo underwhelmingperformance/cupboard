@@ -8,9 +8,9 @@ importers:
 
   .:
     devDependencies:
-      '@cupboard/nix':
+      '@cupboard/nix-store':
         specifier: workspace:*
-        version: link:packages/nix
+        version: link:packages/nix-store
       '@cupboard/protocol':
         specifier: workspace:*
         version: link:packages/protocol
@@ -108,9 +108,9 @@ importers:
       '@cupboard/cli-ui':
         specifier: workspace:*
         version: link:../cli-ui
-      '@cupboard/nix':
+      '@cupboard/nix-store':
         specifier: workspace:*
-        version: link:../nix
+        version: link:../nix-store
       '@cupboard/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -204,7 +204,7 @@ importers:
         specifier: ^4.1.8
         version: 4.1.8(@types/node@25.9.1)(vite@8.0.16(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
-  packages/nix:
+  packages/nix-store:
     dependencies:
       zod:
         specifier: ^4.4.3
@@ -225,9 +225,9 @@ importers:
 
   packages/protocol:
     dependencies:
-      '@cupboard/nix':
+      '@cupboard/nix-store':
         specifier: workspace:*
-        version: link:../nix
+        version: link:../nix-store
       '@orpc/contract':
         specifier: ^1.14.6
         version: 1.14.6
@@ -266,9 +266,9 @@ importers:
 
   packages/server:
     dependencies:
-      '@cupboard/nix':
+      '@cupboard/nix-store':
         specifier: workspace:*
-        version: link:../nix
+        version: link:../nix-store
       '@cupboard/protocol':
         specifier: workspace:*
         version: link:../protocol

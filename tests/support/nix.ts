@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { NixSha256Hash } from '@cupboard/nix/hash';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 
 import { temporaryRoot, withTemporaryDirectory } from './filesystem.ts';
 import { runCommand } from './process.ts';

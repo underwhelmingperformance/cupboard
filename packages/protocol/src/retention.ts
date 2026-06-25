@@ -5,7 +5,7 @@ import {
 	storePathHashSchema,
 	storePathSchema,
 	ttlSecondsSchema
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';

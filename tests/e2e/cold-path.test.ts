@@ -1,7 +1,7 @@
 import path from 'node:path';
 
-import { implicitPinName } from '@cupboard/nix/retention';
-import { StorePath } from '@cupboard/nix/store-path';
+import { implicitPinName } from '@cupboard/nix-store/retention';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
 import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';

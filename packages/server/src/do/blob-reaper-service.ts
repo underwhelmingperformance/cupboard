@@ -2,7 +2,7 @@ import {
 	type NixSha256HashString,
 	type Sha256HexDigest,
 	type StorePathHash
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import {
 	and,
 	asc,

@@ -1,4 +1,4 @@
-import { type SigningKeyId } from '@cupboard/nix/scalars';
+import { type SigningKeyId } from '@cupboard/nix-store/scalars';
 import {
 	type KeyListResponse,
 	type KeyRetireResponse,

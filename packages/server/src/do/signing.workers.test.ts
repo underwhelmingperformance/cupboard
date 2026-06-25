@@ -1,4 +1,4 @@
-import { byCodeUnit } from '@cupboard/nix/store-path';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';

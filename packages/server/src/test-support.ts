@@ -1,5 +1,5 @@
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { NarInfo } from '@cupboard/nix/narinfo';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	DEFAULT_CACHE,
 	nixSha256HashSchema,
@@ -12,9 +12,9 @@ import {
 	type TenantId,
 	tenantIdSchema,
 	WIRE_DEFAULT_CACHE
-} from '@cupboard/nix/scalars';
-import { byCodeUnit } from '@cupboard/nix/store-path';
-import { zstdCompressionStream } from '@cupboard/nix/zstd';
+} from '@cupboard/nix-store/scalars';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import { zstdCompressionStream } from '@cupboard/nix-store/zstd';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema

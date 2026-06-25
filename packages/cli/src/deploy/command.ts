@@ -1,7 +1,7 @@
 import { existsSync } from 'node:fs';
 import { isSea } from 'node:sea';
 
-import { NixConfig } from '@cupboard/nix/nix-config';
+import { NixConfig } from '@cupboard/nix-store/nix-config';
 import type Cloudflare from 'cloudflare';
 import { APIError } from 'cloudflare';
 import { StatusCodes } from 'http-status-codes';

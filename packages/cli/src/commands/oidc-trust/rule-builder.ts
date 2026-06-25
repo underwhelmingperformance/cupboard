@@ -1,4 +1,4 @@
-import { WIRE_DEFAULT_CACHE } from '@cupboard/nix/scalars';
+import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { captureGroups, quotePatternLiteral } from '@cupboard/protocol/capture';
 import {
 	type PermittedGrant,

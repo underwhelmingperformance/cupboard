@@ -2,7 +2,7 @@ import {
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
 	type StorePathHash
-} from '@cupboard/nix/scalars';
+} from '@cupboard/nix-store/scalars';
 import {
 	attestationAttachResponseSchema,
 	attestationDecisionSchema,

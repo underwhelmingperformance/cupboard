@@ -1,4 +1,4 @@
-import { byCodeUnit } from '@cupboard/nix/store-path';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	controlKeyListResponseSchema,
 	controlKeyRotateResponseSchema

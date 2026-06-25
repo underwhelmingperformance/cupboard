@@ -1,7 +1,7 @@
 import { readFile as nodeReadFile } from 'node:fs/promises';
 
-import { NixSha256Hash } from '@cupboard/nix/hash';
-import { NarInfo } from '@cupboard/nix/narinfo';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
 import {
 	type AttestationPolicyOptions,

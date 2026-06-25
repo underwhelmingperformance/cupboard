@@ -1,5 +1,5 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
-import { InvalidStorePathError } from '@cupboard/nix/errors';
+import { InvalidStorePathError } from '@cupboard/nix-store/errors';
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 

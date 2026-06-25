@@ -8,16 +8,20 @@ import {
 } from 'node:fs/promises';
 import pathModule from 'node:path';
 
-import type { NixSha256Hash } from '@cupboard/nix/hash';
-import { toNixSha256 } from '@cupboard/nix/hash';
+import type { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { toNixSha256 } from '@cupboard/nix-store/hash';
 
 import { byteStream } from '../io/byte-stream.ts';
 
 export {
 	InvalidNixSha256HashError,
 	InvalidSha256DigestLengthError
-} from '@cupboard/nix/errors';
-export { NixSha256Hash, toNixBase32, toNixSha256 } from '@cupboard/nix/hash';
+} from '@cupboard/nix-store/errors';
+export {
+	NixSha256Hash,
+	toNixBase32,
+	toNixSha256
+} from '@cupboard/nix-store/hash';
 
 const textEncoder = new TextEncoder();
 

@@ -1,4 +1,4 @@
-import { byCodeUnit } from '@cupboard/nix/store-path';
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';

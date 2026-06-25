@@ -1,4 +1,4 @@
-import { cacheNamePattern } from '@cupboard/nix/scalars';
+import { cacheNamePattern } from '@cupboard/nix-store/scalars';
 import { subjectTokenTypeIdToken } from '@cupboard/protocol/oidc';
 import type {
 	ParsedControlCheckReport,

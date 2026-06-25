@@ -1,4 +1,7 @@
-import { cacheSelectorSchema, rootNameSchema } from '@cupboard/nix/scalars';
+import {
+	cacheSelectorSchema,
+	rootNameSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
