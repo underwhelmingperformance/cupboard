@@ -443,6 +443,15 @@ async function runPushWithTemporaryDirectory(
 		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision)),
 		...prepared.reuseCommits
 	].filter((decision) => !failedUploadIds.has(decision.uploadId));
+	const commitContext: CommitContext = {
+		client,
+		closure,
+		preparedByUploadId: new Map(
+			prepared.uploads.map((upload) => [upload.decision.uploadId, upload])
+		),
+		readCompressedNar,
+		options: { wait: shouldWait, timeoutSeconds: waitTimeoutSeconds }
+	};
 	const commit = await reporter.progress(
 		'Committing metadata',
 		{ total: commitDecisions.length },
@@ -450,20 +459,16 @@ async function runPushWithTemporaryDirectory(
 			const settled = await Promise.allSettled(
 				commitDecisions.map(async (decision) => {
 					try {
-						return await client.commit(
-							{
-								uploadId: decision.uploadId,
-								storePathHash: decision.storePathHash,
-								narHash: decision.narHash
-							},
-							{ wait: shouldWait, timeoutSeconds: waitTimeoutSeconds }
-						);
+						return await commitNegotiated(decision, commitContext);
 					} finally {
 						bar.advance(1);
 					}
 				})
 			);
 
+			// Pending uploads are collected by store-path hash, so a re-negotiated
+			// upload id still resolves to its path for the retention and attestation
+			// gates below.
 			const pending: string[] = [];
 			let committed = 0;
 
@@ -497,7 +502,7 @@ async function runPushWithTemporaryDirectory(
 				}
 
 				if (result.value.status === 'pending') {
-					pending.push(decision.uploadId);
+					pending.push(result.value.storePathHash);
 				} else {
 					committed += 1;
 				}
@@ -522,11 +527,8 @@ async function runPushWithTemporaryDirectory(
 		failures.map((failure) => failure.storePathHash)
 	);
 	if (!shouldWait && commit.pending.length > 0) {
-		for (const hash of pendingUploadStorePathHashes(
-			negotiation.uploads,
-			commit.pending
-		)) {
-			unservableStorePathHashes.add(hash);
+		for (const storePathHash of commit.pending) {
+			unservableStorePathHashes.add(storePathHash);
 		}
 	}
 
@@ -841,24 +843,6 @@ function attestationResultRows(
 	];
 }
 
-function pendingUploadStorePathHashes(
-	decisions: readonly UploadDecision[],
-	pendingUploadIds: readonly string[]
-): Set<string> {
-	const pending = new Set(pendingUploadIds);
-	const storePathHashes = new Set<string>();
-
-	for (const decision of decisions) {
-		if (!isCommittable(decision) || !pending.has(decision.uploadId)) {
-			continue;
-		}
-
-		storePathHashes.add(decision.storePathHash);
-	}
-
-	return storePathHashes;
-}
-
 interface RootRequest {
 	readonly name: string;
 	readonly body: RootSetBody;
@@ -1067,6 +1051,104 @@ async function presignUpload(
 	};
 }
 
+interface CommitContext {
+	readonly client: PushClient;
+	readonly closure: readonly NixValidPathInfo[];
+	readonly preparedByUploadId: ReadonlyMap<string, PreparedUpload>;
+	readonly readCompressedNar: ReadCompressedNar;
+	readonly options: CommitOptions;
+}
+
+function commitTarget(
+	decision: UploadDecisionOf<'upload' | 'commit'>
+): CommitTarget {
+	return {
+		uploadId: decision.uploadId,
+		storePathHash: decision.storePathHash,
+		narHash: decision.narHash
+	};
+}
+
+// Commits one path, re-negotiating it if its slot expired before the commit ran.
+// A long upload phase can outlive the slot the prepare stamped, and a `NOT_FOUND`
+// commit means the pending row was reaped, not that the transfer is dead, so the
+// path is re-driven rather than failed.
+async function commitNegotiated(
+	decision: UploadDecisionOf<'upload' | 'commit'>,
+	context: CommitContext
+): Promise<CommitResponse> {
+	try {
+		return await context.client.commit(commitTarget(decision), context.options);
+	} catch (error) {
+		if (!isStaleUploadError(error)) {
+			throw error;
+		}
+
+		return redriveExpiredCommit(decision, context);
+	}
+}
+
+// Re-drives a path whose commit slot was reaped from wherever its fresh decision
+// puts it: a reuse commits straight away; a fresh upload re-presigns and
+// re-uploads the NAR from the compressed file still on disk before committing; a
+// path the store now already holds needs nothing. The reaped row took its staged
+// bytes with it, so a fresh upload must re-send them.
+async function redriveExpiredCommit(
+	decision: UploadDecisionOf<'upload' | 'commit'>,
+	context: CommitContext
+): Promise<CommitResponse> {
+	const pathInfo = findNegotiatedPath(context.closure, decision);
+	const renegotiation = await context.client.negotiate({
+		paths: [prepareStorePathNegotiation(pathInfo)]
+	});
+	const fresh = renegotiation.uploads.at(0);
+
+	if (fresh === undefined) {
+		throw new UnexpectedUploadDecisionError(
+			decision.storePathHash,
+			decision.narHash
+		);
+	}
+
+	if (isReusedBlobCommit(fresh)) {
+		return context.client.commit(commitTarget(fresh), context.options);
+	}
+
+	if (isSkip(fresh)) {
+		return {
+			storePathHash: fresh.storePathHash,
+			narHash: fresh.narHash,
+			status: 'committed'
+		};
+	}
+
+	const prepared = context.preparedByUploadId.get(decision.uploadId);
+
+	if (prepared === undefined) {
+		// A reuse commit whose shared blob vanished: there is no local NAR to
+		// re-upload, so it cannot be re-driven here.
+		throw new UnexpectedUploadDecisionError(
+			decision.storePathHash,
+			decision.narHash
+		);
+	}
+
+	const presigned = await context.client.prepareUpload(fresh.uploadId, {
+		fileHash: prepared.preparedPath.blob.fileHash.toString(),
+		fileSize: prepared.preparedPath.blob.fileSize,
+		compression: prepared.preparedPath.blob.compression
+	});
+	await context.client.uploadBlob({
+		r2Key: fresh.r2Key,
+		uploadUrl: presigned.uploadUrl,
+		body: context.readCompressedNar(prepared.preparedPath.compressedPath),
+		contentLength: prepared.preparedPath.blob.fileSize,
+		headers: presigned.uploadHeaders
+	});
+
+	return context.client.commit(commitTarget(fresh), context.options);
+}
+
 async function preparePushPath(
 	pathInfo: NixValidPathInfo,
 	dependencies: PreparePushPathDependencies
@@ -1116,7 +1198,7 @@ function verifyNarMetadata(
 
 function findNegotiatedPath(
 	closure: readonly NixValidPathInfo[],
-	decision: Extract<UploadDecision, { action: 'upload' }>
+	decision: UploadDecisionOf<'upload' | 'commit'>
 ): NixValidPathInfo {
 	const pathInfo = closure.find(
 		(item) =>
@@ -1144,12 +1226,6 @@ function isUpload(
 	decision: UploadDecision
 ): decision is Extract<UploadDecision, { action: 'upload' }> {
 	return decision.action === 'upload';
-}
-
-function isCommittable(
-	decision: UploadDecision
-): decision is Extract<UploadDecision, { action: 'commit' | 'upload' }> {
-	return decision.action !== 'skip';
 }
 
 function isReusedBlobCommit(
