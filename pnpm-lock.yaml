@@ -86,6 +86,9 @@ importers:
 
   actions:
     dependencies:
+      '@cupboard/nix':
+        specifier: workspace:*
+        version: link:../packages/nix
       '@cupboard/shared':
         specifier: workspace:*
         version: link:../packages/shared

@@ -5,6 +5,7 @@
 		"cupboard-action": "./src/main.ts"
 	},
 	"dependencies": {
+		"@cupboard/nix": "workspace:*",
 		"@cupboard/shared": "workspace:*",
 		"semver": "^7.8.5"
 	},

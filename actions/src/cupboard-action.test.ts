@@ -15,7 +15,6 @@ import {
 	cacheUrlFor,
 	dispatch,
 	fetchRelease,
-	narHashToHex,
 	normaliseTrustedPublicKeys,
 	normaliseVersion,
 	parseChecksums,
@@ -110,22 +109,6 @@ describe('parseChecksums', () => {
 			'cupboard-v1.2.3-linux-x64.tar.gz':
 				'0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 		});
-	});
-});
-
-describe('narHashToHex', () => {
-	it('decodes an SRI sha256 NAR hash to lower-case hex', () => {
-		expect(
-			narHashToHex('sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=')
-		).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
-	});
-
-	it.each([
-		['not-a-hash'],
-		['sha256:abc'],
-		['sha512-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=']
-	])('rejects %s', (narHash) => {
-		expect(() => narHashToHex(narHash)).toThrow();
 	});
 });
 
