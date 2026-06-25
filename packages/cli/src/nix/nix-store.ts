@@ -38,6 +38,32 @@ export class NixStorePathNotFoundError extends NixStoreError {
 	}
 }
 
+export class NixConfigIncludeError extends NixStoreError {
+	constructor(
+		public readonly target: string,
+		public readonly reason: string
+	) {
+		super(`Could not include Nix configuration ${target}: ${reason}`);
+		this.name = 'NixConfigIncludeError';
+	}
+}
+
+export class UnsupportedNixStoreError extends NixStoreError {
+	constructor(public readonly storeUri: string) {
+		super(
+			`Cannot read path information from the Nix store '${storeUri}': only the local store and the daemon are supported`
+		);
+		this.name = 'UnsupportedNixStoreError';
+	}
+}
+
+export class NixStoreDatabaseError extends NixStoreError {
+	constructor(message: string) {
+		super(message);
+		this.name = 'NixStoreDatabaseError';
+	}
+}
+
 export function prepareStorePathMetadata(
 	pathInfo: NixValidPathInfo,
 	blob: CompressedNarBlob

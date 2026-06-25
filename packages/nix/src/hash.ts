@@ -1,4 +1,9 @@
-import { bytesToBase64, bytesToHex } from './encoding.ts';
+import {
+	base64ToBytes,
+	bytesToBase64,
+	bytesToHex,
+	hexToBytes
+} from './encoding.ts';
 import {
 	InvalidNixSha256HashError,
 	InvalidSha256DigestLengthError
@@ -12,6 +17,20 @@ import {
 
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 const nixSha256Base32Length = 52;
+const sha256HexLength = 64;
+const sha256Prefix = 'sha256:';
+
+function decodeDigest(digest: string): Uint8Array {
+	if (digest.length === sha256HexLength) {
+		return hexToBytes(digest);
+	}
+
+	if (digest.length === nixSha256Base32Length) {
+		return fromNixBase32(digest);
+	}
+
+	return base64ToBytes(digest);
+}
 
 export class NixSha256Hash {
 	static parse(value: string): NixSha256Hash {
@@ -25,6 +44,30 @@ export class NixSha256Hash {
 			parsed.data,
 			fromNixBase32(parsed.data.slice('sha256:'.length))
 		);
+	}
+
+	/**
+	 * Parse a `sha256:`-prefixed digest in any of the encodings Nix writes, the
+	 * way `Hash::parseAnyPrefixed` does: the digest is base16 when it is 64
+	 * characters, Nix base32 when it is 52, and otherwise base64. The Nix store
+	 * database records NAR hashes in this `sha256:<base16>` form.
+	 */
+	static parsePrefixed(value: string): NixSha256Hash {
+		if (!value.startsWith(sha256Prefix)) {
+			throw new InvalidNixSha256HashError(value);
+		}
+
+		const digest = value.slice(sha256Prefix.length);
+
+		try {
+			return this.fromDigest(decodeDigest(digest));
+		} catch (error) {
+			if (error instanceof InvalidNixSha256HashError) {
+				throw error;
+			}
+
+			throw new InvalidNixSha256HashError(value);
+		}
 	}
 
 	static fromDigest(bytes: Uint8Array): NixSha256Hash {

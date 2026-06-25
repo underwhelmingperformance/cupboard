@@ -147,9 +147,21 @@ async function main(): Promise<void> {
 			// the `--disable-warning` shebang in `main.ts` never applies and SEA takes no
 			// node CLI flags. Silence deprecation warnings here, as `--no-deprecation`
 			// would, to keep transitive dependencies' noise (such as the `punycode`
-			// DEP0040 warning) out of the released binary's output.
+			// DEP0040 warning) out of the released binary's output, and drop the
+			// `node:sqlite` experimental-feature warning the local store loads.
 			banner: {
-				js: 'process.noDeprecation = true;'
+				js: [
+					'process.noDeprecation = true;',
+					'{',
+					'  const emitWarning = process.emitWarning.bind(process);',
+					'  process.emitWarning = (warning, ...rest) => {',
+					'    const options = rest[0];',
+					"    const type = typeof options === 'object' && options !== null ? options.type : options;",
+					"    if (type === 'ExperimentalWarning' && String(warning).includes('SQLite')) return;",
+					'    return emitWarning(warning, ...rest);',
+					'  };',
+					'}'
+				].join('\n')
 			},
 			bundle: true,
 			define: {
