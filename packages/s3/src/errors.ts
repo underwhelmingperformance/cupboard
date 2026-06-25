@@ -87,6 +87,27 @@ export class PresignedUrlExpiredError extends AccessDeniedError {
 	}
 }
 
+/** An unauthenticated request reached a route that requires a credential. */
+export class AnonymousAccessDeniedError extends AccessDeniedError {
+	constructor() {
+		super('Anonymous access is not permitted.');
+	}
+}
+
+/** A credential addressed a cache it is not scoped to. */
+export class CredentialCacheMismatchError extends AccessDeniedError {
+	constructor() {
+		super('Credential is not scoped to this cache.');
+	}
+}
+
+/** A credential attempted a write without the upload grant. */
+export class CredentialCannotWriteError extends AccessDeniedError {
+	constructor() {
+		super('Credential cannot write to this cache.');
+	}
+}
+
 // --- SignatureDoesNotMatch (403) -----------------------------------------
 
 /** The re-signed canonical request did not reproduce the client's signature. */
@@ -290,6 +311,13 @@ export class UnsupportedOperationError extends NotImplementedError {
 export class NonCacheWriteError extends NotImplementedError {
 	constructor(resource?: string) {
 		super('Only narinfo and nar objects can be written.', resource);
+	}
+}
+
+/** Object deletion over S3 is not yet wired to the cache's deletion services. */
+export class DeletionNotImplementedError extends NotImplementedError {
+	constructor() {
+		super('Object deletion is not yet supported.');
 	}
 }
 
