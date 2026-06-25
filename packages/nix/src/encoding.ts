@@ -40,3 +40,18 @@ export function bytesToHex(bytes: Uint8Array): string {
 
 	return hex;
 }
+
+/** Decode a hex string into bytes; throws `RangeError` on malformed input. */
+export function hexToBytes(value: string): Uint8Array {
+	if (value.length % 2 !== 0 || /[^\da-f]/iu.test(value)) {
+		throw new RangeError(`not a valid hex string: ${value}`);
+	}
+
+	const bytes = new Uint8Array(value.length / 2);
+
+	for (let index = 0; index < bytes.length; index += 1) {
+		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
+	}
+
+	return bytes;
+}

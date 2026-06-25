@@ -57,7 +57,6 @@ import {
 	type CompressedNarBlob
 } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
-import { NixDaemonStoreClient } from '../nix/nix-daemon.ts';
 import {
 	type NixStoreClient,
 	type NixValidPathInfo,
@@ -65,6 +64,7 @@ import {
 	prepareStorePathMetadata,
 	prepareStorePathNegotiation
 } from '../nix/nix-store.ts';
+import { createNixStoreClient } from '../nix/store-client.ts';
 
 import { runWithConcurrency } from './pool.ts';
 
@@ -182,7 +182,7 @@ export async function runPush(
 		dependencies.root,
 		dependencies.ttlSeconds
 	);
-	const nixStore = dependencies.nixStore ?? new NixDaemonStoreClient();
+	const nixStore = dependencies.nixStore ?? createNixStoreClient();
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
 	const compressNar = dependencies.compressNar ?? compressAndHashNarToFile;

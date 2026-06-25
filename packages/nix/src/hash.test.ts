@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { bytesToBase64, bytesToHex } from './encoding.ts';
 import { InvalidNixSha256HashError } from './errors.ts';
 import { fromNixBase32, NixSha256Hash, toNixBase32 } from './hash.ts';
 
@@ -18,6 +19,30 @@ describe('NixSha256Hash', () => {
 		const hash = NixSha256Hash.fromDigest(digest);
 
 		expect(hash.toUrlSegment()).toBe(`sha256%3A${hash.toString().slice(7)}`);
+	});
+});
+
+describe('NixSha256Hash.parsePrefixed', () => {
+	const digest = Uint8Array.from({ length: 32 }, (_, index) => index * 7);
+
+	it.each([
+		{ encoding: 'base16', body: bytesToHex(digest) },
+		{ encoding: 'base32', body: toNixBase32(digest) },
+		{ encoding: 'base64', body: bytesToBase64(digest) }
+	])('parses a $encoding digest to the same hash', ({ body }) => {
+		expect(
+			NixSha256Hash.parsePrefixed(`sha256:${body}`).digestBytes()
+		).toStrictEqual(digest);
+	});
+
+	it.each([
+		{ name: 'a missing algorithm prefix', value: bytesToHex(digest) },
+		{ name: 'a digest of the wrong length', value: 'sha256:abcd' },
+		{ name: 'a non-hex 64-character digest', value: `sha256:${'g'.repeat(64)}` }
+	])('rejects $name', ({ value }) => {
+		expect(() => NixSha256Hash.parsePrefixed(value)).toThrow(
+			InvalidNixSha256HashError
+		);
 	});
 });
 
