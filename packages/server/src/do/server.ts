@@ -35,9 +35,8 @@ import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
 import { createR2BlobStore } from '../s3/blob-store.ts';
 import {
-	createEncryptionKeyset,
 	type EncryptionKeyset,
-	importEncryptionKey
+	loadEncryptionKeyset
 } from '../s3/credentials.ts';
 import { resolveServableNar } from '../s3/nar-resolver.ts';
 import { createS3Backend } from '../s3/nix-cache-backend.ts';
@@ -78,6 +77,7 @@ import { OidcTrustService } from './oidc-trust-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RootsService } from './roots-service.ts';
+import { S3CredentialAdminService } from './s3-credential-admin-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
 import {
@@ -133,6 +133,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly roots: RootsService;
 	private readonly offboarding: OffboardingService;
 	private readonly maintenanceEligibility: MaintenanceEligibilityService;
+	private readonly s3CredentialAdmin: S3CredentialAdminService;
 	readonly context: ServerContext;
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
@@ -201,6 +202,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.maintenanceEligibility = new MaintenanceEligibilityService(
 			this.context
 		);
+		this.s3CredentialAdmin = new S3CredentialAdminService(this.context);
 
 		// Parked commit sockets answer keepalive pings without waking the
 		// hibernated object.
@@ -508,7 +510,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			garbageCollection: this.garbageCollection,
 			uploads: this.uploads,
 			attestations: this.attestations,
-			verification: this.verification
+			verification: this.verification,
+			s3Credentials: this.s3CredentialAdmin
 		};
 	}
 
@@ -650,29 +653,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// The S3 endpoint's encryption keys, or `undefined` when none is configured so
-	// the endpoint stays disabled. The secret is one or more comma-separated base64
-	// keys: the first seals new credential secrets, the rest are retained so a key
-	// can be rotated out without invalidating credentials still sealed under it.
-	private async encryptionKeyset(): Promise<EncryptionKeyset | undefined> {
-		const secret = this.context.env.S3_SECRET_KEY;
-		if (!secret) {
-			return undefined;
-		}
-
-		const encoded = secret
-			.split(',')
-			.map((part) => part.trim())
-			.filter((part) => part !== '');
-
-		const keys = await Promise.all(
-			encoded.map((part) => importEncryptionKey(part))
-		);
-		const [current, ...previous] = keys;
-		if (current === undefined) {
-			return undefined;
-		}
-
-		return createEncryptionKeyset(current, previous);
+	// the endpoint stays disabled.
+	private encryptionKeyset(): Promise<EncryptionKeyset | undefined> {
+		return loadEncryptionKeyset(this.context.env.S3_SECRET_KEY);
 	}
 
 	// Built once per object, lazily: importing the wrapping key is async, and the

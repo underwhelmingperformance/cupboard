@@ -232,6 +232,15 @@ export class S3EncryptionKeyInvalidError extends ServerHttpError {
 	}
 }
 
+export class S3EndpointNotConfiguredError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+
+	constructor() {
+		super('The S3 endpoint is not configured');
+		this.name = 'S3EndpointNotConfiguredError';
+	}
+}
+
 export class ControlWrappedKeyMalformedError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

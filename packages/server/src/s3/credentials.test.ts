@@ -9,6 +9,7 @@ import {
 	type EncryptionKeyset,
 	encryptSecret,
 	importEncryptionKey,
+	loadEncryptionKeyset,
 	type S3CredentialStore,
 	type StoredS3Credential,
 	UnknownEncryptionKeyError
@@ -103,6 +104,47 @@ describe('secret encryption', () => {
 		await expect(importEncryptionKey(shortKey)).rejects.toThrow(
 			S3EncryptionKeyInvalidError
 		);
+	});
+});
+
+describe('loadEncryptionKeyset', () => {
+	function requireKeyset(
+		keyset: EncryptionKeyset | undefined
+	): EncryptionKeyset {
+		if (keyset === undefined) {
+			throw new Error('expected the secret to load a keyset');
+		}
+		return keyset;
+	}
+
+	it.each<{ name: string; secret: string | undefined }>([
+		{ name: 'unset', secret: undefined },
+		{ name: 'empty', secret: '' },
+		{ name: 'only separators and whitespace', secret: ' , ' }
+	])('disables the endpoint when the secret is $name', async ({ secret }) => {
+		expect(await loadEncryptionKeyset(secret)).toBeUndefined();
+	});
+
+	it('loads a keyset that round-trips a secret', async () => {
+		const keyset = requireKeyset(await loadEncryptionKeyset(randomKeyB64()));
+		const encoded = await encryptSecret(keyset, 'secret');
+
+		expect(await decryptSecret(keyset, encoded)).toBe('secret');
+	});
+
+	it('parses a comma-separated secret, retaining earlier keys for decryption', async () => {
+		const oldKey = randomKeyB64();
+		const newKey = randomKeyB64();
+		const encoded = await encryptSecret(
+			requireKeyset(await loadEncryptionKeyset(oldKey)),
+			'secret'
+		);
+
+		const rotated = requireKeyset(
+			await loadEncryptionKeyset(`${newKey},${oldKey}`)
+		);
+
+		expect(await decryptSecret(rotated, encoded)).toBe('secret');
 	});
 });
 

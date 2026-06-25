@@ -44,6 +44,17 @@ const os = implement(tenantContract)
 	);
 
 export const tenantRouter = os.router({
+	s3Credentials: {
+		create: os.s3Credentials.create.handler(({ input, context }) =>
+			context.services.s3Credentials.create(input)
+		),
+		list: os.s3Credentials.list.handler(({ context }) =>
+			context.services.s3Credentials.list()
+		),
+		revoke: os.s3Credentials.revoke.handler(({ input, context }) =>
+			context.services.s3Credentials.revoke(input.accessKeyId)
+		)
+	},
 	caches: {
 		list: os.caches.list.handler(({ context }) =>
 			context.services.cacheAdmin.listCaches()

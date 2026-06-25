@@ -91,6 +91,36 @@ export function createEncryptionKeyset(
 }
 
 /**
+ * Loads the configured encryption keyset from the comma-separated secret binding
+ * (current key first, the rest retained for decryption), or `undefined` when no
+ * key is configured. Rejects only if a configured key is malformed. Shared by
+ * the serve path and the credential admin path so both agree on whether the S3
+ * endpoint is configured.
+ */
+export async function loadEncryptionKeyset(
+	secret: string | undefined
+): Promise<EncryptionKeyset | undefined> {
+	if (!secret) {
+		return undefined;
+	}
+
+	const encoded = secret
+		.split(',')
+		.map((part) => part.trim())
+		.filter((part) => part !== '');
+
+	const keys = await Promise.all(
+		encoded.map((part) => importEncryptionKey(part))
+	);
+	const [current, ...previous] = keys;
+	if (current === undefined) {
+		return undefined;
+	}
+
+	return createEncryptionKeyset(current, previous);
+}
+
+/**
  * Encrypts a credential secret with the keyset's current key, returning the
  * key id and base64 of the random IV followed by the ciphertext. A fresh IV is
  * generated per call.

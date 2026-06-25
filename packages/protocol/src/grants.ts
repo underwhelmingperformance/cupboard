@@ -50,7 +50,10 @@ export const domainOperations = [
 	'oidc-trust:remove',
 	'policy:list',
 	'policy:add',
-	'policy:remove'
+	'policy:remove',
+	's3-credential:create',
+	's3-credential:list',
+	's3-credential:delete'
 ] as const;
 
 // Control operations that act on a specific tenant (an exact slug).
@@ -90,6 +93,9 @@ export const operationSchema = z.enum([
 	'root:remove',
 	'cache:create',
 	'cache:delete',
+	's3-credential:create',
+	's3-credential:list',
+	's3-credential:delete',
 	'cache:list',
 	'narinfo:delete',
 	'gc:run',

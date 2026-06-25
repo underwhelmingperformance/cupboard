@@ -1,3 +1,4 @@
+import { type S3CredentialSummary } from '@cupboard/protocol/s3-credentials';
 import { eq } from 'drizzle-orm';
 import { z } from 'zod';
 
@@ -105,14 +106,7 @@ export async function createS3Credential(
 	return { accessKeyId, secretAccessKey, credentialId };
 }
 
-export interface S3CredentialSummary {
-	readonly accessKeyId: string;
-	readonly credentialId: string;
-	readonly cache: string;
-	readonly label: string;
-	readonly createdAt: string;
-	readonly expiresAt: string | undefined;
-}
+const uploadGrant = 'upload:commit';
 
 /**
  * Lists the cache's S3 credentials without exposing any secret material.
@@ -129,6 +123,9 @@ export function listS3Credentials(
 			credentialId: row.credentialId,
 			cache: row.cache,
 			label: row.label,
+			writable: grantsSchema
+				.parse(JSON.parse(row.grantsJson))
+				.includes(uploadGrant),
 			createdAt: row.createdAt,
 			expiresAt: row.expiresAt ?? undefined
 		}));

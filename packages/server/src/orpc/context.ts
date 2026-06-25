@@ -8,6 +8,7 @@ import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
 import type { RootsService } from '../do/roots-service.ts';
+import type { S3CredentialAdminService } from '../do/s3-credential-admin-service.ts';
 import type { SigningKeysService } from '../do/signing-keys-service.ts';
 import type { StatsService } from '../do/stats-service.ts';
 import type { UploadsService } from '../do/uploads-service.ts';
@@ -41,6 +42,7 @@ export interface TenantRpcServices {
 	readonly uploads: UploadsService;
 	readonly attestations: AttestationsService;
 	readonly verification: VerificationService;
+	readonly s3Credentials: S3CredentialAdminService;
 }
 
 /** The initial oRPC context for every tenant procedure call. */
