@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import pathModule from 'node:path';
 
+import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
 	type Sha256HexDigest,
@@ -58,18 +59,15 @@ import {
 } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import {
-	type NixStoreClient,
-	type NixValidPathInfo,
 	type PreparedStorePath,
 	prepareStorePathMetadata,
 	prepareStorePathNegotiation
 } from '../nix/nix-store.ts';
-import { createNixStoreClient } from '../nix/store-client.ts';
 
 import { runWithConcurrency } from './pool.ts';
 
 export interface PushDependencies {
-	readonly nixStore?: NixStoreClient;
+	readonly nix?: Nix;
 	readonly client: PushClient;
 	readonly root?: string;
 	readonly ttlSeconds?: number;
@@ -182,7 +180,7 @@ export async function runPush(
 		dependencies.root,
 		dependencies.ttlSeconds
 	);
-	const nixStore = dependencies.nixStore ?? createNixStoreClient();
+	const nix = dependencies.nix ?? Nix.open();
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
 	const compressNar = dependencies.compressNar ?? compressAndHashNarToFile;
@@ -198,7 +196,7 @@ export async function runPush(
 		await runPushWithTemporaryDirectory(paths, reporter, {
 			...dependencies,
 			retention,
-			nixStore,
+			nix,
 			createNarArchive,
 			compressNar,
 			readCompressedNar,
@@ -213,7 +211,7 @@ export async function runPush(
 }
 
 interface PushRuntimeDependencies {
-	readonly nixStore: NixStoreClient;
+	readonly nix: Nix;
 	readonly client: PushClient;
 	readonly retention: RetentionPlan;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
@@ -235,7 +233,7 @@ async function runPushWithTemporaryDirectory(
 	dependencies: PushRuntimeDependencies
 ): Promise<void> {
 	const {
-		nixStore,
+		nix,
 		client,
 		retention,
 		createNarArchive,
@@ -248,7 +246,7 @@ async function runPushWithTemporaryDirectory(
 		'Resolving store closure',
 		async (ctx) => {
 			ctx.fact('roots', formatCount(paths.length));
-			const resolved = await nixStore.resolveClosure(paths);
+			const resolved = await nix.resolveClosure(paths);
 			ctx.fact('paths', formatCount(resolved.length));
 
 			return resolved;
