@@ -24,6 +24,42 @@ export interface NixStoreClient {
 	queryPathInfo(storePath: string): Promise<NixValidPathInfo>;
 }
 
+/**
+ * Resolve the closure of `roots` by walking references breadth-first, visiting
+ * each path once and returning them sorted by store path. The backend supplies
+ * how a single path's info is fetched, so the daemon and local stores share one
+ * traversal.
+ */
+export async function resolveClosureBy(
+	roots: readonly string[],
+	queryPathInfo: (storePath: string) => Promise<NixValidPathInfo>
+): Promise<readonly NixValidPathInfo[]> {
+	const closure = new Map<string, NixValidPathInfo>();
+	const pending = [...roots];
+
+	while (pending.length > 0) {
+		const storePath = pending.shift();
+
+		if (storePath === undefined || closure.has(storePath)) {
+			continue;
+		}
+
+		const info = await queryPathInfo(storePath);
+		closure.set(storePath, info);
+
+		for (const reference of info.references) {
+			if (!closure.has(reference)) {
+				pending.push(reference);
+			}
+		}
+	}
+
+	return closure
+		.values()
+		.toArray()
+		.toSorted((left, right) => left.storePath.localeCompare(right.storePath));
+}
+
 export interface PreparedStorePath {
 	readonly metadata: UploadPathMetadataFields;
 	readonly signatures: readonly string[];

@@ -8,7 +8,8 @@ import {
 	type NixStoreClient,
 	NixStoreDatabaseError,
 	NixStorePathNotFoundError,
-	type NixValidPathInfo
+	type NixValidPathInfo,
+	resolveClosureBy
 } from './nix-store.ts';
 
 /**
@@ -42,7 +43,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 
 	private async withDatabase<T>(
 		use: (database: NixStoreDatabase) => T
-	): Promise<T> {
+	): Promise<Awaited<T>> {
 		const database = this.open();
 
 		try {
@@ -56,7 +57,9 @@ export class NixLocalStoreClient implements NixStoreClient {
 		storePaths: readonly string[]
 	): Promise<readonly NixValidPathInfo[]> {
 		return this.withDatabase((database) =>
-			collectClosure(database, storePaths)
+			resolveClosureBy(storePaths, (storePath) =>
+				Promise.resolve(requirePathInfo(database, storePath))
+			)
 		);
 	}
 
@@ -65,36 +68,6 @@ export class NixLocalStoreClient implements NixStoreClient {
 			requirePathInfo(database, storePath)
 		);
 	}
-}
-
-function collectClosure(
-	database: NixStoreDatabase,
-	storePaths: readonly string[]
-): readonly NixValidPathInfo[] {
-	const closure = new Map<string, NixValidPathInfo>();
-	const pending = [...storePaths];
-
-	while (pending.length > 0) {
-		const storePath = pending.shift();
-
-		if (storePath === undefined || closure.has(storePath)) {
-			continue;
-		}
-
-		const info = requirePathInfo(database, storePath);
-		closure.set(storePath, info);
-
-		for (const reference of info.references) {
-			if (!closure.has(reference)) {
-				pending.push(reference);
-			}
-		}
-	}
-
-	return closure
-		.values()
-		.toArray()
-		.toSorted((left, right) => left.storePath.localeCompare(right.storePath));
 }
 
 function requirePathInfo(
