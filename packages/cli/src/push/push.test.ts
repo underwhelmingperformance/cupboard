@@ -22,6 +22,7 @@ import { z } from 'zod';
 import type { CommitOptions } from '../client/client.ts';
 import {
 	AttestationSubjectNotPushedError,
+	CupboardHttpError,
 	CupboardUploadError,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
@@ -378,6 +379,85 @@ describe('runPush', () => {
 			preparedIds: ['upload-stale', 'upload-fresh'],
 			uploadedKeys: [`nar/${appDigest.narHash.toString()}.nar.zst`],
 			commits: ['upload-fresh']
+		});
+	});
+
+	it('re-negotiates and re-uploads when a commit slot expired', async () => {
+		let negotiations = 0;
+		const preparedIds: string[] = [];
+		const uploadedKeys: string[] = [];
+		const commitAttempts: string[] = [];
+		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate() {
+					negotiations += 1;
+					const uploadId = negotiations === 1 ? 'commit-stale' : 'commit-fresh';
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId,
+								r2Key,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				prepareUpload(uploadId) {
+					preparedIds.push(uploadId);
+
+					return Promise.resolve({
+						uploadUrl: 'https://upload.example/app',
+						uploadHeaders: {
+							'x-amz-checksum-sha256': fileHash.digestBase64()
+						},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					});
+				},
+				uploadBlob(upload) {
+					uploadedKeys.push(upload.r2Key);
+
+					return Promise.resolve();
+				},
+				commit(target) {
+					commitAttempts.push(target.uploadId);
+
+					if (target.uploadId === 'commit-stale') {
+						// The slot expired and was reaped during a long upload phase,
+						// taking the staged bytes with it.
+						return Promise.reject(
+							new CupboardHttpError('POST', '/commit', 404, 'Upload expired')
+						);
+					}
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		expect({
+			negotiations,
+			preparedIds,
+			uploadedKeys,
+			commitAttempts
+		}).toStrictEqual({
+			negotiations: 2,
+			preparedIds: ['commit-stale', 'commit-fresh'],
+			uploadedKeys: [r2Key, r2Key],
+			commitAttempts: ['commit-stale', 'commit-fresh']
 		});
 	});
 

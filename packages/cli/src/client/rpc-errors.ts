@@ -1,20 +1,29 @@
 import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 
 import {
+	CupboardHttpError,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError
 } from '../errors.ts';
+
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 /**
  * Whether a prepare or commit failed because its negotiated upload slot is no
  * longer there: the pending row expired and was reaped, so the server answers
  * `NOT_FOUND`. The caller re-negotiates the path rather than failing the push,
  * since a slow transfer that outran the slot's lifetime is still making
- * progress.
+ * progress. Prepare speaks oRPC and commit speaks the WebSocket, so the same
+ * condition arrives as either an `ORPCError` or a {@link CupboardHttpError}.
  */
 export function isStaleUploadError(error: unknown): boolean {
-	return error instanceof ORPCError && error.code === 'NOT_FOUND';
+	if (error instanceof ORPCError) {
+		return error.code === 'NOT_FOUND';
+	}
+
+	return error instanceof CupboardHttpError && error.status === notFoundStatus;
 }
 
 /**
