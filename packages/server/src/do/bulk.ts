@@ -9,6 +9,9 @@ export const maxInClauseValues = 90;
 // so it runs concurrently without overrunning the platform cap.
 export const maxOutgoingConnections = 6;
 
+// R2 deletes up to 1000 keys in a single `delete` call; a larger set is split.
+export const maxR2DeleteKeys = 1000;
+
 /** Splits `items` into consecutive runs of at most `size`. */
 export function chunk<T>(items: readonly T[], size: number): T[][] {
 	const chunks: T[][] = [];
@@ -18,6 +21,19 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
 	}
 
 	return chunks;
+}
+
+/**
+ * Deletes `keys` from `bucket` in as few `delete` calls as R2's per-call key
+ * limit allows, instead of one round trip per key. An empty set issues no call.
+ */
+export async function deleteObjects(
+	bucket: R2Bucket,
+	keys: readonly string[]
+): Promise<void> {
+	for (const batch of chunk(keys, maxR2DeleteKeys)) {
+		await bucket.delete(batch);
+	}
 }
 
 /**

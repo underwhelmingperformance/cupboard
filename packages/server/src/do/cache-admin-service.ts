@@ -17,6 +17,7 @@ import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 
+import { deleteObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 
@@ -165,15 +166,16 @@ export class CacheAdminService {
 				.where(eq(schema.pendingAttestations.cache, cache))
 				.all();
 
-			for (const upload of pending) {
-				if (upload.r2Key !== narObjectKey(upload.narHash)) {
-					await this.context.env.BLOBS.delete(upload.r2Key);
-				}
-			}
-
-			for (const upload of pendingAttestations) {
-				await this.context.env.BLOBS.delete(upload.r2Key);
-			}
+			await deleteObjects(
+				this.context.env.BLOBS,
+				pending
+					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
+					.map((upload) => upload.r2Key)
+			);
+			await deleteObjects(
+				this.context.env.BLOBS,
+				pendingAttestations.map((upload) => upload.r2Key)
+			);
 
 			this.context.db.transaction((tx) => {
 				for (const path of committed) {
