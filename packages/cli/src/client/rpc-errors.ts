@@ -7,6 +7,17 @@ import {
 } from '../errors.ts';
 
 /**
+ * Whether a prepare or commit failed because its negotiated upload slot is no
+ * longer there: the pending row expired and was reaped, so the server answers
+ * `NOT_FOUND`. The caller re-negotiates the path rather than failing the push,
+ * since a slow transfer that outran the slot's lifetime is still making
+ * progress.
+ */
+export function isStaleUploadError(error: unknown): boolean {
+	return error instanceof ORPCError && error.code === 'NOT_FOUND';
+}
+
+/**
  * Turn an oRPC failure the admin API speaks into an actionable CLI error. A
  * refused or under-scoped token, or an over-quota write, becomes a message that
  * names the fix; anything else (including non-oRPC errors) is returned

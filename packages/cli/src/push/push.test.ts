@@ -15,6 +15,7 @@ import type {
 	UploadPrepareResponse
 } from '@cupboard/protocol/upload';
 import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
+import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -222,6 +223,161 @@ describe('runPush', () => {
 					{ label: 'Pin expiry', value: 'permanent' }
 				]
 			]
+		});
+	});
+
+	it('compresses and prepares NARs in parallel up to the limit', async () => {
+		const limit = 2;
+		const paths = ['1', '2', '3', '4'].map(
+			(n) => `/nix/store/${n}123456789abcdfghijklmnpqrsvwxyz-p${n}`
+		);
+		const digests = new Map(
+			paths.map((path, index) => [path, digest(10 + index, 100 + index)])
+		);
+		const closure = Object.fromEntries(
+			paths.map((path) => [
+				path,
+				pathInfo(path, knownDigest(digests, path), [])
+			])
+		);
+
+		let running = 0;
+		let peak = 0;
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const uploadedKeys: string[] = [];
+
+		await runPush(paths, reporter([]), {
+			prepareConcurrency: limit,
+			client: {
+				negotiate: (body) =>
+					Promise.resolve({
+						uploads: body.paths.map((path) => ({
+							action: 'upload',
+							storePathHash: path.storePathHash,
+							narHash: path.narHash,
+							uploadId: `upload-${path.storePathHash}`,
+							r2Key: `nar/${path.narHash}.nar.zst`,
+							expiresAt: '2026-05-18T12:00:00.000Z'
+						}))
+					}),
+				prepareUpload: () =>
+					Promise.resolve({
+						uploadUrl: 'https://upload.example/p',
+						uploadHeaders: {
+							'x-amz-checksum-sha256': fileHash.digestBase64()
+						},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					}),
+				uploadBlob(upload) {
+					uploadedKeys.push(upload.r2Key);
+
+					return Promise.resolve();
+				},
+				commit: () => Promise.resolve(fallbackCommitResponse()),
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore(closure),
+			createNarArchive: (storePath) =>
+				new FakeNarArchive(knownDigest(digests, storePath)),
+			async compressNar(nar, path) {
+				running += 1;
+				peak = Math.max(peak, running);
+
+				// Once a full batch is in flight, release the gate so the rest can
+				// run; the peak then reveals how many compressed at once.
+				if (running >= limit) {
+					release?.();
+				}
+
+				await gate;
+				running -= 1;
+
+				return fakeCompressedNar(nar, path, digestForNar(nar));
+			},
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		expect({ peak, uploaded: uploadedKeys.length }).toStrictEqual({
+			peak: limit,
+			uploaded: paths.length
+		});
+	});
+
+	it('re-negotiates and retries an upload whose slot expired before prepare', async () => {
+		let negotiations = 0;
+		const preparedIds: string[] = [];
+		const uploadedKeys: string[] = [];
+		const commits: string[] = [];
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate() {
+					negotiations += 1;
+					const uploadId = negotiations === 1 ? 'upload-stale' : 'upload-fresh';
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId,
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				prepareUpload(uploadId) {
+					preparedIds.push(uploadId);
+
+					if (uploadId === 'upload-stale') {
+						// The pending row expired and was reaped while the slow prepare
+						// queue worked through the closure.
+						return Promise.reject(
+							new ORPCError('NOT_FOUND', { message: 'Upload expired' })
+						);
+					}
+
+					return Promise.resolve({
+						uploadUrl: 'https://upload.example/app',
+						uploadHeaders: {
+							'x-amz-checksum-sha256': fileHash.digestBase64()
+						},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					});
+				},
+				uploadBlob(upload) {
+					uploadedKeys.push(upload.r2Key);
+
+					return Promise.resolve();
+				},
+				commit(target) {
+					commits.push(target.uploadId);
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		expect({ negotiations, preparedIds, uploadedKeys, commits }).toStrictEqual({
+			negotiations: 2,
+			preparedIds: ['upload-stale', 'upload-fresh'],
+			uploadedKeys: [`nar/${appDigest.narHash.toString()}.nar.zst`],
+			commits: ['upload-fresh']
 		});
 	});
 
@@ -1704,6 +1860,16 @@ function digestForNar(nar: PushNarArchive): NarDigest {
 	}
 
 	return nar.digestValue;
+}
+
+function knownDigest(digests: Map<string, NarDigest>, path: string): NarDigest {
+	const value = digests.get(path);
+
+	if (value === undefined) {
+		throw new Error(`no digest for ${path}`);
+	}
+
+	return value;
 }
 
 function digest(byte: number, narSize: number): NarDigest {
