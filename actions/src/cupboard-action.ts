@@ -10,6 +10,7 @@ import {
 import path from 'node:path';
 import { arch, env, platform } from 'node:process';
 
+import { Nix } from '@cupboard/nix';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import {
 	identityPolicy,
@@ -30,7 +31,6 @@ import {
 	InvalidInputError,
 	MalformedReleaseResponseError,
 	MissingInputError,
-	NixError,
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
 	UnknownCommandError,
@@ -89,11 +89,6 @@ interface AttestInputs {
 interface StorePathDigest {
 	readonly storePath: string;
 	readonly sha256: string;
-}
-
-interface NixPathInfo {
-	readonly storePath: string;
-	readonly narHash: string;
 }
 
 interface InstallCupboardOptions {
@@ -403,7 +398,7 @@ export async function pushAction(
 		environment
 	});
 
-	const paths = resolveStorePaths(inputs.paths);
+	const paths = resolveStorePaths(Nix.open(), inputs.paths);
 	const arguments_ = buildPushArguments({
 		url: inputs.url,
 		paths,
@@ -874,90 +869,21 @@ export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 	return netrcFile;
 }
 
-function pathInfoEntries(parsed: unknown): readonly unknown[] {
-	if (Array.isArray(parsed)) {
-		return parsed;
-	}
-
-	if (isRecord(parsed)) {
-		return Object.entries(parsed).map(([storePath, info]) => ({
-			path: storePath,
-			...(isRecord(info) && info)
-		}));
-	}
-
-	return [];
+function resolveStorePaths(nix: Nix, paths: readonly string[]): string[] {
+	return paths.map((storePath) => nix.toStorePath(storePath));
 }
 
-function nixPathInfo(storePath: string): NixPathInfo {
-	const result = spawnSync(
-		'nix',
-		['path-info', '--json', '--json-format', '1', storePath],
-		{ encoding: 'utf8' }
+async function resolveStorePathDigests(
+	nix: Nix,
+	paths: readonly string[]
+): Promise<StorePathDigest[]> {
+	return Promise.all(
+		paths.map(async (storePath) => {
+			const info = await nix.queryPathInfo(storePath);
+
+			return { storePath: info.storePath, sha256: info.narHash.digestHex() };
+		})
 	);
-
-	if (result.error !== undefined) {
-		throw new NixError(
-			`nix path-info could not run for ${storePath}: ${result.error.message}`
-		);
-	}
-
-	if (result.status !== 0) {
-		const detail = result.stderr.trim();
-
-		throw new NixError(
-			`nix path-info failed for ${storePath}${detail === '' ? '' : `: ${detail}`}`
-		);
-	}
-
-	const [entry, ...rest] = pathInfoEntries(parseJson(result.stdout));
-
-	if (entry === undefined || rest.length > 0) {
-		throw new NixError(
-			`nix path-info did not resolve exactly one path for ${storePath}`
-		);
-	}
-
-	if (
-		!isRecord(entry) ||
-		typeof entry.path !== 'string' ||
-		typeof entry.narHash !== 'string'
-	) {
-		throw new NixError(`nix path-info gave no NAR hash for ${storePath}`);
-	}
-
-	return { storePath: entry.path, narHash: entry.narHash };
-}
-
-function resolveStorePaths(paths: readonly string[]): string[] {
-	return paths.map((storePath) => nixPathInfo(storePath).storePath);
-}
-
-export function narHashToHex(narHash: string): string {
-	const sri = /^sha256-(?<base64>[A-Za-z0-9+/=]+)$/u.exec(narHash);
-	const base64 = sri?.groups?.base64;
-
-	if (base64 === undefined) {
-		throw new NixError(
-			`expected an SRI sha256 NAR hash (sha256-<base64>), got ${narHash}`
-		);
-	}
-
-	const bytes = Buffer.from(base64, 'base64');
-
-	if (bytes.byteLength !== 32) {
-		throw new NixError(`NAR hash did not decode to 32 bytes: ${narHash}`);
-	}
-
-	return bytes.toString('hex');
-}
-
-function resolveStorePathDigests(paths: readonly string[]): StorePathDigest[] {
-	return paths.map((storePath) => {
-		const info = nixPathInfo(storePath);
-
-		return { storePath: info.storePath, sha256: narHashToHex(info.narHash) };
-	});
 }
 
 export function renderChecksums(digests: readonly StorePathDigest[]): string {
@@ -992,7 +918,7 @@ export async function attestAction(
 	environment: Environment = env
 ): Promise<void> {
 	const inputs = attestInputs(environment);
-	const digests = resolveStorePathDigests(inputs.paths);
+	const digests = await resolveStorePathDigests(Nix.open(), inputs.paths);
 	const checksumsFile = path.resolve(inputs.checksumsFile);
 
 	await mkdir(path.dirname(checksumsFile), { recursive: true });
@@ -1227,10 +1153,6 @@ export async function dispatch(
 	}
 
 	throw new UnknownCommandError(command ?? '');
-}
-
-function parseJson(value: string): unknown {
-	return JSON.parse(value) as unknown;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
