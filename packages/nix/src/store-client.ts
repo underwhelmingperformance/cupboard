@@ -20,7 +20,7 @@ export interface StoreClientEnvironment extends NixConfigEnvironment {
 	socketExists(socketPath: string): boolean;
 }
 
-const defaultStoreClientEnvironment: StoreClientEnvironment = {
+export const defaultStoreClientEnvironment: StoreClientEnvironment = {
 	...defaultNixConfigEnvironment,
 	canWriteStateDirectory: (stateDirectory) => {
 		try {
@@ -47,9 +47,9 @@ const unixScheme = 'unix://';
  * the local store when the state directory is writable and otherwise the daemon.
  */
 export function createNixStoreClient(
-	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment
+	dependencies: StoreClientEnvironment = defaultStoreClientEnvironment,
+	config: NixStoreConfig = discoverNixStoreConfig(dependencies)
 ): NixStoreClient {
-	const config = discoverNixStoreConfig(dependencies);
 	const backend = resolveStoreBackend(config, dependencies);
 
 	if (backend.backend === 'daemon') {

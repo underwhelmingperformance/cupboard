@@ -15,7 +15,9 @@ This is a pnpm workspace.
   tenant's persisted state via DO SQLite, the control plane uses D1, and R2
   holds the NAR and attestation bytes.
 - `packages/nix-store` - the Nix domain layer: NAR/narinfo parsing, store paths,
-  hashes, and the branded scalars.
+  hashes, and the branded scalars. Pure and isomorphic; safe in the Worker.
+- `packages/nix` - the live Nix client (`class Nix`): queries the running store
+  on the system, reading through the daemon or the local store. Node-only.
 - `packages/protocol` - the contract-first oRPC declarations for the JSON admin
   API plus the domain schemas they share.
 - `packages/shared` - attestation verification (`in-toto`, `sigstore`, `slsa`),

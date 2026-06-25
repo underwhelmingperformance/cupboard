@@ -1,6 +1,7 @@
 import { createConnection, type Socket } from 'node:net';
 
-import { NixSha256Hash } from './nar.ts';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+
 import {
 	type NixStoreClient,
 	NixStorePathNotFoundError,

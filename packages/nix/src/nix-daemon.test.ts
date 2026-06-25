@@ -3,11 +3,11 @@ import { createServer } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { describe, expect, it } from 'vitest';
 
-import { ProtocolWriter } from '../../../../tests/support/protocol-writer.ts';
+import { ProtocolWriter } from '../../../tests/support/protocol-writer.ts';
 
-import { NixSha256Hash } from './nar.ts';
 import {
 	connectToNixDaemon,
 	NixDaemonStoreClient,

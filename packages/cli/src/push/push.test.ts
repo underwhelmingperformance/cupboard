@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
 	AttestationNegotiateRequest,
@@ -31,7 +32,6 @@ import {
 	CompressedNarFile
 } from '../nix/blob.ts';
 import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
-import type { NixStoreClient, NixValidPathInfo } from '../nix/nix-store.ts';
 
 import {
 	type PushClient,
@@ -140,7 +140,7 @@ describe('runPush', () => {
 				},
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
@@ -274,7 +274,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name: '', targets: [] }));
 				}
 			} satisfies PushClient,
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
@@ -354,7 +354,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name: '', targets: [] }));
 				}
 			} satisfies PushClient,
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
 			compressNar: (nar, path) =>
 				fakeCompressedNar(nar, path, digestForNar(nar)),
@@ -440,7 +440,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [])
 			}),
 			createNarArchive: () => new FakeNarArchive(appDigest),
@@ -553,7 +553,7 @@ describe('runPush', () => {
 
 				return Promise.resolve(bundle);
 			},
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
@@ -698,7 +698,7 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			attestations: [{ path: 'build.sigstore.json' }],
 			readAttestationBundle: () => Promise.resolve(bundle),
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
@@ -761,7 +761,7 @@ describe('runPush', () => {
 			client: skipClient(roots, clientCalls),
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
@@ -806,7 +806,7 @@ describe('runPush', () => {
 
 						return Promise.resolve(bundle);
 					},
-					nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 					createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 					removeTemporaryDirectory: () => Promise.resolve()
 				});
@@ -872,7 +872,7 @@ describe('runPush', () => {
 					}),
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [])
 			}),
 			createNarArchive: () => {
@@ -940,7 +940,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name: '', targets: [] }));
 				}
 			} satisfies PushClient,
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: expectedPathInfo
 			}),
 			createNarArchive: () => new FakeNarArchive(digest(8, 999)),
@@ -995,7 +995,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
 			root: 'main',
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
@@ -1028,7 +1028,7 @@ describe('runPush', () => {
 			client: skipClient(roots, clientCalls),
 			root: 'main',
 			ttlSeconds: 1_209_600,
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
@@ -1067,7 +1067,7 @@ describe('runPush', () => {
 
 		await runPush([appPath, runtimePath], reporter(results), {
 			client: skipClient(roots, clientCalls),
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
@@ -1125,7 +1125,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
 			ttlSeconds: 604_800,
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		});
@@ -1169,7 +1169,7 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 		const dependencies = {
 			client: skipClient(roots, clientCalls),
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
 			removeTemporaryDirectory: () => Promise.resolve()
 		};
@@ -1263,7 +1263,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
 			compressNar: (nar, path) => fakeCompressedNar(nar, path, appDigest),
 			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
@@ -1328,7 +1328,7 @@ describe('runPush', () => {
 		await runPush([appPath, runtimePath], reporter(results), {
 			client,
 			ttlSeconds: 604_800,
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
@@ -1534,7 +1534,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name: '', ...body }));
 				}
 			} satisfies PushClient,
-			nixStore: nixStore({
+			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
 			}),
@@ -1628,7 +1628,7 @@ function deferredUpload(
 
 function deferredDeps() {
 	return {
-		nixStore: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+		nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 		createNarArchive: () => new FakeNarArchive(appDigest),
 		compressNar: (nar: PushNarArchive, path: string) =>
 			fakeCompressedNar(nar, path, appDigest),
@@ -1774,9 +1774,9 @@ function knownPathInfo(
 		.parse(paths[storePath]);
 }
 
-function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
-	return {
-		resolveClosure(storePaths) {
+function nixStore(paths: Record<string, NixValidPathInfo>): Nix {
+	const store = {
+		resolveClosure(storePaths: readonly string[]) {
 			const closure = new Set(storePaths);
 
 			for (const storePath of storePaths) {
@@ -1790,9 +1790,14 @@ function nixStore(paths: Record<string, NixValidPathInfo>): NixStoreClient {
 				[...closure].map((storePath) => knownPathInfo(paths, storePath))
 			);
 		},
-		queryPathInfo: (storePath) =>
+		queryPathInfo: (storePath: string) =>
 			Promise.resolve(knownPathInfo(paths, storePath))
 	};
+
+	return Nix.forStore(store, {
+		storeDirectory: '/nix/store',
+		realpath: (path) => path
+	});
 }
 
 function rootSummary(
