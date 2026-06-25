@@ -24,7 +24,11 @@ export interface BlobStore {
 	put(
 		key: string,
 		body: ReadableStream<Uint8Array>,
-		meta: PutObjectMeta
+		meta: PutObjectMeta,
+		// The object's SHA-256 as a hex string, recorded on the R2 object (and
+		// verified against the body). The commit pipeline reads it back as the
+		// staged blob's file hash.
+		sha256?: string
 	): Promise<PutObjectResult>;
 	delete(key: string): Promise<void>;
 
@@ -73,9 +77,10 @@ export function createR2BlobStore(bucket: R2Bucket): BlobStore {
 			};
 		},
 
-		async put(key, body, meta) {
+		async put(key, body, meta, sha256) {
 			const object = await bucket.put(key, body, {
-				httpMetadata: httpMetadataFor(meta)
+				httpMetadata: httpMetadataFor(meta),
+				sha256
 			});
 			return { etag: object.etag };
 		},

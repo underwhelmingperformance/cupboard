@@ -1,5 +1,7 @@
+import { fromNixBase32 } from '@cupboard/nix-store/hash';
 import {
 	DEFAULT_CACHE,
+	nixSha256HashSchema,
 	type NixSha256HashString,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -7,8 +9,7 @@ import {
 import {
 	narInfoObjectKey,
 	narObjectKey,
-	parseNarInfoName,
-	parseNarName
+	parseNarInfoName
 } from '../http/http.ts';
 
 /**
@@ -24,6 +25,40 @@ export type NixCacheObject =
 	| { readonly kind: 'nar'; readonly hash: NixSha256HashString };
 
 const narPrefix = 'nar/';
+const narSuffix = '.nar.zst';
+const sha256Prefix = 'sha256:';
+const narBase32Pattern = /^[0-9a-df-np-sv-z]{52}$/;
+
+// The base32 pattern admits 52-character strings whose top bits overflow a
+// 256-bit digest, so a regex match is not a valid hash; decoding settles it.
+function isCanonicalBase32(base32: string): boolean {
+	try {
+		fromNixBase32(base32);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+// Parses the hash from a nar object name. Cupboard's own narinfo URLs name the
+// object `sha256:<base32>.nar.zst`, but a standard Nix/S3 client (nixbuild)
+// writes the bare base32 form `<base32>.nar.zst`; both resolve to the same hash.
+function parseNarObjectName(name: string): NixSha256HashString | undefined {
+	if (!name.endsWith(narSuffix)) {
+		return undefined;
+	}
+
+	const hash = name.slice(0, -narSuffix.length);
+	const base32 = hash.startsWith(sha256Prefix)
+		? hash.slice(sha256Prefix.length)
+		: hash;
+
+	if (!narBase32Pattern.test(base32) || !isCanonicalBase32(base32)) {
+		return undefined;
+	}
+
+	return nixSha256HashSchema.parse(`${sha256Prefix}${base32}`);
+}
 
 /**
  * Classifies an S3 object key against the Nix cache key grammar
@@ -36,7 +71,7 @@ export function classifyKey(key: string): NixCacheObject | undefined {
 	}
 
 	if (key.startsWith(narPrefix)) {
-		const hash = parseNarName(key.slice(narPrefix.length));
+		const hash = parseNarObjectName(key.slice(narPrefix.length));
 		return hash === undefined ? undefined : { kind: 'nar', hash };
 	}
 

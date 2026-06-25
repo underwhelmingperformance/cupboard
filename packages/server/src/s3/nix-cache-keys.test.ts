@@ -32,12 +32,26 @@ describe('classifyKey', () => {
 		});
 	});
 
+	it('accepts the bare base32 nar form a standard S3 client writes', () => {
+		expect(classifyKey(`nar/${'0'.repeat(52)}.nar.zst`)).toStrictEqual({
+			kind: 'nar',
+			hash: narHash
+		});
+	});
+
 	it('rejects keys outside the cache grammar', () => {
 		expect(classifyKey('random.txt')).toBeUndefined();
 		expect(classifyKey('nar/not-a-hash.nar.zst')).toBeUndefined();
 		expect(classifyKey('deadbeef.narinfo')).toBeUndefined();
 		expect(classifyKey(`sub/${storePathHash}.narinfo`)).toBeUndefined();
 		expect(classifyKey('')).toBeUndefined();
+	});
+
+	it('rejects a NAR key whose base32 overflows a 256-bit digest', () => {
+		// 52 characters that match the base32 pattern but set bits beyond 256: the
+		// leading character is the most significant, so anything above `1` overflows.
+		const overflowing = `z${'0'.repeat(51)}`;
+		expect(classifyKey(`nar/${overflowing}.nar.zst`)).toBeUndefined();
 	});
 });
 

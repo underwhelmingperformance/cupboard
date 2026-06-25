@@ -1,4 +1,5 @@
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import { fromNixBase32 } from '@cupboard/nix-store/hash';
 import { parseNarInfo } from '@cupboard/nix-store/narinfo';
 import type {
 	NixSha256HashString,
@@ -11,6 +12,7 @@ import {
 import {
 	CommittedNarInfoUnreadableError,
 	MalformedNarInfoError,
+	NarChecksumMismatchError,
 	NarInfoMismatchError,
 	NarInfoNotCommittableError,
 	NarInfoTooLargeError,
@@ -181,6 +183,17 @@ function translatePipelineError(error: unknown): never {
 	throw error;
 }
 
+const sha256Prefix = 'sha256:';
+
+function sha256HexOf(fileHash: NixSha256HashString): string {
+	const bytes = fromNixBase32(fileHash.slice(sha256Prefix.length));
+	return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function isChecksumMismatch(error: unknown): boolean {
+	return error instanceof Error && /sha-?256|checksum/i.test(error.message);
+}
+
 /**
  * The production {@link NixCacheBackend}: it stages NAR bytes in R2, drives the
  * existing verify/sign/commit pipeline for narinfo, and renders `nix-cache-info`
@@ -195,7 +208,24 @@ export function createNixCacheService(
 		body: ReadableStream<Uint8Array>,
 		meta: PutObjectMeta
 	): Promise<PutObjectResult> {
-		return deps.blobStore.put(s3NarStagingKey(fileHash), body, meta);
+		// The nar object is named by its file hash, so record it as the staged
+		// object's SHA-256: R2 verifies the body against it and the commit pipeline
+		// reads it back as the blob's file hash.
+		try {
+			return await deps.blobStore.put(
+				s3NarStagingKey(fileHash),
+				body,
+				meta,
+				sha256HexOf(fileHash)
+			);
+		} catch (error) {
+			// R2 rejects a body that does not hash to the requested SHA-256: the
+			// client uploaded bytes that do not match the file hash in the key.
+			if (isChecksumMismatch(error)) {
+				throw new NarChecksumMismatchError();
+			}
+			throw error;
+		}
 	}
 
 	async function commitNarinfo(
