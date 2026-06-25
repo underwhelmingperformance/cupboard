@@ -3222,6 +3222,34 @@ authorisation is not addressed here: reads stay public or netrc-gated, and PR
 caches are public-read, so the write boundary alone keeps an untrusted build
 from reaching the default cache.
 
+## S3-compatible endpoint
+
+A direct push target for [nixbuild.net] and generic S3 tooling. The Worker
+answers the AWS S3 protocol (SigV4) on a dedicated host, presenting one tenant's
+cache as a bucket so build results flow in without a CI round-trip. See
+[docs/nixbuild.md](./docs/nixbuild.md) and [docs/s3.md](./docs/s3.md).
+
+[nixbuild.net]: https://docs.nixbuild.net/settings/
+
+- [x] Generic `@cupboard/s3` server: SigV4 verify-by-re-sign, the XML
+      response/error model, range and conditional requests, listing pagination
+      and the multipart protocol, over injected `CredentialResolver` and
+      `ObjectStore` ports, with a reference passthrough provider.
+- [x] `NixCacheObjectStore` decorator: reads and listing delegate to the R2
+      relay; writes, `nix-cache-info` and listing are the materialisation
+      carve-outs. Writes reuse the existing verify, sign and commit pipeline
+      unchanged; narinfo PUT settles inline for read-after-write.
+- [x] Per-tenant S3 credentials in DO SQLite, the secret AES-GCM-encrypted under
+      `S3_SECRET_KEY`. Host detection in the worker dispatches to the tenant DO,
+      where verification happens.
+- [x] Contract-first credential admin
+      (`cupboard s3-credential     create`/`list`/`revoke`), with the `create`
+      command emitting ready-to-paste nixbuild settings.
+- [x] Ingestion origin recorded on the path and read back through
+      `paths.inspect` (`cupboard inspect`), so a direct push stays auditable.
+- [x] Provenance split: the `attest` action resolves subjects from the cache
+      narinfo, so it runs without a realised closure.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.
