@@ -4,7 +4,8 @@ import { NixSha256Hash } from './nar.ts';
 import {
 	type NixStoreClient,
 	NixStorePathNotFoundError,
-	type NixValidPathInfo
+	type NixValidPathInfo,
+	resolveClosureBy
 } from './nix-store.ts';
 
 const defaultDaemonSocketPath = '/nix/var/nix/daemon-socket/socket';
@@ -136,7 +137,9 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		const connection = await this.openConnection();
 
 		try {
-			return await resolveClosureWithConnection(connection, storePaths);
+			return await resolveClosureBy(storePaths, (storePath) =>
+				connection.queryPathInfo(storePath)
+			);
 		} finally {
 			connection.close();
 		}
@@ -626,37 +629,6 @@ interface PendingRead {
 	readonly byteLength: number;
 	resolve(bytes: Uint8Array): void;
 	reject(error: Error): void;
-}
-
-async function resolveClosureWithConnection(
-	connection: NixDaemonConnection,
-	storePaths: readonly string[]
-): Promise<readonly NixValidPathInfo[]> {
-	const closure = new Map<string, NixValidPathInfo>();
-	const pending = [...storePaths];
-
-	while (pending.length > 0) {
-		const storePath = pending.shift();
-
-		if (storePath === undefined || closure.has(storePath)) {
-			continue;
-		}
-
-		const pathInfo = await connection.queryPathInfo(storePath);
-		closure.set(storePath, pathInfo);
-
-		for (const reference of pathInfo.references) {
-			if (!closure.has(reference)) {
-				pending.push(reference);
-			}
-		}
-	}
-
-	const closureValues = closure.values();
-
-	return [...closureValues].toSorted((left, right) =>
-		left.storePath.localeCompare(right.storePath)
-	);
 }
 
 function nixDaemonHash(base16Digest: string): NixSha256Hash {
