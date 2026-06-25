@@ -169,6 +169,27 @@ export class TruncatedChunkedBodyError extends InvalidRequestError {
 	}
 }
 
+/** A PUT narinfo body could not be parsed as a narinfo. */
+export class MalformedNarInfoError extends InvalidRequestError {
+	constructor() {
+		super('Malformed narinfo body.');
+	}
+}
+
+/** A narinfo body did not match its object key or was otherwise invalid. */
+export class NarInfoMismatchError extends InvalidRequestError {
+	constructor() {
+		super('narinfo does not match the object key or is invalid.');
+	}
+}
+
+/** A narinfo PUT body exceeded the maximum accepted size. */
+export class NarInfoTooLargeError extends InvalidRequestError {
+	constructor() {
+		super('The narinfo body is too large.');
+	}
+}
+
 // --- InvalidArgument (400) -----------------------------------------------
 
 abstract class InvalidArgumentError extends S3Error {

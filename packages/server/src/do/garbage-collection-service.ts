@@ -41,11 +41,66 @@ const orphanListPageSize = 1000;
 // next sweep and, failing that, the bucket lifecycle rule.
 const maxOrphanReclaim = 1000;
 
+// S3 ingestion stages NAR bytes under this prefix, keyed by file hash, before
+// the narinfo PUT that registers their pending-upload row. An object older than
+// the staging TTL with no row referencing it is an abandoned upload to reap.
+const s3StagingPrefix = 'staging/s3/';
+const s3StagingTtlMs = 15 * 60 * 1000;
+
+/**
+ * The staged objects to reap: those older than the cutoff that no live
+ * pending-upload row still references. Separated from the R2 listing so the
+ * selection is unit-testable without backdating object timestamps in R2.
+ */
+export function selectOrphanedStagingKeys(
+	objects: readonly { readonly key: string; readonly uploaded: Date }[],
+	referenced: ReadonlySet<string>,
+	cutoffMs: number
+): string[] {
+	return objects
+		.filter(
+			(object) =>
+				object.uploaded.getTime() < cutoffMs && !referenced.has(object.key)
+		)
+		.map((object) => object.key);
+}
+
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly deletionQueue: DeletionQueueService
 	) {}
+
+	// Reaps S3 staging objects abandoned before their narinfo arrived. The
+	// pending-upload reaper above only sees objects a row points at; a NAR PUT
+	// that is never followed by a narinfo PUT leaves no row, so this lists the
+	// staging prefix directly and deletes anything past its TTL that no current
+	// pending upload still references.
+	private async reapOrphanedS3Staging(now: string): Promise<void> {
+		const cutoff = Date.parse(now) - s3StagingTtlMs;
+		const referenced = new Set(
+			this.context.db
+				.select({ r2Key: schema.pendingUploads.r2Key })
+				.from(schema.pendingUploads)
+				.all()
+				.map((row) => row.r2Key)
+		);
+
+		const orphans: string[] = [];
+		let cursor: string | undefined;
+		do {
+			const listed = await this.context.env.BLOBS.list({
+				prefix: s3StagingPrefix,
+				cursor
+			});
+			orphans.push(
+				...selectOrphanedStagingKeys(listed.objects, referenced, cutoff)
+			);
+			cursor = listed.truncated ? listed.cursor : undefined;
+		} while (cursor !== undefined);
+
+		await deleteObjects(this.context.env.BLOBS, orphans);
+	}
 
 	private collectUnreachable(
 		cache: string,
@@ -395,6 +450,8 @@ export class GarbageCollectionService {
 				this.context.env.BLOBS,
 				expiredAttestations.map((upload) => upload.r2Key)
 			);
+
+			await this.reapOrphanedS3Staging(now);
 
 			this.context.db.delete(schema.pendingUploads).where(reapable).run();
 			this.context.db

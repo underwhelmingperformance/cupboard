@@ -4,7 +4,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type ParsedUploadPathNegotiation } from '@cupboard/protocol/upload';
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -74,6 +74,42 @@ export class UploadStateService {
 		}
 
 		return canonicalBlobOf(canonicalKey, winner);
+	}
+
+	// Whether this upload's staging object can be deleted now. The canonical key of
+	// a reuse upload is shared and must survive. An S3 ingest stages a NAR by its
+	// file hash, so two concurrent uploads of identical content share one staging
+	// object; the first to settle must not delete bytes a sibling's verify still
+	// needs, so the object is kept while another still-live upload references it.
+	private stagingObjectIsDeletable(
+		uploadId: string,
+		r2Key: string,
+		narHash: NixSha256HashString
+	): boolean {
+		if (r2Key === narObjectKey(narHash)) {
+			return false;
+		}
+
+		const referencedByLiveSibling = and(
+			eq(schema.pendingUploads.r2Key, r2Key),
+			ne(schema.pendingUploads.id, uploadId),
+			or(
+				isNull(schema.pendingUploads.verdict),
+				notInArray(schema.pendingUploads.verdict, [
+					'servable',
+					'mismatch',
+					'over-quota'
+				])
+			)
+		);
+
+		const sibling = this.context.db
+			.select({ id: schema.pendingUploads.id })
+			.from(schema.pendingUploads)
+			.where(referencedByLiveSibling)
+			.get();
+
+		return sibling === undefined;
 	}
 
 	private async ownedNarHashes(
@@ -170,7 +206,7 @@ export class UploadStateService {
 		r2Key: string,
 		narHash: NixSha256HashString
 	): Promise<void> {
-		if (r2Key !== narObjectKey(narHash)) {
+		if (this.stagingObjectIsDeletable(uploadId, r2Key, narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);
 		}
 
@@ -219,7 +255,7 @@ export class UploadStateService {
 		narHash: NixSha256HashString,
 		verdict: 'servable' | 'mismatch' | 'over-quota'
 	): Promise<void> {
-		if (r2Key !== narObjectKey(narHash)) {
+		if (this.stagingObjectIsDeletable(uploadId, r2Key, narHash)) {
 			await this.context.env.BLOBS.delete(r2Key);
 		}
 

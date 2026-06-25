@@ -220,7 +220,9 @@ describe('maintenance sweep cost', () => {
 	// The garbage collection deletes expired refresh tokens through the
 	// `refresh_token` expiry index. No reconcile reads that table, so this is the one
 	// guard on that index: drop it and the delete scans the whole token backlog, so
-	// the large-backlog sweep reads more than the small one.
+	// the large-backlog sweep reads more than the small one. The S3 staging reaper
+	// adds one bounded read of the in-flight upload set, constant across the token
+	// backlog, so the two sweeps stay equal.
 	it('sweeps expired refresh tokens without scanning the backlog', async () => {
 		await initialise();
 
@@ -238,8 +240,8 @@ describe('maintenance sweep cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 14,
-			largeBacklogCost: 14
+			smallBacklogCost: 15,
+			largeBacklogCost: 15
 		});
 	});
 });
