@@ -1,4 +1,8 @@
-import { CodedError, UsageError } from '@cupboard/shared/errors';
+import {
+	CodedError,
+	genericExitCode,
+	UsageError
+} from '@cupboard/shared/errors';
 
 export class MissingInputError extends UsageError {
 	constructor(public readonly input: string) {
@@ -105,5 +109,23 @@ export class CommandFailedError extends CodedError {
 				: `${command} could not run: ${detail}`
 		);
 		this.name = 'CommandFailedError';
+	}
+}
+
+/**
+ * A failure the cupboard binary reported through its own event stream, carrying
+ * the message and exit code it named so the entry point annotates them.
+ */
+export class CupboardReportedError extends CodedError {
+	constructor(
+		message: string,
+		public readonly status: number | null
+	) {
+		super(message);
+		this.name = 'CupboardReportedError';
+	}
+
+	override get exitCode(): number {
+		return this.status ?? genericExitCode;
 	}
 }

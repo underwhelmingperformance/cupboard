@@ -22,6 +22,7 @@ import { slsaSourceCommit } from '@cupboard/shared/slsa';
 import semverValid from 'semver/functions/valid.js';
 
 import * as annotations from './annotations.ts';
+import { runCupboard } from './cupboard-run.ts';
 import {
 	AttestationError,
 	CachePublicKeyError,
@@ -413,7 +414,7 @@ export async function pushAction(
 
 	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
 	await setOutput(environment, 'cupboard-version', installedCupboard.version);
-	run(installedCupboard.binaryPath, arguments_);
+	await runCupboard(installedCupboard.binaryPath, arguments_);
 }
 
 async function installCupboard(
