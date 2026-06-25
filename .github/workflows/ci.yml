@@ -104,3 +104,33 @@ jobs:
 
       - name: Run the installed binary
         run: cupboard --version
+
+  action-e2e-no-project:
+    name: action e2e (no caller project)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      attestations: read # read the release's attestation to verify it
+    steps:
+      # A caller can run the action before checking out a project of its own,
+      # so the workspace root holds no package.json that pins a pnpm version.
+      # Check this repository out under a subdirectory to leave the root empty
+      # and run the action from there: it must install the pnpm version it pins
+      # itself rather than failing to find one in the caller's workspace. A
+      # local action has to live on disk to be referenced, so the checkout
+      # cannot be dropped entirely; placing it off the root is what reproduces
+      # the missing-caller-manifest case.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          path: action
+
+      - uses: ./action/actions/setup
+        id: setup
+        with:
+          cupboard-version: latest
+          release-repository: ${{ github.repository }}
+          github-token: ${{ github.token }}
+
+      - name: Run the installed binary
+        run: cupboard --version
