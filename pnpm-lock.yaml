@@ -215,6 +215,9 @@ importers:
       '@cupboard/nix-store':
         specifier: workspace:*
         version: link:../nix-store
+      re2js:
+        specifier: ^2.8.3
+        version: 2.8.3
     devDependencies:
       '@types/node':
         specifier: ^25.9.1
