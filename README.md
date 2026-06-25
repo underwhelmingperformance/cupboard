@@ -102,6 +102,10 @@ is a separate choice: `--colour` and `--no-colour` force ANSI on or off, and
 
 - [docs/github-actions.md](./docs/github-actions.md) sets up building,
   attesting, and pushing outputs from GitHub Actions.
+- [docs/nixbuild.md](./docs/nixbuild.md) points nixbuild.net at a cache so build
+  results are pushed straight from the builder.
+- [docs/s3.md](./docs/s3.md) covers the S3-compatible endpoint for generic
+  tooling like `nix copy`, the AWS CLI and `rclone`.
 - [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
 - [PLAN.md](./PLAN.md) tracks the feature plan and progress.
 

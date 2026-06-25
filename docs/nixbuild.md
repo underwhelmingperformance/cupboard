@@ -35,9 +35,18 @@ The endpoint is enabled by two Worker settings:
   `s3.cupboard.example.com`. Every request on this host is treated as an S3
   operation. Point a route at it in `wrangler.jsonc` and set the variable to the
   same hostname. When it is unset the endpoint is inert.
-- `S3_SECRET_KEY`: a base64-encoded 256-bit key used to encrypt stored
-  credential secrets at rest. Set it as a Worker secret. When it is unset the
-  endpoint answers `501 Not Implemented`.
+- `S3_SECRET_KEY`: one or more comma-separated base64-encoded 256-bit keys used
+  to encrypt stored credential secrets at rest. Set it as a Worker secret. The
+  first key seals new secrets; any further keys are retained for decryption, so
+  a key can be rotated out by moving it down the list and dropping it once the
+  credentials sealed under it have been re-issued. A credential whose key is no
+  longer present stops resolving and must be re-issued. When the value is unset
+  or empty the endpoint answers `501 Not Implemented`.
+
+The S3 staging objects an interrupted upload leaves behind are reclaimed by the
+periodic sweep, but an interrupted _multipart_ upload is held by R2 itself.
+Configure an "abort incomplete multipart uploads" lifecycle rule on the blob
+bucket so those are reclaimed too.
 
 ## Provisioning a credential
 
@@ -47,14 +56,26 @@ server must hold the secret to verify a signature; it is stored
 AES-GCM-encrypted under `S3_SECRET_KEY` and is shown in plaintext only once,
 when it is created.
 
-Provision a credential for the cache you want nixbuild.net to push to, and keep
-the access key id and secret access key it returns.
+Provision a credential with the CLI, passing `--endpoint` so it also prints the
+nixbuild.net settings ready to paste:
+
+```console
+$ cupboard s3-credential create https://cache.example.workers.dev/t/acme \
+    --label nixbuild --endpoint https://s3.cupboard.example.com
+```
+
+The secret access key is shown only once, here. Pass `--cache <name>` to scope
+the credential to a named cache, `--read-only` for a substitute-only credential,
+and `--expires-at <iso>` to give it a lifetime. `cupboard s3-credential list`
+shows the credentials a cache holds, and
+`cupboard s3-credential revoke <access-key-id>` removes one.
 
 ## nixbuild.net settings
 
-Point nixbuild.net at the cache with two settings, using path-style addressing
-so the bucket appears in the path. The bucket is the tenant slug and an optional
-prefix selects a named cache (omit it for the default cache):
+`cupboard s3-credential create --endpoint ...` prints these two lines for you.
+They use path-style addressing so the bucket appears in the path; the bucket is
+the tenant slug and an optional prefix selects a named cache (omit it for the
+default cache):
 
 ```
 nixbuild.net> settings caches --add s3://<tenant>/<cache>?region=auto&endpoint=https://<S3_HOST>&addressing-style=path
@@ -81,6 +102,21 @@ provenance, run the lightweight `attest` step from CI against the resulting
 paths: the heavy NAR transfer moves to nixbuild.net while the provenance is
 still attached. nixbuild.net does not emit provenance of its own, so there is
 nothing else to ingest.
+
+The attestation subject is a path's NAR hash. When the closure was built and
+pushed by nixbuild.net rather than realised in CI, fetch the NAR hash from
+Cupboard instead of computing it locally: it is the `NarHash` of the served
+narinfo, and `cupboard inspect <url> <store-path> --output-mode json` returns it
+alongside the rest of the path's summary.
+
+## Auditing a push
+
+Every path Cupboard accepts over the S3 endpoint records its origin: the
+credential that pushed it, by id and label. This is how a direct,
+attestation-less push stays auditable. `cupboard inspect <url> <store-path>`
+shows it as the `Origin` field; a path pushed by the CLI instead reports a
+native push. The origin is an administrative record and never appears in the
+narinfo served to consumers.
 
 ## Supported S3 operations
 
