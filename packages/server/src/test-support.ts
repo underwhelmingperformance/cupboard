@@ -678,17 +678,23 @@ export function readFetch(
 }
 
 // Drives the real Worker handler for an exact path (no tenant prefix added), so a
-// test can exercise routing, admission and dispatch for any `/t/<slug>/…` path.
+// test can exercise routing, admission and dispatch for any `/t/<slug>/…` path. A
+// per-call env copy lets a test vary deployment configuration such as `S3_HOST`.
 export async function handlerFetch(
 	pathname: string,
-	init?: RequestInit
+	init?: RequestInit,
+	envOverride: Readonly<Record<string, string>> = {}
 ): Promise<Response> {
 	const ctx = createExecutionContext();
 	const request = new Request<unknown, IncomingRequestCfProperties>(
 		new URL(pathname, harness.origin),
 		init as RequestInit<IncomingRequestCfProperties>
 	);
-	const response = await worker.fetch(request, env, ctx);
+	const response = await worker.fetch(
+		request,
+		Object.assign({}, env, envOverride),
+		ctx
+	);
 	await waitOnExecutionContext(ctx);
 
 	return response;

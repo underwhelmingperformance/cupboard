@@ -16,8 +16,12 @@ const byKey = (left: string, right: string): number =>
 	left < right ? -1 : left > right ? 1 : 0;
 
 describe('authorize', () => {
-	it('rejects anonymous access', async () => {
-		await expect(authorize('', undefined, false)).rejects.toThrow(
+	it('allows an anonymous read (the front worker gates private tenants)', async () => {
+		await expect(authorize('', undefined, false)).resolves.toBeUndefined();
+	});
+
+	it('rejects an anonymous write', async () => {
+		await expect(authorize('', undefined, true)).rejects.toThrow(
 			AnonymousAccessDeniedError
 		);
 	});

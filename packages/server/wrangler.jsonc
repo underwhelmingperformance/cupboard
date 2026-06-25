@@ -90,7 +90,12 @@
 		"CUPBOARD_SIGNUP_AUDIENCE": "",
 		"CUPBOARD_SIGNUP_SUBJECT": "",
 		"CUPBOARD_LOCAL_DEV": "",
-		"CUPBOARD_COLD_PATH_TTL_SECONDS": ""
+		"CUPBOARD_COLD_PATH_TTL_SECONDS": "",
+		// The hostname the S3-compatible endpoint answers on (for example
+		// `s3.cupboard.example.com`). Empty disables the endpoint. The per-tenant
+		// `S3_SECRET_KEY` that seals credential secrets is sensitive: set it on the
+		// tenant Durable Object worker with `wrangler secret put`.
+		"S3_HOST": ""
 	},
 	"limits": {
 		"cpu_ms": 300000

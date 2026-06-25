@@ -156,7 +156,12 @@ export function authorize(
 	isWrite: boolean
 ): Promise<void> {
 	if (principal === undefined) {
-		return Promise.reject(new AnonymousAccessDeniedError());
+		// The front worker admits an anonymous read only for a publicly readable
+		// tenant, so an unauthenticated read is already permitted here; an
+		// anonymous write is never allowed.
+		return isWrite
+			? Promise.reject(new AnonymousAccessDeniedError())
+			: Promise.resolve();
 	}
 
 	if (principal.cache !== cache) {

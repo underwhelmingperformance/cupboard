@@ -1,4 +1,11 @@
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	AnonymousAccessDeniedError,
+	NoSuchBucketError,
+	type S3Error,
+	WritesNotAcceptedError
+} from '@cupboard/s3/errors';
+import { isSigned } from '@cupboard/s3/sigv4';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
@@ -41,6 +48,21 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	app.onError(serverErrorHandler);
 	app.notFound(() => notFoundResponse());
+
+	// On the configured S3 host every request is an S3 operation: mark it and hand
+	// it to the addressed tenant's Durable Object, which routes the marked request
+	// to its S3 app. The path and signed headers are preserved so SigV4
+	// verification matches. When no S3 host is configured this never fires.
+	app.use(async (context, next) => {
+		// Compare the hostname without any port, so a client that signs and sends
+		// `Host: s3.example.com:443` still matches the configured `s3.example.com`.
+		if (new URL(context.req.url).hostname !== context.env.S3_HOST) {
+			await next();
+			return;
+		}
+
+		return handleS3(context);
+	});
 
 	// Deployment-level endpoints answer at the bare host regardless of tenancy: a
 	// liveness probe and the build version. They carry no tenant or cache prefix.
@@ -340,6 +362,61 @@ async function dispatchTenant(
 	}
 
 	return tenantServer(env, tenant).fetch(inner);
+}
+
+// Handles a request on the S3 host. The first path segment is the bucket, which
+// is the tenant; the request is admitted and write-gated like a tenant request,
+// then dispatched to the Durable Object with the S3 marker header so its S3 app
+// serves it. The request is otherwise untouched, so its signed headers stay valid.
+async function handleS3(context: Context<WorkerHonoEnv>): Promise<Response> {
+	const bucket = new URL(context.req.url).pathname
+		.split('/')
+		.find((segment) => segment !== '');
+
+	if (bucket === undefined) {
+		return s3ErrorResponse(new NoSuchBucketError());
+	}
+
+	const parsed = tenantIdSchema.safeParse(bucket);
+	if (!parsed.success) {
+		return s3ErrorResponse(new NoSuchBucketError());
+	}
+
+	const tenant = parsed.data;
+	const entry = await admitTenant(context.env, context.executionCtx, tenant);
+	if (entry === undefined) {
+		return s3ErrorResponse(new NoSuchBucketError());
+	}
+
+	const isRead = context.req.method === 'GET' || context.req.method === 'HEAD';
+
+	if (isRead) {
+		if (entry.status !== 'active') {
+			return s3ErrorResponse(new NoSuchBucketError());
+		}
+
+		// A private tenant's objects are served over S3 only to a signed request;
+		// a public one is anonymously readable, mirroring the native read path.
+		if (entry.readMode === 'private' && !isSigned(context.req.raw)) {
+			return s3ErrorResponse(new AnonymousAccessDeniedError());
+		}
+	} else {
+		const status = await tenantStatus(context.env, tenant);
+		if (status !== 'active') {
+			return s3ErrorResponse(new WritesNotAcceptedError());
+		}
+	}
+
+	const headers = new Headers(context.req.raw.headers);
+	headers.set('x-cupboard-s3', '1');
+
+	return tenantServer(context.env, tenant).fetch(
+		new Request(context.req.raw, { headers })
+	);
+}
+
+function s3ErrorResponse(error: S3Error): Response {
+	return error.toResponse(crypto.randomUUID().replaceAll('-', ''));
 }
 
 // Whether a tenant request mutates state. Reads never do; the token exchange is an

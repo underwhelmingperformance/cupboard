@@ -54,14 +54,16 @@ async function seedCredential(): Promise<void> {
 describe('S3 endpoint mount', () => {
 	beforeEach(resetTestServer);
 
-	it('rejects an unsigned request with 403', async () => {
-		await useTestServer('s3-mount-unsigned');
+	it('serves nix-cache-info to an anonymous read on a public tenant', async () => {
+		await useTestServer('s3-mount-anonymous');
+		// Trigger the migration so the default cache exists before reading.
+		await currentServer().fetch(new Request('https://do.invalid/pubkey'));
 
 		const response = await currentServer().fetch(
 			s3Request({ 'x-cupboard-s3': '1' })
 		);
-		expect(response.status).toBe(403);
-		expect(await response.text()).toContain('AccessDenied');
+		expect(response.status).toBe(200);
+		expect(await response.text()).toContain('StoreDir: /nix/store');
 	});
 
 	it('serves nix-cache-info to a signed request with a valid credential', async () => {

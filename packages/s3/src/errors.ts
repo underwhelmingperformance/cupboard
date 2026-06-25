@@ -109,6 +109,13 @@ export class CredentialCannotWriteError extends AccessDeniedError {
 	}
 }
 
+/** The addressed tenant is suspended or offboarding and refuses writes. */
+export class WritesNotAcceptedError extends AccessDeniedError {
+	constructor() {
+		super('This tenant is not currently accepting writes.');
+	}
+}
+
 // --- SignatureDoesNotMatch (403) -----------------------------------------
 
 /** The re-signed canonical request did not reproduce the client's signature. */
