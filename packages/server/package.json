@@ -4,6 +4,7 @@
 	"dependencies": {
 		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/protocol": "workspace:*",
+		"@cupboard/s3": "workspace:*",
 		"@cupboard/shared": "workspace:*",
 		"@orpc/json-schema": "^1.14.6",
 		"@orpc/openapi": "^1.14.6",

@@ -334,6 +334,9 @@ importers:
       '@cupboard/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@cupboard/s3':
+        specifier: workspace:*
+        version: link:../s3
       '@cupboard/shared':
         specifier: workspace:*
         version: link:../shared
