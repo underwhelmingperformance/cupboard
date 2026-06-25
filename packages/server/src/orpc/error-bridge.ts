@@ -22,10 +22,13 @@ const codeByStatus: Record<number, string> = {
  * Classes the CLI acts on become defined contract errors carrying data (the
  * server re-validates them against the procedure's error map, so they arrive
  * typed); any other ServerHttpError keeps its status and message under the
- * matching generic code. Anything else is returned unchanged for the
- * handler's own 500 path.
+ * matching generic code. An ORPCError (a defined contract error or an auth
+ * rejection) passes through untouched. Anything else is an unexpected fault
+ * oRPC will mask as a context-free 500, so it is logged with the request's ray
+ * first, the way the wire routes' unmapped-error handler does, before being
+ * returned unchanged for the handler's own 500 path.
  */
-export function bridgedError(error: unknown): unknown {
+export function bridgedError(error: unknown, request?: Request): unknown {
 	if (error instanceof CacheNotEmptyError) {
 		return new ORPCError('CACHE_NOT_EMPTY', {
 			status: error.status,
@@ -40,6 +43,13 @@ export function bridgedError(error: unknown): unknown {
 			{ status: error.status, message: error.message }
 		);
 	}
+
+	if (error instanceof ORPCError) {
+		return error;
+	}
+
+	const ray = request?.headers.get('cf-ray') ?? undefined;
+	console.error('Unhandled server error', { ray, error });
 
 	return error;
 }

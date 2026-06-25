@@ -41,11 +41,11 @@ export interface ControlOrpcContext {
 // is checked against the grants it carries before any handler runs.
 const os = implement(controlContract)
 	.$context<ControlOrpcContext>()
-	.use(async ({ next }) => {
+	.use(async ({ context, next }) => {
 		try {
 			return await next();
 		} catch (error) {
-			throw bridgedError(error);
+			throw bridgedError(error, context.request);
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {

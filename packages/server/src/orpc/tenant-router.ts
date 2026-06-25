@@ -18,11 +18,11 @@ import { bridgedError } from './error-bridge.ts';
 // nothing is repeated per procedure here.
 const os = implement(tenantContract)
 	.$context<TenantOrpcContext>()
-	.use(async ({ next }) => {
+	.use(async ({ context, next }) => {
 		try {
 			return await next();
 		} catch (error) {
-			throw bridgedError(error);
+			throw bridgedError(error, context.request);
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {
