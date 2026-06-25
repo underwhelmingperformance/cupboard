@@ -222,14 +222,18 @@ export class AuthKeysService {
 			.map((key) => ({ kid: key.kid, publicJwk: key.publicJwk }));
 	}
 
-	rotateAuthKey(): Promise<AuthKeyRotateResponse> {
-		// One critical section: the insert and cache reset must not interleave
-		// with a concurrent rotation or a verification reading the key set.
+	async rotateAuthKey(): Promise<AuthKeyRotateResponse> {
+		// Generate the new key pair before the gate: it is independent of the
+		// stored key set, so the keygen need not hold the input gate. Only the read
+		// of the outgoing key, the insert and the cache reset need the critical
+		// section, which must not interleave with a concurrent rotation or a
+		// verification reading the key set.
+		const generated = await generateAuthKeyPair();
+		const kid = crypto.randomUUID();
+		const rotatedAt = new Date();
+		const scheduledRetireAt = scheduledAccessKeyRetireAt(rotatedAt);
+
 		return this.context.ctx.blockConcurrencyWhile(async () => {
-			const generated = await generateAuthKeyPair();
-			const kid = crypto.randomUUID();
-			const rotatedAt = new Date();
-			const scheduledRetireAt = scheduledAccessKeyRetireAt(rotatedAt);
 			const outgoing = await this.activeAuthKey();
 
 			this.context.db

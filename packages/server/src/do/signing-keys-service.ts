@@ -7,7 +7,11 @@ import {
 } from '@cupboard/protocol/keys';
 import { eq } from 'drizzle-orm';
 
-import { generateSigningKey } from '../crypto/crypto.ts';
+import {
+	generateSigningKey,
+	generateSigningKeyMaterial,
+	renderSigningPublicKey
+} from '../crypto/crypto.ts';
 import * as schema from '../db/schema.ts';
 import { LastSigningKeyError } from '../errors.ts';
 import { TextBody } from '../http/http.ts';
@@ -99,13 +103,19 @@ export class SigningKeysService {
 		this.publicKeyBody = undefined;
 	}
 
-	rotateKey(): Promise<KeyRotateResponse> {
-		// One critical section: the read of the existing names, the insert, and
-		// the cache reset must not interleave with a concurrent rotation or a
-		// commit reading the key set.
+	async rotateKey(): Promise<KeyRotateResponse> {
+		// Generate the key material before the gate: the entropy and exports are
+		// independent of the stored key set, so only the name-dependent public-key
+		// rendering and the writes need the critical section, which must not
+		// interleave with a concurrent rotation or a commit reading the key set.
+		const material = await generateSigningKeyMaterial();
+
 		return this.context.ctx.blockConcurrencyWhile(async () => {
 			const existing = await this.loadedKeys();
-			const generated = await generateSigningKey(nextKeyName(existing));
+			const publicKey = renderSigningPublicKey(
+				nextKeyName(existing),
+				material.publicRaw
+			);
 			const id = crypto.randomUUID();
 			const rotationCreatedAt = new Date();
 
@@ -113,8 +123,8 @@ export class SigningKeysService {
 				.insert(schema.signingKeys)
 				.values({
 					id,
-					privateJwkJson: JSON.stringify(generated.privateJwk),
-					publicKey: generated.publicKey,
+					privateJwkJson: JSON.stringify(material.privateJwk),
+					publicKey,
 					signing: true,
 					published: true,
 					createdAt: rotationCreatedAt.toISOString()

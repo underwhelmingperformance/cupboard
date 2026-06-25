@@ -35,9 +35,12 @@ export async function generateEd25519KeyPair(): Promise<CryptoKeyPair> {
 	])) as CryptoKeyPair;
 }
 
-export async function generateSigningKey(name: string): Promise<{
+// The name-independent half of a signing key: the entropy and the exports. Split
+// out so a rotation can generate it before taking the critical section, since
+// only the public-key rendering needs the name read inside that section.
+export async function generateSigningKeyMaterial(): Promise<{
 	readonly privateJwk: JsonWebKey;
-	readonly publicKey: string;
+	readonly publicRaw: Uint8Array;
 }> {
 	const keyPair = await generateEd25519KeyPair();
 	const publicRaw = (await crypto.subtle.exportKey(
@@ -49,9 +52,28 @@ export async function generateSigningKey(name: string): Promise<{
 		keyPair.privateKey
 	)) as JsonWebKey;
 
+	return { privateJwk, publicRaw: new Uint8Array(publicRaw) };
+}
+
+// Renders a Nix signing key's public half, which labels the raw key with its
+// name. Pure, so it can run inside a critical section without holding the gate
+// across any I/O.
+export function renderSigningPublicKey(
+	name: string,
+	publicRaw: Uint8Array
+): string {
+	return `${name}:${bytesToBase64(publicRaw)}`;
+}
+
+export async function generateSigningKey(name: string): Promise<{
+	readonly privateJwk: JsonWebKey;
+	readonly publicKey: string;
+}> {
+	const material = await generateSigningKeyMaterial();
+
 	return {
-		privateJwk,
-		publicKey: `${name}:${bytesToBase64(new Uint8Array(publicRaw))}`
+		privateJwk: material.privateJwk,
+		publicKey: renderSigningPublicKey(name, material.publicRaw)
 	};
 }
 
