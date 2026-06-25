@@ -27,6 +27,7 @@ import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerRootCommands } from './commands/root.ts';
+import { registerS3CredentialCommands } from './commands/s3-credential.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
 import { CliError } from './errors.ts';
@@ -108,6 +109,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerControlOidcTrustCommands(program, options);
 	registerTenantCommands(program, options);
 	registerCacheCommands(program, options);
+	registerS3CredentialCommands(program, options);
 	registerPolicyCommands(program, options);
 	registerOidcTrustCommands(program, options);
 	registerCheckCommand(program, options);
