@@ -265,6 +265,13 @@ export class UnsupportedOperationError extends NotImplementedError {
 	}
 }
 
+/** A write targeted a key that is neither a narinfo nor a NAR object. */
+export class NonCacheWriteError extends NotImplementedError {
+	constructor(resource?: string) {
+		super('Only narinfo and nar objects can be written.', resource);
+	}
+}
+
 // --- NoSuchKey / NoSuchBucket (404) --------------------------------------
 
 /** The named key does not exist (or is not exposed by the cache contract). */
