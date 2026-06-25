@@ -97,7 +97,7 @@ describe('S3 endpoint mount', () => {
 		const response = await currentServer().fetch(
 			s3Request({ 'x-cupboard-s3': '1' })
 		);
-		expect(response.status).toBe(200);
+		expect(response.status).toBe(StatusCodes.OK);
 		expect(await response.text()).toContain('StoreDir: /nix/store');
 	});
 
@@ -122,7 +122,7 @@ describe('S3 endpoint mount', () => {
 		headers.set('x-cupboard-s3', '1');
 
 		const response = await currentServer().fetch(s3Request(headers));
-		expect(response.status).toBe(200);
+		expect(response.status).toBe(StatusCodes.OK);
 		expect(await response.text()).toContain('StoreDir: /nix/store');
 	});
 
@@ -146,7 +146,7 @@ describe('S3 endpoint mount', () => {
 		headers.set('x-cupboard-s3', '1');
 
 		const response = await currentServer().fetch(s3Request(headers));
-		expect(response.status).toBe(403);
+		expect(response.status).toBe(StatusCodes.FORBIDDEN);
 		expect(await response.text()).toContain('SignatureDoesNotMatch');
 	});
 });
@@ -177,23 +177,35 @@ describe('S3 endpoint write path', () => {
 			`nar/${narBase32}.nar.zst`,
 			narBytes
 		);
-		expect(stagedNar.status).toBe(200);
+		expect(stagedNar.status).toBe(StatusCodes.OK);
 
 		const committedNarinfo = await signedS3(
 			'PUT',
 			`${storePathHash}.narinfo`,
 			narinfo
 		);
-		expect(committedNarinfo.status).toBe(200);
+		expect(committedNarinfo.status).toBe(StatusCodes.OK);
+
+		const origin = await runInDurableObject(
+			currentServer(),
+			(_instance, state) =>
+				drizzle(state.storage, { schema })
+					.select({ origin: schema.narInfos.origin })
+					.from(schema.narInfos)
+					.get()
+		);
+		expect(origin?.origin).toBe(
+			JSON.stringify({ credentialId: 'cred-1', label: 'test' })
+		);
 
 		const narinfoResponse = await signedS3('GET', `${storePathHash}.narinfo`);
-		expect(narinfoResponse.status).toBe(200);
+		expect(narinfoResponse.status).toBe(StatusCodes.OK);
 		const served = await narinfoResponse.text();
 		expect(served).toContain(`StorePath: /nix/store/${storePathHash}-name`);
 		expect(served).toContain('Sig: ');
 
 		const narResponse = await signedS3('GET', `nar/${narHash}.nar.zst`);
-		expect(narResponse.status).toBe(200);
+		expect(narResponse.status).toBe(StatusCodes.OK);
 		expect(new Uint8Array(await narResponse.arrayBuffer())).toStrictEqual(
 			narBytes
 		);
@@ -266,7 +278,7 @@ describe('S3 endpoint listing', () => {
 		// The continuation token is the full last key seen, and the listing also
 		// surfaces `nix-cache-info` alongside the narinfo keys.
 		const first = await signedS3('GET', '?list-type=2&max-keys=2');
-		expect(first.status).toBe(200);
+		expect(first.status).toBe(StatusCodes.OK);
 		const firstBody = await first.text();
 		expect(listedKeys(firstBody)).toStrictEqual([
 			`${hash0}.narinfo`,

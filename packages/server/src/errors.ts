@@ -640,6 +640,15 @@ export class UploadExpiredError extends ServerHttpError {
 	}
 }
 
+export class StorePathNotFoundError extends ServerHttpError {
+	readonly status = StatusCodes.NOT_FOUND;
+
+	constructor(public readonly hash: string) {
+		super('Store path not found');
+		this.name = 'StorePathNotFoundError';
+	}
+}
+
 export class UploadCacheMismatchError extends ServerHttpError {
 	readonly status = StatusCodes.BAD_REQUEST;
 

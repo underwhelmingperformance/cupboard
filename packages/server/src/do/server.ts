@@ -74,6 +74,7 @@ import { applyMigrations } from './migrate.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import { PathsService } from './paths-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RootsService } from './roots-service.ts';
@@ -120,6 +121,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly reconcileQueue: ReconcileQueueService;
 	private readonly signingKeys: SigningKeysService;
 	private readonly stats: StatsService;
+	private readonly paths: PathsService;
 	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
 	private readonly retention: RetentionService;
@@ -158,6 +160,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.reconcileQueue = new ReconcileQueueService(this.context);
 		this.signingKeys = new SigningKeysService(this.context);
 		this.stats = new StatsService(this.context);
+		this.paths = new PathsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
 		this.retention = new RetentionService(this.context);
 		this.integrityCheck = new IntegrityCheckService(this.context);
@@ -504,6 +507,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			retention: this.retention,
 			oidcTrust: this.oidcTrust,
 			stats: this.stats,
+			paths: this.paths,
 			integrityCheck: this.integrityCheck,
 			roots: this.roots,
 			deletionQueue: this.deletionQueue,

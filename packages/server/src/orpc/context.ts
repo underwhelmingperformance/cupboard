@@ -6,6 +6,7 @@ import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
 import type { GarbageCollectionService } from '../do/garbage-collection-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
+import type { PathsService } from '../do/paths-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
 import type { RootsService } from '../do/roots-service.ts';
 import type { S3CredentialAdminService } from '../do/s3-credential-admin-service.ts';
@@ -38,6 +39,7 @@ export interface TenantRpcServices {
 	readonly integrityCheck: IntegrityCheckService;
 	readonly roots: RootsService;
 	readonly deletionQueue: DeletionQueueService;
+	readonly paths: PathsService;
 	readonly garbageCollection: GarbageCollectionService;
 	readonly uploads: UploadsService;
 	readonly attestations: AttestationsService;

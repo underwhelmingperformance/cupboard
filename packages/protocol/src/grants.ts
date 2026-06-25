@@ -25,6 +25,7 @@ export const cacheOperations = [
 	'root:remove',
 	'cache:create',
 	'cache:delete',
+	'narinfo:read',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read'
@@ -97,6 +98,7 @@ export const operationSchema = z.enum([
 	's3-credential:list',
 	's3-credential:delete',
 	'cache:list',
+	'narinfo:read',
 	'narinfo:delete',
 	'gc:run',
 	'stats:read',

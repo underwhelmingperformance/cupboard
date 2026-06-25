@@ -1,5 +1,6 @@
 import { cacheFromSelector } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
+import { isCoveredByToken } from '@cupboard/protocol/grants';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import { type GcResponse } from '@cupboard/protocol/retention';
 import { implement } from '@orpc/server';
@@ -152,6 +153,13 @@ export const tenantRouter = os.router({
 		)
 	},
 	paths: {
+		inspect: os.paths.inspect.handler(({ input, context }) =>
+			context.services.paths.inspect(
+				cacheFromSelector(input.cacheName),
+				input.hash,
+				isCoveredByToken(context.claims.grants, 's3-credential:list', {})
+			)
+		),
 		remove: os.paths.remove.handler(({ input, context }) => {
 			const requestUrl = new URL(context.request.url);
 			return context.services.deletionQueue.deleteStorePath(

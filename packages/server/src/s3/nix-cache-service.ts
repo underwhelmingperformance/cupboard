@@ -44,6 +44,7 @@ import type {
 	NixCacheBackend,
 	RenderedCacheInfo
 } from './nix-cache-object-store.ts';
+import { renderUploadOrigin } from './upload-origin.ts';
 
 /** A staged narinfo commit settles to one of these outcomes. */
 export type CommitOutcome =
@@ -72,6 +73,7 @@ export interface PendingUploadRow {
 	readonly r2Key: string;
 	readonly expectedSize: number;
 	readonly metadataJson: string;
+	readonly origin: string | undefined;
 	readonly createdAt: string;
 	readonly expiresAt: string;
 }
@@ -233,7 +235,7 @@ export function createNixCacheService(
 		storePathHash: StorePathHash,
 		body: ReadableStream<Uint8Array>,
 		meta: PutObjectMeta,
-		_principal: S3Principal | undefined
+		principal: S3Principal | undefined
 	): Promise<PutObjectResult> {
 		if (
 			meta.contentLength !== undefined &&
@@ -254,6 +256,7 @@ export function createNixCacheService(
 			r2Key: s3NarStagingKey(metadata.fileHash),
 			expectedSize: metadata.fileSize,
 			metadataJson: JSON.stringify(metadata),
+			origin: renderUploadOrigin(principal),
 			createdAt: issued.toISOString(),
 			expiresAt: new Date(issued.getTime() + stagingTtlMs).toISOString()
 		});

@@ -22,6 +22,7 @@
 		"./keys": "./src/keys.ts",
 		"./oidc": "./src/oidc.ts",
 		"./oidc-issuer": "./src/oidc-issuer.ts",
+		"./paths": "./src/paths.ts",
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",
 		"./s3-credentials": "./src/s3-credentials.ts",

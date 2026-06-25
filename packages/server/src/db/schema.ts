@@ -31,6 +31,10 @@ export const narInfos = sqliteTable(
 		// captured by the D1 reference edge, so a stale deletion compares against it
 		// and can never remove a newer recommitted edge.
 		generation: integer('generation').notNull().default(0),
+		// The provenance of a direct S3 push: a JSON reference to the credential that
+		// uploaded the path, so an attestation-less upload stays auditable. Null for a
+		// native CLI push, which authenticates by token rather than S3 credential.
+		origin: text('origin'),
 		createdAt: text('created_at').notNull()
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -59,6 +63,9 @@ export const pendingUploads = sqliteTable(
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').notNull(),
 		metadataJson: text('metadata_json').notNull(),
+		// Carried from the accepting PUT to the deferred verification pass, which
+		// stamps it onto the reserved narinfo row. Null for a native CLI push.
+		origin: text('origin'),
 		createdAt: text('created_at').notNull(),
 		expiresAt: text('expires_at').notNull(),
 		// The commit-saga status of an accepted upload, the durable marker a crashed

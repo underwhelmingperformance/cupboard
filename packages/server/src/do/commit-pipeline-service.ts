@@ -92,10 +92,11 @@ export class CommitPipelineService {
 	private async commitReusedBlob(
 		cache: string,
 		uploadId: string,
-		metadata: ParsedUploadPathNegotiation
+		metadata: ParsedUploadPathNegotiation,
+		origin: string | undefined
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
-		const reserved = await this.reserveNarInfoRow(cache, metadata);
+		const reserved = await this.reserveNarInfoRow(cache, metadata, origin);
 
 		if (reserved.kind !== 'reserved') {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
@@ -605,7 +606,12 @@ export class CommitPipelineService {
 		// passed verify-before-serve when it was first promoted, so bind it without
 		// re-verifying its bytes.
 		if (pending.r2Key === canonicalKey) {
-			return this.commitReusedBlob(cache, uploadId, metadata);
+			return this.commitReusedBlob(
+				cache,
+				uploadId,
+				metadata,
+				pending.origin ?? undefined
+			);
 		}
 
 		// Verify-before-serve for a fresh upload staged under a private key. One
@@ -644,7 +650,8 @@ export class CommitPipelineService {
 	// different version that won the path (`lost`).
 	async reserveNarInfoRow(
 		cache: string,
-		metadata: ParsedUploadPathNegotiation
+		metadata: ParsedUploadPathNegotiation,
+		origin: string | undefined
 	): Promise<ReserveOutcome> {
 		const clock = new Date();
 		const now = clock.toISOString();
@@ -696,6 +703,7 @@ export class CommitPipelineService {
 					ca: metadata.ca,
 					sigsJson: JSON.stringify(sigs),
 					generation,
+					origin,
 					createdAt: now
 				} satisfies typeof schema.narInfos.$inferInsert)
 				.onConflictDoNothing()

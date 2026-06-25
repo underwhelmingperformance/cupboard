@@ -151,7 +151,8 @@ export class VerificationService {
 	): Promise<number | undefined> {
 		const reserved = await this.commitPipeline.reserveNarInfoRow(
 			pending.cache,
-			metadata
+			metadata,
+			pending.origin ?? undefined
 		);
 
 		if (reserved.kind === 'lost') {

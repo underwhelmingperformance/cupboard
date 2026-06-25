@@ -17,6 +17,7 @@ import { registerConfigCommand } from './commands/config.ts';
 import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
+import { registerInspectCommand } from './commands/inspect.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
 import {
@@ -102,6 +103,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerPubkeyCommand(program, options);
 	registerStatsCommand(program, options);
 	registerDeleteCommand(program, options);
+	registerInspectCommand(program, options);
 	registerRootCommands(program, options);
 	registerKeyCommands(program, options);
 	registerAuthKeyCommands(program, options);
