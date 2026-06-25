@@ -188,6 +188,56 @@ describe('createReporter', () => {
 		]);
 	});
 
+	it('emits throttled interim progress events while a long phase runs', async () => {
+		let clock = 0;
+		const { events, reporter } = jsonReporter(() => clock);
+
+		const value = await reporter.progress(
+			'Preparing',
+			{ total: 100 },
+			(bar) => {
+				bar.advance(10); // t=0, just started: no interim event yet
+				clock = 2000;
+				bar.advance(10); // a full interval on: emits completed=20
+				clock = 2500;
+				bar.advance(10); // 500ms since the last emit: throttled, no event
+				clock = 4000;
+				bar.fact('rate', '5/s');
+				bar.advance(10); // another interval on: emits completed=40 with the fact
+				return 'prepared';
+			}
+		);
+
+		expect(value).toBe('prepared');
+		expect(withoutDurations(events())).toStrictEqual([
+			{
+				event: 'progress',
+				label: 'Preparing',
+				durationMs: 'number',
+				total: 100,
+				completed: 20,
+				facts: {}
+			},
+			{
+				event: 'progress',
+				label: 'Preparing',
+				durationMs: 'number',
+				total: 100,
+				completed: 40,
+				facts: { rate: '5/s' }
+			},
+			{
+				event: 'phase',
+				label: 'Preparing',
+				status: 'ok',
+				durationMs: 'number',
+				total: 100,
+				completed: 40,
+				facts: { rate: '5/s' }
+			}
+		]);
+	});
+
 	it('emits a failed progress phase with the bytes completed so far', async () => {
 		const { events, reporter } = jsonReporter();
 		const failure = new ReporterTestError('progress-failed');
@@ -358,7 +408,7 @@ function captureStream(): {
 	};
 }
 
-function jsonReporter(): {
+function jsonReporter(now?: () => number): {
 	readonly events: () => readonly unknown[];
 	readonly payloads: () => string[];
 	readonly reporter: ReturnType<typeof createReporter>;
@@ -371,7 +421,8 @@ function jsonReporter(): {
 		payloads: payloads.lines,
 		reporter: createReporter({
 			stream: diagnostics.stream,
-			out: payloads.stream
+			out: payloads.stream,
+			...(now !== undefined && { now })
 		})
 	};
 }

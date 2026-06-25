@@ -122,14 +122,25 @@ export interface ReporterOptions {
 	 * output. Tests can pass an in-memory stream to assert on it.
 	 */
 	readonly out?: NodeJS.WritableStream;
+	/** The clock used for durations and progress throttling; defaults to `Date.now`. */
+	readonly now?: () => number;
 }
+
+// A long progress phase emits an interim `progress` event at most this often, so
+// a machine consumer (a CI log) sees a transfer advancing rather than silence
+// until it ends, without one event per byte.
+const progressIntervalMs = 2000;
 
 /**
  * The line-delimited JSON reporter: the machine-readable contract. Terminal
  * rendering lives in `@cupboard/cli-ui`, which selects it for machine mode.
  */
 export function createReporter(options: ReporterOptions = {}): Reporter {
-	return createJsonReporter(options.stream ?? stderr, options.out ?? stdout);
+	return createJsonReporter(
+		options.stream ?? stderr,
+		options.out ?? stdout,
+		options.now ?? (() => Date.now())
+	);
 }
 
 interface StepGroupRecord {
@@ -140,7 +151,8 @@ interface StepGroupRecord {
 
 function createJsonReporter(
 	stream: NodeJS.WritableStream,
-	out: NodeJS.WritableStream
+	out: NodeJS.WritableStream,
+	now: () => number
 ): Reporter {
 	function emit(event: Record<string, unknown>): void {
 		stream.write(`${JSON.stringify(event)}\n`);
@@ -157,7 +169,7 @@ function createJsonReporter(
 	return {
 		async phase(label, body) {
 			const facts: Record<string, string> = {};
-			const startedAt = Date.now();
+			const startedAt = now();
 
 			try {
 				const value = await body({
@@ -171,7 +183,7 @@ function createJsonReporter(
 					event: 'phase',
 					label,
 					status: 'ok',
-					durationMs: Date.now() - startedAt,
+					durationMs: now() - startedAt,
 					facts
 				});
 
@@ -181,7 +193,7 @@ function createJsonReporter(
 					event: 'phase',
 					label,
 					status: 'failed',
-					durationMs: Date.now() - startedAt,
+					durationMs: now() - startedAt,
 					error: error instanceof Error ? error.message : String(error)
 				});
 
@@ -191,15 +203,18 @@ function createJsonReporter(
 
 		async progress(label, options, body) {
 			const facts: Record<string, string> = {};
-			const startedAt = Date.now();
+			const startedAt = now();
 			let completed = 0;
+			// Measured from the start, so a phase short enough to finish within one
+			// interval emits no interim event, only the final summary.
+			let lastEmitAt = startedAt;
 
 			const finish = (status: 'ok' | 'failed', extra: object): void => {
 				emit({
 					event: 'phase',
 					label,
 					status,
-					durationMs: Date.now() - startedAt,
+					durationMs: now() - startedAt,
 					total: options.total,
 					completed,
 					facts,
@@ -211,6 +226,22 @@ function createJsonReporter(
 				const value = await body({
 					advance(step = 1) {
 						completed += step;
+
+						const at = now();
+
+						if (at - lastEmitAt < progressIntervalMs) {
+							return;
+						}
+
+						lastEmitAt = at;
+						emit({
+							event: 'progress',
+							label,
+							durationMs: at - startedAt,
+							total: options.total,
+							completed,
+							facts
+						});
 					},
 					fact(factLabel, factValue) {
 						facts[factLabel] = String(factValue);
@@ -232,7 +263,7 @@ function createJsonReporter(
 
 		async steps(label, body) {
 			const groups: StepGroupRecord[] = [];
-			const startedAt = Date.now();
+			const startedAt = now();
 
 			const addGroup = (name: string): StepGroup => {
 				const record: StepGroupRecord = { name, status: 'open', messages: [] };
@@ -268,7 +299,7 @@ function createJsonReporter(
 					event: 'phase',
 					label,
 					status: 'ok',
-					durationMs: Date.now() - startedAt,
+					durationMs: now() - startedAt,
 					groups,
 					...(messages.length > 0 && { messages })
 				});
@@ -279,7 +310,7 @@ function createJsonReporter(
 					event: 'phase',
 					label,
 					status: 'failed',
-					durationMs: Date.now() - startedAt,
+					durationMs: now() - startedAt,
 					groups,
 					...(messages.length > 0 && { messages }),
 					error: error instanceof Error ? error.message : String(error)
