@@ -340,6 +340,11 @@ const rejectedCases: readonly {
 		value: 'a'.repeat(64)
 	},
 	{
+		name: 'the reserved cache name nar',
+		schema: cacheNameSchema,
+		value: 'nar'
+	},
+	{
 		name: 'a negative cache priority',
 		schema: cachePrioritySchema,
 		value: -1

@@ -113,9 +113,16 @@ export const cacheNamePattern = /^[a-z0-9][a-z0-9._-]{0,62}$/;
 // the default and is deliberately not a valid cache name.
 export const DEFAULT_CACHE = '';
 
+// In the S3 key space a named cache is addressed as a leading key segment
+// (`<cache>/<object>`), but NAR objects are global and content-addressed under
+// `nar/<hash>.nar.zst`. A cache named `nar` would be indistinguishable from that
+// shared NAR namespace and so could never be listed; the name is reserved.
+const reservedCacheNames: ReadonlySet<string> = new Set(['nar']);
+
 export const cacheNameSchema = z
 	.string()
 	.regex(cacheNamePattern)
+	.refine((value) => !reservedCacheNames.has(value))
 	.brand('CacheName');
 export type CacheName = z.infer<typeof cacheNameSchema>;
 
