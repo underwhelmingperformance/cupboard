@@ -28,13 +28,9 @@ interface StoredRoot {
 	readonly updatedAt: string;
 }
 
-type RootActivation =
+type RootWrite =
 	| { readonly kind: 'rejected'; readonly unavailable: readonly string[] }
-	| {
-			readonly kind: 'written';
-			readonly stored: StoredRoot;
-			readonly presence: ReadonlyMap<string, boolean>;
-	  };
+	| { readonly kind: 'written'; readonly stored: StoredRoot };
 
 export class RootsService {
 	constructor(
@@ -139,26 +135,50 @@ export class RootsService {
 			.all();
 	}
 
-	// The serve predicate for each distinct target hash, repairing a merely-lost
-	// object on the way. The caller supplies the predicate: the activation gate
-	// passes the locked variant so it runs inside the gate's critical section,
-	// while a summary passes the section-opening variant. Both report exactly what
-	// serving would, so the gate and the `present` flag cannot drift.
-	private async presence(
-		targets: readonly { storePathHash: StorePathHash }[],
-		isServable: (storePathHash: StorePathHash) => Promise<boolean>
-	): Promise<ReadonlyMap<string, boolean>> {
-		const presence = new Map<string, boolean>();
+	// The set of distinct target hashes that would serve, the same predicate the
+	// read path uses. The common case (the narinfo object is present) is settled by
+	// a bounded fan-out of R2 heads outside any critical section; only a target
+	// whose object is missing falls back to the gated heal-and-recheck, so a large
+	// root no longer heads, or heals, every path under the gate.
+	private async servableTargets(
+		cache: string,
+		targets: readonly { storePathHash: StorePathHash }[]
+	): Promise<ReadonlySet<StorePathHash>> {
+		const hashes = [...new Set(targets.map((target) => target.storePathHash))];
+		const servable = new Set(
+			await this.narInfoObjects.existingNarInfoObjects(cache, hashes)
+		);
 
-		for (const { storePathHash } of targets) {
-			if (presence.has(storePathHash)) {
+		for (const hash of hashes) {
+			if (servable.has(hash)) {
 				continue;
 			}
 
-			presence.set(storePathHash, await isServable(storePathHash));
+			if (await this.narInfoObjects.isServable(cache, hash)) {
+				servable.add(hash);
+			}
 		}
 
-		return presence;
+		return servable;
+	}
+
+	// Whether a committed narinfo row still exists for this path, a synchronous DO
+	// SQLite read. A delete is row-first and runs under the gate, so a row still
+	// present inside the write gate cannot be mid-delete; this is the cheap
+	// re-check that lets the expensive serve probe run outside the gate.
+	private rowPresent(cache: string, storePathHash: StorePathHash): boolean {
+		return (
+			this.context.db
+				.select({ storePathHash: schema.narInfos.storePathHash })
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, storePathHash)
+					)
+				)
+				.get() !== undefined
+		);
 	}
 
 	private rootSummaryFrom(
@@ -169,7 +189,7 @@ export class RootsService {
 			storePathHash: StorePathHash;
 			storePath: StorePathString;
 		}[],
-		presence: ReadonlyMap<string, boolean>
+		servable: ReadonlySet<StorePathHash>
 	): RootSummary {
 		return {
 			name,
@@ -181,7 +201,7 @@ export class RootsService {
 				.map((target) => ({
 					storePathHash: target.storePathHash,
 					storePath: target.storePath,
-					present: presence.get(target.storePathHash) === true
+					present: servable.has(target.storePathHash)
 				}))
 				.toSorted((a, b) => byCodeUnit(a.storePathHash, b.storePathHash))
 		};
@@ -199,43 +219,50 @@ export class RootsService {
 		};
 
 		// Activation gates on the serve predicate so a root never advertises a path
-		// that is not yet substitutable. The check (repairing a merely-lost object)
-		// and the write share one critical section, so a concurrent delete cannot
-		// remove a target between them and leave a root over an unservable path; an
-		// unavailable target rejects without writing, leaving the existing root
-		// untouched. The rejection is thrown after the section so a validation error
-		// does not reset the Durable Object.
-		const activation = await this.context.ctx.blockConcurrencyWhile(
-			async (): Promise<RootActivation> => {
-				const presence = await this.presence(requested.targets, (hash) =>
-					this.narInfoObjects.isServableLocked(cache, hash)
-				);
-				const unavailable = requested.targets
-					.filter((target) => presence.get(target.storePathHash) !== true)
+		// that is not yet substitutable. The probe (repairing a merely-lost object)
+		// runs outside the gate, where its R2 heads and the rare heal do not stall
+		// the object; an unavailable target rejects without writing. The write then
+		// takes a short gate that re-confirms, with a synchronous row read, that no
+		// target was deleted since the probe: a delete is row-first and runs under
+		// the gate, so a row still present here cannot be mid-delete, and the write
+		// cannot interleave with one. Rejections are thrown after the section so a
+		// validation error does not reset the Durable Object.
+		const servable = await this.servableTargets(cache, requested.targets);
+		const unavailable = requested.targets
+			.filter((target) => !servable.has(target.storePathHash))
+			.map((target) => target.storePath);
+
+		if (unavailable.length > 0) {
+			throw new RootTargetsUnavailableError(rootName, unavailable);
+		}
+
+		const write = await this.context.ctx.blockConcurrencyWhile(
+			(): Promise<RootWrite> => {
+				const deleted = requested.targets
+					.filter((target) => !this.rowPresent(cache, target.storePathHash))
 					.map((target) => target.storePath);
 
-				if (unavailable.length > 0) {
-					return { kind: 'rejected', unavailable };
+				if (deleted.length > 0) {
+					return Promise.resolve({ kind: 'rejected', unavailable: deleted });
 				}
 
-				return {
+				return Promise.resolve({
 					kind: 'written',
-					stored: this.writeRoot(cache, requested),
-					presence
-				};
+					stored: this.writeRoot(cache, requested)
+				});
 			}
 		);
 
-		if (activation.kind === 'rejected') {
-			throw new RootTargetsUnavailableError(rootName, activation.unavailable);
+		if (write.kind === 'rejected') {
+			throw new RootTargetsUnavailableError(rootName, write.unavailable);
 		}
 
 		return this.rootSummaryFrom(
 			rootName,
-			activation.stored,
-			activation.stored.updatedAt,
+			write.stored,
+			write.stored.updatedAt,
 			requested.targets,
-			activation.presence
+			servable
 		);
 	}
 
@@ -252,9 +279,7 @@ export class RootsService {
 
 		for (const root of roots) {
 			const targets = this.rootTargetRows(cache, root.name);
-			const presence = await this.presence(targets, (hash) =>
-				this.narInfoObjects.isServable(cache, hash)
-			);
+			const servable = await this.servableTargets(cache, targets);
 
 			summaries.push(
 				this.rootSummaryFrom(
@@ -266,7 +291,7 @@ export class RootsService {
 					},
 					now,
 					targets,
-					presence
+					servable
 				)
 			);
 		}
