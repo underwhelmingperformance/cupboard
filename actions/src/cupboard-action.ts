@@ -712,7 +712,8 @@ async function listAttestations(
 		const { data } = await octokit.rest.repos.listAttestations({
 			owner,
 			repo,
-			subject_digest: `sha256:${subjectDigest}`
+			subject_digest: `sha256:${subjectDigest}`,
+			predicate_type: provenancePredicateType
 		});
 
 		return data.attestations ?? [];
