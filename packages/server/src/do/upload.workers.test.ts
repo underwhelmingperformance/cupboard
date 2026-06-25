@@ -442,6 +442,67 @@ describe('upload flow', () => {
 		);
 	});
 
+	it('routes a mixed closure through one batched negotiate', async () => {
+		const init = await bootstrap();
+
+		// One negotiate must route every path from its bulk reads without crossing
+		// their decisions: a committed path skips, a hash this tenant already owns
+		// reuses at a new store path, and a brand-new path uploads.
+		const committedPath = await commitVerifiablePath(init.token, 'skip-me', {
+			name: 'skip',
+			storePathHash: '22222222222222222222222222222222'
+		});
+		const ownedPath = await commitVerifiablePath(init.token, 'reuse-me', {
+			name: 'reuse',
+			storePathHash: '33333333333333333333333333333333'
+		});
+
+		const reuseStorePathHash = '44444444444444444444444444444444';
+		const reuseMetadata = uploadMetadata({
+			name: 'reuse-again',
+			storePathHash: reuseStorePathHash,
+			narHash: ownedPath.narHash,
+			narSize: ownedPath.narSize,
+			fileHash: ownedPath.fileHash,
+			fileSize: ownedPath.fileSize
+		});
+
+		const { metadata: freshMetadata } = await verifiablePath('upload-me', {
+			name: 'fresh',
+			storePathHash: '55555555555555555555555555555555'
+		});
+
+		const negotiate = await negotiateUploads(init.token, [
+			committedPath,
+			reuseMetadata,
+			freshMetadata
+		]);
+
+		expect(
+			negotiate.uploads.map((decision) => ({
+				action: decision.action,
+				storePathHash: decision.storePathHash,
+				narHash: decision.narHash
+			}))
+		).toStrictEqual([
+			{
+				action: 'skip',
+				storePathHash: committedPath.storePathHash,
+				narHash: committedPath.narHash
+			},
+			{
+				action: 'commit',
+				storePathHash: reuseStorePathHash,
+				narHash: ownedPath.narHash
+			},
+			{
+				action: 'upload',
+				storePathHash: freshMetadata.storePathHash,
+				narHash: freshMetadata.narHash
+			}
+		]);
+	});
+
 	it('serves a tenant its own cached NAR but never one it does not reference', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

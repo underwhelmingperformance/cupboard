@@ -1,7 +1,10 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import {
+	type NixSha256HashString,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
-import { and, eq, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { R2Presigner } from '../blob/presign.ts';
 import * as d1Schema from '../db/d1-schema.ts';
@@ -9,8 +12,16 @@ import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 
+import {
+	chunk,
+	mapWithConcurrency,
+	maxInClauseValues,
+	maxOutgoingConnections
+} from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type CanonicalBlob, canonicalBlobOf } from './upload-metadata.ts';
+
+type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
@@ -58,6 +69,65 @@ export class UploadStateService {
 
 	private r2Presigner(): R2Presigner {
 		return this.context.r2Presigner();
+	}
+
+	private async ownedNarHashes(
+		tenant: TenantId,
+		narHashes: readonly NixSha256HashString[]
+	): Promise<NixSha256HashString[]> {
+		const batches = await mapWithConcurrency(
+			chunk(narHashes, maxInClauseValues),
+			maxOutgoingConnections,
+			(narHashBatch) =>
+				this.context.d1
+					.select({ narHash: d1Schema.tenantBlob.narHash })
+					.from(d1Schema.tenantBlob)
+					.where(
+						and(
+							eq(d1Schema.tenantBlob.tenant, tenant),
+							inArray(d1Schema.tenantBlob.narHash, narHashBatch)
+						)
+					)
+					.all()
+		);
+
+		return batches.flat().map((row) => row.narHash);
+	}
+
+	private async blobStatesByNarHash(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Map<NixSha256HashString, BlobStateRow>> {
+		const batches = await mapWithConcurrency(
+			chunk(narHashes, maxInClauseValues),
+			maxOutgoingConnections,
+			(narHashBatch) =>
+				this.context.d1
+					.select()
+					.from(d1Schema.blobState)
+					.where(inArray(d1Schema.blobState.narHash, narHashBatch))
+					.all()
+		);
+
+		return new Map(batches.flat().map((row) => [row.narHash, row]));
+	}
+
+	private async clearReaperTimers(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<void> {
+		if (narHashes.length === 0) {
+			return;
+		}
+
+		await mapWithConcurrency(
+			chunk(narHashes, maxInClauseValues),
+			maxOutgoingConnections,
+			(narHashBatch) =>
+				this.context.d1
+					.update(d1Schema.blobState)
+					.set({ deleteAfter: sql`null` })
+					.where(inArray(d1Schema.blobState.narHash, narHashBatch))
+					.run()
+		);
 	}
 
 	clearPendingUpload(uploadId: string): void {
@@ -134,60 +204,67 @@ export class UploadStateService {
 			.run();
 	}
 
-	async findReusableBlob(
-		narHash: NixSha256HashString
-	): Promise<typeof d1Schema.blobState.$inferSelect | undefined> {
+	// The reusable shared blobs among `narHashes`, keyed by hash. Batched so a
+	// closure of any size costs a bounded number of D1 queries and R2 heads rather
+	// than a round trip per path, the difference between a prompt negotiate and one
+	// that walks thousands of serial round trips into a platform timeout.
+	//
+	// Existence-oracle-safe: reuse only hashes this tenant already holds its own
+	// presence edge for, never the global `blob_state`. A tenant that has not
+	// itself uploaded a hash is always told to upload, even when another tenant's
+	// identical verified bytes exist; the promote then dedups at rest. So negotiate
+	// never reveals whether another tenant has a blob.
+	async findReusableBlobs(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Map<NixSha256HashString, BlobStateRow>> {
+		const reusable = new Map<NixSha256HashString, BlobStateRow>();
+		const unique = [...new Set(narHashes)];
+
+		if (unique.length === 0) {
+			return reusable;
+		}
+
 		const tenant = this.context.requireTenant();
+		const owned = await this.ownedNarHashes(tenant, unique);
 
-		// Existence-oracle-safe negotiate: reuse only when this tenant already holds
-		// its own presence edge for the hash, never on the global `blob_state`. A
-		// tenant that has not itself uploaded the hash is always told to upload, even
-		// when another tenant's identical verified bytes exist; the promote then
-		// dedups at rest. So negotiate never reveals whether another tenant has a blob.
-		const owned = await this.context.d1
-			.select({ narHash: d1Schema.tenantBlob.narHash })
-			.from(d1Schema.tenantBlob)
-			.where(
-				and(
-					eq(d1Schema.tenantBlob.tenant, tenant),
-					eq(d1Schema.tenantBlob.narHash, narHash)
-				)
+		if (owned.length === 0) {
+			return reusable;
+		}
+
+		const blobStates = await this.blobStatesByNarHash(owned);
+		const candidates = owned.filter((narHash) => blobStates.has(narHash));
+
+		// The shared fact can outlive a reaped object, so confirm the canonical
+		// object is still present before reusing; a stale row is left for the reaper.
+		const present = await mapWithConcurrency(
+			candidates,
+			maxOutgoingConnections,
+			async (narHash) =>
+				(await this.context.env.BLOBS.head(narObjectKey(narHash))) === null
+					? undefined
+					: narHash
+		);
+		const reusableHashes = present.filter(
+			(narHash): narHash is NixSha256HashString => narHash !== undefined
+		);
+
+		// Reusing is a fresh reference, so cancel any reaper grace timer the rows
+		// armed before a commit binds a new edge to the hash.
+		await this.clearReaperTimers(
+			reusableHashes.filter(
+				(narHash) => blobStates.get(narHash)?.deleteAfter !== null
 			)
-			.get();
+		);
 
-		if (owned === undefined) {
-			return undefined;
+		for (const narHash of reusableHashes) {
+			const state = blobStates.get(narHash);
+
+			if (state !== undefined) {
+				reusable.set(narHash, state);
+			}
 		}
 
-		const existingBlob = await this.context.d1
-			.select()
-			.from(d1Schema.blobState)
-			.where(eq(d1Schema.blobState.narHash, narHash))
-			.get();
-
-		if (existingBlob === undefined) {
-			return undefined;
-		}
-
-		const object = await this.context.env.BLOBS.head(narObjectKey(narHash));
-
-		// The object is gone: do not reuse, and leave the stale `blob_state` row for
-		// the reaper to collect. A correct re-upload of the hash heals it.
-		if (object === null) {
-			return undefined;
-		}
-
-		// Reusing is a fresh reference, so cancel any reaper grace timer before the
-		// commit binds a new edge to the hash.
-		if (existingBlob.deleteAfter !== null) {
-			await this.context.d1
-				.update(d1Schema.blobState)
-				.set({ deleteAfter: sql`null` })
-				.where(eq(d1Schema.blobState.narHash, narHash))
-				.run();
-		}
-
-		return existingBlob;
+		return reusable;
 	}
 
 	// Promotes verified staging bytes into the shared, content-addressed CAS and

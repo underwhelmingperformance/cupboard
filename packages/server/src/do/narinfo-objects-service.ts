@@ -6,7 +6,7 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -21,8 +21,26 @@ import {
 } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
+import {
+	chunk,
+	mapWithConcurrency,
+	maxInClauseValues,
+	maxOutgoingConnections
+} from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
+
+type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
+// Identifies a committed reference edge by the three columns negotiate matches a
+// narinfo row against: the path, its generation, and the hash it points at.
+function referenceKey(
+	storePathHash: StorePathHash,
+	generation: number,
+	narHash: NixSha256HashString
+): string {
+	return `${storePathHash} ${String(generation)} ${narHash}`;
+}
 
 export class NarInfoObjectsService {
 	constructor(private readonly context: ServerContext) {}
@@ -220,6 +238,119 @@ export class NarInfoObjectsService {
 			.get();
 
 		return reference !== undefined;
+	}
+
+	// The store-path hashes among `rows` whose committed reference edge still names
+	// the row's exact version, the batched form of {@link hasCommittedReference}.
+	// One D1 read per chunk replaces a read per path, so a large negotiate settles
+	// its committed-ness in a handful of queries.
+	async committedReferences(
+		cache: string,
+		rows: readonly NarInfoRow[]
+	): Promise<Set<StorePathHash>> {
+		const committed = new Set<StorePathHash>();
+
+		if (rows.length === 0) {
+			return committed;
+		}
+
+		const tenant = this.context.requireTenant();
+		const storePathHashes = rows.map((row) => row.storePathHash);
+
+		const batches = await mapWithConcurrency(
+			chunk(storePathHashes, maxInClauseValues),
+			maxOutgoingConnections,
+			(storePathHashBatch) =>
+				this.context.d1
+					.select({
+						storePathHash: d1Schema.blobReference.storePathHash,
+						generation: d1Schema.blobReference.generation,
+						narHash: d1Schema.blobReference.narHash
+					})
+					.from(d1Schema.blobReference)
+					.where(
+						and(
+							eq(d1Schema.blobReference.tenant, tenant),
+							eq(d1Schema.blobReference.cache, cache),
+							inArray(d1Schema.blobReference.storePathHash, storePathHashBatch)
+						)
+					)
+					.all()
+		);
+
+		const referenceKeys = new Set(
+			batches
+				.flat()
+				.map((reference) =>
+					referenceKey(
+						reference.storePathHash,
+						reference.generation,
+						reference.narHash
+					)
+				)
+		);
+
+		for (const row of rows) {
+			if (
+				referenceKeys.has(
+					referenceKey(row.storePathHash, row.generation, row.narHash)
+				)
+			) {
+				committed.add(row.storePathHash);
+			}
+		}
+
+		return committed;
+	}
+
+	// The hashes among `narHashes` whose canonical NAR object is still present in
+	// R2, gathered with a bounded fan-out of `head` reads. The skip decision needs
+	// this for every committed path; batching the reads keeps a large closure off
+	// a serial walk of round trips.
+	async existingNarObjects(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Set<NixSha256HashString>> {
+		const present = await mapWithConcurrency(
+			[...new Set(narHashes)],
+			maxOutgoingConnections,
+			async (narHash) =>
+				(await this.context.env.BLOBS.head(narObjectKey(narHash))) === null
+					? undefined
+					: narHash
+		);
+
+		return new Set(
+			present.filter(
+				(narHash): narHash is NixSha256HashString => narHash !== undefined
+			)
+		);
+	}
+
+	// The store-path hashes among `storePathHashes` whose tenant narinfo object is
+	// already materialised in R2, gathered with a bounded fan-out of `head` reads.
+	// A skip whose object is present needs no self-heal; only the absent ones do.
+	async existingNarInfoObjects(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<Set<StorePathHash>> {
+		const tenant = this.context.requireTenant();
+		const present = await mapWithConcurrency(
+			[...new Set(storePathHashes)],
+			maxOutgoingConnections,
+			async (storePathHash) =>
+				(await this.context.env.BLOBS.head(
+					narInfoObjectKey(tenant, storePathHash, cache)
+				)) === null
+					? undefined
+					: storePathHash
+		);
+
+		return new Set(
+			present.filter(
+				(storePathHash): storePathHash is StorePathHash =>
+					storePathHash !== undefined
+			)
+		);
 	}
 
 	async committedNarInfoRow(

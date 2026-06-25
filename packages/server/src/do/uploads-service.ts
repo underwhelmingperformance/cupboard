@@ -1,3 +1,4 @@
+import { type StorePathHash } from '@cupboard/nix-store/scalars';
 import {
 	type ParsedUploadNegotiateRequest,
 	type ParsedUploadPathMetadata,
@@ -8,8 +9,9 @@ import {
 	type UploadPrepareResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
 	ReusableUploadNotPreparableError,
@@ -19,6 +21,7 @@ import {
 } from '../errors.ts';
 import { narObjectKey, stagingObjectKey } from '../http/http.ts';
 
+import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -28,6 +31,13 @@ import {
 	uploadHeadersFor
 } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
+
+type NarInfoRow = typeof schema.narInfos.$inferSelect;
+type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
+
+// A pending upload, and a reuse upload's reclaim window, both live for fifteen
+// minutes from when they are negotiated or prepared.
+const uploadTtlMs = 15 * 60 * 1000;
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
 
@@ -65,6 +75,116 @@ export class UploadsService {
 		private readonly deletionQueue: DeletionQueueService
 	) {}
 
+	// The committed narinfo rows for a closure, read in cache-scoped chunks that
+	// stay under D1's bound-parameter cap. The DO's own SQLite backs this table,
+	// so the reads are local, but chunking keeps every batched lookup uniform.
+	private existingNarInfos(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): Map<StorePathHash, NarInfoRow> {
+		const rows = chunk(storePathHashes, maxInClauseValues).flatMap(
+			(storePathHashBatch) =>
+				this.context.db
+					.select()
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cache, cache),
+							inArray(schema.narInfos.storePathHash, storePathHashBatch)
+						)
+					)
+					.all()
+		);
+
+		return new Map(rows.map((row) => [row.storePathHash, row]));
+	}
+
+	// Re-materialises the tenant narinfo objects that a skippable path needs but
+	// that R2 no longer holds. The bulk head already told us which are present, so
+	// only the absent few open a critical section to heal.
+	private async healMissingNarInfoObjects(
+		cache: string,
+		rows: readonly NarInfoRow[]
+	): Promise<void> {
+		const presentNarInfoObjects =
+			await this.narInfoObjects.existingNarInfoObjects(
+				cache,
+				rows.map((row) => row.storePathHash)
+			);
+
+		for (const row of rows) {
+			if (presentNarInfoObjects.has(row.storePathHash)) {
+				continue;
+			}
+
+			await this.narInfoObjects.ensureNarInfoObject(cache, row.storePathHash);
+		}
+	}
+
+	// Records a pending upload for one path and returns its decision: a reuse of an
+	// existing shared blob commits against the canonical object, while a fresh
+	// upload stages its bytes under a private, per-upload key so no client write
+	// can race or overwrite the shared one.
+	private planUpload(
+		cache: string,
+		metadata: ParsedUploadPathNegotiation,
+		existingBlob: BlobStateRow | undefined
+	): UploadDecision {
+		const uploadId = crypto.randomUUID();
+		const now = new Date();
+		const expiresAt = new Date(now.getTime() + uploadTtlMs);
+		const pendingMetadata:
+			| ParsedUploadPathNegotiation
+			| ParsedUploadPathMetadata =
+			existingBlob === undefined
+				? metadata
+				: {
+						...commitMetadataFromPathAndBlob(metadata, existingBlob),
+						// Sign the blob's verified narSize, never the client's declared
+						// one: a reuse skips re-verification, so an unchecked size must
+						// not reach the signed narinfo.
+						narSize: existingBlob.narSize
+					};
+		const r2Key =
+			existingBlob === undefined
+				? stagingObjectKey(uploadId)
+				: narObjectKey(metadata.narHash);
+
+		this.context.db
+			.insert(schema.pendingUploads)
+			.values({
+				id: uploadId,
+				// Bind the upload to its cache so a prepare or commit cannot
+				// redirect it to a different one.
+				cache,
+				narHash: metadata.narHash,
+				r2Key,
+				expectedSize: existingBlob?.fileSize ?? 0,
+				metadataJson: JSON.stringify(pendingMetadata),
+				createdAt: now.toISOString(),
+				expiresAt: expiresAt.toISOString()
+			})
+			.run();
+
+		if (existingBlob !== undefined) {
+			return {
+				action: 'commit',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				uploadId
+			};
+		}
+
+		return {
+			action: 'upload',
+			storePathHash: metadata.storePathHash,
+			narHash: metadata.narHash,
+			uploadId,
+			r2Key,
+			expiresAt: expiresAt.toISOString()
+		};
+	}
+
 	// The status of a deferred upload, polled on the uploadId the client holds.
 	// Derived from the durable per-upload verdict: a row that is gone is
 	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
@@ -79,112 +199,80 @@ export class UploadsService {
 		return { status: uploadStatusOf(pending) };
 	}
 
+	// Plans the per-path uploads for a whole closure. Every fact the decision
+	// turns on is read in bulk first, so a closure of any size costs a bounded
+	// number of D1 queries and R2 heads, not one of each per path: a large
+	// negotiate used to walk thousands of serial round trips and time out.
 	async negotiate(
 		cache: string,
 		body: ParsedUploadNegotiateRequest,
 		origin: string
 	): Promise<UploadNegotiateResponse> {
+		if (body.paths.length === 0) {
+			return { uploads: [] };
+		}
+
+		const existingByStorePathHash = this.existingNarInfos(
+			cache,
+			body.paths.map((path) => path.storePathHash)
+		);
+		const existingRows = existingByStorePathHash.values().toArray();
+		const committed = await this.narInfoObjects.committedReferences(
+			cache,
+			existingRows
+		);
+
+		// A committed path is skippable only while its canonical NAR object
+		// survives. Gather those, then self-heal just the skippable paths whose
+		// tenant narinfo object is missing, so the common case enters no critical
+		// section at all.
+		const committedRows = existingRows.filter((row) =>
+			committed.has(row.storePathHash)
+		);
+		const presentNarObjects = await this.narInfoObjects.existingNarObjects(
+			committedRows.map((row) => row.narHash)
+		);
+		const skippableRows = committedRows.filter((row) =>
+			presentNarObjects.has(row.narHash)
+		);
+		await this.healMissingNarInfoObjects(cache, skippableRows);
+		const skippable = new Set(skippableRows.map((row) => row.storePathHash));
+
+		// Only a path that will actually plan an upload needs a reusable blob, so a
+		// fully cached re-push (every path a skip) heads no shared objects at all.
+		const reusableByNarHash = await this.uploadState.findReusableBlobs(
+			body.paths
+				.filter((path) => !skippable.has(path.storePathHash))
+				.map((path) => path.narHash)
+		);
+
 		const uploads: UploadDecision[] = [];
 
 		for (const metadata of body.paths) {
-			const existingNarInfo = this.context.db
-				.select()
-				.from(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cache, cache),
-						eq(schema.narInfos.storePathHash, metadata.storePathHash)
-					)
-				)
-				.get();
+			const existing = existingByStorePathHash.get(metadata.storePathHash);
 
-			if (existingNarInfo !== undefined) {
-				const object = await this.context.env.BLOBS.head(
-					narObjectKey(existingNarInfo.narHash)
-				);
-				const isCommitted = await this.narInfoObjects.hasCommittedReference(
-					cache,
-					existingNarInfo
-				);
-
-				if (object !== null && isCommitted) {
-					await this.narInfoObjects.ensureNarInfoObject(
-						cache,
-						existingNarInfo.storePathHash
-					);
-					uploads.push({
-						action: 'skip',
-						storePathHash: metadata.storePathHash,
-						narHash: existingNarInfo.narHash
-					});
-					continue;
-				}
-
-				if (isCommitted) {
-					await this.deletionQueue.removeStaleNarInfo(existingNarInfo, origin);
-				}
-			}
-
-			const existingBlob = await this.uploadState.findReusableBlob(
-				metadata.narHash
-			);
-			const uploadId = crypto.randomUUID();
-			const now = new Date();
-			const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
-			const pendingMetadata:
-				| ParsedUploadPathNegotiation
-				| ParsedUploadPathMetadata =
-				existingBlob === undefined
-					? metadata
-					: {
-							...commitMetadataFromPathAndBlob(metadata, existingBlob),
-							// Sign the blob's verified narSize, never the client's declared
-							// one: a reuse skips re-verification, so an unchecked size must
-							// not reach the signed narinfo.
-							narSize: existingBlob.narSize
-						};
-			// A fresh upload stages its bytes under a private, per-upload key; a reuse
-			// commits against the canonical blob it already found. Keeping uploads off
-			// the shared key means no client write can ever race or overwrite it.
-			const r2Key =
-				existingBlob === undefined
-					? stagingObjectKey(uploadId)
-					: narObjectKey(metadata.narHash);
-
-			this.context.db
-				.insert(schema.pendingUploads)
-				.values({
-					id: uploadId,
-					// Bind the upload to its cache so a prepare or commit cannot
-					// redirect it to a different one.
-					cache,
-					narHash: metadata.narHash,
-					r2Key,
-					expectedSize: existingBlob?.fileSize ?? 0,
-					metadataJson: JSON.stringify(pendingMetadata),
-					createdAt: now.toISOString(),
-					expiresAt: expiresAt.toISOString()
-				})
-				.run();
-
-			if (existingBlob !== undefined) {
+			if (existing !== undefined && skippable.has(metadata.storePathHash)) {
 				uploads.push({
-					action: 'commit',
+					action: 'skip',
 					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash,
-					uploadId
+					narHash: existing.narHash
 				});
 				continue;
 			}
 
-			uploads.push({
-				action: 'upload',
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				uploadId,
-				r2Key,
-				expiresAt: expiresAt.toISOString()
-			});
+			// Committed, but its NAR object is gone: reconcile the stale narinfo so a
+			// re-upload at the requested hash heals it, then plan that upload.
+			if (existing !== undefined && committed.has(metadata.storePathHash)) {
+				await this.deletionQueue.removeStaleNarInfo(existing, origin);
+			}
+
+			uploads.push(
+				this.planUpload(
+					cache,
+					metadata,
+					reusableByNarHash.get(metadata.narHash)
+				)
+			);
 		}
 
 		return { uploads };
@@ -234,7 +322,7 @@ export class UploadsService {
 			pending.metadataJson
 		);
 		const metadata = commitMetadataFromPathAndBlob(pathMetadata, blobMetadata);
-		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
+		const expiresAt = new Date(Date.now() + uploadTtlMs);
 
 		this.context.db
 			.update(schema.pendingUploads)
