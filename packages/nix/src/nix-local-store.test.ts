@@ -120,8 +120,8 @@ function seededDatabase(): DatabaseSync {
 		)
 		.run();
 
-	// Omit the NULL columns rather than binding them, so each row exercises a
-	// different absent field.
+	// Each row leaves a different column NULL by omitting it, so the adapter is
+	// exercised on an absent deriver, sigs and ca.
 	database
 		.prepare(
 			'insert into ValidPaths (id, path, hash, registrationTime, deriver, narSize, ultimate, sigs) values (?, ?, ?, ?, ?, ?, ?, ?)'
