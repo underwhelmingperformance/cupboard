@@ -1,11 +1,17 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
-import { createORPCClient } from '@orpc/client';
+import {
+	createORPCClient,
+	createORPCErrorFromJson,
+	isORPCErrorJson
+} from '@orpc/client';
 import type { AnyContractRouter, ContractRouterClient } from '@orpc/contract';
 import { ResponseValidationPlugin } from '@orpc/contract/plugins';
 import type { JsonifiedClient } from '@orpc/openapi-client';
 import { OpenAPILink } from '@orpc/openapi-client/fetch';
+import { StatusCodes } from 'http-status-codes';
 
 import { throwIfAborted } from '../abort.ts';
+import { CupboardHttpError } from '../errors.ts';
 
 import {
 	type AccessCredential,
@@ -99,19 +105,77 @@ function derivedClient<C extends AnyContractRouter>(
 				response.status !== unauthorizedStatusCode ||
 				!isTokenProvider(credential)
 			) {
-				return response;
+				return await settleServerError(request, response);
 			}
 
 			const headers = new Headers(retryable.headers);
 			headers.set('authorization', `Bearer ${await credential.refresh()}`);
 
-			return reachable(new Request(retryable, { headers }), {
-				...init,
-				signal
-			});
+			return settleServerError(
+				request,
+				await reachable(new Request(retryable, { headers }), {
+					...init,
+					signal
+				})
+			);
 		},
 		plugins: [new ResponseValidationPlugin(contract)]
 	});
 
 	return createORPCClient(link);
+}
+
+const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
+
+// The 5xx statuses the contract maps to typed errors the CLI acts on; they are
+// left for oRPC to decode so `translateRpcError` can turn them into their
+// actionable forms (an over-quota write, a deployment in maintenance).
+const typedServerErrorStatuses = new Set<number>([
+	StatusCodes.SERVICE_UNAVAILABLE,
+	StatusCodes.INSUFFICIENT_STORAGE
+]);
+
+/**
+ * Turns an unmapped server failure into a {@link CupboardHttpError} carrying the
+ * request, status and Cloudflare ray id, so a bare `500 Internal server error`
+ * arrives with the handle that ties it to its server log line rather than oRPC's
+ * context-free default. Statuses the contract maps to typed errors pass through
+ * unchanged for oRPC to decode.
+ */
+async function settleServerError(
+	request: Request,
+	response: Response
+): Promise<Response> {
+	if (
+		response.status < serverErrorThreshold ||
+		typedServerErrorStatuses.has(response.status)
+	) {
+		return response;
+	}
+
+	throw new CupboardHttpError(
+		request.method,
+		new URL(request.url).pathname,
+		response.status,
+		await serverErrorDetail(response),
+		response.headers.get('cf-ray') ?? undefined
+	);
+}
+
+// A worker 5xx is an oRPC error envelope; let oRPC decode it so the message is
+// the one it would have surfaced. A raw gateway 5xx is not, so keep its body.
+async function serverErrorDetail(response: Response): Promise<string> {
+	const body = await response.text();
+
+	try {
+		const json: unknown = JSON.parse(body);
+
+		if (isORPCErrorJson(json)) {
+			return createORPCErrorFromJson(json).message;
+		}
+	} catch {
+		// Not JSON; fall back to the raw body below.
+	}
+
+	return body.trim();
 }
