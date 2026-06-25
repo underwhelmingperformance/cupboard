@@ -10,6 +10,7 @@ import { StoredReferencesInvalidError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
+import { deleteObjects } from './bulk.ts';
 import {
 	type GarbageCollectionOutcome,
 	type ServerContext
@@ -266,15 +267,16 @@ export class GarbageCollectionService {
 			// An abandoned upload's private staging object is reclaimed directly; a
 			// reuse upload's r2Key is the shared canonical key, which the reaper owns,
 			// so it is left alone.
-			for (const upload of expiredUploads) {
-				if (upload.r2Key !== narObjectKey(upload.narHash)) {
-					await this.context.env.BLOBS.delete(upload.r2Key);
-				}
-			}
-
-			for (const upload of expiredAttestations) {
-				await this.context.env.BLOBS.delete(upload.r2Key);
-			}
+			await deleteObjects(
+				this.context.env.BLOBS,
+				expiredUploads
+					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
+					.map((upload) => upload.r2Key)
+			);
+			await deleteObjects(
+				this.context.env.BLOBS,
+				expiredAttestations.map((upload) => upload.r2Key)
+			);
 
 			this.context.db.delete(schema.pendingUploads).where(reapable).run();
 			this.context.db
