@@ -198,6 +198,21 @@ export const signingKeys = sqliteTable('signing_key', {
 	createdAt: text('created_at').notNull()
 });
 
+// An S3 access credential for the cache's S3-compatible endpoint. The secret
+// access key is stored AES-GCM-encrypted (`secret_ciphertext`); SigV4
+// verification needs it back, unlike the asymmetric JWT path. Scoped to one
+// cache with a fixed grant set.
+export const s3Credentials = sqliteTable('s3_credential', {
+	accessKeyId: text('access_key_id').primaryKey(),
+	credentialId: text('credential_id').notNull(),
+	secretCiphertext: text('secret_ciphertext').notNull(),
+	cache: text('cache').notNull().default(''),
+	grantsJson: text('grants_json').notNull().default('[]'),
+	label: text('label').notNull(),
+	createdAt: text('created_at').notNull(),
+	expiresAt: text('expires_at')
+});
+
 export const retentionRoots = sqliteTable(
 	'retention_root',
 	{
