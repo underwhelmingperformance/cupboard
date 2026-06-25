@@ -1,10 +1,48 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
-import { and, asc, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray, or, type SQL } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
+import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
+
+// D1 caps a query at 100 bound parameters. A composite-key delete binds the
+// tenant plus the key columns of each row in the batch, so each batch is split
+// to stay under the cap: three key columns for a blob reference edge, five for
+// an attestation reference edge.
+const blobReferenceDeleteChunk = 30;
+const attestationReferenceDeleteChunk = 18;
+
+type BlobReferenceKey = Pick<
+	typeof d1Schema.blobReference.$inferSelect,
+	'cache' | 'storePathHash' | 'generation'
+>;
+
+type AttestationReferenceKey = Pick<
+	typeof d1Schema.attestationReference.$inferSelect,
+	'cache' | 'storePathHash' | 'generation' | 'predicateType' | 'digest'
+>;
+
+function blobReferenceMatch(row: BlobReferenceKey): SQL | undefined {
+	return and(
+		eq(d1Schema.blobReference.cache, row.cache),
+		eq(d1Schema.blobReference.storePathHash, row.storePathHash),
+		eq(d1Schema.blobReference.generation, row.generation)
+	);
+}
+
+function attestationReferenceMatch(
+	row: AttestationReferenceKey
+): SQL | undefined {
+	return and(
+		eq(d1Schema.attestationReference.cache, row.cache),
+		eq(d1Schema.attestationReference.storePathHash, row.storePathHash),
+		eq(d1Schema.attestationReference.generation, row.generation),
+		eq(d1Schema.attestationReference.predicateType, row.predicateType),
+		eq(d1Schema.attestationReference.digest, row.digest)
+	);
+}
 
 // Drains a tenant being offboarded. The Durable Object is the single writer of its
 // tenant's `blob_ref`/`tenant_blob` rows, so the Worker removes them only through
@@ -48,17 +86,12 @@ export class OffboardingService {
 			return;
 		}
 
-		for (const reference of references) {
+		for (const batch of chunk(references, blobReferenceDeleteChunk)) {
+			const inBatch = or(...batch.map((row) => blobReferenceMatch(row)));
+
 			await this.context.d1
 				.delete(d1Schema.blobReference)
-				.where(
-					and(
-						eq(d1Schema.blobReference.tenant, tenant),
-						eq(d1Schema.blobReference.cache, reference.cache),
-						eq(d1Schema.blobReference.storePathHash, reference.storePathHash),
-						eq(d1Schema.blobReference.generation, reference.generation)
-					)
-				)
+				.where(and(eq(d1Schema.blobReference.tenant, tenant), inBatch))
 				.run();
 		}
 	}
@@ -119,25 +152,12 @@ export class OffboardingService {
 			return;
 		}
 
-		for (const reference of references) {
+		for (const batch of chunk(references, attestationReferenceDeleteChunk)) {
+			const inBatch = or(...batch.map((row) => attestationReferenceMatch(row)));
+
 			await this.context.d1
 				.delete(d1Schema.attestationReference)
-				.where(
-					and(
-						eq(d1Schema.attestationReference.tenant, tenant),
-						eq(d1Schema.attestationReference.cache, reference.cache),
-						eq(
-							d1Schema.attestationReference.storePathHash,
-							reference.storePathHash
-						),
-						eq(d1Schema.attestationReference.generation, reference.generation),
-						eq(
-							d1Schema.attestationReference.predicateType,
-							reference.predicateType
-						),
-						eq(d1Schema.attestationReference.digest, reference.digest)
-					)
-				)
+				.where(and(eq(d1Schema.attestationReference.tenant, tenant), inBatch))
 				.run();
 		}
 	}
