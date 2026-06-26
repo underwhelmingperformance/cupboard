@@ -63,7 +63,7 @@ runs:
       shell: bash
       env:
         # renovate: datasource=npm depName=pnpm
-        PNPM_VERSION: '11.8.0'
+        PNPM_VERSION: '11.9.0'
       run: echo "version=${PNPM_VERSION}" | tee -a "${GITHUB_OUTPUT}"
 
     - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
