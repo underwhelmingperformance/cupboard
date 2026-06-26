@@ -46,6 +46,7 @@ import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitFrame } from './commit-socket.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
+import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
@@ -460,6 +461,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		}
 	}
 
+	// Runs a direct RPC entrypoint (one that bypasses `fetch`) inside its own
+	// request cost meter, so the Durable Object rows it reads are logged like an
+	// HTTP request's rather than left invisible. The row-heavy maintenance sweeps
+	// run through here.
+	private metered<T>(
+		method: MeteredMethod,
+		body: () => Promise<T>
+	): Promise<T> {
+		return withRequestCost(body, (cost) => {
+			logMethodFinished(method, cost);
+		});
+	}
+
 	private initialise(): Promise<void> {
 		this.migrationPromise ??= this.migrateAndSeed();
 
@@ -497,6 +511,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	private async migrateAndSeed(): Promise<void> {
+		// The cumulative meter is never reset, and a purged object can run this again,
+		// so measure the cold-start cost as a delta over the migration and seed rather
+		// than reading the lifetime totals.
+		this.context.dbCost.settle();
+		const rowsReadBefore = this.context.dbCost.rowsRead;
+		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
+
 		await migrate(this.context.db, migrations);
 		await this.assertZstdAvailable();
 
@@ -515,6 +536,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			.run();
 
 		this.oidcTrust.seedOwnerRule();
+
+		// Migration and seeding run before the first request opens its meter, so their
+		// rows land on no per-request line. Surface them once as the cold-start cost.
+		this.context.dbCost.settle();
+		logMethodFinished('initialise', {
+			rowsRead: this.context.dbCost.rowsRead - rowsReadBefore,
+			rowsWritten: this.context.dbCost.rowsWritten - rowsWrittenBefore
+		});
 	}
 
 	// Test seam: the inbound-OIDC discovery store lives on the context so a test
@@ -535,7 +564,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async fetch(request: Request): Promise<Response> {
 		await this.initialise();
 
-		return this.app.fetch(request, this.env);
+		let status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+		return withRequestCost(
+			async () => {
+				const response = await this.app.fetch(request, this.env);
+				status = response.status;
+
+				return response;
+			},
+			(cost) => {
+				logRequestFinished(request, status, cost);
+			}
+		);
 	}
 
 	// The cron drives maintenance through these RPC methods rather than the HTTP
@@ -546,23 +587,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// orphan-blob grace window.
 	async runGarbageCollection(): Promise<void> {
 		await this.initialise();
-		await this.withMaintenanceEligibility(() =>
-			this.garbageCollection.collectGarbage()
+		await this.metered('garbage-collection', () =>
+			this.withMaintenanceEligibility(() =>
+				this.garbageCollection.collectGarbage()
+			)
 		);
 	}
 
 	async runVerification(): Promise<void> {
 		await this.initialise();
-		await this.withMaintenanceEligibility(async () => {
-			await this.verification.verifyPendingUploads(verificationBatchSize);
-			await this.verification.verifyBatch(undefined, verificationBatchSize);
-		});
+		await this.metered('verification', () =>
+			this.withMaintenanceEligibility(async () => {
+				await this.verification.verifyPendingUploads(verificationBatchSize);
+				await this.verification.verifyBatch(undefined, verificationBatchSize);
+			})
+		);
 	}
 
 	async runAuthKeyRetirement(): Promise<void> {
 		await this.initialise();
-		await this.withMaintenanceEligibility(() =>
-			this.authKeys.retireScheduledAuthKeys()
+		await this.metered('auth-key-retirement', () =>
+			this.withMaintenanceEligibility(() =>
+				this.authKeys.retireScheduledAuthKeys()
+			)
 		);
 	}
 
@@ -577,13 +624,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<void> {
 		await this.initialise();
 
-		for (const target of targets) {
-			await this.narInfoObjects.demoteUnbacked(
-				target.cache,
-				target.storePathHash,
-				narHash
-			);
-		}
+		await this.metered('demote-narinfo-objects', async () => {
+			for (const target of targets) {
+				await this.narInfoObjects.demoteUnbacked(
+					target.cache,
+					target.storePathHash,
+					narHash
+				);
+			}
+		});
 	}
 
 	async measureAttestationBundle(
@@ -606,6 +655,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		size: number
 	): Promise<AttestationReferenceOutcome> {
 		await this.initialise();
+		// The attestation references live in D1, which the cost meter does not see.
+		// The one tenant-identity row this reads through the metered db is folded into
+		// the cumulative meter but is not worth its own per-request line, so this
+		// entrypoint is not metered.
 		return this.attestationCas.reserveReferenceAndCharge(reference, size);
 	}
 
@@ -613,7 +666,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		reference: AttestationReference
 	): Promise<void> {
 		await this.initialise();
-		return this.attestationCas.removeCapturedReference(reference);
+		// D1-bound references, like `reserveAttestationReference`, so not metered.
+		await this.attestationCas.removeCapturedReference(reference);
 	}
 
 	async demoteAttestationReferences(
@@ -621,7 +675,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		fenceStoredAt: string
 	): Promise<void> {
 		await this.initialise();
-		await this.attestations.removeReferencesForDigest(digest, fenceStoredAt);
+		await this.metered('demote-attestation-references', () =>
+			this.attestations.removeReferencesForDigest(digest, fenceStoredAt)
+		);
 	}
 
 	// The control plane begins offboarding this tenant. Marking it stops the
@@ -639,7 +695,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async runOffboard(limit: number): Promise<{ drained: boolean }> {
 		await this.initialise();
 
-		return this.ctx.blockConcurrencyWhile(() => this.offboarding.drain(limit));
+		return this.metered('offboard', () =>
+			this.ctx.blockConcurrencyWhile(() => this.offboarding.drain(limit))
+		);
 	}
 
 	// Wipes this Durable Object's own storage once its tenant is drained: the signing
@@ -693,11 +751,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	async configure(identity: TenantIdentity): Promise<void> {
 		await this.initialise();
 
-		if (this.tenantIdentity.configure(identity)) {
-			this.oidcTrust.seedOwnerRule();
-		}
+		await this.metered('configure', async () => {
+			if (this.tenantIdentity.configure(identity)) {
+				this.oidcTrust.seedOwnerRule();
+			}
 
-		await this.reconcileMaintenanceEligibility();
+			await this.reconcileMaintenanceEligibility();
+		});
 	}
 
 	// The commit protocol is server-to-client: the only client frames are the
@@ -716,4 +776,48 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	webSocketError(socket: WebSocket): void {
 		socket.close(1011, 'socket error');
 	}
+}
+
+// Emits a line when a request finishes, carrying its Durable Object SQLite cost
+// among the fields. The DO is billed per row read, so surfacing rows read and
+// written per request makes a row-heavy request observable in the logs rather
+// than only on the daily bill. One DO backs one tenant, so the emitting object
+// already identifies the tenant.
+function logRequestFinished(
+	request: Request,
+	status: number,
+	cost: DatabaseCost
+): void {
+	console.log('request finished', {
+		method: request.method,
+		path: new URL(request.url).pathname,
+		status,
+		rowsRead: cost.rowsRead,
+		rowsWritten: cost.rowsWritten
+	});
+}
+
+// The closed set of direct (non-`fetch`) entrypoints the cost meter labels, kept as
+// a union so a label cannot drift from its entrypoint or be mistyped.
+type MeteredMethod =
+	| 'alarm'
+	| 'auth-key-retirement'
+	| 'commit'
+	| 'configure'
+	| 'demote-attestation-references'
+	| 'demote-narinfo-objects'
+	| 'garbage-collection'
+	| 'initialise'
+	| 'offboard'
+	| 'verification';
+
+// The same line for a direct RPC entrypoint (the maintenance sweeps, the alarm,
+// configure) that does not flow through `fetch` but still reads Durable Object
+// rows worth surfacing.
+function logMethodFinished(method: MeteredMethod, cost: DatabaseCost): void {
+	console.log('method finished', {
+		method,
+		rowsRead: cost.rowsRead,
+		rowsWritten: cost.rowsWritten
+	});
 }
