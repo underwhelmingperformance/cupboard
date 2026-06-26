@@ -759,7 +759,7 @@ function tenantMaintenanceDueCondition() {
 		or(
 			isNull(d1Schema.tenantMaintenanceEligibility.tenant),
 			lte(d1Schema.tenantMaintenanceEligibility.reconciledAt, staleBefore),
-			lte(d1Schema.tenantMaintenanceEligibility.nextMaintenanceAt, nowIso)
+			lte(d1Schema.tenantMaintenanceEligibility.nextWakeAt, nowIso)
 		)
 	);
 }

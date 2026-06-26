@@ -1304,6 +1304,29 @@ export async function negotiateUploads(
 	return uploadNegotiateResponseSchema.parse(await response.json());
 }
 
+// Drives a single-path negotiate straight at a Durable Object instance, for a
+// test that needs the request and its cost on the same object call rather than
+// routed through the Worker.
+export function negotiateViaInstance(
+	instance: { fetch(request: Request): Promise<Response> },
+	token: string,
+	storePathHash: string,
+	cache: string = DEFAULT_CACHE
+): Promise<Response> {
+	const metadata = uploadMetadata({ storePathHash, fileSize: 1 });
+	const url = new URL(cacheScopedPath(cache, '/uploads'), currentOrigin());
+	const request = new Request(url, {
+		method: 'POST',
+		headers: {
+			authorization: `Bearer ${token}`,
+			'content-type': 'application/json'
+		},
+		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+	});
+
+	return instance.fetch(request);
+}
+
 export async function negotiateViaWorker(
 	token: string,
 	paths: readonly ParsedUploadPathMetadata[]

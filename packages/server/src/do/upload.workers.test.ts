@@ -196,6 +196,12 @@ async function rejectedBy<T extends Error>(
 	return rejection;
 }
 
+const methodLineSchema = z.object({
+	method: z.string(),
+	rowsRead: z.number(),
+	rowsWritten: z.number()
+});
+
 describe('upload flow', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();
@@ -440,6 +446,53 @@ describe('upload flow', () => {
 			`/nar/${metadata.narHash}.nar.zst`,
 			readFetch
 		);
+	});
+
+	it('logs the row cost of the cold start and a settled commit', async () => {
+		const methodLines: unknown[] = [];
+		const logSpy = vi
+			.spyOn(console, 'log')
+			.mockImplementation((message: unknown, fields: unknown) => {
+				if (message === 'method finished') {
+					methodLines.push(fields);
+				}
+			});
+
+		try {
+			// `beforeEach` already initialised a server, so reset again under the spy:
+			// the fresh server's first request runs the cold-start migration where the
+			// log line is visible.
+			await resetTestServer();
+			const init = await bootstrap();
+			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+			const negotiate = await negotiateUploads(init.token, [metadata]);
+			const upload = expectSingleUploadDecision(negotiate, metadata);
+			await prepareUpload(init.token, upload, metadata);
+			await putNarBytes(upload.r2Key);
+			await commitUpload(init.token, upload.uploadId);
+		} finally {
+			logSpy.mockRestore();
+		}
+
+		// The cold-start migration and the commit are the row-heavy entrypoints that
+		// bypass `fetch`, so each logs its own cost line. Neither is on the fetch path
+		// the request-cost test covers, so without this the `metered()` plumbing could
+		// regress unseen. Both are asserted as a present, non-zero cost rather than an
+		// exact figure: the cold-start total tracks the whole DO migration history and
+		// the commit total tracks the closure, neither a stable behavioural quantity.
+		// The meter's row accounting is pinned exactly by the fetch-path and reconcile
+		// cost tests instead.
+		const byMethod = methodLines.map((fields) =>
+			methodLineSchema.parse(fields)
+		);
+		const coldStart = byMethod.find((line) => line.method === 'initialise');
+		const commit = byMethod.find((line) => line.method === 'commit');
+
+		expect({
+			coldStartMeasured: (coldStart?.rowsWritten ?? 0) > 0,
+			commitMeasured:
+				(commit?.rowsRead ?? 0) > 0 || (commit?.rowsWritten ?? 0) > 0
+		}).toStrictEqual({ coldStartMeasured: true, commitMeasured: true });
 	});
 
 	it('routes a mixed closure through one batched negotiate', async () => {
@@ -3293,6 +3346,8 @@ async function foreignKeyToken(scope: 'write' | 'admin'): Promise<string> {
 }
 
 async function runQueuedMaintenanceTick(): Promise<void> {
+	// The eligibility projection is already current: each mutation reconciles it
+	// synchronously, so the cron tick reads a fresh wake time with nothing deferred.
 	const messages = await enqueueMaintenanceJobs(env, queueCollector());
 
 	for (const message of messages) {

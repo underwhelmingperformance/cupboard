@@ -341,8 +341,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		uploadId: string
 	): Promise<void> {
 		try {
-			const outcome = await this.withMaintenanceEligibility(() =>
-				this.commitPipeline.commit(cache, uploadId)
+			// The commit runs in `waitUntil` after the upgrade response, outside the
+			// `fetch` cost meter, so it is metered here directly. The commit is the
+			// row-heaviest write, the operation that breached the budget.
+			const outcome = await this.metered('commit', () =>
+				this.afterMutation(() => this.commitPipeline.commit(cache, uploadId))
 			);
 
 			if (outcome.kind === 'settled') {
@@ -377,13 +380,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// The capabilities the contract procedures reach through the oRPC context:
-	// authentication, the maintenance bracket, and the domain services.
+	// authentication, the post-mutation maintenance hook, and the domain services.
 	private rpcServices(): TenantRpcServices {
 		return {
 			authenticate: (request) => this.authKeys.authenticate(request),
 			pendingCache: (id) => this.pendingCache(id),
-			withMaintenanceEligibility: (body) =>
-				this.withMaintenanceEligibility(body),
+			afterMutation: (body) => this.afterMutation(body),
 			cacheAdmin: this.cacheAdmin,
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
@@ -442,6 +444,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return Promise.resolve(attestation?.cache);
 	}
 
+	// Runs a body and reconciles the maintenance-eligibility projection
+	// synchronously after it, invalidating first so a crash anywhere in the body
+	// leaves the tenant due (fail-open). The cron sweeps use this: a crash during a
+	// maintenance pass must not leave a stale not-due row behind. The request hot path
+	// uses `afterMutation`, which reconciles inline but skips the invalidate: that
+	// would cost a D1 delete on every mutation and defeat the write-coalescing, so it
+	// accepts the narrow eviction window the trailing `finally` leaves instead.
 	private async withMaintenanceEligibility<T>(
 		body: () => Promise<T>
 	): Promise<T> {
@@ -452,12 +461,47 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	// Runs a mutating request and republishes the tenant's wake time before the
+	// request returns. The reconcile is an existence check plus a few index-backed
+	// lookups, cheap enough to run on every mutation, so the published wake time
+	// trails the source tables only between the committed write and this `finally`.
+	// The `finally` covers a body that throws after a partial write; the one case it
+	// does not cover is a hard isolate eviction inside that window, which leaves the
+	// prior wake time in place. Deferred verify is re-triggered out of band by the
+	// `tenant-verify` queue message, so it does not wait; but the other deferred kinds
+	// (queued narinfo deletions, retention-root TTL expiry, auth-key retirement) then
+	// wait for the cron's staleness floor rather than the next tick. The reconcile
+	// publishes through a single conditional upsert that writes only when the wake
+	// time moves, so a push of many paths costs one write.
+	private async afterMutation<T>(body: () => Promise<T>): Promise<T> {
+		try {
+			return await body();
+		} finally {
+			await this.reconcileMaintenanceEligibility();
+		}
+	}
+
 	private async reconcileMaintenanceEligibility(): Promise<void> {
+		// The reconcile publishes through a single conditional upsert, so two concurrent
+		// same-tenant reconciles settle atomically without a lock: a stale one cannot
+		// overwrite a fresher one. A failed reconcile would leave a stale projection that
+		// can suppress maintenance until the staleness floor, so drop the row instead and
+		// let the periodic sweep read the tenant as due (fail-open).
 		try {
 			await this.maintenanceEligibility.reconcile();
 		} catch {
-			// Eligibility is an admission hint. If it cannot be refreshed, cron fails
-			// open through a missing or stale row rather than failing the mutation.
+			await this.invalidateMaintenanceEligibility();
+		}
+	}
+
+	// Drops the maintenance-eligibility projection so the periodic sweep reads the
+	// tenant as due and reconciles on its next tick. Fail-open: if the delete also
+	// fails, the staleness floor still bounds the delay.
+	private async invalidateMaintenanceEligibility(): Promise<void> {
+		try {
+			await this.maintenanceEligibility.invalidate();
+		} catch {
+			// The staleness floor remains the backstop.
 		}
 	}
 
@@ -513,7 +557,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async migrateAndSeed(): Promise<void> {
 		// The cumulative meter is never reset, and a purged object can run this again,
 		// so measure the cold-start cost as a delta over the migration and seed rather
-		// than reading the lifetime totals.
+		// than reading the lifetime totals. The delta is exact only because nothing else
+		// issues statements on this object between the readings: the seed is synchronous
+		// and the one await here (`assertZstdAvailable`) touches no table.
 		this.context.dbCost.settle();
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
@@ -701,8 +747,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// Wipes this Durable Object's own storage once its tenant is drained: the signing
-	// and auth keys, the identity, and the narinfo rows. After this the object is
-	// unconfigured and serves nothing, so its tenant retains no secret or data.
+	// and auth keys, the identity, and the narinfo rows. After this the
+	// object is unconfigured and serves nothing, so its tenant retains no secret or
+	// data.
 	purgeStorage(): Promise<void> {
 		return this.ctx.blockConcurrencyWhile(async () => {
 			await this.ctx.storage.deleteAll();
@@ -800,7 +847,6 @@ function logRequestFinished(
 // The closed set of direct (non-`fetch`) entrypoints the cost meter labels, kept as
 // a union so a label cannot drift from its entrypoint or be mistyped.
 type MeteredMethod =
-	| 'alarm'
 	| 'auth-key-retirement'
 	| 'commit'
 	| 'configure'
@@ -811,9 +857,9 @@ type MeteredMethod =
 	| 'offboard'
 	| 'verification';
 
-// The same line for a direct RPC entrypoint (the maintenance sweeps, the alarm,
-// configure) that does not flow through `fetch` but still reads Durable Object
-// rows worth surfacing.
+// The same line for a direct RPC entrypoint (the maintenance sweeps, configure,
+// the cold-start migration) that does not flow through `fetch` but still reads
+// Durable Object rows worth surfacing.
 function logMethodFinished(method: MeteredMethod, cost: DatabaseCost): void {
 	console.log('method finished', {
 		method,

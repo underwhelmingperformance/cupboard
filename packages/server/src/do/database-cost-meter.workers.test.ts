@@ -9,6 +9,7 @@ import {
 	currentServer,
 	initialise,
 	negotiateUploads,
+	negotiateViaInstance,
 	resetTestServer,
 	uploadMetadata
 } from '../test-support.ts';
@@ -144,20 +145,68 @@ describe('db cost meter', () => {
 		}
 
 		// The meter is wired into the entrypoint, not just exercised in isolation, so a
-		// real request emits one cost line, and it reports the rows the request moved
-		// rather than zeroes. Dropping the `fetch` wrapper would emit no such line.
+		// real request emits one cost line reporting the exact rows the request moved.
+		// Dropping the `fetch` wrapper would emit no such line, and a mis-count that
+		// stayed positive would slip past a `> 0` assertion.
 		const negotiate = costFields
 			.map((fields) => costLineSchema.parse(fields))
 			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
 
 		expect({
 			status: negotiate?.status,
-			measuredReads: (negotiate?.rowsRead ?? 0) > 0,
-			measuredWrites: (negotiate?.rowsWritten ?? 0) > 0
+			rowsRead: negotiate?.rowsRead,
+			rowsWritten: negotiate?.rowsWritten
 		}).toStrictEqual({
 			status: StatusCodes.OK,
-			measuredReads: true,
-			measuredWrites: true
+			rowsRead: 13,
+			rowsWritten: 4
+		});
+	});
+
+	it('logs the cost line with a 500 status when the request fails', async () => {
+		const token = await initialise();
+
+		const costFields: unknown[] = [];
+		const logSpy = vi
+			.spyOn(console, 'log')
+			.mockImplementation((message: unknown, fields: unknown) => {
+				if (message === 'request finished') {
+					costFields.push(fields);
+				}
+			});
+
+		try {
+			await runInDurableObject(currentServer(), async (instance) => {
+				// Fail the negotiate's slot write after its reads, so the request returns a
+				// 500 once the meter has already accumulated rows.
+				Object.defineProperty(instance.context.db, 'insert', {
+					value: () => {
+						throw new Error('forced negotiate failure');
+					},
+					configurable: true
+				});
+
+				return negotiateViaInstance(instance, token, 'a'.repeat(32));
+			});
+		} finally {
+			logSpy.mockRestore();
+		}
+
+		// A failed request still emits its cost line: the meter settles in a `finally`,
+		// and `fetch` reports the 500 the failed body resolved to with the rows it had
+		// already read.
+		const negotiate = costFields
+			.map((fields) => costLineSchema.parse(fields))
+			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
+
+		expect({
+			status: negotiate?.status,
+			rowsRead: negotiate?.rowsRead,
+			rowsWritten: negotiate?.rowsWritten
+		}).toStrictEqual({
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			rowsRead: 13,
+			rowsWritten: 0
 		});
 	});
 });

@@ -78,9 +78,9 @@ export const pendingUploads = sqliteTable(
 			enum: ['committing', 'pending', 'servable', 'mismatch', 'over-quota']
 		})
 	},
-	// The maintenance sweep finds the soonest-expiring upload and counts those
-	// still awaiting verification; without these indexes each pass scans the whole
-	// in-flight set.
+	// The maintenance reconcile finds the soonest-expiring upload and probes for any
+	// still awaiting verification (an existence check, not a count); without these
+	// indexes each pass scans the whole in-flight set.
 	(table) => [
 		index('pending_upload_expires_at_idx').on(table.expiresAt),
 		index('pending_upload_verdict_idx').on(table.verdict)

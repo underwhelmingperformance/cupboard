@@ -17,14 +17,17 @@ import type { PendingCacheResolver } from './authorise.ts';
 
 /**
  * The capabilities the contract's procedures need from the Durable Object:
- * authentication, the maintenance-eligibility bracket, and the domain
- * services. The object supplies an instance per request through the handler
- * context.
+ * authentication, the post-mutation maintenance hook, and the domain services.
+ * The object supplies an instance per request through the handler context.
  */
 export interface TenantRpcServices {
 	authenticate(request: Request): Promise<AccessClaims>;
 	pendingCache: PendingCacheResolver;
-	withMaintenanceEligibility<T>(body: () => Promise<T>): Promise<T>;
+	// Runs a mutating procedure and reconciles the maintenance-eligibility wake time
+	// inline, before the request returns. A push runs the procedure once per store
+	// path; the reconcile is flat in the in-flight set, and it skips the D1 write when
+	// the wake time is unchanged, so a push publishes the wake time once.
+	afterMutation<T>(body: () => Promise<T>): Promise<T>;
 	readonly cacheAdmin: CacheAdminService;
 	readonly signingKeys: SigningKeysService;
 	readonly authKeys: AuthKeysService;
