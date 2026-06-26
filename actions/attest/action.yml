@@ -34,7 +34,7 @@ runs:
       shell: bash
       env:
         # renovate: datasource=npm depName=pnpm
-        PNPM_VERSION: '11.8.0'
+        PNPM_VERSION: '11.9.0'
       run: echo "version=${PNPM_VERSION}" | tee -a "${GITHUB_OUTPUT}"
 
     - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
@@ -67,7 +67,7 @@ runs:
 
     - name: Attest subjects
       id: attest
-      uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+      uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
       with:
         subject-checksums: ${{ steps.subjects.outputs.checksums-file }}
         github-token: ${{ inputs.github-token || github.token }}
