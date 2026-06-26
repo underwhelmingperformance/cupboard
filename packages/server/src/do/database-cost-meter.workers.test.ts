@@ -60,6 +60,24 @@ describe('db cost meter', () => {
 		});
 	});
 
+	it('measures the rows an insert writes', async () => {
+		const measured = await runInDurableObject(currentServer(), (instance) => {
+			const { db, dbCost } = instance.context;
+
+			dbCost.settle();
+			const before = dbCost.rowsWritten;
+			insertUploads(db, 0, 3);
+			dbCost.settle();
+
+			return dbCost.rowsWritten - before;
+		});
+
+		// Writes are folded on their own accumulation, so pin a positive count: each
+		// insert writes the table row plus its primary-key, `expires_at` and `verdict`
+		// index entries, four per row across three rows.
+		expect(measured).toBe(12);
+	});
+
 	it('attributes rows to the request that read them, not a concurrent one', async () => {
 		const measured = await runInDurableObject(
 			currentServer(),

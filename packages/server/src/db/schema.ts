@@ -8,6 +8,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import {
+	index,
 	integer,
 	primaryKey,
 	sqliteTable,
@@ -50,41 +51,57 @@ export const generationSeq = sqliteTable(
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
 );
 
-export const pendingUploads = sqliteTable('pending_upload', {
-	id: text('id').primaryKey(),
-	cache: text('cache').notNull().default(''),
-	narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
-	r2Key: text('r2_key').notNull(),
-	expectedSize: integer('expected_size').notNull(),
-	metadataJson: text('metadata_json').notNull(),
-	createdAt: text('created_at').notNull(),
-	expiresAt: text('expires_at').notNull(),
-	// The commit-saga status of an accepted upload, the durable marker a crashed
-	// commit is re-driven from and a `push --wait` client polls. `committing` once an
-	// inline commit starts, before it reserves the narinfo row; `pending` once a blob
-	// above the inline-verify budget is accepted, awaiting the background NAR-hash
-	// check; then a terminal `servable` once the background pass commits it, `mismatch`
-	// once the NAR-hash check fails, or `over-quota` once the background pass finds the
-	// canonical size exceeds the tenant's quota. The three terminal verdicts are
-	// retained through a status-observation window for a later reader to observe,
-	// distinguished so a quota rejection is not misreported as bad content; null while
-	// a row still awaits its bytes. The verdict is per-upload and never written globally
-	// by nar_hash, so a bad upload leaves no global trace. The background verify pass
-	// re-drives both `committing` and `pending` rows.
-	verdict: text('verdict', {
-		enum: ['committing', 'pending', 'servable', 'mismatch', 'over-quota']
-	})
-});
+export const pendingUploads = sqliteTable(
+	'pending_upload',
+	{
+		id: text('id').primaryKey(),
+		cache: text('cache').notNull().default(''),
+		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
+		r2Key: text('r2_key').notNull(),
+		expectedSize: integer('expected_size').notNull(),
+		metadataJson: text('metadata_json').notNull(),
+		createdAt: text('created_at').notNull(),
+		expiresAt: text('expires_at').notNull(),
+		// The commit-saga status of an accepted upload, the durable marker a crashed
+		// commit is re-driven from and a `push --wait` client polls. `committing` once an
+		// inline commit starts, before it reserves the narinfo row; `pending` once a blob
+		// above the inline-verify budget is accepted, awaiting the background NAR-hash
+		// check; then a terminal `servable` once the background pass commits it, `mismatch`
+		// once the NAR-hash check fails, or `over-quota` once the background pass finds the
+		// canonical size exceeds the tenant's quota. The three terminal verdicts are
+		// retained through a status-observation window for a later reader to observe,
+		// distinguished so a quota rejection is not misreported as bad content; null while
+		// a row still awaits its bytes. The verdict is per-upload and never written globally
+		// by nar_hash, so a bad upload leaves no global trace. The background verify pass
+		// re-drives both `committing` and `pending` rows.
+		verdict: text('verdict', {
+			enum: ['committing', 'pending', 'servable', 'mismatch', 'over-quota']
+		})
+	},
+	// The maintenance sweep finds the soonest-expiring upload and counts those
+	// still awaiting verification; without these indexes each pass scans the whole
+	// in-flight set.
+	(table) => [
+		index('pending_upload_expires_at_idx').on(table.expiresAt),
+		index('pending_upload_verdict_idx').on(table.verdict)
+	]
+);
 
-export const pendingAttestations = sqliteTable('pending_attestation', {
-	id: text('id').primaryKey(),
-	cache: text('cache').notNull().default(''),
-	storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
-	digest: text('digest').$type<Sha256HexDigest>().notNull(),
-	r2Key: text('r2_key').notNull(),
-	createdAt: text('created_at').notNull(),
-	expiresAt: text('expires_at').notNull()
-});
+export const pendingAttestations = sqliteTable(
+	'pending_attestation',
+	{
+		id: text('id').primaryKey(),
+		cache: text('cache').notNull().default(''),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		digest: text('digest').$type<Sha256HexDigest>().notNull(),
+		r2Key: text('r2_key').notNull(),
+		createdAt: text('created_at').notNull(),
+		expiresAt: text('expires_at').notNull()
+	},
+	// The maintenance sweep finds the soonest-expiring attestation and GC reaps the
+	// expired ones; the index spares both a scan of every staged bundle.
+	(table) => [index('pending_attestation_expires_at_idx').on(table.expiresAt)]
+);
 
 export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
@@ -105,17 +122,29 @@ export const narInfoDeletions = sqliteTable(
 	]
 );
 
-export const authKeys = sqliteTable('auth_key', {
-	id: text('id').primaryKey(),
-	// The JWKS key id carried in each issued token's header so a verifier can
-	// pick the right key across a rotation. Always populated on key creation.
-	kid: text('kid').notNull().default(''),
-	privateJwkJson: text('private_jwk_json').notNull(),
-	publicJwkJson: text('public_jwk_json').notNull(),
-	createdAt: text('created_at').notNull(),
-	scheduledRetireAt: text('scheduled_retire_at'),
-	retiredAt: text('retired_at')
-});
+export const authKeys = sqliteTable(
+	'auth_key',
+	{
+		id: text('id').primaryKey(),
+		// The JWKS key id carried in each issued token's header so a verifier can
+		// pick the right key across a rotation. Always populated on key creation.
+		kid: text('kid').notNull().default(''),
+		privateJwkJson: text('private_jwk_json').notNull(),
+		publicJwkJson: text('public_jwk_json').notNull(),
+		createdAt: text('created_at').notNull(),
+		scheduledRetireAt: text('scheduled_retire_at'),
+		retiredAt: text('retired_at')
+	},
+	// The maintenance sweep finds the soonest scheduled retirement among the keys
+	// still in service; filtering on `retired_at` then ordering by
+	// `scheduled_retire_at` uses this index instead of scanning the key set.
+	(table) => [
+		index('auth_key_retirement_idx').on(
+			table.retiredAt,
+			table.scheduledRetireAt
+		)
+	]
+);
 
 // A live refresh grant: the wire token is `<id>.<secret>` and only the secret's
 // SHA-256 is held here, so a copy of this table issues nothing. Presenting the
@@ -123,14 +152,20 @@ export const authKeys = sqliteTable('auth_key', {
 // makes each refresh token single-use: a replayed one finds no row and fails as
 // `invalid_grant`. The rule id re-reads the rule's grants at refresh time, so
 // retiring or disabling a trust rule ends its sessions.
-export const refreshTokens = sqliteTable('refresh_token', {
-	id: text('id').primaryKey(),
-	secretHash: text('secret_hash').notNull(),
-	ruleId: text('rule_id').notNull(),
-	subject: text('subject').notNull(),
-	createdAt: text('created_at').notNull(),
-	expiresAt: text('expires_at').notNull()
-});
+export const refreshTokens = sqliteTable(
+	'refresh_token',
+	{
+		id: text('id').primaryKey(),
+		secretHash: text('secret_hash').notNull(),
+		ruleId: text('rule_id').notNull(),
+		subject: text('subject').notNull(),
+		createdAt: text('created_at').notNull(),
+		expiresAt: text('expires_at').notNull()
+	},
+	// The GC sweep deletes expired refresh tokens by `expires_at`; the index spares
+	// it a scan of every live grant.
+	(table) => [index('refresh_token_expires_at_idx').on(table.expiresAt)]
+);
 
 // The Durable Object's own identity, set by the control plane's `configure` RPC at
 // provision time and on config-version bumps. It is the sole identity source for a
@@ -168,7 +203,12 @@ export const retentionRoots = sqliteTable(
 		createdAt: text('created_at').notNull(),
 		updatedAt: text('updated_at').notNull()
 	},
-	(table) => [primaryKey({ columns: [table.cache, table.name] })]
+	// The maintenance sweep finds the soonest-expiring TTL root; the index spares
+	// it a scan of every root.
+	(table) => [
+		primaryKey({ columns: [table.cache, table.name] }),
+		index('retention_root_expires_at_idx').on(table.expiresAt)
+	]
 );
 
 export const retentionRootTargets = sqliteTable(

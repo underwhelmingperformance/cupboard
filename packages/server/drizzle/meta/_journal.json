@@ -155,6 +155,20 @@
 			"when": 1781279666754,
 			"tag": "0021_refresh_tokens",
 			"breakpoints": true
+		},
+		{
+			"idx": 22,
+			"version": "6",
+			"when": 1782467124575,
+			"tag": "0022_maintenance_indexes",
+			"breakpoints": true
+		},
+		{
+			"idx": 23,
+			"version": "6",
+			"when": 1782474459053,
+			"tag": "0023_more_expiry_indexes",
+			"breakpoints": true
 		}
 	]
 }
