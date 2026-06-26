@@ -86,8 +86,10 @@ export async function withRequestCost<T>(
 // Wraps a SqlStorage so every statement it runs is tracked. The cumulative meter
 // holds the object's lifetime totals (read by tests); the request-scoped meter,
 // when one is active, additionally attributes the statement to the in-flight
-// request for the per-request cost line. Only `exec` is instrumented; the rest of
-// the surface delegates unchanged.
+// request for the per-request cost line. `SqlStorage` is exactly `exec`,
+// `databaseSize`, `Cursor` and `Statement`, so the returned object covers the whole
+// surface (the `SqlStorage` return type would fail to compile if a member were
+// missed): `exec` is instrumented and the other three pass through to the real handle.
 function meteredSql(
 	sql: SqlStorage,
 	cumulative: DatabaseCostMeter

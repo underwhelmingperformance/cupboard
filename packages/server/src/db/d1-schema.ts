@@ -174,20 +174,19 @@ export const tenantMaintenanceEligibility = sqliteTable(
 	'tenant_maintenance_eligibility',
 	{
 		tenant: text('tenant').$type<TenantId>().primaryKey(),
-		pendingVerificationCount: integer('pending_verification_count')
-			.notNull()
-			.default(0),
-		earliestUploadExpiry: text('earliest_upload_expiry'),
-		queuedNarInfoDeletionCount: integer('queued_narinfo_deletion_count')
-			.notNull()
-			.default(0),
-		earliestRootExpiry: text('earliest_root_expiry'),
-		nextMaintenanceAt: text('next_maintenance_at'),
+		// The tenant's next wake time: a fixed past sentinel when work is due now, the
+		// soonest deferred deadline otherwise, or null when the tenant is idle.
+		nextWakeAt: text('next_wake_at'),
+		// When the wake time was last recomputed. Not strictly monotonic: the conflict
+		// rule can write an older reconcile's stamp when its wake is sooner, so a reader
+		// must not treat this as a "last reconciled" high-water mark. Its only consumer
+		// is the cron staleness floor, where a backward value can only trigger an extra
+		// sweep, never miss one.
 		reconciledAt: text('reconciled_at').notNull()
 	},
 	(table) => [
 		index('tenant_maintenance_eligibility_due_idx').on(
-			table.nextMaintenanceAt,
+			table.nextWakeAt,
 			table.reconciledAt
 		)
 	]

@@ -12,10 +12,10 @@ import { bridgedError } from './error-bridge.ts';
 
 // The implementer carries the cross-cutting middleware every procedure runs:
 // the error bridge, authentication against the scope the contract's meta
-// declares (an admin token satisfies every scope), and the
-// maintenance-eligibility bracket for procedures whose meta marks them
-// mutating. The contract supplies the scope and maintenance declarations, so
-// nothing is repeated per procedure here.
+// declares (an admin token satisfies every scope), and the post-mutation
+// maintenance hook for procedures whose meta marks them mutating. The contract
+// supplies the scope and maintenance declarations, so nothing is repeated per
+// procedure here.
 const os = implement(tenantContract)
 	.$context<TenantOrpcContext>()
 	.use(async ({ context, next }) => {
@@ -39,7 +39,7 @@ const os = implement(tenantContract)
 	})
 	.use(({ context, procedure, next }) =>
 		procedure['~orpc'].meta.maintenance === true
-			? context.services.withMaintenanceEligibility(async () => next())
+			? context.services.afterMutation(async () => next())
 			: next()
 	);
 

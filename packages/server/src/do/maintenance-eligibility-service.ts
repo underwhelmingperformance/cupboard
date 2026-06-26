@@ -1,27 +1,35 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import { and, asc, count, eq, isNotNull, isNull, or, sql } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	eq,
+	isNotNull,
+	isNull,
+	or,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
 import { type ServerContext } from './context.ts';
 
-export interface MaintenanceEligibilitySnapshot {
-	readonly tenant: string;
-	readonly pendingVerificationCount: number;
-	readonly earliestUploadExpiry: string | undefined;
-	readonly queuedNarInfoDeletionCount: number;
-	readonly earliestRootExpiry: string | undefined;
-	readonly nextMaintenanceAt: string | undefined;
-	readonly reconciledAt: string;
-}
+// A tenant with work due now should be woken on the scheduler's next pass. We store a
+// fixed past instant rather than the moving current time, so the many mutations of a
+// single push leave the wake time unchanged and skip the redundant D1 write.
+const wakeImmediately = new Date(0).toISOString();
 
 export class MaintenanceEligibilityService {
 	constructor(private readonly context: ServerContext) {}
 
-	private pendingVerificationCount(): number {
-		const row = this.context.db
-			.select({ count: count() })
+	// Whether the tenant has work due now: an upload awaiting verification, or a queued
+	// narinfo deletion. Both are existence checks reached through an index, so the cost
+	// is flat in the in-flight set rather than a full count, which lets the wake time
+	// be recomputed on every mutation without the old quadratic read load.
+	private hasImmediateWork(): boolean {
+		const awaitingVerification = this.context.db
+			.select({ present: sql`1` })
 			.from(schema.pendingUploads)
 			.where(
 				or(
@@ -29,9 +37,20 @@ export class MaintenanceEligibilityService {
 					eq(schema.pendingUploads.verdict, 'committing')
 				)
 			)
+			.limit(1)
 			.get();
 
-		return row?.count ?? 0;
+		if (awaitingVerification !== undefined) {
+			return true;
+		}
+
+		const queuedDeletion = this.context.db
+			.select({ present: sql`1` })
+			.from(schema.narInfoDeletions)
+			.limit(1)
+			.get();
+
+		return queuedDeletion !== undefined;
 	}
 
 	private earliestUploadExpiry(): string | undefined {
@@ -51,15 +70,6 @@ export class MaintenanceEligibilityService {
 		return [pendingUploadExpiry, pendingAttestationExpiry]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
-	}
-
-	private queuedNarInfoDeletionCount(): number {
-		const row = this.context.db
-			.select({ count: count() })
-			.from(schema.narInfoDeletions)
-			.get();
-
-		return row?.count ?? 0;
 	}
 
 	private earliestRootExpiry(): string | undefined {
@@ -91,28 +101,22 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
-	private nextMaintenanceAt(input: {
-		readonly now: string;
-		readonly pendingVerificationCount: number;
-		readonly earliestUploadExpiry: string | undefined;
-		readonly queuedNarInfoDeletionCount: number;
-		readonly earliestRootExpiry: string | undefined;
-		readonly earliestAuthKeyRetirement: string | undefined;
-	}): string | undefined {
-		if (
-			input.pendingVerificationCount > 0 ||
-			input.queuedNarInfoDeletionCount > 0
-		) {
-			return input.now;
-		}
-
+	// The soonest deferred deadline once there is nothing due now: an upload or
+	// attestation expiry, a retention-root TTL, or an auth-key retirement.
+	private earliestFutureWake(): string | undefined {
 		return [
-			input.earliestUploadExpiry,
-			input.earliestRootExpiry,
-			input.earliestAuthKeyRetirement
+			this.earliestUploadExpiry(),
+			this.earliestRootExpiry(),
+			this.earliestAuthKeyRetirement()
 		]
 			.filter((value) => value !== undefined)
 			.toSorted(byCodeUnit)[0];
+	}
+
+	private nextWakeAt(): string | undefined {
+		return this.hasImmediateWork()
+			? wakeImmediately
+			: this.earliestFutureWake();
 	}
 
 	async invalidate(): Promise<void> {
@@ -127,52 +131,54 @@ export class MaintenanceEligibilityService {
 			.run();
 	}
 
-	async reconcile(
-		now: Date = new Date()
-	): Promise<MaintenanceEligibilitySnapshot> {
+	// Recomputes the tenant's wake time and publishes it to D1 where the scheduler
+	// reads it. A single conditional upsert settles the publish atomically: the row is
+	// rewritten only when the wake time actually moves, and a stale reconcile racing a
+	// fresher one cannot overwrite it (see `maintenanceWakeWins`). So a push whose
+	// mutations all leave the same wake time costs one effective D1 write, not one per
+	// path, and concurrent same-tenant reconciles need no external lock.
+	async reconcile(now: Date = new Date()): Promise<void> {
 		const tenant = this.context.requireTenant();
 		const reconciledAt = now.toISOString();
-		const pendingVerificationCount = this.pendingVerificationCount();
-		const earliestUploadExpiry = this.earliestUploadExpiry();
-		const queuedNarInfoDeletionCount = this.queuedNarInfoDeletionCount();
-		const earliestRootExpiry = this.earliestRootExpiry();
-		const earliestAuthKeyRetirement = this.earliestAuthKeyRetirement();
-		const nextMaintenanceAt = this.nextMaintenanceAt({
-			now: reconciledAt,
-			pendingVerificationCount,
-			earliestUploadExpiry,
-			queuedNarInfoDeletionCount,
-			earliestRootExpiry,
-			earliestAuthKeyRetirement
-		});
-		const snapshot = {
-			tenant,
-			pendingVerificationCount,
-			earliestUploadExpiry,
-			queuedNarInfoDeletionCount,
-			earliestRootExpiry,
-			nextMaintenanceAt,
-			reconciledAt
-		} satisfies MaintenanceEligibilitySnapshot;
+		const nextWakeAt = this.nextWakeAt();
 
 		await this.context.d1
 			.insert(d1Schema.tenantMaintenanceEligibility)
-			.values(snapshot)
+			.values({ tenant, nextWakeAt, reconciledAt })
 			.onConflictDoUpdate({
 				target: d1Schema.tenantMaintenanceEligibility.tenant,
 				set: {
-					pendingVerificationCount,
-					earliestUploadExpiry: earliestUploadExpiry ?? sql`null`,
-					queuedNarInfoDeletionCount,
-					earliestRootExpiry: earliestRootExpiry ?? sql`null`,
-					nextMaintenanceAt: nextMaintenanceAt ?? sql`null`,
+					nextWakeAt: nextWakeAt ?? sql`null`,
 					reconciledAt
-				}
+				},
+				setWhere: maintenanceWakeWins(nextWakeAt, reconciledAt)
 			})
 			.run();
-
-		return snapshot;
 	}
+}
+
+// The conflict rule that keeps the published wake time atomic without a lock. On a
+// conflict the row is rewritten only when the new wake time differs from the stored
+// one and this reconcile is strictly newer than the stored one, so neither a stale
+// reconcile nor a same-instant one can clobber a fresher publish. The second clause
+// lets any real incoming wake that is sooner than the stored one win whatever the
+// timestamps, where a stored NULL (an idle tenant, no wake) counts as the latest
+// possible time so a tenant that just became due always wins, even on a timestamp tie:
+// publishing too early only costs a wasted scheduler tick, whereas publishing too late
+// would strand due work, so ties resolve towards waking. The comparisons run against
+// the values this upsert binds, so no `excluded` reference is needed.
+function maintenanceWakeWins(
+	nextWakeAt: string | undefined,
+	reconciledAt: string
+): SQL {
+	const { nextWakeAt: storedWake, reconciledAt: storedReconciledAt } =
+		d1Schema.tenantMaintenanceEligibility;
+	const incomingWake = nextWakeAt ?? sql`null`;
+
+	const fresherAndChanged = sql`${storedWake} is not ${incomingWake} and ${reconciledAt} > ${storedReconciledAt}`;
+	const sooner = sql`${incomingWake} is not null and (${storedWake} is null or ${incomingWake} < ${storedWake})`;
+
+	return sql`(${fresherAndChanged}) or (${sooner})`;
 }
 
 export async function withMaintenanceEligibility<T>(

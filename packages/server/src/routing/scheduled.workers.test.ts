@@ -99,7 +99,7 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('retiring');
 		await deleteEligibility('acme');
 		await writeEligibility('beta', {
-			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			nextWakeAt: '2026-01-01T00:00:00.000Z',
 			reconciledAt: '2026-01-01T00:00:00.000Z'
 		});
 		await writeEligibility('current', {
@@ -633,6 +633,11 @@ describe('scheduled tenant pass failure records', () => {
 	});
 
 	it('schedules tenants with due eligibility signals', async () => {
+		// `delete` and `verify` carry immediate work, which the reconcile publishes as
+		// the fixed past `wakeImmediately` sentinel. Seed that exact value so the
+		// producer's "due now" marker threads through the cron's `lte` selection.
+		const wakeImmediately = new Date(0).toISOString();
+
 		await provisionNamedTenant('delete');
 		await provisionNamedTenant('idle');
 		await provisionNamedTenant('root');
@@ -640,26 +645,22 @@ describe('scheduled tenant pass failure records', () => {
 		await provisionNamedTenant('verify');
 		await suspendTenant('v1');
 		await writeEligibility('delete', {
-			queuedNarInfoDeletionCount: 1,
-			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			nextWakeAt: wakeImmediately,
 			reconciledAt: '2026-01-01T00:00:00.000Z'
 		});
 		await writeEligibility('idle', {
 			reconciledAt: '2026-01-01T00:00:00.000Z'
 		});
 		await writeEligibility('root', {
-			earliestRootExpiry: '2026-01-01T00:00:00.000Z',
-			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			nextWakeAt: '2026-01-01T00:00:00.000Z',
 			reconciledAt: '2026-01-01T00:00:00.000Z'
 		});
 		await writeEligibility('upload', {
-			earliestUploadExpiry: '2026-01-01T00:00:00.000Z',
-			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			nextWakeAt: '2026-01-01T00:00:00.000Z',
 			reconciledAt: '2026-01-01T00:00:00.000Z'
 		});
 		await writeEligibility('verify', {
-			pendingVerificationCount: 1,
-			nextMaintenanceAt: '2026-01-01T00:00:00.000Z',
+			nextWakeAt: wakeImmediately,
 			reconciledAt: '2026-01-01T00:00:00.000Z'
 		});
 
@@ -872,11 +873,7 @@ async function writeEligibility(
 		.onConflictDoUpdate({
 			target: d1Schema.tenantMaintenanceEligibility.tenant,
 			set: {
-				pendingVerificationCount: fields.pendingVerificationCount ?? 0,
-				earliestUploadExpiry: fields.earliestUploadExpiry ?? sql`null`,
-				queuedNarInfoDeletionCount: fields.queuedNarInfoDeletionCount ?? 0,
-				earliestRootExpiry: fields.earliestRootExpiry ?? sql`null`,
-				nextMaintenanceAt: fields.nextMaintenanceAt ?? sql`null`,
+				nextWakeAt: fields.nextWakeAt ?? sql`null`,
 				reconciledAt: fields.reconciledAt ?? '2026-01-01T00:00:00.000Z'
 			}
 		})

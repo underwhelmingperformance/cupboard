@@ -173,8 +173,9 @@ export default defineConfig(
 		// query builder (and `values`/`all`, which drain via `toArray`) keeps the
 		// meter honest, so ban the raw `get(sql...)` forms in runtime code rather than
 		// relying on the convention being remembered. The tagged-template and
-		// `sql.raw()` forms are caught; an aliased `sql` import would slip past, which
-		// no static selector can see, so this is a backstop, not a proof.
+		// `sql.raw()` forms are caught; an aliased `sql` import or a fieldless `get()`
+		// on a prepared statement would slip past, which no static selector can see, so
+		// this is a backstop, not a proof.
 		files: ['packages/server/src/**/*.{ts,js}'],
 		ignores: [
 			'packages/server/src/**/*.test.{ts,js}',

@@ -7,7 +7,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
@@ -22,6 +22,9 @@ import {
 } from './maintenance-eligibility-service.ts';
 
 const now = new Date('2026-01-01T00:00:00.000Z');
+
+// A tenant with work due now stores a fixed past instant. Mirrors the service.
+const wakeImmediately = new Date(0).toISOString();
 
 class MaintenanceProjectionTestError extends Error {
 	constructor(public readonly operation: 'delete' | 'insert') {
@@ -57,11 +60,7 @@ async function eligibilityRow(tenant: string = fixtureTenant) {
 
 	return {
 		tenant: row.tenant,
-		pendingVerificationCount: row.pendingVerificationCount,
-		earliestUploadExpiry: row.earliestUploadExpiry ?? undefined,
-		queuedNarInfoDeletionCount: row.queuedNarInfoDeletionCount,
-		earliestRootExpiry: row.earliestRootExpiry ?? undefined,
-		nextMaintenanceAt: row.nextMaintenanceAt ?? undefined,
+		nextWakeAt: row.nextWakeAt ?? undefined,
 		reconciledAt: row.reconciledAt
 	};
 }
@@ -70,31 +69,16 @@ describe('maintenance eligibility projection', () => {
 	beforeEach(resetTestServer);
 
 	it('records an idle tenant with no next maintenance time', async () => {
-		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+		await runInDurableObject(currentServer(), (instance) => {
 			const service = new MaintenanceEligibilityService(instance.context);
 
 			return service.reconcile(now);
 		});
 
-		expect({ snapshot, row: await eligibilityRow() }).toStrictEqual({
-			snapshot: {
-				tenant: fixtureTenant,
-				pendingVerificationCount: 0,
-				earliestUploadExpiry: undefined,
-				queuedNarInfoDeletionCount: 0,
-				earliestRootExpiry: undefined,
-				nextMaintenanceAt: undefined,
-				reconciledAt: now.toISOString()
-			},
-			row: {
-				tenant: fixtureTenant,
-				pendingVerificationCount: 0,
-				earliestUploadExpiry: undefined,
-				queuedNarInfoDeletionCount: 0,
-				earliestRootExpiry: undefined,
-				nextMaintenanceAt: undefined,
-				reconciledAt: now.toISOString()
-			}
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: undefined,
+			reconciledAt: now.toISOString()
 		});
 	});
 
@@ -212,7 +196,7 @@ describe('maintenance eligibility projection', () => {
 	});
 
 	it('marks verification and deletion work due immediately', async () => {
-		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.insert(schema.pendingUploads)
 				.values([
@@ -247,30 +231,15 @@ describe('maintenance eligibility projection', () => {
 			return service.reconcile(now);
 		});
 
-		expect({ snapshot, row: await eligibilityRow() }).toStrictEqual({
-			snapshot: {
-				tenant: fixtureTenant,
-				pendingVerificationCount: 2,
-				earliestUploadExpiry: '2026-01-02T00:00:00.000Z',
-				queuedNarInfoDeletionCount: 1,
-				earliestRootExpiry: '2026-01-05T00:00:00.000Z',
-				nextMaintenanceAt: now.toISOString(),
-				reconciledAt: now.toISOString()
-			},
-			row: {
-				tenant: fixtureTenant,
-				pendingVerificationCount: 2,
-				earliestUploadExpiry: '2026-01-02T00:00:00.000Z',
-				queuedNarInfoDeletionCount: 1,
-				earliestRootExpiry: '2026-01-05T00:00:00.000Z',
-				nextMaintenanceAt: now.toISOString(),
-				reconciledAt: now.toISOString()
-			}
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: wakeImmediately,
+			reconciledAt: now.toISOString()
 		});
 	});
 
 	it('uses the earliest expiry when there is no immediate work', async () => {
-		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.insert(schema.pendingUploads)
 				.values(pendingUpload('terminal', '2026-01-04T00:00:00.000Z'))
@@ -291,19 +260,15 @@ describe('maintenance eligibility projection', () => {
 			return service.reconcile(now);
 		});
 
-		expect(snapshot).toStrictEqual({
+		expect(await eligibilityRow()).toStrictEqual({
 			tenant: fixtureTenant,
-			pendingVerificationCount: 0,
-			earliestUploadExpiry: '2026-01-04T00:00:00.000Z',
-			queuedNarInfoDeletionCount: 0,
-			earliestRootExpiry: '2026-01-03T00:00:00.000Z',
-			nextMaintenanceAt: '2026-01-03T00:00:00.000Z',
+			nextWakeAt: '2026-01-03T00:00:00.000Z',
 			reconciledAt: now.toISOString()
 		});
 	});
 
 	it('uses pending attestation expiry as deferred maintenance work', async () => {
-		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.insert(schema.pendingAttestations)
 				.values(
@@ -316,19 +281,15 @@ describe('maintenance eligibility projection', () => {
 			return service.reconcile(now);
 		});
 
-		expect(snapshot).toStrictEqual({
+		expect(await eligibilityRow()).toStrictEqual({
 			tenant: fixtureTenant,
-			pendingVerificationCount: 0,
-			earliestUploadExpiry: '2026-01-02T00:00:00.000Z',
-			queuedNarInfoDeletionCount: 0,
-			earliestRootExpiry: undefined,
-			nextMaintenanceAt: '2026-01-02T00:00:00.000Z',
+			nextWakeAt: '2026-01-02T00:00:00.000Z',
 			reconciledAt: now.toISOString()
 		});
 	});
 
 	it('uses the earliest unretired auth-key retirement as deferred work', async () => {
-		const snapshot = await runInDurableObject(currentServer(), (instance) => {
+		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.insert(schema.authKeys)
 				.values([
@@ -352,17 +313,131 @@ describe('maintenance eligibility projection', () => {
 			return service.reconcile(now);
 		});
 
-		expect(snapshot).toStrictEqual({
+		expect(await eligibilityRow()).toStrictEqual({
 			tenant: fixtureTenant,
-			pendingVerificationCount: 0,
-			earliestUploadExpiry: undefined,
-			queuedNarInfoDeletionCount: 0,
-			earliestRootExpiry: undefined,
-			nextMaintenanceAt: '2026-01-03T00:00:00.000Z',
+			nextWakeAt: '2026-01-03T00:00:00.000Z',
 			reconciledAt: now.toISOString()
 		});
 	});
 });
+
+describe('maintenance wake conflict resolution', () => {
+	beforeEach(resetTestServer);
+
+	const earlier = '2026-01-01T00:00:00.000Z';
+	const later = '2026-02-01T00:00:00.000Z';
+	const soonFuture = '2026-03-01T00:00:00.000Z';
+	const farFuture = '2026-09-01T00:00:00.000Z';
+
+	// Each case seeds a stored projection row, then reconciles against Durable Object
+	// state that drives the incoming wake (`immediate` from a pending upload, a future
+	// deadline from a retention root, or none) with `now` setting its `reconciled_at`.
+	// The conditional upsert decides which survives.
+	const cases = [
+		{
+			name: 'keeps a fresher wake when a staler reconcile computes a later one',
+			stored: { wake: soonFuture, reconciledAt: later },
+			incoming: { work: { future: farFuture }, now: earlier },
+			expected: { nextWakeAt: soonFuture, reconciledAt: later }
+		},
+		{
+			name: 'takes a newer reconcile that moves the wake',
+			stored: { wake: soonFuture, reconciledAt: earlier },
+			incoming: { work: { future: farFuture }, now: later },
+			expected: { nextWakeAt: farFuture, reconciledAt: later }
+		},
+		{
+			name: 'lets a sooner wake win even from a staler reconcile',
+			stored: { wake: farFuture, reconciledAt: later },
+			incoming: { work: 'immediate', now: earlier },
+			expected: { nextWakeAt: wakeImmediately, reconciledAt: earlier }
+		},
+		{
+			name: 'lets a sooner future deadline win over a later one from a staler reconcile',
+			stored: { wake: farFuture, reconciledAt: later },
+			incoming: { work: { future: soonFuture }, now: earlier },
+			expected: { nextWakeAt: soonFuture, reconciledAt: earlier }
+		},
+		{
+			name: 'wakes an idle stored tenant that just became due, even from a staler reconcile',
+			stored: { wake: undefined, reconciledAt: later },
+			incoming: { work: 'immediate', now: earlier },
+			expected: { nextWakeAt: wakeImmediately, reconciledAt: earlier }
+		},
+		{
+			name: 'skips the write when the wake is unchanged',
+			stored: { wake: wakeImmediately, reconciledAt: earlier },
+			incoming: { work: 'immediate', now: later },
+			expected: { nextWakeAt: wakeImmediately, reconciledAt: earlier }
+		},
+		{
+			name: 'does not let a same-instant not-due reconcile overwrite a due row',
+			stored: { wake: wakeImmediately, reconciledAt: later },
+			incoming: { work: { future: farFuture }, now: later },
+			expected: { nextWakeAt: wakeImmediately, reconciledAt: later }
+		},
+		{
+			name: 'clears the wake to null when work has drained',
+			stored: { wake: soonFuture, reconciledAt: earlier },
+			incoming: { work: 'none', now: later },
+			expected: { nextWakeAt: undefined, reconciledAt: later }
+		}
+	] as const;
+
+	it.each(cases)('$name', async ({ stored, incoming, expected }) => {
+		await seedEligibility(stored.wake, stored.reconciledAt);
+
+		await runInDurableObject(currentServer(), async (instance) => {
+			const { work } = incoming;
+
+			if (work === 'immediate') {
+				instance.context.db
+					.insert(schema.pendingUploads)
+					.values(pendingUpload('incoming', farFuture, 'pending'))
+					.run();
+			} else if (work !== 'none') {
+				instance.context.db
+					.insert(schema.retentionRoots)
+					.values({
+						cache: '',
+						name: rootNameSchema.parse('incoming'),
+						expiresAt: work.future,
+						createdAt: earlier,
+						updatedAt: earlier
+					})
+					.run();
+			}
+
+			await new MaintenanceEligibilityService(instance.context).reconcile(
+				new Date(incoming.now)
+			);
+		});
+
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: expected.nextWakeAt,
+			reconciledAt: expected.reconciledAt
+		});
+	});
+});
+
+async function seedEligibility(
+	nextWakeAt: string | undefined,
+	reconciledAt: string
+): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+		.insert(d1Schema.tenantMaintenanceEligibility)
+		.values({
+			tenant: tenantIdSchema.parse(fixtureTenant),
+			nextWakeAt,
+			reconciledAt
+		})
+		.onConflictDoUpdate({
+			target: d1Schema.tenantMaintenanceEligibility.tenant,
+			set: { nextWakeAt: nextWakeAt ?? sql`null`, reconciledAt }
+		})
+		.run();
+}
 
 function pendingUpload(
 	id: string,
