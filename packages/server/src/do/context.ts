@@ -28,6 +28,8 @@ import { parseStored } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { type OidcTrustRule } from '../oidc/oidc-trust.ts';
 
+import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
+
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
 };
@@ -117,6 +119,9 @@ export class ServerContext {
 	private presigner: R2Presigner | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
+	// Sums the rows this DO's SQLite reads and writes, so a request's cost can be
+	// logged when it ends and asserted on in tests.
+	readonly dbCost = new DatabaseCostMeter();
 	env: RuntimeEnv;
 	readonly ctx: DurableObjectState;
 	discovery = new OidcDiscoveryStore();
@@ -130,7 +135,7 @@ export class ServerContext {
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
 		this.env = env;
-		this.db = drizzle(ctx.storage, { schema });
+		this.db = drizzle(meteredStorage(ctx.storage, this.dbCost), { schema });
 		// The global shared-blob facts live in D1, readable and writable by every
 		// tenant DO and the Worker, rather than in this DO's own SQLite.
 		this.d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });

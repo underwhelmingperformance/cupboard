@@ -167,6 +167,38 @@ export default defineConfig(
 		}
 	},
 	{
+		// A raw fieldless `db.get(sql`...`)` pulls a single row with `.next()` and
+		// leaves the rest of the cursor undrained, so the Durable Object cost meter
+		// settles it before the scan's rows are counted and under-reports. The fielded
+		// query builder (and `values`/`all`, which drain via `toArray`) keeps the
+		// meter honest, so ban the raw `get(sql...)` forms in runtime code rather than
+		// relying on the convention being remembered. The tagged-template and
+		// `sql.raw()` forms are caught; an aliased `sql` import would slip past, which
+		// no static selector can see, so this is a backstop, not a proof.
+		files: ['packages/server/src/**/*.{ts,js}'],
+		ignores: [
+			'packages/server/src/**/*.test.{ts,js}',
+			'packages/server/src/**/*test-support.ts'
+		],
+		rules: {
+			'no-restricted-syntax': [
+				'error',
+				{
+					selector:
+						"CallExpression[callee.property.name='get'] > TaggedTemplateExpression[tag.name='sql']",
+					message:
+						'A raw db.get(sql`...`) leaves its cursor undrained, so the Durable Object cost meter under-counts its rows. Use the fielded query builder.'
+				},
+				{
+					selector:
+						"CallExpression[callee.property.name='get'] > CallExpression[callee.object.name='sql'][callee.property.name='raw']",
+					message:
+						'A raw db.get(sql.raw(...)) leaves its cursor undrained, so the Durable Object cost meter under-counts its rows. Use the fielded query builder.'
+				}
+			]
+		}
+	},
+	{
 		// `node:zlib` is the only zstd implementation available on workerd —
 		// Compression Streams offer no zstd — so this one audited module is the
 		// sanctioned Node boundary for the server-side NAR verifier. The ban on
@@ -174,6 +206,34 @@ export default defineConfig(
 		files: ['packages/nix-store/src/zstd.ts'],
 		rules: {
 			'no-restricted-imports': 'off'
+		}
+	},
+	{
+		// `AsyncLocalStorage` (`node:async_hooks`) scopes the per-request database
+		// cost meter, so a request that interleaves with another on the same Durable
+		// Object never folds its rows into the other's logged figure. workerd exposes
+		// it under `nodejs_compat`; it is the sanctioned Node boundary for
+		// request-scoped metering. Only that one module is allowed: every other
+		// `node:*` import stays banned here as everywhere else.
+		files: ['packages/server/src/do/database-cost-meter.ts'],
+		rules: {
+			'no-restricted-imports': [
+				'error',
+				{
+					paths: nodeBuiltInImports.map((name) => ({
+						name,
+						message:
+							'Server and shared runtime code must use Cloudflare Worker APIs.'
+					})),
+					patterns: [
+						{
+							group: ['node:*', '!node:async_hooks'],
+							message:
+								'Server and shared runtime code must use Cloudflare Worker APIs.'
+						}
+					]
+				}
+			]
 		}
 	},
 	{
