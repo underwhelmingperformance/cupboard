@@ -468,11 +468,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// The `finally` covers a body that throws after a partial write; the one case it
 	// does not cover is a hard isolate eviction inside that window, which leaves the
 	// prior wake time in place. Deferred verify is re-triggered out of band by the
-	// `tenant-verify` queue message, so it does not wait; but the other deferred kinds
-	// (queued narinfo deletions, retention-root TTL expiry, auth-key retirement) then
-	// wait for the cron's staleness floor rather than the next tick. The reconcile
-	// publishes through a single conditional upsert that writes only when the wake
-	// time moves, so a push of many paths costs one write.
+	// `tenant-verify` queue message, so it does not wait; the rest waits for the cron's
+	// staleness floor rather than the next tick: a now-due queued narinfo deletion, or a
+	// deferred deadline (upload or attestation expiry, retention-root TTL, auth-key
+	// retirement). The reconcile publishes through a single conditional upsert that
+	// writes only when the wake time moves, so a push of many paths costs one write.
 	private async afterMutation<T>(body: () => Promise<T>): Promise<T> {
 		try {
 			return await body();
