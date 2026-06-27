@@ -100,8 +100,6 @@ export class CommitPipelineService {
 		uploadId: string,
 		metadata: ParsedUploadPathMetadata
 	): Promise<CommitOutcome> {
-		this.uploadState.markUploadCommitting(uploadId);
-
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
 
@@ -508,6 +506,14 @@ export class CommitPipelineService {
 			throw new QuotaExceededError(tenant);
 		}
 
+		// Past the synchronous validation, mark the row `committing` before any of
+		// the reserve/promote/materialise work so an interruption (or, once
+		// verification runs off the DO, the handoff itself) leaves a durable saga
+		// marker the verify pass re-drives, rather than a null-verdict row
+		// indistinguishable from one still awaiting its bytes. The reuse and fresh
+		// branches below both inherit this marker.
+		this.uploadState.markUploadCommitting(uploadId);
+
 		const canonicalKey = narObjectKey(metadata.narHash);
 
 		// A reuse binds a new narinfo to a blob already in the verified CAS. It
@@ -533,7 +539,6 @@ export class CommitPipelineService {
 			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
 		}
 
-		this.uploadState.markUploadPending(uploadId);
 		await this.requestVerification(tenant);
 
 		return {
