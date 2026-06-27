@@ -3,12 +3,32 @@ import { StatusCodes } from 'http-status-codes';
 
 import {
 	CupboardHttpError,
+	CupboardUploadError,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError
 } from '../errors.ts';
 
+import { expiredRequestCode } from './r2-error.ts';
+
 const notFoundStatus: number = StatusCodes.NOT_FOUND;
+const forbiddenStatus: number = StatusCodes.FORBIDDEN;
+
+/**
+ * Whether a blob PUT failed because its presigned URL had expired by the time
+ * it was used: R2 answers `403` with an `ExpiredRequest` code. The caller
+ * re-presigns the upload and retries rather than failing the path, since the
+ * NAR is built and only the short-lived URL went stale.
+ */
+export function isExpiredUploadUrlError(
+	error: unknown
+): error is CupboardUploadError {
+	return (
+		error instanceof CupboardUploadError &&
+		error.status === forbiddenStatus &&
+		error.r2Error?.code === expiredRequestCode
+	);
+}
 
 /**
  * Whether a prepare or commit failed because its negotiated upload slot is no

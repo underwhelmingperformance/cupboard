@@ -5,6 +5,8 @@ import {
 } from '@cupboard/shared/errors';
 import { z } from 'zod';
 
+import { parseR2Error, type R2ErrorBody } from './client/r2-error.ts';
+
 // The CLI's own failure categories, layered on the shared generic (1) and usage
 // (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
 // EX_TEMPFAIL).
@@ -207,6 +209,9 @@ export class CupboardHttpError extends CliError {
 }
 
 export class CupboardUploadError extends CliError {
+	/** The parsed R2 error envelope, when the body carried one. */
+	public readonly r2Error: R2ErrorBody | undefined;
+
 	constructor(
 		public readonly r2Key: string,
 		public readonly status: number,
@@ -214,6 +219,7 @@ export class CupboardUploadError extends CliError {
 	) {
 		super(`Uploading a NAR failed (HTTP ${String(status)}): ${body}`);
 		this.name = 'CupboardUploadError';
+		this.r2Error = parseR2Error(body);
 	}
 }
 
