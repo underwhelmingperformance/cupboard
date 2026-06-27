@@ -34,6 +34,7 @@ import {
 	formatBytes,
 	formatCount,
 	type PhaseContext,
+	type ProgressHandle,
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
@@ -41,7 +42,10 @@ import { z } from 'zod';
 
 import { isAbortError } from '../abort.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
-import { isStaleUploadError } from '../client/rpc-errors.ts';
+import {
+	isExpiredUploadUrlError,
+	isStaleUploadError
+} from '../client/rpc-errors.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationSubjectNotPushedError,
@@ -169,19 +173,32 @@ interface PreparedUpload {
 	readonly uploadHeaders: Readonly<Record<string, string>>;
 }
 
-// The result of the prepare phase. Most paths produce an upload, but a path
-// whose slot expired and was re-negotiated can come back already reusable (the
-// blob was uploaded elsewhere meanwhile), so it commits directly without an
-// upload; a re-negotiated skip is already cached and produces neither.
-interface PreparedUploads {
-	readonly uploads: readonly PreparedUpload[];
-	readonly reuseCommits: readonly UploadDecisionOf<'commit'>[];
+// A NAR built and compressed in the prepare phase, awaiting its presign and
+// upload. Presigning is left to the upload phase so the presigned URL is signed
+// immediately before it is used rather than at the start of a prepare queue that
+// may outlive the URL.
+interface CompressedUpload {
+	readonly decision: UploadDecisionOf<'upload'>;
+	readonly preparedPath: PreparedPushPath;
 }
 
 type PrepareOutcome =
 	| { readonly kind: 'upload'; readonly upload: PreparedUpload }
 	| { readonly kind: 'commit'; readonly decision: UploadDecisionOf<'commit'> }
 	| { readonly kind: 'skip' };
+
+// The result of presigning and uploading one compressed NAR. Most paths upload;
+// a presign that re-negotiated an expired slot can come back already reusable or
+// skippable; a PUT that could not be re-presigned fails.
+type UploadResult =
+	| { readonly kind: 'uploaded'; readonly upload: PreparedUpload }
+	| { readonly kind: 'reuse'; readonly decision: UploadDecisionOf<'commit'> }
+	| { readonly kind: 'skip' }
+	| {
+			readonly kind: 'failed';
+			readonly uploadId: string;
+			readonly failure: PushFailure;
+	  };
 
 // A path that could not be uploaded or committed. The push presses on with the
 // rest, then fails as a whole so nothing downstream treats it as finished.
@@ -310,16 +327,15 @@ async function runPushWithTemporaryDirectory(
 	}
 
 	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
-	const prepared = await reporter.progress(
+	const compressed = await reporter.progress(
 		'Preparing missing NARs',
 		{ total: uploadDecisions.length },
 		async (bar) => {
 			bar.fact('paths', formatCount(uploadDecisions.length));
-			const preparedUploads = await prepareUploads(
+			const items = await compressUploads(
 				uploadDecisions,
 				closure,
 				{
-					client,
 					createNarArchive,
 					compressNar,
 					temporaryDirectory: dependencies.temporaryDirectory,
@@ -330,12 +346,11 @@ async function runPushWithTemporaryDirectory(
 					bar.advance(1);
 				}
 			);
-			bar.fact('nars', formatCount(preparedUploads.uploads.length));
+			bar.fact('nars', formatCount(items.length));
 
-			return preparedUploads;
+			return items;
 		}
 	);
-	const uploads = prepared.uploads;
 
 	// A path that fails to upload or commit is collected here rather than
 	// aborting the run, so the paths that can finish do. The push then fails as a
@@ -350,11 +365,18 @@ async function runPushWithTemporaryDirectory(
 		])
 	);
 
+	// Presigning and uploading happen together here, after the prepare phase, so
+	// each presigned URL is signed immediately before its PUT. A path can come
+	// back reusable or skippable when its presign re-negotiates an expired slot,
+	// so the committable uploads are collected as the uploads complete.
+	const uploads: PreparedUpload[] = [];
+	const reuseCommits: UploadDecisionOf<'commit'>[] = [];
+
 	// The bar tracks bytes across every blob; each chunk advances it as it
 	// streams, so a single large NAR shows steady movement while it uploads,
 	// and concurrent uploads each advance the one bar.
-	const totalUploadBytes = uploads.reduce(
-		(sum, upload) => sum + upload.preparedPath.blob.fileSize,
+	const totalUploadBytes = compressed.reduce(
+		(sum, item) => sum + item.preparedPath.blob.fileSize,
 		0
 	);
 	const uploadedBytes = await reporter.progress(
@@ -368,7 +390,7 @@ async function runPushWithTemporaryDirectory(
 			const reportBlobs = (): void => {
 				bar.fact(
 					'blobs',
-					`${formatCount(done)}/${formatCount(uploads.length)}`
+					`${formatCount(done)}/${formatCount(compressed.length)}`
 				);
 
 				const elapsedSeconds = (Date.now() - startedAt) / 1000;
@@ -380,49 +402,45 @@ async function runPushWithTemporaryDirectory(
 
 			reportBlobs();
 
+			const uploadContext: UploadContext = {
+				client,
+				closure,
+				readCompressedNar,
+				storePathByHash
+			};
+
 			await runWithConcurrency(
-				uploads,
+				compressed,
 				dependencies.uploadConcurrency ?? defaultUploadConcurrency,
-				async (upload) => {
-					try {
-						await client.uploadBlob({
-							r2Key: upload.decision.r2Key,
-							uploadUrl: upload.uploadUrl,
-							body: countingByteStream(
-								readCompressedNar(upload.preparedPath.compressedPath),
-								(byteLength) => {
-									bar.advance(byteLength);
-								}
-							),
-							contentLength: upload.preparedPath.blob.fileSize,
-							headers: upload.uploadHeaders
-						});
+				async (item) => {
+					const result = await uploadCompressedNar(item, uploadContext, bar);
 
-						completedBytes += upload.preparedPath.blob.fileSize;
-						done += 1;
-						reportBlobs();
-					} catch (error) {
-						// A Ctrl-C aborts the whole push; any other failure is this one
-						// path's, collected so the rest still upload.
-						if (isAbortError(error)) {
-							throw error;
+					switch (result.kind) {
+						case 'uploaded': {
+							uploads.push(result.upload);
+							completedBytes += item.preparedPath.blob.fileSize;
+							done += 1;
+							break;
 						}
-
-						const storePath =
-							storePathByHash.get(upload.decision.storePathHash) ??
-							upload.decision.storePathHash;
-						failedUploadIds.add(upload.decision.uploadId);
-						failures.push({
-							storePathHash: upload.decision.storePathHash,
-							storePath,
-							stage: 'upload',
-							reason: failureReason(error)
-						});
-						bar.warn(
-							'upload failed',
-							`${StorePath.basename(storePath)}: ${failureReason(error)}`
-						);
+						case 'reuse': {
+							reuseCommits.push(result.decision);
+							break;
+						}
+						case 'failed': {
+							failedUploadIds.add(result.uploadId);
+							failures.push(result.failure);
+							bar.warn(
+								'upload failed',
+								`${StorePath.basename(result.failure.storePath)}: ${result.failure.reason}`
+							);
+							break;
+						}
+						case 'skip': {
+							break;
+						}
 					}
+
+					reportBlobs();
 				}
 			);
 
@@ -439,15 +457,15 @@ async function runPushWithTemporaryDirectory(
 	// the blobs the negotiation said to reuse, and any path a re-negotiation
 	// turned into a reuse.
 	const commitDecisions = [
-		...prepared.uploads.map((upload) => upload.decision),
+		...uploads.map((upload) => upload.decision),
 		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision)),
-		...prepared.reuseCommits
+		...reuseCommits
 	].filter((decision) => !failedUploadIds.has(decision.uploadId));
 	const commitContext: CommitContext = {
 		client,
 		closure,
 		preparedByUploadId: new Map(
-			prepared.uploads.map((upload) => [upload.decision.uploadId, upload])
+			uploads.map((upload) => [upload.decision.uploadId, upload])
 		),
 		readCompressedNar,
 		options: { wait: shouldWait, timeoutSeconds: waitTimeoutSeconds }
@@ -943,19 +961,20 @@ interface PreparePushPathDependencies {
 	readonly temporaryDirectory: string;
 }
 
-interface PrepareUploadsDependencies extends PreparePushPathDependencies {
-	readonly client: PushClient;
+interface CompressUploadsDependencies extends PreparePushPathDependencies {
 	readonly prepareConcurrency: number;
 }
 
-async function prepareUploads(
+// Builds and compresses one NAR per missing path, leaving presigning to the
+// upload phase. Compression is the prepare phase's cost and runs on the libuv
+// thread pool, so several run at once.
+async function compressUploads(
 	decisions: readonly UploadDecisionOf<'upload'>[],
 	closure: readonly NixValidPathInfo[],
-	dependencies: PrepareUploadsDependencies,
-	onPrepared?: () => void
-): Promise<PreparedUploads> {
-	const uploads: PreparedUpload[] = [];
-	const reuseCommits: UploadDecisionOf<'commit'>[] = [];
+	dependencies: CompressUploadsDependencies,
+	onCompressed?: () => void
+): Promise<CompressedUpload[]> {
+	const items: CompressedUpload[] = [];
 
 	await runWithConcurrency(
 		decisions,
@@ -963,24 +982,118 @@ async function prepareUploads(
 		async (decision) => {
 			const pathInfo = findNegotiatedPath(closure, decision);
 			const preparedPath = await preparePushPath(pathInfo, dependencies);
-			const outcome = await prepareNegotiatedUpload(
-				decision,
-				pathInfo,
-				preparedPath,
-				dependencies.client
-			);
 
-			if (outcome.kind === 'upload') {
-				uploads.push(outcome.upload);
-			} else if (outcome.kind === 'commit') {
-				reuseCommits.push(outcome.decision);
-			}
+			items.push({ decision, preparedPath });
 
-			onPrepared?.();
+			onCompressed?.();
 		}
 	);
 
-	return { uploads, reuseCommits };
+	return items;
+}
+
+interface UploadContext {
+	readonly client: PushClient;
+	readonly closure: readonly NixValidPathInfo[];
+	readonly readCompressedNar: ReadCompressedNar;
+	readonly storePathByHash: ReadonlyMap<string, string>;
+}
+
+// Presigns one compressed NAR and uploads it. The presign happens here, next to
+// the PUT, so the URL is fresh; if it still expires in flight (a single upload
+// slower than the slot's lifetime) the path is presigned again and the PUT
+// retried once. A presign can re-negotiate an expired slot, so the path may
+// come back reusable or skippable rather than uploadable.
+async function uploadCompressedNar(
+	item: CompressedUpload,
+	context: UploadContext,
+	bar: ProgressHandle
+): Promise<UploadResult> {
+	const pathInfo = findNegotiatedPath(context.closure, item.decision);
+	const fileSize = item.preparedPath.blob.fileSize;
+
+	for (let attempt = 0; attempt < 2; attempt += 1) {
+		const outcome = await prepareNegotiatedUpload(
+			item.decision,
+			pathInfo,
+			item.preparedPath,
+			context.client
+		);
+
+		if (outcome.kind === 'commit') {
+			bar.advance(fileSize);
+
+			return { kind: 'reuse', decision: outcome.decision };
+		}
+
+		if (outcome.kind === 'skip') {
+			bar.advance(fileSize);
+
+			return { kind: 'skip' };
+		}
+
+		let counted = 0;
+
+		try {
+			await context.client.uploadBlob({
+				r2Key: outcome.upload.decision.r2Key,
+				uploadUrl: outcome.upload.uploadUrl,
+				body: countingByteStream(
+					context.readCompressedNar(item.preparedPath.compressedPath),
+					(byteLength) => {
+						counted += byteLength;
+						bar.advance(byteLength);
+					}
+				),
+				contentLength: fileSize,
+				headers: outcome.upload.uploadHeaders
+			});
+
+			return { kind: 'uploaded', upload: outcome.upload };
+		} catch (error) {
+			// A Ctrl-C aborts the whole push; any other failure is this one path's,
+			// collected so the rest still upload.
+			if (isAbortError(error)) {
+				throw error;
+			}
+
+			// Undo this attempt's byte progress so a retry does not double-count.
+			bar.advance(-counted);
+
+			if (attempt === 0 && isExpiredUploadUrlError(error)) {
+				continue;
+			}
+
+			return failedUpload(item.decision, context, error);
+		}
+	}
+
+	return failedUpload(
+		item.decision,
+		context,
+		new Error('Upload retry did not resolve')
+	);
+}
+
+function failedUpload(
+	decision: UploadDecisionOf<'upload'>,
+	context: UploadContext,
+	error: unknown
+): UploadResult {
+	const storePath =
+		context.storePathByHash.get(decision.storePathHash) ??
+		decision.storePathHash;
+
+	return {
+		kind: 'failed',
+		uploadId: decision.uploadId,
+		failure: {
+			storePathHash: decision.storePathHash,
+			storePath,
+			stage: 'upload',
+			reason: failureReason(error)
+		}
+	};
 }
 
 // Presigns one path's upload, re-negotiating it if its slot is gone. A slow
