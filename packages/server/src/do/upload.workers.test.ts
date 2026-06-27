@@ -1001,6 +1001,35 @@ describe('upload flow', () => {
 		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
 	});
 
+	it('marks a fresh deferred commit committing before verification runs', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		// A fresh upload defers for verify-before-serve. The commit must leave a
+		// durable `committing` marker before any reserve/verify work, so the verify
+		// pass re-drives it and an interruption never strands a null-verdict row.
+		const deferred = await commitUpload(token, upload.uploadId, DEFAULT_CACHE, {
+			wait: false
+		});
+
+		expect({
+			status: deferred.status,
+			verdict: await pendingUploadVerdict(upload.uploadId)
+		}).toStrictEqual({ status: 'pending', verdict: 'committing' });
+
+		await currentServer().runVerification();
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
+	});
+
 	it('does not strand a reserved row when an in-flight commit is retried', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
