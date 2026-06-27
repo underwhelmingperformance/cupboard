@@ -41,6 +41,7 @@
 	"license": "AGPL-3.0-or-later",
 	"private": true,
 	"scripts": {
+		"bench": "vitest bench --run",
 		"check:types": "tsc --noEmit",
 		"cli": "node --experimental-transform-types --disable-warning=ExperimentalWarning src/main.ts",
 		"test": "vitest run --passWithNoTests"

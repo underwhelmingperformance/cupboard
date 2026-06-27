@@ -59,6 +59,7 @@
 		"fix:deps": "syncpack format",
 		"fix:format": "prettier --write .",
 		"fix:lint": "eslint . --fix",
+		"bench:push": "pnpm --filter @cupboard/server build-info && vitest bench --run --config tests/perf/vitest.config.ts",
 		"fixtures:generate": "node tests/fixtures/generate.ts",
 		"test:actions": "vitest run actions/src --exclude '**/.claude/**'",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts",
