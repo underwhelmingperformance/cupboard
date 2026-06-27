@@ -16,6 +16,7 @@ import type {
 } from '@cupboard/protocol/upload';
 import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
 import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -458,6 +459,96 @@ describe('runPush', () => {
 			preparedIds: ['commit-stale', 'commit-fresh'],
 			uploadedKeys: [r2Key, r2Key],
 			commitAttempts: ['commit-stale', 'commit-fresh']
+		});
+	});
+
+	it('re-presigns and retries an upload whose presigned URL expired', async () => {
+		const preparedIds: string[] = [];
+		const uploadAttempts: string[] = [];
+		const readRequests: string[] = [];
+		const commits: string[] = [];
+		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
+		const expiredBody =
+			'<?xml version="1.0" encoding="UTF-8"?><Error><Code>ExpiredRequest</Code><Message>Request has expired</Message></Error>';
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate: () =>
+					Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					}),
+				prepareUpload(uploadId) {
+					preparedIds.push(uploadId);
+
+					return Promise.resolve({
+						uploadUrl: `https://upload.example/app?attempt=${String(preparedIds.length)}`,
+						uploadHeaders: {
+							'x-amz-checksum-sha256': fileHash.digestBase64()
+						},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					});
+				},
+				uploadBlob(upload) {
+					uploadAttempts.push(upload.uploadUrl);
+
+					// The first presigned URL aged out in the prepare-to-upload gap; R2
+					// rejects the stale signature so the path must be re-presigned.
+					if (uploadAttempts.length === 1) {
+						return Promise.reject(
+							new CupboardUploadError(
+								upload.r2Key,
+								StatusCodes.FORBIDDEN,
+								expiredBody
+							)
+						);
+					}
+
+					return Promise.resolve();
+				},
+				commit(target) {
+					commits.push(target.uploadId);
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
+			readCompressedNar(path) {
+				readRequests.push(path);
+
+				return byteStream([Buffer.from('compressed nar')]);
+			},
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		const compressedPath = `/tmp/cupboard-test/${StorePath.hash(appPath)}.nar.zst`;
+
+		expect({
+			preparedIds,
+			uploadAttempts,
+			readRequests,
+			commits
+		}).toStrictEqual({
+			preparedIds: ['upload-app', 'upload-app'],
+			uploadAttempts: [
+				'https://upload.example/app?attempt=1',
+				'https://upload.example/app?attempt=2'
+			],
+			readRequests: [compressedPath, compressedPath],
+			commits: ['upload-app']
 		});
 	});
 
