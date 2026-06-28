@@ -642,11 +642,15 @@ const verifyDecodeConcurrency = 4;
 // transitions run on the single writer. A transient fetch/decode fault leaves
 // the row for the next pass (the consumer simply does not report it); a
 // definitively missing staging object fails it terminally.
-async function verifyTenant(env: Env, id: TenantId): Promise<void> {
+export async function verifyTenant(
+	env: Env,
+	id: TenantId,
+	batchSize: number = verificationBatchSize
+): Promise<void> {
 	const server = tenantServer(env, id);
-	const claims = await server.claimPendingVerifications(verificationBatchSize);
+	const claims = await server.claimPendingVerifications(batchSize);
 
-	await settleWithConcurrency(
+	const results = await settleWithConcurrency(
 		claims,
 		verifyDecodeConcurrency,
 		async (claim) => {
@@ -671,6 +675,21 @@ async function verifyTenant(env: Env, id: TenantId): Promise<void> {
 			await server.recordVerification(claim.uploadId, verification);
 		}
 	);
+
+	// A push that defers more rows than one batch holds coalesces onto a single
+	// request, so the rows past the first batch would otherwise wait for the cron.
+	// A full batch means more are pending; chain another pass to drain them now.
+	// Requiring some progress first stops a batch that wholly fails to read (a
+	// transient fault that leaves every row pending) from spinning.
+	const isProgressed = results.some((result) => result.status === 'fulfilled');
+
+	if (claims.length === batchSize && isProgressed) {
+		const message: MaintenanceQueueMessage = {
+			kind: 'tenant-verify',
+			tenant: id
+		};
+		await env.MAINTENANCE_QUEUE.send(message);
+	}
 }
 
 async function executeTenantMaintenanceMessage(

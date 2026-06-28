@@ -170,6 +170,7 @@ export const fixtureOwner = {
 const harness = {
 	origin: 'https://cupboard.test',
 	server: testServerFor('initial'),
+	serverName: 'initial',
 	nextTestServerId: 0,
 	nextProvisionConfigVersion: 1
 };
@@ -192,7 +193,8 @@ export interface GcResult {
  */
 export async function resetTestServer(): Promise<void> {
 	harness.origin = `https://cupboard-${String(harness.nextTestServerId)}.test`;
-	harness.server = testServerFor(`test-${String(harness.nextTestServerId)}`);
+	harness.serverName = `test-${String(harness.nextTestServerId)}`;
+	harness.server = testServerFor(harness.serverName);
 	harness.nextTestServerId += 1;
 
 	await configureFixtureTenant(harness.server);
@@ -469,6 +471,15 @@ export function testServerFor(name: string): DurableObjectStub<CupboardServer> {
 /** The Durable Object stub the harness is currently targeting. */
 export function currentServer(): DurableObjectStub<CupboardServer> {
 	return harness.server;
+}
+
+/**
+ * The slug the current harness server is addressed by, for a worker-side call
+ * (a queue consumer) that resolves the same Durable Object through
+ * `tenantServer(env, tenant)`.
+ */
+export function currentServerTenant(): TenantId {
+	return tenantIdSchema.parse(harness.serverName);
 }
 
 export interface InitialisedServer {
