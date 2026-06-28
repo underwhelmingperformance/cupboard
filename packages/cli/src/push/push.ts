@@ -22,13 +22,16 @@ import type {
 	RootSetResponse,
 	RootSummary
 } from '@cupboard/protocol/retention';
-import type {
-	CommitResponse,
-	UploadDecision,
-	UploadNegotiateRequest,
-	UploadNegotiateResponse,
-	UploadPrepareRequest,
-	UploadPrepareResponse
+import {
+	type CommitResponse,
+	type UploadDecision,
+	type UploadNegotiateRequest,
+	type UploadNegotiateResponse,
+	uploadPrepareBatchMaxItems,
+	type UploadPrepareBatchResponse,
+	type UploadPrepareItemRequest,
+	type UploadPrepareRequest,
+	type UploadPrepareResponse
 } from '@cupboard/protocol/upload';
 import {
 	formatBytes,
@@ -118,6 +121,12 @@ export interface PushClient {
 		uploadId: string,
 		body: UploadPrepareRequest
 	): Promise<UploadPrepareResponse>;
+	// Presigns a chunk of uploads in one call. Optional so a minimal client can
+	// rely on the per-path `prepareUpload`; the push uses it when present to take
+	// the per-path round-trip off the prepare path.
+	prepareUploads?(
+		items: readonly UploadPrepareItemRequest[]
+	): Promise<UploadPrepareBatchResponse>;
 	uploadBlob(upload: PushBlobUpload): Promise<void>;
 	commit(target: CommitTarget, options: CommitOptions): Promise<CommitResponse>;
 	negotiateAttestations?(
@@ -174,9 +183,8 @@ interface PreparedUpload {
 }
 
 // A NAR built and compressed in the prepare phase, awaiting its presign and
-// upload. Presigning is left to the upload phase so the presigned URL is signed
-// immediately before it is used rather than at the start of a prepare queue that
-// may outlive the URL.
+// upload. Presigning is left to the upload phase, where the URL is signed close
+// to the PUT, so a long prepare cannot outlive it.
 interface CompressedUpload {
 	readonly decision: UploadDecisionOf<'upload'>;
 	readonly preparedPath: PreparedPushPath;
@@ -406,7 +414,8 @@ async function runPushWithTemporaryDirectory(
 				client,
 				closure,
 				readCompressedNar,
-				storePathByHash
+				storePathByHash,
+				presigned: await presignUploads(compressed, client)
 			};
 
 			await runWithConcurrency(
@@ -997,13 +1006,72 @@ interface UploadContext {
 	readonly closure: readonly NixValidPathInfo[];
 	readonly readCompressedNar: ReadCompressedNar;
 	readonly storePathByHash: ReadonlyMap<string, string>;
+	// URLs presigned ahead of the PUT by the batch call, keyed by upload id. A
+	// path absent here (omitted by the batch, or no batch client) is presigned
+	// one at a time at upload.
+	readonly presigned: ReadonlyMap<string, PreparedUpload>;
 }
 
-// Presigns one compressed NAR and uploads it. The presign happens here, next to
-// the PUT, so the URL is fresh; if it still expires in flight (a single upload
-// slower than the slot's lifetime) the path is presigned again and the PUT
-// retried once. A presign can re-negotiate an expired slot, so the path may
-// come back reusable or skippable rather than uploadable.
+function chunkItems<T>(items: readonly T[], size: number): T[][] {
+	const chunks: T[][] = [];
+
+	for (let start = 0; start < items.length; start += size) {
+		chunks.push(items.slice(start, start + size));
+	}
+
+	return chunks;
+}
+
+// Presigns the whole upload set in batches before the PUTs begin, so a whole
+// closure's prepare costs a handful of round-trips. Returns the URLs keyed by
+// upload id; a client without the batch call, or an item the server could not
+// presign, is left out and presigned one at a time at upload.
+async function presignUploads(
+	items: readonly CompressedUpload[],
+	client: PushClient
+): Promise<ReadonlyMap<string, PreparedUpload>> {
+	const presigned = new Map<string, PreparedUpload>();
+
+	if (client.prepareUploads === undefined || items.length === 0) {
+		return presigned;
+	}
+
+	const itemsById = new Map(
+		items.map((item) => [item.decision.uploadId, item])
+	);
+
+	for (const group of chunkItems(items, uploadPrepareBatchMaxItems)) {
+		const response = await client.prepareUploads(
+			group.map((item) => ({
+				id: item.decision.uploadId,
+				fileHash: item.preparedPath.blob.fileHash.toString(),
+				fileSize: item.preparedPath.blob.fileSize,
+				compression: item.preparedPath.blob.compression
+			}))
+		);
+
+		for (const result of response.items) {
+			const item = itemsById.get(result.id);
+
+			if (result.ok && item !== undefined) {
+				presigned.set(result.id, {
+					decision: item.decision,
+					preparedPath: item.preparedPath,
+					uploadUrl: result.uploadUrl,
+					uploadHeaders: result.uploadHeaders
+				});
+			}
+		}
+	}
+
+	return presigned;
+}
+
+// Presigns one compressed NAR and uploads it. The first attempt uses a URL the
+// batch presigned ahead of time when it has one; if a URL expires in flight (a
+// single upload slower than the slot's lifetime) the path is presigned again and
+// the PUT retried once. A presign can re-negotiate an expired slot, so the path
+// may come back reusable or skippable.
 async function uploadCompressedNar(
 	item: CompressedUpload,
 	context: UploadContext,
@@ -1013,12 +1081,19 @@ async function uploadCompressedNar(
 	const fileSize = item.preparedPath.blob.fileSize;
 
 	for (let attempt = 0; attempt < 2; attempt += 1) {
-		const outcome = await prepareNegotiatedUpload(
-			item.decision,
-			pathInfo,
-			item.preparedPath,
-			context.client
-		);
+		// First attempt uses the URL the batch presigned ahead of time when it has
+		// one; an expiry retry (and any path the batch omitted) presigns one at a
+		// time, which also re-negotiates a slot the server has since reaped.
+		const fromBatch =
+			attempt === 0 ? context.presigned.get(item.decision.uploadId) : undefined;
+		const outcome: PrepareOutcome = fromBatch
+			? { kind: 'upload', upload: fromBatch }
+			: await prepareNegotiatedUpload(
+					item.decision,
+					pathInfo,
+					item.preparedPath,
+					context.client
+				);
 
 		if (outcome.kind === 'commit') {
 			bar.advance(fileSize);

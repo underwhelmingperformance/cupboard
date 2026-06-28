@@ -97,6 +97,9 @@ export const uploadPrepareItemRequestSchema = z.strictObject({
 export type ParsedUploadPrepareItemRequest = z.output<
 	typeof uploadPrepareItemRequestSchema
 >;
+export type UploadPrepareItemRequest = z.input<
+	typeof uploadPrepareItemRequestSchema
+>;
 
 export const uploadPrepareBatchRequestSchema = z.strictObject({
 	items: z
