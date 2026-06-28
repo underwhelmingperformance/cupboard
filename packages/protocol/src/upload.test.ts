@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	commitSessionFrameSchema,
+	commitSessionRequestSchema,
 	statsResponseSchema,
 	uploadDecisionSchema,
 	uploadNegotiateMaxPaths,
@@ -167,5 +169,41 @@ describe('response schemas', () => {
 		};
 
 		expect(usageResponseSchema.parse(value)).toStrictEqual(value);
+	});
+});
+
+describe('commit session schemas', () => {
+	it.each([
+		{ op: 'commit', uploadId: 'upload-1' },
+		{ op: 'subscribe', uploadIds: ['upload-1', 'upload-2'] }
+	])('accepts the $op request', (value) => {
+		expect(commitSessionRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('rejects an unknown request op', () => {
+		expect(
+			commitSessionRequestSchema.safeParse({ op: 'cancel', uploadId: 'x' })
+				.success
+		).toBe(false);
+	});
+
+	it.each([
+		{
+			ev: 'settled',
+			uploadId: 'upload-1',
+			response: { storePathHash, narHash, status: 'committed' }
+		},
+		{ ev: 'deferred', uploadId: 'upload-1', storePathHash, narHash },
+		{ ev: 'verdict', uploadId: 'upload-1', status: 'servable' },
+		{ ev: 'error', uploadId: 'upload-1', status: 500, message: 'boom' }
+	])('accepts the $ev frame', (value) => {
+		expect(commitSessionFrameSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('requires an uploadId on every frame', () => {
+		expect(
+			commitSessionFrameSchema.safeParse({ ev: 'verdict', status: 'servable' })
+				.success
+		).toBe(false);
 	});
 });
