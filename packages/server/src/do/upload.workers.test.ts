@@ -1180,6 +1180,53 @@ describe('upload flow', () => {
 		});
 	});
 
+	it('sends one verify request per push, re-arming when a pass starts', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		const sent: unknown[] = [];
+		const metrics = { backlogCount: 0, backlogBytes: 0 };
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: (message: unknown) => {
+						sent.push(message);
+						return Promise.resolve({ metadata: { metrics } });
+					},
+					sendBatch: () => Promise.resolve({ metadata: { metrics } }),
+					metrics: () => Promise.resolve(metrics)
+				}
+			};
+			return Promise.resolve();
+		});
+
+		// Two deferrals before any pass starts coalesce onto one outstanding
+		// request: the pass it triggers will claim both rows.
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		expect(sent).toStrictEqual([
+			{ kind: 'tenant-verify', tenant: fixtureTenant }
+		]);
+
+		// A pass starts (the queue consumer claims the rows), re-arming the guard.
+		await currentServer().claimPendingVerifications(10);
+
+		// A deferral after the snapshot asks for a fresh pass; the one that has
+		// already chosen its rows will not see it.
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		expect(sent).toStrictEqual([
+			{ kind: 'tenant-verify', tenant: fixtureTenant },
+			{ kind: 'tenant-verify', tenant: fixtureTenant }
+		]);
+	});
+
 	it('tracks the loser of a commit race for verification rather than parking its socket', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

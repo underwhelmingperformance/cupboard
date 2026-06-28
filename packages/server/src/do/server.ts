@@ -646,6 +646,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	async runVerification(): Promise<void> {
 		await this.initialise();
+		// This pass will claim the pending rows, so re-arm the prompt-verify
+		// single-flight guard: a deferral after this point asks for its own pass.
+		this.commitPipeline.onVerificationPassStarted();
 		await this.metered('verification', () =>
 			this.withMaintenanceEligibility(async () => {
 				await this.verification.verifyPendingUploads(verificationBatchSize);
@@ -663,6 +666,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		limit: number
 	): Promise<PendingVerification[]> {
 		await this.initialise();
+		// Claiming is the start of a pass: re-arm the prompt-verify guard before
+		// taking the snapshot so a deferral after it triggers a fresh request.
+		this.commitPipeline.onVerificationPassStarted();
 		return this.metered('claim-verifications', () =>
 			Promise.resolve(this.verification.listPendingForVerify(limit))
 		);
