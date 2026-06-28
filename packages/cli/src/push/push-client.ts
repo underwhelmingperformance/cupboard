@@ -41,6 +41,8 @@ export function pushClientFor(
 		negotiate: (body) => rpc.uploads.negotiate({ cacheName, ...body }),
 		prepareUpload: (uploadId, body) =>
 			rpc.uploads.prepare({ cacheName, id: uploadId, ...body }),
+		prepareUploads: (items) =>
+			rpc.uploads.prepareBatch({ cacheName, items: [...items] }),
 		uploadBlob: (upload) => raw.uploadBlob(upload),
 		commit: (target, commitOptions) =>
 			raw.commit(credential, target, commitOptions),

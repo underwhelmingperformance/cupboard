@@ -552,6 +552,171 @@ describe('runPush', () => {
 		});
 	});
 
+	it('presigns through the batch endpoint and uploads with that URL', async () => {
+		const prepareBatches: { id: string; fileSize: number }[][] = [];
+		const singlePrepares: string[] = [];
+		const uploadUrls: string[] = [];
+		const commits: string[] = [];
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate: () =>
+					Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					}),
+				prepareUpload(uploadId) {
+					singlePrepares.push(uploadId);
+
+					return Promise.resolve(fallbackPrepareUploadResponse());
+				},
+				prepareUploads(items) {
+					prepareBatches.push(
+						items.map((item) => ({ id: item.id, fileSize: item.fileSize }))
+					);
+
+					return Promise.resolve({
+						items: items.map((item) => ({
+							ok: true,
+							id: item.id,
+							uploadUrl: `https://batch.example/${item.id}`,
+							uploadHeaders: {
+								'x-amz-checksum-sha256': fileHash.digestBase64()
+							},
+							expiresAt: '2026-05-18T12:00:00.000Z'
+						}))
+					});
+				},
+				uploadBlob(upload) {
+					uploadUrls.push(upload.uploadUrl);
+
+					return Promise.resolve();
+				},
+				commit(target) {
+					commits.push(target.uploadId);
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		// The batch presigns the chunk; the per-path single prepare is untouched on
+		// the happy path; the PUT uses the batch URL.
+		expect({
+			prepareBatches,
+			singlePrepares,
+			uploadUrls,
+			commits
+		}).toStrictEqual({
+			prepareBatches: [[{ id: 'upload-app', fileSize: 456 }]],
+			singlePrepares: [],
+			uploadUrls: ['https://batch.example/upload-app'],
+			commits: ['upload-app']
+		});
+	});
+
+	it('re-presigns one path when its batch URL expires', async () => {
+		const singlePrepares: string[] = [];
+		const uploadUrls: string[] = [];
+		const expiredBody =
+			'<?xml version="1.0" encoding="UTF-8"?><Error><Code>ExpiredRequest</Code><Message>Request has expired</Message></Error>';
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate: () =>
+					Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					}),
+				prepareUpload(uploadId) {
+					singlePrepares.push(uploadId);
+
+					return Promise.resolve({
+						uploadUrl: 'https://single.example/fresh',
+						uploadHeaders: {
+							'x-amz-checksum-sha256': fileHash.digestBase64()
+						},
+						expiresAt: '2026-05-18T12:00:00.000Z'
+					});
+				},
+				prepareUploads: (items) =>
+					Promise.resolve({
+						items: items.map((item) => ({
+							ok: true,
+							id: item.id,
+							uploadUrl: 'https://batch.example/stale',
+							uploadHeaders: {
+								'x-amz-checksum-sha256': fileHash.digestBase64()
+							},
+							expiresAt: '2026-05-18T12:00:00.000Z'
+						}))
+					}),
+				uploadBlob(upload) {
+					uploadUrls.push(upload.uploadUrl);
+
+					if (uploadUrls.length === 1) {
+						return Promise.reject(
+							new CupboardUploadError(
+								upload.r2Key,
+								StatusCodes.FORBIDDEN,
+								expiredBody
+							)
+						);
+					}
+
+					return Promise.resolve();
+				},
+				commit: (target) =>
+					Promise.resolve({
+						...fallbackCommitResponse(),
+						storePathHash: target.storePathHash
+					}),
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar, path) =>
+				fakeCompressedNar(nar, path, digestForNar(nar)),
+			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
+			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
+			removeTemporaryDirectory: () => Promise.resolve()
+		});
+
+		// The stale batch URL is used first, then the path is presigned one at a
+		// time and the PUT retried with the fresh URL.
+		expect({ singlePrepares, uploadUrls }).toStrictEqual({
+			singlePrepares: ['upload-app'],
+			uploadUrls: [
+				'https://batch.example/stale',
+				'https://single.example/fresh'
+			]
+		});
+	});
+
 	it('with --dry-run, reports the plan without uploading or committing', async () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
