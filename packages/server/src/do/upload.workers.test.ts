@@ -25,7 +25,8 @@ import {
 	enqueueMaintenanceJobs,
 	executeMaintenanceQueueMessage,
 	type MaintenanceQueueMessage,
-	runBlobReaper
+	runBlobReaper,
+	verifyTenant
 } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -44,6 +45,7 @@ import {
 	commitVerifiablePath,
 	currentOrigin,
 	currentServer,
+	currentServerTenant,
 	defaultCacheStatsPath,
 	deletePath,
 	expectConditionalNotModified,
@@ -1583,6 +1585,70 @@ describe('upload flow', () => {
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
 		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
+	});
+
+	it('chains a verify pass that fills its batch and drains the rest, stopping on a short batch', async () => {
+		const token = await initialise();
+
+		// Three distinct deferred uploads: more than one pass holds at a batch of two.
+		const uploadIds: string[] = [];
+		for (const index of [0, 1, 2]) {
+			const seed = `drain-${String(index)}`;
+			const { metadata, nar } = await verifiablePath(seed, {
+				storePathHash: String(index + 1).repeat(32),
+				name: seed
+			});
+			const upload = expectSingleUploadDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
+			await prepareUpload(token, upload, metadata);
+			await putNarBytes(upload.r2Key, nar);
+			await markUploadPendingVerification(upload.uploadId);
+			uploadIds.push(upload.uploadId);
+		}
+
+		const sent: MaintenanceQueueMessage[] = [];
+		const queue = {
+			send: (message: MaintenanceQueueMessage) => {
+				sent.push(message);
+
+				return Promise.resolve();
+			}
+		};
+		// A Proxy keeps every real binding (the Durable Object stub, R2) and swaps
+		// only the queue, since spreading the worker `env` loses its binding getters.
+		const verifyEnv = new Proxy(env, {
+			get: (target, property, receiver): unknown =>
+				property === 'MAINTENANCE_QUEUE'
+					? queue
+					: Reflect.get(target, property, receiver)
+		});
+		const tenant = currentServerTenant();
+
+		// A committed upload clears its row, so a gone verdict counts as servable.
+		const servableCount = async (): Promise<number> => {
+			const verdicts = await Promise.all(
+				uploadIds.map((uploadId) => pendingUploadVerdict(uploadId))
+			);
+
+			return verdicts.filter((verdict) => verdict === undefined).length;
+		};
+
+		// A full batch leaves a row pending, so the pass chains one continuation.
+		await verifyTenant(verifyEnv, tenant, 2);
+		expect({
+			sent: sent.length,
+			servable: await servableCount()
+		}).toStrictEqual({ sent: 1, servable: 2 });
+
+		// The continuation claims a short batch (the last row): it drains it and
+		// sends no further request.
+		await verifyTenant(verifyEnv, tenant, 2);
+		expect({
+			sent: sent.length,
+			servable: await servableCount()
+		}).toStrictEqual({ sent: 1, servable: 3 });
 	});
 
 	it('marks a deferred upload servable on commit, and a later delete is not undone', async () => {
