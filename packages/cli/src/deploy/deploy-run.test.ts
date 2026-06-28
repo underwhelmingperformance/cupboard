@@ -16,6 +16,7 @@ function worker(overrides: Partial<WorkerConfig>): WorkerConfig {
 		compatibilityFlags: ['nodejs_compat'],
 		cpuMs: 300_000,
 		observability: true,
+		tracing: false,
 		vars: {},
 		durableObjects: [],
 		r2Buckets: [{ binding: 'BLOBS', bucketName: 'cupboard-blobs' }],

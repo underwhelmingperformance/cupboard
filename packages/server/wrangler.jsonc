@@ -96,7 +96,10 @@
 		"cpu_ms": 300000
 	},
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"traces": {
+			"enabled": true
+		}
 	},
 	"triggers": {
 		"crons": ["0 * * * *"]

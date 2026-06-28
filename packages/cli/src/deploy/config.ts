@@ -60,6 +60,7 @@ export interface WorkerConfig {
 	readonly compatibilityFlags: readonly string[];
 	readonly cpuMs: number | undefined;
 	readonly observability: boolean;
+	readonly tracing: boolean;
 	readonly vars: Readonly<Record<string, string>>;
 	readonly durableObjects: readonly DurableObjectBinding[];
 	readonly r2Buckets: readonly R2Binding[];
@@ -175,6 +176,11 @@ const migration = z.object({
 	new_sqlite_classes: z.array(z.string()).default([])
 });
 
+const observability = z.object({
+	enabled: z.boolean(),
+	traces: z.object({ enabled: z.boolean() }).partial().optional()
+});
+
 const rawWranglerSchema = z.object({
 	name: workerName,
 	compatibility_date: z
@@ -183,7 +189,7 @@ const rawWranglerSchema = z.object({
 	compatibility_flags: z.array(z.string()).default([]),
 	vars: z.record(z.string(), z.string()).default({}),
 	limits: z.object({ cpu_ms: z.number() }).partial().optional(),
-	observability: z.object({ enabled: z.boolean() }).optional(),
+	observability: observability.optional(),
 	durable_objects: z
 		.object({ bindings: z.array(durableObjectBinding) })
 		.optional(),
@@ -235,6 +241,7 @@ function toWorkerConfig(raw: RawWrangler, mainModule: string): WorkerConfig {
 		compatibilityFlags: raw.compatibility_flags,
 		cpuMs: raw.limits?.cpu_ms,
 		observability: raw.observability?.enabled ?? false,
+		tracing: raw.observability?.traces?.enabled ?? false,
 		vars: raw.vars,
 		durableObjects: (raw.durable_objects?.bindings ?? []).map((binding) => ({
 			binding: binding.name,

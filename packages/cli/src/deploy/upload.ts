@@ -107,7 +107,10 @@ export function buildScriptMetadata(
 		main_module: worker.mainModule,
 		compatibility_date: worker.compatibilityDate,
 		compatibility_flags: [...worker.compatibilityFlags],
-		observability: { enabled: worker.observability },
+		observability: {
+			enabled: worker.observability,
+			...(worker.tracing && { traces: { enabled: true } })
+		},
 		keep_bindings: ['secret_text'],
 		bindings: bindingsFor(worker, resources),
 		...(worker.cpuMs !== undefined && { limits: { cpu_ms: worker.cpuMs } }),
