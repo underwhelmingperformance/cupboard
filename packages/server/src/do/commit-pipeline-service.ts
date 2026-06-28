@@ -60,6 +60,15 @@ export type CommitOutcome =
 	  };
 
 export class CommitPipelineService {
+	// Single-flight guard for the prompt verification request: true from when a
+	// `tenant-verify` message is enqueued until the next pass starts and claims the
+	// pending rows (`onVerificationPassStarted`). While it is set, a deferral skips
+	// the send, because the pass already coming will observe its row — the row is
+	// written before the deferral requests, and a set guard means that pass has not
+	// yet taken its snapshot. So one message covers a whole push with no duplicate
+	// and no row left for the backstop.
+	private verifyMessageOutstanding = false;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly cacheAdmin: CacheAdminService,
@@ -68,16 +77,23 @@ export class CommitPipelineService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	// Asks for a prompt verification pass over the maintenance queue, so a
-	// pending commit becomes servable in seconds rather than at the next
-	// hourly sweep. Requested, not awaited: the sweep remains the backstop, so
-	// a failed send only delays the promotion and must never fail the commit.
+	// Asks for a prompt verification pass over the maintenance queue, so a pending
+	// commit becomes servable within seconds. Single-flight: at most one message
+	// is outstanding per DO instance at a time. Requested, not awaited: a failed
+	// send clears the guard so the next deferral retries, and the hourly sweep is
+	// a backstop only for a lost message.
 	private async requestVerification(tenant: TenantId): Promise<void> {
+		if (this.verifyMessageOutstanding) {
+			return;
+		}
+
+		this.verifyMessageOutstanding = true;
 		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
 
 		try {
 			await this.context.env.MAINTENANCE_QUEUE.send(message);
 		} catch (error) {
+			this.verifyMessageOutstanding = false;
 			console.warn('verification request not enqueued', {
 				tenant,
 				error: error instanceof Error ? error.message : String(error)
@@ -363,6 +379,14 @@ export class CommitPipelineService {
 		return existing?.fileSize ?? stagedSize;
 	}
 
+	// A verification pass is about to claim the pending rows, satisfying the
+	// outstanding request. Clear the guard before the snapshot is taken: the pass
+	// starting now has already chosen its rows, so a deferral after this point
+	// must enqueue its own request to be seen.
+	onVerificationPassStarted(): void {
+		this.verifyMessageOutstanding = false;
+	}
+
 	async commit(cache: string, uploadId: string): Promise<CommitOutcome> {
 		// A commit settling after offboarding began must publish nothing: refuse
 		// before deferring, so the writer hears a stopped write rather than a
@@ -509,9 +533,10 @@ export class CommitPipelineService {
 		// Past the synchronous validation, mark the row `committing` before any of
 		// the reserve/promote/materialise work so an interruption (or, once
 		// verification runs off the DO, the handoff itself) leaves a durable saga
-		// marker the verify pass re-drives, rather than a null-verdict row
-		// indistinguishable from one still awaiting its bytes. The reuse and fresh
-		// branches below both inherit this marker.
+		// marker the verify pass re-drives. A null-verdict row would be
+		// indistinguishable from one still awaiting its bytes, so it must not be
+		// left that way. The reuse and fresh branches below both inherit this
+		// marker.
 		this.uploadState.markUploadCommitting(uploadId);
 
 		const canonicalKey = narObjectKey(metadata.narHash);
