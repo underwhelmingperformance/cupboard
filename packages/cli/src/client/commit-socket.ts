@@ -63,6 +63,10 @@ export interface CommitSessionOptions {
 	readonly timeoutSeconds: number;
 	readonly signal?: AbortSignal;
 	readonly keepaliveMs?: number;
+	/** How many times a dropped socket is re-established before the push fails. */
+	readonly maxReconnects?: number;
+	/** Base back-off before the first reconnect; doubles, jittered, then capped. */
+	readonly reconnectBackoffMs?: number;
 }
 
 /** A push's commit session: many paths commit over one socket. */
@@ -76,10 +80,18 @@ interface SessionEntry {
 	readonly target: CommitSessionTarget;
 	readonly resolve: (response: CommitResponse) => void;
 	readonly reject: (error: Error) => void;
+	// A `deferred` frame has arrived, so the server holds a durable row for this
+	// upload. A reconnect resumes such an id with `subscribe`, where a since-gone
+	// row safely means it committed; an un-acked id is re-sent as `commit`
+	// instead, since its op may never have reached the server.
+	acked: boolean;
 	deadline?: NodeJS.Timeout;
 }
 
 const defaultKeepaliveMs = 30_000;
+const defaultMaxReconnects = 5;
+const defaultReconnectBackoffMs = 500;
+const maxReconnectBackoffMs = 5000;
 const keepaliveRequest = 'ping';
 const keepaliveResponse = 'pong';
 
@@ -89,8 +101,12 @@ const keepaliveResponse = 'pong';
  * settled or already-present reply straight away, a `deferred` upload's verdict
  * once verification answers (or `pending` when `wait` is off). A frame names its
  * upload, so many commits multiplex over the one connection. The server answers
- * the keepalive pings without waking the Durable Object, so a long park
- * survives idle timeouts.
+ * the keepalive pings without waking the Durable Object, so a long park survives
+ * idle timeouts.
+ *
+ * A transient drop does not fail the push: the session reconnects with a capped
+ * back-off and replays the outstanding work onto the fresh socket, so one blip
+ * costs at most a brief pause rather than every in-flight commit.
  */
 export function runCommitSession(
 	connect: CommitSocketConnect,
@@ -99,30 +115,36 @@ export function runCommitSession(
 	options: CommitSessionOptions
 ): CommitSession {
 	const outstanding = new Map<string, SessionEntry>();
-	const socket = connect(url, headers);
+	const maxReconnects = options.maxReconnects ?? defaultMaxReconnects;
+	const backoffBase = options.reconnectBackoffMs ?? defaultReconnectBackoffMs;
+
+	let socket: CommitSocket | undefined;
 	let isOpened = false;
 	let isClosed = false;
 	let failure: Error | undefined;
 	let keepalive: NodeJS.Timeout | undefined;
+	let reconnectTimer: NodeJS.Timeout | undefined;
+	let reconnectsLeft = maxReconnects;
 
-	// A commit op queued before the upgrade completes; `ws` rejects a send on a
-	// socket that has not opened, so ops wait here until the open handler flushes.
-	const outbox: CommitSessionRequest[] = [];
+	const sendNow = (request: CommitSessionRequest): void => {
+		socket?.send(JSON.stringify(request));
+	};
 
-	const send = (request: CommitSessionRequest): void => {
-		if (!isOpened) {
-			outbox.push(request);
-
+	const clearKeepalive = (): void => {
+		if (keepalive === undefined) {
 			return;
 		}
 
-		socket.send(JSON.stringify(request));
+		clearInterval(keepalive);
+		keepalive = undefined;
 	};
 
 	const teardown = (): void => {
-		if (keepalive !== undefined) {
-			clearInterval(keepalive);
-			keepalive = undefined;
+		clearKeepalive();
+
+		if (reconnectTimer !== undefined) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
 		}
 
 		for (const entry of outstanding.values()) {
@@ -132,11 +154,11 @@ export function runCommitSession(
 		}
 
 		options.signal?.removeEventListener('abort', onAbort);
-		socket.close();
+		socket?.close();
 	};
 
-	// A connection-wide failure (a drop, an abort, a bad frame, a refused
-	// upgrade) ends the whole session: every outstanding commit rejects, since
+	// A failure the session cannot recover from (a refused upgrade, exhausted
+	// reconnects, an abort, a bad frame): every outstanding commit rejects, since
 	// the one socket carried them all.
 	const failSession = (error: Error): void => {
 		if (isClosed) {
@@ -161,7 +183,8 @@ export function runCommitSession(
 		const entry = outstanding.get(uploadId);
 
 		// A frame for an unknown id is a stale duplicate (a verdict after the entry
-		// already settled); ignore it.
+		// already settled, or a reply from a socket a reconnect superseded); ignore
+		// it.
 		if (entry === undefined) {
 			return;
 		}
@@ -185,6 +208,9 @@ export function runCommitSession(
 			return;
 		}
 
+		// A valid frame is progress, so a later drop gets the full reconnect budget
+		// again; only a run of drops with nothing in between exhausts it.
+		reconnectsLeft = maxReconnects;
 		const frame = parsed.data;
 
 		switch (frame.ev) {
@@ -215,6 +241,7 @@ export function runCommitSession(
 					return;
 				}
 
+				entry.acked = true;
 				entry.deadline ??= armDeadline(frame.uploadId);
 
 				return;
@@ -271,6 +298,69 @@ export function runCommitSession(
 		}
 	};
 
+	// On every open (the first connect and each reconnect), drive the outstanding
+	// work onto the fresh socket: an acked id resumes with `subscribe`, an un-acked
+	// id is re-sent as `commit`. On the first open this is just a `commit` per
+	// registered path.
+	const replayOutstanding = (): void => {
+		const ackedIds: string[] = [];
+
+		for (const [uploadId, entry] of outstanding) {
+			if (entry.acked) {
+				ackedIds.push(uploadId);
+				continue;
+			}
+
+			sendNow({ op: 'commit', uploadId });
+		}
+
+		if (ackedIds.length > 0) {
+			sendNow({ op: 'subscribe', uploadIds: ackedIds });
+		}
+	};
+
+	// A drop on an established socket is treated as transient: reconnect and
+	// replay rather than fail, so a network blip does not lose the whole push. A
+	// refused upgrade is handled separately, as it will not heal on retry.
+	const onDrop = (error: Error): void => {
+		if (isClosed) {
+			return;
+		}
+
+		isOpened = false;
+		clearKeepalive();
+
+		// The server closes the socket once nothing is outstanding; that is a clean
+		// end, not a drop to recover from.
+		if (outstanding.size === 0) {
+			teardown();
+
+			return;
+		}
+
+		if (options.signal?.aborted === true) {
+			failSession(abortReason(options.signal));
+
+			return;
+		}
+
+		if (reconnectsLeft <= 0) {
+			failSession(error);
+
+			return;
+		}
+
+		reconnectsLeft -= 1;
+		reconnectTimer = setTimeout(
+			() => {
+				reconnectTimer = undefined;
+				openConnection();
+			},
+			reconnectDelay(maxReconnects - reconnectsLeft, backoffBase)
+		);
+		reconnectTimer.unref();
+	};
+
 	function armDeadline(uploadId: string): NodeJS.Timeout {
 		const deadline = setTimeout(() => {
 			finishEntry(uploadId, (entry) => {
@@ -288,67 +378,67 @@ export function runCommitSession(
 		}
 	}
 
-	socket.on('open', () => {
-		isOpened = true;
+	function openConnection(): void {
+		isOpened = false;
+		socket = connect(url, headers);
 
-		for (const request of outbox) {
-			socket.send(JSON.stringify(request));
-		}
-		outbox.length = 0;
+		socket.on('open', () => {
+			isOpened = true;
+			replayOutstanding();
 
-		keepalive = setInterval(() => {
-			socket.send(keepaliveRequest);
-		}, options.keepaliveMs ?? defaultKeepaliveMs);
-		keepalive.unref();
-	});
+			keepalive = setInterval(() => {
+				socket?.send(keepaliveRequest);
+			}, options.keepaliveMs ?? defaultKeepaliveMs);
+			keepalive.unref();
+		});
 
-	socket.on('message', (data) => {
-		const text = data.toString();
+		socket.on('message', (data) => {
+			const text = data.toString();
 
-		if (text === keepaliveResponse) {
-			return;
-		}
+			if (text === keepaliveResponse) {
+				return;
+			}
 
-		onFrame(text);
-	});
+			onFrame(text);
+		});
 
-	socket.on('close', () => {
-		if (outstanding.size > 0) {
-			failSession(
+		socket.on('close', () => {
+			onDrop(
 				new CommitSocketProtocolError(
 					options.path,
 					'the socket closed before every commit settled'
 				)
 			);
-		}
-	});
-
-	socket.on('error', (error) => {
-		failSession(error);
-	});
-
-	socket.on('unexpected-response', (_request, response) => {
-		const chunks: string[] = [];
-
-		response.on('data', (chunk) => {
-			chunks.push(chunk.toString());
 		});
-		response.on('end', () => {
-			failSession(
-				new CupboardHttpError(
-					'GET',
-					options.path,
-					response.statusCode ?? 0,
-					chunks.join('')
-				)
-			);
+
+		socket.on('error', (error) => {
+			onDrop(error);
 		});
-	});
+
+		socket.on('unexpected-response', (_request, response) => {
+			const chunks: string[] = [];
+
+			response.on('data', (chunk) => {
+				chunks.push(chunk.toString());
+			});
+			response.on('end', () => {
+				failSession(
+					new CupboardHttpError(
+						'GET',
+						options.path,
+						response.statusCode ?? 0,
+						chunks.join('')
+					)
+				);
+			});
+		});
+	}
 
 	if (options.signal?.aborted === true) {
 		onAbort();
 	} else {
 		options.signal?.addEventListener('abort', onAbort, { once: true });
+		openConnection();
 	}
 
 	const commit = (target: CommitSessionTarget): Promise<CommitResponse> => {
@@ -363,8 +453,18 @@ export function runCommitSession(
 		}
 
 		return new Promise<CommitResponse>((resolve, reject) => {
-			outstanding.set(target.uploadId, { target, resolve, reject });
-			send({ op: 'commit', uploadId: target.uploadId });
+			outstanding.set(target.uploadId, {
+				target,
+				resolve,
+				reject,
+				acked: false
+			});
+
+			// An open socket sends now; before the first open (or mid-reconnect) the
+			// op waits and `replayOutstanding` sends it when the socket comes up.
+			if (isOpened) {
+				sendNow({ op: 'commit', uploadId: target.uploadId });
+			}
 		});
 	};
 
@@ -378,6 +478,15 @@ export function runCommitSession(
 	};
 
 	return { commit, close };
+}
+
+// Exponential back-off with full jitter, capped. The jittered delay never
+// exceeds the cap, so a test can fire any pending reconnect by advancing a fake
+// clock past `maxReconnectBackoffMs`.
+function reconnectDelay(attempt: number, base: number): number {
+	const ceiling = Math.min(base * 2 ** (attempt - 1), maxReconnectBackoffMs);
+
+	return ceiling / 2 + Math.random() * (ceiling / 2);
 }
 
 function safeJsonParse(text: string): unknown {
