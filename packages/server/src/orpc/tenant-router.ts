@@ -187,6 +187,12 @@ export const tenantRouter = os.router({
 				}
 			)
 		),
+		prepareBatch: os.uploads.prepareBatch.handler(({ input, context }) =>
+			context.services.uploads.prepareUploads(
+				cacheFromSelector(input.cacheName),
+				input.items
+			)
+		),
 		status: os.uploads.status.handler(({ input, context }) =>
 			context.services.uploads.uploadStatus(input.id)
 		)

@@ -4,6 +4,8 @@ import { z } from 'zod';
 import {
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
+	uploadPrepareBatchRequestSchema,
+	uploadPrepareBatchResponseSchema,
 	uploadPrepareRequestSchema,
 	uploadPrepareResponseSchema,
 	uploadStatusResponseSchema
@@ -46,6 +48,24 @@ export const uploadsContract = {
 			})
 		)
 		.output(uploadPrepareResponseSchema),
+
+	// Presigns a chunk of uploads in one round-trip: the hot-path call a push
+	// makes, so a whole closure presigns in a handful of requests. The per-path
+	// single prepare above re-negotiates one slot at a time.
+	prepareBatch: baseProcedure
+		.meta({
+			requires: 'upload:prepare',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true
+		})
+		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/prepare' })
+		.input(
+			z.strictObject({
+				cacheName: cacheSelectorSchema,
+				...uploadPrepareBatchRequestSchema.shape
+			})
+		)
+		.output(uploadPrepareBatchResponseSchema),
 
 	// A deferred upload's status, polled by the uploadId the client holds; the
 	// id is unique across caches, so the cache is read from the pending row. A
