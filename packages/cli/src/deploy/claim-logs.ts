@@ -22,8 +22,9 @@ export interface ClaimLogDeps {
  * The exception lines the control Worker logged for a refused request, found by
  * its cf-ray. Workers Observability lags the request by a few seconds, so the
  * query is retried before giving up. An empty result means nothing was found
- * (observability is off, or the log has not been ingested yet), leaving the
- * caller to fall back to pointing at the logs.
+ * (observability is off, the credential cannot read it, the query failed, or
+ * the log has not been ingested yet), leaving the caller to fall back to
+ * pointing at the logs.
  */
 export async function fetchClaimFailureLogs(
 	deps: ClaimLogDeps
@@ -34,12 +35,23 @@ export async function fetchClaimFailureLogs(
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {
 		throwIfAborted(deps.signal);
 
-		const events = await deps.api.queryWorkerLogs({
-			needle: deps.ray,
-			fromMs: queriedAt - lookbackMs,
-			toMs: queriedAt + lookaheadMs,
-			limit: eventLimit
-		});
+		let events: readonly WorkerLogEvent[];
+
+		try {
+			events = await deps.api.queryWorkerLogs({
+				needle: deps.ray,
+				fromMs: queriedAt - lookbackMs,
+				toMs: queriedAt + lookaheadMs,
+				limit: eventLimit
+			});
+		} catch {
+			throwIfAborted(deps.signal);
+
+			// Reading the log is best-effort: the deploy credential may lack the
+			// Workers Observability scope, or the query may be unavailable. The
+			// caller still has the server fault to report and points at the log.
+			return [];
+		}
 
 		const lines = logLines(events);
 
