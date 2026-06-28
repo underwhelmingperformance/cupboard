@@ -12,7 +12,6 @@ import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { commitSessionRequestSchema } from '@cupboard/protocol/upload';
 import { DurableObject } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
-import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -58,6 +57,7 @@ import {
 	MaintenanceEligibilityService,
 	withMaintenanceEligibility
 } from './maintenance-eligibility-service.ts';
+import { applyMigrations } from './migrate.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
@@ -635,7 +635,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const rowsReadBefore = this.context.dbCost.rowsRead;
 		const rowsWrittenBefore = this.context.dbCost.rowsWritten;
 
-		await migrate(this.context.db, migrations);
+		applyMigrations(this.context.db, migrations);
 		await this.assertZstdAvailable();
 
 		const now = new Date();

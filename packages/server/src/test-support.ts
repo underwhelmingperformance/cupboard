@@ -62,7 +62,6 @@ import { env } from 'cloudflare:workers';
 import { and, count, eq, isNull, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
-import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { StatusCodes } from 'http-status-codes';
 import { expect, vi } from 'vitest';
 import { z } from 'zod';
@@ -96,6 +95,7 @@ import {
 	signingKeys
 } from './db/schema.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
+import { applyMigrations } from './do/migrate.ts';
 import type { CupboardServer } from './do/server.ts';
 import {
 	attestationStagingObjectKey,
@@ -2832,11 +2832,13 @@ function migrationsThrough(throughIndex: number) {
  * a test plant rows in an older table shape and then assert how a later
  * migration backfills them; the migrator skips migrations already applied.
  */
-export async function migrateThrough(
+export function migrateThrough(
 	state: DurableObjectState,
 	throughIndex: number
 ): Promise<void> {
-	await migrate(drizzle(state.storage), migrationsThrough(throughIndex));
+	applyMigrations(drizzle(state.storage), migrationsThrough(throughIndex));
+
+	return Promise.resolve();
 }
 
 export interface SigningKeySeed {
