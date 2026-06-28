@@ -45,6 +45,7 @@ import { z } from 'zod';
 
 import { isAbortError } from '../abort.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
+import type { CommitSession } from '../client/commit-socket.ts';
 import {
 	isExpiredUploadUrlError,
 	isStaleUploadError
@@ -129,6 +130,10 @@ export interface PushClient {
 	): Promise<UploadPrepareBatchResponse>;
 	uploadBlob(upload: PushBlobUpload): Promise<void>;
 	commit(target: CommitTarget, options: CommitOptions): Promise<CommitResponse>;
+	// Opens one commit session for the whole push. Optional so a minimal client
+	// can rely on the per-path `commit`; the push uses it when present to commit
+	// every path over a single socket.
+	openCommitSession?(options: CommitOptions): Promise<CommitSession>;
 	negotiateAttestations?(
 		body: AttestationNegotiateRequest
 	): Promise<AttestationNegotiateResponse>;
@@ -470,74 +475,84 @@ async function runPushWithTemporaryDirectory(
 		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision)),
 		...reuseCommits
 	].filter((decision) => !failedUploadIds.has(decision.uploadId));
+	const commitOptions: CommitOptions = {
+		wait: shouldWait,
+		timeoutSeconds: waitTimeoutSeconds
+	};
+	const session = await client.openCommitSession?.(commitOptions);
 	const commitContext: CommitContext = {
 		client,
+		session,
 		closure,
 		preparedByUploadId: new Map(
 			uploads.map((upload) => [upload.decision.uploadId, upload])
 		),
 		readCompressedNar,
-		options: { wait: shouldWait, timeoutSeconds: waitTimeoutSeconds }
+		options: commitOptions
 	};
 	const commit = await reporter.progress(
 		'Committing metadata',
 		{ total: commitDecisions.length },
 		async (bar) => {
-			const settled = await Promise.allSettled(
-				commitDecisions.map(async (decision) => {
-					try {
-						return await commitNegotiated(decision, commitContext);
-					} finally {
-						bar.advance(1);
-					}
-				})
-			);
+			try {
+				const settled = await Promise.allSettled(
+					commitDecisions.map(async (decision) => {
+						try {
+							return await commitNegotiated(decision, commitContext);
+						} finally {
+							bar.advance(1);
+						}
+					})
+				);
 
-			// Pending uploads are collected by store-path hash, so a re-negotiated
-			// upload id still resolves to its path for the retention and attestation
-			// gates below.
-			const pending: string[] = [];
-			let committed = 0;
+				// Pending uploads are collected by store-path hash, so a re-negotiated
+				// upload id still resolves to its path for the retention and
+				// attestation gates below.
+				const pending: string[] = [];
+				let committed = 0;
 
-			for (const [index, result] of settled.entries()) {
-				const decision = commitDecisions[index];
+				for (const [index, result] of settled.entries()) {
+					const decision = commitDecisions[index];
 
-				if (decision === undefined) {
-					continue;
-				}
-
-				if (result.status === 'rejected') {
-					if (isAbortError(result.reason)) {
-						throw result.reason;
+					if (decision === undefined) {
+						continue;
 					}
 
-					const storePath =
-						storePathByHash.get(decision.storePathHash) ??
-						decision.storePathHash;
-					const reason = failureReason(result.reason);
-					failures.push({
-						storePathHash: decision.storePathHash,
-						storePath,
-						stage: 'commit',
-						reason
-					});
-					bar.warn(
-						'commit failed',
-						`${StorePath.basename(storePath)}: ${reason}`
-					);
-					continue;
+					if (result.status === 'rejected') {
+						if (isAbortError(result.reason)) {
+							throw result.reason;
+						}
+
+						const storePath =
+							storePathByHash.get(decision.storePathHash) ??
+							decision.storePathHash;
+						const reason = failureReason(result.reason);
+						failures.push({
+							storePathHash: decision.storePathHash,
+							storePath,
+							stage: 'commit',
+							reason
+						});
+						bar.warn(
+							'commit failed',
+							`${StorePath.basename(storePath)}: ${reason}`
+						);
+						continue;
+					}
+
+					if (result.value.status === 'pending') {
+						pending.push(result.value.storePathHash);
+					} else {
+						committed += 1;
+					}
 				}
 
-				if (result.value.status === 'pending') {
-					pending.push(result.value.storePathHash);
-				} else {
-					committed += 1;
-				}
+				bar.fact('committed', formatCount(committed));
+
+				return { pending };
+			} finally {
+				session?.close();
 			}
-
-			bar.fact('committed', formatCount(committed));
-
-			return { pending };
 		}
 	);
 
@@ -1241,10 +1256,24 @@ async function presignUpload(
 
 interface CommitContext {
 	readonly client: PushClient;
+	readonly session: CommitSession | undefined;
 	readonly closure: readonly NixValidPathInfo[];
 	readonly preparedByUploadId: ReadonlyMap<string, PreparedUpload>;
 	readonly readCompressedNar: ReadCompressedNar;
 	readonly options: CommitOptions;
+}
+
+// Commits one path over the push's shared session, falling back to a per-path
+// commit for a minimal client that opens no session.
+function commitVia(
+	context: CommitContext,
+	target: CommitTarget
+): Promise<CommitResponse> {
+	if (context.session === undefined) {
+		return context.client.commit(target, context.options);
+	}
+
+	return context.session.commit(target);
 }
 
 function commitTarget(
@@ -1266,7 +1295,7 @@ async function commitNegotiated(
 	context: CommitContext
 ): Promise<CommitResponse> {
 	try {
-		return await context.client.commit(commitTarget(decision), context.options);
+		return await commitVia(context, commitTarget(decision));
 	} catch (error) {
 		if (!isStaleUploadError(error)) {
 			throw error;
@@ -1299,7 +1328,7 @@ async function redriveExpiredCommit(
 	}
 
 	if (isReusedBlobCommit(fresh)) {
-		return context.client.commit(commitTarget(fresh), context.options);
+		return commitVia(context, commitTarget(fresh));
 	}
 
 	if (isSkip(fresh)) {
@@ -1334,7 +1363,7 @@ async function redriveExpiredCommit(
 		headers: presigned.uploadHeaders
 	});
 
-	return context.client.commit(commitTarget(fresh), context.options);
+	return commitVia(context, commitTarget(fresh));
 }
 
 async function preparePushPath(
