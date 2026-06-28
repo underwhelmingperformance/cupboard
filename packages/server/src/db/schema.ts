@@ -76,7 +76,12 @@ export const pendingUploads = sqliteTable(
 		// re-drives both `committing` and `pending` rows.
 		verdict: text('verdict', {
 			enum: ['committing', 'pending', 'servable', 'mismatch', 'over-quota']
-		})
+		}),
+		// The commit session socket a waiting client holds for this upload, read by
+		// the verify pass to route the terminal verdict to the right connection.
+		// Null until a commit attaches its session; re-pointed when a reconnected
+		// socket re-subscribes. Looked up by the upload's id, so it needs no index.
+		sessionId: text('session_id')
 	},
 	// The maintenance reconcile finds the soonest-expiring upload and probes for any
 	// still awaiting verification (an existence check, not a count); without these

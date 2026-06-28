@@ -169,6 +169,13 @@
 			"when": 1782474459053,
 			"tag": "0023_more_expiry_indexes",
 			"breakpoints": true
+		},
+		{
+			"idx": 24,
+			"version": "6",
+			"when": 1782635391781,
+			"tag": "0024_pending_upload_session",
+			"breakpoints": true
 		}
 	]
 }
