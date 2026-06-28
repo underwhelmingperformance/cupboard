@@ -77,30 +77,6 @@ export class CommitPipelineService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	// Asks for a prompt verification pass over the maintenance queue, so a pending
-	// commit becomes servable within seconds. Single-flight: at most one message
-	// is outstanding per DO instance at a time. Requested, not awaited: a failed
-	// send clears the guard so the next deferral retries, and the hourly sweep is
-	// a backstop only for a lost message.
-	private async requestVerification(tenant: TenantId): Promise<void> {
-		if (this.verifyMessageOutstanding) {
-			return;
-		}
-
-		this.verifyMessageOutstanding = true;
-		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
-
-		try {
-			await this.context.env.MAINTENANCE_QUEUE.send(message);
-		} catch (error) {
-			this.verifyMessageOutstanding = false;
-			console.warn('verification request not enqueued', {
-				tenant,
-				error: error instanceof Error ? error.message : String(error)
-			});
-		}
-	}
-
 	// Commits a fresh inline upload row-first: mark the saga in progress, reserve the
 	// not-yet-servable row, verify the staged bytes (never serving them unverified,
 	// even when `blob_state` already holds the hash), promote into the shared CAS,
@@ -385,6 +361,31 @@ export class CommitPipelineService {
 	// must enqueue its own request to be seen.
 	onVerificationPassStarted(): void {
 		this.verifyMessageOutstanding = false;
+	}
+
+	// Asks for a prompt verification pass over the maintenance queue, so a pending
+	// commit becomes servable within seconds. Single-flight: at most one message
+	// is outstanding per DO instance at a time, so a pass continuing the drain and
+	// a concurrent deferral collapse onto one message that claims each row once. A
+	// failed send clears the guard so the next deferral retries, and the hourly
+	// sweep is a backstop for a lost message.
+	async requestVerification(tenant: TenantId): Promise<void> {
+		if (this.verifyMessageOutstanding) {
+			return;
+		}
+
+		this.verifyMessageOutstanding = true;
+		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
+
+		try {
+			await this.context.env.MAINTENANCE_QUEUE.send(message);
+		} catch (error) {
+			this.verifyMessageOutstanding = false;
+			console.warn('verification request not enqueued', {
+				tenant,
+				error: error instanceof Error ? error.message : String(error)
+			});
+		}
 	}
 
 	async commit(cache: string, uploadId: string): Promise<CommitOutcome> {

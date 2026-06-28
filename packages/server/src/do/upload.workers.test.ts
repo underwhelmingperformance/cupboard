@@ -1608,21 +1608,25 @@ describe('upload flow', () => {
 			uploadIds.push(upload.uploadId);
 		}
 
-		const sent: MaintenanceQueueMessage[] = [];
-		const queue = {
-			send: (message: MaintenanceQueueMessage) => {
-				sent.push(message);
+		// The continuation routes through the object's single-flight, so it sends on
+		// the object's own queue binding; collect those sends.
+		const sent: unknown[] = [];
+		const metrics = { backlogCount: 0, backlogBytes: 0 };
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.env = {
+				...instance.context.env,
+				MAINTENANCE_QUEUE: {
+					send: (message: unknown) => {
+						sent.push(message);
 
-				return Promise.resolve();
-			}
-		};
-		// A Proxy keeps every real binding (the Durable Object stub, R2) and swaps
-		// only the queue, since spreading the worker `env` loses its binding getters.
-		const verifyEnv = new Proxy(env, {
-			get: (target, property, receiver): unknown =>
-				property === 'MAINTENANCE_QUEUE'
-					? queue
-					: Reflect.get(target, property, receiver)
+						return Promise.resolve({ metadata: { metrics } });
+					},
+					sendBatch: () => Promise.resolve({ metadata: { metrics } }),
+					metrics: () => Promise.resolve(metrics)
+				}
+			};
+
+			return Promise.resolve();
 		});
 		const tenant = currentServerTenant();
 
@@ -1636,7 +1640,7 @@ describe('upload flow', () => {
 		};
 
 		// A full batch leaves a row pending, so the pass chains one continuation.
-		await verifyTenant(verifyEnv, tenant, 2);
+		await verifyTenant(env, tenant, 2);
 		expect({
 			sent: sent.length,
 			servable: await servableCount()
@@ -1644,7 +1648,7 @@ describe('upload flow', () => {
 
 		// The continuation claims a short batch (the last row): it drains it and
 		// sends no further request.
-		await verifyTenant(verifyEnv, tenant, 2);
+		await verifyTenant(env, tenant, 2);
 		expect({
 			sent: sent.length,
 			servable: await servableCount()
