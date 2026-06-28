@@ -24,7 +24,7 @@ const controlSource = `{
 	},
 	"vars": { "CUPBOARD_AUTH_ISSUER": "cupboard" },
 	"limits": { "cpu_ms": 300000 },
-	"observability": { "enabled": true },
+	"observability": { "enabled": true, "traces": { "enabled": true } },
 	"triggers": { "crons": ["0 * * * *"] }
 }`;
 
@@ -50,6 +50,7 @@ describe('parseDeploymentConfig', () => {
 				compatibilityFlags: ['nodejs_compat'],
 				cpuMs: 300_000,
 				observability: true,
+				tracing: true,
 				vars: { CUPBOARD_AUTH_ISSUER: 'cupboard' },
 				durableObjects: [
 					{
@@ -86,6 +87,7 @@ describe('parseDeploymentConfig', () => {
 				compatibilityFlags: ['nodejs_compat'],
 				cpuMs: undefined,
 				observability: true,
+				tracing: false,
 				vars: {},
 				durableObjects: [
 					{
