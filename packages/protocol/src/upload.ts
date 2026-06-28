@@ -214,35 +214,6 @@ export type ParsedUploadStatusResponse = z.output<
 >;
 export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
 
-// The commit endpoint is a WebSocket: the upgrade request carries the write
-// token, and every frame is server to client. The first frame settles the
-// path at commit time (`result`) or reports it stored pending verification
-// (`deferred`); a deferred upload's socket stays open until the verification
-// pass answers with the terminal `verdict`. `error` mirrors what the HTTP
-// error response would have said, then the socket closes.
-export const commitSocketFrameSchema = z.discriminatedUnion('event', [
-	z.strictObject({
-		event: z.literal('result'),
-		response: commitResponseSchema
-	}),
-	z.strictObject({
-		event: z.literal('deferred'),
-		storePathHash: storePathHashSchema,
-		narHash: nixSha256HashSchema
-	}),
-	z.strictObject({
-		event: z.literal('verdict'),
-		status: uploadStatusSchema
-	}),
-	z.strictObject({
-		event: z.literal('error'),
-		status: z.number().int(),
-		message: z.string()
-	})
-]);
-export type ParsedCommitSocketFrame = z.output<typeof commitSocketFrameSchema>;
-export type CommitSocketFrame = z.input<typeof commitSocketFrameSchema>;
-
 // The multiplexed commit session: one socket per push carries every path's
 // commit, so each request and frame names the upload it concerns. The client
 // sends `commit` to settle one id and `subscribe` to re-attach a reconnected

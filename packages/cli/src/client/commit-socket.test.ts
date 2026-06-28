@@ -1,4 +1,4 @@
-import type { CommitSocketFrame } from '@cupboard/protocol/upload';
+import type { CommitSessionFrame } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -12,14 +12,25 @@ import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
-import { settleCommitSocket } from './commit-socket.ts';
+import {
+	type CommitSessionTarget,
+	type CommitSocket,
+	runCommitSession
+} from './commit-socket.ts';
 
-function frame(value: CommitSocketFrame): string {
+function frame(value: CommitSessionFrame): string {
 	return JSON.stringify(value);
+}
+
+function commitOp(uploadId: string): string {
+	return JSON.stringify({ op: 'commit', uploadId });
 }
 
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const narHash = `sha256:${'1'.repeat(52)}`;
+const path = '/cache/_default/commit';
+const uploadId = 'upload-app';
+const target: CommitSessionTarget = { uploadId, storePathHash, narHash };
 
 type ErrorConstructor<T extends Error> = abstract new (
 	...arguments_: never[]
@@ -49,7 +60,7 @@ async function rejectedBy<T extends Error>(
 	return rejection;
 }
 
-function settle(
+function openSession(
 	socket: FakeCommitSocket,
 	options: {
 		readonly wait?: boolean;
@@ -57,20 +68,24 @@ function settle(
 		readonly signal?: AbortSignal;
 		readonly keepaliveMs?: number;
 	} = {}
-): Promise<unknown> {
-	return settleCommitSocket(socket, {
-		path: '/uploads/upload-app/commit',
-		uploadId: 'upload-app',
-		storePathHash,
-		narHash,
-		wait: options.wait ?? true,
-		timeoutSeconds: options.timeoutSeconds ?? 600,
-		signal: options.signal,
-		keepaliveMs: options.keepaliveMs
-	});
+): ReturnType<typeof runCommitSession> {
+	const connect = (): CommitSocket => socket;
+
+	return runCommitSession(
+		connect,
+		new URL(`wss://cupboard.test${path}`),
+		{},
+		{
+			path,
+			wait: options.wait ?? true,
+			timeoutSeconds: options.timeoutSeconds ?? 600,
+			signal: options.signal,
+			keepaliveMs: options.keepaliveMs
+		}
+	);
 }
 
-describe('settleCommitSocket', () => {
+describe('runCommitSession', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
 	});
@@ -79,14 +94,17 @@ describe('settleCommitSocket', () => {
 		vi.useRealTimers();
 	});
 
-	it('settles with the response of a result frame and closes the socket', async () => {
+	it('settles a commit on a settled frame and leaves the socket open', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket);
+		const session = openSession(socket);
+		const settled = session.commit(target);
 
+		socket.emit('open');
 		socket.emit(
 			'message',
 			frame({
-				event: 'result',
+				ev: 'settled',
+				uploadId,
 				response: { storePathHash, narHash, status: 'already-present' }
 			})
 		);
@@ -96,16 +114,69 @@ describe('settleCommitSocket', () => {
 			narHash,
 			status: 'already-present'
 		});
+		expect(socket.closed).toBe(false);
+
+		session.close();
 		expect(socket.closed).toBe(true);
+	});
+
+	it('settles each commit by its upload id over one socket', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const first = session.commit({
+			uploadId: 'upload-a',
+			storePathHash,
+			narHash
+		});
+		const second = session.commit({
+			uploadId: 'upload-b',
+			storePathHash,
+			narHash
+		});
+
+		socket.emit('open');
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId: 'upload-b',
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+		socket.emit(
+			'message',
+			frame({ ev: 'deferred', uploadId: 'upload-a', storePathHash, narHash })
+		);
+		socket.emit(
+			'message',
+			frame({ ev: 'verdict', uploadId: 'upload-a', status: 'servable' })
+		);
+
+		await expect(second).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		await expect(first).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect(socket.sent).toStrictEqual([
+			commitOp('upload-a'),
+			commitOp('upload-b')
+		]);
 	});
 
 	it('reports a deferred upload as pending without waiting when wait is off', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket, { wait: false });
+		const session = openSession(socket, { wait: false });
+		const settled = session.commit(target);
 
+		socket.emit('open');
 		socket.emit(
 			'message',
-			frame({ event: 'deferred', storePathHash, narHash })
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
 
 		await expect(settled).resolves.toStrictEqual({
@@ -117,50 +188,59 @@ describe('settleCommitSocket', () => {
 
 	it('parks a deferred upload and settles committed on a servable verdict', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket);
+		const session = openSession(socket);
+		const settled = session.commit(target);
 
+		socket.emit('open');
 		socket.emit(
 			'message',
-			frame({ event: 'deferred', storePathHash, narHash })
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
-		socket.emit('message', frame({ event: 'verdict', status: 'servable' }));
+		socket.emit(
+			'message',
+			frame({ ev: 'verdict', uploadId, status: 'servable' })
+		);
 
 		await expect(settled).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'committed'
 		});
-		expect(socket.closed).toBe(true);
 	});
 
 	it('settles committed on a servable verdict that arrives before the deferred frame', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket);
+		const session = openSession(socket);
+		const settled = session.commit(target);
 
-		// Verification settled the upload as the socket opened, so the verdict races
-		// ahead of the deferred frame. The client settles from the upload's known
-		// identity instead of failing the push.
-		socket.emit('message', frame({ event: 'verdict', status: 'servable' }));
+		// Verification settled the upload before its deferred frame, so the verdict
+		// races ahead. The client settles from the target's known identity.
+		socket.emit('open');
+		socket.emit(
+			'message',
+			frame({ ev: 'verdict', uploadId, status: 'servable' })
+		);
 
 		await expect(settled).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'committed'
 		});
-		expect(socket.closed).toBe(true);
 	});
 
 	it.each(['mismatch', 'over-quota', 'absent'] as const)(
 		'rejects a parked upload on a %s verdict',
 		async (status) => {
 			const socket = new FakeCommitSocket();
-			const settled = settle(socket);
+			const session = openSession(socket);
+			const settled = session.commit(target);
 
+			socket.emit('open');
 			socket.emit(
 				'message',
-				frame({ event: 'deferred', storePathHash, narHash })
+				frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 			);
-			socket.emit('message', frame({ event: 'verdict', status }));
+			socket.emit('message', frame({ ev: 'verdict', uploadId, status }));
 
 			const error = await rejectedBy(settled, UploadVerificationFailedError);
 
@@ -170,7 +250,7 @@ describe('settleCommitSocket', () => {
 				status: error.status
 			}).toStrictEqual({
 				name: 'UploadVerificationFailedError',
-				uploadId: 'upload-app',
+				uploadId,
 				status
 			});
 		}
@@ -178,11 +258,13 @@ describe('settleCommitSocket', () => {
 
 	it('rejects an error frame with the HTTP error it mirrors', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket);
+		const session = openSession(socket);
+		const settled = session.commit(target);
 
+		socket.emit('open');
 		socket.emit(
 			'message',
-			frame({ event: 'error', status: 507, message: 'over quota' })
+			frame({ ev: 'error', uploadId, status: 507, message: 'over quota' })
 		);
 
 		const error = await rejectedBy(settled, CupboardHttpError);
@@ -196,15 +278,16 @@ describe('settleCommitSocket', () => {
 		}).toStrictEqual({
 			name: 'CupboardHttpError',
 			method: 'GET',
-			path: '/uploads/upload-app/commit',
+			path,
 			status: 507,
 			body: 'over quota'
 		});
 	});
 
-	it('rejects a refused upgrade with the response status and body', async () => {
+	it('fails every commit when the upgrade is refused', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket);
+		const session = openSession(socket);
+		const settled = session.commit(target);
 		const refusal = new FakeUpgradeFailure(401);
 
 		socket.emit('unexpected-response', {}, refusal);
@@ -222,53 +305,53 @@ describe('settleCommitSocket', () => {
 		}).toStrictEqual({
 			name: 'CupboardHttpError',
 			method: 'GET',
-			path: '/uploads/upload-app/commit',
+			path,
 			status: 401,
 			body: 'Missing bearer token'
 		});
 	});
 
-	it('rejects when the socket closes before the commit settles', async () => {
+	it('fails every outstanding commit when the socket closes early', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket);
+		const session = openSession(socket);
+		const settled = session.commit(target);
 
+		socket.emit('open');
 		socket.emit('close', 1006);
 
 		const error = await rejectedBy(settled, CommitSocketProtocolError);
 
-		expect({
-			name: error.name,
-			path: error.path
-		}).toStrictEqual({
+		expect({ name: error.name, path: error.path }).toStrictEqual({
 			name: 'CommitSocketProtocolError',
-			path: '/uploads/upload-app/commit'
+			path
 		});
 	});
 
 	it('rejects an unparseable frame as a protocol error', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket);
+		const session = openSession(socket);
+		const settled = session.commit(target);
 
+		socket.emit('open');
 		socket.emit('message', 'not json');
 
 		const error = await rejectedBy(settled, CommitSocketProtocolError);
 
-		expect({
-			name: error.name,
-			path: error.path
-		}).toStrictEqual({
+		expect({ name: error.name, path: error.path }).toStrictEqual({
 			name: 'CommitSocketProtocolError',
-			path: '/uploads/upload-app/commit'
+			path
 		});
 	});
 
 	it('times out a parked upload after the wait deadline', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket, { timeoutSeconds: 30 });
+		const session = openSession(socket, { timeoutSeconds: 30 });
+		const settled = session.commit(target);
 
+		socket.emit('open');
 		socket.emit(
 			'message',
-			frame({ event: 'deferred', storePathHash, narHash })
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
 		const rejection = rejectedBy(settled, UploadWaitTimeoutError);
 		await vi.advanceTimersByTimeAsync(30_000);
@@ -283,12 +366,12 @@ describe('settleCommitSocket', () => {
 			pending: 1,
 			timeoutSeconds: 30
 		});
-		expect(socket.closed).toBe(true);
 	});
 
 	it('keeps the socket alive with pings and ignores the pong replies', async () => {
 		const socket = new FakeCommitSocket();
-		const settled = settle(socket, { keepaliveMs: 1000 });
+		const session = openSession(socket, { keepaliveMs: 1000 });
+		const settled = session.commit(target);
 
 		socket.emit('open');
 		await vi.advanceTimersByTimeAsync(2000);
@@ -297,7 +380,8 @@ describe('settleCommitSocket', () => {
 		socket.emit(
 			'message',
 			frame({
-				event: 'result',
+				ev: 'settled',
+				uploadId,
 				response: { storePathHash, narHash, status: 'committed' }
 			})
 		);
@@ -307,13 +391,14 @@ describe('settleCommitSocket', () => {
 			narHash,
 			status: 'committed'
 		});
-		expect(socket.sent).toStrictEqual(['ping', 'ping']);
+		expect(socket.sent).toStrictEqual([commitOp(uploadId), 'ping', 'ping']);
 	});
 
 	it('rejects and closes the socket when the signal aborts', async () => {
 		const socket = new FakeCommitSocket();
 		const controller = new AbortController();
-		const settled = settle(socket, { signal: controller.signal });
+		const session = openSession(socket, { signal: controller.signal });
+		const settled = session.commit(target);
 
 		controller.abort();
 

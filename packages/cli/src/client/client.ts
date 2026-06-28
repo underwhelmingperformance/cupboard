@@ -30,8 +30,9 @@ import {
 } from '../errors.ts';
 
 import {
+	type CommitSession,
 	type CommitSocketConnect,
-	settleCommitSocket
+	runCommitSession
 } from './commit-socket.ts';
 import {
 	type AccessCredential,
@@ -124,6 +125,25 @@ export class CupboardClient {
 		return url;
 	}
 
+	private connectCommitSession(
+		bearer: string | undefined,
+		options: CommitOptions
+	): CommitSession {
+		const path = this.selectorScoped('/commit');
+
+		return runCommitSession(
+			this.connectSocket,
+			this.socketUrl(path),
+			bearerHeaders(bearer),
+			{
+				path,
+				wait: options.wait ?? true,
+				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
+				signal: this.signal
+			}
+		);
+	}
+
 	private async postTokenForm(
 		form: Readonly<Record<string, string>>
 	): Promise<Response> {
@@ -192,10 +212,23 @@ export class CupboardClient {
 	}
 
 	/**
-	 * Commits an upload over the commit WebSocket. The upgrade request carries
-	 * the write token; a deferred upload parks on the socket for the server's
-	 * verification verdict, or returns `pending` straight away when `wait` is
-	 * off.
+	 * Opens a commit session over one WebSocket. The upgrade request carries the
+	 * write token; every path in the push commits over the returned session, and
+	 * a deferred upload parks on the same socket for the server's verification
+	 * verdict (or resolves `pending` straight away when `wait` is off).
+	 */
+	async openCommitSession(
+		token: AccessCredential,
+		options: CommitOptions = {}
+	): Promise<CommitSession> {
+		throwIfAborted(this.signal);
+
+		return this.connectCommitSession(await resolveBearer(token), options);
+	}
+
+	/**
+	 * Commits a single upload over its own session. Used to re-drive one path that
+	 * a push had to renegotiate; the bulk push commits over a shared session.
 	 */
 	async commit(
 		token: AccessCredential,
@@ -204,20 +237,17 @@ export class CupboardClient {
 	): Promise<CommitResponse> {
 		throwIfAborted(this.signal);
 
-		const path = this.selectorScoped(`/uploads/${target.uploadId}/commit`);
-		const settle = (bearer: string | undefined): Promise<CommitResponse> =>
-			settleCommitSocket(
-				this.connectSocket(this.socketUrl(path), bearerHeaders(bearer)),
-				{
-					path,
-					uploadId: target.uploadId,
-					storePathHash: target.storePathHash,
-					narHash: target.narHash,
-					wait: options.wait ?? true,
-					timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
-					signal: this.signal
-				}
-			);
+		const settle = async (
+			bearer: string | undefined
+		): Promise<CommitResponse> => {
+			const session = this.connectCommitSession(bearer, options);
+
+			try {
+				return await session.commit(target);
+			} finally {
+				session.close();
+			}
+		};
 
 		try {
 			return await settle(await resolveBearer(token));

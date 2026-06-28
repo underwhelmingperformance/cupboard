@@ -46,6 +46,8 @@ export function pushClientFor(
 		uploadBlob: (upload) => raw.uploadBlob(upload),
 		commit: (target, commitOptions) =>
 			raw.commit(credential, target, commitOptions),
+		openCommitSession: (commitOptions) =>
+			raw.openCommitSession(credential, commitOptions),
 		negotiateAttestations: (body) =>
 			rpc.attestations.negotiate({ cacheName, ...body }),
 		prepareAttestation: (uploadId) =>

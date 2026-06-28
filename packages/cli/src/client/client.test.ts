@@ -1,6 +1,6 @@
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
-import type { CommitSocketFrame } from '@cupboard/protocol/upload';
+import type { CommitSessionFrame } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -273,7 +273,7 @@ function commitClient(
 	return { client, connections: () => connections };
 }
 
-function sendFrame(socket: FakeCommitSocket, frame: CommitSocketFrame): void {
+function sendFrame(socket: FakeCommitSocket, frame: CommitSessionFrame): void {
 	socket.emit('message', JSON.stringify(frame));
 }
 
@@ -292,7 +292,7 @@ describe('CupboardClient.commit', () => {
 	it('commits over a wss socket carrying the bearer token on the upgrade', async () => {
 		const { client, connections } = commitClient([
 			(socket) => {
-				sendFrame(socket, { event: 'result', response });
+				sendFrame(socket, { ev: 'settled', uploadId: 'upload-app', response });
 			}
 		]);
 
@@ -302,7 +302,7 @@ describe('CupboardClient.commit', () => {
 			result: response,
 			connections: [
 				{
-					url: 'wss://cupboard.test/cache/_default/uploads/upload-app/commit',
+					url: 'wss://cupboard.test/cache/_default/commit',
 					authorization: 'Bearer write-token'
 				}
 			]
@@ -313,7 +313,11 @@ describe('CupboardClient.commit', () => {
 		const { client, connections } = commitClient(
 			[
 				(socket) => {
-					sendFrame(socket, { event: 'result', response });
+					sendFrame(socket, {
+						ev: 'settled',
+						uploadId: 'upload-build',
+						response
+					});
 				}
 			],
 			'/cache/builds'
@@ -323,7 +327,7 @@ describe('CupboardClient.commit', () => {
 
 		expect(connections()).toStrictEqual([
 			{
-				url: 'wss://cupboard.test/cache/builds/uploads/upload-build/commit',
+				url: 'wss://cupboard.test/cache/builds/commit',
 				authorization: 'Bearer write-token'
 			}
 		]);
@@ -337,7 +341,7 @@ describe('CupboardClient.commit', () => {
 				refusal.emit('end');
 			},
 			(socket) => {
-				sendFrame(socket, { event: 'result', response });
+				sendFrame(socket, { ev: 'settled', uploadId: 'upload-app', response });
 			}
 		]);
 		const provider: TokenProvider = {
@@ -351,11 +355,11 @@ describe('CupboardClient.commit', () => {
 			result: response,
 			connections: [
 				{
-					url: 'wss://cupboard.test/cache/_default/uploads/upload-app/commit',
+					url: 'wss://cupboard.test/cache/_default/commit',
 					authorization: 'Bearer stale-token'
 				},
 				{
-					url: 'wss://cupboard.test/cache/_default/uploads/upload-app/commit',
+					url: 'wss://cupboard.test/cache/_default/commit',
 					authorization: 'Bearer fresh-token'
 				}
 			]
