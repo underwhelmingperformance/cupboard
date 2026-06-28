@@ -1,7 +1,7 @@
 import { ORPCError } from '@orpc/client';
 import { ValidationError } from '@orpc/contract';
 import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { CliAbortError, CupboardHttpError } from '../errors.ts';
@@ -49,6 +49,21 @@ async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 
 	return rejected;
 }
+
+const internalError = (): Response =>
+	Response.json(
+		{
+			defined: false,
+			code: 'INTERNAL_SERVER_ERROR',
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			message: 'Internal server error',
+			data: undefined
+		},
+		{
+			status: StatusCodes.INTERNAL_SERVER_ERROR,
+			headers: { 'cf-ray': 'a113b23c78faf6c2' }
+		}
+	);
 
 describe('tenantRpc', () => {
 	it('keeps the tenant path prefix and sends the bound credential', async () => {
@@ -143,49 +158,73 @@ describe('tenantRpc', () => {
 		]);
 	});
 
-	it('surfaces the ray id and decoded message on an unmapped server error', async () => {
-		const { fetcher } = capturingFetcher([
-			() =>
-				Response.json(
-					{
-						defined: false,
-						code: 'INTERNAL_SERVER_ERROR',
-						status: StatusCodes.INTERNAL_SERVER_ERROR,
-						message: 'Internal server error',
-						data: undefined
-					},
-					{
-						status: StatusCodes.INTERNAL_SERVER_ERROR,
-						headers: { 'cf-ray': 'a113b23c78faf6c2' }
-					}
-				)
-		]);
-		const rpc = tenantRpc('https://cupboard.test/t/acme', {
-			credential: 'admin-token',
-			fetcher
-		});
+	it('retries an unmapped 5xx and returns the eventual success', async () => {
+		vi.useFakeTimers();
 
-		const rejected = await rejectedBy(() => rpc.caches.list());
-
-		expect(rejected).toBeInstanceOf(CupboardHttpError);
-
-		if (rejected instanceof CupboardHttpError) {
-			expect({
-				method: rejected.method,
-				path: rejected.path,
-				status: rejected.status,
-				body: rejected.body,
-				ray: rejected.ray,
-				message: rejected.message
-			}).toStrictEqual({
-				method: 'GET',
-				path: '/t/acme/caches',
-				status: StatusCodes.INTERNAL_SERVER_ERROR,
-				body: 'Internal server error',
-				ray: 'a113b23c78faf6c2',
-				message:
-					'GET /t/acme/caches failed with 500: Internal server error (Cloudflare ray a113b23c78faf6c2)'
+		try {
+			const { fetcher, captured } = capturingFetcher([
+				internalError,
+				internalError,
+				() => Response.json({ caches: [] })
+			]);
+			const rpc = tenantRpc('https://cupboard.test/t/acme', {
+				credential: 'admin-token',
+				fetcher
 			});
+
+			const pending = rpc.caches.list();
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect({
+				listed: await pending,
+				attempts: captured.length
+			}).toStrictEqual({ listed: { caches: [] }, attempts: 3 });
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('surfaces the ray id and decoded message once the retry budget is spent', async () => {
+		vi.useFakeTimers();
+
+		try {
+			// One attempt plus the four retries: every one fails, so the error
+			// surfaces rather than retrying forever.
+			const { fetcher, captured } = capturingFetcher(
+				Array.from({ length: 5 }, () => internalError)
+			);
+			const rpc = tenantRpc('https://cupboard.test/t/acme', {
+				credential: 'admin-token',
+				fetcher
+			});
+
+			const pending = rejectedBy(() => rpc.caches.list());
+			await vi.advanceTimersByTimeAsync(60_000);
+			const rejected = await pending;
+
+			expect(rejected).toBeInstanceOf(CupboardHttpError);
+			expect(captured.length).toBe(5);
+
+			if (rejected instanceof CupboardHttpError) {
+				expect({
+					method: rejected.method,
+					path: rejected.path,
+					status: rejected.status,
+					body: rejected.body,
+					ray: rejected.ray,
+					message: rejected.message
+				}).toStrictEqual({
+					method: 'GET',
+					path: '/t/acme/caches',
+					status: StatusCodes.INTERNAL_SERVER_ERROR,
+					body: 'Internal server error',
+					ray: 'a113b23c78faf6c2',
+					message:
+						'GET /t/acme/caches failed with 500: Internal server error (Cloudflare ray a113b23c78faf6c2)'
+				});
+			}
+		} finally {
+			vi.useRealTimers();
 		}
 	});
 
