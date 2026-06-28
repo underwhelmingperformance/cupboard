@@ -741,6 +741,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	// Asks for another verification pass, through the same single-flight as a
+	// deferring commit, so a continuation from the queue consumer and a fresh
+	// deferral collapse onto one message that claims each row once.
+	async requestVerificationPass(): Promise<void> {
+		await this.initialise();
+		await this.commitPipeline.requestVerification(this.context.requireTenant());
+	}
+
 	async recordVerification(
 		uploadId: string,
 		verification: NarVerification

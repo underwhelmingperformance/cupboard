@@ -676,19 +676,17 @@ export async function verifyTenant(
 		}
 	);
 
-	// A push that defers more rows than one batch holds coalesces onto a single
-	// request, so the rows past the first batch would otherwise wait for the cron.
-	// A full batch means more are pending; chain another pass to drain them now.
-	// Requiring some progress first stops a batch that wholly fails to read (a
-	// transient fault that leaves every row pending) from spinning.
+	// One verify message can coalesce a whole push's deferrals, and a pass claims
+	// a bounded batch, so a push larger than one batch leaves rows for the cron. A
+	// full batch means more are pending; chain another pass to drain them now,
+	// through the object's single-flight so this continuation and a concurrent
+	// deferral collapse onto one message that claims each row once. Continue only
+	// after real progress, so a batch of pure read failures (a transient fault
+	// leaving every row pending) backs off to the cron.
 	const isProgressed = results.some((result) => result.status === 'fulfilled');
 
 	if (claims.length === batchSize && isProgressed) {
-		const message: MaintenanceQueueMessage = {
-			kind: 'tenant-verify',
-			tenant: id
-		};
-		await env.MAINTENANCE_QUEUE.send(message);
+		await server.requestVerificationPass();
 	}
 }
 
