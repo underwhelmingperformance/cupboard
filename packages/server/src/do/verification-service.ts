@@ -1,3 +1,4 @@
+import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import {
 	type ParsedUploadPathMetadata,
@@ -17,6 +18,20 @@ import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { parseStoredUploadMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
+
+/**
+ * A deferred upload claimed for verification, carrying just what the queue
+ * consumer needs to fetch and decode the staging object off the DO thread. A
+ * `reuse` row's bytes are the shared canonical object, already verified when it
+ * was first promoted, so the consumer skips the decode for it.
+ */
+export interface PendingVerification {
+	readonly uploadId: string;
+	readonly r2Key: string;
+	readonly narHash: NixSha256HashString;
+	readonly narSize: number;
+	readonly reuse: boolean;
+}
 
 export class VerificationService {
 	constructor(
@@ -40,6 +55,10 @@ export class VerificationService {
 		}
 	}
 
+	// The on-DO verify path, the hourly-cron backstop: reserve the row, decode and
+	// hash-check the staging bytes here, then commit. The prompt path runs the
+	// decode in the queue consumer off the DO thread and reaches `commitVerified`
+	// through `recordVerification` instead.
 	private async verifyAndCommitPending(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<void> {
@@ -48,26 +67,11 @@ export class VerificationService {
 			pending.metadataJson
 		);
 
-		// Reserve the row before verifying: a fresh deferred upload gets its first
-		// row, a crashed or re-driven commit finds its own (`mine`). A different
-		// version holding the path (`lost`) means this upload can never own it — drop
-		// it and reclaim its staging bytes.
-		const reserved = await this.commitPipeline.reserveNarInfoRow(
-			pending.cache,
-			metadata
-		);
+		const reserved = await this.reservePendingRow(pending, metadata);
 
-		if (reserved.kind === 'lost') {
-			await this.uploadState.clearPendingUploadAndStaging(
-				pending.id,
-				pending.r2Key,
-				metadata.narHash
-			);
-			this.notifyWaiters(pending.id, 'absent');
+		if (reserved === undefined) {
 			return;
 		}
-
-		const { generation } = reserved;
 
 		// A returned `{ok:false}` (a hash/size mismatch or an undecodable frame) is a
 		// definitive content failure that reclaims the reserved row. A thrown error
@@ -86,13 +90,54 @@ export class VerificationService {
 			);
 		} catch (error) {
 			if (error instanceof UploadedObjectNotFoundError) {
-				await this.failReservedUpload(pending, metadata, generation);
+				await this.failReservedUpload(pending, metadata, reserved);
 				return;
 			}
 
 			throw error;
 		}
 
+		await this.commitVerified(pending, metadata, reserved, verification);
+	}
+
+	// Reserves the narinfo row before committing a verified upload: a fresh deferred
+	// upload gets its first row, a crashed or re-driven commit finds its own
+	// (`mine`). A different version holding the path (`lost`) means this upload can
+	// never own it, so its row and staging bytes are dropped and waiters told
+	// `absent`; the caller stops. Returns the reserved generation, or undefined when
+	// the path was lost.
+	private async reservePendingRow(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: ParsedUploadPathMetadata
+	): Promise<number | undefined> {
+		const reserved = await this.commitPipeline.reserveNarInfoRow(
+			pending.cache,
+			metadata
+		);
+
+		if (reserved.kind === 'lost') {
+			await this.uploadState.clearPendingUploadAndStaging(
+				pending.id,
+				pending.r2Key,
+				metadata.narHash
+			);
+			this.notifyWaiters(pending.id, 'absent');
+			return undefined;
+		}
+
+		return reserved.generation;
+	}
+
+	// The post-verify half of the saga, shared by the on-DO cron path and the
+	// worker-driven `recordVerification`: a failed verdict reclaims the reserved
+	// row, a good one promotes the staging bytes into the shared CAS and
+	// materialises the servable object.
+	private async commitVerified(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: ParsedUploadPathMetadata,
+		generation: number,
+		verification: NarVerification
+	): Promise<void> {
 		if (!verification.ok) {
 			await this.failReservedUpload(pending, metadata, generation);
 			return;
@@ -409,5 +454,99 @@ export class VerificationService {
 				continue;
 			}
 		}
+	}
+
+	// Lists deferred uploads for the queue consumer to verify off the DO thread,
+	// the read-only first half of the prompt verify path. The consumer fetches and
+	// decodes each staging object, then calls `recordVerification`. A reuse row is
+	// flagged so the consumer skips its decode.
+	listPendingForVerify(limit: number): PendingVerification[] {
+		const pendings = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(
+				or(
+					eq(schema.pendingUploads.verdict, 'pending'),
+					eq(schema.pendingUploads.verdict, 'committing')
+				)
+			)
+			.orderBy(asc(schema.pendingUploads.id))
+			.limit(limit)
+			.all();
+
+		return pendings.map((pending) => {
+			const metadata = parseStoredUploadMetadata(
+				pending.id,
+				pending.metadataJson
+			);
+
+			return {
+				uploadId: pending.id,
+				r2Key: pending.r2Key,
+				narHash: metadata.narHash,
+				narSize: metadata.narSize,
+				reuse: pending.r2Key === narObjectKey(metadata.narHash)
+			};
+		});
+	}
+
+	// Commits a deferred upload the queue consumer has already verified off the DO
+	// thread, running the same reserve→promote→materialise path the on-DO pass uses
+	// with the verdict passed in. A vanished row or a lost race is handled
+	// idempotently, so a re-driven verify (the consumer may run a row twice) is
+	// safe.
+	async recordVerification(
+		uploadId: string,
+		verification: NarVerification
+	): Promise<void> {
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		if (pending === undefined) {
+			return;
+		}
+
+		const metadata = parseStoredUploadMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+		const generation = await this.reservePendingRow(pending, metadata);
+
+		if (generation === undefined) {
+			return;
+		}
+
+		await this.commitVerified(pending, metadata, generation, verification);
+	}
+
+	// Records a terminal `mismatch` for a deferred upload whose staging object the
+	// queue consumer found definitively gone, so its waiters are answered rather
+	// than left parked until the commit timeout.
+	async recordMissingObject(uploadId: string): Promise<void> {
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		if (pending === undefined) {
+			return;
+		}
+
+		const metadata = parseStoredUploadMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+
+		await this.uploadState.markUploadTerminal(
+			pending.id,
+			pending.r2Key,
+			metadata.narHash,
+			'mismatch'
+		);
+		this.notifyWaiters(pending.id, 'mismatch');
 	}
 }

@@ -8,6 +8,7 @@ import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
+import { verifyDecompressedNar } from '../blob/nar-verify.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	deleteTenantMember,
@@ -22,7 +23,7 @@ import {
 	type DemoteTarget,
 	type NarInfoDemoter
 } from '../do/blob-reaper-service.ts';
-import { blobReaperBatchSize } from '../http/http.ts';
+import { blobReaperBatchSize, verificationBatchSize } from '../http/http.ts';
 
 import { tenantServer } from './durable-object.ts';
 
@@ -629,8 +630,47 @@ function maintainTenant(env: Env, id: TenantId): Promise<void> {
 	);
 }
 
-function verifyTenant(env: Env, id: TenantId): Promise<void> {
-	return tenantServer(env, id).runVerification();
+// How many staging objects the queue consumer decodes at once for one tenant.
+// Bounded so a single tenant's verify pass does not monopolise the consumer's
+// isolate; the heavy decode is off the DO thread regardless.
+const verifyDecodeConcurrency = 4;
+
+// The prompt verify path. The CPU-bound NAR decode is the work that saturated
+// the single DO thread, so it runs here in the queue consumer instead: claim a
+// batch of deferred uploads (a read on the DO), fetch and decode each staging
+// object off the DO thread, then report each verdict back so only the state
+// transitions run on the single writer. A transient fetch/decode fault leaves
+// the row for the next pass (the consumer simply does not report it); a
+// definitively missing staging object fails it terminally.
+async function verifyTenant(env: Env, id: TenantId): Promise<void> {
+	const server = tenantServer(env, id);
+	const claims = await server.claimPendingVerifications(verificationBatchSize);
+
+	await settleWithConcurrency(
+		claims,
+		verifyDecodeConcurrency,
+		async (claim) => {
+			if (claim.reuse) {
+				await server.recordVerification(claim.uploadId, { ok: true });
+				return;
+			}
+
+			const object = await env.BLOBS.get(claim.r2Key);
+
+			if (object === null) {
+				await server.recordMissingObject(claim.uploadId);
+				return;
+			}
+
+			// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed only
+			// as `ReadableStream`; narrow it to the byte stream the verifier expects.
+			const verification = await verifyDecompressedNar(
+				object.body as ReadableStream<Uint8Array>,
+				{ narHash: claim.narHash, narSize: claim.narSize }
+			);
+			await server.recordVerification(claim.uploadId, verification);
+		}
+	);
 }
 
 async function executeTenantMaintenanceMessage(

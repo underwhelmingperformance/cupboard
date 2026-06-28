@@ -1030,6 +1030,75 @@ describe('upload flow', () => {
 		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
 	});
 
+	it('claims a deferred upload, then records its verdict to servable', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+
+		// The queue consumer claims the deferred upload (a read on the DO), decodes
+		// the bytes off the DO thread, then reports the verdict back.
+		expect(await currentServer().claimPendingVerifications(10)).toStrictEqual([
+			{
+				uploadId: upload.uploadId,
+				r2Key: upload.r2Key,
+				narHash: metadata.narHash,
+				narSize: metadata.narSize,
+				reuse: false
+			}
+		]);
+
+		await currentServer().recordVerification(upload.uploadId, { ok: true });
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+		const narInfo = await fetchNarInfo(metadata.storePathHash);
+		expect(narInfo.narHash.toString()).toBe(metadata.narHash);
+	});
+
+	it('records a terminal mismatch verdict from an off-DO verification', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+
+		await currentServer().recordVerification(upload.uploadId, {
+			ok: false,
+			reason: 'nar-hash-mismatch',
+			actualNarHash: metadata.narHash
+		});
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+		await expect(
+			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
+		).resolves.toBeNull();
+	});
+
+	it('records a terminal mismatch when the staging object has vanished', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+
+		await currentServer().recordMissingObject(upload.uploadId);
+
+		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+	});
+
 	it('does not strand a reserved row when an in-flight commit is retried', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

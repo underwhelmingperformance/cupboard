@@ -17,6 +17,7 @@ import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
 
 import migrations from '../../drizzle/migrations.js';
+import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
 import {
 	CommitUpgradeRequiredError,
@@ -69,7 +70,10 @@ import {
 import { TokenExchangeService } from './token-exchange-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService } from './uploads-service.ts';
-import { VerificationService } from './verification-service.ts';
+import {
+	type PendingVerification,
+	VerificationService
+} from './verification-service.ts';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -650,6 +654,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
+	// The prompt verify path runs the CPU-bound NAR decode in the queue consumer,
+	// off the DO thread. The consumer claims a batch of pending uploads here (a
+	// read), decodes each staging object itself, then reports each verdict back
+	// through `recordVerification` / `recordMissingObject` so only the state
+	// transitions run on the single writer.
+	async claimPendingVerifications(
+		limit: number
+	): Promise<PendingVerification[]> {
+		await this.initialise();
+		return this.metered('claim-verifications', () =>
+			Promise.resolve(this.verification.listPendingForVerify(limit))
+		);
+	}
+
+	async recordVerification(
+		uploadId: string,
+		verification: NarVerification
+	): Promise<void> {
+		await this.initialise();
+		await this.metered('record-verification', () =>
+			this.verification.recordVerification(uploadId, verification)
+		);
+	}
+
+	async recordMissingObject(uploadId: string): Promise<void> {
+		await this.initialise();
+		await this.metered('record-missing-object', () =>
+			this.verification.recordMissingObject(uploadId)
+		);
+	}
+
 	async runAuthKeyRetirement(): Promise<void> {
 		await this.initialise();
 		await this.metered('auth-key-retirement', () =>
@@ -848,6 +883,7 @@ function logRequestFinished(
 // a union so a label cannot drift from its entrypoint or be mistyped.
 type MeteredMethod =
 	| 'auth-key-retirement'
+	| 'claim-verifications'
 	| 'commit'
 	| 'configure'
 	| 'demote-attestation-references'
@@ -855,6 +891,8 @@ type MeteredMethod =
 	| 'garbage-collection'
 	| 'initialise'
 	| 'offboard'
+	| 'record-missing-object'
+	| 'record-verification'
 	| 'verification';
 
 // The same line for a direct RPC entrypoint (the maintenance sweeps, configure,
