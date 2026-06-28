@@ -1,10 +1,10 @@
-import type { CommitSocketFrame } from '@cupboard/protocol/upload';
+import type { CommitSessionFrame } from '@cupboard/protocol/upload';
 
-// One encoder for every frame the commit socket carries, so the protocol
+// One encoder for every frame the commit session carries, so the protocol
 // module's schema stays the single source of the wire shape.
-export function sendCommitFrame(
+export function sendCommitSessionFrame(
 	socket: WebSocket,
-	frame: CommitSocketFrame
+	frame: CommitSessionFrame
 ): void {
 	socket.send(JSON.stringify(frame));
 }

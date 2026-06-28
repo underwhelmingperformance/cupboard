@@ -9,12 +9,14 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
+import { commitSessionRequestSchema } from '@cupboard/protocol/upload';
 import { DurableObject } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { migrate } from 'drizzle-orm/durable-sqlite/migrator';
 import { Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
+import { z } from 'zod';
 
 import migrations from '../../drizzle/migrations.js';
 import { type NarVerification } from '../blob/nar-verify.ts';
@@ -45,7 +47,7 @@ import { AuthKeysService } from './auth-keys-service.ts';
 import { type DemoteTarget } from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
-import { sendCommitFrame } from './commit-socket.ts';
+import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
 import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
@@ -68,12 +70,20 @@ import {
 	TenantIdentityService
 } from './tenant-identity-service.ts';
 import { TokenExchangeService } from './token-exchange-service.ts';
+import { parseStoredUploadMetadata } from './upload-metadata.ts';
 import { UploadStateService } from './upload-state-service.ts';
-import { UploadsService } from './uploads-service.ts';
+import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
 	type PendingVerification,
 	VerificationService
 } from './verification-service.ts';
+
+// What a commit session socket carries across a hibernation wake: the cache it
+// was opened against and the id the verify pass routes its verdicts to.
+const commitSessionAttachmentSchema = z.object({
+	cache: z.string(),
+	sessionId: z.string()
+});
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -279,14 +289,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// answers with the terminal verdict.
 		this.app.on(
 			'GET',
-			['/uploads/:id/commit', '/cache/:cacheName/uploads/:id/commit'],
-			this.commitGuard(),
-			(context) =>
-				this.commitSocket(
-					context.req.raw,
-					context.get('cache'),
-					context.req.param('id')
-				)
+			['/commit', '/cache/:cacheName/commit'],
+			this.commitSessionGuard(),
+			(context) => this.commitSession(context.req.raw, context.get('cache'))
 		);
 		// The serve routes stream stored objects with conditional-request
 		// handling, so they keep their Response-shaped handlers.
@@ -315,16 +320,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// Upgrades a commit request, parks the socket through the hibernation API
-	// (tagged by upload id, so verification can find every waiter even after
-	// this object was evicted), and runs the commit transition once the 101 is
-	// on its way. The scoped('write') middleware authenticates the upgrade
-	// request as plain HTTP before any socket exists.
-	private commitSocket(
-		request: Request,
-		cache: string,
-		uploadId: string
-	): Response {
+	// Upgrades a push's single commit socket. The session is tagged with one id
+	// the verify pass routes verdicts to, and that id plus the cache are stored on
+	// the socket so the message handlers have them after a hibernation wake. The
+	// guard authenticates the upgrade as plain HTTP before any socket exists; each
+	// `commit` is authorised by the cache the session was opened against.
+	private commitSession(request: Request, cache: string): Response {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
 		}
@@ -332,54 +333,118 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const pair = new WebSocketPair();
 		const client = pair[0];
 		const server = pair[1];
+		const sessionId = crypto.randomUUID();
 
-		this.ctx.acceptWebSocket(server, [uploadId]);
-		this.ctx.waitUntil(this.runSocketCommit(server, cache, uploadId));
+		this.ctx.acceptWebSocket(server, [sessionId]);
+		server.serializeAttachment(
+			commitSessionAttachmentSchema.parse({ cache, sessionId })
+		);
 
 		return new Response(undefined, { status: 101, webSocket: client });
 	}
 
-	private async runSocketCommit(
+	// Commits one upload over the session and replies with a per-id frame. The
+	// socket stays open: a deferred upload's verdict arrives later over the same
+	// connection, and other ids keep committing. An error fails just this id.
+	private async runSessionCommit(
 		socket: WebSocket,
 		cache: string,
+		sessionId: string,
 		uploadId: string
 	): Promise<void> {
 		try {
-			// The commit runs in `waitUntil` after the upgrade response, outside the
-			// `fetch` cost meter, so it is metered here directly. The commit is the
-			// row-heaviest write, the operation that breached the budget.
+			// Record the session before the commit can defer, so a verdict reached
+			// before this returns still routes here.
+			this.uploadState.attachSession(uploadId, sessionId);
+
 			const outcome = await this.metered('commit', () =>
 				this.afterMutation(() => this.commitPipeline.commit(cache, uploadId))
 			);
 
 			if (outcome.kind === 'settled') {
-				sendCommitFrame(socket, {
-					event: 'result',
+				sendCommitSessionFrame(socket, {
+					ev: 'settled',
+					uploadId,
 					response: outcome.response
 				});
-				socket.close(1000, 'settled');
 
 				return;
 			}
 
-			sendCommitFrame(socket, {
-				event: 'deferred',
+			sendCommitSessionFrame(socket, {
+				ev: 'deferred',
+				uploadId,
 				storePathHash: outcome.storePathHash,
 				narHash: outcome.narHash
 			});
-			// The socket stays parked; verification closes it with the verdict.
 		} catch (error) {
 			// A ServerHttpError carries a client-facing message; anything else is an
 			// internal fault whose detail must not leak over the socket, matching the
 			// platform 500 the HTTP error handler rethrows to.
 			const isKnown = error instanceof ServerHttpError;
 
-			sendCommitFrame(socket, {
-				event: 'error',
+			sendCommitSessionFrame(socket, {
+				ev: 'error',
+				uploadId,
 				status: isKnown ? error.status : StatusCodes.INTERNAL_SERVER_ERROR,
 				message: isKnown ? error.message : 'internal error'
 			});
-			socket.close(1000, 'failed');
+		}
+	}
+
+	// Re-attaches a reconnected session to ids still outstanding and replays each
+	// one's current durable state: a still-pending upload re-emits `deferred` so
+	// the client re-arms its wait, a terminal row replays its verdict, and a row
+	// already cleared was committed (every clear path leaves a servable path), so
+	// it replays `servable`.
+	private replaySubscribe(
+		socket: WebSocket,
+		cache: string,
+		sessionId: string,
+		uploadIds: readonly string[]
+	): void {
+		for (const uploadId of uploadIds) {
+			const row = this.context.db
+				.select()
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.get();
+
+			if (row === undefined) {
+				sendCommitSessionFrame(socket, {
+					ev: 'verdict',
+					uploadId,
+					status: 'servable'
+				});
+				continue;
+			}
+
+			if (row.cache !== cache) {
+				sendCommitSessionFrame(socket, {
+					ev: 'error',
+					uploadId,
+					status: StatusCodes.NOT_FOUND,
+					message: 'unknown upload'
+				});
+				continue;
+			}
+
+			// Re-point the row at this socket so a verdict from here on routes to it.
+			this.uploadState.attachSession(uploadId, sessionId);
+			const status = uploadStatusOf(row);
+
+			if (status === 'pending') {
+				const metadata = parseStoredUploadMetadata(uploadId, row.metadataJson);
+				sendCommitSessionFrame(socket, {
+					ev: 'deferred',
+					uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				});
+				continue;
+			}
+
+			sendCommitSessionFrame(socket, { ev: 'verdict', uploadId, status });
 		}
 	}
 
@@ -406,18 +471,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		};
 	}
 
-	// Authorises the commit WebSocket, the one write route outside the contract:
-	// `upload:commit` against the cache the pending upload was opened for, read
-	// from its row rather than the path.
-	private commitGuard() {
+	// Authorises the commit session, the one write route outside the contract:
+	// `upload:commit` against the cache the session is scoped to. Each `commit`
+	// frame then commits an id in that cache, and `commit(cache, uploadId)` fails
+	// an id whose row belongs to another cache, so the cache check covers every id.
+	private commitSessionGuard() {
 		return createMiddleware<TenantHonoEnv>(async (context, next) => {
 			const claims = await this.authKeys.authenticate(context.req.raw);
+			const cache = context.get('cache');
 
 			await authoriseRequest(
 				claims,
 				{ requires: 'upload:commit', resource: { cache: { pending: true } } },
-				{ id: context.req.param('id') },
-				(id) => this.pendingCache(id)
+				{ id: cache },
+				() => Promise.resolve(cache)
 			);
 
 			await next();
@@ -848,11 +915,43 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// The commit protocol is server-to-client: the only client frames are the
-	// keepalive pings the auto-response answers without waking this object, so
-	// anything that reaches the handler is a protocol violation.
-	webSocketMessage(socket: WebSocket): void {
-		socket.close(1002, 'unexpected message');
+	// A client frame on the commit session: a `commit` to settle one id or a
+	// `subscribe` to re-attach a reconnected socket to ids still outstanding.
+	// Keepalive pings never reach here; the auto-response answers them without
+	// waking this object. The cache and session id ride on the socket so they
+	// survive a hibernation wake.
+	async webSocketMessage(
+		socket: WebSocket,
+		message: string | ArrayBuffer
+	): Promise<void> {
+		const attachment = commitSessionAttachmentSchema.safeParse(
+			socket.deserializeAttachment()
+		);
+
+		if (!attachment.success) {
+			socket.close(1011, 'missing session');
+			return;
+		}
+
+		const text =
+			typeof message === 'string' ? message : new TextDecoder().decode(message);
+		let request;
+
+		try {
+			request = commitSessionRequestSchema.parse(JSON.parse(text));
+		} catch {
+			socket.close(1002, 'invalid commit request');
+			return;
+		}
+
+		const { cache, sessionId } = attachment.data;
+
+		if (request.op === 'commit') {
+			await this.runSessionCommit(socket, cache, sessionId, request.uploadId);
+			return;
+		}
+
+		this.replaySubscribe(socket, cache, sessionId, request.uploadIds);
 	}
 
 	// A waiter that hangs up needs no bookkeeping (the hibernation API drops it

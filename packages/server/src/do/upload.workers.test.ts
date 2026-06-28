@@ -69,6 +69,7 @@ import {
 	negotiateUploads,
 	negotiateViaWorker,
 	nixSha256Hash,
+	openCommitSession,
 	pendingUploadVerdict,
 	prepareUpload,
 	prepareUploadViaWorker,
@@ -94,6 +95,13 @@ import {
 	verifyNarInfoSignature,
 	workerFetch
 } from '../test-support.ts';
+
+function byUploadId(
+	left: { readonly uploadId: string },
+	right: { readonly uploadId: string }
+): number {
+	return left.uploadId.localeCompare(right.uploadId);
+}
 
 function publicKeyShape(publicKey: string): {
 	readonly name: string;
@@ -345,7 +353,7 @@ describe('upload flow', () => {
 			},
 			method: 'POST'
 		});
-		const commit = await fetchPath('/uploads/not-real/commit', {
+		const commit = await fetchPath('/cache/_default/commit', {
 			headers: { upgrade: 'websocket' }
 		});
 
@@ -1146,6 +1154,123 @@ describe('upload flow', () => {
 		expect(presigned.uploadHeaders['x-amz-checksum-sha256']).toBe(
 			fileHash.digestBase64()
 		);
+	});
+
+	it('multiplexes commits for many uploads over one session socket', async () => {
+		const token = await initialise();
+		const metaA = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			name: 'a',
+			narHash: nixSha256Hash('a'),
+			fileSize: narBytes.byteLength
+		});
+		const metaB = uploadMetadata({
+			storePathHash: 'b'.repeat(32),
+			name: 'b',
+			narHash: nixSha256Hash('b'),
+			fileSize: narBytes.byteLength
+		});
+		const negotiated = await negotiateUploads(token, [metaA, metaB]);
+		const decisionFor = (storePathHash: string) => {
+			const decision = negotiated.uploads.find(
+				(candidate) => candidate.storePathHash === storePathHash
+			);
+
+			if (decision?.action !== 'upload') {
+				throw new Error(`expected an upload decision for ${storePathHash}`);
+			}
+
+			return decision;
+		};
+		const a = decisionFor(metaA.storePathHash);
+		const b = decisionFor(metaB.storePathHash);
+		await prepareUpload(token, a, metaA);
+		await putNarBytes(a.r2Key);
+		await prepareUpload(token, b, metaB);
+		await putNarBytes(b.r2Key);
+
+		// Both commits ride one socket and each gets its own per-id frame.
+		const session = await openCommitSession(token);
+		session.send({ op: 'commit', uploadId: a.uploadId });
+		session.send({ op: 'commit', uploadId: b.uploadId });
+		const frames = [await session.nextFrame(), await session.nextFrame()];
+		session.socket.close();
+
+		expect(
+			frames
+				.map((frame) => ({ ev: frame.ev, uploadId: frame.uploadId }))
+				.toSorted(byUploadId)
+		).toStrictEqual(
+			[
+				{ ev: 'deferred', uploadId: a.uploadId },
+				{ ev: 'deferred', uploadId: b.uploadId }
+			].toSorted(byUploadId)
+		);
+	});
+
+	it('replays a deferred upload to a reconnected session and routes its verdict there', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		// Commit on one session; it defers, then that socket drops.
+		const first = await openCommitSession(token);
+		first.send({ op: 'commit', uploadId: upload.uploadId });
+		const deferred = await first.nextFrame();
+		expect(deferred.ev).toBe('deferred');
+		first.socket.close();
+
+		// A reconnected session re-subscribes and is replayed the deferral.
+		const second = await openCommitSession(token);
+		second.send({ op: 'subscribe', uploadIds: [upload.uploadId] });
+		const replay = await second.nextFrame();
+		expect({ ev: replay.ev, uploadId: replay.uploadId }).toStrictEqual({
+			ev: 'deferred',
+			uploadId: upload.uploadId
+		});
+
+		// The verdict routes to the reconnected socket.
+		await currentServer().runVerification();
+		const verdict = await second.nextFrame();
+		second.socket.close();
+
+		if (verdict.ev !== 'verdict') {
+			throw new Error(`expected a verdict frame, got ${verdict.ev}`);
+		}
+
+		expect(verdict.status).toBe('servable');
+	});
+
+	it('replays a committed-and-cleared upload as servable', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await prepareUpload(token, upload, metadata);
+		await putNarBytes(upload.r2Key);
+
+		// Commit fully, so its pending row is cleared.
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		// A later subscribe to the cleared row replays servable: a cleared row is
+		// always a committed path.
+		const session = await openCommitSession(token);
+		session.send({ op: 'subscribe', uploadIds: [upload.uploadId] });
+		const replay = await session.nextFrame();
+		session.socket.close();
+
+		expect({ ev: replay.ev, uploadId: replay.uploadId }).toStrictEqual({
+			ev: 'verdict',
+			uploadId: upload.uploadId
+		});
 	});
 
 	it('does not strand a reserved row when an in-flight commit is retried', async () => {

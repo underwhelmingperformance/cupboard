@@ -47,7 +47,7 @@ type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
 // Maps a polled upload's durable verdict to the status a `push --wait` client reads.
 // An absent row is `absent`; a terminal verdict maps straight across; any in-flight
 // or not-yet-committed verdict (null, `pending`, `committing`) is `pending`.
-function uploadStatusOf(
+export function uploadStatusOf(
 	pending: undefined | { readonly verdict: PendingVerdict }
 ): UploadStatusResponse['status'] {
 	if (pending === undefined) {
