@@ -127,7 +127,7 @@ describe('runPush', () => {
 					uploads.push({
 						r2Key: upload.r2Key,
 						uploadUrl: upload.uploadUrl,
-						body: await collectReadableStream(upload.body),
+						body: await collectReadableStream(upload.body()),
 						contentLength: upload.contentLength,
 						headers: upload.headers
 					});
@@ -499,6 +499,9 @@ describe('runPush', () => {
 				},
 				uploadBlob(upload) {
 					uploadAttempts.push(upload.uploadUrl);
+					// The real client streams the body factory per attempt; invoke it so
+					// the re-read on the re-presigned retry is observed.
+					upload.body();
 
 					// The first presigned URL aged out in the prepare-to-upload gap; R2
 					// rejects the stale signature so the path must be re-presigned.
@@ -1023,7 +1026,7 @@ describe('runPush', () => {
 				async uploadBlob(upload) {
 					uploaded.push({
 						r2Key: upload.r2Key,
-						body: await collectReadableStream(upload.body),
+						body: await collectReadableStream(upload.body()),
 						contentLength: upload.contentLength,
 						headers: upload.headers
 					});
@@ -1172,7 +1175,7 @@ describe('runPush', () => {
 				async uploadBlob(upload) {
 					uploaded.push({
 						r2Key: upload.r2Key,
-						body: await collectReadableStream(upload.body),
+						body: await collectReadableStream(upload.body()),
 						contentLength: upload.contentLength,
 						headers: upload.headers
 					});
@@ -2003,7 +2006,7 @@ describe('runPush', () => {
 						expiresAt: '2026-05-18T12:00:00.000Z'
 					}),
 				async uploadBlob(upload) {
-					await collectReadableStream(upload.body);
+					await collectReadableStream(upload.body());
 
 					if (upload.r2Key.includes(runtimeDigest.narHash.toString())) {
 						throw new CupboardUploadError(upload.r2Key, 500, 'boom');

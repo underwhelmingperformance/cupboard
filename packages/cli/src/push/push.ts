@@ -164,7 +164,8 @@ export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
 export interface PushBlobUpload {
 	readonly r2Key: string;
 	readonly uploadUrl: string;
-	readonly body: ReadableStream<Uint8Array>;
+	// Builds the body on demand, so a retried PUT streams a fresh copy.
+	readonly body: () => ReadableStream<Uint8Array>;
 	readonly contentLength: number;
 	readonly headers: Readonly<Record<string, string>>;
 }
@@ -785,7 +786,7 @@ async function attachPushedAttestations(
 			await dependencies.client.uploadBlob({
 				r2Key: decision.r2Key,
 				uploadUrl: preparedUpload.uploadUrl,
-				body: byteStream([bundle.bytes]),
+				body: () => byteStream([bundle.bytes]),
 				contentLength: bundle.bytes.byteLength,
 				headers: preparedUpload.uploadHeaders
 			});
@@ -1128,13 +1129,20 @@ async function uploadCompressedNar(
 			await context.client.uploadBlob({
 				r2Key: outcome.upload.decision.r2Key,
 				uploadUrl: outcome.upload.uploadUrl,
-				body: countingByteStream(
-					context.readCompressedNar(item.preparedPath.compressedPath),
-					(byteLength) => {
-						counted += byteLength;
-						bar.advance(byteLength);
-					}
-				),
+				body: () => {
+					// A retry re-streams from the start, so rewind the partial progress
+					// the failed attempt counted before streaming the fresh body.
+					bar.advance(-counted);
+					counted = 0;
+
+					return countingByteStream(
+						context.readCompressedNar(item.preparedPath.compressedPath),
+						(byteLength) => {
+							counted += byteLength;
+							bar.advance(byteLength);
+						}
+					);
+				},
 				contentLength: fileSize,
 				headers: outcome.upload.uploadHeaders
 			});
@@ -1358,7 +1366,7 @@ async function redriveExpiredCommit(
 	await context.client.uploadBlob({
 		r2Key: fresh.r2Key,
 		uploadUrl: presigned.uploadUrl,
-		body: context.readCompressedNar(prepared.preparedPath.compressedPath),
+		body: () => context.readCompressedNar(prepared.preparedPath.compressedPath),
 		contentLength: prepared.preparedPath.blob.fileSize,
 		headers: presigned.uploadHeaders
 	});

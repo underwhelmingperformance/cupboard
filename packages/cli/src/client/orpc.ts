@@ -19,6 +19,7 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
+import { backoffDelay, maxTransientRetries } from './retry.ts';
 import { parseWorkerUrl, reachableFetcher } from './transport.ts';
 
 /**
@@ -93,31 +94,57 @@ function derivedClient<C extends AnyContractRouter>(
 
 			return bearerHeaders(await resolveBearer(credential));
 		},
+		// Bodies are buffered JSON, so cloning the request per attempt is cheap. A
+		// 401 refreshes the bearer once; a transient failure (a network fault or an
+		// unmapped 5xx) backs off and retries, so a single Durable Object blip does
+		// not fail a long push of presign and negotiate calls. The contract's
+		// procedures are idempotent or self-healing under a repeat (a re-presign
+		// re-signs, a re-negotiate's unused rows are reaped), so a retried call is
+		// safe.
 		fetch: async (request, init) => {
-			throwIfAborted(signal);
+			let current = request;
+			let isBearerRefreshed = false;
+			let retries = 0;
 
-			// Bodies are buffered JSON, so the clone held back for a retry is
-			// cheap.
-			const retryable = request.clone();
-			const response = await reachable(request, { ...init, signal });
+			for (;;) {
+				throwIfAborted(signal);
 
-			if (
-				response.status !== unauthorizedStatusCode ||
-				!isTokenProvider(credential)
-			) {
-				return await settleServerError(request, response);
+				let response: Response;
+				try {
+					response = await reachable(current.clone(), { ...init, signal });
+				} catch (error) {
+					if (signal?.aborted === true || retries >= maxTransientRetries) {
+						throw error;
+					}
+
+					retries += 1;
+					await backoffDelay(retries, signal);
+					continue;
+				}
+
+				if (
+					response.status === unauthorizedStatusCode &&
+					isTokenProvider(credential) &&
+					!isBearerRefreshed
+				) {
+					isBearerRefreshed = true;
+					const headers = new Headers(current.headers);
+					headers.set('authorization', `Bearer ${await credential.refresh()}`);
+					current = new Request(current, { headers });
+					continue;
+				}
+
+				if (
+					isTransientStatus(response.status) &&
+					retries < maxTransientRetries
+				) {
+					retries += 1;
+					await backoffDelay(retries, signal);
+					continue;
+				}
+
+				return await settleServerError(current, response);
 			}
-
-			const headers = new Headers(retryable.headers);
-			headers.set('authorization', `Bearer ${await credential.refresh()}`);
-
-			return settleServerError(
-				request,
-				await reachable(new Request(retryable, { headers }), {
-					...init,
-					signal
-				})
-			);
 		},
 		plugins: [new ResponseValidationPlugin(contract)]
 	});
@@ -134,6 +161,14 @@ const typedServerErrorStatuses = new Set<number>([
 	StatusCodes.SERVICE_UNAVAILABLE,
 	StatusCodes.INSUFFICIENT_STORAGE
 ]);
+
+// The typed 5xx (over-quota, maintenance) are excluded from retry: they are
+// deterministic or already surfaced to the user, so oRPC decodes them as-is.
+function isTransientStatus(status: number): boolean {
+	return (
+		status >= serverErrorThreshold && !typedServerErrorStatuses.has(status)
+	);
+}
 
 /**
  * Turns an unmapped server failure into a {@link CupboardHttpError} carrying the

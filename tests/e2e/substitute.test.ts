@@ -181,7 +181,7 @@ describe('Nix substitution', () => {
 					r2Key: upload.r2Key,
 					uploadUrl: tampered.href,
 					headers: upload.uploadHeaders,
-					body: readFileByteStream(upload.compressedPath),
+					body: () => readFileByteStream(upload.compressedPath),
 					contentLength: upload.fileSize
 				})
 			);

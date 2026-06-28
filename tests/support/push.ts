@@ -97,7 +97,7 @@ export async function pushStorePaths(
 				r2Key: decision.r2Key,
 				uploadUrl: prepared.uploadUrl,
 				headers: prepared.uploadHeaders,
-				body: readFileByteStream(entry.compressedPath),
+				body: () => readFileByteStream(entry.compressedPath),
 				contentLength: entry.metadata.fileSize
 			});
 		}
