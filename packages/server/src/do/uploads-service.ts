@@ -3,9 +3,12 @@ import {
 	type ParsedUploadNegotiateRequest,
 	type ParsedUploadPathMetadata,
 	type ParsedUploadPathNegotiation,
+	type ParsedUploadPrepareItemRequest,
 	type ParsedUploadPrepareRequest,
 	type UploadDecision,
 	type UploadNegotiateResponse,
+	type UploadPrepareBatchResponse,
+	type UploadPrepareItemResult,
 	type UploadPrepareResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
@@ -343,5 +346,36 @@ export class UploadsService {
 			uploadHeaders: uploadHeadersFor(metadata),
 			expiresAt: expiresAt.toISOString()
 		};
+	}
+
+	// Presigns a chunk of uploads in one call by running the single-path prepare
+	// per item. An item whose slot expired or turned out reusable yields a failed
+	// result the client re-negotiates on its own, so one such item leaves the rest
+	// of the chunk presigned.
+	async prepareUploads(
+		cache: string,
+		items: readonly ParsedUploadPrepareItemRequest[]
+	): Promise<UploadPrepareBatchResponse> {
+		const results: UploadPrepareItemResult[] = [];
+
+		for (const item of items) {
+			try {
+				const prepared = await this.prepareUpload(cache, item.id, {
+					fileHash: item.fileHash,
+					fileSize: item.fileSize,
+					compression: item.compression
+				});
+
+				results.push({ ok: true, id: item.id, ...prepared });
+			} catch (error) {
+				results.push({
+					ok: false,
+					id: item.id,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
+		}
+
+		return { items: results };
 	}
 }

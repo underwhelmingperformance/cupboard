@@ -3,8 +3,10 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	DEFAULT_CACHE,
-	storePathHashSchema
+	storePathHashSchema,
+	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
+import { uploadPrepareBatchResponseSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -1097,6 +1099,53 @@ describe('upload flow', () => {
 		await currentServer().recordMissingObject(upload.uploadId);
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
+	});
+
+	it('presigns a batch and reports a failed item without sinking the chunk', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		const response = await authorisedFetch(
+			`/cache/${WIRE_DEFAULT_CACHE}/uploads/prepare`,
+			token,
+			{
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					items: [
+						{ id: upload.uploadId, ...uploadBlobMetadata(metadata) },
+						{ id: 'missing-upload', ...uploadBlobMetadata(metadata) }
+					]
+				})
+			}
+		);
+
+		expect(response.status).toBe(StatusCodes.OK);
+		const body = uploadPrepareBatchResponseSchema.parse(await response.json());
+
+		// The real slot presigns; the unknown id fails on its own, leaving the
+		// chunk's result intact.
+		expect(
+			body.items.map((item) => ({ id: item.id, ok: item.ok }))
+		).toStrictEqual([
+			{ id: upload.uploadId, ok: true },
+			{ id: 'missing-upload', ok: false }
+		]);
+
+		const [presigned] = body.items;
+
+		if (presigned?.ok !== true) {
+			throw new Error('expected the first batch item to be presigned');
+		}
+
+		// The signed checksum still binds the per-path compressed hash.
+		expect(presigned.uploadHeaders['x-amz-checksum-sha256']).toBe(
+			fileHash.digestBase64()
+		);
 	});
 
 	it('does not strand a reserved row when an in-flight commit is retried', async () => {
