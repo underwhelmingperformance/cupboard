@@ -29,6 +29,9 @@ function commitOp(uploadId: string): string {
 const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
 const narHash = `sha256:${'1'.repeat(52)}`;
 const path = '/cache/_default/commit';
+// The session's jittered reconnect back-off never exceeds this cap, so advancing
+// a fake clock by it fires any pending reconnect.
+const maxBackoffMs = 5000;
 const uploadId = 'upload-app';
 const target: CommitSessionTarget = { uploadId, storePathHash, narHash };
 
@@ -60,16 +63,34 @@ async function rejectedBy<T extends Error>(
 	return rejection;
 }
 
-function openSession(
-	socket: FakeCommitSocket,
-	options: {
-		readonly wait?: boolean;
-		readonly timeoutSeconds?: number;
-		readonly signal?: AbortSignal;
-		readonly keepaliveMs?: number;
-	} = {}
+interface SessionTestOptions {
+	readonly wait?: boolean;
+	readonly timeoutSeconds?: number;
+	readonly signal?: AbortSignal;
+	readonly keepaliveMs?: number;
+	readonly maxReconnects?: number;
+	readonly reconnectBackoffMs?: number;
+}
+
+// Hands the session a fresh socket per connection attempt, so a test can drop
+// one and drive the reconnect onto the next.
+function openSessionOver(
+	sockets: readonly FakeCommitSocket[],
+	options: SessionTestOptions = {}
 ): ReturnType<typeof runCommitSession> {
-	const connect = (): CommitSocket => socket;
+	let attempt = 0;
+	const connect = (): CommitSocket => {
+		const socket = sockets[attempt];
+		attempt += 1;
+
+		if (socket === undefined) {
+			throw new Error(
+				`no socket scripted for connection attempt ${String(attempt)}`
+			);
+		}
+
+		return socket;
+	};
 
 	return runCommitSession(
 		connect,
@@ -80,9 +101,18 @@ function openSession(
 			wait: options.wait ?? true,
 			timeoutSeconds: options.timeoutSeconds ?? 600,
 			signal: options.signal,
-			keepaliveMs: options.keepaliveMs
+			keepaliveMs: options.keepaliveMs,
+			maxReconnects: options.maxReconnects,
+			reconnectBackoffMs: options.reconnectBackoffMs
 		}
 	);
+}
+
+function openSession(
+	socket: FakeCommitSocket,
+	options: SessionTestOptions = {}
+): ReturnType<typeof runCommitSession> {
+	return openSessionOver([socket], options);
 }
 
 describe('runCommitSession', () => {
@@ -311,9 +341,9 @@ describe('runCommitSession', () => {
 		});
 	});
 
-	it('fails every outstanding commit when the socket closes early', async () => {
+	it('fails every outstanding commit when a drop exhausts the reconnect budget', async () => {
 		const socket = new FakeCommitSocket();
-		const session = openSession(socket);
+		const session = openSession(socket, { maxReconnects: 0 });
 		const settled = session.commit(target);
 
 		socket.emit('open');
@@ -324,6 +354,74 @@ describe('runCommitSession', () => {
 		expect({ name: error.name, path: error.path }).toStrictEqual({
 			name: 'CommitSocketProtocolError',
 			path
+		});
+	});
+
+	it('reconnects after a drop and resumes a parked upload by subscribing', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const settled = session.commit(target);
+
+		first.emit('open');
+		first.emit(
+			'message',
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
+		);
+
+		// The socket drops while the upload is parked for its verdict.
+		first.emit('close', 1006);
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// The reconnect resumes the acked id with a subscribe, and the replayed
+		// verdict settles it over the new socket.
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({ ev: 'verdict', uploadId, status: 'servable' })
+		);
+
+		await expect(settled).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [commitOp(uploadId)],
+			second: [JSON.stringify({ op: 'subscribe', uploadIds: [uploadId] })]
+		});
+	});
+
+	it('reconnects after a drop and re-commits an un-acked upload', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const settled = session.commit(target);
+
+		// The socket drops before any frame, so the commit op may never have landed.
+		first.emit('open');
+		first.emit('close', 1006);
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// The reconnect re-sends the commit, which settles over the new socket.
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(settled).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [commitOp(uploadId)],
+			second: [commitOp(uploadId)]
 		});
 	});
 
