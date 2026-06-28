@@ -106,4 +106,30 @@ describe('fetchClaimFailureLogs', () => {
 			slept: sleep.mock.calls.length
 		}).toStrictEqual({ lines: [], queryCount: 3, slept: 2 });
 	});
+
+	it('falls back to empty when the log query itself fails', async () => {
+		const sleep = vi.fn(() => Promise.resolve());
+		let calls = 0;
+		const api = {
+			queryWorkerLogs: () => {
+				calls += 1;
+
+				return Promise.reject(new Error('Authentication error'));
+			}
+		};
+
+		const lines = await fetchClaimFailureLogs({
+			api,
+			ray: 'ray-3',
+			now: () => 0,
+			sleep,
+			attempts: 3
+		});
+
+		expect({ lines, calls, slept: sleep.mock.calls.length }).toStrictEqual({
+			lines: [],
+			calls: 1,
+			slept: 0
+		});
+	});
 });
