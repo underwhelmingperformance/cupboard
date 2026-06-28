@@ -243,6 +243,54 @@ export const commitSocketFrameSchema = z.discriminatedUnion('event', [
 export type ParsedCommitSocketFrame = z.output<typeof commitSocketFrameSchema>;
 export type CommitSocketFrame = z.input<typeof commitSocketFrameSchema>;
 
+// The multiplexed commit session: one socket per push carries every path's
+// commit, so each request and frame names the upload it concerns. The client
+// sends `commit` to settle one id and `subscribe` to re-attach a reconnected
+// socket to ids still outstanding; the server answers with a per-id frame whose
+// `ev` mirrors the single-socket protocol's events.
+const uploadIdsSchema = z.array(z.string());
+
+export const commitSessionRequestSchema = z.discriminatedUnion('op', [
+	z.strictObject({ op: z.literal('commit'), uploadId: z.string() }),
+	z.strictObject({
+		op: z.literal('subscribe'),
+		uploadIds: uploadIdsSchema
+	})
+]);
+export type ParsedCommitSessionRequest = z.output<
+	typeof commitSessionRequestSchema
+>;
+export type CommitSessionRequest = z.input<typeof commitSessionRequestSchema>;
+
+export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
+	z.strictObject({
+		ev: z.literal('settled'),
+		uploadId: z.string(),
+		response: commitResponseSchema
+	}),
+	z.strictObject({
+		ev: z.literal('deferred'),
+		uploadId: z.string(),
+		storePathHash: storePathHashSchema,
+		narHash: nixSha256HashSchema
+	}),
+	z.strictObject({
+		ev: z.literal('verdict'),
+		uploadId: z.string(),
+		status: uploadStatusSchema
+	}),
+	z.strictObject({
+		ev: z.literal('error'),
+		uploadId: z.string(),
+		status: z.number().int(),
+		message: z.string()
+	})
+]);
+export type ParsedCommitSessionFrame = z.output<
+	typeof commitSessionFrameSchema
+>;
+export type CommitSessionFrame = z.input<typeof commitSessionFrameSchema>;
+
 export const statsResponseSchema = z.strictObject({
 	storePaths: countSchema,
 	narBlobs: countSchema,
