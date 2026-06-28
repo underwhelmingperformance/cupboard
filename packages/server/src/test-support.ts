@@ -33,9 +33,10 @@ import {
 } from '@cupboard/protocol/retention';
 import {
 	type CommitResponse,
-	commitSocketFrameSchema,
+	commitSessionFrameSchema,
+	type CommitSessionRequest,
 	type DeletePathResponse,
-	type ParsedCommitSocketFrame,
+	type ParsedCommitSessionFrame,
 	type ParsedUploadPathMetadata,
 	pathDeletionResponseSchema,
 	type StatsResponse,
@@ -1477,12 +1478,9 @@ export async function attemptPushToTenant(
 	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 
-	const upgraded = await tenantWorkerFetch(
-		tenant,
-		`/uploads/${decision.uploadId}/commit`,
-		token,
-		{ headers: { upgrade: 'websocket' } }
-	);
+	const upgraded = await tenantWorkerFetch(tenant, '/commit', token, {
+		headers: { upgrade: 'websocket' }
+	});
 
 	const switchingProtocols: number = StatusCodes.SWITCHING_PROTOCOLS;
 
@@ -1491,8 +1489,9 @@ export async function attemptPushToTenant(
 	}
 
 	try {
-		await settleCommitSocket(
-			commitSocketFromResponse(upgraded),
+		await settleCommitSession(
+			commitSessionFromResponse(upgraded),
+			decision.uploadId,
 			() => tenantServer(env, tenant).runVerification(),
 			{}
 		);
@@ -1596,10 +1595,15 @@ export class CommitSocketProtocolError extends Error {
  * reader. The listener attaches before `accept()` so no frame the server sent
  * during the commit transition is missed.
  */
-export function commitSocketFromResponse(response: Response): {
-	socket: WebSocket;
-	nextFrame: () => Promise<ParsedCommitSocketFrame>;
-} {
+interface CommitConversation {
+	readonly socket: WebSocket;
+	readonly send: (request: CommitSessionRequest) => void;
+	readonly nextFrame: () => Promise<ParsedCommitSessionFrame>;
+}
+
+export function commitSessionFromResponse(
+	response: Response
+): CommitConversation {
 	expect(response.status).toBe(StatusCodes.SWITCHING_PROTOCOLS);
 	const socket = response.webSocket;
 
@@ -1609,14 +1613,16 @@ export function commitSocketFromResponse(response: Response): {
 		);
 	}
 
-	const frames: ParsedCommitSocketFrame[] = [];
+	const frames: ParsedCommitSessionFrame[] = [];
 	const waiters: {
-		resolve: (frame: ParsedCommitSocketFrame) => void;
+		resolve: (frame: ParsedCommitSessionFrame) => void;
 		reject: (reason: Error) => void;
 	}[] = [];
 
 	socket.addEventListener('message', (event) => {
-		const frame = commitSocketFrameSchema.parse(JSON.parse(String(event.data)));
+		const frame = commitSessionFrameSchema.parse(
+			JSON.parse(String(event.data))
+		);
 		const waiter = waiters.shift();
 
 		if (waiter === undefined) {
@@ -1636,74 +1642,69 @@ export function commitSocketFromResponse(response: Response): {
 	});
 	socket.accept();
 
-	const nextFrame = (): Promise<ParsedCommitSocketFrame> => {
+	const nextFrame = (): Promise<ParsedCommitSessionFrame> => {
 		const queued = frames.shift();
 
 		if (queued !== undefined) {
 			return Promise.resolve(queued);
 		}
 
-		const waiter = Promise.withResolvers<ParsedCommitSocketFrame>();
+		const waiter = Promise.withResolvers<ParsedCommitSessionFrame>();
 		waiters.push(waiter);
 
 		return waiter.promise;
 	};
 
-	return { socket, nextFrame };
+	const send = (request: CommitSessionRequest): void => {
+		socket.send(JSON.stringify(request));
+	};
+
+	return { socket, send, nextFrame };
 }
 
-/** Opens the commit WebSocket against the Durable Object stub. */
-export async function openCommitSocket(
+/** Opens a push's commit session WebSocket against the Durable Object stub. */
+export async function openCommitSession(
 	token: string,
-	uploadId: string,
 	cache: string = DEFAULT_CACHE
-): Promise<{
-	socket: WebSocket;
-	nextFrame: () => Promise<ParsedCommitSocketFrame>;
-}> {
-	const response = await fetchPath(
-		cacheScopedPath(cache, `/uploads/${uploadId}/commit`),
-		{
-			headers: {
-				authorization: `Bearer ${token}`,
-				upgrade: 'websocket'
-			}
+): Promise<CommitConversation> {
+	const response = await fetchPath(cacheScopedPath(cache, '/commit'), {
+		headers: {
+			authorization: `Bearer ${token}`,
+			upgrade: 'websocket'
 		}
-	);
+	});
 
-	return commitSocketFromResponse(response);
+	return commitSessionFromResponse(response);
 }
 
-interface CommitConversation {
-	readonly socket: WebSocket;
-	readonly nextFrame: () => Promise<ParsedCommitSocketFrame>;
-}
-
-// The frame dance both commit helpers share: settle on the first frame, or
-// drive the verification pass (the queue would run it in production) and
-// settle on the verdict; `wait: false` returns the deferral as `pending`.
-async function settleCommitSocket(
+// The frame dance the commit helpers share: send the commit op, settle on the
+// reply, or drive the verification pass (the queue would run it in production)
+// and settle on the verdict; `wait: false` returns the deferral as `pending`.
+// The session stays open across a deferral, so the helper closes it on settle.
+async function settleCommitSession(
 	conversation: CommitConversation,
+	uploadId: string,
 	runVerification: () => Promise<void>,
 	options: { readonly wait?: boolean }
 ): Promise<CommitResponse> {
-	const { socket, nextFrame } = conversation;
+	const { socket, send, nextFrame } = conversation;
+	send({ op: 'commit', uploadId });
 	const first = await nextFrame();
 
-	if (first.event === 'result') {
+	if (first.ev === 'settled') {
+		socket.close();
+
 		return first.response;
 	}
 
-	if (first.event === 'error') {
+	if (first.ev === 'error') {
 		socket.close();
 		throw new CommitSocketError(first.status, first.message);
 	}
 
-	if (first.event !== 'deferred') {
+	if (first.ev !== 'deferred') {
 		socket.close();
-		throw new CommitSocketProtocolError(
-			`unexpected first frame: ${first.event}`
-		);
+		throw new CommitSocketProtocolError(`unexpected first frame: ${first.ev}`);
 	}
 
 	if (options.wait === false) {
@@ -1718,9 +1719,10 @@ async function settleCommitSocket(
 
 	await runVerification();
 	const verdict = await nextFrame();
+	socket.close();
 
-	if (verdict.event !== 'verdict') {
-		throw new CommitSocketProtocolError(`unexpected frame: ${verdict.event}`);
+	if (verdict.ev !== 'verdict') {
+		throw new CommitSocketProtocolError(`unexpected frame: ${verdict.ev}`);
 	}
 
 	if (verdict.status !== 'servable') {
@@ -1735,8 +1737,8 @@ async function settleCommitSocket(
 }
 
 /**
- * Commits an upload over the WebSocket the way a client does, against the
- * Durable Object stub. A deferred upload's verification is driven
+ * Commits an upload over the session WebSocket the way a client does, against
+ * the Durable Object stub. A deferred upload's verification is driven
  * synchronously and the verdict awaited, so callers see the settled
  * `committed` result; `wait: false` returns the deferral as `pending`
  * instead. A refused commit throws {@link CommitSocketError} with the status
@@ -1749,10 +1751,11 @@ export async function commitUpload(
 	cache: string = DEFAULT_CACHE,
 	options: { readonly wait?: boolean } = {}
 ): Promise<CommitResponse> {
-	const conversation = await openCommitSocket(token, uploadId, cache);
+	const conversation = await openCommitSession(token, cache);
 
-	return settleCommitSocket(
+	return settleCommitSession(
 		conversation,
+		uploadId,
 		() => currentServer().runVerification(),
 		options
 	);
@@ -1802,15 +1805,13 @@ export async function commitUploadViaWorker(
 	options: { readonly wait?: boolean; readonly tenant?: string } = {}
 ): Promise<CommitResponse> {
 	const tenant = tenantIdSchema.parse(options.tenant ?? fixtureTenant);
-	const response = await tenantWorkerFetch(
-		tenant,
-		`/uploads/${uploadId}/commit`,
-		token,
-		{ headers: { upgrade: 'websocket' } }
-	);
+	const response = await tenantWorkerFetch(tenant, '/commit', token, {
+		headers: { upgrade: 'websocket' }
+	});
 
-	return settleCommitSocket(
-		commitSocketFromResponse(response),
+	return settleCommitSession(
+		commitSessionFromResponse(response),
+		uploadId,
 		() => tenantServer(env, tenant).runVerification(),
 		options
 	);

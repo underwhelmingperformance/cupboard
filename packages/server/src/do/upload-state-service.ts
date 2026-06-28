@@ -162,6 +162,17 @@ export class UploadStateService {
 			.run();
 	}
 
+	// Records the commit session waiting on an upload, so the verify pass can
+	// route its verdict to that connection. A no-op for a row that is gone (a bad
+	// id, or one already settled and cleared).
+	attachSession(uploadId: string, sessionId: string): void {
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ sessionId })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	}
+
 	// Marks an inline commit in progress before it reserves the narinfo row, so a
 	// crash mid-commit leaves a durable saga marker the verify pass re-drives rather
 	// than a null-verdict upload indistinguishable from one still awaiting its bytes.

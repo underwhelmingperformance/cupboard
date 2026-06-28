@@ -12,7 +12,7 @@ import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
-import { sendCommitFrame } from './commit-socket.ts';
+import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
@@ -42,16 +42,21 @@ export class VerificationService {
 		private readonly uploadState: UploadStateService
 	) {}
 
-	// Settles every commit socket parked for an upload with its terminal
-	// verdict. Hibernation tags key the lookup, so waiters survive the object
-	// being evicted between the deferral and this pass.
+	// Routes an upload's terminal verdict to the commit session waiting on it. The
+	// session id is the socket's hibernation tag, read from the row, so the lookup
+	// finds the waiter even after the object was evicted between the deferral and
+	// this pass. The session stays open: it carries the other ids in the push too.
 	private notifyWaiters(
 		uploadId: string,
+		sessionId: string | null,
 		status: ParsedUploadStatusResponse['status']
 	): void {
-		for (const socket of this.context.ctx.getWebSockets(uploadId)) {
-			sendCommitFrame(socket, { event: 'verdict', status });
-			socket.close(1000, status);
+		if (sessionId === null) {
+			return;
+		}
+
+		for (const socket of this.context.ctx.getWebSockets(sessionId)) {
+			sendCommitSessionFrame(socket, { ev: 'verdict', uploadId, status });
 		}
 	}
 
@@ -121,7 +126,7 @@ export class VerificationService {
 				pending.r2Key,
 				metadata.narHash
 			);
-			this.notifyWaiters(pending.id, 'absent');
+			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			return undefined;
 		}
 
@@ -188,7 +193,7 @@ export class VerificationService {
 			// The parked sockets carry the verdict, and the narinfo itself is the
 			// durable evidence of success, so a settled upload leaves no residue:
 			// the row clears and the staging bytes go.
-			this.notifyWaiters(pending.id, 'servable');
+			this.notifyWaiters(pending.id, pending.sessionId, 'servable');
 			this.uploadState.clearPendingUpload(pending.id);
 			await this.context.env.BLOBS.delete(pending.r2Key);
 			return;
@@ -199,7 +204,7 @@ export class VerificationService {
 		// left for the reaper to collect.
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.context.env.BLOBS.delete(pending.r2Key);
-		this.notifyWaiters(pending.id, 'absent');
+		this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 	}
 
 	// Reclaims the reserved row a deferred upload never made servable and records its
@@ -226,7 +231,7 @@ export class VerificationService {
 			metadata.narHash,
 			verdict
 		);
-		this.notifyWaiters(pending.id, verdict);
+		this.notifyWaiters(pending.id, pending.sessionId, verdict);
 	}
 
 	// Restore a missing narinfo object, re-confirming the NAR inside the critical
@@ -547,6 +552,6 @@ export class VerificationService {
 			metadata.narHash,
 			'mismatch'
 		);
-		this.notifyWaiters(pending.id, 'mismatch');
+		this.notifyWaiters(pending.id, pending.sessionId, 'mismatch');
 	}
 }
