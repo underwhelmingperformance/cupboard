@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import type { R2PresignerConfiguration } from './presign.ts';
-import { createR2TemporaryCredentials } from './temporary-credentials.ts';
+import {
+	createR2TemporaryCredentials,
+	pushUploadActions
+} from './temporary-credentials.ts';
 
 const configuration: R2PresignerConfiguration = {
 	accountId: 'acct-123',
@@ -179,5 +182,46 @@ describe('createR2TemporaryCredentials', () => {
 				objectPaths: ['staging/push-1/one.nar.zst']
 			}
 		});
+	});
+
+	it('narrows the credential to the upload actions when asked', async () => {
+		const credentials = await createR2TemporaryCredentials(
+			configuration,
+			{
+				scope: 'object-read-write',
+				actions: pushUploadActions,
+				prefixPaths,
+				ttlSeconds
+			},
+			now
+		);
+
+		const { payload } = jwtFrom(credentials.sessionToken);
+
+		expect(payload).toMatchObject({
+			scope: 'object-read-write',
+			actions: [
+				'PutObject',
+				'CreateMultipartUpload',
+				'UploadPart',
+				'CompleteMultipartUpload',
+				'AbortMultipartUpload'
+			],
+			paths: { prefixPaths, objectPaths: [] }
+		});
+	});
+
+	it('grants no read or list operation through the upload action set', () => {
+		const readOrList = new Set([
+			'GetObject',
+			'HeadObject',
+			'ListObjectsV2',
+			'ListParts',
+			'ListMultipartUploads'
+		]);
+
+		expect(
+			pushUploadActions.filter((action) => readOrList.has(action))
+		).toStrictEqual([]);
 	});
 });
