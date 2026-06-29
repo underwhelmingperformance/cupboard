@@ -9,7 +9,7 @@
 		"@types/node": "^25.9.1",
 		"@types/ws": "^8.18.1",
 		"esbuild": "^0.28.0",
-		"eslint": "10.5.0",
+		"eslint": "10.6.0",
 		"eslint-config-prettier": "10.1.8",
 		"eslint-plugin-simple-import-sort": "13.0.0",
 		"eslint-plugin-unicorn": "67.0.0",
