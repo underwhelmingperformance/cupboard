@@ -26,6 +26,12 @@ importers:
       '@types/ws':
         specifier: ^8.18.1
         version: 8.18.1
+      cloudflare:
+        specifier: ^6.4.0
+        version: 6.5.0
+      commander:
+        specifier: ^15.0.0
+        version: 15.0.0
       esbuild:
         specifier: ^0.28.0
         version: 0.28.1
