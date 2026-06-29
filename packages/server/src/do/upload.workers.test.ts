@@ -133,6 +133,13 @@ async function cachedResponseShape(
 	};
 }
 
+// Drives the DO alarm directly so the negotiated reconcile runs: the test pool
+// does not deliver the request-armed alarm negotiate sets, so the handler is
+// invoked the way the GC continuation tests invoke it.
+async function fireReconcile(): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => instance.alarm());
+}
+
 type ErrorConstructor<T extends Error> = abstract new (
 	...arguments_: never[]
 ) => T;
@@ -2062,19 +2069,14 @@ describe('upload flow', () => {
 		expect(response.status).toBe(StatusCodes.NOT_FOUND);
 	});
 
-	it('re-materialises a missing narinfo object on the next negotiate', async () => {
+	it('restores a missing narinfo object through the negotiated reconcile', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-		await prepareUpload(token, upload, metadata);
-		await putNarBytes(upload.r2Key);
-		await commitUpload(token, upload.uploadId);
+		await commitPath(token, metadata);
 
 		const original = await readStoredNarInfo(metadata.storePathHash);
 
+		// The common breakage: the narinfo object is gone but its NAR is intact.
 		await env.BLOBS.delete(
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
@@ -2082,6 +2084,8 @@ describe('upload flow', () => {
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
 
+		// Negotiate skips on the lingering blob_state row and queues the path; it
+		// does not heal on the hot path.
 		const skip = await negotiateUploads(token, [metadata]);
 
 		expect(skip.uploads).toStrictEqual([
@@ -2092,42 +2096,55 @@ describe('upload flow', () => {
 			}
 		]);
 
-		const healed = await readStoredNarInfo(metadata.storePathHash);
+		// The reconcile restores the object, so the path serves again after the one
+		// re-push.
+		await fireReconcile();
 
-		expect(healed.body).toBe(original.body);
+		const healed = await readStoredNarInfo(metadata.storePathHash);
+		const served = await readFetch(`/${metadata.storePathHash}.narinfo`);
+
+		expect({ body: healed.body, served: served.status }).toStrictEqual({
+			body: original.body,
+			served: StatusCodes.OK
+		});
 	});
 
 	it('clears the orphaned narinfo object when its NAR blob is gone', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-		await prepareUpload(token, upload, metadata);
-		await putNarBytes(upload.r2Key);
-		await commitUpload(token, upload.uploadId);
+		await commitPath(token, metadata);
 
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
-		const retry = await negotiateUploads(token, [metadata]);
+		// The blob_state row still backs the hash, so negotiate skips and queues the
+		// path; the reconcile then finds the NAR truly gone and removes the narinfo.
+		const skip = await negotiateUploads(token, [metadata]);
 
-		expectSingleUploadDecision(retry, metadata);
+		expect(skip.uploads).toStrictEqual([
+			{
+				action: 'skip',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash
+			}
+		]);
+
+		await fireReconcile();
+
 		await expect(
 			env.BLOBS.head(narInfoObjectKey(fixtureTenant, metadata.storePathHash))
 		).resolves.toBeNull();
-	});
 
-	it('purges the cached narinfo when recovering from a missing NAR blob', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const upload = expectSingleUploadDecision(
+		// With the dangling narinfo gone, the next re-push re-uploads the NAR.
+		expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
-		await putNarBytes(upload.r2Key);
-		await commitUpload(token, upload.uploadId);
+	});
+
+	it('purges the cached narinfo when the reconcile removes a missing NAR blob', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		await commitPath(token, metadata);
 
 		const cacheKeyUrl = new URL(
 			narInfoCachePath(fixtureTenant, metadata.storePathHash),
@@ -2141,8 +2158,11 @@ describe('upload flow', () => {
 			status: StatusCodes.OK
 		});
 
+		// Negotiate records the push origin with the queued path, so the reconcile
+		// purges the edge cache the request populated when it removes the narinfo.
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 		await negotiateUploads(token, [metadata]);
+		await fireReconcile();
 
 		await expect(caches.default.match(cacheKey)).resolves.toBeUndefined();
 	});
@@ -2182,7 +2202,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('keeps the shared blob accounting when an R2 head miss races a referencing path', async () => {
+	it('keeps the shared blob accounting consistent when the reconcile removes a lost NAR', async () => {
 		const token = await initialise();
 		const first = uploadMetadata({ fileSize: narBytes.byteLength });
 		const second = uploadMetadata({
@@ -2199,17 +2219,25 @@ describe('upload flow', () => {
 		await commitPath(token, first);
 		await commitSharedPath(token, second);
 
-		// The blob object disappears, but two committed paths still reference it.
+		// Two committed paths share one blob; its object disappears.
 		await env.BLOBS.delete(narObjectKey(first.narHash));
 
-		expectSingleUploadDecision(await negotiateUploads(token, [third]), third);
+		// Negotiate skips both committed paths (the blob_state row still backs the
+		// hash) and queues them. The reconcile finds the NAR gone and retires both
+		// edges, crediting the shared blob exactly once: the per-tenant counters stay
+		// consistent and non-negative across the two removals.
+		await negotiateUploads(token, [first, second]);
+		await fireReconcile();
 
 		await expectStats(token, {
-			storePaths: 2,
-			narBlobs: 1,
-			pendingUploads: 1,
-			totalFileSize: narBytes.byteLength
+			storePaths: 0,
+			narBlobs: 0,
+			pendingUploads: 0,
+			totalFileSize: 0
 		});
+
+		// A genuinely lost NAR re-plans an upload on the next push.
+		expectSingleUploadDecision(await negotiateUploads(token, [third]), third);
 	});
 
 	it('purges a swept narinfo from the edge cache during GC', async () => {
@@ -2630,28 +2658,28 @@ describe('upload flow', () => {
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength
 		});
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-		await prepareUpload(token, upload, metadata);
-		await putNarBytes(upload.r2Key);
-		await commitUpload(token, upload.uploadId);
+		await commitPath(token, metadata);
 		await env.BLOBS.delete(narObjectKey(metadata.narHash));
 
+		// Negotiate skips on the lingering blob_state row and queues the path; the
+		// reconcile finds the NAR gone and removes the stale narinfo.
+		await negotiateUploads(token, [metadata]);
+		await fireReconcile();
+
+		// The reconcile credited the tenant's presence back even though the shared
+		// fact lingers for the reaper.
+		await expectStats(token, {
+			storePaths: 0,
+			narBlobs: 0,
+			pendingUploads: 0,
+			totalFileSize: 0
+		});
+
+		// The next push re-plans an upload for the genuinely lost NAR.
 		expectSingleUploadDecision(
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-
-		// Re-negotiating removed the stale narinfo whose NAR object had vanished; the
-		// tenant's presence is gone even though the shared fact lingers for the reaper.
-		await expectStats(token, {
-			storePaths: 0,
-			narBlobs: 0,
-			pendingUploads: 1,
-			totalFileSize: 0
-		});
 	});
 
 	it('keeps committed blobs when expired pending uploads reuse them', async () => {

@@ -81,8 +81,8 @@ describe('upload negotiation cost', () => {
 		// The read is the same handful of rows whatever the backlog: assert the exact
 		// figure, so a constant baseline regression cannot hide behind an inequality.
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 13,
-			largeBacklogCost: 13
+			emptyBacklogCost: 12,
+			largeBacklogCost: 12
 		});
 	});
 

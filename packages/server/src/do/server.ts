@@ -64,6 +64,7 @@ import { applyMigrations } from './migrate.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
+import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { RootsService } from './roots-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
@@ -103,6 +104,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly narInfoObjects: NarInfoObjectsService;
 	private readonly uploadState: UploadStateService;
 	private readonly deletionQueue: DeletionQueueService;
+	private readonly reconcileQueue: ReconcileQueueService;
 	private readonly signingKeys: SigningKeysService;
 	private readonly stats: StatsService;
 	private readonly tenantIdentity: TenantIdentityService;
@@ -139,6 +141,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.attestationCas,
 			this.attestations
 		);
+		this.reconcileQueue = new ReconcileQueueService(this.context);
 		this.signingKeys = new SigningKeysService(this.context);
 		this.stats = new StatsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
@@ -158,7 +161,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.context,
 			this.uploadState,
 			this.narInfoObjects,
-			this.deletionQueue
+			this.deletionQueue,
+			this.reconcileQueue
 		);
 		this.commitPipeline = new CommitPipelineService(
 			this.context,
@@ -695,6 +699,50 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.ctx.storage.setAlarm(Date.now());
 	}
 
+	// Resumes a garbage-collection sweep that stopped at its per-run cap. A run
+	// that did not stop at the cap left no continuation, so this is a no-op.
+	private async resumeGarbageCollection(): Promise<void> {
+		const sweepLimit = await this.ctx.storage.get<number>(gcContinuationKey);
+
+		if (typeof sweepLimit !== 'number') {
+			return;
+		}
+
+		await this.ctx.storage.delete(gcContinuationKey);
+		await this.sweepGarbageOnce(sweepLimit);
+	}
+
+	// One bounded reconcile of the committed paths a recent negotiate queued. Like
+	// the garbage-collection sweep it holds the gate only for the chunk's
+	// reconciles and re-arms the alarm while more remain, so a large closure's R2
+	// probes drain across firings off the push hot path. A drained queue clears its
+	// origin marker so a later push starts fresh.
+	private async reconcileNegotiatedOnce(): Promise<void> {
+		const queued = await this.reconcileQueue.claimChunk();
+
+		if (queued.size === 0) {
+			await this.reconcileQueue.clearOrigin();
+			return;
+		}
+
+		const origin = await this.reconcileQueue.origin();
+
+		await this.metered('reconcile', () =>
+			this.withMaintenanceEligibility(() =>
+				this.verification.reconcileTargets(queued.values().toArray(), origin)
+			)
+		);
+
+		await this.reconcileQueue.clearKeys(queued.keys().toArray());
+
+		if (await this.reconcileQueue.hasPending()) {
+			await this.ctx.storage.setAlarm(Date.now());
+			return;
+		}
+
+		await this.reconcileQueue.clearOrigin();
+	}
+
 	// Test seam: the inbound-OIDC discovery store lives on the context so a test
 	// can substitute a fixture before exercising a token exchange.
 	get discovery(): OidcDiscoveryStore {
@@ -739,18 +787,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.sweepGarbageOnce(sweepLimit);
 	}
 
-	// Resumes a garbage-collection sweep that stopped at its per-run cap. Each
-	// resumed chunk re-arms the alarm while it keeps hitting the cap, so the
-	// backlog converges across firings.
+	// Drives the two bounded background loops the single DO alarm carries: resuming
+	// a capped garbage-collection sweep, and reconciling the committed paths a
+	// recent negotiate queued. Each re-arms the alarm while it has work left, so the
+	// backlogs converge across firings while the gate stays free between them.
 	override async alarm(): Promise<void> {
 		await this.initialise();
-
-		const sweepLimit = await this.ctx.storage.get<number>(gcContinuationKey);
-
-		if (typeof sweepLimit === 'number') {
-			await this.ctx.storage.delete(gcContinuationKey);
-			await this.sweepGarbageOnce(sweepLimit);
-		}
+		await this.resumeGarbageCollection();
+		await this.reconcileNegotiatedOnce();
 	}
 
 	async runVerification(): Promise<void> {
@@ -1046,6 +1090,7 @@ type MeteredMethod =
 	| 'garbage-collection'
 	| 'initialise'
 	| 'offboard'
+	| 'reconcile'
 	| 'record-missing-object'
 	| 'record-verification'
 	| 'verification';

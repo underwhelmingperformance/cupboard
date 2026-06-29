@@ -130,6 +130,24 @@ export class UploadStateService {
 		);
 	}
 
+	// The NAR hashes among `narHashes` that still hold a `blob_state` row. A row
+	// exists exactly while the canonical `nar/<narHash>.nar.zst` object does (the
+	// reaper drops the row before the object), so a present hash confirms the NAR
+	// without an R2 head: the skip decision turns on this pure-D1 read.
+	async presentNarHashes(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Set<NixSha256HashString>> {
+		const unique = [...new Set(narHashes)];
+
+		if (unique.length === 0) {
+			return new Set();
+		}
+
+		const states = await this.blobStatesByNarHash(unique);
+
+		return new Set(states.keys());
+	}
+
 	clearPendingUpload(uploadId: string): void {
 		this.context.db
 			.delete(schema.pendingUploads)
@@ -215,10 +233,12 @@ export class UploadStateService {
 			.run();
 	}
 
-	// The reusable shared blobs among `narHashes`, keyed by hash. Batched so a
-	// closure of any size costs a bounded number of D1 queries and R2 heads rather
-	// than a round trip per path, the difference between a prompt negotiate and one
-	// that walks thousands of serial round trips into a platform timeout.
+	// The reusable shared blobs among `narHashes`, keyed by hash. Pure D1: a
+	// `blob_state` row exists exactly while the canonical object does, so its
+	// presence confirms reuse without an R2 head, and a closure of any size costs a
+	// bounded number of D1 queries rather than a round trip per path. Drift (a row
+	// outliving a reaped object) is healed off the hot path by the negotiated
+	// reconcile, which probes R2 and removes any narinfo whose NAR is gone.
 	//
 	// Existence-oracle-safe: reuse only hashes this tenant already holds its own
 	// presence edge for, never the global `blob_state`. A tenant that has not
@@ -245,29 +265,15 @@ export class UploadStateService {
 		const blobStates = await this.blobStatesByNarHash(owned);
 		const candidates = owned.filter((narHash) => blobStates.has(narHash));
 
-		// The shared fact can outlive a reaped object, so confirm the canonical
-		// object is still present before reusing; a stale row is left for the reaper.
-		const present = await mapWithConcurrency(
-			candidates,
-			maxOutgoingConnections,
-			async (narHash) =>
-				(await this.context.env.BLOBS.head(narObjectKey(narHash))) === null
-					? undefined
-					: narHash
-		);
-		const reusableHashes = present.filter(
-			(narHash): narHash is NixSha256HashString => narHash !== undefined
-		);
-
 		// Reusing is a fresh reference, so cancel any reaper grace timer the rows
 		// armed before a commit binds a new edge to the hash.
 		await this.clearReaperTimers(
-			reusableHashes.filter(
+			candidates.filter(
 				(narHash) => blobStates.get(narHash)?.deleteAfter !== null
 			)
 		);
 
-		for (const narHash of reusableHashes) {
+		for (const narHash of candidates) {
 			const state = blobStates.get(narHash);
 
 			if (state !== undefined) {
