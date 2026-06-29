@@ -50,7 +50,10 @@ import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
 import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
-import { GarbageCollectionService } from './garbage-collection-service.ts';
+import {
+	GarbageCollectionService,
+	maxPathsSweptPerRun
+} from './garbage-collection-service.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import {
@@ -84,6 +87,11 @@ const commitSessionAttachmentSchema = z.object({
 	cache: z.string(),
 	sessionId: z.string()
 });
+
+// A storage key marking that a bounded garbage-collection sweep stopped at its
+// per-run cap with work left over. The alarm reads it to resume, so a large
+// backlog drains across successive alarm firings rather than holding the gate.
+export const gcContinuationKey = 'maintenance:gc-pending';
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -663,6 +671,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	// One bounded sweep. Stopping at the cap means there is likely more to
+	// collect, so it records the cap and arms an immediate alarm; the gate is free
+	// between firings, so push requests interleave while the backlog drains across
+	// chunks. Each chunk holds the gate only for its own deletes. The cap is
+	// persisted so the alarm resumes with the bound the run started with.
+	private async sweepGarbageOnce(
+		sweepLimit: number = maxPathsSweptPerRun
+	): Promise<void> {
+		const outcome = await this.metered('garbage-collection', () =>
+			this.withMaintenanceEligibility(() =>
+				this.garbageCollection.collectGarbage(undefined, undefined, sweepLimit)
+			)
+		);
+
+		await (outcome.pathsSwept >= sweepLimit
+			? this.armGarbageContinuation(sweepLimit)
+			: this.ctx.storage.delete(gcContinuationKey));
+	}
+
+	private async armGarbageContinuation(sweepLimit: number): Promise<void> {
+		await this.ctx.storage.put(gcContinuationKey, sweepLimit);
+		await this.ctx.storage.setAlarm(Date.now());
+	}
+
 	// Test seam: the inbound-OIDC discovery store lives on the context so a test
 	// can substitute a fixture before exercising a token exchange.
 	get discovery(): OidcDiscoveryStore {
@@ -702,13 +734,23 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// use. Both sweep every cache and skip the edge-cache purge, exactly as an
 	// internal-origin HTTP sweep did, relying on the narinfo TTL and the
 	// orphan-blob grace window.
-	async runGarbageCollection(): Promise<void> {
+	async runGarbageCollection(sweepLimit?: number): Promise<void> {
 		await this.initialise();
-		await this.metered('garbage-collection', () =>
-			this.withMaintenanceEligibility(() =>
-				this.garbageCollection.collectGarbage()
-			)
-		);
+		await this.sweepGarbageOnce(sweepLimit);
+	}
+
+	// Resumes a garbage-collection sweep that stopped at its per-run cap. Each
+	// resumed chunk re-arms the alarm while it keeps hitting the cap, so the
+	// backlog converges across firings.
+	override async alarm(): Promise<void> {
+		await this.initialise();
+
+		const sweepLimit = await this.ctx.storage.get<number>(gcContinuationKey);
+
+		if (typeof sweepLimit === 'number') {
+			await this.ctx.storage.delete(gcContinuationKey);
+			await this.sweepGarbageOnce(sweepLimit);
+		}
 	}
 
 	async runVerification(): Promise<void> {

@@ -18,6 +18,12 @@ import {
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { parseStoredUploadMetadata } from './upload-metadata.ts';
 
+// One sweep deletes at most this many committed paths before returning, so a
+// chunk holds the Durable Object's gate only for its own deletes. When a sweep
+// stops at this cap the caller resumes it on an alarm, draining the backlog
+// across chunks.
+export const maxPathsSweptPerRun = 1000;
+
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
@@ -26,7 +32,8 @@ export class GarbageCollectionService {
 
 	private collectUnreachable(
 		cache: string,
-		now: string
+		now: string,
+		budget: number
 	): {
 		rootsExpired: number;
 		pathsSwept: number;
@@ -178,6 +185,13 @@ export class GarbageCollectionService {
 				continue;
 			}
 
+			// A later sweep (resumed by the alarm, or the next scheduled run) takes
+			// the remaining unreachable paths; stopping here keeps the gate hold
+			// bounded.
+			if (pathsSwept >= budget) {
+				break;
+			}
+
 			this.context.db.transaction((tx) => {
 				tx.delete(schema.narInfos)
 					.where(
@@ -230,7 +244,8 @@ export class GarbageCollectionService {
 
 	collectGarbage(
 		cache?: string,
-		purgeOrigin?: string
+		purgeOrigin?: string,
+		sweepLimit: number = maxPathsSweptPerRun
 	): Promise<GarbageCollectionOutcome> {
 		const startedAt = new Date();
 		const now = startedAt.toISOString();
@@ -306,9 +321,17 @@ export class GarbageCollectionService {
 			let pathsSwept = 0;
 
 			for (const name of sweepCaches) {
-				const swept = this.collectUnreachable(name, now);
+				const swept = this.collectUnreachable(
+					name,
+					now,
+					sweepLimit - pathsSwept
+				);
 				rootsExpired += swept.rootsExpired;
 				pathsSwept += swept.pathsSwept;
+
+				if (pathsSwept >= sweepLimit) {
+					break;
+				}
 			}
 
 			return {
