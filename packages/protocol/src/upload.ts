@@ -60,12 +60,51 @@ export type ParsedUploadPathMetadata = z.output<
 	typeof uploadPathMetadataSchema
 >;
 
+// An identifier for one push, signed and handed out by the server when it issues
+// the push's upload credential. It namespaces the push's staging objects under
+// `staging/<pushId>/`, so one credential scoped to that prefix covers every
+// upload the push stages, including the fresh keys a re-negotiated slot creates.
+// The wire shape is constrained to url-safe characters with no slash or dot, so
+// a pushId can never widen the staging key past its prefix; the server checks
+// the signature itself, the schema only bounds the wire format.
+export const pushIdSchema = z
+	.string()
+	.regex(/^[A-Za-z0-9-]{1,128}$/, 'pushId must be url-safe');
+export type ParsedPushId = z.output<typeof pushIdSchema>;
+
+// A temporary R2 S3 credential: the access-key triple a standard S3 client signs
+// with, where to send the requests, and when it stops working. The single
+// declaration of the shape, shared by the server helper that builds it and the
+// wire response that carries it.
+export const r2CredentialSchema = z.strictObject({
+	accessKeyId: z.string(),
+	secretAccessKey: z.string(),
+	sessionToken: z.string(),
+	endpoint: z.string(),
+	bucket: z.string(),
+	expiresAt: z.string()
+});
+export type ParsedR2Credential = z.output<typeof r2CredentialSchema>;
+export type R2Credential = z.input<typeof r2CredentialSchema>;
+
+// The credential a push uploads its blobs with, scoped to the push's staging
+// prefix, plus the signed push id that names the prefix. The CLI drives a
+// standard S3 client with these straight to R2, so no blob byte passes the
+// Worker.
+export const pushCredentialSchema = z.strictObject({
+	pushId: pushIdSchema,
+	...r2CredentialSchema.shape
+});
+export type ParsedPushCredential = z.output<typeof pushCredentialSchema>;
+export type PushCredential = z.input<typeof pushCredentialSchema>;
+
 // One negotiate carries a store-path closure, bounded by the store itself. The
 // cap sits well above any real closure, so it rejects only an abusive body, not
 // a legitimate push.
 export const uploadNegotiateMaxPaths = 100_000;
 
 export const uploadNegotiateRequestSchema = z.strictObject({
+	pushId: pushIdSchema,
 	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
 });
 export type ParsedUploadNegotiateRequest = z.output<

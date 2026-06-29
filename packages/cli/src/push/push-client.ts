@@ -1,4 +1,5 @@
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { type PushCredential } from '@cupboard/protocol/upload';
 
 import { cachePrefixFor, CupboardClient } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
@@ -37,8 +38,19 @@ export function pushClientFor(
 		options.signal
 	);
 
+	// One credential per push, fetched on first use and reused. It carries the
+	// signed push id every negotiate names, so a re-negotiated slot stays under
+	// the same staging prefix the credential is scoped to.
+	let session: Promise<PushCredential> | undefined;
+	const pushSession = (): Promise<PushCredential> =>
+		(session ??= rpc.uploads.credential({ cacheName }));
+
 	return {
-		negotiate: (body) => rpc.uploads.negotiate({ cacheName, ...body }),
+		negotiate: async (body) => {
+			const { pushId } = await pushSession();
+
+			return rpc.uploads.negotiate({ cacheName, pushId, ...body });
+		},
 		prepareUpload: (uploadId, body) =>
 			rpc.uploads.prepare({ cacheName, id: uploadId, ...body }),
 		prepareUploads: (items) =>

@@ -44,6 +44,7 @@ export default defineConfig(async () => {
 									R2_ACCOUNT_ID: 'test-account-id',
 									R2_BUCKET_NAME: 'cupboard-blobs',
 									R2_SECRET_ACCESS_KEY: 'test-secret-access-key',
+									PUSH_ID_SIGNING_KEY: 'test-push-id-signing-key',
 									TEST_MIGRATIONS: migrations
 								},
 								// The admission manifest KV the control handler reads and writes;

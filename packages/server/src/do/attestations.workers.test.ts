@@ -50,6 +50,7 @@ import {
 	sigstoreBundleBytes,
 	tenantCasBlobRows,
 	tenantUsageRow,
+	testPushId,
 	testServerFor,
 	uploadBlobMetadata,
 	uploadMetadata,
@@ -685,7 +686,10 @@ async function pushPathThroughTenant(
 		'/cache/_default/uploads',
 		token,
 		{
-			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] }),
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(metadata)]
+			}),
 			headers: { 'content-type': 'application/json' },
 			method: 'POST'
 		}

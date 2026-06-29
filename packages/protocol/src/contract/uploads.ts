@@ -2,6 +2,7 @@ import { cacheSelectorSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
+	pushCredentialSchema,
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
 	uploadPrepareBatchRequestSchema,
@@ -18,6 +19,18 @@ import { baseProcedure } from './base.ts';
 // commit itself is a WebSocket outside the contract, and the staged bytes go
 // straight to the presigned URL.
 export const uploadsContract = {
+	// Issues the temporary R2 credential a push uploads its blobs with, once at
+	// push start. The server signs a fresh push id and scopes the credential to
+	// that push's staging prefix; the client then names every upload with the id.
+	credential: baseProcedure
+		.meta({
+			requires: 'upload:negotiate',
+			resource: { cache: { field: 'cacheName' } }
+		})
+		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/credential' })
+		.input(z.strictObject({ cacheName: cacheSelectorSchema }))
+		.output(pushCredentialSchema),
+
 	negotiate: baseProcedure
 		.meta({
 			requires: 'upload:negotiate',

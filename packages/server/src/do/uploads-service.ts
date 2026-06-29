@@ -5,6 +5,7 @@ import {
 	type ParsedUploadPathNegotiation,
 	type ParsedUploadPrepareItemRequest,
 	type ParsedUploadPrepareRequest,
+	type PushCredential,
 	type UploadDecision,
 	type UploadNegotiateResponse,
 	type UploadPrepareBatchResponse,
@@ -17,6 +18,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
+	InvalidPushIdError,
 	ReusableUploadNotPreparableError,
 	UploadCacheMismatchError,
 	UploadExpiredError,
@@ -110,6 +112,7 @@ export class UploadsService {
 	// can race or overwrite the shared one.
 	private planUpload(
 		cache: string,
+		pushId: string,
 		metadata: ParsedUploadPathNegotiation,
 		existingBlob: BlobStateRow | undefined
 	): UploadDecision {
@@ -130,7 +133,7 @@ export class UploadsService {
 					};
 		const r2Key =
 			existingBlob === undefined
-				? stagingObjectKey(uploadId)
+				? stagingObjectKey(pushId, uploadId)
 				: narObjectKey(metadata.narHash);
 
 		this.context.db
@@ -200,6 +203,10 @@ export class UploadsService {
 		body: ParsedUploadNegotiateRequest,
 		origin: string
 	): Promise<UploadNegotiateResponse> {
+		if (!(await this.context.pushCredentials().verify(body.pushId))) {
+			throw new InvalidPushIdError();
+		}
+
 		if (body.paths.length === 0) {
 			return { uploads: [] };
 		}
@@ -260,6 +267,7 @@ export class UploadsService {
 			uploads.push(
 				this.planUpload(
 					cache,
+					body.pushId,
 					metadata,
 					reusableByNarHash.get(metadata.narHash)
 				)
@@ -275,6 +283,12 @@ export class UploadsService {
 		);
 
 		return { uploads };
+	}
+
+	// Issues a push's upload credential, once at push start: a signed push id and
+	// a temporary R2 credential scoped to that push's staging prefix.
+	issuePushCredential(): Promise<PushCredential> {
+		return this.context.pushCredentials().issue(new Date());
 	}
 
 	async prepareUpload(

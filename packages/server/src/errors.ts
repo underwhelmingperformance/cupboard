@@ -604,6 +604,24 @@ export class R2PresignConfigurationMissingError extends ServerHttpError {
 	}
 }
 
+export class PushIdSigningKeyMissingError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('PUSH_ID_SIGNING_KEY is not configured');
+		this.name = 'PushIdSigningKeyMissingError';
+	}
+}
+
+export class InvalidPushIdError extends ServerHttpError {
+	readonly status = StatusCodes.FORBIDDEN;
+
+	constructor() {
+		super('Push id is not recognised');
+		this.name = 'InvalidPushIdError';
+	}
+}
+
 export class UploadNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 

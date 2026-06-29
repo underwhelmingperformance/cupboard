@@ -69,6 +69,7 @@ import { z } from 'zod';
 import migrations from '../drizzle/migrations.js';
 
 import { issueAccessJwt } from './auth/auth.ts';
+import { issuePushId } from './blob/push-id.ts';
 import {
 	activeControlKey,
 	ensureControlKey
@@ -1292,6 +1293,16 @@ export function cacheScopedPath(cache: string, suffix: string): string {
 	return `/cache/${selectorForCache(cache)}${suffix}`;
 }
 
+// A push id signed with the test signing key (the PUSH_ID_SIGNING_KEY the worker
+// pool binds) over a fixed nonce, so a negotiated decision's staging key under
+// `staging/<pushId>/` is deterministic to assert. The server verifies it exactly
+// as production would.
+const testPushIdSigningKey = 'test-push-id-signing-key';
+export const testPushId = await issuePushId(
+	testPushIdSigningKey,
+	new Uint8Array(16)
+);
+
 export async function negotiateUploads(
 	token: string,
 	paths: readonly ParsedUploadPathMetadata[],
@@ -1302,6 +1313,7 @@ export async function negotiateUploads(
 		token,
 		{
 			body: JSON.stringify({
+				pushId: testPushId,
 				paths: paths.map((path) => uploadPathNegotiation(path))
 			}),
 			headers: {
@@ -1333,7 +1345,10 @@ export function negotiateViaInstance(
 			authorization: `Bearer ${token}`,
 			'content-type': 'application/json'
 		},
-		body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+		body: JSON.stringify({
+			pushId: testPushId,
+			paths: [uploadPathNegotiation(metadata)]
+		})
 	});
 
 	return instance.fetch(request);
@@ -1348,6 +1363,7 @@ export async function negotiateViaWorker(
 		token,
 		{
 			body: JSON.stringify({
+				pushId: testPushId,
 				paths: paths.map((path) => uploadPathNegotiation(path))
 			}),
 			headers: {
@@ -1415,7 +1431,10 @@ export async function pushPathToTenant(
 		{
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(metadata)]
+			})
 		}
 	);
 
@@ -1465,7 +1484,10 @@ export async function attemptPushToTenant(
 		{
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(metadata)]
+			})
 		}
 	);
 
@@ -1534,7 +1556,10 @@ export async function stageDeferredForTenant(
 		{
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ paths: [uploadPathNegotiation(metadata)] })
+			body: JSON.stringify({
+				pushId: testPushId,
+				paths: [uploadPathNegotiation(metadata)]
+			})
 		}
 	);
 
@@ -2733,7 +2758,7 @@ export function expectSingleUploadDecision(
 			storePathHash: metadata.storePathHash,
 			narHash: metadata.narHash,
 			uploadId: decision.uploadId,
-			r2Key: stagingObjectKey(decision.uploadId),
+			r2Key: stagingObjectKey(testPushId, decision.uploadId),
 			expiresAt: expectedExpiresAt
 		}
 	]);
@@ -2789,7 +2814,7 @@ export async function expectPrepareUploadResponse(
 	}).toStrictEqual({
 		protocol: 'https:',
 		hostname: 'test-account-id.r2.cloudflarestorage.com',
-		path: ['', 'cupboard-blobs', 'staging', `${uploadId}.nar.zst`],
+		path: ['', 'cupboard-blobs', 'staging', testPushId, `${uploadId}.nar.zst`],
 		hasSignature: true,
 		uploadHeaders: {
 			'x-amz-checksum-sha256': NixSha256Hash.parse(

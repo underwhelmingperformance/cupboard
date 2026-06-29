@@ -25,6 +25,7 @@ import {
 	pushPath,
 	resetTestServer,
 	sigstoreBundleBytes,
+	testPushId,
 	uploadBlobMetadata,
 	uploadMetadata,
 	uploadPathNegotiation,
@@ -281,6 +282,7 @@ describe('tenant contract round trip', () => {
 
 		const negotiated = await client.uploads.negotiate({
 			cacheName: '_default',
+			pushId: testPushId,
 			paths: [uploadPathNegotiation(metadata)]
 		});
 		const decision = uploadActionDecisionSchema

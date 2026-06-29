@@ -81,7 +81,7 @@ describe('createR2TemporaryCredentials', () => {
 			accessKeyId: credentials.accessKeyId,
 			endpoint: credentials.endpoint,
 			bucket: credentials.bucket,
-			expiresAt: credentials.expiresAt.toISOString(),
+			expiresAt: credentials.expiresAt,
 			secretAccessKey: credentials.secretAccessKey
 		}).toStrictEqual({
 			accessKeyId: 'parent-access-key',
