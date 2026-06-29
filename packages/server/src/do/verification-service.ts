@@ -1,4 +1,7 @@
-import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import {
 	type ParsedUploadPathMetadata,
@@ -16,8 +19,24 @@ import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { type ReconcileTarget } from './reconcile-queue-service.ts';
 import { parseStoredUploadMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
+
+type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
+// A committed row paired with what an R2 probe found for the two objects it
+// points at: its canonical NAR and its tenant narinfo object. The probe runs
+// outside the DO gate; the reconcile re-checks the row under the gate before
+// acting on it.
+interface RowObservation {
+	readonly row: NarInfoRow;
+	readonly narPresent: boolean;
+	readonly objectPresent: boolean;
+}
+
+// What a single row's reconcile did, so a batch can tally restores and removals.
+type ReconcileOutcome = 'removed' | 'restored' | 'unchanged';
 
 /**
  * A deferred upload claimed for verification, carrying just what the queue
@@ -273,6 +292,120 @@ export class VerificationService {
 		});
 	}
 
+	private narInfoRow(
+		cache: string,
+		storePathHash: StorePathHash
+	): NarInfoRow | undefined {
+		return this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+	}
+
+	// Probes a committed row's two R2 objects outside any critical section, so the
+	// round-trips never block a concurrent commit or delete. A transient R2 fault
+	// drops the row from this pass rather than aborting it. The narinfo object is
+	// only probed when its NAR is present: a missing NAR removes the row regardless
+	// of the narinfo object.
+	private async probeRow(row: NarInfoRow): Promise<RowObservation | undefined> {
+		try {
+			const tenant = this.context.requireTenant();
+			const isNarPresent =
+				(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !== null;
+			const isObjectPresent =
+				isNarPresent &&
+				(await this.context.env.BLOBS.head(
+					narInfoObjectKey(tenant, row.storePathHash, row.cache)
+				)) !== null;
+
+			return { row, narPresent: isNarPresent, objectPresent: isObjectPresent };
+		} catch (error) {
+			this.warnSkippedRow(row, error);
+
+			return undefined;
+		}
+	}
+
+	// Applies one row's probe under the caller's critical section. The generation
+	// re-check rejects any row a commit or delete changed during the probe, so a
+	// reconcile never acts on stale state: a NAR only reappears through a commit,
+	// which bumps the generation. A missing NAR removes the dangling narinfo; a
+	// present NAR with a missing object restores the object.
+	//
+	// Runs inside the caller's critical section; must not open its own.
+	private async reconcileObservation(
+		observation: RowObservation,
+		origin: string | undefined
+	): Promise<ReconcileOutcome> {
+		const {
+			row,
+			narPresent: isNarPresent,
+			objectPresent: isObjectPresent
+		} = observation;
+		const current = this.narInfoRow(row.cache, row.storePathHash);
+
+		if (current?.generation !== row.generation) {
+			return 'unchanged';
+		}
+
+		try {
+			if (!isNarPresent) {
+				await this.deletionQueue.reconcileMissingNar(current, origin);
+
+				return 'removed';
+			}
+
+			if (!isObjectPresent) {
+				return (await this.restoreNarInfoObject(current)) === 1
+					? 'restored'
+					: 'unchanged';
+			}
+		} catch (error) {
+			this.warnSkippedRow(row, error);
+		}
+
+		return 'unchanged';
+	}
+
+	// Reconciles a targeted set of committed paths, the per-push counterpart of the
+	// scanning {@link verifyBatch}. The probes run outside the gate; one short
+	// critical section applies the generation-checked reconciles. The DO alarm
+	// drives this in bounded chunks for a recently negotiated closure, so a missing
+	// narinfo object is restored and a lost NAR removed without the negotiate
+	// heading R2 on its hot path.
+	async reconcileTargets(
+		targets: readonly ReconcileTarget[],
+		origin: string | undefined
+	): Promise<void> {
+		const rows = targets
+			.map((target) => this.narInfoRow(target.cache, target.storePathHash))
+			.filter((row): row is NarInfoRow => row !== undefined);
+
+		if (rows.length === 0) {
+			return;
+		}
+
+		const observations = await Promise.all(
+			rows.map((row) => this.probeRow(row))
+		);
+
+		await this.context.ctx.blockConcurrencyWhile(async () => {
+			for (const observation of observations) {
+				if (observation === undefined) {
+					continue;
+				}
+
+				await this.reconcileObservation(observation, origin);
+			}
+		});
+	}
+
 	// One interactive verify pass: settle deferred uploads first, then run a
 	// bounded reconciling batch and report it.
 	async verify(
@@ -319,37 +452,13 @@ export class VerificationService {
 		// Probe R2 for every row outside any critical section, so the batch's
 		// round-trips never block a concurrent commit or delete. One row's
 		// transient R2 fault drops it from this pass rather than aborting the batch.
-		const tenant = this.context.requireTenant();
 		const observations = await Promise.all(
-			rows.map(async (row) => {
-				try {
-					const isNarPresent =
-						(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !==
-						null;
-					const isObjectPresent =
-						isNarPresent &&
-						(await this.context.env.BLOBS.head(
-							narInfoObjectKey(tenant, row.storePathHash, row.cache)
-						)) !== null;
-
-					return {
-						row,
-						narPresent: isNarPresent,
-						objectPresent: isObjectPresent
-					};
-				} catch (error) {
-					this.warnSkippedRow(row, error);
-
-					return;
-				}
-			})
+			rows.map((row) => this.probeRow(row))
 		);
 
 		// Apply the reconciles and advance the cursor in one short critical section.
-		// The generation re-check rejects any row a commit or delete changed during
-		// the probe, so a reconcile never acts on stale state. What remains inside
-		// the gate is fast synchronous SQLite plus the rare write for an unhealthy
-		// row, instead of every row's R2 round-trips.
+		// What remains inside the gate is fast synchronous SQLite plus the rare write
+		// for an unhealthy row, instead of every row's R2 round-trips.
 		return this.context.ctx.blockConcurrencyWhile(async () => {
 			let narInfoObjectsRestored = 0;
 			let danglingNarInfosRemoved = 0;
@@ -359,37 +468,12 @@ export class VerificationService {
 					continue;
 				}
 
-				const {
-					row,
-					narPresent: isNarPresent,
-					objectPresent: isObjectPresent
-				} = observation;
-				const current = this.context.db
-					.select()
-					.from(schema.narInfos)
-					.where(
-						and(
-							eq(schema.narInfos.cache, row.cache),
-							eq(schema.narInfos.storePathHash, row.storePathHash)
-						)
-					)
-					.get();
+				const outcome = await this.reconcileObservation(observation, origin);
 
-				// A NAR only reappears through a commit, which bumps the generation, so
-				// a generation match means the probe still holds for this row.
-				if (current?.generation !== row.generation) {
-					continue;
-				}
-
-				try {
-					if (!isNarPresent) {
-						await this.deletionQueue.reconcileMissingNar(current, origin);
-						danglingNarInfosRemoved += 1;
-					} else if (!isObjectPresent) {
-						narInfoObjectsRestored += await this.restoreNarInfoObject(current);
-					}
-				} catch (error) {
-					this.warnSkippedRow(row, error);
+				if (outcome === 'removed') {
+					danglingNarInfosRemoved += 1;
+				} else if (outcome === 'restored') {
+					narInfoObjectsRestored += 1;
 				}
 			}
 

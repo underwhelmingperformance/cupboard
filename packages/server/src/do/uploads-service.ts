@@ -28,6 +28,7 @@ import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import {
 	commitMetadataFromPathAndBlob,
 	parseStoredUploadPathMetadata,
@@ -75,7 +76,8 @@ export class UploadsService {
 		private readonly context: ServerContext,
 		private readonly uploadState: UploadStateService,
 		private readonly narInfoObjects: NarInfoObjectsService,
-		private readonly deletionQueue: DeletionQueueService
+		private readonly deletionQueue: DeletionQueueService,
+		private readonly reconcileQueue: ReconcileQueueService
 	) {}
 
 	// The committed narinfo rows for a closure, read in cache-scoped chunks that
@@ -100,28 +102,6 @@ export class UploadsService {
 		);
 
 		return new Map(rows.map((row) => [row.storePathHash, row]));
-	}
-
-	// Re-materialises the tenant narinfo objects that a skippable path needs but
-	// that R2 no longer holds. The bulk head already told us which are present, so
-	// only the absent few open a critical section to heal.
-	private async healMissingNarInfoObjects(
-		cache: string,
-		rows: readonly NarInfoRow[]
-	): Promise<void> {
-		const presentNarInfoObjects =
-			await this.narInfoObjects.existingNarInfoObjects(
-				cache,
-				rows.map((row) => row.storePathHash)
-			);
-
-		for (const row of rows) {
-			if (presentNarInfoObjects.has(row.storePathHash)) {
-				continue;
-			}
-
-			await this.narInfoObjects.ensureNarInfoObject(cache, row.storePathHash);
-		}
 	}
 
 	// Records a pending upload for one path and returns its decision: a reuse of an
@@ -202,10 +182,19 @@ export class UploadsService {
 		return { status: uploadStatusOf(pending) };
 	}
 
-	// Plans the per-path uploads for a whole closure. Every fact the decision
-	// turns on is read in bulk first, so a closure of any size costs a bounded
-	// number of D1 queries and R2 heads, not one of each per path: a large
-	// negotiate used to walk thousands of serial round trips and time out.
+	// Plans the per-path uploads for a whole closure from pure-database facts, so a
+	// closure of any size costs a bounded number of D1 queries and no R2 head on
+	// the hot path: a negotiate that headed R2 per path hit the per-invocation
+	// subrequest cap around a few hundred cached paths and broke large pushes.
+	//
+	// A `blob_state` row exists exactly while the canonical NAR object does, so it
+	// stands in for the head: a committed path whose row is present is skippable;
+	// one whose row is gone has lost its NAR, so its stale narinfo is reconciled
+	// here and the path re-plans an upload. The skippable closure is then queued
+	// for an off-hot-path reconcile (see {@link ReconcileQueueService}) that probes
+	// R2 and repairs any drift the database could not see, so a missing narinfo
+	// object is restored in one re-push and a genuinely lost NAR is removed for the
+	// next.
 	async negotiate(
 		cache: string,
 		body: ParsedUploadNegotiateRequest,
@@ -225,24 +214,22 @@ export class UploadsService {
 			existingRows
 		);
 
-		// A committed path is skippable only while its canonical NAR object
-		// survives. Gather those, then self-heal just the skippable paths whose
-		// tenant narinfo object is missing, so the common case enters no critical
-		// section at all.
+		// A committed path is skippable only while a `blob_state` row still backs
+		// its NAR. The reaper drops that row before the object, so its presence
+		// confirms the NAR without an R2 head.
 		const committedRows = existingRows.filter((row) =>
 			committed.has(row.storePathHash)
 		);
-		const presentNarObjects = await this.narInfoObjects.existingNarObjects(
+		const backedNarHashes = await this.uploadState.presentNarHashes(
 			committedRows.map((row) => row.narHash)
 		);
 		const skippableRows = committedRows.filter((row) =>
-			presentNarObjects.has(row.narHash)
+			backedNarHashes.has(row.narHash)
 		);
-		await this.healMissingNarInfoObjects(cache, skippableRows);
 		const skippable = new Set(skippableRows.map((row) => row.storePathHash));
 
 		// Only a path that will actually plan an upload needs a reusable blob, so a
-		// fully cached re-push (every path a skip) heads no shared objects at all.
+		// fully cached re-push (every path a skip) reads no reuse facts at all.
 		const reusableByNarHash = await this.uploadState.findReusableBlobs(
 			body.paths
 				.filter((path) => !skippable.has(path.storePathHash))
@@ -263,8 +250,9 @@ export class UploadsService {
 				continue;
 			}
 
-			// Committed, but its NAR object is gone: reconcile the stale narinfo so a
-			// re-upload at the requested hash heals it, then plan that upload.
+			// Committed, but no `blob_state` row backs its NAR: reconcile the stale
+			// narinfo so a re-upload at the requested hash heals it, then plan that
+			// upload.
 			if (existing !== undefined && committed.has(metadata.storePathHash)) {
 				await this.deletionQueue.removeStaleNarInfo(existing, origin);
 			}
@@ -277,6 +265,14 @@ export class UploadsService {
 				)
 			);
 		}
+
+		// Queue the skippable closure for the off-hot-path reconcile and arm the
+		// alarm. The push returns at once; the alarm probes R2 for each path and
+		// restores a missing narinfo object or removes one whose NAR is truly gone.
+		await this.reconcileQueue.enqueue(
+			origin,
+			skippableRows.map((row) => ({ cache, storePathHash: row.storePathHash }))
+		);
 
 		return { uploads };
 	}

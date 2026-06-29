@@ -303,29 +303,6 @@ export class NarInfoObjectsService {
 		return committed;
 	}
 
-	// The hashes among `narHashes` whose canonical NAR object is still present in
-	// R2, gathered with a bounded fan-out of `head` reads. The skip decision needs
-	// this for every committed path; batching the reads keeps a large closure off
-	// a serial walk of round trips.
-	async existingNarObjects(
-		narHashes: readonly NixSha256HashString[]
-	): Promise<Set<NixSha256HashString>> {
-		const present = await mapWithConcurrency(
-			[...new Set(narHashes)],
-			maxOutgoingConnections,
-			async (narHash) =>
-				(await this.context.env.BLOBS.head(narObjectKey(narHash))) === null
-					? undefined
-					: narHash
-		);
-
-		return new Set(
-			present.filter(
-				(narHash): narHash is NixSha256HashString => narHash !== undefined
-			)
-		);
-	}
-
 	// The store-path hashes among `storePathHashes` whose tenant narinfo object is
 	// already materialised in R2, gathered with a bounded fan-out of `head` reads.
 	// A skip whose object is present needs no self-heal; only the absent ones do.
