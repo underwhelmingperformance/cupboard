@@ -10,6 +10,5 @@
 			"entry": ["src/do/server.ts", "src/tenant-worker.ts"]
 		}
 	},
-	"ignoreDependencies": ["cloudflare"],
 	"ignore": [".wrangler/**", "worker-configuration*.d.ts"]
 }
