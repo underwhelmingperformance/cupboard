@@ -15,6 +15,7 @@ import {
 } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 
+import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -285,10 +286,27 @@ export class UploadsService {
 		return { uploads };
 	}
 
-	// Issues a push's upload credential, once at push start: a signed push id and
-	// a temporary R2 credential scoped to that push's staging prefix.
-	issuePushCredential(): Promise<PushCredential> {
-		return this.context.pushCredentials().issue(new Date());
+	// Issues a push's upload credential, scoped to its staging prefix and the
+	// write-only upload actions, and never outliving the access token that asked
+	// for it. Without a push id the server signs a fresh one; with one it refreshes
+	// the credential for that push, having checked it signed the id.
+	async issuePushCredential(
+		tokenExpiresAt: Date,
+		pushId?: string
+	): Promise<PushCredential> {
+		const now = new Date();
+		const ttlSeconds = pushCredentialTtlSeconds(tokenExpiresAt, now);
+		const issuer = this.context.pushCredentials();
+
+		if (pushId === undefined) {
+			return issuer.issue(ttlSeconds, now);
+		}
+
+		if (!(await issuer.verify(pushId))) {
+			throw new InvalidPushIdError();
+		}
+
+		return issuer.issueFor(pushId, ttlSeconds, now);
 	}
 
 	async prepareUpload(

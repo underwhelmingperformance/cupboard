@@ -309,6 +309,49 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('issues, refreshes and bounds a push credential to the token', async () => {
+		await useTestServer('contract-credential');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+
+		const issued = await client.uploads.credential({ cacheName: '_default' });
+		const refreshed = await client.uploads.credential({
+			cacheName: '_default',
+			pushId: issued.pushId
+		});
+
+		const expiresInSeconds =
+			(new Date(issued.expiresAt).getTime() - Date.now()) / 1000;
+
+		expect({
+			pushIdShape: /^[0-9a-f]{96}$/.test(issued.pushId),
+			bucket: issued.bucket,
+			endpoint: issued.endpoint,
+			hasCredential:
+				issued.accessKeyId.length > 0 &&
+				issued.secretAccessKey.length > 0 &&
+				issued.sessionToken.length > 0,
+			// The admin token lives 600s, far under the six-hour cap, so a credential
+			// bounded to the token lands well under an hour.
+			boundToToken: expiresInSeconds > 0 && expiresInSeconds < 700,
+			refreshKeepsPrefix: refreshed.pushId === issued.pushId
+		}).toStrictEqual({
+			pushIdShape: true,
+			bucket: 'cupboard-blobs',
+			endpoint: 'https://test-account-id.r2.cloudflarestorage.com',
+			hasCredential: true,
+			boundToToken: true,
+			refreshKeepsPrefix: true
+		});
+
+		await expect(
+			client.uploads.credential({
+				cacheName: '_default',
+				pushId: 'f'.repeat(96)
+			})
+		).rejects.toThrow();
+	});
+
 	it('attaches an attestation bundle through the derived client', async () => {
 		await useTestServer('contract-attestations');
 		const init = await bootstrap();

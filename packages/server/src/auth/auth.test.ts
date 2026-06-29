@@ -93,7 +93,11 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			now
 		);
 
-		expect(claims).toStrictEqual({ subject: 'ci', grants });
+		expect(claims).toStrictEqual({
+			subject: 'ci',
+			grants,
+			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
+		});
 	});
 
 	it('preserves audit claims alongside the grants', async () => {
@@ -119,7 +123,11 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			now
 		);
 
-		expect(claims).toStrictEqual({ subject: 'ci', grants: wildcardGrants });
+		expect(claims).toStrictEqual({
+			subject: 'ci',
+			grants: wildcardGrants,
+			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
+		});
 	});
 
 	it('selects the verification key by kid from a rotated set', async () => {
@@ -148,7 +156,11 @@ describe('issueAccessJwt and verifyAccessJwt', () => {
 			now
 		);
 
-		expect(claims).toStrictEqual({ subject: 'ci', grants: wildcardGrants });
+		expect(claims).toStrictEqual({
+			subject: 'ci',
+			grants: wildcardGrants,
+			expiresAt: new Date(now.getTime() + ttlSeconds * 1000)
+		});
 	});
 
 	it.each([

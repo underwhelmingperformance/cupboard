@@ -74,7 +74,8 @@ describe('control key store', () => {
 			verificationKeys: [{ kid: active.kid }],
 			claims: {
 				subject: 'admin',
-				grants: [{ type: 'cupboard_wildcard' }]
+				grants: [{ type: 'cupboard_wildcard' }],
+				expiresAt: new Date(now.getTime() + 600 * 1000)
 			}
 		});
 	});

@@ -12,6 +12,9 @@ import { generateEd25519KeyPair } from '../crypto/crypto.ts';
 export interface AccessClaims {
 	readonly subject: string;
 	readonly grants: AuthorizationDetails;
+	// When the bearer token itself expires. A credential the token mints must not
+	// outlive it, so issuance caps the credential's life at this instant.
+	readonly expiresAt: Date;
 }
 
 // The issued-token type per RFC 9068, set in the header and verified on the way
@@ -197,9 +200,13 @@ export async function verifyAccessJwt(
 		throw new MissingSubjectError();
 	}
 
+	// `exp` is a required claim above, so a verified token always carries one.
+	const expiresAt = new Date((verified.payload.exp ?? 0) * 1000);
+
 	return {
 		subject,
-		grants: parseGrants(verified.payload[authorizationDetailsClaim])
+		grants: parseGrants(verified.payload[authorizationDetailsClaim]),
+		expiresAt
 	};
 }
 
