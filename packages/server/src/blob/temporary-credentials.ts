@@ -8,10 +8,26 @@ export type R2CredentialScope =
 
 export interface R2TemporaryCredentialOptions {
 	readonly scope: R2CredentialScope;
+	// An allow-list of S3 operations that narrows the credential within its scope.
+	// Omitted leaves the scope's full operation set; supplied, only these are
+	// permitted (R2 honours it on the locally signed JWT we issue).
+	readonly actions?: readonly string[];
 	readonly prefixPaths?: readonly string[];
 	readonly objectPaths?: readonly string[];
 	readonly ttlSeconds: number;
 }
+
+// The S3 operations a push needs to stage a blob: a single PutObject for a NAR
+// small enough to hold in memory, and the multipart calls for a large one that
+// streams. Read and list are left out, so the credential cannot read back
+// another upload's staged bytes, only write its own.
+export const pushUploadActions = [
+	'PutObject',
+	'CreateMultipartUpload',
+	'UploadPart',
+	'CompleteMultipartUpload',
+	'AbortMultipartUpload'
+] as const;
 
 export interface R2TemporaryCredentials {
 	readonly accessKeyId: string;
@@ -88,7 +104,7 @@ export async function createR2TemporaryCredentials(
 	const issuedAt = Math.floor(now.getTime() / 1000);
 	const expiresAt = issuedAt + options.ttlSeconds;
 
-	const claims = {
+	const claims: Record<string, unknown> = {
 		bucket: configuration.bucketName,
 		scope: options.scope,
 		paths: {
@@ -101,6 +117,10 @@ export async function createR2TemporaryCredentials(
 		iat: issuedAt,
 		exp: expiresAt
 	};
+
+	if (options.actions !== undefined && options.actions.length > 0) {
+		claims.actions = options.actions;
+	}
 
 	const header = base64UrlJson({ alg: 'HS256', typ: 'JWT' });
 	const payload = base64UrlJson(claims);
