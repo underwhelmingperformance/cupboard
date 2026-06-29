@@ -137,7 +137,7 @@ importers:
         version: 1.14.6
       '@sigstore/verify':
         specifier: ^4.0.0
-        version: 4.0.0
+        version: 4.1.0
       aws4fetch:
         specifier: ^1.0.20
         version: 1.0.20
@@ -381,7 +381,7 @@ importers:
         version: 5.0.0
       '@sigstore/verify':
         specifier: ^4.0.0
-        version: 4.0.0
+        version: 4.1.0
       http-status-codes:
         specifier: ^2.3.0
         version: 2.3.0
@@ -1846,8 +1846,8 @@ packages:
     resolution: {integrity: sha512-wefjygudENbzbQMks1t5u34EP0fFoD0XvaEP7DOUP/sXKvogzEJYFw5E6pegGyp3onGWzVEYKVa3bNZWyTYX+A==}
     engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
 
-  '@sigstore/core@4.0.0':
-    resolution: {integrity: sha512-uFGJpKiMCKXV+61jsxQ0ECfr0wjDP+8qnT6pgfsOXbIk0j/KPfBSp2Dks/YcNcT/S4e3P267JKPL6gAwygJRuw==}
+  '@sigstore/core@4.0.1':
+    resolution: {integrity: sha512-9v5hRjujn5NXq8o7XFEUgLyAtdr5Iisb4pzM05u3K61IS5q3hP3luWAndk0RkPPLTUFoTbg7Vb84UQ1ZQeajWQ==}
     engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
 
   '@sigstore/protobuf-specs@0.5.1':
@@ -1858,8 +1858,8 @@ packages:
     resolution: {integrity: sha512-Zyqg9tcHps3uRAlKHLNmsW4ohsUZAjb9G+31r7lg0ICh/JOcadzmJsIRdjKljlRHpaR0K4aJ2kXXIdywdcdMlA==}
     engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
 
-  '@sigstore/verify@4.0.0':
-    resolution: {integrity: sha512-yYQTYQkjkdp69M5f+XGOhX45RvgCwh0cz6r++hGRHi7G/NVPmIK7ISxY73fM5WVerIiYe/ZbVlMu47dDodBP6A==}
+  '@sigstore/verify@4.1.0':
+    resolution: {integrity: sha512-p/s720RiWxLG8XtmfdPfEJOlATA6H/2knFqmtQbFkHKN3IrhWGUwPfpQAf1UnQIEES9IaH6zzhfjkrhTfeSdZw==}
     engines: {node: ^22.22.2 || ^24.15.0 || >=26.0.0}
 
   '@sindresorhus/is@7.2.0':
@@ -4460,7 +4460,7 @@ snapshots:
     dependencies:
       '@sigstore/protobuf-specs': 0.5.1
 
-  '@sigstore/core@4.0.0': {}
+  '@sigstore/core@4.0.1': {}
 
   '@sigstore/protobuf-specs@0.5.1': {}
 
@@ -4471,10 +4471,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@sigstore/verify@4.0.0':
+  '@sigstore/verify@4.1.0':
     dependencies:
       '@sigstore/bundle': 5.0.0
-      '@sigstore/core': 4.0.0
+      '@sigstore/core': 4.0.1
       '@sigstore/protobuf-specs': 0.5.1
 
   '@sindresorhus/is@7.2.0': {}
