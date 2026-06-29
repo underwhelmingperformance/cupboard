@@ -249,7 +249,7 @@ describe('offboarding drain', () => {
 						narHash: narHashB
 					}
 				],
-				presence: [{ narHash: narHashA, fileSize: 43 }],
+				presence: [{ narHash: narHashA, fileSize: 47 }],
 				objects: [`t/${id}/narinfo/${'b'.repeat(32)}`]
 			},
 			final: {

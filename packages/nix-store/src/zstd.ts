@@ -1,5 +1,5 @@
 import type { Transform } from 'node:stream';
-import { createZstdCompress, createZstdDecompress } from 'node:zlib';
+import { constants, createZstdCompress, createZstdDecompress } from 'node:zlib';
 
 import { ZstdDecodeError } from './errors.ts';
 
@@ -13,7 +13,12 @@ type ZstdFactory = () => Transform;
 const maxQueuedChunks = 16;
 
 export function zstdCompressionStream(): ByteTransformPair {
-	return zstdTransformStream(createZstdCompress);
+	// Embed a content checksum in the frame epilogue: every decompressor, the
+	// server's verify pass and the client's Nix alike, then rejects a corrupted
+	// frame on its own, independent of the narHash check.
+	return zstdTransformStream(() =>
+		createZstdCompress({ params: { [constants.ZSTD_c_checksumFlag]: 1 } })
+	);
 }
 
 export function zstdDecompressionStream(): ByteTransformPair {
