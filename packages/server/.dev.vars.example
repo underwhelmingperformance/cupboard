@@ -3,11 +3,15 @@
 #
 # Production secrets are set with `wrangler secret put <NAME>`.
 
-# R2 credentials for the presigned NAR uploads.
+# R2 credentials the Durable Object signs NAR upload credentials with.
 R2_ACCOUNT_ID=
 R2_ACCESS_KEY_ID=
 R2_BUCKET_NAME=cupboard-blobs
 R2_SECRET_ACCESS_KEY=
+
+# Signs the per-push id the upload credential is scoped to. Sensitive; the deploy
+# generates one if absent and it must stay stable afterwards.
+PUSH_ID_SIGNING_KEY=
 
 # The issuer and audience cupboard stamps into its own access tokens. Both
 # default to `cupboard` in wrangler.toml; set them here to override locally.

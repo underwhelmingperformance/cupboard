@@ -1,3 +1,5 @@
+import type { R2Credential } from '@cupboard/protocol/upload';
+
 import type { R2PresignerConfiguration } from './presign.ts';
 
 export type R2CredentialScope =
@@ -28,15 +30,6 @@ export const pushUploadActions = [
 	'CompleteMultipartUpload',
 	'AbortMultipartUpload'
 ] as const;
-
-export interface R2TemporaryCredentials {
-	readonly accessKeyId: string;
-	readonly secretAccessKey: string;
-	readonly sessionToken: string;
-	readonly endpoint: string;
-	readonly bucket: string;
-	readonly expiresAt: Date;
-}
 
 const textEncoder = new TextEncoder();
 
@@ -99,7 +92,7 @@ export async function createR2TemporaryCredentials(
 	configuration: R2PresignerConfiguration,
 	options: R2TemporaryCredentialOptions,
 	now: Date
-): Promise<R2TemporaryCredentials> {
+): Promise<R2Credential> {
 	const endpoint = `https://${configuration.accountId}.r2.cloudflarestorage.com`;
 	const issuedAt = Math.floor(now.getTime() / 1000);
 	const expiresAt = issuedAt + options.ttlSeconds;
@@ -135,6 +128,6 @@ export async function createR2TemporaryCredentials(
 		sessionToken: btoa(`jwt/${jwt}`),
 		endpoint,
 		bucket: configuration.bucketName,
-		expiresAt: new Date(expiresAt * 1000)
+		expiresAt: new Date(expiresAt * 1000).toISOString()
 	};
 }

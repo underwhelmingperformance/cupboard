@@ -18,6 +18,10 @@ import {
 import { z } from 'zod';
 
 import { r2PresignConfiguration, R2Presigner } from '../blob/presign.ts';
+import {
+	PushCredentialIssuer,
+	pushIdSigningKey
+} from '../blob/push-credential.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import {
@@ -117,6 +121,7 @@ export type MaterialiseOutcome =
 // sections), the inbound-OIDC discovery store, and the lazy R2 presigner.
 export class ServerContext {
 	private presigner: R2Presigner | undefined;
+	private credentialIssuer: PushCredentialIssuer | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
 	// Sums the rows this DO's SQLite reads and writes, so a request's cost can be
@@ -145,6 +150,15 @@ export class ServerContext {
 		this.presigner ??= new R2Presigner(r2PresignConfiguration(this.env));
 
 		return this.presigner;
+	}
+
+	pushCredentials(): PushCredentialIssuer {
+		this.credentialIssuer ??= new PushCredentialIssuer(
+			() => r2PresignConfiguration(this.env),
+			pushIdSigningKey(this.env)
+		);
+
+		return this.credentialIssuer;
 	}
 
 	// This Durable Object's tenant slug, the one source for its tenant-scoped D1

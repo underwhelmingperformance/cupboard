@@ -168,11 +168,14 @@ export const tenantRouter = os.router({
 		)
 	},
 	uploads: {
+		credential: os.uploads.credential.handler(({ context }) =>
+			context.services.uploads.issuePushCredential()
+		),
 		negotiate: os.uploads.negotiate.handler(({ input, context }) => {
 			const requestUrl = new URL(context.request.url);
 			return context.services.uploads.negotiate(
 				cacheFromSelector(input.cacheName),
-				{ paths: input.paths },
+				{ pushId: input.pushId, paths: input.paths },
 				requestUrl.origin
 			);
 		}),

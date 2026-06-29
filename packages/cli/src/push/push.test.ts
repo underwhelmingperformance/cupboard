@@ -67,7 +67,7 @@ function fallbackCommitResponse() {
 
 describe('runPush', () => {
 	it('uploads missing blobs and commits uploaded metadata', async () => {
-		const negotiations: UploadNegotiateRequest[] = [];
+		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
 		const uploads: {
 			r2Key: string;
 			uploadUrl: string;

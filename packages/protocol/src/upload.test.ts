@@ -13,6 +13,7 @@ import {
 const storePathHash = '0'.repeat(32);
 const storePath = `/nix/store/${storePathHash}-name`;
 const narHash = `sha256:${'1'.repeat(52)}`;
+const pushId = 'push-1';
 
 const negotiationPath = {
 	storePathHash,
@@ -24,7 +25,7 @@ const negotiationPath = {
 
 describe('uploadNegotiateRequestSchema', () => {
 	it('accepts a well-formed request', () => {
-		const value = { paths: [negotiationPath] };
+		const value = { pushId, paths: [negotiationPath] };
 
 		expect(uploadNegotiateRequestSchema.parse(value)).toStrictEqual(value);
 	});
@@ -34,6 +35,7 @@ describe('uploadNegotiateRequestSchema', () => {
 		{ name: 'a ca', field: 'ca' as const }
 	])('accepts $name metadata line', ({ field }) => {
 		const value = {
+			pushId,
 			paths: [{ ...negotiationPath, [field]: `${storePath}.drv` }]
 		};
 
@@ -88,7 +90,9 @@ describe('uploadNegotiateRequestSchema', () => {
 			}
 		}
 	])('rejects $name', ({ value }) => {
-		expect(uploadNegotiateRequestSchema.safeParse(value).success).toBe(false);
+		expect(
+			uploadNegotiateRequestSchema.safeParse({ pushId, ...value }).success
+		).toBe(false);
 	});
 });
 

@@ -117,7 +117,9 @@ export const defaultPrepareConcurrency = 6;
  * presigned URL and the commit speaks the WebSocket, so both stay raw.
  */
 export interface PushClient {
-	negotiate(body: UploadNegotiateRequest): Promise<UploadNegotiateResponse>;
+	negotiate(
+		body: Omit<UploadNegotiateRequest, 'pushId'>
+	): Promise<UploadNegotiateResponse>;
 	prepareUpload(
 		uploadId: string,
 		body: UploadPrepareRequest

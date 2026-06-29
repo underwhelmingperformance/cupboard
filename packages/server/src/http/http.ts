@@ -88,12 +88,18 @@ export function attestationListObjectKey(
 	return `t/${tenant}/${suffix}`;
 }
 
-// Where a client uploads unverified bytes, private to one upload. The server
-// verifies them here, then promotes them into the shared `nar/<narHash>` key, so
-// the canonical object only ever holds confirmed content and no client ever
-// writes it directly.
-export function stagingObjectKey(uploadId: string): string {
-	return `staging/${uploadId}.nar.zst`;
+// Where a client uploads unverified bytes, private to one upload and grouped
+// under its push so a credential scoped to `staging/<pushId>/` covers the whole
+// push. The server verifies the bytes here, then promotes them into the shared
+// `nar/<narHash>` key, so the canonical object only ever holds confirmed content
+// and no client ever writes it directly.
+export function stagingObjectKey(pushId: string, uploadId: string): string {
+	return `staging/${pushId}/${uploadId}.nar.zst`;
+}
+
+// The prefix a push's staging objects share, the scope of its upload credential.
+export function stagingPushPrefix(pushId: string): string {
+	return `staging/${pushId}/`;
 }
 
 export function attestationStagingObjectKey(uploadId: string): string {

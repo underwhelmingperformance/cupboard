@@ -87,6 +87,7 @@ import {
 	seedReservedNarInfo,
 	setRoot,
 	testBase,
+	testPushId,
 	uploadBlobMetadata,
 	uploadMetadata,
 	uploadPathNegotiation,
@@ -356,7 +357,7 @@ describe('upload flow', () => {
 	it('rejects unauthenticated management requests', async () => {
 		const stats = await fetchPath(defaultCacheStatsPath);
 		const negotiate = await fetchPath('/cache/_default/uploads', {
-			body: JSON.stringify({ paths: [] }),
+			body: JSON.stringify({ pushId: testPushId, paths: [] }),
 			headers: {
 				'content-type': 'application/json'
 			},
@@ -2498,6 +2499,7 @@ describe('upload flow', () => {
 
 		const response = await authorisedFetch('/cache/_default/uploads', token, {
 			body: JSON.stringify({
+				pushId: testPushId,
 				paths: [{ ...uploadPathNegotiation(metadata), ...fields }]
 			}),
 			headers: {
