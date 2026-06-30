@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
-import { assembleSecrets, generateWrapSecret } from './secrets.ts';
+import {
+	assembleSecrets,
+	generatePushIdSigningKey,
+	generateWrapSecret
+} from './secrets.ts';
 
 const fullEnv = {
 	CONTROL_KEY_WRAP_SECRET: 'wrap',
 	CUPBOARD_SIGNUP_SECRET: 'signup',
 	R2_ACCESS_KEY_ID: 'akid',
-	R2_SECRET_ACCESS_KEY: 'secret'
+	R2_SECRET_ACCESS_KEY: 'secret',
+	PUSH_ID_SIGNING_KEY: 'push'
 };
 
 describe('assembleSecrets', () => {
@@ -28,7 +33,8 @@ describe('assembleSecrets', () => {
 					{ name: 'R2_ACCOUNT_ID', text: 'acc-1' },
 					{ name: 'R2_BUCKET_NAME', text: 'cupboard-blobs' },
 					{ name: 'R2_ACCESS_KEY_ID', text: 'akid' },
-					{ name: 'R2_SECRET_ACCESS_KEY', text: 'secret' }
+					{ name: 'R2_SECRET_ACCESS_KEY', text: 'secret' },
+					{ name: 'PUSH_ID_SIGNING_KEY', text: 'push' }
 				]
 			}
 		});
@@ -43,7 +49,8 @@ describe('assembleSecrets', () => {
 
 		expect(result.missing).toStrictEqual([
 			'CONTROL_KEY_WRAP_SECRET',
-			'R2_SECRET_ACCESS_KEY'
+			'R2_SECRET_ACCESS_KEY',
+			'PUSH_ID_SIGNING_KEY'
 		]);
 		expect(result.secrets.control).toStrictEqual([]);
 		expect(result.secrets.tenant).toStrictEqual([
@@ -54,10 +61,13 @@ describe('assembleSecrets', () => {
 	});
 });
 
-describe('generateWrapSecret', () => {
-	it('produces a fresh base64 AES-256 key each call', () => {
-		const first = generateWrapSecret();
-		const second = generateWrapSecret();
+describe.each([
+	['generateWrapSecret', generateWrapSecret],
+	['generatePushIdSigningKey', generatePushIdSigningKey]
+])('%s', (_name, generate) => {
+	it('produces a fresh high-entropy base64 key each call', () => {
+		const first = generate();
+		const second = generate();
 
 		expect({
 			firstBytes: Buffer.from(first, 'base64').byteLength,

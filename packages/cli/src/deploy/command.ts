@@ -66,7 +66,11 @@ import {
 	createScopedR2Key,
 	TokenManagementNotPermittedError
 } from './r2-token.ts';
-import { assembleSecrets, generateWrapSecret } from './secrets.ts';
+import {
+	assembleSecrets,
+	generatePushIdSigningKey,
+	generateWrapSecret
+} from './secrets.ts';
 import { planWorkerSource } from './source.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
 
@@ -1037,6 +1041,7 @@ async function deployFlow(
 		Promise<{ control: readonly string[]; tenant: readonly string[] }>
 	>();
 	let generatedWrapSecret: string | undefined;
+	let generatedPushIdSigningKey: string | undefined;
 
 	const existingSecretsFor = (
 		accountId: string
@@ -1087,6 +1092,7 @@ async function deployFlow(
 			bucketName: bucketNameOf(state.config)
 		});
 		const controlSecrets = [...assembled.secrets.control];
+		const tenantSecrets = [...assembled.secrets.tenant];
 		// The R2 pair is settled after the review (kept, created or entered),
 		// so its absence is pending work rather than a problem to warn about.
 		const pendingR2 = assembled.missing.filter((name) =>
@@ -1130,11 +1136,41 @@ async function deployFlow(
 			}
 		}
 
+		// Generate the per-push id signing key on a first deploy, but never
+		// overwrite an existing one: a different value invalidates in-flight pushes.
+		if (missing.includes('PUSH_ID_SIGNING_KEY')) {
+			const { tenant } = await existingSecretsFor(state.accountId);
+			missing = missing.filter((name) => name !== 'PUSH_ID_SIGNING_KEY');
+
+			if (!tenant.includes('PUSH_ID_SIGNING_KEY')) {
+				const isNewlyGenerated = generatedPushIdSigningKey === undefined;
+				generatedPushIdSigningKey ??= generatePushIdSigningKey();
+				tenantSecrets.push({
+					name: 'PUSH_ID_SIGNING_KEY',
+					text: generatedPushIdSigningKey
+				});
+
+				if (isNewlyGenerated) {
+					ui.note('Generated PUSH_ID_SIGNING_KEY: save this value now', [
+						{
+							label: 'What',
+							value: 'the key that signs per-push upload-credential ids'
+						},
+						{
+							label: 'Why',
+							value: 'a different one invalidates in-flight pushes'
+						},
+						{ label: 'Value', value: generatedPushIdSigningKey }
+					]);
+				}
+			}
+		}
+
 		return {
 			options: {
 				domain: state.domain,
 				dryRun: false,
-				secrets: { control: controlSecrets, tenant: assembled.secrets.tenant },
+				secrets: { control: controlSecrets, tenant: tenantSecrets },
 				// Settled right before the deploy runs, on the agreed plan.
 				liveBuild: undefined
 			},

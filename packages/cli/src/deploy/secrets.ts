@@ -12,6 +12,15 @@ export function generateWrapSecret(): string {
 }
 
 /**
+ * Generate a fresh `PUSH_ID_SIGNING_KEY`: a high-entropy base64 secret. Used on
+ * a first deploy when the operator has not supplied one. It must stay stable
+ * afterwards, as a different value invalidates in-flight push ids.
+ */
+export function generatePushIdSigningKey(): string {
+	return randomBytes(32).toString('base64');
+}
+
+/**
  * The secrets each Worker needs, ready to apply. The control plane holds the
  * signing-key wrapping secret; the tenant Durable Object holds the R2
  * credentials its presigner uses (see `packages/server/src/do/context.ts`).
@@ -35,6 +44,7 @@ export interface AssembledSecrets {
 const requiredControl = ['CONTROL_KEY_WRAP_SECRET'];
 const optionalControl = ['CUPBOARD_SIGNUP_SECRET'];
 const requiredTenantR2 = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
+const requiredTenant = ['PUSH_ID_SIGNING_KEY'];
 
 /**
  * Assemble the per-Worker secrets from the environment and the resolved
@@ -77,7 +87,7 @@ export function assembleSecrets(inputs: SecretInputs): AssembledSecrets {
 		{ name: 'R2_BUCKET_NAME', text: inputs.bucketName }
 	];
 
-	for (const name of requiredTenantR2) {
+	for (const name of [...requiredTenantR2, ...requiredTenant]) {
 		const text = fromEnv(name);
 
 		if (text === undefined) {
