@@ -19,39 +19,98 @@ export interface NixStoreClient {
 }
 
 /**
+ * How many path-info queries the closure walk runs at once by default. A daemon
+ * query is a round-trip the walk would otherwise pay one path at a time, so the
+ * frontier fans out across this many concurrent queries. The backend must be
+ * able to serve this many at once: the daemon store gives each query its own
+ * connection.
+ */
+export const defaultClosureConcurrency = 16;
+
+/**
  * Resolve the closure of `roots` by walking references breadth-first, visiting
  * each path once and returning them sorted by store path. The backend supplies
  * how a single path's info is fetched, so the daemon and local stores share one
- * traversal.
+ * traversal. The walk queries each frontier with up to `concurrency` queries in
+ * flight, so `queryPathInfo` must be safe to call that many times concurrently.
  */
 export async function resolveClosureBy(
 	roots: readonly string[],
-	queryPathInfo: (storePath: string) => Promise<NixValidPathInfo>
+	queryPathInfo: (storePath: string) => Promise<NixValidPathInfo>,
+	concurrency = 1
 ): Promise<readonly NixValidPathInfo[]> {
 	const closure = new Map<string, NixValidPathInfo>();
-	const pending = [...roots];
+	const claimed = new Set<string>();
+	let frontier = claimUnseen(roots, claimed);
 
-	while (pending.length > 0) {
-		const storePath = pending.shift();
+	while (frontier.length > 0) {
+		const infos = await queryFrontier(frontier, concurrency, queryPathInfo);
+		const references: string[] = [];
 
-		if (storePath === undefined || closure.has(storePath)) {
-			continue;
+		for (const info of infos) {
+			closure.set(info.storePath, info);
+			references.push(...info.references);
 		}
 
-		const info = await queryPathInfo(storePath);
-		closure.set(storePath, info);
-
-		for (const reference of info.references) {
-			if (!closure.has(reference)) {
-				pending.push(reference);
-			}
-		}
+		frontier = claimUnseen(references, claimed);
 	}
 
 	return closure
 		.values()
 		.toArray()
 		.toSorted((left, right) => left.storePath.localeCompare(right.storePath));
+}
+
+// The candidates not yet claimed, in order and deduplicated, marking each one
+// claimed so a path reachable by several edges is queried once. A path is
+// claimed when it joins a frontier, before it is queried, so the next frontier
+// never re-schedules a path already in flight.
+function claimUnseen(
+	candidates: readonly string[],
+	claimed: Set<string>
+): string[] {
+	const next: string[] = [];
+
+	for (const candidate of candidates) {
+		if (claimed.has(candidate)) {
+			continue;
+		}
+
+		claimed.add(candidate);
+		next.push(candidate);
+	}
+
+	return next;
+}
+
+// Queries one frontier with a bounded number of queries in flight. Order is not
+// preserved, which is fine: the caller folds the results into a map and sorts at
+// the end.
+async function queryFrontier(
+	frontier: readonly string[],
+	concurrency: number,
+	queryPathInfo: (storePath: string) => Promise<NixValidPathInfo>
+): Promise<NixValidPathInfo[]> {
+	const infos: NixValidPathInfo[] = [];
+	let cursor = 0;
+
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const storePath = frontier[cursor];
+			cursor += 1;
+
+			if (storePath === undefined) {
+				return;
+			}
+
+			infos.push(await queryPathInfo(storePath));
+		}
+	};
+
+	const workerCount = Math.min(Math.max(concurrency, 1), frontier.length);
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+	return infos;
 }
 
 export abstract class NixStoreError extends Error {}

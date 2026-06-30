@@ -119,6 +119,48 @@ describe('NixDaemonStoreClient', () => {
 		]);
 	});
 
+	it('resolves a multi-path frontier across several connections', async () => {
+		let connections = 0;
+		const client = new NixDaemonStoreClient({
+			connect: () => {
+				connections += 1;
+
+				return Promise.resolve(
+					new FakeDaemonTransport({
+						[appPath]: {
+							hash: appHash,
+							narSize: 123,
+							references: [libraryPath, runtimePath],
+							signatures: []
+						},
+						[libraryPath]: {
+							hash: libraryHash,
+							narSize: 456,
+							references: [],
+							signatures: []
+						},
+						[runtimePath]: {
+							hash: runtimeHash,
+							narSize: 789,
+							references: [],
+							signatures: []
+						}
+					})
+				);
+			}
+		});
+
+		await expect(client.resolveClosure([appPath])).resolves.toStrictEqual([
+			pathInfo(appPath, appHash, 123, [libraryPath, runtimePath]),
+			pathInfo(libraryPath, libraryHash, 456, []),
+			pathInfo(runtimePath, runtimeHash, 789, [])
+		]);
+
+		// The root is one frontier on its own; its two references form the next,
+		// so the pool opens a second connection to query them at the same time.
+		expect(connections).toBe(2);
+	});
+
 	it('rejects daemon misses with a typed path error', async () => {
 		const client = new NixDaemonStoreClient({
 			connect: () => Promise.resolve(new FakeDaemonTransport({}))

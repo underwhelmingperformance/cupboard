@@ -3,6 +3,7 @@ import { createConnection, type Socket } from 'node:net';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 
 import {
+	defaultClosureConcurrency,
 	type NixStoreClient,
 	NixStorePathNotFoundError,
 	type NixValidPathInfo,
@@ -113,6 +114,16 @@ export class InvalidNixDaemonHashError extends NixDaemonError {
 	}
 }
 
+// Raised when a connection finishes opening after the pool was closed (the
+// closure walk aborted). The connection is closed and this is thrown so the
+// abandoned query settles rather than using a dead socket.
+export class NixDaemonConnectionPoolClosedError extends NixDaemonError {
+	constructor() {
+		super('Nix daemon connection pool closed during closure walk');
+		this.name = 'NixDaemonConnectionPoolClosedError';
+	}
+}
+
 export class NixDaemonStoreClient implements NixStoreClient {
 	private readonly socketPath: string;
 
@@ -135,14 +146,19 @@ export class NixDaemonStoreClient implements NixStoreClient {
 	async resolveClosure(
 		storePaths: readonly string[]
 	): Promise<readonly NixValidPathInfo[]> {
-		const connection = await this.openConnection();
+		const pool = new NixDaemonConnectionPool(
+			() => this.openConnection(),
+			defaultClosureConcurrency
+		);
 
 		try {
-			return await resolveClosureBy(storePaths, (storePath) =>
-				connection.queryPathInfo(storePath)
+			return await resolveClosureBy(
+				storePaths,
+				(storePath) => pool.queryPathInfo(storePath),
+				defaultClosureConcurrency
 			);
 		} finally {
-			connection.close();
+			pool.closeAll();
 		}
 	}
 
@@ -152,6 +168,96 @@ export class NixDaemonStoreClient implements NixStoreClient {
 		try {
 			return await connection.queryPathInfo(storePath);
 		} finally {
+			connection.close();
+		}
+	}
+}
+
+// A lazily grown pool of daemon connections, each a serial request/response
+// channel. The closure walk issues several queries at once; this hands each one
+// a free connection, opens a new one up to the cap when none is free, and parks
+// the query until one frees once the cap is reached. A small closure opens only
+// as many connections as it has paths in flight; a large one fans out to the cap.
+class NixDaemonConnectionPool {
+	private readonly all: NixDaemonConnection[] = [];
+
+	private readonly free: NixDaemonConnection[] = [];
+
+	private readonly waiters: ((connection: NixDaemonConnection) => void)[] = [];
+
+	private opened = 0;
+
+	private closed = false;
+
+	constructor(
+		private readonly open: () => Promise<NixDaemonConnection>,
+		private readonly max: number
+	) {}
+
+	private async acquire(): Promise<NixDaemonConnection> {
+		const free = this.free.pop();
+
+		if (free !== undefined) {
+			return free;
+		}
+
+		if (this.opened < this.max) {
+			this.opened += 1;
+
+			let connection: NixDaemonConnection;
+
+			try {
+				connection = await this.open();
+			} catch (error) {
+				this.opened -= 1;
+				throw error;
+			}
+
+			// `closeAll` may have run while this connection was opening (a sibling
+			// query rejected and aborted the walk). It iterated a snapshot taken
+			// before this connection existed, so close it here rather than retain a
+			// leaked socket the pool will never end.
+			if (this.closed) {
+				connection.close();
+				throw new NixDaemonConnectionPoolClosedError();
+			}
+
+			this.all.push(connection);
+
+			return connection;
+		}
+
+		return new Promise((resolve) => {
+			this.waiters.push(resolve);
+		});
+	}
+
+	private release(connection: NixDaemonConnection): void {
+		const waiter = this.waiters.shift();
+
+		if (waiter !== undefined) {
+			waiter(connection);
+
+			return;
+		}
+
+		this.free.push(connection);
+	}
+
+	async queryPathInfo(storePath: string): Promise<NixValidPathInfo> {
+		const connection = await this.acquire();
+
+		try {
+			return await connection.queryPathInfo(storePath);
+		} finally {
+			this.release(connection);
+		}
+	}
+
+	closeAll(): void {
+		this.closed = true;
+
+		for (const connection of this.all) {
 			connection.close();
 		}
 	}
