@@ -243,6 +243,7 @@ async function runPushFlow(
 	// mistaken for a finished one.
 	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
+	const negotiated = indexNegotiatedPaths(closure);
 	const storePathByHash = new Map<string, string>(
 		closure.map((pathInfo) => [
 			StorePath.hash(pathInfo.storePath),
@@ -253,7 +254,7 @@ async function runPushFlow(
 	let uploadedBytes = 0;
 	const uploadContext: UploadContext = {
 		client,
-		closure,
+		negotiated,
 		createNarArchive,
 		compressNar,
 		onBytes: (count) => {
@@ -330,7 +331,7 @@ async function runPushFlow(
 	const commitContext: CommitContext = {
 		client,
 		session,
-		closure,
+		negotiated,
 		createNarArchive,
 		compressNar,
 		options: commitOptions
@@ -818,7 +819,7 @@ function describePinExpiry(summaries: readonly RootSummary[]): string {
 
 interface UploadContext {
 	readonly client: PushClient;
-	readonly closure: readonly NixValidPathInfo[];
+	readonly negotiated: NegotiatedPaths;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly onBytes: (count: number) => void;
@@ -834,7 +835,7 @@ async function streamNarUpload(
 	decision: UploadDecisionOf<'upload'>,
 	context: UploadContext
 ): Promise<void> {
-	const pathInfo = findNegotiatedPath(context.closure, decision);
+	const pathInfo = findNegotiatedPath(context.negotiated, decision);
 	const upload = context.compressNar(
 		context.createNarArchive(pathInfo.storePath)
 	);
@@ -849,7 +850,7 @@ async function streamNarUpload(
 interface CommitContext {
 	readonly client: PushClient;
 	readonly session: CommitSession | undefined;
-	readonly closure: readonly NixValidPathInfo[];
+	readonly negotiated: NegotiatedPaths;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly options: CommitOptions;
@@ -905,7 +906,7 @@ async function redriveExpiredCommit(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext
 ): Promise<CommitResponse> {
-	const pathInfo = findNegotiatedPath(context.closure, decision);
+	const pathInfo = findNegotiatedPath(context.negotiated, decision);
 	const renegotiation = await context.client.negotiate({
 		paths: [prepareStorePathNegotiation(pathInfo)]
 	});
@@ -966,14 +967,35 @@ function verifyNarMetadata(
 	);
 }
 
+// The closure indexed by the pair a negotiation decision names, so resolving a
+// decision back to its path is one lookup. Built once: scanning the closure and
+// rehashing every store path on every lookup is quadratic across a large push.
+type NegotiatedPaths = ReadonlyMap<string, NixValidPathInfo>;
+
+function negotiatedPathKey(storePathHash: string, narHash: string): string {
+	return `${storePathHash}\0${narHash}`;
+}
+
+function indexNegotiatedPaths(
+	closure: readonly NixValidPathInfo[]
+): NegotiatedPaths {
+	return new Map(
+		closure.map((item) => [
+			negotiatedPathKey(
+				StorePath.hash(item.storePath),
+				item.narHash.toString()
+			),
+			item
+		])
+	);
+}
+
 function findNegotiatedPath(
-	closure: readonly NixValidPathInfo[],
+	negotiated: NegotiatedPaths,
 	decision: UploadDecisionOf<'upload' | 'commit'>
 ): NixValidPathInfo {
-	const pathInfo = closure.find(
-		(item) =>
-			StorePath.hash(item.storePath) === decision.storePathHash &&
-			item.narHash.toString() === decision.narHash
+	const pathInfo = negotiated.get(
+		negotiatedPathKey(decision.storePathHash, decision.narHash)
 	);
 
 	if (pathInfo !== undefined) {
