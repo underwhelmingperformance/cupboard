@@ -3,7 +3,7 @@ import {
 	type NixSha256HashString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
+import { type ParsedUploadPathNegotiation } from '@cupboard/protocol/upload';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { R2Presigner } from '../blob/presign.ts';
@@ -28,13 +28,20 @@ export class UploadStateService {
 
 	private async ensureCanonicalObject(
 		stagingKey: string,
-		metadata: ParsedUploadPathMetadata
+		narHash: NixSha256HashString,
+		// The blob facts verify derived for a fresh upload. A reuse promotes against
+		// an already-canonical object and derives them from it, so it passes none.
+		blob: CanonicalBlob | undefined
 	): Promise<CanonicalBlob> {
-		const canonicalKey = narObjectKey(metadata.narHash);
+		const canonicalKey = narObjectKey(narHash);
 		const existing = await this.context.env.BLOBS.head(canonicalKey);
 
 		if (existing !== null) {
 			return canonicalBlobOf(canonicalKey, existing);
+		}
+
+		if (blob === undefined) {
+			throw new UploadedObjectNotFoundError(canonicalKey);
 		}
 
 		const staged = await this.context.env.BLOBS.get(stagingKey);
@@ -47,13 +54,16 @@ export class UploadStateService {
 			canonicalKey,
 			staged.body,
 			{
-				sha256: NixSha256Hash.parse(metadata.fileHash).digestBytes(),
+				// The file hash was computed over these exact staging bytes during verify,
+				// so R2 re-checking the copy against it confirms the promote moved them
+				// intact, not that a client-asserted value matched.
+				sha256: NixSha256Hash.parse(blob.fileHash).digestBytes(),
 				onlyIf: { etagDoesNotMatch: '*' }
 			}
 		);
 
 		if (written !== null) {
-			return { fileHash: metadata.fileHash, fileSize: metadata.fileSize };
+			return blob;
 		}
 
 		// A concurrent promotion won between the head and the conditional put: adopt
@@ -295,9 +305,14 @@ export class UploadStateService {
 	// promotion and commit recovers from the surviving staging copy.
 	async promoteStagingBlob(
 		stagingKey: string,
-		metadata: ParsedUploadPathMetadata
+		metadata: ParsedUploadPathNegotiation,
+		blob: CanonicalBlob | undefined
 	): Promise<CanonicalBlob> {
-		const canonical = await this.ensureCanonicalObject(stagingKey, metadata);
+		const canonical = await this.ensureCanonicalObject(
+			stagingKey,
+			metadata.narHash,
+			blob
+		);
 		const now = new Date();
 		const verifiedAt = now.toISOString();
 
@@ -305,13 +320,14 @@ export class UploadStateService {
 		// exactly when the canonical R2 object does. The first writer for a hash
 		// fixes the metadata; a concurrent or repeated promotion keeps it, but clears
 		// any reaper grace timer, since promoting is a fresh reference to the hash.
+		// A verified frame is always zstd, the only encoding the server stores.
 		await this.context.d1
 			.insert(d1Schema.blobState)
 			.values({
 				narHash: metadata.narHash,
 				fileHash: canonical.fileHash,
 				fileSize: canonical.fileSize,
-				compression: metadata.compression,
+				compression: 'zstd',
 				narSize: metadata.narSize,
 				verifiedAt
 			})

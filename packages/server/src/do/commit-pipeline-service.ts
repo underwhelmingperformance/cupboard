@@ -1,5 +1,4 @@
-import { NixSha256Hash } from '@cupboard/nix-store/hash';
-import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { narFingerprint } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
 	type StorePathHash,
@@ -8,13 +7,12 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type CommitResponse,
-	type ParsedUploadPathMetadata
+	type ParsedUploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import { and, eq, notExists, sql } from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
-import { verifyUploadedObject } from '../blob/upload-verification.ts';
 import { signNixFingerprint } from '../crypto/crypto.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -42,7 +40,7 @@ import {
 } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
-import { parseStoredUploadMetadata } from './upload-metadata.ts';
+import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 /**
@@ -100,7 +98,7 @@ export class CommitPipelineService {
 	private async commitReusedBlob(
 		cache: string,
 		uploadId: string,
-		metadata: ParsedUploadPathMetadata
+		metadata: ParsedUploadPathNegotiation
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
@@ -169,7 +167,7 @@ export class CommitPipelineService {
 	private async concedeToWinner(
 		cache: string,
 		uploadId: string,
-		metadata: ParsedUploadPathMetadata,
+		metadata: ParsedUploadPathNegotiation,
 		stagingKey: string
 	): Promise<CommitOutcome> {
 		const winner = await this.narInfoObjects.committedNarInfoRow(
@@ -272,7 +270,7 @@ export class CommitPipelineService {
 	private async reserveEdgeAndCharge(
 		tenant: TenantId,
 		cache: string,
-		metadata: ParsedUploadPathMetadata,
+		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		blob: { readonly fileSize: number }
 	): Promise<void> {
@@ -494,7 +492,10 @@ export class CommitPipelineService {
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 
-		const metadata = parseStoredUploadMetadata(uploadId, pending.metadataJson);
+		const metadata = parseStoredUploadPathMetadata(
+			uploadId,
+			pending.metadataJson
+		);
 		const existingNarInfo = this.context.db
 			.select()
 			.from(schema.narInfos)
@@ -574,16 +575,22 @@ export class CommitPipelineService {
 		const object =
 			(await this.context.env.BLOBS.head(pending.r2Key)) ?? undefined;
 
-		verifyUploadedObject(object, pending.expectedSize, metadata, pending.r2Key);
+		// The staged object must exist before a commit can verify or promote it; its
+		// contents are checked by the decompression pass, not here, so a missing
+		// object is the only synchronous content failure.
+		if (object === undefined) {
+			throw new UploadedObjectNotFoundError(pending.r2Key);
+		}
 
 		// Advisory pre-verify quota check: skip the expensive verify and promote when
 		// charging this hash would clearly exceed quota. It estimates the charge from
 		// the canonical size if the hash already exists (the promote adopts it),
-		// otherwise the staged size; the authoritative decision is made against the
-		// canonical size in materialiseServable, so a concurrent promote that changes
-		// the size cannot let an over-quota commit through.
+		// otherwise the stored object's size, which becomes the canonical size; the
+		// authoritative decision is made against the canonical size in
+		// materialiseServable, so a concurrent promote that changes the size cannot
+		// let an over-quota commit through.
 		const tenant = this.context.requireTenant();
-		const estimate = await this.chargeSize(metadata.narHash, metadata.fileSize);
+		const estimate = await this.chargeSize(metadata.narHash, object.size);
 
 		if (await this.overQuota(tenant, metadata.narHash, estimate)) {
 			throw new QuotaExceededError(tenant);
@@ -643,25 +650,22 @@ export class CommitPipelineService {
 	// different version that won the path (`lost`).
 	async reserveNarInfoRow(
 		cache: string,
-		metadata: ParsedUploadPathMetadata
+		metadata: ParsedUploadPathNegotiation
 	): Promise<ReserveOutcome> {
 		const clock = new Date();
 		const now = clock.toISOString();
 		this.cacheAdmin.loadOrCreateCache(cache);
 		const signingKeys = await this.signingKeysService.signingKeys();
-		const narInfo = new NarInfo(
+		// The fingerprint, and so the signature, commits to the uncompressed NAR and
+		// references alone, never the compressed encoding, so the row is reserved and
+		// signed from the path metadata before a fresh upload's file hash and size
+		// are known.
+		const fingerprint = narFingerprint(
 			new StorePath(metadata.storePath),
-			narObjectKey(metadata.narHash),
-			metadata.compression,
-			NixSha256Hash.parse(metadata.fileHash),
-			metadata.fileSize,
-			NixSha256Hash.parse(metadata.narHash),
+			metadata.narHash,
 			metadata.narSize,
-			metadata.references,
-			metadata.deriver,
-			metadata.ca
+			metadata.references
 		);
-		const fingerprint = narInfo.fingerprint();
 		const sigs = await Promise.all(
 			signingKeys.map((key) =>
 				signNixFingerprint(key.privateJwk, fingerprint, key.name)
@@ -765,7 +769,7 @@ export class CommitPipelineService {
 	// Runs inside the caller's critical section; must not open its own.
 	async materialiseServable(
 		cache: string,
-		metadata: ParsedUploadPathMetadata,
+		metadata: ParsedUploadPathNegotiation,
 		generation: number
 	): Promise<MaterialiseOutcome> {
 		// A commit that passed the Worker's write gate while the tenant was active can
@@ -899,7 +903,7 @@ export class CommitPipelineService {
 
 	async verifyPendingNar(
 		r2Key: string,
-		metadata: ParsedUploadPathMetadata
+		metadata: ParsedUploadPathNegotiation
 	): Promise<NarVerification> {
 		const object = await this.context.env.BLOBS.get(r2Key);
 

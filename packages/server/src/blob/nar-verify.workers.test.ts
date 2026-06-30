@@ -22,6 +22,12 @@ function compressedStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
 	return source.pipeThrough(zstdCompressionStream());
 }
 
+async function compressedBytes(bytes: Uint8Array): Promise<Uint8Array> {
+	return new Uint8Array(
+		await new Response(compressedStream(bytes)).arrayBuffer()
+	);
+}
+
 describe('verifyDecompressedNar', () => {
 	// ~3 MB so the stream cycles the bridge's chunk queue rather than passing in
 	// one piece; a true multi-hundred-MB bounded-memory check belongs in the
@@ -29,15 +35,20 @@ describe('verifyDecompressedNar', () => {
 	const encoder = new TextEncoder();
 	const nar = encoder.encode('nar payload '.repeat(250_000));
 
-	it('accepts a blob whose decompressed bytes match the claimed hash and size', async () => {
+	it('accepts a blob and reports the compressed file hash and size', async () => {
 		const narHash = await nixNarHash(nar);
+		const compressed = await compressedBytes(nar);
 
 		const result = await verifyDecompressedNar(compressedStream(nar), {
 			narHash,
 			narSize: nar.byteLength
 		});
 
-		expect(result).toStrictEqual({ ok: true });
+		expect(result).toStrictEqual({
+			ok: true,
+			fileHash: await nixNarHash(compressed),
+			fileSize: compressed.byteLength
+		});
 	});
 
 	it('rejects a hash mismatch and reports the recomputed hash', async () => {

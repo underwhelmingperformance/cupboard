@@ -4,7 +4,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import {
-	type ParsedUploadPathMetadata,
+	type ParsedUploadPathNegotiation,
 	type ParsedUploadStatusResponse
 } from '@cupboard/protocol/upload';
 import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
@@ -20,7 +20,7 @@ import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type ReconcileTarget } from './reconcile-queue-service.ts';
-import { parseStoredUploadMetadata } from './upload-metadata.ts';
+import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
@@ -100,7 +100,7 @@ export class VerificationService {
 	private async verifyAndCommitPending(
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<void> {
-		const metadata = parseStoredUploadMetadata(
+		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
 		);
@@ -146,7 +146,7 @@ export class VerificationService {
 	// the path was lost.
 	private async reservePendingRow(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathMetadata
+		metadata: ParsedUploadPathNegotiation
 	): Promise<number | undefined> {
 		const reserved = await this.commitPipeline.reserveNarInfoRow(
 			pending.cache,
@@ -172,7 +172,7 @@ export class VerificationService {
 	// materialises the servable object.
 	private async commitVerified(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathMetadata,
+		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		verification: NarVerification
 	): Promise<void> {
@@ -183,8 +183,14 @@ export class VerificationService {
 
 		// Promote outside the critical section: streaming the staging bytes into the
 		// shared CAS must not run under `blockConcurrencyWhile`. It is idempotent and
-		// content-addressed, so a redundant promotion is harmless.
-		await this.uploadState.promoteStagingBlob(pending.r2Key, metadata);
+		// content-addressed, so a redundant promotion is harmless. A byte verification
+		// carries the file hash and size; a reuse pass-through carries none and
+		// promotes against the already-canonical object.
+		const blob =
+			verification.fileHash !== undefined && verification.fileSize !== undefined
+				? { fileHash: verification.fileHash, fileSize: verification.fileSize }
+				: undefined;
+		await this.uploadState.promoteStagingBlob(pending.r2Key, metadata, blob);
 
 		const outcome = await this.context.ctx.blockConcurrencyWhile(async () => {
 			const current = this.context.db
@@ -246,7 +252,7 @@ export class VerificationService {
 	// rejection.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
-		metadata: ParsedUploadPathMetadata,
+		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {
@@ -578,7 +584,7 @@ export class VerificationService {
 			.all();
 
 		return pendings.map((pending) => {
-			const metadata = parseStoredUploadMetadata(
+			const metadata = parseStoredUploadPathMetadata(
 				pending.id,
 				pending.metadataJson
 			);
@@ -612,7 +618,7 @@ export class VerificationService {
 			return;
 		}
 
-		const metadata = parseStoredUploadMetadata(
+		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
 		);
@@ -674,7 +680,7 @@ export class VerificationService {
 			return;
 		}
 
-		const metadata = parseStoredUploadMetadata(
+		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
 		);
