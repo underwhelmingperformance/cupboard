@@ -81,10 +81,8 @@ describe('credentialSession', () => {
 
 	it('shares one in-flight issue across concurrent callers', async () => {
 		let calls = 0;
-		let resolveIssue: ((credential: PushCredential) => void) | undefined;
-		const issued = new Promise<PushCredential>((resolve) => {
-			resolveIssue = resolve;
-		});
+		const { promise: issued, resolve: resolveIssue } =
+			Promise.withResolvers<PushCredential>();
 		const session = credentialSession(
 			() => {
 				calls += 1;
@@ -96,7 +94,7 @@ describe('credentialSession', () => {
 
 		const credentialPromise = session.provider();
 		const pushIdPromise = session.pushId();
-		resolveIssue?.(credential({ expiresAt: minutes(60) }));
+		resolveIssue(credential({ expiresAt: minutes(60) }));
 
 		const resolvedCredential = await credentialPromise;
 

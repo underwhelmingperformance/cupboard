@@ -468,14 +468,9 @@ export function createCloudflareApi(
 				})
 			};
 
-			const consumers: unknown[] = [];
-
-			for await (const consumer of client.queues.consumers.list(
-				queueId,
-				account
-			)) {
-				consumers.push(consumer);
-			}
+			const consumers: unknown[] = await Array.fromAsync(
+				client.queues.consumers.list(queueId, account)
+			);
 
 			const existing = consumers
 				.map((consumer) => liveConsumerSchema.safeParse(consumer))

@@ -209,7 +209,7 @@ function claimRefusalAdvice(
  * logged for the failing request (by its cf-ray) and show it inline, falling
  * back to the exact command that reads the log when it cannot be fetched yet.
  */
-async function showServerFault(deps: {
+async function showServerFault(dependencies: {
 	readonly ui: DeployUi;
 	readonly api: CloudflareApi;
 	readonly ray: string | undefined;
@@ -217,17 +217,17 @@ async function showServerFault(deps: {
 	readonly signal: AbortSignal | undefined;
 	readonly lead: string;
 }): Promise<void> {
-	const { ui, ray, worker, lead } = deps;
+	const { ui, ray, worker, lead } = dependencies;
 
 	const logged =
 		ray === undefined
 			? []
 			: await fetchClaimFailureLogs({
-					api: deps.api,
+					api: dependencies.api,
 					ray,
 					now: Date.now,
-					sleep: (ms) => delayMs(ms, { signal: deps.signal }),
-					signal: deps.signal
+					sleep: (ms) => delayMs(ms, { signal: dependencies.signal }),
+					signal: dependencies.signal
 				});
 
 	if (logged.length > 0) {

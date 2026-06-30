@@ -552,7 +552,7 @@ function describeR2Check(check: ParsedR2CredentialCheck): string {
  * bad credentials still serves reads, so problems are said out loud and left
  * fixable by a re-run.
  */
-async function ensureWorkerR2(deps: {
+async function ensureWorkerR2(dependencies: {
 	readonly ui: DeployUi;
 	readonly api: CloudflareApi;
 	readonly client: OnboardClient;
@@ -564,10 +564,10 @@ async function ensureWorkerR2(deps: {
 	readonly sleep?: (ms: number) => Promise<void>;
 	readonly signal?: AbortSignal;
 }): Promise<void> {
-	const { ui, client, token, r2 } = deps;
+	const { ui, client, token, r2 } = dependencies;
 	let report: ParsedR2CredentialCheck;
 
-	throwIfAborted(deps.signal);
+	throwIfAborted(dependencies.signal);
 
 	try {
 		report = await ui
@@ -605,7 +605,7 @@ async function ensureWorkerR2(deps: {
 	);
 
 	for (;;) {
-		throwIfAborted(deps.signal);
+		throwIfAborted(dependencies.signal);
 
 		const pair = await promptR2CredentialPair(ui, r2.accountId);
 
@@ -621,7 +621,7 @@ async function ensureWorkerR2(deps: {
 		const probe = await ui
 			.reporter()
 			.phase('Checking the new pair against R2', () =>
-				deps.check({
+				dependencies.check({
 					accountId: r2.accountId,
 					bucketName: r2.bucketName,
 					credentials: pair
@@ -645,11 +645,11 @@ async function ensureWorkerR2(deps: {
 		await ui
 			.reporter()
 			.phase('Setting the new credentials on the Worker', async () => {
-				await deps.api.putSecret(deps.tenantScriptName, {
+				await dependencies.api.putSecret(dependencies.tenantScriptName, {
 					name: 'R2_ACCESS_KEY_ID',
 					text: pair.accessKeyId
 				});
-				await deps.api.putSecret(deps.tenantScriptName, {
+				await dependencies.api.putSecret(dependencies.tenantScriptName, {
 					name: 'R2_SECRET_ACCESS_KEY',
 					text: pair.secretAccessKey
 				});
@@ -661,9 +661,9 @@ async function ensureWorkerR2(deps: {
 		const settled = await pollProbe(
 			ui,
 			'Waiting for the Worker to pick up the new credentials',
-			deps.attempts,
-			deps.sleep,
-			deps.signal,
+			dependencies.attempts,
+			dependencies.sleep,
+			dependencies.signal,
 			async () => {
 				const report = await client.controlCheck(token);
 				const checked = report.r2;

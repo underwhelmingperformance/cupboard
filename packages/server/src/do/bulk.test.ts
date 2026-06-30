@@ -35,10 +35,8 @@ describe('mapWithConcurrency', () => {
 	it('runs at most `limit` tasks at once', async () => {
 		let running = 0;
 		let peak = 0;
-		let open: (() => void) | undefined;
-		const gate = new Promise<void>((resolve) => {
-			open = resolve;
-		});
+		const { promise: gate, resolve: open }: PromiseWithResolvers<void> =
+			Promise.withResolvers();
 
 		// Every task parks on a shared gate, so only as many as the limit allows
 		// can be in flight before any of them is released.
@@ -53,7 +51,7 @@ describe('mapWithConcurrency', () => {
 
 		expect(peak).toBe(2);
 
-		open?.();
+		open();
 		await settled;
 
 		expect(peak).toBe(2);

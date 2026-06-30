@@ -123,7 +123,7 @@ interface IdTokenWorld {
 	readonly loginGrant?: CloudflareGrant;
 }
 
-function idTokenDeps(world: IdTokenWorld): {
+function idTokenDependencies(world: IdTokenWorld): {
 	deps: Parameters<typeof cupboardIdToken>[0];
 	calls: { logins: CloudflareGrant[]; written: CloudflareGrant[] };
 } {
@@ -159,7 +159,9 @@ function idTokenDeps(world: IdTokenWorld): {
 describe('cupboardIdToken', () => {
 	it('answers from the cached grant without a browser', async () => {
 		const idToken = tokenExpiringAt(now / 1000 + 3600);
-		const { deps, calls } = idTokenDeps({ storedGrant: grantWith(idToken) });
+		const { deps, calls } = idTokenDependencies({
+			storedGrant: grantWith(idToken)
+		});
 
 		expect({
 			token: await cupboardIdToken(deps),
@@ -176,7 +178,7 @@ describe('cupboardIdToken', () => {
 		const expired = tokenExpiringAt(now / 1000 - 60);
 		const fresh = tokenExpiringAt(now / 1000 + 3600);
 		const loginGrant = grantWith(fresh);
-		const { deps, calls } = idTokenDeps({
+		const { deps, calls } = idTokenDependencies({
 			storedGrant: grantWith(expired),
 			loginGrant
 		});
@@ -196,7 +198,7 @@ describe('cupboardIdToken', () => {
 	it('logs in afresh when no grant is cached', async () => {
 		const fresh = tokenExpiringAt(now / 1000 + 3600);
 		const loginGrant = grantWith(fresh);
-		const { deps, calls } = idTokenDeps({ loginGrant });
+		const { deps, calls } = idTokenDependencies({ loginGrant });
 
 		expect({
 			token: await cupboardIdToken(deps),
@@ -210,7 +212,7 @@ describe('cupboardIdToken', () => {
 	});
 
 	it('rejects a login that carried no id_token', async () => {
-		const { deps, calls } = idTokenDeps({ loginGrant: grantWith() });
+		const { deps, calls } = idTokenDependencies({ loginGrant: grantWith() });
 		const outcome = await (async () => {
 			try {
 				const token = await cupboardIdToken(deps);

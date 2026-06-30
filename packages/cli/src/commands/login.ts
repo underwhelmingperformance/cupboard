@@ -112,14 +112,14 @@ export class LoginIdTokenMissingError extends CliError {
  * `openid` authorize, and a narrower grant would desynchronise the cache the
  * deploy reuses). A fresh login is persisted for both flows to share.
  */
-export async function cupboardIdToken(deps: {
+export async function cupboardIdToken(dependencies: {
 	readonly chain: Pick<
 		CredentialChain,
 		'readGrant' | 'writeGrant' | 'refreshGrant' | 'now'
 	>;
 	readonly login: () => Promise<CloudflareGrant>;
 }): Promise<string> {
-	const cached = await freshIdToken(deps.chain);
+	const cached = await freshIdToken(dependencies.chain);
 	const expiry = cached === undefined ? undefined : jwtExpiryMs(cached);
 
 	// `freshIdToken` falls back to a stale token when the refresh declines;
@@ -127,13 +127,13 @@ export async function cupboardIdToken(deps: {
 	// token known to be expired would only bounce, so it goes to the browser.
 	if (
 		cached !== undefined &&
-		(expiry === undefined || expiry > deps.chain.now())
+		(expiry === undefined || expiry > dependencies.chain.now())
 	) {
 		return cached;
 	}
 
-	const grant = await deps.login();
-	await deps.chain.writeGrant(grant);
+	const grant = await dependencies.login();
+	await dependencies.chain.writeGrant(grant);
 
 	if (grant.idToken === undefined) {
 		throw new LoginIdTokenMissingError();

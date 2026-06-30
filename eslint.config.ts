@@ -74,12 +74,22 @@ export default defineConfig(
 	unicorn.configs.recommended,
 	{
 		rules: {
-			'unicorn/prevent-abbreviations': [
+			'unicorn/name-replacements': [
 				'error',
 				{
+					// `name-replacements` (renamed from `prevent-abbreviations` in
+					// unicorn v68) gained default replacements in v68/v69 that would
+					// have us *abbreviate* `configuration`→`config` and
+					// `repository`→`repo` — the opposite of this rule's purpose and at
+					// odds with our deliberately verbose vocabulary (including exported
+					// error classes such as `OwnerConfigurationInvalidError`). Opt those
+					// two words out alongside the abbreviations we already allow; the
+					// rule stays on for everything else.
 					replacements: {
 						env: false,
-						ctx: false
+						ctx: false,
+						configuration: false,
+						repository: false
 					}
 				}
 			]

@@ -104,10 +104,12 @@ export class GarbageCollectionService {
 			.all();
 
 		for (const target of rootTargets) {
-			if (!visited.has(target.storePathHash)) {
-				visited.add(target.storePathHash);
-				queue.push(storePathHashSchema.parse(target.storePathHash));
+			if (visited.has(target.storePathHash)) {
+				continue;
 			}
+
+			visited.add(target.storePathHash);
+			queue.push(storePathHashSchema.parse(target.storePathHash));
 		}
 
 		while (queue.length > 0) {
