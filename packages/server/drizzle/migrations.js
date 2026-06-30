@@ -24,6 +24,7 @@ import m0021 from './0021_refresh_tokens.sql';
 import m0022 from './0022_maintenance_indexes.sql';
 import m0023 from './0023_more_expiry_indexes.sql';
 import m0024 from './0024_pending_upload_session.sql';
+import m0025 from './0025_drop_pending_upload_expected_size.sql';
 
 export default {
 	journal,
@@ -52,6 +53,7 @@ export default {
 		m0021,
 		m0022,
 		m0023,
-		m0024
+		m0024,
+		m0025
 	}
 };

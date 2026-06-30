@@ -58,7 +58,6 @@ export const pendingUploads = sqliteTable(
 		cache: text('cache').notNull().default(''),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').notNull(),
-		expectedSize: integer('expected_size').notNull(),
 		metadataJson: text('metadata_json').notNull(),
 		createdAt: text('created_at').notNull(),
 		expiresAt: text('expires_at').notNull(),
