@@ -52,6 +52,20 @@ export interface PendingVerification {
 	readonly reuse: boolean;
 }
 
+// The verdict the queue consumer reached for one claimed upload off the DO
+// thread: the decoded NAR verification, or that its staging object was
+// definitively gone.
+export type VerificationVerdict =
+	| { readonly kind: 'verified'; readonly verification: NarVerification }
+	| { readonly kind: 'missing' };
+
+// One upload's verdict, carried back to the DO so a whole batch settles in a
+// single RPC rather than one round trip per upload.
+export interface VerificationResult {
+	readonly uploadId: string;
+	readonly verdict: VerificationVerdict;
+}
+
 export class VerificationService {
 	constructor(
 		private readonly context: ServerContext,
@@ -609,6 +623,41 @@ export class VerificationService {
 		}
 
 		await this.commitVerified(pending, metadata, generation, verification);
+	}
+
+	// Settles a batch of verdicts the queue consumer decoded off the DO thread in
+	// one RPC, so a pass over many deferred uploads costs a single round trip into
+	// the DO rather than one per upload. The verdicts apply one at a time, each
+	// through the same idempotent reserve→commit path, so two never interleave their
+	// critical sections. One verdict's apply failing (a transient promote or commit
+	// fault) must not abort the rest of the batch or fail the queue message: its row
+	// is left for the next pass, the same fault isolation the per-upload RPCs had.
+	// Returns how many verdicts actually applied, so the caller continues the drain
+	// only on real progress rather than on a mere decode, and a batch whose every
+	// apply fails backs off to the cron instead of spinning.
+	async recordVerifications(
+		results: readonly VerificationResult[]
+	): Promise<number> {
+		let applied = 0;
+
+		for (const { uploadId, verdict } of results) {
+			try {
+				if (verdict.kind === 'missing') {
+					await this.recordMissingObject(uploadId);
+				} else {
+					await this.recordVerification(uploadId, verdict.verification);
+				}
+
+				applied += 1;
+			} catch (error) {
+				console.warn('verification verdict not recorded', {
+					uploadId,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
+		}
+
+		return applied;
 	}
 
 	// Records a terminal `mismatch` for a deferred upload whose staging object the
