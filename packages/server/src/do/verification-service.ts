@@ -234,7 +234,7 @@ export class VerificationService {
 			// the row clears and the staging bytes go.
 			this.notifyWaiters(pending.id, pending.sessionId, 'servable');
 			this.uploadState.clearPendingUpload(pending.id);
-			await this.context.env.BLOBS.delete(pending.r2Key);
+			await this.deleteStagingObject(pending);
 			return;
 		}
 
@@ -242,8 +242,21 @@ export class VerificationService {
 		// lost: clear its marker. Any blob it promoted that no edge now references is
 		// left for the reaper to collect.
 		this.uploadState.clearPendingUpload(pending.id);
-		await this.context.env.BLOBS.delete(pending.r2Key);
+		await this.deleteStagingObject(pending);
 		this.notifyWaiters(pending.id, pending.sessionId, 'absent');
+	}
+
+	// Reclaims an upload's private staging object once its saga settles. A reuse
+	// row's r2Key is the shared canonical key, which the blob reaper owns and
+	// other paths reference, so it is left untouched.
+	private async deleteStagingObject(
+		pending: typeof schema.pendingUploads.$inferSelect
+	): Promise<void> {
+		if (pending.r2Key === narObjectKey(pending.narHash)) {
+			return;
+		}
+
+		await this.context.env.BLOBS.delete(pending.r2Key);
 	}
 
 	// Reclaims the reserved row a deferred upload never made servable and records its
