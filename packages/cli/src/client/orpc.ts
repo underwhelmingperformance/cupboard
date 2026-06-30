@@ -97,10 +97,9 @@ function derivedClient<C extends AnyContractRouter>(
 		// Bodies are buffered JSON, so cloning the request per attempt is cheap. A
 		// 401 refreshes the bearer once; a transient failure (a network fault or an
 		// unmapped 5xx) backs off and retries, so a single Durable Object blip does
-		// not fail a long push of presign and negotiate calls. The contract's
-		// procedures are idempotent or self-healing under a repeat (a re-presign
-		// re-signs, a re-negotiate's unused rows are reaped), so a retried call is
-		// safe.
+		// not fail a long push of negotiate and commit calls. The contract's
+		// procedures are idempotent or self-healing under a repeat (a re-negotiate's
+		// unused rows are reaped), so a retried call is safe.
 		fetch: async (request, init) => {
 			let current = request;
 			let isBearerRefreshed = false;

@@ -16,7 +16,6 @@ import type { CommitOptions } from '../client/client.ts';
 import {
 	AttestationSubjectNotPushedError,
 	CupboardHttpError,
-	CupboardUploadError,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
 	UploadVerificationFailedError
@@ -1424,7 +1423,7 @@ describe('runPush', () => {
 					await collectReadableStream(body);
 
 					if (r2Key.includes(runtimeDigest.narHash.toString())) {
-						throw new CupboardUploadError(r2Key, 500, 'boom');
+						throw new Error('boom');
 					}
 
 					uploaded.push(r2Key);
