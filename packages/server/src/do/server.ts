@@ -795,6 +795,47 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 		await this.resumeGarbageCollection();
 		await this.reconcileNegotiatedOnce();
+		await this.resumeCacheTeardown();
+	}
+
+	// Starts a cache teardown directly, the manual/test entry that the `caches`
+	// remove route reaches through `removeCache`. The optional limit caps the first
+	// drain chunk so a test can force the over-cap, alarm-resumed path without
+	// pushing a whole cap's worth of paths, mirroring {@link runGarbageCollection}.
+	async runCacheTeardown(
+		cache: string,
+		origin: string,
+		limit?: number
+	): Promise<void> {
+		await this.initialise();
+		await this.metered('cache-teardown', () =>
+			this.withMaintenanceEligibility(() =>
+				this.cacheAdmin.tearDownCache(cache, origin, limit)
+			)
+		);
+	}
+
+	// Resumes a cache teardown that stopped at its per-run cap. It claims one cache
+	// awaiting teardown, retires another bounded chunk, then re-arms the alarm while
+	// any cache still has a marker, so several queued teardowns drain across firings
+	// with the gate free between them. No marker means nothing to do. The optional
+	// limit caps the chunk for tests, mirroring {@link runGarbageCollection}.
+	async resumeCacheTeardown(limit?: number): Promise<void> {
+		const claimed = await this.cacheAdmin.claimTeardown();
+
+		if (claimed === undefined) {
+			return;
+		}
+
+		await this.metered('cache-teardown', () =>
+			this.withMaintenanceEligibility(() =>
+				this.cacheAdmin.resumeTeardownPass(claimed.cache, claimed.origin, limit)
+			)
+		);
+
+		if (await this.cacheAdmin.hasPendingTeardown()) {
+			await this.ctx.storage.setAlarm(Date.now());
+		}
 	}
 
 	async runVerification(): Promise<void> {
@@ -1082,6 +1123,7 @@ function logRequestFinished(
 // a union so a label cannot drift from its entrypoint or be mistyped.
 type MeteredMethod =
 	| 'auth-key-retirement'
+	| 'cache-teardown'
 	| 'claim-verifications'
 	| 'commit'
 	| 'configure'
