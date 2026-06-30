@@ -176,6 +176,13 @@
 			"when": 1782635391781,
 			"tag": "0024_pending_upload_session",
 			"breakpoints": true
+		},
+		{
+			"idx": 25,
+			"version": "6",
+			"when": 1782817905752,
+			"tag": "0025_drop_pending_upload_expected_size",
+			"breakpoints": true
 		}
 	]
 }

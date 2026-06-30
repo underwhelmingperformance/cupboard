@@ -28,7 +28,7 @@ type NarInfoRow = typeof schema.narInfos.$inferSelect;
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 
 // A pending upload, and a reuse upload's reclaim window, both live for fifteen
-// minutes from when they are negotiated or prepared.
+// minutes from when they are negotiated.
 const uploadTtlMs = 15 * 60 * 1000;
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
@@ -126,12 +126,11 @@ export class UploadsService {
 			.insert(schema.pendingUploads)
 			.values({
 				id: uploadId,
-				// Bind the upload to its cache so a prepare or commit cannot
-				// redirect it to a different one.
+				// Bind the upload to its cache so a later commit cannot redirect it
+				// to a different one.
 				cache,
 				narHash: metadata.narHash,
 				r2Key,
-				expectedSize: existingBlob?.fileSize ?? 0,
 				metadataJson: JSON.stringify(pendingMetadata),
 				createdAt: now.toISOString(),
 				expiresAt: expiresAt.toISOString()

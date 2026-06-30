@@ -449,7 +449,6 @@ function pendingUpload(
 		cache: '',
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: `staging/${id}`,
-		expectedSize: 0,
 		metadataJson: '{}',
 		createdAt: '2026-01-01T00:00:00.000Z',
 		expiresAt,
