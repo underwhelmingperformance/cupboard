@@ -231,6 +231,33 @@ function stagingReclaimRule(): LifecycleUpdateParams.Rule {
 	};
 }
 
+// The subset of a lifecycle rule this deploy owns. Projecting both the stored
+// and desired rule down to it makes the idempotency check ignore fields R2 adds
+// on its own.
+interface ManagedLifecycleFields {
+	readonly id?: string;
+	readonly enabled?: boolean;
+	readonly conditions?: { readonly prefix?: string };
+	readonly deleteObjectsTransition?: unknown;
+	readonly abortMultipartUploadsTransition?: unknown;
+}
+
+function managedLifecycleFields(rule: ManagedLifecycleFields): {
+	id: string | undefined;
+	enabled: boolean | undefined;
+	prefix: string | undefined;
+	deleteObjectsTransition: unknown;
+	abortMultipartUploadsTransition: unknown;
+} {
+	return {
+		id: rule.id,
+		enabled: rule.enabled,
+		prefix: rule.conditions?.prefix,
+		deleteObjectsTransition: rule.deleteObjectsTransition,
+		abortMultipartUploadsTransition: rule.abortMultipartUploadsTransition
+	};
+}
+
 /**
  * The real {@link CloudflareApi}, backed by the official SDK. Resource creators
  * look the resource up by name first and create it only when absent, so a
@@ -280,7 +307,17 @@ export function createCloudflareApi(
 
 			const existing = rules.find((rule) => rule.id === desired.id);
 
-			if (existing !== undefined && isDeepStrictEqual(existing, desired)) {
+			// Compare only the fields this rule manages, not the whole object: R2 may
+			// echo back optional fields (such as storage-class transitions) the rule
+			// never sets, and comparing those would re-PUT an already-correct rule on
+			// every deploy.
+			if (
+				existing !== undefined &&
+				isDeepStrictEqual(
+					managedLifecycleFields(existing),
+					managedLifecycleFields(desired)
+				)
+			) {
 				return;
 			}
 
