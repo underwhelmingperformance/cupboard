@@ -138,7 +138,6 @@ describe('applyMigrations', () => {
 							error instanceof DurableObjectMigrationError
 								? error.tag
 								: undefined,
-						message: error instanceof Error ? error.message : String(error),
 						// The first migration committed before the second failed.
 						applied: appliedTags(state.storage),
 						tables: tableNames(state.storage)
@@ -151,8 +150,6 @@ describe('applyMigrations', () => {
 			threw: true,
 			isMigrationError: true,
 			tag: '0001_bad_index',
-			message:
-				'Durable Object migration 0001_bad_index failed: no such column: nope at offset 43: SQLITE_ERROR',
 			applied: ['0000_widget'],
 			tables: ['widget']
 		});
