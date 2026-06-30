@@ -190,18 +190,22 @@ describe('maintenance sweep cost', () => {
 		{
 			method: 'demote-narinfo-objects',
 			run: () =>
-				currentServer().demoteNarInfoObjects(
-					nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
-					[]
-				)
+				currentServer().demoteNarInfoObjects([
+					{
+						narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
+						targets: []
+					}
+				])
 		},
 		{
 			method: 'demote-attestation-references',
 			run: () =>
-				currentServer().demoteAttestationReferences(
-					sha256HexDigestSchema.parse('b'.repeat(64)),
-					'2000-01-01T00:00:00.000Z'
-				)
+				currentServer().demoteAttestationReferences([
+					{
+						digest: sha256HexDigestSchema.parse('b'.repeat(64)),
+						fenceStoredAt: '2000-01-01T00:00:00.000Z'
+					}
+				])
 		}
 	] as const;
 
