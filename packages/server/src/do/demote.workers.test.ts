@@ -136,6 +136,48 @@ describe('reaper demote pass', () => {
 		});
 	});
 
+	it('demotes a shared blob through every referencing tenant in one pass', async () => {
+		// Two tenants push identical content, so they share one `blob_state` row but
+		// each holds its own narinfo object and edge. One demote pass must route to
+		// both owning tenants and then drop the single shared fact.
+		const first = await committedTenantPath('demote-shared');
+		const second = await committedTenantPath('demote-shared');
+
+		await env.BLOBS.delete(narObjectKey(first.narHash));
+
+		expect({
+			sharedHash: first.narHash === second.narHash,
+			blobState: await blobStateNarHashes(),
+			edges: await edgeCount()
+		}).toStrictEqual({
+			sharedHash: true,
+			blobState: [{ narHash: first.narHash }],
+			edges: 2
+		});
+
+		const demoted = await runReaperDemote(env);
+
+		expect({
+			demoted,
+			blobState: await blobStateNarHashes(),
+			firstNarInfo: await narInfoPresent(
+				first.tenant,
+				first.metadata.storePathHash
+			),
+			secondNarInfo: await narInfoPresent(
+				second.tenant,
+				second.metadata.storePathHash
+			),
+			edges: await edgeCount()
+		}).toStrictEqual({
+			demoted: 1,
+			blobState: [],
+			firstNarInfo: false,
+			secondNarInfo: false,
+			edges: 2
+		});
+	});
+
 	it('leaves a blob whose object is present untouched', async () => {
 		const { tenant, metadata, narHash } =
 			await committedTenantPath('demote-present');

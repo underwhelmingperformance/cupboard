@@ -13,12 +13,21 @@ import {
 	isNull,
 	lte,
 	notInArray,
+	or,
 	sql
 } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
+
+import {
+	chunk,
+	deleteObjects,
+	mapWithConcurrency,
+	maxInClauseValues,
+	maxOutgoingConnections
+} from './bulk.ts';
 
 // One narinfo whose object the demote pass must take down: a tenant, the cache it
 // lives in, and its store-path hash. The reaper groups these by tenant and routes
@@ -29,25 +38,39 @@ export interface DemoteTarget {
 	readonly storePathHash: StorePathHash;
 }
 
+// One hash whose shared object is gone, paired with the narinfos referencing it
+// in a single tenant. A demote routes one of these batches to each owning tenant,
+// so a tenant referencing many reaped hashes is told about them in one call.
+export interface NarInfoDemotion {
+	readonly narHash: NixSha256HashString;
+	readonly targets: readonly DemoteTarget[];
+}
+
 // The port the demote pass reaches a tenant's Durable Object through. The reaper
 // itself never touches a tenant's objects; it asks the owning tenant to
-// de-materialise the narinfos referencing a hash whose shared object is gone, so the
-// per-tenant single-writer rule holds.
+// de-materialise the narinfos referencing hashes whose shared objects are gone, so
+// the per-tenant single-writer rule holds.
 export interface NarInfoDemoter {
-	demote(
-		tenant: string,
-		narHash: NixSha256HashString,
-		targets: readonly DemoteTarget[]
-	): Promise<void>;
+	demote(tenant: string, demotions: readonly NarInfoDemotion[]): Promise<void>;
+}
+
+// One attestation digest whose CAS object is gone, with the `stored_at` the delete
+// is fenced on so a re-stored object is left intact.
+export interface CasReferenceDemotion {
+	readonly digest: Sha256HexDigest;
+	readonly fenceStoredAt: string;
 }
 
 export interface CasReferenceDemoter {
 	demote(
 		tenant: string,
-		digest: Sha256HexDigest,
-		fenceStoredAt: string
+		demotions: readonly CasReferenceDemotion[]
 	): Promise<void>;
 }
+
+// A fenced batch delete binds two parameters per row (the key and its fence), so
+// the OR-of-AND list is chunked to stay within D1's bound-parameter limit.
+const maxFencedDeleteRows = Math.floor(maxInClauseValues / 2);
 
 // The demote scan's resume position across cron ticks. It is the last `nar_hash`
 // reached, an exclusive lower bound for the next keyset page, with '' meaning start
@@ -134,7 +157,7 @@ export class BlobReaperService {
 			)
 			.limit(limit)
 			.all();
-		let collected = 0;
+		const removedKeys: string[] = [];
 
 		for (const blob of expired) {
 			const referencedHashes = this.d1
@@ -154,12 +177,15 @@ export class BlobReaperService {
 				.all();
 
 			if (removed.length > 0) {
-				await this.blobs.delete(narObjectKey(blob.narHash));
-				collected += 1;
+				removedKeys.push(narObjectKey(blob.narHash));
 			}
 		}
 
-		return collected;
+		// Every fenced D1 delete has run, so the R2 objects go in one bulk delete,
+		// keeping the D1-first/R2-last order a crash relies on.
+		await deleteObjects(this.blobs, removedKeys);
+
+		return removedKeys.length;
 	}
 
 	private async armUnreferencedCasObjects(
@@ -217,7 +243,7 @@ export class BlobReaperService {
 			)
 			.limit(limit)
 			.all();
-		let collected = 0;
+		const removedKeys: string[] = [];
 
 		for (const object of expired) {
 			const referencedDigests = this.d1
@@ -237,68 +263,161 @@ export class BlobReaperService {
 				.all();
 
 			if (removed.length > 0) {
-				await this.blobs.delete(casObjectKey(object.digest));
-				collected += 1;
+				removedKeys.push(casObjectKey(object.digest));
 			}
 		}
 
-		return collected;
+		await deleteObjects(this.blobs, removedKeys);
+
+		return removedKeys.length;
 	}
 
-	// De-materialises the referencing narinfos for a hash whose object is gone, then
-	// deletes the `blob_state` row. The narinfos go first (idempotent in each owning
-	// Durable Object), and the fact is deleted last, fenced on the `verified_at`
-	// captured at scan so a row deleted and re-promoted in the window is left intact.
-	// If routing to any tenant fails, the fact is left in place and the next pass
-	// re-drives it. Returns whether the fact was demoted.
-	private async demoteBlob(
-		narHash: NixSha256HashString,
-		verifiedAt: string
-	): Promise<boolean> {
-		const targetsByTenant = await this.referencingTargets(narHash);
+	// The narinfos referencing each of a batch of hashes, grouped by owning tenant
+	// then by hash, in one bulk read per chunk rather than a read per hash. Each
+	// tenant's entry is the set of demotions to route to it in a single call.
+	private async referencingDemotions(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Map<string, NarInfoDemotion[]>> {
+		const pages = await mapWithConcurrency(
+			chunk(narHashes, maxInClauseValues),
+			maxOutgoingConnections,
+			(batch) =>
+				this.d1
+					.selectDistinct({
+						tenant: d1Schema.blobReference.tenant,
+						narHash: d1Schema.blobReference.narHash,
+						cache: d1Schema.blobReference.cache,
+						storePathHash: d1Schema.blobReference.storePathHash
+					})
+					.from(d1Schema.blobReference)
+					.where(inArray(d1Schema.blobReference.narHash, batch))
+					.all()
+		);
 
-		for (const [tenant, targets] of targetsByTenant) {
-			await this.demoter.demote(tenant, narHash, targets);
+		const edgesByTenant = Map.groupBy(pages.flat(), (edge) => edge.tenant);
+		const demotionsByTenant = new Map<string, NarInfoDemotion[]>();
+
+		for (const [tenant, edges] of edgesByTenant) {
+			const edgesByHash = Map.groupBy(edges, (edge) => edge.narHash);
+			demotionsByTenant.set(
+				tenant,
+				[...edgesByHash].map(([narHash, group]) => ({
+					narHash,
+					targets: group.map((edge) => ({
+						cache: edge.cache,
+						storePathHash: edge.storePathHash
+					}))
+				}))
+			);
 		}
 
-		const removed = await this.d1
-			.delete(d1Schema.blobState)
-			.where(
-				and(
-					eq(d1Schema.blobState.narHash, narHash),
-					eq(d1Schema.blobState.verifiedAt, verifiedAt)
-				)
-			)
-			.returning({ narHash: d1Schema.blobState.narHash })
-			.all();
-
-		return removed.length > 0;
+		return demotionsByTenant;
 	}
 
-	private async referencingTargets(
-		narHash: NixSha256HashString
-	): Promise<Map<string, DemoteTarget[]>> {
-		const edges = await this.d1
-			.selectDistinct({
-				tenant: d1Schema.blobReference.tenant,
-				cache: d1Schema.blobReference.cache,
-				storePathHash: d1Schema.blobReference.storePathHash
-			})
-			.from(d1Schema.blobReference)
-			.where(eq(d1Schema.blobReference.narHash, narHash))
-			.all();
-
-		const edgesByTenant = Map.groupBy(edges, (edge) => edge.tenant);
-
-		return new Map(
-			edgesByTenant.entries().map(([tenant, group]) => [
-				tenant,
-				group.map((edge) => ({
-					cache: edge.cache,
-					storePathHash: edge.storePathHash
-				}))
-			])
+	// The store-path hashes whose canonical NAR object is present, found with a
+	// bounded fan-out of `head` reads rather than one head at a time.
+	private async presentNarObjects(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<ReadonlySet<NixSha256HashString>> {
+		const present = await mapWithConcurrency(
+			narHashes,
+			maxOutgoingConnections,
+			async (narHash) =>
+				(await this.blobs.head(narObjectKey(narHash))) === null
+					? undefined
+					: narHash
 		);
+
+		return new Set(
+			present.filter(
+				(narHash): narHash is NixSha256HashString => narHash !== undefined
+			)
+		);
+	}
+
+	// The digests whose CAS object is present, the attestation counterpart of
+	// {@link presentNarObjects}.
+	private async presentCasObjects(
+		digests: readonly Sha256HexDigest[]
+	): Promise<ReadonlySet<Sha256HexDigest>> {
+		const present = await mapWithConcurrency(
+			digests,
+			maxOutgoingConnections,
+			async (digest) =>
+				(await this.blobs.head(casObjectKey(digest))) === null
+					? undefined
+					: digest
+		);
+
+		return new Set(
+			present.filter(
+				(digest): digest is Sha256HexDigest => digest !== undefined
+			)
+		);
+	}
+
+	// Routes each tenant's demotions to its Durable Object, bounded and caught per
+	// tenant, and returns the tenants whose routing failed. A failed tenant leaves
+	// its hashes' facts in place so the next pass re-drives them.
+	private async routeByTenant<T>(
+		byTenant: ReadonlyMap<string, readonly T[]>,
+		send: (tenant: string, items: readonly T[]) => Promise<void>
+	): Promise<ReadonlySet<string>> {
+		const failed = new Set<string>();
+
+		await mapWithConcurrency(
+			[...byTenant],
+			maxOutgoingConnections,
+			async ([tenant, items]) => {
+				try {
+					await send(tenant, items);
+				} catch (error) {
+					// Keep the per-tenant isolation (the others still demote and the
+					// failed tenant's facts are left for the next pass), but surface the
+					// failure: a tenant whose demote routing keeps failing must not be
+					// silently swallowed.
+					failed.add(tenant);
+					console.error('reaper demote routing failed', {
+						tenant,
+						count: items.length,
+						error: error instanceof Error ? error.message : String(error)
+					});
+				}
+			}
+		);
+
+		return failed;
+	}
+
+	// Deletes the `blob_state` rows for the given hashes, each fenced on the
+	// `verified_at` captured at scan so a row deleted and re-promoted in the window
+	// is left intact. The fence is an OR of per-row (hash, verified_at) pairs,
+	// chunked to stay within D1's bound-parameter limit. Returns how many were
+	// deleted.
+	private async deleteFencedBlobStates(
+		rows: readonly { narHash: NixSha256HashString; verifiedAt: string }[]
+	): Promise<number> {
+		let demoted = 0;
+
+		for (const batch of chunk(rows, maxFencedDeleteRows)) {
+			const match = or(
+				...batch.map((row) =>
+					and(
+						eq(d1Schema.blobState.narHash, row.narHash),
+						eq(d1Schema.blobState.verifiedAt, row.verifiedAt)
+					)
+				)
+			);
+			const removed = await this.d1
+				.delete(d1Schema.blobState)
+				.where(match)
+				.returning({ narHash: d1Schema.blobState.narHash })
+				.all();
+
+			demoted += removed.length;
+		}
+
+		return demoted;
 	}
 
 	// One keyset page of `blob_state` after the cursor, the Drizzle cursor-pagination
@@ -319,22 +438,33 @@ export class BlobReaperService {
 			.all();
 	}
 
-	private async demoteCasObject(
-		digest: Sha256HexDigest,
-		storedAt: string
-	): Promise<boolean> {
-		const removed = await this.d1
-			.delete(d1Schema.casObject)
-			.where(
-				and(
-					eq(d1Schema.casObject.digest, digest),
-					eq(d1Schema.casObject.storedAt, storedAt)
-				)
-			)
-			.returning({ digest: d1Schema.casObject.digest })
-			.all();
+	// Deletes the `cas_object` rows for the given digests, each fenced on the
+	// `stored_at` captured at scan, the CAS counterpart of
+	// {@link deleteFencedBlobStates}. Returns how many were deleted.
+	private async deleteFencedCasObjects(
+		rows: readonly { digest: Sha256HexDigest; storedAt: string }[]
+	): Promise<number> {
+		let demoted = 0;
 
-		return removed.length > 0;
+		for (const batch of chunk(rows, maxFencedDeleteRows)) {
+			const match = or(
+				...batch.map((row) =>
+					and(
+						eq(d1Schema.casObject.digest, row.digest),
+						eq(d1Schema.casObject.storedAt, row.storedAt)
+					)
+				)
+			);
+			const removed = await this.d1
+				.delete(d1Schema.casObject)
+				.where(match)
+				.returning({ digest: d1Schema.casObject.digest })
+				.all();
+
+			demoted += removed.length;
+		}
+
+		return demoted;
 	}
 
 	private demoteCasBatch(
@@ -353,16 +483,49 @@ export class BlobReaperService {
 			.all();
 	}
 
-	private async casReferencingTenants(
-		digest: Sha256HexDigest
-	): Promise<string[]> {
-		const rows = await this.d1
-			.selectDistinct({ tenant: d1Schema.attestationReference.tenant })
-			.from(d1Schema.attestationReference)
-			.where(eq(d1Schema.attestationReference.digest, digest))
-			.all();
+	// The tenants referencing each of a batch of digests, grouped by tenant, in one
+	// bulk read per chunk. Each tenant's entry is the demotions to route to it in a
+	// single call, carrying the per-digest `stored_at` fence.
+	private async casReferencingDemotions(
+		objects: readonly { digest: Sha256HexDigest; storedAt: string }[]
+	): Promise<Map<string, CasReferenceDemotion[]>> {
+		const storedAtByDigest = new Map(
+			objects.map((object) => [object.digest, object.storedAt])
+		);
+		const pages = await mapWithConcurrency(
+			chunk(
+				objects.map((object) => object.digest),
+				maxInClauseValues
+			),
+			maxOutgoingConnections,
+			(batch) =>
+				this.d1
+					.selectDistinct({
+						tenant: d1Schema.attestationReference.tenant,
+						digest: d1Schema.attestationReference.digest
+					})
+					.from(d1Schema.attestationReference)
+					.where(inArray(d1Schema.attestationReference.digest, batch))
+					.all()
+		);
 
-		return rows.map((row) => row.tenant);
+		const rowsByTenant = Map.groupBy(pages.flat(), (row) => row.tenant);
+		const demotionsByTenant = new Map<string, CasReferenceDemotion[]>();
+
+		for (const [tenant, rows] of rowsByTenant) {
+			demotionsByTenant.set(
+				tenant,
+				rows.flatMap((row) => {
+					const fenceStoredAt = storedAtByDigest.get(row.digest);
+
+					return fenceStoredAt === undefined
+						? []
+						: [{ digest: row.digest, fenceStoredAt }];
+				})
+			);
+		}
+
+		return demotionsByTenant;
 	}
 
 	// Returns how many shared blobs it collected.
@@ -395,26 +558,48 @@ export class BlobReaperService {
 
 		// A short page means the scan reached the end of the hash order, so wrap to the
 		// start; otherwise resume after the last hash scanned. Advanced before
-		// processing, so a per-blob failure does not wedge the scan.
+		// processing, so a failure does not wedge the scan.
 		const next = batch.length < limit ? '' : (batch.at(-1)?.narHash ?? '');
 		await cursor.advance(next);
 
-		let demoted = 0;
+		if (batch.length === 0) {
+			return 0;
+		}
 
-		for (const blob of batch) {
-			const isPresent =
-				(await this.blobs.head(narObjectKey(blob.narHash))) !== null;
+		const present = await this.presentNarObjects(
+			batch.map((blob) => blob.narHash)
+		);
+		const missing = batch.filter((blob) => !present.has(blob.narHash));
 
-			if (isPresent) {
+		if (missing.length === 0) {
+			return 0;
+		}
+
+		// De-materialise the referencing narinfos first (one call per tenant), then
+		// delete the facts. A hash whose tenant routing failed keeps its fact for the
+		// next pass; one referenced by no tenant is eligible immediately.
+		const demotionsByTenant = await this.referencingDemotions(
+			missing.map((blob) => blob.narHash)
+		);
+		const failedTenants = await this.routeByTenant(
+			demotionsByTenant,
+			(tenant, demotions) => this.demoter.demote(tenant, demotions)
+		);
+		const blocked = new Set<NixSha256HashString>();
+
+		for (const [tenant, demotions] of demotionsByTenant) {
+			if (!failedTenants.has(tenant)) {
 				continue;
 			}
 
-			if (await this.demoteBlob(blob.narHash, blob.verifiedAt)) {
-				demoted += 1;
+			for (const demotion of demotions) {
+				blocked.add(demotion.narHash);
 			}
 		}
 
-		return demoted;
+		return this.deleteFencedBlobStates(
+			missing.filter((blob) => !blocked.has(blob.narHash))
+		);
 	}
 
 	async demoteMissingCasObjects(
@@ -426,27 +611,38 @@ export class BlobReaperService {
 		const next = batch.length < limit ? '' : (batch.at(-1)?.digest ?? '');
 		await cursor.advance(next);
 
-		let demoted = 0;
+		if (batch.length === 0) {
+			return 0;
+		}
 
-		for (const object of batch) {
-			const isPresent =
-				(await this.blobs.head(casObjectKey(object.digest))) !== null;
+		const present = await this.presentCasObjects(
+			batch.map((object) => object.digest)
+		);
+		const missing = batch.filter((object) => !present.has(object.digest));
 
-			if (isPresent) {
+		if (missing.length === 0) {
+			return 0;
+		}
+
+		const demotionsByTenant = await this.casReferencingDemotions(missing);
+		const failedTenants = await this.routeByTenant(
+			demotionsByTenant,
+			(tenant, demotions) => this.casDemoter.demote(tenant, demotions)
+		);
+		const blocked = new Set<Sha256HexDigest>();
+
+		for (const [tenant, demotions] of demotionsByTenant) {
+			if (!failedTenants.has(tenant)) {
 				continue;
 			}
 
-			const tenants = await this.casReferencingTenants(object.digest);
-
-			for (const tenant of tenants) {
-				await this.casDemoter.demote(tenant, object.digest, object.storedAt);
-			}
-
-			if (await this.demoteCasObject(object.digest, object.storedAt)) {
-				demoted += 1;
+			for (const demotion of demotions) {
+				blocked.add(demotion.digest);
 			}
 		}
 
-		return demoted;
+		return this.deleteFencedCasObjects(
+			missing.filter((object) => !blocked.has(object.digest))
+		);
 	}
 }

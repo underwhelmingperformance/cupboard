@@ -3,9 +3,7 @@ import {
 	cacheFromSelector,
 	cachePrioritySchema,
 	cacheSelectorSchema,
-	DEFAULT_CACHE,
-	type NixSha256HashString,
-	type Sha256HexDigest
+	DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
@@ -43,7 +41,10 @@ import {
 } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { AuthKeysService } from './auth-keys-service.ts';
-import { type DemoteTarget } from './blob-reaper-service.ts';
+import {
+	type CasReferenceDemotion,
+	type NarInfoDemotion
+} from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
@@ -916,24 +917,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The global reaper found a shared object gone and routes the de-materialisation
-	// of this tenant's narinfos for that hash through here, the single writer of the
-	// tenant's objects. Each target is de-materialised only if its live row still
-	// names the hash and the object is still absent, so the call is idempotent and the
-	// reaper can re-drive it until the `blob_state` row is cleared.
+	// The global reaper found shared objects gone and routes the de-materialisation
+	// of this tenant's narinfos for those hashes through here in one call, the single
+	// writer of the tenant's objects. Each target is de-materialised only if its live
+	// row still names the hash and the object is still absent, so the call is
+	// idempotent and the reaper can re-drive it until the `blob_state` row is cleared.
 	async demoteNarInfoObjects(
-		narHash: NixSha256HashString,
-		targets: readonly DemoteTarget[]
+		demotions: readonly NarInfoDemotion[]
 	): Promise<void> {
 		await this.initialise();
 
 		await this.metered('demote-narinfo-objects', async () => {
-			for (const target of targets) {
-				await this.narInfoObjects.demoteUnbacked(
-					target.cache,
-					target.storePathHash,
-					narHash
-				);
+			for (const { narHash, targets } of demotions) {
+				for (const target of targets) {
+					await this.narInfoObjects.demoteUnbacked(
+						target.cache,
+						target.storePathHash,
+						narHash
+					);
+				}
 			}
 		});
 	}
@@ -974,13 +976,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	async demoteAttestationReferences(
-		digest: Sha256HexDigest,
-		fenceStoredAt: string
+		demotions: readonly CasReferenceDemotion[]
 	): Promise<void> {
 		await this.initialise();
-		await this.metered('demote-attestation-references', () =>
-			this.attestations.removeReferencesForDigest(digest, fenceStoredAt)
-		);
+		await this.metered('demote-attestation-references', async () => {
+			for (const { digest, fenceStoredAt } of demotions) {
+				await this.attestations.removeReferencesForDigest(
+					digest,
+					fenceStoredAt
+				);
+			}
+		});
 	}
 
 	// The control plane begins offboarding this tenant. Marking it stops the

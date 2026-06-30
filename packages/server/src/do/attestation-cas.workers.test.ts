@@ -508,10 +508,9 @@ describe('attestation CAS lifecycle', () => {
 		// head was stale. Stripping the references and crediting quota would corrupt a
 		// live object's accounting, so the demote re-checks and is a no-op. The stale
 		// fence value is never consulted because the presence check short-circuits.
-		await currentServer().demoteAttestationReferences(
-			bundle.digest,
-			'2000-01-01T00:00:00.000Z'
-		);
+		await currentServer().demoteAttestationReferences([
+			{ digest: bundle.digest, fenceStoredAt: '2000-01-01T00:00:00.000Z' }
+		]);
 
 		expect({
 			objects: await casObjectRows(),
@@ -550,10 +549,9 @@ describe('attestation CAS lifecycle', () => {
 			.where(eq(d1Schema.casObject.digest, bundle.digest))
 			.run();
 
-		await currentServer().demoteAttestationReferences(
-			bundle.digest,
-			'2000-01-01T00:00:00.000Z'
-		);
+		await currentServer().demoteAttestationReferences([
+			{ digest: bundle.digest, fenceStoredAt: '2000-01-01T00:00:00.000Z' }
+		]);
 
 		expect({
 			objects: await casObjectRows(),

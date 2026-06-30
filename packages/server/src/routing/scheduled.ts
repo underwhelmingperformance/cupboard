@@ -1,9 +1,4 @@
-import {
-	type NixSha256HashString,
-	type Sha256HexDigest,
-	type TenantId,
-	tenantIdSchema
-} from '@cupboard/nix-store/scalars';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -19,9 +14,10 @@ import * as d1Schema from '../db/d1-schema.ts';
 import {
 	BlobReaperService,
 	type CasReferenceDemoter,
+	type CasReferenceDemotion,
 	type DemoteCursor,
-	type DemoteTarget,
-	type NarInfoDemoter
+	type NarInfoDemoter,
+	type NarInfoDemotion
 } from '../do/blob-reaper-service.ts';
 import { mapWithConcurrency } from '../do/bulk.ts';
 import { type VerificationResult } from '../do/verification-service.ts';
@@ -415,13 +411,9 @@ class TenantNarInfoDemoter implements NarInfoDemoter {
 
 	demote(
 		tenant: TenantId,
-		narHash: NixSha256HashString,
-		targets: readonly DemoteTarget[]
+		demotions: readonly NarInfoDemotion[]
 	): Promise<void> {
-		return tenantServer(this.env, tenant).demoteNarInfoObjects(
-			narHash,
-			targets
-		);
+		return tenantServer(this.env, tenant).demoteNarInfoObjects(demotions);
 	}
 }
 
@@ -430,12 +422,10 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
 
 	demote(
 		tenant: TenantId,
-		digest: Sha256HexDigest,
-		fenceStoredAt: string
+		demotions: readonly CasReferenceDemotion[]
 	): Promise<void> {
 		return tenantServer(this.env, tenant).demoteAttestationReferences(
-			digest,
-			fenceStoredAt
+			demotions
 		);
 	}
 }
