@@ -9,12 +9,7 @@ describe('pushAuthorizationDetails', () => {
 		).toStrictEqual([
 			{
 				type: 'cupboard_cache',
-				actions: [
-					'upload:negotiate',
-					'upload:prepare',
-					'upload:status',
-					'upload:commit'
-				],
+				actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
 				cache: 'pr-1'
 			}
 		]);
@@ -32,11 +27,9 @@ describe('pushAuthorizationDetails', () => {
 				type: 'cupboard_cache',
 				actions: [
 					'upload:negotiate',
-					'upload:prepare',
 					'upload:status',
 					'upload:commit',
 					'attestation:negotiate',
-					'attestation:prepare',
 					'attestation:attach',
 					'root:set'
 				],

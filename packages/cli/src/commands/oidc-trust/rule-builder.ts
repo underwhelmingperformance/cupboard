@@ -31,17 +31,8 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 // The cache operations each `--allow` shorthand expands to. `push` and `attest`
 // are the upload and attestation conversations; `root` is a retention-root write.
 const allowExpansions = {
-	push: [
-		'upload:negotiate',
-		'upload:prepare',
-		'upload:status',
-		'upload:commit'
-	],
-	attest: [
-		'attestation:negotiate',
-		'attestation:prepare',
-		'attestation:attach'
-	],
+	push: ['upload:negotiate', 'upload:status', 'upload:commit'],
+	attest: ['attestation:negotiate', 'attestation:attach'],
 	root: ['root:set']
 } as const;
 

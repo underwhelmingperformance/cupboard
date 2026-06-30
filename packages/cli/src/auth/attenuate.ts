@@ -13,18 +13,9 @@ export interface PushGrantIntent {
 	readonly root?: string;
 }
 
-const uploadActions = [
-	'upload:negotiate',
-	'upload:prepare',
-	'upload:status',
-	'upload:commit'
-];
+const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 
-const attestActions = [
-	'attestation:negotiate',
-	'attestation:prepare',
-	'attestation:attach'
-];
+const attestActions = ['attestation:negotiate', 'attestation:attach'];
 
 /**
  * The concrete `authorization_details` a push requests: a single cache grant on
