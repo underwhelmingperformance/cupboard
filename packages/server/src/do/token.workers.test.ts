@@ -269,12 +269,7 @@ const trustClassGrants = {
 	write: [
 		{
 			type: 'cupboard_cache',
-			actions: [
-				'upload:negotiate',
-				'upload:prepare',
-				'upload:status',
-				'upload:commit'
-			],
+			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
 			resources: { cache: { exact: 'ci', validate: 'cacheName' } }
 		}
 	]

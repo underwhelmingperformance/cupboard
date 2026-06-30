@@ -517,11 +517,9 @@ export function initialiseViaWorker(): Promise<string> {
 // only the roots its rule named.
 const cacheWriteActions = [
 	'upload:negotiate',
-	'upload:prepare',
 	'upload:status',
 	'upload:commit',
 	'attestation:negotiate',
-	'attestation:prepare',
 	'attestation:attach'
 ] as const;
 

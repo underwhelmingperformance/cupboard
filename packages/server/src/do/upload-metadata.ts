@@ -56,8 +56,8 @@ export function parseStoredUploadPathMetadata(
 	const json = parseStoredJson(source, onInvalid);
 
 	// A row may store the path metadata alone (a streaming upload) or carry the
-	// blob fields too (a prepared or reuse row); the commit path needs only the
-	// path metadata, so project a full record down to it before validating.
+	// blob fields too (a reuse row); the commit path needs only the path
+	// metadata, so project a full record down to it before validating.
 	const full = uploadPathMetadataSchema.safeParse(json);
 
 	if (full.success) {

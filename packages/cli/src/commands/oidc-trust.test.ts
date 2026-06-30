@@ -30,17 +30,8 @@ const identity: RepositoryIdentity = {
 	fullName: 'acme/infra'
 };
 const tenantUrl = 'https://cache.example.workers.dev/t/acme';
-const uploadActions = [
-	'upload:negotiate',
-	'upload:prepare',
-	'upload:status',
-	'upload:commit'
-];
-const attestActions = [
-	'attestation:negotiate',
-	'attestation:prepare',
-	'attestation:attach'
-];
+const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
+const attestActions = ['attestation:negotiate', 'attestation:attach'];
 const prSubstitutions = {
 	pr: {
 		claim: 'ref',
@@ -60,16 +51,11 @@ const prRootBinding = {
 
 const ciGrant: OidcTrustSummary['permittedGrants'][number] = {
 	type: 'cupboard_cache',
-	actions: [
-		'upload:negotiate',
-		'upload:prepare',
-		'upload:status',
-		'upload:commit'
-	],
+	actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
 	resources: { cache: { exact: 'owner-ci', validate: 'cacheName' } }
 };
 const ciGrantRow =
-	'cache owner-ci: upload:negotiate, upload:prepare, upload:status, upload:commit';
+	'cache owner-ci: upload:negotiate, upload:status, upload:commit';
 
 function summary(overrides: Partial<OidcTrustSummary>): OidcTrustSummary {
 	return {

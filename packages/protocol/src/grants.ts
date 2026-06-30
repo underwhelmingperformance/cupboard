@@ -16,11 +16,9 @@ import { z } from 'zod';
 // form carries none, and the procedure's declared resource picks which.
 export const cacheOperations = [
 	'upload:negotiate',
-	'upload:prepare',
 	'upload:status',
 	'upload:commit',
 	'attestation:negotiate',
-	'attestation:prepare',
 	'attestation:attach',
 	'root:set',
 	'root:list',
@@ -83,11 +81,9 @@ export const controlOperations = [
 // Every operation, deduplicated (`gc:run`/`stats:read` span two grant types).
 export const operationSchema = z.enum([
 	'upload:negotiate',
-	'upload:prepare',
 	'upload:status',
 	'upload:commit',
 	'attestation:negotiate',
-	'attestation:prepare',
 	'attestation:attach',
 	'root:set',
 	'root:list',

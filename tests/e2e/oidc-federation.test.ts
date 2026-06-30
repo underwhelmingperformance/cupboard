@@ -92,12 +92,7 @@ describe('OIDC federation', () => {
 				permittedGrants: [
 					{
 						type: 'cupboard_cache',
-						actions: [
-							'upload:negotiate',
-							'upload:prepare',
-							'upload:commit',
-							'root:set'
-						],
+						actions: ['upload:negotiate', 'upload:commit', 'root:set'],
 						resources: {
 							cache: { exact: 'owner-ci', validate: 'cacheName' },
 							root: { exact: 'github:owner/', validate: 'rootName' }

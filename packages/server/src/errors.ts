@@ -630,7 +630,7 @@ export class UploadCacheMismatchError extends ServerHttpError {
 		public readonly negotiatedCache: string,
 		public readonly requestedCache: string
 	) {
-		super('Upload prepared or committed under a different cache');
+		super('Upload committed under a different cache than it negotiated');
 		this.name = 'UploadCacheMismatchError';
 	}
 }
@@ -670,7 +670,9 @@ export class AttestationUploadCacheMismatchError extends ServerHttpError {
 		public readonly negotiatedCache: string,
 		public readonly requestedCache: string
 	) {
-		super('Attestation upload prepared or attached under a different cache');
+		super(
+			'Attestation upload attached under a different cache than it negotiated'
+		);
 		this.name = 'AttestationUploadCacheMismatchError';
 	}
 }
