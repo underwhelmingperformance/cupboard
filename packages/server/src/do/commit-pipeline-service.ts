@@ -85,12 +85,6 @@ export class CommitPipelineService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	// Commits a fresh inline upload row-first: mark the saga in progress, reserve the
-	// not-yet-servable row, verify the staged bytes (never serving them unverified,
-	// even when `blob_state` already holds the hash), promote into the shared CAS,
-	// then materialise the servable object. A concurrent commit that already holds
-	// the path is conceded to; a verification failure reclaims the reserved row and
-	// rejects.
 	// Commits a reuse of a blob already in the verified CAS: reserve the row, then
 	// materialise from the existing canonical object and `blob_state`. If the shared
 	// blob was reaped between negotiate and now, reclaim the row and report it gone so

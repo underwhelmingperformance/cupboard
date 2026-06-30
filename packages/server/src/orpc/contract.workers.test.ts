@@ -305,6 +305,27 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
+	it('rejects upload negotiation under a forged push id', async () => {
+		await useTestServer('contract-uploads-forged');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		const [error] = await safe(
+			client.uploads.negotiate({
+				cacheName: '_default',
+				pushId: 'f'.repeat(96),
+				paths: [uploadPathNegotiation(metadata)]
+			})
+		);
+
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN
+		});
+	});
+
 	it('issues, refreshes and bounds a push credential to the token', async () => {
 		await useTestServer('contract-credential');
 		const init = await bootstrap();
@@ -340,12 +361,18 @@ describe('tenant contract round trip', () => {
 			refreshKeepsPrefix: true
 		});
 
-		await expect(
+		const [forgedError] = await safe(
 			client.uploads.credential({
 				cacheName: '_default',
 				pushId: 'f'.repeat(96)
 			})
-		).rejects.toThrow();
+		);
+
+		expect(forgedError).toBeInstanceOf(ORPCError);
+		expect(forgedError).toMatchObject({
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN
+		});
 	});
 
 	it('attaches an attestation bundle through the derived client', async () => {
@@ -387,6 +414,26 @@ describe('tenant contract round trip', () => {
 			digest,
 			predicateType: 'https://slsa.dev/provenance/v1',
 			status: 'attached'
+		});
+	});
+
+	it('rejects attestation negotiation under a forged push id', async () => {
+		await useTestServer('contract-attestations-forged');
+		const init = await bootstrap();
+		const client = tenantClient(init.token);
+
+		const [error] = await safe(
+			client.attestations.negotiate({
+				cacheName: '_default',
+				pushId: 'f'.repeat(96),
+				bundles: [{ storePathHash: 'a'.repeat(32), digest: 'b'.repeat(64) }]
+			})
+		);
+
+		expect(error).toBeInstanceOf(ORPCError);
+		expect(error).toMatchObject({
+			code: 'FORBIDDEN',
+			status: StatusCodes.FORBIDDEN
 		});
 	});
 
