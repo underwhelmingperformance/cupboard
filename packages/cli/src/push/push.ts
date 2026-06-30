@@ -618,32 +618,44 @@ async function attachPushedAttestations(
 		const uploadStep = log.group('upload');
 		let uploadedBytes = 0;
 
-		for (const decision of toUpload) {
-			const bundle = findAttestationBundle(ready, decision);
+		// The bundles all address the same tenant, so they upload under the same
+		// bound as blob uploads; sending them one at a time pays a round-trip per
+		// bundle.
+		await runWithConcurrency(
+			toUpload,
+			defaultUploadConcurrency,
+			async (decision) => {
+				const bundle = findAttestationBundle(ready, decision);
 
-			// The bundle streams to its staging key under the push prefix with the
-			// same credential the NARs use, so there is no separate upload path.
-			await dependencies.client.uploadNar(
-				decision.r2Key,
-				byteStream([bundle.bytes])
-			);
+				// The bundle streams to its staging key under the push prefix with
+				// the same credential the NARs use, so there is no separate upload
+				// path.
+				await dependencies.client.uploadNar(
+					decision.r2Key,
+					byteStream([bundle.bytes])
+				);
 
-			uploadedBytes += bundle.bytes.byteLength;
-		}
+				uploadedBytes += bundle.bytes.byteLength;
+			}
+		);
 
 		uploadStep.success(formatBytes(uploadedBytes));
 
 		const attachStep = log.group('attach');
 		let attached = 0;
 
-		for (const decision of toUpload) {
-			if (dependencies.client.attachAttestation === undefined) {
-				throw new AttestationUploadUnavailableError('attachAttestation');
-			}
+		await runWithConcurrency(
+			toUpload,
+			defaultUploadConcurrency,
+			async (decision) => {
+				if (dependencies.client.attachAttestation === undefined) {
+					throw new AttestationUploadUnavailableError('attachAttestation');
+				}
 
-			await dependencies.client.attachAttestation(decision.uploadId);
-			attached += 1;
-		}
+				await dependencies.client.attachAttestation(decision.uploadId);
+				attached += 1;
+			}
+		);
 
 		attachStep.success(`${formatCount(attached)} attached`);
 
@@ -778,11 +790,18 @@ async function recordRetention(
 		];
 	}
 
+	// Each pin is its own root request to the same tenant, so they are sent under
+	// the same bound as blob uploads; the expiry summary folds them
+	// order-independently.
 	const summaries: RootSummary[] = [];
 
-	for (const { name, body } of retention.requests) {
-		summaries.push(await client.setRoot(name, body));
-	}
+	await runWithConcurrency(
+		retention.requests,
+		defaultUploadConcurrency,
+		async ({ name, body }) => {
+			summaries.push(await client.setRoot(name, body));
+		}
+	);
 
 	const expiry = describePinExpiry(summaries);
 	ctx.fact('pins', formatCount(retention.requests.length));
