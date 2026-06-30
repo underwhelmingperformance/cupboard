@@ -79,6 +79,7 @@ import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
 	type PendingVerification,
+	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
 
@@ -876,6 +877,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.commitPipeline.requestVerification(this.context.requireTenant());
 	}
 
+	// Settles a whole batch of verdicts in one call, so the queue consumer reports
+	// a pass with a single RPC into the DO rather than one per upload. Returns how
+	// many verdicts actually applied, so the consumer's continuation gates on real
+	// progress.
+	async recordVerifications(
+		results: readonly VerificationResult[]
+	): Promise<number> {
+		await this.initialise();
+		return this.metered('record-verifications', () =>
+			this.verification.recordVerifications(results)
+		);
+	}
+
 	async recordVerification(
 		uploadId: string,
 		verification: NarVerification
@@ -1135,6 +1149,7 @@ type MeteredMethod =
 	| 'reconcile'
 	| 'record-missing-object'
 	| 'record-verification'
+	| 'record-verifications'
 	| 'verification';
 
 // The same line for a direct RPC entrypoint (the maintenance sweeps, configure,

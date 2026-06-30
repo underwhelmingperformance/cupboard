@@ -23,6 +23,8 @@ import {
 	type DemoteTarget,
 	type NarInfoDemoter
 } from '../do/blob-reaper-service.ts';
+import { mapWithConcurrency } from '../do/bulk.ts';
+import { type VerificationResult } from '../do/verification-service.ts';
 import { blobReaperBatchSize, verificationBatchSize } from '../http/http.ts';
 
 import { tenantServer } from './durable-object.ts';
@@ -638,9 +640,9 @@ const verifyDecodeConcurrency = 4;
 // The prompt verify path. The CPU-bound NAR decode is the work that saturated
 // the single DO thread, so it runs here in the queue consumer instead: claim a
 // batch of deferred uploads (a read on the DO), fetch and decode each staging
-// object off the DO thread, then report each verdict back so only the state
-// transitions run on the single writer. A transient fetch/decode fault leaves
-// the row for the next pass (the consumer simply does not report it); a
+// object off the DO thread, then report all the verdicts back in one RPC so only
+// the state transitions run on the single writer. A transient fetch/decode fault
+// leaves the row for the next pass (the consumer simply does not report it); a
 // definitively missing staging object fails it terminally.
 export async function verifyTenant(
 	env: Env,
@@ -650,40 +652,59 @@ export async function verifyTenant(
 	const server = tenantServer(env, id);
 	const claims = await server.claimPendingVerifications(batchSize);
 
-	const results = await settleWithConcurrency(
+	const verdicts = await mapWithConcurrency(
 		claims,
 		verifyDecodeConcurrency,
-		async (claim) => {
-			if (claim.reuse) {
-				await server.recordVerification(claim.uploadId, { ok: true });
-				return;
+		async (claim): Promise<VerificationResult | undefined> => {
+			try {
+				if (claim.reuse) {
+					return {
+						uploadId: claim.uploadId,
+						verdict: { kind: 'verified', verification: { ok: true } }
+					};
+				}
+
+				const object = await env.BLOBS.get(claim.r2Key);
+
+				if (object === null) {
+					return { uploadId: claim.uploadId, verdict: { kind: 'missing' } };
+				}
+
+				// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed
+				// only as `ReadableStream`; narrow it to the byte stream the verifier
+				// expects.
+				const verification = await verifyDecompressedNar(
+					object.body as ReadableStream<Uint8Array>,
+					{ narHash: claim.narHash, narSize: claim.narSize }
+				);
+
+				return {
+					uploadId: claim.uploadId,
+					verdict: { kind: 'verified', verification }
+				};
+			} catch {
+				// A transient fetch or decode fault leaves the row for the next pass.
+				return undefined;
 			}
-
-			const object = await env.BLOBS.get(claim.r2Key);
-
-			if (object === null) {
-				await server.recordMissingObject(claim.uploadId);
-				return;
-			}
-
-			// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed only
-			// as `ReadableStream`; narrow it to the byte stream the verifier expects.
-			const verification = await verifyDecompressedNar(
-				object.body as ReadableStream<Uint8Array>,
-				{ narHash: claim.narHash, narSize: claim.narSize }
-			);
-			await server.recordVerification(claim.uploadId, verification);
 		}
 	);
+
+	const reported = verdicts.filter(
+		(verdict): verdict is VerificationResult => verdict !== undefined
+	);
+
+	const applied =
+		reported.length > 0 ? await server.recordVerifications(reported) : 0;
 
 	// One verify message can coalesce a whole push's deferrals, and a pass claims
 	// a bounded batch, so a push larger than one batch leaves rows for the cron. A
 	// full batch means more are pending; chain another pass to drain them now,
 	// through the object's single-flight so this continuation and a concurrent
 	// deferral collapse onto one message that claims each row once. Continue only
-	// after real progress, so a batch of pure read failures (a transient fault
-	// leaving every row pending) backs off to the cron.
-	const isProgressed = results.some((result) => result.status === 'fulfilled');
+	// after a verdict actually applied: a batch whose reads or applies all fail (a
+	// transient fault leaving every row pending) backs off to the cron rather than
+	// spinning a continuation that re-claims and re-fails the same rows.
+	const isProgressed = applied > 0;
 
 	if (claims.length === batchSize && isProgressed) {
 		await server.requestVerificationPass();
