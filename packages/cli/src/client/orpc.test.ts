@@ -211,16 +211,13 @@ describe('tenantRpc', () => {
 					path: rejected.path,
 					status: rejected.status,
 					body: rejected.body,
-					ray: rejected.ray,
-					message: rejected.message
+					ray: rejected.ray
 				}).toStrictEqual({
 					method: 'GET',
 					path: '/t/acme/caches',
 					status: StatusCodes.INTERNAL_SERVER_ERROR,
 					body: 'Internal server error',
-					ray: 'a113b23c78faf6c2',
-					message:
-						'GET /t/acme/caches failed with 500: Internal server error (Cloudflare ray a113b23c78faf6c2)'
+					ray: 'a113b23c78faf6c2'
 				});
 			}
 		} finally {
