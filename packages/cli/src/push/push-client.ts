@@ -6,6 +6,7 @@ import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
 
 import { type PushClient } from './push.ts';
+import { type BlobUploader, r2BlobUploader } from './r2-upload.ts';
 
 export interface PushClientOptions {
 	readonly cache?: string;
@@ -39,11 +40,26 @@ export function pushClientFor(
 	);
 
 	// One credential per push, fetched on first use and reused. It carries the
-	// signed push id every negotiate names, so a re-negotiated slot stays under
-	// the same staging prefix the credential is scoped to.
+	// signed push id every negotiate names, and scopes the uploader to the push's
+	// staging prefix; a re-negotiated slot stays under that same prefix.
 	let session: Promise<PushCredential> | undefined;
 	const pushSession = (): Promise<PushCredential> =>
 		(session ??= rpc.uploads.credential({ cacheName }));
+
+	// The uploader is built once from the push's endpoint and bucket and renews
+	// its credential through the session as it expires.
+	let uploader: Promise<BlobUploader> | undefined;
+	const buildUploader = async (): Promise<BlobUploader> => {
+		const push = await pushSession();
+
+		return r2BlobUploader({
+			endpoint: push.endpoint,
+			bucket: push.bucket,
+			provider: pushSession
+		});
+	};
+	const blobUploader = (): Promise<BlobUploader> =>
+		(uploader ??= buildUploader());
 
 	return {
 		negotiate: async (body) => {
@@ -51,19 +67,16 @@ export function pushClientFor(
 
 			return rpc.uploads.negotiate({ cacheName, pushId, ...body });
 		},
-		prepareUpload: (uploadId, body) =>
-			rpc.uploads.prepare({ cacheName, id: uploadId, ...body }),
-		prepareUploads: (items) =>
-			rpc.uploads.prepareBatch({ cacheName, items: [...items] }),
-		uploadBlob: (upload) => raw.uploadBlob(upload),
+		uploadNar: async (r2Key, body) => (await blobUploader())(r2Key, body),
 		commit: (target, commitOptions) =>
 			raw.commit(credential, target, commitOptions),
 		openCommitSession: (commitOptions) =>
 			raw.openCommitSession(credential, commitOptions),
-		negotiateAttestations: (body) =>
-			rpc.attestations.negotiate({ cacheName, ...body }),
-		prepareAttestation: (uploadId) =>
-			rpc.attestations.prepare({ cacheName, id: uploadId }),
+		negotiateAttestations: async (body) => {
+			const { pushId } = await pushSession();
+
+			return rpc.attestations.negotiate({ cacheName, pushId, ...body });
+		},
 		attachAttestation: (uploadId) =>
 			rpc.attestations.attach({ cacheName, id: uploadId }),
 		setRoot: (name, body) => rpc.roots.set({ cacheName, name, ...body })

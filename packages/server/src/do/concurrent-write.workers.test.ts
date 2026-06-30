@@ -1,10 +1,7 @@
 import { NarInfo } from '@cupboard/nix-store/narinfo';
-import type { ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
-import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import {
-	authorisedFetch,
 	commitUpload,
 	expectSingleUploadDecision,
 	expectStats,
@@ -15,27 +12,8 @@ import {
 	putNarBytes,
 	readStoredNarInfo,
 	resetTestServer,
-	uploadBlobMetadata,
 	uploadMetadata
 } from '../test-support.ts';
-
-async function prepare(
-	token: string,
-	uploadId: string,
-	metadata: ParsedUploadPathMetadata
-): Promise<void> {
-	const response = await authorisedFetch(
-		`/cache/_default/uploads/${uploadId}`,
-		token,
-		{
-			body: JSON.stringify(uploadBlobMetadata(metadata)),
-			headers: { 'content-type': 'application/json' },
-			method: 'PUT'
-		}
-	);
-
-	expect(response.status).toBe(StatusCodes.OK);
-}
 
 describe('concurrent writes', () => {
 	beforeEach(resetTestServer);
@@ -53,9 +31,7 @@ describe('concurrent writes', () => {
 			metadata
 		);
 
-		await prepare(token, first.uploadId, metadata);
 		await putNarBytes(first.r2Key);
-		await prepare(token, second.uploadId, metadata);
 		await putNarBytes(second.r2Key);
 
 		// Both commits defer (neither sees a committed reference yet), so both park

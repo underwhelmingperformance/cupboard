@@ -2,21 +2,13 @@ import { createHash } from 'node:crypto';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import type {
-	AttestationNegotiateRequest,
-	AttestationPrepareResponse
-} from '@cupboard/protocol/attestations';
+import type { AttestationNegotiateRequest } from '@cupboard/protocol/attestations';
 import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
-import type {
-	UploadNegotiateRequest,
-	UploadPrepareResponse
-} from '@cupboard/protocol/upload';
+import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
 import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
-import { ORPCError } from '@orpc/client';
-import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
@@ -30,10 +22,7 @@ import {
 	UploadVerificationFailedError
 } from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
-import {
-	type CompressedAndHashedNarFile,
-	CompressedNarFile
-} from '../nix/blob.ts';
+import type { NarUploadStream } from '../nix/blob.ts';
 import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
 
 import {
@@ -47,15 +36,7 @@ const appPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
 const appDigest = digest(1, 123);
 const runtimeDigest = digest(2, 234);
-const fileHash = NixSha256Hash.fromDigest(Buffer.alloc(32, 9));
-
-function fallbackPrepareUploadResponse(): UploadPrepareResponse {
-	return {
-		uploadUrl: '',
-		uploadHeaders: {},
-		expiresAt: ''
-	};
-}
+const compressedNarBytes = Buffer.from('compressed nar');
 
 function fallbackCommitResponse() {
 	return {
@@ -70,24 +51,10 @@ describe('runPush', () => {
 		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
 		const uploads: {
 			r2Key: string;
-			uploadUrl: string;
 			body: Uint8Array;
-			contentLength: number;
-			headers: Readonly<Record<string, string>>;
 		}[] = [];
-		const readRequests: string[] = [];
 		const commits: string[] = [];
 		const results: ResultRow[][] = [];
-		const uploadBody = Buffer.from('compressed nar');
-		const removedTemporaryDirectories: string[] = [];
-		const preparedUploads: {
-			uploadId: string;
-			body: {
-				fileHash: string;
-				fileSize: number;
-				compression: 'zstd';
-			};
-		}[] = [];
 
 		await runPush([appPath], reporter(results), {
 			client: {
@@ -112,25 +79,8 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareUpload(uploadId, body) {
-					preparedUploads.push({ uploadId, body });
-
-					return Promise.resolve({
-						uploadUrl: 'https://upload.example/app',
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				async uploadBlob(upload) {
-					uploads.push({
-						r2Key: upload.r2Key,
-						uploadUrl: upload.uploadUrl,
-						body: await collectReadableStream(upload.body()),
-						contentLength: upload.contentLength,
-						headers: upload.headers
-					});
+				async uploadNar(r2Key, body) {
+					uploads.push({ r2Key, body: await collectReadableStream(body) });
 				},
 				commit(target) {
 					commits.push(target.uploadId);
@@ -149,19 +99,7 @@ describe('runPush', () => {
 			}),
 			createNarArchive: (storePath) =>
 				new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar(path) {
-				readRequests.push(path);
-
-				return byteStream([uploadBody]);
-			},
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory(path) {
-				removedTemporaryDirectories.push(path);
-
-				return Promise.resolve();
-			}
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		});
 
 		expect(negotiations).toStrictEqual([
@@ -188,47 +126,26 @@ describe('runPush', () => {
 				]
 			}
 		]);
-		expect(preparedUploads).toStrictEqual([
-			{
-				uploadId: 'upload-app',
-				body: {
-					fileHash: fileHash.toString(),
-					fileSize: 456,
-					compression: 'zstd'
-				}
-			}
-		]);
 		expect(uploads).toStrictEqual([
 			{
 				r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-				uploadUrl: 'https://upload.example/app',
-				body: uploadBody,
-				contentLength: 456,
-				headers: {
-					'x-amz-checksum-sha256': fileHash.digestBase64()
-				}
+				body: compressedNarBytes
 			}
 		]);
-		expect(readRequests).toStrictEqual([
-			`/tmp/cupboard-test/${StorePath.hash(appPath)}.nar.zst`
-		]);
 		expect(commits).toStrictEqual(['upload-app']);
-		expect({ removedTemporaryDirectories, results }).toStrictEqual({
-			removedTemporaryDirectories: ['/tmp/cupboard-test'],
-			results: [
-				[
-					{ label: 'Uploaded paths', value: '1' },
-					{ label: 'Already cached', value: '0' },
-					{ label: 'Skipped', value: '1' },
-					{ label: 'Bytes uploaded', value: '456 B' },
-					{ label: 'Pinned paths', value: '1' },
-					{ label: 'Pin expiry', value: 'permanent' }
-				]
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '1' },
+				{ label: 'Already cached', value: '0' },
+				{ label: 'Skipped', value: '1' },
+				{ label: 'Bytes uploaded', value: '14 B' },
+				{ label: 'Pinned paths', value: '1' },
+				{ label: 'Pin expiry', value: 'permanent' }
 			]
-		});
+		]);
 	});
 
-	it('compresses and prepares NARs in parallel up to the limit', async () => {
+	it('uploads NARs in parallel up to the limit', async () => {
 		const limit = 2;
 		const paths = ['1', '2', '3', '4'].map(
 			(n) => `/nix/store/${n}123456789abcdfghijklmnpqrsvwxyz-p${n}`
@@ -252,7 +169,7 @@ describe('runPush', () => {
 		const uploadedKeys: string[] = [];
 
 		await runPush(paths, reporter([]), {
-			prepareConcurrency: limit,
+			uploadConcurrency: limit,
 			client: {
 				negotiate: (body) =>
 					Promise.resolve({
@@ -265,18 +182,21 @@ describe('runPush', () => {
 							expiresAt: '2026-05-18T12:00:00.000Z'
 						}))
 					}),
-				prepareUpload: () =>
-					Promise.resolve({
-						uploadUrl: 'https://upload.example/p',
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					}),
-				uploadBlob(upload) {
-					uploadedKeys.push(upload.r2Key);
+				async uploadNar(r2Key, body) {
+					running += 1;
+					peak = Math.max(peak, running);
 
-					return Promise.resolve();
+					// Once a full batch is in flight, release the gate so the rest can
+					// run; the peak then reveals how many uploaded at once.
+					if (running >= limit) {
+						release?.();
+					}
+
+					await gate;
+					running -= 1;
+
+					await collectReadableStream(body);
+					uploadedKeys.push(r2Key);
 				},
 				commit: () => Promise.resolve(fallbackCommitResponse()),
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
@@ -284,24 +204,7 @@ describe('runPush', () => {
 			nix: nixStore(closure),
 			createNarArchive: (storePath) =>
 				new FakeNarArchive(knownDigest(digests, storePath)),
-			async compressNar(nar, path) {
-				running += 1;
-				peak = Math.max(peak, running);
-
-				// Once a full batch is in flight, release the gate so the rest can
-				// run; the peak then reveals how many compressed at once.
-				if (running >= limit) {
-					release?.();
-				}
-
-				await gate;
-				running -= 1;
-
-				return fakeCompressedNar(nar, path, digestForNar(nar));
-			},
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		});
 
 		expect({ peak, uploaded: uploadedKeys.length }).toStrictEqual({
@@ -310,82 +213,8 @@ describe('runPush', () => {
 		});
 	});
 
-	it('re-negotiates and retries an upload whose slot expired before prepare', async () => {
-		let negotiations = 0;
-		const preparedIds: string[] = [];
-		const uploadedKeys: string[] = [];
-		const commits: string[] = [];
-
-		await runPush([appPath], reporter([]), {
-			client: {
-				negotiate() {
-					negotiations += 1;
-					const uploadId = negotiations === 1 ? 'upload-stale' : 'upload-fresh';
-
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId,
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					});
-				},
-				prepareUpload(uploadId) {
-					preparedIds.push(uploadId);
-
-					if (uploadId === 'upload-stale') {
-						// The pending row expired and was reaped while the slow prepare
-						// queue worked through the closure.
-						return Promise.reject(
-							new ORPCError('NOT_FOUND', { message: 'Upload expired' })
-						);
-					}
-
-					return Promise.resolve({
-						uploadUrl: 'https://upload.example/app',
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				uploadBlob(upload) {
-					uploadedKeys.push(upload.r2Key);
-
-					return Promise.resolve();
-				},
-				commit(target) {
-					commits.push(target.uploadId);
-
-					return Promise.resolve(fallbackCommitResponse());
-				},
-				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
-			} satisfies PushClient,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
-		});
-
-		expect({ negotiations, preparedIds, uploadedKeys, commits }).toStrictEqual({
-			negotiations: 2,
-			preparedIds: ['upload-stale', 'upload-fresh'],
-			uploadedKeys: [`nar/${appDigest.narHash.toString()}.nar.zst`],
-			commits: ['upload-fresh']
-		});
-	});
-
 	it('re-negotiates and re-uploads when a commit slot expired', async () => {
 		let negotiations = 0;
-		const preparedIds: string[] = [];
 		const uploadedKeys: string[] = [];
 		const commitAttempts: string[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
@@ -409,21 +238,9 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareUpload(uploadId) {
-					preparedIds.push(uploadId);
-
-					return Promise.resolve({
-						uploadUrl: 'https://upload.example/app',
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				uploadBlob(upload) {
-					uploadedKeys.push(upload.r2Key);
-
-					return Promise.resolve();
+				async uploadNar(key, body) {
+					await collectReadableStream(body);
+					uploadedKeys.push(key);
 				},
 				commit(target) {
 					commitAttempts.push(target.uploadId);
@@ -442,281 +259,17 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		});
 
 		expect({
 			negotiations,
-			preparedIds,
 			uploadedKeys,
 			commitAttempts
 		}).toStrictEqual({
 			negotiations: 2,
-			preparedIds: ['commit-stale', 'commit-fresh'],
 			uploadedKeys: [r2Key, r2Key],
 			commitAttempts: ['commit-stale', 'commit-fresh']
-		});
-	});
-
-	it('re-presigns and retries an upload whose presigned URL expired', async () => {
-		const preparedIds: string[] = [];
-		const uploadAttempts: string[] = [];
-		const readRequests: string[] = [];
-		const commits: string[] = [];
-		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
-		const expiredBody =
-			'<?xml version="1.0" encoding="UTF-8"?><Error><Code>ExpiredRequest</Code><Message>Request has expired</Message></Error>';
-
-		await runPush([appPath], reporter([]), {
-			client: {
-				negotiate: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					}),
-				prepareUpload(uploadId) {
-					preparedIds.push(uploadId);
-
-					return Promise.resolve({
-						uploadUrl: `https://upload.example/app?attempt=${String(preparedIds.length)}`,
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				uploadBlob(upload) {
-					uploadAttempts.push(upload.uploadUrl);
-					// The real client streams the body factory per attempt; invoke it so
-					// the re-read on the re-presigned retry is observed.
-					upload.body();
-
-					// The first presigned URL aged out in the prepare-to-upload gap; R2
-					// rejects the stale signature so the path must be re-presigned.
-					if (uploadAttempts.length === 1) {
-						return Promise.reject(
-							new CupboardUploadError(
-								upload.r2Key,
-								StatusCodes.FORBIDDEN,
-								expiredBody
-							)
-						);
-					}
-
-					return Promise.resolve();
-				},
-				commit(target) {
-					commits.push(target.uploadId);
-
-					return Promise.resolve(fallbackCommitResponse());
-				},
-				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
-			} satisfies PushClient,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar(path) {
-				readRequests.push(path);
-
-				return byteStream([Buffer.from('compressed nar')]);
-			},
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
-		});
-
-		const compressedPath = `/tmp/cupboard-test/${StorePath.hash(appPath)}.nar.zst`;
-
-		expect({
-			preparedIds,
-			uploadAttempts,
-			readRequests,
-			commits
-		}).toStrictEqual({
-			preparedIds: ['upload-app', 'upload-app'],
-			uploadAttempts: [
-				'https://upload.example/app?attempt=1',
-				'https://upload.example/app?attempt=2'
-			],
-			readRequests: [compressedPath, compressedPath],
-			commits: ['upload-app']
-		});
-	});
-
-	it('presigns through the batch endpoint and uploads with that URL', async () => {
-		const prepareBatches: { id: string; fileSize: number }[][] = [];
-		const singlePrepares: string[] = [];
-		const uploadUrls: string[] = [];
-		const commits: string[] = [];
-
-		await runPush([appPath], reporter([]), {
-			client: {
-				negotiate: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					}),
-				prepareUpload(uploadId) {
-					singlePrepares.push(uploadId);
-
-					return Promise.resolve(fallbackPrepareUploadResponse());
-				},
-				prepareUploads(items) {
-					prepareBatches.push(
-						items.map((item) => ({ id: item.id, fileSize: item.fileSize }))
-					);
-
-					return Promise.resolve({
-						items: items.map((item) => ({
-							ok: true,
-							id: item.id,
-							uploadUrl: `https://batch.example/${item.id}`,
-							uploadHeaders: {
-								'x-amz-checksum-sha256': fileHash.digestBase64()
-							},
-							expiresAt: '2026-05-18T12:00:00.000Z'
-						}))
-					});
-				},
-				uploadBlob(upload) {
-					uploadUrls.push(upload.uploadUrl);
-
-					return Promise.resolve();
-				},
-				commit(target) {
-					commits.push(target.uploadId);
-
-					return Promise.resolve(fallbackCommitResponse());
-				},
-				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
-			} satisfies PushClient,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
-		});
-
-		// The batch presigns the chunk; the per-path single prepare is untouched on
-		// the happy path; the PUT uses the batch URL.
-		expect({
-			prepareBatches,
-			singlePrepares,
-			uploadUrls,
-			commits
-		}).toStrictEqual({
-			prepareBatches: [[{ id: 'upload-app', fileSize: 456 }]],
-			singlePrepares: [],
-			uploadUrls: ['https://batch.example/upload-app'],
-			commits: ['upload-app']
-		});
-	});
-
-	it('re-presigns one path when its batch URL expires', async () => {
-		const singlePrepares: string[] = [];
-		const uploadUrls: string[] = [];
-		const expiredBody =
-			'<?xml version="1.0" encoding="UTF-8"?><Error><Code>ExpiredRequest</Code><Message>Request has expired</Message></Error>';
-
-		await runPush([appPath], reporter([]), {
-			client: {
-				negotiate: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					}),
-				prepareUpload(uploadId) {
-					singlePrepares.push(uploadId);
-
-					return Promise.resolve({
-						uploadUrl: 'https://single.example/fresh',
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				prepareUploads: (items) =>
-					Promise.resolve({
-						items: items.map((item) => ({
-							ok: true,
-							id: item.id,
-							uploadUrl: 'https://batch.example/stale',
-							uploadHeaders: {
-								'x-amz-checksum-sha256': fileHash.digestBase64()
-							},
-							expiresAt: '2026-05-18T12:00:00.000Z'
-						}))
-					}),
-				uploadBlob(upload) {
-					uploadUrls.push(upload.uploadUrl);
-
-					if (uploadUrls.length === 1) {
-						return Promise.reject(
-							new CupboardUploadError(
-								upload.r2Key,
-								StatusCodes.FORBIDDEN,
-								expiredBody
-							)
-						);
-					}
-
-					return Promise.resolve();
-				},
-				commit: (target) =>
-					Promise.resolve({
-						...fallbackCommitResponse(),
-						storePathHash: target.storePathHash
-					}),
-				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
-			} satisfies PushClient,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
-		});
-
-		// The stale batch URL is used first, then the path is presigned one at a
-		// time and the PUT retried with the fresh URL.
-		expect({ singlePrepares, uploadUrls }).toStrictEqual({
-			singlePrepares: ['upload-app'],
-			uploadUrls: [
-				'https://batch.example/stale',
-				'https://single.example/fresh'
-			]
 		});
 	});
 
@@ -748,13 +301,8 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareUpload: () => {
-					clientCalls.push({ method: 'prepareUpload' });
-
-					return Promise.resolve(fallbackPrepareUploadResponse());
-				},
-				uploadBlob: () => {
-					clientCalls.push({ method: 'uploadBlob' });
+				uploadNar: () => {
+					clientCalls.push({ method: 'uploadNar' });
 
 					return Promise.resolve();
 				},
@@ -772,9 +320,7 @@ describe('runPush', () => {
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
-			}),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			})
 		});
 
 		expect({ clientCalls, results }).toStrictEqual({
@@ -818,21 +364,9 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareUpload() {
-					clientCalls.push({ method: 'prepareUpload' });
-
-					return Promise.resolve({
-						uploadUrl: 'https://upload.example/app',
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				uploadBlob() {
-					clientCalls.push({ method: 'uploadBlob' });
-
-					return Promise.resolve();
+				async uploadNar(_r2Key, body) {
+					clientCalls.push({ method: 'uploadNar' });
+					await collectReadableStream(body);
 				},
 				commit() {
 					clientCalls.push({ method: 'commit' });
@@ -851,18 +385,13 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		});
 
 		expect({ clientCalls, results, warnings }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
-				{ method: 'prepareUpload' },
-				{ method: 'uploadBlob' },
+				{ method: 'uploadNar' },
 				{ method: 'commit' }
 			],
 			results: [
@@ -870,7 +399,7 @@ describe('runPush', () => {
 					{ label: 'Uploaded paths', value: '1' },
 					{ label: 'Already cached', value: '0' },
 					{ label: 'Skipped', value: '0' },
-					{ label: 'Bytes uploaded', value: '456 B' }
+					{ label: 'Bytes uploaded', value: '14 B' }
 				]
 			],
 			warnings: [
@@ -906,19 +435,10 @@ describe('runPush', () => {
 						]
 					});
 				},
-				uploadBlob() {
-					clientCalls.push({ method: 'uploadBlob' });
+				uploadNar() {
+					clientCalls.push({ method: 'uploadNar' });
 
 					return Promise.resolve();
-				},
-				prepareUpload() {
-					clientCalls.push({ method: 'prepareUpload' });
-
-					return Promise.resolve({
-						uploadUrl: '',
-						uploadHeaders: {},
-						expiresAt: ''
-					});
 				},
 				commit(target) {
 					clientCalls.push({ method: 'commit', uploadId: target.uploadId });
@@ -939,17 +459,11 @@ describe('runPush', () => {
 				[appPath]: pathInfo(appPath, appDigest, [])
 			}),
 			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar() {
+			compressNar(nar) {
 				clientCalls.push({ method: 'compressNar' });
 
-				return fakeCompressedNar(
-					new FakeNarArchive(appDigest),
-					appPath,
-					appDigest
-				);
-			},
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+				return fakeNarUpload(nar, appDigest);
+			}
 		});
 
 		expect({ clientCalls, results }).toStrictEqual({
@@ -979,25 +493,17 @@ describe('runPush', () => {
 
 	it('attaches attestation bundles to the matching pushed closure path', async () => {
 		const roots: SetRootCall[] = [];
-		const negotiations: AttestationNegotiateRequest[] = [];
+		const negotiations: Omit<AttestationNegotiateRequest, 'pushId'>[] = [];
 		const uploaded: {
 			readonly r2Key: string;
 			readonly body: Uint8Array;
-			readonly contentLength: number;
-			readonly headers: Readonly<Record<string, string>>;
 		}[] = [];
 		const attached: string[] = [];
-		const preparedAttestations: string[] = [];
 		const readBundles: string[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
 		const bundleDigest = sha256Hex(bundle);
-		const attestationUpload: AttestationPrepareResponse = {
-			uploadUrl: 'https://upload.example/attestation',
-			uploadHeaders: { 'x-amz-checksum-sha256': 'attestation-checksum' },
-			expiresAt: '2026-05-18T12:00:00.000Z'
-		};
 
 		await runPush([appPath], reporter(results), {
 			client: {
@@ -1018,18 +524,8 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareAttestation(uploadId) {
-					preparedAttestations.push(uploadId);
-
-					return Promise.resolve(attestationUpload);
-				},
-				async uploadBlob(upload) {
-					uploaded.push({
-						r2Key: upload.r2Key,
-						body: await collectReadableStream(upload.body()),
-						contentLength: upload.contentLength,
-						headers: upload.headers
-					});
+				async uploadNar(r2Key, body) {
+					uploaded.push({ r2Key, body: await collectReadableStream(body) });
 				},
 				attachAttestation(uploadId) {
 					attached.push(uploadId);
@@ -1048,9 +544,7 @@ describe('runPush', () => {
 
 				return Promise.resolve(bundle);
 			},
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
 		expect(negotiations).toStrictEqual([
@@ -1063,10 +557,7 @@ describe('runPush', () => {
 				]
 			}
 		]);
-		expect({ preparedAttestations, readBundles }).toStrictEqual({
-			preparedAttestations: ['attestation-app'],
-			readBundles: ['app.sigstore.json']
-		});
+		expect(readBundles).toStrictEqual(['app.sigstore.json']);
 		expect({ clientCalls, roots }).toStrictEqual({
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
@@ -1090,9 +581,7 @@ describe('runPush', () => {
 		expect(uploaded).toStrictEqual([
 			{
 				r2Key: 'staging/attestations/attestation-app',
-				body: Buffer.from(bundle),
-				contentLength: bundle.byteLength,
-				headers: { 'x-amz-checksum-sha256': 'attestation-checksum' }
+				body: Buffer.from(bundle)
 			}
 		]);
 		expect(attached).toStrictEqual(['attestation-app']);
@@ -1118,15 +607,12 @@ describe('runPush', () => {
 
 	it('attaches a multi-subject bundle to every matching closure path', async () => {
 		const roots: SetRootCall[] = [];
-		const negotiations: AttestationNegotiateRequest[] = [];
+		const negotiations: Omit<AttestationNegotiateRequest, 'pushId'>[] = [];
 		const uploaded: {
 			readonly r2Key: string;
 			readonly body: Uint8Array;
-			readonly contentLength: number;
-			readonly headers: Readonly<Record<string, string>>;
 		}[] = [];
 		const attached: string[] = [];
-		const preparedAttestations: string[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
 		const bundle = sigstoreBundleBytes([
@@ -1134,11 +620,6 @@ describe('runPush', () => {
 			narDigestHex(runtimeDigest.narHash)
 		]);
 		const bundleDigest = sha256Hex(bundle);
-		const attestationUpload: AttestationPrepareResponse = {
-			uploadUrl: 'https://upload.example/attestation',
-			uploadHeaders: { 'x-amz-checksum-sha256': 'attestation-checksum' },
-			expiresAt: '2026-05-18T12:00:00.000Z'
-		};
 
 		await runPush([appPath], reporter(results), {
 			client: {
@@ -1167,18 +648,8 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareAttestation(uploadId) {
-					preparedAttestations.push(uploadId);
-
-					return Promise.resolve(attestationUpload);
-				},
-				async uploadBlob(upload) {
-					uploaded.push({
-						r2Key: upload.r2Key,
-						body: await collectReadableStream(upload.body()),
-						contentLength: upload.contentLength,
-						headers: upload.headers
-					});
+				async uploadNar(r2Key, body) {
+					uploaded.push({ r2Key, body: await collectReadableStream(body) });
 				},
 				attachAttestation(uploadId) {
 					attached.push(uploadId);
@@ -1196,9 +667,7 @@ describe('runPush', () => {
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, [runtimePath]),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
-			}),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			})
 		});
 
 		expect(negotiations).toStrictEqual([
@@ -1209,22 +678,15 @@ describe('runPush', () => {
 				]
 			}
 		]);
-		expect({ preparedAttestations, attached }).toStrictEqual({
-			preparedAttestations: ['attestation-app', 'attestation-runtime'],
-			attached: ['attestation-app', 'attestation-runtime']
-		});
+		expect(attached).toStrictEqual(['attestation-app', 'attestation-runtime']);
 		expect(uploaded).toStrictEqual([
 			{
 				r2Key: 'staging/attestations/attestation-app',
-				body: Buffer.from(bundle),
-				contentLength: bundle.byteLength,
-				headers: { 'x-amz-checksum-sha256': 'attestation-checksum' }
+				body: Buffer.from(bundle)
 			},
 			{
 				r2Key: 'staging/attestations/attestation-runtime',
-				body: Buffer.from(bundle),
-				contentLength: bundle.byteLength,
-				headers: { 'x-amz-checksum-sha256': 'attestation-checksum' }
+				body: Buffer.from(bundle)
 			}
 		]);
 		expect(results).toStrictEqual([
@@ -1256,9 +718,7 @@ describe('runPush', () => {
 			client: skipClient(roots, clientCalls),
 			attest: false,
 			attestations: [{ path: 'app.sigstore.json' }],
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
 		expect({ clientCalls, results }).toStrictEqual({
@@ -1301,9 +761,7 @@ describe('runPush', () => {
 
 						return Promise.resolve(bundle);
 					},
-					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-					createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-					removeTemporaryDirectory: () => Promise.resolve()
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 				});
 				return { pushed: true };
 			} catch (error_: unknown) {
@@ -1352,13 +810,9 @@ describe('runPush', () => {
 							}
 						]
 					}),
-				prepareUpload: () =>
-					Promise.resolve({
-						uploadUrl: 'https://upload.example/app',
-						uploadHeaders: {},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					}),
-				uploadBlob: () => Promise.resolve(),
+				uploadNar: async (_r2Key, body) => {
+					await collectReadableStream(body);
+				},
 				commit: () =>
 					Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
@@ -1376,21 +830,23 @@ describe('runPush', () => {
 
 				return archive;
 			},
-			compressNar: (nar, path) => fakeCompressedNar(nar, path, appDigest),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			compressNar: (nar) => fakeNarUpload(nar, appDigest)
 		});
 
 		expect(archives.map((archive) => archive.iterations)).toStrictEqual([1]);
 	});
 
-	it('rejects mismatched computed NAR metadata with a typed error', async () => {
+	it('records mismatched computed NAR metadata as a push failure', async () => {
 		const clientCalls: unknown[] = [];
+		const warnings: { label: string; value?: string }[] = [];
 		const expectedPathInfo = pathInfo(appPath, appDigest, []);
-		const actualNar = await fakeCompressedNar(
-			new FakeNarArchive(digest(8, 999)),
-			'/tmp/cupboard-test/app.nar.zst',
-			digest(8, 999)
+		const actualDigest = digest(8, 999);
+		const mismatch = new PushNarMetadataMismatchError(
+			appPath,
+			expectedPathInfo.narHash.toString(),
+			actualDigest.narHash.toString(),
+			expectedPathInfo.narSize,
+			actualDigest.narSize
 		);
 
 		const options = {
@@ -1414,15 +870,9 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareUpload() {
-					clientCalls.push({ method: 'prepareUpload' });
-
-					return Promise.resolve(fallbackPrepareUploadResponse());
-				},
-				uploadBlob() {
-					clientCalls.push({ method: 'uploadBlob' });
-
-					return Promise.resolve();
+				async uploadNar(_r2Key, body) {
+					clientCalls.push({ method: 'uploadNar' });
+					await collectReadableStream(body);
 				},
 				commit() {
 					clientCalls.push({ method: 'commit' });
@@ -1438,27 +888,21 @@ describe('runPush', () => {
 			nix: nixStore({
 				[appPath]: expectedPathInfo
 			}),
-			createNarArchive: () => new FakeNarArchive(digest(8, 999)),
-			compressNar: (nar, path) => fakeCompressedNar(nar, path, digest(8, 999)),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			createNarArchive: () => new FakeNarArchive(actualDigest),
+			compressNar: (nar) => fakeNarUpload(nar, actualDigest)
 		} satisfies PushDependencies;
 		const outcome = await (async () => {
 			try {
-				await runPush([appPath], reporter([]), options);
+				await runPush([appPath], reporter([], warnings), options);
 				return { pushed: true };
 			} catch (error_: unknown) {
-				expect(error_).toBeInstanceOf(PushNarMetadataMismatchError);
+				expect(error_).toBeInstanceOf(PushIncompleteError);
 
-				if (error_ instanceof PushNarMetadataMismatchError) {
+				if (error_ instanceof PushIncompleteError) {
 					return {
 						error: {
 							name: error_.name,
-							storePath: error_.storePath,
-							expectedNarHash: error_.expectedNarHash,
-							actualNarHash: error_.actualNarHash,
-							expectedNarSize: error_.expectedNarSize,
-							actualNarSize: error_.actualNarSize
+							failedPaths: error_.failedPaths
 						}
 					};
 				}
@@ -1467,18 +911,28 @@ describe('runPush', () => {
 			}
 		})();
 
-		expect({ outcome, clientCalls }).toStrictEqual({
+		expect({ outcome, clientCalls, warnings }).toStrictEqual({
 			outcome: {
 				error: {
-					name: PushNarMetadataMismatchError.name,
-					storePath: appPath,
-					expectedNarHash: expectedPathInfo.narHash.toString(),
-					actualNarHash: actualNar.narDigest.narHash.toString(),
-					expectedNarSize: expectedPathInfo.narSize,
-					actualNarSize: actualNar.narDigest.narSize
+					name: PushIncompleteError.name,
+					failedPaths: [StorePath.basename(appPath)]
 				}
 			},
-			clientCalls: [{ method: 'negotiate', paths: [appPath] }]
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{ method: 'uploadNar' }
+			],
+			warnings: [
+				{
+					label: 'upload failed',
+					value: `${StorePath.basename(appPath)}: ${mismatch.message}`
+				},
+				{
+					label: 'incomplete',
+					value:
+						'1 path(s) failed; retention not recorded, re-run cupboard push to finish'
+				}
+			]
 		});
 	});
 
@@ -1490,9 +944,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
 			root: 'main',
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
 		expect({ clientCalls, roots, results }).toStrictEqual({
@@ -1523,9 +975,7 @@ describe('runPush', () => {
 			client: skipClient(roots, clientCalls),
 			root: 'main',
 			ttlSeconds: 1_209_600,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
 		expect({ clientCalls, roots, results }).toStrictEqual({
@@ -1565,9 +1015,7 @@ describe('runPush', () => {
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
-			}),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			})
 		});
 
 		expect({ clientCalls, roots, results }).toStrictEqual({
@@ -1620,9 +1068,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter(results), {
 			client: skipClient(roots, clientCalls),
 			ttlSeconds: 604_800,
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
 		expect({ clientCalls, roots, results }).toStrictEqual({
@@ -1664,9 +1110,7 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 		const dependencies = {
 			client: skipClient(roots, clientCalls),
-			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		};
 
 		await runPush([appPath], reporter([]), dependencies);
@@ -1729,19 +1173,9 @@ describe('runPush', () => {
 						]
 					});
 				},
-				prepareUpload() {
-					events.push('prepareUpload');
-
-					return Promise.resolve({
-						uploadUrl: 'https://upload.example/app',
-						uploadHeaders: {},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					});
-				},
-				uploadBlob() {
-					events.push('uploadBlob');
-
-					return Promise.resolve();
+				async uploadNar(_r2Key, body) {
+					events.push('uploadNar');
+					await collectReadableStream(body);
 				},
 				commit() {
 					events.push('commit');
@@ -1760,16 +1194,12 @@ describe('runPush', () => {
 			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 			createNarArchive: () => new FakeNarArchive(appDigest),
-			compressNar: (nar, path) => fakeCompressedNar(nar, path, appDigest),
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			compressNar: (nar) => fakeNarUpload(nar, appDigest)
 		});
 
 		expect(events).toStrictEqual([
 			'negotiate',
-			'prepareUpload',
-			'uploadBlob',
+			'uploadNar',
 			'commit',
 			'setRoot'
 		]);
@@ -1796,13 +1226,8 @@ describe('runPush', () => {
 					}))
 				});
 			},
-			prepareUpload() {
-				clientCalls.push({ method: 'prepareUpload' });
-
-				return Promise.resolve(fallbackPrepareUploadResponse());
-			},
-			uploadBlob() {
-				clientCalls.push({ method: 'uploadBlob' });
+			uploadNar() {
+				clientCalls.push({ method: 'uploadNar' });
 
 				return Promise.resolve();
 			},
@@ -1826,9 +1251,7 @@ describe('runPush', () => {
 			nix: nixStore({
 				[appPath]: pathInfo(appPath, appDigest, []),
 				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
-			}),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			})
 		});
 
 		expect({ clientCalls, results }).toStrictEqual({
@@ -1899,7 +1322,7 @@ describe('runPush', () => {
 		});
 
 		expect({ events, commitOptions }).toStrictEqual({
-			events: ['negotiate', 'prepareUpload', 'uploadBlob', 'commit', 'setRoot'],
+			events: ['negotiate', 'uploadNar', 'commit', 'setRoot'],
 			commitOptions: [{ wait: true, timeoutSeconds: 30 }]
 		});
 	});
@@ -1953,7 +1376,7 @@ describe('runPush', () => {
 					failedPaths: [StorePath.basename(appPath)]
 				}
 			},
-			events: ['negotiate', 'prepareUpload', 'uploadBlob', 'commit']
+			events: ['negotiate', 'uploadNar', 'commit']
 		});
 
 		expect(warnings).toStrictEqual([
@@ -1997,22 +1420,14 @@ describe('runPush', () => {
 							}
 						]
 					}),
-				prepareUpload: (uploadId) =>
-					Promise.resolve({
-						uploadUrl: `https://upload.example/${uploadId}`,
-						uploadHeaders: {
-							'x-amz-checksum-sha256': fileHash.digestBase64()
-						},
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					}),
-				async uploadBlob(upload) {
-					await collectReadableStream(upload.body());
+				async uploadNar(r2Key, body) {
+					await collectReadableStream(body);
 
-					if (upload.r2Key.includes(runtimeDigest.narHash.toString())) {
-						throw new CupboardUploadError(upload.r2Key, 500, 'boom');
+					if (r2Key.includes(runtimeDigest.narHash.toString())) {
+						throw new CupboardUploadError(r2Key, 500, 'boom');
 					}
 
-					uploaded.push(upload.r2Key);
+					uploaded.push(r2Key);
 				},
 				commit(target) {
 					committed.push(target.uploadId);
@@ -2035,11 +1450,7 @@ describe('runPush', () => {
 			}),
 			createNarArchive: (storePath) =>
 				new FakeNarArchive(storePath === appPath ? appDigest : runtimeDigest),
-			compressNar: (nar, path) =>
-				fakeCompressedNar(nar, path, digestForNar(nar)),
-			readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-			createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-			removeTemporaryDirectory: () => Promise.resolve()
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		} satisfies PushDependencies;
 		const outcome = await (async () => {
 			try {
@@ -2077,7 +1488,7 @@ describe('runPush', () => {
 
 function deferredUpload(
 	events: string[]
-): Pick<PushClient, 'negotiate' | 'prepareUpload' | 'uploadBlob' | 'commit'> {
+): Pick<PushClient, 'negotiate' | 'uploadNar' | 'commit'> {
 	return {
 		negotiate() {
 			events.push('negotiate');
@@ -2095,19 +1506,9 @@ function deferredUpload(
 				]
 			});
 		},
-		prepareUpload() {
-			events.push('prepareUpload');
-
-			return Promise.resolve({
-				uploadUrl: 'https://upload.example/app',
-				uploadHeaders: {},
-				expiresAt: '2026-05-18T12:00:00.000Z'
-			});
-		},
-		uploadBlob() {
-			events.push('uploadBlob');
-
-			return Promise.resolve();
+		async uploadNar(_r2Key, body) {
+			events.push('uploadNar');
+			await collectReadableStream(body);
 		},
 		commit() {
 			events.push('commit');
@@ -2125,11 +1526,7 @@ function deferredDeps() {
 	return {
 		nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 		createNarArchive: () => new FakeNarArchive(appDigest),
-		compressNar: (nar: PushNarArchive, path: string) =>
-			fakeCompressedNar(nar, path, appDigest),
-		readCompressedNar: () => byteStream([Buffer.from('compressed nar')]),
-		createTemporaryDirectory: () => Promise.resolve('/tmp/cupboard-test'),
-		removeTemporaryDirectory: () => Promise.resolve()
+		compressNar: (nar: PushNarArchive) => fakeNarUpload(nar, appDigest)
 	} satisfies Partial<PushDependencies>;
 }
 
@@ -2146,21 +1543,21 @@ class FakeNarArchive {
 	}
 }
 
-async function fakeCompressedNar(
+function fakeNarUpload(
 	nar: PushNarArchive,
-	path: string,
-	narDigest: NarDigest
-): Promise<CompressedAndHashedNarFile> {
-	await drain(nar);
-
+	narDigest: NarDigest,
+	body: Uint8Array = compressedNarBytes
+): NarUploadStream {
 	return {
-		compressed: new CompressedNarFile(path, {
-			fileHash,
-			fileSize: 456,
-			compression: 'zstd'
+		body: new ReadableStream<Uint8Array>({
+			async start(controller) {
+				await drain(nar);
+				controller.enqueue(body);
+				controller.close();
+			}
 		}),
-		narDigest
-	} satisfies CompressedAndHashedNarFile;
+		digest: () => narDigest
+	};
 }
 
 async function drain(source: PushNarArchive): Promise<void> {
@@ -2353,13 +1750,8 @@ function skipClient(roots: SetRootCall[], clientCalls: unknown[]): PushClient {
 				}))
 			});
 		},
-		prepareUpload() {
-			clientCalls.push({ method: 'prepareUpload' });
-
-			return Promise.resolve(fallbackPrepareUploadResponse());
-		},
-		uploadBlob() {
-			clientCalls.push({ method: 'uploadBlob' });
+		uploadNar() {
+			clientCalls.push({ method: 'uploadNar' });
 
 			return Promise.resolve();
 		},

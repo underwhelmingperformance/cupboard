@@ -14,7 +14,6 @@ import {
 	markUploadPendingVerification,
 	narBytes,
 	negotiateUploads,
-	prepareUpload,
 	pushPath,
 	putNarBytes,
 	resetTestServer,
@@ -43,7 +42,6 @@ describe('root activation gating', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		// Deferred to the background pass: staged and pending, never yet servable.
 		await markUploadPendingVerification(upload.uploadId);

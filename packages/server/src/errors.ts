@@ -569,24 +569,6 @@ export class BinaryFuseConstructionIndexOutOfBoundsError extends ServerHttpError
 	}
 }
 
-export class UploadNotPreparedError extends ServerHttpError {
-	readonly status = StatusCodes.BAD_REQUEST;
-
-	constructor(public readonly uploadId: string) {
-		super('Upload has not been prepared');
-		this.name = 'UploadNotPreparedError';
-	}
-}
-
-export class ReusableUploadNotPreparableError extends ServerHttpError {
-	readonly status = StatusCodes.CONFLICT;
-
-	constructor(public readonly uploadId: string) {
-		super('Upload reuses an existing blob and must be committed, not prepared');
-		this.name = 'ReusableUploadNotPreparableError';
-	}
-}
-
 export type R2PresignBindingName =
 	| 'R2_ACCOUNT_ID'
 	| 'R2_ACCESS_KEY_ID'

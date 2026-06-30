@@ -52,7 +52,6 @@ import {
 	tenantUsageRow,
 	testPushId,
 	testServerFor,
-	uploadBlobMetadata,
 	uploadMetadata,
 	uploadPathNegotiation,
 	verifiableNar
@@ -396,12 +395,6 @@ describe('attestation attach and reads', () => {
 			await negotiate(token, metadata.storePathHash, digest)
 		);
 
-		const prepared = await authorisedWorkerFetch(
-			`/cache/_default/attestations/${decision.uploadId}`,
-			token,
-			{ method: 'PUT' }
-		);
-		expect(prepared.status).toBe(StatusCodes.OK);
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 		const error = await runInDurableObject(
@@ -467,12 +460,6 @@ describe('attestation attach and reads', () => {
 			await negotiate(token, metadata.storePathHash, digest)
 		);
 
-		const prepared = await authorisedWorkerFetch(
-			`/cache/_default/attestations/${decision.uploadId}`,
-			token,
-			{ method: 'PUT' }
-		);
-		expect(prepared.status).toBe(StatusCodes.OK);
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 		const expiredPending = {
@@ -501,12 +488,6 @@ describe('attestation attach and reads', () => {
 			await negotiate(token, metadata.storePathHash, digest)
 		);
 
-		const prepared = await authorisedWorkerFetch(
-			`/cache/_default/attestations/${decision.uploadId}`,
-			token,
-			{ method: 'PUT' }
-		);
-		expect(prepared.status).toBe(StatusCodes.OK);
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 		const response = await authorisedWorkerFetch(
@@ -595,12 +576,6 @@ async function attachBundleResponse(
 		await negotiate(token, pathHash, digest)
 	);
 
-	const prepared = await authorisedWorkerFetch(
-		`/cache/_default/attestations/${decision.uploadId}`,
-		token,
-		{ method: 'PUT' }
-	);
-	expect(prepared.status).toBe(StatusCodes.OK);
 	await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 
 	return authorisedWorkerFetch(
@@ -619,7 +594,10 @@ async function negotiate(
 		'/cache/_default/attestations',
 		token,
 		{
-			body: JSON.stringify({ bundles: [{ storePathHash: pathHash, digest }] }),
+			body: JSON.stringify({
+				pushId: testPushId,
+				bundles: [{ storePathHash: pathHash, digest }]
+			}),
 			headers: { 'content-type': 'application/json' },
 			method: 'POST'
 		}
@@ -642,7 +620,10 @@ async function negotiateTenant(
 		'/cache/_default/attestations',
 		token,
 		{
-			body: JSON.stringify({ bundles: [{ storePathHash: pathHash, digest }] }),
+			body: JSON.stringify({
+				pushId: testPushId,
+				bundles: [{ storePathHash: pathHash, digest }]
+			}),
 			headers: { 'content-type': 'application/json' },
 			method: 'POST'
 		}
@@ -698,17 +679,6 @@ async function pushPathThroughTenant(
 	const body = uploadNegotiateResponseSchema.parse(await negotiated.json());
 	const [decision] = z.tuple([uploadActionDecisionSchema]).parse(body.uploads);
 
-	const prepared = await tenantFetch(
-		tenant,
-		`/cache/_default/uploads/${decision.uploadId}`,
-		token,
-		{
-			body: JSON.stringify(uploadBlobMetadata(metadata)),
-			headers: { 'content-type': 'application/json' },
-			method: 'PUT'
-		}
-	);
-	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 
 	const committed = await commitUploadViaWorker(token, decision.uploadId, {

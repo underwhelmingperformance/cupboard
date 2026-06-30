@@ -16,8 +16,9 @@ import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	bootstrap,
-	cacheScopedPath,
 	cacheWriteGrants,
+	CommitSocketError,
+	commitUploadRejection,
 	expectSingleUploadDecision,
 	issueServerSignedToken,
 	narBytes,
@@ -25,10 +26,15 @@ import {
 	pushPath,
 	putNarBytes,
 	resetTestServer,
-	uploadBlobMetadata,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
+
+function expectCommitSocketError(
+	error: unknown
+): asserts error is CommitSocketError {
+	expect(error).toBeInstanceOf(CommitSocketError);
+}
 
 async function putCache(
 	token: string,
@@ -147,15 +153,6 @@ describe('cache registry admin', () => {
 			metadata
 		);
 
-		const prepared = await authorisedFetch(
-			cacheScopedPath('builds', `/uploads/${decision.uploadId}`),
-			init.token,
-			{
-				body: JSON.stringify(uploadBlobMetadata(metadata)),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
 		await putNarBytes(decision.r2Key);
 
 		const stagedBefore = await env.BLOBS.head(decision.r2Key);
@@ -166,20 +163,19 @@ describe('cache registry admin', () => {
 
 		// The pending upload is gone with the cache, so a late commit cannot
 		// resurrect it.
-		const commit = await authorisedFetch(
-			cacheScopedPath('builds', `/uploads/${decision.uploadId}/commit`),
+		const commitError = await commitUploadRejection(
 			init.token,
-			{ method: 'POST' }
+			decision.uploadId,
+			'builds'
 		);
 
+		expectCommitSocketError(commitError);
 		expect({
-			prepared: prepared.status,
 			stagedBefore: stagedBefore !== null,
 			removed: removed.status,
 			stagedAfter: stagedAfter === null,
-			commit: commit.status
+			commit: commitError.status
 		}).toStrictEqual({
-			prepared: StatusCodes.OK,
 			stagedBefore: true,
 			removed: StatusCodes.OK,
 			stagedAfter: true,

@@ -23,10 +23,10 @@ import {
 	narBytes,
 	narDigestHex,
 	pushPath,
+	putNarBytes,
 	resetTestServer,
 	sigstoreBundleBytes,
 	testPushId,
-	uploadBlobMetadata,
 	uploadMetadata,
 	uploadPathNegotiation,
 	useTestServer,
@@ -274,7 +274,7 @@ describe('tenant contract round trip', () => {
 		});
 	});
 
-	it('drives upload negotiation and preparation through the derived client', async () => {
+	it('drives upload negotiation and staging through the derived client', async () => {
 		await useTestServer('contract-uploads');
 		const init = await bootstrap();
 		const client = tenantClient(init.token);
@@ -291,20 +291,16 @@ describe('tenant contract round trip', () => {
 			.transform(([decision]) => uploadActionDecisionSchema.parse(decision))
 			.parse(negotiated.uploads);
 
-		const prepared = await client.uploads.prepare({
-			cacheName: '_default',
-			id: decision.uploadId,
-			...uploadBlobMetadata(metadata)
-		});
+		await putNarBytes(decision.r2Key);
 		const status = await client.uploads.status({ id: decision.uploadId });
 
 		expect({
 			storePathHash: decision.storePathHash,
-			presigned: prepared.uploadUrl.length > 0,
+			r2Key: decision.r2Key.length > 0,
 			status
 		}).toStrictEqual({
 			storePathHash: metadata.storePathHash,
-			presigned: true,
+			r2Key: true,
 			status: { status: 'pending' }
 		});
 	});
@@ -369,6 +365,7 @@ describe('tenant contract round trip', () => {
 		const digest = await sha256HexBytes(bundle);
 		const negotiated = await client.attestations.negotiate({
 			cacheName: '_default',
+			pushId: testPushId,
 			bundles: [{ storePathHash: metadata.storePathHash, digest }]
 		});
 		const decision = attestationUploadDecisionSchema
@@ -379,27 +376,17 @@ describe('tenant contract round trip', () => {
 			)
 			.parse(negotiated.bundles);
 
-		const prepared = await client.attestations.prepare({
-			cacheName: '_default',
-			id: decision.uploadId
-		});
 		await env.BLOBS.put(decision.r2Key, bundle, { sha256: hexBytes(digest) });
 		const attached = await client.attestations.attach({
 			cacheName: '_default',
 			id: decision.uploadId
 		});
 
-		expect({
-			presigned: prepared.uploadUrl.length > 0,
-			attached
-		}).toStrictEqual({
-			presigned: true,
-			attached: {
-				storePathHash: metadata.storePathHash,
-				digest,
-				predicateType: 'https://slsa.dev/provenance/v1',
-				status: 'attached'
-			}
+		expect(attached).toStrictEqual({
+			storePathHash: metadata.storePathHash,
+			digest,
+			predicateType: 'https://slsa.dev/provenance/v1',
+			status: 'attached'
 		});
 	});
 

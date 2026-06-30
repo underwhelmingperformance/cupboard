@@ -111,77 +111,6 @@ export type ParsedUploadNegotiateRequest = z.output<
 	typeof uploadNegotiateRequestSchema
 >;
 
-export const uploadPrepareRequestSchema = uploadBlobMetadataSchema;
-export type ParsedUploadPrepareRequest = z.output<
-	typeof uploadPrepareRequestSchema
->;
-
-export const uploadPrepareResponseSchema = z.strictObject({
-	uploadUrl: z.string(),
-	uploadHeaders: z.record(z.string(), z.string()),
-	expiresAt: z.string()
-});
-export type ParsedUploadPrepareResponse = z.output<
-	typeof uploadPrepareResponseSchema
->;
-
-// One batch prepare presigns a chunk of a push in a single round-trip. The cap
-// bounds the request body; the client chunks the closure under it.
-export const uploadPrepareBatchMaxItems = 256;
-
-export const uploadPrepareItemRequestSchema = z.strictObject({
-	id: z.string(),
-	...uploadBlobMetadataShape
-});
-export type ParsedUploadPrepareItemRequest = z.output<
-	typeof uploadPrepareItemRequestSchema
->;
-export type UploadPrepareItemRequest = z.input<
-	typeof uploadPrepareItemRequestSchema
->;
-
-export const uploadPrepareBatchRequestSchema = z.strictObject({
-	items: z
-		.array(uploadPrepareItemRequestSchema)
-		.min(1)
-		.max(uploadPrepareBatchMaxItems)
-});
-export type ParsedUploadPrepareBatchRequest = z.output<
-	typeof uploadPrepareBatchRequestSchema
->;
-
-// A per-item result, so one item whose slot expired or turned out reusable does
-// not fail the whole chunk: a presigned item carries its URL, a failed one its
-// id and reason, and the client re-negotiates the failed ids one at a time.
-export const uploadPrepareItemResultSchema = z.discriminatedUnion('ok', [
-	z.strictObject({
-		ok: z.literal(true),
-		id: z.string(),
-		...uploadPrepareResponseSchema.shape
-	}),
-	z.strictObject({
-		ok: z.literal(false),
-		id: z.string(),
-		error: z.string()
-	})
-]);
-export type ParsedUploadPrepareItemResult = z.output<
-	typeof uploadPrepareItemResultSchema
->;
-export type UploadPrepareItemResult = z.input<
-	typeof uploadPrepareItemResultSchema
->;
-
-export const uploadPrepareBatchResponseSchema = z.strictObject({
-	items: z.array(uploadPrepareItemResultSchema)
-});
-export type ParsedUploadPrepareBatchResponse = z.output<
-	typeof uploadPrepareBatchResponseSchema
->;
-export type UploadPrepareBatchResponse = z.input<
-	typeof uploadPrepareBatchResponseSchema
->;
-
 export const uploadSkipDecisionSchema = z.strictObject({
 	action: z.literal('skip'),
 	storePathHash: storePathHashSchema,
@@ -343,8 +272,6 @@ export type UploadPathMetadataFields = z.input<typeof uploadPathMetadataSchema>;
 export type UploadNegotiateRequest = z.input<
 	typeof uploadNegotiateRequestSchema
 >;
-export type UploadPrepareRequest = z.input<typeof uploadPrepareRequestSchema>;
-export type UploadPrepareResponse = z.input<typeof uploadPrepareResponseSchema>;
 export type UploadActionDecision = z.input<typeof uploadActionDecisionSchema>;
 export type UploadCommitDecision = z.input<typeof uploadCommitDecisionSchema>;
 export type UploadDecision = z.input<typeof uploadDecisionSchema>;

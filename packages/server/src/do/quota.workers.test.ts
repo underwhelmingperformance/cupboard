@@ -21,7 +21,6 @@ import {
 	markUploadPendingVerification,
 	negotiateUploads,
 	pendingUploadVerdict,
-	prepareUpload,
 	provisionFixtureTenant,
 	putNarBytes,
 	resetTestServer,
@@ -221,7 +220,6 @@ describe('per-tenant quota', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, decision, metadata);
 		await putNarBytes(decision.r2Key, nar);
 		const commitError = await commitUploadRejection(token, decision.uploadId);
 
@@ -274,7 +272,6 @@ describe('per-tenant quota', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, decision, metadata);
 		await putNarBytes(decision.r2Key, nar);
 		const commitError = await commitUploadRejection(token, decision.uploadId);
 
@@ -356,7 +353,6 @@ describe('per-tenant quota', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, decision, metadata);
 		await putNarBytes(decision.r2Key, small);
 		const commitError = await commitUploadRejection(token, decision.uploadId);
 		// A retry must not hang reporting pending: the over-quota verdict is
@@ -405,7 +401,6 @@ describe('per-tenant quota', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key, nar);
 		await markUploadPendingVerification(upload.uploadId);
 		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength - 1 });

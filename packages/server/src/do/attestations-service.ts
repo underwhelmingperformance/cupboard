@@ -14,7 +14,6 @@ import {
 	type AttestationDescriptor,
 	type AttestationList,
 	type AttestationNegotiateResponse,
-	type AttestationPrepareResponse,
 	type ParsedAttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
 import {
@@ -36,6 +35,7 @@ import {
 	AttestationUploadCacheMismatchError,
 	AttestationUploadExpiredError,
 	AttestationUploadNotFoundError,
+	InvalidPushIdError,
 	QuotaExceededError,
 	TenantWritesStoppedError
 } from '../errors.ts';
@@ -329,6 +329,10 @@ export class AttestationsService {
 		cache: string,
 		body: ParsedAttestationNegotiateRequest
 	): Promise<AttestationNegotiateResponse> {
+		if (!(await this.context.pushCredentials().verify(body.pushId))) {
+			throw new InvalidPushIdError();
+		}
+
 		const bundles: AttestationDecision[] = [];
 
 		for (const bundle of body.bundles) {
@@ -358,7 +362,7 @@ export class AttestationsService {
 			const uploadId = crypto.randomUUID();
 			const now = new Date();
 			const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
-			const r2Key = attestationStagingObjectKey(uploadId);
+			const r2Key = attestationStagingObjectKey(body.pushId, uploadId);
 
 			this.context.db
 				.insert(schema.pendingAttestations)
@@ -384,38 +388,6 @@ export class AttestationsService {
 		}
 
 		return { bundles };
-	}
-
-	async prepare(
-		cache: string,
-		uploadId: string
-	): Promise<AttestationPrepareResponse> {
-		const pending = await this.pendingUpload(cache, uploadId);
-		const expiresAt = new Date(Date.now() + 15 * 60 * 1000);
-
-		this.context.db
-			.update(schema.pendingAttestations)
-			.set({ expiresAt: expiresAt.toISOString() })
-			.where(eq(schema.pendingAttestations.id, uploadId))
-			.run();
-
-		const remainingSeconds = Math.floor(
-			(expiresAt.getTime() - Date.now()) / 1000
-		);
-		const checksumSha256 = hexDigestBase64(pending.digest);
-		const uploadUrl = await this.context.r2Presigner().presignPutUrl({
-			key: pending.r2Key,
-			checksumSha256,
-			expiresSeconds: Math.max(1, remainingSeconds)
-		});
-
-		return {
-			uploadUrl,
-			uploadHeaders: {
-				'x-amz-checksum-sha256': checksumSha256
-			},
-			expiresAt: expiresAt.toISOString()
-		};
 	}
 
 	async attach(
@@ -637,45 +609,6 @@ function narHashDigestHex(narHash: NixSha256HashString): Sha256HexDigest {
 	return NixSha256Hash.parse(narHash).digestHex();
 }
 
-function hexDigestBase64(digest: Sha256HexDigest): string {
-	return bytesBase64(hexBytes(digest));
-}
-
-function hexBytes(value: string): Uint8Array {
-	const bytes = new Uint8Array(value.length / 2);
-
-	for (let index = 0; index < bytes.byteLength; index += 1) {
-		bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
-	}
-
-	return bytes;
-}
-
-function bytesBase64(bytes: Uint8Array): string {
-	let result = '';
-
-	for (let index = 0; index < bytes.byteLength; index += 3) {
-		const first = bytes[index] ?? 0;
-		const second = bytes[index + 1];
-		const third = bytes[index + 2];
-		const combined = (first << 16) | ((second ?? 0) << 8) | (third ?? 0);
-
-		result += base64Alphabet[(combined >> 18) & 0x3f] ?? '';
-		result += base64Alphabet[(combined >> 12) & 0x3f] ?? '';
-		result +=
-			second === undefined
-				? '='
-				: (base64Alphabet[(combined >> 6) & 0x3f] ?? '');
-		result +=
-			third === undefined ? '=' : (base64Alphabet[combined & 0x3f] ?? '');
-	}
-
-	return result;
-}
-
 function notFound(): Response {
 	return new Response('Not found\n', { status: StatusCodes.NOT_FOUND });
 }
-
-const base64Alphabet =
-	'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';

@@ -102,8 +102,11 @@ export function stagingPushPrefix(pushId: string): string {
 	return `staging/${pushId}/`;
 }
 
-export function attestationStagingObjectKey(uploadId: string): string {
-	return `staging/attestations/${uploadId}`;
+export function attestationStagingObjectKey(
+	pushId: string,
+	uploadId: string
+): string {
+	return `staging/${pushId}/attestations/${uploadId}`;
 }
 
 // The request path a narinfo is served and edge-cached under: under the tenant

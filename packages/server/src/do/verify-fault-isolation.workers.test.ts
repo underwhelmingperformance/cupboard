@@ -13,7 +13,6 @@ import {
 	markUploadPendingVerification,
 	negotiateUploads,
 	pendingUploadVerdict,
-	prepareUpload,
 	putNarBytes,
 	resetTestServer,
 	verifiablePath
@@ -58,7 +57,6 @@ async function deferUpload(
 		await negotiateUploads(token, [metadata]),
 		metadata
 	);
-	await prepareUpload(token, upload, metadata);
 	await putNarBytes(upload.r2Key, nar);
 	await markUploadPendingVerification(upload.uploadId);
 

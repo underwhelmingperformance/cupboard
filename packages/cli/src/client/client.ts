@@ -24,7 +24,6 @@ import { z } from 'zod';
 import { throwIfAborted } from '../abort.ts';
 import {
 	CupboardHttpError,
-	CupboardUploadError,
 	InvalidCacheNameError,
 	MalformedResponseError,
 	ResponseSchemaMismatchError
@@ -41,20 +40,9 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
-import { backoffDelay, maxTransientRetries } from './retry.ts';
 import { parseWorkerUrl, reachableFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
-
-export interface CupboardBlobUpload {
-	readonly r2Key: string;
-	readonly uploadUrl: string;
-	// Builds the request body on demand, so a retried PUT streams a fresh copy
-	// after a previous attempt consumed one.
-	readonly body: () => ReadableStream<Uint8Array>;
-	readonly contentLength: number;
-	readonly headers: Readonly<Record<string, string>>;
-}
 
 export class CupboardClient {
 	static fromUrl(
@@ -269,61 +257,6 @@ export class CupboardClient {
 		}
 	}
 
-	// Streams a blob to its presigned URL. A transient failure (a network fault or
-	// a 5xx) backs off and retries with a fresh body, so a single R2 or Durable
-	// Object blip does not fail a push of thousands of blobs. The PUT is
-	// idempotent (same key, same bytes), so a retry is safe.
-	async uploadBlob(upload: CupboardBlobUpload): Promise<void> {
-		const requestHeaders = new Headers(upload.headers);
-		requestHeaders.set('content-length', String(upload.contentLength));
-
-		let retries = 0;
-
-		for (;;) {
-			throwIfAborted(this.signal);
-
-			const request: StreamingRequestInit = {
-				method: 'PUT',
-				headers: requestHeaders,
-				body: upload.body(),
-				duplex: 'half',
-				signal: this.signal
-			};
-
-			let response: Response;
-			try {
-				response = await this.fetcher(upload.uploadUrl, request);
-			} catch (error) {
-				if (this.signal?.aborted === true || retries >= maxTransientRetries) {
-					throw error;
-				}
-
-				retries += 1;
-				await backoffDelay(retries, this.signal);
-				continue;
-			}
-
-			if (response.ok) {
-				return;
-			}
-
-			if (
-				response.status >= serverErrorStatus &&
-				retries < maxTransientRetries
-			) {
-				retries += 1;
-				await backoffDelay(retries, this.signal);
-				continue;
-			}
-
-			throw new CupboardUploadError(
-				upload.r2Key,
-				response.status,
-				await response.text()
-			);
-		}
-	}
-
 	/**
 	 * Claims (or idempotently re-claims) global admin of the deployment at the
 	 * bootstrap `POST /signup` endpoint. The endpoint is unauthenticated — the
@@ -442,7 +375,6 @@ export interface CommitOptions {
 // Widened to `number` so a comparison against a plain response status is not an
 // enum-versus-number mismatch.
 const unauthorizedStatus: number = StatusCodes.UNAUTHORIZED;
-const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
 const defaultCommitWaitSeconds = 600;
 
 const connectCommitSocket: CommitSocketConnect = (url, headers) =>
@@ -464,8 +396,4 @@ export function cachePrefixFor(cache: string): string {
 	}
 
 	return `/cache/${cache}`;
-}
-
-interface StreamingRequestInit extends RequestInit {
-	readonly duplex: 'half';
 }

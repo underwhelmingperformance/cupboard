@@ -1,10 +1,8 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
-import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import {
-	authorisedFetch,
 	bootstrap,
 	commitUpload,
 	expectSingleUploadDecision,
@@ -15,7 +13,6 @@ import {
 	putNarBytes,
 	resetTestServer,
 	seedSigningKeys,
-	uploadBlobMetadata,
 	uploadMetadata,
 	verifyNarInfoSignature
 } from '../test-support.ts';
@@ -52,17 +49,6 @@ describe('signing with a key set', () => {
 			await negotiateUploads(init.token, [metadata]),
 			metadata
 		);
-
-		const prepared = await authorisedFetch(
-			`/cache/_default/uploads/${upload.uploadId}`,
-			init.token,
-			{
-				body: JSON.stringify(uploadBlobMetadata(metadata)),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
-		expect(prepared.status).toBe(StatusCodes.OK);
 
 		await putNarBytes(upload.r2Key);
 		await commitUpload(init.token, upload.uploadId);
