@@ -246,6 +246,20 @@ describe('ensureStagingLifecycleRule', () => {
 		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
 	});
 
+	it('does not re-write when R2 echoes extra fields it did not set', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${lifecyclePath}`]: {
+				rules: [{ ...stagingRule, storageClassTransitions: [] }]
+			}
+		});
+
+		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
+
+		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
+	});
+
 	it('keeps unrelated rules and replaces a drifted staging rule', async () => {
 		const otherRule = {
 			id: 'keep-me',
