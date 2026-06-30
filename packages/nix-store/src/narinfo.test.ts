@@ -2,6 +2,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
+import { bytesToBase64 } from './encoding.ts';
 import { MalformedNarInfoLineError } from './errors.ts';
 import { toNixBase32 } from './hash.ts';
 import {
@@ -9,7 +10,8 @@ import {
 	type NarInfoFields,
 	narInfoSchema,
 	parseFields,
-	parseNarInfo
+	parseNarInfo,
+	verifyNarInfoSignature
 } from './narinfo.ts';
 const exampleStorePath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-example';
 
@@ -41,6 +43,51 @@ function narInfoWith(overrides: Partial<NarInfoFields>): NarInfo {
 		...overrides
 	});
 }
+
+async function signedNarInfo(): Promise<{
+	narInfo: NarInfo;
+	publicKey: string;
+}> {
+	const keyPair = (await crypto.subtle.generateKey({ name: 'Ed25519' }, true, [
+		'sign',
+		'verify'
+	])) as unknown as { privateKey: CryptoKey; publicKey: CryptoKey };
+	const fingerprint = new TextEncoder().encode(narInfoWith({}).fingerprint());
+	const signature = new Uint8Array(
+		await crypto.subtle.sign('Ed25519', keyPair.privateKey, fingerprint)
+	);
+	const rawPublic = new Uint8Array(
+		await crypto.subtle.exportKey('raw', keyPair.publicKey)
+	);
+
+	return {
+		narInfo: narInfoWith({ sigs: [`k1:${bytesToBase64(signature)}`] }),
+		publicKey: `k1:${bytesToBase64(rawPublic)}`
+	};
+}
+
+describe('verifyNarInfoSignature', () => {
+	it('accepts a signature made by a trusted key', async () => {
+		const { narInfo, publicKey } = await signedNarInfo();
+
+		expect(await verifyNarInfoSignature(narInfo, [publicKey])).toBe(true);
+	});
+
+	it('rejects a signature no trusted key matches', async () => {
+		const { narInfo } = await signedNarInfo();
+		const { publicKey: otherKey } = await signedNarInfo();
+
+		expect(await verifyNarInfoSignature(narInfo, [otherKey])).toBe(false);
+	});
+
+	it('rejects an unsigned narinfo', async () => {
+		const { publicKey } = await signedNarInfo();
+
+		expect(
+			await verifyNarInfoSignature(narInfoWith({ sigs: [] }), [publicKey])
+		).toBe(false);
+	});
+});
 
 function narinfoLines(
 	overrides: { readonly fileSize?: string; readonly references?: string } = {}

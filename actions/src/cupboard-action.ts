@@ -11,6 +11,8 @@ import path from 'node:path';
 import { arch, env, platform } from 'node:process';
 
 import { Nix } from '@cupboard/nix';
+import { NarInfo, verifyNarInfoSignature } from '@cupboard/nix-store/narinfo';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import {
 	identityPolicy,
@@ -32,6 +34,7 @@ import {
 	InvalidInputError,
 	MalformedReleaseResponseError,
 	MissingInputError,
+	NixError,
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
 	UnknownCommandError,
@@ -85,6 +88,17 @@ interface PushInputs {
 interface AttestInputs {
 	readonly paths: readonly string[];
 	readonly checksumsFile: string;
+	// When set, subjects are resolved from this cache's served narinfo rather
+	// than from a local `nix path-info`, so the attest step needs no realised
+	// closure (e.g. a build that nixbuild.net pushed straight to the cache).
+	readonly url: string;
+	readonly cache: string;
+	readonly readUser: string;
+	readonly readPassword: string;
+}
+
+export interface AttestDependencies {
+	readonly fetch?: typeof fetch;
 }
 
 interface StorePathDigest {
@@ -912,14 +926,126 @@ export function attestInputs(environment: Environment): AttestInputs {
 		)
 	);
 
-	return { paths, checksumsFile };
+	const readUser = input(environment, 'READ_USER');
+	const readPassword = input(environment, 'READ_PASSWORD');
+	assertReadCredentialComplete(readUser, readPassword);
+
+	return {
+		paths,
+		checksumsFile,
+		url: input(environment, 'URL'),
+		cache: input(environment, 'CACHE'),
+		readUser,
+		readPassword
+	};
+}
+
+function cacheReadHeaders(
+	readUser: string,
+	readPassword: string
+): Record<string, string> {
+	if (readUser === '' || readPassword === '') {
+		return { ...cacheHeaders };
+	}
+
+	const token = Buffer.from(`${readUser}:${readPassword}`).toString('base64');
+	return { ...cacheHeaders, authorization: `Basic ${token}` };
+}
+
+async function fetchCachePublicKeys(
+	fetcher: typeof fetch,
+	url: string
+): Promise<readonly string[]> {
+	const response = await fetcher(cachePublicKeyUrl(url), {
+		headers: cachePublicKeyRequestHeaders()
+	});
+
+	if (!response.ok) {
+		throw new CachePublicKeyError(
+			`failed to fetch cache public key: ${String(response.status)}`
+		);
+	}
+
+	const body = await response.text();
+	const keys = body.split(/\s+/u).filter(Boolean);
+
+	if (keys.length === 0) {
+		throw new CachePublicKeyError('cache public key response was empty');
+	}
+
+	return keys;
+}
+
+// Resolves one subject from the cache's narinfo. The subject's NAR hash and its
+// name both come from the signed narinfo, not from the input string: the store
+// path is checked to match the requested hash, and the signature is verified
+// against the cache key, so a wrong or tampered narinfo cannot steer the
+// attestation. This is the trust the local `nix path-info` flow gets for free.
+async function remoteStorePathDigest(
+	fetcher: typeof fetch,
+	base: string,
+	headers: Record<string, string>,
+	publicKeys: readonly string[],
+	storePath: string
+): Promise<StorePathDigest> {
+	const storePathHash = StorePath.hash(storePath);
+	const response = await fetcher(`${base}/${storePathHash}.narinfo`, {
+		headers
+	});
+
+	if (!response.ok) {
+		throw new NixError(
+			`could not fetch narinfo for ${storePath} (${String(response.status)})`
+		);
+	}
+
+	const narInfo = NarInfo.parse(await response.text());
+
+	if (narInfo.storePath.hash !== storePathHash) {
+		throw new NixError(
+			`narinfo for ${storePath} describes a different store path (${narInfo.storePath.value})`
+		);
+	}
+
+	if (!(await verifyNarInfoSignature(narInfo, publicKeys))) {
+		throw new NixError(
+			`narinfo signature for ${storePath} did not verify against the cache key`
+		);
+	}
+
+	return {
+		storePath: narInfo.storePath.value,
+		sha256: narInfo.narHash.digestHex()
+	};
+}
+
+async function resolveRemoteStorePathDigests(
+	fetcher: typeof fetch,
+	inputs: AttestInputs
+): Promise<StorePathDigest[]> {
+	const base = cacheUrlFor(inputs.url, inputs.cache);
+	const headers = cacheReadHeaders(inputs.readUser, inputs.readPassword);
+	const publicKeys = await fetchCachePublicKeys(fetcher, inputs.url);
+
+	return Promise.all(
+		inputs.paths.map((storePath) =>
+			remoteStorePathDigest(fetcher, base, headers, publicKeys, storePath)
+		)
+	);
 }
 
 export async function attestAction(
-	environment: Environment = env
+	environment: Environment = env,
+	dependencies: AttestDependencies = {}
 ): Promise<void> {
 	const inputs = attestInputs(environment);
-	const digests = await resolveStorePathDigests(Nix.open(), inputs.paths);
+	const digests =
+		inputs.url === ''
+			? await resolveStorePathDigests(Nix.open(), inputs.paths)
+			: await resolveRemoteStorePathDigests(
+					dependencies.fetch ?? fetch,
+					inputs
+				);
 	const checksumsFile = path.resolve(inputs.checksumsFile);
 
 	await mkdir(path.dirname(checksumsFile), { recursive: true });
@@ -929,10 +1055,13 @@ export async function attestAction(
 	await setOutput(environment, 'subject-count', String(digests.length));
 }
 
-export function setupInputs(environment: Environment): SetupInputs {
-	const readUser = input(environment, 'READ_USER');
-	const readPassword = input(environment, 'READ_PASSWORD');
-
+// A read credential is all-or-nothing: half of one silently drops the
+// authorisation, turning a private-cache read into a confusing 404 rather than
+// an actionable error.
+function assertReadCredentialComplete(
+	readUser: string,
+	readPassword: string
+): void {
 	if (readUser !== '' && readPassword === '') {
 		throw new InvalidInputError(
 			'read-password',
@@ -946,6 +1075,13 @@ export function setupInputs(environment: Environment): SetupInputs {
 			'read-user is required when read-password is supplied'
 		);
 	}
+}
+
+export function setupInputs(environment: Environment): SetupInputs {
+	const readUser = input(environment, 'READ_USER');
+	const readPassword = input(environment, 'READ_PASSWORD');
+
+	assertReadCredentialComplete(readUser, readPassword);
 
 	const cacheUrl = input(environment, 'CACHE_URL');
 

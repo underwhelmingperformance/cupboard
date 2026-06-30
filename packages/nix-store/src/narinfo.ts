@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { base64ToBytes } from './encoding.ts';
 import { MalformedNarInfoLineError } from './errors.ts';
 import { NixSha256Hash } from './hash.ts';
 import {
@@ -268,4 +269,65 @@ export function narFingerprint(
 		String(narSize),
 		fingerprintReferenceStorePaths(storePath, references).join(',')
 	].join(';');
+}
+
+/**
+ * Whether any of a narinfo's `Sig:` lines is a valid Ed25519 signature over its
+ * fingerprint under one of the given `name:base64` public keys. The signature
+ * binds the store path, NAR hash, size and references, so a verified narinfo can
+ * be trusted as the cache's own statement about a path.
+ */
+export async function verifyNarInfoSignature(
+	narInfo: NarInfo,
+	publicKeys: readonly string[]
+): Promise<boolean> {
+	if (narInfo.sigs.length === 0) {
+		return false;
+	}
+
+	const fingerprint = new TextEncoder().encode(narInfo.fingerprint());
+
+	for (const publicKey of publicKeys) {
+		const key = await crypto.subtle.importKey(
+			'raw',
+			toArrayBuffer(namedBytes(publicKey)),
+			'Ed25519',
+			false,
+			['verify']
+		);
+
+		for (const signature of narInfo.sigs) {
+			const isVerified = await crypto.subtle.verify(
+				'Ed25519',
+				key,
+				toArrayBuffer(namedBytes(signature)),
+				toArrayBuffer(fingerprint)
+			);
+
+			if (isVerified) {
+				return true;
+			}
+		}
+	}
+
+	return false;
+}
+
+function namedBytes(value: string): Uint8Array {
+	const separator = value.indexOf(':');
+
+	if (separator <= 0) {
+		throw new MalformedNarInfoLineError(
+			`Expected a name:base64 value: ${value}`
+		);
+	}
+
+	return base64ToBytes(value.slice(separator + 1));
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+	return bytes.buffer.slice(
+		bytes.byteOffset,
+		bytes.byteOffset + bytes.byteLength
+	) as ArrayBuffer;
 }

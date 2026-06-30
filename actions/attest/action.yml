@@ -13,6 +13,26 @@ inputs:
       Where to write the generated subject checksums file. Defaults to a
       runner-local path under RUNNER_TEMP.
     required: false
+  url:
+    description:
+      Cache URL to resolve each path's NAR hash from its served narinfo, instead
+      of a local `nix path-info`. Use this when the closure was pushed straight
+      to the cache (e.g. by nixbuild.net) and is not realised on the runner. In
+      this mode `paths` must be concrete store paths, not derivations or
+      installables, and each narinfo's signature is verified against the cache
+      key. When unset, subjects are resolved locally.
+    required: false
+  cache:
+    description: Named cache to resolve subjects from when `url` is set.
+    required: false
+  read-user:
+    description:
+      Username for a private cache when resolving subjects from `url`.
+    required: false
+  read-password:
+    description:
+      Password for a private cache when resolving subjects from `url`.
+    required: false
   github-token:
     description: GitHub token used by the attestation step.
     required: false
@@ -60,6 +80,10 @@ runs:
       env:
         INPUT_PATHS: ${{ inputs.paths }}
         INPUT_CHECKSUMS_FILE: ${{ inputs.checksums-file }}
+        INPUT_URL: ${{ inputs.url }}
+        INPUT_CACHE: ${{ inputs.cache }}
+        INPUT_READ_USER: ${{ inputs.read-user }}
+        INPUT_READ_PASSWORD: ${{ inputs.read-password }}
       run: >
         node --experimental-transform-types
         --disable-warning=ExperimentalWarning

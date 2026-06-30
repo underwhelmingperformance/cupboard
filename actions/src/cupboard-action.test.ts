@@ -3,12 +3,16 @@ import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { StorePath } from '@cupboard/nix-store/store-path';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import type { VerifiedBundle } from '@cupboard/shared/sigstore';
 import { describe, expect, it } from 'vitest';
 
 import {
 	assetNameFor,
+	attestAction,
 	attestInputs,
 	buildPushArguments,
 	cachePublicKeyRequestHeaders,
@@ -35,10 +39,91 @@ import {
 	InvalidInputError,
 	MalformedReleaseResponseError,
 	MissingInputError,
+	NixError,
 	NoReleaseFoundError,
 	UnknownCommandError,
 	UnsupportedPlatformError
 } from './errors.ts';
+
+interface NarInfoFixture {
+	readonly narinfoBody: string;
+	readonly publicKey: string;
+	readonly storePath: string;
+	readonly storePathHash: string;
+	readonly narHash: string;
+}
+
+async function signedNarInfoFixture(): Promise<NarInfoFixture> {
+	const narHash = 'sha256:1qjpr1bqmj286dkawd7rrzplp9g0zdp50syslw15kg13pf2ra347';
+	const fileHash = narHash;
+	const storePathHash = 'a'.repeat(32);
+	const storePath = `/nix/store/${storePathHash}-foo`;
+	const url = `nar/${fileHash.slice('sha256:'.length)}.nar.zst`;
+
+	const draft = new NarInfo(
+		new StorePath(storePath),
+		url,
+		'zstd',
+		NixSha256Hash.parse(fileHash),
+		100,
+		NixSha256Hash.parse(narHash),
+		200,
+		[]
+	);
+
+	const keyPair = await crypto.subtle.generateKey({ name: 'Ed25519' }, true, [
+		'sign',
+		'verify'
+	]);
+	const fingerprint = new TextEncoder().encode(draft.fingerprint());
+	const signature = new Uint8Array(
+		await crypto.subtle.sign('Ed25519', keyPair.privateKey, fingerprint)
+	);
+	const rawPublic = new Uint8Array(
+		await crypto.subtle.exportKey('raw', keyPair.publicKey)
+	);
+	const name = 'cache-test-1';
+
+	const signed = new NarInfo(
+		new StorePath(storePath),
+		url,
+		'zstd',
+		NixSha256Hash.parse(fileHash),
+		100,
+		NixSha256Hash.parse(narHash),
+		200,
+		[],
+		undefined,
+		undefined,
+		[`${name}:${Buffer.from(signature).toString('base64')}`]
+	);
+
+	return {
+		narinfoBody: signed.render(),
+		publicKey: `${name}:${Buffer.from(rawPublic).toString('base64')}`,
+		storePath,
+		storePathHash,
+		narHash
+	};
+}
+
+function stubCacheFetch(
+	requested: string[],
+	data: { narinfoBody: string; publicKey: string }
+): typeof fetch {
+	return (resource) => {
+		if (typeof resource !== 'string') {
+			throw new TypeError('expected a string url');
+		}
+
+		requested.push(resource);
+
+		const body = resource.endsWith('/pubkey')
+			? data.publicKey
+			: data.narinfoBody;
+		return Promise.resolve(new Response(body, { status: 200 }));
+	};
+}
 
 describe('normaliseVersion', () => {
 	it.each([
@@ -573,7 +658,11 @@ describe('attestInputs', () => {
 
 		expect(inputs).toStrictEqual({
 			paths: [paths],
-			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt'
+			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt',
+			url: '',
+			cache: '',
+			readUser: '',
+			readPassword: ''
 		});
 	});
 
@@ -586,7 +675,93 @@ describe('attestInputs', () => {
 
 		expect(inputs).toStrictEqual({
 			paths: [paths],
-			checksumsFile: '/somewhere/subjects.txt'
+			checksumsFile: '/somewhere/subjects.txt',
+			url: '',
+			cache: '',
+			readUser: '',
+			readPassword: ''
+		});
+	});
+
+	it('resolves and verifies subjects from the cache narinfo', async () => {
+		const { narinfoBody, publicKey, storePath, storePathHash, narHash } =
+			await signedNarInfoFixture();
+
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const checksumsFile = path.join(directory, 'subjects.txt');
+		const outputFile = path.join(directory, 'output');
+		await writeFile(outputFile, '');
+
+		const requested: string[] = [];
+		const fetcher = stubCacheFetch(requested, { narinfoBody, publicKey });
+
+		await attestAction(
+			{
+				INPUT_PATHS: storePath,
+				INPUT_CHECKSUMS_FILE: checksumsFile,
+				INPUT_URL: 'https://cache.example.com/t/acme',
+				INPUT_CACHE: 'builds',
+				GITHUB_OUTPUT: outputFile
+			},
+			{ fetch: fetcher }
+		);
+
+		const expectedSubject = NixSha256Hash.parse(narHash).digestHex();
+		expect({
+			requested,
+			checksums: await readFile(checksumsFile, 'utf8'),
+			output: await readFile(outputFile, 'utf8')
+		}).toStrictEqual({
+			requested: [
+				'https://cache.example.com/t/acme/pubkey',
+				`https://cache.example.com/t/acme/cache/builds/${storePathHash}.narinfo`
+			],
+			checksums: `${expectedSubject}  ${storePathHash}-foo\n`,
+			output: `checksums-file=${checksumsFile}\nsubject-count=1\n`
+		});
+	});
+
+	it('rejects a narinfo whose signature does not verify', async () => {
+		const { narinfoBody, storePath } = await signedNarInfoFixture();
+		const { publicKey: otherKey } = await signedNarInfoFixture();
+
+		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-attest-'));
+		const fetcher = stubCacheFetch([], {
+			narinfoBody,
+			publicKey: otherKey
+		});
+
+		await expect(
+			attestAction(
+				{
+					INPUT_PATHS: storePath,
+					INPUT_CHECKSUMS_FILE: path.join(directory, 'subjects.txt'),
+					INPUT_URL: 'https://cache.example.com/t/acme',
+					INPUT_CACHE: 'builds',
+					GITHUB_OUTPUT: path.join(directory, 'output')
+				},
+				{ fetch: fetcher }
+			)
+		).rejects.toThrow(NixError);
+	});
+
+	it('reads the remote-resolution inputs when given', () => {
+		const inputs = attestInputs({
+			INPUT_PATHS: paths,
+			INPUT_CHECKSUMS_FILE: '/somewhere/subjects.txt',
+			INPUT_URL: 'https://cache.example.com/t/acme',
+			INPUT_CACHE: 'builds',
+			INPUT_READ_USER: 'reader',
+			INPUT_READ_PASSWORD: 'secret'
+		});
+
+		expect(inputs).toStrictEqual({
+			paths: [paths],
+			checksumsFile: '/somewhere/subjects.txt',
+			url: 'https://cache.example.com/t/acme',
+			cache: 'builds',
+			readUser: 'reader',
+			readPassword: 'secret'
 		});
 	});
 

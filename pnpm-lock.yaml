@@ -89,6 +89,9 @@ importers:
       '@cupboard/nix':
         specifier: workspace:*
         version: link:../packages/nix
+      '@cupboard/nix-store':
+        specifier: workspace:*
+        version: link:../packages/nix-store
       '@cupboard/shared':
         specifier: workspace:*
         version: link:../packages/shared

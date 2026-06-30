@@ -104,10 +104,11 @@ still attached. nixbuild.net does not emit provenance of its own, so there is
 nothing else to ingest.
 
 The attestation subject is a path's NAR hash. When the closure was built and
-pushed by nixbuild.net rather than realised in CI, fetch the NAR hash from
-Cupboard instead of computing it locally: it is the `NarHash` of the served
-narinfo, and `cupboard inspect <url> <store-path> --output-mode json` returns it
-alongside the rest of the path's summary.
+pushed by nixbuild.net rather than realised in CI, the `attest` action resolves
+the subject from Cupboard instead of a local `nix path-info`: pass its `url`
+input (and `cache`, plus `read-user`/`read-password` for a private cache) and it
+reads each path's `NarHash` from the served narinfo. The same value is available
+ad hoc from `cupboard inspect <url> <store-path> --output-mode json`.
 
 ## Auditing a push
 
