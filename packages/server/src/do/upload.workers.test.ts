@@ -39,7 +39,6 @@ import {
 	commitSharedPath,
 	CommitSocketError,
 	commitUpload,
-	commitUploadRejection,
 	commitUploadViaWorker,
 	CommitVerdictError,
 	commitVerifiablePath,
@@ -1073,7 +1072,13 @@ describe('upload flow', () => {
 			}
 		]);
 
-		await currentServer().recordVerification(upload.uploadId, { ok: true });
+		// The off-DO consumer reports the file hash and size it computed while
+		// decoding, the facts the promote records for the served narinfo.
+		await currentServer().recordVerification(upload.uploadId, {
+			ok: true,
+			fileHash: fileHash.value,
+			fileSize: narBytes.byteLength
+		});
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
 		const narInfo = await fetchNarInfo(metadata.storePathHash);
@@ -2362,35 +2367,6 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('keeps an upload pending when the object size does not match metadata', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({
-			fileSize: narBytes.byteLength + 1
-		});
-		const negotiate = await negotiateUploads(token, [metadata]);
-		const upload = expectSingleUploadDecision(negotiate, metadata);
-		await prepareUpload(token, upload, metadata);
-		await putNarBytes(upload.r2Key);
-
-		const error = await commitUploadRejection(token, upload.uploadId);
-		expectError(error, CommitSocketError);
-
-		expect({ error: { name: error.name, status: error.status } }).toStrictEqual(
-			{
-				error: {
-					name: CommitSocketError.name,
-					status: StatusCodes.BAD_REQUEST
-				}
-			}
-		);
-		await expectStats(token, {
-			storePaths: 0,
-			narBlobs: 0,
-			pendingUploads: 1,
-			totalFileSize: 0
-		});
-	});
-
 	it('requires R2 presign configuration for upload decisions', async () => {
 		const previousSecret = env.R2_SECRET_ACCESS_KEY;
 		Object.assign(env, { R2_SECRET_ACCESS_KEY: '' });
@@ -2419,65 +2395,6 @@ describe('upload flow', () => {
 		} finally {
 			Object.assign(env, { R2_SECRET_ACCESS_KEY: previousSecret });
 		}
-	});
-
-	it('keeps an upload pending when the object checksum does not match metadata', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({
-			fileHash: nixSha256Hash('2'),
-			fileSize: narBytes.byteLength
-		});
-		const negotiate = await negotiateUploads(token, [metadata]);
-		const upload = expectSingleUploadDecision(negotiate, metadata);
-		await prepareUpload(token, upload, metadata);
-		await putNarBytes(upload.r2Key);
-
-		const error = await commitUploadRejection(token, upload.uploadId);
-		expectError(error, CommitSocketError);
-
-		expect({ error: { name: error.name, status: error.status } }).toStrictEqual(
-			{
-				error: {
-					name: CommitSocketError.name,
-					status: StatusCodes.BAD_REQUEST
-				}
-			}
-		);
-		await expectStats(token, {
-			storePaths: 0,
-			narBlobs: 0,
-			pendingUploads: 1,
-			totalFileSize: 0
-		});
-	});
-
-	it('keeps an upload pending when the object checksum is missing', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({
-			fileSize: narBytes.byteLength
-		});
-		const negotiate = await negotiateUploads(token, [metadata]);
-		const upload = expectSingleUploadDecision(negotiate, metadata);
-		await prepareUpload(token, upload, metadata);
-		await env.BLOBS.put(upload.r2Key, narBytes);
-
-		const error = await commitUploadRejection(token, upload.uploadId);
-		expectError(error, CommitSocketError);
-
-		expect({ error: { name: error.name, status: error.status } }).toStrictEqual(
-			{
-				error: {
-					name: CommitSocketError.name,
-					status: StatusCodes.BAD_REQUEST
-				}
-			}
-		);
-		await expectStats(token, {
-			storePaths: 0,
-			narBlobs: 0,
-			pendingUploads: 1,
-			totalFileSize: 0
-		});
 	});
 
 	it.each([

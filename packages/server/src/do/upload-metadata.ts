@@ -13,7 +13,7 @@ import {
 	UploadedObjectChecksumMissingError,
 	UploadNotPreparedError
 } from '../errors.ts';
-import { parseStored, parseStoredJson } from '../http/parse.ts';
+import { parseStoredJson } from '../http/parse.ts';
 
 // The compressed metadata of the one canonical object served for a NAR hash.
 // Read from the object itself so a committed narinfo always advertises the
@@ -75,11 +75,44 @@ export function parseStoredUploadPathMetadata(
 	uploadId: string,
 	source: string
 ): ParsedUploadPathNegotiation {
-	return parseStored(
-		uploadPathNegotiationSchema,
-		source,
-		(cause) => new StoredUploadMetadataInvalidError(uploadId, cause)
-	);
+	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>
+		new StoredUploadMetadataInvalidError(uploadId, cause);
+	const json = parseStoredJson(source, onInvalid);
+
+	// A row may store the path metadata alone (a streaming upload) or carry the
+	// blob fields too (a prepared or reuse row); the commit path needs only the
+	// path metadata, so project a full record down to it before validating.
+	const full = uploadPathMetadataSchema.safeParse(json);
+
+	if (full.success) {
+		const {
+			storePathHash,
+			storePath,
+			narHash,
+			narSize,
+			references,
+			deriver,
+			ca
+		} = full.data;
+
+		return {
+			storePathHash,
+			storePath,
+			narHash,
+			narSize,
+			references,
+			deriver,
+			ca
+		};
+	}
+
+	const path = uploadPathNegotiationSchema.safeParse(json);
+
+	if (path.success) {
+		return path.data;
+	}
+
+	throw onInvalid(path.error);
 }
 
 export function uploadHeadersFor(

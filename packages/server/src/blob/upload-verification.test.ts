@@ -1,6 +1,5 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
-import { uploadPathMetadataSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -11,8 +10,9 @@ import {
 } from '../errors.ts';
 
 import {
+	type ExpectedNarBlob,
 	type UploadedObject,
-	verifyUploadedObject
+	verifyStoredBlob
 } from './upload-verification.ts';
 
 const digest = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
@@ -23,16 +23,7 @@ const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 // reports the object actually inspected rather than the canonical default.
 const r2Key = 'staging/upload-1.nar.zst';
 
-const metadata = uploadPathMetadataSchema.parse({
-	storePathHash: '0'.repeat(32),
-	storePath: `/nix/store/${'0'.repeat(32)}-app`,
-	narHash,
-	narSize: 1234,
-	references: [],
-	fileHash,
-	fileSize: 4,
-	compression: 'zstd'
-});
+const expected: ExpectedNarBlob = { narHash, fileHash, fileSize: 4 };
 
 function uploadedObject(
 	overrides: Partial<UploadedObject> = {}
@@ -58,18 +49,18 @@ function acceptedBy(function_: () => void): { readonly accepted: true } {
 	return { accepted: true };
 }
 
-describe('verifyUploadedObject', () => {
-	it('accepts an object that matches the metadata', () => {
+describe('verifyStoredBlob', () => {
+	it('accepts an object that matches the expected blob', () => {
 		expect(
 			acceptedBy(() => {
-				verifyUploadedObject(uploadedObject(), 4, metadata, r2Key);
+				verifyStoredBlob(uploadedObject(), expected, r2Key);
 			})
 		).toStrictEqual({ accepted: true });
 	});
 
 	it('rejects a missing object with its key', () => {
 		const error = thrownBy(() => {
-			verifyUploadedObject(undefined, 4, metadata, r2Key);
+			verifyStoredBlob(undefined, expected, r2Key);
 		});
 
 		expect(error).toBeInstanceOf(UploadedObjectNotFoundError);
@@ -84,7 +75,7 @@ describe('verifyUploadedObject', () => {
 
 	it('rejects a size mismatch with the expected and actual sizes', () => {
 		const error = thrownBy(() => {
-			verifyUploadedObject(uploadedObject({ size: 9 }), 4, metadata, r2Key);
+			verifyStoredBlob(uploadedObject({ size: 9 }), expected, r2Key);
 		});
 
 		expect(error).toBeInstanceOf(UploadedObjectSizeMismatchError);
@@ -106,12 +97,7 @@ describe('verifyUploadedObject', () => {
 
 	it('rejects an object with no checksum', () => {
 		const error = thrownBy(() => {
-			verifyUploadedObject(
-				uploadedObject({ checksums: {} }),
-				4,
-				metadata,
-				r2Key
-			);
+			verifyStoredBlob(uploadedObject({ checksums: {} }), expected, r2Key);
 		});
 
 		expect(error).toBeInstanceOf(UploadedObjectChecksumMissingError);
@@ -126,10 +112,9 @@ describe('verifyUploadedObject', () => {
 
 	it('rejects a checksum mismatch with the expected and actual hashes', () => {
 		const error = thrownBy(() => {
-			verifyUploadedObject(
+			verifyStoredBlob(
 				uploadedObject({ checksums: { sha256: otherDigest.buffer } }),
-				4,
-				metadata,
+				expected,
 				r2Key
 			);
 		});

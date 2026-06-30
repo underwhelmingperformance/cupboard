@@ -159,23 +159,6 @@ export class NarInfo {
 		public readonly sigs: readonly string[] = []
 	) {}
 
-	private referenceStorePaths(): readonly string[] {
-		const path = this.storePath.value;
-		const separator = path.lastIndexOf('/');
-		const storeDirectory =
-			separator === -1 ? undefined : path.slice(0, separator);
-
-		// Nix's canonical fingerprint sorts the full reference store paths, so the
-		// signature must not depend on the order the references arrive in.
-		return this.references
-			.map((reference) =>
-				storeDirectory === undefined
-					? reference
-					: `${storeDirectory}/${reference}`
-			)
-			.toSorted(byCodeUnit);
-	}
-
 	withSignature(signature: string): NarInfo {
 		return new NarInfo(
 			this.storePath,
@@ -193,13 +176,12 @@ export class NarInfo {
 	}
 
 	fingerprint(): string {
-		return [
-			'1',
-			this.storePath.value,
+		return narFingerprint(
+			this.storePath,
 			this.narHash.toString(),
-			String(this.narSize),
-			this.referenceStorePaths().join(',')
-		].join(';');
+			this.narSize,
+			this.references
+		);
 	}
 
 	render(): string {
@@ -245,4 +227,45 @@ export class NarInfo {
 			sigs: this.sigs
 		};
 	}
+}
+
+// Nix's canonical fingerprint sorts the full reference store paths, so a
+// signature never depends on the order the references arrive in.
+function fingerprintReferenceStorePaths(
+	storePath: StorePath,
+	references: readonly StorePathBasename[]
+): readonly string[] {
+	const path = storePath.value;
+	const separator = path.lastIndexOf('/');
+	const storeDirectory =
+		separator === -1 ? undefined : path.slice(0, separator);
+
+	return references
+		.map((reference) =>
+			storeDirectory === undefined
+				? reference
+				: `${storeDirectory}/${reference}`
+		)
+		.toSorted(byCodeUnit);
+}
+
+/**
+ * The Nix narinfo fingerprint a signature is computed over. It commits to the
+ * uncompressed NAR (`narHash`/`narSize`) and the references alone, never the
+ * compressed encoding, so it can be signed before a blob's file hash and size
+ * are known.
+ */
+export function narFingerprint(
+	storePath: StorePath,
+	narHash: string,
+	narSize: number,
+	references: readonly StorePathBasename[]
+): string {
+	return [
+		'1',
+		storePath.value,
+		narHash,
+		String(narSize),
+		fingerprintReferenceStorePaths(storePath, references).join(',')
+	].join(';');
 }

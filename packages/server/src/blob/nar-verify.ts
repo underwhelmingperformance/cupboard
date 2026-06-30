@@ -1,5 +1,6 @@
 import { ZstdDecodeError } from '@cupboard/nix-store/errors';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 
 import { verifiableMaxBytes } from '../http/http.ts';
@@ -12,7 +13,15 @@ export interface ExpectedNar {
 }
 
 export type NarVerification =
-	| { readonly ok: true }
+	| {
+			readonly ok: true;
+			// The compressed object's own SHA-256 and byte length, computed over the
+			// same bytes this pass decompresses. A byte verification always reports
+			// them; the reuse pass-through, which verifies no bytes, omits them and
+			// sources the blob facts from `blob_state`.
+			readonly fileHash?: NixSha256HashString;
+			readonly fileSize?: number;
+	  }
 	| {
 			readonly ok: false;
 			readonly reason: 'nar-hash-mismatch';
@@ -28,10 +37,12 @@ export type NarVerification =
 /**
  * Streams a stored `.nar.zst` body through native zstd decompression and a
  * running SHA-256, recomputing the uncompressed NAR hash and size and comparing
- * them to what the narinfo commits to. The stream is never buffered whole, so
- * peak memory stays bounded regardless of NAR size and only CPU time bounds how
- * large a NAR can be verified in one pass. This is the server-side check that
- * makes a client-asserted `narHash` trustworthy before it is signed and served.
+ * them to what the narinfo commits to. The same pass hashes and counts the
+ * compressed input, so a successful verification also yields the object's own
+ * file hash and size without a second read. The stream is never buffered whole,
+ * so peak memory stays bounded regardless of NAR size and only CPU time bounds
+ * how large a NAR can be verified in one pass. This is the server-side check
+ * that makes a client's `narHash` trustworthy before it is signed and served.
  */
 export async function verifyDecompressedNar(
 	body: ReadableStream<Uint8Array>,
@@ -43,16 +54,43 @@ export async function verifyDecompressedNar(
 	// larger than what the server is willing to verify regardless of what the
 	// client declared.
 	const limit = Math.min(expected.narSize, verifiableMaxBytes);
-	const reader = body.pipeThrough(zstdDecompressionStream()).getReader();
+
+	// Hash and count the compressed bytes as they arrive, before decompression,
+	// so a successful pass reports the stored object's own file hash and size.
+	const fileDigestStream = new crypto.DigestStream('SHA-256');
+	const fileDigestComplete = fileDigestStream.digest;
+	const fileWriter = fileDigestStream.getWriter();
+	let fileSize = 0;
+
+	const compressed = body.pipeThrough(
+		new TransformStream<Uint8Array, Uint8Array>({
+			async transform(chunk, controller) {
+				fileSize += chunk.byteLength;
+				await fileWriter.write(chunk);
+				controller.enqueue(chunk);
+			},
+			async flush() {
+				await fileWriter.close();
+			}
+		})
+	);
+
+	const reader = compressed.pipeThrough(zstdDecompressionStream()).getReader();
 	const digestStream = new crypto.DigestStream('SHA-256');
 	const digestComplete = digestStream.digest;
 	const writer = digestStream.getWriter();
 	let narSize = 0;
 
-	// Cancel both ends and discard the (now-rejecting) digest so an early exit
+	// Cancel every end and discard the (now-rejecting) digests so an early exit
 	// never leaves an unhandled rejection or a dangling decompression.
 	const teardown = async (): Promise<void> => {
-		await Promise.allSettled([reader.cancel(), writer.abort(), digestComplete]);
+		await Promise.allSettled([
+			reader.cancel(),
+			writer.abort(),
+			fileWriter.abort(),
+			digestComplete,
+			fileDigestComplete
+		]);
 	};
 
 	try {
@@ -103,5 +141,11 @@ export async function verifyDecompressedNar(
 		return { ok: false, reason: 'nar-size-mismatch', actualNarSize: narSize };
 	}
 
-	return { ok: true };
+	const fileDigest = new Uint8Array(await fileDigestComplete);
+
+	return {
+		ok: true,
+		fileHash: NixSha256Hash.fromDigest(fileDigest).value,
+		fileSize
+	};
 }

@@ -1,6 +1,5 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
-import type { ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 
 import {
 	UploadedObjectChecksumMismatchError,
@@ -65,26 +64,5 @@ export function verifyStoredBlob(
 		r2Key,
 		expected.fileHash,
 		actual
-	);
-}
-
-/**
- * Confirms a freshly uploaded object matches the metadata the client
- * negotiated.
- */
-export function verifyUploadedObject(
-	object: UploadedObject | undefined,
-	expectedSize: number,
-	metadata: ParsedUploadPathMetadata,
-	r2Key: string
-): void {
-	verifyStoredBlob(
-		object,
-		{
-			narHash: metadata.narHash,
-			fileHash: metadata.fileHash,
-			fileSize: expectedSize
-		},
-		r2Key
 	);
 }
