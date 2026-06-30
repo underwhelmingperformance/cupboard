@@ -182,23 +182,6 @@ export const tenantRouter = os.router({
 				requestUrl.origin
 			);
 		}),
-		prepare: os.uploads.prepare.handler(({ input, context }) =>
-			context.services.uploads.prepareUpload(
-				cacheFromSelector(input.cacheName),
-				input.id,
-				{
-					fileHash: input.fileHash,
-					fileSize: input.fileSize,
-					compression: input.compression
-				}
-			)
-		),
-		prepareBatch: os.uploads.prepareBatch.handler(({ input, context }) =>
-			context.services.uploads.prepareUploads(
-				cacheFromSelector(input.cacheName),
-				input.items
-			)
-		),
 		status: os.uploads.status.handler(({ input, context }) =>
 			context.services.uploads.uploadStatus(input.id)
 		)
@@ -207,13 +190,7 @@ export const tenantRouter = os.router({
 		negotiate: os.attestations.negotiate.handler(({ input, context }) =>
 			context.services.attestations.negotiate(
 				cacheFromSelector(input.cacheName),
-				{ bundles: input.bundles }
-			)
-		),
-		prepare: os.attestations.prepare.handler(({ input, context }) =>
-			context.services.attestations.prepare(
-				cacheFromSelector(input.cacheName),
-				input.id
+				{ pushId: input.pushId, bundles: input.bundles }
 			)
 		),
 		attach: os.attestations.attach.handler(({ input, context }) =>

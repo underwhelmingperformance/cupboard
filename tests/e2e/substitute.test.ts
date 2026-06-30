@@ -8,10 +8,8 @@ import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
-import { CupboardUploadError } from '../../packages/cli/src/errors.ts';
-import { readFileByteStream } from '../../packages/cli/src/io/file-stream.ts';
+import { UploadVerificationFailedError } from '../../packages/cli/src/errors.ts';
 import type { PushClient } from '../../packages/cli/src/push/push.ts';
-import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import {
@@ -50,10 +48,10 @@ async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 	return rejected;
 }
 
-function expectCupboardUploadError(
+function expectUploadVerificationFailed(
 	error: unknown
-): asserts error is CupboardUploadError {
-	expect(error).toBeInstanceOf(CupboardUploadError);
+): asserts error is UploadVerificationFailedError {
+	expect(error).toBeInstanceOf(UploadVerificationFailedError);
 }
 
 function namedBytesShape(value: string): {
@@ -169,30 +167,38 @@ describe('Nix substitution', () => {
 			});
 		}));
 
-	it('rejects a presigned upload whose signature has been tampered with', () =>
+	it('rejects a commit whose staged bytes do not match the negotiated NAR', () =>
 		withHarness('cupboard-e2e-tamper-', async (harness) => {
 			const storePath = await harness.source.add(contentAddressedFixture);
 			const upload = await negotiateUpload(pushContext(harness), storePath);
-			const tampered = new URL(upload.uploadUrl);
-			tampered.searchParams.set('X-Amz-Signature', '0'.repeat(64));
+
+			// Corrupt the compressed bytes so they no longer decode to the NAR the
+			// commit names. The server derives the hash from what was staged, so a
+			// commit over tampered bytes must fail verification rather than serve.
+			const tampered = Uint8Array.from(
+				upload.compressed,
+				(byte) => byte ^ 0xff
+			);
+			await harness.server.stageObject(upload.r2Key, tampered);
 
 			const error = await rejectedBy(() =>
-				harness.client.uploadBlob({
-					r2Key: upload.r2Key,
-					uploadUrl: tampered.href,
-					headers: upload.uploadHeaders,
-					body: () => readFileByteStream(upload.compressedPath),
-					contentLength: upload.fileSize
-				})
+				harness.client.commit(
+					{
+						uploadId: upload.uploadId,
+						storePathHash: upload.storePathHash,
+						narHash: upload.narHash
+					},
+					{ wait: true }
+				)
 			);
 
-			expectCupboardUploadError(error);
+			expectUploadVerificationFailed(error);
 			expect({
-				r2Key: error.r2Key,
+				uploadId: error.uploadId,
 				status: error.status
 			}).toStrictEqual({
-				r2Key: upload.r2Key,
-				status: 403
+				uploadId: upload.uploadId,
+				status: 'mismatch'
 			});
 		}));
 });
@@ -203,7 +209,6 @@ interface Harness {
 	readonly target: NixStore;
 	readonly client: PushClient;
 	readonly publicKey: string;
-	readonly directory: string;
 }
 
 function withHarness(
@@ -216,10 +221,7 @@ function withHarness(
 			const server = await CupboardTestServer.start(directory);
 
 			try {
-				const raw = new CupboardClient(
-					server.tenantUrl,
-					server.uploadFetcher()
-				);
+				const raw = new CupboardClient(server.tenantUrl);
 				const token = await server.ownerAdminToken();
 				const publicKey = await raw.publicKey();
 
@@ -230,11 +232,8 @@ function withHarness(
 						path.join(directory, 'target-store'),
 						path.join(directory, 'target-home')
 					),
-					client: pushClientFor(server.tenantUrl, token, {
-						fetcher: server.uploadFetcher()
-					}),
-					publicKey,
-					directory
+					client: server.pushClient(token),
+					publicKey
 				});
 			} finally {
 				await server.stop();
@@ -247,8 +246,7 @@ function withHarness(
 function pushContext(harness: Harness): PushContext {
 	return {
 		client: harness.client,
-		store: harness.source,
-		workDirectory: harness.directory
+		store: harness.source
 	};
 }
 

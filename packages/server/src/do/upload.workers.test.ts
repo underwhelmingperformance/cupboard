@@ -3,10 +3,8 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	DEFAULT_CACHE,
-	storePathHashSchema,
-	WIRE_DEFAULT_CACHE
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { uploadPrepareBatchResponseSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -72,8 +70,6 @@ import {
 	nixSha256Hash,
 	openCommitSession,
 	pendingUploadVerdict,
-	prepareUpload,
-	prepareUploadViaWorker,
 	provisionNamedTenant,
 	pushPath,
 	putNarBytes,
@@ -87,10 +83,8 @@ import {
 	setRoot,
 	testBase,
 	testPushId,
-	uploadBlobMetadata,
 	uploadMetadata,
 	uploadPathNegotiation,
-	useTestServer,
 	verifiableNar,
 	verifiableNarStored,
 	verifiablePath,
@@ -385,7 +379,6 @@ describe('upload flow', () => {
 
 		const negotiate = await negotiateUploads(init.token, [metadata]);
 		const upload = expectSingleUploadDecision(negotiate, metadata);
-		await prepareUpload(init.token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		const committed = await commitUpload(init.token, upload.uploadId);
@@ -486,7 +479,6 @@ describe('upload flow', () => {
 			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 			const negotiate = await negotiateUploads(init.token, [metadata]);
 			const upload = expectSingleUploadDecision(negotiate, metadata);
-			await prepareUpload(init.token, upload, metadata);
 			await putNarBytes(upload.r2Key);
 			await commitUpload(init.token, upload.uploadId);
 		} finally {
@@ -626,7 +618,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		const error = await rejectedBy(
@@ -665,7 +656,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key, {
 			narBytes: garbage,
 			narHash: metadata.narHash,
@@ -707,7 +697,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [badMetadata]),
 			badMetadata
 		);
-		await prepareUpload(token, bad, badMetadata);
 		await putNarBytes(bad.r2Key, wrong);
 
 		const error = await rejectedBy(
@@ -734,7 +723,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [goodMetadata]),
 			goodMetadata
 		);
-		await prepareUpload(token, goodUpload, goodMetadata);
 		await putNarBytes(goodUpload.r2Key, good);
 
 		const goodCommit = await commitUpload(token, goodUpload.uploadId);
@@ -789,9 +777,7 @@ describe('upload flow', () => {
 			second
 		);
 
-		await prepareUpload(token, firstUpload, first);
 		await putNarBytes(firstUpload.r2Key, compressed);
-		await prepareUpload(token, secondUpload, second);
 		await putNarBytes(secondUpload.r2Key, stored);
 
 		await commitUpload(token, firstUpload.uploadId);
@@ -832,7 +818,6 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key, wrong);
 		await markUploadPendingVerification(upload.uploadId);
 
@@ -892,44 +877,6 @@ describe('upload flow', () => {
 		expect(served.toFields().narSize).toBe(nar.narSize);
 	});
 
-	it('rejects preparing a reuse upload and leaves the canonical object untouched', async () => {
-		const token = await initialise();
-		const first = uploadMetadata({ fileSize: narBytes.byteLength });
-
-		await commitPath(token, first);
-
-		// A second store path negotiates a reuse decision for the same narHash.
-		const second = uploadMetadata({
-			name: 'second',
-			storePathHash: '22222222222222222222222222222222',
-			narHash: first.narHash,
-			fileHash: first.fileHash,
-			fileSize: narBytes.byteLength
-		});
-		const reuse = expectSingleCommitDecision(
-			await negotiateUploads(token, [second]),
-			second
-		);
-
-		// Preparing a reuse upload must be rejected outright: its r2Key is the shared
-		// canonical key, so presigning it would hand out a direct write to the CAS
-		// object that the reuse commit does not re-verify.
-		const prepare = await authorisedFetch(
-			`/cache/_default/uploads/${reuse.uploadId}`,
-			token,
-			{
-				body: JSON.stringify(uploadBlobMetadata(second)),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
-
-		expect(prepare.status).toBe(StatusCodes.CONFLICT);
-		await expect(
-			env.BLOBS.head(narObjectKey(first.narHash))
-		).resolves.not.toBeNull();
-	});
-
 	it('verifies and commits a deferred pending upload in the background pass', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -938,7 +885,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// A blob too large to verify inline commits as `pending`: stored, but not
@@ -971,7 +917,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// An inline commit that crashed after marking itself in progress but before
@@ -999,7 +944,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await markUploadCommitting(upload.uploadId);
 
@@ -1027,7 +971,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// A fresh upload defers for verify-before-serve. The commit must leave a
@@ -1056,7 +999,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
@@ -1092,7 +1034,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
@@ -1115,60 +1056,12 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
 
 		await currentServer().recordMissingObject(upload.uploadId);
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBe('mismatch');
-	});
-
-	it('presigns a batch and reports a failed item without sinking the chunk', async () => {
-		const token = await initialise();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-
-		const response = await authorisedFetch(
-			`/cache/${WIRE_DEFAULT_CACHE}/uploads/prepare`,
-			token,
-			{
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify({
-					items: [
-						{ id: upload.uploadId, ...uploadBlobMetadata(metadata) },
-						{ id: 'missing-upload', ...uploadBlobMetadata(metadata) }
-					]
-				})
-			}
-		);
-
-		expect(response.status).toBe(StatusCodes.OK);
-		const body = uploadPrepareBatchResponseSchema.parse(await response.json());
-
-		// The real slot presigns; the unknown id fails on its own, leaving the
-		// chunk's result intact.
-		expect(
-			body.items.map((item) => ({ id: item.id, ok: item.ok }))
-		).toStrictEqual([
-			{ id: upload.uploadId, ok: true },
-			{ id: 'missing-upload', ok: false }
-		]);
-
-		const [presigned] = body.items;
-
-		if (presigned?.ok !== true) {
-			throw new Error('expected the first batch item to be presigned');
-		}
-
-		// The signed checksum still binds the per-path compressed hash.
-		expect(presigned.uploadHeaders['x-amz-checksum-sha256']).toBe(
-			fileHash.digestBase64()
-		);
 	});
 
 	it('multiplexes commits for many uploads over one session socket', async () => {
@@ -1199,9 +1092,7 @@ describe('upload flow', () => {
 		};
 		const a = decisionFor(metaA.storePathHash);
 		const b = decisionFor(metaB.storePathHash);
-		await prepareUpload(token, a, metaA);
 		await putNarBytes(a.r2Key);
-		await prepareUpload(token, b, metaB);
 		await putNarBytes(b.r2Key);
 
 		// Both commits ride one socket and each gets its own per-id frame.
@@ -1230,7 +1121,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// Commit on one session; it defers, then that socket drops.
@@ -1268,7 +1158,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// Commit fully, so its pending row is cleared.
@@ -1295,7 +1184,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// The state a crashed inline commit leaves: the row reserved at generation 0,
@@ -1332,7 +1220,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// A crashed inline reuse saga: reserved row, marked committing, never settled
@@ -1376,7 +1263,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		const sent: unknown[] = [];
@@ -1423,7 +1309,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, loser, metadata);
 		await putNarBytes(loser.r2Key);
 
 		// A rival commit reserved the path but has not committed its reference yet:
@@ -1476,7 +1361,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [liar]),
 			liar
 		);
-		await prepareUpload(token, liarUpload, liar);
 		await putNarBytes(liarUpload.r2Key, wrong);
 
 		// A correct upload of `good` for another path commits first, so `blob_state`
@@ -1523,7 +1407,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [reserved]),
 			reserved
 		);
-		await prepareUpload(token, reservedUpload, reserved);
 		await putNarBytes(reservedUpload.r2Key, wrong);
 
 		const honest = uploadMetadata({
@@ -1576,7 +1459,6 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await markUploadPendingVerification(upload.uploadId);
 
@@ -1615,7 +1497,6 @@ describe('upload flow', () => {
 				await negotiateUploads(token, [metadata]),
 				metadata
 			);
-			await prepareUpload(token, upload, metadata);
 			await putNarBytes(upload.r2Key, nar);
 			await markUploadPendingVerification(upload.uploadId);
 			uploadIds.push(upload.uploadId);
@@ -1676,7 +1557,6 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await markUploadPendingVerification(upload.uploadId);
 
@@ -1721,7 +1601,6 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key, {
 			narBytes: garbage,
 			narHash: metadata.narHash,
@@ -1758,7 +1637,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [x]),
 			x
 		);
-		await prepareUpload(token, xUpload, x);
 		await putNarBytes(xUpload.r2Key, narX);
 		await markUploadPendingVerification(xUpload.uploadId);
 
@@ -1775,7 +1653,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [y]),
 			y
 		);
-		await prepareUpload(token, yUpload, y);
 		await putNarBytes(yUpload.r2Key, narY);
 		await markUploadPendingVerification(yUpload.uploadId);
 
@@ -1805,7 +1682,6 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await markUploadPendingVerification(upload.uploadId);
 
@@ -1835,7 +1711,6 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key, wrong);
 		await markUploadPendingVerification(upload.uploadId);
 
@@ -1863,7 +1738,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		const error = await rejectedBy(
@@ -1888,7 +1762,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// The deferral must ask for a prompt verification pass rather than
@@ -1936,9 +1809,7 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, first, metadata);
 		await putNarBytes(first.r2Key);
-		await prepareUpload(token, second, metadata);
 		await putNarBytes(second.r2Key);
 
 		const firstCommit = await commitUpload(token, first.uploadId);
@@ -1968,7 +1839,6 @@ describe('upload flow', () => {
 			metadata
 		);
 
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await putNarBytes(narObjectKey(metadata.narHash));
 
@@ -1997,14 +1867,12 @@ describe('upload flow', () => {
 			await negotiateUploads(init.token, [metadata]),
 			metadata
 		);
-		await prepareUpload(init.token, first, metadata);
 		await putNarBytes(first.r2Key);
 
 		const second = expectSingleUploadDecision(
 			await negotiateUploads(init.token, [metadata]),
 			metadata
 		);
-		await prepareUpload(init.token, second, metadata);
 
 		const committed = await commitUpload(init.token, first.uploadId);
 
@@ -2058,7 +1926,6 @@ describe('upload flow', () => {
 			await negotiateUploads(init.token, [metadata]),
 			metadata
 		);
-		await prepareUpload(init.token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 		await commitUpload(init.token, upload.uploadId);
 
@@ -2186,7 +2053,6 @@ describe('upload flow', () => {
 
 		const firstNegotiate = await negotiateUploads(token, [first]);
 		const firstUpload = expectSingleUploadDecision(firstNegotiate, first);
-		await prepareUpload(token, firstUpload, first);
 		await putNarBytes(firstUpload.r2Key);
 		await commitUpload(token, firstUpload.uploadId);
 
@@ -2342,7 +2208,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [reserved]),
 			reserved
 		);
-		await prepareUpload(token, upload, reserved);
 		await putNarBytes(upload.r2Key);
 		await seedReservedNarInfo(reserved);
 		await markUploadCommitting(upload.uploadId);
@@ -2365,36 +2230,6 @@ describe('upload flow', () => {
 			},
 			narHash: reserved.narHash
 		});
-	});
-
-	it('requires R2 presign configuration for upload decisions', async () => {
-		const previousSecret = env.R2_SECRET_ACCESS_KEY;
-		Object.assign(env, { R2_SECRET_ACCESS_KEY: '' });
-		await useTestServer('r2-config');
-
-		try {
-			const token = await initialise();
-			const metadata = uploadMetadata({
-				fileSize: narBytes.byteLength
-			});
-			const negotiate = await negotiateUploads(token, [metadata]);
-			const upload = expectSingleUploadDecision(negotiate, metadata);
-			const response = await authorisedFetch(
-				`/cache/_default/uploads/${upload.uploadId}`,
-				token,
-				{
-					body: JSON.stringify(uploadBlobMetadata(metadata)),
-					headers: {
-						'content-type': 'application/json'
-					},
-					method: 'PUT'
-				}
-			);
-
-			expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
-		} finally {
-			Object.assign(env, { R2_SECRET_ACCESS_KEY: previousSecret });
-		}
 	});
 
 	it.each([
@@ -2451,67 +2286,6 @@ describe('upload flow', () => {
 		});
 	});
 
-	it.each([
-		{
-			name: 'a malformed file hash',
-			fields: { fileHash: 'sha256:not-a-valid-hash' },
-			issues: [{ code: 'invalid_format', path: ['fileHash'] }]
-		},
-		{
-			name: 'a non-positive file size',
-			fields: { fileSize: 0 },
-			issues: [{ code: 'too_small', path: ['fileSize'] }]
-		}
-	])('rejects upload preparation with $name', async ({ fields, issues }) => {
-		const token = await initialise();
-		const metadata = uploadMetadata({
-			fileSize: narBytes.byteLength
-		});
-		const upload = expectSingleUploadDecision(
-			await negotiateUploads(token, [metadata]),
-			metadata
-		);
-		const response = await authorisedFetch(
-			`/cache/_default/uploads/${upload.uploadId}`,
-			token,
-			{
-				body: JSON.stringify({
-					...uploadBlobMetadata(metadata),
-					...fields
-				}),
-				headers: {
-					'content-type': 'application/json'
-				},
-				method: 'PUT'
-			}
-		);
-
-		const body = badRequestBodyShape(await response.json());
-
-		expect({
-			status: response.status,
-			body: {
-				code: body.code,
-				status: body.status,
-				issues: body.issues
-			}
-		}).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST,
-			body: {
-				code: 'BAD_REQUEST',
-				status: StatusCodes.BAD_REQUEST,
-				issues
-			}
-		});
-
-		await expectStats(token, {
-			storePaths: 0,
-			narBlobs: 0,
-			pendingUploads: 1,
-			totalFileSize: 0
-		});
-	});
-
 	it('rejects malformed JSON upload requests', async () => {
 		const token = await initialise();
 		const response = await authorisedFetch('/cache/_default/uploads', token, {
@@ -2538,7 +2312,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [metadata]),
 			metadata
 		);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		await expect(env.BLOBS.head(upload.r2Key)).resolves.not.toBeNull();
@@ -2618,7 +2391,6 @@ describe('upload flow', () => {
 			await negotiateUploads(token, [first]),
 			first
 		);
-		await prepareUpload(token, firstUpload, first);
 		await putNarBytes(firstUpload.r2Key);
 		await commitUpload(token, firstUpload.uploadId);
 		expectSingleCommitDecision(await negotiateUploads(token, [second]), second);
@@ -2662,7 +2434,6 @@ describe('upload flow', () => {
 		});
 		const negotiation = await negotiateViaWorker(token, [metadata]);
 		const upload = expectSingleUploadDecision(negotiation, metadata);
-		await prepareUploadViaWorker(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		await expectStatsViaWorker(token, {
@@ -2702,7 +2473,6 @@ describe('upload flow', () => {
 			committedNegotiation,
 			committed
 		);
-		await prepareUploadViaWorker(token, committedUpload, committed);
 		await putNarBytes(committedUpload.r2Key);
 		const commit = await commitUploadViaWorker(token, committedUpload.uploadId);
 		expect(commit.status).toBe('committed');
@@ -2719,7 +2489,6 @@ describe('upload flow', () => {
 		});
 		const staleNegotiation = await negotiateViaWorker(token, [stale]);
 		const staleUpload = expectSingleUploadDecision(staleNegotiation, stale);
-		await prepareUploadViaWorker(token, staleUpload, stale);
 
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await runQueuedMaintenanceTick();

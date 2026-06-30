@@ -3,14 +3,9 @@ import {
 	type ParsedUploadNegotiateRequest,
 	type ParsedUploadPathMetadata,
 	type ParsedUploadPathNegotiation,
-	type ParsedUploadPrepareItemRequest,
-	type ParsedUploadPrepareRequest,
 	type PushCredential,
 	type UploadDecision,
 	type UploadNegotiateResponse,
-	type UploadPrepareBatchResponse,
-	type UploadPrepareItemResult,
-	type UploadPrepareResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -18,13 +13,7 @@ import { and, eq, inArray } from 'drizzle-orm';
 import { pushCredentialTtlSeconds } from '../blob/push-credential.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import {
-	InvalidPushIdError,
-	ReusableUploadNotPreparableError,
-	UploadCacheMismatchError,
-	UploadExpiredError,
-	UploadNotFoundError
-} from '../errors.ts';
+import { InvalidPushIdError } from '../errors.ts';
 import { narObjectKey, stagingObjectKey } from '../http/http.ts';
 
 import { chunk, maxInClauseValues } from './bulk.ts';
@@ -32,11 +21,7 @@ import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
-import {
-	commitMetadataFromPathAndBlob,
-	parseStoredUploadPathMetadata,
-	uploadHeadersFor
-} from './upload-metadata.ts';
+import { commitMetadataFromPathAndBlob } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
@@ -307,103 +292,5 @@ export class UploadsService {
 		}
 
 		return issuer.issueFor(pushId, ttlSeconds, now);
-	}
-
-	async prepareUpload(
-		cache: string,
-		uploadId: string,
-		blobMetadata: ParsedUploadPrepareRequest
-	): Promise<UploadPrepareResponse> {
-		const pending = this.context.db
-			.select()
-			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.get();
-
-		if (pending === undefined) {
-			throw new UploadNotFoundError(uploadId);
-		}
-
-		if (pending.cache !== cache) {
-			throw new UploadCacheMismatchError(uploadId, pending.cache, cache);
-		}
-
-		const now = new Date();
-
-		if (pending.expiresAt < now.toISOString()) {
-			await this.uploadState.clearPendingUploadAndStaging(
-				uploadId,
-				pending.r2Key,
-				pending.narHash
-			);
-
-			throw new UploadExpiredError(uploadId);
-		}
-
-		// A reuse upload's r2Key is the shared canonical key. It needs no upload, so
-		// it is never prepared; reject it explicitly rather than presign a write
-		// straight onto the shared CAS object (which the reuse commit would not
-		// re-verify). The client should commit a reuse decision directly.
-		if (pending.r2Key === narObjectKey(pending.narHash)) {
-			throw new ReusableUploadNotPreparableError(uploadId);
-		}
-
-		const pathMetadata = parseStoredUploadPathMetadata(
-			uploadId,
-			pending.metadataJson
-		);
-		const metadata = commitMetadataFromPathAndBlob(pathMetadata, blobMetadata);
-		const expiresAt = new Date(Date.now() + uploadTtlMs);
-
-		this.context.db
-			.update(schema.pendingUploads)
-			.set({
-				expectedSize: metadata.fileSize,
-				metadataJson: JSON.stringify(metadata),
-				expiresAt: expiresAt.toISOString()
-			})
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.run();
-
-		return {
-			uploadUrl: await this.uploadState.presignedPutUrl(
-				pending.r2Key,
-				metadata.fileHash,
-				expiresAt
-			),
-			uploadHeaders: uploadHeadersFor(metadata),
-			expiresAt: expiresAt.toISOString()
-		};
-	}
-
-	// Presigns a chunk of uploads in one call by running the single-path prepare
-	// per item. An item whose slot expired or turned out reusable yields a failed
-	// result the client re-negotiates on its own, so one such item leaves the rest
-	// of the chunk presigned.
-	async prepareUploads(
-		cache: string,
-		items: readonly ParsedUploadPrepareItemRequest[]
-	): Promise<UploadPrepareBatchResponse> {
-		const results: UploadPrepareItemResult[] = [];
-
-		for (const item of items) {
-			try {
-				const prepared = await this.prepareUpload(cache, item.id, {
-					fileHash: item.fileHash,
-					fileSize: item.fileSize,
-					compression: item.compression
-				});
-
-				results.push({ ok: true, id: item.id, ...prepared });
-			} catch (error) {
-				results.push({
-					ok: false,
-					id: item.id,
-					error: error instanceof Error ? error.message : String(error)
-				});
-			}
-		}
-
-		return { items: results };
 	}
 }

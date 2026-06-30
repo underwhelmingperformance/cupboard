@@ -12,7 +12,6 @@ import {
 	initialise,
 	markUploadPendingVerification,
 	negotiateUploads,
-	prepareUpload,
 	provisionFixtureTenant,
 	putNarBytes,
 	readStoredNarInfo,
@@ -28,8 +27,8 @@ import {
 // `mismatch` and `over-quota` verdicts. A settled upload leaves no residue, so
 // its status reads `absent` and servability is observed at the narinfo itself.
 
-// Stages a deferred upload (negotiate, prepare, upload, mark pending) and returns
-// its uploadId, the state every fresh upload reaches before the background pass
+// Stages a deferred upload (negotiate, upload, mark pending) and returns its
+// uploadId, the state every fresh upload reaches before the background pass
 // runs.
 async function stageDeferred(nar: {
 	readonly narHash: NixSha256HashString;
@@ -51,7 +50,6 @@ async function stageDeferred(nar: {
 		metadata
 	);
 
-	await prepareUpload(token, upload, metadata);
 	await putNarBytes(upload.r2Key, nar);
 	await markUploadPendingVerification(upload.uploadId);
 

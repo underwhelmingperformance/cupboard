@@ -6,6 +6,8 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import { pushIdSchema } from './upload.ts';
+
 export const attestationDescriptorSchema = z.strictObject({
 	digest: sha256HexDigestSchema,
 	predicateType: predicateTypeSchema,
@@ -30,6 +32,7 @@ const attestationBundleRequestSchema = z.strictObject({
 export const attestationNegotiateMaxBundles = 100_000;
 
 export const attestationNegotiateRequestSchema = z.strictObject({
+	pushId: pushIdSchema,
 	bundles: z
 		.array(attestationBundleRequestSchema)
 		.max(attestationNegotiateMaxBundles)
@@ -74,15 +77,6 @@ export type ParsedAttestationNegotiateResponse = z.output<
 	typeof attestationNegotiateResponseSchema
 >;
 
-export const attestationPrepareResponseSchema = z.strictObject({
-	uploadUrl: z.string(),
-	uploadHeaders: z.record(z.string(), z.string()),
-	expiresAt: z.string()
-});
-export type ParsedAttestationPrepareResponse = z.output<
-	typeof attestationPrepareResponseSchema
->;
-
 export const attestationAttachResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	digest: sha256HexDigestSchema,
@@ -104,9 +98,6 @@ export type AttestationUploadDecision = z.input<
 >;
 export type AttestationNegotiateResponse = z.input<
 	typeof attestationNegotiateResponseSchema
->;
-export type AttestationPrepareResponse = z.input<
-	typeof attestationPrepareResponseSchema
 >;
 export type AttestationAttachResponse = z.input<
 	typeof attestationAttachResponseSchema

@@ -21,7 +21,6 @@ import {
 	narBytes,
 	negotiateUploads,
 	negotiateViaInstance,
-	prepareUpload,
 	putNarBytes,
 	resetTestServer,
 	uploadMetadata
@@ -143,7 +142,6 @@ describe('maintenance reconcile', () => {
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const negotiate = await negotiateUploads(token, [metadata]);
 		const upload = expectSingleUploadDecision(negotiate, metadata);
-		await prepareUpload(token, upload, metadata);
 		await putNarBytes(upload.r2Key);
 
 		// A stale projection left from before the commit: a sentinel wake no real state

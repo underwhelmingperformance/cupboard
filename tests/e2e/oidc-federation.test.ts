@@ -3,7 +3,6 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
-import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import {
 	CupboardTestServer,
 	ownerAudience,
@@ -48,8 +47,7 @@ describe('OIDC federation', () => {
 		withFederation('cupboard-e2e-owner-', async ({ server }) => {
 			const adminToken = await server.ownerAdminToken();
 			const rpc = tenantRpc(server.tenantUrl, {
-				credential: adminToken,
-				fetcher: server.uploadFetcher()
+				credential: adminToken
 			});
 			const { rules } = await rpc.oidcTrust.list();
 
@@ -83,8 +81,7 @@ describe('OIDC federation', () => {
 		withFederation('cupboard-e2e-ci-', async ({ server, directory }) => {
 			const adminToken = await server.ownerAdminToken();
 			const rpc = tenantRpc(server.tenantUrl, {
-				credential: adminToken,
-				fetcher: server.uploadFetcher()
+				credential: adminToken
 			});
 			// The rule permits a named CI cache and root writes beneath an owner
 			// prefix; the issued grant carries whatever subset the CI requests.
@@ -132,12 +129,8 @@ describe('OIDC federation', () => {
 			const target = await source.add(contentAddressedFixture);
 			await pushStorePaths(
 				{
-					client: pushClientFor(server.tenantUrl, adminToken, {
-						cache: 'owner-ci',
-						fetcher: server.uploadFetcher()
-					}),
-					store: source,
-					workDirectory: directory
+					client: server.pushClient(adminToken, { cache: 'owner-ci' }),
+					store: source
 				},
 				[target]
 			);
@@ -145,8 +138,7 @@ describe('OIDC federation', () => {
 			// The CI token authorises per call, so its derived client binds it
 			// directly rather than going through the cached owner session.
 			const ciRoots = tenantRpc(server.tenantUrl, {
-				credential: ciToken,
-				fetcher: server.uploadFetcher()
+				credential: ciToken
 			}).roots;
 			const permitted = await ciRoots.set({
 				cacheName: 'owner-ci',
@@ -179,8 +171,7 @@ describe('OIDC federation', () => {
 		withFederation('cupboard-e2e-ci-mismatch-', async ({ server }) => {
 			const adminToken = await server.ownerAdminToken();
 			const rpc = tenantRpc(server.tenantUrl, {
-				credential: adminToken,
-				fetcher: server.uploadFetcher()
+				credential: adminToken
 			});
 			await rpc.oidcTrust.add({
 				issuer: server.issuer.issuer,

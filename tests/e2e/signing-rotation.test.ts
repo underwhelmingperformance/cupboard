@@ -7,7 +7,6 @@ import { describe, expect, it } from 'vitest';
 
 import { CupboardClient } from '../../packages/cli/src/client/client.ts';
 import { tenantRpc } from '../../packages/cli/src/client/orpc.ts';
-import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore, type RealiseOptions } from '../support/nix.ts';
@@ -35,14 +34,10 @@ describe('Nix substitution through a signing-key rotation', () => {
 				const server = await CupboardTestServer.start(directory);
 
 				try {
-					const client = new CupboardClient(
-						server.tenantUrl,
-						server.uploadFetcher()
-					);
+					const client = new CupboardClient(server.tenantUrl);
 					const token = await server.ownerAdminToken();
 					const rpc = tenantRpc(server.tenantUrl, {
-						credential: token,
-						fetcher: server.uploadFetcher()
+						credential: token
 					});
 					const oldKey = await client.publicKey();
 					const source = await NixStore.host(
@@ -50,13 +45,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 					);
 					const push = (storePath: string): Promise<unknown> =>
 						pushStorePaths(
-							{
-								client: pushClientFor(server.tenantUrl, token, {
-									fetcher: server.uploadFetcher()
-								}),
-								store: source,
-								workDirectory: directory
-							},
+							{ client: server.pushClient(token), store: source },
 							[storePath]
 						);
 					const trusting = (keys: readonly string[]): RealiseOptions => ({

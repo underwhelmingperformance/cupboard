@@ -4,16 +4,15 @@ import { z } from 'zod';
 import {
 	attestationAttachResponseSchema,
 	attestationNegotiateRequestSchema,
-	attestationNegotiateResponseSchema,
-	attestationPrepareResponseSchema
+	attestationNegotiateResponseSchema
 } from '../attestations.ts';
 
 import { baseProcedure } from './base.ts';
 
 // The attestation upload conversation: negotiation decides per bundle whether
-// to upload or skip, preparation presigns the staging PUT, and attach
-// verifies and references the staged bundle. The Nix-facing list and bundle
-// reads stay outside the contract.
+// to upload or skip, the bundle streams to its staging key with the push
+// credential, and attach verifies and references the staged bundle. The
+// Nix-facing list and bundle reads stay outside the contract.
 export const attestationsContract = {
 	negotiate: baseProcedure
 		.meta({
@@ -29,16 +28,6 @@ export const attestationsContract = {
 			})
 		)
 		.output(attestationNegotiateResponseSchema),
-
-	prepare: baseProcedure
-		.meta({
-			requires: 'attestation:prepare',
-			resource: { cache: { field: 'cacheName' } },
-			maintenance: true
-		})
-		.route({ method: 'PUT', path: '/cache/{cacheName}/attestations/{id}' })
-		.input(z.strictObject({ cacheName: cacheSelectorSchema, id: z.string() }))
-		.output(attestationPrepareResponseSchema),
 
 	// The cache is taken from the pending attestation row the id addresses, not
 	// the path: the bundle was negotiated against that row's cache.

@@ -19,7 +19,6 @@ import {
 	authorisedFetch,
 	blobStateCount,
 	bootstrap,
-	cacheScopedPath,
 	cacheWriteGrants,
 	CommitSocketError,
 	commitUpload,
@@ -33,7 +32,6 @@ import {
 	putNarBytes,
 	resetTestServer,
 	testServerFor,
-	uploadBlobMetadata,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
@@ -294,15 +292,6 @@ describe('named caches', () => {
 		);
 
 		// The same upload still completes through the cache it was negotiated under.
-		await authorisedFetch(
-			cacheScopedPath('builds', `/uploads/${decision.uploadId}`),
-			init.token,
-			{
-				body: JSON.stringify(uploadBlobMetadata(metadata)),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
 		await putNarBytes(decision.r2Key);
 		const committed = await commitUpload(
 			init.token,
@@ -330,26 +319,5 @@ describe('named caches', () => {
 			defaultPaths: 0,
 			buildsPaths: 1
 		});
-	});
-
-	it('refuses to prepare an upload under a different cache than negotiated', async () => {
-		const init = await bootstrap();
-		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
-		const decision = expectSingleUploadDecision(
-			await negotiateUploads(init.token, [metadata], 'builds'),
-			metadata
-		);
-
-		const prepare = await authorisedFetch(
-			`/cache/_default/uploads/${decision.uploadId}`,
-			init.token,
-			{
-				body: JSON.stringify(uploadBlobMetadata(metadata)),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
-
-		expect(prepare.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 });

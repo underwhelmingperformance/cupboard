@@ -6,7 +6,6 @@ import {
 import { type ParsedUploadPathNegotiation } from '@cupboard/protocol/upload';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
-import { R2Presigner } from '../blob/presign.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
@@ -75,10 +74,6 @@ export class UploadStateService {
 		}
 
 		return canonicalBlobOf(canonicalKey, winner);
-	}
-
-	private r2Presigner(): R2Presigner {
-		return this.context.r2Presigner();
 	}
 
 	private async ownedNarHashes(
@@ -342,23 +337,5 @@ export class UploadStateService {
 			.run();
 
 		return canonical;
-	}
-
-	async presignedPutUrl(
-		key: string,
-		fileHash: NixSha256HashString,
-		expiresAt: Date
-	): Promise<string> {
-		const checksumSha256 = NixSha256Hash.parse(fileHash).digestBase64();
-		const expiresSeconds = Math.max(
-			1,
-			Math.floor((expiresAt.getTime() - Date.now()) / 1000)
-		);
-
-		return this.r2Presigner().presignPutUrl({
-			key,
-			checksumSha256,
-			expiresSeconds
-		});
 	}
 }

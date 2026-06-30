@@ -5,12 +5,6 @@ import {
 	R2PresignConfigurationMissingError
 } from '../errors.ts';
 
-export interface R2PresignOptions {
-	readonly key: string;
-	readonly checksumSha256: string;
-	readonly expiresSeconds: number;
-}
-
 export interface R2PresignerConfiguration {
 	readonly accountId: string;
 	readonly accessKeyId: string;
@@ -39,24 +33,6 @@ export class R2Presigner {
 		url.searchParams.set('X-Amz-Expires', String(expiresSeconds));
 
 		return url.href;
-	}
-
-	async presignPutUrl(options: R2PresignOptions): Promise<string> {
-		// R2 ignores a query-hoisted checksum (no integrity check) and rejects an
-		// unsigned x-amz-checksum-sha256 header, so the checksum stays a signed
-		// header: a `signQuery` sign leaves the passed headers in SignedHeaders
-		// rather than hoisting them, so the uploader sends the header and R2
-		// verifies both the signature and the body.
-		const signed = await this.client.sign(
-			this.objectUrl(options.key, options.expiresSeconds),
-			{
-				method: 'PUT',
-				headers: { 'x-amz-checksum-sha256': options.checksumSha256 },
-				aws: { signQuery: true }
-			}
-		);
-
-		return signed.url;
 	}
 
 	/**

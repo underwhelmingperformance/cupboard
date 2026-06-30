@@ -4,7 +4,6 @@ import { implicitPinName } from '@cupboard/nix-store/retention';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
-import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { CupboardTestServer } from '../support/cupboard-server.ts';
 import { withTemporaryDirectory } from '../support/filesystem.ts';
 import { NixStore } from '../support/nix.ts';
@@ -26,9 +25,7 @@ describe('cold-path retention TTL', () => {
 
 				try {
 					const token = await server.ownerAdminToken();
-					const client = pushClientFor(server.tenantUrl, token, {
-						fetcher: server.uploadFetcher()
-					});
+					const client = server.pushClient(token);
 					const source = await NixStore.host(
 						path.join(directory, 'source-home')
 					);
@@ -36,10 +33,7 @@ describe('cold-path retention TTL', () => {
 
 					// Root activation gates on servability, so the target must be pushed
 					// before it can be rooted.
-					await pushStorePaths(
-						{ client, store: source, workDirectory: directory },
-						[storePath]
-					);
+					await pushStorePaths({ client, store: source }, [storePath]);
 
 					const pin = await client.setRoot(
 						implicitPinName(StorePath.hash(storePath)),

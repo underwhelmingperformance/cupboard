@@ -6,19 +6,15 @@ import {
 	pushIdSchema,
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
-	uploadPrepareBatchRequestSchema,
-	uploadPrepareBatchResponseSchema,
-	uploadPrepareRequestSchema,
-	uploadPrepareResponseSchema,
 	uploadStatusResponseSchema
 } from '../upload.ts';
 
 import { baseProcedure } from './base.ts';
 
-// The upload conversation up to the commit: negotiation decides per path
-// whether to upload, reuse or skip; preparation presigns the staging PUT. The
-// commit itself is a WebSocket outside the contract, and the staged bytes go
-// straight to the presigned URL.
+// The upload conversation up to the commit: a credential scopes the push to its
+// staging prefix, negotiation decides per path whether to upload, reuse or skip,
+// and the missing NARs stream straight to R2 with the credential. The commit is
+// a WebSocket outside the contract.
 export const uploadsContract = {
 	// Issues the temporary R2 credential a push uploads its blobs with. Called
 	// without a push id at push start, the server signs a fresh one and scopes the
@@ -54,40 +50,6 @@ export const uploadsContract = {
 			})
 		)
 		.output(uploadNegotiateResponseSchema),
-
-	prepare: baseProcedure
-		.meta({
-			requires: 'upload:prepare',
-			resource: { cache: { field: 'cacheName' } },
-			maintenance: true
-		})
-		.route({ method: 'PUT', path: '/cache/{cacheName}/uploads/{id}' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				id: z.string(),
-				...uploadPrepareRequestSchema.shape
-			})
-		)
-		.output(uploadPrepareResponseSchema),
-
-	// Presigns a chunk of uploads in one round-trip: the hot-path call a push
-	// makes, so a whole closure presigns in a handful of requests. The per-path
-	// single prepare above re-negotiates one slot at a time.
-	prepareBatch: baseProcedure
-		.meta({
-			requires: 'upload:prepare',
-			resource: { cache: { field: 'cacheName' } },
-			maintenance: true
-		})
-		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/prepare' })
-		.input(
-			z.strictObject({
-				cacheName: cacheSelectorSchema,
-				...uploadPrepareBatchRequestSchema.shape
-			})
-		)
-		.output(uploadPrepareBatchResponseSchema),
 
 	// A deferred upload's status, polled by the uploadId the client holds; the
 	// id is unique across caches, so the cache is read from the pending row. A

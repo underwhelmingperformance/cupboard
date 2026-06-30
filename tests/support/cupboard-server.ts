@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import {
 	createServer,
@@ -19,10 +20,12 @@ import { Miniflare } from 'miniflare';
 import { build, type Plugin } from 'vite';
 import { type RawData, type WebSocket, WebSocketServer } from 'ws';
 
+import type { AccessCredential } from '../../packages/cli/src/client/credentials.ts';
+import type { PushClient } from '../../packages/cli/src/push/push.ts';
+import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { fixtureTenant } from '../../packages/server/src/routing/tenant-routing.test-support.ts';
 
 import { StubOidcIssuer } from './oidc-issuer.ts';
-import { presigningFetcher } from './r2-presign.ts';
 
 const root = path.resolve(import.meta.dirname, '../..');
 
@@ -60,9 +63,10 @@ type MiniflareRequestInit = NonNullable<
 
 /**
  * A running cupboard worker backed by Miniflare, fronted by a local HTTP server
- * so that Nix can reach it over a real socket. Blobs are written straight into
- * the bound R2 bucket because presigned uploads target Cloudflare's endpoint,
- * which Miniflare does not serve.
+ * so that Nix can reach it over a real socket. A push's NAR bytes are written
+ * straight into the bound R2 bucket because the real upload signs with a
+ * temporary credential against Cloudflare's S3 endpoint, which Miniflare does
+ * not serve.
  */
 export class CupboardTestServer {
 	static async start(
@@ -81,6 +85,7 @@ export class CupboardTestServer {
 		// Object across scripts via `scriptName`.
 		const tenantBindings = {
 			CUPBOARD_COLD_PATH_TTL_SECONDS: '',
+			PUSH_ID_SIGNING_KEY: 'e2e-push-id-signing-key',
 			R2_ACCESS_KEY_ID: r2Credentials.accessKeyId,
 			R2_ACCOUNT_ID: r2Credentials.accountId,
 			R2_BUCKET_NAME: r2Credentials.bucketName,
@@ -275,14 +280,31 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * A `fetch` that accepts the presigned uploads cupboard hands out: it
-	 * verifies their SigV4 signature and checksum, then stores the body in this
-	 * server's R2 bucket. Other requests fall through to the real `fetch`.
+	 * Builds the push client an e2e test drives. Negotiation, commit and
+	 * retention speak to the running worker; the streamed NAR bytes are written
+	 * straight into the bound R2 bucket the worker verifies against, standing in
+	 * for the temporary-credential upload to Cloudflare's S3 endpoint that the
+	 * SDK cannot reach under Miniflare.
 	 */
-	uploadFetcher(): typeof fetch {
-		return presigningFetcher(this.bucket, {
-			accessKeyId: r2Credentials.accessKeyId,
-			secretAccessKey: r2Credentials.secretAccessKey
+	pushClient(
+		credential: AccessCredential,
+		options: { readonly cache?: string } = {}
+	): PushClient {
+		const base = pushClientFor(this.tenantUrl, credential, {
+			cache: options.cache
+		});
+
+		return {
+			...base,
+			uploadNar: async (r2Key, body) =>
+				this.stageObject(r2Key, await collectStreamBytes(body))
+		};
+	}
+
+	/** Writes bytes to a staging key, the bucket the worker verifies against. */
+	async stageObject(r2Key: string, bytes: Uint8Array): Promise<void> {
+		await this.bucket.put(r2Key, bytes, {
+			sha256: createHash('sha256').update(bytes).digest()
 		});
 	}
 
@@ -384,6 +406,12 @@ export class TenantProvisionFailedError extends Error {
 		super(`Tenant provisioning failed with ${String(status)}: ${body}`);
 		this.name = 'TenantProvisionFailedError';
 	}
+}
+
+async function collectStreamBytes(
+	stream: ReadableStream<Uint8Array>
+): Promise<Uint8Array> {
+	return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
 // Order filenames by UTF-16 code unit, matching the default `Array#sort` order.

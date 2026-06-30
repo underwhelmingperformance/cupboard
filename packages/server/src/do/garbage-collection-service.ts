@@ -16,7 +16,7 @@ import {
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
-import { parseStoredUploadMetadata } from './upload-metadata.ts';
+import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 // One sweep deletes at most this many committed paths before returning, so a
 // chunk holds the Durable Object's gate only for its own deletes. When a sweep
@@ -156,7 +156,7 @@ export class GarbageCollectionService {
 		for (const upload of reservedUploads) {
 			try {
 				inFlight.add(
-					parseStoredUploadMetadata(upload.id, upload.metadataJson)
+					parseStoredUploadPathMetadata(upload.id, upload.metadataJson)
 						.storePathHash
 				);
 			} catch {

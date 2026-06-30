@@ -1,31 +1,6 @@
 import type { NixValidPathInfo } from '@cupboard/nix';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import type {
-	UploadPathMetadataFields,
-	UploadPathNegotiationFields
-} from '@cupboard/protocol/upload';
-
-import type { CompressedNarBlob } from './blob.ts';
-
-export interface PreparedStorePath {
-	readonly metadata: UploadPathMetadataFields;
-	readonly signatures: readonly string[];
-}
-
-export function prepareStorePathMetadata(
-	pathInfo: NixValidPathInfo,
-	blob: CompressedNarBlob
-): PreparedStorePath {
-	return {
-		metadata: {
-			...prepareStorePathNegotiation(pathInfo),
-			fileHash: blob.fileHash.toString(),
-			fileSize: blob.fileSize,
-			compression: blob.compression
-		},
-		signatures: pathInfo.signatures
-	};
-}
+import type { UploadPathNegotiationFields } from '@cupboard/protocol/upload';
 
 export function prepareStorePathNegotiation(
 	pathInfo: NixValidPathInfo

@@ -1,7 +1,5 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import pathModule from 'node:path';
+import { readFile } from 'node:fs/promises';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { implicitPinName } from '@cupboard/nix-store/retention';
@@ -14,8 +12,7 @@ import type {
 	AttestationAttachResponse,
 	AttestationDecision,
 	AttestationNegotiateRequest,
-	AttestationNegotiateResponse,
-	AttestationPrepareResponse
+	AttestationNegotiateResponse
 } from '@cupboard/protocol/attestations';
 import type {
 	RootSetBody,
@@ -26,18 +23,12 @@ import {
 	type CommitResponse,
 	type UploadDecision,
 	type UploadNegotiateRequest,
-	type UploadNegotiateResponse,
-	uploadPrepareBatchMaxItems,
-	type UploadPrepareBatchResponse,
-	type UploadPrepareItemRequest,
-	type UploadPrepareRequest,
-	type UploadPrepareResponse
+	type UploadNegotiateResponse
 } from '@cupboard/protocol/upload';
 import {
 	formatBytes,
 	formatCount,
 	type PhaseContext,
-	type ProgressHandle,
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
@@ -46,10 +37,7 @@ import { z } from 'zod';
 import { isAbortError } from '../abort.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import type { CommitSession } from '../client/commit-socket.ts';
-import {
-	isExpiredUploadUrlError,
-	isStaleUploadError
-} from '../client/rpc-errors.ts';
+import { isStaleUploadError } from '../client/rpc-errors.ts';
 import {
 	AttestationBundleInvalidError,
 	AttestationSubjectNotPushedError,
@@ -60,18 +48,9 @@ import {
 	UnexpectedUploadDecisionError
 } from '../errors.ts';
 import { byteStream, countingByteStream } from '../io/byte-stream.ts';
-import { readFileByteStream } from '../io/file-stream.ts';
-import {
-	compressAndHashNarToFile,
-	type CompressedAndHashedNarFile,
-	type CompressedNarBlob
-} from '../nix/blob.ts';
+import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
-import {
-	type PreparedStorePath,
-	prepareStorePathMetadata,
-	prepareStorePathNegotiation
-} from '../nix/nix-store.ts';
+import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import { runWithConcurrency } from './pool.ts';
 
@@ -91,55 +70,39 @@ export interface PushDependencies {
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly createNarArchive?: (storePath: string) => PushNarArchive;
 	readonly compressNar?: CompressNar;
-	readonly readCompressedNar?: ReadCompressedNar;
-	readonly createTemporaryDirectory?: () => Promise<string>;
-	readonly removeTemporaryDirectory?: (path: string) => Promise<void>;
-	/** How many blob uploads run at once; defaults to {@link defaultUploadConcurrency}. */
+	/** How many NARs compress and upload at once; defaults to {@link defaultUploadConcurrency}. */
 	readonly uploadConcurrency?: number;
-	/** How many NARs are compressed and prepared at once; defaults to {@link defaultPrepareConcurrency}. */
-	readonly prepareConcurrency?: number;
 	/** Report what a push would do, without uploading or committing anything. */
 	readonly dryRun?: boolean;
 }
 
+// Each upload streams one NAR's compression into its R2 PUT, a CPU-bound zstd
+// pass overlapped with network, so running several at once keeps the phase from
+// walking the closure one NAR at a time.
 export const defaultUploadConcurrency = 6;
-
-// NAR compression is the prepare phase's cost and runs on the libuv thread pool,
-// so preparing several at once keeps the phase from walking the closure one
-// CPU-bound NAR at a time, the difference between a prompt push and one that
-// outruns its upload slots' lifetime.
-export const defaultPrepareConcurrency = 6;
 
 /**
  * The client surface a push consumes. The contract-backed conversations
- * (negotiate, prepare, attestations, roots) come from the derived client with
- * the credential and cache bound at construction; the blob upload PUTs to a
- * presigned URL and the commit speaks the WebSocket, so both stay raw.
+ * (negotiate, attestations, roots) come from the derived client with the
+ * credential and cache bound at construction; the blob upload streams its
+ * compressed bytes straight to R2 with the push's temporary credential, and the
+ * commit speaks the WebSocket, so both stay raw.
  */
 export interface PushClient {
 	negotiate(
 		body: Omit<UploadNegotiateRequest, 'pushId'>
 	): Promise<UploadNegotiateResponse>;
-	prepareUpload(
-		uploadId: string,
-		body: UploadPrepareRequest
-	): Promise<UploadPrepareResponse>;
-	// Presigns a chunk of uploads in one call. Optional so a minimal client can
-	// rely on the per-path `prepareUpload`; the push uses it when present to take
-	// the per-path round-trip off the prepare path.
-	prepareUploads?(
-		items: readonly UploadPrepareItemRequest[]
-	): Promise<UploadPrepareBatchResponse>;
-	uploadBlob(upload: PushBlobUpload): Promise<void>;
+	// Streams one NAR's compressed bytes to its staging key. The server derives
+	// the file hash and size from the bytes, so the upload carries no metadata.
+	uploadNar(r2Key: string, body: ReadableStream<Uint8Array>): Promise<void>;
 	commit(target: CommitTarget, options: CommitOptions): Promise<CommitResponse>;
 	// Opens one commit session for the whole push. Optional so a minimal client
 	// can rely on the per-path `commit`; the push uses it when present to commit
 	// every path over a single socket.
 	openCommitSession?(options: CommitOptions): Promise<CommitSession>;
 	negotiateAttestations?(
-		body: AttestationNegotiateRequest
+		body: Omit<AttestationNegotiateRequest, 'pushId'>
 	): Promise<AttestationNegotiateResponse>;
-	prepareAttestation?(uploadId: string): Promise<AttestationPrepareResponse>;
 	attachAttestation?(uploadId: string): Promise<AttestationAttachResponse>;
 	setRoot(name: string, body: RootSetBody): Promise<RootSetResponse>;
 }
@@ -150,12 +113,7 @@ export type PushNarArchive =
 	| ReadableStream<Uint8Array>
 	| AsyncIterable<Uint8Array>;
 
-export type CompressNar = (
-	nar: PushNarArchive,
-	path: string
-) => Promise<CompressedAndHashedNarFile>;
-
-export type ReadCompressedNar = (path: string) => ReadableStream<Uint8Array>;
+export type CompressNar = (nar: PushNarArchive) => NarUploadStream;
 
 export interface PushAttestationSource {
 	readonly path: string;
@@ -163,58 +121,10 @@ export interface PushAttestationSource {
 
 export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
 
-export interface PushBlobUpload {
-	readonly r2Key: string;
-	readonly uploadUrl: string;
-	// Builds the body on demand, so a retried PUT streams a fresh copy.
-	readonly body: () => ReadableStream<Uint8Array>;
-	readonly contentLength: number;
-	readonly headers: Readonly<Record<string, string>>;
-}
-
-interface PreparedPushPath {
-	readonly metadata: PreparedStorePath;
-	readonly blob: CompressedNarBlob;
-	readonly compressedPath: string;
-}
-
 type UploadDecisionOf<A extends UploadDecision['action']> = Extract<
 	UploadDecision,
 	{ action: A }
 >;
-
-interface PreparedUpload {
-	readonly decision: UploadDecisionOf<'upload'>;
-	readonly preparedPath: PreparedPushPath;
-	readonly uploadUrl: string;
-	readonly uploadHeaders: Readonly<Record<string, string>>;
-}
-
-// A NAR built and compressed in the prepare phase, awaiting its presign and
-// upload. Presigning is left to the upload phase, where the URL is signed close
-// to the PUT, so a long prepare cannot outlive it.
-interface CompressedUpload {
-	readonly decision: UploadDecisionOf<'upload'>;
-	readonly preparedPath: PreparedPushPath;
-}
-
-type PrepareOutcome =
-	| { readonly kind: 'upload'; readonly upload: PreparedUpload }
-	| { readonly kind: 'commit'; readonly decision: UploadDecisionOf<'commit'> }
-	| { readonly kind: 'skip' };
-
-// The result of presigning and uploading one compressed NAR. Most paths upload;
-// a presign that re-negotiated an expired slot can come back already reusable or
-// skippable; a PUT that could not be re-presigned fails.
-type UploadResult =
-	| { readonly kind: 'uploaded'; readonly upload: PreparedUpload }
-	| { readonly kind: 'reuse'; readonly decision: UploadDecisionOf<'commit'> }
-	| { readonly kind: 'skip' }
-	| {
-			readonly kind: 'failed';
-			readonly uploadId: string;
-			readonly failure: PushFailure;
-	  };
 
 // A path that could not be uploaded or committed. The push presses on with the
 // rest, then fails as a whole so nothing downstream treats it as finished.
@@ -244,31 +154,18 @@ export async function runPush(
 	const nix = dependencies.nix ?? Nix.open();
 	const createNarArchive =
 		dependencies.createNarArchive ?? ((storePath) => new NarArchive(storePath));
-	const compressNar = dependencies.compressNar ?? compressAndHashNarToFile;
-	const readCompressedNar =
-		dependencies.readCompressedNar ?? readFileByteStream;
-	const createTemporaryDirectory =
-		dependencies.createTemporaryDirectory ?? defaultCreateTemporaryDirectory;
-	const removeTemporaryDirectory =
-		dependencies.removeTemporaryDirectory ?? defaultRemoveTemporaryDirectory;
-	const temporaryDirectory = await createTemporaryDirectory();
+	const compressNar = dependencies.compressNar ?? compressNarToStream;
 
-	try {
-		await runPushWithTemporaryDirectory(paths, reporter, {
-			...dependencies,
-			retention,
-			nix,
-			createNarArchive,
-			compressNar,
-			readCompressedNar,
-			temporaryDirectory,
-			wait: dependencies.wait ?? true,
-			waitTimeoutSeconds:
-				dependencies.waitTimeoutSeconds ?? defaultWaitTimeoutSeconds
-		});
-	} finally {
-		await removeTemporaryDirectory(temporaryDirectory);
-	}
+	await runPushFlow(paths, reporter, {
+		...dependencies,
+		retention,
+		nix,
+		createNarArchive,
+		compressNar,
+		wait: dependencies.wait ?? true,
+		waitTimeoutSeconds:
+			dependencies.waitTimeoutSeconds ?? defaultWaitTimeoutSeconds
+	});
 }
 
 interface PushRuntimeDependencies {
@@ -277,19 +174,16 @@ interface PushRuntimeDependencies {
 	readonly retention: RetentionPlan;
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
-	readonly readCompressedNar: ReadCompressedNar;
-	readonly temporaryDirectory: string;
 	readonly wait: boolean;
 	readonly waitTimeoutSeconds: number;
 	readonly attest?: boolean;
 	readonly attestations?: readonly PushAttestationSource[];
 	readonly readAttestationBundle?: ReadAttestationBundle;
 	readonly uploadConcurrency?: number;
-	readonly prepareConcurrency?: number;
 	readonly dryRun?: boolean;
 }
 
-async function runPushWithTemporaryDirectory(
+async function runPushFlow(
 	paths: readonly string[],
 	reporter: Reporter,
 	dependencies: PushRuntimeDependencies
@@ -300,7 +194,6 @@ async function runPushWithTemporaryDirectory(
 		retention,
 		createNarArchive,
 		compressNar,
-		readCompressedNar,
 		wait: shouldWait,
 		waitTimeoutSeconds
 	} = dependencies;
@@ -343,30 +236,6 @@ async function runPushWithTemporaryDirectory(
 	}
 
 	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
-	const compressed = await reporter.progress(
-		'Preparing missing NARs',
-		{ total: uploadDecisions.length },
-		async (bar) => {
-			bar.fact('paths', formatCount(uploadDecisions.length));
-			const items = await compressUploads(
-				uploadDecisions,
-				closure,
-				{
-					createNarArchive,
-					compressNar,
-					temporaryDirectory: dependencies.temporaryDirectory,
-					prepareConcurrency:
-						dependencies.prepareConcurrency ?? defaultPrepareConcurrency
-				},
-				() => {
-					bar.advance(1);
-				}
-			);
-			bar.fact('nars', formatCount(items.length));
-
-			return items;
-		}
-	);
 
 	// A path that fails to upload or commit is collected here rather than
 	// aborting the run, so the paths that can finish do. The push then fails as a
@@ -381,87 +250,65 @@ async function runPushWithTemporaryDirectory(
 		])
 	);
 
-	// Presigning and uploading happen together here, after the prepare phase, so
-	// each presigned URL is signed immediately before its PUT. A path can come
-	// back reusable or skippable when its presign re-negotiates an expired slot,
-	// so the committable uploads are collected as the uploads complete.
-	const uploads: PreparedUpload[] = [];
-	const reuseCommits: UploadDecisionOf<'commit'>[] = [];
+	let uploadedBytes = 0;
+	const uploadContext: UploadContext = {
+		client,
+		closure,
+		createNarArchive,
+		compressNar,
+		onBytes: (count) => {
+			uploadedBytes += count;
+		}
+	};
+	const uploaded: UploadDecisionOf<'upload'>[] = [];
 
-	// The bar tracks bytes across every blob; each chunk advances it as it
-	// streams, so a single large NAR shows steady movement while it uploads,
-	// and concurrent uploads each advance the one bar.
-	const totalUploadBytes = compressed.reduce(
-		(sum, item) => sum + item.preparedPath.blob.fileSize,
-		0
-	);
-	const uploadedBytes = await reporter.progress(
-		'Uploading missing blobs',
-		{ total: totalUploadBytes },
+	await reporter.progress(
+		'Uploading missing NARs',
+		{ total: uploadDecisions.length },
 		async (bar) => {
-			const startedAt = Date.now();
-			let completedBytes = 0;
 			let done = 0;
-
-			const reportBlobs = (): void => {
-				bar.fact(
-					'blobs',
-					`${formatCount(done)}/${formatCount(compressed.length)}`
-				);
-
-				const elapsedSeconds = (Date.now() - startedAt) / 1000;
-
-				if (elapsedSeconds > 0 && completedBytes > 0) {
-					bar.fact('rate', `${formatBytes(completedBytes / elapsedSeconds)}/s`);
-				}
-			};
-
-			reportBlobs();
-
-			const uploadContext: UploadContext = {
-				client,
-				closure,
-				readCompressedNar,
-				storePathByHash,
-				presigned: await presignUploads(compressed, client)
-			};
-
-			await runWithConcurrency(
-				compressed,
-				dependencies.uploadConcurrency ?? defaultUploadConcurrency,
-				async (item) => {
-					const result = await uploadCompressedNar(item, uploadContext, bar);
-
-					switch (result.kind) {
-						case 'uploaded': {
-							uploads.push(result.upload);
-							completedBytes += item.preparedPath.blob.fileSize;
-							done += 1;
-							break;
-						}
-						case 'reuse': {
-							reuseCommits.push(result.decision);
-							break;
-						}
-						case 'failed': {
-							failedUploadIds.add(result.uploadId);
-							failures.push(result.failure);
-							bar.warn(
-								'upload failed',
-								`${StorePath.basename(result.failure.storePath)}: ${result.failure.reason}`
-							);
-							break;
-						}
-						case 'skip': {
-							break;
-						}
-					}
-
-					reportBlobs();
-				}
+			bar.fact(
+				'nars',
+				`${formatCount(done)}/${formatCount(uploadDecisions.length)}`
 			);
 
-			return completedBytes;
+			await runWithConcurrency(
+				uploadDecisions,
+				dependencies.uploadConcurrency ?? defaultUploadConcurrency,
+				async (decision) => {
+					try {
+						await streamNarUpload(decision, uploadContext);
+						uploaded.push(decision);
+						done += 1;
+					} catch (error) {
+						if (isAbortError(error)) {
+							throw error;
+						}
+
+						const storePath =
+							storePathByHash.get(decision.storePathHash) ??
+							decision.storePathHash;
+						const reason = failureReason(error);
+						failedUploadIds.add(decision.uploadId);
+						failures.push({
+							storePathHash: decision.storePathHash,
+							storePath,
+							stage: 'upload',
+							reason
+						});
+						bar.warn(
+							'upload failed',
+							`${StorePath.basename(storePath)}: ${reason}`
+						);
+					} finally {
+						bar.advance(1);
+						bar.fact(
+							'nars',
+							`${formatCount(done)}/${formatCount(uploadDecisions.length)}`
+						);
+					}
+				}
+			);
 		}
 	);
 
@@ -469,14 +316,11 @@ async function runPushWithTemporaryDirectory(
 	// their sockets and the server's verification pass settles them together,
 	// so committing serially would wait one pass per path. With `--no-wait` a
 	// deferred upload reports `pending` as soon as it is stored. The committable
-	// decisions are the prepared uploads (whose ids may have been re-negotiated,
-	// so they come from the prepared set rather than the original negotiation),
-	// the blobs the negotiation said to reuse, and any path a re-negotiation
-	// turned into a reuse.
+	// decisions are the uploaded paths and the blobs the negotiation said to
+	// reuse.
 	const commitDecisions = [
-		...uploads.map((upload) => upload.decision),
-		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision)),
-		...reuseCommits
+		...uploaded,
+		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision))
 	].filter((decision) => !failedUploadIds.has(decision.uploadId));
 	const commitOptions: CommitOptions = {
 		wait: shouldWait,
@@ -487,10 +331,8 @@ async function runPushWithTemporaryDirectory(
 		client,
 		session,
 		closure,
-		preparedByUploadId: new Map(
-			uploads.map((upload) => [upload.decision.uploadId, upload])
-		),
-		readCompressedNar,
+		createNarArchive,
+		compressNar,
 		options: commitOptions
 	};
 	const commit = await reporter.progress(
@@ -776,22 +618,14 @@ async function attachPushedAttestations(
 		let uploadedBytes = 0;
 
 		for (const decision of toUpload) {
-			if (dependencies.client.prepareAttestation === undefined) {
-				throw new AttestationUploadUnavailableError('prepareAttestation');
-			}
-
 			const bundle = findAttestationBundle(ready, decision);
-			const preparedUpload = await dependencies.client.prepareAttestation(
-				decision.uploadId
-			);
 
-			await dependencies.client.uploadBlob({
-				r2Key: decision.r2Key,
-				uploadUrl: preparedUpload.uploadUrl,
-				body: () => byteStream([bundle.bytes]),
-				contentLength: bundle.bytes.byteLength,
-				headers: preparedUpload.uploadHeaders
-			});
+			// The bundle streams to its staging key under the push prefix with the
+			// same credential the NARs use, so there is no separate upload path.
+			await dependencies.client.uploadNar(
+				decision.r2Key,
+				byteStream([bundle.bytes])
+			);
 
 			uploadedBytes += bundle.bytes.byteLength;
 		}
@@ -982,294 +816,42 @@ function describePinExpiry(summaries: readonly RootSummary[]): string {
 		: `expires ${earliest} to ${latest}`;
 }
 
-interface PreparePushPathDependencies {
-	readonly createNarArchive: (storePath: string) => PushNarArchive;
-	readonly compressNar: CompressNar;
-	readonly temporaryDirectory: string;
-}
-
-interface CompressUploadsDependencies extends PreparePushPathDependencies {
-	readonly prepareConcurrency: number;
-}
-
-// Builds and compresses one NAR per missing path, leaving presigning to the
-// upload phase. Compression is the prepare phase's cost and runs on the libuv
-// thread pool, so several run at once.
-async function compressUploads(
-	decisions: readonly UploadDecisionOf<'upload'>[],
-	closure: readonly NixValidPathInfo[],
-	dependencies: CompressUploadsDependencies,
-	onCompressed?: () => void
-): Promise<CompressedUpload[]> {
-	const items: CompressedUpload[] = [];
-
-	await runWithConcurrency(
-		decisions,
-		dependencies.prepareConcurrency,
-		async (decision) => {
-			const pathInfo = findNegotiatedPath(closure, decision);
-			const preparedPath = await preparePushPath(pathInfo, dependencies);
-
-			items.push({ decision, preparedPath });
-
-			onCompressed?.();
-		}
-	);
-
-	return items;
-}
-
 interface UploadContext {
 	readonly client: PushClient;
 	readonly closure: readonly NixValidPathInfo[];
-	readonly readCompressedNar: ReadCompressedNar;
-	readonly storePathByHash: ReadonlyMap<string, string>;
-	// URLs presigned ahead of the PUT by the batch call, keyed by upload id. A
-	// path absent here (omitted by the batch, or no batch client) is presigned
-	// one at a time at upload.
-	readonly presigned: ReadonlyMap<string, PreparedUpload>;
+	readonly createNarArchive: (storePath: string) => PushNarArchive;
+	readonly compressNar: CompressNar;
+	readonly onBytes: (count: number) => void;
 }
 
-function chunkItems<T>(items: readonly T[], size: number): T[][] {
-	const chunks: T[][] = [];
-
-	for (let start = 0; start < items.length; start += size) {
-		chunks.push(items.slice(start, start + size));
-	}
-
-	return chunks;
-}
-
-// Presigns the whole upload set in batches before the PUTs begin, so a whole
-// closure's prepare costs a handful of round-trips. Returns the URLs keyed by
-// upload id; a client without the batch call, or an item the server could not
-// presign, is left out and presigned one at a time at upload.
-async function presignUploads(
-	items: readonly CompressedUpload[],
-	client: PushClient
-): Promise<ReadonlyMap<string, PreparedUpload>> {
-	const presigned = new Map<string, PreparedUpload>();
-
-	if (client.prepareUploads === undefined || items.length === 0) {
-		return presigned;
-	}
-
-	const itemsById = new Map(
-		items.map((item) => [item.decision.uploadId, item])
+// Streams one missing NAR straight to its staging key: the archive is compressed
+// on the fly and the compressed bytes go to R2 without ever touching disk, so a
+// large closure cannot exhaust a runner's temporary space. The uncompressed hash
+// and size, accumulated as the bytes pass through, are checked against what was
+// negotiated once the stream drains, so a store path that changed under the push
+// is caught before its commit.
+async function streamNarUpload(
+	decision: UploadDecisionOf<'upload'>,
+	context: UploadContext
+): Promise<void> {
+	const pathInfo = findNegotiatedPath(context.closure, decision);
+	const upload = context.compressNar(
+		context.createNarArchive(pathInfo.storePath)
 	);
 
-	for (const group of chunkItems(items, uploadPrepareBatchMaxItems)) {
-		const response = await client.prepareUploads(
-			group.map((item) => ({
-				id: item.decision.uploadId,
-				fileHash: item.preparedPath.blob.fileHash.toString(),
-				fileSize: item.preparedPath.blob.fileSize,
-				compression: item.preparedPath.blob.compression
-			}))
-		);
-
-		for (const result of response.items) {
-			const item = itemsById.get(result.id);
-
-			if (result.ok && item !== undefined) {
-				presigned.set(result.id, {
-					decision: item.decision,
-					preparedPath: item.preparedPath,
-					uploadUrl: result.uploadUrl,
-					uploadHeaders: result.uploadHeaders
-				});
-			}
-		}
-	}
-
-	return presigned;
-}
-
-// Presigns one compressed NAR and uploads it. The first attempt uses a URL the
-// batch presigned ahead of time when it has one; if a URL expires in flight (a
-// single upload slower than the slot's lifetime) the path is presigned again and
-// the PUT retried once. A presign can re-negotiate an expired slot, so the path
-// may come back reusable or skippable.
-async function uploadCompressedNar(
-	item: CompressedUpload,
-	context: UploadContext,
-	bar: ProgressHandle
-): Promise<UploadResult> {
-	const pathInfo = findNegotiatedPath(context.closure, item.decision);
-	const fileSize = item.preparedPath.blob.fileSize;
-
-	for (let attempt = 0; attempt < 2; attempt += 1) {
-		// First attempt uses the URL the batch presigned ahead of time when it has
-		// one; an expiry retry (and any path the batch omitted) presigns one at a
-		// time, which also re-negotiates a slot the server has since reaped.
-		const fromBatch =
-			attempt === 0 ? context.presigned.get(item.decision.uploadId) : undefined;
-		const outcome: PrepareOutcome = fromBatch
-			? { kind: 'upload', upload: fromBatch }
-			: await prepareNegotiatedUpload(
-					item.decision,
-					pathInfo,
-					item.preparedPath,
-					context.client
-				);
-
-		if (outcome.kind === 'commit') {
-			bar.advance(fileSize);
-
-			return { kind: 'reuse', decision: outcome.decision };
-		}
-
-		if (outcome.kind === 'skip') {
-			bar.advance(fileSize);
-
-			return { kind: 'skip' };
-		}
-
-		let counted = 0;
-
-		try {
-			await context.client.uploadBlob({
-				r2Key: outcome.upload.decision.r2Key,
-				uploadUrl: outcome.upload.uploadUrl,
-				body: () => {
-					// A retry re-streams from the start, so rewind the partial progress
-					// the failed attempt counted before streaming the fresh body.
-					bar.advance(-counted);
-					counted = 0;
-
-					return countingByteStream(
-						context.readCompressedNar(item.preparedPath.compressedPath),
-						(byteLength) => {
-							counted += byteLength;
-							bar.advance(byteLength);
-						}
-					);
-				},
-				contentLength: fileSize,
-				headers: outcome.upload.uploadHeaders
-			});
-
-			return { kind: 'uploaded', upload: outcome.upload };
-		} catch (error) {
-			// A Ctrl-C aborts the whole push; any other failure is this one path's,
-			// collected so the rest still upload.
-			if (isAbortError(error)) {
-				throw error;
-			}
-
-			// Undo this attempt's byte progress so a retry does not double-count.
-			bar.advance(-counted);
-
-			if (attempt === 0 && isExpiredUploadUrlError(error)) {
-				continue;
-			}
-
-			return failedUpload(item.decision, context, error);
-		}
-	}
-
-	return failedUpload(
-		item.decision,
-		context,
-		new Error('Upload retry did not resolve')
+	await context.client.uploadNar(
+		decision.r2Key,
+		countingByteStream(upload.body, context.onBytes)
 	);
-}
-
-function failedUpload(
-	decision: UploadDecisionOf<'upload'>,
-	context: UploadContext,
-	error: unknown
-): UploadResult {
-	const storePath =
-		context.storePathByHash.get(decision.storePathHash) ??
-		decision.storePathHash;
-
-	return {
-		kind: 'failed',
-		uploadId: decision.uploadId,
-		failure: {
-			storePathHash: decision.storePathHash,
-			storePath,
-			stage: 'upload',
-			reason: failureReason(error)
-		}
-	};
-}
-
-// Presigns one path's upload, re-negotiating it if its slot is gone. A slow
-// prepare queue can outlive the fifteen-minute slot the negotiate stamped, so a
-// `NOT_FOUND` on prepare is not a failure: the path is re-negotiated and the
-// fresh decision honoured, which keeps a transfer that is still making progress
-// from being killed by an expiry. The re-negotiation can come back already
-// reusable or skippable if the blob landed elsewhere meanwhile.
-async function prepareNegotiatedUpload(
-	decision: UploadDecisionOf<'upload'>,
-	pathInfo: NixValidPathInfo,
-	preparedPath: PreparedPushPath,
-	client: PushClient
-): Promise<PrepareOutcome> {
-	try {
-		return {
-			kind: 'upload',
-			upload: await presignUpload(decision, preparedPath, client)
-		};
-	} catch (error) {
-		if (!isStaleUploadError(error)) {
-			throw error;
-		}
-
-		const response = await client.negotiate({
-			paths: [prepareStorePathNegotiation(pathInfo)]
-		});
-		const fresh = response.uploads.at(0);
-
-		if (fresh === undefined) {
-			throw new UnexpectedUploadDecisionError(
-				StorePath.hash(pathInfo.storePath),
-				pathInfo.narHash.toString()
-			);
-		}
-
-		if (isUpload(fresh)) {
-			return {
-				kind: 'upload',
-				upload: await presignUpload(fresh, preparedPath, client)
-			};
-		}
-
-		if (isReusedBlobCommit(fresh)) {
-			return { kind: 'commit', decision: fresh };
-		}
-
-		return { kind: 'skip' };
-	}
-}
-
-async function presignUpload(
-	decision: UploadDecisionOf<'upload'>,
-	preparedPath: PreparedPushPath,
-	client: PushClient
-): Promise<PreparedUpload> {
-	const upload = await client.prepareUpload(decision.uploadId, {
-		fileHash: preparedPath.blob.fileHash.toString(),
-		fileSize: preparedPath.blob.fileSize,
-		compression: preparedPath.blob.compression
-	});
-
-	return {
-		decision,
-		preparedPath,
-		uploadUrl: upload.uploadUrl,
-		uploadHeaders: upload.uploadHeaders
-	};
+	verifyNarMetadata(pathInfo, upload.digest());
 }
 
 interface CommitContext {
 	readonly client: PushClient;
 	readonly session: CommitSession | undefined;
 	readonly closure: readonly NixValidPathInfo[];
-	readonly preparedByUploadId: ReadonlyMap<string, PreparedUpload>;
-	readonly readCompressedNar: ReadCompressedNar;
+	readonly createNarArchive: (storePath: string) => PushNarArchive;
+	readonly compressNar: CompressNar;
 	readonly options: CommitOptions;
 }
 
@@ -1349,55 +931,17 @@ async function redriveExpiredCommit(
 		};
 	}
 
-	const prepared = context.preparedByUploadId.get(decision.uploadId);
+	// The reaped row took the staged bytes with it, so re-stream the NAR to the
+	// fresh staging key before committing. The store path is still in the closure,
+	// so nothing local is needed beyond re-reading it.
+	const upload = context.compressNar(
+		context.createNarArchive(pathInfo.storePath)
+	);
 
-	if (prepared === undefined) {
-		// A reuse commit whose shared blob vanished: there is no local NAR to
-		// re-upload, so it cannot be re-driven here.
-		throw new UnexpectedUploadDecisionError(
-			decision.storePathHash,
-			decision.narHash
-		);
-	}
-
-	const presigned = await context.client.prepareUpload(fresh.uploadId, {
-		fileHash: prepared.preparedPath.blob.fileHash.toString(),
-		fileSize: prepared.preparedPath.blob.fileSize,
-		compression: prepared.preparedPath.blob.compression
-	});
-	await context.client.uploadBlob({
-		r2Key: fresh.r2Key,
-		uploadUrl: presigned.uploadUrl,
-		body: () => context.readCompressedNar(prepared.preparedPath.compressedPath),
-		contentLength: prepared.preparedPath.blob.fileSize,
-		headers: presigned.uploadHeaders
-	});
+	await context.client.uploadNar(fresh.r2Key, upload.body);
+	verifyNarMetadata(pathInfo, upload.digest());
 
 	return commitVia(context, commitTarget(fresh));
-}
-
-async function preparePushPath(
-	pathInfo: NixValidPathInfo,
-	dependencies: PreparePushPathDependencies
-): Promise<PreparedPushPath> {
-	const nar = dependencies.createNarArchive(pathInfo.storePath);
-	const compressed = await dependencies.compressNar(
-		nar,
-		pathModule.join(
-			dependencies.temporaryDirectory,
-			`${StorePath.hash(pathInfo.storePath)}.nar.zst`
-		)
-	);
-	const verifiedPathInfo = verifyNarMetadata(pathInfo, compressed.narDigest);
-
-	return {
-		metadata: prepareStorePathMetadata(
-			verifiedPathInfo,
-			compressed.compressed.blob
-		),
-		blob: compressed.compressed.blob,
-		compressedPath: compressed.compressed.path
-	};
 }
 
 function verifyNarMetadata(
@@ -1575,12 +1119,4 @@ function sha256Hex(bytes: Uint8Array): string {
 
 async function defaultReadAttestationBundle(path: string): Promise<Uint8Array> {
 	return readFile(path);
-}
-
-function defaultCreateTemporaryDirectory(): Promise<string> {
-	return mkdtemp(pathModule.join(tmpdir(), 'cupboard-push-'));
-}
-
-function defaultRemoveTemporaryDirectory(path: string): Promise<void> {
-	return rm(path, { force: true, recursive: true });
 }

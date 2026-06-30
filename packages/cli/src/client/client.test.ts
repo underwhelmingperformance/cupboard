@@ -1,12 +1,10 @@
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import type { CommitSessionFrame } from '@cupboard/protocol/upload';
-import { StatusCodes } from 'http-status-codes';
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
 	CupboardHttpError,
-	CupboardUploadError,
 	InvalidCacheNameError,
 	MalformedResponseError,
 	ResponseSchemaMismatchError
@@ -66,21 +64,6 @@ function capturingClient(
 
 	return { client, captured: () => captured };
 }
-
-const closedStream = (): ReadableStream<Uint8Array> =>
-	new ReadableStream({
-		start(controller) {
-			controller.close();
-		}
-	});
-
-const blobUpload = (body: () => ReadableStream<Uint8Array>) => ({
-	r2Key: 'staging/abc.nar.zst',
-	uploadUrl: 'https://r2.example/staging/abc.nar.zst',
-	body,
-	contentLength: 0,
-	headers: {}
-});
 
 async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 	let rejected: unknown;
@@ -449,79 +432,6 @@ describe('CupboardClient response validation', () => {
 				path: '/token',
 				cause: 'SyntaxError'
 			});
-		}
-	});
-});
-
-describe('CupboardClient.uploadBlob', () => {
-	it('retries a transient 5xx and re-streams a fresh body each attempt', async () => {
-		vi.useFakeTimers();
-
-		try {
-			const statuses = [
-				StatusCodes.INTERNAL_SERVER_ERROR,
-				StatusCodes.SERVICE_UNAVAILABLE,
-				StatusCodes.OK
-			];
-			let attempts = 0;
-			let bodies = 0;
-			const client = new CupboardClient(
-				new URL('https://cupboard.test'),
-				(_input, init) => {
-					void init?.body;
-					const status = statuses[attempts] ?? StatusCodes.OK;
-					attempts += 1;
-
-					return Promise.resolve(new Response(undefined, { status }));
-				}
-			);
-
-			const pending = client.uploadBlob(
-				blobUpload(() => {
-					bodies += 1;
-
-					return closedStream();
-				})
-			);
-			await vi.advanceTimersByTimeAsync(60_000);
-			await pending;
-
-			expect({ attempts, bodies }).toStrictEqual({ attempts: 3, bodies: 3 });
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it('surfaces the upload error once the retry budget is spent', async () => {
-		vi.useFakeTimers();
-
-		try {
-			let attempts = 0;
-			const client = new CupboardClient(
-				new URL('https://cupboard.test'),
-				(_input, init) => {
-					void init?.body;
-					attempts += 1;
-
-					return Promise.resolve(
-						new Response('busy', {
-							status: StatusCodes.INTERNAL_SERVER_ERROR
-						})
-					);
-				}
-			);
-
-			const pending = rejectedBy(() =>
-				client.uploadBlob(blobUpload(closedStream))
-			);
-			await vi.advanceTimersByTimeAsync(60_000);
-			const rejected = await pending;
-
-			expect(rejected).toBeInstanceOf(CupboardUploadError);
-			// One attempt plus the four retries.
-			expect(attempts).toBe(5);
-		} finally {
-			vi.useRealTimers();
 		}
 	});
 });

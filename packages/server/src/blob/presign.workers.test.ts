@@ -1,4 +1,3 @@
-import { bytesToBase64 } from '@cupboard/nix-store/encoding';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { R2Presigner } from './presign.ts';
@@ -22,42 +21,6 @@ describe('R2Presigner', () => {
 
 	afterEach(() => {
 		vi.useRealTimers();
-	});
-
-	// The signed-header and not-hoisted assertions are the R2 contract: R2 ignores
-	// a query-hoisted checksum and rejects an unsigned one. The pinned signature is
-	// the deterministic SigV4 output for these fixed inputs, so a change in how the
-	// URL is signed fails here.
-	it('signs a PUT with the checksum as a signed header, not hoisted', async () => {
-		const checksum = new Uint8Array(32).fill(7);
-		const url = new URL(
-			await new R2Presigner(options).presignPutUrl({
-				key,
-				checksumSha256: bytesToBase64(checksum),
-				expiresSeconds: 900
-			})
-		);
-
-		expect({
-			host: url.host,
-			pathname: url.pathname,
-			algorithm: url.searchParams.get('X-Amz-Algorithm'),
-			credential: url.searchParams.get('X-Amz-Credential'),
-			expires: url.searchParams.get('X-Amz-Expires'),
-			signedHeaders: url.searchParams.get('X-Amz-SignedHeaders'),
-			checksumHoisted: url.searchParams.has('x-amz-checksum-sha256'),
-			signature: url.searchParams.get('X-Amz-Signature')
-		}).toStrictEqual({
-			host: 'test-account-id.r2.cloudflarestorage.com',
-			pathname: objectPath,
-			algorithm: 'AWS4-HMAC-SHA256',
-			credential: 'test-access-key-id/20260528/auto/s3/aws4_request',
-			expires: '900',
-			signedHeaders: 'host;x-amz-checksum-sha256',
-			checksumHoisted: false,
-			signature:
-				'494e9aaa0d137e6c80a31f55fce61f7e3a7c9263e025c2e84053d2afb5dc839b'
-		});
 	});
 
 	it('signs a HEAD probe', async () => {

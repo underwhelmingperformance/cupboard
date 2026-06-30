@@ -49,7 +49,6 @@ import {
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
 	uploadPathMetadataSchema,
-	uploadPrepareResponseSchema,
 	type UploadStatusResponse,
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
@@ -1012,7 +1011,7 @@ export async function stageAttestationBundle(
 	uploadId: string,
 	bytes: Uint8Array
 ): Promise<string> {
-	const key = attestationStagingObjectKey(uploadId);
+	const key = attestationStagingObjectKey(testPushId, uploadId);
 	await env.BLOBS.put(key, bytes);
 
 	return key;
@@ -1289,7 +1288,7 @@ export function fixtureWorkerServer(): DurableObjectStub<CupboardServer> {
 }
 
 /** Prepends the `/cache/<selector>` prefix to a cache-scoped route. */
-export function cacheScopedPath(cache: string, suffix: string): string {
+function cacheScopedPath(cache: string, suffix: string): string {
 	return `/cache/${selectorForCache(cache)}${suffix}`;
 }
 
@@ -1398,17 +1397,6 @@ export async function pushPath(
 	}
 
 	if (decision.action === 'upload') {
-		const prepared = await authorisedFetch(
-			cacheScopedPath(cache, `/uploads/${decision.uploadId}`),
-			token,
-			{
-				body: JSON.stringify(uploadBlobMetadata(metadata)),
-				headers: { 'content-type': 'application/json' },
-				method: 'PUT'
-			}
-		);
-		expect(prepared.status).toBe(StatusCodes.OK);
-
 		await putNarBytes(decision.r2Key, nar);
 	}
 
@@ -1444,18 +1432,6 @@ export async function pushPathToTenant(
 		metadata
 	);
 
-	const prepared = await tenantWorkerFetch(
-		tenant,
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
-		token,
-		{
-			method: 'PUT',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify(uploadBlobMetadata(metadata))
-		}
-	);
-
-	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 
 	const committed = await commitUploadViaWorker(token, decision.uploadId, {
@@ -1497,18 +1473,6 @@ export async function attemptPushToTenant(
 		metadata
 	);
 
-	const prepared = await tenantWorkerFetch(
-		tenant,
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
-		token,
-		{
-			method: 'PUT',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify(uploadBlobMetadata(metadata))
-		}
-	);
-
-	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 
 	const upgraded = await tenantWorkerFetch(tenant, '/commit', token, {
@@ -1569,18 +1533,6 @@ export async function stageDeferredForTenant(
 		metadata
 	);
 
-	const prepared = await tenantWorkerFetch(
-		tenant,
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
-		token,
-		{
-			method: 'PUT',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify(uploadBlobMetadata(metadata))
-		}
-	);
-
-	expect(prepared.status).toBe(StatusCodes.OK);
 	await putNarBytes(decision.r2Key, nar);
 	await markUploadPendingVerification(decision.uploadId, testServerFor(tenant));
 
@@ -1853,58 +1805,6 @@ export async function commitUploadViaWorker(
 	);
 }
 
-export async function prepareUpload(
-	token: string,
-	decision: UploadActionDecision,
-	metadata: ParsedUploadPathMetadata
-): Promise<void> {
-	const expectedExpiresAt = uploadExpiryFromNow();
-	const response = await authorisedFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
-		token,
-		{
-			body: JSON.stringify(uploadBlobMetadata(metadata)),
-			headers: {
-				'content-type': 'application/json'
-			},
-			method: 'PUT'
-		}
-	);
-
-	await expectPrepareUploadResponse(
-		response,
-		metadata,
-		expectedExpiresAt,
-		decision.uploadId
-	);
-}
-
-export async function prepareUploadViaWorker(
-	token: string,
-	decision: UploadActionDecision,
-	metadata: ParsedUploadPathMetadata
-): Promise<void> {
-	const expectedExpiresAt = uploadExpiryFromNow();
-	const response = await authorisedWorkerFetch(
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads/${decision.uploadId}`,
-		token,
-		{
-			body: JSON.stringify(uploadBlobMetadata(metadata)),
-			headers: {
-				'content-type': 'application/json'
-			},
-			method: 'PUT'
-		}
-	);
-
-	await expectPrepareUploadResponse(
-		response,
-		metadata,
-		expectedExpiresAt,
-		decision.uploadId
-	);
-}
-
 export async function commitPath(
 	token: string,
 	metadata: ParsedUploadPathMetadata,
@@ -1914,7 +1814,6 @@ export async function commitPath(
 		await negotiateUploads(token, [metadata]),
 		metadata
 	);
-	await prepareUpload(token, upload, metadata);
 	await putNarBytes(upload.r2Key, nar);
 	await commitUpload(token, upload.uploadId);
 }
@@ -2689,14 +2588,6 @@ export async function readStoredNarInfo(storePathHash: StorePathHash): Promise<{
 	};
 }
 
-export function uploadBlobMetadata(metadata: ParsedUploadPathMetadata) {
-	return {
-		fileHash: metadata.fileHash,
-		fileSize: metadata.fileSize,
-		compression: metadata.compression
-	};
-}
-
 export function uploadPathNegotiation(metadata: ParsedUploadPathMetadata) {
 	return {
 		storePathHash: metadata.storePathHash,
@@ -2789,40 +2680,6 @@ export function singleDecision(
 ): UploadDecision {
 	const [decision] = z.tuple([uploadDecisionSchema]).parse(response.uploads);
 	return uploadDecisionSchema.parse(decision);
-}
-
-export async function expectPrepareUploadResponse(
-	response: Response,
-	metadata: ParsedUploadPathMetadata,
-	expiresAt: string,
-	uploadId: string
-): Promise<void> {
-	expect(response.status).toBe(StatusCodes.OK);
-
-	const body = uploadPrepareResponseSchema.parse(await response.json());
-	const uploadUrl = new URL(body.uploadUrl);
-
-	expect({
-		protocol: uploadUrl.protocol,
-		hostname: uploadUrl.hostname,
-		path: uploadUrl.pathname
-			.split('/')
-			.map((segment) => decodeURIComponent(segment)),
-		hasSignature: uploadUrl.searchParams.has('X-Amz-Signature'),
-		uploadHeaders: body.uploadHeaders,
-		expiresAt: body.expiresAt
-	}).toStrictEqual({
-		protocol: 'https:',
-		hostname: 'test-account-id.r2.cloudflarestorage.com',
-		path: ['', 'cupboard-blobs', 'staging', testPushId, `${uploadId}.nar.zst`],
-		hasSignature: true,
-		uploadHeaders: {
-			'x-amz-checksum-sha256': NixSha256Hash.parse(
-				metadata.fileHash
-			).digestBase64()
-		},
-		expiresAt
-	});
 }
 
 export function uploadExpiryFromNow(): string {

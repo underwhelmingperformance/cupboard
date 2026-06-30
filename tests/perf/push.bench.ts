@@ -6,7 +6,6 @@ import { Writable } from 'node:stream';
 import { afterAll, beforeAll, bench } from 'vitest';
 
 import { type PushClient, runPush } from '../../packages/cli/src/push/push.ts';
-import { pushClientFor } from '../../packages/cli/src/push/push-client.ts';
 import { Nix, type NixValidPathInfo } from '../../packages/nix/src/index.ts';
 import {
 	createReporter,
@@ -17,7 +16,7 @@ import { NixStore } from '../support/nix.ts';
 
 // An integration benchmark of the real push against a worker running under
 // Miniflare over a real socket: every cost the phase pays in production is
-// present (NAR build, zstd, the per-path presign round-trip, the R2 PUT, the
+// present (NAR build, zstd, the credential fetch, the R2 upload, the
 // commit), and the latency emerges from real work rather than an injected
 // delay. Each iteration pushes a fresh batch of unique store paths so the cache
 // never reports them as already present; without that, the second iteration
@@ -201,9 +200,7 @@ beforeAll(async () => {
 	state.harness = {
 		server,
 		source,
-		client: pushClientFor(server.tenantUrl, token, {
-			fetcher: server.uploadFetcher()
-		}),
+		client: server.pushClient(token),
 		nix: storeClientFor(source),
 		workspace,
 		pool,
@@ -237,7 +234,7 @@ afterAll(async () => {
 			const perSecond = (batchSize / meanMs) * 1000;
 
 			console.log(
-				`[push-bench] prepareConcurrency=${String(concurrency)} "${label}" mean=${meanMs.toFixed(0)}ms (${perSecond.toFixed(1)} paths/s)`
+				`[push-bench] uploadConcurrency=${String(concurrency)} "${label}" mean=${meanMs.toFixed(0)}ms (${perSecond.toFixed(1)} paths/s)`
 			);
 		}
 	}
@@ -258,7 +255,6 @@ function pushBatch(concurrency: number): () => Promise<void> {
 			nix: harness.nix,
 			client: harness.client,
 			wait: false,
-			prepareConcurrency: concurrency,
 			uploadConcurrency: concurrency
 		});
 
@@ -268,7 +264,7 @@ function pushBatch(concurrency: number): () => Promise<void> {
 
 for (const concurrency of concurrencyLevels) {
 	bench(
-		`push ${String(batchSize)} missing NARs, prepareConcurrency=${String(concurrency)}`,
+		`push ${String(batchSize)} missing NARs, uploadConcurrency=${String(concurrency)}`,
 		pushBatch(concurrency),
 		{ iterations, warmupIterations, time: 0, warmupTime: 0 }
 	);

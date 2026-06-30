@@ -8,10 +8,12 @@ import {
 const storePathHash = '0'.repeat(32);
 const digest = 'a'.repeat(64);
 const bundle = { storePathHash, digest };
+const pushId = 'push-1';
 
 describe('attestationNegotiateRequestSchema', () => {
 	it('accepts a request within the bundle cap', () => {
 		const value = {
+			pushId,
 			bundles: Array.from(
 				{ length: attestationNegotiateMaxBundles },
 				() => bundle
@@ -44,8 +46,8 @@ describe('attestationNegotiateRequestSchema', () => {
 			}
 		}
 	])('rejects $name', ({ value }) => {
-		expect(attestationNegotiateRequestSchema.safeParse(value).success).toBe(
-			false
-		);
+		expect(
+			attestationNegotiateRequestSchema.safeParse({ pushId, ...value }).success
+		).toBe(false);
 	});
 });

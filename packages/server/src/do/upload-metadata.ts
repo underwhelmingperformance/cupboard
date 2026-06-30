@@ -10,8 +10,7 @@ import {
 
 import {
 	StoredUploadMetadataInvalidError,
-	UploadedObjectChecksumMissingError,
-	UploadNotPreparedError
+	UploadedObjectChecksumMissingError
 } from '../errors.ts';
 import { parseStoredJson } from '../http/parse.ts';
 
@@ -46,29 +45,6 @@ export function canonicalBlobOf(key: string, object: R2Object): CanonicalBlob {
 		fileHash: NixSha256Hash.fromDigest(new Uint8Array(sha256)).value,
 		fileSize: object.size
 	};
-}
-
-export function parseStoredUploadMetadata(
-	uploadId: string,
-	source: string
-): ParsedUploadPathMetadata {
-	const onInvalid = (cause: Error): StoredUploadMetadataInvalidError =>
-		new StoredUploadMetadataInvalidError(uploadId, cause);
-	const json = parseStoredJson(source, onInvalid);
-	const prepared = uploadPathMetadataSchema.safeParse(json);
-
-	if (prepared.success) {
-		return prepared.data;
-	}
-
-	// Negotiation stores the path metadata alone until the upload is prepared
-	// with its blob details. A well-formed path-only record means the client
-	// committed before preparing, not that the stored state is corrupt.
-	if (uploadPathNegotiationSchema.safeParse(json).success) {
-		throw new UploadNotPreparedError(uploadId);
-	}
-
-	throw onInvalid(prepared.error);
 }
 
 export function parseStoredUploadPathMetadata(
@@ -113,14 +89,4 @@ export function parseStoredUploadPathMetadata(
 	}
 
 	throw onInvalid(path.error);
-}
-
-export function uploadHeadersFor(
-	metadata: ParsedUploadPathMetadata
-): Readonly<Record<string, string>> {
-	return {
-		'x-amz-checksum-sha256': NixSha256Hash.parse(
-			metadata.fileHash
-		).digestBase64()
-	};
 }

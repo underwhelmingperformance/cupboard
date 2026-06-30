@@ -75,7 +75,7 @@ import {
 	TenantIdentityService
 } from './tenant-identity-service.ts';
 import { TokenExchangeService } from './token-exchange-service.ts';
-import { parseStoredUploadMetadata } from './upload-metadata.ts';
+import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
@@ -448,7 +448,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const status = uploadStatusOf(row);
 
 			if (status === 'pending') {
-				const metadata = parseStoredUploadMetadata(uploadId, row.metadataJson);
+				const metadata = parseStoredUploadPathMetadata(
+					uploadId,
+					row.metadataJson
+				);
 				sendCommitSessionFrame(socket, {
 					ev: 'deferred',
 					uploadId,
