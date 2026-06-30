@@ -430,3 +430,55 @@ export const permittedGrantSchema = z.discriminatedUnion('type', [
 	z.strictObject({ type: z.literal('cupboard_wildcard') })
 ]);
 export type PermittedGrant = z.infer<typeof permittedGrantSchema>;
+
+const knownOperations: ReadonlySet<string> = new Set(operationSchema.options);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === 'object' && value !== null;
+}
+
+// A grant a rule persisted under an earlier build may name an operation since
+// retired (a removed scope). Drop the unknown actions so the rule still
+// validates against the current operation set, rather than failing the whole
+// rule. A grant carrying no recognised action becomes meaningless and is
+// dropped; a wildcard grant has no actions and passes through untouched.
+function withoutRetiredActions(grants: unknown): unknown {
+	if (!Array.isArray(grants)) {
+		return grants;
+	}
+
+	const items: readonly unknown[] = grants;
+
+	const pruned = items.map((grant) => {
+		if (!isRecord(grant) || !Array.isArray(grant.actions)) {
+			return grant;
+		}
+
+		const actions: readonly unknown[] = grant.actions;
+
+		return {
+			...grant,
+			actions: actions.filter(
+				(action) => typeof action === 'string' && knownOperations.has(action)
+			)
+		};
+	});
+
+	return pruned.filter(
+		(grant) =>
+			!isRecord(grant) ||
+			!Array.isArray(grant.actions) ||
+			grant.actions.length > 0
+	);
+}
+
+/**
+ * Validates the grants a trust rule persisted, tolerating an older row that
+ * still names a retired operation. Unknown actions are dropped and any grant
+ * left empty is removed before the strict grant schema runs, so a routine
+ * upgrade that narrows the operation set does not fail a stored rule.
+ */
+export const storedPermittedGrantsSchema = z.preprocess(
+	withoutRetiredActions,
+	z.array(permittedGrantSchema)
+);
