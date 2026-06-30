@@ -1,6 +1,6 @@
 import {
 	oidcTrustDisplaySchema,
-	permittedGrantSchema
+	storedPermittedGrantsSchema
 } from '@cupboard/protocol/grants';
 import {
 	type OidcTrustListResponse,
@@ -25,7 +25,6 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 type ControlTrustRow = typeof d1Schema.controlTrust.$inferSelect;
 
 const storedClaimsSchema = z.record(z.string(), z.string());
-const storedPermittedGrantsSchema = z.array(permittedGrantSchema);
 
 function ruleFromRow(row: ControlTrustRow): OidcTrustRule {
 	const fault = (cause: Error): StoredControlTrustInvalidError =>

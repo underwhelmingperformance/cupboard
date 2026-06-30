@@ -6,7 +6,7 @@ import {
 import { type ResolvedRootTarget } from '@cupboard/nix-store/store-path';
 import {
 	oidcTrustDisplaySchema,
-	permittedGrantSchema
+	storedPermittedGrantsSchema
 } from '@cupboard/protocol/grants';
 import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
 import { type RetentionPolicySummary } from '@cupboard/protocol/retention';
@@ -58,7 +58,6 @@ export type SchemaWriter =
 export const ownerRuleId = 'owner';
 
 export const storedClaimsSchema = z.record(z.string(), z.string());
-export const storedPermittedGrantsSchema = z.array(permittedGrantSchema);
 
 export interface OwnerConfig {
 	readonly issuer: string;

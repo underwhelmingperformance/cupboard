@@ -7,7 +7,8 @@ import {
 	isCoveredByToken,
 	type Operation,
 	permittedGrantSchema,
-	type ResourceRequest
+	type ResourceRequest,
+	storedPermittedGrantsSchema
 } from './grants.ts';
 
 // Fixtures are parsed through the schema so the branded cache/root/tenant
@@ -309,5 +310,58 @@ describe('permittedGrantSchema', () => {
 				actions: ['signing-key:rotate']
 			}).success
 		).toBe(true);
+	});
+});
+
+describe('storedPermittedGrantsSchema', () => {
+	const cacheResources = {
+		cache: { exact: 'owner-ci', validate: 'cacheName' }
+	};
+
+	it('strips a retired action a rule was persisted with', () => {
+		const parsed = storedPermittedGrantsSchema.parse([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate', 'upload:prepare', 'upload:commit'],
+				resources: cacheResources
+			}
+		]);
+
+		expect(parsed).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate', 'upload:commit'],
+				resources: cacheResources
+			}
+		]);
+	});
+
+	it('drops a grant left with no recognised action', () => {
+		const parsed = storedPermittedGrantsSchema.parse([
+			{
+				type: 'cupboard_cache',
+				actions: ['attestation:prepare'],
+				resources: cacheResources
+			},
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: cacheResources
+			}
+		]);
+
+		expect(parsed).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				resources: cacheResources
+			}
+		]);
+	});
+
+	it('passes a wildcard grant through untouched', () => {
+		const grants = [{ type: 'cupboard_wildcard' }];
+
+		expect(storedPermittedGrantsSchema.parse(grants)).toStrictEqual(grants);
 	});
 });
