@@ -59,6 +59,16 @@ export type CommitOutcome =
 			readonly narHash: NixSha256HashString;
 	  };
 
+// The tenant's publish status and quota basis, read together by
+// {@link CommitPipelineService.tenantAccount}. The usage columns are nullable
+// because the left join may find no usage row.
+interface TenantAccount {
+	readonly status: (typeof d1Schema.tenant.$inferSelect)['status'];
+	readonly bytes: number | null;
+	readonly casBytes: number | null;
+	readonly quotaBytes: number | null;
+}
+
 export class CommitPipelineService {
 	// Single-flight guard for the prompt verification request: true from when a
 	// `tenant-verify` message is enqueued until the next pass starts and claims the
@@ -190,18 +200,66 @@ export class CommitPipelineService {
 		};
 	}
 
-	// The authoritative active check the edge/object publish is gated on: the Worker's
-	// write gate read this status before dispatch, but a commit can settle here after a
-	// suspend or offboard, so it is re-read in the critical section. A missing row reads
-	// as not-active and fails closed.
-	private async tenantActive(): Promise<boolean> {
-		const row = await this.context.d1
-			.select({ status: d1Schema.tenant.status })
+	// The tenant's publish gate and quota basis in one read. The status is the
+	// authoritative active check the edge/object publish is gated on: the Worker's
+	// write gate read it before dispatch, but a commit can settle here after a
+	// suspend or offboard, so it is re-read in the critical section, and a missing
+	// row reads as not-active and fails closed. The usage columns ride along on a
+	// left join, so the same read also answers the quota decision; an absent usage
+	// row leaves them null, which {@link isOverQuota} reads as within quota.
+	private async tenantAccount(
+		tenant: TenantId
+	): Promise<TenantAccount | undefined> {
+		return this.context.d1
+			.select({
+				status: d1Schema.tenant.status,
+				bytes: d1Schema.tenantUsage.bytes,
+				casBytes: d1Schema.tenantUsage.casBytes,
+				quotaBytes: d1Schema.tenantUsage.quotaBytes
+			})
 			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, this.context.requireTenant()))
+			.leftJoin(
+				d1Schema.tenantUsage,
+				eq(d1Schema.tenantUsage.tenant, d1Schema.tenant.id)
+			)
+			.where(eq(d1Schema.tenant.id, tenant))
+			.get();
+	}
+
+	// Whether charging this hash would take the tenant over its quota, decided from
+	// an account already read. A null quota or a hash the tenant already holds is
+	// within quota; otherwise the ownership read settles whether this is a fresh
+	// charge. Null usage columns (no usage row) count as zero, matching an unset
+	// quota.
+	private async isOverQuota(
+		tenant: TenantId,
+		account: TenantAccount,
+		narHash: NixSha256HashString,
+		fileSize: number
+	): Promise<boolean> {
+		if (account.quotaBytes === null) {
+			return false;
+		}
+
+		const owned = await this.context.d1
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					eq(d1Schema.tenantBlob.narHash, narHash)
+				)
+			)
 			.get();
 
-		return row?.status === 'active';
+		if (owned !== undefined) {
+			return false;
+		}
+
+		return (
+			(account.bytes ?? 0) + (account.casBytes ?? 0) + fileSize >
+			account.quotaBytes
+		);
 	}
 
 	// Writes the reference edge and per-tenant presence and charges usage, all in one
@@ -718,13 +776,20 @@ export class CommitPipelineService {
 		// on the authoritative D1 status, read in the caller's critical section so the
 		// check and the edge write below are one atomic decision. The single rule —
 		// publish only while the tenant is active — covers suspended, offboarding,
-		// offboarded and a missing row alike.
-		if (this.context.offboarding || !(await this.tenantActive())) {
+		// offboarded and a missing row alike. The same read carries the quota basis.
+		const tenant = this.context.requireTenant();
+		const account = await this.tenantAccount(tenant);
+
+		if (this.context.offboarding || account?.status !== 'active') {
 			return 'tenant-inactive';
 		}
 
 		const blob = await this.context.d1
-			.select({ fileSize: d1Schema.blobState.fileSize })
+			.select({
+				fileHash: d1Schema.blobState.fileHash,
+				fileSize: d1Schema.blobState.fileSize,
+				compression: d1Schema.blobState.compression
+			})
 			.from(d1Schema.blobState)
 			.where(eq(d1Schema.blobState.narHash, metadata.narHash))
 			.get();
@@ -754,19 +819,17 @@ export class CommitPipelineService {
 			return 'superseded';
 		}
 
-		const narInfo = await this.narInfoObjects.narInfoFromRow(row);
-
-		if (narInfo === undefined) {
-			return 'blob-gone';
-		}
-
-		const tenant = this.context.requireTenant();
+		// The blob is confirmed present above, so the narinfo renders from the row and
+		// the metadata already in hand, with no second `blob_state` read.
+		const narInfo = this.narInfoObjects.buildNarInfo(row, blob);
 
 		// Authoritative quota decision against the size that will actually be charged:
 		// the canonical `blob_state` size, which the promote may have adopted from an
 		// existing encoding and so can differ from the staged size the pre-check used.
 		// Returning here lets the caller reclaim the reserved row rather than charging.
-		if (await this.overQuota(tenant, metadata.narHash, blob.fileSize)) {
+		if (
+			await this.isOverQuota(tenant, account, metadata.narHash, blob.fileSize)
+		) {
 			return 'over-quota';
 		}
 
