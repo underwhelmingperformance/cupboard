@@ -32,6 +32,13 @@ import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 
+// The canonical compressed metadata a narinfo advertises, the subset of
+// `blob_state` {@link NarInfoObjectsService.buildNarInfo} needs.
+type NarInfoBlobFields = Pick<
+	typeof d1Schema.blobState.$inferSelect,
+	'fileHash' | 'fileSize' | 'compression'
+>;
+
 // Identifies a committed reference edge by the three columns negotiate matches a
 // narinfo row against: the path, its generation, and the hash it points at.
 function referenceKey(
@@ -154,6 +161,16 @@ export class NarInfoObjectsService {
 			return undefined;
 		}
 
+		return this.buildNarInfo(row, blob);
+	}
+
+	// Renders a narinfo from a row and the canonical compressed metadata the caller
+	// has already read, so a caller holding the `blob_state` row does not read it
+	// again. {@link narInfoFromRow} is the form that fetches the metadata itself.
+	buildNarInfo(
+		row: typeof schema.narInfos.$inferSelect,
+		blob: NarInfoBlobFields
+	): NarInfo {
 		return new NarInfo(
 			new StorePath(row.storePath),
 			narObjectKey(row.narHash),
