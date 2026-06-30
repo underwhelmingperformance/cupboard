@@ -30,14 +30,14 @@ function isCpuLimitsUnsupported(error: unknown): boolean {
  * deploys and runs within the plan's own CPU budget.
  */
 async function uploadScriptForPlan(
-	deps: DeployDeps,
+	dependencies: DeployDependencies,
 	context: PhaseContext,
 	scriptName: string,
 	metadata: ScriptUpdateParams.Metadata,
 	bundle: WorkerBundle
 ): Promise<void> {
 	try {
-		await deps.api.uploadScript(scriptName, metadata, bundle);
+		await dependencies.api.uploadScript(scriptName, metadata, bundle);
 	} catch (error) {
 		if (!isCpuLimitsUnsupported(error) || metadata.limits === undefined) {
 			throw error;
@@ -49,7 +49,7 @@ async function uploadScriptForPlan(
 		);
 
 		const { limits: _limits, ...withoutLimits } = metadata;
-		await deps.api.uploadScript(scriptName, withoutLimits, bundle);
+		await dependencies.api.uploadScript(scriptName, withoutLimits, bundle);
 	}
 }
 
@@ -61,7 +61,7 @@ export interface DeployOptions {
 	readonly liveBuild: string | undefined;
 }
 
-export interface DeployDeps {
+export interface DeployDependencies {
 	readonly artifact: DeploymentArtifact;
 	readonly api: CloudflareApi;
 	readonly reporter: Reporter;
@@ -175,10 +175,10 @@ export function choicePlanRows(
 }
 
 async function reconcileResources(
-	deps: DeployDeps,
+	dependencies: DeployDependencies,
 	plan: ResourcePlan
 ): Promise<ResolvedResources> {
-	const { api, reporter } = deps;
+	const { api, reporter } = dependencies;
 
 	return reporter.phase('Reconciling resources', async (context) => {
 		await Promise.all(
@@ -214,10 +214,10 @@ async function reconcileResources(
 }
 
 async function configureTriggers(
-	deps: DeployDeps,
+	dependencies: DeployDependencies,
 	resources: ResolvedResources
 ): Promise<void> {
-	const { api, reporter, options, artifact } = deps;
+	const { api, reporter, options, artifact } = dependencies;
 	const control = artifact.config.control;
 
 	await reporter.phase('Configuring triggers', async (context) => {
@@ -329,11 +329,13 @@ function canonicalJson(value: unknown): string {
  * cross-script. With `--dry-run` it renders the plan and stops before any
  * mutation.
  */
-export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
-	const { artifact, api, reporter, options } = deps;
+export async function runDeploy(
+	dependencies: DeployDependencies
+): Promise<ResultRow[]> {
+	const { artifact, api, reporter, options } = dependencies;
 
 	const resources = await reconcileResources(
-		deps,
+		dependencies,
 		collectResources(artifact.config)
 	);
 
@@ -412,7 +414,7 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 	} else {
 		await reporter.phase('Uploading tenant worker', (context) =>
 			uploadScriptForPlan(
-				deps,
+				dependencies,
 				context,
 				artifact.config.tenant.name,
 				tenantMetadata,
@@ -428,7 +430,7 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 	} else {
 		await reporter.phase('Uploading control worker', (context) =>
 			uploadScriptForPlan(
-				deps,
+				dependencies,
 				context,
 				artifact.config.control.name,
 				controlMetadata,
@@ -460,7 +462,7 @@ export async function runDeploy(deps: DeployDeps): Promise<ResultRow[]> {
 		reporter.step('Setting secrets · no secrets to set');
 	}
 
-	await configureTriggers(deps, resources);
+	await configureTriggers(dependencies, resources);
 
 	const d1Name = artifact.config.tenant.d1Databases[0]?.databaseName;
 	const d1Database =

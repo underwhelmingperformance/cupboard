@@ -161,10 +161,8 @@ describe('runPush', () => {
 
 		let running = 0;
 		let peak = 0;
-		let release: (() => void) | undefined;
-		const gate = new Promise<void>((resolve) => {
-			release = resolve;
-		});
+		const { promise: gate, resolve: release }: PromiseWithResolvers<void> =
+			Promise.withResolvers();
 		const uploadedKeys: string[] = [];
 
 		await runPush(paths, reporter([]), {
@@ -188,7 +186,7 @@ describe('runPush', () => {
 					// Once a full batch is in flight, release the gate so the rest can
 					// run; the peak then reveals how many uploaded at once.
 					if (running >= limit) {
-						release?.();
+						release();
 					}
 
 					await gate;
@@ -1317,7 +1315,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			...deferredDeps()
+			...deferredDependencies()
 		});
 
 		expect({ events, commitOptions }).toStrictEqual({
@@ -1346,7 +1344,7 @@ describe('runPush', () => {
 					return Promise.resolve(rootSummary({ name, ...body }));
 				}
 			} satisfies PushClient,
-			...deferredDeps()
+			...deferredDependencies()
 		} satisfies PushDependencies;
 		const outcome = await (async () => {
 			try {
@@ -1521,7 +1519,7 @@ function deferredUpload(
 	};
 }
 
-function deferredDeps() {
+function deferredDependencies() {
 	return {
 		nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
 		createNarArchive: () => new FakeNarArchive(appDigest),

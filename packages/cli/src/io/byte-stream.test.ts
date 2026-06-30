@@ -5,11 +5,7 @@ import { byteStream, countingByteStream } from './byte-stream.ts';
 async function collect(
 	stream: ReadableStream<Uint8Array>
 ): Promise<Uint8Array> {
-	const chunks: Uint8Array[] = [];
-
-	for await (const chunk of stream) {
-		chunks.push(chunk);
-	}
+	const chunks: Uint8Array[] = await Array.fromAsync(stream);
 
 	return Buffer.concat(chunks);
 }

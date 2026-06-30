@@ -8,7 +8,7 @@ const ingestionAttempts = 4;
 const ingestionDelayMs = 2500;
 const eventLimit = 20;
 
-export interface ClaimLogDeps {
+export interface ClaimLogDependencies {
 	readonly api: Pick<CloudflareApi, 'queryWorkerLogs'>;
 	/** The cf-ray of the refused request, matched against each event. */
 	readonly ray: string;
@@ -27,25 +27,25 @@ export interface ClaimLogDeps {
  * pointing at the logs.
  */
 export async function fetchClaimFailureLogs(
-	deps: ClaimLogDeps
+	dependencies: ClaimLogDependencies
 ): Promise<readonly string[]> {
-	const queriedAt = deps.now();
-	const attempts = deps.attempts ?? ingestionAttempts;
+	const queriedAt = dependencies.now();
+	const attempts = dependencies.attempts ?? ingestionAttempts;
 
 	for (let attempt = 1; attempt <= attempts; attempt += 1) {
-		throwIfAborted(deps.signal);
+		throwIfAborted(dependencies.signal);
 
 		let events: readonly WorkerLogEvent[];
 
 		try {
-			events = await deps.api.queryWorkerLogs({
-				needle: deps.ray,
+			events = await dependencies.api.queryWorkerLogs({
+				needle: dependencies.ray,
 				fromMs: queriedAt - lookbackMs,
 				toMs: queriedAt + lookaheadMs,
 				limit: eventLimit
 			});
 		} catch {
-			throwIfAborted(deps.signal);
+			throwIfAborted(dependencies.signal);
 
 			// Reading the log is best-effort: the deploy credential may lack the
 			// Workers Observability scope, or the query may be unavailable. The
@@ -60,7 +60,7 @@ export async function fetchClaimFailureLogs(
 		}
 
 		if (attempt < attempts) {
-			await deps.sleep(ingestionDelayMs);
+			await dependencies.sleep(ingestionDelayMs);
 		}
 	}
 
