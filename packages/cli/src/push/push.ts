@@ -879,7 +879,7 @@ function commitTarget(
 }
 
 // Commits one path, re-negotiating it if its slot expired before the commit ran.
-// A long upload phase can outlive the slot the prepare stamped, and a `NOT_FOUND`
+// A long upload phase can outlive the slot negotiate stamped, and a `NOT_FOUND`
 // commit means the pending row was reaped, not that the transfer is dead, so the
 // path is re-driven rather than failed.
 async function commitNegotiated(
@@ -898,10 +898,9 @@ async function commitNegotiated(
 }
 
 // Re-drives a path whose commit slot was reaped from wherever its fresh decision
-// puts it: a reuse commits straight away; a fresh upload re-presigns and
-// re-uploads the NAR from the compressed file still on disk before committing; a
-// path the store now already holds needs nothing. The reaped row took its staged
-// bytes with it, so a fresh upload must re-send them.
+// puts it: a reuse commits straight away; a fresh upload re-streams the NAR
+// before committing; a path the store now already holds needs nothing. The
+// reaped row took its staged bytes with it, so a fresh upload must re-send them.
 async function redriveExpiredCommit(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext

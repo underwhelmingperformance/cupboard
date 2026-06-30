@@ -1,20 +1,13 @@
 import { ORPCError } from '@orpc/client';
-import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import {
-	CupboardUploadError,
 	QuotaExceededError,
 	ScopeForbiddenError,
 	SessionRejectedError
 } from '../errors.ts';
 
-import { isExpiredUploadUrlError, translateRpcError } from './rpc-errors.ts';
-
-const expiredBody =
-	'<Error><Code>ExpiredRequest</Code><Message>Request has expired</Message></Error>';
-const deniedBody =
-	'<Error><Code>AccessDenied</Code><Message>no</Message></Error>';
+import { translateRpcError } from './rpc-errors.ts';
 
 describe('translateRpcError', () => {
 	it.each([
@@ -60,40 +53,5 @@ describe('translateRpcError', () => {
 		const error = new Error('boom');
 
 		expect(translateRpcError(error)).toBe(error);
-	});
-});
-
-describe('isExpiredUploadUrlError', () => {
-	it.each([
-		{
-			name: 'a 403 ExpiredRequest',
-			error: new CupboardUploadError(
-				'nar/key',
-				StatusCodes.FORBIDDEN,
-				expiredBody
-			),
-			expected: true
-		},
-		{
-			name: 'a 403 with another code',
-			error: new CupboardUploadError(
-				'nar/key',
-				StatusCodes.FORBIDDEN,
-				deniedBody
-			),
-			expected: false
-		},
-		{
-			name: 'an ExpiredRequest with a non-403 status',
-			error: new CupboardUploadError(
-				'nar/key',
-				StatusCodes.BAD_REQUEST,
-				expiredBody
-			),
-			expected: false
-		},
-		{ name: 'an unrelated error', error: new Error('boom'), expected: false }
-	])('is $expected for $name', ({ error, expected }) => {
-		expect(isExpiredUploadUrlError(error)).toBe(expected);
 	});
 });
