@@ -8,7 +8,11 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	MalformedNarInfoError,
 	NarInfoMismatchError,
-	NarInfoTooLargeError
+	NarInfoNotCommittableError,
+	NarInfoTooLargeError,
+	UploadDigestMismatchError,
+	UploadOverQuotaError,
+	UploadStillPendingError
 } from '@cupboard/s3/errors';
 import type {
 	ObjectStat,
@@ -17,12 +21,15 @@ import type {
 } from '@cupboard/s3/ports';
 import { describe, expect, it, type Mock, vi } from 'vitest';
 
+import { QuotaExceededError } from '../errors.ts';
+
 import type { BlobStore } from './blob-store.ts';
 import {
 	type CommitOutcome,
 	createNixCacheService,
 	type NixCacheServiceDeps,
-	type PendingUploadRow
+	type PendingUploadRow,
+	type UploadSettlement
 } from './nix-cache-service.ts';
 
 const tenant = 'acme';
@@ -69,12 +76,13 @@ interface Harness {
 	readonly puts: { key: string }[];
 	readonly registered: PendingUploadRow[];
 	readonly commit: Mock<(cache: string, id: string) => Promise<CommitOutcome>>;
-	readonly settlePending: Mock<() => Promise<void>>;
+	readonly settleUpload: Mock<(id: string) => Promise<UploadSettlement>>;
 }
 
 function harness(
 	options: {
 		commitOutcome?: CommitOutcome;
+		settlement?: UploadSettlement;
 		narinfoStat?: ObjectStat;
 	} = {}
 ): Harness {
@@ -82,8 +90,8 @@ function harness(
 	const registered: PendingUploadRow[] = [];
 	const commit: Mock<(cache: string, id: string) => Promise<CommitOutcome>> =
 		vi.fn(() => Promise.resolve(options.commitOutcome ?? { kind: 'settled' }));
-	const settlePending: Mock<() => Promise<void>> = vi.fn(() =>
-		Promise.resolve()
+	const settleUpload: Mock<(id: string) => Promise<UploadSettlement>> = vi.fn(
+		() => Promise.resolve(options.settlement ?? 'servable')
 	);
 
 	const blobStore: BlobStore = {
@@ -108,7 +116,7 @@ function harness(
 				registered.push(row);
 			},
 			commit,
-			settlePending
+			settleUpload
 		},
 		caches: {
 			find: (cache) =>
@@ -137,7 +145,7 @@ function harness(
 		newId: () => 'upload-1'
 	};
 
-	return { deps, puts, registered, commit, settlePending };
+	return { deps, puts, registered, commit, settleUpload };
 }
 
 describe('createNixCacheService write path', () => {
@@ -151,8 +159,9 @@ describe('createNixCacheService write path', () => {
 	});
 
 	it('commits a narinfo and settles a deferred verification inline', async () => {
-		const { deps, registered, commit, settlePending } = harness({
+		const { deps, registered, commit, settleUpload } = harness({
 			commitOutcome: { kind: 'deferred' },
+			settlement: 'servable',
 			narinfoStat: {
 				size: 10,
 				etag: 'narinfo-etag',
@@ -171,7 +180,7 @@ describe('createNixCacheService write path', () => {
 
 		expect(result.etag).toBe('narinfo-etag');
 		expect(commit).toHaveBeenCalledWith('', 'upload-1');
-		expect(settlePending).toHaveBeenCalledOnce();
+		expect(settleUpload).toHaveBeenCalledWith('upload-1');
 		expect(registered).toHaveLength(1);
 		expect(registered[0]).toMatchObject({
 			id: 'upload-1',
@@ -191,7 +200,7 @@ describe('createNixCacheService write path', () => {
 	});
 
 	it('does not settle when the commit is already settled', async () => {
-		const { deps, settlePending } = harness({
+		const { deps, settleUpload } = harness({
 			commitOutcome: { kind: 'settled' },
 			narinfoStat: { size: 10, etag: 'narinfo-etag', lastModified: issuedAt }
 		});
@@ -204,7 +213,7 @@ describe('createNixCacheService write path', () => {
 			anyMeta,
 			undefined
 		);
-		expect(settlePending).not.toHaveBeenCalled();
+		expect(settleUpload).not.toHaveBeenCalled();
 	});
 
 	it('rejects a malformed narinfo body', async () => {
@@ -259,6 +268,52 @@ describe('createNixCacheService write path', () => {
 		const service = createNixCacheService(deps);
 
 		expect(await service.resolveServableNar(fileHash)).toBe(fileHash);
+	});
+});
+
+describe('createNixCacheService settlement', () => {
+	it.each([
+		{ settlement: 'mismatch', error: UploadDigestMismatchError },
+		{ settlement: 'over-quota', error: UploadOverQuotaError },
+		{ settlement: 'pending', error: UploadStillPendingError },
+		{ settlement: 'absent', error: NarInfoNotCommittableError }
+	] as const)(
+		'maps a $settlement verdict to its S3 error',
+		async ({ settlement, error }) => {
+			const { deps } = harness({
+				commitOutcome: { kind: 'deferred' },
+				settlement
+			});
+			const service = createNixCacheService(deps);
+
+			await expect(
+				service.commitNarinfo(
+					'',
+					storePathHash,
+					streamOf(narBody),
+					anyMeta,
+					undefined
+				)
+			).rejects.toThrow(error);
+		}
+	);
+
+	it('translates a quota error thrown by the commit pipeline', async () => {
+		const { deps, commit } = harness();
+		commit.mockImplementation(() =>
+			Promise.reject(new QuotaExceededError('acme'))
+		);
+		const service = createNixCacheService(deps);
+
+		await expect(
+			service.commitNarinfo(
+				'',
+				storePathHash,
+				streamOf(narBody),
+				anyMeta,
+				undefined
+			)
+		).rejects.toThrow(UploadOverQuotaError);
 	});
 });
 

@@ -8,6 +8,7 @@ import {
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { commitSessionRequestSchema } from '@cupboard/protocol/upload';
+import { createS3App } from '@cupboard/s3/app';
 import { DurableObject } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -32,6 +33,15 @@ import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { authoriseRequest } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
+import { createR2BlobStore } from '../s3/blob-store.ts';
+import {
+	createEncryptionKeyset,
+	type EncryptionKeyset,
+	importEncryptionKey
+} from '../s3/credentials.ts';
+import { resolveServableNar } from '../s3/nar-resolver.ts';
+import { createS3Backend } from '../s3/nix-cache-backend.ts';
+import { createNixCacheObjectStore } from '../s3/nix-cache-object-store.ts';
 
 import {
 	AttestationCasService,
@@ -99,6 +109,7 @@ export const gcContinuationKey = 'maintenance:gc-pending';
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
 	private migrationPromise: Promise<void> | undefined;
+	private s3AppPromise: Promise<Hono | undefined> | undefined;
 
 	private readonly authKeys: AuthKeysService;
 	private readonly attestationCas: AttestationCasService;
@@ -202,6 +213,19 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	private routes(): void {
 		this.app.onError(serverErrorHandler);
+
+		// The S3-compatible endpoint is dispatched whole to its own app, marked by
+		// the worker so its path and signed headers reach SigV4 verification
+		// untouched. It owns its auth, so it runs before the tenant-configured gate
+		// and the JSON contract handler.
+		this.app.use(async (context, next) => {
+			if (context.req.header('x-cupboard-s3') === undefined) {
+				await next();
+				return;
+			}
+
+			return this.serveS3(context.req.raw);
+		});
 
 		// An unconfigured Durable Object has no identity to issue, verify or advertise
 		// under, so it serves nothing rather than falling back to a default. This is
@@ -610,6 +634,80 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.migrationPromise ??= this.migrateAndSeed();
 
 		return this.migrationPromise;
+	}
+
+	private async serveS3(request: Request): Promise<Response> {
+		this.s3AppPromise ??= this.buildS3App();
+		const app = await this.s3AppPromise;
+
+		if (app === undefined) {
+			return new Response('The S3 endpoint is not configured.\n', {
+				status: 501
+			});
+		}
+
+		return app.fetch(request, this.env);
+	}
+
+	// The S3 endpoint's encryption keys, or `undefined` when none is configured so
+	// the endpoint stays disabled. The secret is one or more comma-separated base64
+	// keys: the first seals new credential secrets, the rest are retained so a key
+	// can be rotated out without invalidating credentials still sealed under it.
+	private async encryptionKeyset(): Promise<EncryptionKeyset | undefined> {
+		const secret = this.context.env.S3_SECRET_KEY;
+		if (!secret) {
+			return undefined;
+		}
+
+		const encoded = secret
+			.split(',')
+			.map((part) => part.trim())
+			.filter((part) => part !== '');
+
+		const keys = await Promise.all(
+			encoded.map((part) => importEncryptionKey(part))
+		);
+		const [current, ...previous] = keys;
+		if (current === undefined) {
+			return undefined;
+		}
+
+		return createEncryptionKeyset(current, previous);
+	}
+
+	// Built once per object, lazily: importing the wrapping key is async, and the
+	// endpoint is disabled when no key is configured.
+	private async buildS3App(): Promise<Hono | undefined> {
+		// The secret binding is typed as always present, but an unconfigured
+		// deployment leaves it unset at runtime; treat that like the empty value so
+		// the endpoint reports as not configured rather than failing key import.
+		const keyset = await this.encryptionKeyset();
+		if (keyset === undefined) {
+			return undefined;
+		}
+
+		const blobStore = createR2BlobStore(this.context.env.BLOBS);
+		const tenant = this.context.requireTenant();
+		const { backend, resolver } = createS3Backend({
+			db: this.context.db,
+			tenant,
+			blobStore,
+			encryptionKeyset: keyset,
+			commit: async (cache, uploadId) => {
+				const outcome = await this.commitPipeline.commit(cache, uploadId);
+				return { kind: outcome.kind };
+			},
+			settleUpload: (uploadId) => this.verification.settleUpload(uploadId),
+			resolveServableNar: (hash) =>
+				resolveServableNar(this.context.d1, tenant, hash),
+			now: () => new Date(),
+			newId: () => crypto.randomUUID()
+		});
+
+		return createS3App({
+			resolver,
+			store: createNixCacheObjectStore(tenant, blobStore, backend)
+		});
 	}
 
 	// Fail loudly at initialisation if the runtime lacks native zstd, rather than

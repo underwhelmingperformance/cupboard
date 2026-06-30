@@ -35,7 +35,8 @@ import type {
 	CacheRemover,
 	IngestPipeline,
 	NarResolver,
-	NixCacheServiceDeps
+	NixCacheServiceDeps,
+	UploadSettlement
 } from './nix-cache-service.ts';
 import { createNixCacheService } from './nix-cache-service.ts';
 
@@ -51,7 +52,7 @@ export interface S3BackendContext {
 	readonly blobStore: BlobStore;
 	readonly encryptionKeyset: EncryptionKeyset;
 	readonly commit: (cache: string, uploadId: string) => Promise<CommitKind>;
-	readonly settlePending: () => Promise<void>;
+	readonly settleUpload: (uploadId: string) => Promise<UploadSettlement>;
 	// Resolves the hash in a `nar/<hash>` key to a canonical NAR hash this tenant
 	// may read, gating cross-tenant access. Injected because tenant ownership
 	// lives in D1, which the Durable Object owns.
@@ -84,7 +85,7 @@ export function createS3Backend(context: S3BackendContext): {
 			context.db.insert(schema.pendingUploads).values(row).run();
 		},
 		commit: (cache, uploadId) => context.commit(cache, uploadId),
-		settlePending: () => context.settlePending()
+		settleUpload: (uploadId) => context.settleUpload(uploadId)
 	};
 
 	const caches: CacheRecords = {

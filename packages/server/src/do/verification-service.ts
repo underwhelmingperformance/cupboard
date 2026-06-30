@@ -13,6 +13,7 @@ import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { type UploadSettlement } from '../s3/nix-cache-service.ts';
 
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
@@ -339,6 +340,39 @@ export class VerificationService {
 				)
 			)
 			.get();
+	}
+
+	// The durable test for a servable path: a committed narinfo row carrying this
+	// upload's NAR hash with its served object present. True even when a
+	// concurrent push of the same content committed the path first.
+	private async isPathServable(
+		cache: string,
+		metadata: ParsedUploadPathNegotiation
+	): Promise<boolean> {
+		const row = this.context.db
+			.select({ narHash: schema.narInfos.narHash })
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, metadata.storePathHash)
+				)
+			)
+			.get();
+
+		if (row?.narHash !== metadata.narHash) {
+			return false;
+		}
+
+		const object = await this.context.env.BLOBS.head(
+			narInfoObjectKey(
+				this.context.requireTenant(),
+				metadata.storePathHash,
+				cache
+			)
+		);
+
+		return object !== null;
 	}
 
 	// Probes a committed row's two R2 objects outside any critical section, so the
@@ -705,5 +739,56 @@ export class VerificationService {
 			'mismatch'
 		);
 		this.notifyWaiters(pending.id, pending.sessionId, 'mismatch');
+	}
+
+	// Synchronously settles one specific upload and reports its terminal outcome,
+	// so the S3 narinfo PUT only returns success once this upload's bytes are
+	// verified and the path is servable. Unlike the bounded sweep it targets the
+	// given id rather than a batch, and reads the durable narinfo as the source of
+	// truth.
+	async settleUpload(uploadId: string): Promise<UploadSettlement> {
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		// An absent row was already settled (an inline reuse commit, or an earlier
+		// pass), so the durable narinfo is the only remaining evidence; trust it.
+		if (pending === undefined) {
+			return 'servable';
+		}
+
+		const metadata = parseStoredUploadPathMetadata(
+			uploadId,
+			pending.metadataJson
+		);
+		await this.verifyAndCommitPending(pending);
+
+		if (await this.isPathServable(pending.cache, metadata)) {
+			return 'servable';
+		}
+
+		const settled = this.context.db
+			.select({ verdict: schema.pendingUploads.verdict })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		switch (settled?.verdict) {
+			case 'mismatch': {
+				return 'mismatch';
+			}
+			case 'over-quota': {
+				return 'over-quota';
+			}
+			case 'pending':
+			case 'committing': {
+				return 'pending';
+			}
+			default: {
+				return 'absent';
+			}
+		}
 	}
 }

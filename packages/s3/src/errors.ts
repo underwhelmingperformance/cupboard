@@ -22,6 +22,7 @@ export type S3ErrorCode =
 	| 'NoSuchKey'
 	| 'NotImplemented'
 	| 'PreconditionFailed'
+	| 'ServiceUnavailable'
 	| 'SignatureDoesNotMatch';
 
 /**
@@ -211,6 +212,13 @@ export class NarInfoTooLargeError extends InvalidRequestError {
 	}
 }
 
+/** A narinfo could not be committed for its path (a different version won). */
+export class NarInfoNotCommittableError extends InvalidRequestError {
+	constructor() {
+		super('The narinfo could not be committed for this path.');
+	}
+}
+
 // --- InvalidArgument (400) -----------------------------------------------
 
 abstract class InvalidArgumentError extends S3Error {
@@ -318,6 +326,73 @@ export class NonCacheWriteError extends NotImplementedError {
 export class DeletionNotImplementedError extends NotImplementedError {
 	constructor() {
 		super('Object deletion is not yet supported.');
+	}
+}
+
+// --- BadDigest (400) -----------------------------------------------------
+
+abstract class BadDigestError extends S3Error {
+	readonly code = 'BadDigest';
+	readonly status = StatusCodes.BAD_REQUEST;
+}
+
+/** The uploaded NAR did not verify against the narinfo, or was never staged. */
+export class UploadDigestMismatchError extends BadDigestError {
+	constructor() {
+		super(
+			'The uploaded NAR does not match the narinfo, or was not uploaded first.'
+		);
+	}
+}
+
+/** The uploaded NAR bytes do not hash to the file hash named in the key. */
+export class NarChecksumMismatchError extends BadDigestError {
+	constructor() {
+		super('The uploaded NAR bytes do not match the requested key.');
+	}
+}
+
+// --- EntityTooLarge (400) ------------------------------------------------
+
+/** The upload exceeds the tenant's storage quota or verifiable size. */
+export class UploadOverQuotaError extends S3Error {
+	readonly code = 'EntityTooLarge';
+	readonly status = StatusCodes.BAD_REQUEST;
+
+	constructor() {
+		super('Upload exceeds the cache quota.');
+	}
+}
+
+// --- ServiceUnavailable (503) --------------------------------------------
+
+/** The upload is staged but not yet verified; the client may retry shortly. */
+export class UploadStillPendingError extends S3Error {
+	readonly code = 'ServiceUnavailable';
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+
+	constructor() {
+		super('The upload is still being verified; retry shortly.');
+	}
+}
+
+/** An upload reached no terminal state; treated as an internal inconsistency. */
+export class UploadNotSettledError extends S3Error {
+	readonly code = 'InternalError';
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('The narinfo upload did not reach a terminal state.');
+	}
+}
+
+/** A committed narinfo could not be read back; an internal inconsistency. */
+export class CommittedNarInfoUnreadableError extends S3Error {
+	readonly code = 'InternalError';
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor() {
+		super('The narinfo was committed but could not be read back.');
 	}
 }
 

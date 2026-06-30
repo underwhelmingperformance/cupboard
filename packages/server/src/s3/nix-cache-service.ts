@@ -9,9 +9,16 @@ import {
 	uploadPathMetadataSchema
 } from '@cupboard/protocol/upload';
 import {
+	CommittedNarInfoUnreadableError,
 	MalformedNarInfoError,
 	NarInfoMismatchError,
-	NarInfoTooLargeError
+	NarInfoNotCommittableError,
+	NarInfoTooLargeError,
+	type S3Error,
+	UploadDigestMismatchError,
+	UploadNotSettledError,
+	UploadOverQuotaError,
+	UploadStillPendingError
 } from '@cupboard/s3/errors';
 import type {
 	ListObjectsQuery,
@@ -21,6 +28,12 @@ import type {
 	S3Principal
 } from '@cupboard/s3/ports';
 
+import {
+	NarTooLargeError,
+	QuotaExceededError,
+	UploadedObjectNotFoundError,
+	UploadExpiredError
+} from '../errors.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 
 import type { BlobStore } from './blob-store.ts';
@@ -34,6 +47,20 @@ import type {
 export type CommitOutcome =
 	| { readonly kind: 'settled' }
 	| { readonly kind: 'deferred' };
+
+/**
+ * The terminal outcome of settling one upload: `servable` once the path is
+ * verified and served; `mismatch` when the NAR fails its hash check or was never
+ * staged; `over-quota` when the canonical size exceeds the tenant's quota;
+ * `pending` when verification has not yet reached a verdict; `absent` when a
+ * different version won the path.
+ */
+export type UploadSettlement =
+	| 'servable'
+	| 'mismatch'
+	| 'over-quota'
+	| 'pending'
+	| 'absent';
 
 /** A pending-upload row, as the commit pipeline consumes it. */
 export interface PendingUploadRow {
@@ -55,7 +82,7 @@ export interface PendingUploadRow {
 export interface IngestPipeline {
 	registerPending(row: PendingUploadRow): void;
 	commit(cache: string, uploadId: string): Promise<CommitOutcome>;
-	settlePending(): Promise<void>;
+	settleUpload(uploadId: string): Promise<UploadSettlement>;
 }
 
 export interface CacheRecord {
@@ -113,6 +140,47 @@ function s3NarStagingKey(fileHash: NixSha256HashString): string {
 	return `staging/s3/${fileHash}.nar.zst`;
 }
 
+function settlementError(settlement: UploadSettlement): S3Error {
+	switch (settlement) {
+		case 'mismatch': {
+			return new UploadDigestMismatchError();
+		}
+		case 'over-quota': {
+			return new UploadOverQuotaError();
+		}
+		case 'absent': {
+			return new NarInfoNotCommittableError();
+		}
+		case 'pending': {
+			return new UploadStillPendingError();
+		}
+		default: {
+			return new UploadNotSettledError();
+		}
+	}
+}
+
+// The commit pipeline raises its own server errors before a settlement verdict
+// is reached; translate the ones a client caused into the matching S3 error so
+// they are not reported as a generic internal failure.
+function translatePipelineError(error: unknown): never {
+	if (
+		error instanceof QuotaExceededError ||
+		error instanceof NarTooLargeError
+	) {
+		throw new UploadOverQuotaError();
+	}
+
+	if (
+		error instanceof UploadedObjectNotFoundError ||
+		error instanceof UploadExpiredError
+	) {
+		throw new UploadDigestMismatchError();
+	}
+
+	throw error;
+}
+
 /**
  * The production {@link NixCacheBackend}: it stages NAR bytes in R2, drives the
  * existing verify/sign/commit pipeline for narinfo, and renders `nix-cache-info`
@@ -160,15 +228,32 @@ export function createNixCacheService(
 			expiresAt: new Date(issued.getTime() + stagingTtlMs).toISOString()
 		});
 
-		const outcome = await deps.pipeline.commit(cache, uploadId);
-		if (outcome.kind === 'deferred') {
-			await deps.pipeline.settlePending();
+		let settlement: UploadSettlement;
+		try {
+			const outcome = await deps.pipeline.commit(cache, uploadId);
+			settlement =
+				outcome.kind === 'settled'
+					? 'servable'
+					: await deps.pipeline.settleUpload(uploadId);
+		} catch (error) {
+			translatePipelineError(error);
+		}
+
+		if (settlement !== 'servable') {
+			throw settlementError(settlement);
 		}
 
 		const stat = await deps.blobStore.head(
 			narInfoObjectKey(deps.tenant, storePathHash, cache)
 		);
-		return { etag: stat?.etag ?? '' };
+
+		// A servable verdict guarantees the served object exists; a missing one
+		// here would be an internal inconsistency, not a client error.
+		if (stat === undefined) {
+			throw new CommittedNarInfoUnreadableError();
+		}
+
+		return { etag: stat.etag };
 	}
 
 	return {
