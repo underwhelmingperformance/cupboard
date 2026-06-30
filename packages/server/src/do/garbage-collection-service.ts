@@ -7,7 +7,7 @@ import { and, eq, isNull, lt, lte, or } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { StoredReferencesInvalidError } from '../errors.ts';
-import { narObjectKey } from '../http/http.ts';
+import { narObjectKey, stagingPrefix } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
 import { deleteObjects } from './bulk.ts';
@@ -23,6 +23,23 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 // stops at this cap the caller resumes it on an alarm, draining the backlog
 // across chunks.
 export const maxPathsSweptPerRun = 1000;
+
+// An upload credential is scoped to `staging/<pushId>/` and a client may write
+// any key beneath it, including keys it never negotiated. The negotiated keys
+// have pending rows the reaper owns; the rest are orphans only this
+// reconciliation reclaims. Matching the upload TTL, an object younger than this
+// may still belong to an in-flight upload, so the sweep leaves it for a later
+// pass; the bucket lifecycle rule is the lazy backstop for anything beyond the
+// per-run cap.
+const orphanStagingGraceMs = 15 * 60 * 1000;
+
+// One R2 `list` page; the platform caps a page at 1000 keys.
+const orphanListPageSize = 1000;
+
+// At most this many orphans are deleted per sweep, so a flood of staged objects
+// cannot make a single GC run unbounded. Whatever remains is reclaimed by the
+// next sweep and, failing that, the bucket lifecycle rule.
+const maxOrphanReclaim = 1000;
 
 export class GarbageCollectionService {
 	constructor(
@@ -242,7 +259,93 @@ export class GarbageCollectionService {
 		}
 	}
 
-	collectGarbage(
+	// The r2Keys of every live pending upload and attestation: the staging objects
+	// a row vouches for, which the reaper, not the orphan sweep, owns. Read once
+	// per sweep, and only when there is a staging object to reconcile, so an idle
+	// store with an empty staging root never scans the pending tables.
+	private trackedStagingKeys(): ReadonlySet<string> {
+		return new Set<string>([
+			...this.context.db
+				.select({ r2Key: schema.pendingUploads.r2Key })
+				.from(schema.pendingUploads)
+				.all()
+				.map((row) => row.r2Key),
+			...this.context.db
+				.select({ r2Key: schema.pendingAttestations.r2Key })
+				.from(schema.pendingAttestations)
+				.all()
+				.map((row) => row.r2Key)
+		]);
+	}
+
+	// An object is reclaimable when no pending row tracks it and it predates the
+	// upload grace, so an in-flight upload whose row this snapshot raced survives.
+	private isReclaimableOrphan(
+		object: R2Object,
+		tracked: ReadonlySet<string>,
+		orphanBefore: number
+	): boolean {
+		return !tracked.has(object.key) && object.uploaded.getTime() < orphanBefore;
+	}
+
+	// Lists the staging root and gathers the orphan keys, stopping at the per-run
+	// cap. The tracked set is loaded lazily on the first object seen, so a sweep
+	// over an empty staging root reads no rows. `wasCapped` is true when the cap
+	// was reached with orphans still unlisted, so the caller can record that the
+	// next sweep and the lifecycle rule finish the job.
+	private async collectOrphanStagingKeys(
+		orphanBefore: number
+	): Promise<{ keys: string[]; wasCapped: boolean }> {
+		const keys: string[] = [];
+		let cursor: string | undefined;
+		let tracked: ReadonlySet<string> | undefined;
+
+		do {
+			const listed = await this.context.env.BLOBS.list({
+				prefix: stagingPrefix,
+				cursor,
+				limit: orphanListPageSize
+			});
+
+			for (const object of listed.objects) {
+				if (keys.length >= maxOrphanReclaim) {
+					return { keys, wasCapped: true };
+				}
+
+				tracked ??= this.trackedStagingKeys();
+
+				if (this.isReclaimableOrphan(object, tracked, orphanBefore)) {
+					keys.push(object.key);
+				}
+			}
+
+			cursor = listed.truncated ? listed.cursor : undefined;
+		} while (cursor !== undefined);
+
+		return { keys, wasCapped: false };
+	}
+
+	// Reclaims staging objects no pending row tracks: keys a client wrote under
+	// its `staging/<pushId>/` credential beyond what it negotiated, and the
+	// remnants of pushes whose rows have already been reaped. Bounded per run and
+	// gated on an upload-grace age so an in-flight upload survives.
+	private async reclaimOrphanStaging(now: Date): Promise<number> {
+		const orphanBefore = now.getTime() - orphanStagingGraceMs;
+		const { keys, wasCapped } =
+			await this.collectOrphanStagingKeys(orphanBefore);
+
+		await deleteObjects(this.context.env.BLOBS, keys);
+
+		if (wasCapped) {
+			console.warn(
+				`orphan staging sweep reclaimed ${String(keys.length)} objects and hit the per-run cap; the next sweep and the bucket lifecycle rule reclaim the rest`
+			);
+		}
+
+		return keys.length;
+	}
+
+	async collectGarbage(
 		cache?: string,
 		purgeOrigin?: string,
 		sweepLimit: number = maxPathsSweptPerRun
@@ -250,7 +353,7 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = startedAt.toISOString();
 
-		return this.context.ctx.blockConcurrencyWhile(async () => {
+		const reaped = await this.context.ctx.blockConcurrencyWhile(async () => {
 			// A `pending` or `committing` upload is a live commit saga (awaiting
 			// background verification, or a crashed inline commit the verify pass
 			// re-drives), not abandoned, so it and its staged bytes must survive the
@@ -343,5 +446,13 @@ export class GarbageCollectionService {
 					await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin)
 			};
 		});
+
+		// The orphan sweep lists and deletes R2 objects, so it runs outside the
+		// critical section. It reconciles against the live pending rows by their
+		// keys, not a snapshot taken earlier, and skips anything within the upload
+		// grace, so a row created while it runs is never mistaken for an orphan.
+		const orphanStagingDeleted = await this.reclaimOrphanStaging(startedAt);
+
+		return { ...reaped, orphanStagingDeleted };
 	}
 }

@@ -1,5 +1,8 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import Cloudflare from 'cloudflare';
 import { NotFoundError, toFile } from 'cloudflare';
+import type { LifecycleUpdateParams } from 'cloudflare/resources/r2/buckets/lifecycle';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
 import { z } from 'zod';
 
@@ -66,6 +69,12 @@ export interface CloudflareApi {
 
 	r2BucketExists(name: string): Promise<boolean>;
 	ensureR2Bucket(name: string): Promise<void>;
+	/**
+	 * Asserts the lifecycle rule that reclaims a push's transient `staging/`
+	 * objects, expiring them and aborting their incomplete multipart uploads
+	 * after a day. The bucket must already exist.
+	 */
+	ensureStagingLifecycleRule(bucketName: string): Promise<void>;
 	ensureD1Database(name: string): Promise<string>;
 	ensureKvNamespace(title: string): Promise<string>;
 	ensureQueue(name: string): Promise<string>;
@@ -197,6 +206,31 @@ function isConsumerSettled(
 	);
 }
 
+const stagingPrefix = 'staging/';
+const stagingReclaimRuleId = 'cupboard-staging-reclaim';
+const oneDayInSeconds = 24 * 60 * 60;
+
+/**
+ * The lifecycle rule reclaiming a push's transient staging objects: it expires
+ * anything under `staging/` a day after it is written, and aborts incomplete
+ * multipart uploads there a day after they begin. An abandoned incomplete
+ * multipart upload is not a listable object, so this rule is the only thing
+ * that can recover its storage.
+ */
+function stagingReclaimRule(): LifecycleUpdateParams.Rule {
+	return {
+		id: stagingReclaimRuleId,
+		enabled: true,
+		conditions: { prefix: stagingPrefix },
+		deleteObjectsTransition: {
+			condition: { type: 'Age', maxAge: oneDayInSeconds }
+		},
+		abortMultipartUploadsTransition: {
+			condition: { type: 'Age', maxAge: oneDayInSeconds }
+		}
+	};
+}
+
 /**
  * The real {@link CloudflareApi}, backed by the official SDK. Resource creators
  * look the resource up by name first and create it only when absent, so a
@@ -233,6 +267,29 @@ export function createCloudflareApi(
 			}
 
 			await client.r2.buckets.create({ ...account, name });
+		},
+
+		async ensureStagingLifecycleRule(bucketName) {
+			const desired = stagingReclaimRule();
+
+			const current = await client.r2.buckets.lifecycle.get(
+				bucketName,
+				account
+			);
+			const rules = current.rules ?? [];
+
+			const existing = rules.find((rule) => rule.id === desired.id);
+
+			if (existing !== undefined && isDeepStrictEqual(existing, desired)) {
+				return;
+			}
+
+			const others = rules.filter((rule) => rule.id !== desired.id);
+
+			await client.r2.buckets.lifecycle.update(bucketName, {
+				...account,
+				rules: [...others, desired]
+			});
 		},
 
 		async ensureD1Database(name) {

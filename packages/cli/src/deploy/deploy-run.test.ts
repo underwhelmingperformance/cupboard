@@ -138,6 +138,10 @@ function recordingApi(): { api: CloudflareApi; calls: string[] } {
 				calls.push(`r2:${name}`);
 				return Promise.resolve();
 			},
+			ensureStagingLifecycleRule(name) {
+				calls.push(`lifecycle:${name}`);
+				return Promise.resolve();
+			},
 			ensureD1Database(name) {
 				calls.push(`d1:${name}`);
 				return Promise.resolve('db-id');
@@ -231,6 +235,7 @@ describe('runDeploy', () => {
 
 		expect(calls).toStrictEqual([
 			'r2:cupboard-blobs',
+			'lifecycle:cupboard-blobs',
 			'queue:cupboard-maintenance',
 			'queue:cupboard-maintenance-dlq',
 			'd1:cupboard',
@@ -302,6 +307,7 @@ describe('runDeploy', () => {
 		expect({ calls, succeeded, skipped }).toStrictEqual({
 			calls: [
 				'r2:cupboard-blobs',
+				'lifecycle:cupboard-blobs',
 				'queue:cupboard-maintenance',
 				'queue:cupboard-maintenance-dlq',
 				'd1:cupboard',
@@ -340,6 +346,7 @@ describe('runDeploy', () => {
 
 		expect(calls).toStrictEqual([
 			'r2:cupboard-blobs',
+			'lifecycle:cupboard-blobs',
 			'queue:cupboard-maintenance',
 			'queue:cupboard-maintenance-dlq',
 			'd1:cupboard',
@@ -416,6 +423,7 @@ describe('runDeploy', () => {
 		expect({ calls, warnings }).toStrictEqual({
 			calls: [
 				'r2:cupboard-blobs',
+				'lifecycle:cupboard-blobs',
 				'queue:cupboard-maintenance',
 				'queue:cupboard-maintenance-dlq',
 				'd1:cupboard',
