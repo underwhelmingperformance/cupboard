@@ -181,7 +181,12 @@ async function reconcileResources(
 	const { api, reporter } = deps;
 
 	return reporter.phase('Reconciling resources', async (context) => {
-		await Promise.all(plan.r2Buckets.map((name) => api.ensureR2Bucket(name)));
+		await Promise.all(
+			plan.r2Buckets.map(async (name) => {
+				await api.ensureR2Bucket(name);
+				await api.ensureStagingLifecycleRule(name);
+			})
+		);
 		await Promise.all(plan.queues.map((name) => api.ensureQueue(name)));
 
 		const d1 = new Map<string, string>();

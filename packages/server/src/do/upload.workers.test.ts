@@ -2144,7 +2144,8 @@ describe('upload flow', () => {
 			pendingAttestationsDeleted: 0,
 			rootsExpired: 0,
 			pathsSwept: 1,
-			narInfosDeleted: 1
+			narInfosDeleted: 1,
+			orphanStagingDeleted: 0
 		});
 
 		await expect(caches.default.match(cacheKey)).resolves.toBeUndefined();
@@ -2226,7 +2227,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 0,
-				narInfosDeleted: 0
+				narInfosDeleted: 0,
+				orphanStagingDeleted: 0
 			},
 			narHash: reserved.narHash
 		});
@@ -2333,7 +2335,8 @@ describe('upload flow', () => {
 			pendingAttestationsDeleted: 0,
 			rootsExpired: 0,
 			pathsSwept: 0,
-			narInfosDeleted: 0
+			narInfosDeleted: 0,
+			orphanStagingDeleted: 0
 		});
 
 		await expectStats(await initialise(), {
@@ -2410,7 +2413,8 @@ describe('upload flow', () => {
 			pendingAttestationsDeleted: 0,
 			rootsExpired: 0,
 			pathsSwept: 0,
-			narInfosDeleted: 0
+			narInfosDeleted: 0,
+			orphanStagingDeleted: 0
 		});
 
 		await expectStats(await initialise(), {
@@ -3003,7 +3007,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
 			});
 
 			await expect(
@@ -3052,7 +3057,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
 			});
 
 			for (const hash of [hashA, hashB, hashC]) {
@@ -3095,7 +3101,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
 			});
 
 			for (const hash of [hashA, hashB]) {
@@ -3119,7 +3126,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 0,
-				narInfosDeleted: 0
+				narInfosDeleted: 0,
+				orphanStagingDeleted: 0
 			});
 			await expect(
 				env.BLOBS.head(narInfoObjectKey(fixtureTenant, path.storePathHash))
@@ -3147,7 +3155,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 0,
-				narInfosDeleted: 0
+				narInfosDeleted: 0,
+				orphanStagingDeleted: 0
 			});
 			await expect(
 				env.BLOBS.head(narInfoObjectKey(fixtureTenant, committed.storePathHash))
@@ -3183,7 +3192,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 1,
 				pathsSwept: 1,
-				narInfosDeleted: 1
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
 			});
 
 			const { roots } = await listRoots(token);
@@ -3217,7 +3227,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 1,
 				pathsSwept: 1,
-				narInfosDeleted: 1
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
 			});
 
 			const { roots } = await listRoots(token);
@@ -3256,7 +3267,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
 			});
 
 			await expect(
@@ -3297,7 +3309,8 @@ describe('upload flow', () => {
 				pendingAttestationsDeleted: 0,
 				rootsExpired: 0,
 				pathsSwept: 1,
-				narInfosDeleted: 1
+				narInfosDeleted: 1,
+				orphanStagingDeleted: 0
 			});
 
 			// The reaper arms the unreferenced blob; the grace not yet elapsed, the

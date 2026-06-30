@@ -97,9 +97,13 @@ export function stagingObjectKey(pushId: string, uploadId: string): string {
 	return `staging/${pushId}/${uploadId}.nar.zst`;
 }
 
+// The root every push stages under. Each push owns the `staging/<pushId>/`
+// subtree; reconciliation scans this root for objects no pending row tracks.
+export const stagingPrefix = 'staging/';
+
 // The prefix a push's staging objects share, the scope of its upload credential.
 export function stagingPushPrefix(pushId: string): string {
-	return `staging/${pushId}/`;
+	return `${stagingPrefix}${pushId}/`;
 }
 
 export function attestationStagingObjectKey(

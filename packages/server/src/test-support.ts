@@ -184,6 +184,7 @@ export interface GcResult {
 	readonly rootsExpired: number;
 	readonly pathsSwept: number;
 	readonly narInfosDeleted: number;
+	readonly orphanStagingDeleted: number;
 }
 
 /**

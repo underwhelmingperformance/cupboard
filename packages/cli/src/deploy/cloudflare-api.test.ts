@@ -17,8 +17,10 @@ interface Recorded {
 function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 	client: Cloudflare;
 	requests: Recorded[];
+	bodies: unknown[];
 } {
 	const requests: Recorded[] = [];
+	const bodies: unknown[] = [];
 
 	const fetcher: typeof fetch = (input, init) => {
 		let rawUrl: string;
@@ -35,6 +37,9 @@ function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 		const method = init?.method ?? 'GET';
 		const path = url.pathname.replace('/client/v4', '');
 		requests.push({ method, path });
+		bodies.push(
+			typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+		);
 
 		const routeKey = `${method} ${path}`;
 		const body = routes[routeKey];
@@ -60,7 +65,8 @@ function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {
 
 	return {
 		client: new Cloudflare({ apiToken: 'token', fetch: fetcher }),
-		requests
+		requests,
+		bodies
 	};
 }
 
@@ -191,6 +197,88 @@ describe('ensureSchedules', () => {
 			{ method: 'GET', path: schedulesPath },
 			{ method: 'PUT', path: schedulesPath }
 		]);
+	});
+});
+
+describe('ensureStagingLifecycleRule', () => {
+	const lifecyclePath = '/accounts/acc-1/r2/buckets/cupboard-blobs/lifecycle';
+
+	const stagingRule = {
+		id: 'cupboard-staging-reclaim',
+		enabled: true,
+		conditions: { prefix: 'staging/' },
+		deleteObjectsTransition: {
+			condition: { type: 'Age', maxAge: 86_400 }
+		},
+		abortMultipartUploadsTransition: {
+			condition: { type: 'Age', maxAge: 86_400 }
+		}
+	};
+
+	it('writes the staging rule when the bucket has none', async () => {
+		const { client, requests, bodies } = fakeCloudflare({
+			[`GET ${lifecyclePath}`]: { rules: [] },
+			[`PUT ${lifecyclePath}`]: {}
+		});
+
+		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
+
+		expect({ requests, putBody: bodies[1] }).toStrictEqual({
+			requests: [
+				{ method: 'GET', path: lifecyclePath },
+				{ method: 'PUT', path: lifecyclePath }
+			],
+			putBody: { rules: [stagingRule] }
+		});
+	});
+
+	it('does not write when the staging rule already matches', async () => {
+		const { client, requests } = fakeCloudflare({
+			[`GET ${lifecyclePath}`]: { rules: [stagingRule] }
+		});
+
+		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
+
+		expect(requests).toStrictEqual([{ method: 'GET', path: lifecyclePath }]);
+	});
+
+	it('keeps unrelated rules and replaces a drifted staging rule', async () => {
+		const otherRule = {
+			id: 'keep-me',
+			enabled: true,
+			conditions: { prefix: 'nar/' },
+			deleteObjectsTransition: { condition: { type: 'Age', maxAge: 2_592_000 } }
+		};
+		const { client, requests, bodies } = fakeCloudflare({
+			[`GET ${lifecyclePath}`]: {
+				rules: [
+					otherRule,
+					{
+						...stagingRule,
+						deleteObjectsTransition: {
+							condition: { type: 'Age', maxAge: 604_800 }
+						}
+					}
+				]
+			},
+			[`PUT ${lifecyclePath}`]: {}
+		});
+
+		await createCloudflareApi(client, 'acc-1').ensureStagingLifecycleRule(
+			'cupboard-blobs'
+		);
+
+		expect({ requests, putBody: bodies[1] }).toStrictEqual({
+			requests: [
+				{ method: 'GET', path: lifecyclePath },
+				{ method: 'PUT', path: lifecyclePath }
+			],
+			putBody: { rules: [otherRule, stagingRule] }
+		});
 	});
 });
 
