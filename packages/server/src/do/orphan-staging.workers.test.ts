@@ -95,4 +95,49 @@ describe('orphan staging reconciliation', () => {
 			orphanPresent: (await env.BLOBS.head(orphanKey)) !== null
 		}).toStrictEqual({ orphanStagingDeleted: 0, orphanPresent: true });
 	});
+
+	it('caps the reclaim per run and leaves the overflow for the next sweep', async () => {
+		const perRunCap = 1000;
+		const total = perRunCap + 1;
+
+		const realNow = await realUploadInstant();
+		vi.setSystemTime(new Date(realNow + uploadGraceMs + 5 * 60 * 1000));
+
+		await Promise.all(
+			Array.from({ length: total }, (_unused, index) =>
+				env.BLOBS.put(
+					`staging/flood/${String(index)}.nar.zst`,
+					new Uint8Array([1])
+				)
+			)
+		);
+
+		const warnings: string[] = [];
+		const warnSpy = vi
+			.spyOn(console, 'warn')
+			.mockImplementation((message: unknown) => {
+				if (typeof message === 'string') {
+					warnings.push(message);
+				}
+			});
+
+		let result;
+		try {
+			result = await runGcResult();
+		} finally {
+			warnSpy.mockRestore();
+		}
+
+		const remaining = await env.BLOBS.list({ prefix: 'staging/flood/' });
+
+		expect({
+			orphanStagingDeleted: result.orphanStagingDeleted,
+			remaining: remaining.objects.length,
+			warnedAboutCap: warnings.some((line) => line.includes('per-run cap'))
+		}).toStrictEqual({
+			orphanStagingDeleted: perRunCap,
+			remaining: total - perRunCap,
+			warnedAboutCap: true
+		});
+	});
 });
