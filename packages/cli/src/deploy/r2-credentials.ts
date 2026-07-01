@@ -98,12 +98,16 @@ function secretAccessKeyProblemText(value: string): string | undefined {
 		: secretAccessKeyProblemMessage(problem);
 }
 
+const credentialProbeKey = '.cupboard-credential-probe';
+
 /**
- * Whether the credential pair authenticates against R2, without writing
- * anything: a signed HEAD for an object that need not exist. Any authenticated
- * response (200, or 404 for a missing object or bucket) proves the pair;
- * 401/403 means R2 rejected it. A read-denied (write-only) token is reported
- * as rejected too, which is why the caller offers an override.
+ * Whether the credential pair can write to the bucket the way a push does,
+ * leaving nothing behind: begin a multipart upload, then abort it. Beginning one
+ * proves write access (a push stages every NAR as a multipart upload) and
+ * creates no object, since only completing one would; the abort clears the
+ * in-progress upload. Probing a write rather than a read is what lets a
+ * write-only token pass, since a push uploads with a write-only credential.
+ * 401/403 means R2 rejected the pair.
  */
 export async function checkR2Credentials(
 	options: {
@@ -120,20 +124,50 @@ export async function checkR2Credentials(
 		region: 'auto'
 	});
 
-	const url = `https://${options.accountId}.r2.cloudflarestorage.com/${options.bucketName}/.cupboard-credential-probe`;
+	const objectUrl = `https://${options.accountId}.r2.cloudflarestorage.com/${options.bucketName}/${credentialProbeKey}`;
 
-	let response: Response;
+	let begun: Response;
 
 	try {
-		const signed = await client.sign(url, { method: 'HEAD' });
-		response = await fetcher(signed);
+		const signed = await client.sign(`${objectUrl}?uploads`, {
+			method: 'POST'
+		});
+		begun = await fetcher(signed);
 	} catch (error) {
 		return { kind: 'unreachable', cause: error };
 	}
 
-	if (response.ok || response.status === 404) {
-		return { kind: 'valid' };
+	if (!begun.ok) {
+		return { kind: 'rejected', status: begun.status };
 	}
 
-	return { kind: 'rejected', status: response.status };
+	const uploadId = parseUploadId(await begun.text());
+
+	if (uploadId !== undefined) {
+		const signed = await client.sign(
+			`${objectUrl}?uploadId=${encodeURIComponent(uploadId)}`,
+			{ method: 'DELETE' }
+		);
+
+		try {
+			await fetcher(signed);
+		} catch {
+			// A begun upload holds no object, so a failed abort leaves only an empty
+			// in-progress upload that R2 drops on its own; the verdict is already set.
+		}
+	}
+
+	return { kind: 'valid' };
+}
+
+function parseUploadId(body: string): string | undefined {
+	const open = '<UploadId>';
+	const start = body.indexOf(open);
+	const end = body.indexOf('</UploadId>');
+
+	if (start === -1 || end === -1) {
+		return undefined;
+	}
+
+	return body.slice(start + open.length, end);
 }

@@ -128,8 +128,8 @@ export class R2CredentialsRejectedError extends CliError {
 	constructor(public readonly status: number) {
 		super(
 			`R2 rejected the credentials (HTTP ${String(status)}). ` +
-				'Check the access key id and secret, and that the token may read ' +
-				'and write the cache bucket.'
+				'Check the access key id and secret, and that the token may write ' +
+				'to the cache bucket.'
 		);
 		this.name = 'R2CredentialsRejectedError';
 	}
@@ -767,10 +767,11 @@ const propagationAttempts = 12;
 const propagationDelayMs = 5000;
 
 /**
- * Probe R2 with the pair before deploying anything. A freshly created token
- * is retried while it propagates. Interactively, a rejection offers to
- * re-enter the pair, deploy anyway (a write-only token reads as rejected), or
- * cancel; without a terminal it is fatal.
+ * Probe R2 with the pair before deploying anything, by beginning and aborting a
+ * multipart upload. A freshly created token is retried while it propagates. The
+ * probe writes, so a write-only token passes and a rejection means the pair
+ * cannot write; interactively a rejection offers to re-enter the pair, deploy
+ * anyway, or cancel, and without a terminal it is fatal.
  */
 export async function verifyR2Credentials(options: {
 	readonly ui: DeployUi;
@@ -843,7 +844,7 @@ export async function verifyR2Credentials(options: {
 				{
 					value: 'continue',
 					label: 'Deploy anyway',
-					hint: 'a write-only token fails this check but works'
+					hint: 'set this pair even though R2 rejected the write probe'
 				},
 				{ value: 'cancel', label: 'Cancel' }
 			]);
