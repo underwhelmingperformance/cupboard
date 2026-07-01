@@ -38,10 +38,10 @@ export class ApiTokenResponseError extends CliError {
 	}
 }
 
-const objectPermissionGroups = [
-	'Workers R2 Storage Bucket Item Read',
-	'Workers R2 Storage Bucket Item Write'
-];
+// Write alone: a push uploads with a write-only credential and the deploy
+// probe writes too, so the token never needs to read. Object serving goes
+// through the R2 bucket binding, not this S3 key.
+const writePermissionGroups = ['Workers R2 Storage Bucket Item Write'];
 
 /** The deterministic token name a deployment owns for a bucket. */
 export function scopedR2TokenName(bucketName: string): string {
@@ -50,10 +50,10 @@ export function scopedR2TokenName(bucketName: string): string {
 
 /**
  * Creates (or, on a re-deploy, rolls) the account-owned API token that backs
- * the cache's R2 credentials: object read/write on exactly one bucket. The
- * bucket must already exist; the caller creates it, visibly, first. The S3
- * pair is derived from the token; nothing is stored anywhere except as Worker
- * secrets, and re-running rotates the secret.
+ * the cache's R2 credentials: write-only on exactly one bucket. The bucket must
+ * already exist; the caller creates it, visibly, first. The S3 pair is derived
+ * from the token; nothing is stored anywhere except as Worker secrets, and
+ * re-running rotates the secret.
  */
 export async function createScopedR2Key(
 	api: CloudflareApi,
@@ -72,11 +72,11 @@ export async function createScopedR2Key(
 		const groups = await api.listTokenPermissionGroups();
 		const ids: string[] = [];
 
-		for (const groupName of objectPermissionGroups) {
+		for (const groupName of writePermissionGroups) {
 			const id = groups.find((group) => group.name === groupName)?.id;
 
 			if (id === undefined) {
-				throw new R2PermissionGroupsError(objectPermissionGroups);
+				throw new R2PermissionGroupsError(writePermissionGroups);
 			}
 
 			ids.push(id);

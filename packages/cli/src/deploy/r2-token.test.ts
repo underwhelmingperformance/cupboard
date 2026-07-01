@@ -189,7 +189,7 @@ describe('createScopedR2Key', () => {
 					method: 'createApiToken',
 					name: scopedR2TokenName('cupboard-blobs'),
 					policy: {
-						permissionGroupIds: ['pg-read', 'pg-write'],
+						permissionGroupIds: ['pg-write'],
 						resources: {
 							'com.cloudflare.edge.r2.bucket.acc-1_default_cupboard-blobs': '*'
 						}
@@ -276,10 +276,7 @@ describe('createScopedR2Key', () => {
 			outcome: {
 				error: {
 					name: R2PermissionGroupsError.name,
-					wanted: [
-						'Workers R2 Storage Bucket Item Read',
-						'Workers R2 Storage Bucket Item Write'
-					]
+					wanted: ['Workers R2 Storage Bucket Item Write']
 				}
 			},
 			apiCalls: [
@@ -349,7 +346,7 @@ describe('createScopedR2Key', () => {
 					method: 'createApiToken',
 					name: scopedR2TokenName('cupboard-blobs'),
 					policy: {
-						permissionGroupIds: ['pg-read', 'pg-write'],
+						permissionGroupIds: ['pg-write'],
 						resources: {
 							'com.cloudflare.edge.r2.bucket.acc-1_default_cupboard-blobs': '*'
 						}
