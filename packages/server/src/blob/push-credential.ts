@@ -46,8 +46,7 @@ export function pushIdSigningKey(env: PushIdSigningEnv): string {
 /**
  * Issues and verifies a push's upload credential. The push id is signed with the
  * dedicated key so the server recognises it again on negotiate, and the
- * credential is confined to that push's staging prefix and the write-only upload
- * actions.
+ * credential is confined to that push's staging prefix.
  */
 export class PushCredentialIssuer {
 	// The R2 configuration is read lazily, only when a credential is issued, so
@@ -66,10 +65,13 @@ export class PushCredentialIssuer {
 		ttlSeconds: number,
 		now: Date
 	): Promise<PushCredential> {
+		// Granted by the write-only action set rather than a scope: R2 rejects a
+		// credential carrying both a scope and an actions claim, and the actions
+		// leave the credential unable to read another upload's staged bytes. The
+		// staging prefix confines it to this push.
 		const credential = await createR2TemporaryCredentials(
 			this.configuration(),
 			{
-				scope: 'object-read-write',
 				actions: pushUploadActions,
 				prefixPaths: [stagingPushPrefix(pushId)],
 				ttlSeconds

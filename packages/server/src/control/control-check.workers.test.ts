@@ -11,18 +11,6 @@ import {
 	resetTestServer
 } from '../test-support.ts';
 
-function requestUrl(input: RequestInfo | URL): string {
-	if (typeof input === 'string') {
-		return input;
-	}
-
-	if (input instanceof URL) {
-		return input.href;
-	}
-
-	return input.url;
-}
-
 describe('control plane GET /control/check', () => {
 	beforeEach(resetTestServer);
 	afterEach(() => {
@@ -57,17 +45,25 @@ describe('control plane GET /control/check', () => {
 	});
 
 	it.each([
-		// A missing probe object still answers 404 with a valid signature.
-		['accepted signature', 404, { result: 'ok' }],
-		['rejected signature', 403, { result: 'rejected', status: 403 }]
+		// The write-only credential may not read the probe key, so an accepted
+		// one answers 403; a missing key would answer 404. Both mean accepted.
+		['accepted credential (read denied)', 403, { result: 'ok' }],
+		['accepted credential (missing key)', 404, { result: 'ok' }],
+		// A rejected temporary credential answers 400 (InvalidArgument).
+		['rejected credential', 400, { result: 'rejected', status: 400 }]
 	])(
-		'relays the probe verdict for an %s through the tenant Durable Object',
+		'relays the probe verdict for a %s through the tenant Durable Object',
 		async (_name, r2Status, expected) => {
 			const token = await issueControlAdminToken();
 
-			const probed: string[] = [];
-			vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
-				probed.push(requestUrl(input));
+			const probed: { url: string; method: string; hasToken: boolean }[] = [];
+			vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) => {
+				const request = new Request(input, init);
+				probed.push({
+					url: request.url,
+					method: request.method,
+					hasToken: request.headers.has('x-amz-security-token')
+				});
 
 				return Promise.resolve(new Response(undefined, { status: r2Status }));
 			});
@@ -75,11 +71,16 @@ describe('control plane GET /control/check', () => {
 			const response = await controlFetch('/control/check', {
 				headers: { authorization: `Bearer ${token}` }
 			});
-			const [probeUrl] = z.tuple([z.string()]).parse(probed);
-			const signed = new URL(probeUrl);
-			const searchKeys = Iterator.from(signed.searchParams.keys())
-				.toArray()
-				.toSorted((a, b) => a.localeCompare(b));
+			const [probe] = z
+				.tuple([
+					z.object({
+						url: z.string(),
+						method: z.string(),
+						hasToken: z.boolean()
+					})
+				])
+				.parse(probed);
+			const signed = new URL(probe.url);
 
 			expect({
 				status: response.status,
@@ -88,7 +89,11 @@ describe('control plane GET /control/check', () => {
 					protocol: signed.protocol,
 					host: signed.host,
 					pathname: signed.pathname,
-					searchKeys
+					search: signed.search,
+					method: probe.method,
+					// The push mechanism carries the session token in the header, never
+					// the query string, which R2 rejects for a temporary credential.
+					hasToken: probe.hasToken
 				}
 			}).toStrictEqual({
 				status: 200,
@@ -96,15 +101,10 @@ describe('control plane GET /control/check', () => {
 				r2Probe: {
 					protocol: 'https:',
 					host: 'test-account-id.r2.cloudflarestorage.com',
-					pathname: '/cupboard-blobs/.cupboard-credential-probe',
-					searchKeys: [
-						'X-Amz-Algorithm',
-						'X-Amz-Credential',
-						'X-Amz-Date',
-						'X-Amz-Expires',
-						'X-Amz-Signature',
-						'X-Amz-SignedHeaders'
-					]
+					pathname: '/cupboard-blobs/staging/.cupboard-credential-probe/probe',
+					search: '',
+					method: 'GET',
+					hasToken: true
 				}
 			});
 		}

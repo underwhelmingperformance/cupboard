@@ -1027,16 +1027,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Proves the R2 credentials this script is bound with: their values cannot
 	// be read back, so the control plane asks the Durable Object (which holds
-	// them) to sign a HEAD probe and see whether R2 accepts the signature. The
-	// probe touches only the env, never this object's storage, so any instance
-	// can answer it.
+	// them) to mint a temporary credential the way a push does and see whether R2
+	// accepts it. Probing the derived credential, not just the pair, catches a
+	// pair that signs plain requests but cannot mint the credential uploads use.
+	// The probe touches only the env, never this object's storage, so any
+	// instance can answer it.
 	async checkR2(): Promise<ParsedR2CredentialCheck> {
-		let probeUrl: string;
+		let response: Response;
 
 		try {
-			probeUrl = await this.context
+			response = await this.context
 				.r2Presigner()
-				.presignHeadUrl('.cupboard-credential-probe', 60);
+				.probeTemporaryCredential(new Date());
 		} catch (error) {
 			if (error instanceof R2PresignConfigurationMissingError) {
 				return { result: 'unconfigured' };
@@ -1045,11 +1047,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			throw error;
 		}
 
-		const response = await fetch(probeUrl, { method: 'HEAD' });
-
-		// A missing probe object still answers 404 with a valid signature; only
-		// a rejected signature speaks against the credentials.
-		if (response.ok || response.status === 404) {
+		// R2 refuses the temporary credential with 400 (InvalidArgument); a valid
+		// one answers 403 (the write-only grant may not read the probe key) or
+		// 404, so only other statuses speak against the pair.
+		if (response.ok || response.status === 403 || response.status === 404) {
 			return { result: 'ok' };
 		}
 

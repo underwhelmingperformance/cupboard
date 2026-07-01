@@ -13,6 +13,9 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+
+# Local R2 credential env files used for manual testing; contain secrets.
+.r2_*
 .dev.vars
 
 *.tsbuildinfo

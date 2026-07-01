@@ -8,21 +8,24 @@ export type R2CredentialScope =
 	| 'admin-read-only'
 	| 'admin-read-write';
 
-export interface R2TemporaryCredentialOptions {
-	readonly scope: R2CredentialScope;
-	// An allow-list of S3 operations that narrows the credential within its scope.
-	// Omitted leaves the scope's full operation set; supplied, only these are
-	// permitted (R2 honours it on the locally signed JWT we issue).
-	readonly actions?: readonly string[];
+// A credential's permission is granted either by a preset scope or by an
+// explicit S3-operation allow-list, never both: R2 rejects a JWT carrying both a
+// `scope` and an `actions` claim (InvalidArgument on X-Amz-Security-Token), even
+// its own documented example.
+export type R2CredentialGrant =
+	| { readonly scope: R2CredentialScope }
+	| { readonly actions: readonly string[] };
+
+export type R2TemporaryCredentialOptions = R2CredentialGrant & {
 	readonly prefixPaths?: readonly string[];
 	readonly objectPaths?: readonly string[];
 	readonly ttlSeconds: number;
-}
+};
 
 // The S3 operations a push needs to stage a blob: a single PutObject for a NAR
 // small enough to hold in memory, and the multipart calls for a large one that
-// streams. Read and list are left out, so the credential cannot read back
-// another upload's staged bytes, only write its own.
+// streams. Read and list are left out, so the credential can only write, not
+// read back another upload's staged bytes.
 export const pushUploadActions = [
 	'PutObject',
 	'CreateMultipartUpload',
@@ -99,7 +102,9 @@ export async function createR2TemporaryCredentials(
 
 	const claims: Record<string, unknown> = {
 		bucket: configuration.bucketName,
-		scope: options.scope,
+		...('scope' in options
+			? { scope: options.scope }
+			: { actions: options.actions }),
 		paths: {
 			prefixPaths: options.prefixPaths ?? [],
 			objectPaths: options.objectPaths ?? []
@@ -110,10 +115,6 @@ export async function createR2TemporaryCredentials(
 		iat: issuedAt,
 		exp: expiresAt
 	};
-
-	if (options.actions !== undefined && options.actions.length > 0) {
-		claims.actions = options.actions;
-	}
 
 	const header = base64UrlJson({ alg: 'HS256', typ: 'JWT' });
 	const payload = base64UrlJson(claims);

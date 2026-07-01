@@ -1,10 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { R2PresignerConfiguration } from './presign.ts';
-import {
-	createR2TemporaryCredentials,
-	pushUploadActions
-} from './temporary-credentials.ts';
+import { createR2TemporaryCredentials } from './temporary-credentials.ts';
 
 const configuration: R2PresignerConfiguration = {
 	accountId: 'acct-123',
@@ -184,44 +181,23 @@ describe('createR2TemporaryCredentials', () => {
 		});
 	});
 
-	it('narrows the credential to the upload actions when asked', async () => {
+	it('grants by an actions allow-list and no scope when given actions', async () => {
+		// R2 rejects a JWT carrying both, so a grant is one claim or the other.
 		const credentials = await createR2TemporaryCredentials(
 			configuration,
-			{
-				scope: 'object-read-write',
-				actions: pushUploadActions,
-				prefixPaths,
-				ttlSeconds
-			},
+			{ actions: ['PutObject', 'GetObject'], prefixPaths, ttlSeconds },
 			now
 		);
 
-		const { payload } = jwtFrom(credentials.sessionToken);
-
-		expect(payload).toMatchObject({
-			scope: 'object-read-write',
-			actions: [
-				'PutObject',
-				'CreateMultipartUpload',
-				'UploadPart',
-				'CompleteMultipartUpload',
-				'AbortMultipartUpload'
-			],
-			paths: { prefixPaths, objectPaths: [] }
+		expect(jwtFrom(credentials.sessionToken).payload).toStrictEqual({
+			bucket: 'cupboard-blobs',
+			actions: ['PutObject', 'GetObject'],
+			paths: { prefixPaths, objectPaths: [] },
+			sub: 'acct-123',
+			iss: 'parent-access-key',
+			aud: 'acct-123.r2.cloudflarestorage.com',
+			iat: issuedAt,
+			exp: issuedAt + ttlSeconds
 		});
-	});
-
-	it('grants no read or list operation through the upload action set', () => {
-		const readOrList = new Set([
-			'GetObject',
-			'HeadObject',
-			'ListObjectsV2',
-			'ListParts',
-			'ListMultipartUploads'
-		]);
-
-		expect(
-			pushUploadActions.filter((action) => readOrList.has(action))
-		).toStrictEqual([]);
 	});
 });
