@@ -302,6 +302,8 @@ export interface PlanState {
 	readonly domain: string | undefined;
 	readonly config: DeploymentConfig;
 	readonly owner: OwnerChoice;
+	/** Replace the R2 credentials the Worker already holds with a new pair. */
+	readonly replaceR2Credentials?: boolean;
 }
 
 type ResourceChoice = `${EditableResourceKind}:${string}`;
@@ -311,6 +313,7 @@ type PlanChoice =
 	| 'domain'
 	| 'crons'
 	| 'owner'
+	| 'r2-credentials'
 	| 'cancel'
 	| ResourceChoice;
 
@@ -323,8 +326,13 @@ const resourceLabels: Record<EditableResourceKind, string> = {
 /**
  * The review menu: Deploy first (so plain Enter accepts the plan as shown),
  * then one entry per editable value with its current setting, then Cancel.
+ * The R2 credentials entry appears only when replacing the pair already on the
+ * Worker is a choice worth offering.
  */
-export function planMenuEntries(state: PlanState): MenuEntry<PlanChoice>[] {
+export function planMenuEntries(
+	state: PlanState,
+	canReplaceR2Credentials = false
+): MenuEntry<PlanChoice>[] {
 	const resources = collectResources(state.config);
 	const resourceEntries = (
 		kind: EditableResourceKind,
@@ -336,6 +344,19 @@ export function planMenuEntries(state: PlanState): MenuEntry<PlanChoice>[] {
 			hint: name
 		}));
 
+	const r2CredentialEntries: MenuEntry<PlanChoice>[] = canReplaceR2Credentials
+		? [
+				{
+					value: 'r2-credentials',
+					label: 'R2 credentials',
+					hint:
+						state.replaceR2Credentials === true
+							? 'replace the current key'
+							: 'keep the current key'
+				}
+			]
+		: [];
+
 	return [
 		{ value: 'deploy', label: 'Deploy' },
 		{ value: 'account', label: 'Account', hint: state.accountId },
@@ -345,6 +366,7 @@ export function planMenuEntries(state: PlanState): MenuEntry<PlanChoice>[] {
 			hint: state.domain ?? '(none)'
 		},
 		...resourceEntries('bucket', resources.r2Buckets),
+		...r2CredentialEntries,
 		...resourceEntries('database', resources.d1Databases),
 		...resourceEntries('queue', resources.queues),
 		{
@@ -379,6 +401,11 @@ export interface PlanReviewWorld {
 	readonly deployer: OwnerBinding | undefined;
 	/** True when `--yes` accepted the plan up front. */
 	readonly skipReview: boolean;
+	/**
+	 * Whether replacing the R2 credentials the Worker already holds is worth
+	 * offering for the given plan. Absent when the caller cannot tell.
+	 */
+	readonly canReplaceR2Credentials?: (state: PlanState) => Promise<boolean>;
 }
 
 async function editOwner(
@@ -506,6 +533,26 @@ async function applyPlanEdit(
 		return editOwner(state, world);
 	}
 
+	if (choice === 'r2-credentials') {
+		const decision = await ui.menu(
+			'The Worker already holds R2 credentials. How should this deploy set them?',
+			[
+				{ value: 'keep', label: 'Keep the current key' },
+				{
+					value: 'replace',
+					label: 'Replace the current key',
+					hint: 'creating a new key invalidates the current one'
+				}
+			]
+		);
+
+		if (decision === undefined) {
+			return state;
+		}
+
+		return { ...state, replaceR2Credentials: decision === 'replace' };
+	}
+
 	if (choice === 'crons') {
 		const edit = await ui.editText({
 			message: 'Cron triggers, comma separated (empty for none)',
@@ -568,9 +615,14 @@ export async function reviewPlan(
 			return state;
 		}
 
+		const canReplaceR2Credentials =
+			world.canReplaceR2Credentials === undefined
+				? false
+				: await world.canReplaceR2Credentials(state);
+
 		const choice = await world.ui.menu(
 			'Deploy to Cloudflare with the plan above?',
-			planMenuEntries(state)
+			planMenuEntries(state, canReplaceR2Credentials)
 		);
 
 		if (choice === undefined || choice === 'cancel') {
@@ -1215,7 +1267,11 @@ async function deployFlow(
 			},
 			accounts: () => apiFor(accountId).listAccounts(),
 			deployer,
-			skipReview: cliOptions.yes === true
+			skipReview: cliOptions.yes === true,
+			// Replacing is only a choice when the environment did not supply a pair
+			// (which already deploys as given) and the Worker already holds one.
+			canReplaceR2Credentials: async (state) =>
+				r2Credentials === undefined && (await r2AlreadySetFor(state))
 		}
 	);
 
@@ -1230,8 +1286,9 @@ async function deployFlow(
 
 	if (r2Credentials === undefined) {
 		const isAlreadySet = await r2AlreadySetFor(agreed);
+		const isReplaceRequested = agreed.replaceR2Credentials === true;
 
-		if (isAlreadySet && !isBucketRenamed) {
+		if (isAlreadySet && !isBucketRenamed && !isReplaceRequested) {
 			// The Worker keeps the pair it already holds. The values cannot be
 			// read back, so the onboarding asks the deployment to prove them
 			// once a cache exists to ask through.

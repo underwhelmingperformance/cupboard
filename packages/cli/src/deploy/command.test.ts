@@ -379,6 +379,43 @@ describe('planMenuEntries', () => {
 			{ value: 'cancel', label: 'Cancel' }
 		]);
 	});
+
+	it('offers replacing the R2 credentials, after the bucket, when already set', () => {
+		const base: PlanState = {
+			accountId: 'acc-1',
+			domain: undefined,
+			config,
+			owner: { kind: 'owner', owner: deployer, origin: 'deployer' }
+		};
+
+		const keepEntries = planMenuEntries(base, true);
+		const bucketIndex = keepEntries.findIndex(
+			(entry) => entry.value === 'bucket:cupboard-blobs'
+		);
+
+		expect({
+			omittedByDefault: planMenuEntries(base).some(
+				(entry) => entry.value === 'r2-credentials'
+			),
+			keepEntry: keepEntries[bucketIndex + 1],
+			replaceEntry: planMenuEntries(
+				{ ...base, replaceR2Credentials: true },
+				true
+			)[bucketIndex + 1]
+		}).toStrictEqual({
+			omittedByDefault: false,
+			keepEntry: {
+				value: 'r2-credentials',
+				label: 'R2 credentials',
+				hint: 'keep the current key'
+			},
+			replaceEntry: {
+				value: 'r2-credentials',
+				label: 'R2 credentials',
+				hint: 'replace the current key'
+			}
+		});
+	});
 });
 
 describe('reviewPlan', () => {
@@ -394,6 +431,7 @@ describe('reviewPlan', () => {
 		options?: {
 			readonly skipReview?: boolean;
 			readonly deployer?: OwnerBinding;
+			readonly canReplaceR2Credentials?: boolean;
 		}
 	): { world: PlanReviewWorld; rendered: PlanState[] } {
 		const rendered: PlanState[] = [];
@@ -408,7 +446,11 @@ describe('reviewPlan', () => {
 				},
 				accounts: () => Promise.resolve(accounts),
 				deployer: options?.deployer,
-				skipReview: options?.skipReview ?? false
+				skipReview: options?.skipReview ?? false,
+				...(options?.canReplaceR2Credentials !== undefined && {
+					canReplaceR2Credentials: () =>
+						Promise.resolve(options.canReplaceR2Credentials ?? false)
+				})
 			}
 		};
 	}
@@ -579,6 +621,30 @@ describe('reviewPlan', () => {
 		expect(await reviewPlan(bound, w)).toStrictEqual({
 			...bound,
 			owner: { kind: 'none' }
+		});
+	});
+
+	it('records a request to replace the R2 credentials', async () => {
+		const { world: w } = world(
+			scriptedUi({ menuChoices: ['r2-credentials', 'replace', 'deploy'] }),
+			{ canReplaceR2Credentials: true }
+		);
+
+		expect(await reviewPlan(initial, w)).toStrictEqual({
+			...initial,
+			replaceR2Credentials: true
+		});
+	});
+
+	it('keeps the R2 credentials when that is chosen in the submenu', async () => {
+		const { world: w } = world(
+			scriptedUi({ menuChoices: ['r2-credentials', 'keep', 'deploy'] }),
+			{ canReplaceR2Credentials: true }
+		);
+
+		expect(await reviewPlan(initial, w)).toStrictEqual({
+			...initial,
+			replaceR2Credentials: false
 		});
 	});
 });
