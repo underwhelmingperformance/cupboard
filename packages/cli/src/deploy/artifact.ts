@@ -1,14 +1,11 @@
-import { execFile } from 'node:child_process';
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
 
+import { resolveBuildVersion } from './build-version.ts';
 import type { Bundler, WorkerBundle } from './bundle.ts';
 import { type DeploymentConfig, parseDeploymentConfig } from './config.ts';
 import { type D1Migration, parseD1Migrations } from './migrations.ts';
 import { controlWorker, tenantWorker } from './source.ts';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * Everything needed to deploy, independent of where it came from. Tree mode
@@ -56,21 +53,13 @@ const buildInfoPath = `${serverDirectory}/src/build-info.generated.ts`;
 const migrationsDirectory = `${serverDirectory}/drizzle-d1`;
 
 // The server entrypoints import `build-info.generated.ts`, which is produced by
-// `scripts/build-info.ts` and not committed. Regenerate it from the current
-// Git state before bundling: the onboarding compares this version against the
-// live `/_version` to know the new deployment is serving, so a stale file
-// (matching what is already deployed) would defeat that comparison. Returns
-// the version the bundle will embed.
+// `scripts/build-info.ts` and not committed. Regenerate it before bundling: the
+// onboarding compares this version against the live `/_version` to know the new
+// deployment is serving, so a stale file (matching what is already deployed)
+// would defeat that comparison. Returns the version the bundle will embed.
 async function ensureBuildInfo(checkoutRoot: string): Promise<string> {
 	const outputPath = path.join(checkoutRoot, buildInfoPath);
-
-	const revision = await gitOutput(checkoutRoot, [
-		'rev-parse',
-		'--short=12',
-		'HEAD'
-	]);
-	const status = await gitOutput(checkoutRoot, ['status', '--porcelain']);
-	const version = status === '' ? revision : `${revision}+dirty`;
+	const version = await resolveBuildVersion(checkoutRoot);
 
 	await writeFile(
 		outputPath,
@@ -78,15 +67,6 @@ async function ensureBuildInfo(checkoutRoot: string): Promise<string> {
 	);
 
 	return version;
-}
-
-async function gitOutput(
-	cwd: string,
-	arguments_: readonly string[]
-): Promise<string> {
-	const { stdout } = await execFileAsync('git', [...arguments_], { cwd });
-
-	return stdout.trim();
 }
 
 async function readMigrations(checkoutRoot: string): Promise<D1Migration[]> {
