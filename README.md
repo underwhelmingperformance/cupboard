@@ -102,6 +102,8 @@ is a separate choice: `--colour` and `--no-colour` force ANSI on or off, and
 
 - [docs/github-actions.md](./docs/github-actions.md) sets up building,
   attesting, and pushing outputs from GitHub Actions.
+- [docs/nix.md](./docs/nix.md) installs the CLI with Nix and adds a cache as a
+  substituter.
 - [AGENTS.md](./AGENTS.md) describes the repository layout and conventions.
 - [PLAN.md](./PLAN.md) tracks the feature plan and progress.
 
