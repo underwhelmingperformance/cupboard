@@ -5,6 +5,17 @@ import {
 	R2PresignConfigurationMissingError
 } from '../errors.ts';
 
+import {
+	createR2TemporaryCredentials,
+	pushUploadActions
+} from './temporary-credentials.ts';
+
+// A staging key a push credential's prefix scope would cover, used only to probe
+// that R2 accepts a temporary credential. Nothing is written; the probe reads a
+// key that never exists.
+const credentialProbeKey = 'staging/.cupboard-credential-probe/probe';
+const credentialProbePrefix = 'staging/.cupboard-credential-probe/';
+
 export interface R2PresignerConfiguration {
 	readonly accountId: string;
 	readonly accessKeyId: string;
@@ -13,40 +24,45 @@ export interface R2PresignerConfiguration {
 }
 
 export class R2Presigner {
-	private readonly client: AwsClient;
 	private readonly endpoint: string;
 
 	constructor(private readonly configuration: R2PresignerConfiguration) {
-		this.client = new AwsClient({
-			accessKeyId: configuration.accessKeyId,
-			secretAccessKey: configuration.secretAccessKey,
-			service: 's3',
-			region: 'auto'
-		});
 		this.endpoint = `https://${configuration.accountId}.r2.cloudflarestorage.com`;
 	}
 
-	private objectUrl(key: string, expiresSeconds: number): string {
-		const url = new URL(
-			`${this.endpoint}/${this.configuration.bucketName}/${key}`
-		);
-		url.searchParams.set('X-Amz-Expires', String(expiresSeconds));
-
-		return url.href;
-	}
-
 	/**
-	 * A presigned HEAD for a probe object, used to prove the configured
-	 * credentials sign requests R2 accepts (a missing object still answers
-	 * 404 with a valid signature; a bad pair answers 401 or 403).
+	 * Proves R2 accepts a temporary credential minted the way a push is, the
+	 * mechanism uploads actually use. A push signs with a short-lived credential
+	 * derived from the configured pair, so a valid pair alone is not enough: R2
+	 * must also honour the derived credential, granted by the same write-only
+	 * action set. The probe reads a never-present key under a staging prefix the
+	 * credential is confined to; a rejected credential answers 400, and a valid
+	 * one answers 403 (the write-only grant may not read) or 404. Nothing is
+	 * written.
 	 */
-	async presignHeadUrl(key: string, expiresSeconds: number): Promise<string> {
-		const signed = await this.client.sign(this.objectUrl(key, expiresSeconds), {
-			method: 'HEAD',
-			aws: { signQuery: true }
+	async probeTemporaryCredential(now: Date): Promise<Response> {
+		const credential = await createR2TemporaryCredentials(
+			this.configuration,
+			{
+				actions: pushUploadActions,
+				prefixPaths: [credentialProbePrefix],
+				ttlSeconds: 60
+			},
+			now
+		);
+
+		const client = new AwsClient({
+			accessKeyId: credential.accessKeyId,
+			secretAccessKey: credential.secretAccessKey,
+			sessionToken: credential.sessionToken,
+			service: 's3',
+			region: 'auto'
 		});
 
-		return signed.url;
+		return client.fetch(
+			`${this.endpoint}/${this.configuration.bucketName}/${credentialProbeKey}`,
+			{ method: 'GET' }
+		);
 	}
 }
 
