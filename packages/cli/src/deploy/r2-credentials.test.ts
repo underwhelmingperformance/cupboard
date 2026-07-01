@@ -15,7 +15,14 @@ const options = {
 	}
 };
 
-function respondingWith(status: number): {
+const initiateBody =
+	'<?xml version="1.0" encoding="UTF-8"?><InitiateMultipartUploadResult>' +
+	'<UploadId>UP-1</UploadId></InitiateMultipartUploadResult>';
+
+function respondingWith(
+	status: number,
+	body?: string
+): {
 	fetcher: typeof fetch;
 	requests: Request[];
 } {
@@ -24,25 +31,22 @@ function respondingWith(status: number): {
 	const fetcher: typeof fetch = (input, init) => {
 		requests.push(new Request(input, init));
 
-		return Promise.resolve(new Response(undefined, { status }));
+		return Promise.resolve(new Response(body, { status }));
 	};
 
 	return { fetcher, requests };
 }
 
 describe('checkR2Credentials', () => {
-	it.each([
-		['an existing probe object', 200],
-		['a missing object or bucket', 404]
-	])('accepts %s as proof of valid credentials', async (_name, status) => {
-		const { fetcher } = respondingWith(status);
+	it('accepts a begun multipart upload as proof of write access', async () => {
+		const { fetcher } = respondingWith(200, initiateBody);
 
 		expect(await checkR2Credentials(options, fetcher)).toStrictEqual({
 			kind: 'valid'
 		});
 	});
 
-	it.each([[401], [403]])('reports a %i as rejected', async (status) => {
+	it.each([[401], [403], [404]])('reports a %i as rejected', async (status) => {
 		const { fetcher } = respondingWith(status);
 
 		expect(await checkR2Credentials(options, fetcher)).toStrictEqual({
@@ -51,8 +55,8 @@ describe('checkR2Credentials', () => {
 		});
 	});
 
-	it('signs a HEAD against the bucket on the account R2 endpoint', async () => {
-		const { fetcher, requests } = respondingWith(404);
+	it('begins then aborts a multipart upload against the bucket', async () => {
+		const { fetcher, requests } = respondingWith(200, initiateBody);
 
 		await checkR2Credentials(options, fetcher);
 
@@ -66,8 +70,13 @@ describe('checkR2Credentials', () => {
 			}))
 		).toStrictEqual([
 			{
-				method: 'HEAD',
-				url: 'https://acc-hex.r2.cloudflarestorage.com/cupboard-blobs/.cupboard-credential-probe',
+				method: 'POST',
+				url: 'https://acc-hex.r2.cloudflarestorage.com/cupboard-blobs/.cupboard-credential-probe?uploads',
+				signed: true
+			},
+			{
+				method: 'DELETE',
+				url: 'https://acc-hex.r2.cloudflarestorage.com/cupboard-blobs/.cupboard-credential-probe?uploadId=UP-1',
 				signed: true
 			}
 		]);
