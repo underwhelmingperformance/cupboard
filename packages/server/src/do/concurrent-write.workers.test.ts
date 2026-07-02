@@ -18,7 +18,7 @@ import {
 describe('concurrent writes', () => {
 	beforeEach(resetTestServer);
 
-	it('settles two concurrent commits of one path, both reporting committed', async () => {
+	it('settles two concurrent commits of one path, both reporting success', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 
@@ -34,25 +34,35 @@ describe('concurrent writes', () => {
 		await putNarBytes(first.r2Key);
 		await putNarBytes(second.r2Key);
 
-		// Both commits defer (neither sees a committed reference yet), so both park
-		// on their sockets and hear the verdict of the single materialisation.
+		// Both commits race to the single materialisation. The loser answers by
+		// what it finds: 'committed' when it parked on the shared verdict, or
+		// 'already-present' when the winner settled before its frame was
+		// processed, exactly as a re-push of a cached path answers. Both are
+		// converged successes; the accounting below pins that only one path was
+		// materialised and charged.
 		const settled = await Promise.all([
 			commitUpload(token, first.uploadId),
 			commitUpload(token, second.uploadId)
 		]);
+		const statuses = settled.map((outcome) => outcome.status);
 
-		expect(settled).toStrictEqual([
-			{
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				status: 'committed'
-			},
-			{
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				status: 'committed'
-			}
-		]);
+		expect({
+			paths: settled.map((outcome) => ({
+				storePathHash: outcome.storePathHash,
+				narHash: outcome.narHash
+			})),
+			allSettled: statuses.every(
+				(status) => status === 'committed' || status === 'already-present'
+			),
+			anyCommitted: statuses.includes('committed')
+		}).toStrictEqual({
+			paths: [
+				{ storePathHash: metadata.storePathHash, narHash: metadata.narHash },
+				{ storePathHash: metadata.storePathHash, narHash: metadata.narHash }
+			],
+			allSettled: true,
+			anyCommitted: true
+		});
 
 		const stored = await readStoredNarInfo(metadata.storePathHash);
 
