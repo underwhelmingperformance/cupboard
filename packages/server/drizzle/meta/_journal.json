@@ -183,6 +183,13 @@
 			"when": 1782817905752,
 			"tag": "0025_drop_pending_upload_expected_size",
 			"breakpoints": true
+		},
+		{
+			"idx": 26,
+			"version": "6",
+			"when": 1783007648388,
+			"tag": "0026_pending_upload_claimed_at",
+			"breakpoints": true
 		}
 	]
 }

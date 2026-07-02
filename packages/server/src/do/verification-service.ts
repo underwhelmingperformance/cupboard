@@ -7,12 +7,16 @@ import {
 	type ParsedUploadPathNegotiation,
 	type ParsedUploadStatusResponse
 } from '@cupboard/protocol/upload';
-import { and, asc, eq, gt, or, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import {
+	narInfoObjectKey,
+	narObjectKey,
+	verifyClaimLeaseMs
+} from '../http/http.ts';
 
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
@@ -52,6 +56,14 @@ export interface PendingVerification {
 	readonly reuse: boolean;
 }
 
+// One claim call's result: the chunk of rows the consumer should work now,
+// plus whether pending rows were left behind by the row or byte cap, the
+// signal to chain a continuation pass.
+export interface PendingVerificationBatch {
+	readonly claims: readonly PendingVerification[];
+	readonly truncated: boolean;
+}
+
 // The verdict the queue consumer reached for one claimed upload off the DO
 // thread: the decoded NAR verification, that the bytes verified and the
 // consumer also promoted them (the canonical object and its `blob_state` row
@@ -80,6 +92,72 @@ function isAwaitingVerdict(
 	row: typeof schema.pendingUploads.$inferSelect
 ): boolean {
 	return row.verdict === 'pending' || row.verdict === 'committing';
+}
+
+// The rows a verify pass may claim: awaiting a verdict, and not leased to a
+// pass already working them. A lease older than `verifyClaimLeaseMs` belongs
+// to a pass presumed dead, so its rows are claimable again.
+function claimableFilter(now: Date) {
+	const leasedBefore = new Date(
+		now.getTime() - verifyClaimLeaseMs
+	).toISOString();
+
+	return and(
+		or(
+			eq(schema.pendingUploads.verdict, 'pending'),
+			eq(schema.pendingUploads.verdict, 'committing')
+		),
+		or(
+			isNull(schema.pendingUploads.claimedAt),
+			lte(schema.pendingUploads.claimedAt, leasedBefore)
+		)
+	);
+}
+
+// Cuts one claim's chunk from the selected rows: at most `limit` rows and at
+// most `maxNarBytes` of cumulative uncompressed size over the fresh rows
+// (reuse rows decode nothing and count zero), taken as a contiguous prefix in
+// id order so the consumer's continuation drains the rest. The first fresh
+// row is admitted whatever its size, so a lone over-cap NAR cannot starve.
+// `truncated` reports that pending rows were left behind, the consumer's
+// signal to chain another pass.
+function chunkClaims(
+	pendings: readonly (typeof schema.pendingUploads.$inferSelect)[],
+	limit: number,
+	maxNarBytes: number
+): PendingVerificationBatch {
+	const claims: PendingVerification[] = [];
+	let bytes = 0;
+	let hasFresh = false;
+
+	for (const pending of pendings) {
+		if (claims.length === limit) {
+			return { claims, truncated: true };
+		}
+
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+		const isReuse = pending.r2Key === narObjectKey(metadata.narHash);
+		const cost = isReuse ? 0 : metadata.narSize;
+
+		if (cost > 0 && hasFresh && bytes + cost > maxNarBytes) {
+			return { claims, truncated: true };
+		}
+
+		claims.push({
+			uploadId: pending.id,
+			r2Key: pending.r2Key,
+			narHash: metadata.narHash,
+			narSize: metadata.narSize,
+			reuse: isReuse
+		});
+		bytes += cost;
+		hasFresh ||= cost > 0;
+	}
+
+	return { claims, truncated: false };
 }
 
 export class VerificationService {
@@ -436,6 +514,33 @@ export class VerificationService {
 		return 'unchanged';
 	}
 
+	// Takes the lease for rows a pass is about to work, synchronously with the
+	// selection that chose them, so no other claim can interleave. Only the
+	// rows actually handed out are leased: the selection's sentinel row and any
+	// rows a cap excluded stay claimable.
+	private leaseRows(uploadIds: readonly string[], now: Date): void {
+		if (uploadIds.length === 0) {
+			return;
+		}
+
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ claimedAt: now.toISOString() })
+			.where(inArray(schema.pendingUploads.id, uploadIds))
+			.run();
+	}
+
+	// Frees a claimed row the pass working it is abandoning unsettled (a
+	// transient fault), so the next pass need not wait the lease out. A crashed
+	// pass never reaches this; its rows free at lease expiry.
+	private releaseLease(uploadId: string): void {
+		this.context.db
+			.update(schema.pendingUploads)
+			.set({ claimedAt: sql`null` })
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.run();
+	}
+
 	// Reconciles a targeted set of committed paths, the per-push counterpart of the
 	// scanning {@link verifyBatch}. The probes run outside the gate; one short
 	// critical section applies the generation-checked reconciles. The DO alarm
@@ -583,63 +688,66 @@ export class VerificationService {
 	async verifyPendingUploads(limit: number): Promise<void> {
 		// Re-drive both deferred (`pending`) uploads awaiting their first verify and
 		// inline commits crashed mid-saga (`committing`); both finish through the same
-		// idempotent reserve→verify→promote→materialise path.
+		// idempotent reserve→verify→promote→materialise path. Leased rows are a
+		// consumer pass's in-flight work: this pass claims around them, and takes
+		// the lease itself so a consumer crossing it stays off its rows too.
+		const now = new Date();
 		const pendings = this.context.db
 			.select()
 			.from(schema.pendingUploads)
-			.where(
-				or(
-					eq(schema.pendingUploads.verdict, 'pending'),
-					eq(schema.pendingUploads.verdict, 'committing')
-				)
-			)
+			.where(claimableFilter(now))
 			.orderBy(asc(schema.pendingUploads.id))
 			.limit(limit)
 			.all();
+
+		this.leaseRows(
+			pendings.map((pending) => pending.id),
+			now
+		);
 
 		for (const pending of pendings) {
 			try {
 				await this.verifyAndCommitPending(pending);
 			} catch {
 				// One upload's failure (a transient promote or commit error) must not
-				// starve the rest of the pass; leave its marker for the next pass.
+				// starve the rest of the pass; free its lease and leave its marker
+				// for the next pass.
+				this.releaseLease(pending.id);
 				continue;
 			}
 		}
 	}
 
-	// Lists deferred uploads for the queue consumer to verify off the DO thread,
-	// the read-only first half of the prompt verify path. The consumer fetches and
-	// decodes each staging object, then calls `recordVerification`. A reuse row is
-	// flagged so the consumer skips its decode.
-	listPendingForVerify(limit: number): PendingVerification[] {
+	// Claims deferred uploads for the queue consumer to verify off the DO
+	// thread, the first half of the prompt verify path. The consumer fetches,
+	// decodes and promotes each staging object, then reports the verdicts. A
+	// reuse row is flagged so the consumer skips its decode.
+	//
+	// The claim is a bounded chunk (see {@link chunkClaims}) of the claimable
+	// rows, and leases what it hands out: the selection and the lease are one
+	// synchronous step on the single-writer, so a duplicate pass (the alarm
+	// backstop's re-request, an overlapping cron) claims nothing already in
+	// flight.
+	listPendingForVerify(
+		limit: number,
+		maxNarBytes: number
+	): PendingVerificationBatch {
+		const now = new Date();
 		const pendings = this.context.db
 			.select()
 			.from(schema.pendingUploads)
-			.where(
-				or(
-					eq(schema.pendingUploads.verdict, 'pending'),
-					eq(schema.pendingUploads.verdict, 'committing')
-				)
-			)
+			.where(claimableFilter(now))
 			.orderBy(asc(schema.pendingUploads.id))
-			.limit(limit)
+			.limit(limit + 1)
 			.all();
+		const batch = chunkClaims(pendings, limit, maxNarBytes);
 
-		return pendings.map((pending) => {
-			const metadata = parseStoredUploadPathMetadata(
-				pending.id,
-				pending.metadataJson
-			);
+		this.leaseRows(
+			batch.claims.map((claim) => claim.uploadId),
+			now
+		);
 
-			return {
-				uploadId: pending.id,
-				r2Key: pending.r2Key,
-				narHash: metadata.narHash,
-				narSize: metadata.narSize,
-				reuse: pending.r2Key === narObjectKey(metadata.narHash)
-			};
-		});
+		return batch;
 	}
 
 	// Commits a deferred upload the queue consumer has already verified off the DO
