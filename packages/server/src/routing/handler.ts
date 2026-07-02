@@ -1,4 +1,8 @@
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	cacheFromSelector,
+	cacheSelectorSchema,
+	type TenantId
+} from '@cupboard/nix-store/scalars';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { type Context, Hono } from 'hono';
@@ -292,12 +296,16 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// facts.
 	app.on('POST', '/t/:tenant/cache/:cacheName/uploads', async (context) => {
 		const tenant = context.get('tenant');
+		const selector = cacheSelectorSchema.safeParse(
+			context.req.param('cacheName')
+		);
 		// The hints clone the body, so they are read before `innerRequest` wraps
 		// the raw request for dispatch.
 		const hints = await computeNegotiateHints(
 			context.req.raw,
 			context.env,
-			tenant
+			tenant,
+			selector.success ? cacheFromSelector(selector.data) : undefined
 		);
 		const inner = innerRequest(context);
 

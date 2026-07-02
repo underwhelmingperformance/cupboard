@@ -1,5 +1,6 @@
 import {
 	nixSha256HashSchema,
+	storePathHashSchema,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -27,7 +28,10 @@ const hintPathCap = 10_000;
 // Just the fields the hint reads key on, tolerant of everything else in the
 // body: the Durable Object's contract schema stays the authority, and a body
 // this parse rejects simply dispatches without hints.
-const hintPathSchema = z.object({ narHash: nixSha256HashSchema });
+const hintPathSchema = z.object({
+	narHash: nixSha256HashSchema,
+	storePathHash: storePathHashSchema
+});
 const lenientNegotiateBodySchema = z.object({
 	pushId: z.string(),
 	paths: z.array(hintPathSchema).min(1).max(hintPathCap)
@@ -47,7 +51,8 @@ const lenientNegotiateBodySchema = z.object({
 export async function computeNegotiateHints(
 	request: Request,
 	env: Env,
-	tenant: TenantId
+	tenant: TenantId,
+	cache: string | undefined
 ): Promise<NegotiateHints | undefined> {
 	if (request.headers.get('authorization') === null) {
 		return undefined;
@@ -78,8 +83,11 @@ export async function computeNegotiateHints(
 	}
 
 	const narHashes = [...new Set(parsed.data.paths.map((path) => path.narHash))];
+	const storePathHashes = [
+		...new Set(parsed.data.paths.map((path) => path.storePathHash))
+	];
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	const [blobStatePages, ownedPages] = await Promise.all([
+	const [blobStatePages, ownedPages, edgePages] = await Promise.all([
 		mapWithConcurrency(
 			chunk(narHashes, maxInClauseValues),
 			maxOutgoingConnections,
@@ -111,11 +119,34 @@ export async function computeNegotiateHints(
 						)
 					)
 					.all()
-		)
+		),
+		cache === undefined
+			? undefined
+			: mapWithConcurrency(
+					chunk(storePathHashes, maxInClauseValues),
+					maxOutgoingConnections,
+					(batch) =>
+						database
+							.select({
+								storePathHash: d1Schema.blobReference.storePathHash,
+								generation: d1Schema.blobReference.generation,
+								narHash: d1Schema.blobReference.narHash
+							})
+							.from(d1Schema.blobReference)
+							.where(
+								and(
+									eq(d1Schema.blobReference.tenant, tenant),
+									eq(d1Schema.blobReference.cache, cache),
+									inArray(d1Schema.blobReference.storePathHash, batch)
+								)
+							)
+							.all()
+				)
 	]);
 
 	return {
 		blobStates: blobStatePages.flat(),
-		ownedNarHashes: ownedPages.flat().map((row) => row.narHash)
+		ownedNarHashes: ownedPages.flat().map((row) => row.narHash),
+		committedEdges: edgePages?.flat()
 	};
 }
