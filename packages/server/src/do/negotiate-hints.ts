@@ -1,6 +1,7 @@
 import {
 	nixSha256HashSchema,
-	type NixSha256HashString
+	type NixSha256HashString,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
@@ -29,6 +30,18 @@ export const blobStateHintSchema = z.object({
 });
 export type BlobStateHint = z.infer<typeof blobStateHintSchema>;
 
+// One `blob_reference` edge the Worker found for a requested store path in
+// the negotiated cache. The Durable Object compares these against its own
+// live narinfo rows, so an edge read before a recommit bumped the generation
+// simply fails to match: it fails towards "not committed", the safe
+// direction.
+export const committedEdgeHintSchema = z.object({
+	storePathHash: storePathHashSchema,
+	generation: z.number().int().nonnegative(),
+	narHash: nixSha256HashSchema
+});
+export type CommittedEdgeHint = z.infer<typeof committedEdgeHintSchema>;
+
 /**
  * The shared-fact reads for one negotiate, computed by the front Worker so
  * the Durable Object thread spends no time on them. Coverage is total: the
@@ -39,7 +52,11 @@ export type BlobStateHint = z.infer<typeof blobStateHintSchema>;
  */
 export const negotiateHintsSchema = z.object({
 	blobStates: z.array(blobStateHintSchema),
-	ownedNarHashes: z.array(nixSha256HashSchema)
+	ownedNarHashes: z.array(nixSha256HashSchema),
+	// Absent when the staging Worker did not compute the edge read (an older
+	// script, or no cache resolved): the fallback is the object's own edge
+	// read, never "no edges".
+	committedEdges: z.array(committedEdgeHintSchema).optional()
 });
 export type NegotiateHints = z.infer<typeof negotiateHintsSchema>;
 
@@ -47,6 +64,7 @@ export type NegotiateHints = z.infer<typeof negotiateHintsSchema>;
 export interface NegotiateFacts {
 	readonly backedNarHashes: ReadonlySet<NixSha256HashString>;
 	readonly reusableByNarHash: ReadonlyMap<NixSha256HashString, BlobStateHint>;
+	readonly committedEdges: readonly CommittedEdgeHint[] | undefined;
 }
 
 export function factsFromHints(hints: NegotiateHints): NegotiateFacts {
@@ -58,7 +76,8 @@ export function factsFromHints(hints: NegotiateHints): NegotiateFacts {
 			hints.blobStates
 				.filter((state) => owned.has(state.narHash))
 				.map((state) => [state.narHash, state])
-		)
+		),
+		committedEdges: hints.committedEdges
 	};
 }
 

@@ -15,6 +15,7 @@ import {
 	CommitSocketError,
 	commitUploadRejection,
 	currentServer,
+	deleteBlobReferenceEdge,
 	expectSingleCommitDecision,
 	expectSingleUploadDecision,
 	handlerFetch,
@@ -102,16 +103,18 @@ describe('computing negotiate hints', () => {
 		const signed = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths: [path] }),
 			env,
-			fixtureTenant
+			fixtureTenant,
+			'_default'
 		);
 		const forged = await computeNegotiateHints(
 			probeRequest({ pushId: 'a'.repeat(96), paths: [path] }),
 			env,
-			fixtureTenant
+			fixtureTenant,
+			'_default'
 		);
 
 		expect({ signed, forged }).toStrictEqual({
-			signed: { blobStates: [], ownedNarHashes: [] },
+			signed: { blobStates: [], ownedNarHashes: [], committedEdges: [] },
 			forged: undefined
 		});
 	});
@@ -120,7 +123,8 @@ describe('computing negotiate hints', () => {
 		const hints = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths: [path] }, {}),
 			env,
-			fixtureTenant
+			fixtureTenant,
+			'_default'
 		);
 
 		expect(hints).toBeUndefined();
@@ -130,7 +134,8 @@ describe('computing negotiate hints', () => {
 		const hints = await computeNegotiateHints(
 			probeRequest('{not json'),
 			env,
-			fixtureTenant
+			fixtureTenant,
+			'_default'
 		);
 
 		expect(hints).toBeUndefined();
@@ -141,7 +146,8 @@ describe('computing negotiate hints', () => {
 		const hints = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths }),
 			env,
-			fixtureTenant
+			fixtureTenant,
+			'_default'
 		);
 
 		expect(hints).toBeUndefined();
@@ -262,6 +268,40 @@ describe('negotiate hints', () => {
 			decisions: { [committed.storePathHash]: 'skip' },
 			generation,
 			queued: []
+		});
+	});
+
+	it('fails a hinted edge check towards not-committed', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('hints-edge');
+		const committed = uploadMetadata({
+			name: 'edge',
+			storePathHash: '8'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, committed, nar);
+
+		// The row survives but its committed edge is gone, the residue of a
+		// delete that crashed between the edge retirement and the row.
+		const generation = await narInfoGeneration(committed.storePathHash);
+
+		expect(generation).toBeDefined();
+
+		if (generation !== undefined) {
+			await deleteBlobReferenceEdge(committed.storePathHash, generation);
+		}
+
+		// No edge means no skip: the hinted check fails towards not-committed
+		// and the path re-plans, as a reuse commit since the tenant still holds
+		// the blob.
+		const hinted = await negotiateViaWorker(token, [committed]);
+
+		expect(actionsByPath(hinted)).toStrictEqual({
+			[committed.storePathHash]: 'commit'
 		});
 	});
 

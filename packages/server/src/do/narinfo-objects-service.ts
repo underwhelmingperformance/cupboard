@@ -265,10 +265,8 @@ export class NarInfoObjectsService {
 		cache: string,
 		rows: readonly NarInfoRow[]
 	): Promise<Set<StorePathHash>> {
-		const committed = new Set<StorePathHash>();
-
 		if (rows.length === 0) {
-			return committed;
+			return new Set();
 		}
 
 		const tenant = this.context.requireTenant();
@@ -295,16 +293,26 @@ export class NarInfoObjectsService {
 					.all()
 		);
 
+		return this.committedReferencesFrom(batches.flat(), rows);
+	}
+
+	// The pure comparison half of {@link committedReferences}: which of `rows`
+	// the given edges name at their exact version. The rows are the Durable
+	// Object's own live SQLite state, so an edge read before a recommit bumped
+	// a generation simply fails to match, failing towards "not committed".
+	committedReferencesFrom(
+		edges: readonly {
+			readonly storePathHash: StorePathHash;
+			readonly generation: number;
+			readonly narHash: NixSha256HashString;
+		}[],
+		rows: readonly NarInfoRow[]
+	): Set<StorePathHash> {
+		const committed = new Set<StorePathHash>();
 		const referenceKeys = new Set(
-			batches
-				.flat()
-				.map((reference) =>
-					referenceKey(
-						reference.storePathHash,
-						reference.generation,
-						reference.narHash
-					)
-				)
+			edges.map((edge) =>
+				referenceKey(edge.storePathHash, edge.generation, edge.narHash)
+			)
 		);
 
 		for (const row of rows) {

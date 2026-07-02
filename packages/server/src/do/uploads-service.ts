@@ -257,7 +257,12 @@ export class UploadsService {
 		// superset whose extra rows (mid-saga reservations) are rare, in exchange
 		// for one D1 wave instead of two.
 		const [committed, backedNarHashes] = await Promise.all([
-			this.narInfoObjects.committedReferences(cache, existingRows),
+			facts?.committedEdges === undefined
+				? this.narInfoObjects.committedReferences(cache, existingRows)
+				: this.narInfoObjects.committedReferencesFrom(
+						facts.committedEdges,
+						existingRows
+					),
 			this.backedNarHashes(facts, body, existingRows)
 		]);
 
