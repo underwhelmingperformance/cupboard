@@ -20,9 +20,11 @@
 
       # SRI hash of the fetched pnpm store. The fetcher downloads every
       # platform's binaries, so the store and its hash are identical on all
-      # systems. After a `pnpm-lock.yaml` change set this to lib.fakeHash,
-      # build on any one platform, and copy the hash Nix reports back here.
-      pnpmDepsHash = "sha256-f1pMd+s96XwgrFXxiQNq2Sg77D4IFNVmbOUa0CBlkHA=";
+      # systems. The file pairs the hash with a digest of the lockfile it was
+      # resolved from: `pnpm update:flake-deps` refreshes the pair after a
+      # `pnpm-lock.yaml` change, and `pnpm check:flake-deps` fails when they
+      # drift apart.
+      pnpmDepsHash = (nixpkgs.lib.importJSON ./pnpm-deps-hash.json).store;
 
       # `pnpm build:binary` bundles the CLI and both Workers, then injects the
       # bundle into a copy of the Node binary as a single executable. The build

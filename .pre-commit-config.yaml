@@ -58,6 +58,18 @@ repos:
             pnpm-workspace\.yaml
           )$
 
+      - id: pnpm-check-flake-deps
+        name: pnpm check:flake-deps
+        entry: pnpm check:flake-deps
+        language: system
+        pass_filenames: false
+        files: >-
+          (?x)^(
+            pnpm-deps-hash\.json|
+            pnpm-lock\.yaml|
+            scripts/flake-dependencies\.ts
+          )$
+
       - id: pnpm-check-format
         name: pnpm check:format
         entry: pnpm check:format
