@@ -6,6 +6,7 @@ import { type Context, Hono } from 'hono';
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
 import { TenantWritesStoppedError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
@@ -27,6 +28,7 @@ import {
 import { admitTenant } from './admission.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
+import { computeNegotiateHints } from './negotiate-hints.ts';
 import { enqueueMaintenanceJobs, handleMaintenanceQueue } from './scheduled.ts';
 import { parseTenantPath } from './tenant-routing.ts';
 
@@ -282,6 +284,38 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
+	// Upload negotiation carries its shared-fact D1 reads with it: the Worker
+	// computes them here and stages them onto the tenant's Durable Object over
+	// RPC, so the negotiate handler spends no Durable Object time on them. A
+	// request the hints cannot be computed for (or an older tenant script
+	// without the staging RPC) dispatches plainly and the object reads its own
+	// facts.
+	app.on('POST', '/t/:tenant/cache/:cacheName/uploads', async (context) => {
+		const tenant = context.get('tenant');
+		// The hints clone the body, so they are read before `innerRequest` wraps
+		// the raw request for dispatch.
+		const hints = await computeNegotiateHints(
+			context.req.raw,
+			context.env,
+			tenant
+		);
+		const inner = innerRequest(context);
+
+		if (hints !== undefined) {
+			try {
+				const token = await tenantServer(
+					context.env,
+					tenant
+				).stageNegotiateHints(hints);
+				inner.headers.set(negotiateHintsHeader, token);
+			} catch {
+				// Staging unavailable: dispatch without hints.
+			}
+		}
+
+		return dispatchTenant(inner, context.env, tenant);
+	});
+
 	// Everything else under the tenant subtree dispatches to the Durable Object,
 	// registered last so the read routes above answer first.
 	app.all('/t/:tenant/*', (context) =>
@@ -311,12 +345,17 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 // The tenant-relative request: the `/t/<tenant>/` prefix stripped, everything
-// else preserved, as the Durable Object and the serve helpers expect it.
+// else preserved, as the Durable Object and the serve helpers expect it. The
+// hint-token header is always dropped here, the one choke point every tenant
+// dispatch passes: hints are staged over RPC and only the Worker sets the
+// token, so a client-supplied value must never reach the Durable Object.
 function innerRequest(context: Context<WorkerHonoEnv>): Request {
 	const inner = new URL(context.req.url);
 	inner.pathname = context.get('tenantRest');
+	const request = new Request(inner, context.req.raw);
+	request.headers.delete(negotiateHintsHeader);
 
-	return new Request(inner, context.req.raw);
+	return request;
 }
 
 // Dispatches a non-read tenant request to its Durable Object. A write (anything but

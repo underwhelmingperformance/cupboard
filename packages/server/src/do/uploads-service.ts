@@ -1,4 +1,7 @@
-import { type StorePathHash } from '@cupboard/nix-store/scalars';
+import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import {
 	type ParsedUploadNegotiateRequest,
 	type ParsedUploadPathMetadata,
@@ -20,12 +23,24 @@ import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import {
+	factsFromHints,
+	type NegotiateFacts,
+	type NegotiateHints
+} from './negotiate-hints.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
 import { commitMetadataFromPathAndBlob } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
+
+// The blob facts a reuse decision plans from, satisfied by a `blob_state` row
+// and by a Worker-computed hint alike.
+type ReusableBlob = Pick<
+	BlobStateRow,
+	'fileHash' | 'fileSize' | 'compression' | 'narSize'
+>;
 
 // A pending upload, and a reuse upload's reclaim window, both live for fifteen
 // minutes from when they are negotiated.
@@ -100,7 +115,7 @@ export class UploadsService {
 		cache: string,
 		pushId: string,
 		metadata: ParsedUploadPathNegotiation,
-		existingBlob: BlobStateRow | undefined
+		existingBlob: ReusableBlob | undefined
 	): UploadDecision {
 		const uploadId = crypto.randomUUID();
 		const now = new Date();
@@ -156,6 +171,35 @@ export class UploadsService {
 		};
 	}
 
+	// The NAR hashes whose `blob_state` row confirms a backing canonical object.
+	// The Worker's hints read `blob_state` only for the hashes the request body
+	// carries, so they answer nothing about an existing row whose committed NAR
+	// differs from the one now pushed (the same store path rebuilt to different
+	// bytes). Those rows read their own presence here; treating absence from the
+	// hint set as a lost NAR would reconcile a healthy row away.
+	private async backedNarHashes(
+		facts: NegotiateFacts | undefined,
+		body: ParsedUploadNegotiateRequest,
+		existingRows: readonly NarInfoRow[]
+	): Promise<ReadonlySet<NixSha256HashString>> {
+		const rowHashes = existingRows.map((row) => row.narHash);
+
+		if (facts === undefined) {
+			return this.uploadState.presentNarHashes(rowHashes);
+		}
+
+		const requested = new Set(body.paths.map((path) => path.narHash));
+		const uncovered = rowHashes.filter((hash) => !requested.has(hash));
+
+		if (uncovered.length === 0) {
+			return facts.backedNarHashes;
+		}
+
+		const present = await this.uploadState.presentNarHashes(uncovered);
+
+		return new Set([...facts.backedNarHashes, ...present]);
+	}
+
 	// The status of a deferred upload, polled on the uploadId the client holds.
 	// Derived from the durable per-upload verdict: a row that is gone is
 	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
@@ -186,7 +230,8 @@ export class UploadsService {
 	async negotiate(
 		cache: string,
 		body: ParsedUploadNegotiateRequest,
-		origin: string
+		origin: string,
+		hints?: NegotiateHints
 	): Promise<UploadNegotiateResponse> {
 		if (!(await this.context.pushCredentials().verify(body.pushId))) {
 			throw new InvalidPushIdError();
@@ -195,6 +240,11 @@ export class UploadsService {
 		if (body.paths.length === 0) {
 			return { uploads: [] };
 		}
+
+		// With Worker-staged hints the shared-fact reads are already done, and
+		// negotiate spends no time on D1 for them; without (an older Worker, a
+		// lost or expired token) it reads its own.
+		const facts = hints === undefined ? undefined : factsFromHints(hints);
 
 		const existingByStorePathHash = this.existingNarInfos(
 			cache,
@@ -208,7 +258,7 @@ export class UploadsService {
 		// for one D1 wave instead of two.
 		const [committed, backedNarHashes] = await Promise.all([
 			this.narInfoObjects.committedReferences(cache, existingRows),
-			this.uploadState.presentNarHashes(existingRows.map((row) => row.narHash))
+			this.backedNarHashes(facts, body, existingRows)
 		]);
 
 		// A committed path is skippable only while a `blob_state` row still backs
@@ -221,14 +271,18 @@ export class UploadsService {
 		const skippable = new Set(skippableRows.map((row) => row.storePathHash));
 
 		// Only a path that will actually plan an upload needs a reusable blob, so a
-		// fully cached re-push (every path a skip) reads no reuse facts at all.
-		const reusableByNarHash = await this.uploadState.findReusableBlobs(
-			body.paths
-				.filter((path) => !skippable.has(path.storePathHash))
-				.map((path) => path.narHash)
-		);
+		// fully cached re-push (every path a skip) reads no reuse facts at all. The
+		// hinted map may cover skippable hashes too; only planned uploads read it.
+		const reusableByNarHash: ReadonlyMap<string, ReusableBlob> =
+			facts?.reusableByNarHash ??
+			(await this.uploadState.findReusableBlobs(
+				body.paths
+					.filter((path) => !skippable.has(path.storePathHash))
+					.map((path) => path.narHash)
+			));
 
 		const uploads: UploadDecision[] = [];
+		const armedReuseHashes = new Set<NixSha256HashString>();
 
 		for (const metadata of body.paths) {
 			const existing = existingByStorePathHash.get(metadata.storePathHash);
@@ -249,6 +303,12 @@ export class UploadsService {
 				await this.deletionQueue.removeStaleNarInfo(existing, origin);
 			}
 
+			const hinted = facts?.reusableByNarHash.get(metadata.narHash);
+
+			if (hinted !== undefined && hinted.deleteAfter !== null) {
+				armedReuseHashes.add(metadata.narHash);
+			}
+
 			uploads.push(
 				this.planUpload(
 					cache,
@@ -258,6 +318,13 @@ export class UploadsService {
 				)
 			);
 		}
+
+		// Reusing is a fresh reference, so cancel any armed reaper grace timer
+		// before the response commits the client to the plan; the fallback read
+		// (`findReusableBlobs`) clears its own. A clear deferred past the
+		// response can be lost, leaving the reaper racing the client across its
+		// whole negotiate-to-commit window.
+		await this.uploadState.clearReaperTimers([...armedReuseHashes]);
 
 		// Queue the skippable closure for the off-hot-path reconcile and arm the
 		// alarm. The push returns at once; the alarm probes R2 for each path and

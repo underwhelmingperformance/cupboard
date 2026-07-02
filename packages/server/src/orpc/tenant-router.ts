@@ -179,7 +179,8 @@ export const tenantRouter = os.router({
 			return context.services.uploads.negotiate(
 				cacheFromSelector(input.cacheName),
 				{ pushId: input.pushId, paths: input.paths },
-				requestUrl.origin
+				requestUrl.origin,
+				context.services.takeNegotiateHints(context.request)
 			);
 		}),
 		status: os.uploads.status.handler(({ input, context }) =>

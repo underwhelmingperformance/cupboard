@@ -67,6 +67,12 @@ import {
 } from './maintenance-eligibility-service.ts';
 import { applyMigrations } from './migrate.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import {
+	type NegotiateHints,
+	negotiateHintsHeader,
+	negotiateHintsSchema,
+	type NegotiateHintsToken
+} from './negotiate-hints.ts';
 import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
@@ -481,6 +487,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			authenticate: (request) => this.authKeys.authenticate(request),
 			pendingCache: (id) => this.pendingCache(id),
 			afterMutation: (body) => this.afterMutation(body),
+			takeNegotiateHints: (request) => {
+				const token = request.headers.get(negotiateHintsHeader);
+
+				return token === null
+					? undefined
+					: this.context.negotiateHints.take(token, Date.now());
+			},
 			cacheAdmin: this.cacheAdmin,
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
@@ -941,6 +954,22 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const batch = await this.claimVerificationBatch(limit, Infinity);
 
 		return [...batch.claims];
+	}
+
+	// Stages Worker-computed negotiate hints, returning the single-use token the
+	// dispatch that follows carries; see {@link NegotiateHintStore}. Reachable
+	// only over RPC, never HTTP, so a client cannot forge hints. An unrecognised
+	// shape (a deploy-skewed Worker) throws, which the Worker treats as staging
+	// unavailable and dispatches without hints.
+	async stageNegotiateHints(
+		hints: NegotiateHints
+	): Promise<NegotiateHintsToken> {
+		await this.initialise();
+
+		return this.context.negotiateHints.stage(
+			negotiateHintsSchema.parse(hints),
+			Date.now()
+		);
 	}
 
 	// Asks for another verification pass, through the same single-flight as a

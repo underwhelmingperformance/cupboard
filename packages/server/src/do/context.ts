@@ -33,6 +33,7 @@ import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { type OidcTrustRule } from '../oidc/oidc-trust.ts';
 
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
+import { NegotiateHintStore } from './negotiate-hints.ts';
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
@@ -136,6 +137,9 @@ export class ServerContext {
 	// gate, so the only caller to guard is an in-flight commit settling on this warm
 	// instance, which sees the flag set by the same instance's offboard RPC.
 	offboarding = false;
+	// The Worker-staged negotiate hints awaiting their dispatch; see
+	// {@link NegotiateHintStore}.
+	readonly negotiateHints = new NegotiateHintStore();
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
