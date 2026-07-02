@@ -3,7 +3,11 @@ import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
-import { verifyDecompressedNar } from '../blob/nar-verify.ts';
+import {
+	type NarVerification,
+	verifyDecompressedNar
+} from '../blob/nar-verify.ts';
+import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	deleteTenantMember,
@@ -19,8 +23,11 @@ import {
 	type NarInfoDemoter,
 	type NarInfoDemotion
 } from '../do/blob-reaper-service.ts';
-import { mapWithConcurrency } from '../do/bulk.ts';
-import { type VerificationResult } from '../do/verification-service.ts';
+import { mapWithConcurrency, maxOutgoingConnections } from '../do/bulk.ts';
+import {
+	type PendingVerification,
+	type VerificationResult
+} from '../do/verification-service.ts';
 import { blobReaperBatchSize, verificationBatchSize } from '../http/http.ts';
 
 import { tenantServer } from './durable-object.ts';
@@ -627,11 +634,49 @@ function maintainTenant(env: Env, id: TenantId): Promise<void> {
 // isolate; the heavy decode is off the DO thread regardless.
 const verifyDecodeConcurrency = 4;
 
+// Promotes one fresh claim's verified bytes and reports the verdict. A promote
+// the consumer completed spares the settle its own; one that fails falls back
+// to the plain verified verdict, so the decode is never wasted and the settle
+// promotes as before.
+async function promoteAndReport(
+	database: DrizzleD1Database<typeof d1Schema>,
+	blobs: R2Bucket,
+	claim: PendingVerification,
+	verification: NarVerification
+): Promise<VerificationResult> {
+	const fallback: VerificationResult = {
+		uploadId: claim.uploadId,
+		verdict: { kind: 'verified', verification }
+	};
+
+	if (
+		!verification.ok ||
+		verification.fileHash === undefined ||
+		verification.fileSize === undefined
+	) {
+		return fallback;
+	}
+
+	try {
+		await promoteVerifiedBlob(
+			database,
+			blobs,
+			claim.r2Key,
+			{ narHash: claim.narHash, narSize: claim.narSize },
+			{ fileHash: verification.fileHash, fileSize: verification.fileSize }
+		);
+
+		return { uploadId: claim.uploadId, verdict: { kind: 'promoted' } };
+	} catch {
+		return fallback;
+	}
+}
+
 // The prompt verify path. The CPU-bound NAR decode is the work that saturated
 // the single DO thread, so it runs here in the queue consumer instead: claim a
-// batch of deferred uploads (a read on the DO), fetch and decode each staging
-// object off the DO thread, then report all the verdicts back in one RPC so only
-// the state transitions run on the single writer. A transient fetch/decode fault
+// batch of deferred uploads (a read on the DO), fetch, decode and promote each
+// staging object off the DO thread, then report the verdicts back so only the
+// state transitions run on the single writer. A transient fetch/decode fault
 // leaves the row for the next pass (the consumer simply does not report it); a
 // definitively missing staging object fails it terminally.
 export async function verifyTenant(
@@ -641,19 +686,45 @@ export async function verifyTenant(
 ): Promise<void> {
 	const server = tenantServer(env, id);
 	const claims = await server.claimPendingVerifications(batchSize);
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	// Reuse rows need no decode: their bytes are the shared canonical object,
+	// verified when it was first promoted. Promote each (a canonical head plus
+	// the blob_state upsert) and settle them all before any decode starts, so
+	// the cheap rows are never hostage to the expensive ones. A reuse whose
+	// canonical object is gone stays unreported for the next pass.
+	const reuseVerdicts = await mapWithConcurrency(
+		claims.filter((claim) => claim.reuse),
+		maxOutgoingConnections,
+		async (claim): Promise<VerificationResult | undefined> => {
+			try {
+				await promoteVerifiedBlob(
+					database,
+					env.BLOBS,
+					claim.r2Key,
+					{ narHash: claim.narHash, narSize: claim.narSize },
+					undefined
+				);
+
+				return { uploadId: claim.uploadId, verdict: { kind: 'promoted' } };
+			} catch {
+				return undefined;
+			}
+		}
+	);
+	const reuseReported = reuseVerdicts.filter(
+		(verdict): verdict is VerificationResult => verdict !== undefined
+	);
+	let applied =
+		reuseReported.length > 0
+			? await server.recordVerifications(reuseReported)
+			: 0;
 
 	const verdicts = await mapWithConcurrency(
-		claims,
+		claims.filter((claim) => !claim.reuse),
 		verifyDecodeConcurrency,
 		async (claim): Promise<VerificationResult | undefined> => {
 			try {
-				if (claim.reuse) {
-					return {
-						uploadId: claim.uploadId,
-						verdict: { kind: 'verified', verification: { ok: true } }
-					};
-				}
-
 				const object = await env.BLOBS.get(claim.r2Key);
 
 				if (object === null) {
@@ -668,10 +739,7 @@ export async function verifyTenant(
 					{ narHash: claim.narHash, narSize: claim.narSize }
 				);
 
-				return {
-					uploadId: claim.uploadId,
-					verdict: { kind: 'verified', verification }
-				};
+				return await promoteAndReport(database, env.BLOBS, claim, verification);
 			} catch {
 				// A transient fetch or decode fault leaves the row for the next pass.
 				return undefined;
@@ -683,7 +751,7 @@ export async function verifyTenant(
 		(verdict): verdict is VerificationResult => verdict !== undefined
 	);
 
-	const applied =
+	applied +=
 		reported.length > 0 ? await server.recordVerifications(reported) : 0;
 
 	// One verify message can coalesce a whole push's deferrals, and a pass claims

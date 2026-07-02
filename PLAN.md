@@ -1124,11 +1124,12 @@ SQLite database. A tenant's DO is the single writer for that tenant's
 `blob_ref`/`tenant_blob` rows, serialising its accounting transitions (including
 offboarding, which deletes those rows through the DO, not from the Worker). This
 is per-table, not blanket: `blob_state` is shared and multi-writer (any tenant
-DO at promote, the Worker reaper for `delete_after` and collection); the tenant
-DO writes its own `tenant_usage` counters (`bytes`/`narinfos`/`blobs`, where it
-charges and credits quota) while the Worker writes only that row's quota
-configuration (`quota_bytes`) — disjoint columns, no write conflict; and the
-Worker owns `tenant`, `control_*`, and `global_admin`.
+DO at promote, the queue consumer promoting the bytes it has just verified, the
+Worker reaper for `delete_after` and collection); the tenant DO writes its own
+`tenant_usage` counters (`bytes`/`narinfos`/`blobs`, where it charges and
+credits quota) while the Worker writes only that row's quota configuration
+(`quota_bytes`) — disjoint columns, no write conflict; and the Worker owns
+`tenant`, `control_*`, and `global_admin`.
 
 ### Control plane
 
@@ -1392,10 +1393,13 @@ consume its rows, keeps a resume position (a single KV value, see below):
    R2-last), so crash residue is a harmless orphan object the next promote
    adopts, never an "available but no object" stranding.
 
-`delete_after` is cleared to NULL by both paths that re-reference a hash:
-promote (`ON CONFLICT DO UPDATE SET delete_after = NULL`) and reuse-commit (an
-explicit update in the same batch as its edge insert — reuse does no promote, so
-this is mandatory). The grace is the single deployment-wide
+`delete_after` is cleared to NULL by the paths that re-reference a hash: promote
+(`ON CONFLICT DO UPDATE SET delete_after = NULL`), a negotiate that plans a
+reuse of an armed hash (the tenant DO clears it before answering), and
+reuse-commit (an explicit update in the same batch as its edge insert — a
+synchronous reuse commit does no promote, so this is mandatory; a deferred reuse
+settles through a decode-free promote against the canonical object, which clears
+it the promote way). The grace is the single deployment-wide
 `narinfo TTL + margin` (one TTL constant, preserved from V3). The reaper also
 runs a demote pass — it, not the per-DO verify pass, is the only actor that can
 scan global `blob_state` — keyset-paginating `blob_state` by `nar_hash` from a
