@@ -15,11 +15,11 @@ export default defineConfig(async () => {
 
 	return {
 		test: {
-			testTimeout: 30_000,
 			projects: [
 				{
 					test: {
 						name: 'node',
+						testTimeout: 30_000,
 						sequence: { groupOrder: 0 },
 						benchmark: {
 							include: ['src/**/*.bench.ts']
@@ -66,6 +66,7 @@ export default defineConfig(async () => {
 					],
 					test: {
 						name: 'workers',
+						testTimeout: 30_000,
 						fileParallelism: true,
 						maxWorkers: 4,
 						sequence: { groupOrder: 1 },
