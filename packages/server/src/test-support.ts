@@ -2525,6 +2525,35 @@ export async function commitVerifiablePath(
 }
 
 /**
+ * Collects every message the current server sends through its own queue
+ * binding (the path `requestVerification` and its continuations take), by
+ * swapping a recording stub onto the live instance before the code under test
+ * runs.
+ */
+export async function collectVerificationPasses(): Promise<unknown[]> {
+	const sent: unknown[] = [];
+	const metrics = { backlogCount: 0, backlogBytes: 0 };
+	await runInDurableObject(currentServer(), (instance) => {
+		instance.context.env = {
+			...instance.context.env,
+			MAINTENANCE_QUEUE: {
+				send: (message: unknown) => {
+					sent.push(message);
+
+					return Promise.resolve({ metadata: { metrics } });
+				},
+				sendBatch: () => Promise.resolve({ metadata: { metrics } }),
+				metrics: () => Promise.resolve(metrics)
+			}
+		};
+
+		return Promise.resolve();
+	});
+
+	return sent;
+}
+
+/**
  * Negotiates one fresh path, stages its bytes, and defers it as `pending`
  * background verification, returning the facts a verify claim carries for it.
  */

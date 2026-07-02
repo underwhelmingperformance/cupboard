@@ -43,6 +43,12 @@ import { type SigningKeysService } from './signing-keys-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
+// How long a sent `tenant-verify` request suppresses further sends before it
+// is presumed lost and a deferral may send again. Must stay below the verify
+// alarm backstop's delay, so that when the backstop fires the previous request
+// is already stale and its re-request is a real send.
+export const verifyRequestStaleMs = 45_000;
+
 /**
  * What a commit settled to at commit time: the path is served (`settled`,
  * committed by these bytes or already present from an earlier upload), or the
@@ -68,14 +74,19 @@ interface TenantAccount {
 }
 
 export class CommitPipelineService {
-	// Single-flight guard for the prompt verification request: true from when a
-	// `tenant-verify` message is enqueued until the next pass starts and claims the
-	// pending rows (`onVerificationPassStarted`). While it is set, a deferral skips
-	// the send, because the pass already coming will observe its row — the row is
-	// written before the deferral requests, and a set guard means that pass has not
-	// yet taken its snapshot. So one message covers a whole push with no duplicate
-	// and no row left for the backstop.
-	private verifyMessageOutstanding = false;
+	// Single-flight guard for the prompt verification request: when a
+	// `tenant-verify` message was enqueued, cleared when the next pass starts
+	// and claims the pending rows (`onVerificationPassStarted`). While a recent
+	// send is outstanding, a deferral skips its own: the row is written before
+	// the deferral requests, and an unclaimed send means that pass has not yet
+	// taken its snapshot, so the pass already coming will observe the row. One
+	// message thereby covers a whole push with no duplicate.
+	//
+	// The guard is a timestamp so a lost message cannot suppress requests
+	// forever: past `verifyRequestStaleMs` a deferral sends again. Eviction
+	// clearing it early is harmless, since the worst case is one duplicate
+	// message whose claim is idempotent and chunk-bounded.
+	private verifyRequestedAt: number | undefined;
 
 	constructor(
 		private readonly context: ServerContext,
@@ -410,27 +421,32 @@ export class CommitPipelineService {
 	// starting now has already chosen its rows, so a deferral after this point
 	// must enqueue its own request to be seen.
 	onVerificationPassStarted(): void {
-		this.verifyMessageOutstanding = false;
+		this.verifyRequestedAt = undefined;
 	}
 
 	// Asks for a prompt verification pass over the maintenance queue, so a pending
-	// commit becomes servable within seconds. Single-flight: at most one message
-	// is outstanding per DO instance at a time, so a pass continuing the drain and
-	// a concurrent deferral collapse onto one message that claims each row once. A
-	// failed send clears the guard so the next deferral retries, and the hourly
-	// sweep is a backstop for a lost message.
+	// commit becomes servable within seconds. Single-flight while fresh: at most
+	// one message per staleness window per DO instance, so a pass continuing the
+	// drain and a concurrent deferral collapse onto one message that claims each
+	// row once. A failed send clears the guard so the next deferral retries; a
+	// sent message no pass ever claims goes stale and the next deferral re-sends.
 	async requestVerification(tenant: TenantId): Promise<void> {
-		if (this.verifyMessageOutstanding) {
+		const now = Date.now();
+
+		if (
+			this.verifyRequestedAt !== undefined &&
+			now - this.verifyRequestedAt < verifyRequestStaleMs
+		) {
 			return;
 		}
 
-		this.verifyMessageOutstanding = true;
+		this.verifyRequestedAt = now;
 		const message: MaintenanceQueueMessage = { kind: 'tenant-verify', tenant };
 
 		try {
 			await this.context.env.MAINTENANCE_QUEUE.send(message);
 		} catch (error) {
-			this.verifyMessageOutstanding = false;
+			this.verifyRequestedAt = undefined;
 			console.warn('verification request not enqueued', {
 				tenant,
 				error: error instanceof Error ? error.message : String(error)
