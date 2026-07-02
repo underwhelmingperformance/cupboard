@@ -17,8 +17,8 @@ Install it into a profile:
 nix profile install github:underwhelmingperformance/cupboard
 ```
 
-The flake builds the CLI from source for the host platform (Linux and macOS,
-x86-64 and arm64), so pinning the input at a revision gives you the `cupboard`
+The flake builds the CLI from source for the host platform (x86-64 and arm64
+Linux, arm64 macOS), so pinning the input at a revision gives you the `cupboard`
 built from that same revision, and the package version reflects it. The flake
 also exposes an overlay, so you can refer to `pkgs.cupboard` after adding
 `inputs.cupboard.overlays.default` to your `nixpkgs.overlays`.
