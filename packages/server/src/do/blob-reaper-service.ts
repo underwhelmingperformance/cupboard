@@ -127,16 +127,21 @@ export class BlobReaperService {
 
 		const candidateHashes = candidates.map((candidate) => candidate.narHash);
 
-		await this.d1
-			.update(d1Schema.blobState)
-			.set({ deleteAfter: deletionTime })
-			.where(
-				and(
-					inArray(d1Schema.blobState.narHash, candidateHashes),
-					isNull(d1Schema.blobState.deleteAfter)
+		// The candidate batch can exceed D1's bound-parameter limit, so the arm
+		// update runs per chunk. Each chunk re-checks the timer is still unset, so
+		// a commit clearing it between chunks wins.
+		for (const batch of chunk(candidateHashes, maxInClauseValues)) {
+			await this.d1
+				.update(d1Schema.blobState)
+				.set({ deleteAfter: deletionTime })
+				.where(
+					and(
+						inArray(d1Schema.blobState.narHash, batch),
+						isNull(d1Schema.blobState.deleteAfter)
+					)
 				)
-			)
-			.run();
+				.run();
+		}
 	}
 
 	// Collects armed shared blobs whose grace has elapsed. Each is removed by a
@@ -215,16 +220,21 @@ export class BlobReaperService {
 
 		const candidateDigests = candidates.map((candidate) => candidate.digest);
 
-		await this.d1
-			.update(d1Schema.casObject)
-			.set({ deleteAfter: deletionTime })
-			.where(
-				and(
-					inArray(d1Schema.casObject.digest, candidateDigests),
-					isNull(d1Schema.casObject.deleteAfter)
+		// The candidate batch can exceed D1's bound-parameter limit, so the arm
+		// update runs per chunk. Each chunk re-checks the timer is still unset, so
+		// an attach clearing it between chunks wins.
+		for (const batch of chunk(candidateDigests, maxInClauseValues)) {
+			await this.d1
+				.update(d1Schema.casObject)
+				.set({ deleteAfter: deletionTime })
+				.where(
+					and(
+						inArray(d1Schema.casObject.digest, batch),
+						isNull(d1Schema.casObject.deleteAfter)
+					)
 				)
-			)
-			.run();
+				.run();
+		}
 	}
 
 	private async collectExpiredCasObjects(
