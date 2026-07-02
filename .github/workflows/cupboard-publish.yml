@@ -86,14 +86,18 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      # Substitute from the cache being published to, so store paths that are
-      # already present are fetched rather than rebuilt.
+      # Substitute from the cache being published to, so builds reuse the
+      # store paths it already holds.
+      # Locally-run actions have no github.action_repository to default the
+      # release repository from, so name the repository publishing the
+      # cupboard binaries explicitly.
       - uses: ./.cupboard/actions/setup
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
           trusted-public-key: ${{ inputs.trusted-public-key }}
           cupboard-version: ${{ inputs.cupboard-version }}
+          release-repository: underwhelmingperformance/cupboard
 
       - name: Build
         env:
@@ -128,3 +132,4 @@ jobs:
           ttl: ${{ inputs.ttl }}
           attestations: ${{ steps.attest.outputs.bundle-path || '' }}
           cupboard-version: ${{ inputs.cupboard-version }}
+          release-repository: underwhelmingperformance/cupboard
