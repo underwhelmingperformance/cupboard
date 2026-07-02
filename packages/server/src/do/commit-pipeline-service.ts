@@ -32,6 +32,7 @@ import {
 } from '../http/http.ts';
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type MaterialiseOutcome,
@@ -48,6 +49,14 @@ import { type UploadStateService } from './upload-state-service.ts';
 // alarm backstop's delay, so that when the backstop fires the previous request
 // is already stale and its re-request is a real send.
 export const verifyRequestStaleMs = 45_000;
+
+// The verify backstop: a durable storage marker holding the epoch millisecond
+// at which the alarm re-drives verification, armed by every deferral. The
+// queue path settles work in seconds when healthy; the backstop bounds how
+// long a lost message, a dead-lettered pass or an evicted instance can leave
+// waiters parked. The delay sits above `verifyRequestStaleMs` (see there).
+export const verifyBackstopKey = 'maintenance:verify-pending';
+export const verifyBackstopDelayMs = 60_000;
 
 /**
  * What a commit settled to at commit time: the path is served (`settled`,
@@ -416,6 +425,26 @@ export class CommitPipelineService {
 		return existing?.fileSize ?? stagedSize;
 	}
 
+	// Arms the durable verify backstop for `now + verifyBackstopDelayMs`. An
+	// already-armed future deadline is never pushed later, so a stream of
+	// deferrals cannot starve an imminent firing; a past-due marker (the
+	// backstop is firing and re-requesting) starts the next cycle instead.
+	private async armVerifyBackstop(now: number): Promise<void> {
+		const storage = this.context.ctx.storage;
+		const dueAt = now + verifyBackstopDelayMs;
+		const existing = await storage.get<number>(verifyBackstopKey);
+		const effective =
+			existing !== undefined && existing > now
+				? Math.min(existing, dueAt)
+				: dueAt;
+
+		if (existing !== effective) {
+			await storage.put(verifyBackstopKey, effective);
+		}
+
+		await armAlarmNoLaterThan(storage, effective);
+	}
+
 	// A verification pass is about to claim the pending rows, satisfying the
 	// outstanding request. Clear the guard before the snapshot is taken: the pass
 	// starting now has already chosen its rows, so a deferral after this point
@@ -432,6 +461,11 @@ export class CommitPipelineService {
 	// sent message no pass ever claims goes stale and the next deferral re-sends.
 	async requestVerification(tenant: TenantId): Promise<void> {
 		const now = Date.now();
+
+		// The backstop arms regardless of the single-flight guard: a deferral
+		// that coalesces onto an outstanding message still needs the alarm to
+		// cover that message being lost.
+		await this.armVerifyBackstop(now);
 
 		if (
 			this.verifyRequestedAt !== undefined &&
