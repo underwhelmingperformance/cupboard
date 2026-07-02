@@ -201,22 +201,22 @@ export class UploadsService {
 			body.paths.map((path) => path.storePathHash)
 		);
 		const existingRows = existingByStorePathHash.values().toArray();
-		const committed = await this.narInfoObjects.committedReferences(
-			cache,
-			existingRows
-		);
+		// The edge check and the `blob_state` presence check are independent
+		// reads over the same row set, so they run concurrently. Presence is read
+		// for every existing row's hash rather than only the committed ones: a
+		// superset whose extra rows (mid-saga reservations) are rare, in exchange
+		// for one D1 wave instead of two.
+		const [committed, backedNarHashes] = await Promise.all([
+			this.narInfoObjects.committedReferences(cache, existingRows),
+			this.uploadState.presentNarHashes(existingRows.map((row) => row.narHash))
+		]);
 
 		// A committed path is skippable only while a `blob_state` row still backs
 		// its NAR. The reaper drops that row before the object, so its presence
 		// confirms the NAR without an R2 head.
-		const committedRows = existingRows.filter((row) =>
-			committed.has(row.storePathHash)
-		);
-		const backedNarHashes = await this.uploadState.presentNarHashes(
-			committedRows.map((row) => row.narHash)
-		);
-		const skippableRows = committedRows.filter((row) =>
-			backedNarHashes.has(row.narHash)
+		const skippableRows = existingRows.filter(
+			(row) =>
+				committed.has(row.storePathHash) && backedNarHashes.has(row.narHash)
 		);
 		const skippable = new Set(skippableRows.map((row) => row.storePathHash));
 
