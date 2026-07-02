@@ -53,11 +53,18 @@ export interface PendingVerification {
 }
 
 // The verdict the queue consumer reached for one claimed upload off the DO
-// thread: the decoded NAR verification, or that its staging object was
-// definitively gone.
+// thread: the decoded NAR verification, that the bytes verified and the
+// consumer also promoted them (the canonical object and its `blob_state` row
+// are already durable, so the settle skips its own promote), or that its
+// staging object was definitively gone.
 export type VerificationVerdict =
 	| { readonly kind: 'verified'; readonly verification: NarVerification }
+	| { readonly kind: 'promoted' }
 	| { readonly kind: 'missing' };
+
+// Whether a verdict's apply still owes the promote, or the reporter already
+// ran it. The on-DO cron path always promotes itself.
+export type PromotionState = 'promote' | 'already-promoted';
 
 // One upload's verdict, carried back to the DO so a whole batch settles in a
 // single RPC rather than one round trip per upload.
@@ -144,7 +151,13 @@ export class VerificationService {
 			throw error;
 		}
 
-		await this.commitVerified(pending, metadata, reserved, verification);
+		await this.commitVerified(
+			pending,
+			metadata,
+			reserved,
+			verification,
+			'promote'
+		);
 	}
 
 	// Reserves the narinfo row before committing a verified upload: a fresh deferred
@@ -183,7 +196,8 @@ export class VerificationService {
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
-		verification: NarVerification
+		verification: NarVerification,
+		promotion: PromotionState
 	): Promise<void> {
 		if (!verification.ok) {
 			await this.failReservedUpload(pending, metadata, generation);
@@ -194,12 +208,16 @@ export class VerificationService {
 		// shared CAS must not run under `blockConcurrencyWhile`. It is idempotent and
 		// content-addressed, so a redundant promotion is harmless. A byte verification
 		// carries the file hash and size; a reuse pass-through carries none and
-		// promotes against the already-canonical object.
-		const blob =
-			verification.fileHash !== undefined && verification.fileSize !== undefined
-				? { fileHash: verification.fileHash, fileSize: verification.fileSize }
-				: undefined;
-		await this.uploadState.promoteStagingBlob(pending.r2Key, metadata, blob);
+		// promotes against the already-canonical object. A reporter that already
+		// promoted (the queue consumer) skips it here entirely.
+		if (promotion === 'promote') {
+			const blob =
+				verification.fileHash !== undefined &&
+				verification.fileSize !== undefined
+					? { fileHash: verification.fileHash, fileSize: verification.fileSize }
+					: undefined;
+			await this.uploadState.promoteStagingBlob(pending.r2Key, metadata, blob);
+		}
 
 		const outcome = await this.context.ctx.blockConcurrencyWhile(async () => {
 			const current = this.context.db
@@ -631,7 +649,8 @@ export class VerificationService {
 	// safe.
 	async recordVerification(
 		uploadId: string,
-		verification: NarVerification
+		verification: NarVerification,
+		promotion: PromotionState = 'promote'
 	): Promise<void> {
 		const pending = this.context.db
 			.select()
@@ -653,7 +672,13 @@ export class VerificationService {
 			return;
 		}
 
-		await this.commitVerified(pending, metadata, generation, verification);
+		await this.commitVerified(
+			pending,
+			metadata,
+			generation,
+			verification,
+			promotion
+		);
 	}
 
 	// Settles a batch of verdicts the queue consumer decoded off the DO thread in
@@ -675,6 +700,12 @@ export class VerificationService {
 			try {
 				if (verdict.kind === 'missing') {
 					await this.recordMissingObject(uploadId);
+				} else if (verdict.kind === 'promoted') {
+					await this.recordVerification(
+						uploadId,
+						{ ok: true },
+						'already-promoted'
+					);
 				} else {
 					await this.recordVerification(uploadId, verdict.verification);
 				}
