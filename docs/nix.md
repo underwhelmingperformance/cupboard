@@ -34,8 +34,9 @@ url="https://cupboard.example.workers.dev/t/acme"
 cupboard config "$url" "$(cupboard pubkey "$url")"
 ```
 
-That prints the `substituters` and `trusted-public-keys` lines for a `nix.conf`.
-There are three ways to apply them.
+That prints the `extra-substituters` and `extra-trusted-public-keys` lines for a
+`nix.conf`; the `extra-` forms add the cache alongside cache.nixos.org. There
+are three ways to apply them.
 
 ### In your own flake
 

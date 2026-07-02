@@ -7,8 +7,8 @@ describe('NixConfig', () => {
 		const config = new NixConfig('https://cache.example', 'cupboard-1:key');
 		expect(config.render()).toBe(
 			[
-				'substituters = https://cache.example',
-				'trusted-public-keys = cupboard-1:key',
+				'extra-substituters = https://cache.example',
+				'extra-trusted-public-keys = cupboard-1:key',
 				''
 			].join('\n')
 		);
@@ -21,8 +21,8 @@ describe('NixConfig', () => {
 		);
 		expect(config.render()).toBe(
 			[
-				'substituters = https://cache.example',
-				'trusted-public-keys = cupboard-1:one cupboard-2:two',
+				'extra-substituters = https://cache.example',
+				'extra-trusted-public-keys = cupboard-1:one cupboard-2:two',
 				''
 			].join('\n')
 		);

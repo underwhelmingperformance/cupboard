@@ -11,8 +11,8 @@ export class NixConfig {
 		const trustedPublicKeys = this.publicKey.split(/\s+/).filter(Boolean);
 
 		return [
-			`substituters = ${this.url}`,
-			`trusted-public-keys = ${trustedPublicKeys.join(' ')}`,
+			`extra-substituters = ${this.url}`,
+			`extra-trusted-public-keys = ${trustedPublicKeys.join(' ')}`,
 			''
 		].join('\n');
 	}

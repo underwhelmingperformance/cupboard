@@ -248,8 +248,8 @@ function isHttpUrl(value: string): boolean {
 
 export function renderNixConfig(options: NixConfigOptions): string {
 	const lines = [
-		`substituters = ${options.substituter}`,
-		`trusted-public-keys = ${normaliseTrustedPublicKeys(options.trustedPublicKey)}`
+		`extra-substituters = ${options.substituter}`,
+		`extra-trusted-public-keys = ${normaliseTrustedPublicKeys(options.trustedPublicKey)}`
 	];
 
 	if (options.netrcFile !== undefined) {
