@@ -9,7 +9,6 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
-        "x86_64-darwin"
         "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs systems;
@@ -19,16 +18,11 @@
       # cupboard. `dirtyShortRev` covers building from an uncommitted worktree.
       version = self.shortRev or self.dirtyShortRev or "dev";
 
-      # SRI hash of the fetched pnpm store, per system: the store carries the
-      # platform's esbuild binary, so it differs across systems. After a
-      # `pnpm-lock.yaml` change set the relevant entry to lib.fakeHash, build,
-      # and copy the hash Nix reports back into place.
-      pnpmDepsHash = {
-        x86_64-linux = nixpkgs.lib.fakeHash;
-        aarch64-linux = nixpkgs.lib.fakeHash;
-        x86_64-darwin = nixpkgs.lib.fakeHash;
-        aarch64-darwin = nixpkgs.lib.fakeHash;
-      };
+      # SRI hash of the fetched pnpm store. The fetcher downloads every
+      # platform's binaries, so the store and its hash are identical on all
+      # systems. After a `pnpm-lock.yaml` change set this to lib.fakeHash,
+      # build on any one platform, and copy the hash Nix reports back here.
+      pnpmDepsHash = "sha256-f1pMd+s96XwgrFXxiQNq2Sg77D4IFNVmbOUa0CBlkHA=";
 
       # `pnpm build:binary` bundles the CLI and both Workers, then injects the
       # bundle into a copy of the Node binary as a single executable. The build
@@ -40,6 +34,11 @@
         let
           inherit (pkgs) lib stdenv;
           nodejs = pkgs.nodejs_24;
+
+          # pnpm 11 keeps its store index in a SQLite database it opens through
+          # `node:sqlite`, and on darwin that dies with an EXC_GUARD file
+          # descriptor violation during install. pnpm 10 has no store database.
+          pnpm = pkgs.pnpm_10;
         in
         stdenv.mkDerivation (finalAttrs: {
           pname = "cupboard";
@@ -48,16 +47,17 @@
 
           pnpmDeps = pkgs.fetchPnpmDeps {
             inherit (finalAttrs) pname version src;
-            pnpm = pkgs.pnpm;
-            fetcherVersion = 3;
-            hash = pnpmDepsHash.${stdenv.hostPlatform.system};
+            inherit pnpm;
+            fetcherVersion = 4;
+            hash = pnpmDepsHash;
           };
 
           nativeBuildInputs = [
             nodejs
-            pkgs.pnpm
+            pnpm
             pkgs.pnpmConfigHook
-          ] ++ lib.optional stdenv.isDarwin pkgs.darwin.sigtool;
+          ]
+          ++ lib.optional stdenv.isDarwin pkgs.darwin.sigtool;
 
           env.CUPBOARD_BUILD_VERSION = version;
 
