@@ -184,6 +184,51 @@ files the bundle against them. Pushing needs an `oidc_trust` rule on the tenant
 that accepts this repository's GitHub Actions token, added with
 `cupboard oidc-trust`.
 
+## The reusable workflow
+
+`cupboard-publish.yml` wraps that whole job into one reusable workflow. It
+installs Nix, configures the cache as a substituter, builds a flake output,
+signs provenance for it, and pushes the result. To use it, add a job that
+references the workflow and says where the build should go:
+
+```yaml
+jobs:
+  publish:
+    if: github.event_name == 'pull_request'
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: owner/cupboard/.github/workflows/cupboard-publish.yml@main
+    with:
+      url: https://cupboard.example.workers.dev/t/acme
+      cache: pr-${{ github.event.pull_request.number }}
+      root: github:acme/app/pr-${{ github.event.pull_request.number }}
+      ttl: 14d
+```
+
+`cache`, `root`, and `ttl` say where the paths land and how long they are kept.
+In this example every pull request publishes to its own `pr-<number>` cache, and
+the pushed paths expire two weeks after the last push. A cache is created the
+first time something is pushed to it, so per-PR and per-release caches need no
+setup step.
+
+The workflow appends the builder's Nix system to `root`, so this example retains
+under `github:acme/app/pr-7/x86_64-linux`. A root holds a single build: pushing
+to it again replaces what it retains. Appending the system keeps platforms out
+of each other's way, so a Linux build and a macOS build of the same pull request
+each stay retained under their own root.
+
+The remaining inputs: `installable` picks what to build (the default is `.`, the
+flake at the repository root), `attest` turns provenance signing off for tenants
+that do not accept it, `runs-on` picks the runner, and `trusted-public-key` and
+`cupboard-version` pass through to `actions/setup`.
+
+Always reference the workflow as `@main`, not by a local path. The tenant's
+trust rule can then require that pushes come from this exact file on `main`, so
+a pull request cannot smuggle in an edited copy of the publish job and gain the
+rule's access.
+
 ## Trust rules
 
 A push from CI exchanges its GitHub Actions OIDC token for a cupboard token. The
@@ -249,6 +294,29 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
 
 The trailing slash on the root makes it a prefix, so one grant covers every
 per-system root beneath it.
+
+Release builds usually go to a cache named after the tag, and no preset covers
+that. `--capture` builds the rule instead: it reads a value out of a token claim
+using a pattern with a named group, and that value fills the `{...}`
+placeholders in `--cache-template` and `--root-template`. The pattern also acts
+as a filter: a token whose claim does not match is refused. This rule sends a
+build of tag `v1.2.3` to a cache called `v1.2.3`:
+
+```bash
+cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
+  --issuer https://token.actions.githubusercontent.com \
+  --audience https://cupboard.example.workers.dev/t/acme \
+  --claim repository_id=123456 \
+  --claim repository_owner_id=7890 \
+  --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main \
+  --capture 'ref=^refs/tags/(?<tag>v[0-9][A-Za-z0-9.+-]*)$' \
+  --cache-template '{tag}' \
+  --root-template 'github:acme/infra/{tag}/' \
+  --allow push --allow attest --allow root
+```
+
+The two numeric id claims pin the repository the same way the presets do.
+`gh api repos/<owner>/<repo>` prints both: `.id` and `.owner.id`.
 
 ## Binary Releases
 
