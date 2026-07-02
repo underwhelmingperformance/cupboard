@@ -5,10 +5,13 @@ import {
 	assetContentType,
 	checksumTargets,
 	createDraftBody,
+	fetchCachePublicKey,
 	MissingInputError,
 	NonCanonicalVersionError,
+	PublicKeyFetchError,
 	renderChecksums,
 	selectDraftRelease,
+	substituterSection,
 	updateDraftBody
 } from './release.ts';
 
@@ -93,15 +96,77 @@ describe('createDraftBody', () => {
 			createDraftBody({
 				version: 'v1.2.3',
 				commitish: 'abc123',
-				name: 'v1.2.3'
+				name: 'v1.2.3',
+				body: 'substituters...'
 			})
 		).toStrictEqual({
 			tag_name: 'v1.2.3',
 			target_commitish: 'abc123',
 			name: 'v1.2.3',
+			body: 'substituters...',
 			draft: true,
 			generate_release_notes: true
 		});
+	});
+});
+
+const unavailable = () =>
+	Promise.resolve({
+		ok: false,
+		status: 503,
+		text: () => Promise.resolve('')
+	});
+
+describe('fetchCachePublicKey', () => {
+	it('returns the served key without surrounding whitespace', async () => {
+		const requests: string[] = [];
+		const fetchLike = (url: string) => {
+			requests.push(url);
+
+			return Promise.resolve({
+				ok: true,
+				status: 200,
+				text: () => Promise.resolve('cupboard-1:abc123=\n')
+			});
+		};
+
+		const key = await fetchCachePublicKey(
+			'https://cupboard.example/t/acme',
+			fetchLike
+		);
+
+		expect(key).toBe('cupboard-1:abc123=');
+		expect(requests).toEqual(['https://cupboard.example/t/acme/pubkey']);
+	});
+
+	it('rejects a response that is not ok', async () => {
+		await expect(
+			fetchCachePublicKey('https://cupboard.example/t/acme', unavailable)
+		).rejects.toThrow(PublicKeyFetchError);
+	});
+});
+
+describe('substituterSection', () => {
+	it('renders the cache URL and key as nix.conf lines', () => {
+		expect(
+			substituterSection({
+				cacheUrl: 'https://cupboard.example/t/acme',
+				version: 'v1.2.3',
+				publicKey: 'cupboard-1:abc123='
+			})
+		).toBe(
+			[
+				'## Substitute from the release cache',
+				'',
+				'This release is in a Nix binary cache. Add these lines to nix.conf to',
+				'fetch it instead of building:',
+				'',
+				'```',
+				'extra-substituters = https://cupboard.example/t/acme/cache/v1.2.3',
+				'extra-trusted-public-keys = cupboard-1:abc123=',
+				'```'
+			].join('\n')
+		);
 	});
 });
 

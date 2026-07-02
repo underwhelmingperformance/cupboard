@@ -44,6 +44,7 @@ interface CreateDraftBody {
 	readonly tag_name: string;
 	readonly target_commitish: string;
 	readonly name: string;
+	readonly body: string;
 	readonly draft: true;
 	readonly generate_release_notes: true;
 }
@@ -58,6 +59,7 @@ interface CreateDraftOptions {
 	readonly version: string;
 	readonly commitish: string;
 	readonly name: string;
+	readonly body: string;
 }
 
 interface UpdateDraftOptions {
@@ -77,9 +79,11 @@ interface PublishInputs {
 	readonly commitish: string;
 	readonly name: string;
 	readonly directory: string;
+	readonly cacheUrl: string;
 }
 
 const fallbackReleaseRepository = 'cupboard/cupboard';
+const fallbackCacheUrl = 'https://cupboard.supply/t/cupboard';
 
 export class MissingInputError extends UsageError {
 	constructor(public readonly input: string) {
@@ -115,6 +119,16 @@ class PublishedReleaseExistsError extends CodedError {
 	constructor(public readonly version: string) {
 		super(`a published release for ${version} already exists`);
 		this.name = 'PublishedReleaseExistsError';
+	}
+}
+
+export class PublicKeyFetchError extends CodedError {
+	constructor(
+		public readonly url: string,
+		public readonly status: number
+	) {
+		super(`fetching ${url} failed with status ${String(status)}`);
+		this.name = 'PublicKeyFetchError';
 	}
 }
 
@@ -157,9 +171,55 @@ export function createDraftBody(options: CreateDraftOptions): CreateDraftBody {
 		tag_name: options.version,
 		target_commitish: options.commitish,
 		name: options.name,
+		body: options.body,
 		draft: true,
 		generate_release_notes: true
 	};
+}
+
+type FetchLike = (
+	url: string
+) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
+
+/** The cache signing key the deployment serves at `/pubkey`. */
+export async function fetchCachePublicKey(
+	cacheUrl: string,
+	fetchLike: FetchLike = fetch
+): Promise<string> {
+	const url = `${cacheUrl}/pubkey`;
+	const response = await fetchLike(url);
+
+	if (!response.ok) {
+		throw new PublicKeyFetchError(url, response.status);
+	}
+
+	const key = await response.text();
+
+	return key.trim();
+}
+
+/**
+ * The release-notes section pointing readers at the release's binary cache.
+ * GitHub appends the generated notes after this body, so the draft carries the
+ * section from the start; publishing the release fires the release-cache
+ * workflow, which fills the cache the section names.
+ */
+export function substituterSection(options: {
+	readonly cacheUrl: string;
+	readonly version: string;
+	readonly publicKey: string;
+}): string {
+	return [
+		'## Substitute from the release cache',
+		'',
+		'This release is in a Nix binary cache. Add these lines to nix.conf to',
+		'fetch it instead of building:',
+		'',
+		'```',
+		`extra-substituters = ${options.cacheUrl}/cache/${options.version}`,
+		`extra-trusted-public-keys = ${options.publicKey}`,
+		'```'
+	].join('\n');
 }
 
 export function updateDraftBody(options: UpdateDraftOptions): UpdateDraftBody {
@@ -256,7 +316,13 @@ export async function publishAction(
 		});
 	}
 
-	const release = await upsertDraft(octokit, inputs, selection.existing);
+	const body = substituterSection({
+		cacheUrl: inputs.cacheUrl,
+		version: inputs.version,
+		publicKey: await fetchCachePublicKey(inputs.cacheUrl)
+	});
+
+	const release = await upsertDraft(octokit, inputs, body, selection.existing);
 	const assetFiles = await readdir(inputs.directory);
 	const assetNames = assetFiles.toSorted(compareStrings);
 
@@ -285,6 +351,7 @@ async function listReleases(
 async function upsertDraft(
 	octokit: Octokit,
 	inputs: PublishInputs,
+	body: string,
 	existing: ReleaseSummary | undefined
 ): Promise<ReleaseSummary> {
 	if (existing === undefined) {
@@ -294,7 +361,8 @@ async function upsertDraft(
 			...createDraftBody({
 				version: inputs.version,
 				commitish: inputs.commitish,
-				name: inputs.name
+				name: inputs.name,
+				body
 			})
 		});
 
@@ -379,7 +447,8 @@ function publishInputs(environment: Environment): PublishInputs {
 		name: input(environment, 'NAME', version),
 		directory: path.resolve(
 			requireInput(input(environment, 'DIRECTORY'), 'directory')
-		)
+		),
+		cacheUrl: input(environment, 'CACHE_URL', fallbackCacheUrl)
 	};
 }
 
