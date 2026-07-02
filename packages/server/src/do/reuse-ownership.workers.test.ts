@@ -80,7 +80,7 @@ describe('reuse commit ownership', () => {
 			canonicalPresent:
 				(await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({
-			error: { name: 'CommitSocketError', status: StatusCodes.BAD_REQUEST },
+			error: { name: 'CommitSocketError', status: StatusCodes.NOT_FOUND },
 			edges: [],
 			presence: [],
 			canonicalPresent: true

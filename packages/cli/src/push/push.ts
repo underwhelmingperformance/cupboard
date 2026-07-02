@@ -45,7 +45,8 @@ import {
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
 	UnexpectedAttestationDecisionError,
-	UnexpectedUploadDecisionError
+	UnexpectedUploadDecisionError,
+	UploadVerificationFailedError
 } from '../errors.ts';
 import { byteStream, countingByteStream } from '../io/byte-stream.ts';
 import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
@@ -898,10 +899,22 @@ function commitTarget(
 	};
 }
 
-// Commits one path, re-negotiating it if its slot expired before the commit ran.
-// A long upload phase can outlive the slot negotiate stamped, and a `NOT_FOUND`
-// commit means the pending row was reaped, not that the transfer is dead, so the
-// path is re-driven rather than failed.
+// A deferred commit whose verify pass answered `absent`: the row or the
+// shared blob it relied on vanished before the verdict could settle it, the
+// deferred twin of a `NOT_FOUND` commit. It recovers the same way, by
+// planning afresh.
+function isAbsentVerdict(error: unknown): boolean {
+	return (
+		error instanceof UploadVerificationFailedError && error.status === 'absent'
+	);
+}
+
+// Commits one path, re-negotiating it if what it negotiated is gone by commit
+// time. A long upload phase can outlive the slot negotiate stamped, and a
+// reused blob can be collected between negotiate and commit; a `NOT_FOUND`
+// commit or an `absent` deferred verdict means one of those, not that the
+// transfer is dead, so the path is re-driven rather than failed. The re-drive
+// commits without this wrapper, so a second loss propagates.
 async function commitNegotiated(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext
@@ -909,7 +922,7 @@ async function commitNegotiated(
 	try {
 		return await commitVia(context, commitTarget(decision));
 	} catch (error) {
-		if (!isStaleUploadError(error)) {
+		if (!isStaleUploadError(error) && !isAbsentVerdict(error)) {
 			throw error;
 		}
 
