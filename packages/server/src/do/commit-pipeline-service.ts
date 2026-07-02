@@ -82,6 +82,48 @@ interface TenantAccount {
 	readonly quotaBytes: number | null;
 }
 
+// The canonical blob facts a materialisation renders and charges from.
+interface CanonicalBlobFacts {
+	readonly fileHash: NixSha256HashString;
+	readonly fileSize: number;
+	readonly compression: (typeof d1Schema.blobState.$inferSelect)['compression'];
+}
+
+/**
+ * The shared facts a materialisation decides on, probed outside the critical
+ * section so their round-trips never hold the gate: the tenant's publish
+ * status and quota basis, the canonical blob's compressed metadata and object
+ * presence, and whether the tenant already holds the hash (no fresh charge).
+ * The gate re-checks only what the single writer owns (the generation fence
+ * and the in-memory offboarding flag); a probe going stale converges through
+ * the same paths a concurrent delete always could, and the quota CHECK
+ * constraint remains the authoritative guard behind the probed decision.
+ */
+export interface MaterialisationProbe {
+	readonly account: TenantAccount | undefined;
+	readonly blob: CanonicalBlobFacts | undefined;
+	readonly isCanonicalPresent: boolean;
+	readonly isOwned: boolean;
+}
+
+// Whether charging this hash would take the tenant over its quota. A null
+// quota or a hash the tenant already holds is within quota; null usage
+// columns (no usage row) count as zero, matching an unset quota.
+function isOverQuota(
+	account: TenantAccount,
+	isOwned: boolean,
+	fileSize: number
+): boolean {
+	if (account.quotaBytes === null || isOwned) {
+		return false;
+	}
+
+	return (
+		(account.bytes ?? 0) + (account.casBytes ?? 0) + fileSize >
+		account.quotaBytes
+	);
+}
+
 export class CommitPipelineService {
 	// Single-flight guard for the prompt verification request: when a
 	// `tenant-verify` message was enqueued, cleared when the next pass starts
@@ -121,8 +163,11 @@ export class CommitPipelineService {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
 
+		const probe = await this.probeMaterialisation(metadata);
 		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
-			this.materialiseServable(cache, metadata, reserved.generation)
+			this.materialiseServable(cache, metadata, reserved.generation, probe, {
+				mustOwnBlob: true
+			})
 		);
 
 		if (outcome === 'materialised') {
@@ -215,7 +260,8 @@ export class CommitPipelineService {
 	// The tenant's publish gate and quota basis in one read. The status is the
 	// authoritative active check the edge/object publish is gated on: the Worker's
 	// write gate read it before dispatch, but a commit can settle here after a
-	// suspend or offboard, so it is re-read in the critical section, and a missing
+	// suspend or offboard, so the probe re-reads it (and the gate re-checks just
+	// the status right before the charge; see {@link tenantStatus}). A missing
 	// row reads as not-active and fails closed. The usage columns ride along on a
 	// left join, so the same read also answers the quota decision; an absent usage
 	// row leaves them null, which {@link isOverQuota} reads as within quota.
@@ -238,21 +284,29 @@ export class CommitPipelineService {
 			.get();
 	}
 
-	// Whether charging this hash would take the tenant over its quota, decided from
-	// an account already read. A null quota or a hash the tenant already holds is
-	// within quota; otherwise the ownership read settles whether this is a fresh
-	// charge. Null usage columns (no usage row) count as zero, matching an unset
-	// quota.
-	private async isOverQuota(
-		tenant: TenantId,
-		account: TenantAccount,
-		narHash: NixSha256HashString,
-		fileSize: number
-	): Promise<boolean> {
-		if (account.quotaBytes === null) {
-			return false;
-		}
+	// The narrow in-gate twin of {@link tenantAccount}: only the status column,
+	// read inside the critical section. The probe's read runs before the gate,
+	// and the wait for the gate plus the R2 head give a suspension written
+	// meanwhile a window; writes have no other status check (the front door
+	// gates reads only), so this one stands right against the charge.
+	private async tenantStatus(
+		tenant: TenantId
+	): Promise<TenantAccount['status'] | undefined> {
+		const row = await this.context.d1
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, tenant))
+			.get();
 
+		return row?.status;
+	}
+
+	// Whether the tenant holds a presence edge for this hash, so charging it
+	// would be a replay rather than fresh usage.
+	private async ownsHash(
+		tenant: TenantId,
+		narHash: NixSha256HashString
+	): Promise<boolean> {
 		const owned = await this.context.d1
 			.select({ narHash: d1Schema.tenantBlob.narHash })
 			.from(d1Schema.tenantBlob)
@@ -264,14 +318,7 @@ export class CommitPipelineService {
 			)
 			.get();
 
-		if (owned !== undefined) {
-			return false;
-		}
-
-		return (
-			(account.bytes ?? 0) + (account.casBytes ?? 0) + fileSize >
-			account.quotaBytes
-		);
+		return owned !== undefined;
 	}
 
 	// Writes the reference edge and per-tenant presence and charges usage, all in one
@@ -287,7 +334,7 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		blob: { readonly fileSize: number }
-	): Promise<void> {
+	): Promise<'charged' | 'over-quota'> {
 		const clock = new Date();
 		const now = clock.toISOString();
 		const edgeFilter = and(
@@ -321,46 +368,69 @@ export class CommitPipelineService {
 			presenceMissing
 		);
 
-		// The `requireQuota` pre-check in the same critical section is the clean
-		// over-quota rejection. The `tenant_usage` CHECK constraint backs it as a
-		// database-level invariant: should a charge ever reach here over quota, the
-		// batch fails and rolls back, so no edge or charge is stranded even though the
-		// pre-check is the expected guard.
-		await this.context.d1.batch([
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1`,
-					updatedAt: now
-				})
-				.where(creditNarInfoFilter),
-			this.context.d1
-				.update(d1Schema.tenantUsage)
-				.set({
-					bytes: sql`${d1Schema.tenantUsage.bytes} + ${blob.fileSize}`,
-					blobs: sql`${d1Schema.tenantUsage.blobs} + 1`,
-					updatedAt: now
-				})
-				.where(creditBytesFilter),
-			this.context.d1
-				.insert(d1Schema.blobReference)
-				.values({
-					tenant,
-					cache,
-					storePathHash: metadata.storePathHash,
-					generation,
-					narHash: metadata.narHash
-				})
-				.onConflictDoNothing(),
-			this.context.d1
-				.insert(d1Schema.tenantBlob)
-				.values({ tenant, narHash: metadata.narHash, fileSize: blob.fileSize })
-				.onConflictDoNothing(),
-			this.context.d1
-				.update(d1Schema.blobState)
-				.set({ deleteAfter: sql`null` })
-				.where(eq(d1Schema.blobState.narHash, metadata.narHash))
-		]);
+		// The probed pre-check is the clean over-quota rejection. The
+		// `tenant_usage` CHECK constraint backs it as a database-level invariant:
+		// a charge that reaches here over quota fails the batch and rolls it
+		// back, so no edge or charge is ever stranded over quota.
+		try {
+			await this.context.d1.batch([
+				this.context.d1
+					.update(d1Schema.tenantUsage)
+					.set({
+						narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1`,
+						updatedAt: now
+					})
+					.where(creditNarInfoFilter),
+				this.context.d1
+					.update(d1Schema.tenantUsage)
+					.set({
+						bytes: sql`${d1Schema.tenantUsage.bytes} + ${blob.fileSize}`,
+						blobs: sql`${d1Schema.tenantUsage.blobs} + 1`,
+						updatedAt: now
+					})
+					.where(creditBytesFilter),
+				this.context.d1
+					.insert(d1Schema.blobReference)
+					.values({
+						tenant,
+						cache,
+						storePathHash: metadata.storePathHash,
+						generation,
+						narHash: metadata.narHash
+					})
+					.onConflictDoNothing(),
+				this.context.d1
+					.insert(d1Schema.tenantBlob)
+					.values({
+						tenant,
+						narHash: metadata.narHash,
+						fileSize: blob.fileSize
+					})
+					.onConflictDoNothing(),
+				this.context.d1
+					.update(d1Schema.blobState)
+					.set({ deleteAfter: sql`null` })
+					.where(eq(d1Schema.blobState.narHash, metadata.narHash))
+			]);
+		} catch (error) {
+			// Two commits can both probe under quota and race to the charge; the
+			// CHECK fails the loser's batch. An authoritative in-gate re-read tells
+			// that loss apart from a fault: genuinely over quota reclaims cleanly,
+			// anything else propagates.
+			const account = await this.tenantAccount(tenant);
+			const isOwned = await this.ownsHash(tenant, metadata.narHash);
+
+			if (
+				account !== undefined &&
+				isOverQuota(account, isOwned, blob.fileSize)
+			) {
+				return 'over-quota';
+			}
+
+			throw error;
+		}
+
+		return 'charged';
 	}
 
 	// Whether charging this hash would take the tenant over its quota. A hash the
@@ -801,51 +871,79 @@ export class CommitPipelineService {
 		});
 	}
 
+	// Probes the shared facts a materialisation decides on, outside any critical
+	// section so the D1 and R2 round-trips never hold the gate; see
+	// {@link MaterialisationProbe}. Must not open its own critical section.
+	async probeMaterialisation(
+		metadata: ParsedUploadPathNegotiation
+	): Promise<MaterialisationProbe> {
+		const tenant = this.context.requireTenant();
+		const [account, blob, canonical, isOwned] = await Promise.all([
+			this.tenantAccount(tenant),
+			this.context.d1
+				.select({
+					fileHash: d1Schema.blobState.fileHash,
+					fileSize: d1Schema.blobState.fileSize,
+					compression: d1Schema.blobState.compression
+				})
+				.from(d1Schema.blobState)
+				.where(eq(d1Schema.blobState.narHash, metadata.narHash))
+				.get(),
+			this.context.env.BLOBS.head(narObjectKey(metadata.narHash)),
+			this.ownsHash(tenant, metadata.narHash)
+		]);
+
+		return { account, blob, isCanonicalPresent: canonical !== null, isOwned };
+	}
+
 	// Makes a reserved narinfo servable, the edge-last half of the saga and the only
 	// place that writes the reference edge and the served object or clears the
-	// pending upload. It requires the shared blob to be present — the `available`
-	// `blob_state` fact and the canonical R2 object — re-reads the live row to
-	// confirm it is still this reserved version, writes the D1 edge and per-tenant
-	// presence, renders the object from the canonical compressed metadata in
-	// `blob_state`, and puts it. Every step is idempotent, so a crash before the
-	// caller resolves the pending upload leaves it re-drivable from its durable marker.
+	// pending upload. The shared-fact reads arrive in the caller's probe, taken
+	// outside the gate so their round-trips never hold it; what runs here is the
+	// synchronous generation fence, one atomic D1 batch (the edge, presence and
+	// charge), and the narinfo object put. The edge batch stays inside the gate
+	// because `reclaimReservedRow` and the offboard drain fence on the edge's
+	// existence; the object put stays because it overwrites a fixed key with no
+	// compare-and-swap, and the verify passes heal presence, not content, so a
+	// stale overwrite would never converge. Every step is idempotent, so a crash
+	// before the caller resolves the pending upload leaves it re-drivable from
+	// its durable marker.
 	//
-	// Runs inside the caller's critical section; must not open its own.
+	// Runs inside the caller's critical section; must not open its own. The
+	// probe may be stale by the time the gate runs: a fact deleted after it was
+	// probed converges exactly as a delete after the gate always has (the reaper
+	// demote re-drive), and the quota CHECK in the charge batch is the
+	// authoritative guard behind the probed decision.
 	async materialiseServable(
 		cache: string,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number
+		generation: number,
+		probe: MaterialisationProbe,
+		options: { readonly mustOwnBlob: boolean }
 	): Promise<MaterialiseOutcome> {
-		// A commit that passed the Worker's write gate while the tenant was active can
-		// still be settling here after the tenant was suspended or began offboarding.
-		// Publishing its edge now would re-reference a shared blob the drain is
-		// reclaiming, pinning it forever, so the caller reclaims the reserved row
-		// instead. The in-memory flag is a fast same-instance signal; correctness rests
-		// on the authoritative D1 status, read in the caller's critical section so the
-		// check and the edge write below are one atomic decision. The single rule —
-		// publish only while the tenant is active — covers suspended, offboarding,
-		// offboarded and a missing row alike. The same read carries the quota basis.
-		const tenant = this.context.requireTenant();
-		const account = await this.tenantAccount(tenant);
-
-		if (this.context.offboarding || account?.status !== 'active') {
+		// A commit that passed the Worker's write gate while the tenant was active
+		// can still be settling here after the tenant was suspended or began
+		// offboarding. Publishing its edge now would re-reference a shared blob
+		// the drain is reclaiming, pinning it forever, so the caller reclaims the
+		// reserved row instead. The in-memory flag is re-checked inside the gate:
+		// the offboard drain runs its passes under `blockConcurrencyWhile` on this
+		// same instance after setting it, so the flag and the gate together keep
+		// an edge write from landing behind a drain pass. The single rule, publish
+		// only while the tenant is active, covers suspended, offboarding,
+		// offboarded and a missing row alike.
+		if (this.context.offboarding || probe.account?.status !== 'active') {
 			return 'tenant-inactive';
 		}
 
-		const blob = await this.context.d1
-			.select({
-				fileHash: d1Schema.blobState.fileHash,
-				fileSize: d1Schema.blobState.fileSize,
-				compression: d1Schema.blobState.compression
-			})
-			.from(d1Schema.blobState)
-			.where(eq(d1Schema.blobState.narHash, metadata.narHash))
-			.get();
-		const isCanonicalPresent =
-			(await this.context.env.BLOBS.head(narObjectKey(metadata.narHash))) !==
-			null;
+		if (probe.blob === undefined || !probe.isCanonicalPresent) {
+			return 'blob-gone';
+		}
 
-		if (blob === undefined || !isCanonicalPresent) {
+		// A reuse binds a narinfo to bytes this tenant never re-proved, on the
+		// strength of its presence edge; with the edge gone (a delete credited it
+		// back) the reuse fails towards re-upload rather than re-referencing a
+		// hash the tenant no longer holds.
+		if (options.mustOwnBlob && !probe.isOwned) {
 			return 'blob-gone';
 		}
 
@@ -867,21 +965,39 @@ export class CommitPipelineService {
 			return 'superseded';
 		}
 
-		// The blob is confirmed present above, so the narinfo renders from the row and
-		// the metadata already in hand, with no second `blob_state` read.
-		const narInfo = this.narInfoObjects.buildNarInfo(row, blob);
+		// The blob was probed present, so the narinfo renders from the row and the
+		// metadata already in hand.
+		const narInfo = this.narInfoObjects.buildNarInfo(row, probe.blob);
 
-		// Authoritative quota decision against the size that will actually be charged:
-		// the canonical `blob_state` size, which the promote may have adopted from an
-		// existing encoding and so can differ from the staged size the pre-check used.
-		// Returning here lets the caller reclaim the reserved row rather than charging.
-		if (
-			await this.isOverQuota(tenant, account, metadata.narHash, blob.fileSize)
-		) {
+		// Quota decision against the size that will actually be charged: the
+		// canonical `blob_state` size, which the promote may have adopted from an
+		// existing encoding and so can differ from the staged size the negotiate
+		// pre-check used. Returning here lets the caller reclaim the reserved row
+		// rather than charging; the charge batch re-fences the decision.
+		if (isOverQuota(probe.account, probe.isOwned, probe.blob.fileSize)) {
 			return 'over-quota';
 		}
 
-		await this.reserveEdgeAndCharge(tenant, cache, metadata, generation, blob);
+		const tenant = this.context.requireTenant();
+
+		// The probed status can be stale by the whole probe-to-gate window;
+		// re-check it here so a suspension never has more than one round trip of
+		// room to slip a charge through.
+		if ((await this.tenantStatus(tenant)) !== 'active') {
+			return 'tenant-inactive';
+		}
+
+		const charged = await this.reserveEdgeAndCharge(
+			tenant,
+			cache,
+			metadata,
+			generation,
+			probe.blob
+		);
+
+		if (charged === 'over-quota') {
+			return 'over-quota';
+		}
 
 		await this.narInfoObjects.putNarInfoObject(
 			cache,
