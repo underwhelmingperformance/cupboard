@@ -29,13 +29,6 @@
 		"ws": "^8.21.0",
 		"zod": "^4.4.3"
 	},
-	"devEngines": {
-		"runtime": {
-			"name": "node",
-			"onFail": "download",
-			"version": "24.16.0"
-		}
-	},
 	"engines": {
 		"node": ">=24"
 	},
