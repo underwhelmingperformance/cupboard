@@ -3,6 +3,10 @@ import { z } from 'zod';
 
 export abstract class ServerHttpError extends Error {
 	abstract readonly status: number;
+
+	// When set, the response carries a Retry-After header: the refusal is
+	// transient and a client that waits this long may succeed.
+	readonly retryAfterSeconds?: number;
 }
 
 export abstract class InvalidRequestBodyError extends ServerHttpError {
@@ -645,6 +649,16 @@ export class UploadedObjectNotFoundError extends ServerHttpError {
 	constructor(public readonly r2Key: string) {
 		super('Uploaded object not found');
 		this.name = 'UploadedObjectNotFoundError';
+	}
+}
+
+export class TenantAdmissionUnavailableError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor(public override readonly cause: unknown) {
+		super('Tenant admission is temporarily unavailable');
+		this.name = 'TenantAdmissionUnavailableError';
 	}
 }
 

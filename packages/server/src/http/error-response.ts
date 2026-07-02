@@ -19,8 +19,14 @@ function errorResponse(error: unknown): Response | undefined {
 	}
 
 	if (error instanceof ServerHttpError) {
+		const headers =
+			error.retryAfterSeconds === undefined
+				? undefined
+				: { 'retry-after': String(error.retryAfterSeconds) };
+
 		return new Response(`${error.message}\n`, {
-			status: error.status
+			status: error.status,
+			headers
 		});
 	}
 
