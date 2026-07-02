@@ -3,7 +3,7 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
-import { and, eq, exists, sql } from 'drizzle-orm';
+import { and, eq, exists, inArray, notExists, or, sql } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -11,7 +11,27 @@ import { narInfoCachePath, narInfoObjectKey } from '../http/http.ts';
 
 import { type AttestationCasService } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
+import {
+	chunk,
+	deleteObjects,
+	mapWithConcurrency,
+	maxInClauseValues,
+	maxOutgoingConnections
+} from './bulk.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
+
+// One queued teardown deletion, the captured narinfo version its retirement is
+// fenced on.
+export interface TornDownNarInfo {
+	readonly storePathHash: StorePathHash;
+	readonly generation: number;
+	readonly narHash: NixSha256HashString;
+}
+
+// A fenced edge retirement binds two parameters per row (the path and its
+// generation), so the OR-of-AND list is chunked to stay within D1's
+// bound-parameter limit with headroom for the fixed tenant and cache.
+const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
 
 export class DeletionQueueService {
 	constructor(
@@ -340,6 +360,226 @@ export class DeletionQueueService {
 			objectDeleted: true,
 			narScheduledForDeletion: isNarScheduledForDeletion
 		};
+	}
+
+	// Retires a whole chunk of a cache teardown's queued deletions in batched
+	// D1 operations: the per-path form costs three or four round-trips per path
+	// inside the gate, which for a large cache holds it for minutes. The chunk
+	// shares one removed cache, so the work batches cleanly: one bulk R2 delete
+	// for the narinfo objects, one fenced credit-and-delete batch per edge
+	// sub-chunk, one presence sweep per hash sub-chunk, and a synchronous queue
+	// clear. A path recommitted since its row was removed keeps its live object
+	// (the generation fence skips its object delete), while the captured
+	// generation's edge and references are still retired.
+	//
+	// Runs inside the caller's critical section; must not open its own.
+	async retireTornDownNarInfos(
+		cache: string,
+		entries: readonly TornDownNarInfo[],
+		origin?: string
+	): Promise<void> {
+		if (entries.length === 0) {
+			return;
+		}
+
+		const tenant = this.context.requireTenant();
+		const clock = new Date();
+		const now = clock.toISOString();
+
+		// The generation fence, against the DO's own live rows (synchronous).
+		const liveGenerations = new Map(
+			chunk(
+				entries.map((entry) => entry.storePathHash),
+				maxInClauseValues
+			).flatMap((batch) =>
+				this.context.db
+					.select({
+						storePathHash: schema.narInfos.storePathHash,
+						generation: schema.narInfos.generation
+					})
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cache, cache),
+							inArray(schema.narInfos.storePathHash, batch)
+						)
+					)
+					.all()
+					.map((row) => [row.storePathHash, row.generation] as const)
+			)
+		);
+		const removable = entries.filter((entry) => {
+			const live = liveGenerations.get(entry.storePathHash);
+
+			return live === undefined || live === entry.generation;
+		});
+
+		// The served objects go in bulk, then their edge-cache entries
+		// (best-effort, bounded fan-out).
+		await deleteObjects(
+			this.context.env.BLOBS,
+			removable.map((entry) =>
+				narInfoObjectKey(tenant, entry.storePathHash, cache)
+			)
+		);
+
+		if (origin !== undefined) {
+			await mapWithConcurrency(removable, maxOutgoingConnections, (entry) =>
+				this.purgeCachedNarInfo(
+					`${origin}${narInfoCachePath(tenant, entry.storePathHash, cache)}`
+				)
+			);
+		}
+
+		// Retire every captured edge, crediting the narinfo count by how many
+		// actually existed, atomically per sub-chunk so a replay cannot
+		// double-credit.
+		for (const batch of chunk(entries, maxFencedRetireRows)) {
+			const edgeFilter = and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				eq(d1Schema.blobReference.cache, cache),
+				or(
+					...batch.map((entry) =>
+						and(
+							eq(d1Schema.blobReference.storePathHash, entry.storePathHash),
+							eq(d1Schema.blobReference.generation, entry.generation)
+						)
+					)
+				)
+			);
+			const edgeCount = this.context.d1
+				.select({ count: sql<number>`count(*)` })
+				.from(d1Schema.blobReference)
+				.where(edgeFilter);
+
+			await this.context.d1.batch([
+				this.context.d1
+					.update(d1Schema.tenantUsage)
+					.set({
+						narinfos: sql`${d1Schema.tenantUsage.narinfos} - (${edgeCount})`,
+						updatedAt: now
+					})
+					.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+				this.context.d1.delete(d1Schema.blobReference).where(edgeFilter)
+			]);
+		}
+
+		// Drop the presence rows whose hashes the tenant no longer references
+		// anywhere, crediting bytes and blob counts by what is actually dropped.
+		// This runs in the caller's critical section and this Durable Object is
+		// the single writer of its tenant's presence rows, so the select and the
+		// batch cannot be interleaved by another charge.
+		const narHashes = [...new Set(entries.map((entry) => entry.narHash))];
+
+		for (const batch of chunk(narHashes, maxInClauseValues)) {
+			const stillReferenced = this.context.d1
+				.select({ narHash: d1Schema.blobReference.narHash })
+				.from(d1Schema.blobReference)
+				.where(
+					and(
+						eq(d1Schema.blobReference.tenant, tenant),
+						eq(d1Schema.blobReference.narHash, d1Schema.tenantBlob.narHash)
+					)
+				);
+			const droppableFilter = and(
+				eq(d1Schema.tenantBlob.tenant, tenant),
+				inArray(d1Schema.tenantBlob.narHash, batch),
+				notExists(stillReferenced)
+			);
+			const droppable = await this.context.d1
+				.select({
+					narHash: d1Schema.tenantBlob.narHash,
+					fileSize: d1Schema.tenantBlob.fileSize
+				})
+				.from(d1Schema.tenantBlob)
+				.where(droppableFilter)
+				.all();
+
+			if (droppable.length === 0) {
+				continue;
+			}
+
+			const bytes = droppable.reduce((total, row) => total + row.fileSize, 0);
+			const dropFilter = and(
+				eq(d1Schema.tenantBlob.tenant, tenant),
+				inArray(
+					d1Schema.tenantBlob.narHash,
+					droppable.map((row) => row.narHash)
+				)
+			);
+
+			await this.context.d1.batch([
+				this.context.d1
+					.update(d1Schema.tenantUsage)
+					.set({
+						bytes: sql`${d1Schema.tenantUsage.bytes} - ${bytes}`,
+						blobs: sql`${d1Schema.tenantUsage.blobs} - ${droppable.length}`,
+						updatedAt: now
+					})
+					.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+				this.context.d1.delete(d1Schema.tenantBlob).where(dropFilter)
+			]);
+		}
+
+		// Attestation references are rare on most paths; read them per sub-chunk
+		// and retire each, re-rendering the affected paths' list objects.
+		for (const batch of chunk(entries, maxFencedRetireRows)) {
+			const pairFilters = batch.map((entry) =>
+				and(
+					eq(d1Schema.attestationReference.storePathHash, entry.storePathHash),
+					eq(d1Schema.attestationReference.generation, entry.generation)
+				)
+			);
+			const referenceFilter = and(
+				eq(d1Schema.attestationReference.tenant, tenant),
+				eq(d1Schema.attestationReference.cache, cache),
+				or(...pairFilters)
+			);
+			const references = await this.context.d1
+				.select({
+					cache: d1Schema.attestationReference.cache,
+					storePathHash: d1Schema.attestationReference.storePathHash,
+					generation: d1Schema.attestationReference.generation,
+					predicateType: d1Schema.attestationReference.predicateType,
+					digest: d1Schema.attestationReference.digest
+				})
+				.from(d1Schema.attestationReference)
+				.where(referenceFilter)
+				.all();
+
+			for (const reference of references) {
+				await this.attestationCas.removeCapturedReference(reference);
+			}
+
+			// Re-render every retired path's list object, not just those whose
+			// reference rows were found: a replayed chunk that crashed between the
+			// reference removal and this render finds no rows, and its stale list
+			// object must still go.
+			const affected = [...new Set(batch.map((entry) => entry.storePathHash))];
+
+			for (const storePathHash of affected) {
+				await this.attestations.materialiseList(cache, storePathHash);
+			}
+		}
+
+		// The queue rows clear synchronously, exactly the retired (path,
+		// generation) pairs: a later-queued generation of the same path keeps its
+		// row, and with it the retirement it is still owed.
+		for (const batch of chunk(entries, maxFencedRetireRows)) {
+			const retiredPairs = batch.map((entry) =>
+				and(
+					eq(schema.narInfoDeletions.storePathHash, entry.storePathHash),
+					eq(schema.narInfoDeletions.generation, entry.generation)
+				)
+			);
+
+			this.context.db
+				.delete(schema.narInfoDeletions)
+				.where(
+					and(eq(schema.narInfoDeletions.cache, cache), or(...retiredPairs))
+				)
+				.run();
+		}
 	}
 
 	deleteStorePath(
