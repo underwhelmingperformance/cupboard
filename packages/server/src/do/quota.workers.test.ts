@@ -1,8 +1,21 @@
-import { storePathHashSchema } from '@cupboard/nix-store/scalars';
+import {
+	type StorePathHash,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	beforeEach,
+	describe,
+	expect,
+	it,
+	type MockInstance,
+	vi
+} from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -25,6 +38,7 @@ import {
 	putNarBytes,
 	resetTestServer,
 	seedCanonicalBlob,
+	suspendTenant,
 	tenantBlobRows,
 	tenantUsageRow,
 	testBase,
@@ -435,5 +449,166 @@ describe('per-tenant quota', () => {
 		await currentServer().runGarbageCollection();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+	});
+});
+
+async function probeWindowState(storePathHash: StorePathHash): Promise<{
+	edges: unknown[];
+	presence: unknown[];
+	bytes: number | undefined;
+	servable: boolean;
+}> {
+	const usage = await tenantUsageRow();
+
+	return {
+		edges: await blobReferenceRows(),
+		presence: await tenantBlobRows(),
+		bytes: usage?.bytes,
+		servable:
+			(await env.BLOBS.head(narInfoObjectKey(fixtureTenant, storePathHash))) !==
+			null
+	};
+}
+
+// The quota pre-checks read the account outside the gate, so a quota or
+// status change can land between the probe and the charge. The charge batch's
+// CHECK constraint and the in-gate status re-read are the authorities behind
+// the probed decision; these drive that window deliberately through the
+// background verify pass, holding the probe's canonical head (its account
+// read has already resolved) while the account changes underneath it. Real
+// timers: the hold is released through a polled R2 marker, and no waiter
+// socket is involved, so nothing retries around the hold.
+describe('the probe-to-charge window', () => {
+	beforeEach(async () => {
+		await resetTestServer();
+		await clearBlobStorage();
+	});
+
+	const releaseKey = 'test/probe-window-release';
+
+	// Holds the verify pass at the probe's canonical head (the second head of
+	// the canonical key: the promote's own comes first) until the release
+	// marker object appears. Every promise stays in the Durable Object's own
+	// request context; the test signals through R2 state instead.
+	function holdProbeHead(canonicalKey: string): {
+		spy: MockInstance;
+		heads: () => number;
+	} {
+		const originalHead = env.BLOBS.head.bind(env.BLOBS);
+		let heads = 0;
+		const spy = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementation(async (key: string) => {
+				if (key === canonicalKey) {
+					heads += 1;
+
+					if (heads === 2) {
+						for (let poll = 0; poll < 400; poll += 1) {
+							if ((await originalHead(releaseKey)) !== null) {
+								break;
+							}
+
+							await new Promise((resolve) => setTimeout(resolve, 25));
+						}
+					}
+				}
+
+				return originalHead(key);
+			});
+
+		return { spy, heads: () => heads };
+	}
+
+	async function heldVerify(quotaOf: (nar: VerifiableNar) => number) {
+		const token = await initialise();
+		const nar = await verifiableNar('probe-window');
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		await provisionFixtureTenant({ quotaBytes: quotaOf(nar) });
+
+		const decision = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+
+		await putNarBytes(decision.r2Key, nar);
+		await markUploadPendingVerification(decision.uploadId);
+
+		const held = holdProbeHead(narObjectKey(nar.narHash));
+		const pass = currentServer().runVerification();
+
+		await vi.waitFor(() => {
+			expect(held.heads()).toBe(2);
+		});
+
+		return { nar, metadata, decision, held, pass };
+	}
+
+	it('recovers cleanly when the charge loses the quota race', async () => {
+		const { nar, metadata, decision, held, pass } = await heldVerify(
+			(fits) => fits.narBytes.byteLength
+		);
+
+		try {
+			// The quota shrinks while the probe is held: its account read already
+			// resolved under the old quota, so the pre-checks pass and the charge
+			// batch is what discovers the loss. The recovery must read that as
+			// genuinely over quota, settling terminally with nothing stranded.
+			await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+				.update(d1Schema.tenantUsage)
+				.set({ quotaBytes: nar.narBytes.byteLength - 1 })
+				.where(eq(d1Schema.tenantUsage.tenant, fixtureTenant))
+				.run();
+			await env.BLOBS.put(releaseKey, 'go');
+			await pass;
+
+			expect({
+				verdict: await pendingUploadVerdict(decision.uploadId),
+				...(await probeWindowState(metadata.storePathHash))
+			}).toStrictEqual({
+				verdict: 'over-quota',
+				edges: [],
+				presence: [],
+				bytes: 0,
+				servable: false
+			});
+		} finally {
+			held.spy.mockRestore();
+		}
+	});
+
+	it('stops a commit whose tenant was suspended past the probe', async () => {
+		const { metadata, decision, held, pass } = await heldVerify(
+			(fits) => fits.narBytes.byteLength * 2
+		);
+
+		try {
+			// The suspension lands while the probe is held, after its account read
+			// resolved active: only the in-gate status re-read stands between it
+			// and the charge.
+			await suspendTenant(fixtureTenant);
+			await env.BLOBS.put(releaseKey, 'go');
+			await pass;
+
+			expect({
+				verdict: await pendingUploadVerdict(decision.uploadId),
+				...(await probeWindowState(metadata.storePathHash))
+			}).toStrictEqual({
+				verdict: undefined,
+				edges: [],
+				presence: [],
+				bytes: 0,
+				servable: false
+			});
+		} finally {
+			held.spy.mockRestore();
+		}
 	});
 });

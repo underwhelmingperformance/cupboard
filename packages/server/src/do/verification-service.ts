@@ -301,6 +301,10 @@ export class VerificationService {
 			await this.uploadState.promoteStagingBlob(pending.r2Key, metadata, blob);
 		}
 
+		// Probed after the promote, which is what makes the canonical object and
+		// its `blob_state` row exist; probing earlier would read them absent.
+		const probe = await this.commitPipeline.probeMaterialisation(metadata);
+
 		const outcome = await this.context.ctx.blockConcurrencyWhile(async () => {
 			const current = this.context.db
 				.select()
@@ -318,7 +322,12 @@ export class VerificationService {
 			return this.commitPipeline.materialiseServable(
 				pending.cache,
 				metadata,
-				generation
+				generation,
+				probe,
+				// A deferred settle proved its bytes (a fresh decode, or a reuse row
+				// negotiate admitted when the presence edge existed), so ownership is
+				// not re-required here; the first commit of a hash is not yet owned.
+				{ mustOwnBlob: false }
 			);
 		});
 
@@ -337,6 +346,29 @@ export class VerificationService {
 				generation,
 				'over-quota'
 			);
+			return;
+		}
+
+		// Publishing stopped between the reserve and the gate (a suspension or
+		// offboard). The reserved row is reclaimed for the same reason as the
+		// over-quota rejection: left behind, a later scan would restore an
+		// unreferenced, uncharged object for it. The waiter hears `absent`, the
+		// same answer an inline commit's writes-stopped rejection amounts to.
+		if (outcome === 'tenant-inactive') {
+			await this.context.ctx.blockConcurrencyWhile(() =>
+				this.commitPipeline.reclaimReservedRow(
+					pending.cache,
+					metadata.storePathHash,
+					generation,
+					metadata.narHash
+				)
+			);
+			await this.uploadState.clearPendingUploadAndStaging(
+				pending.id,
+				pending.r2Key,
+				metadata.narHash
+			);
+			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			return;
 		}
 
