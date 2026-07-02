@@ -388,7 +388,7 @@ describe('per-tenant quota', () => {
 			error: { name: 'CommitVerdictError', verdict: 'over-quota' },
 			retryError: {
 				name: 'CommitSocketError',
-				status: StatusCodes.BAD_REQUEST
+				status: StatusCodes.NOT_FOUND
 			},
 			edges: [],
 			presence: [],

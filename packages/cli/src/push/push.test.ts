@@ -270,6 +270,158 @@ describe('runPush', () => {
 		});
 	});
 
+	it('re-negotiates and uploads when a reuse commit finds its blob gone', async () => {
+		let negotiations = 0;
+		const uploadedKeys: string[] = [];
+		const commitAttempts: string[] = [];
+		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate() {
+					negotiations += 1;
+
+					// The first negotiate offers a reuse of a shared blob; by commit
+					// time the blob was collected, so the re-negotiate (the tenant's
+					// presence edge credited back) plans a fresh upload.
+					if (negotiations === 1) {
+						return Promise.resolve({
+							uploads: [
+								{
+									action: 'commit',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'reuse-gone'
+								}
+							]
+						});
+					}
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-fresh',
+								r2Key,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				async uploadNar(key, body) {
+					await collectReadableStream(body);
+					uploadedKeys.push(key);
+				},
+				commit(target) {
+					commitAttempts.push(target.uploadId);
+
+					if (target.uploadId === 'reuse-gone') {
+						return Promise.reject(
+							new CupboardHttpError(
+								'POST',
+								'/commit',
+								404,
+								'Uploaded object not found'
+							)
+						);
+					}
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		expect({
+			negotiations,
+			uploadedKeys,
+			commitAttempts
+		}).toStrictEqual({
+			negotiations: 2,
+			uploadedKeys: [r2Key],
+			commitAttempts: ['reuse-gone', 'upload-fresh']
+		});
+	});
+
+	it('re-negotiates when a deferred commit settles absent', async () => {
+		let negotiations = 0;
+		const uploadedKeys: string[] = [];
+		const commitAttempts: string[] = [];
+		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate() {
+					negotiations += 1;
+
+					// The first negotiate offers a reuse; the canonical object is
+					// collected while the deferred commit awaits its verdict, so the
+					// verify pass answers absent and the re-negotiate plans a fresh
+					// upload.
+					if (negotiations === 1) {
+						return Promise.resolve({
+							uploads: [
+								{
+									action: 'commit',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'reuse-absent'
+								}
+							]
+						});
+					}
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-fresh',
+								r2Key,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				async uploadNar(key, body) {
+					await collectReadableStream(body);
+					uploadedKeys.push(key);
+				},
+				commit(target) {
+					commitAttempts.push(target.uploadId);
+
+					if (target.uploadId === 'reuse-absent') {
+						return Promise.reject(
+							new UploadVerificationFailedError('reuse-absent', 'absent')
+						);
+					}
+
+					return Promise.resolve(fallbackCommitResponse());
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		expect({
+			negotiations,
+			uploadedKeys,
+			commitAttempts
+		}).toStrictEqual({
+			negotiations: 2,
+			uploadedKeys: [r2Key],
+			commitAttempts: ['reuse-absent', 'upload-fresh']
+		});
+	});
+
 	it('with --dry-run, reports the plan without uploading or committing', async () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];

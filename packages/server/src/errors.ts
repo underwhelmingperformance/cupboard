@@ -636,7 +636,11 @@ export class UploadCacheMismatchError extends ServerHttpError {
 }
 
 export class UploadedObjectNotFoundError extends ServerHttpError {
-	readonly status = StatusCodes.BAD_REQUEST;
+	// NOT_FOUND, matching a reaped upload slot: in every flow that surfaces
+	// this (a staging object gone before commit, a reused blob gone between
+	// negotiate and commit), the client's remedy is the same re-negotiate the
+	// push already performs for a 404 commit.
+	readonly status = StatusCodes.NOT_FOUND;
 
 	constructor(public readonly r2Key: string) {
 		super('Uploaded object not found');

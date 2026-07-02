@@ -379,7 +379,7 @@ describe('negotiate hints', () => {
 
 		expectCommitSocketError(commitError);
 		expect({ status: commitError.status }).toStrictEqual({
-			status: StatusCodes.BAD_REQUEST
+			status: StatusCodes.NOT_FOUND
 		});
 
 		// The token was consumed by the first negotiate; replaying it falls back
