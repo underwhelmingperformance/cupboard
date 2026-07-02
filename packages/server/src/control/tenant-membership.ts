@@ -5,6 +5,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { TenantAdmissionUnavailableError } from '../errors.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
 
@@ -166,13 +167,51 @@ function rowCacheKey(slug: string): Request {
 	);
 }
 
-function entryFromRow(row: {
+// How long the admission read waits before its one retry of a thrown D1 read.
+const admissionReadRetryDelayMs = 100;
+
+// The authoritative row read with one bounded retry: a transient D1 fault on
+// this read sits on every push and fetch, so it must not surface as an
+// internal error. A persistent fault maps to a retryable refusal instead;
+// Nix and the CLI both retry a 503.
+async function readTenantRow(
+	database: Database,
+	slug: TenantId
+): Promise<TenantAdmissionRow | undefined> {
+	for (let attempt = 0; ; attempt += 1) {
+		try {
+			return await database
+				.select({
+					status: d1Schema.tenant.status,
+					readMode: d1Schema.tenant.readMode,
+					readUser: d1Schema.tenant.readUser,
+					readPasswordHash: d1Schema.tenant.readPasswordHash,
+					readPasswordSalt: d1Schema.tenant.readPasswordSalt
+				})
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, slug))
+				.get();
+		} catch (error) {
+			if (attempt >= 1) {
+				throw new TenantAdmissionUnavailableError(error);
+			}
+
+			await new Promise((resolve) =>
+				setTimeout(resolve, admissionReadRetryDelayMs)
+			);
+		}
+	}
+}
+
+interface TenantAdmissionRow {
 	status: TenantEntry['status'];
 	readMode: TenantEntry['readMode'];
 	readUser: string | null;
 	readPasswordHash: string | null;
 	readPasswordSalt: string | null;
-}): TenantEntry {
+}
+
+function entryFromRow(row: TenantAdmissionRow): TenantEntry {
 	if (
 		row.readUser !== null &&
 		row.readPasswordHash !== null &&
@@ -213,17 +252,7 @@ async function readTenantEntry(
 	}
 
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	const row = await database
-		.select({
-			status: d1Schema.tenant.status,
-			readMode: d1Schema.tenant.readMode,
-			readUser: d1Schema.tenant.readUser,
-			readPasswordHash: d1Schema.tenant.readPasswordHash,
-			readPasswordSalt: d1Schema.tenant.readPasswordSalt
-		})
-		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.id, slug))
-		.get();
+	const row = await readTenantRow(database, slug);
 
 	if (row === undefined || row.status === 'offboarded') {
 		return undefined;

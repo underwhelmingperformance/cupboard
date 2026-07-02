@@ -10,6 +10,7 @@ import {
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
+import { Hono } from 'hono';
 import { describe, expect, it } from 'vitest';
 
 import { controlTenantCreate } from '../control/control-plane.ts';
@@ -21,8 +22,46 @@ import {
 } from '../control/tenant-membership.ts';
 import { ensureTenant, setTenantStatus } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { TenantAdmissionUnavailableError } from '../errors.ts';
+import { serverErrorHandler } from '../http/error-response.ts';
 
 const now = '2026-01-01T00:00:00.000Z';
+
+// A D1 binding whose next `failures` reads throw, then delegates: the shape of
+// a transient control-plane fault under the admission read.
+function flakyD1(inner: D1Database, plan: { failures: number }): D1Database {
+	return {
+		prepare(query) {
+			if (plan.failures > 0) {
+				plan.failures -= 1;
+				throw new Error('transient D1 fault');
+			}
+
+			return inner.prepare(query);
+		},
+		batch: (statements) => inner.batch(statements),
+		exec: (query) => inner.exec(query),
+		withSession: (constraint) => inner.withSession(constraint),
+		// The admission read never dumps; the member exists only to satisfy the
+		// binding's shape.
+		dump: () => Promise.reject(new Error('dump is not supported here'))
+	};
+}
+
+async function admitWithFaults(
+	slug: string,
+	failures: number
+): Promise<TenantEntry | undefined> {
+	const ctx = createExecutionContext();
+	const faultyEnv = {
+		...env,
+		CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, { failures })
+	};
+	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse(slug));
+	await waitOnExecutionContext(ctx);
+
+	return entry;
+}
 
 function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
@@ -193,6 +232,56 @@ describe('layered admission gate', () => {
 		await refreshTenantMembership(env);
 
 		expect(await admit('acme')).toBeUndefined();
+	});
+
+	it('retries a transient fault on the admission row read', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await refreshTenantMembership(env);
+
+		expect(await admitWithFaults('acme', 1)).toStrictEqual({
+			status: 'active',
+			readMode: 'private'
+		});
+	});
+
+	it('maps a persistent admission read fault to a retryable refusal', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await refreshTenantMembership(env);
+
+		let caught: unknown;
+
+		try {
+			await admitWithFaults('acme', Number.MAX_SAFE_INTEGER);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(TenantAdmissionUnavailableError);
+
+		if (!(caught instanceof TenantAdmissionUnavailableError)) {
+			return;
+		}
+
+		expect({
+			status: caught.status,
+			retryAfterSeconds: caught.retryAfterSeconds
+		}).toStrictEqual({ status: 503, retryAfterSeconds: 5 });
+	});
+
+	it('answers the admission refusal as a 503 with Retry-After', async () => {
+		const app = new Hono();
+
+		app.onError(serverErrorHandler);
+		app.get('/probe', () => {
+			throw new TenantAdmissionUnavailableError(new Error('down'));
+		});
+
+		const response = await app.request('/probe');
+
+		expect({
+			status: response.status,
+			retryAfter: response.headers.get('retry-after')
+		}).toStrictEqual({ status: 503, retryAfter: '5' });
 	});
 
 	it('reflects a private tenant credential change with no row caching', async () => {
