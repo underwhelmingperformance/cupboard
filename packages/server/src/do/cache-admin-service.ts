@@ -57,11 +57,10 @@ export class CacheAdminService {
 		return row !== undefined;
 	}
 
-	// Retires one bounded chunk of a cache's queued teardown deletions: each path's
-	// edge and R2 object. `deleteQueuedNarInfo` is fenced on the captured
-	// generation, so a path recommitted since its row was removed (a fresh commit
-	// the client was told succeeded) is left intact: its live generation no longer
-	// matches the queued one. Returns how many it retired.
+	// Retires one bounded chunk of a cache's queued teardown deletions in
+	// batched operations; see {@link DeletionQueueService.retireTornDownNarInfos}
+	// for the batching and the generation fence that leaves a recommitted path's
+	// live object intact. Returns how many it retired.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	private async drainTeardownChunk(
@@ -72,21 +71,15 @@ export class CacheAdminService {
 		const queued = this.context.db
 			.select({
 				storePathHash: schema.narInfoDeletions.storePathHash,
-				generation: schema.narInfoDeletions.generation
+				generation: schema.narInfoDeletions.generation,
+				narHash: schema.narInfoDeletions.narHash
 			})
 			.from(schema.narInfoDeletions)
 			.where(eq(schema.narInfoDeletions.cache, cache))
 			.limit(limit)
 			.all();
 
-		for (const entry of queued) {
-			await this.deletionQueue.deleteQueuedNarInfo(
-				cache,
-				entry.storePathHash,
-				entry.generation,
-				origin
-			);
-		}
+		await this.deletionQueue.retireTornDownNarInfos(cache, queued, origin);
 
 		return queued.length;
 	}

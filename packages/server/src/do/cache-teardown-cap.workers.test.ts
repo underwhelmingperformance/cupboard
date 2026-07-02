@@ -6,10 +6,11 @@ import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narInfoObjectKey } from '../http/http.ts';
+import { attestationListObjectKey, narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
+	blobReferenceRows,
 	bootstrap,
 	currentServer,
 	narBytes,
@@ -18,6 +19,8 @@ import {
 	pushPath,
 	queueUnflushedNarInfoDeletion,
 	resetTestServer,
+	tenantBlobRows,
+	tenantUsageRow,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
@@ -124,6 +127,175 @@ describe('cache teardown', () => {
 				objectsLeft: present.filter(Boolean).length,
 				pending: await teardownPending('builds')
 			}).toStrictEqual({ objectsLeft: 0, pending: undefined });
+		});
+	});
+
+	it('retires a chunk-spanning teardown with correct accounting', async () => {
+		await useTestServer('teardown-batch');
+		const { token } = await bootstrap();
+
+		// Enough paths that the fenced edge retirement spans several parameter
+		// sub-chunks; a count that fits one sub-chunk would leave the chunking
+		// unexercised.
+		const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
+		const paths = Array.from({ length: 95 }, (_, index) => {
+			const suffix =
+				alphabet.charAt(Math.floor(index / 32)) + alphabet.charAt(index % 32);
+
+			return uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: `${'0'.repeat(30)}${suffix}`,
+				name: `path-${suffix}`
+			});
+		});
+
+		for (const metadata of paths) {
+			await pushPath(token, metadata, 'builds');
+		}
+
+		const response = await authorisedFetch('/caches/builds?force=true', token, {
+			method: 'DELETE'
+		});
+		const removed = cacheRemoveResponseSchema.parse(await response.json());
+		const usage = await tenantUsageRow();
+
+		expect({
+			status: response.status,
+			removed,
+			rows: await rowsRemaining(paths),
+			queued: await narInfoDeletionRows(),
+			edges: await blobReferenceRows(),
+			presence: await tenantBlobRows(),
+			usage: {
+				bytes: usage?.bytes,
+				narinfos: usage?.narinfos,
+				blobs: usage?.blobs
+			}
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			removed: { name: 'builds', removed: true, storePathsRemoved: 95 },
+			rows: 0,
+			queued: [],
+			edges: [],
+			presence: [],
+			usage: { bytes: 0, narinfos: 0, blobs: 0 }
+		});
+	});
+
+	it('clears only the generations a chunk actually retired', async () => {
+		await useTestServer('teardown-generations');
+		const { token } = await bootstrap();
+		const path = buildMetadata('a');
+
+		// A delete whose queued cleanup never flushed, then a recommit: the queue
+		// holds two generations of the one path. A cap of one splits them across
+		// drain chunks, so the first chunk's clear must remove only the generation
+		// it retired; wiping the path's other row would drop the second
+		// generation's edge retirement and credits on the floor.
+		await pushPath(token, path, 'builds');
+		await queueUnflushedNarInfoDeletion({
+			storePathHash: path.storePathHash,
+			cache: 'builds'
+		});
+		await pushPath(token, path, 'builds');
+
+		await currentServer().runCacheTeardown('builds', origin, 1);
+
+		await vi.waitFor(async () => {
+			await currentServer().resumeCacheTeardown(1);
+			const usage = await tenantUsageRow();
+			expect({
+				queued: await narInfoDeletionRows(),
+				edges: await blobReferenceRows(),
+				presence: await tenantBlobRows(),
+				pending: await teardownPending('builds'),
+				object: await narInfoObjectPresent(path.storePathHash, 'builds'),
+				usage: {
+					bytes: usage?.bytes,
+					narinfos: usage?.narinfos,
+					blobs: usage?.blobs
+				}
+			}).toStrictEqual({
+				queued: [],
+				edges: [],
+				presence: [],
+				pending: undefined,
+				object: false,
+				usage: { bytes: 0, narinfos: 0, blobs: 0 }
+			});
+		});
+	});
+
+	it('spares presence a sibling cache still references', async () => {
+		await useTestServer('teardown-shared');
+		const { token } = await bootstrap();
+		const torn = buildMetadata('a');
+		const kept = buildMetadata('b');
+
+		// Two caches share the blob. Tearing one down retires its edge, but the
+		// sibling's edge must keep the presence row and its byte charge.
+		await pushPath(token, torn, 'builds');
+		await pushPath(token, kept, 'other');
+
+		const response = await authorisedFetch('/caches/builds?force=true', token, {
+			method: 'DELETE'
+		});
+		const removed = cacheRemoveResponseSchema.parse(await response.json());
+		const usage = await tenantUsageRow();
+		const presence = await tenantBlobRows();
+		const edges = await blobReferenceRows();
+
+		expect({
+			status: response.status,
+			removed,
+			presence: presence.map((row) => row.fileSize),
+			edges: edges.map((row) => ({
+				cache: row.cache,
+				storePathHash: row.storePathHash
+			})),
+			usage: {
+				bytes: usage?.bytes,
+				narinfos: usage?.narinfos,
+				blobs: usage?.blobs
+			}
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			removed: { name: 'builds', removed: true, storePathsRemoved: 1 },
+			presence: [narBytes.byteLength],
+			edges: [{ cache: 'other', storePathHash: kept.storePathHash }],
+			usage: { bytes: narBytes.byteLength, narinfos: 1, blobs: 1 }
+		});
+	});
+
+	it('removes a stale attestation list object on a replayed retirement', async () => {
+		await useTestServer('teardown-attestation-list');
+		const { token } = await bootstrap();
+		const path = buildMetadata('a');
+
+		await pushPath(token, path, 'builds');
+
+		// The residue of a teardown chunk that crashed after removing the path's
+		// attestation references but before re-rendering its list object. The
+		// replayed retirement finds no reference rows, and must still remove the
+		// object rather than leave it advertising deleted bundles.
+		const listKey = attestationListObjectKey(
+			fixtureTenant,
+			path.storePathHash,
+			'builds'
+		);
+
+		await env.BLOBS.put(listKey, JSON.stringify({ attestations: [] }));
+
+		const response = await authorisedFetch('/caches/builds?force=true', token, {
+			method: 'DELETE'
+		});
+
+		expect({
+			status: response.status,
+			listObject: (await env.BLOBS.head(listKey)) !== null
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			listObject: false
 		});
 	});
 

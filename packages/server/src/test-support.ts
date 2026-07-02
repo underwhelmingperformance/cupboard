@@ -1196,7 +1196,10 @@ export async function tenantUsagePresent(id: string): Promise<boolean> {
  */
 export async function queueUnflushedNarInfoDeletion(fields: {
 	readonly storePathHash: StorePathHash;
+	readonly cache?: string;
 }): Promise<void> {
+	const cache = fields.cache ?? DEFAULT_CACHE;
+
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		const database = drizzle(state.storage, {
 			schema: { narInfoDeletions, narInfos }
@@ -1213,7 +1216,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 				.from(narInfos)
 				.where(
 					and(
-						eq(narInfos.cache, DEFAULT_CACHE),
+						eq(narInfos.cache, cache),
 						eq(narInfos.storePathHash, fields.storePathHash)
 					)
 				)
@@ -1231,7 +1234,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 				cache: deletion.cache,
 				storePathHash: deletion.storePathHash
 			}).toStrictEqual({
-				cache: DEFAULT_CACHE,
+				cache,
 				storePathHash: fields.storePathHash
 			});
 
