@@ -72,14 +72,23 @@ jobs:
         with:
           persist-credentials: false
 
+      # The composite actions ship alongside this workflow, which callers
+      # reference at main, so fetch the same ref's copy of them into the
+      # workspace. Running them from a local path keeps a repository's
+      # SHA-pinning policy for remote actions intact; the directory is
+      # untracked, so the flake source and its revision are unaffected.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: underwhelmingperformance/cupboard
+          ref: main
+          path: .cupboard
+          persist-credentials: false
+
       - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
 
-      # This repository's own composite actions ride at main on purpose: they
-      # ship alongside this workflow and are exactly as trusted as it is.
-      #
       # Substitute from the cache being published to, so store paths that are
       # already present are fetched rather than rebuilt.
-      - uses: underwhelmingperformance/cupboard/actions/setup@main # zizmor: ignore[unpinned-uses]
+      - uses: ./.cupboard/actions/setup
         with:
           cache-url: ${{ inputs.url }}
           cache: ${{ inputs.cache }}
@@ -106,11 +115,11 @@ jobs:
       - name: Attest
         id: attest
         if: ${{ inputs.attest }}
-        uses: underwhelmingperformance/cupboard/actions/attest@main # zizmor: ignore[unpinned-uses]
+        uses: ./.cupboard/actions/attest
         with:
           paths: ${{ inputs.installable }}
 
-      - uses: underwhelmingperformance/cupboard/actions/push@main # zizmor: ignore[unpinned-uses]
+      - uses: ./.cupboard/actions/push
         with:
           url: ${{ inputs.url }}
           paths: ${{ inputs.installable }}
