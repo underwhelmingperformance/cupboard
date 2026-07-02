@@ -1,0 +1,57 @@
+# Publishes CI builds to the cupboard tenant on cupboard.supply: every pull
+# request to a short-lived cache of its own, and every push to main to the
+# default cache that flake consumers substitute from. The jobs live apart from
+# ci.yml because their reusable-workflow reference resolves against main when
+# the run starts: publishing availability must not gate the check suite.
+name: cache publish
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Each pull request publishes its flake build to a cache of its own, expiring
+  # two weeks after the last push. The trust rule on the tenant routes it there
+  # and nowhere else, keyed on the pull-request number in the token.
+  publish-pr:
+    name: publish (pr cache)
+    if: github.event_name == 'pull_request'
+    permissions:
+      attestations: write # record the build provenance on the repository
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    # The @main reference is load-bearing: the tenant's trust rule pins the
+    # job_workflow_ref claim to this file at refs/heads/main.
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main # zizmor: ignore[unpinned-uses]
+    with:
+      url: https://cupboard.supply/t/cupboard
+      cache: pr-${{ github.event.pull_request.number }}
+      root:
+        github:${{ github.repository }}/pr-${{ github.event.pull_request.number
+        }}
+      ttl: 14d
+
+  # Pushes to main publish to the tenant's default cache, which is what
+  # consumers of the flake substitute from.
+  publish-main:
+    name: publish (default cache)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      attestations: write # record the build provenance on the repository
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    # The @main reference is load-bearing: the tenant's trust rule pins the
+    # job_workflow_ref claim to this file at refs/heads/main.
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main # zizmor: ignore[unpinned-uses]
+    with:
+      url: https://cupboard.supply/t/cupboard
+      root: github:${{ github.repository }}/main

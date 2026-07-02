@@ -1,0 +1,41 @@
+# The cache leg of the release flow. release.yml builds the binaries, drafts
+# the release, and writes the substituter instructions into the draft's notes;
+# publishing that draft creates the tag and fires this workflow, which builds
+# the tagged revision through the flake on every supported system and pushes
+# the builds to the cache named in those notes.
+name: release cache
+
+on:
+  release:
+    types:
+      - published
+
+# One run per release; a re-run of the same tag queues rather than racing an
+# in-flight publish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.release.tag_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish (release cache)
+    strategy:
+      matrix:
+        runs-on:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+          - macos-15
+    permissions:
+      attestations: write # record the build provenance on the repository
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    # The @main reference is load-bearing: the tenant's trust rule pins the
+    # job_workflow_ref claim to this file at refs/heads/main.
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-publish.yml@main # zizmor: ignore[unpinned-uses]
+    with:
+      runs-on: ${{ matrix.runs-on }}
+      url: https://cupboard.supply/t/cupboard
+      cache: ${{ github.event.release.tag_name }}
+      root: github:${{ github.repository }}/${{ github.event.release.tag_name }}
