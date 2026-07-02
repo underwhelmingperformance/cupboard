@@ -15,6 +15,8 @@ import { UploadedObjectNotFoundError } from '../errors.ts';
 import {
 	narInfoObjectKey,
 	narObjectKey,
+	narObjectKeyPrefix,
+	narObjectKeySuffix,
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 
@@ -750,6 +752,67 @@ export class VerificationService {
 		);
 
 		return batch;
+	}
+
+	// Settles up to `limit` pending reuse rows on the DO. Their bytes are the
+	// already-verified canonical object, so the settle is decode-free: the
+	// promote is a head plus the `blob_state` upsert. The alarm backstop drives
+	// this so waiters on cheap rows are answered even with no consumer pass
+	// running; fresh rows stay for the queue consumer, which decodes off the DO
+	// thread. The reuse test and the bound run in the query, so a large
+	// fresh-row backlog costs nothing to walk past, and the snapshot leases its
+	// rows synchronously: a consumer pass's claims are respected, and a
+	// consumer crossing this settle stays off its rows in turn.
+	async settlePendingReuse(limit: number): Promise<number> {
+		const now = new Date();
+		const pendings = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(
+				and(
+					claimableFilter(now),
+					eq(
+						schema.pendingUploads.r2Key,
+						sql`${narObjectKeyPrefix} || ${schema.pendingUploads.narHash} || ${narObjectKeySuffix}`
+					)
+				)
+			)
+			.orderBy(asc(schema.pendingUploads.id))
+			.limit(limit)
+			.all();
+
+		this.leaseRows(
+			pendings.map((pending) => pending.id),
+			now
+		);
+
+		let settled = 0;
+
+		for (const pending of pendings) {
+			try {
+				await this.recordVerification(pending.id, { ok: true }, 'promote');
+				settled += 1;
+			} catch (error) {
+				if (error instanceof UploadedObjectNotFoundError) {
+					// The canonical object is gone and cannot reappear: answer the
+					// waiter terminally instead of retrying the same vanished object
+					// every firing.
+					await this.recordMissingObject(pending.id);
+					settled += 1;
+					continue;
+				}
+
+				// A transient fault: free the lease and leave the row for the next
+				// pass without starving the rest.
+				this.releaseLease(pending.id);
+				console.warn('reuse settle failed', {
+					uploadId: pending.id,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
+		}
+
+		return settled;
 	}
 
 	// Commits a deferred upload the queue consumer has already verified off the DO

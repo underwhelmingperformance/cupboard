@@ -9,7 +9,7 @@ import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import { commitSessionRequestSchema } from '@cupboard/protocol/upload';
 import { DurableObject } from 'cloudflare:workers';
-import { eq } from 'drizzle-orm';
+import { eq, or } from 'drizzle-orm';
 import { Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
@@ -33,6 +33,7 @@ import { authoriseRequest } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
 
+import { armAlarmNoLaterThan } from './alarm.ts';
 import {
 	AttestationCasService,
 	type AttestationReference,
@@ -46,7 +47,10 @@ import {
 	type NarInfoDemotion
 } from './blob-reaper-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
-import { CommitPipelineService } from './commit-pipeline-service.ts';
+import {
+	CommitPipelineService,
+	verifyBackstopKey
+} from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type RuntimeEnv, ServerContext } from './context.ts';
 import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
@@ -96,6 +100,10 @@ const commitSessionAttachmentSchema = z.object({
 // per-run cap with work left over. The alarm reads it to resume, so a large
 // backlog drains across successive alarm firings rather than holding the gate.
 export const gcContinuationKey = 'maintenance:gc-pending';
+
+// How many decode-free reuse rows one verify-backstop firing settles locally;
+// fresh rows always wait for the queue consumer's off-thread decode.
+const verifyBackstopReuseSettleLimit = 16;
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
@@ -749,6 +757,51 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.reconcileQueue.clearOrigin();
 	}
 
+	// The verify backstop: while deferred uploads may be pending, the alarm
+	// re-drives verification if the queue path has gone quiet. Not yet due, it
+	// only re-arms (another loop's immediate continuation consumed the alarm,
+	// which the runtime deletes once the handler returns). Due, it settles a
+	// bounded batch of decode-free reuse rows locally, then re-requests a queue
+	// pass; the request's staleness guard makes that a real send exactly when
+	// the previous one is presumed lost, and its arming starts the next backstop
+	// cycle. NAR decode never runs here: fresh rows wait for the queue consumer.
+	private async resumeVerifyBackstop(): Promise<void> {
+		const dueAt = await this.ctx.storage.get<number>(verifyBackstopKey);
+
+		if (dueAt === undefined) {
+			return;
+		}
+
+		if (Date.now() < dueAt) {
+			await armAlarmNoLaterThan(this.ctx.storage, dueAt);
+			return;
+		}
+
+		const pending = this.context.db
+			.select({ id: schema.pendingUploads.id })
+			.from(schema.pendingUploads)
+			.where(
+				or(
+					eq(schema.pendingUploads.verdict, 'pending'),
+					eq(schema.pendingUploads.verdict, 'committing')
+				)
+			)
+			.limit(1)
+			.get();
+
+		if (pending === undefined) {
+			await this.ctx.storage.delete(verifyBackstopKey);
+			return;
+		}
+
+		await this.metered('verify-backstop', () =>
+			this.withMaintenanceEligibility(() =>
+				this.verification.settlePendingReuse(verifyBackstopReuseSettleLimit)
+			)
+		);
+		await this.commitPipeline.requestVerification(this.context.requireTenant());
+	}
+
 	// Test seam: the inbound-OIDC discovery store lives on the context so a test
 	// can substitute a fixture before exercising a token exchange.
 	get discovery(): OidcDiscoveryStore {
@@ -793,15 +846,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.sweepGarbageOnce(sweepLimit);
 	}
 
-	// Drives the two bounded background loops the single DO alarm carries: resuming
-	// a capped garbage-collection sweep, and reconciling the committed paths a
-	// recent negotiate queued. Each re-arms the alarm while it has work left, so the
-	// backlogs converge across firings while the gate stays free between them.
+	// Drives the bounded background loops the single DO alarm carries: resuming
+	// a capped garbage-collection sweep, reconciling the committed paths a
+	// recent negotiate queued, resuming a cache teardown, and the verify
+	// backstop. Each re-arms the alarm while it has work left, so the backlogs
+	// converge across firings while the gate stays free between them.
 	override async alarm(): Promise<void> {
 		await this.initialise();
 		await this.resumeGarbageCollection();
 		await this.reconcileNegotiatedOnce();
 		await this.resumeCacheTeardown();
+		await this.resumeVerifyBackstop();
 	}
 
 	// Starts a cache teardown directly, the manual/test entry that the `caches`
@@ -1175,7 +1230,8 @@ type MeteredMethod =
 	| 'record-missing-object'
 	| 'record-verification'
 	| 'record-verifications'
-	| 'verification';
+	| 'verification'
+	| 'verify-backstop';
 
 // The same line for a direct RPC entrypoint (the maintenance sweeps, configure,
 // the cold-start migration) that does not flow through `fetch` but still reads

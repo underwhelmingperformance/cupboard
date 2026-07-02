@@ -73,8 +73,13 @@ export const blobReaperGraceMs = (narInfoCacheTtlSeconds + 600) * 1000;
 // The most blobs the reaper arms or collects in a single bounded pass.
 export const blobReaperBatchSize = 500;
 
+// The canonical key's fixed parts, shared with SQL that rebuilds the key from
+// a row's `nar_hash` column to test whether an upload is a reuse.
+export const narObjectKeyPrefix = 'nar/';
+export const narObjectKeySuffix = '.nar.zst';
+
 export function narObjectKey(narHash: NixSha256HashString): string {
-	return `nar/${narHash}.nar.zst`;
+	return `${narObjectKeyPrefix}${narHash}${narObjectKeySuffix}`;
 }
 
 export function casObjectKey(digest: Sha256HexDigest): string {
