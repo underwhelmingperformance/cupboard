@@ -40,11 +40,12 @@
 		"build:binary": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/build-cupboard-binary.ts",
 		"check": "pnpm run '/^check:.*/'",
 		"check:deps": "syncpack lint",
+		"check:flake-deps": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/flake-dependencies.ts check",
 		"check:format": "prettier --check .",
 		"check:knip": "knip --include dependencies,unlisted --no-progress",
 		"check:lint": "eslint .",
 		"check:migrations": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/check-d1-migrations.ts",
-		"check:test": "pnpm -r run test && pnpm test:actions && pnpm test:release",
+		"check:test": "pnpm -r run test && pnpm test:actions && pnpm test:scripts",
 		"check:types": "pnpm -r run check:types",
 		"check:types:root": "tsc -p tsconfig.json",
 		"check:types:tests": "tsc -p tests/e2e/tsconfig.json",
@@ -59,7 +60,8 @@
 		"fixtures:generate": "node tests/fixtures/generate.ts",
 		"test:actions": "vitest run actions/src --exclude '**/.claude/**'",
 		"test:e2e": "pnpm --filter @cupboard/server build-info && vitest run --config tests/e2e/vitest.config.ts",
-		"test:release": "vitest run scripts/release.test.ts --exclude '**/.claude/**'"
+		"test:scripts": "vitest run scripts --exclude '**/.claude/**'",
+		"update:flake-deps": "node --experimental-transform-types --disable-warning=ExperimentalWarning scripts/flake-dependencies.ts update"
 	},
 	"type": "module"
 }
