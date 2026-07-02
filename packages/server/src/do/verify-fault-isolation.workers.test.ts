@@ -1,12 +1,11 @@
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
-import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narObjectKey } from '../http/http.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import {
-	currentServer,
+	collectVerificationPasses,
 	currentServerTenant,
 	expectSingleUploadDecision,
 	initialise,
@@ -17,32 +16,6 @@ import {
 	resetTestServer,
 	verifiablePath
 } from '../test-support.ts';
-
-// Collects every continuation the pass sends through the object's own queue
-// binding, the path `requestVerificationPass` takes, by swapping a recording
-// stub onto the live instance before the pass runs.
-async function collectVerificationPasses(): Promise<unknown[]> {
-	const sent: unknown[] = [];
-	const metrics = { backlogCount: 0, backlogBytes: 0 };
-	await runInDurableObject(currentServer(), (instance) => {
-		instance.context.env = {
-			...instance.context.env,
-			MAINTENANCE_QUEUE: {
-				send: (message: unknown) => {
-					sent.push(message);
-
-					return Promise.resolve({ metadata: { metrics } });
-				},
-				sendBatch: () => Promise.resolve({ metadata: { metrics } }),
-				metrics: () => Promise.resolve(metrics)
-			}
-		};
-
-		return Promise.resolve();
-	});
-
-	return sent;
-}
 
 async function deferUpload(
 	token: string,
