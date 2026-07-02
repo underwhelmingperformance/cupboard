@@ -1,8 +1,9 @@
-# The cache leg of the release flow. release.yml builds the binaries, drafts
-# the release, and writes the substituter instructions into the draft's notes;
-# publishing that draft creates the tag and fires this workflow, which builds
-# the tagged revision through the flake on every supported system and pushes
-# the builds to the cache named in those notes.
+# The distribution leg of the release flow. release.yml builds the binaries,
+# drafts the release, and writes the substituter instructions into the draft's
+# notes; publishing that draft creates the tag and fires this workflow, which
+# builds the tagged revision through the flake on every supported system,
+# pushes the builds to the cache named in those notes, and publishes the flake
+# release to FlakeHub so consumers can track versions with a semver range.
 name: release cache
 
 on:
@@ -39,3 +40,21 @@ jobs:
       url: https://cupboard.supply/t/cupboard
       cache: ${{ github.event.release.tag_name }}
       root: github:${{ github.repository }}/${{ github.event.release.tag_name }}
+
+  flakehub:
+    name: publish (flakehub)
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # check out the tagged flake source
+      id-token: write # OIDC token that authenticates the FlakeHub publish
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      - uses: DeterminateSystems/flakehub-push@71f57208810a5d299fc6545350981de98fdbc860 # v6
+        with:
+          visibility: public
+          tag: ${{ github.event.release.tag_name }}
