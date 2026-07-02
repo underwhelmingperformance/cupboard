@@ -66,6 +66,15 @@ export interface VerificationResult {
 	readonly verdict: VerificationVerdict;
 }
 
+// Whether a row is still awaiting its verdict. A terminal row is retained
+// through its observation window as the settled authority; verify passes
+// overlap, so a straggling verdict may find one and must never reopen it.
+function isAwaitingVerdict(
+	row: typeof schema.pendingUploads.$inferSelect
+): boolean {
+	return row.verdict === 'pending' || row.verdict === 'committing';
+}
+
 export class VerificationService {
 	constructor(
 		private readonly context: ServerContext,
@@ -199,7 +208,10 @@ export class VerificationService {
 				.where(eq(schema.pendingUploads.id, pending.id))
 				.get();
 
-			if (current === undefined) {
+			// A vanished row was settled elsewhere; a terminal one was settled by a
+			// competing pass during this apply's promote and probe awaits. Either
+			// way the row's fate is decided and this apply must not touch it.
+			if (current === undefined || !isAwaitingVerdict(current)) {
 				return 'gone' as const;
 			}
 
@@ -627,7 +639,7 @@ export class VerificationService {
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
 
-		if (pending === undefined) {
+		if (pending === undefined || !isAwaitingVerdict(pending)) {
 			return;
 		}
 
@@ -689,7 +701,7 @@ export class VerificationService {
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
 
-		if (pending === undefined) {
+		if (pending === undefined || !isAwaitingVerdict(pending)) {
 			return;
 		}
 

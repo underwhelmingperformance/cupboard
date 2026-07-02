@@ -2343,6 +2343,28 @@ export async function pendingUploadVerdict(
 	});
 }
 
+/**
+ * Snapshots a pending upload's verdict and observation window, `undefined` if
+ * the row is gone. A terminal row must survive a straggling verdict unchanged,
+ * so tests compare whole snapshots taken either side of the straggler.
+ */
+export async function pendingUploadSnapshot(
+	uploadId: string
+): Promise<{ verdict: string | null; expiresAt: string } | undefined> {
+	return runInDurableObject(currentServer(), (_instance, state) => {
+		const row = drizzle(state.storage, { schema: { pendingUploads } })
+			.select({
+				verdict: pendingUploads.verdict,
+				expiresAt: pendingUploads.expiresAt
+			})
+			.from(pendingUploads)
+			.where(eq(pendingUploads.id, uploadId))
+			.get();
+
+		return row;
+	});
+}
+
 /** Polls a deferred upload's status the way `push --wait` does, by its uploadId. */
 export async function uploadStatus(
 	uploadId: string
