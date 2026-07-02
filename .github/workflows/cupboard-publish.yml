@@ -1,0 +1,121 @@
+# The reusable publish workflow: build a flake installable and push it to a
+# cupboard cache with GitHub OIDC authentication. Callers reference it at main
+# so a trust rule can pin the job_workflow_ref claim to this file at
+# refs/heads/main, and route by cache and retention root per trigger.
+name: cupboard publish
+
+on:
+  workflow_call:
+    inputs:
+      url:
+        description: Tenant or named-cache URL to push to.
+        required: true
+        type: string
+      installable:
+        description: Flake installable to build and push.
+        required: false
+        type: string
+        default: '.'
+      cache:
+        description: Named cache to push to. Empty pushes to the default cache.
+        required: false
+        type: string
+        default: ''
+      root:
+        description:
+          Retention root prefix recorded over the pushed paths. The builder's
+          Nix system is appended, so one prefix serves every platform.
+        required: false
+        type: string
+        default: ''
+      ttl:
+        description: Retention TTL such as 7d. Empty retains permanently.
+        required: false
+        type: string
+        default: ''
+      attest:
+        description: Sign and attach SLSA build provenance for the paths.
+        required: false
+        type: boolean
+        default: true
+      runs-on:
+        description: Runner label to build on.
+        required: false
+        type: string
+        default: ubuntu-24.04
+      trusted-public-key:
+        description:
+          Nix trusted public key for the cache. Empty trusts the key the
+          deployment serves, on first use.
+        required: false
+        type: string
+        default: ''
+      cupboard-version:
+        description: cupboard release to install.
+        required: false
+        type: string
+        default: latest
+
+# The caller grants the job permissions; nothing runs at workflow scope.
+permissions: {}
+
+jobs:
+  publish:
+    name: build and push
+    runs-on: ${{ inputs.runs-on }}
+    permissions:
+      attestations: write # record the build provenance on the repository
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@ef8a148080ab6020fd15196c2084a2eea5ff2d25 # v22
+
+      # This repository's own composite actions ride at main on purpose: they
+      # ship alongside this workflow and are exactly as trusted as it is.
+      #
+      # Substitute from the cache being published to, so store paths that are
+      # already present are fetched rather than rebuilt.
+      - uses: underwhelmingperformance/cupboard/actions/setup@main # zizmor: ignore[unpinned-uses]
+        with:
+          cache-url: ${{ inputs.url }}
+          cache: ${{ inputs.cache }}
+          trusted-public-key: ${{ inputs.trusted-public-key }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+
+      - name: Build
+        env:
+          INSTALLABLE: ${{ inputs.installable }}
+        run: nix build -L "$INSTALLABLE"
+
+      # A retention root holds one closure and a push replaces it wholesale, so
+      # builds for different systems must retain under sibling roots. Append
+      # this builder's system to the caller's prefix.
+      - name: Resolve the retention root
+        id: root
+        if: ${{ inputs.root != '' }}
+        env:
+          ROOT: ${{ inputs.root }}
+        run:
+          echo "root=${ROOT}/$(nix config show system)" | tee -a
+          "$GITHUB_OUTPUT"
+
+      - name: Attest
+        id: attest
+        if: ${{ inputs.attest }}
+        uses: underwhelmingperformance/cupboard/actions/attest@main # zizmor: ignore[unpinned-uses]
+        with:
+          paths: ${{ inputs.installable }}
+
+      - uses: underwhelmingperformance/cupboard/actions/push@main # zizmor: ignore[unpinned-uses]
+        with:
+          url: ${{ inputs.url }}
+          paths: ${{ inputs.installable }}
+          cache: ${{ inputs.cache }}
+          root: ${{ steps.root.outputs.root || '' }}
+          ttl: ${{ inputs.ttl }}
+          attestations: ${{ steps.attest.outputs.bundle-path || '' }}
+          cupboard-version: ${{ inputs.cupboard-version }}
