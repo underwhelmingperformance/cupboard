@@ -1,3 +1,4 @@
+import Cloudflare from 'cloudflare';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -7,6 +8,7 @@ import {
 	buildVerdict,
 	canonicalPath,
 	detectSession,
+	fetchPaged,
 	mergeBusy,
 	normalisePath,
 	type OperationGroup,
@@ -19,6 +21,7 @@ import {
 	sliceWindow,
 	type SpanEvent,
 	summaryRows,
+	type TelemetryQuery,
 	type TimeWindow,
 	type TraceSummary,
 	triggerGroup,
@@ -245,6 +248,217 @@ describe('parseSpanEvent', () => {
 		]
 	])('rejects %s', (_label, event) => {
 		expect(parseSpanEvent(event)).toBeUndefined();
+	});
+});
+
+const noSleep = (): Promise<void> => Promise.resolve();
+const noProgress = (): void => {
+	/* progress unobserved */
+};
+const timestampOf = (row: unknown): number | undefined =>
+	typeof row === 'object' && row !== null && 'timestamp' in row
+		? Number(row.timestamp)
+		: undefined;
+
+function tracePage(from: number, count: number): { timestamp: number }[] {
+	return Array.from({ length: count }, (_, index) => ({
+		timestamp: from - index
+	}));
+}
+
+describe('fetchPaged', () => {
+	it('continues past a short page and stops on the empty one', async () => {
+		// The view caps a page below the requested limit, so a short page still
+		// has older rows behind it; only the empty page ends the walk.
+		const timeframes: { from: number; to: number }[] = [];
+		const pages = [tracePage(1000, 500), tracePage(500, 100), []];
+		const query: TelemetryQuery = (parameters) => {
+			timeframes.push({ ...parameters.timeframe });
+
+			return Promise.resolve({ traces: pages.shift() ?? [] });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'traces',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			noProgress,
+			noSleep
+		);
+
+		// The next page's upper bound is the oldest row's own millisecond, read
+		// inclusively so same-millisecond rows past the page cap are not lost.
+		expect({ rowCount: rows.length, timeframes }).toStrictEqual({
+			rowCount: 600,
+			timeframes: [
+				{ from: 0, to: 1000 },
+				{ from: 0, to: 501 },
+				{ from: 0, to: 401 }
+			]
+		});
+	});
+
+	it('walks through a same-millisecond boundary without dropping rows', async () => {
+		const timeframes: { from: number; to: number }[] = [];
+		// The burst at 700 spans the page boundary: the second page re-reads
+		// that millisecond, and only its unseen rows count as progress.
+		const pages = [
+			[
+				{ timestamp: 800, id: 'a' },
+				{ timestamp: 700, id: 'b' },
+				{ timestamp: 700, id: 'c' }
+			],
+			[
+				{ timestamp: 700, id: 'b' },
+				{ timestamp: 700, id: 'c' },
+				{ timestamp: 700, id: 'd' },
+				{ timestamp: 650, id: 'e' }
+			],
+			[]
+		];
+		const query: TelemetryQuery = (parameters) => {
+			timeframes.push({ ...parameters.timeframe });
+
+			return Promise.resolve({ traces: pages.shift() ?? [] });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'traces',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			noProgress,
+			noSleep
+		);
+
+		expect({ rows, timeframes }).toStrictEqual({
+			rows: [
+				{ timestamp: 800, id: 'a' },
+				{ timestamp: 700, id: 'b' },
+				{ timestamp: 700, id: 'c' },
+				{ timestamp: 700, id: 'd' },
+				{ timestamp: 650, id: 'e' }
+			],
+			timeframes: [
+				{ from: 0, to: 1000 },
+				{ from: 0, to: 700 },
+				{ from: 0, to: 650 }
+			]
+		});
+	});
+
+	it('stops on a burst page that yields nothing new', async () => {
+		const timeframes: { from: number; to: number }[] = [];
+		// Every row shares one millisecond and the view has no cursor into it:
+		// the second page repeats the first, so the walk must stop (reporting
+		// the truncation) rather than loop.
+		const burst = [
+			{ timestamp: 700, id: 'a' },
+			{ timestamp: 700, id: 'b' }
+		];
+		const query: TelemetryQuery = (parameters) => {
+			timeframes.push({ ...parameters.timeframe });
+
+			return Promise.resolve({ traces: [...burst] });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'traces',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			noProgress,
+			noSleep
+		);
+
+		expect({ rows, timeframes }).toStrictEqual({
+			rows: burst,
+			timeframes: [
+				{ from: 0, to: 1000 },
+				{ from: 0, to: 700 }
+			]
+		});
+	});
+
+	it('retries a transient telemetry refusal and then succeeds', async () => {
+		const sleeps: number[] = [];
+		let failures = 2;
+		const query: TelemetryQuery = () => {
+			if (failures > 0) {
+				failures -= 1;
+
+				return Promise.reject(
+					new Cloudflare.APIError(401, undefined, 'unauthorized', undefined)
+				);
+			}
+
+			return Promise.resolve({ traces: [] });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'traces',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			noProgress,
+			(ms) => {
+				sleeps.push(ms);
+
+				return Promise.resolve();
+			}
+		);
+
+		expect({ rows, retries: sleeps.length }).toStrictEqual({
+			rows: [],
+			retries: 2
+		});
+	});
+
+	it('surfaces the refusal once the retries are exhausted', async () => {
+		let attempts = 0;
+		const query: TelemetryQuery = () => {
+			attempts += 1;
+
+			return Promise.reject(
+				new Cloudflare.APIError(429, undefined, 'rate limited', undefined)
+			);
+		};
+
+		await expect(
+			fetchPaged(
+				query,
+				'traces',
+				{ from: 0, to: 1000 },
+				timestampOf,
+				noProgress,
+				noSleep
+			)
+		).rejects.toBeInstanceOf(Cloudflare.APIError);
+		expect(attempts).toBe(5);
+	});
+
+	it('does not retry a refusal that will not change', async () => {
+		let attempts = 0;
+		const query: TelemetryQuery = () => {
+			attempts += 1;
+
+			return Promise.reject(
+				new Cloudflare.APIError(400, undefined, 'bad query', undefined)
+			);
+		};
+
+		await expect(
+			fetchPaged(
+				query,
+				'traces',
+				{ from: 0, to: 1000 },
+				timestampOf,
+				noProgress,
+				noSleep
+			)
+		).rejects.toBeInstanceOf(Cloudflare.APIError);
+		expect(attempts).toBe(1);
 	});
 });
 

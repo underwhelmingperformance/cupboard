@@ -1295,56 +1295,147 @@ function serviceFilter(worker: string): {
 	};
 }
 
-// Walks a telemetry view back through time, a page at a time, stepping the upper
-// bound to just before the oldest row of each page until a short page ends it.
 /** Reports the number of rows in each page as it arrives. */
 type PageProgress = (pageRows: number) => void;
 
-async function fetchPaged(
-	client: Cloudflare,
-	accountId: string,
-	worker: string,
+/** One page of a telemetry view, as the SDK's query returns it. */
+export interface TelemetryPageResponse {
+	readonly events?: { readonly events?: unknown[] | null } | null;
+	readonly traces?: unknown[] | null;
+}
+
+/** The telemetry query as the pager consumes it: just the page parameters. */
+export type TelemetryQuery = (parameters: {
+	readonly view: 'events' | 'traces';
+	readonly limit: number;
+	readonly timeframe: { readonly from: number; readonly to: number };
+}) => Promise<TelemetryPageResponse>;
+
+type Sleep = (ms: number) => Promise<void>;
+
+const defaultSleep: Sleep = (ms) =>
+	new Promise((resolve) => setTimeout(resolve, ms));
+
+// How many attempts a page query gets, and the base of the jittered linear
+// backoff between them.
+const telemetryQueryAttempts = 5;
+const telemetryRetryBaseDelayMs = 500;
+
+// The telemetry endpoint intermittently answers a bare 401 for a valid token,
+// and 429/5xx are ordinary transient refusals; all are worth a few retries
+// before the run fails.
+function isRetryableTelemetryStatus(status: number): boolean {
+	return status === 401 || status === 429 || status >= 500;
+}
+
+function telemetryErrorStatus(error: unknown): number | undefined {
+	if (!(error instanceof Cloudflare.APIError)) {
+		return undefined;
+	}
+
+	const status: unknown = error.status;
+
+	return typeof status === 'number' ? status : undefined;
+}
+
+async function queryPageWithRetry(
+	query: TelemetryQuery,
+	parameters: Parameters<TelemetryQuery>[0],
+	sleep: Sleep
+): Promise<TelemetryPageResponse> {
+	for (let attempt = 1; ; attempt += 1) {
+		try {
+			return await query(parameters);
+		} catch (error) {
+			const status = telemetryErrorStatus(error);
+
+			if (
+				attempt >= telemetryQueryAttempts ||
+				status === undefined ||
+				!isRetryableTelemetryStatus(status)
+			) {
+				throw error;
+			}
+
+			await sleep(
+				telemetryRetryBaseDelayMs * attempt +
+					Math.random() * telemetryRetryBaseDelayMs
+			);
+		}
+	}
+}
+
+// Walks a telemetry view back through time, a page at a time, stepping the
+// upper bound to the oldest row's own millisecond: stepping past it would
+// drop the rows sharing that millisecond which did not fit the page, exactly
+// the bursts a push incident produces. The boundary millisecond is re-read on
+// the next page and its already-collected rows dropped by content. The walk
+// ends on an empty page or one that yields nothing new; the view caps a page
+// below the requested limit, so a short page alone does not mean the window
+// is drained.
+export async function fetchPaged(
+	query: TelemetryQuery,
 	view: 'events' | 'traces',
 	window: TimeWindow,
 	timestampOf: (row: unknown) => number | undefined,
-	onPage: PageProgress
+	onPage: PageProgress,
+	sleep: Sleep = defaultSleep
 ): Promise<unknown[]> {
 	const rows: unknown[] = [];
 	let upper = window.to;
+	let boundary = new Set<string>();
 
 	for (;;) {
-		const response = await client.workers.observability.telemetry.query({
-			account_id: accountId,
-			queryId: 'cupboard-diagnose-push',
-			view,
-			limit: pageLimit,
-			timeframe: { from: window.from, to: upper },
-			parameters: { filters: [serviceFilter(worker)] }
-		});
+		const response = await queryPageWithRetry(
+			query,
+			{
+				view,
+				limit: pageLimit,
+				timeframe: { from: window.from, to: upper }
+			},
+			sleep
+		);
 
 		const page =
 			view === 'events'
 				? (response.events?.events ?? [])
 				: (response.traces ?? []);
+		const fresh = page.filter((row) => !boundary.has(JSON.stringify(row)));
 
-		if (page.length === 0) {
+		if (fresh.length === 0) {
+			if (page.length > 0) {
+				// The whole page sits at one already-collected millisecond: a burst
+				// larger than one page, which the view offers no cursor into. Say
+				// so rather than silently presenting the walk as complete.
+				console.warn(
+					`telemetry ${view} truncated at ${String(upper)}: a same-millisecond burst exceeds one page`
+				);
+			}
+
 			break;
 		}
 
-		rows.push(...page);
-		onPage(page.length);
+		rows.push(...fresh);
+		onPage(fresh.length);
 
-		if (page.length < pageLimit) {
+		const oldest = Math.min(...fresh.map((row) => timestampOf(row) ?? upper));
+
+		if (!Number.isFinite(oldest)) {
 			break;
 		}
 
-		const oldest = Math.min(...page.map((row) => timestampOf(row) ?? upper));
+		const atBoundary = fresh
+			.filter((row) => timestampOf(row) === oldest)
+			.map((row) => JSON.stringify(row));
 
-		if (!Number.isFinite(oldest) || oldest >= upper) {
-			break;
-		}
-
-		upper = oldest - 1;
+		// At a repeated upper bound the boundary set grows instead of resetting,
+		// so the walk always either moves back in time or converges on the
+		// nothing-new break above.
+		boundary =
+			oldest === upper
+				? new Set([...boundary, ...atBoundary])
+				: new Set(atBoundary);
+		upper = oldest;
 
 		if (upper <= window.from) {
 			break;
@@ -1450,11 +1541,17 @@ async function fetchTelemetry(
 		slices.map((slice) => ({ view, slice }))
 	);
 
+	const query: TelemetryQuery = (parameters) =>
+		client.workers.observability.telemetry.query({
+			account_id: accountId,
+			queryId: 'cupboard-diagnose-push',
+			parameters: { filters: [serviceFilter(worker)] },
+			...parameters
+		});
+
 	await mapWithConcurrency(tasks, fetchConcurrency, async ({ view, slice }) => {
 		const rows = await fetchPaged(
-			client,
-			accountId,
-			worker,
+			query,
 			view,
 			slice,
 			timestampOf[view],
