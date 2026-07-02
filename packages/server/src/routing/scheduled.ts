@@ -28,6 +28,7 @@ import {
 	type PendingVerification,
 	type VerificationResult
 } from '../do/verification-service.ts';
+import { UploadedObjectNotFoundError } from '../errors.ts';
 import {
 	blobReaperBatchSize,
 	verifyClaimBatchSize,
@@ -638,6 +639,110 @@ function maintainTenant(env: Env, id: TenantId): Promise<void> {
 // isolate; the heavy decode is off the DO thread regardless.
 const verifyDecodeConcurrency = 4;
 
+// How a recorder reaches the DO through a fault: a couple of in-place retries
+// keep a pass's decodes from being wasted on a transient blip, short enough
+// that a genuinely down DO fails the message while its claims' leases still
+// hold.
+const recordAttempts = 3;
+const recordRetryDelayMs = 500;
+
+/**
+ * Buffers verdicts as they are reached and records them incrementally: one
+ * `recordVerifications` RPC in flight at a time, verdicts completing meanwhile
+ * coalescing into the next. Progress is monotonic: an invocation that dies
+ * mid-pass loses at most the batch in flight plus the buffer, and every
+ * verdict recorded before that stays settled. A flush the retries cannot land
+ * stops the recorder and surfaces from `settle`, failing the queue message so
+ * the platform redelivers it; the applies are idempotent, so the redelivered
+ * pass re-records safely.
+ */
+export class VerdictRecorder {
+	private buffer: VerificationResult[] = [];
+	private flushing: Promise<void> | undefined;
+	private applied = 0;
+	private failure: { readonly error: unknown } | undefined;
+
+	constructor(
+		private readonly record: (
+			results: readonly VerificationResult[]
+		) => Promise<number>,
+		private readonly attempts = recordAttempts,
+		private readonly retryDelayMs = recordRetryDelayMs
+	) {}
+
+	private async flush(): Promise<void> {
+		while (this.buffer.length > 0) {
+			const batch = this.buffer;
+			this.buffer = [];
+
+			try {
+				this.applied += await this.recordWithRetry(batch);
+			} catch (error) {
+				// The batch could not record: keep it buffered (ahead of anything
+				// added meanwhile, preserving order) and stop rather than spin
+				// against a DO that is down. `settle` surfaces the failure.
+				this.buffer = [...batch, ...this.buffer];
+				this.failure = { error };
+				break;
+			}
+		}
+
+		this.flushing = undefined;
+	}
+
+	private async recordWithRetry(
+		batch: readonly VerificationResult[]
+	): Promise<number> {
+		let lastError: unknown;
+
+		for (let attempt = 0; attempt < this.attempts; attempt += 1) {
+			if (attempt > 0) {
+				await new Promise((resolve) => setTimeout(resolve, this.retryDelayMs));
+			}
+
+			try {
+				return await this.record(batch);
+			} catch (error) {
+				lastError = error;
+				console.warn('verification verdicts not recorded', {
+					count: batch.length,
+					attempt: attempt + 1,
+					error: error instanceof Error ? error.message : String(error)
+				});
+			}
+		}
+
+		throw lastError;
+	}
+
+	add(result: VerificationResult): void {
+		this.buffer.push(result);
+
+		if (this.failure === undefined) {
+			this.flushing ??= this.flush();
+		}
+	}
+
+	/**
+	 * Waits for every buffered verdict to record and returns how many actually
+	 * applied. Rethrows a recording failure the in-flush retries could not
+	 * clear, so the pass's queue message fails and redelivers.
+	 */
+	async settle(): Promise<number> {
+		// A verdict added while a flush is in flight starts a fresh one when it
+		// ends, so quiescence means waiting out each successor in turn.
+		while (this.flushing !== undefined) {
+			await this.flushing;
+		}
+
+		if (this.failure !== undefined) {
+			throw this.failure.error;
+		}
+
+		return this.applied;
+	}
+}
+
 // Promotes one fresh claim's verified bytes and reports the verdict. A promote
 // the consumer completed spares the settle its own; one that fails falls back
 // to the plain verified verdict, so the decode is never wasted and the settle
@@ -695,16 +800,21 @@ export async function verifyTenant(
 		maxNarBytes
 	);
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+	// Verdicts record as they are reached: a waiter unparks as soon as its own
+	// upload settles, and an invocation dying mid-pass keeps everything already
+	// recorded.
+	const recorder = new VerdictRecorder((results) =>
+		server.recordVerifications(results)
+	);
 
 	// Reuse rows need no decode: their bytes are the shared canonical object,
 	// verified when it was first promoted. Promote each (a canonical head plus
-	// the blob_state upsert) and settle them all before any decode starts, so
-	// the cheap rows are never hostage to the expensive ones. A reuse whose
-	// canonical object is gone stays unreported for the next pass.
-	const reuseVerdicts = await mapWithConcurrency(
+	// the blob_state upsert) ahead of the decodes, so the cheap rows are never
+	// hostage to the expensive ones.
+	await mapWithConcurrency(
 		claims.filter((claim) => claim.reuse),
 		maxOutgoingConnections,
-		async (claim): Promise<VerificationResult | undefined> => {
+		async (claim) => {
 			try {
 				await promoteVerifiedBlob(
 					database,
@@ -713,30 +823,39 @@ export async function verifyTenant(
 					{ narHash: claim.narHash, narSize: claim.narSize },
 					undefined
 				);
-
-				return { uploadId: claim.uploadId, verdict: { kind: 'promoted' } };
-			} catch {
-				return undefined;
+				recorder.add({
+					uploadId: claim.uploadId,
+					verdict: { kind: 'promoted' }
+				});
+			} catch (error) {
+				// A vanished canonical object cannot reappear: the row can never
+				// settle, so report it gone and let the settle answer the waiter
+				// rather than leave it parked until the commit timeout. Anything
+				// else is transient; hand the claim back for a prompt retry.
+				recorder.add({
+					uploadId: claim.uploadId,
+					verdict:
+						error instanceof UploadedObjectNotFoundError
+							? { kind: 'missing' }
+							: { kind: 'abandoned' }
+				});
 			}
 		}
 	);
-	const reuseReported = reuseVerdicts.filter(
-		(verdict): verdict is VerificationResult => verdict !== undefined
-	);
-	let applied =
-		reuseReported.length > 0
-			? await server.recordVerifications(reuseReported)
-			: 0;
 
-	const verdicts = await mapWithConcurrency(
+	await mapWithConcurrency(
 		claims.filter((claim) => !claim.reuse),
 		verifyDecodeConcurrency,
-		async (claim): Promise<VerificationResult | undefined> => {
+		async (claim) => {
 			try {
 				const object = await env.BLOBS.get(claim.r2Key);
 
 				if (object === null) {
-					return { uploadId: claim.uploadId, verdict: { kind: 'missing' } };
+					recorder.add({
+						uploadId: claim.uploadId,
+						verdict: { kind: 'missing' }
+					});
+					return;
 				}
 
 				// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed
@@ -747,20 +866,21 @@ export async function verifyTenant(
 					{ narHash: claim.narHash, narSize: claim.narSize }
 				);
 
-				return await promoteAndReport(database, env.BLOBS, claim, verification);
+				recorder.add(
+					await promoteAndReport(database, env.BLOBS, claim, verification)
+				);
 			} catch {
-				// A transient fetch or decode fault leaves the row for the next pass.
-				return undefined;
+				// A transient fetch or decode fault: hand the claim back so the next
+				// pass retries promptly rather than waiting the lease out.
+				recorder.add({
+					uploadId: claim.uploadId,
+					verdict: { kind: 'abandoned' }
+				});
 			}
 		}
 	);
 
-	const reported = verdicts.filter(
-		(verdict): verdict is VerificationResult => verdict !== undefined
-	);
-
-	applied +=
-		reported.length > 0 ? await server.recordVerifications(reported) : 0;
+	const applied = await recorder.settle();
 
 	// One verify message can coalesce a whole push's deferrals, and a pass
 	// claims a bounded chunk, so a larger backlog is left behind by design. A

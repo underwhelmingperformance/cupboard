@@ -12,6 +12,7 @@ import {
 	commitPath,
 	currentServer,
 	currentServerTenant,
+	deferFreshUpload,
 	expectSingleCommitDecision,
 	expectSingleUploadDecision,
 	initialise,
@@ -139,6 +140,43 @@ describe('consumer verify pass', () => {
 		});
 	});
 
+	it('keeps recorded verdicts when a later decode fails', async () => {
+		const token = await initialise();
+		const first = await deferFreshUpload(token, 'progress-a', 'a'.repeat(32));
+		const second = await deferFreshUpload(token, 'progress-b', 'b'.repeat(32));
+
+		// The second upload's staging read fails, so its decode never reaches a
+		// verdict. The first upload's verdict recorded incrementally and stays
+		// settled regardless.
+		const originalGet = env.BLOBS.get.bind(env.BLOBS);
+		const get = vi
+			.spyOn(env.BLOBS, 'get')
+			.mockImplementation((key, options) =>
+				key === second.r2Key
+					? Promise.reject(new Error('simulated staging outage'))
+					: originalGet(key, options)
+			);
+
+		try {
+			await verifyTenant(env, currentServerTenant(), 10);
+		} finally {
+			get.mockRestore();
+		}
+
+		expect({
+			first: await pendingUploadVerdict(first.uploadId),
+			second: await pendingUploadVerdict(second.uploadId)
+		}).toStrictEqual({ first: undefined, second: 'pending' });
+
+		// With the fault gone, the next pass settles the remainder.
+		await verifyTenant(env, currentServerTenant(), 10);
+
+		expect({
+			first: await pendingUploadVerdict(first.uploadId),
+			second: await pendingUploadVerdict(second.uploadId)
+		}).toStrictEqual({ first: undefined, second: undefined });
+	});
+
 	it('settles a deferred reuse row without reading any bytes', async () => {
 		const token = await initialise();
 		const nar = await verifiableNar('consumer-reuse');
@@ -193,6 +231,124 @@ describe('consumer verify pass', () => {
 			verdict: undefined,
 			servable: true,
 			canonicalPresent: true
+		});
+	});
+
+	it('answers absent for a deferred reuse whose canonical object vanished', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reuse-vanished');
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'c'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, first, nar);
+
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: 'd'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+
+		await markUploadPendingVerification(reuse.uploadId);
+
+		// The canonical object was collected between the negotiate and this pass.
+		// It cannot reappear, so the row must settle to a terminal answer (the
+		// waiter is told absent and re-drives the push) rather than park until
+		// the client's commit timeout.
+		await env.BLOBS.delete(narObjectKey(nar.narHash));
+
+		await verifyTenant(env, currentServerTenant(), 10);
+
+		expect({
+			verdict: await pendingUploadVerdict(reuse.uploadId),
+			servable:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, second.storePathHash)
+				)) !== null
+		}).toStrictEqual({
+			verdict: undefined,
+			servable: false
+		});
+	});
+
+	it('frees a reuse claim a transient promote fault abandoned', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reuse-transient');
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'g'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, first, nar);
+
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: 'h'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+
+		await markUploadPendingVerification(reuse.uploadId);
+
+		// The promote's canonical head fails transiently; the pass abandons the
+		// claim, and abandoning must free the lease so the next pass retries at
+		// once instead of waiting it out.
+		const canonicalKey = narObjectKey(nar.narHash);
+		const originalHead = env.BLOBS.head.bind(env.BLOBS);
+		let shouldFail = true;
+		const head = vi
+			.spyOn(env.BLOBS, 'head')
+			.mockImplementation(async (key: string) => {
+				if (key === canonicalKey && shouldFail) {
+					shouldFail = false;
+					throw new Error('simulated canonical outage');
+				}
+
+				return originalHead(key);
+			});
+
+		try {
+			await verifyTenant(env, currentServerTenant(), 10);
+
+			expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
+
+			// With the fault gone, the very next pass settles it.
+			await verifyTenant(env, currentServerTenant(), 10);
+		} finally {
+			head.mockRestore();
+		}
+
+		expect({
+			verdict: await pendingUploadVerdict(reuse.uploadId),
+			servable:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, second.storePathHash)
+				)) !== null
+		}).toStrictEqual({
+			verdict: undefined,
+			servable: true
 		});
 	});
 });
