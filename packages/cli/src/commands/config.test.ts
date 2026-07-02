@@ -96,8 +96,8 @@ function capturingReporter(captured: CapturedOutput): Reporter {
 }
 
 const nixConfig = [
-	'substituters = https://cupboard.example.workers.dev',
-	'trusted-public-keys = cupboard-1:abc123'
+	'extra-substituters = https://cupboard.example.workers.dev',
+	'extra-trusted-public-keys = cupboard-1:abc123'
 ].join('\n');
 
 describe('runConfig', () => {
@@ -148,8 +148,8 @@ describe('runConfig', () => {
 		expect(captured).toStrictEqual({
 			data: [
 				[
-					'substituters = http://localhost:1234',
-					'trusted-public-keys = cupboard-1:abc123'
+					'extra-substituters = http://localhost:1234',
+					'extra-trusted-public-keys = cupboard-1:abc123'
 				].join('\n')
 			],
 			infos: [

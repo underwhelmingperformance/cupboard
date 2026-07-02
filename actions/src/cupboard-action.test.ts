@@ -179,8 +179,8 @@ describe('renderNixConfig', () => {
 			})
 		).toBe(
 			[
-				'substituters = https://cache.example.test/cache/ci',
-				'trusted-public-keys = cupboard-1:key cupboard-1:next-key',
+				'extra-substituters = https://cache.example.test/cache/ci',
+				'extra-trusted-public-keys = cupboard-1:key cupboard-1:next-key',
 				'netrc-file = /tmp/cupboard-netrc',
 				''
 			].join('\n')
