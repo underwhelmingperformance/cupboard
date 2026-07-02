@@ -1,12 +1,15 @@
+import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narObjectKey } from '../http/http.ts';
-import { runBlobReaper } from '../routing/scheduled.ts';
+import { blobReaperGraceMs, narObjectKey } from '../http/http.ts';
+import { runBlobReaper, runCasReaper } from '../routing/scheduled.ts';
 import {
 	afterGrace,
 	blobReferenceRows,
+	blobStateArmTimes,
 	blobStateNarHashes,
+	casObjectRows,
 	clearBlobStorage,
 	commitPath,
 	deleteBlobState,
@@ -14,6 +17,10 @@ import {
 	fetchNarInfo,
 	initialise,
 	resetTestServer,
+	seedBlobStates,
+	seedCasObjects,
+	syntheticCasDigest,
+	syntheticNarHash,
 	testBase,
 	uploadMetadata,
 	verifiableNar
@@ -67,6 +74,37 @@ describe('blob reaper', () => {
 			blobState: await blobStateNarHashes(),
 			blobPresent: (await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
 		}).toStrictEqual({ blobState: [], blobPresent: false });
+	});
+
+	it('arms candidate batches beyond one D1 parameter chunk', async () => {
+		const narHashes = Array.from({ length: 120 }, (_, index) =>
+			syntheticNarHash(index)
+		);
+		const digests = Array.from({ length: 120 }, (_, index) =>
+			syntheticCasDigest(index)
+		);
+
+		await seedBlobStates(narHashes);
+		await seedCasObjects(digests);
+
+		await runBlobReaper(env);
+		await runCasReaper(env);
+
+		const armedUntil = new Date(
+			testBase.getTime() + blobReaperGraceMs
+		).toISOString();
+
+		expect({
+			blobs: await blobStateArmTimes(),
+			casObjects: await casObjectRows()
+		}).toStrictEqual({
+			blobs: narHashes
+				.toSorted(byCodeUnit)
+				.map((narHash) => ({ narHash, deleteAfter: armedUntil })),
+			casObjects: digests
+				.toSorted(byCodeUnit)
+				.map((digest) => ({ digest, size: 1, deleteAfter: armedUntil }))
+		});
 	});
 
 	it('spares a blob re-referenced by a reuse commit during the grace', async () => {

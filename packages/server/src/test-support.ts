@@ -7,6 +7,7 @@ import {
 	predicateTypeSchema,
 	selectorForCache,
 	type Sha256HexDigest,
+	sha256HexDigestSchema,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId,
@@ -94,6 +95,7 @@ import {
 	pendingUploads,
 	signingKeys
 } from './db/schema.ts';
+import { chunk } from './do/bulk.ts';
 import { MaintenanceEligibilityService } from './do/maintenance-eligibility-service.ts';
 import { applyMigrations } from './do/migrate.ts';
 import type { CupboardServer } from './do/server.ts';
@@ -835,6 +837,83 @@ export async function blobStateCount(): Promise<number> {
 		.get();
 
 	return row?.count ?? 0;
+}
+
+// The Nix base32 alphabet (no e, o, t or u), for fabricating syntactically
+// valid hashes when a test seeds shared facts in volume.
+const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
+
+/** A deterministic, syntactically valid NAR hash derived from an index. */
+export function syntheticNarHash(index: number): NixSha256HashString {
+	let remaining = index;
+	let suffix = '';
+
+	for (let position = 0; position < 8; position += 1) {
+		suffix = nixBase32Alphabet.charAt(remaining % 32) + suffix;
+		remaining = Math.floor(remaining / 32);
+	}
+
+	return nixSha256HashSchema.parse(`sha256:${'0'.repeat(44)}${suffix}`);
+}
+
+/** A deterministic, syntactically valid CAS digest derived from an index. */
+export function syntheticCasDigest(index: number): Sha256HexDigest {
+	return sha256HexDigestSchema.parse(index.toString(16).padStart(64, '0'));
+}
+
+/** Seeds shared blob facts directly, for tests that need candidate volume. */
+export async function seedBlobStates(
+	narHashes: readonly NixSha256HashString[]
+): Promise<void> {
+	const verifiedAt = new Date().toISOString();
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: { blobState } });
+
+	// Each row binds six parameters, so the insert is chunked under D1's
+	// bound-parameter limit.
+	for (const batch of chunk(narHashes, 12)) {
+		await database
+			.insert(blobState)
+			.values(
+				batch.map((narHash) => ({
+					narHash,
+					fileHash: narHash,
+					fileSize: 1,
+					compression: 'zstd' as const,
+					narSize: 1,
+					verifiedAt
+				}))
+			)
+			.run();
+	}
+}
+
+/** Seeds shared CAS object facts directly, for tests that need candidate volume. */
+export async function seedCasObjects(
+	digests: readonly Sha256HexDigest[]
+): Promise<void> {
+	const storedAt = new Date().toISOString();
+	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	for (const batch of chunk(digests, 20)) {
+		await database
+			.insert(d1Schema.casObject)
+			.values(batch.map((digest) => ({ digest, size: 1, storedAt })))
+			.run();
+	}
+}
+
+/** The shared blob facts with their reaper timers, sorted by NAR hash. */
+export async function blobStateArmTimes(): Promise<
+	{ narHash: NixSha256HashString; deleteAfter: string | undefined }[]
+> {
+	const rows = await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
+		.select({ narHash: blobState.narHash, deleteAfter: blobState.deleteAfter })
+		.from(blobState)
+		.all();
+
+	return rows
+		.map((row) => ({ ...row, deleteAfter: row.deleteAfter ?? undefined }))
+		.toSorted((left, right) => byCodeUnit(left.narHash, right.narHash));
 }
 
 /**
