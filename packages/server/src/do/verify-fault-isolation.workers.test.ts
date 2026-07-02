@@ -76,10 +76,11 @@ describe('batched verify fault isolation', () => {
 		const failing = await deferUpload(token, 'apply-fails', 'a'.repeat(32));
 		const sibling = await deferUpload(token, 'apply-ok', 'b'.repeat(32));
 
-		// Fail only the failing upload's promote: its canonical object write throws,
-		// while every other R2 write (including the sibling's) goes through. The
-		// consumer-side decode reads the staging object and is unaffected, so both
-		// verdicts reach the batch and only the failing apply throws.
+		// Fail only the failing upload's promote: its canonical object write
+		// throws, while every other R2 write (including the sibling's) goes
+		// through. The consumer's decode still succeeds; its own promote fails on
+		// the same write, so it falls back to the plain verified verdict, and the
+		// settle's promote then fails the apply.
 		const failingKey = narObjectKey(failing.narHash);
 		const originalPut = env.BLOBS.put.bind(env.BLOBS);
 		const put = vi
@@ -114,8 +115,9 @@ describe('batched verify fault isolation', () => {
 		const first = await deferUpload(token, 'all-fail-a', 'a'.repeat(32));
 		const second = await deferUpload(token, 'all-fail-b', 'b'.repeat(32));
 
-		// Every upload's promote fails, so a full batch reaches the apply step but
-		// settles nothing.
+		// Every upload's promote fails, in the consumer (falling each verdict back
+		// to plain verified) and again in the settle, so a full batch reaches the
+		// apply step but settles nothing.
 		const failingKeys = new Set([
 			narObjectKey(first.narHash),
 			narObjectKey(second.narHash)

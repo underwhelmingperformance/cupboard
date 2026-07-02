@@ -4,10 +4,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { narInfoObjectKey } from '../http/http.ts';
+import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
+	blobStateNarHashes,
+	commitPath,
 	currentServer,
+	currentServerTenant,
+	expectSingleCommitDecision,
 	expectSingleUploadDecision,
 	initialise,
 	markUploadPendingVerification,
@@ -16,6 +21,8 @@ import {
 	putNarBytes,
 	resetTestServer,
 	testBase,
+	uploadMetadata,
+	verifiableNar,
 	verifiablePath
 } from '../test-support.ts';
 
@@ -88,6 +95,104 @@ describe('recording a promoted verdict', () => {
 			// The `verified_at` stamped by the reporter's promote survives, so the
 			// settle ran no promote of its own.
 			blobState: [{ narHash: metadata.narHash, verifiedAt: promotedAt }]
+		});
+	});
+});
+
+// The queue consumer's pass end to end: it decodes, promotes and reports off
+// the DO thread, leaving the settle only the state transitions.
+describe('consumer verify pass', () => {
+	beforeEach(async () => {
+		vi.useFakeTimers();
+		vi.setSystemTime(testBase);
+		await resetTestServer();
+	});
+
+	it('settles a fresh deferred upload, promoting in the consumer', async () => {
+		const token = await initialise();
+		const { metadata, nar } = await verifiablePath('consumer-promotes', {
+			storePathHash: 'a'.repeat(32),
+			name: 'consumer-promotes'
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key, nar);
+		await markUploadPendingVerification(upload.uploadId);
+
+		await verifyTenant(env, currentServerTenant(), 10);
+
+		expect({
+			verdict: await pendingUploadVerdict(upload.uploadId),
+			blobState: await blobStateNarHashes(),
+			servable:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+				)) !== null,
+			stagingGone: (await env.BLOBS.head(upload.r2Key)) === null
+		}).toStrictEqual({
+			verdict: undefined,
+			blobState: [{ narHash: metadata.narHash }],
+			servable: true,
+			stagingGone: true
+		});
+	});
+
+	it('settles a deferred reuse row without reading any bytes', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('consumer-reuse');
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, first, nar);
+
+		// A second store path reuses the committed blob; deferring its commit
+		// leaves a pending row pointing at the shared canonical key.
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: 'b'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+		await markUploadPendingVerification(reuse.uploadId);
+
+		// A reuse verdict needs no bytes: the pass may head the canonical object
+		// but must never fetch a body, its or anyone's.
+		const get = vi.spyOn(env.BLOBS, 'get');
+
+		try {
+			await verifyTenant(env, currentServerTenant(), 10);
+		} finally {
+			get.mockRestore();
+		}
+
+		expect({
+			reads: get.mock.calls.length,
+			verdict: await pendingUploadVerdict(reuse.uploadId),
+			servable:
+				(await env.BLOBS.head(
+					narInfoObjectKey(fixtureTenant, second.storePathHash)
+				)) !== null,
+			canonicalPresent:
+				(await env.BLOBS.head(narObjectKey(nar.narHash))) !== null
+		}).toStrictEqual({
+			reads: 0,
+			verdict: undefined,
+			servable: true,
+			canonicalPresent: true
 		});
 	});
 });
