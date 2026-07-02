@@ -67,12 +67,14 @@ export interface PendingVerificationBatch {
 // The verdict the queue consumer reached for one claimed upload off the DO
 // thread: the decoded NAR verification, that the bytes verified and the
 // consumer also promoted them (the canonical object and its `blob_state` row
-// are already durable, so the settle skips its own promote), or that its
-// staging object was definitively gone.
+// are already durable, so the settle skips its own promote), that its staging
+// object was definitively gone, or that a transient fault made the consumer
+// abandon the claim unsettled, freeing its lease for the next pass.
 export type VerificationVerdict =
 	| { readonly kind: 'verified'; readonly verification: NarVerification }
 	| { readonly kind: 'promoted' }
-	| { readonly kind: 'missing' };
+	| { readonly kind: 'missing' }
+	| { readonly kind: 'abandoned' };
 
 // Whether a verdict's apply still owes the promote, or the reporter already
 // ran it. The on-DO cron path always promotes itself.
@@ -806,6 +808,14 @@ export class VerificationService {
 
 		for (const { uploadId, verdict } of results) {
 			try {
+				if (verdict.kind === 'abandoned') {
+					// The consumer gave the claim up unsettled (a transient fault);
+					// free the lease so the next pass retries promptly. Not progress,
+					// so it does not count towards the continuation gate.
+					this.releaseLease(uploadId);
+					continue;
+				}
+
 				if (verdict.kind === 'missing') {
 					await this.recordMissingObject(uploadId);
 				} else if (verdict.kind === 'promoted') {
@@ -830,9 +840,13 @@ export class VerificationService {
 		return applied;
 	}
 
-	// Records a terminal `mismatch` for a deferred upload whose staging object the
-	// queue consumer found definitively gone, so its waiters are answered rather
-	// than left parked until the commit timeout.
+	// Records the terminal outcome for a deferred upload whose bytes the queue
+	// consumer found definitively gone, so its waiters are answered rather than
+	// left parked until the commit timeout. A fresh row's staging object cannot
+	// reappear, so it fails as `mismatch`. A reuse row's bytes are the shared
+	// canonical object, whose disappearance says nothing against the client's
+	// upload: the row is dropped and its waiters told `absent`, the answer that
+	// re-drives the push through a fresh negotiate and upload.
 	async recordMissingObject(uploadId: string): Promise<void> {
 		const pending = this.context.db
 			.select()
@@ -848,6 +862,16 @@ export class VerificationService {
 			pending.id,
 			pending.metadataJson
 		);
+
+		if (pending.r2Key === narObjectKey(metadata.narHash)) {
+			await this.uploadState.clearPendingUploadAndStaging(
+				pending.id,
+				pending.r2Key,
+				metadata.narHash
+			);
+			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
+			return;
+		}
 
 		await this.uploadState.markUploadTerminal(
 			pending.id,
