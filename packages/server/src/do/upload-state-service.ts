@@ -1,4 +1,3 @@
-import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import {
 	type NixSha256HashString,
 	type TenantId
@@ -6,9 +5,9 @@ import {
 import { type ParsedUploadPathNegotiation } from '@cupboard/protocol/upload';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
+import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { UploadedObjectNotFoundError } from '../errors.ts';
 import { narObjectKey } from '../http/http.ts';
 
 import {
@@ -18,63 +17,12 @@ import {
 	maxOutgoingConnections
 } from './bulk.ts';
 import { type ServerContext } from './context.ts';
-import { type CanonicalBlob, canonicalBlobOf } from './upload-metadata.ts';
+import { type CanonicalBlob } from './upload-metadata.ts';
 
 type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
-
-	private async ensureCanonicalObject(
-		stagingKey: string,
-		narHash: NixSha256HashString,
-		// The blob facts verify derived for a fresh upload. A reuse promotes against
-		// an already-canonical object and derives them from it, so it passes none.
-		blob: CanonicalBlob | undefined
-	): Promise<CanonicalBlob> {
-		const canonicalKey = narObjectKey(narHash);
-		const existing = await this.context.env.BLOBS.head(canonicalKey);
-
-		if (existing !== null) {
-			return canonicalBlobOf(canonicalKey, existing);
-		}
-
-		if (blob === undefined) {
-			throw new UploadedObjectNotFoundError(canonicalKey);
-		}
-
-		const staged = await this.context.env.BLOBS.get(stagingKey);
-
-		if (staged === null) {
-			throw new UploadedObjectNotFoundError(stagingKey);
-		}
-
-		const written = await this.context.env.BLOBS.put(
-			canonicalKey,
-			staged.body,
-			{
-				// The file hash was computed over these exact staging bytes during verify,
-				// so R2 re-checking the copy against it confirms the promote moved them
-				// intact, not that a client-asserted value matched.
-				sha256: NixSha256Hash.parse(blob.fileHash).digestBytes(),
-				onlyIf: { etagDoesNotMatch: '*' }
-			}
-		);
-
-		if (written !== null) {
-			return blob;
-		}
-
-		// A concurrent promotion won between the head and the conditional put: adopt
-		// the stored encoding so this narinfo matches the object that is served.
-		const winner = await this.context.env.BLOBS.head(canonicalKey);
-
-		if (winner === null) {
-			throw new UploadedObjectNotFoundError(canonicalKey);
-		}
-
-		return canonicalBlobOf(canonicalKey, winner);
-	}
 
 	private async ownedNarHashes(
 		tenant: TenantId,
@@ -289,53 +237,20 @@ export class UploadStateService {
 		return reusable;
 	}
 
-	// Promotes verified staging bytes into the shared, content-addressed CAS and
-	// returns the canonical object's compressed metadata. The canonical key is
-	// write-once: a conditional put means the first promotion of a hash fixes the
-	// stored encoding, and any later or concurrent upload of the same hash adopts
-	// that encoding instead of overwriting it — so every narinfo for the hash
-	// advertises the one object that is actually served, even when tenants upload
-	// different zstd encodings of the same NAR. The staging object is left in place;
-	// its caller deletes it only once the commit is durable, so a crash between
-	// promotion and commit recovers from the surviving staging copy.
-	async promoteStagingBlob(
+	// Promotes verified staging bytes into the shared CAS; see
+	// {@link promoteVerifiedBlob} for the write-once and crash-recovery
+	// contract.
+	promoteStagingBlob(
 		stagingKey: string,
 		metadata: ParsedUploadPathNegotiation,
 		blob: CanonicalBlob | undefined
 	): Promise<CanonicalBlob> {
-		const canonical = await this.ensureCanonicalObject(
+		return promoteVerifiedBlob(
+			this.context.d1,
+			this.context.env.BLOBS,
 			stagingKey,
-			metadata.narHash,
+			{ narHash: metadata.narHash, narSize: metadata.narSize },
 			blob
 		);
-		const now = new Date();
-		const verifiedAt = now.toISOString();
-
-		// Record the shared fact together with the object, so `blob_state` exists
-		// exactly when the canonical R2 object does. The first writer for a hash
-		// fixes the metadata; a concurrent or repeated promotion keeps it, but clears
-		// any reaper grace timer, since promoting is a fresh reference to the hash.
-		// A verified frame is always zstd, the only encoding the server stores.
-		await this.context.d1
-			.insert(d1Schema.blobState)
-			.values({
-				narHash: metadata.narHash,
-				fileHash: canonical.fileHash,
-				fileSize: canonical.fileSize,
-				compression: 'zstd',
-				narSize: metadata.narSize,
-				verifiedAt
-			})
-			.onConflictDoUpdate({
-				target: d1Schema.blobState.narHash,
-				// Advancing `verified_at` on a re-promote (which re-creates an object the
-				// reaper may have collected) makes it the optimistic-concurrency token the
-				// demote pass fences its delete on: a demote that scanned the old row will
-				// not delete the freshly re-promoted one.
-				set: { deleteAfter: sql`null`, verifiedAt }
-			})
-			.run();
-
-		return canonical;
 	}
 }
