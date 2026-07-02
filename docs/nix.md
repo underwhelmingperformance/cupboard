@@ -23,6 +23,28 @@ built from that same revision, and the package version reflects it. The flake
 also exposes an overlay, so you can refer to `pkgs.cupboard` after adding
 `inputs.cupboard.overlays.default` to your `nixpkgs.overlays`.
 
+## Tracking releases
+
+Every release is published to [FlakeHub], and that is the way to follow
+versioned releases rather than individual commits. Point the input at FlakeHub
+with a version range:
+
+```nix
+inputs.cupboard.url = "https://flakehub.com/f/underwhelmingperformance/cupboard/*";
+```
+
+`*` follows the newest release; a range such as `0.1.*` allows patch and minor
+movement only. FlakeHub resolves the range when the input is locked, so
+`nix flake update` is what moves you to a newer release, and `flake.lock` pins
+the exact release you got until the next update.
+
+Each release's GitHub notes carry the `nix.conf` lines for a binary cache
+holding that release's builds, so updating a release does not mean rebuilding
+it. Alternatively pin a tag directly
+(`github:underwhelmingperformance/cupboard/v1.2.3`) and bump it yourself.
+
+[FlakeHub]: https://flakehub.com
+
 ## Using a cache as a substituter
 
 A cupboard cache speaks the standard Nix binary-cache protocol, so any client
