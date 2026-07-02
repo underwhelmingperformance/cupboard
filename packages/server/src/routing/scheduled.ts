@@ -28,7 +28,11 @@ import {
 	type PendingVerification,
 	type VerificationResult
 } from '../do/verification-service.ts';
-import { blobReaperBatchSize, verificationBatchSize } from '../http/http.ts';
+import {
+	blobReaperBatchSize,
+	verifyClaimBatchSize,
+	verifyClaimMaxNarBytes
+} from '../http/http.ts';
 
 import { tenantServer } from './durable-object.ts';
 
@@ -682,10 +686,14 @@ async function promoteAndReport(
 export async function verifyTenant(
 	env: Env,
 	id: TenantId,
-	batchSize: number = verificationBatchSize
+	batchSize: number = verifyClaimBatchSize,
+	maxNarBytes: number = verifyClaimMaxNarBytes
 ): Promise<void> {
 	const server = tenantServer(env, id);
-	const claims = await server.claimPendingVerifications(batchSize);
+	const { claims, truncated } = await server.claimVerificationBatch(
+		batchSize,
+		maxNarBytes
+	);
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
 	// Reuse rows need no decode: their bytes are the shared canonical object,
@@ -754,9 +762,9 @@ export async function verifyTenant(
 	applied +=
 		reported.length > 0 ? await server.recordVerifications(reported) : 0;
 
-	// One verify message can coalesce a whole push's deferrals, and a pass claims
-	// a bounded batch, so a push larger than one batch leaves rows for the cron. A
-	// full batch means more are pending; chain another pass to drain them now,
+	// One verify message can coalesce a whole push's deferrals, and a pass
+	// claims a bounded chunk, so a larger backlog is left behind by design. A
+	// truncated claim means rows remain; chain another pass to drain them now,
 	// through the object's single-flight so this continuation and a concurrent
 	// deferral collapse onto one message that claims each row once. Continue only
 	// after a verdict actually applied: a batch whose reads or applies all fail (a
@@ -764,7 +772,7 @@ export async function verifyTenant(
 	// spinning a continuation that re-claims and re-fails the same rows.
 	const isProgressed = applied > 0;
 
-	if (claims.length === batchSize && isProgressed) {
+	if (truncated && isProgressed) {
 		await server.requestVerificationPass();
 	}
 }

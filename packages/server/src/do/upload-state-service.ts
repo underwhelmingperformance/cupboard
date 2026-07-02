@@ -125,10 +125,13 @@ export class UploadStateService {
 		this.clearPendingUpload(uploadId);
 	}
 
+	// Marking is a (re-)drive: any verify lease on the row belongs to a pass
+	// that no longer speaks for it, and the pass this drive requests must not
+	// wait that lease out.
 	markUploadPending(uploadId: string): void {
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ verdict: 'pending' })
+			.set({ verdict: 'pending', claimedAt: sql`null` })
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 	}
@@ -150,7 +153,7 @@ export class UploadStateService {
 	markUploadCommitting(uploadId: string): void {
 		this.context.db
 			.update(schema.pendingUploads)
-			.set({ verdict: 'committing' })
+			.set({ verdict: 'committing', claimedAt: sql`null` })
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.run();
 	}

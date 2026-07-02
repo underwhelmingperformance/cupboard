@@ -80,7 +80,13 @@ export const pendingUploads = sqliteTable(
 		// the verify pass to route the terminal verdict to the right connection.
 		// Null until a commit attaches its session; re-pointed when a reconnected
 		// socket re-subscribes. Looked up by the upload's id, so it needs no index.
-		sessionId: text('session_id')
+		sessionId: text('session_id'),
+		// The lease a verify pass takes when it claims this row, so an overlapping
+		// pass (the alarm backstop's duplicate message, the cron crossing a
+		// consumer run) claims nothing already being worked. Null while unclaimed;
+		// a crashed pass's lease simply expires. A client re-drive resets it so
+		// the pass it requests need not wait the lease out.
+		claimedAt: text('claimed_at')
 	},
 	// The maintenance reconcile finds the soonest-expiring upload and probes for any
 	// still awaiting verification (an existence check, not a count); without these

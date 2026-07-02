@@ -39,6 +39,25 @@ export const verificationBatchSize = 500;
 // and whether the Durable Object honours `cpu_ms = 300000`); see PLAN.md V5
 // step 1. The mechanism is correct at any value; only the bound is unmeasured.
 export const verifiableMaxBytes = 4 * 1024 * 1024 * 1024;
+
+// One prompt verify claim: a small row count and a cumulative uncompressed
+// byte cap over the fresh rows (reuse rows decode nothing and count zero), so
+// a single consumer pass stays far below the invocation's CPU and wall limits
+// and a lost invocation redoes at most one chunk; a backlog drains through the
+// chained continuation. The byte cap matches `verifiableMaxBytes`, the
+// single-NAR bound the CPU budget must cover anyway, and a lone over-cap row
+// is still claimable alone.
+export const verifyClaimBatchSize = 32;
+export const verifyClaimMaxNarBytes = verifiableMaxBytes;
+
+// How long a claim leases its rows to the pass working them, so an
+// overlapping pass (the alarm backstop's duplicate message, the cron crossing
+// a consumer run) claims nothing already in flight. Generous enough to
+// outlive a full byte-capped pass, fetch plus decode; a crashed pass's rows
+// free at expiry and still settle comfortably inside the client's commit
+// wait.
+export const verifyClaimLeaseMs = 4 * 60 * 1000;
+
 export const maxAttestationBundleBytes = 1024 * 1024;
 
 export const narInfoCacheTtlSeconds = 3600;

@@ -2525,6 +2525,35 @@ export async function commitVerifiablePath(
 }
 
 /**
+ * Negotiates one fresh path, stages its bytes, and defers it as `pending`
+ * background verification, returning the facts a verify claim carries for it.
+ */
+export async function deferFreshUpload(
+	token: string,
+	seed: string,
+	storePathHash: string
+): Promise<{
+	uploadId: string;
+	r2Key: string;
+	metadata: ParsedUploadPathMetadata;
+	nar: VerifiableNar;
+}> {
+	const { metadata, nar } = await verifiablePath(seed, {
+		storePathHash,
+		name: seed
+	});
+	const upload = expectSingleUploadDecision(
+		await negotiateUploads(token, [metadata]),
+		metadata
+	);
+
+	await putNarBytes(upload.r2Key, nar);
+	await markUploadPendingVerification(upload.uploadId);
+
+	return { uploadId: upload.uploadId, r2Key: upload.r2Key, metadata, nar };
+}
+
+/**
  * Marks a negotiated upload `pending` background verification, the verdict a
  * commit records for a blob above the inline-verify budget. Lets a test exercise
  * the background verify-and-commit pass without a multi-megabyte fixture.

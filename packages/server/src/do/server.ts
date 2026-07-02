@@ -80,6 +80,7 @@ import { UploadStateService } from './upload-state-service.ts';
 import { UploadsService, uploadStatusOf } from './uploads-service.ts';
 import {
 	type PendingVerification,
+	type PendingVerificationBatch,
 	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
@@ -857,20 +858,34 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// The prompt verify path runs the CPU-bound NAR decode in the queue consumer,
-	// off the DO thread. The consumer claims a batch of pending uploads here (a
-	// read), decodes each staging object itself, then reports each verdict back
-	// through `recordVerification` / `recordMissingObject` so only the state
-	// transitions run on the single writer.
-	async claimPendingVerifications(
-		limit: number
-	): Promise<PendingVerification[]> {
+	// off the DO thread. The consumer claims a bounded chunk of pending uploads
+	// here (a read), decodes and promotes each staging object itself, then
+	// reports the verdicts back so only the state transitions run on the single
+	// writer. A truncated claim tells the consumer more rows remain.
+	async claimVerificationBatch(
+		limit: number,
+		maxNarBytes: number
+	): Promise<PendingVerificationBatch> {
 		await this.initialise();
 		// Claiming is the start of a pass: re-arm the prompt-verify guard before
 		// taking the snapshot so a deferral after it triggers a fresh request.
 		this.commitPipeline.onVerificationPassStarted();
 		return this.metered('claim-verifications', () =>
-			Promise.resolve(this.verification.listPendingForVerify(limit))
+			Promise.resolve(
+				this.verification.listPendingForVerify(limit, maxNarBytes)
+			)
 		);
+	}
+
+	// The uncapped claim an older consumer script calls; the DO and the consumer
+	// deploy separately, so this stays callable until both run a release that
+	// speaks `claimVerificationBatch`.
+	async claimPendingVerifications(
+		limit: number
+	): Promise<PendingVerification[]> {
+		const batch = await this.claimVerificationBatch(limit, Infinity);
+
+		return [...batch.claims];
 	}
 
 	// Asks for another verification pass, through the same single-flight as a
