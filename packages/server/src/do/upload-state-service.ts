@@ -64,7 +64,10 @@ export class UploadStateService {
 		return new Map(batches.flat().map((row) => [row.narHash, row]));
 	}
 
-	private async clearReaperTimers(
+	// Un-arms the reaper grace timer for hashes a negotiate is about to offer
+	// for reuse: reusing is a fresh reference, and the clear must land before
+	// the response commits the client to the plan.
+	async clearReaperTimers(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<void> {
 		if (narHashes.length === 0) {

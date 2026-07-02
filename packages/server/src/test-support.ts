@@ -902,6 +902,18 @@ export async function seedCasObjects(
 	}
 }
 
+/** Arms a shared blob's reaper grace timer directly. */
+export async function armBlobReaperTimer(
+	narHash: NixSha256HashString,
+	graceUntil: string = new Date(Date.now() + 60_000).toISOString()
+): Promise<void> {
+	await drizzleD1(env.CUPBOARD_DB, { schema: { blobState } })
+		.update(blobState)
+		.set({ deleteAfter: graceUntil })
+		.where(eq(blobState.narHash, narHash))
+		.run();
+}
+
 /** The shared blob facts with their reaper timers, sorted by NAR hash. */
 export async function blobStateArmTimes(): Promise<
 	{ narHash: NixSha256HashString; deleteAfter: string | undefined }[]

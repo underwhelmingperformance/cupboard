@@ -69,7 +69,8 @@ import {
 import {
 	assembleSecrets,
 	generatePushIdSigningKey,
-	generateWrapSecret
+	generateWrapSecret,
+	settlePushIdSigningKey
 } from './secrets.ts';
 import { planWorkerSource } from './source.ts';
 import { createDeployUi, type DeployUi, type MenuEntry } from './ui.ts';
@@ -1189,32 +1190,50 @@ async function deployFlow(
 			}
 		}
 
-		// Generate the per-push id signing key on a first deploy, but never
-		// overwrite an existing one: a different value invalidates in-flight pushes.
+		// Settle the per-push id signing key when the environment does not
+		// supply it: generate one on a first deploy, keep what both Workers
+		// already hold, and rotate a fresh key onto both when only one holds it
+		// (an applied value cannot be read back to copy across); see
+		// {@link settlePushIdSigningKey}.
 		if (missing.includes('PUSH_ID_SIGNING_KEY')) {
-			const { tenant } = await existingSecretsFor(state.accountId);
+			const existing = await existingSecretsFor(state.accountId);
 			missing = missing.filter((name) => name !== 'PUSH_ID_SIGNING_KEY');
+			const settlement = settlePushIdSigningKey(existing);
 
-			if (!tenant.includes('PUSH_ID_SIGNING_KEY')) {
+			if (settlement !== 'keep') {
 				const isNewlyGenerated = generatedPushIdSigningKey === undefined;
 				generatedPushIdSigningKey ??= generatePushIdSigningKey();
-				tenantSecrets.push({
+				const secret = {
 					name: 'PUSH_ID_SIGNING_KEY',
 					text: generatedPushIdSigningKey
-				});
+				};
+
+				controlSecrets.push(secret);
+				tenantSecrets.push(secret);
 
 				if (isNewlyGenerated) {
-					ui.note('Generated PUSH_ID_SIGNING_KEY: save this value now', [
-						{
-							label: 'What',
-							value: 'the key that signs per-push upload-credential ids'
-						},
-						{
-							label: 'Why',
-							value: 'a different one invalidates in-flight pushes'
-						},
-						{ label: 'Value', value: generatedPushIdSigningKey }
-					]);
+					ui.note(
+						settlement === 'rotate'
+							? 'Rotated PUSH_ID_SIGNING_KEY: save this value now'
+							: 'Generated PUSH_ID_SIGNING_KEY: save this value now',
+						[
+							{
+								label: 'What',
+								value: 'the key that signs per-push upload-credential ids'
+							},
+							settlement === 'rotate'
+								? {
+										label: 'Why',
+										value:
+											'both Workers verify push ids and the applied value cannot be read back; a push in flight needs re-running'
+									}
+								: {
+										label: 'Why',
+										value: 'a different one invalidates in-flight pushes'
+									},
+							{ label: 'Value', value: generatedPushIdSigningKey }
+						]
+					);
 				}
 			}
 		}

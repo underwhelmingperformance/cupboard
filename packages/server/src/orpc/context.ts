@@ -5,6 +5,7 @@ import type { CacheAdminService } from '../do/cache-admin-service.ts';
 import type { DeletionQueueService } from '../do/deletion-queue-service.ts';
 import type { GarbageCollectionService } from '../do/garbage-collection-service.ts';
 import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
+import type { NegotiateHints } from '../do/negotiate-hints.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
 import type { RootsService } from '../do/roots-service.ts';
@@ -28,6 +29,10 @@ export interface TenantRpcServices {
 	// path; the reconcile is flat in the in-flight set, and it skips the D1 write when
 	// the wake time is unchanged, so a push publishes the wake time once.
 	afterMutation<T>(body: () => Promise<T>): Promise<T>;
+	// Takes the Worker-staged negotiate hints the request's token header
+	// references, at most once; absent, unknown or expired tokens read as no
+	// hints and negotiate falls back to its own D1 reads.
+	takeNegotiateHints(request: Request): NegotiateHints | undefined;
 	readonly cacheAdmin: CacheAdminService;
 	readonly signingKeys: SigningKeysService;
 	readonly authKeys: AuthKeysService;

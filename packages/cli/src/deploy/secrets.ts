@@ -24,6 +24,9 @@ export function generatePushIdSigningKey(): string {
  * The secrets each Worker needs, ready to apply. The control plane holds the
  * signing-key wrapping secret; the tenant Durable Object holds the R2
  * credentials its presigner uses (see `packages/server/src/do/context.ts`).
+ * The push id signing key goes to both Workers: the tenant object issues and
+ * verifies push ids with it, and the front Worker verifies them to gate its
+ * pre-auth negotiate hint reads.
  */
 export interface DeploySecrets {
 	readonly control: readonly WorkerSecret[];
@@ -44,7 +47,32 @@ export interface AssembledSecrets {
 const requiredControl = ['CONTROL_KEY_WRAP_SECRET'];
 const optionalControl = ['CUPBOARD_SIGNUP_SECRET'];
 const requiredTenantR2 = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY'];
-const requiredTenant = ['PUSH_ID_SIGNING_KEY'];
+const requiredShared = ['PUSH_ID_SIGNING_KEY'];
+
+/**
+ * How a deploy settles the push id signing key when the environment does not
+ * supply it, decided from which Workers already hold one. Both Workers need
+ * the same key, and an applied secret cannot be read back: a deployment
+ * holding it on both keeps what it has, one holding it nowhere generates a
+ * first key, and one holding it on a single Worker is realigned by rotating a
+ * fresh key onto both. A rotation invalidates in-flight push ids, so a push
+ * running at that moment fails and is re-run.
+ */
+export type PushIdKeySettlement = 'keep' | 'generate' | 'rotate';
+
+export function settlePushIdSigningKey(existing: {
+	readonly control: readonly string[];
+	readonly tenant: readonly string[];
+}): PushIdKeySettlement {
+	const isOnControl = existing.control.includes('PUSH_ID_SIGNING_KEY');
+	const isOnTenant = existing.tenant.includes('PUSH_ID_SIGNING_KEY');
+
+	if (isOnControl && isOnTenant) {
+		return 'keep';
+	}
+
+	return isOnControl || isOnTenant ? 'rotate' : 'generate';
+}
 
 /**
  * Assemble the per-Worker secrets from the environment and the resolved
@@ -87,12 +115,23 @@ export function assembleSecrets(inputs: SecretInputs): AssembledSecrets {
 		{ name: 'R2_BUCKET_NAME', text: inputs.bucketName }
 	];
 
-	for (const name of [...requiredTenantR2, ...requiredTenant]) {
+	for (const name of requiredTenantR2) {
 		const text = fromEnv(name);
 
 		if (text === undefined) {
 			missing.push(name);
 		} else {
+			tenant.push({ name, text });
+		}
+	}
+
+	for (const name of requiredShared) {
+		const text = fromEnv(name);
+
+		if (text === undefined) {
+			missing.push(name);
+		} else {
+			control.push({ name, text });
 			tenant.push({ name, text });
 		}
 	}
