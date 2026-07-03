@@ -236,22 +236,20 @@ export class RootsService {
 			throw new RootTargetsUnavailableError(rootName, unavailable);
 		}
 
-		const write = await this.context.ctx.blockConcurrencyWhile(
-			(): Promise<RootWrite> => {
-				const deleted = requested.targets
-					.filter((target) => !this.rowPresent(cache, target.storePathHash))
-					.map((target) => target.storePath);
+		const write = await this.context.criticalSection((): Promise<RootWrite> => {
+			const deleted = requested.targets
+				.filter((target) => !this.rowPresent(cache, target.storePathHash))
+				.map((target) => target.storePath);
 
-				if (deleted.length > 0) {
-					return Promise.resolve({ kind: 'rejected', unavailable: deleted });
-				}
-
-				return Promise.resolve({
-					kind: 'written',
-					stored: this.writeRoot(cache, requested)
-				});
+			if (deleted.length > 0) {
+				return Promise.resolve({ kind: 'rejected', unavailable: deleted });
 			}
-		);
+
+			return Promise.resolve({
+				kind: 'written',
+				stored: this.writeRoot(cache, requested)
+			});
+		});
 
 		if (write.kind === 'rejected') {
 			throw new RootTargetsUnavailableError(rootName, write.unavailable);

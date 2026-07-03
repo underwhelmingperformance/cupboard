@@ -355,7 +355,7 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = startedAt.toISOString();
 
-		const reaped = await this.context.ctx.blockConcurrencyWhile(async () => {
+		const reaped = await this.context.criticalSection(async () => {
 			// A `pending` or `committing` upload is a live commit saga (awaiting
 			// background verification, or a crashed inline commit the verify pass
 			// re-drives), not abandoned, so it and its staged bytes must survive the

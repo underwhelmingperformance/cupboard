@@ -1,11 +1,14 @@
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narObjectKey } from '../http/http.ts';
+import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import {
 	collectVerificationPasses,
+	currentServer,
 	currentServerTenant,
 	expectSingleUploadDecision,
 	initialise,
@@ -81,6 +84,52 @@ describe('batched verify fault isolation', () => {
 			sibling: undefined,
 			failing: 'pending'
 		});
+	});
+
+	it('survives a D1 fault inside the settle critical section', async () => {
+		const token = await initialise();
+		const upload = await deferUpload(token, 'd1-fault', 'c'.repeat(32));
+
+		// An in-memory marker whose survival proves the instance was not broken:
+		// the runtime replaces a broken object, and a fresh instance builds a
+		// fresh discovery store.
+		const marker = new OidcDiscoveryStore();
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.discovery = marker;
+		});
+
+		// Fail the D1 status re-check that runs inside the settle's critical
+		// section. The runtime breaks the whole object when the gated callback
+		// itself throws, so the fault must surface as an ordinary rejection the
+		// caller's per-verdict isolation absorbs.
+		const statusQuery = 'select "status" from "tenant"';
+		const originalPrepare = env.CUPBOARD_DB.prepare.bind(env.CUPBOARD_DB);
+		const prepare = vi
+			.spyOn(env.CUPBOARD_DB, 'prepare')
+			.mockImplementation((query) => {
+				if (typeof query === 'string' && query.startsWith(statusQuery)) {
+					throw new Error('simulated D1 outage');
+				}
+
+				return originalPrepare(query);
+			});
+
+		try {
+			// The pass must not throw and must leave the upload for a retry.
+			await verifyTenant(env, currentServerTenant(), 10);
+		} finally {
+			prepare.mockRestore();
+		}
+
+		const isSameInstance = await runInDurableObject(
+			currentServer(),
+			(instance) => instance.discovery === marker
+		);
+
+		expect({
+			verdict: await pendingUploadVerdict(upload.uploadId),
+			isSameInstance
+		}).toStrictEqual({ verdict: 'pending', isSameInstance: true });
 	});
 
 	it('backs off without a continuation when a full batch applies nothing', async () => {

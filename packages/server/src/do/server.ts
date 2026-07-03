@@ -1107,7 +1107,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.initialise();
 
 		return this.metered('offboard', () =>
-			this.ctx.blockConcurrencyWhile(() => this.offboarding.drain(limit))
+			this.context.criticalSection(() => this.offboarding.drain(limit))
 		);
 	}
 
