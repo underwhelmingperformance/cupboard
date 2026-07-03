@@ -99,10 +99,18 @@ jobs:
           cupboard-version: ${{ inputs.cupboard-version }}
           release-repository: underwhelmingperformance/cupboard
 
+      # The attest and push actions take store paths, so record what the build
+      # produces.
       - name: Build
+        id: build
         env:
           INSTALLABLE: ${{ inputs.installable }}
-        run: nix build -L "$INSTALLABLE"
+        run: |
+          {
+            echo 'paths<<EOF'
+            nix build -L --print-out-paths "${INSTALLABLE}"
+            echo 'EOF'
+          } | tee -a "${GITHUB_OUTPUT}"
 
       # A retention root holds one closure and a push replaces it wholesale, so
       # builds for different systems must retain under sibling roots. Append
@@ -114,19 +122,19 @@ jobs:
           ROOT: ${{ inputs.root }}
         run:
           echo "root=${ROOT}/$(nix config show system)" | tee -a
-          "$GITHUB_OUTPUT"
+          "${GITHUB_OUTPUT}"
 
       - name: Attest
         id: attest
         if: ${{ inputs.attest }}
         uses: ./.cupboard/actions/attest
         with:
-          paths: ${{ inputs.installable }}
+          paths: ${{ steps.build.outputs.paths }}
 
       - uses: ./.cupboard/actions/push
         with:
           url: ${{ inputs.url }}
-          paths: ${{ inputs.installable }}
+          paths: ${{ steps.build.outputs.paths }}
           cache: ${{ inputs.cache }}
           root: ${{ steps.root.outputs.root || '' }}
           ttl: ${{ inputs.ttl }}
