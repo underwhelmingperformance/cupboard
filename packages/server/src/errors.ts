@@ -485,6 +485,7 @@ export class UnsupportedGrantTypeError extends OAuthError {
 // permanent.
 export class IssuerUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
 
 	constructor(
 		public readonly issuer: string,
@@ -659,6 +660,19 @@ export class TenantAdmissionUnavailableError extends ServerHttpError {
 	constructor(public override readonly cause: unknown) {
 		super('Tenant admission is temporarily unavailable');
 		this.name = 'TenantAdmissionUnavailableError';
+	}
+}
+
+// A request the runtime aborted with a fault it marks retryable: the Durable
+// Object serving it was reset or overloaded, so the request died with the
+// object rather than through anything about the request itself.
+export class TenantDispatchInterruptedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor(public override readonly cause: unknown) {
+		super('Tenant is temporarily unavailable');
+		this.name = 'TenantDispatchInterruptedError';
 	}
 }
 
