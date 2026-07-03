@@ -226,12 +226,23 @@ async function ownedReuseDecision(): Promise<{
 	return { token, uploadId: decision.uploadId };
 }
 
-// A never-settling promise: what the wedged eligibility publish answers with,
-// so the test observes the reply not waiting on it.
-function parkForever(): Promise<never> {
-	return new Promise<never>(() => {
-		// Never resolved: the caller must not be waiting on it.
-	});
+// A hold the wedged eligibility publish parks on, so the test observes the
+// reply not waiting on it. Released before the test ends: a promise left
+// pending inside the Durable Object races the suite's final teardown.
+function parkUntilReleased(): {
+	readonly park: () => Promise<void>;
+	readonly release: () => void;
+} {
+	const { promise, resolve } = Promise.withResolvers<undefined>();
+
+	return {
+		park: async () => {
+			await promise;
+		},
+		release: () => {
+			resolve(undefined);
+		}
+	};
 }
 
 // A commit replies without waiting on the eligibility publish: the publish
@@ -281,36 +292,41 @@ describe('coalesced maintenance reconcile', () => {
 
 	it('replies to a commit without waiting on the eligibility publish', async () => {
 		const { token, uploadId } = await ownedReuseDecision();
+		const hold = parkUntilReleased();
 
-		// Wedge every eligibility publish: it never resolves. The commit must
-		// still reply, since the publish runs behind it.
-		await runInDurableObject(currentServer(), (instance) => {
-			const realD1 = instance.context.d1;
+		try {
+			// Wedge every eligibility publish on the hold. The commit must still
+			// reply, since the publish runs behind it.
+			await runInDurableObject(currentServer(), (instance) => {
+				const realD1 = instance.context.d1;
 
-			Object.defineProperty(instance.context, 'd1', {
-				configurable: true,
-				value: {
-					select: realD1.select.bind(realD1),
-					update: realD1.update.bind(realD1),
-					delete: realD1.delete.bind(realD1),
-					batch: realD1.batch.bind(realD1),
-					insert: (table: Parameters<typeof realD1.insert>[0]) =>
-						table === d1Schema.tenantMaintenanceEligibility
-							? {
-									values: () => ({
-										onConflictDoUpdate: () => ({
-											run: () => parkForever()
+				Object.defineProperty(instance.context, 'd1', {
+					configurable: true,
+					value: {
+						select: realD1.select.bind(realD1),
+						update: realD1.update.bind(realD1),
+						delete: realD1.delete.bind(realD1),
+						batch: realD1.batch.bind(realD1),
+						insert: (table: Parameters<typeof realD1.insert>[0]) =>
+							table === d1Schema.tenantMaintenanceEligibility
+								? {
+										values: () => ({
+											onConflictDoUpdate: () => ({
+												run: () => hold.park()
+											})
 										})
-									})
-								}
-							: realD1.insert(table)
-				}
+									}
+								: realD1.insert(table)
+					}
+				});
 			});
-		});
 
-		const response = await commitUpload(token, uploadId);
+			const response = await commitUpload(token, uploadId);
 
-		expect(response.status).toBe('committed');
+			expect(response.status).toBe('committed');
+		} finally {
+			hold.release();
+		}
 	});
 });
 

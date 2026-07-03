@@ -601,8 +601,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// The commit hot path's twin of {@link afterMutation}: the reply does not
 	// wait on the publish, and concurrent mutations coalesce onto a shared one.
-	// A push settling hundreds of paths costs a publish per in-flight window
-	// rather than one awaited D1 round trip per path.
+	// A push settling hundreds of paths costs a publish per in-flight window.
 	private async afterHotMutation<T>(body: () => Promise<T>): Promise<T> {
 		try {
 			return await body();
