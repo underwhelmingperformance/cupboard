@@ -113,7 +113,7 @@ describe('narinfo object publish fence', () => {
 		});
 
 		// The fence saw the row naming a different version, so it re-rendered
-		// the object from the row rather than leaving the stale bytes.
+		// the object from the row.
 		expect(await narInfoObjectText(metadata.storePathHash)).toBe(current);
 	});
 

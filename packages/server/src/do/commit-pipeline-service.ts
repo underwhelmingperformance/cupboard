@@ -1,4 +1,5 @@
 import { narFingerprint } from '@cupboard/nix-store/narinfo';
+import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
 	type StorePathHash,
@@ -10,6 +11,7 @@ import {
 	type ParsedUploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import { and, eq, exists, notExists, sql } from 'drizzle-orm';
+import { type BatchItem } from 'drizzle-orm/batch';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
@@ -90,6 +92,55 @@ interface CanonicalBlobFacts {
 }
 
 /**
+ * One settle awaiting the shared materialise flush; see
+ * {@link CommitPipelineService.materialiseBatched}.
+ */
+export interface MaterialiseRequest {
+	readonly cache: string;
+	readonly metadata: ParsedUploadPathNegotiation;
+	readonly generation: number;
+	readonly probe: MaterialisationProbe;
+	readonly mustOwnBlob: boolean;
+	/**
+	 * Runs inside the flush gate before the fence; a false verdict settles the
+	 * request as `gone` (its row's fate was decided elsewhere) without charging.
+	 * Must be synchronous: the whole point of the shared gate is that nothing
+	 * awaits inside it beyond the one combined charge batch.
+	 */
+	readonly isStillSettleable?: () => boolean;
+}
+
+/**
+ * What a batched materialisation settles to: a {@link MaterialiseOutcome}, or
+ * `gone` when the request's own settleable check found its row's fate already
+ * decided.
+ */
+export type BatchedMaterialiseOutcome =
+	| MaterialiseOutcome
+	| { readonly kind: 'gone' };
+
+interface PendingMaterialise {
+	readonly request: MaterialiseRequest;
+	readonly resolve: (outcome: BatchedMaterialiseOutcome) => void;
+	readonly reject: (error: unknown) => void;
+}
+
+// How many settles one flush charges in a single D1 batch: five statements
+// and a handful of bound parameters each, kept well inside D1's per-batch
+// budgets. A larger burst drains over successive flushes.
+const materialiseFlushCap = 32;
+
+// A flush produced no outcome for a request it carried: a programming error
+// (every fence and charge path assigns one). Surfacing it keeps the waiter
+// from parking forever.
+class MaterialiseFlushOutcomeMissingError extends Error {
+	constructor() {
+		super('materialise flush produced no outcome for a request');
+		this.name = 'MaterialiseFlushOutcomeMissingError';
+	}
+}
+
+/**
  * The shared facts a materialisation decides on, probed outside the critical
  * section so their round-trips never hold the gate: the tenant's publish
  * status and quota basis, the canonical blob's compressed metadata and object
@@ -139,6 +190,11 @@ export class CommitPipelineService {
 	// message whose claim is idempotent and chunk-bounded.
 	private verifyRequestedAt: number | undefined;
 
+	// The settles awaiting the next materialise flush, and the drain currently
+	// flushing them; see {@link materialiseBatched}.
+	private readonly materialiseQueue: PendingMaterialise[] = [];
+	private materialiseDrain: Promise<void> | undefined;
+
 	constructor(
 		private readonly context: ServerContext,
 		private readonly cacheAdmin: CacheAdminService,
@@ -167,11 +223,13 @@ export class CommitPipelineService {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
 
-		const outcome = await this.context.criticalSection(() =>
-			this.materialiseServable(cache, metadata, reserved.generation, probe, {
-				mustOwnBlob: true
-			})
-		);
+		const outcome = await this.materialiseBatched({
+			cache,
+			metadata,
+			generation: reserved.generation,
+			probe,
+			mustOwnBlob: true
+		});
 
 		if (outcome.kind === 'materialised') {
 			// The object publishes after the gate; the marker clears only once it
@@ -318,25 +376,20 @@ export class CommitPipelineService {
 		return owned !== undefined;
 	}
 
-	// Writes the reference edge and per-tenant presence and charges usage, all in one
-	// atomic D1 batch that is also the authoritative status fence: every write
-	// applies only while the tenant row is active, and the same batch reads the
-	// status back, so a suspension can never slip a charge through however stale
-	// the probe is. The counters are charged before the inserts and gated on the
-	// rows not yet existing, so a replay (the edge/presence already present) neither
-	// double-charges nor double-references, and an over-quota bytes charge fails the
-	// `tenant_usage` CHECK and rolls the whole batch back: no edge and no charge are
-	// ever stranded over quota. Clearing the reaper grace timer in the same batch
-	// keeps a re-referenced blob alive.
-	private async reserveEdgeAndCharge(
+	// The five statements one charge contributes to an atomic D1 batch: credit
+	// the usage counters (gated on the edge/presence rows not yet existing, so a
+	// replay neither double-charges nor double-references), insert the edge and
+	// presence rows, and clear the reaper grace timer so a re-referenced blob
+	// stays alive. Every statement applies only while the tenant row is active,
+	// so the batch that carries them is also the authoritative status fence.
+	private chargeStatements(
 		tenant: TenantId,
 		cache: string,
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
-		blob: { readonly fileSize: number }
-	): Promise<'charged' | 'over-quota' | 'tenant-inactive'> {
-		const clock = new Date();
-		const now = clock.toISOString();
+		blob: { readonly fileSize: number },
+		now: string
+	): BatchItem<'sqlite'>[] {
 		const activeTenantFilter = and(
 			eq(d1Schema.tenant.id, tenant),
 			eq(d1Schema.tenant.status, 'active')
@@ -384,73 +437,97 @@ export class CommitPipelineService {
 			tenantActive
 		);
 
+		return [
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1`,
+					updatedAt: now
+				})
+				.where(creditNarInfoFilter),
+			this.context.d1
+				.update(d1Schema.tenantUsage)
+				.set({
+					bytes: sql`${d1Schema.tenantUsage.bytes} + ${blob.fileSize}`,
+					blobs: sql`${d1Schema.tenantUsage.blobs} + 1`,
+					updatedAt: now
+				})
+				.where(creditBytesFilter),
+			this.context.d1
+				.insert(d1Schema.blobReference)
+				.select((qb) =>
+					qb
+						.select({
+							tenant: sql<TenantId>`${tenant}`.as('tenant'),
+							cache: sql<string>`${cache}`.as('cache'),
+							storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
+								'store_path_hash'
+							),
+							generation: sql<number>`${generation}`.as('generation'),
+							narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
+								'nar_hash'
+							)
+						})
+						.from(d1Schema.tenant)
+						.where(activeTenantFilter)
+				)
+				.onConflictDoNothing(),
+			this.context.d1
+				.insert(d1Schema.tenantBlob)
+				.select((qb) =>
+					qb
+						.select({
+							tenant: sql<TenantId>`${tenant}`.as('tenant'),
+							narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
+								'nar_hash'
+							),
+							fileSize: sql<number>`${blob.fileSize}`.as('file_size')
+						})
+						.from(d1Schema.tenant)
+						.where(activeTenantFilter)
+				)
+				.onConflictDoNothing(),
+			this.context.d1
+				.update(d1Schema.blobState)
+				.set({ deleteAfter: sql`null` })
+				.where(graceClearFilter)
+		];
+	}
+
+	// The status read every charge batch carries: not-active (or a missing row)
+	// means every conditional write in the batch was a no-op, telling a refused
+	// charge apart from an applied one. Fails closed, matching the write gate.
+	private tenantStatusSelect(tenant: TenantId) {
+		return this.context.d1
+			.select({ status: d1Schema.tenant.status })
+			.from(d1Schema.tenant)
+			.where(eq(d1Schema.tenant.id, tenant));
+	}
+
+	// Writes the reference edge and per-tenant presence and charges usage, all in one
+	// atomic D1 batch that is also the authoritative status fence; see
+	// {@link chargeStatements}. An over-quota bytes charge fails the
+	// `tenant_usage` CHECK and rolls the whole batch back: no edge and no charge
+	// are ever stranded over quota.
+	private async reserveEdgeAndCharge(
+		tenant: TenantId,
+		cache: string,
+		metadata: ParsedUploadPathNegotiation,
+		generation: number,
+		blob: { readonly fileSize: number }
+	): Promise<'charged' | 'over-quota' | 'tenant-inactive'> {
+		const now = new Date().toISOString();
+
 		// The probed pre-check is the clean over-quota rejection. The
-		// `tenant_usage` CHECK constraint backs it as a database-level invariant:
-		// a charge that reaches here over quota fails the batch and rolls it
-		// back, so no edge or charge is ever stranded over quota.
+		// `tenant_usage` CHECK constraint backs it as a database-level invariant.
 		let statusRows: { status: TenantAccount['status'] }[];
 
 		try {
-			const results = await this.context.d1.batch([
-				this.context.d1
-					.update(d1Schema.tenantUsage)
-					.set({
-						narinfos: sql`${d1Schema.tenantUsage.narinfos} + 1`,
-						updatedAt: now
-					})
-					.where(creditNarInfoFilter),
-				this.context.d1
-					.update(d1Schema.tenantUsage)
-					.set({
-						bytes: sql`${d1Schema.tenantUsage.bytes} + ${blob.fileSize}`,
-						blobs: sql`${d1Schema.tenantUsage.blobs} + 1`,
-						updatedAt: now
-					})
-					.where(creditBytesFilter),
-				this.context.d1
-					.insert(d1Schema.blobReference)
-					.select((qb) =>
-						qb
-							.select({
-								tenant: sql<TenantId>`${tenant}`.as('tenant'),
-								cache: sql<string>`${cache}`.as('cache'),
-								storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
-									'store_path_hash'
-								),
-								generation: sql<number>`${generation}`.as('generation'),
-								narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
-									'nar_hash'
-								)
-							})
-							.from(d1Schema.tenant)
-							.where(activeTenantFilter)
-					)
-					.onConflictDoNothing(),
-				this.context.d1
-					.insert(d1Schema.tenantBlob)
-					.select((qb) =>
-						qb
-							.select({
-								tenant: sql<TenantId>`${tenant}`.as('tenant'),
-								narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
-									'nar_hash'
-								),
-								fileSize: sql<number>`${blob.fileSize}`.as('file_size')
-							})
-							.from(d1Schema.tenant)
-							.where(activeTenantFilter)
-					)
-					.onConflictDoNothing(),
-				this.context.d1
-					.update(d1Schema.blobState)
-					.set({ deleteAfter: sql`null` })
-					.where(graceClearFilter),
-				this.context.d1
-					.select({ status: d1Schema.tenant.status })
-					.from(d1Schema.tenant)
-					.where(eq(d1Schema.tenant.id, tenant))
+			const [status] = await this.context.d1.batch([
+				this.tenantStatusSelect(tenant),
+				...this.chargeStatements(tenant, cache, metadata, generation, blob, now)
 			]);
-			statusRows = results[5];
+			statusRows = status;
 		} catch (error) {
 			// Two commits can both probe under quota and race to the charge; the
 			// CHECK fails the loser's batch. An authoritative in-gate re-read tells
@@ -469,9 +546,53 @@ export class CommitPipelineService {
 			throw error;
 		}
 
-		// The status read in the batch tells a refused charge apart from an applied
-		// one: not-active (or a missing row) means every conditional write above
-		// was a no-op. Fails closed, matching the write gate.
+		if (statusRows.at(0)?.status !== 'active') {
+			return 'tenant-inactive';
+		}
+
+		return 'charged';
+	}
+
+	// The whole flush's charges in one atomic D1 batch, one status select plus
+	// five conditional statements per settle. The statements run sequentially
+	// inside the transaction, so two settles of the same hash in one flush see
+	// each other's presence row and charge it once, exactly as two sequential
+	// batches would. A thrown batch (one settle's charge tripping the quota
+	// CHECK rolls all of them back) answers `retry-individually`, and the flush
+	// re-runs each charge on its own so only the offenders refuse.
+	private async reserveEdgesAndCharge(
+		tenant: TenantId,
+		charges: readonly {
+			readonly cache: string;
+			readonly metadata: ParsedUploadPathNegotiation;
+			readonly generation: number;
+			readonly blob: CanonicalBlobFacts;
+		}[]
+	): Promise<'charged' | 'tenant-inactive' | 'retry-individually'> {
+		const now = new Date().toISOString();
+		const statements = charges.flatMap((charge) =>
+			this.chargeStatements(
+				tenant,
+				charge.cache,
+				charge.metadata,
+				charge.generation,
+				charge.blob,
+				now
+			)
+		);
+
+		let statusRows: { status: TenantAccount['status'] }[];
+
+		try {
+			const [status] = await this.context.d1.batch([
+				this.tenantStatusSelect(tenant),
+				...statements
+			]);
+			statusRows = status;
+		} catch {
+			return 'retry-individually';
+		}
+
 		if (statusRows.at(0)?.status !== 'active') {
 			return 'tenant-inactive';
 		}
@@ -497,6 +618,226 @@ export class CommitPipelineService {
 		}
 
 		await armAlarmNoLaterThan(storage, effective);
+	}
+
+	// The synchronous half of a materialisation, run inside the shared flush
+	// gate: the offboarding and probe checks, the generation fence against the
+	// live row, and the advisory quota decision. A chargeable request comes back
+	// with its narinfo rendered and the canonical facts its charge uses;
+	// everything else settles with its outcome here, before any charge.
+	private materialiseFence(request: MaterialiseRequest):
+		| {
+				readonly outcome: Exclude<MaterialiseOutcome, { kind: 'materialised' }>;
+		  }
+		| { readonly narInfo: NarInfo; readonly blob: CanonicalBlobFacts } {
+		const { cache, metadata, generation, probe } = request;
+
+		// A commit that passed the Worker's write gate while the tenant was active
+		// can still be settling here after the tenant was suspended or began
+		// offboarding. Publishing its edge now would re-reference a shared blob
+		// the drain is reclaiming, pinning it forever, so the caller reclaims the
+		// reserved row instead. The in-memory flag is re-checked inside the gate:
+		// the offboard drain runs its passes under the same gate on this instance
+		// after setting it, so the flag and the gate together keep an edge write
+		// from landing behind a drain pass. The single rule, publish only while
+		// the tenant is active, covers suspended, offboarding, offboarded and a
+		// missing row alike.
+		if (this.context.offboarding || probe.account?.status !== 'active') {
+			return { outcome: { kind: 'tenant-inactive' } };
+		}
+
+		if (probe.blob === undefined || !probe.isCanonicalPresent) {
+			return { outcome: { kind: 'blob-gone' } };
+		}
+
+		// A reuse binds a narinfo to bytes this tenant never re-proved, on the
+		// strength of its presence edge; with the edge gone (a delete credited it
+		// back) the reuse fails towards re-upload rather than re-referencing a
+		// hash the tenant no longer holds.
+		if (request.mustOwnBlob && !probe.isOwned) {
+			return { outcome: { kind: 'blob-gone' } };
+		}
+
+		const row = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, metadata.storePathHash)
+				)
+			)
+			.get();
+
+		// A concurrent recommit may have replaced the row between reserve and now;
+		// only materialise the version this commit reserved, so the edge and the
+		// served object always describe the same narinfo version.
+		if (row?.generation !== generation || row.narHash !== metadata.narHash) {
+			return { outcome: { kind: 'superseded' } };
+		}
+
+		// Quota decision against the size that will actually be charged: the
+		// canonical `blob_state` size, which the promote may have adopted from an
+		// existing encoding and so can differ from the staged size the negotiate
+		// pre-check used. Refusing here lets the caller reclaim the reserved row
+		// rather than charging; the charge batch re-fences the decision.
+		if (isOverQuota(probe.account, probe.isOwned, probe.blob.fileSize)) {
+			return { outcome: { kind: 'over-quota' } };
+		}
+
+		// The blob was probed present, so the narinfo renders from the row and the
+		// metadata already in hand.
+		return {
+			narInfo: this.narInfoObjects.buildNarInfo(row, probe.blob),
+			blob: probe.blob
+		};
+	}
+
+	// Settles one flush of materialisations inside the caller's gate: each
+	// request's settleable check and synchronous fence run first, then every
+	// surviving charge joins one combined D1 batch. A batch a quota race rolled
+	// back re-runs each charge on its own, so only the offenders refuse.
+	// Returns one outcome per request, in order.
+	private async settleMaterialiseFlushLocked(
+		requests: readonly MaterialiseRequest[]
+	): Promise<(BatchedMaterialiseOutcome | undefined)[]> {
+		const outcomes: (BatchedMaterialiseOutcome | undefined)[] = Array.from({
+			length: requests.length
+		});
+		const chargeable: {
+			readonly index: number;
+			readonly request: MaterialiseRequest;
+			readonly narInfo: NarInfo;
+			readonly blob: CanonicalBlobFacts;
+		}[] = [];
+
+		for (const [index, request] of requests.entries()) {
+			if (
+				request.isStillSettleable !== undefined &&
+				!request.isStillSettleable()
+			) {
+				outcomes[index] = { kind: 'gone' };
+				continue;
+			}
+
+			const fenced = this.materialiseFence(request);
+
+			if ('outcome' in fenced) {
+				outcomes[index] = fenced.outcome;
+				continue;
+			}
+
+			chargeable.push({
+				index,
+				request,
+				narInfo: fenced.narInfo,
+				blob: fenced.blob
+			});
+		}
+
+		if (chargeable.length === 0) {
+			return outcomes;
+		}
+
+		const tenant = this.context.requireTenant();
+		const charged = await this.reserveEdgesAndCharge(
+			tenant,
+			chargeable.map((charge) => ({
+				cache: charge.request.cache,
+				metadata: charge.request.metadata,
+				generation: charge.request.generation,
+				blob: charge.blob
+			}))
+		);
+
+		if (charged === 'charged' || charged === 'tenant-inactive') {
+			for (const charge of chargeable) {
+				outcomes[charge.index] =
+					charged === 'charged'
+						? { kind: 'materialised', narInfo: charge.narInfo }
+						: { kind: 'tenant-inactive' };
+			}
+
+			return outcomes;
+		}
+
+		for (const charge of chargeable) {
+			const single = await this.reserveEdgeAndCharge(
+				tenant,
+				charge.request.cache,
+				charge.request.metadata,
+				charge.request.generation,
+				charge.blob
+			);
+			outcomes[charge.index] =
+				single === 'charged'
+					? { kind: 'materialised', narInfo: charge.narInfo }
+					: { kind: single };
+		}
+
+		return outcomes;
+	}
+
+	// One flush: a single gate settles a whole batch, taken from the queue
+	// inside the gate callback itself. The wait for the gate is the collection
+	// window: every settle whose own turn in the gate queue (its reserve, a
+	// competing flush) came up while this flush waited has enqueued by the time
+	// the callback runs, so a concurrent burst lands in one batch with no timer
+	// involved. The waiters resume once the gate has released, so their
+	// publishes and replies never run under it. A flush that fails as a whole
+	// (a D1 fault surviving the individual retries) rejects every waiter it
+	// carried; each caller's own error handling answers its client, and the
+	// saga markers keep the settles re-drivable.
+	private async flushMaterialiseQueue(): Promise<void> {
+		let batch: PendingMaterialise[] = [];
+		let outcomes: (BatchedMaterialiseOutcome | undefined)[] = [];
+
+		try {
+			await this.context.criticalSection(async () => {
+				batch = this.materialiseQueue.splice(0, materialiseFlushCap);
+				outcomes = await this.settleMaterialiseFlushLocked(
+					batch.map((item) => item.request)
+				);
+			});
+		} catch (error) {
+			// A failure before the callback took its batch fails everything queued:
+			// they were all waiting on this drain.
+			const failed = batch.length > 0 ? batch : [...this.materialiseQueue];
+
+			if (batch.length === 0) {
+				this.materialiseQueue.length = 0;
+			}
+
+			for (const item of failed) {
+				item.reject(error);
+			}
+
+			return;
+		}
+
+		for (const [index, item] of batch.entries()) {
+			const outcome = outcomes[index];
+
+			if (outcome === undefined) {
+				item.reject(new MaterialiseFlushOutcomeMissingError());
+				continue;
+			}
+
+			item.resolve(outcome);
+		}
+	}
+
+	// Drains the queue a flush at a time. An uncontended settle flushes alone
+	// with no added latency; under load, where gates queue behind one another,
+	// each flush's wait collects the burst that shares it.
+	private async drainMaterialiseQueue(): Promise<void> {
+		try {
+			while (this.materialiseQueue.length > 0) {
+				await this.flushMaterialiseQueue();
+			}
+		} finally {
+			this.materialiseDrain = undefined;
+		}
 	}
 
 	// A verification pass is about to claim the pending rows, satisfying the
@@ -900,110 +1241,20 @@ export class CommitPipelineService {
 		return { account, blob, isCanonicalPresent: canonical !== null, isOwned };
 	}
 
-	// Makes a reserved narinfo servable, the edge-last half of the saga and the only
-	// place that writes the reference edge or clears the pending upload. The
-	// shared-fact reads arrive in the caller's probe, taken outside the gate so
-	// their round-trips never hold it; what runs here is the synchronous
-	// generation fence and one atomic D1 batch (the edge, presence and charge).
-	// The edge batch stays inside the gate because `reclaimReservedRow` and the
-	// offboard drain fence on the edge's existence. The served object is not
-	// written here: the caller publishes the returned narinfo after the gate
-	// through {@link NarInfoObjectsService.publishNarInfoObject}, whose per-path
-	// ordering and post-publish fence keep a stale object from outliving a gated
-	// delete or recommit. Every step is idempotent, so a crash before the caller
-	// resolves the pending upload leaves it re-drivable from its durable marker.
-	//
-	// Runs inside the caller's critical section; must not open its own. The
-	// probe may be stale by the time the gate runs: a fact deleted after it was
-	// probed converges exactly as a delete after the gate always has (the reaper
-	// demote re-drive), and the quota CHECK in the charge batch is the
-	// authoritative guard behind the probed decision.
-	async materialiseServable(
-		cache: string,
-		metadata: ParsedUploadPathNegotiation,
-		generation: number,
-		probe: MaterialisationProbe,
-		options: { readonly mustOwnBlob: boolean }
-	): Promise<MaterialiseOutcome> {
-		// A commit that passed the Worker's write gate while the tenant was active
-		// can still be settling here after the tenant was suspended or began
-		// offboarding. Publishing its edge now would re-reference a shared blob
-		// the drain is reclaiming, pinning it forever, so the caller reclaims the
-		// reserved row instead. The in-memory flag is re-checked inside the gate:
-		// the offboard drain runs its passes under `blockConcurrencyWhile` on this
-		// same instance after setting it, so the flag and the gate together keep
-		// an edge write from landing behind a drain pass. The single rule, publish
-		// only while the tenant is active, covers suspended, offboarding,
-		// offboarded and a missing row alike.
-		if (this.context.offboarding || probe.account?.status !== 'active') {
-			return { kind: 'tenant-inactive' };
-		}
-
-		if (probe.blob === undefined || !probe.isCanonicalPresent) {
-			return { kind: 'blob-gone' };
-		}
-
-		// A reuse binds a narinfo to bytes this tenant never re-proved, on the
-		// strength of its presence edge; with the edge gone (a delete credited it
-		// back) the reuse fails towards re-upload rather than re-referencing a
-		// hash the tenant no longer holds.
-		if (options.mustOwnBlob && !probe.isOwned) {
-			return { kind: 'blob-gone' };
-		}
-
-		const row = this.context.db
-			.select()
-			.from(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.cache, cache),
-					eq(schema.narInfos.storePathHash, metadata.storePathHash)
-				)
-			)
-			.get();
-
-		// A concurrent recommit may have replaced the row between reserve and now;
-		// only materialise the version this commit reserved, so the edge and the
-		// served object always describe the same narinfo version.
-		if (row?.generation !== generation || row.narHash !== metadata.narHash) {
-			return { kind: 'superseded' };
-		}
-
-		// The blob was probed present, so the narinfo renders from the row and the
-		// metadata already in hand.
-		const narInfo = this.narInfoObjects.buildNarInfo(row, probe.blob);
-
-		// Quota decision against the size that will actually be charged: the
-		// canonical `blob_state` size, which the promote may have adopted from an
-		// existing encoding and so can differ from the staged size the negotiate
-		// pre-check used. Returning here lets the caller reclaim the reserved row
-		// rather than charging; the charge batch re-fences the decision.
-		if (isOverQuota(probe.account, probe.isOwned, probe.blob.fileSize)) {
-			return { kind: 'over-quota' };
-		}
-
-		const tenant = this.context.requireTenant();
-
-		// The probed status can be stale by the whole probe-to-gate window; the
-		// charge batch is the authoritative fence, applying its writes only while
-		// the tenant row is active and reporting the refusal back.
-		const charged = await this.reserveEdgeAndCharge(
-			tenant,
-			cache,
-			metadata,
-			generation,
-			probe.blob
-		);
-
-		if (charged !== 'charged') {
-			return { kind: charged };
-		}
-
-		// The pending upload's lifecycle is the caller's: an inline commit clears the
-		// row (it returns `committed` synchronously), while a deferred commit records a
-		// terminal `servable` verdict for `push --wait` to observe. Both publish the
-		// returned narinfo's object first, after the gate.
-		return { kind: 'materialised', narInfo };
+	// Materialises a reserved narinfo through the shared flush queue: concurrent
+	// settles (socket commits and verify-pass verdicts alike) share one gate and
+	// one combined charge batch per flush, so a push of hundreds of paths costs
+	// a handful of gates. The request's probe arrives
+	// from outside any gate and may be stale by its flush; the charge batch is
+	// the authoritative guard, exactly as it is for a lone settle. The returned
+	// narinfo's object is the caller's to publish, after the flush.
+	async materialiseBatched(
+		request: MaterialiseRequest
+	): Promise<BatchedMaterialiseOutcome> {
+		return new Promise<BatchedMaterialiseOutcome>((resolve, reject) => {
+			this.materialiseQueue.push({ request, resolve, reject });
+			this.materialiseDrain ??= this.drainMaterialiseQueue();
+		});
 	}
 
 	// Removes a reserved narinfo row whose commit failed verification, leaving its

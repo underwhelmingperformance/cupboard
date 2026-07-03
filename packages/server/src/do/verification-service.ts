@@ -20,9 +20,10 @@ import {
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 
+import { mapWithConcurrency, maxOutgoingConnections } from './bulk.ts';
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
-import { type MaterialiseOutcome, type ServerContext } from './context.ts';
+import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type ReconcileTarget } from './reconcile-queue-service.ts';
@@ -305,33 +306,30 @@ export class VerificationService {
 		// its `blob_state` row exist; probing earlier would read them absent.
 		const probe = await this.commitPipeline.probeMaterialisation(metadata);
 
-		const outcome = await this.context.criticalSection(
-			async (): Promise<MaterialiseOutcome | { kind: 'gone' }> => {
+		const outcome = await this.commitPipeline.materialiseBatched({
+			cache: pending.cache,
+			metadata,
+			generation,
+			probe,
+			// A deferred settle proved its bytes (a fresh decode, or a reuse row
+			// negotiate admitted when the presence edge existed), so ownership is
+			// not re-required here; the first commit of a hash is not yet owned.
+			mustOwnBlob: false,
+			// A vanished row was settled elsewhere; a terminal one was settled by a
+			// competing pass during this apply's promote and probe awaits. Either
+			// way the row's fate is decided and this apply must not touch it. Runs
+			// inside the flush gate, so the check and the charge cannot interleave
+			// with a competing settle.
+			isStillSettleable: () => {
 				const current = this.context.db
 					.select()
 					.from(schema.pendingUploads)
 					.where(eq(schema.pendingUploads.id, pending.id))
 					.get();
 
-				// A vanished row was settled elsewhere; a terminal one was settled by a
-				// competing pass during this apply's promote and probe awaits. Either
-				// way the row's fate is decided and this apply must not touch it.
-				if (current === undefined || !isAwaitingVerdict(current)) {
-					return { kind: 'gone' };
-				}
-
-				return this.commitPipeline.materialiseServable(
-					pending.cache,
-					metadata,
-					generation,
-					probe,
-					// A deferred settle proved its bytes (a fresh decode, or a reuse row
-					// negotiate admitted when the presence edge existed), so ownership is
-					// not re-required here; the first commit of a hash is not yet owned.
-					{ mustOwnBlob: false }
-				);
+				return current !== undefined && isAwaitingVerdict(current);
 			}
-		);
+		});
 
 		if (outcome.kind === 'gone') {
 			return;
@@ -900,50 +898,56 @@ export class VerificationService {
 	}
 
 	// Settles a batch of verdicts the queue consumer decoded off the DO thread in
-	// one RPC, so a pass over many deferred uploads costs a single round trip into
-	// the DO rather than one per upload. The verdicts apply one at a time, each
-	// through the same idempotent reserve→commit path, so two never interleave their
-	// critical sections. One verdict's apply failing (a transient promote or commit
-	// fault) must not abort the rest of the batch or fail the queue message: its row
-	// is left for the next pass, the same fault isolation the per-upload RPCs had.
-	// Returns how many verdicts actually applied, so the caller continues the drain
-	// only on real progress rather than on a mere decode, and a batch whose every
+	// one RPC, so a pass over many deferred uploads costs a single round trip
+	// into the DO. The verdicts apply concurrently (each
+	// upload id is claimed once, so no two applies share a row) and their
+	// materialisations coalesce onto the shared flush, so a batch costs a
+	// handful of gates and charge batches. One
+	// verdict's apply failing (a transient promote or commit fault) must not
+	// abort the rest of the batch or fail the queue message: its row is left for
+	// the next pass, the same fault isolation the per-upload RPCs had. Returns
+	// how many verdicts actually applied, so the caller continues the drain only
+	// on real progress rather than on a mere decode, and a batch whose every
 	// apply fails backs off to the cron instead of spinning.
 	async recordVerifications(
 		results: readonly VerificationResult[]
 	): Promise<number> {
 		let applied = 0;
 
-		for (const { uploadId, verdict } of results) {
-			try {
-				if (verdict.kind === 'abandoned') {
-					// The consumer gave the claim up unsettled (a transient fault);
-					// free the lease so the next pass retries promptly. Not progress,
-					// so it does not count towards the continuation gate.
-					this.releaseLease(uploadId);
-					continue;
-				}
+		await mapWithConcurrency(
+			results,
+			maxOutgoingConnections,
+			async ({ uploadId, verdict }) => {
+				try {
+					if (verdict.kind === 'abandoned') {
+						// The consumer gave the claim up unsettled (a transient fault);
+						// free the lease so the next pass retries promptly. Not progress,
+						// so it does not count towards the continuation gate.
+						this.releaseLease(uploadId);
+						return;
+					}
 
-				if (verdict.kind === 'missing') {
-					await this.recordMissingObject(uploadId);
-				} else if (verdict.kind === 'promoted') {
-					await this.recordVerification(
+					if (verdict.kind === 'missing') {
+						await this.recordMissingObject(uploadId);
+					} else if (verdict.kind === 'promoted') {
+						await this.recordVerification(
+							uploadId,
+							{ ok: true },
+							'already-promoted'
+						);
+					} else {
+						await this.recordVerification(uploadId, verdict.verification);
+					}
+
+					applied += 1;
+				} catch (error) {
+					console.warn('verification verdict not recorded', {
 						uploadId,
-						{ ok: true },
-						'already-promoted'
-					);
-				} else {
-					await this.recordVerification(uploadId, verdict.verification);
+						error: error instanceof Error ? error.message : String(error)
+					});
 				}
-
-				applied += 1;
-			} catch (error) {
-				console.warn('verification verdict not recorded', {
-					uploadId,
-					error: error instanceof Error ? error.message : String(error)
-				});
 			}
-		}
+		);
 
 		return applied;
 	}
