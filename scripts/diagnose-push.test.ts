@@ -1,8 +1,12 @@
 import Cloudflare from 'cloudflare';
 import { describe, expect, it } from 'vitest';
 
+import { fakeCliUi } from '../packages/cli-ui/src/testing.ts';
+import type { ResultRow } from '../packages/reporter/src/reporter.ts';
+
 import {
 	analyse,
+	type Analysis,
 	bucketForLog,
 	bucketForTrace,
 	buildVerdict,
@@ -18,7 +22,9 @@ import {
 	parseTraceSummary,
 	parseWorkerLog,
 	percentile,
+	renderAnalysis,
 	sliceWindow,
+	slowestRows,
 	type SpanEvent,
 	summaryRows,
 	type TelemetryQuery,
@@ -876,5 +882,80 @@ describe('buildVerdict', () => {
 
 	it('explains an empty window', () => {
 		expect(buildVerdict([], true)).toBe('Traces carried no duration.');
+	});
+});
+
+// The fake UI records a note's rows joined the same way, so an expected note
+// body is built from the row helpers under test.
+const noteBody = (rows: readonly ResultRow[]): string =>
+	rows.map((row) => `${row.label}\t${row.value}`).join('\n');
+
+describe('renderAnalysis', () => {
+	const operations = [
+		operationStat({
+			bucket: 'PUT /cache/:cache/roots/:name',
+			totalMs: 400,
+			p95Ms: 400,
+			unaccountedMs: 300,
+			spans: [{ name: 'r2_head', count: 2, busyMs: 100 }]
+		})
+	];
+
+	const analysis: Analysis = {
+		worker: 'cupboard-tenant',
+		window: { from: 0, to: 10_000 },
+		windowSource: 'session',
+		invocations: 1,
+		tracedServerMs: 400,
+		wallSpanMs: 10_000,
+		tracingAvailable: true,
+		verdict: 'fine',
+		groups: [fetchGroupOf(operations)],
+		slowest: [
+			{
+				traceId: 't1',
+				bucket: 'PUT /cache/:cache/roots/:name',
+				durationMs: 400,
+				spans: 3,
+				startMs: 0,
+				errored: false
+			}
+		],
+		totals: { rowsRead: 20, rowsWritten: 10, errors: 0 }
+	};
+
+	it('writes the analysis alone to stdout in JSON mode', () => {
+		const { ui, captured } = fakeCliUi();
+
+		renderAnalysis(ui, ui.reporter(), 'json', analysis);
+
+		expect(captured.data).toStrictEqual([JSON.stringify(analysis)]);
+		expect(captured.results).toStrictEqual([]);
+		expect(captured.notes).toStrictEqual([]);
+	});
+
+	it('renders the result card and notes in terminal mode', () => {
+		const { ui, captured } = fakeCliUi();
+
+		renderAnalysis(ui, ui.reporter(), 'terminal', analysis);
+
+		expect(captured.data).toStrictEqual([]);
+		expect(captured.results).toStrictEqual([
+			{
+				kind: 'push-diagnostic',
+				data: analysis,
+				rows: summaryRows(analysis)
+			}
+		]);
+		expect(captured.notes).toStrictEqual([
+			{
+				title: 'fetch · 400ms · 1 traced',
+				body: noteBody(operationRows(operations))
+			},
+			{
+				title: 'Slowest invocations',
+				body: noteBody(slowestRows(analysis))
+			}
+		]);
 	});
 });
