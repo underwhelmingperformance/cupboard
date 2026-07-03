@@ -591,8 +591,8 @@ describe('the probe-to-charge window', () => {
 
 		try {
 			// The suspension lands while the probe is held, after its account read
-			// resolved active: only the in-gate status re-read stands between it
-			// and the charge.
+			// resolved active: only the charge batch's status fence stands between
+			// it and the charge.
 			await suspendTenant(fixtureTenant);
 			await env.BLOBS.put(releaseKey, 'go');
 			await pass;
