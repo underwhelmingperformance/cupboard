@@ -154,7 +154,11 @@ export class CommitPipelineService {
 	private async commitReusedBlob(
 		cache: string,
 		uploadId: string,
-		metadata: ParsedUploadPathNegotiation
+		metadata: ParsedUploadPathNegotiation,
+		// The caller's probe of the shared facts, taken alongside its advisory
+		// checks. It may be stale by the gate below; the charge batch is the
+		// authoritative guard.
+		probe: MaterialisationProbe
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
@@ -163,7 +167,6 @@ export class CommitPipelineService {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
 
-		const probe = await this.probeMaterialisation(metadata);
 		const outcome = await this.context.criticalSection(() =>
 			this.materialiseServable(cache, metadata, reserved.generation, probe, {
 				mustOwnBlob: true
@@ -433,68 +436,6 @@ export class CommitPipelineService {
 		return 'charged';
 	}
 
-	// Whether charging this hash would take the tenant over its quota. A hash the
-	// tenant already holds (no charge), an absent usage row, or an unset quota are all
-	// within quota. The caller passes the size that will actually be charged.
-	private async overQuota(
-		tenant: TenantId,
-		narHash: NixSha256HashString,
-		fileSize: number
-	): Promise<boolean> {
-		const usage = await this.context.d1
-			.select({
-				bytes: d1Schema.tenantUsage.bytes,
-				casBytes: d1Schema.tenantUsage.casBytes,
-				quotaBytes: d1Schema.tenantUsage.quotaBytes
-			})
-			.from(d1Schema.tenantUsage)
-			.where(eq(d1Schema.tenantUsage.tenant, tenant))
-			.get();
-
-		if (usage === undefined) {
-			return false;
-		}
-
-		if (usage.quotaBytes === null) {
-			return false;
-		}
-
-		const owned = await this.context.d1
-			.select({ narHash: d1Schema.tenantBlob.narHash })
-			.from(d1Schema.tenantBlob)
-			.where(
-				and(
-					eq(d1Schema.tenantBlob.tenant, tenant),
-					eq(d1Schema.tenantBlob.narHash, narHash)
-				)
-			)
-			.get();
-
-		if (owned !== undefined) {
-			return false;
-		}
-
-		return usage.bytes + usage.casBytes + fileSize > usage.quotaBytes;
-	}
-
-	// The size a commit of this hash will be charged: the canonical compressed size
-	// already recorded for the hash if one exists (the promote adopts that encoding),
-	// otherwise this upload's staged size, which becomes the canonical size. Used by
-	// the advisory pre-check; the authoritative charge reads the canonical size after
-	// the promote.
-	private async chargeSize(
-		narHash: NixSha256HashString,
-		stagedSize: number
-	): Promise<number> {
-		const existing = await this.context.d1
-			.select({ fileSize: d1Schema.blobState.fileSize })
-			.from(d1Schema.blobState)
-			.where(eq(d1Schema.blobState.narHash, narHash))
-			.get();
-
-		return existing?.fileSize ?? stagedSize;
-	}
-
 	// Arms the durable verify backstop for `now + verifyBackstopDelayMs`. An
 	// already-armed future deadline is never pushed later, so a stream of
 	// deferrals cannot starve an imminent firing; a past-due marker (the
@@ -686,13 +627,32 @@ export class CommitPipelineService {
 			};
 		}
 
-		const object =
-			(await this.context.env.BLOBS.head(pending.r2Key)) ?? undefined;
+		const canonicalKey = narObjectKey(metadata.narHash);
+
+		// The shared facts a commit decides on, probed once in one parallel wave:
+		// the advisory quota check reads them here and a reuse's materialise gate
+		// takes the same probe, so a commit never re-reads its account, blob state
+		// or canonical presence. A reuse's staged key is the canonical object
+		// itself, whose presence the probe already answers, so only a fresh upload
+		// heads its private staging object.
+		const [probe, stagedObject] = await Promise.all([
+			this.probeMaterialisation(metadata),
+			pending.r2Key === canonicalKey
+				? undefined
+				: this.context.env.BLOBS.head(pending.r2Key)
+		]);
 
 		// The staged object must exist before a commit can verify or promote it; its
 		// contents are checked by the decompression pass, not here, so a missing
 		// object is the only synchronous content failure.
-		if (object === undefined) {
+		const stagedSize =
+			pending.r2Key === canonicalKey
+				? probe.isCanonicalPresent
+					? (probe.blob?.fileSize ?? 0)
+					: undefined
+				: (stagedObject?.size ?? undefined);
+
+		if (stagedSize === undefined) {
 			throw new UploadedObjectNotFoundError(pending.r2Key);
 		}
 
@@ -704,9 +664,12 @@ export class CommitPipelineService {
 		// materialiseServable, so a concurrent promote that changes the size cannot
 		// let an over-quota commit through.
 		const tenant = this.context.requireTenant();
-		const estimate = await this.chargeSize(metadata.narHash, object.size);
+		const estimate = probe.blob?.fileSize ?? stagedSize;
 
-		if (await this.overQuota(tenant, metadata.narHash, estimate)) {
+		if (
+			probe.account !== undefined &&
+			isOverQuota(probe.account, probe.isOwned, estimate)
+		) {
 			throw new QuotaExceededError(tenant);
 		}
 
@@ -719,13 +682,11 @@ export class CommitPipelineService {
 		// marker.
 		this.uploadState.markUploadCommitting(uploadId);
 
-		const canonicalKey = narObjectKey(metadata.narHash);
-
 		// A reuse binds a new narinfo to a blob already in the verified CAS. It
 		// passed verify-before-serve when it was first promoted, so bind it without
 		// re-verifying its bytes.
 		if (pending.r2Key === canonicalKey) {
-			return this.commitReusedBlob(cache, uploadId, metadata);
+			return this.commitReusedBlob(cache, uploadId, metadata, probe);
 		}
 
 		// Verify-before-serve for a fresh upload staged under a private key. One
