@@ -8,9 +8,9 @@
 		"picocolors": "^1.1.1"
 	},
 	"devDependencies": {
-		"@types/node": "^25.9.1",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"@types/node": "25.9.1",
+		"typescript": "6.0.3",
+		"vitest": "4.1.8"
 	},
 	"exports": {
 		".": "./src/cli-ui.ts",

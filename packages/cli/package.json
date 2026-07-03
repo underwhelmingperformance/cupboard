@@ -29,13 +29,13 @@
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@types/make-fetch-happen": "^10.0.4",
-		"@types/node": "^25.9.1",
-		"@types/ws": "^8.18.1",
-		"esbuild": "^0.28.0",
-		"miniflare": "^4.20260603.0",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8"
+		"@types/make-fetch-happen": "10.0.4",
+		"@types/node": "25.9.1",
+		"@types/ws": "8.18.1",
+		"esbuild": "0.28.1",
+		"miniflare": "4.20260603.0",
+		"typescript": "6.0.3",
+		"vitest": "4.1.8"
 	},
 	"engines": {
 		"node": ">=24"
