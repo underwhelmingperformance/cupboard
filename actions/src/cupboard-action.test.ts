@@ -333,7 +333,9 @@ function verifiedAs(digest: string, commit: string): VerifiedBundle {
 					}
 				]
 			}
-		}
+		},
+		signedTimestampCount: 0,
+		tlogEntries: []
 	};
 }
 

@@ -6,7 +6,9 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	AttestationPredicateTypeMismatchError,
 	AttestationSubjectMismatchError,
-	type VerifiedIdentityPolicy
+	type VerifiedBundle,
+	type VerifiedIdentityPolicy,
+	type VerifyTrust
 } from '@cupboard/shared/sigstore';
 import type { Signer } from '@sigstore/verify';
 import { describe, expect, it } from 'vitest';
@@ -169,6 +171,33 @@ function verifiedSigner(policy: VerifiedIdentityPolicy): Signer {
 	};
 }
 
+const integratedTime = '2024-06-30T14:22:07.000Z';
+const tlogEntries = [{ logIndex: '148905233', integratedTime }];
+const signedTimestampCount = 1;
+const trust: VerifyTrust = {
+	tlogEntries,
+	timestampCount: signedTimestampCount,
+	signedAt: integratedTime
+};
+
+function verifiedBundle(
+	policy: VerifiedIdentityPolicy,
+	fields: {
+		readonly predicateType: string;
+		readonly subjectDigests: readonly string[];
+		readonly predicate?: unknown;
+	}
+): VerifiedBundle {
+	return {
+		predicateType: fields.predicateType,
+		subjectDigests: fields.subjectDigests,
+		signer: verifiedSigner(policy),
+		...(fields.predicate !== undefined && { predicate: fields.predicate }),
+		signedTimestampCount,
+		tlogEntries
+	};
+}
+
 async function generateSigningKeyPair(): Promise<Ed25519KeyPair> {
 	const fixture = signingKeyFixtureSequence.next().value;
 	const [privateKey, publicKey] = await Promise.all([
@@ -246,11 +275,12 @@ describe('local attestation verification', () => {
 						...verifierThresholds
 					});
 
-					return Promise.resolve({
-						predicateType,
-						subjectDigests: [narDigest],
-						signer: verifiedSigner(policy)
-					});
+					return Promise.resolve(
+						verifiedBundle(policy, {
+							predicateType,
+							subjectDigests: [narDigest]
+						})
+					);
 				}
 			}
 		);
@@ -261,7 +291,78 @@ describe('local attestation verification', () => {
 				predicateType,
 				subjectDigest: narDigest,
 				signerIdentity: 'alice@example.test',
-				signerIssuer: 'https://issuer.test'
+				signerIssuer: 'https://issuer.test',
+				trust
+			}
+		]);
+	});
+
+	it('surfaces the SLSA provenance summary from the predicate', async () => {
+		const predicate = {
+			buildDefinition: {
+				externalParameters: {
+					workflow: {
+						ref: 'refs/heads/main',
+						repository: 'https://github.com/owner/repo',
+						path: '.github/workflows/build.yml'
+					}
+				},
+				internalParameters: { github: { event_name: 'push' } },
+				resolvedDependencies: [
+					{
+						uri: 'git+https://github.com/owner/repo@refs/heads/main',
+						digest: { gitCommit: 'abc123' }
+					}
+				]
+			},
+			runDetails: {
+				builder: { id: 'https://github.com/actions/runner/github-hosted' },
+				metadata: {
+					invocationId:
+						'https://github.com/owner/repo/actions/runs/42/attempts/1'
+				}
+			}
+		};
+
+		const results = await verifyLocalAttestations(
+			{
+				bundles: ['bundle.sigstore.json'],
+				narHash,
+				predicateType,
+				certificateIdentity: policy.identity,
+				certificateOidcIssuer: policy.issuer
+			},
+			{
+				readFile: () => Promise.resolve(new Uint8Array([1])),
+				verify: () =>
+					Promise.resolve(
+						verifiedBundle(policy, {
+							predicateType,
+							subjectDigests: [narDigest],
+							predicate
+						})
+					)
+			}
+		);
+
+		expect(results).toStrictEqual([
+			{
+				bundle: 'bundle.sigstore.json',
+				predicateType,
+				subjectDigest: narDigest,
+				signerIdentity: 'alice@example.test',
+				signerIssuer: 'https://issuer.test',
+				provenance: {
+					builder: 'https://github.com/actions/runner/github-hosted',
+					sourceRepository: 'https://github.com/owner/repo',
+					sourceRef: 'refs/heads/main',
+					sourceRevision: 'abc123',
+					workflow: '.github/workflows/build.yml',
+					buildTrigger: 'push',
+					invocationId:
+						'https://github.com/owner/repo/actions/runs/42/attempts/1'
+				},
+				trust
 			}
 		]);
 	});
@@ -280,11 +381,12 @@ describe('local attestation verification', () => {
 					{
 						readFile: () => Promise.resolve(new Uint8Array([1])),
 						verify: () =>
-							Promise.resolve({
-								predicateType,
-								subjectDigests: ['0'.repeat(64)],
-								signer: verifiedSigner(policy)
-							})
+							Promise.resolve(
+								verifiedBundle(policy, {
+									predicateType,
+									subjectDigests: ['0'.repeat(64)]
+								})
+							)
 					}
 				);
 
@@ -327,11 +429,12 @@ describe('local attestation verification', () => {
 					{
 						readFile: () => Promise.resolve(new Uint8Array([1])),
 						verify: () =>
-							Promise.resolve({
-								predicateType: 'https://example.test/other',
-								subjectDigests: [narDigest],
-								signer: verifiedSigner(policy)
-							})
+							Promise.resolve(
+								verifiedBundle(policy, {
+									predicateType: 'https://example.test/other',
+									subjectDigests: [narDigest]
+								})
+							)
 					}
 				);
 
@@ -451,11 +554,12 @@ describe('remote attestation verification', () => {
 						...verifierThresholds
 					});
 
-					return Promise.resolve({
-						predicateType,
-						subjectDigests: [narDigest],
-						signer: verifiedSigner(policy)
-					});
+					return Promise.resolve(
+						verifiedBundle(policy, {
+							predicateType,
+							subjectDigests: [narDigest]
+						})
+					);
 				}
 			}
 		);
@@ -466,7 +570,8 @@ describe('remote attestation verification', () => {
 				predicateType,
 				subjectDigest: narDigest,
 				signerIdentity: 'alice@example.test',
-				signerIssuer: 'https://issuer.test'
+				signerIssuer: 'https://issuer.test',
+				trust
 			}
 		]);
 
@@ -520,11 +625,12 @@ describe('remote attestation verification', () => {
 					{
 						fetch: fetcher,
 						verify: () =>
-							Promise.resolve({
-								predicateType,
-								subjectDigests: [narDigest],
-								signer: verifiedSigner(policy)
-							})
+							Promise.resolve(
+								verifiedBundle(policy, {
+									predicateType,
+									subjectDigests: [narDigest]
+								})
+							)
 					}
 				);
 

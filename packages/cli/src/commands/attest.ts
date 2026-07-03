@@ -1,6 +1,8 @@
 import { env } from 'node:process';
 
-import { formatCount } from '@cupboard/reporter';
+import { formatCount, type ResultRow } from '@cupboard/reporter';
+import type { VerifyResult, VerifyTrust } from '@cupboard/shared/sigstore';
+import type { SlsaProvenanceSummary } from '@cupboard/shared/slsa';
 import type { Command } from 'commander';
 
 import {
@@ -223,18 +225,89 @@ export function registerAttestCommands(
 					{
 						label: 'Predicate types',
 						value: formatCount(predicateTypes.size)
-					}
+					},
+					...results.flatMap((result) => [
+						{ label: '', value: '' },
+						...bundleRows(result, options)
+					])
 				]
 			});
-
-			for (const result of results) {
-				reporter.info(
-					[
-						result.bundle,
-						result.predicateType,
-						result.signerIdentity ?? '(unknown signer)'
-					].join(' ')
-				);
-			}
 		});
+}
+
+function optionalRow(label: string, value: string | undefined): ResultRow[] {
+	return value === undefined ? [] : [{ label, value }];
+}
+
+function bundleRows(result: VerifyResult, options: VerifyOptions): ResultRow[] {
+	return [
+		{ label: 'Bundle', value: result.bundle },
+		{ label: 'Predicate', value: result.predicateType },
+		{ label: 'Subject', value: `sha256:${result.subjectDigest}` },
+		{ label: 'Signer', value: result.signerIdentity ?? '(unknown signer)' },
+		...optionalRow('Issuer', result.signerIssuer),
+		...provenanceRows(result.provenance),
+		...trustRows(result.trust, options)
+	];
+}
+
+function provenanceRows(
+	provenance: SlsaProvenanceSummary | undefined
+): ResultRow[] {
+	if (provenance === undefined) {
+		return [];
+	}
+
+	return [
+		...optionalRow('Source repo', provenance.sourceRepository),
+		...optionalRow('Source ref', provenance.sourceRef),
+		...optionalRow('Source commit', provenance.sourceRevision),
+		...optionalRow('Workflow', provenance.workflow),
+		...optionalRow('Build trigger', provenance.buildTrigger),
+		...optionalRow('Builder', provenance.builder),
+		...optionalRow('Run', provenance.invocationId)
+	];
+}
+
+function trustRows(trust: VerifyTrust, options: VerifyOptions): ResultRow[] {
+	const indexes = trust.tlogEntries.map((entry) => entry.logIndex).join(', ');
+
+	return [
+		...optionalRow('Signed at', trust.signedAt),
+		...optionalRow(
+			'Rekor log',
+			indexes === '' ? undefined : `index ${indexes}`
+		),
+		{
+			label: 'Transparency',
+			value: describeCount(
+				trust.tlogEntries.length,
+				'log entry',
+				'log entries',
+				options.tlogThreshold
+			)
+		},
+		{
+			label: 'Timestamps',
+			value: describeCount(
+				trust.timestampCount,
+				'signed',
+				'signed',
+				options.timestampThreshold
+			)
+		}
+	];
+}
+
+function describeCount(
+	count: number,
+	singular: string,
+	plural: string,
+	threshold: number | undefined
+): string {
+	const base = `${formatCount(count)} ${count === 1 ? singular : plural}`;
+
+	return threshold === undefined
+		? base
+		: `${base} (threshold ${formatCount(threshold)})`;
 }

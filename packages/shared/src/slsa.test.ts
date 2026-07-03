@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { slsaSourceCommit } from './slsa.ts';
+import { slsaProvenanceSummary, slsaSourceCommit } from './slsa.ts';
 
 function provenance(dependencies: readonly unknown[]): Record<string, unknown> {
 	return { buildDefinition: { resolvedDependencies: dependencies } };
@@ -98,5 +98,67 @@ describe('slsaSourceCommit', () => {
 		}
 	])('returns undefined when $name', ({ predicate }) => {
 		expect(slsaSourceCommit(predicate, sourceRepository)).toBeUndefined();
+	});
+});
+
+describe('slsaProvenanceSummary', () => {
+	const fullPredicate = {
+		buildDefinition: {
+			externalParameters: {
+				workflow: {
+					ref: 'refs/heads/main',
+					repository: 'https://github.com/owner/repo',
+					path: '.github/workflows/build.yml'
+				}
+			},
+			internalParameters: { github: { event_name: 'push' } },
+			resolvedDependencies: [
+				{
+					uri: 'git+https://github.com/owner/repo@refs/heads/main',
+					digest: { gitCommit: 'abc123' }
+				}
+			]
+		},
+		runDetails: {
+			builder: { id: 'https://github.com/actions/runner/github-hosted' },
+			metadata: {
+				invocationId: 'https://github.com/owner/repo/actions/runs/42/attempts/1'
+			}
+		}
+	};
+
+	it('summarises the build identity of a full provenance predicate', () => {
+		expect(slsaProvenanceSummary(fullPredicate)).toStrictEqual({
+			builder: 'https://github.com/actions/runner/github-hosted',
+			sourceRepository: 'https://github.com/owner/repo',
+			sourceRef: 'refs/heads/main',
+			sourceRevision: 'abc123',
+			workflow: '.github/workflows/build.yml',
+			buildTrigger: 'push',
+			invocationId: 'https://github.com/owner/repo/actions/runs/42/attempts/1'
+		});
+	});
+
+	it('omits fields the predicate does not record', () => {
+		expect(
+			slsaProvenanceSummary({
+				buildDefinition: {
+					externalParameters: {
+						workflow: { repository: 'https://github.com/owner/repo' }
+					}
+				}
+			})
+		).toStrictEqual({ sourceRepository: 'https://github.com/owner/repo' });
+	});
+
+	it.each([
+		{ name: 'an empty predicate', predicate: {} },
+		{ name: 'a non-object predicate', predicate: 'nope' },
+		{
+			name: 'a null build definition',
+			predicate: fromJson('{ "buildDefinition": null }')
+		}
+	])('returns undefined for $name', ({ predicate }) => {
+		expect(slsaProvenanceSummary(predicate)).toBeUndefined();
 	});
 });
