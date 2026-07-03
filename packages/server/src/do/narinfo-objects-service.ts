@@ -50,7 +50,92 @@ function referenceKey(
 }
 
 export class NarInfoObjectsService {
+	// The in-flight publish per (cache, path); see {@link publishNarInfoObject}.
+	private readonly publishes = new Map<string, Promise<void>>();
+
 	constructor(private readonly context: ServerContext) {}
+
+	// The link a publish adds to its path's chain: settle behind the previous
+	// publish (however it settled; its own caller heard any failure), then put
+	// the object and fence it.
+	private async chainedPublish(
+		previous: Promise<void> | undefined,
+		cache: string,
+		storePathHash: StorePathHash,
+		generation: number,
+		narHash: NixSha256HashString,
+		narInfo: NarInfo
+	): Promise<void> {
+		if (previous !== undefined) {
+			try {
+				await previous;
+			} catch {
+				// The earlier publish's caller heard its failure; this link only
+				// needs it settled so the puts stay ordered.
+			}
+		}
+
+		await this.putNarInfoObject(cache, storePathHash, narInfo);
+		await this.context.criticalSection(() =>
+			this.confirmPublishedObjectLocked(
+				cache,
+				storePathHash,
+				generation,
+				narHash
+			)
+		);
+	}
+
+	// The post-publish fence: the object landed outside any gate, so re-read the
+	// row under one. A row still naming the published version means nothing
+	// moved and the publish stands, at no gate cost beyond the synchronous read.
+	// Anything else means a delete or recommit gated between the charge and the
+	// object landing, so the object is rewritten from the row as this gate sees
+	// it: deleted with the row, or re-rendered to the version that superseded
+	// the published one.
+	private async confirmPublishedObjectLocked(
+		cache: string,
+		storePathHash: StorePathHash,
+		generation: number,
+		narHash: NixSha256HashString
+	): Promise<void> {
+		const row = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		if (row?.generation === generation && row.narHash === narHash) {
+			return;
+		}
+
+		if (
+			this.context.offboarding ||
+			row === undefined ||
+			!(await this.hasCommittedReference(cache, row))
+		) {
+			await this.context.env.BLOBS.delete(
+				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
+			);
+
+			return;
+		}
+
+		const narInfo = await this.narInfoFromRow(row);
+
+		// No shared fact means the blob was demoted; the demote path owns the
+		// object from here.
+		if (narInfo === undefined) {
+			return;
+		}
+
+		await this.putNarInfoObject(cache, storePathHash, narInfo);
+	}
 
 	// Re-materialises a lost narinfo object when the row, the matching reference
 	// edge, and the shared blob are still present. The caller must already hold the
@@ -137,6 +222,41 @@ export class NarInfoObjectsService {
 		await this.context.env.BLOBS.delete(
 			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
 		);
+	}
+
+	// Publishes a freshly materialised narinfo's object, keeping the R2 put out
+	// of the caller's critical section. Two guards keep a put that lands late
+	// from outliving what a gated delete or recommit decided meanwhile: the
+	// publishes for one path run in order behind each other, and each one
+	// re-reads the row under a short gate after its put. A row still naming the
+	// published version is the common case and costs the gate nothing beyond
+	// synchronous SQLite; anything else hands the path to the recovery that
+	// deletes or re-renders the object against the row as the gate sees it.
+	async publishNarInfoObject(
+		cache: string,
+		storePathHash: StorePathHash,
+		generation: number,
+		narHash: NixSha256HashString,
+		narInfo: NarInfo
+	): Promise<void> {
+		const key = `${cache} ${storePathHash}`;
+		const publish = this.chainedPublish(
+			this.publishes.get(key),
+			cache,
+			storePathHash,
+			generation,
+			narHash,
+			narInfo
+		);
+		this.publishes.set(key, publish);
+
+		try {
+			await publish;
+		} finally {
+			if (this.publishes.get(key) === publish) {
+				this.publishes.delete(key);
+			}
+		}
 	}
 
 	// Renders a narinfo by joining the tenant row (identity, uncompressed NarHash/

@@ -1,3 +1,4 @@
+import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
 	type RootName,
@@ -102,8 +103,9 @@ export type ReserveOutcome =
 	| { kind: 'mine'; generation: number }
 	| { kind: 'lost'; narHash: NixSha256HashString };
 
-// The outcome of materialising a reserved narinfo: `materialised` on success;
-// `superseded` when a concurrent recommit replaced the reserved version;
+// The outcome of materialising a reserved narinfo: `materialised` on success,
+// carrying the rendered narinfo whose object the caller publishes after the
+// gate; `superseded` when a concurrent recommit replaced the reserved version;
 // `blob-gone` when the shared blob (`blob_state` or the canonical object) is no
 // longer present and the path must be re-uploaded; `over-quota` when charging the
 // blob's canonical size would exceed the tenant's quota, so the caller reclaims the
@@ -111,11 +113,11 @@ export type ReserveOutcome =
 // active (suspended, offboarding, offboarded, or gone), so the caller reclaims the
 // reserved row rather than publishing an edge and object the drain would have to chase.
 export type MaterialiseOutcome =
-	| 'materialised'
-	| 'superseded'
-	| 'blob-gone'
-	| 'over-quota'
-	| 'tenant-inactive';
+	| { readonly kind: 'materialised'; readonly narInfo: NarInfo }
+	| { readonly kind: 'superseded' }
+	| { readonly kind: 'blob-gone' }
+	| { readonly kind: 'over-quota' }
+	| { readonly kind: 'tenant-inactive' };
 
 // The shared state every service is constructed with: the DO SQLite handle, the
 // global D1 handle, the runtime environment, the DO state (for critical

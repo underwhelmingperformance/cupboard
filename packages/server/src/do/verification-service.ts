@@ -22,7 +22,7 @@ import {
 
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
-import { type ServerContext } from './context.ts';
+import { type MaterialiseOutcome, type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type ReconcileTarget } from './reconcile-queue-service.ts';
@@ -305,33 +305,35 @@ export class VerificationService {
 		// its `blob_state` row exist; probing earlier would read them absent.
 		const probe = await this.commitPipeline.probeMaterialisation(metadata);
 
-		const outcome = await this.context.criticalSection(async () => {
-			const current = this.context.db
-				.select()
-				.from(schema.pendingUploads)
-				.where(eq(schema.pendingUploads.id, pending.id))
-				.get();
+		const outcome = await this.context.criticalSection(
+			async (): Promise<MaterialiseOutcome | { kind: 'gone' }> => {
+				const current = this.context.db
+					.select()
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, pending.id))
+					.get();
 
-			// A vanished row was settled elsewhere; a terminal one was settled by a
-			// competing pass during this apply's promote and probe awaits. Either
-			// way the row's fate is decided and this apply must not touch it.
-			if (current === undefined || !isAwaitingVerdict(current)) {
-				return 'gone' as const;
+				// A vanished row was settled elsewhere; a terminal one was settled by a
+				// competing pass during this apply's promote and probe awaits. Either
+				// way the row's fate is decided and this apply must not touch it.
+				if (current === undefined || !isAwaitingVerdict(current)) {
+					return { kind: 'gone' };
+				}
+
+				return this.commitPipeline.materialiseServable(
+					pending.cache,
+					metadata,
+					generation,
+					probe,
+					// A deferred settle proved its bytes (a fresh decode, or a reuse row
+					// negotiate admitted when the presence edge existed), so ownership is
+					// not re-required here; the first commit of a hash is not yet owned.
+					{ mustOwnBlob: false }
+				);
 			}
+		);
 
-			return this.commitPipeline.materialiseServable(
-				pending.cache,
-				metadata,
-				generation,
-				probe,
-				// A deferred settle proved its bytes (a fresh decode, or a reuse row
-				// negotiate admitted when the presence edge existed), so ownership is
-				// not re-required here; the first commit of a hash is not yet owned.
-				{ mustOwnBlob: false }
-			);
-		});
-
-		if (outcome === 'gone') {
+		if (outcome.kind === 'gone') {
 			return;
 		}
 
@@ -339,7 +341,7 @@ export class VerificationService {
 		// terminal `over-quota` verdict, the same shape as an inline over-quota commit.
 		// Otherwise a later verify pass, scanning narInfos, would restore its object and
 		// make an unreferenced, uncharged path servable.
-		if (outcome === 'over-quota') {
+		if (outcome.kind === 'over-quota') {
 			await this.failReservedUpload(
 				pending,
 				metadata,
@@ -354,7 +356,7 @@ export class VerificationService {
 		// over-quota rejection: left behind, a later scan would restore an
 		// unreferenced, uncharged object for it. The waiter hears `absent`, the
 		// same answer an inline commit's writes-stopped rejection amounts to.
-		if (outcome === 'tenant-inactive') {
+		if (outcome.kind === 'tenant-inactive') {
 			await this.context.criticalSection(() =>
 				this.commitPipeline.reclaimReservedRow(
 					pending.cache,
@@ -372,7 +374,18 @@ export class VerificationService {
 			return;
 		}
 
-		if (outcome === 'materialised') {
+		if (outcome.kind === 'materialised') {
+			// The object publishes after the gate; the waiters hear the verdict and
+			// the marker clears only once it has landed, so an interruption in
+			// between stays re-drivable from the durable marker.
+			await this.narInfoObjects.publishNarInfoObject(
+				pending.cache,
+				metadata.storePathHash,
+				generation,
+				metadata.narHash,
+				outcome.narInfo
+			);
+
 			// The parked sockets carry the verdict, and the narinfo itself is the
 			// durable evidence of success, so a settled upload leaves no residue:
 			// the row clears and the staging bytes go.
