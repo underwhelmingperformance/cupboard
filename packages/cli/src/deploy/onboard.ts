@@ -42,7 +42,7 @@ type Probe<T> =
 			readonly ray?: string;
 	  }
 	/** A terminal answer: the host responded with an error it will not recover
-	 * from, so polling stops at once rather than running out the attempts. */
+	 * from, so polling stops at once. */
 	| {
 			readonly kind: 'stop';
 			readonly detail: string;
@@ -580,7 +580,7 @@ async function ensureWorkerR2(dependencies: {
 			});
 	} catch (error) {
 		// An older deployment has no check route; the credentials stay
-		// unproven rather than the onboarding failing.
+		// unproven.
 		if (error instanceof ORPCError) {
 			ui.warn(
 				`Could not check the R2 credentials (the deployment answered ` +
@@ -691,8 +691,7 @@ async function ensureWorkerR2(dependencies: {
 /**
  * Settles the claim secret the signup must present: the value this deploy
  * already knows, the one the operator types when only the Worker holds it,
- * or none at all. A dismissed prompt withholds the claim rather than sending
- * one that is sure to be refused.
+ * or none at all. A dismissed prompt withholds the claim.
  */
 async function resolveClaimSecret(
 	ui: DeployUi,
@@ -911,8 +910,7 @@ async function attemptProbe<T>(
 				return { kind: 'retry', ...answer };
 			}
 
-			// A non-retryable 5xx is the server's own fault; stop and surface it,
-			// rather than retry it or throw it as if the request were malformed.
+			// A non-retryable 5xx is the server's own fault; stop and surface it.
 			if (error.status >= serverErrorStatus) {
 				return { kind: 'stop', ...answer };
 			}

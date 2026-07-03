@@ -82,10 +82,10 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 			'\nMost commands act on a deployment and need a session first: ' +
 				'run `cupboard login <url>`.'
 		)
-		// Throw a CommanderError instead of writing to stderr and exiting, and
-		// suppress commander's own error text, so a usage error (unknown command,
-		// missing argument) reaches the top-level funnel and is reported once in the
-		// active mode rather than as prose plus a usage block.
+		// Throw a CommanderError with commander's own error text suppressed, so a
+		// usage error (unknown command, missing argument) reaches the top-level
+		// funnel and is reported once in the active mode, not as prose plus a usage
+		// block.
 		.exitOverride()
 		.configureOutput({
 			outputError: () => {
@@ -125,8 +125,8 @@ export function colourFromGlobals(program: Command): boolean | undefined {
 
 /**
  * The {@link CliUi} for a command: the output mode comes from `--output-mode`
- * and the environment, the colour from `--colour`/`--no-colour`, wired to the
- * program's abort signal so an interrupted command renders its active spinner,
+ * and the environment, the colour from `--colour`/`--no-colour`, connected to
+ * the program's abort signal so an interrupted command renders its active spinner,
  * bar or task as cancelled. `assumeYes` carries a command's `--yes` flag through
  * to confirmations.
  */

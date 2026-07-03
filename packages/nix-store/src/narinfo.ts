@@ -28,7 +28,7 @@ export interface NarInfoFields {
 
 // A narinfo is a sequence of `Key: value` lines. Most keys appear once; `Sig`
 // may repeat. The lexer collects raw values per key, splitting on either line
-// ending, and a malformed line (no separator) is the only failure it owns —
+// ending, and a malformed line (no separator) is the only failure it owns;
 // every other rule belongs to the schema.
 export function parseFields(source: string): Record<string, string[]> {
 	const fields: Record<string, string[]> = {};

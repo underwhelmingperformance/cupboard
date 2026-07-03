@@ -127,8 +127,8 @@ export interface ReporterOptions {
 }
 
 // A long progress phase emits an interim `progress` event at most this often, so
-// a machine consumer (a CI log) sees a transfer advancing rather than silence
-// until it ends, without one event per byte.
+// a machine consumer (a CI log) sees a transfer advancing continuously, without
+// one event per byte.
 const progressIntervalMs = 2000;
 
 /**

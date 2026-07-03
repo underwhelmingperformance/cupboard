@@ -189,7 +189,7 @@ describe('tenantRpc', () => {
 
 		try {
 			// One attempt plus the four retries: every one fails, so the error
-			// surfaces rather than retrying forever.
+			// surfaces after the final attempt.
 			const { fetcher, captured } = capturingFetcher(
 				Array.from({ length: 5 }, () => internalError)
 			);

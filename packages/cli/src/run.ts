@@ -11,10 +11,9 @@ import { translateRpcError } from './client/rpc-errors.ts';
 import { CliAbortError } from './errors.ts';
 
 /**
- * Parse `argv` and run the matching command, returning the process exit code
- * rather than exiting. Both the ESM entry point and the bundled
- * single-executable entry call this, so they share one funnel for interrupts,
- * usage errors and reporting instead of each reimplementing it. `argv` defaults
+ * Parse `argv` and run the matching command, returning the process exit code.
+ * Both the ESM entry point and the bundled single-executable entry call this,
+ * sharing one funnel for interrupts, usage errors and reporting. `argv` defaults
  * to `process.argv`; pass an explicit list (including the node and program
  * placeholders) to drive it from a test.
  */

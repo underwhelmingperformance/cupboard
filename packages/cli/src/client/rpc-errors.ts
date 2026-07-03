@@ -15,8 +15,8 @@ const notFoundStatus: number = StatusCodes.NOT_FOUND;
  * there, so the server answers `NOT_FOUND`: the pending row expired and was
  * reaped, the staged bytes vanished before the commit ran, or the shared blob
  * a reuse commit was negotiated against was collected. The caller
- * re-negotiates the path rather than failing the push, since every one of
- * those recovers by planning afresh (a lost reuse re-plans as an upload).
+ * re-negotiates the path, since every one of those recovers by planning afresh
+ * (a lost reuse re-plans as an upload).
  * Prepare speaks oRPC and commit speaks the WebSocket, so the same condition
  * arrives as either an `ORPCError` or a {@link CupboardHttpError}.
  */

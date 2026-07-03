@@ -35,7 +35,7 @@ const wakeImmediately = new Date(0).toISOString();
 
 // The maintenance reconcile runs synchronously on each mutation, publishing the
 // tenant's wake time to D1 before the request returns: an existence check plus
-// index-backed lookups, cheap enough to run inline rather than on a debounce alarm.
+// index-backed lookups, cheap enough to run inline.
 // Running it inline narrows the window in which an eviction can strand a stale
 // not-due row to the gap between the committed write and the trailing reconcile.
 describe('maintenance reconcile', () => {
@@ -172,7 +172,7 @@ describe('maintenance reconcile', () => {
 		// time: the settled upload leaves no immediate work, so the sentinel wake clears
 		// to null and the timestamp advances off the seeded-stale value. Dropping the
 		// commit's reconcile would leave the stale row untouched. `reconciledAt` is the
-		// commit's wall-clock stamp, so assert it moved rather than its exact value.
+		// commit's wall-clock stamp, so assert it moved.
 		const row = await eligibilityRow();
 		expect({
 			tenant: row?.tenant,

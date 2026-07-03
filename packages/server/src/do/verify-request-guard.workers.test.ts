@@ -13,8 +13,8 @@ import {
 import { verifyRequestStaleMs } from './commit-pipeline-service.ts';
 
 // The verify request guard is single-flight while fresh: a second request
-// inside the staleness window rides the outstanding message, and one past it
-// presumes that message lost and sends again.
+// inside the staleness window coalesces with the outstanding message, and one
+// past it presumes that message lost and sends again.
 describe('verify request staleness guard', () => {
 	beforeEach(async () => {
 		vi.useFakeTimers();

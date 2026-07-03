@@ -105,8 +105,8 @@ const credentialProbeKey = '.cupboard-credential-probe';
  * leaving nothing behind: begin a multipart upload, then abort it. Beginning one
  * proves write access (a push stages every NAR as a multipart upload) and
  * creates no object, since only completing one would; the abort clears the
- * in-progress upload. Probing a write rather than a read is what lets a
- * write-only token pass, since a push uploads with a write-only credential.
+ * in-progress upload. Probing a write (not a read) lets a write-only token
+ * pass, since a push uploads with a write-only credential.
  * 401/403 means R2 rejected the pair.
  */
 export async function checkR2Credentials(

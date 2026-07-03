@@ -42,7 +42,7 @@ export async function parseFormBody<S extends z.ZodType>(
 	schema: S,
 	request: Request
 ): Promise<z.output<S>> {
-	// Decode the raw bytes rather than `request.text()`: the runtime warns when
+	// Decode the raw bytes directly: the runtime warns when
 	// `.text()` is called on a body whose type is not `text/*`, and a urlencoded
 	// body parses identically from its UTF-8 bytes.
 	const decoder = new TextDecoder();

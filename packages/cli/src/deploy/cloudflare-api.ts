@@ -59,10 +59,10 @@ export interface WorkerLogEvent {
 }
 
 /**
- * The Cloudflare operations the deploy pipeline performs, as a narrow seam over
- * the official SDK so the orchestration is testable against a fake. Every method
- * is reconcile-friendly: resource creators return the live id and are safe to
- * call when the resource already exists.
+ * The Cloudflare operations the deploy pipeline performs, as a narrow interface
+ * over the official SDK so the orchestration is testable against a fake. Every
+ * method is reconcile-friendly: resource creators return the live id and are
+ * safe to call when the resource already exists.
  */
 export interface CloudflareApi {
 	listAccounts(): Promise<AccountSummary[]>;
@@ -261,7 +261,7 @@ function managedLifecycleFields(rule: ManagedLifecycleFields): {
 /**
  * The real {@link CloudflareApi}, backed by the official SDK. Resource creators
  * look the resource up by name first and create it only when absent, so a
- * re-run converges rather than failing on conflicts.
+ * re-run converges; existing resources are updated in place.
  */
 export function createCloudflareApi(
 	client: Cloudflare,

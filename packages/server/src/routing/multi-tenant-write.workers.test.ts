@@ -40,7 +40,7 @@ import { fixtureTenant } from './tenant-routing.test-support.ts';
 const acme = tenantIdSchema.parse('acme');
 
 // Orders strings by UTF-16 code unit, matching the default `Array#sort()` for
-// strings. Referenced (rather than inlined) so the comparator is not mistaken
+// strings. Referenced so the comparator is not mistaken
 // for a numeric subtraction.
 function byCodeUnit(a: string, b: string): number {
 	if (a < b) {

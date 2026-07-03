@@ -12,13 +12,13 @@ import { generateEd25519KeyPair } from '../crypto/crypto.ts';
 export interface AccessClaims {
 	readonly subject: string;
 	readonly grants: AuthorizationDetails;
-	// When the bearer token itself expires. A credential the token mints must not
-	// outlive it, so issuance caps the credential's life at this instant.
+	// When the bearer token itself expires. Any credential derived from this
+	// token is capped at this instant, so it cannot outlive the token.
 	readonly expiresAt: Date;
 }
 
 // The issued-token type per RFC 9068, set in the header and verified on the way
-// back in. The grants ride in the RFC 9396 claim.
+// back in. The grants are carried in the RFC 9396 claim.
 const accessTokenType = 'at+jwt';
 const authorizationDetailsClaim = 'authorization_details';
 

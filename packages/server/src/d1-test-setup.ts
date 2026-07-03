@@ -29,8 +29,8 @@ import { clearAbandonedAlarms } from './test-support.ts';
 await applyD1Migrations(env.CUPBOARD_DB, env.TEST_MIGRATIONS);
 
 // D1 is a single shared binding the pool does not roll back between tests (the
-// per-test reset other state relies on — a fresh Durable Object via
-// resetTestServer — leaves D1 untouched). Wiping the global facts before each
+// per-test reset other state relies on, specifically a fresh Durable Object via
+// resetTestServer, leaves D1 untouched). Wiping the global facts before each
 // test gives every test the empty shared store it expects. Every D1 table must
 // be cleared here; add new ones as the schema grows.
 beforeEach(async () => {

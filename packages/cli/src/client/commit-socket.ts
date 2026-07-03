@@ -106,7 +106,7 @@ const keepaliveResponse = 'pong';
  *
  * A transient drop does not fail the push: the session reconnects with a capped
  * back-off and replays the outstanding work onto the fresh socket, so one blip
- * costs at most a brief pause rather than every in-flight commit.
+ * costs at most a brief pause.
  */
 export function runCommitSession(
 	connect: CommitSocketConnect,
@@ -320,8 +320,8 @@ export function runCommitSession(
 	};
 
 	// A drop on an established socket is treated as transient: reconnect and
-	// replay rather than fail, so a network blip does not lose the whole push. A
-	// refused upgrade is handled separately, as it will not heal on retry.
+	// replay, so a network blip does not lose the whole push. A refused upgrade
+	// is handled separately, as it will not heal on retry.
 	const onDrop = (error: Error): void => {
 		if (isClosed) {
 			return;

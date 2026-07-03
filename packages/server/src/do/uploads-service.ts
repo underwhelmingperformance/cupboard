@@ -253,9 +253,8 @@ export class UploadsService {
 		const existingRows = existingByStorePathHash.values().toArray();
 		// The edge check and the `blob_state` presence check are independent
 		// reads over the same row set, so they run concurrently. Presence is read
-		// for every existing row's hash rather than only the committed ones: a
-		// superset whose extra rows (mid-saga reservations) are rare, in exchange
-		// for one D1 wave instead of two.
+		// for every existing row's hash, a superset that includes mid-saga
+		// reservations, so both checks complete in one D1 wave.
 		const [committed, backedNarHashes] = await Promise.all([
 			facts?.committedEdges === undefined
 				? this.narInfoObjects.committedReferences(cache, existingRows)

@@ -47,8 +47,8 @@ interface Word64Scratch {
 
 // FNV-1a over everything past the 4-byte checksum field: an integrity guard so
 // a corrupted artifact (a bit flip, a partial KV write) is rejected at
-// deserialise and the caller falls open, rather than reading false negatives
-// out of a structurally valid but wrong filter and 404ing live tenants.
+// deserialise and the caller falls open, protecting against false negatives
+// from a structurally valid but wrong filter that would 404 live tenants.
 function bodyChecksum(bytes: Uint8Array): number {
 	let hash = 0x81_1c_9d_c5;
 

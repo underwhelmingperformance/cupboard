@@ -174,7 +174,7 @@ describe('Nix substitution', () => {
 
 			// Corrupt the compressed bytes so they no longer decode to the NAR the
 			// commit names. The server derives the hash from what was staged, so a
-			// commit over tampered bytes must fail verification rather than serve.
+			// commit over tampered bytes must fail verification.
 			const tampered = Uint8Array.from(
 				upload.compressed,
 				(byte) => byte ^ 0xff

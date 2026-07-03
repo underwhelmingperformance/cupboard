@@ -77,10 +77,10 @@ function expectCommitVerdictError(
 }
 
 // `tenant_usage` is charged once per tenant per unique NAR hash on the 0-to-1
-// presence transition and credited symmetrically on the 1-to-0. The charge rides
-// the reservation's atomic batch, gated so a replay neither double-charges nor
-// double-references, and an over-quota charge fails the table's CHECK so the whole
-// reservation rolls back.
+// presence transition and credited symmetrically on the 1-to-0. The charge is
+// applied in the reservation's atomic batch, gated so a replay neither
+// double-charges nor double-references, and an over-quota charge fails the
+// table's CHECK so the whole reservation rolls back.
 
 describe('per-tenant quota', () => {
 	beforeEach(async () => {
@@ -370,8 +370,7 @@ describe('per-tenant quota', () => {
 		await putNarBytes(decision.r2Key, small);
 		const commitError = await commitUploadRejection(token, decision.uploadId);
 		// A retry must not hang reporting pending: the over-quota verdict is
-		// terminal and its staging reclaimed, so the retry is refused outright
-		// rather than stranded re-driving.
+		// terminal and its staging reclaimed, so the retry is refused outright.
 		const retryError = await commitUploadRejection(token, decision.uploadId);
 
 		const usage = await tenantUsageRow();
@@ -444,7 +443,7 @@ describe('per-tenant quota', () => {
 		});
 
 		// The terminal over-quota row is reaped once its observation window has passed,
-		// the same as a mismatch row, rather than lingering forever.
+		// the same as a mismatch row.
 		vi.setSystemTime(new Date('2026-01-01T00:16:00.000Z'));
 		await currentServer().runGarbageCollection();
 

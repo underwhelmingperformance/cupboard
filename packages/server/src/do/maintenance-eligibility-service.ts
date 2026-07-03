@@ -16,8 +16,8 @@ import * as schema from '../db/schema.ts';
 import { type ServerContext } from './context.ts';
 
 // A tenant with work due now should be woken on the scheduler's next pass. We store a
-// fixed past instant rather than the moving current time, so the many mutations of a
-// single push leave the wake time unchanged and skip the redundant D1 write.
+// fixed past instant, so the many mutations of a single push leave the wake time
+// unchanged and skip the redundant D1 write.
 const wakeImmediately = new Date(0).toISOString();
 
 export class MaintenanceEligibilityService {
@@ -25,8 +25,8 @@ export class MaintenanceEligibilityService {
 
 	// Whether the tenant has work due now: an upload awaiting verification, or a queued
 	// narinfo deletion. Both are existence checks reached through an index, so the cost
-	// is flat in the in-flight set rather than a full count, which lets the wake time
-	// be recomputed on every mutation without the old quadratic read load.
+	// is flat in the in-flight set: a single indexed row lookup, so the wake time
+	// can be recomputed on every mutation without quadratic read load.
 	private hasImmediateWork(): boolean {
 		const awaitingVerification = this.context.db
 			.select({ present: sql`1` })

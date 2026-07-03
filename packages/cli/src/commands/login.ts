@@ -182,8 +182,8 @@ export function registerLoginCommand(
 				reporter.info('Waiting for you to authorise in your browser…');
 			};
 
-			// Login is interactive, so show its prompts the moment they happen
-			// rather than holding them behind a spinner the user is meant to act on.
+			// Login is interactive, so its prompts are shown the moment they happen,
+			// not held behind a spinner the user is meant to act on.
 			const idToken = await (async (): Promise<string> => {
 				// The built-in client against its own issuer uses the deploy's
 				// cached grant: silent while a cached login can be renewed, the

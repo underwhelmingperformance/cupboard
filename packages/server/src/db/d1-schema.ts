@@ -15,11 +15,11 @@ import {
 	text
 } from 'drizzle-orm/sqlite-core';
 
-// The global, cross-tenant shared-blob facts, held in D1 rather than any one
-// tenant's Durable Object SQLite. A row exists exactly when a verified shared
+// The global, cross-tenant shared-blob facts, held in D1 and shared across all
+// tenant Durable Objects. A row exists exactly when a verified shared
 // object lives at `nar/<nar_hash>.nar.zst`, so it is both the `available` set and
 // the canonical compressed metadata a servable narinfo advertises. Only positive
-// facts are recorded — a mismatch is kept on the per-upload record, never here —
+// facts are recorded; a mismatch is kept on the per-upload record, never here,
 // so one tenant's bad upload can never poison a hash for everyone.
 export const blobState = sqliteTable(
 	'blob_state',
@@ -88,7 +88,7 @@ export const controlAuthKey = sqliteTable('control_auth_key', {
 
 // The control-plane trust policy: which external OIDC identity may exchange a
 // subject token for the control grants `permitted_grants_json` permits. It
-// mirrors a tenant `oidc_trust` rule but is global — `iss`/`aud` must match and
+// mirrors a tenant `oidc_trust` rule but is global: `iss`/`aud` must match and
 // every `claims_json` entry (a pinned `sub` lives here) must match exactly. The
 // bootstrap owner is seeded with a wildcard by the gated first-signup claim;
 // scoped identities are added through the control admin API. `disabled_at`
@@ -139,7 +139,7 @@ export const tenant = sqliteTable(
 		readPasswordSalt: text('read_password_salt'),
 		// When the cron last ran maintenance (GC + verify) for this tenant. The sweep
 		// processes the most-overdue active tenants first and stamps this, so the
-		// table carries its own round-robin position rather than a separate cursor;
+		// table carries its own round-robin position (no separate cursor);
 		// NULL (a never-maintained tenant) sorts first, so a new tenant is picked up
 		// promptly.
 		lastMaintainedAt: text('last_maintained_at')

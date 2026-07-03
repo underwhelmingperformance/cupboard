@@ -9,7 +9,7 @@ import {
 
 // Pure store-path derivations, kept dependency-free so both the wire schemas
 // and the `StorePath` value object share one implementation. These return
-// `undefined` rather than throwing; callers that want a hard failure layer
+// `undefined` on failure; callers that want a hard failure layer
 // their own typed error on top.
 
 // Order strings by UTF-16 code unit, matching the default `Array#sort` order.
@@ -50,8 +50,7 @@ export interface ResolvedRootTarget {
 
 /**
  * A retention root is a set: collapses targets sharing a store-path hash to the
- * first occurrence, so a repeated path is idempotent rather than a primary-key
- * clash downstream. Targets are expected to be validated store paths; any whose
+ * first occurrence, so a repeated path is idempotent, with no primary-key clash downstream. Targets are expected to be validated store paths; any whose
  * hash cannot be derived are dropped.
  */
 export function resolveRootTargets(
@@ -105,7 +104,7 @@ export class StorePath {
 
 	// A `StorePath` is valid by construction: it parses its basename and hash up
 	// front and rejects anything that is not `/nix/store/<hash>-<name>`, so every
-	// instance carries those derived values rather than re-deriving them lazily.
+	// instance carries those derived values up front.
 	constructor(value: string) {
 		if (!value.startsWith('/nix/store/')) {
 			throw new InvalidStorePathError(value);

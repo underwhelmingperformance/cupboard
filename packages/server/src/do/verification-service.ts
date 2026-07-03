@@ -84,7 +84,7 @@ export type VerificationVerdict =
 export type PromotionState = 'promote' | 'already-promoted';
 
 // One upload's verdict, carried back to the DO so a whole batch settles in a
-// single RPC rather than one round trip per upload.
+// single RPC.
 export interface VerificationResult {
 	readonly uploadId: string;
 	readonly verdict: VerificationVerdict;
@@ -498,9 +498,9 @@ export class VerificationService {
 
 	// Probes a committed row's two R2 objects outside any critical section, so the
 	// round-trips never block a concurrent commit or delete. A transient R2 fault
-	// drops the row from this pass rather than aborting it. The narinfo object is
-	// only probed when its NAR is present: a missing NAR removes the row regardless
-	// of the narinfo object.
+	// drops the row from this pass, letting the batch continue. The narinfo object
+	// is only probed when its NAR is present: a missing NAR removes the row
+	// regardless of the narinfo object.
 	private async probeRow(row: NarInfoRow): Promise<RowObservation | undefined> {
 		try {
 			const tenant = this.context.requireTenant();
@@ -665,15 +665,15 @@ export class VerificationService {
 			.all();
 
 		// Probe R2 for every row outside any critical section, so the batch's
-		// round-trips never block a concurrent commit or delete. One row's
-		// transient R2 fault drops it from this pass rather than aborting the batch.
+		// round-trips never block a concurrent commit or delete. A transient R2
+		// fault on one row drops it from this pass, letting the batch continue.
 		const observations = await Promise.all(
 			rows.map((row) => this.probeRow(row))
 		);
 
 		// Apply the reconciles and advance the cursor in one short critical section.
 		// What remains inside the gate is fast synchronous SQLite plus the rare write
-		// for an unhealthy row, instead of every row's R2 round-trips.
+		// for an unhealthy row.
 		return this.context.criticalSection(async () => {
 			let narInfoObjectsRestored = 0;
 			let danglingNarInfosRemoved = 0;
@@ -838,8 +838,7 @@ export class VerificationService {
 			} catch (error) {
 				if (error instanceof UploadedObjectNotFoundError) {
 					// The canonical object is gone and cannot reappear: answer the
-					// waiter terminally instead of retrying the same vanished object
-					// every firing.
+					// waiter terminally so the lease is not wasted on a stale row.
 					await this.recordMissingObject(pending.id);
 					settled += 1;
 					continue;
@@ -907,8 +906,7 @@ export class VerificationService {
 	// abort the rest of the batch or fail the queue message: its row is left for
 	// the next pass, the same fault isolation the per-upload RPCs had. Returns
 	// how many verdicts actually applied, so the caller continues the drain only
-	// on real progress rather than on a mere decode, and a batch whose every
-	// apply fails backs off to the cron instead of spinning.
+	// on real progress; a batch whose every apply fails backs off to the cron.
 	async recordVerifications(
 		results: readonly VerificationResult[]
 	): Promise<number> {
@@ -953,8 +951,8 @@ export class VerificationService {
 	}
 
 	// Records the terminal outcome for a deferred upload whose bytes the queue
-	// consumer found definitively gone, so its waiters are answered rather than
-	// left parked until the commit timeout. A fresh row's staging object cannot
+	// consumer found definitively gone, so its waiters are answered promptly. A
+	// fresh row's staging object cannot
 	// reappear, so it fails as `mismatch`. A reuse row's bytes are the shared
 	// canonical object, whose disappearance says nothing against the client's
 	// upload: the row is dropped and its waiters told `absent`, the answer that

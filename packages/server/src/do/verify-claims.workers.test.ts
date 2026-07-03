@@ -113,7 +113,7 @@ describe('claiming a verification batch', () => {
 
 		// The first claim takes the whole backlog; a duplicate pass (the alarm
 		// backstop's re-request, an overlapping cron) inside the lease window
-		// must claim nothing rather than re-decode the same rows.
+		// must claim nothing.
 		const first = await currentServer().claimVerificationBatch(
 			10,
 			Number.MAX_SAFE_INTEGER
@@ -204,7 +204,7 @@ describe('claiming a verification batch', () => {
 		const upload = await deferFreshUpload(token, 'cron-lease', 'a'.repeat(32));
 
 		// The consumer holds the claim; the hourly cron crossing its pass must
-		// leave the row alone rather than decode it a second time on the DO.
+		// leave the row alone.
 		await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
 		await currentServer().runVerification();
 

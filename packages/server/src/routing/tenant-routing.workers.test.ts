@@ -117,8 +117,7 @@ describe('tenant routing', () => {
 		);
 
 		// Both the key set and the AS metadata route to the Durable Object, so an
-		// unconfigured tenant advertises no identity at all rather than serving
-		// edge-built metadata for an issuer it has not been assigned.
+		// unconfigured tenant advertises no identity.
 		expect({ jwks: jwks.status, asMetadata: asMetadata.status }).toStrictEqual({
 			jwks: StatusCodes.SERVICE_UNAVAILABLE,
 			asMetadata: StatusCodes.SERVICE_UNAVAILABLE
@@ -156,7 +155,7 @@ describe('tenant routing', () => {
 		await provisionNamedTenant('acme');
 
 		// No token: the write is dispatched to the tenant's object, which rejects it as
-		// unauthorised, rather than the Worker refusing every named write.
+		// unauthorised.
 		const response = await handlerFetch(
 			'/t/acme/cache/_default/uploads',
 			writeRequest()

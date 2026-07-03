@@ -116,7 +116,7 @@ export class InvalidNixDaemonHashError extends NixDaemonError {
 
 // Raised when a connection finishes opening after the pool was closed (the
 // closure walk aborted). The connection is closed and this is thrown so the
-// abandoned query settles rather than using a dead socket.
+// abandoned query settles on a closed-pool error without using a dead socket.
 export class NixDaemonConnectionPoolClosedError extends NixDaemonError {
 	constructor() {
 		super('Nix daemon connection pool closed during closure walk');
@@ -215,8 +215,8 @@ class NixDaemonConnectionPool {
 
 			// `closeAll` may have run while this connection was opening (a sibling
 			// query rejected and aborted the walk). It iterated a snapshot taken
-			// before this connection existed, so close it here rather than retain a
-			// leaked socket the pool will never end.
+			// before this connection existed, so close it here to avoid retaining a
+			// leaked socket the pool will never clean up.
 			if (this.closed) {
 				connection.close();
 				throw new NixDaemonConnectionPoolClosedError();

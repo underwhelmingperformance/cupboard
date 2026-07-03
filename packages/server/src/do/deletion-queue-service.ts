@@ -149,9 +149,9 @@ export class DeletionQueueService {
 		]);
 	}
 
-	// Whether no committed narinfo, in any tenant, still references this NAR hash —
-	// the "safe to reclaim" probe, on `blob_ref` (its indexed `nar_hash`) rather than
-	// any one tenant's narinfos. The reaper does the actual reclamation against
+	// Whether no committed narinfo, in any tenant, still references this NAR hash:
+	// the "safe to reclaim" probe, on `blob_ref` (its indexed `nar_hash`) across
+	// all tenants' narinfos. The reaper does the actual reclamation against
 	// `blob_state.delete_after`; a delete only reports this so a client learns its
 	// NAR became unreferenced.
 	private async blobHashUnreferenced(

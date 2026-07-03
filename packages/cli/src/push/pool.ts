@@ -1,7 +1,7 @@
 /**
  * Run `worker` over `items` with at most `limit` in flight at once, preserving
  * no order. The first worker rejection stops new items from being scheduled and
- * propagates, so a failed upload aborts the batch rather than pressing on.
+ * propagates, so a failed upload aborts the batch immediately.
  */
 export async function runWithConcurrency<T>(
 	items: readonly T[],

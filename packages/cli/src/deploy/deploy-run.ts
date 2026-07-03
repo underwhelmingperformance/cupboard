@@ -290,7 +290,7 @@ export function hasMatchingBindings(
 
 function canonicalise(bindings: readonly unknown[]): string[] {
 	// Both sides of the equality check run through this same comparator, so the
-	// absolute order does not matter — only that it is a consistent total order.
+	// absolute order does not matter, only that it is a consistent total order.
 	return bindings
 		.map((binding) => canonicalJson(binding))
 		.toSorted((a, b) => a.localeCompare(b));

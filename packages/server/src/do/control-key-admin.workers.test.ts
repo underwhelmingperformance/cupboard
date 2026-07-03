@@ -84,7 +84,7 @@ describe('control key administration', () => {
 		const afterRetire = await liveControlKids();
 
 		// The token is signed by the first key, which is still live, so this call
-		// authenticates — and is refused only because it would retire the last key.
+		// authenticates, and is refused only because it would retire the last key.
 		const retireLast = await controlFetch(
 			`/control/keys/retire/${firstKid}`,
 			authed(token)

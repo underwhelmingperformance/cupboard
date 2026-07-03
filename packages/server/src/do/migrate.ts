@@ -28,7 +28,7 @@ const statementBreakpoint = '--> statement-breakpoint';
  * Thrown when a migration statement fails for a reason other than the change
  * already being present. It names the migration and the offending statement and
  * keeps the underlying database error as its cause, so the real fault reaches
- * the logs instead of the opaque rollback Drizzle's bundled migrator surfaces.
+ * the logs.
  */
 export class DurableObjectMigrationError extends Error {
 	constructor(
@@ -85,7 +85,7 @@ function statementsOf(bundle: MigrationBundle, entry: JournalEntry): string[] {
 // SQLite reports an additive change that is already in place with one of these.
 // Re-running such a statement against a store that already holds the object is a
 // no-op, so a Durable Object whose migration history diverged from this build
-// converges instead of wedging on the first conflict.
+// converges.
 function isAlreadyApplied(error: unknown): boolean {
 	return causeMessages(error).some(
 		(message) =>
@@ -163,9 +163,8 @@ function applyMigration<TSchema extends Record<string, unknown>>(
  *
  * A migration is applied unless its tag is already recorded or it predates the
  * latest recorded timestamp, so a store Drizzle's migrator already tracked is
- * reconciled once and tag-tracked thereafter. Tracking by tag, rather than by
- * timestamp alone, keeps a regenerated migration from re-running when its
- * journal timestamp changes. Each migration runs in its own transaction, and a
+ * reconciled once and tag-tracked thereafter. Tag tracking ensures a regenerated
+ * migration does not re-run when its journal timestamp changes. Each migration runs in its own transaction, and a
  * genuine statement failure is raised with its cause attached.
  */
 export function applyMigrations<TSchema extends Record<string, unknown>>(

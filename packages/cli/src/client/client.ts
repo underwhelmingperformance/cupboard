@@ -98,8 +98,8 @@ export class CupboardClient {
 		return body.trimEnd();
 	}
 
-	// Routes that moved onto the contract address the default cache by its wire
-	// alias rather than a bare path, so the selector form is always prefixed.
+	// Routes on the contract address the default cache by its wire alias, so the
+	// selector form is always prefixed.
 	private selectorScoped(path: string): string {
 		return this.cachePrefix === ''
 			? `/cache/${WIRE_DEFAULT_CACHE}${path}`
@@ -144,8 +144,8 @@ export class CupboardClient {
 
 	// A failed token grant fails the whole CI run or push behind it, so a
 	// transient refusal (a control-plane blip, an unreachable issuer) is retried
-	// with backoff rather than surfaced; a 503 is only retried when the server
-	// marks it temporary with a Retry-After.
+	// with backoff. A 503 is only retried when the server marks it temporary
+	// with a Retry-After.
 	private async postTokenForm(
 		form: Readonly<Record<string, string>>
 	): Promise<Response> {
@@ -289,9 +289,9 @@ export class CupboardClient {
 
 	/**
 	 * Claims (or idempotently re-claims) global admin of the deployment at the
-	 * bootstrap `POST /signup` endpoint. The endpoint is unauthenticated — the
+	 * bootstrap `POST /signup` endpoint. The endpoint is unauthenticated (the
 	 * external OIDC subject token is the credential, judged against the
-	 * deployment's signup gate — and takes a urlencoded body.
+	 * deployment's signup gate) and takes a urlencoded body.
 	 */
 	async signup(request: SignupRequest): Promise<ParsedSignupResponse> {
 		throwIfAborted(this.signal);
@@ -325,8 +325,8 @@ export class CupboardClient {
 
 	/**
 	 * Exchanges an external OIDC subject token for a cupboard access token at the
-	 * OAuth `POST /token` endpoint. The endpoint is unauthenticated — the subject
-	 * token is the credential — and takes a urlencoded body, so it bypasses the
+	 * OAuth `POST /token` endpoint. The endpoint is unauthenticated (the subject
+	 * token is the credential) and takes a urlencoded body, so it bypasses the
 	 * JSON request path the rest of the client uses.
 	 */
 	async tokenExchange(

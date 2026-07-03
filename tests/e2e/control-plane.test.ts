@@ -71,7 +71,7 @@ function isJwtVerifiedAgainst(
 	}
 
 	// The signing algorithm is determined by the key type for Ed25519, so it is
-	// passed as `undefined` rather than a digest name.
+	// passed as `undefined` for Ed25519 key types.
 	return verifyEd25519(
 		undefined,
 		Buffer.from(`${headerPart}.${payloadPart}`),
@@ -107,10 +107,10 @@ describe('control plane token exchange', () => {
 					body: body.toString()
 				});
 
-				const minted = tokenResponseSchema.parse(await response.json());
-				const claims = decodeJwtClaims(minted.access_token);
+				const issued = tokenResponseSchema.parse(await response.json());
+				const claims = decodeJwtClaims(issued.access_token);
 
-				// A control key is published, and the minted token carries the control
+				// A control key is published, and the issued token carries the control
 				// identity: the control issuer (the bare-host origin), the control
 				// audience, the wildcard grant, and the verified external subject.
 				const jwksResponse = await fetch(
@@ -128,7 +128,7 @@ describe('control plane token exchange', () => {
 
 				expect({
 					tokenStatus: response.status,
-					responseGrants: minted.authorization_details,
+					responseGrants: issued.authorization_details,
 					controlJwksStatus: jwksResponse.status,
 					tenantJwksStatus: tenantJwksResponse.status,
 					iss: claims.iss,
@@ -138,11 +138,11 @@ describe('control plane token exchange', () => {
 					controlKeyCount: jwks.keys.length,
 					tenantKeyCount: tenantJwks.keys.length,
 					verifiesAgainstControlKeys: isJwtVerifiedAgainst(
-						minted.access_token,
+						issued.access_token,
 						jwks.keys
 					),
 					verifiesAgainstTenantKeys: isJwtVerifiedAgainst(
-						minted.access_token,
+						issued.access_token,
 						tenantJwks.keys
 					)
 				}).toStrictEqual({

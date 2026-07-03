@@ -17,7 +17,7 @@ const pushCredentialMaxTtlSeconds = 6 * 60 * 60;
 
 // The life a credential gets: the time the access token has left, never beyond
 // the cap and never below a second. Bounding it by the token means a credential
-// cannot outlive the authorisation that minted it.
+// cannot outlive the authorisation that issued it.
 export function pushCredentialTtlSeconds(
 	tokenExpiresAt: Date,
 	now: Date
@@ -65,7 +65,7 @@ export class PushCredentialIssuer {
 		ttlSeconds: number,
 		now: Date
 	): Promise<PushCredential> {
-		// Granted by the write-only action set rather than a scope: R2 rejects a
+		// Granted by the write-only action set: R2 rejects a
 		// credential carrying both a scope and an actions claim, and the actions
 		// leave the credential unable to read another upload's staged bytes. The
 		// staging prefix confines it to this push.

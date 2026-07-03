@@ -166,7 +166,7 @@ export function fromNixBase32(value: string): Uint8Array {
 			if (sourceBit >= bytes.byteLength * 8) {
 				// The most-significant base32 digit spans more bits than a 256-bit
 				// digest holds. A canonical encoding leaves those overflow bits zero,
-				// so reject a value that sets them instead of silently dropping them.
+				// so a value that sets them is rejected.
 				if (bitValue === 1) {
 					throw new InvalidNixSha256HashError(value);
 				}

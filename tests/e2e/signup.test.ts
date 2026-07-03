@@ -58,7 +58,7 @@ describe('control plane signup bootstrap', () => {
 					claim_secret: signupSecret
 				});
 
-				// The claim seeded control trust, so this principal can now mint a
+				// The claim seeded control trust, so this principal can now obtain a
 				// control admin token.
 				const exchange = await postForm(new URL('/token', server.url), {
 					grant_type: tokenExchangeGrantType,
@@ -68,14 +68,14 @@ describe('control plane signup bootstrap', () => {
 					}),
 					subject_token_type: subjectTokenTypeIdToken
 				});
-				const minted = tokenResponseSchema.parse(await exchange.json());
+				const issued = tokenResponseSchema.parse(await exchange.json());
 
 				// The admin token provisions a tenant.
 				const create = await fetch(new URL('/control/tenants', server.url), {
 					method: 'POST',
 					headers: {
 						'content-type': 'application/json',
-						authorization: `Bearer ${minted.access_token}`
+						authorization: `Bearer ${issued.access_token}`
 					},
 					body: JSON.stringify({
 						id: 'acme',
@@ -89,13 +89,13 @@ describe('control plane signup bootstrap', () => {
 					signupStatus: signup.status,
 					badGateStatus: badGate.status,
 					intruderStatus: intruder.status,
-					mintedGrants: minted.authorization_details,
+					issuedGrants: issued.authorization_details,
 					createStatus: create.status
 				}).toStrictEqual({
 					signupStatus: 200,
 					badGateStatus: 403,
 					intruderStatus: 409,
-					mintedGrants: [{ type: 'cupboard_wildcard' }],
+					issuedGrants: [{ type: 'cupboard_wildcard' }],
 					createStatus: 200
 				});
 				expect(await signup.json()).toStrictEqual({

@@ -27,8 +27,8 @@ function expectCommitSocketError(
 
 // A reuse commit binds a narinfo to bytes the tenant never re-proves, on the
 // strength of its presence edge for the hash. With the edge credited back by a
-// delete between negotiate and commit, the commit must fail towards re-upload
-// rather than re-reference a hash the tenant no longer holds.
+// delete between negotiate and commit, the commit must fail towards re-upload:
+// the presence edge is gone.
 describe('reuse commit ownership', () => {
 	beforeEach(resetTestServer);
 

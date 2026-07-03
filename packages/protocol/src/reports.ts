@@ -34,7 +34,7 @@ export type ParsedCheckReport = z.output<typeof checkReportSchema>;
 // One bounded pass of background verification: how many narinfo rows it scanned,
 // how many missing narinfo objects it re-materialised, how many dangling
 // narinfos (their NAR gone) it removed, and the resume position as a composite
-// (cursorCache, cursor) — both empty once the scan has wrapped, so the next pass
+// (cursorCache, cursor), both empty once the scan has wrapped, so the next pass
 // starts at the first cache's lowest store path hash.
 export const verifyReportSchema = z.strictObject({
 	scanned: countSchema,

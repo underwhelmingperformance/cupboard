@@ -27,7 +27,7 @@ export const claimMatchSchema = z.union([
 export type ClaimMatch = z.infer<typeof claimMatchSchema>;
 
 // RFC 8693 token-exchange issues the first cupboard token of a session. The
-// subject token is an external OIDC JWT — the owner's `id_token` or a CI GitHub
+// subject token is an external OIDC JWT: the owner's `id_token` or a CI GitHub
 // Actions token. The issued cupboard token is reported as an access token.
 export const tokenExchangeGrantType =
 	'urn:ietf:params:oauth:grant-type:token-exchange';
@@ -51,15 +51,15 @@ export const subjectTokenTypeJwt = 'urn:ietf:params:oauth:token-type:jwt';
 // The `authorization_details` a client requests: the RFC 9396 array as a
 // JSON-encoded form field, carried as an opaque string here. The token service
 // parses and validates it, so a malformed or unpermitted value answers
-// `invalid_authorization_details` rather than a generic `invalid_request` from
-// the body validator. A claim-bound (CI) rule must send it; an interactive
+// `invalid_authorization_details` from the token service. A claim-bound (CI)
+// rule must send it; an interactive
 // owner may omit it and receive a wildcard.
 const requestedAuthorizationDetailsSchema = z.string().min(1);
 
 // The optional fields RFC 8693 permits (`audience`, `scope`, `resource`, …) are
 // accepted and ignored: the matched trust rule alone fixes the issued audience,
-// so a non-strict object strips them rather than rejecting the request.
-// `authorization_details` is the one optional field cupboard reads.
+// so a non-strict object strips them. `authorization_details` is the one
+// optional field cupboard reads.
 export const tokenExchangeRequestSchema = z.object({
 	grant_type: z.string().min(1),
 	subject_token: z.string().min(1),
@@ -72,8 +72,7 @@ export type ParsedTokenExchangeRequest = z.output<
 
 // The tenant token endpoint's request, before grant dispatch: only the grant
 // type is required here, and each grant validates its own fields afterwards,
-// so an unknown grant type answers `unsupported_grant_type` rather than a
-// generic schema failure.
+// so an unknown grant type answers `unsupported_grant_type`.
 export const tokenRequestSchema = z.object({
 	grant_type: z.string().min(1),
 	subject_token: z.string().min(1).optional(),

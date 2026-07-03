@@ -11,7 +11,7 @@ interface Recorded {
 /**
  * A Cloudflare client whose HTTP layer is a fake: responses are looked up by
  * `METHOD path` (paths relative to the v4 API root), and every request is
- * recorded. This exercises the real seam code against wire shapes the live
+ * recorded. This exercises the real interface code against wire shapes the live
  * API actually produces, which the SDK's published types do not always match.
  */
 function fakeCloudflare(routes: Readonly<Record<string, unknown>>): {

@@ -78,8 +78,8 @@ export function settlePushIdSigningKey(existing: {
  * Assemble the per-Worker secrets from the environment and the resolved
  * deployment facts. `R2_ACCOUNT_ID` and `R2_BUCKET_NAME` are derived; the
  * sensitive values come from the environment. Names whose required value is
- * absent are returned in `missing` so the caller can warn rather than deploy a
- * cache that cannot run.
+ * absent are returned in `missing` so the caller can warn before deploying a
+ * cache that would fail to start.
  */
 export function assembleSecrets(inputs: SecretInputs): AssembledSecrets {
 	const missing: string[] = [];

@@ -25,7 +25,7 @@ const storedGrantSchema = z.object({
 /**
  * Reads the cached Cloudflare grant, or undefined when none is stored or the
  * file does not parse (a corrupt cache reads as absent, so the caller logs in
- * again rather than failing).
+ * again on parse failure).
  */
 export async function readCachedGrant(): Promise<CloudflareGrant | undefined> {
 	const contents = await readSecretFile(grantFilePath());

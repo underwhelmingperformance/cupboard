@@ -2,7 +2,7 @@ import { InvalidWorkerUrlError, UnreachableHostError } from '../errors.ts';
 
 /**
  * Parse a Worker URL, turning a malformed value into a typed usage error that
- * names the offending input rather than a bare `TypeError [ERR_INVALID_URL]`.
+ * naming the offending input.
  */
 export function parseWorkerUrl(value: string | URL): URL {
 	try {
@@ -14,9 +14,8 @@ export function parseWorkerUrl(value: string | URL): URL {
 
 /**
  * Wrap a fetcher so a network-level failure (DNS lookup, refused connection)
- * surfaces as a typed {@link UnreachableHostError} naming the host, rather than
- * a bare `TypeError: fetch failed`. An abort is a `DOMException`, not a
- * `TypeError`, so it propagates unchanged.
+ * surfaces as a typed {@link UnreachableHostError} naming the host. An abort
+ * is a `DOMException`, not a `TypeError`, so it propagates unchanged.
  */
 export function reachableFetcher(fetcher: typeof fetch): typeof fetch {
 	return async (input, init) => {

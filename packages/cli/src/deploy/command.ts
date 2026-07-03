@@ -1148,7 +1148,7 @@ async function deployFlow(
 		const controlSecrets = [...assembled.secrets.control];
 		const tenantSecrets = [...assembled.secrets.tenant];
 		// The R2 pair is settled after the review (kept, created or entered),
-		// so its absence is pending work rather than a problem to warn about.
+		// so its absence here is pending work.
 		const pendingR2 = assembled.missing.filter((name) =>
 			r2SecretNames.has(name)
 		);
@@ -1492,7 +1492,7 @@ async function deployFlow(
 
 		case 'unreachable': {
 			// A status means the host answered, so it is reachable and erroring,
-			// not absent: surface it as a server fault rather than blaming DNS.
+			// not absent: surface it as a server fault.
 			if (
 				outcome.lastStatus !== undefined &&
 				outcome.lastStatus >= serverError

@@ -265,8 +265,7 @@ describe('consumer verify pass', () => {
 
 		// The canonical object was collected between the negotiate and this pass.
 		// It cannot reappear, so the row must settle to a terminal answer (the
-		// waiter is told absent and re-drives the push) rather than park until
-		// the client's commit timeout.
+		// waiter is told absent and re-drives the push).
 		await env.BLOBS.delete(narObjectKey(nar.narHash));
 
 		await verifyTenant(env, currentServerTenant(), 10);
@@ -314,7 +313,7 @@ describe('consumer verify pass', () => {
 
 		// The promote's canonical head fails transiently; the pass abandons the
 		// claim, and abandoning must free the lease so the next pass retries at
-		// once instead of waiting it out.
+		// at once.
 		const canonicalKey = narObjectKey(nar.narHash);
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		let shouldFail = true;

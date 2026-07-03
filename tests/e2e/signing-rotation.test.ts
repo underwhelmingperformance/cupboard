@@ -80,7 +80,7 @@ describe('Nix substitution through a signing-key rotation', () => {
 					const publishedInWindow = await publishedKeys(server);
 
 					// The window path substitutes under the old key alone and under the
-					// new key alone — the rotation guarantee.
+					// new key alone, which is the rotation guarantee.
 					await targetOld.realise(windowPath, trusting([oldKey]));
 					await targetNew.realise(windowPath, trusting([newKey]));
 

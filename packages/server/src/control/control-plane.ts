@@ -248,8 +248,7 @@ async function verifyControlInbound(
 	token: string
 ): Promise<JWTPayload> {
 	// Reaching the issuer is an upstream condition, not a bad token, so a discovery
-	// or JWKS-fetch failure is a retryable 503 rather than a permanent
-	// `invalid_grant`.
+	// or JWKS-fetch failure is a retryable 503.
 	let issuer;
 	try {
 		issuer = await discovery.resolve(rule.issuer);
@@ -323,9 +322,9 @@ export function controlAsMetadata(
 }
 
 // Authenticates a control bearer token: signed by a live control key and
-// carrying the control issuer and audience. Anything else — a missing token, a
-// tenant token, a bad signature — is rejected. The grants it carries decide what
-// it may do; the router authorises each operation against them.
+// carrying the control issuer and audience. A missing token, a tenant token, or
+// a bad signature is rejected. The grants it carries decide what it may do; the
+// router authorises each operation against them.
 export async function controlAuthenticate(
 	request: Request,
 	env: Env
@@ -380,7 +379,7 @@ export async function controlCheck(env: Env): Promise<ControlCheckReport> {
 }
 
 // Whether the control database answers a trivial read against a core table, so a
-// reachable-but-unmigrated binding reads as not ready rather than ready.
+// reachable-but-unmigrated binding reads as not ready.
 async function controlDatabaseCheck(
 	env: Env
 ): Promise<ControlCheckReport['db']> {
@@ -475,7 +474,7 @@ export async function controlTenantCreate(
 	// Provision in order: write the authoritative row, configure the Durable Object,
 	// write the tenant's membership marker, then publish the rebuilt filter. Each
 	// step is idempotent, so a retry after a mid-provision failure replays cleanly
-	// rather than stranding an admitted-but-unconfigured tenant.
+	// avoiding an admitted-but-unconfigured tenant.
 	const now = new Date();
 	const summary = await ensureTenant(database, body, now.toISOString());
 	const issuer = `${origin}/t/${summary.id}`;

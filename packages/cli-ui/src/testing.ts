@@ -70,7 +70,7 @@ const silentStepLog: StepLog = {
 /**
  * A {@link CliUi} that records every narration and answers prompts from a
  * script, for asserting on a command's output without a terminal. Phases run
- * their body straight through and results are captured rather than rendered.
+ * their body straight through and results are captured, not rendered.
  */
 export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 	const captured: CliUiCapture = {

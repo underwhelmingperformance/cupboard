@@ -195,7 +195,7 @@ export class UploadStateService {
 	// The reusable shared blobs among `narHashes`, keyed by hash. Pure D1: a
 	// `blob_state` row exists exactly while the canonical object does, so its
 	// presence confirms reuse without an R2 head, and a closure of any size costs a
-	// bounded number of D1 queries rather than a round trip per path. Drift (a row
+	// bounded number of D1 queries for a closure of any size. Drift (a row
 	// outliving a reaped object) is healed off the hot path by the negotiated
 	// reconcile, which probes R2 and removes any narinfo whose NAR is gone.
 	//

@@ -31,7 +31,7 @@ export class R2Presigner {
 	}
 
 	/**
-	 * Proves R2 accepts a temporary credential minted the way a push is, the
+	 * Proves R2 accepts a temporary credential issued the way a push does, the
 	 * mechanism uploads actually use. A push signs with a short-lived credential
 	 * derived from the configured pair, so a valid pair alone is not enough: R2
 	 * must also honour the derived credential, granted by the same write-only

@@ -315,7 +315,7 @@ export class CacheAdminService {
 
 	// Resumes a teardown from the alarm: retires one more bounded chunk of the
 	// cache's queued deletions and clears the marker once the queue is drained. The
-	// optional limit is a test seam, mirroring {@link runGarbageCollection}. The
+	// optional limit is a test parameter, mirroring {@link runGarbageCollection}. The
 	// caller re-arms the alarm while any marker remains.
 	async resumeTeardownPass(
 		cache: string,

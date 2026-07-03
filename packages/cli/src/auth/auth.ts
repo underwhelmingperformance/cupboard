@@ -51,8 +51,7 @@ export interface OwnerSessionDependencies {
 	readonly signal?: AbortSignal;
 }
 
-// An access token this close to its expiry is renewed up front rather than
-// spent on a request that would only bounce with a 401.
+// An access token this close to its expiry is renewed up front.
 const accessTokenFreshnessMarginMs = 30 * 1000;
 
 /**
@@ -116,8 +115,7 @@ function isExpired(accessToken: string, nowMs: number): boolean {
 
 // Rotates the cupboard refresh token. A token the server refuses outright is
 // a stale session, answered with undefined so the caller falls back; a
-// transport or server failure propagates rather than misreporting the session
-// as logged out.
+// transport or server failure propagates.
 async function rotateSession(
 	client: SessionTokenClient,
 	refreshToken: string

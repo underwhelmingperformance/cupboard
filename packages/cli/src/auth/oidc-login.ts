@@ -557,7 +557,7 @@ type CallbackOutcome =
 
 function readCallback(url: URL, expectedState: string): CallbackOutcome {
 	// `state` is checked first: a request that is not for this login (no state or
-	// a stale one) is ignored rather than failing the flow.
+	// a stale one) is ignored.
 	if (url.searchParams.get('state') !== expectedState) {
 		return { kind: 'ignore', message: 'Unexpected callback; ignoring.' };
 	}
@@ -614,11 +614,11 @@ const deviceAuthorizationSchema = z.object({
 });
 
 // RFC 8628 makes `expires_in` required; an issuer that omits it still gets a
-// bounded poll rather than an unbounded one.
+// bounded poll.
 const deviceCodeFallbackLifetimeSeconds = 600;
 
 // The poll interval used when the issuer advertises none, and the increment
-// applied on a `slow_down` — both 5 seconds, per the RFC 8628 example.
+// applied on a `slow_down`, both 5 seconds, per the RFC 8628 example.
 const devicePollIntervalSeconds = 5;
 const deviceSlowDownIncrementMs = 5 * 1000;
 
@@ -627,7 +627,7 @@ const deviceErrorSchema = z.object({ error: z.string() });
 /**
  * The `--headless` owner-login flow: RFC 8628 device authorization. Asks the
  * issuer for a code, shows the user where to enter it, and polls the token
- * endpoint — honouring `authorization_pending` and `slow_down` — until an
+ * endpoint, honouring `authorization_pending` and `slow_down`, until an
  * `id_token` is issued.
  */
 export async function deviceLogin(
@@ -781,8 +781,7 @@ async function pollDeviceToken(
 }
 
 // A token endpoint can return a non-JSON body (an HTML error page, a proxy
-// notice); parse defensively so that surfaces as an `OidcLoginError` rather than
-// a raw `SyntaxError`.
+// notice); parse defensively so that surfaces as an `OidcLoginError`.
 async function readJson(
 	response: Response,
 	kind: OidcLoginErrorKind

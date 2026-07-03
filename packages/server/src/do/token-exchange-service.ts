@@ -60,7 +60,7 @@ export class TokenExchangeService {
 
 		// Attenuation is detected by signature, not the declared token type: a
 		// subject token this tenant itself issued is narrowed to a requested subset
-		// of its own grants rather than routed to a trust rule.
+		// of its own grants.
 		const presented = await this.verifySelfIssued(body.subject_token);
 
 		if (presented !== undefined) {

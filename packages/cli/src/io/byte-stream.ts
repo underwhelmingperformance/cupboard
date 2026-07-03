@@ -14,7 +14,7 @@ export function byteStream(source: ByteSource): ReadableStream<Uint8Array> {
 /**
  * Wraps a byte stream so `onChunk` sees each chunk's length as the consumer
  * pulls it through, leaving the bytes themselves untouched. Used to follow an
- * upload's progress as it is sent rather than only once it completes.
+ * upload's progress as each chunk is sent.
  */
 export function countingByteStream(
 	source: ReadableStream<Uint8Array>,

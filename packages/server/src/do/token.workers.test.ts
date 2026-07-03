@@ -13,7 +13,7 @@ import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { decodeJwt, exportJWK, generateKeyPair, SignJWT } from 'jose';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { oidcTrust, refreshTokens } from '../db/schema.ts';
@@ -27,7 +27,6 @@ import {
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
-import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import {
 	currentOrigin,
 	currentServer,
@@ -88,7 +87,7 @@ function postToken(form: Record<string, string>): Promise<Response> {
 }
 
 // A real, well-formed inbound token whose issuer matches no trust rule, so
-// matching fails before any JWKS fetch — the verification network is never
+// matching fails before any JWKS fetch; the verification network is never
 // touched in these tests.
 async function untrustedToken(): Promise<string> {
 	const { privateKey } = await generateKeyPair('RS256', { extractable: true });
@@ -131,6 +130,9 @@ function tokenExchangeError(body: Record<string, string>): Promise<unknown> {
 
 describe('POST /token', () => {
 	beforeEach(resetTestServer);
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
 
 	it('renders an OAuth error as a no-store envelope', async () => {
 		const response = await postToken({
@@ -227,7 +229,7 @@ describe('POST /token', () => {
 			.setExpirationTime('5m')
 			.sign(idp.privateKey);
 
-		await runInDurableObject(currentServer(), async (instance, state) => {
+		await runInDurableObject(currentServer(), async (_instance, state) => {
 			await migrateThrough(state, latestMigrationIndex);
 			drizzle(state.storage, { schema: { oidcTrust } })
 				.insert(oidcTrust)
@@ -240,10 +242,9 @@ describe('POST /token', () => {
 					createdAt: '2026-01-01T00:00:00.000Z'
 				})
 				.run();
-			instance.discovery = new OidcDiscoveryStore({
-				fetcher: () => Promise.reject(new Error('issuer is down'))
-			});
 		});
+
+		vi.stubGlobal('fetch', () => Promise.reject(new Error('issuer is down')));
 
 		const response = await postToken({
 			grant_type: tokenExchangeGrantType,
@@ -305,7 +306,7 @@ async function installTrustedIdp(
 
 	let remainingFailures = options.failFirstFetches ?? 0;
 
-	await runInDurableObject(currentServer(), async (instance, state) => {
+	await runInDurableObject(currentServer(), async (_instance, state) => {
 		await migrateThrough(state, latestMigrationIndex);
 		drizzle(state.storage, { schema: { oidcTrust } })
 			.insert(oidcTrust)
@@ -318,33 +319,32 @@ async function installTrustedIdp(
 				createdAt: '2026-01-01T00:00:00.000Z'
 			})
 			.run();
-		instance.discovery = new OidcDiscoveryStore({
-			fetcher: (input) => {
-				if (remainingFailures > 0) {
-					remainingFailures -= 1;
+	});
 
-					return Promise.reject(new Error('issuer fetch blip'));
-				}
-				const url = input instanceof Request ? input.url : String(input);
+	vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
+		if (remainingFailures > 0) {
+			remainingFailures -= 1;
 
-				if (url === 'https://idp.test/.well-known/openid-configuration') {
-					return Promise.resolve(
-						Response.json({
-							issuer: 'https://idp.test',
-							jwks_uri: 'https://idp.test/jwks'
-						})
-					);
-				}
+			return Promise.reject(new Error('issuer fetch blip'));
+		}
+		const url = input instanceof Request ? input.url : String(input);
 
-				if (url === 'https://idp.test/jwks') {
-					return Promise.resolve(
-						Response.json({ keys: [{ ...jwk, kid: 'idp', alg: 'RS256' }] })
-					);
-				}
+		if (url === 'https://idp.test/.well-known/openid-configuration') {
+			return Promise.resolve(
+				Response.json({
+					issuer: 'https://idp.test',
+					jwks_uri: 'https://idp.test/jwks'
+				})
+			);
+		}
 
-				return Promise.resolve(new Response('not found', { status: 404 }));
-			}
-		});
+		if (url === 'https://idp.test/jwks') {
+			return Promise.resolve(
+				Response.json({ keys: [{ ...jwk, kid: 'idp', alg: 'RS256' }] })
+			);
+		}
+
+		return Promise.resolve(new Response('not found', { status: 404 }));
 	});
 
 	return subjectToken;

@@ -38,8 +38,8 @@ describe('deferred reuse verification', () => {
 		await commitPath(token, first, nar);
 
 		// A second store path reuses the same blob, so its pending row points at the
-		// shared canonical key rather than a private staging object. Deferring it
-		// pushes the reuse through the background verify pass.
+		// shared canonical key. Deferring it pushes the reuse through the background
+		// verify pass.
 		const second = uploadMetadata({
 			name: 'second',
 			storePathHash: 'b'.repeat(32),

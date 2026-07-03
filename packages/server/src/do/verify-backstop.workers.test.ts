@@ -240,8 +240,7 @@ describe('verify alarm backstop', () => {
 		await currentServer().requestVerificationPass();
 
 		// The canonical object was collected before the backstop fired. It cannot
-		// reappear, so the settle must answer the waiter terminally rather than
-		// retry the same vanished object every firing.
+		// reappear, so the settle must answer the waiter terminally.
 		await env.BLOBS.delete(narObjectKey(nar.narHash));
 
 		vi.setSystemTime(new Date(base.getTime() + verifyBackstopDelayMs));
@@ -290,7 +289,7 @@ describe('verify alarm backstop', () => {
 		await collectVerificationPasses();
 
 		// A consumer pass holds the claim; the backstop's settle must stay off
-		// its rows rather than race the in-flight promote.
+		// its rows.
 		await currentServer().claimVerificationBatch(10, Number.MAX_SAFE_INTEGER);
 		await currentServer().requestVerificationPass();
 

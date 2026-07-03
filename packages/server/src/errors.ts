@@ -173,8 +173,8 @@ export class TenantWritesStoppedError extends ServerHttpError {
 }
 
 // An offboarded tenant is a terminal tombstone: its slug is retired and can never be
-// re-provisioned or moved back to another status, so a status mutation targeting it
-// is refused as Gone rather than silently resurrecting the slug.
+// re-provisioned or moved back to another status. A status mutation targeting it
+// is refused as Gone.
 export class TenantRetiredError extends ServerHttpError {
 	readonly status = StatusCodes.GONE;
 
@@ -186,8 +186,7 @@ export class TenantRetiredError extends ServerHttpError {
 
 // Resume only moves a suspended tenant back to active. A tenant that is already
 // active cannot be resumed (an offboarding or offboarded one is a
-// `TenantRetiredError`), so the mutation is refused as a conflict rather than
-// silently no-oping.
+// `TenantRetiredError`). The mutation is refused as a conflict.
 export class TenantNotSuspendedError extends ServerHttpError {
 	readonly status = StatusCodes.CONFLICT;
 
@@ -369,8 +368,8 @@ export class TokenRequestBodyInvalidError extends InvalidRequestError {
 
 /**
  * A claim-bound (CI) exchange omitted `authorization_details`. Only the
- * interactive owner class may exchange without naming the grants it wants, so a
- * CI rule must say what it asks for rather than have it inferred.
+ * interactive owner class may exchange without naming the grants it wants; a
+ * CI rule must declare them explicitly.
  */
 export class AuthorizationDetailsRequiredError extends InvalidRequestError {
 	readonly problem = 'authorization-details-required';
@@ -384,8 +383,7 @@ export class AuthorizationDetailsRequiredError extends InvalidRequestError {
 /**
  * `invalid_authorization_details` (RFC 9396 §5): a requested grant was empty,
  * malformed, or not permitted by the matching trust rule. The request is refused
- * whole rather than narrowed, so a client never silently receives less than it
- * asked for.
+ * in full, so a client never silently receives less than it asked for.
  */
 export class InvalidAuthorizationDetailsError extends OAuthError {
 	readonly status = StatusCodes.BAD_REQUEST;
@@ -480,9 +478,8 @@ export class UnsupportedGrantTypeError extends OAuthError {
 }
 
 // Discovery (or the JWKS behind it) for the subject token's issuer could not be
-// reached. This is an upstream/transient condition, not a bad token, so it is a
-// 503 the caller can retry — never an `invalid_grant` the caller treats as
-// permanent.
+// reached. This is an upstream/transient condition, not a bad token: a 503 the
+// caller can retry, not an `invalid_grant` the caller treats as permanent.
 export class IssuerUnavailableError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -678,7 +675,7 @@ export class SharedFactsUnavailableError extends ServerHttpError {
 
 // A request the runtime aborted with a fault it marks retryable: the Durable
 // Object serving it was reset or overloaded, so the request died with the
-// object rather than through anything about the request itself.
+// object, independent of anything about the request itself.
 export class TenantDispatchInterruptedError extends ServerHttpError {
 	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
 	override readonly retryAfterSeconds = 5;
@@ -831,7 +828,7 @@ export class NarVerificationFailedError extends ServerHttpError {
 
 // The declared uncompressed NAR is larger than the server will decompress to
 // verify within its CPU budget, so it could never be served safely. Rejected at
-// commit rather than stored as an unservable path.
+// commit.
 export class NarTooLargeError extends ServerHttpError {
 	readonly status = StatusCodes.REQUEST_TOO_LONG;
 

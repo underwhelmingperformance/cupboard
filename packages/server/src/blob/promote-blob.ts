@@ -67,7 +67,7 @@ async function ensureCanonicalObject(
  * returns the canonical object's compressed metadata. The canonical key is
  * write-once: a conditional put means the first promotion of a hash fixes the
  * stored encoding, and any later or concurrent upload of the same hash adopts
- * that encoding instead of overwriting it, so every narinfo for the hash
+ * that encoding, so every narinfo for the hash
  * advertises the one object that is actually served, even when tenants upload
  * different zstd encodings of the same NAR. The staging object is left in
  * place; its caller deletes it only once the commit is durable, so a crash

@@ -71,7 +71,7 @@ export class OidcTrustService {
 		}
 
 		// A configured-but-malformed issuer is a deploy error: surface it now
-		// rather than seeding a rule that can never match (a silent admin lockout).
+		// to prevent seeding a rule that can never match.
 		const issuerUrl = IssuerUrl.parse(issuer);
 
 		if (issuerUrl === undefined) {
@@ -86,8 +86,8 @@ export class OidcTrustService {
 		token: string
 	): Promise<JWTPayload> {
 		// Discovery resolves the issuer's JWKS and its accepted algorithms. Failing
-		// to reach the issuer is an upstream condition, not a bad token, so it is a
-		// retryable 503 rather than a permanent `invalid_grant`.
+		// to reach the issuer is an upstream condition, not a bad token, so it yields
+		// a retryable 503.
 		let issuer;
 		try {
 			issuer = await this.context.discovery.resolve(rule.issuer);
@@ -109,8 +109,7 @@ export class OidcTrustService {
 				new Date()
 			);
 		} catch (error) {
-			// A JWKS fetch that fails (rather than the token failing verification)
-			// is the same transient upstream condition as a discovery failure.
+			// A JWKS fetch failure is the same transient upstream condition as a discovery failure.
 			if (error instanceof OidcKeysUnreachableError) {
 				throw new IssuerUnavailableError(rule.issuer, { cause: error });
 			}

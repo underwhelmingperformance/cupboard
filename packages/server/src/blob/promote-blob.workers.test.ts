@@ -41,7 +41,7 @@ describe('promoteVerifiedBlob', () => {
 		});
 
 		// Blinding redirects the head to a key that holds nothing, so the miss is
-		// a genuine R2 answer rather than a fabricated value.
+		// a genuine R2 answer, not a fabricated value.
 		const originalHead = env.BLOBS.head.bind(env.BLOBS);
 		let isBlinded = true;
 		const head = vi

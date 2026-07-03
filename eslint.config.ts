@@ -80,7 +80,7 @@ export default defineConfig(
 					// `name-replacements` (renamed from `prevent-abbreviations` in
 					// unicorn v68) gained default replacements in v68/v69 that would
 					// have us *abbreviate* `configuration`→`config` and
-					// `repository`→`repo` — the opposite of this rule's purpose and at
+					// `repository`→`repo`, the opposite of this rule's purpose and at
 					// odds with our deliberately verbose vocabulary (including exported
 					// error classes such as `OwnerConfigurationInvalidError`). Opt those
 					// two words out alongside the abbreviations we already allow; the
@@ -181,8 +181,8 @@ export default defineConfig(
 		// leaves the rest of the cursor undrained, so the Durable Object cost meter
 		// settles it before the scan's rows are counted and under-reports. The fielded
 		// query builder (and `values`/`all`, which drain via `toArray`) keeps the
-		// meter honest, so ban the raw `get(sql...)` forms in runtime code rather than
-		// relying on the convention being remembered. The tagged-template and
+		// meter honest, so the raw `get(sql...)` forms in runtime code are banned;
+		// relying on the convention being remembered is not enough. The tagged-template and
 		// `sql.raw()` forms are caught; an aliased `sql` import or a fieldless `get()`
 		// on a prepared statement would slip past, which no static selector can see, so
 		// this is a backstop, not a proof.
@@ -210,8 +210,8 @@ export default defineConfig(
 		}
 	},
 	{
-		// `node:zlib` is the only zstd implementation available on workerd —
-		// Compression Streams offer no zstd — so this one audited module is the
+		// `node:zlib` is the only zstd implementation available on workerd;
+		// Compression Streams offer no zstd, so this one audited module is the
 		// sanctioned Node boundary for the server-side NAR verifier. The ban on
 		// `node:*` in server and shared code stays in force everywhere else.
 		files: ['packages/nix-store/src/zstd.ts'],

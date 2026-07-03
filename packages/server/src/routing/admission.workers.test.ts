@@ -125,7 +125,7 @@ describe('layered admission gate', () => {
 		const seeded = await admit('acme');
 
 		// Creating another tenant through the control path rebuilds the filter, so it
-		// is admittable at once rather than only after the hourly cron rebuild.
+		// is admittable at once.
 		await controlTenantCreate(env, createBody('beta'), 'https://cupboard.test');
 		const created = await admit('beta');
 
@@ -153,7 +153,7 @@ describe('layered admission gate', () => {
 			outcome = 'failed';
 		}
 
-		// The create reports failure rather than success-but-inadmissible: the stale
+		// The create reports failure: the stale
 		// filter still excludes beta, so it 404s until the cron rebuild includes it
 		// (the row and marker persisted, so recovery needs no re-create).
 		const beforeRecovery = await admit('beta');
