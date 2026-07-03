@@ -663,6 +663,19 @@ export class TenantAdmissionUnavailableError extends ServerHttpError {
 	}
 }
 
+// An authoritative shared-fact read behind a serve kept failing. Refusing
+// retryably is safer than answering from absence: a missing-object answer
+// would read as the path not existing and send the client off to rebuild it.
+export class SharedFactsUnavailableError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor(public override readonly cause: unknown) {
+		super('Cache facts are temporarily unavailable');
+		this.name = 'SharedFactsUnavailableError';
+	}
+}
+
 // A request the runtime aborted with a fault it marks retryable: the Durable
 // Object serving it was reset or overloaded, so the request died with the
 // object rather than through anything about the request itself.

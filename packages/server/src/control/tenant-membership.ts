@@ -5,6 +5,7 @@ import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { z } from 'zod';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { readWithOneRetry } from '../db/transient.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 
 import { BinaryFuse8 } from './binary-fuse-filter/index.ts';
@@ -167,20 +168,17 @@ function rowCacheKey(slug: string): Request {
 	);
 }
 
-// How long the admission read waits before its one retry of a thrown D1 read.
-const admissionReadRetryDelayMs = 100;
-
 // The authoritative row read with one bounded retry: a transient D1 fault on
 // this read sits on every push and fetch, so it must not surface as an
 // internal error. A persistent fault maps to a retryable refusal instead;
-// Nix and the CLI both retry a 503.
+// Nix and the CLI both retry a 503 carrying Retry-After.
 async function readTenantRow(
 	database: Database,
 	slug: TenantId
 ): Promise<TenantAdmissionRow | undefined> {
-	for (let attempt = 0; ; attempt += 1) {
-		try {
-			return await database
+	try {
+		return await readWithOneRetry(() =>
+			database
 				.select({
 					status: d1Schema.tenant.status,
 					readMode: d1Schema.tenant.readMode,
@@ -190,16 +188,10 @@ async function readTenantRow(
 				})
 				.from(d1Schema.tenant)
 				.where(eq(d1Schema.tenant.id, slug))
-				.get();
-		} catch (error) {
-			if (attempt >= 1) {
-				throw new TenantAdmissionUnavailableError(error);
-			}
-
-			await new Promise((resolve) =>
-				setTimeout(resolve, admissionReadRetryDelayMs)
-			);
-		}
+				.get()
+		);
+	} catch (error) {
+		throw new TenantAdmissionUnavailableError(error);
 	}
 }
 

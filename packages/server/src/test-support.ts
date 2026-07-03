@@ -696,6 +696,36 @@ export async function handlerFetch(
 	return response;
 }
 
+/** What {@link flakyD1} injects: how many matching reads throw before it heals. */
+export interface FlakyD1Plan {
+	failures: number;
+	/** Restricts the faults to matching queries; every query when absent. */
+	readonly matches?: (query: string) => boolean;
+}
+
+/**
+ * A D1 binding whose next `failures` matching reads throw, then delegates: the
+ * shape of a transient control-plane fault under an authoritative D1 read.
+ */
+export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
+	return {
+		prepare(query) {
+			if (plan.failures > 0 && (plan.matches?.(query) ?? true)) {
+				plan.failures -= 1;
+				throw new Error('transient D1 fault');
+			}
+
+			return inner.prepare(query);
+		},
+		batch: (statements) => inner.batch(statements),
+		exec: (query) => inner.exec(query),
+		withSession: (constraint) => inner.withSession(constraint),
+		// The request-path reads never dump; the member exists only to satisfy
+		// the binding's shape.
+		dump: () => Promise.reject(new Error('dump is not supported here'))
+	};
+}
+
 // Fetches a bare-host path through the real Worker — the control surface, with no
 // tenant prefix. A per-call env copy lets a test vary the control configuration.
 export async function controlFetch(
