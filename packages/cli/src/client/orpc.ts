@@ -19,7 +19,12 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
-import { backoffDelay, maxTransientRetries } from './retry.ts';
+import {
+	backoffDelay,
+	isTransientResponse,
+	maxTransientRetries,
+	transientResponseDelay
+} from './retry.ts';
 import { parseWorkerUrl, reachableFetcher } from './transport.ts';
 
 /**
@@ -133,12 +138,9 @@ function derivedClient<C extends AnyContractRouter>(
 					continue;
 				}
 
-				if (
-					isTransientStatus(response.status) &&
-					retries < maxTransientRetries
-				) {
+				if (isTransientResponse(response) && retries < maxTransientRetries) {
 					retries += 1;
-					await backoffDelay(retries, signal);
+					await transientResponseDelay(response, retries, signal);
 					continue;
 				}
 
@@ -160,14 +162,6 @@ const typedServerErrorStatuses = new Set<number>([
 	StatusCodes.SERVICE_UNAVAILABLE,
 	StatusCodes.INSUFFICIENT_STORAGE
 ]);
-
-// The typed 5xx (over-quota, maintenance) are excluded from retry: they are
-// deterministic or already surfaced to the user, so oRPC decodes them as-is.
-function isTransientStatus(status: number): boolean {
-	return (
-		status >= serverErrorThreshold && !typedServerErrorStatuses.has(status)
-	);
-}
 
 /**
  * Turns an unmapped server failure into a {@link CupboardHttpError} carrying the

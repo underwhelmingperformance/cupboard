@@ -1,9 +1,10 @@
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import type { CommitSessionFrame } from '@cupboard/protocol/upload';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
 	MalformedResponseError,
@@ -167,6 +168,172 @@ describe('CupboardClient.tokenExchange', () => {
 		);
 
 		expect(signal).toBe(controller.signal);
+	});
+});
+
+const tokenResponse: TokenResponse = {
+	access_token: 'write-jwt',
+	token_type: 'Bearer',
+	expires_in: 900,
+	issued_token_type: 'urn:ietf:params:oauth:token-type:access_token'
+};
+
+function scriptedClient(
+	attempts: (() => Response | Promise<Response>)[],
+	signal?: AbortSignal
+): { readonly client: CupboardClient; readonly attempted: () => number } {
+	let attempted = 0;
+
+	const client = new CupboardClient(
+		new URL('https://cupboard.test'),
+		() => {
+			const next = attempts[attempted];
+			attempted += 1;
+
+			if (next === undefined) {
+				throw new Error('fetch script exhausted');
+			}
+
+			return Promise.resolve(next());
+		},
+		'',
+		signal
+	);
+
+	return { client, attempted: () => attempted };
+}
+
+const exchange = (client: CupboardClient) =>
+	client.tokenExchange(
+		'subject.jwt',
+		'urn:ietf:params:oauth:token-type:id_token'
+	);
+
+const markedTransient = (status: number) => () =>
+	new Response('Temporarily unavailable\n', {
+		status,
+		headers: { 'retry-after': '5' }
+	});
+const bareUnavailable = () =>
+	new Response('boom\n', { status: 503, headers: { 'cf-ray': 'ray-1' } });
+
+describe('CupboardClient token retry', () => {
+	it.each([
+		{ label: 'a 503 carrying Retry-After', failure: markedTransient(503) },
+		{
+			label: 'an unmapped 500',
+			failure: () => new Response('', { status: 500 })
+		},
+		{
+			label: 'an unmapped 502',
+			failure: () => new Response('', { status: 502 })
+		}
+	])('retries $label and returns the eventual token', async ({ failure }) => {
+		vi.useFakeTimers();
+
+		try {
+			const { client, attempted } = scriptedClient([
+				failure,
+				failure,
+				() => Response.json(tokenResponse)
+			]);
+
+			const pending = exchange(client);
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect({ result: await pending, attempts: attempted() }).toStrictEqual({
+				result: tokenResponse,
+				attempts: 3
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('retries a network fault and returns the eventual token', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const { client, attempted } = scriptedClient([
+				() => Promise.reject(new TypeError('fetch failed')),
+				() => Response.json(tokenResponse)
+			]);
+
+			const pending = exchange(client);
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect({ result: await pending, attempts: attempted() }).toStrictEqual({
+				result: tokenResponse,
+				attempts: 2
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('does not retry a 503 without Retry-After', async () => {
+		const { client, attempted } = scriptedClient([bareUnavailable]);
+
+		const error = await rejectedBy(() => exchange(client));
+
+		expectCupboardHttpError(error);
+		expect({
+			attempts: attempted(),
+			method: error.method,
+			path: error.path,
+			status: error.status,
+			ray: error.ray
+		}).toStrictEqual({
+			attempts: 1,
+			method: 'POST',
+			path: '/token',
+			status: 503,
+			ray: 'ray-1'
+		});
+	});
+
+	it('surfaces the failure once the retry budget is spent', async () => {
+		vi.useFakeTimers();
+
+		try {
+			// One attempt plus the four retries, all refused.
+			const { client, attempted } = scriptedClient(
+				Array.from({ length: 5 }, () => markedTransient(503))
+			);
+
+			const pending = rejectedBy(() => exchange(client));
+			await vi.advanceTimersByTimeAsync(60_000);
+			const error = await pending;
+
+			expectCupboardHttpError(error);
+			expect({ attempts: attempted(), status: error.status }).toStrictEqual({
+				attempts: 5,
+				status: 503
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('stops retrying when the signal aborts during the wait', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const controller = new AbortController();
+			const { client, attempted } = scriptedClient(
+				[markedTransient(503)],
+				controller.signal
+			);
+
+			const pending = rejectedBy(() => exchange(client));
+			controller.abort(new CliAbortError());
+			await vi.advanceTimersByTimeAsync(60_000);
+
+			expect(await pending).toBeInstanceOf(CliAbortError);
+			expect(attempted()).toBe(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 });
 
