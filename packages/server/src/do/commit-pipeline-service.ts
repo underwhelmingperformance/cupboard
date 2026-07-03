@@ -173,7 +173,17 @@ export class CommitPipelineService {
 			})
 		);
 
-		if (outcome === 'materialised') {
+		if (outcome.kind === 'materialised') {
+			// The object publishes after the gate; the marker clears only once it
+			// has landed, so an interruption in between stays re-drivable.
+			await this.narInfoObjects.publishNarInfoObject(
+				cache,
+				metadata.storePathHash,
+				reserved.generation,
+				metadata.narHash,
+				outcome.narInfo
+			);
+
 			// A reuse commit settles synchronously, so its upload row is cleared
 			// rather than retained for observation.
 			this.uploadState.clearPendingUpload(uploadId);
@@ -188,11 +198,11 @@ export class CommitPipelineService {
 			};
 		}
 
-		if (outcome === 'superseded') {
+		if (outcome.kind === 'superseded') {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
 
-		if (outcome === 'tenant-inactive') {
+		if (outcome.kind === 'tenant-inactive') {
 			await this.context.criticalSection(() =>
 				this.reclaimReservedRow(
 					cache,
@@ -891,17 +901,17 @@ export class CommitPipelineService {
 	}
 
 	// Makes a reserved narinfo servable, the edge-last half of the saga and the only
-	// place that writes the reference edge and the served object or clears the
-	// pending upload. The shared-fact reads arrive in the caller's probe, taken
-	// outside the gate so their round-trips never hold it; what runs here is the
-	// synchronous generation fence, one atomic D1 batch (the edge, presence and
-	// charge), and the narinfo object put. The edge batch stays inside the gate
-	// because `reclaimReservedRow` and the offboard drain fence on the edge's
-	// existence; the object put stays because it overwrites a fixed key with no
-	// compare-and-swap, and the verify passes heal presence, not content, so a
-	// stale overwrite would never converge. Every step is idempotent, so a crash
-	// before the caller resolves the pending upload leaves it re-drivable from
-	// its durable marker.
+	// place that writes the reference edge or clears the pending upload. The
+	// shared-fact reads arrive in the caller's probe, taken outside the gate so
+	// their round-trips never hold it; what runs here is the synchronous
+	// generation fence and one atomic D1 batch (the edge, presence and charge).
+	// The edge batch stays inside the gate because `reclaimReservedRow` and the
+	// offboard drain fence on the edge's existence. The served object is not
+	// written here: the caller publishes the returned narinfo after the gate
+	// through {@link NarInfoObjectsService.publishNarInfoObject}, whose per-path
+	// ordering and post-publish fence keep a stale object from outliving a gated
+	// delete or recommit. Every step is idempotent, so a crash before the caller
+	// resolves the pending upload leaves it re-drivable from its durable marker.
 	//
 	// Runs inside the caller's critical section; must not open its own. The
 	// probe may be stale by the time the gate runs: a fact deleted after it was
@@ -926,11 +936,11 @@ export class CommitPipelineService {
 		// only while the tenant is active, covers suspended, offboarding,
 		// offboarded and a missing row alike.
 		if (this.context.offboarding || probe.account?.status !== 'active') {
-			return 'tenant-inactive';
+			return { kind: 'tenant-inactive' };
 		}
 
 		if (probe.blob === undefined || !probe.isCanonicalPresent) {
-			return 'blob-gone';
+			return { kind: 'blob-gone' };
 		}
 
 		// A reuse binds a narinfo to bytes this tenant never re-proved, on the
@@ -938,7 +948,7 @@ export class CommitPipelineService {
 		// back) the reuse fails towards re-upload rather than re-referencing a
 		// hash the tenant no longer holds.
 		if (options.mustOwnBlob && !probe.isOwned) {
-			return 'blob-gone';
+			return { kind: 'blob-gone' };
 		}
 
 		const row = this.context.db
@@ -956,7 +966,7 @@ export class CommitPipelineService {
 		// only materialise the version this commit reserved, so the edge and the
 		// served object always describe the same narinfo version.
 		if (row?.generation !== generation || row.narHash !== metadata.narHash) {
-			return 'superseded';
+			return { kind: 'superseded' };
 		}
 
 		// The blob was probed present, so the narinfo renders from the row and the
@@ -969,7 +979,7 @@ export class CommitPipelineService {
 		// pre-check used. Returning here lets the caller reclaim the reserved row
 		// rather than charging; the charge batch re-fences the decision.
 		if (isOverQuota(probe.account, probe.isOwned, probe.blob.fileSize)) {
-			return 'over-quota';
+			return { kind: 'over-quota' };
 		}
 
 		const tenant = this.context.requireTenant();
@@ -986,19 +996,14 @@ export class CommitPipelineService {
 		);
 
 		if (charged !== 'charged') {
-			return charged;
+			return { kind: charged };
 		}
-
-		await this.narInfoObjects.putNarInfoObject(
-			cache,
-			metadata.storePathHash,
-			narInfo
-		);
 
 		// The pending upload's lifecycle is the caller's: an inline commit clears the
 		// row (it returns `committed` synchronously), while a deferred commit records a
-		// terminal `servable` verdict for `push --wait` to observe.
-		return 'materialised';
+		// terminal `servable` verdict for `push --wait` to observe. Both publish the
+		// returned narinfo's object first, after the gate.
+		return { kind: 'materialised', narInfo };
 	}
 
 	// Removes a reserved narinfo row whose commit failed verification, leaving its
