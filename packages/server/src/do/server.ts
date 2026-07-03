@@ -115,6 +115,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
 	private migrationPromise: Promise<void> | undefined;
 
+	// Whether a mutation is waiting on the next coalesced eligibility publish,
+	// and the drain currently publishing; see
+	// {@link CupboardServer.scheduleMaintenanceReconcile}.
+	private isReconcileDue = false;
+	private reconcileDrain: Promise<void> | undefined;
+
 	private readonly authKeys: AuthKeysService;
 	private readonly attestationCas: AttestationCasService;
 	private readonly attestations: AttestationsService;
@@ -387,7 +393,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.uploadState.attachSession(uploadId, sessionId);
 
 			const outcome = await this.metered('commit', () =>
-				this.afterMutation(() => this.commitPipeline.commit(cache, uploadId))
+				this.afterHotMutation(() => this.commitPipeline.commit(cache, uploadId))
 			);
 
 			if (outcome.kind === 'settled') {
@@ -557,10 +563,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Runs a body and reconciles the maintenance-eligibility projection
 	// synchronously after it, invalidating first so a crash anywhere in the body
 	// leaves the tenant due (fail-open). The cron sweeps use this: a crash during a
-	// maintenance pass must not leave a stale not-due row behind. The request hot path
-	// uses `afterMutation`, which reconciles inline but skips the invalidate: that
-	// would cost a D1 delete on every mutation and defeat the write-coalescing, so it
-	// accepts the narrow eviction window the trailing `finally` leaves instead.
+	// maintenance pass must not leave a stale not-due row behind. The mutating
+	// request paths skip the invalidate (that would cost a D1 delete on every
+	// mutation and defeat the write-coalescing) and accept the eviction window
+	// their trailing reconcile leaves: the admin mutations reconcile inline via
+	// `afterMutation`, the commit and verdict hot paths coalesce theirs via
+	// `afterHotMutation`.
 	private async withMaintenanceEligibility<T>(
 		body: () => Promise<T>
 	): Promise<T> {
@@ -589,6 +597,46 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} finally {
 			await this.reconcileMaintenanceEligibility();
 		}
+	}
+
+	// The commit hot path's twin of {@link afterMutation}: the reply does not
+	// wait on the publish, and concurrent mutations coalesce onto a shared one.
+	// A push settling hundreds of paths costs a publish per in-flight window
+	// rather than one awaited D1 round trip per path.
+	private async afterHotMutation<T>(body: () => Promise<T>): Promise<T> {
+		try {
+			return await body();
+		} finally {
+			this.scheduleMaintenanceReconcile();
+		}
+	}
+
+	// Requests an eligibility publish without waiting for it. While one publish
+	// is in flight every further request collapses onto a single follow-up,
+	// which runs with the state as it stands then, so the last mutation of a
+	// burst is always covered. An eviction can drop a scheduled publish; the
+	// sweep's staleness floor bounds how long the stale projection can suppress
+	// maintenance, the same backstop the synchronous reconcile's eviction
+	// window relies on.
+	private scheduleMaintenanceReconcile(): void {
+		this.isReconcileDue = true;
+
+		if (this.reconcileDrain !== undefined) {
+			return;
+		}
+
+		const drain = async (): Promise<void> => {
+			try {
+				while (this.isReconcileDue) {
+					this.isReconcileDue = false;
+					await this.reconcileMaintenanceEligibility();
+				}
+			} finally {
+				this.reconcileDrain = undefined;
+			}
+		};
+
+		this.reconcileDrain = drain();
 	}
 
 	private async reconcileMaintenanceEligibility(): Promise<void> {
@@ -989,7 +1037,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<number> {
 		await this.initialise();
 		return this.metered('record-verifications', () =>
-			this.verification.recordVerifications(results)
+			this.afterHotMutation(() =>
+				this.verification.recordVerifications(results)
+			)
 		);
 	}
 
@@ -999,14 +1049,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	): Promise<void> {
 		await this.initialise();
 		await this.metered('record-verification', () =>
-			this.verification.recordVerification(uploadId, verification)
+			this.afterHotMutation(() =>
+				this.verification.recordVerification(uploadId, verification)
+			)
 		);
 	}
 
 	async recordMissingObject(uploadId: string): Promise<void> {
 		await this.initialise();
 		await this.metered('record-missing-object', () =>
-			this.verification.recordMissingObject(uploadId)
+			this.afterHotMutation(() =>
+				this.verification.recordMissingObject(uploadId)
+			)
 		);
 	}
 
