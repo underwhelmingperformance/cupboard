@@ -590,7 +590,7 @@ export class DeletionQueueService {
 		// One critical section so the row transaction and the opportunistic object
 		// cleanup cannot interleave with a heal that would re-materialise the
 		// object.
-		return this.context.ctx.blockConcurrencyWhile(async () => {
+		return this.context.criticalSection(async () => {
 			const row = this.context.db
 				.select()
 				.from(schema.narInfos)
@@ -662,7 +662,7 @@ export class DeletionQueueService {
 		row: typeof schema.narInfos.$inferSelect,
 		origin: string
 	): Promise<void> {
-		await this.context.ctx.blockConcurrencyWhile(() =>
+		await this.context.criticalSection(() =>
 			this.reconcileMissingNar(row, origin)
 		);
 	}

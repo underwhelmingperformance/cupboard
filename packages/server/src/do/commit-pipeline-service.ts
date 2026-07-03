@@ -164,7 +164,7 @@ export class CommitPipelineService {
 		}
 
 		const probe = await this.probeMaterialisation(metadata);
-		const outcome = await this.context.ctx.blockConcurrencyWhile(() =>
+		const outcome = await this.context.criticalSection(() =>
 			this.materialiseServable(cache, metadata, reserved.generation, probe, {
 				mustOwnBlob: true
 			})
@@ -190,7 +190,7 @@ export class CommitPipelineService {
 		}
 
 		if (outcome === 'tenant-inactive') {
-			await this.context.ctx.blockConcurrencyWhile(() =>
+			await this.context.criticalSection(() =>
 				this.reclaimReservedRow(
 					cache,
 					metadata.storePathHash,
@@ -206,7 +206,7 @@ export class CommitPipelineService {
 			);
 		}
 
-		await this.context.ctx.blockConcurrencyWhile(() =>
+		await this.context.criticalSection(() =>
 			this.reclaimReservedRow(
 				cache,
 				metadata.storePathHash,

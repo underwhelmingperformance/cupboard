@@ -237,7 +237,7 @@ export class CacheAdminService {
 		origin: string,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
-		return this.context.ctx.blockConcurrencyWhile(async () => {
+		return this.context.criticalSection(async () => {
 			const now = new Date().toISOString();
 			const pending = this.context.db
 				.select({
@@ -322,7 +322,7 @@ export class CacheAdminService {
 		origin: string,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
-		await this.context.ctx.blockConcurrencyWhile(async () => {
+		await this.context.criticalSection(async () => {
 			await this.drainTeardownChunk(cache, origin, limit);
 
 			// The queue is the source of truth: a concurrent re-teardown re-enqueues

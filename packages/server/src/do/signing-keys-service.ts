@@ -110,7 +110,7 @@ export class SigningKeysService {
 		// interleave with a concurrent rotation or a commit reading the key set.
 		const material = await generateSigningKeyMaterial();
 
-		return this.context.ctx.blockConcurrencyWhile(async () => {
+		return this.context.criticalSection(async () => {
 			const existing = await this.loadedKeys();
 			const publicKey = renderSigningPublicKey(
 				nextKeyName(existing),
@@ -152,7 +152,7 @@ export class SigningKeysService {
 		// so two concurrent retirements cannot both see themselves as safe. A
 		// refused retirement is reported as an outcome and thrown afterwards:
 		// throwing inside blockConcurrencyWhile would break the input gate.
-		const outcome = await this.context.ctx.blockConcurrencyWhile(
+		const outcome = await this.context.criticalSection(
 			async (): Promise<{ stage: SigningKeyStage } | { refused: true }> => {
 				const keys = await this.loadedKeys();
 				const key = keys.find((candidate) => candidate.id === id);

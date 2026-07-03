@@ -426,7 +426,7 @@ export class AttestationsService {
 
 		// A rejection inside blockConcurrencyWhile would break the input gate, so
 		// the outcome is carried out as a value and rethrown afterwards.
-		const finalised = await this.context.ctx.blockConcurrencyWhile(async () => {
+		const finalised = await this.context.criticalSection(async () => {
 			try {
 				const value = await this.finaliseAttach(
 					cache,

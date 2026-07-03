@@ -233,7 +233,7 @@ export class AuthKeysService {
 		const rotatedAt = new Date();
 		const scheduledRetireAt = scheduledAccessKeyRetireAt(rotatedAt);
 
-		return this.context.ctx.blockConcurrencyWhile(async () => {
+		return this.context.criticalSection(async () => {
 			const outgoing = await this.activeAuthKey();
 
 			this.context.db
@@ -266,7 +266,7 @@ export class AuthKeysService {
 		// concurrent retirements cannot both see themselves as safe. A refused
 		// retirement is returned as an outcome and thrown afterwards: throwing
 		// inside blockConcurrencyWhile would break the input gate.
-		const outcome = await this.context.ctx.blockConcurrencyWhile(
+		const outcome = await this.context.criticalSection(
 			async (): Promise<{ retired: boolean } | { refused: true }> => {
 				const keys = await this.authKeys();
 				const live = keys.filter((key) => !key.retired);
@@ -301,7 +301,7 @@ export class AuthKeysService {
 	}
 
 	async retireScheduledAuthKeys(now: Date = new Date()): Promise<number> {
-		return this.context.ctx.blockConcurrencyWhile(() => {
+		return this.context.criticalSection(() => {
 			const nowIso = now.toISOString();
 			const due = this.context.db
 				.select({ kid: schema.authKeys.kid })

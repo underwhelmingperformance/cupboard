@@ -199,7 +199,7 @@ export class NarInfoObjectsService {
 		cache: string,
 		storePathHash: StorePathHash
 	): Promise<void> {
-		await this.context.ctx.blockConcurrencyWhile(() =>
+		await this.context.criticalSection(() =>
 			this.materialiseIfRecoverable(cache, storePathHash)
 		);
 	}
@@ -214,7 +214,7 @@ export class NarInfoObjectsService {
 		cache: string,
 		storePathHash: StorePathHash
 	): Promise<boolean> {
-		return this.context.ctx.blockConcurrencyWhile(() =>
+		return this.context.criticalSection(() =>
 			this.isServableLocked(cache, storePathHash)
 		);
 	}
@@ -391,7 +391,7 @@ export class NarInfoObjectsService {
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString
 	): Promise<void> {
-		await this.context.ctx.blockConcurrencyWhile(() =>
+		await this.context.criticalSection(() =>
 			this.demoteUnbackedLocked(cache, storePathHash, narHash)
 		);
 	}

@@ -305,7 +305,7 @@ export class VerificationService {
 		// its `blob_state` row exist; probing earlier would read them absent.
 		const probe = await this.commitPipeline.probeMaterialisation(metadata);
 
-		const outcome = await this.context.ctx.blockConcurrencyWhile(async () => {
+		const outcome = await this.context.criticalSection(async () => {
 			const current = this.context.db
 				.select()
 				.from(schema.pendingUploads)
@@ -355,7 +355,7 @@ export class VerificationService {
 		// unreferenced, uncharged object for it. The waiter hears `absent`, the
 		// same answer an inline commit's writes-stopped rejection amounts to.
 		if (outcome === 'tenant-inactive') {
-			await this.context.ctx.blockConcurrencyWhile(() =>
+			await this.context.criticalSection(() =>
 				this.commitPipeline.reclaimReservedRow(
 					pending.cache,
 					metadata.storePathHash,
@@ -413,7 +413,7 @@ export class VerificationService {
 		generation: number,
 		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {
-		await this.context.ctx.blockConcurrencyWhile(() =>
+		await this.context.criticalSection(() =>
 			this.commitPipeline.reclaimReservedRow(
 				pending.cache,
 				metadata.storePathHash,
@@ -599,7 +599,7 @@ export class VerificationService {
 			rows.map((row) => this.probeRow(row))
 		);
 
-		await this.context.ctx.blockConcurrencyWhile(async () => {
+		await this.context.criticalSection(async () => {
 			for (const observation of observations) {
 				if (observation === undefined) {
 					continue;
@@ -663,7 +663,7 @@ export class VerificationService {
 		// Apply the reconciles and advance the cursor in one short critical section.
 		// What remains inside the gate is fast synchronous SQLite plus the rare write
 		// for an unhealthy row, instead of every row's R2 round-trips.
-		return this.context.ctx.blockConcurrencyWhile(async () => {
+		return this.context.criticalSection(async () => {
 			let narInfoObjectsRestored = 0;
 			let danglingNarInfosRemoved = 0;
 

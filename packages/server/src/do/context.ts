@@ -150,6 +150,33 @@ export class ServerContext {
 		this.d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	}
 
+	// A request-path critical section: arriving events are gated out while `run`
+	// executes, exactly as `blockConcurrencyWhile` gates them, but a failure
+	// propagates to the caller as an ordinary rejection. The runtime breaks the
+	// whole object when the gated callback itself throws, turning one transient
+	// storage fault into a failure for every in-flight request; every section
+	// here is an idempotent saga step whose caller already handles the
+	// rejection, so the object must survive it.
+	async criticalSection<T>(run: () => Promise<T>): Promise<T> {
+		type Outcome = { ok: true; value: T } | { ok: false; error: unknown };
+
+		const outcome = await this.ctx.blockConcurrencyWhile(
+			async (): Promise<Outcome> => {
+				try {
+					return { ok: true, value: await run() };
+				} catch (error) {
+					return { ok: false, error };
+				}
+			}
+		);
+
+		if (!outcome.ok) {
+			throw outcome.error;
+		}
+
+		return outcome.value;
+	}
+
 	r2Presigner(): R2Presigner {
 		this.presigner ??= new R2Presigner(r2PresignConfiguration(this.env));
 
