@@ -18,6 +18,7 @@ import {
 	deleteBlobReferenceEdge,
 	expectSingleCommitDecision,
 	expectSingleUploadDecision,
+	flakyD1,
 	handlerFetch,
 	initialise,
 	narInfoDeletionRows,
@@ -146,6 +147,23 @@ describe('computing negotiate hints', () => {
 		const hints = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths }),
 			env,
+			fixtureTenant,
+			'_default'
+		);
+
+		expect(hints).toBeUndefined();
+	});
+
+	it('computes none when the shared-fact reads fault', async () => {
+		const faultyEnv = {
+			...env,
+			CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+				failures: Number.MAX_SAFE_INTEGER
+			})
+		};
+		const hints = await computeNegotiateHints(
+			probeRequest({ pushId: testPushId, paths: [path] }),
+			faultyEnv,
 			fixtureTenant,
 			'_default'
 		);

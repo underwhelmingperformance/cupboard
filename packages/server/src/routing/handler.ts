@@ -10,8 +10,12 @@ import { type Context, Hono } from 'hono';
 import { buildVersion } from '../build-info.generated.ts';
 import { controlApp } from '../control/control-app.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { readWithOneRetry } from '../db/transient.ts';
 import { negotiateHintsHeader } from '../do/negotiate-hints.ts';
-import { TenantWritesStoppedError } from '../errors.ts';
+import {
+	TenantAdmissionUnavailableError,
+	TenantWritesStoppedError
+} from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	notFoundResponse,
@@ -408,17 +412,27 @@ function isTenantWrite(inner: Request): boolean {
 
 // The authoritative tenant status, read from D1 rather than the KV manifest, so a
 // write stop takes effect before the manifest TTL catches up. Returns undefined if
-// the row is gone, which the caller treats as not-active and fails closed.
+// the row is gone, which the caller treats as not-active and fails closed. The
+// read sits on every tenant write, the same exposure as the admission row read,
+// so it gets the same bounded retry and maps a persistent fault to the same
+// retryable refusal.
 async function tenantStatus(
 	env: Env,
 	tenant: TenantId
 ): Promise<string | undefined> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
-	const row = await database
-		.select({ status: d1Schema.tenant.status })
-		.from(d1Schema.tenant)
-		.where(eq(d1Schema.tenant.id, tenant))
-		.get();
 
-	return row?.status;
+	try {
+		const row = await readWithOneRetry(() =>
+			database
+				.select({ status: d1Schema.tenant.status })
+				.from(d1Schema.tenant)
+				.where(eq(d1Schema.tenant.id, tenant))
+				.get()
+		);
+
+		return row?.status;
+	} catch (error) {
+		throw new TenantAdmissionUnavailableError(error);
+	}
 }

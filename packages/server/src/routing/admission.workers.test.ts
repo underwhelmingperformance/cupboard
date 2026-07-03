@@ -24,29 +24,11 @@ import { ensureTenant, setTenantStatus } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
+import { flakyD1 } from '../test-support.ts';
+
+import worker from './handler.ts';
 
 const now = '2026-01-01T00:00:00.000Z';
-
-// A D1 binding whose next `failures` reads throw, then delegates: the shape of
-// a transient control-plane fault under the admission read.
-function flakyD1(inner: D1Database, plan: { failures: number }): D1Database {
-	return {
-		prepare(query) {
-			if (plan.failures > 0) {
-				plan.failures -= 1;
-				throw new Error('transient D1 fault');
-			}
-
-			return inner.prepare(query);
-		},
-		batch: (statements) => inner.batch(statements),
-		exec: (query) => inner.exec(query),
-		withSession: (constraint) => inner.withSession(constraint),
-		// The admission read never dumps; the member exists only to satisfy the
-		// binding's shape.
-		dump: () => Promise.reject(new Error('dump is not supported here'))
-	};
-}
 
 async function admitWithFaults(
 	slug: string,
@@ -266,6 +248,56 @@ describe('layered admission gate', () => {
 			status: caught.status,
 			retryAfterSeconds: caught.retryAfterSeconds
 		}).toStrictEqual({ status: 503, retryAfterSeconds: 5 });
+	});
+
+	// The dispatch write gate's status read shares the admission read's exposure:
+	// it sits on every tenant write. These drive it through the real Worker, with
+	// the faults confined to the gate's own query so admission itself stays
+	// healthy.
+	const statusGateQuery = 'select "status" from "tenant"';
+
+	async function writeWithGateFaults(failures: number): Promise<Response> {
+		const ctx = createExecutionContext();
+		const faultyEnv = {
+			...env,
+			CUPBOARD_DB: flakyD1(env.CUPBOARD_DB, {
+				failures,
+				matches: (query) => query.startsWith(statusGateQuery)
+			})
+		};
+		const response = await worker.fetch(
+			new Request('https://cache.example/t/acme/gate-probe', {
+				method: 'POST'
+			}),
+			faultyEnv,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		return response;
+	}
+
+	it('retries a transient fault on the write gate status read', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await refreshTenantMembership(env);
+
+		const response = await writeWithGateFaults(1);
+
+		// Past the gate, the unconfigured tenant object answers however it will;
+		// what matters is the gate did not surface its blip as a retryable refusal.
+		expect(response.headers.get('retry-after')).toBeNull();
+	});
+
+	it('maps a persistent write gate fault to a retryable refusal', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await refreshTenantMembership(env);
+
+		const response = await writeWithGateFaults(Number.MAX_SAFE_INTEGER);
+
+		expect({
+			status: response.status,
+			retryAfter: response.headers.get('retry-after')
+		}).toStrictEqual({ status: 503, retryAfter: '5' });
 	});
 
 	it('answers the admission refusal as a 503 with Retry-After', async () => {

@@ -1,5 +1,7 @@
 import {
 	nixSha256HashSchema,
+	type NixSha256HashString,
+	type StorePathHash,
 	storePathHashSchema,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -87,6 +89,24 @@ export async function computeNegotiateHints(
 		...new Set(parsed.data.paths.map((path) => path.storePathHash))
 	];
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+
+	try {
+		return await readHints(database, tenant, cache, narHashes, storePathHashes);
+	} catch {
+		// The hints are an optimisation: a shared-fact read fault dispatches
+		// plainly and the Durable Object reads its own facts after
+		// authenticating.
+		return undefined;
+	}
+}
+
+async function readHints(
+	database: ReturnType<typeof drizzleD1<typeof d1Schema>>,
+	tenant: TenantId,
+	cache: string | undefined,
+	narHashes: readonly NixSha256HashString[],
+	storePathHashes: readonly StorePathHash[]
+): Promise<NegotiateHints> {
 	const [blobStatePages, ownedPages, edgePages] = await Promise.all([
 		mapWithConcurrency(
 			chunk(narHashes, maxInClauseValues),

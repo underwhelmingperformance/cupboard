@@ -13,6 +13,8 @@ import { StatusCodes } from 'http-status-codes';
 
 import { type TenantEntry } from '../control/tenant-membership.ts';
 import * as d1Schema from '../db/d1-schema.ts';
+import { readWithOneRetry } from '../db/transient.ts';
+import { SharedFactsUnavailableError } from '../errors.ts';
 import {
 	isNotModified,
 	narInfoCachePath,
@@ -118,6 +120,8 @@ export function serveNar(
 
 // Whether the tenant holds its own presence edge for the NAR hash. Mirrors the
 // `tenant_blob` ownership check `findReusableBlob` uses on the negotiate path.
+// The read gets one bounded retry; a persistent fault refuses retryably, since
+// answering it as a miss would tell the client the path does not exist.
 async function tenantReferencesNar(
 	env: Env,
 	tenant: TenantId,
@@ -125,18 +129,24 @@ async function tenantReferencesNar(
 ): Promise<boolean> {
 	const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 
-	const owned = await database
-		.select({ narHash: d1Schema.tenantBlob.narHash })
-		.from(d1Schema.tenantBlob)
-		.where(
-			and(
-				eq(d1Schema.tenantBlob.tenant, tenant),
-				eq(d1Schema.tenantBlob.narHash, narHash)
-			)
-		)
-		.get();
+	try {
+		const owned = await readWithOneRetry(() =>
+			database
+				.select({ narHash: d1Schema.tenantBlob.narHash })
+				.from(d1Schema.tenantBlob)
+				.where(
+					and(
+						eq(d1Schema.tenantBlob.tenant, tenant),
+						eq(d1Schema.tenantBlob.narHash, narHash)
+					)
+				)
+				.get()
+		);
 
-	return owned !== undefined;
+		return owned !== undefined;
+	} catch (error) {
+		throw new SharedFactsUnavailableError(error);
+	}
 }
 
 // The narinfo edge-cache key carries the tenant prefix, matching the deletion
