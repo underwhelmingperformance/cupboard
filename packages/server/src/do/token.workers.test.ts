@@ -252,9 +252,11 @@ describe('POST /token', () => {
 		});
 
 		expect({
-			status: response.status
+			status: response.status,
+			retryAfter: response.headers.get('retry-after')
 		}).toStrictEqual({
-			status: StatusCodes.SERVICE_UNAVAILABLE
+			status: StatusCodes.SERVICE_UNAVAILABLE,
+			retryAfter: '5'
 		});
 	});
 });

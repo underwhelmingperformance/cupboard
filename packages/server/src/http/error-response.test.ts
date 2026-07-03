@@ -86,4 +86,43 @@ describe('serverErrorHandler', () => {
 			['Unhandled server error', { ray: 'ray-9', error: boom }]
 		]);
 	});
+
+	it.each([
+		{ flag: 'retryable' },
+		{ flag: 'durableObjectReset' },
+		{ flag: 'overloaded' }
+	])(
+		'answers a runtime fault marked $flag as a retryable 503',
+		async ({ flag }) => {
+			const fault = Object.assign(new Error('dispatch died'), {
+				[flag]: true
+			});
+
+			const response = await appThatThrows(fault).request('/', {
+				headers: { 'cf-ray': 'ray-77' }
+			});
+
+			expect({
+				status: response.status,
+				retryAfter: response.headers.get('retry-after'),
+				body: await response.text(),
+				errorLogged: logged
+			}).toStrictEqual({
+				status: 503,
+				retryAfter: '5',
+				body: 'Tenant is temporarily unavailable\n',
+				errorLogged: []
+			});
+		}
+	);
+
+	it('does not treat a false runtime flag as retryable', async () => {
+		const fault = Object.assign(new Error('dispatch died'), {
+			retryable: false
+		});
+
+		const response = await appThatThrows(fault).request('/');
+
+		expect(response.status).toBe(500);
+	});
 });
