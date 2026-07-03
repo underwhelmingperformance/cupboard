@@ -17,15 +17,15 @@
 		"zod": "^4.4.3"
 	},
 	"devDependencies": {
-		"@cloudflare/vitest-pool-workers": "^0.16.13",
-		"@cloudflare/workers-types": "^4.20260605.1",
-		"@orpc/client": "^1.14.6",
-		"@orpc/contract": "^1.14.6",
-		"@orpc/openapi-client": "^1.14.6",
-		"drizzle-kit": "^0.31.10",
-		"typescript": "^6.0.3",
-		"vitest": "^4.1.8",
-		"wrangler": "^4.98.0"
+		"@cloudflare/vitest-pool-workers": "0.16.13",
+		"@cloudflare/workers-types": "4.20260605.1",
+		"@orpc/client": "1.14.6",
+		"@orpc/contract": "1.14.6",
+		"@orpc/openapi-client": "1.14.6",
+		"drizzle-kit": "0.31.10",
+		"typescript": "6.0.3",
+		"vitest": "4.1.8",
+		"wrangler": "4.98.0"
 	},
 	"license": "AGPL-3.0-or-later",
 	"main": "src/worker.ts",
