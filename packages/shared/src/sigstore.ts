@@ -15,6 +15,9 @@ import {
 	DsseDecodeError,
 	inTotoStatementSchema
 } from './in-toto.ts';
+import { type SlsaProvenanceSummary, slsaProvenanceSummary } from './slsa.ts';
+
+const slsaProvenancePrefix = 'https://slsa.dev/provenance/';
 
 export interface IdentityPolicyOptions {
 	readonly certificateIdentity?: string;
@@ -31,12 +34,32 @@ export interface AttestationPolicyOptions extends IdentityPolicyOptions {
 	readonly timestampThreshold?: number;
 }
 
+/** A Rekor transparency-log entry a verified bundle was recorded in. */
+export interface VerifyTlogEntry {
+	readonly logIndex: string;
+	readonly integratedTime?: string;
+}
+
+/**
+ * The trust evidence a Sigstore verification rested on: when the signature was
+ * recorded, the transparency-log entries it was found in, and how many signed
+ * timestamps backed it. The verifier enforces the configured thresholds; this
+ * reports what it actually matched.
+ */
+export interface VerifyTrust {
+	readonly signedAt?: string;
+	readonly tlogEntries: readonly VerifyTlogEntry[];
+	readonly timestampCount: number;
+}
+
 export interface VerifyResult {
 	readonly bundle: string;
 	readonly predicateType: string;
 	readonly subjectDigest: string;
 	readonly signerIdentity?: string;
 	readonly signerIssuer?: string;
+	readonly provenance?: SlsaProvenanceSummary;
+	readonly trust: VerifyTrust;
 }
 
 /**
@@ -53,6 +76,8 @@ export interface VerifiedBundle {
 	readonly predicateType: string;
 	readonly subjectDigests: readonly string[];
 	readonly predicate?: unknown;
+	readonly signedTimestampCount: number;
+	readonly tlogEntries: readonly VerifyTlogEntry[];
 }
 
 export interface BundleVerifyOptions extends VerifierOptions {
@@ -183,10 +208,8 @@ export async function verifyBundle(
 	const parsed = parseBundle(bytes);
 	const trustMaterial = toTrustMaterial(await trustedRoot(options));
 	const verifier = new Verifier(trustMaterial, verifierOptions(options));
-	const signer = verifier.verify(
-		toSignedEntity(parsed.bundle),
-		verificationPolicy(policy)
-	);
+	const signedEntity = toSignedEntity(parsed.bundle);
+	const signer = verifier.verify(signedEntity, verificationPolicy(policy));
 
 	// The verifier matches certificate extensions by exact value, so a regex
 	// issuer cannot be expressed as a policy and is enforced here.
@@ -204,7 +227,16 @@ export async function verifyBundle(
 		signer,
 		predicateType: parsed.predicateType,
 		subjectDigests: parsed.subjectDigests,
-		predicate: parsed.predicate
+		predicate: parsed.predicate,
+		signedTimestampCount: signedEntity.timestamps.length,
+		tlogEntries: signedEntity.tlogEntries.map((entry) => {
+			const integratedTime = isoFromUnixSeconds(entry.integratedTime);
+
+			return {
+				logIndex: entry.logIndex,
+				...(integratedTime !== undefined && { integratedTime })
+			};
+		})
 	};
 }
 
@@ -232,13 +264,54 @@ export function resultFor(
 		);
 	}
 
+	const provenance = verified.predicateType.startsWith(slsaProvenancePrefix)
+		? slsaProvenanceSummary(verified.predicate)
+		: undefined;
+
 	return {
 		bundle,
 		predicateType: verified.predicateType,
 		subjectDigest: expectedSubject,
 		signerIdentity: verified.signer.identity?.subjectAlternativeName,
-		signerIssuer: verified.signer.identity?.extensions?.issuer
+		signerIssuer: verified.signer.identity?.extensions?.issuer,
+		...(provenance !== undefined && { provenance }),
+		trust: trustFor(verified)
 	};
+}
+
+function trustFor(verified: VerifiedBundle): VerifyTrust {
+	let signedAt: string | undefined;
+
+	for (const entry of verified.tlogEntries) {
+		if (entry.integratedTime === undefined) {
+			continue;
+		}
+
+		if (signedAt === undefined || entry.integratedTime < signedAt) {
+			signedAt = entry.integratedTime;
+		}
+	}
+
+	return {
+		tlogEntries: verified.tlogEntries,
+		timestampCount: verified.signedTimestampCount,
+		...(signedAt !== undefined && { signedAt })
+	};
+}
+
+/**
+ * A Rekor integrated time, a UNIX-seconds string, as an ISO 8601 instant.
+ * Returns undefined when the value is not a positive finite number, so an
+ * absent or malformed time is simply not shown.
+ */
+function isoFromUnixSeconds(seconds: string): string | undefined {
+	const value = Number(seconds);
+
+	if (!Number.isFinite(value) || value <= 0) {
+		return undefined;
+	}
+
+	return new Date(value * 1000).toISOString();
 }
 
 export function bundleVerifyOptions(
