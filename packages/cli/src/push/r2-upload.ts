@@ -3,8 +3,8 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { type PushCredential } from '@cupboard/protocol/upload';
 
 // 8 MiB parts, above R2's 5 MiB multipart minimum: a NAR that compresses smaller
-// goes in one PutObject, a larger one streams as multipart, bounding memory to a
-// few parts rather than the whole NAR or a temp file.
+// goes in one PutObject, a larger one streams as multipart, bounding memory to
+// a few parts at a time.
 const partBytes = 8 * 1024 * 1024;
 
 // Re-fetches the push's credential. The S3 client calls it when it has no

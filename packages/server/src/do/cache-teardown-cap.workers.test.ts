@@ -277,7 +277,7 @@ describe('cache teardown', () => {
 		// The residue of a teardown chunk that crashed after removing the path's
 		// attestation references but before re-rendering its list object. The
 		// replayed retirement finds no reference rows, and must still remove the
-		// object rather than leave it advertising deleted bundles.
+		// object and stop it advertising deleted bundles.
 		const listKey = attestationListObjectKey(
 			fixtureTenant,
 			path.storePathHash,

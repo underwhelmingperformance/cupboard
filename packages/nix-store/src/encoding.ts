@@ -1,7 +1,6 @@
 // Byte encoders shared across the workspace. They use `btoa`/`atob`, which are
-// available in both Node and workerd, and loop over the bytes rather than
-// spreading them into `String.fromCodePoint`, so they are safe for inputs of
-// any length.
+// available in both Node and workerd. Looping over the bytes keeps them safe
+// for inputs of any length.
 
 /** Encode bytes as standard (padded) base64. */
 export function bytesToBase64(bytes: Uint8Array): string {

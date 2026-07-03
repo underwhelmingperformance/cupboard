@@ -181,7 +181,7 @@ export class NarInfoObjectsService {
 		const narInfo = await this.narInfoFromRow(row);
 
 		// No shared fact means the blob was demoted; leave the path non-servable
-		// until a re-upload re-promotes it rather than render an unbacked object.
+		// until a re-upload re-promotes it.
 		if (narInfo === undefined) {
 			return;
 		}
@@ -261,7 +261,7 @@ export class NarInfoObjectsService {
 
 	// Renders a narinfo by joining the tenant row (identity, uncompressed NarHash/
 	// NarSize, references, signature) with the canonical compressed metadata in
-	// `blob_state` — the narinfo row holds no compressed fields of its own. Returns
+	// `blob_state` (the narinfo row holds no compressed fields of its own). Returns
 	// undefined when the shared fact is gone (a demoted blob), so the caller leaves
 	// the path non-servable until a re-upload heals it.
 	async narInfoFromRow(
@@ -340,8 +340,8 @@ export class NarInfoObjectsService {
 	}
 
 	// {@link isServable} for a caller that already holds the DO critical section, so
-	// it can check the predicate and act on it (e.g. activate a root) atomically
-	// with the check rather than racing a delete across an `await`.
+	// it can check the predicate and act on it (e.g. activate a root) atomically,
+	// without a delete racing across an `await`.
 	async isServableLocked(
 		cache: string,
 		storePathHash: StorePathHash

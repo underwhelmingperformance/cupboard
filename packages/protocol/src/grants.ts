@@ -439,8 +439,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 // A grant a rule persisted under an earlier build may name an operation since
 // retired (a removed scope). Drop the unknown actions so the rule still
-// validates against the current operation set, rather than failing the whole
-// rule. A grant carrying no recognised action becomes meaningless and is
+// validates against the current operation set; the rule is not failed outright. A grant carrying no recognised action becomes meaningless and is
 // dropped; a wildcard grant has no actions and passes through untouched.
 function withoutRetiredActions(grants: unknown): unknown {
 	if (!Array.isArray(grants)) {

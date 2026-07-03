@@ -108,7 +108,7 @@ describe('background verification', () => {
 		const report = await runVerify(token);
 
 		// The unrenderable row is skipped, but the pass still restores the sound
-		// row and advances its cursor to the end rather than parking on the poison.
+		// row and advances its cursor to the end.
 		expect({
 			report,
 			soundRestored:

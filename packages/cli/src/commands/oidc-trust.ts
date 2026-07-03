@@ -49,8 +49,8 @@ interface GithubBranchOptions {
 	readonly attest?: boolean;
 }
 
-// Attestation is a dedicated toggle on the GitHub presets rather than an
-// `--allow` value, and it is granted by default; `--no-attest` is authoritative,
+// Attestation is a dedicated toggle on the GitHub presets, not a grant value,
+// and it is granted by default; `--no-attest` is authoritative,
 // so it wins even if `attest` was named some other way.
 function withAttest(
 	allow: readonly string[],
@@ -580,7 +580,7 @@ function buildOidcTrustCommands(
 					'',
 					'Example:',
 					'  # Trust pushes to main, requiring the reusable publish workflow',
-					'  # that mints the token, and publish to the default cache',
+					'  # that issues the token, and publish to the default cache',
 					'  cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \\',
 					'    --repo acme/infra --branch main \\',
 					'    --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main'

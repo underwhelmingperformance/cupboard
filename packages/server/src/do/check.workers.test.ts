@@ -170,9 +170,9 @@ describe('storage check', () => {
 
 		await pushPath(token, metadata, DEFAULT_CACHE, nar);
 
-		// Place the genuine bytes under the claimed hash's key — their compressed
+		// Place the genuine bytes under the claimed hash's key (their compressed
 		// metadata still matches the narinfo, but they decompress to `nar`, not
-		// `claimed` — and repoint the narinfo at that key.
+		// `claimed`), and repoint the narinfo at that key.
 		await env.BLOBS.put(narObjectKey(claimed.narHash), nar.narBytes, {
 			sha256: await crypto.subtle.digest('SHA-256', nar.narBytes)
 		});

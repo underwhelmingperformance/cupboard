@@ -488,9 +488,9 @@ describe('upload flow', () => {
 		// The cold-start migration and the commit are the row-heavy entrypoints that
 		// bypass `fetch`, so each logs its own cost line. Neither is on the fetch path
 		// the request-cost test covers, so without this the `metered()` plumbing could
-		// regress unseen. Both are asserted as a present, non-zero cost rather than an
-		// exact figure: the cold-start total tracks the whole DO migration history and
-		// the commit total tracks the closure, neither a stable behavioural quantity.
+		// regress unseen. Both are asserted as a present, non-zero cost: the cold-start
+		// total tracks the whole DO migration history and the commit total tracks the
+		// closure, neither a stable behavioural quantity.
 		// The meter's row accounting is pinned exactly by the fetch-path and reconcile
 		// cost tests instead.
 		const byMethod = methodLines.map((fields) =>
@@ -683,7 +683,7 @@ describe('upload flow', () => {
 		const good = await verifiableNar('isolation-good');
 		const wrong = await verifiableNar('isolation-wrong');
 
-		// A bad upload claims `good`'s narHash but stages `wrong`'s bytes — whose own
+		// A bad upload claims `good`'s narHash but stages `wrong`'s bytes, whose own
 		// compressed hash matches, so only the decompress-verify catches it.
 		const badMetadata = uploadMetadata({
 			name: 'bad',
@@ -766,7 +766,7 @@ describe('upload flow', () => {
 			narSize: stored.narSize
 		});
 
-		// Both negotiate as fresh uploads before either commits — the only window in
+		// Both negotiate as fresh uploads before either commits, the only window in
 		// which two distinct encodings of one hash race.
 		const firstUpload = expectSingleUploadDecision(
 			await negotiateUploads(token, [first]),
@@ -783,8 +783,8 @@ describe('upload flow', () => {
 		await commitUpload(token, firstUpload.uploadId);
 		await commitUpload(token, secondUpload.uploadId);
 
-		// Both narinfos advertise the canonical object's fileHash — the one promoted
-		// first — so a substituter fetching either downloads bytes whose hash matches.
+		// Both narinfos advertise the canonical object's fileHash (the one promoted
+		// first), so a substituter fetching either downloads bytes whose hash matches.
 		const firstInfo = await fetchNarInfo(first.storePathHash);
 		const secondInfo = await fetchNarInfo(second.storePathHash);
 		const canonical = await env.BLOBS.head(narObjectKey(compressed.narHash));
@@ -1320,9 +1320,8 @@ describe('upload flow', () => {
 			wait: false
 		});
 
-		// There is nothing committed to concede to, so rather than returning an
-		// untracked deferral whose socket would park until the commit timeout, the
-		// loser is marked pending and staged for the prompt verification pass.
+		// There is nothing committed to concede to; the loser is marked pending
+		// and staged for the prompt verification pass.
 		expect({
 			status: committed.status,
 			verdict: await pendingUploadVerdict(loser.uploadId),
@@ -1658,7 +1657,7 @@ describe('upload flow', () => {
 
 		// One pass settles both: whichever verifies first wins the narinfo row,
 		// the other loses it, and anything the loser staged or promoted that no
-		// edge references must be reaped rather than stranded.
+		// edge references are reaped.
 		await currentServer().runVerification();
 		await currentServer().runGarbageCollection();
 
@@ -1764,8 +1763,7 @@ describe('upload flow', () => {
 		);
 		await putNarBytes(upload.r2Key);
 
-		// The deferral must ask for a prompt verification pass rather than
-		// leaving the upload to the hourly sweep.
+		// The deferral must trigger a prompt verification pass.
 		const sent: unknown[] = [];
 		const metrics = { backlogCount: 0, backlogBytes: 0 };
 		await runInDurableObject(currentServer(), (instance) => {
@@ -1818,8 +1816,8 @@ describe('upload flow', () => {
 		expect(firstCommit.status).toBe('committed');
 		expect(secondCommit.status).toBe('already-present');
 
-		// Both private staging objects are reclaimed — the winner's on commit and
-		// the loser's on the already-present path — leaving only the canonical blob.
+		// Both private staging objects are reclaimed (the winner's on commit and
+		// the loser's on the already-present path), leaving only the canonical blob.
 		// GC never has a handle to a staging key once its upload is cleared.
 		await expect(env.BLOBS.head(first.r2Key)).resolves.toBeNull();
 		await expect(env.BLOBS.head(second.r2Key)).resolves.toBeNull();
@@ -3141,7 +3139,7 @@ describe('upload flow', () => {
 
 			// Activation only allows a servable target, but that target can later be
 			// deleted, leaving the root resolving to nothing committed. The sweep must
-			// then skip rather than collect the rest of the cache.
+			// then skip the rest of the cache.
 			const ghost = await commitVerifiablePath(token, 'ghost', {
 				name: 'ghost',
 				storePathHash: '99999999999999999999999999999999'

@@ -1,6 +1,6 @@
 // The `cupboard-tenant` Worker. It defines the per-tenant Durable Object; the
 // control-plane Worker reaches every tenant through the external Durable Object
-// binding rather than over HTTP, so this script has no public surface of its own.
+// binding, so this script has no public surface of its own.
 // Keeping the class in its own script is what isolates the control signing key:
 // this script never binds the wrapping secret, so the Durable Object cannot reach
 // it.

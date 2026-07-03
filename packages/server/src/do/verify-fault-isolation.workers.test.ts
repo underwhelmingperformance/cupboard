@@ -95,7 +95,7 @@ describe('batched verify fault isolation', () => {
 		// fresh discovery store.
 		const marker = new OidcDiscoveryStore();
 		await runInDurableObject(currentServer(), (instance) => {
-			instance.discovery = marker;
+			instance.context.discovery = marker;
 		});
 
 		// Fail the D1 status re-check that runs inside the settle's critical
@@ -123,7 +123,7 @@ describe('batched verify fault isolation', () => {
 
 		const isSameInstance = await runInDurableObject(
 			currentServer(),
-			(instance) => instance.discovery === marker
+			(instance) => instance.context.discovery === marker
 		);
 
 		expect({

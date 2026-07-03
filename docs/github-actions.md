@@ -269,7 +269,7 @@ cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acm
 ```
 
 `--job-workflow-ref` is optional on both presets and restricts the rule further
-to the `job_workflow_ref` claim, the workflow file that minted the token,
+to the `job_workflow_ref` claim, the workflow file that issued the token,
 written `owner/repo/path@ref`. Give it with an `@ref` to match exactly, or
 without one to match that file at any ref; the latter is what a reusable
 workflow needs, since its ref is the file's own location rather than the branch

@@ -155,7 +155,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		await commitPath(token, metadata, nar);
 		await deletePath(token, metadata.storePathHash);
 		// The delete drained this tenant's presence edge, so the recommit re-uploads
-		// (oracle-safe negotiate) rather than reusing; the promote adopts the surviving
+		// (oracle-safe negotiate); the promote adopts the surviving
 		// canonical object, and the generation advances past the deleted one.
 		await commitPath(token, metadata, nar);
 

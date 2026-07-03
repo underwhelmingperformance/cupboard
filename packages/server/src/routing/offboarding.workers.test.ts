@@ -212,7 +212,7 @@ describe('offboarding drain', () => {
 		await offboardTenant(id);
 
 		// One row and one object per tick: the first tick cannot finish, so the tenant
-		// stays `offboarding` with residue rather than being finalised early.
+		// stays `offboarding` with residue and is not finalised early.
 		await runOffboardSweep(env, 10, 1, 1);
 
 		const midRow = await tenantRow(id);

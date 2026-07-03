@@ -5,7 +5,7 @@ import { type Substitution } from './grants.ts';
 // Capture patterns come from admin-authored trust rules, so they are evaluated
 // with RE2 (linear time, no catastrophic backtracking) and never JavaScript
 // `RegExp`. RE2 also rejects backreferences and lookaround at compile, so an
-// unsupported feature fails closed here rather than at match time.
+// unsupported feature fails closed at compile time.
 
 export class InvalidCapturePatternError extends Error {
 	constructor(message: string) {
@@ -54,8 +54,8 @@ export function isAnchoredRe2(pattern: string): boolean {
 
 /**
  * Whether `value` matches the anchored pattern in full. Fails closed: a pattern
- * that does not compile yields `false` rather than throwing, so claim matching
- * never faults a token exchange.
+ * that does not compile yields `false`, so claim matching never faults a token
+ * exchange.
  */
 export function isPatternMatch(pattern: string, value: string): boolean {
 	try {

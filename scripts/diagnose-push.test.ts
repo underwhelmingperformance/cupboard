@@ -358,7 +358,7 @@ describe('fetchPaged', () => {
 		const timeframes: { from: number; to: number }[] = [];
 		// Every row shares one millisecond and the view has no cursor into it:
 		// the second page repeats the first, so the walk must stop (reporting
-		// the truncation) rather than loop.
+		// the truncation).
 		const burst = [
 			{ timestamp: 700, id: 'a' },
 			{ timestamp: 700, id: 'b' }
@@ -621,7 +621,7 @@ describe('analyse', () => {
 
 	// A root span per trace wraps its children, so the root is a container and is
 	// left out of the breakdown. The two r2_head leaves in t1 overlap, so their
-	// busy time merges into one interval rather than summing.
+	// busy time merges into one interval.
 	const span = (
 		traceId: string,
 		spanId: string,

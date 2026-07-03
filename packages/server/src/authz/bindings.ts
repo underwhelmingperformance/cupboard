@@ -15,8 +15,7 @@ import { type OidcClaims } from '../oidc/oidc-trust.ts';
 // A trust rule's resource bindings are evaluated against the verified claims to
 // decide whether a requested grant is permitted. Rendering fails closed: a
 // missing claim, a capture that does not match, or a rendered value that fails
-// its grammar yields no value, so the requested grant is refused rather than
-// issued against a half-formed resource.
+// its grammar yields no value, so the requested grant is refused.
 
 type CacheBinding = Extract<
 	PermittedGrant,
@@ -56,7 +55,7 @@ function renderTemplate(
 
 	// Stitch the literal spans and the rendered substitutions together. A missing
 	// substitution or a transform that throws fails the whole render: the caller
-	// reads `undefined` and refuses the grant rather than issue a partial value.
+	// reads `undefined` and refuses the grant.
 	for (const match of template.matchAll(placeholderPattern)) {
 		const name = match[1];
 		const substitution = name === undefined ? undefined : substitutions?.[name];

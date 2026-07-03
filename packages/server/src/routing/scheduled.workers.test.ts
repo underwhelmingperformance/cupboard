@@ -244,7 +244,7 @@ describe('scheduled tenant pass failure records', () => {
 		}
 
 		// Both batches are attempted and their failures are aggregated in send order,
-		// so the accumulation keeps every failure rather than only the last.
+		// so the accumulation keeps every failure, not just the last.
 		expect({ outcome, attempted }).toStrictEqual({
 			outcome: {
 				error: { name: QueueBatchSendError.name, errors: failures }

@@ -205,8 +205,8 @@ export class CommitPipelineService {
 
 	// Commits a reuse of a blob already in the verified CAS: reserve the row, then
 	// materialise from the existing canonical object and `blob_state`. If the shared
-	// blob was reaped between negotiate and now, reclaim the row and report it gone so
-	// the client re-uploads, rather than serve a narinfo with no backing object.
+	// blob was reaped between negotiate and now, reclaim the row and report it gone:
+	// a narinfo with no backing object must never be served.
 	private async commitReusedBlob(
 		cache: string,
 		uploadId: string,
@@ -243,7 +243,7 @@ export class CommitPipelineService {
 			);
 
 			// A reuse commit settles synchronously, so its upload row is cleared
-			// rather than retained for observation.
+			// immediately.
 			this.uploadState.clearPendingUpload(uploadId);
 
 			return {
@@ -356,8 +356,8 @@ export class CommitPipelineService {
 			.get();
 	}
 
-	// Whether the tenant holds a presence edge for this hash, so charging it
-	// would be a replay rather than fresh usage.
+	// Whether the tenant holds a presence edge for this hash; if so, charging it
+	// would replay an existing ownership and must be skipped.
 	private async ownsHash(
 		tenant: TenantId,
 		narHash: NixSha256HashString
@@ -652,8 +652,7 @@ export class CommitPipelineService {
 
 		// A reuse binds a narinfo to bytes this tenant never re-proved, on the
 		// strength of its presence edge; with the edge gone (a delete credited it
-		// back) the reuse fails towards re-upload rather than re-referencing a
-		// hash the tenant no longer holds.
+		// back) the reuse fails towards re-upload: the presence edge is gone.
 		if (request.mustOwnBlob && !probe.isOwned) {
 			return { outcome: { kind: 'blob-gone' } };
 		}
@@ -679,8 +678,8 @@ export class CommitPipelineService {
 		// Quota decision against the size that will actually be charged: the
 		// canonical `blob_state` size, which the promote may have adopted from an
 		// existing encoding and so can differ from the staged size the negotiate
-		// pre-check used. Refusing here lets the caller reclaim the reserved row
-		// rather than charging; the charge batch re-fences the decision.
+		// pre-check used. Refusing here lets the caller reclaim the reserved row;
+		// the charge batch re-fences the decision.
 		if (isOverQuota(probe.account, probe.isOwned, probe.blob.fileSize)) {
 			return { outcome: { kind: 'over-quota' } };
 		}
@@ -885,8 +884,7 @@ export class CommitPipelineService {
 
 	async commit(cache: string, uploadId: string): Promise<CommitOutcome> {
 		// A commit settling after offboarding began must publish nothing: refuse
-		// before deferring, so the writer hears a stopped write rather than a
-		// verification verdict that never comes.
+		// before deferring, so the writer hears a stopped write immediately.
 		if (this.context.offboarding) {
 			throw new TenantWritesStoppedError(
 				this.context.requireTenant(),
@@ -950,8 +948,7 @@ export class CommitPipelineService {
 			// This upload already started its own commit saga and is mid-verify:
 			// its row is reserved, not yet servable, and the verification pass
 			// re-drives it from the durable marker. Stay deferred, leaving the
-			// marker and the staged bytes the re-drive needs intact, rather than
-			// conceding and deleting them. A concurrent commit, by contrast,
+			// marker and the staged bytes the re-drive needs intact. A concurrent commit, by contrast,
 			// reaches here with its own verdict still null.
 			if (pending.verdict === 'committing' || pending.verdict === 'pending') {
 				// Request a prompt verification pass so a retried socket is re-driven
@@ -977,8 +974,8 @@ export class CommitPipelineService {
 				// reference yet, so there is nothing to concede to. Track this upload for
 				// verification, exactly as a fresh deferral does, so the pass drives it to
 				// a terminal verdict (`servable` once it owns the path, `absent` if the
-				// rival version won) instead of leaving its socket parked until the commit
-				// timeout.
+				// rival version won); the socket is driven to completion without waiting
+				// for the commit timeout.
 				this.uploadState.markUploadPending(uploadId);
 				await this.requestVerification(this.context.requireTenant());
 
@@ -1099,9 +1096,9 @@ export class CommitPipelineService {
 	}
 
 	// Reserves the narinfo row for a commit before its bytes are verified, the
-	// row-first half of the row-first/edge-last saga. It signs the fingerprint —
-	// over the uncompressed `NarHash`/`NarSize`/references only, so it is independent
-	// of any compressed encoding — reads and stamps the next generation, and advances
+	// row-first half of the row-first/edge-last saga. It signs the fingerprint
+	// over the uncompressed `NarHash`/`NarSize`/references only (independent of
+	// any compressed encoding), reads and stamps the next generation, and advances
 	// the durable counter, all in one DO transaction. It writes neither the D1 edge
 	// nor the R2 object and never touches the pending upload, so the reserved row is
 	// never servable on its own. On a conflicting row it reports whether that row is

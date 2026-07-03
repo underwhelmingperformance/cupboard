@@ -47,7 +47,7 @@ const maintenanceEligibilityStaleMs = 6 * 60 * 60 * 1000;
 // Per cron tick, the offboard drain works at most this many tenants, each for at
 // most this many bounded rounds of this many rows/objects. The product bounds the
 // tick's subrequest fan-out; the per-round chunk matches R2's 1000-key delete so a
-// large tenant reclaims many batches per tick rather than one. Provisional, pending
+// large tenant reclaims many batches per tick. Provisional, pending
 // a fleet-scale measurement.
 const offboardTenantsPerTick = 10;
 const offboardRoundsPerTick = 10;
@@ -347,7 +347,7 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
 
 /**
  * The global blob reaper, run Worker-side over the shared D1 facts and R2 objects
- * rather than inside any tenant's Durable Object, so the only actor that sees every
+ * in the Worker, so the only actor that sees every
  * tenant's reference edges does the collecting. Returns how many shared blobs it
  * collected.
  */
@@ -449,7 +449,7 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
  * through the Worker; a tenant whose rows and objects are both gone is finalised into
  * its terminal scrubbed tombstone. Offboarding tenants are disjoint from the
  * maintenance sweep (which serves only active tenants), so the two never contend for
- * one tenant. Per-tenant failures are surfaced together rather than swallowed.
+ * one tenant. Per-tenant failures are all surfaced.
  */
 export async function runOffboardSweep(
 	env: Env,
@@ -553,7 +553,7 @@ async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
  * Drives one hourly cron tick: maintains the most-overdue active tenants and stamps
  * them, so the table's own `last_maintained_at` carries the round-robin position and
  * the whole fleet is covered over successive ticks. Per-tenant failures are collected
- * and surfaced together rather than swallowed, so a fleet-wide stall is observable;
+ * and all surfaced, so a fleet-wide stall is observable;
  * the batch is stamped regardless of per-tenant outcome, so one failing tenant does
  * not wedge the sweep.
  */
@@ -679,7 +679,7 @@ export class VerdictRecorder {
 				this.applied += await this.recordWithRetry(batch);
 			} catch (error) {
 				// The batch could not record: keep it buffered (ahead of anything
-				// added meanwhile, preserving order) and stop rather than spin
+				// added meanwhile, preserving order) and stop to avoid spinning
 				// against a DO that is down. `settle` surfaces the failure.
 				this.buffer = [...batch, ...this.buffer];
 				this.failure = { error };
@@ -830,7 +830,7 @@ export async function verifyTenant(
 			} catch (error) {
 				// A vanished canonical object cannot reappear: the row can never
 				// settle, so report it gone and let the settle answer the waiter
-				// rather than leave it parked until the commit timeout. Anything
+				// so the settle answers the waiter without waiting for the commit timeout. Anything
 				// else is transient; hand the claim back for a prompt retry.
 				recorder.add({
 					uploadId: claim.uploadId,
@@ -871,7 +871,7 @@ export async function verifyTenant(
 				);
 			} catch {
 				// A transient fetch or decode fault: hand the claim back so the next
-				// pass retries promptly rather than waiting the lease out.
+				// pass retries promptly on the next cycle.
 				recorder.add({
 					uploadId: claim.uploadId,
 					verdict: { kind: 'abandoned' }
@@ -888,8 +888,8 @@ export async function verifyTenant(
 	// through the object's single-flight so this continuation and a concurrent
 	// deferral collapse onto one message that claims each row once. Continue only
 	// after a verdict actually applied: a batch whose reads or applies all fail (a
-	// transient fault leaving every row pending) backs off to the cron rather than
-	// spinning a continuation that re-claims and re-fails the same rows.
+	// transient fault leaving every row pending) backs off to the cron,
+	// avoiding a continuation that re-claims and re-fails the same rows.
 	const isProgressed = applied > 0;
 
 	if (truncated && isProgressed) {
@@ -1083,7 +1083,7 @@ export async function runScheduledMaintenance(
 
 // Runs the optional key-retirement pass after collection and verification have
 // settled, capturing its outcome as a settled result so the caller can surface
-// it alongside the other passes rather than letting it short-circuit them. An
+// it alongside the other passes without short-circuiting them. An
 // absent pass settles as a fulfilled no-op.
 async function settleAuthKeyRetirement(
 	runAuthKeyRetirement: (() => Promise<void>) | undefined

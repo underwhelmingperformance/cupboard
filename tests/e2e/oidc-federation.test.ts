@@ -131,7 +131,7 @@ describe('OIDC federation', () => {
 			);
 
 			// The CI token authorises per call, so its derived client binds it
-			// directly rather than going through the cached owner session.
+			// directly, bypassing the cached owner session.
 			const ciRoots = tenantRpc(server.tenantUrl, {
 				credential: ciToken
 			}).roots;

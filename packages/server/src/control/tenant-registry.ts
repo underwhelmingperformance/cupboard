@@ -160,7 +160,7 @@ export async function ensureTenant(
 	// The config matches: ensure the usage row idempotently (recovering a crash that
 	// left only the tenant row), then accept the quota only if it matches the stored
 	// one. `onConflictDoNothing` keeps an existing quota, so a different quota is a
-	// genuine conflict rather than a silent overwrite.
+	// genuine conflict, surfaced immediately.
 	await ensureUsageRow(database, body, now);
 	const existingQuota = await loadQuota(database, body.id);
 

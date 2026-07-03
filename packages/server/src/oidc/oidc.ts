@@ -42,9 +42,8 @@ export class OidcTokenVerificationError extends Error {
 }
 
 // The issuer's keys could not be retrieved (a JWKS fetch timeout, a bad JWKS
-// response, or a network failure) — distinct from the token itself failing
-// verification, so the caller can treat it as transient rather than rejecting
-// the token outright.
+// response, or a network failure). This is distinct from the token itself
+// failing verification, so the caller can treat it as transient and retry.
 export class OidcKeysUnreachableError extends Error {
 	constructor(options: { readonly cause: unknown }) {
 		super("Could not retrieve the issuer's signing keys", {
@@ -88,14 +87,14 @@ export interface InboundVerifyOptions {
 /**
  * Verifies an inbound OIDC token against a resolved key set, pinning the issuer,
  * audience and the supplied algorithm set. The key resolver and algorithms are
- * supplied by the caller — the Durable Object from the issuer's discovered
- * metadata, a test from a local key set — so verification needs no network of
- * its own.
+ * supplied by the caller (the Durable Object from the issuer's discovered
+ * metadata, or a test from a local key set), so verification needs no network
+ * of its own.
  */
 // `jwtVerify` fails either because the token is bad or because the issuer's keys
 // could not be fetched. These are the token-level failures; anything else (a
 // JWKS timeout, a malformed JWKS response, a raw network error) means the keys
-// were unreachable and the caller should retry rather than reject the token.
+// were unreachable and the caller should treat the failure as transient and retry.
 const tokenVerificationErrors = [
 	joseErrors.JWSSignatureVerificationFailed,
 	joseErrors.JWTExpired,

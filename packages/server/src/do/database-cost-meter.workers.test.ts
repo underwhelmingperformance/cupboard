@@ -31,7 +31,7 @@ const costLineSchema = z.object({
 
 // The meter reports the rows the Durable Object's SQLite actually read and wrote,
 // the figure the platform bills on, so the cost-regression tests assert on a real
-// measurement rather than a count of function calls. A full table scan reads one
+// measurement. A full table scan reads one
 // row per row present, so the read count tracks the table and a read writes
 // nothing.
 describe('db cost meter', () => {
@@ -144,10 +144,10 @@ describe('db cost meter', () => {
 			logSpy.mockRestore();
 		}
 
-		// The meter is wired into the entrypoint, not just exercised in isolation, so a
-		// real request emits one cost line reporting the exact rows the request moved.
-		// Dropping the `fetch` wrapper would emit no such line, and a mis-count that
-		// stayed positive would slip past a `> 0` assertion.
+		// The meter is integrated into the entrypoint, not just exercised in
+		// isolation, so a real request emits one cost line reporting the exact rows
+		// the request moved. A mis-count that stayed positive would slip past a
+		// `> 0` assertion.
 		const negotiate = costFields
 			.map((fields) => costLineSchema.parse(fields))
 			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));

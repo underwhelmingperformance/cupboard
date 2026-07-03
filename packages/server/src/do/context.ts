@@ -108,10 +108,9 @@ export type ReserveOutcome =
 // gate; `superseded` when a concurrent recommit replaced the reserved version;
 // `blob-gone` when the shared blob (`blob_state` or the canonical object) is no
 // longer present and the path must be re-uploaded; `over-quota` when charging the
-// blob's canonical size would exceed the tenant's quota, so the caller reclaims the
-// reserved row rather than charging; `tenant-inactive` when the tenant is no longer
-// active (suspended, offboarding, offboarded, or gone), so the caller reclaims the
-// reserved row rather than publishing an edge and object the drain would have to chase.
+// blob's canonical size would exceed the tenant's quota (the caller reclaims the
+// reserved row); `tenant-inactive` when the tenant is no longer active (suspended,
+// offboarding, offboarded, or gone) and the caller reclaims the reserved row.
 export type MaterialiseOutcome =
 	| { readonly kind: 'materialised'; readonly narInfo: NarInfo }
 	| { readonly kind: 'superseded' }
@@ -134,7 +133,7 @@ export class ServerContext {
 	readonly ctx: DurableObjectState;
 	discovery = new OidcDiscoveryStore();
 	// Set once the control plane begins offboarding this tenant, so the verify-restore
-	// path no-ops rather than re-materialising a narinfo object the drain is removing.
+	// path no-ops while the drain removes narinfo objects.
 	// In-memory is sufficient: a new write is already refused by the Worker's status
 	// gate, so the only caller to guard is an in-flight commit settling on this warm
 	// instance, which sees the flag set by the same instance's offboard RPC.
@@ -148,7 +147,7 @@ export class ServerContext {
 		this.env = env;
 		this.db = drizzle(meteredStorage(ctx.storage, this.dbCost), { schema });
 		// The global shared-blob facts live in D1, readable and writable by every
-		// tenant DO and the Worker, rather than in this DO's own SQLite.
+		// tenant DO and the Worker.
 		this.d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 	}
 
@@ -197,7 +196,7 @@ export class ServerContext {
 	// This Durable Object's tenant slug, the one source for its tenant-scoped D1
 	// reference edges and R2 narinfo keys. It comes from the assigned identity, so a
 	// route that reaches a write has already passed the 503 guard; an absent row
-	// here is a programming error, surfaced rather than defaulted.
+	// here is a programming error and is surfaced as an exception.
 	requireTenant(): TenantId {
 		const row = this.db
 			.select({ tenant: schema.tenantIdentity.tenant })

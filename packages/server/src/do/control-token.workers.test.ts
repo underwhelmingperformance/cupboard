@@ -267,7 +267,7 @@ describe('control plane POST /token', () => {
 
 	it('refuses to issue, failing closed, when a control trust rule pins no subject', async () => {
 		// An admin-scoped rule with no pinned subject would match every subject of
-		// the trusted issuer and audience, so it must be rejected rather than honoured.
+		// the trusted issuer and audience, so it must be rejected.
 		await seedControlTrust({
 			issuer: 'https://idp.example.test',
 			audience: 'cupboard-control'

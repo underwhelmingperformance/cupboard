@@ -137,7 +137,7 @@ const jwtClaimsSchema = z.object({
 // plane issues `iss` equal to the bare host, so an issuer match alone rules out
 // cross-target reuse. The audience must also admit the target: a tenant token's
 // audience is the target URL, while a control token's audience is a configured
-// client id rather than a URL, so a non-URL audience is accepted too.
+// client id (non-URL), so a non-URL audience is accepted too.
 function isTokenBoundToTarget(token: string, target: string): boolean {
 	const claims = decodeJwtClaims(token);
 

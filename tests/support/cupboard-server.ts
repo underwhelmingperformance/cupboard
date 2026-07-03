@@ -123,7 +123,7 @@ export class CupboardTestServer {
 					kvNamespaces: { TENANT_CACHE: 'tenant-cache' },
 					// The maintenance queue, consumed by the control Worker as in
 					// production, so a deferred commit's verification request is
-					// processed rather than dropped.
+					// processed.
 					queueProducers: {
 						MAINTENANCE_QUEUE: { queueName: 'cupboard-maintenance' }
 					},
@@ -224,7 +224,7 @@ export class CupboardTestServer {
 	}
 
 	/**
-	 * The fixture tenant's base URL — the `/t/<tenant>/` prefix every tenant route
+	 * The fixture tenant's base URL: the `/t/<tenant>/` prefix every tenant route
 	 * (token exchange, uploads, narinfo and NAR reads) lives under. The bare
 	 * {@link URL} is the deployment/control surface.
 	 */
@@ -503,8 +503,8 @@ async function bundleEntry(
 			outDir: outputDirectory,
 			rolldownOptions: {
 				// Leave `node:*` to workerd's `nodejs_compat` runtime, as
-				// `wrangler deploy` does, rather than bundling a polyfill. The
-				// polyfilled `node:zlib` lacks the native zstd the verifier needs.
+				// `wrangler deploy` does. The polyfilled `node:zlib` lacks the
+				// native zstd the verifier needs.
 				external: ['cloudflare:workers', /^node:/],
 				output: {
 					entryFileNames: `${name}.mjs`

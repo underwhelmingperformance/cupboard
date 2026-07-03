@@ -84,7 +84,7 @@ describe('applyMigrations', () => {
 		// A Durable Object initialised by a divergent build can carry a later
 		// migration's objects without that migration recorded. Dropping the record
 		// of a migration whose objects remain reproduces that: re-running it must
-		// skip the change that is already present rather than wedge.
+		// skip the change that is already present and converge cleanly.
 		const result = await runInDurableObject(
 			testServerFor('migrate-diverged'),
 			async (_instance, state) => {

@@ -24,7 +24,7 @@ export function isAllowedIssuerUrl(value: string): boolean {
 
 /**
  * A validated, normalised OpenID Connect issuer identifier. Construction enforces
- * the transport rule — HTTPS, or HTTP only for loopback — and removes a trailing
+ * the transport rule (HTTPS, or HTTP only for loopback) and removes a trailing
  * slash, so that an issuer compares equal to a token's `iss` regardless of a
  * trailing slash, the discovery URL is exact, and the metadata `issuer` check
  * (OpenID Connect Discovery §4.3) is slash-insensitive.
@@ -50,7 +50,7 @@ export class IssuerUrl {
 		}
 
 		// The stored value is the raw identifier with only the trailing slash
-		// trimmed — deliberately not host-lowercased or otherwise URL-normalised,
+		// trimmed, deliberately not host-lowercased or otherwise URL-normalised,
 		// since OpenID Connect compares the issuer as a case-sensitive string.
 		return new IssuerUrl(raw.endsWith('/') ? raw.slice(0, -1) : raw);
 	}

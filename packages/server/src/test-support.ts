@@ -282,7 +282,7 @@ export async function provisionFixtureTenant(
  * optionally configures its Durable Object with its path-based issuer, and
  * seeds the membership filter and marker. Returns the tenant's issuer URL. Pass
  * `configure: false` to admit a slug whose Durable Object stays unconfigured, so a
- * test can prove that route 503s rather than serving under a fallback identity.
+ * test can prove that the route 503s on an unconfigured identity.
  */
 export async function provisionNamedTenant(
 	name: string,
@@ -606,8 +606,8 @@ async function issueServerSignedTokenFor(
 
 /**
  * Issues a token signed by a Durable Object's active auth key but pinned to an
- * explicit issuer and audience, so a route-level test can prove a tenant issues
- * under its own path-based issuer rather than the fixed low-level one.
+ * explicit issuer and audience, so a route-level test can verify a tenant issues
+ * under its own path-based issuer.
  */
 export async function issueTokenForTenant(
 	stub: DurableObjectStub<CupboardServer>,
@@ -742,8 +742,8 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 	};
 }
 
-// Fetches a bare-host path through the real Worker — the control surface, with no
-// tenant prefix. A per-call env copy lets a test vary the control configuration.
+// Fetches a bare-host path through the real Worker (the control surface, with no
+// tenant prefix). A per-call env copy lets a test vary the control configuration.
 export async function controlFetch(
 	pathname: string,
 	init?: RequestInit,
@@ -1355,7 +1355,7 @@ export async function narInfoDeletionRows(): Promise<
 }
 
 // Deletes a committed narinfo row directly, leaving its D1 edge, shared fact and
-// R2 object behind — the cross-store state a delete leaves after its row
+// R2 object behind: the cross-store state a delete leaves after its row
 // transaction but before the repair retires the edge and object.
 export async function deleteNarInfoRow(
 	storePathHash: StorePathHash
@@ -1467,8 +1467,7 @@ export async function negotiateUploads(
 }
 
 // Drives a single-path negotiate straight at a Durable Object instance, for a
-// test that needs the request and its cost on the same object call rather than
-// routed through the Worker.
+// test that needs the request and its cost on the same object call.
 export function negotiateViaInstance(
 	instance: { fetch(request: Request): Promise<Response> },
 	token: string,
@@ -2340,7 +2339,7 @@ function singleChunkStream(bytes: Uint8Array): ReadableStream<Uint8Array> {
  * A distinct, self-consistent NAR for a seed: real zstd bytes whose decompressed
  * payload hashes to `narHash`, so the server's verify-before-serve accepts it.
  * Tests that need several distinct blobs (reference graphs, per-blob GC) build one
- * per path with this rather than fabricating unrelated hashes.
+ * per path with this helper.
  */
 export async function verifiableNar(seed: string): Promise<VerifiableNar> {
 	const encoder = new TextEncoder();
@@ -2440,9 +2439,9 @@ function storedZstdFrame(payload: Uint8Array): Uint8Array {
 
 /**
  * The same NAR payload as {@link verifiableNar} for a seed, but encoded as an
- * uncompressed "stored" zstd frame. It decompresses to the same bytes — so it
- * shares the seed's `narHash` — yet its compressed bytes (and thus `fileHash`)
- * differ, modelling a client that compressed the same NAR with other zstd settings.
+ * uncompressed "stored" zstd frame. It decompresses to the same bytes (sharing
+ * the seed's `narHash`), yet its compressed bytes and thus `fileHash` differ,
+ * modelling a client that compressed the same NAR with other zstd settings.
  */
 export async function verifiableNarStored(
 	seed: string
@@ -2567,8 +2566,7 @@ export async function verifiablePath(
 /**
  * Negotiates, uploads and commits a path backed by a distinct verifiable NAR for
  * the seed, returning its metadata. Use for the second and later paths in a test:
- * each needs its own NAR hash so negotiate returns an `upload` rather than reusing
- * an earlier blob.
+ * each needs its own NAR hash so negotiate returns a fresh `upload` for each.
  */
 export async function commitVerifiablePath(
 	token: string,
@@ -2722,8 +2720,8 @@ export async function seedReservedNarInfo(
 
 /**
  * Rewrites fields on a committed narinfo row directly, to plant a stored blob
- * that disagrees with the hash or size its narinfo signed — a state a normal
- * verified commit cannot produce, so that the deep storage check's NAR
+ * that disagrees with the hash or size its narinfo signed. This is a state a
+ * normal verified commit cannot produce, so the deep storage check's NAR
  * re-derivation can be exercised.
  */
 export async function corruptCommittedNarInfo(
@@ -2958,8 +2956,8 @@ export interface SeededSigningKey {
 /**
  * Plants signing keys directly in the current Durable Object's storage so a
  * test can exercise multi-key signing without going through key rotation. Run
- * it before the DO first loads its keys — the load is cached for the DO's
- * lifetime — i.e. before the first bootstrap or read.
+ * it before the DO first loads its keys (the load is cached for the DO's
+ * lifetime), before the first bootstrap or read.
  */
 export async function seedSigningKeys(
 	seeds: readonly SigningKeySeed[]

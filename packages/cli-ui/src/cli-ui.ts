@@ -125,7 +125,7 @@ export interface ConfirmOptions {
 /**
  * Thrown when a confirmation is needed but the run is non-interactive and
  * `--yes` was not given: there is no terminal to prompt on, so the command
- * fails loudly rather than blocking or silently proceeding.
+ * fails loudly; blocking or silent proceeding are not acceptable fallbacks.
  */
 export class ConfirmationRequiredError extends Error {
 	constructor(message: string) {

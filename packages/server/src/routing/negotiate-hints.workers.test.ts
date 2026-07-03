@@ -265,7 +265,7 @@ describe('negotiate hints', () => {
 		// The same store path rebuilt non-reproducibly: a different NAR behind
 		// the same path. The Worker's hint reads cover only the pushed hash, so
 		// the committed row's own NAR sits outside them; its presence must still
-		// be read rather than presumed lost, or the live row would be reconciled
+		// be read; its presence is not presumed lost, or the live row would be reconciled
 		// away and the path re-planned as an upload.
 		const rebuiltNar = await verifiableNar('hints-rebuilt-other');
 		const rebuilt = uploadMetadata({

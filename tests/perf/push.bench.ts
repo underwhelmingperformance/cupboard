@@ -17,10 +17,9 @@ import { NixStore } from '../support/nix.ts';
 // An integration benchmark of the real push against a worker running under
 // Miniflare over a real socket: every cost the phase pays in production is
 // present (NAR build, zstd, the credential fetch, the R2 upload, the
-// commit), and the latency emerges from real work rather than an injected
-// delay. Each iteration pushes a fresh batch of unique store paths so the cache
-// never reports them as already present; without that, the second iteration
-// would negotiate nothing and measure an empty push.
+// commit). Each iteration pushes a fresh batch of unique store paths so the
+// cache never reports them as already present; without that, the second
+// iteration would negotiate nothing and measure an empty push.
 
 const batchSize = 24;
 const iterations = 3;
@@ -67,8 +66,8 @@ function pseudoRandomBytes(size: number, seed: number): Buffer {
 	return buffer;
 }
 
-// Semi-compressible content, so zstd does real work rather than collapsing a
-// run of zeroes; the per-path index keeps every payload distinct.
+// Semi-compressible content, so zstd does real work on varied bytes; the
+// per-path index keeps every payload distinct.
 function compressibleContent(seed: number): Buffer {
 	const fallbackBlock = pseudoRandomBytes(blockSize, seed);
 	const dictionary = Array.from({ length: dictionaryBlocks }, (_, index) =>

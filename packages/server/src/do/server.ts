@@ -28,7 +28,6 @@ import {
 import { serverErrorHandler } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
-import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { authoriseRequest } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
@@ -104,7 +103,7 @@ const commitSessionAttachmentSchema = z.object({
 
 // A storage key marking that a bounded garbage-collection sweep stopped at its
 // per-run cap with work left over. The alarm reads it to resume, so a large
-// backlog drains across successive alarm firings rather than holding the gate.
+// backlog drains across successive alarm firings without holding the gate open.
 export const gcContinuationKey = 'maintenance:gc-pending';
 
 // How many decode-free reuse rows one verify-backstop firing settles locally;
@@ -225,7 +224,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.app.onError(serverErrorHandler);
 
 		// An unconfigured Durable Object has no identity to issue, verify or advertise
-		// under, so it serves nothing rather than falling back to a default. This is
+		// under, so it serves nothing. This is
 		// input-gated: the control plane's `configure` RPC, which assigns the
 		// identity, is a method and so is not gated here.
 		this.app.use(async (_context, next) => {
@@ -587,7 +586,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// does not cover is a hard isolate eviction inside that window, which leaves the
 	// prior wake time in place. Deferred verify is re-triggered out of band by the
 	// `tenant-verify` queue message, so it does not wait; the rest waits for the cron's
-	// staleness floor rather than the next tick: a now-due queued narinfo deletion, or a
+	// staleness floor: a now-due queued narinfo deletion, or a
 	// deferred deadline (upload or attestation expiry, retention-root TTL, auth-key
 	// retirement). The reconcile publishes through a single conditional upsert that
 	// writes only when the wake time moves, so a push of many paths costs one write.
@@ -664,7 +663,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Runs a direct RPC entrypoint (one that bypasses `fetch`) inside its own
 	// request cost meter, so the Durable Object rows it reads are logged like an
-	// HTTP request's rather than left invisible. The row-heavy maintenance sweeps
+	// HTTP request's, so the row-heavy maintenance sweeps
 	// run through here.
 	private metered<T>(
 		method: MeteredMethod,
@@ -681,8 +680,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return this.migrationPromise;
 	}
 
-	// Fail loudly at initialisation if the runtime lacks native zstd, rather than
-	// as an opaque per-request stream error at the first verified commit.
+	// Fail loudly at initialisation if the runtime lacks native zstd, before
+	// an opaque per-request stream error surfaces at the first verified commit.
 	private async assertZstdAvailable(): Promise<void> {
 		const frame = new Uint8Array([
 			40, 181, 47, 253, 32, 8, 65, 0, 0, 42, 7, 42, 7, 42, 7, 42, 7
@@ -862,21 +861,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await this.commitPipeline.requestVerification(this.context.requireTenant());
 	}
 
-	// Test seam: the inbound-OIDC discovery store lives on the context so a test
-	// can substitute a fixture before exercising a token exchange.
-	get discovery(): OidcDiscoveryStore {
-		return this.context.discovery;
-	}
-
-	set discovery(discovery: OidcDiscoveryStore) {
-		this.context.discovery = discovery;
-	}
-
-	// Test seam: re-seed the owner rule after mutating the context environment.
-	seedOwnerRule(): void {
-		this.oidcTrust.seedOwnerRule();
-	}
-
 	async fetch(request: Request): Promise<Response> {
 		await this.initialise();
 
@@ -895,8 +879,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	// The cron drives maintenance through these RPC methods rather than the HTTP
-	// admin routes: the service binding authorises the call, so no token is
+	// The cron drives maintenance through these RPC methods via service binding,
+	// so no token is
 	// issued or exchanged. The same cores back `/gc` and `/verify` for manual
 	// use. Both sweep every cache and skip the edge-cache purge, exactly as an
 	// internal-origin HTTP sweep did, relying on the narinfo TTL and the
@@ -1028,7 +1012,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	// Settles a whole batch of verdicts in one call, so the queue consumer reports
-	// a pass with a single RPC into the DO rather than one per upload. Returns how
+	// a pass with a single RPC into the DO. Returns how
 	// many verdicts actually applied, so the consumer's continuation gates on real
 	// progress.
 	async recordVerifications(
@@ -1179,10 +1163,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	// Proves the R2 credentials this script is bound with: their values cannot
 	// be read back, so the control plane asks the Durable Object (which holds
-	// them) to mint a temporary credential the way a push does and see whether R2
-	// accepts it. Probing the derived credential, not just the pair, catches a
-	// pair that signs plain requests but cannot mint the credential uploads use.
-	// The probe touches only the env, never this object's storage, so any
+	// them) to issue a temporary credential the way a push does and see whether
+	// R2 accepts it. Probing the derived credential, not just the pair, catches
+	// a pair that signs plain requests but cannot issue the credential uploads
+	// use. The probe touches only the env, never this object's storage, so any
 	// instance can answer it.
 	async checkR2(): Promise<ParsedR2CredentialCheck> {
 		let response: Response;

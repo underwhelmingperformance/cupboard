@@ -42,7 +42,7 @@ const bootstrapId = 'bootstrap';
 
 // Ensures a control signing key exists, creating the first one if the set is
 // empty. First-writer-wins on a fixed bootstrap id, so concurrent Workers racing
-// the first request settle on a single key rather than each issuing their own (the
+// the first request settle on a single key (the
 // loser's generated key is simply discarded).
 export async function ensureControlKey(
 	database: Database,
@@ -108,7 +108,7 @@ export async function activeControlKey(
 	};
 }
 
-// Every key that still verifies a control token, public part only — the control
+// Every key that still verifies a control token, public part only: the control
 // JWKS. No unwrap is needed, so the wrapping secret is not required here.
 export async function controlVerificationKeys(
 	database: Database
@@ -191,7 +191,7 @@ export async function rotateControlKey(
 // no-op). Retiring the last live key is refused, since it would leave no key able
 // to verify outstanding control tokens.
 //
-// The refusal is a single guarded statement rather than a read-then-write: a
+// The refusal is a single guarded statement (a read-then-write would be unsafe): a
 // count-then-update would let two concurrent retirements of different keys each
 // observe two live keys and both proceed, draining the set to zero. The guard
 // requires that *another* live key still exists, evaluated within the statement,

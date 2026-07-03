@@ -44,7 +44,7 @@ const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
 
 // Builds and wires the worker Hono app. The route registrations are side
-// effects, so they live inside this builder rather than at module top level;
+// effects, so they live inside this builder and not at module top level;
 // the exported handler dispatches to the app this returns.
 function buildApp(): Hono<WorkerHonoEnv> {
 	const app = new Hono<WorkerHonoEnv>();
@@ -128,8 +128,8 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	// OAuth discovery (RFC 8414) and the auth public keys both proxy to the
 	// tenant's Durable Object, so an admitted but unconfigured tenant returns 503
-	// here rather than advertising or serving an identity it has not been
-	// assigned. The object builds the metadata from its own request, so the
+	// here, advertising and serving no identity until one has been assigned.
+	// The object builds the metadata from its own request, so the
 	// issuer stays the tenant's path-based URL.
 	app.on(
 		'GET',
@@ -347,7 +347,7 @@ export default {
 
 	async scheduled(_controller, env) {
 		// Cron plans bounded work; the queue consumer owns execution and outcome
-		// recording so retries are per-message rather than per-tick.
+		// recording so retries are per-message.
 		await enqueueMaintenanceJobs(env);
 	},
 
@@ -410,7 +410,7 @@ function isTenantWrite(inner: Request): boolean {
 	return innerUrl.pathname !== '/token';
 }
 
-// The authoritative tenant status, read from D1 rather than the KV manifest, so a
+// The authoritative tenant status, read from D1 and not the KV manifest, so a
 // write stop takes effect before the manifest TTL catches up. Returns undefined if
 // the row is gone, which the caller treats as not-active and fails closed. The
 // read sits on every tenant write, the same exposure as the admission row read,

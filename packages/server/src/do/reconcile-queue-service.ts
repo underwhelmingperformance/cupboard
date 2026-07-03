@@ -6,8 +6,8 @@ import { type ServerContext } from './context.ts';
 // A committed path queued for an off-hot-path reconcile of the R2 objects its
 // narinfo points at. Negotiate persists the closure's committed paths here and
 // arms an immediate alarm; the alarm drains them in bounded chunks, so a push
-// returns without heading R2 and a large closure spreads its probes across
-// firings rather than hitting the per-invocation subrequest cap on the hot path.
+// returns without hitting R2 and a large closure spreads its probes across
+// firings within the per-invocation subrequest cap.
 export interface ReconcileTarget {
 	readonly cache: string;
 	readonly storePathHash: StorePathHash;

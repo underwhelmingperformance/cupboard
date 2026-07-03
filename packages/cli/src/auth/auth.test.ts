@@ -324,7 +324,7 @@ describe('cachedOwnerProvider', () => {
 		});
 	});
 
-	it('prompts a login when no silent path can mint', async () => {
+	it('prompts a login when no silent path can issue a token', async () => {
 		const { clientCalls, harness, sessions } = sessionHarness();
 
 		const provider = cachedOwnerProvider(target, harness);

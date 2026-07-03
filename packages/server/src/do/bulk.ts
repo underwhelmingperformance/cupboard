@@ -25,7 +25,7 @@ export function chunk<T>(items: readonly T[], size: number): T[][] {
 
 /**
  * Deletes `keys` from `bucket` in as few `delete` calls as R2's per-call key
- * limit allows, instead of one round trip per key. An empty set issues no call.
+ * limit allows (batching calls to minimise round trips). An empty set issues no call.
  */
 export async function deleteObjects(
 	bucket: R2Bucket,
@@ -40,7 +40,7 @@ export async function deleteObjects(
  * Maps `items` through `task` with at most `limit` running at once, preserving
  * input order in the result. Workers share one iterator, so each pulls the next
  * item as it frees up; a bounded pool keeps a fan-out of I/O within the
- * platform's simultaneous-connection cap rather than issuing it serially.
+ * platform's simultaneous-connection cap without issuing requests serially.
  */
 export async function mapWithConcurrency<T, R>(
 	items: readonly T[],

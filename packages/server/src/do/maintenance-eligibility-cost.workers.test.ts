@@ -108,7 +108,7 @@ describe('upload negotiation cost', () => {
 	});
 
 	// "Due now" is decided by whether any deletion is queued, not how many, so the
-	// reconcile checks existence (one indexed row) rather than counting the table.
+	// reconcile checks existence (one indexed row).
 	// That is what lets it run synchronously on every mutation: the read stays flat
 	// however large the deletion backlog grows. Drop to a `COUNT(*)` and the large
 	// figure would climb.

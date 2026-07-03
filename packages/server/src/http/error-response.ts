@@ -43,8 +43,8 @@ function serverHttpErrorResponse(error: ServerHttpError): Response {
 }
 
 // Hono error handler carrying the same mapping. A fault the runtime marks
-// retryable is a transient refusal rather than a server fault; anything else
-// we do not model is answered by {@link unmappedErrorResponse}.
+// retryable is a transient refusal, not a server fault; anything else we do
+// not model is answered by {@link unmappedErrorResponse}.
 export const serverErrorHandler: ErrorHandler = (error, context) => {
 	const mapped = errorResponse(error);
 

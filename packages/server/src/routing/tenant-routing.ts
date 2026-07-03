@@ -9,8 +9,8 @@ export interface TenantRoute {
 }
 
 // Splits a leading `/t/<slug>/` tenant prefix off a path. Returns the slug and the
-// tenant-relative remainder, or undefined for a bare-host path — the control
-// surface. A malformed or invalid slug also returns undefined, so a bad slug is
+// tenant-relative remainder, or undefined for a bare-host path (the control
+// surface). A malformed or invalid slug also returns undefined, so a bad slug is
 // never mistaken for a tenant and never reaches a Durable Object.
 export function parseTenantPath(pathname: string): TenantRoute | undefined {
 	if (!pathname.startsWith(tenantPrefix)) {

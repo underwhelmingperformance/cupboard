@@ -203,7 +203,7 @@ describe('isGrantPermittedByRule', () => {
 	it('refuses a rendered cache that escapes the cache grammar', () => {
 		// The template renders a claim verbatim; a value with a space or capital
 		// fails `cacheNamePattern`, so the binding yields nothing and refuses every
-		// request rather than issue against an invalid cache name.
+		// request, issuing nothing against an invalid cache name.
 		const verbatimGrant = grant({
 			type: 'cupboard_cache',
 			actions: ['upload:commit'],

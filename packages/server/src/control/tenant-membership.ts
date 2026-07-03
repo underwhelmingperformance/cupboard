@@ -127,8 +127,8 @@ function deserialiseFilter(bytes: Uint8Array): BinaryFuse8 | undefined {
 
 // Tier 1: the membership filter, served from the colo's edge cache and refetched
 // from KV on a miss. Returns `undefined` when the filter is unavailable (missing,
-// unparseable, or a KV fault), so the caller falls open to tier 2 rather than
-// rejecting. The edge cache keeps the per-request lookup off the network without
+// unparseable, or a KV fault), so the caller falls open to tier 2. The edge cache
+// keeps the per-request lookup off the network without
 // any module-scoped state; a rebuild purges the local entry to refetch promptly.
 async function loadMembershipFilter(
 	env: Env,
@@ -306,7 +306,7 @@ export async function refreshTenantMembership(env: Env): Promise<number> {
 
 // Rebuilds and republishes just the membership filter from the live registry, the
 // sole writer of the filter key. The control plane calls this after a create so a
-// new tenant is admittable within the filter cache TTL rather than waiting on the
+// new tenant is admittable within the filter cache TTL, not blocked on the
 // hourly cron, without rewriting every marker. A filter negative is definitive, so
 // a tenant absent from the filter 404s at tier 1 until a rebuild includes it.
 export async function rebuildMembershipFilter(env: Env): Promise<void> {

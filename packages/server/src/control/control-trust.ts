@@ -33,8 +33,8 @@ function ruleFromRow(row: ControlTrustRow): OidcTrustRule {
 	const claims = parseStored(storedClaimsSchema, row.claimsJson, fault);
 
 	// A control rule MUST pin a subject. Without it the rule would match every
-	// subject of the trusted issuer and audience — the highest-privilege grant in
-	// the system, handed out on issuer membership alone.
+	// subject of the trusted issuer and audience (the highest-privilege grant in
+	// the system), handed out on issuer membership alone.
 	if (typeof claims.sub !== 'string' || claims.sub === '') {
 		throw fault(new Error('a control trust rule must pin a subject'));
 	}

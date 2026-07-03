@@ -72,8 +72,7 @@ describe('garbage collection sweep cap', () => {
 
 		expect(await collectableRemaining()).toBe(2);
 
-		// A cap of one path per sweep records a continuation rather than collecting
-		// both in one run.
+		// A cap of one path per sweep records a continuation.
 		await currentServer().runGarbageCollection(1);
 
 		// The continuation drains the remaining collectable paths a chunk at a time

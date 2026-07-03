@@ -236,8 +236,8 @@ export class GarbageCollectionService {
 	}
 
 	// Walks a row's references, enqueuing each not-yet-visited reference hash for
-	// the reachability traversal. Extracted from the traversal loop so the
-	// per-reference skip is a plain early return rather than a nested `continue`.
+	// the reachability traversal. Extracted from the traversal loop so each
+	// per-reference skip is a plain early return.
 	private enqueueReachableReferences(
 		references: readonly string[],
 		visited: Set<string>,

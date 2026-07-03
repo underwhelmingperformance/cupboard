@@ -20,7 +20,7 @@ const otherDigest = Uint8Array.from({ length: 32 }, (_, index) => index + 100);
 const fileHash = NixSha256Hash.fromDigest(digest).value;
 const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 // A staging key, distinct from the canonical nar/<hash> key, to prove the error
-// reports the object actually inspected rather than the canonical default.
+// reports the object actually inspected.
 const r2Key = 'staging/upload-1.nar.zst';
 
 const expected: ExpectedNarBlob = { narHash, fileHash, fileSize: 4 };

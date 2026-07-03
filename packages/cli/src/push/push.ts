@@ -238,10 +238,9 @@ async function runPushFlow(
 
 	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
 
-	// A path that fails to upload or commit is collected here rather than
-	// aborting the run, so the paths that can finish do. The push then fails as a
-	// whole (see the end of this function) so the incomplete result is never
-	// mistaken for a finished one.
+	// A path that fails to upload or commit is collected here, so the paths that
+	// can finish do. The push then fails as a whole (see the end of this
+	// function) so the incomplete result is never mistaken for a finished one.
 	const failures: PushFailure[] = [];
 	const failedUploadIds = new Set<string>();
 	const negotiated = indexNegotiatedPaths(closure);
@@ -913,7 +912,7 @@ function isAbsentVerdict(error: unknown): boolean {
 // time. A long upload phase can outlive the slot negotiate stamped, and a
 // reused blob can be collected between negotiate and commit; a `NOT_FOUND`
 // commit or an `absent` deferred verdict means one of those, not that the
-// transfer is dead, so the path is re-driven rather than failed. The re-drive
+// transfer is dead, so the path is re-driven. The re-drive
 // commits without this wrapper, so a second loss propagates.
 async function commitNegotiated(
 	decision: UploadDecisionOf<'upload' | 'commit'>,

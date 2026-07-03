@@ -272,7 +272,7 @@ const idTokenFreshnessMarginMs = 5 * 60 * 1000;
  * while it has time left, otherwise one reissued by refreshing the grant. A
  * deploy can outlive the id_token it logged in with (the tokens live an hour
  * and the claim happens minutes in), so callers fetch one at the moment of
- * use rather than carrying the login's snapshot.
+ * use, not from the login snapshot.
  */
 export async function freshIdToken(
 	chain: Pick<

@@ -147,7 +147,7 @@ export const authKeys = sqliteTable(
 	},
 	// The maintenance sweep finds the soonest scheduled retirement among the keys
 	// still in service; filtering on `retired_at` then ordering by
-	// `scheduled_retire_at` uses this index instead of scanning the key set.
+	// `scheduled_retire_at` uses this index.
 	(table) => [
 		index('auth_key_retirement_idx').on(
 			table.retiredAt,

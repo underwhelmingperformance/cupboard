@@ -49,7 +49,7 @@ export async function verifyDecompressedNar(
 	expected: ExpectedNar
 ): Promise<NarVerification> {
 	// Decompression stops once it exceeds the declared size or the server's hard
-	// cap, whichever is smaller — so a frame that expands far beyond its declared
+	// cap, whichever is smaller. A frame that expands far beyond its declared
 	// `narSize` (a zstd bomb) cannot burn the CPU budget, and the bound is never
 	// larger than what the server is willing to verify regardless of what the
 	// client declared.

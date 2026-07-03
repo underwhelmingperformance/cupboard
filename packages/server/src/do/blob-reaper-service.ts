@@ -74,9 +74,8 @@ const maxFencedDeleteRows = Math.floor(maxInClauseValues / 2);
 
 // The demote scan's resume position across cron ticks. It is the last `nar_hash`
 // reached, an exclusive lower bound for the next keyset page, with '' meaning start
-// from the beginning (and written back to wrap). It is pure cron bookkeeping rather
-// than shared-blob data, so the Worker backs it with a single KV value instead of a
-// relational row; the eventual consistency is harmless because the scan is idempotent
+// from the beginning (and written back to wrap). It is pure cron bookkeeping, so
+// the Worker backs it with a single KV value (not a relational row); the eventual consistency is harmless because the scan is idempotent
 // and the position only ever resumes a window it would otherwise cover anyway.
 export interface DemoteCursor {
 	read(): Promise<string>;
@@ -84,8 +83,8 @@ export interface DemoteCursor {
 }
 
 // The global blob reaper. It is the only actor that sees every tenant's reference
-// edges, so it runs Worker-side over the shared D1 facts rather than inside any one
-// tenant's Durable Object, driven by the cron. It works `blob_state` in two
+// edges, so it runs Worker-side over the shared D1 facts, driven by the cron
+// and not inside any one tenant's Durable Object. It works `blob_state` in two
 // bounded passes: arm every blob no live `blob_ref` references with a grace timer,
 // then collect those whose grace has elapsed and that are still unreferenced. Its
 // safety rests on the atomic compare-and-delete that re-checks the predicate, not
@@ -283,7 +282,7 @@ export class BlobReaperService {
 	}
 
 	// The narinfos referencing each of a batch of hashes, grouped by owning tenant
-	// then by hash, in one bulk read per chunk rather than a read per hash. Each
+	// then by hash, in one bulk read per chunk. Each
 	// tenant's entry is the set of demotions to route to it in a single call.
 	private async referencingDemotions(
 		narHashes: readonly NixSha256HashString[]
@@ -325,7 +324,7 @@ export class BlobReaperService {
 	}
 
 	// The store-path hashes whose canonical NAR object is present, found with a
-	// bounded fan-out of `head` reads rather than one head at a time.
+	// bounded fan-out of concurrent `head` reads.
 	private async presentNarObjects(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<ReadonlySet<NixSha256HashString>> {

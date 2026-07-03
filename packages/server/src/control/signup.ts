@@ -76,7 +76,7 @@ export async function handleSignup(
 // The deployment gate configuration the claim consults: a single-use claim secret,
 // a pinned subject, and the local-development relaxation flag. A secret never put
 // (and a var a hand-rolled deploy omitted) is an absent binding, so each member
-// reads as undefined rather than the empty string.
+// reads as undefined when unset.
 export interface SignupGate {
 	readonly CUPBOARD_SIGNUP_SECRET: string | undefined;
 	readonly CUPBOARD_SIGNUP_SUBJECT: string | undefined;
@@ -188,8 +188,7 @@ function controlDatabase(env: Env): Database {
 }
 
 // The verification half of the signup config. A hand-rolled deployment may
-// omit the vars entirely, in which case the env reads as undefined rather
-// than the empty string; both refuse.
+// omit the vars entirely, in which case the env reads as undefined; both refuse.
 interface SignupVerificationConfig {
 	readonly CUPBOARD_SIGNUP_ISSUER: string | undefined;
 	readonly CUPBOARD_SIGNUP_AUDIENCE: string | undefined;

@@ -9,7 +9,7 @@ export interface BrowserMessages {
 
 /**
  * Best-effort browser launch: the URL is always printed, so a failed or absent
- * opener leaves the user a link to follow rather than a dead end.
+ * opener still leaves the user a link to follow.
  */
 export function openBrowser(target: string, messages: BrowserMessages): void {
 	messages.info(`Opening your browser to:\n${target}`);

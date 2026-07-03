@@ -94,7 +94,7 @@ function derivedClient<C extends AnyContractRouter>(
 		url,
 		headers: async () => {
 			// The credential fetch is the first thing every admin command does;
-			// honour an abort here so Ctrl-C is prompt rather than waiting on it.
+			// honour an abort here so Ctrl-C is prompt.
 			throwIfAborted(signal);
 
 			return bearerHeaders(await resolveBearer(credential));
@@ -166,8 +166,8 @@ const typedServerErrorStatuses = new Set<number>([
 /**
  * Turns an unmapped server failure into a {@link CupboardHttpError} carrying the
  * request, status and Cloudflare ray id, so a bare `500 Internal server error`
- * arrives with the handle that ties it to its server log line rather than oRPC's
- * context-free default. Statuses the contract maps to typed errors pass through
+ * arrives with the handle that ties it to its server log line. Statuses the
+ * contract maps to typed errors pass through
  * unchanged for oRPC to decode.
  */
 async function settleServerError(
