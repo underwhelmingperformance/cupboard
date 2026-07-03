@@ -259,6 +259,16 @@ describe('POST /token', () => {
 			retryAfter: '5'
 		});
 	});
+
+	it('retries an issuer fetch blip before refusing the exchange', async () => {
+		const subjectToken = await installTrustedIdp('admin', {
+			failFirstFetches: 1
+		});
+
+		const exchanged = await exchange(subjectToken);
+
+		expect(exchanged.status).toBe(StatusCodes.OK);
+	});
 });
 
 // Installs a trust rule for a stub issuer whose discovery and JWKS documents
@@ -277,7 +287,10 @@ const trustClassGrants = {
 	]
 } as const;
 
-async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
+async function installTrustedIdp(
+	scope: 'admin' | 'write',
+	options: { failFirstFetches?: number } = {}
+): Promise<string> {
 	const idp = await generateKeyPair('RS256', { extractable: true });
 	const jwk = await exportJWK(idp.publicKey);
 	const signer = new SignJWT({});
@@ -289,6 +302,8 @@ async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
 		.setIssuedAt()
 		.setExpirationTime('5m')
 		.sign(idp.privateKey);
+
+	let remainingFailures = options.failFirstFetches ?? 0;
 
 	await runInDurableObject(currentServer(), async (instance, state) => {
 		await migrateThrough(state, latestMigrationIndex);
@@ -305,6 +320,11 @@ async function installTrustedIdp(scope: 'admin' | 'write'): Promise<string> {
 			.run();
 		instance.discovery = new OidcDiscoveryStore({
 			fetcher: (input) => {
+				if (remainingFailures > 0) {
+					remainingFailures -= 1;
+
+					return Promise.reject(new Error('issuer fetch blip'));
+				}
 				const url = input instanceof Request ? input.url : String(input);
 
 				if (url === 'https://idp.test/.well-known/openid-configuration') {

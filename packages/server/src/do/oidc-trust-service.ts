@@ -33,6 +33,10 @@ import {
 } from './context.ts';
 import { type TenantIdentityService } from './tenant-identity-service.ts';
 
+// How long an inbound verify waits before its one retry of an issuer that
+// could not be reached.
+const issuerRetryDelayMs = 100;
+
 export class OidcTrustService {
 	constructor(
 		private readonly context: ServerContext,
@@ -75,6 +79,44 @@ export class OidcTrustService {
 		}
 
 		return { issuer: issuerUrl.value, subject, audience };
+	}
+
+	private async verifyInboundOnce(
+		rule: OidcTrustRule,
+		token: string
+	): Promise<JWTPayload> {
+		// Discovery resolves the issuer's JWKS and its accepted algorithms. Failing
+		// to reach the issuer is an upstream condition, not a bad token, so it is a
+		// retryable 503 rather than a permanent `invalid_grant`.
+		let issuer;
+		try {
+			issuer = await this.context.discovery.resolve(rule.issuer);
+		} catch (error: unknown) {
+			throw new IssuerUnavailableError(rule.issuer, { cause: error });
+		}
+
+		try {
+			// The signature is checked against the discovered keys, with issuer and
+			// audience pinned.
+			return await verifyInboundOidcToken(
+				issuer.resolver,
+				token,
+				{
+					issuer: rule.issuer,
+					audience: rule.audience,
+					algorithms: issuer.algorithms
+				},
+				new Date()
+			);
+		} catch (error) {
+			// A JWKS fetch that fails (rather than the token failing verification)
+			// is the same transient upstream condition as a discovery failure.
+			if (error instanceof OidcKeysUnreachableError) {
+				throw new IssuerUnavailableError(rule.issuer, { cause: error });
+			}
+
+			throw new SubjectTokenVerificationFailedError();
+		}
 	}
 
 	listRules(): OidcTrustListResponse {
@@ -170,37 +212,19 @@ export class OidcTrustService {
 	}
 
 	async verifyInbound(rule: OidcTrustRule, token: string): Promise<JWTPayload> {
-		// Discovery resolves the issuer's JWKS and its accepted algorithms. Failing
-		// to reach the issuer is an upstream condition, not a bad token, so it is a
-		// retryable 503 rather than a permanent `invalid_grant`.
-		let issuer;
 		try {
-			issuer = await this.context.discovery.resolve(rule.issuer);
-		} catch (error: unknown) {
-			throw new IssuerUnavailableError(rule.issuer, { cause: error });
-		}
-
-		try {
-			// The signature is checked against the discovered keys, with issuer and
-			// audience pinned.
-			return await verifyInboundOidcToken(
-				issuer.resolver,
-				token,
-				{
-					issuer: rule.issuer,
-					audience: rule.audience,
-					algorithms: issuer.algorithms
-				},
-				new Date()
-			);
+			return await this.verifyInboundOnce(rule, token);
 		} catch (error) {
-			// A JWKS fetch that fails (rather than the token failing verification)
-			// is the same transient upstream condition as a discovery failure.
-			if (error instanceof OidcKeysUnreachableError) {
-				throw new IssuerUnavailableError(rule.issuer, { cause: error });
+			// Only the transient upstream refusal is retried; a token that failed
+			// verification is refused at once. One short in-place retry absorbs an
+			// issuer fetch blip before it costs the client a full round trip.
+			if (!(error instanceof IssuerUnavailableError)) {
+				throw error;
 			}
 
-			throw new SubjectTokenVerificationFailedError();
+			await new Promise((resolve) => setTimeout(resolve, issuerRetryDelayMs));
+
+			return this.verifyInboundOnce(rule, token);
 		}
 	}
 
