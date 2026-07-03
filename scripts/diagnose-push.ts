@@ -1573,11 +1573,23 @@ async function fetchTelemetry(
 	return out;
 }
 
-function renderAnalysis(
+/**
+ * Renders the analysis: the result card and per-group notes in terminal mode.
+ * JSON mode writes the analysis alone to stdout, apart from the progress
+ * events on stderr, so it can be piped or redirected on its own.
+ */
+export function renderAnalysis(
 	ui: CliUi,
 	reporter: Reporter,
+	mode: ReporterMode,
 	analysis: Analysis
 ): void {
+	if (mode === 'json') {
+		reporter.data(JSON.stringify(analysis));
+
+		return;
+	}
+
 	reporter.result({
 		kind: 'push-diagnostic',
 		data: analysis,
@@ -1696,7 +1708,7 @@ async function main(): Promise<void> {
 		);
 	});
 
-	renderAnalysis(ui, reporter, analysis);
+	renderAnalysis(ui, reporter, options.mode, analysis);
 
 	ui.outro('Done');
 }
