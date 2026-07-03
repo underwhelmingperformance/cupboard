@@ -9,7 +9,7 @@ import {
 	type CommitResponse,
 	type ParsedUploadPathNegotiation
 } from '@cupboard/protocol/upload';
-import { and, eq, notExists, sql } from 'drizzle-orm';
+import { and, eq, exists, notExists, sql } from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
@@ -261,13 +261,14 @@ export class CommitPipelineService {
 	}
 
 	// The tenant's publish gate and quota basis in one read. The status is the
-	// authoritative active check the edge/object publish is gated on: the Worker's
-	// write gate read it before dispatch, but a commit can settle here after a
-	// suspend or offboard, so the probe re-reads it (and the gate re-checks just
-	// the status right before the charge; see {@link tenantStatus}). A missing
-	// row reads as not-active and fails closed. The usage columns ride along on a
-	// left join, so the same read also answers the quota decision; an absent usage
-	// row leaves them null, which {@link isOverQuota} reads as within quota.
+	// advisory active check the probe carries: the Worker's write gate read it
+	// before dispatch, but a commit can settle here after a suspend or offboard,
+	// so the probe re-reads it, and the charge batch fences it authoritatively (a
+	// write applies only while the tenant row is active, decided in the batch).
+	// A missing row reads as not-active and fails closed. The usage columns come
+	// from a left join, so the same read also answers the quota decision; an
+	// absent usage row leaves them null, which {@link isOverQuota} reads as
+	// within quota.
 	private async tenantAccount(
 		tenant: TenantId
 	): Promise<TenantAccount | undefined> {
@@ -285,23 +286,6 @@ export class CommitPipelineService {
 			)
 			.where(eq(d1Schema.tenant.id, tenant))
 			.get();
-	}
-
-	// The narrow in-gate twin of {@link tenantAccount}: only the status column,
-	// read inside the critical section. The probe's read runs before the gate,
-	// and the wait for the gate plus the R2 head give a suspension written
-	// meanwhile a window; writes have no other status check (the front door
-	// gates reads only), so this one stands right against the charge.
-	private async tenantStatus(
-		tenant: TenantId
-	): Promise<TenantAccount['status'] | undefined> {
-		const row = await this.context.d1
-			.select({ status: d1Schema.tenant.status })
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, tenant))
-			.get();
-
-		return row?.status;
 	}
 
 	// Whether the tenant holds a presence edge for this hash, so charging it
@@ -325,7 +309,10 @@ export class CommitPipelineService {
 	}
 
 	// Writes the reference edge and per-tenant presence and charges usage, all in one
-	// atomic D1 batch. The counters are charged before the inserts and gated on the
+	// atomic D1 batch that is also the authoritative status fence: every write
+	// applies only while the tenant row is active, and the same batch reads the
+	// status back, so a suspension can never slip a charge through however stale
+	// the probe is. The counters are charged before the inserts and gated on the
 	// rows not yet existing, so a replay (the edge/presence already present) neither
 	// double-charges nor double-references, and an over-quota bytes charge fails the
 	// `tenant_usage` CHECK and rolls the whole batch back: no edge and no charge are
@@ -337,9 +324,19 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		blob: { readonly fileSize: number }
-	): Promise<'charged' | 'over-quota'> {
+	): Promise<'charged' | 'over-quota' | 'tenant-inactive'> {
 		const clock = new Date();
 		const now = clock.toISOString();
+		const activeTenantFilter = and(
+			eq(d1Schema.tenant.id, tenant),
+			eq(d1Schema.tenant.status, 'active')
+		);
+		const tenantActive = exists(
+			this.context.d1
+				.select({ one: d1Schema.tenant.id })
+				.from(d1Schema.tenant)
+				.where(activeTenantFilter)
+		);
 		const edgeFilter = and(
 			eq(d1Schema.blobReference.tenant, tenant),
 			eq(d1Schema.blobReference.cache, cache),
@@ -364,19 +361,27 @@ export class CommitPipelineService {
 		);
 		const creditNarInfoFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
-			edgeMissing
+			edgeMissing,
+			tenantActive
 		);
 		const creditBytesFilter = and(
 			eq(d1Schema.tenantUsage.tenant, tenant),
-			presenceMissing
+			presenceMissing,
+			tenantActive
+		);
+		const graceClearFilter = and(
+			eq(d1Schema.blobState.narHash, metadata.narHash),
+			tenantActive
 		);
 
 		// The probed pre-check is the clean over-quota rejection. The
 		// `tenant_usage` CHECK constraint backs it as a database-level invariant:
 		// a charge that reaches here over quota fails the batch and rolls it
 		// back, so no edge or charge is ever stranded over quota.
+		let statusRows: { status: TenantAccount['status'] }[];
+
 		try {
-			await this.context.d1.batch([
+			const results = await this.context.d1.batch([
 				this.context.d1
 					.update(d1Schema.tenantUsage)
 					.set({
@@ -394,27 +399,48 @@ export class CommitPipelineService {
 					.where(creditBytesFilter),
 				this.context.d1
 					.insert(d1Schema.blobReference)
-					.values({
-						tenant,
-						cache,
-						storePathHash: metadata.storePathHash,
-						generation,
-						narHash: metadata.narHash
-					})
+					.select((qb) =>
+						qb
+							.select({
+								tenant: sql<TenantId>`${tenant}`.as('tenant'),
+								cache: sql<string>`${cache}`.as('cache'),
+								storePathHash: sql<StorePathHash>`${metadata.storePathHash}`.as(
+									'store_path_hash'
+								),
+								generation: sql<number>`${generation}`.as('generation'),
+								narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
+									'nar_hash'
+								)
+							})
+							.from(d1Schema.tenant)
+							.where(activeTenantFilter)
+					)
 					.onConflictDoNothing(),
 				this.context.d1
 					.insert(d1Schema.tenantBlob)
-					.values({
-						tenant,
-						narHash: metadata.narHash,
-						fileSize: blob.fileSize
-					})
+					.select((qb) =>
+						qb
+							.select({
+								tenant: sql<TenantId>`${tenant}`.as('tenant'),
+								narHash: sql<NixSha256HashString>`${metadata.narHash}`.as(
+									'nar_hash'
+								),
+								fileSize: sql<number>`${blob.fileSize}`.as('file_size')
+							})
+							.from(d1Schema.tenant)
+							.where(activeTenantFilter)
+					)
 					.onConflictDoNothing(),
 				this.context.d1
 					.update(d1Schema.blobState)
 					.set({ deleteAfter: sql`null` })
-					.where(eq(d1Schema.blobState.narHash, metadata.narHash))
+					.where(graceClearFilter),
+				this.context.d1
+					.select({ status: d1Schema.tenant.status })
+					.from(d1Schema.tenant)
+					.where(eq(d1Schema.tenant.id, tenant))
 			]);
+			statusRows = results[5];
 		} catch (error) {
 			// Two commits can both probe under quota and race to the charge; the
 			// CHECK fails the loser's batch. An authoritative in-gate re-read tells
@@ -431,6 +457,13 @@ export class CommitPipelineService {
 			}
 
 			throw error;
+		}
+
+		// The status read in the batch tells a refused charge apart from an applied
+		// one: not-active (or a missing row) means every conditional write above
+		// was a no-op. Fails closed, matching the write gate.
+		if (statusRows.at(0)?.status !== 'active') {
+			return 'tenant-inactive';
 		}
 
 		return 'charged';
@@ -941,13 +974,9 @@ export class CommitPipelineService {
 
 		const tenant = this.context.requireTenant();
 
-		// The probed status can be stale by the whole probe-to-gate window;
-		// re-check it here so a suspension never has more than one round trip of
-		// room to slip a charge through.
-		if ((await this.tenantStatus(tenant)) !== 'active') {
-			return 'tenant-inactive';
-		}
-
+		// The probed status can be stale by the whole probe-to-gate window; the
+		// charge batch is the authoritative fence, applying its writes only while
+		// the tenant row is active and reporting the refusal back.
 		const charged = await this.reserveEdgeAndCharge(
 			tenant,
 			cache,
@@ -956,8 +985,8 @@ export class CommitPipelineService {
 			probe.blob
 		);
 
-		if (charged === 'over-quota') {
-			return 'over-quota';
+		if (charged !== 'charged') {
+			return charged;
 		}
 
 		await this.narInfoObjects.putNarInfoObject(
