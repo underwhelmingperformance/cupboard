@@ -7,15 +7,17 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
+	commitPath,
 	commitUpload,
 	currentServer,
+	expectSingleCommitDecision,
 	expectSingleUploadDecision,
 	initialise,
 	narBytes,
@@ -23,7 +25,8 @@ import {
 	negotiateViaInstance,
 	putNarBytes,
 	resetTestServer,
-	uploadMetadata
+	uploadMetadata,
+	verifiableNar
 } from '../test-support.ts';
 
 // Stored for a tenant with work due now: a fixed past instant, so the many mutations
@@ -180,6 +183,134 @@ describe('maintenance reconcile', () => {
 			nextWakeAt: undefined,
 			advancedOffStale: true
 		});
+	});
+});
+
+// A commit replies without waiting on the eligibility publish: the publish
+// runs behind the reply, with concurrent requests coalescing onto a shared
+// drain. These drive it through a reuse commit, which settles with no
+// verification pass, so the trailing coalesced publish is the only reconcile
+// in play.
+// A tenant owning a hash, plus a fresh reuse decision for it: the commit
+// settles synchronously from the canonical object.
+async function ownedReuseDecision(): Promise<{
+	token: string;
+	uploadId: string;
+}> {
+	const token = await initialise();
+	const nar = await verifiableNar('coalesced-reconcile');
+	const first = uploadMetadata({
+		name: 'first',
+		storePathHash: 'a'.repeat(32),
+		narHash: nar.narHash,
+		fileHash: nar.fileHash,
+		fileSize: nar.narBytes.byteLength,
+		narSize: nar.narSize
+	});
+
+	await commitPath(token, first, nar);
+
+	const reuse = uploadMetadata({
+		name: 'reuse',
+		storePathHash: 'b'.repeat(32),
+		narHash: nar.narHash,
+		fileHash: nar.fileHash,
+		fileSize: nar.narBytes.byteLength,
+		narSize: nar.narSize
+	});
+	const decision = expectSingleCommitDecision(
+		await negotiateUploads(token, [reuse]),
+		reuse
+	);
+
+	return { token, uploadId: decision.uploadId };
+}
+
+// A never-settling promise: what the wedged eligibility publish answers with,
+// so the test observes the reply not waiting on it.
+function parkForever(): Promise<never> {
+	return new Promise<never>(() => {
+		// Never resolved: the caller must not be waiting on it.
+	});
+}
+
+// A commit replies without waiting on the eligibility publish: the publish
+// runs behind the reply, with concurrent requests coalescing onto a shared
+// drain. These drive it through a reuse commit, which settles with no
+// verification pass, so the trailing coalesced publish is the only reconcile
+// in play.
+describe('coalesced maintenance reconcile', () => {
+	beforeEach(resetTestServer);
+
+	it('publishes the wake time behind a settled reuse commit', async () => {
+		const { token, uploadId } = await ownedReuseDecision();
+
+		// A stale projection with a sentinel wake no real state produces. The
+		// commit's coalesced publish must overwrite it after the reply.
+		const staleReconciledAt = '2000-01-01T00:00:00.000Z';
+		await drizzleD1(env.CUPBOARD_DB, { schema: d1Schema })
+			.insert(d1Schema.tenantMaintenanceEligibility)
+			.values({
+				tenant: tenantIdSchema.parse(fixtureTenant),
+				nextWakeAt: '2099-12-31T23:59:59.999Z',
+				reconciledAt: staleReconciledAt
+			})
+			.onConflictDoUpdate({
+				target: d1Schema.tenantMaintenanceEligibility.tenant,
+				set: {
+					nextWakeAt: '2099-12-31T23:59:59.999Z',
+					reconciledAt: staleReconciledAt
+				}
+			})
+			.run();
+
+		const response = await commitUpload(token, uploadId);
+
+		expect(response.status).toBe('committed');
+
+		// The publish is not awaited by the reply, so observe it land.
+		await vi.waitFor(async () => {
+			const row = await eligibilityRow();
+
+			expect({
+				nextWakeAt: row?.nextWakeAt ?? undefined,
+				advancedOffStale: row?.reconciledAt !== staleReconciledAt
+			}).toStrictEqual({ nextWakeAt: undefined, advancedOffStale: true });
+		});
+	});
+
+	it('replies to a commit without waiting on the eligibility publish', async () => {
+		const { token, uploadId } = await ownedReuseDecision();
+
+		// Wedge every eligibility publish: it never resolves. The commit must
+		// still reply, since the publish runs behind it.
+		await runInDurableObject(currentServer(), (instance) => {
+			const realD1 = instance.context.d1;
+
+			Object.defineProperty(instance.context, 'd1', {
+				configurable: true,
+				value: {
+					select: realD1.select.bind(realD1),
+					update: realD1.update.bind(realD1),
+					delete: realD1.delete.bind(realD1),
+					batch: realD1.batch.bind(realD1),
+					insert: (table: Parameters<typeof realD1.insert>[0]) =>
+						table === d1Schema.tenantMaintenanceEligibility
+							? {
+									values: () => ({
+										onConflictDoUpdate: () => ({
+											run: () => parkForever()
+										})
+									})
+								}
+							: realD1.insert(table)
+				}
+			});
+		});
+
+		const response = await commitUpload(token, uploadId);
+
+		expect(response.status).toBe('committed');
 	});
 });
 
