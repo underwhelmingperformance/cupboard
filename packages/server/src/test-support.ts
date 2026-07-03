@@ -477,6 +477,22 @@ export function currentServer(): DurableObjectStub<CupboardServer> {
 }
 
 /**
+ * Clears any alarm the test's Durable Objects left armed. A test's objects
+ * are abandoned when it ends (the next test points the harness elsewhere),
+ * and an armed alarm on an abandoned object fires into a test environment
+ * that has moved on: its handler's console output then races the pool's log
+ * forwarding and surfaces as teardown errors. The shared `afterEach` runs
+ * this so every object a test drove goes quiet with it.
+ */
+export async function clearAbandonedAlarms(): Promise<void> {
+	for (const stub of [harness.server, fixtureWorkerServer()]) {
+		await runInDurableObject(stub, (_instance, state) =>
+			state.storage.deleteAlarm()
+		);
+	}
+}
+
+/**
  * The slug the current harness server is addressed by, for a worker-side call
  * (a queue consumer) that resolves the same Durable Object through
  * `tenantServer(env, tenant)`.
