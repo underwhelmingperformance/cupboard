@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { buildVersion } from '../build-info.generated.ts';
+import * as schema from '../db/schema.ts';
 import {
 	narInfoCachePath,
 	narInfoObjectKey,
@@ -1312,9 +1313,26 @@ describe('upload flow', () => {
 		await putNarBytes(loser.r2Key);
 
 		// A rival commit reserved the path but has not committed its reference yet:
-		// the narinfo row exists, unmaterialised, with no D1 edge or R2 object. This
-		// upload's own verdict is still null, so it is a distinct racer, not a retry.
+		// the narinfo row exists, unmaterialised, with no D1 edge or R2 object, and
+		// the rival's own upload row is live (mid-saga, unexpired). This upload's
+		// verdict is still null, so it is a distinct racer, not a retry, and the
+		// live rival is what routes it to the verification pass; a reservation with
+		// no live upload behind it is reclaimed at commit instead.
 		await seedReservedNarInfo(metadata);
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.pendingUploads)
+				.values({
+					id: 'rival-upload',
+					cache: '',
+					narHash: metadata.narHash,
+					r2Key: 'staging/rival-upload',
+					metadataJson: '{}',
+					createdAt: '2026-01-01T00:00:00.000Z',
+					expiresAt: '2099-01-01T00:00:00.000Z'
+				})
+				.run();
+		});
 
 		const committed = await commitUpload(token, loser.uploadId, DEFAULT_CACHE, {
 			wait: false

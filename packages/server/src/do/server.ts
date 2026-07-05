@@ -417,6 +417,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// platform 500 the HTTP error handler rethrows to.
 			const isKnown = error instanceof ServerHttpError;
 
+			if (!isKnown) {
+				// The frame carries no detail, so this log line is the only record
+				// of what actually failed.
+				console.error('commit failed with an internal fault', {
+					uploadId,
+					error
+				});
+			}
+
 			sendCommitSessionFrame(socket, {
 				ev: 'error',
 				uploadId,

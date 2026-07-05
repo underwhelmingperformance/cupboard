@@ -10,7 +10,18 @@ import {
 	type CommitResponse,
 	type ParsedUploadPathNegotiation
 } from '@cupboard/protocol/upload';
-import { and, eq, exists, notExists, sql } from 'drizzle-orm';
+import {
+	and,
+	eq,
+	exists,
+	gte,
+	inArray,
+	isNull,
+	ne,
+	notExists,
+	or,
+	sql
+} from 'drizzle-orm';
 import { type BatchItem } from 'drizzle-orm/batch';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
@@ -354,6 +365,38 @@ export class CommitPipelineService {
 			)
 			.where(eq(d1Schema.tenant.id, tenant))
 			.get();
+	}
+
+	// Whether another upload's live saga backs a reservation of this hash: a
+	// row still awaiting its verdict and not yet expired. An expired or reaped
+	// rival left its reservation dead, with nothing for the verification pass
+	// to arbitrate.
+	private hasLiveRival(
+		cache: string,
+		narHash: NixSha256HashString,
+		uploadId: string,
+		nowIso: string
+	): boolean {
+		// A null verdict is an inline commit mid-flight; `committing` and
+		// `pending` are sagas the verification pass re-drives.
+		const isAwaiting = or(
+			isNull(schema.pendingUploads.verdict),
+			inArray(schema.pendingUploads.verdict, ['committing', 'pending'])
+		);
+		const rivalFilter = and(
+			eq(schema.pendingUploads.cache, cache),
+			eq(schema.pendingUploads.narHash, narHash),
+			ne(schema.pendingUploads.id, uploadId),
+			gte(schema.pendingUploads.expiresAt, nowIso),
+			isAwaiting
+		);
+		const rival = this.context.db
+			.select({ id: schema.pendingUploads.id })
+			.from(schema.pendingUploads)
+			.where(rivalFilter)
+			.get();
+
+		return rival !== undefined;
 	}
 
 	// Whether the tenant holds a presence edge for this hash; if so, charging it
@@ -807,6 +850,13 @@ export class CommitPipelineService {
 				this.materialiseQueue.length = 0;
 			}
 
+			// The waiters' own surfaces carry no detail, so this log line is the
+			// record of what took the flush down.
+			console.error('materialise flush failed', {
+				settles: failed.length,
+				error
+			});
+
 			for (const item of failed) {
 				item.reject(error);
 			}
@@ -965,17 +1015,37 @@ export class CommitPipelineService {
 			}
 
 			if (
-				!(await this.narInfoObjects.hasCommittedReference(
-					cache,
-					existingNarInfo
-				))
+				await this.narInfoObjects.hasCommittedReference(cache, existingNarInfo)
 			) {
-				// A concurrent commit reserved the path but has not committed its
-				// reference yet, so there is nothing to concede to. Track this upload for
-				// verification, exactly as a fresh deferral does, so the pass drives it to
-				// a terminal verdict (`servable` once it owns the path, `absent` if the
-				// rival version won); the socket is driven to completion without waiting
-				// for the commit timeout.
+				// A concurrent commit already holds the path: heal its object if
+				// missing and concede, reclaiming this upload's own staging.
+				await this.narInfoObjects.ensureNarInfoObject(
+					cache,
+					existingNarInfo.storePathHash
+				);
+				await this.uploadState.clearPendingUploadAndStaging(
+					uploadId,
+					pending.r2Key,
+					metadata.narHash
+				);
+
+				return {
+					kind: 'settled',
+					response: {
+						storePathHash: metadata.storePathHash,
+						narHash: existingNarInfo.narHash,
+						status: 'already-present'
+					}
+				};
+			}
+
+			if (this.hasLiveRival(cache, existingNarInfo.narHash, uploadId, nowIso)) {
+				// A concurrent commit reserved the path and its saga is live, so the
+				// verification pass arbitrates. Track this upload for the pass,
+				// exactly as a fresh deferral does, so it reaches a terminal verdict
+				// (`servable` once it owns the path, `absent` if the rival version
+				// won); the socket is driven to completion without waiting for the
+				// commit timeout.
 				this.uploadState.markUploadPending(uploadId);
 				await this.requestVerification(this.context.requireTenant());
 
@@ -986,26 +1056,19 @@ export class CommitPipelineService {
 				};
 			}
 
-			// A concurrent commit already holds the path: heal its object if missing
-			// and concede, reclaiming this upload's own staging.
-			await this.narInfoObjects.ensureNarInfoObject(
-				cache,
-				existingNarInfo.storePathHash
+			// No live upload backs the reservation: its saga died (the upload
+			// expired or was reaped before materialising), so only the periodic
+			// scan would ever reap the row. Waiting on that parks every retry of
+			// the path behind a heal this commit can perform itself: reclaim the
+			// dead reservation and commit afresh.
+			await this.context.criticalSection(() =>
+				this.reclaimReservedRow(
+					cache,
+					metadata.storePathHash,
+					existingNarInfo.generation,
+					existingNarInfo.narHash
+				)
 			);
-			await this.uploadState.clearPendingUploadAndStaging(
-				uploadId,
-				pending.r2Key,
-				metadata.narHash
-			);
-
-			return {
-				kind: 'settled',
-				response: {
-					storePathHash: metadata.storePathHash,
-					narHash: existingNarInfo.narHash,
-					status: 'already-present'
-				}
-			};
 		}
 
 		const canonicalKey = narObjectKey(metadata.narHash);
