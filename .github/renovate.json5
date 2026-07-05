@@ -8,12 +8,12 @@
 	// The flake builds from a pnpm store pinned by the fixed-output hash in
 	// pnpm-deps-hash.json, so a bare pnpm-lock.yaml bump leaves the hash stale
 	// and every flake build failing. Refresh the recorded pair on the same
-	// branch. The command must be permitted by `allowedCommands` in the
-	// Renovate workflow in underwhelmingperformance/.github.
+	// branch. `pnpm update:flake-deps` builds the flake, so it needs Nix: the
+	// Renovate workflow in underwhelmingperformance/.github installs a real Nix
+	// into the container and permits the command through `allowedCommands`.
 	postUpgradeTasks: {
 		commands: ['pnpm update:flake-deps'],
 		fileFilters: ['pnpm-deps-hash.json'],
-		executionMode: 'branch',
-		installTools: { nix: {} }
+		executionMode: 'branch'
 	}
 }
