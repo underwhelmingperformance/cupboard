@@ -1,7 +1,8 @@
 import {
 	type CliUi,
 	ConfirmationRequiredError,
-	createCliUi
+	createCliUi,
+	resolveReporterMode
 } from '@cupboard/cli-ui';
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
@@ -30,7 +31,6 @@ import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
 import { CliError } from './errors.ts';
-import { resolveReporterMode } from './reporter-mode.ts';
 import { cupboardVersion } from './version.ts';
 
 export interface GlobalOptions {

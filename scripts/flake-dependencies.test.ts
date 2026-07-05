@@ -6,6 +6,7 @@ import {
 	FakeHashMatchedError,
 	FakeHashRecordedError,
 	fakeStoreHash,
+	type FetchPurpose,
 	InvalidHashesFileError,
 	LockfileDriftError,
 	parseDependenciesHashes,
@@ -24,12 +25,12 @@ const staleDigest = 'sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=';
 const oldStoreHash = 'sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=';
 const newStoreHash = 'sha256-CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=';
 
-function captureError<T>(
+async function captureError<T>(
 	type: new (...parameters: never[]) => T,
 	action: () => unknown
-): T {
+): Promise<T> {
 	try {
-		action();
+		await action();
 	} catch (error) {
 		if (error instanceof type) {
 			return error;
@@ -57,19 +58,19 @@ function fakeWorkspace(hashes: DependenciesHashes): Workspace & {
 	};
 }
 
-/** A fetcher yielding the given results in order, recording each call. */
+/** A fetcher yielding the given results in order, recording each purpose. */
 function fakeFetcher(results: readonly (string | undefined)[]): StoreFetcher & {
-	calls: () => number;
+	purposes: FetchPurpose[];
 } {
-	let call = 0;
+	const purposes: FetchPurpose[] = [];
 
 	return {
-		calls: () => call,
-		resolveHash: () => {
-			const result = results[call];
-			call += 1;
+		purposes,
+		resolveHash: (purpose) => {
+			const result = results[purposes.length];
+			purposes.push(purpose);
 
-			return result;
+			return Promise.resolve(result);
 		}
 	};
 }
@@ -89,8 +90,8 @@ describe('parseDependenciesHashes', () => {
 		).toEqual(hashes);
 	});
 
-	it('rejects unparsable JSON', () => {
-		const error = captureError(UnparsableHashesFileError, () =>
+	it('rejects unparsable JSON', async () => {
+		const error = await captureError(UnparsableHashesFileError, () =>
 			parseDependenciesHashes('{')
 		);
 
@@ -125,8 +126,8 @@ describe('parseDependenciesHashes', () => {
 				{ code: 'invalid_format', path: ['store'] }
 			]
 		}
-	])('rejects $name', ({ text, issues }) => {
-		const error = captureError(InvalidHashesFileError, () =>
+	])('rejects $name', async ({ text, issues }) => {
+		const error = await captureError(InvalidHashesFileError, () =>
 			parseDependenciesHashes(text)
 		);
 
@@ -148,13 +149,13 @@ describe('checkFlakeDependencies', () => {
 		}).not.toThrow();
 	});
 
-	it('reports both digests when they have drifted apart', () => {
+	it('reports both digests when they have drifted apart', async () => {
 		const workspace = fakeWorkspace({
 			lockfile: staleDigest,
 			store: oldStoreHash
 		});
 
-		const error = captureError(LockfileDriftError, () => {
+		const error = await captureError(LockfileDriftError, () => {
 			checkFlakeDependencies(workspace);
 		});
 
@@ -164,13 +165,13 @@ describe('checkFlakeDependencies', () => {
 		});
 	});
 
-	it('rejects a recorded placeholder store hash', () => {
+	it('rejects a recorded placeholder store hash', async () => {
 		const workspace = fakeWorkspace({
 			lockfile: lockfileDigest,
 			store: fakeStoreHash
 		});
 
-		const error = captureError(FakeHashRecordedError, () => {
+		const error = await captureError(FakeHashRecordedError, () => {
 			checkFlakeDependencies(workspace);
 		});
 
@@ -179,28 +180,28 @@ describe('checkFlakeDependencies', () => {
 });
 
 describe('updateFlakeDependencies', () => {
-	it('leaves a matching file alone without fetching', () => {
+	it('leaves a matching file alone without fetching', async () => {
 		const workspace = fakeWorkspace({
 			lockfile: lockfileDigest,
 			store: oldStoreHash
 		});
 		const fetcher = fakeFetcher([]);
 
-		const outcome = updateFlakeDependencies(workspace, fetcher);
+		const outcome = await updateFlakeDependencies(workspace, fetcher);
 
 		expect(outcome).toEqual({ kind: 'already-current', store: oldStoreHash });
 		expect(workspace.writes).toEqual([]);
-		expect(fetcher.calls()).toBe(0);
+		expect(fetcher.purposes).toEqual([]);
 	});
 
-	it('resolves against the fake hash so a realised store cannot mask drift', () => {
+	it('resolves against the fake hash so a realised store cannot mask drift', async () => {
 		const workspace = fakeWorkspace({
 			lockfile: staleDigest,
 			store: oldStoreHash
 		});
 		const fetcher = fakeFetcher([oldStoreHash, undefined]);
 
-		const outcome = updateFlakeDependencies(workspace, fetcher);
+		const outcome = await updateFlakeDependencies(workspace, fetcher);
 
 		expect(outcome).toEqual({ kind: 'store-unchanged', store: oldStoreHash });
 		expect(
@@ -211,14 +212,14 @@ describe('updateFlakeDependencies', () => {
 		]);
 	});
 
-	it('records the corrected store hash and confirms it fetches cleanly', () => {
+	it('records the corrected store hash and confirms it fetches cleanly', async () => {
 		const workspace = fakeWorkspace({
 			lockfile: staleDigest,
 			store: oldStoreHash
 		});
 		const fetcher = fakeFetcher([newStoreHash, undefined]);
 
-		const outcome = updateFlakeDependencies(workspace, fetcher);
+		const outcome = await updateFlakeDependencies(workspace, fetcher);
 
 		expect(outcome).toEqual({ kind: 'store-updated', store: newStoreHash });
 		expect(
@@ -229,7 +230,7 @@ describe('updateFlakeDependencies', () => {
 		]);
 	});
 
-	it('rejects a store hash that changes between consecutive fetches', () => {
+	it('rejects a store hash that changes between consecutive fetches', async () => {
 		const original: DependenciesHashes = {
 			lockfile: staleDigest,
 			store: oldStoreHash
@@ -237,7 +238,7 @@ describe('updateFlakeDependencies', () => {
 		const workspace = fakeWorkspace(original);
 		const fetcher = fakeFetcher([newStoreHash, oldStoreHash]);
 
-		const error = captureError(UnstableStoreHashError, () =>
+		const error = await captureError(UnstableStoreHashError, () =>
 			updateFlakeDependencies(workspace, fetcher)
 		);
 
@@ -245,7 +246,7 @@ describe('updateFlakeDependencies', () => {
 			first: newStoreHash,
 			second: oldStoreHash
 		});
-		expect(fetcher.calls()).toBe(2);
+		expect(fetcher.purposes).toEqual(['resolve', 'confirm']);
 		expect(
 			workspace.writes.map((text) => parseDependenciesHashes(text))
 		).toEqual([
@@ -255,7 +256,7 @@ describe('updateFlakeDependencies', () => {
 		]);
 	});
 
-	it('rejects a fetch that succeeds against the fake hash', () => {
+	it('rejects a fetch that succeeds against the fake hash', async () => {
 		const original: DependenciesHashes = {
 			lockfile: staleDigest,
 			store: oldStoreHash
@@ -263,7 +264,7 @@ describe('updateFlakeDependencies', () => {
 		const workspace = fakeWorkspace(original);
 		const fetcher = fakeFetcher([undefined]);
 
-		const error = captureError(FakeHashMatchedError, () =>
+		const error = await captureError(FakeHashMatchedError, () =>
 			updateFlakeDependencies(workspace, fetcher)
 		);
 
@@ -273,14 +274,14 @@ describe('updateFlakeDependencies', () => {
 		).toEqual([{ lockfile: lockfileDigest, store: fakeStoreHash }, original]);
 	});
 
-	it('refetches when the placeholder store hash was recorded for the current lockfile', () => {
+	it('refetches when the placeholder store hash was recorded for the current lockfile', async () => {
 		const workspace = fakeWorkspace({
 			lockfile: lockfileDigest,
 			store: fakeStoreHash
 		});
 		const fetcher = fakeFetcher([newStoreHash, undefined]);
 
-		const outcome = updateFlakeDependencies(workspace, fetcher);
+		const outcome = await updateFlakeDependencies(workspace, fetcher);
 
 		expect(outcome).toEqual({ kind: 'store-updated', store: newStoreHash });
 		expect(
@@ -291,7 +292,7 @@ describe('updateFlakeDependencies', () => {
 		]);
 	});
 
-	it('restores the original file when the fetch itself fails', () => {
+	it('restores the original file when the fetch itself fails', async () => {
 		const original: DependenciesHashes = {
 			lockfile: staleDigest,
 			store: oldStoreHash
@@ -304,7 +305,7 @@ describe('updateFlakeDependencies', () => {
 			}
 		};
 
-		const error = captureError(Error, () =>
+		const error = await captureError(Error, () =>
 			updateFlakeDependencies(workspace, fetcher)
 		);
 

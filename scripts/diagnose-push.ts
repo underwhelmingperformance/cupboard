@@ -3,6 +3,8 @@ import path from 'node:path';
 import { argv, env, exit } from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { type CliUi, createCliUi, resolveReporterMode } from '@cupboard/cli-ui';
+import type { Reporter, ReporterMode, ResultRow } from '@cupboard/reporter';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import Cloudflare from 'cloudflare';
 import { Command, InvalidArgumentError } from 'commander';
@@ -17,13 +19,6 @@ import {
 	readSecretFile,
 	writeSecretFile
 } from '../packages/cli/src/auth/secret-file.ts';
-import { resolveReporterMode } from '../packages/cli/src/reporter-mode.ts';
-import { type CliUi, createCliUi } from '../packages/cli-ui/src/cli-ui.ts';
-import type {
-	Reporter,
-	ReporterMode,
-	ResultRow
-} from '../packages/reporter/src/reporter.ts';
 
 // The diagnostic talks to Cloudflare as a dedicated public OAuth client (the id
 // lives in `cf_analytics_client_id` at the repo root), separate from the deploy
