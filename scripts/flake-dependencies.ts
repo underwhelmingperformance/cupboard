@@ -1,9 +1,11 @@
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+import { createCliUi, resolveReporterMode } from '@cupboard/cli-ui';
+import type { Reporter } from '@cupboard/reporter';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { Command } from 'commander';
 import { z } from 'zod';
@@ -34,6 +36,9 @@ export interface Workspace {
 	writeHashesFile(text: string): void;
 }
 
+/** Which of the update's two fetches is running. */
+export type FetchPurpose = 'resolve' | 'confirm';
+
 /** Resolves the store hash for the workspace's current lockfile. */
 export interface StoreFetcher {
 	/**
@@ -41,7 +46,7 @@ export interface StoreFetcher {
 	 * when the recorded one no longer matches, and undefined when it still
 	 * does.
 	 */
-	resolveHash(): string | undefined;
+	resolveHash(purpose: FetchPurpose): Promise<string | undefined>;
 }
 
 export class UnparsableHashesFileError extends CodedError {
@@ -164,10 +169,10 @@ export const fakeStoreHash = `sha256-${'A'.repeat(43)}=`;
 // The fetch runs against the fake hash: building against the recorded hash
 // would be satisfied by a store output already realised for it, masking a
 // stale hash on any machine that has fetched before.
-export function updateFlakeDependencies(
+export async function updateFlakeDependencies(
 	workspace: Workspace,
 	fetcher: StoreFetcher
-): UpdateOutcome {
+): Promise<UpdateOutcome> {
 	const digest = sriSha256(workspace.readLockfile());
 	const originalText = workspace.readHashesFile();
 	const current = parseDependenciesHashes(originalText);
@@ -177,7 +182,7 @@ export function updateFlakeDependencies(
 	}
 
 	try {
-		return refetchStoreHash(workspace, fetcher, digest, current);
+		return await refetchStoreHash(workspace, fetcher, digest, current);
 	} catch (error) {
 		// A failure must not leave the placeholder or an unverified hash on
 		// disk: whatever ran the update may commit the file regardless.
@@ -186,17 +191,17 @@ export function updateFlakeDependencies(
 	}
 }
 
-function refetchStoreHash(
+async function refetchStoreHash(
 	workspace: Workspace,
 	fetcher: StoreFetcher,
 	digest: string,
 	current: DependenciesHashes
-): UpdateOutcome {
+): Promise<UpdateOutcome> {
 	workspace.writeHashesFile(
 		serialiseDependenciesHashes({ lockfile: digest, store: fakeStoreHash })
 	);
 
-	const resolved = fetcher.resolveHash();
+	const resolved = await fetcher.resolveHash('resolve');
 
 	if (resolved === undefined) {
 		throw new FakeHashMatchedError();
@@ -206,7 +211,7 @@ function refetchStoreHash(
 		serialiseDependenciesHashes({ lockfile: digest, store: resolved })
 	);
 
-	const confirming = fetcher.resolveHash();
+	const confirming = await fetcher.resolveHash('confirm');
 
 	if (confirming !== undefined) {
 		throw new UnstableStoreHashError(resolved, confirming);
@@ -232,36 +237,63 @@ function repositoryWorkspace(root: string): Workspace {
 	};
 }
 
+const fetchLabels: Record<FetchPurpose, string> = {
+	resolve: 'Fetching the pnpm store to resolve its hash',
+	confirm: 'Fetching the pnpm store again to confirm the hash'
+};
+
 // Builds the store with the recorded hash; Nix reports the real hash in its
 // mismatch error, which is the supported way to resolve a fixed-output hash.
-function nixStoreFetcher(root: string): StoreFetcher {
+function nixStoreFetcher(root: string, reporter: Reporter): StoreFetcher {
 	return {
-		resolveHash: () => {
-			const build = spawnSync(
-				'nix',
-				['build', '.#cupboard.pnpmDeps', '--no-link'],
-				{ cwd: root, encoding: 'utf8' }
-			);
+		resolveHash: (purpose) =>
+			reporter.phase(fetchLabels[purpose], async (context) => {
+				const build = await runNixBuild(root);
 
-			if (build.error !== undefined) {
-				throw new StoreFetchFailedError(String(build.error));
-			}
+				if (build.status === 0) {
+					return;
+				}
 
-			if (build.status === 0) {
-				return;
-			}
+				const mismatch = /got: {4}(?<hash>sha256-[\d+/A-Za-z]{43}=)/.exec(
+					build.stderr
+				);
 
-			const mismatch = /got: {4}(?<hash>sha256-[\d+/A-Za-z]{43}=)/.exec(
-				build.stderr
-			);
+				if (mismatch?.groups?.hash === undefined) {
+					throw new StoreFetchFailedError(build.stderr);
+				}
 
-			if (mismatch?.groups?.hash === undefined) {
-				throw new StoreFetchFailedError(build.stderr);
-			}
+				context.fact('store', mismatch.groups.hash);
 
-			return mismatch.groups.hash;
-		}
+				return mismatch.groups.hash;
+			})
 	};
+}
+
+interface NixBuildResult {
+	readonly status: number | null;
+	readonly stderr: string;
+}
+
+function runNixBuild(root: string): Promise<NixBuildResult> {
+	return new Promise((resolve, reject) => {
+		const build = spawn('nix', ['build', '.#cupboard.pnpmDeps', '--no-link'], {
+			cwd: root,
+			stdio: ['ignore', 'ignore', 'pipe']
+		});
+
+		let stderr = '';
+		build.stderr.setEncoding('utf8');
+		build.stderr.on('data', (chunk: string) => {
+			stderr += chunk;
+		});
+
+		build.on('error', (error) => {
+			reject(new StoreFetchFailedError(String(error)));
+		});
+		build.on('close', (status) => {
+			resolve({ status, stderr });
+		});
+	});
 }
 
 const updateMessages: Record<UpdateOutcome['kind'], (store: string) => string> =
@@ -272,6 +304,10 @@ const updateMessages: Record<UpdateOutcome['kind'], (store: string) => string> =
 			'The pnpm store is unchanged; recorded the new lockfile digest.',
 		'store-updated': (store) => `Recorded the new pnpm store hash ${store}.`
 	};
+
+function scriptReporter(): Reporter {
+	return createCliUi({ mode: resolveReporterMode() }).reporter();
+}
 
 function buildProgram(): Command {
 	const program = new Command('flake-dependencies');
@@ -287,7 +323,9 @@ function buildProgram(): Command {
 		)
 		.action(() => {
 			checkFlakeDependencies(repositoryWorkspace(repoRoot));
-			console.log('The flake pnpm store hash matches pnpm-lock.yaml.');
+			scriptReporter().success(
+				'The flake pnpm store hash matches pnpm-lock.yaml.'
+			);
 		});
 
 	program
@@ -295,13 +333,21 @@ function buildProgram(): Command {
 		.description(
 			`refetch the pnpm store and record its hash in ${hashesFileName}`
 		)
-		.action(() => {
-			const outcome = updateFlakeDependencies(
+		.action(async () => {
+			const reporter = scriptReporter();
+			const outcome = await updateFlakeDependencies(
 				repositoryWorkspace(repoRoot),
-				nixStoreFetcher(repoRoot)
+				nixStoreFetcher(repoRoot, reporter)
 			);
 
-			console.log(updateMessages[outcome.kind](outcome.store));
+			const message = updateMessages[outcome.kind](outcome.store);
+
+			if (outcome.kind === 'already-current') {
+				reporter.step(message);
+				return;
+			}
+
+			reporter.success(message);
 		});
 
 	return program;
@@ -312,14 +358,10 @@ if (
 	import.meta.url === pathToFileURL(process.argv[1]).href
 ) {
 	try {
-		buildProgram().parse();
+		await buildProgram().parseAsync();
 	} catch (error: unknown) {
-		if (error instanceof CodedError) {
-			console.error(error.message);
-			process.exitCode = error.exitCode;
-		} else {
-			console.error(error);
-			process.exitCode = genericExitCode;
-		}
+		scriptReporter().error(error);
+		process.exitCode =
+			error instanceof CodedError ? error.exitCode : genericExitCode;
 	}
 }

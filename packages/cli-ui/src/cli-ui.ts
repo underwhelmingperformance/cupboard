@@ -38,6 +38,7 @@ import { type BrowserMessages, openBrowser } from './open-browser.ts';
 type Colours = ReturnType<typeof pc.createColors>;
 
 export { type BrowserMessages, openBrowser } from './open-browser.ts';
+export { resolveReporterMode } from './reporter-mode.ts';
 
 // British spelling for the cancel marker clack renders when a spinner, bar or
 // task is aborted without an explicit per-call message. Clack only exposes this
