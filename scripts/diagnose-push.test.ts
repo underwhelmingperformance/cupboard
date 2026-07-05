@@ -265,6 +265,13 @@ const timestampOf = (row: unknown): number | undefined =>
 	typeof row === 'object' && row !== null && 'timestamp' in row
 		? Number(row.timestamp)
 		: undefined;
+const cursorOf = (row: unknown): string | undefined => {
+	if (typeof row !== 'object' || row === null || !('id' in row)) {
+		return undefined;
+	}
+
+	return typeof row.id === 'string' ? row.id : undefined;
+};
 
 function tracePage(from: number, count: number): { timestamp: number }[] {
 	return Array.from({ length: count }, (_, index) => ({
@@ -289,6 +296,7 @@ describe('fetchPaged', () => {
 			'traces',
 			{ from: 0, to: 1000 },
 			timestampOf,
+			undefined,
 			noProgress,
 			noSleep
 		);
@@ -334,6 +342,7 @@ describe('fetchPaged', () => {
 			'traces',
 			{ from: 0, to: 1000 },
 			timestampOf,
+			undefined,
 			noProgress,
 			noSleep
 		);
@@ -374,6 +383,7 @@ describe('fetchPaged', () => {
 			'traces',
 			{ from: 0, to: 1000 },
 			timestampOf,
+			undefined,
 			noProgress,
 			noSleep
 		);
@@ -407,6 +417,7 @@ describe('fetchPaged', () => {
 			'traces',
 			{ from: 0, to: 1000 },
 			timestampOf,
+			undefined,
 			noProgress,
 			(ms) => {
 				sleeps.push(ms);
@@ -437,6 +448,7 @@ describe('fetchPaged', () => {
 				'traces',
 				{ from: 0, to: 1000 },
 				timestampOf,
+				undefined,
 				noProgress,
 				noSleep
 			)
@@ -460,11 +472,170 @@ describe('fetchPaged', () => {
 				'traces',
 				{ from: 0, to: 1000 },
 				timestampOf,
+				undefined,
 				noProgress,
 				noSleep
 			)
 		).rejects.toBeInstanceOf(Cloudflare.APIError);
 		expect(attempts).toBe(1);
+	});
+
+	it('pages a same-millisecond burst by its smallest id', async () => {
+		// The timeframe stays fixed; the offset is the smallest id of each page,
+		// not its last row, so an intra-millisecond burst the view returns out of
+		// id order is still walked strictly downwards. Here `d` trails `e` in the
+		// second page though it is the smaller id, and the offset takes `d`.
+		const requests: {
+			offset: string | undefined;
+			direction: string | undefined;
+			timeframe: { from: number; to: number };
+		}[] = [];
+		const pages = [
+			[
+				{ timestamp: 700, id: 'g' },
+				{ timestamp: 700, id: 'f' }
+			],
+			[
+				{ timestamp: 700, id: 'e' },
+				{ timestamp: 700, id: 'd' }
+			],
+			[]
+		];
+		const query: TelemetryQuery = (parameters) => {
+			requests.push({
+				offset: parameters.offset,
+				direction: parameters.offsetDirection,
+				timeframe: { ...parameters.timeframe }
+			});
+
+			return Promise.resolve({ events: { events: pages.shift() ?? [] } });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'events',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			cursorOf,
+			noProgress,
+			noSleep
+		);
+
+		expect({ rows, requests }).toStrictEqual({
+			rows: [
+				{ timestamp: 700, id: 'g' },
+				{ timestamp: 700, id: 'f' },
+				{ timestamp: 700, id: 'e' },
+				{ timestamp: 700, id: 'd' }
+			],
+			requests: [
+				{
+					offset: undefined,
+					direction: undefined,
+					timeframe: { from: 0, to: 1000 }
+				},
+				{ offset: 'f', direction: 'next', timeframe: { from: 0, to: 1000 } },
+				{ offset: 'd', direction: 'next', timeframe: { from: 0, to: 1000 } }
+			]
+		});
+	});
+
+	it('drops rows the view replays across pages', async () => {
+		// A page whose smallest id is newer than an already-served row still
+		// carries duplicates of it; the walk keeps only the unseen rows.
+		const pages = [
+			[
+				{ timestamp: 700, id: 'g' },
+				{ timestamp: 700, id: 'f' }
+			],
+			[
+				{ timestamp: 700, id: 'g' },
+				{ timestamp: 650, id: 'e' }
+			],
+			[]
+		];
+		const query: TelemetryQuery = () =>
+			Promise.resolve({ events: { events: pages.shift() ?? [] } });
+
+		const rows = await fetchPaged(
+			query,
+			'events',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			cursorOf,
+			noProgress,
+			noSleep
+		);
+
+		expect(rows).toStrictEqual([
+			{ timestamp: 700, id: 'g' },
+			{ timestamp: 700, id: 'f' },
+			{ timestamp: 650, id: 'e' }
+		]);
+	});
+
+	it('steps the bound below the oldest row when the cursor stalls', async () => {
+		// The view refuses to page a dense millisecond: given the offset it keeps
+		// answering the same page, its smallest id never dropping below the
+		// offset. The walk steps the upper bound below the oldest timestamp it
+		// has seen and pages on beneath it, reaching the older rows.
+		const requests: {
+			offset: string | undefined;
+			to: number;
+		}[] = [];
+		const query: TelemetryQuery = (parameters) => {
+			requests.push({ offset: parameters.offset, to: parameters.timeframe.to });
+
+			// A burst at 700 the cursor cannot page past: the top bound always
+			// answers the same page, whatever offset it is given.
+			if (parameters.timeframe.to === 1000) {
+				return Promise.resolve({
+					events: {
+						events: [
+							{ timestamp: 700, id: 'g' },
+							{ timestamp: 700, id: 'f' }
+						]
+					}
+				});
+			}
+
+			// Below the stepped bound the older row is reachable, and a cursor
+			// past it drains the window.
+			return Promise.resolve({
+				events: {
+					events:
+						parameters.timeframe.to === 699 && parameters.offset === undefined
+							? [{ timestamp: 650, id: 'e' }]
+							: []
+				}
+			});
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'events',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			cursorOf,
+			noProgress,
+			noSleep
+		);
+
+		expect({ rows, requests }).toStrictEqual({
+			rows: [
+				{ timestamp: 700, id: 'g' },
+				{ timestamp: 700, id: 'f' },
+				{ timestamp: 650, id: 'e' }
+			],
+			requests: [
+				// The full bound: a fresh page, then the stall on the replayed page.
+				{ offset: undefined, to: 1000 },
+				{ offset: 'f', to: 1000 },
+				// Stepped below the burst's millisecond; the older row, then empty.
+				{ offset: undefined, to: 699 },
+				{ offset: 'e', to: 699 }
+			]
+		});
 	});
 });
 

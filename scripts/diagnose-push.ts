@@ -43,8 +43,9 @@ const observabilityScope =
 
 const repoRoot = path.resolve(fileURLToPath(import.meta.url), '..', '..');
 
-// Cloudflare caps a single telemetry page; pages are walked by stepping the
-// upper bound of the window back to just before the oldest row seen.
+// Cloudflare caps a single telemetry page. The events view is walked by its
+// row-id cursor; the traces view, which has none, steps the window's upper
+// bound back to just before the oldest row seen.
 const pageLimit = 1000;
 
 // The window is cut into slices, each paged on its own and fetched concurrently:
@@ -1304,6 +1305,8 @@ export type TelemetryQuery = (parameters: {
 	readonly view: 'events' | 'traces';
 	readonly limit: number;
 	readonly timeframe: { readonly from: number; readonly to: number };
+	readonly offset?: string;
+	readonly offsetDirection?: 'next';
 }) => Promise<TelemetryPageResponse>;
 
 type Sleep = (ms: number) => Promise<void>;
@@ -1360,10 +1363,147 @@ async function queryPageWithRetry(
 	}
 }
 
-// Walks a telemetry view back through time, a page at a time, stepping the
-// upper bound to the oldest row's own millisecond: stepping past it would
-// drop the rows sharing that millisecond which did not fit the page, exactly
-// the bursts a push incident produces. The boundary millisecond is re-read on
+function pageRowsOf(
+	response: TelemetryPageResponse,
+	view: 'events' | 'traces'
+): unknown[] {
+	return view === 'events'
+		? (response.events?.events ?? [])
+		: (response.traces ?? []);
+}
+
+// The smallest row id in a page, or undefined if no row carries one. The id
+// (a ULID) sorts lexicographically, so the minimum is the page's true oldest
+// row regardless of the order the view returns it in.
+function smallestCursor(
+	page: readonly unknown[],
+	cursorOf: (row: unknown) => string | undefined
+): string | undefined {
+	let smallest: string | undefined;
+
+	for (const row of page) {
+		const id = cursorOf(row);
+
+		if (id !== undefined && (smallest === undefined || id < smallest)) {
+			smallest = id;
+		}
+	}
+
+	return smallest;
+}
+
+// The oldest (smallest) timestamp in a page, or undefined if none carries one.
+function oldestTimestamp(
+	page: readonly unknown[],
+	timestampOf: (row: unknown) => number | undefined
+): number | undefined {
+	let oldest: number | undefined;
+
+	for (const row of page) {
+		const at = timestampOf(row);
+
+		if (at !== undefined && (oldest === undefined || at < oldest)) {
+			oldest = at;
+		}
+	}
+
+	return oldest;
+}
+
+// Pages a view with the API's cursor: within a fixed upper bound each page's
+// smallest row id becomes the next page's offset, so the walk reaches every
+// row, including bursts sharing one millisecond that a stepped timeframe
+// cannot subdivide. Within a millisecond the view has no stable order, so the
+// last row of a page is not its oldest; advancing by the smallest id keeps the
+// offset moving strictly downwards.
+//
+// The cursor eventually refuses to page a dense burst any further, answering a
+// full page whose smallest id is the offset it was already given. The walk
+// then steps the upper bound below the oldest timestamp it has seen and drops
+// the cursor: everything above that timestamp is already drained, so this
+// resumes older rows and, because the bound strictly decreases, guarantees the
+// walk terminates. Rows dedup by id across the whole walk. It ends on an empty
+// page or once the bound falls below the window.
+async function fetchByCursor(
+	query: TelemetryQuery,
+	view: 'events' | 'traces',
+	window: TimeWindow,
+	cursorOf: (row: unknown) => string | undefined,
+	timestampOf: (row: unknown) => number | undefined,
+	onPage: PageProgress,
+	sleep: Sleep
+): Promise<unknown[]> {
+	const rows: unknown[] = [];
+	const seen = new Set<string>();
+	let upper = window.to;
+	let offset: string | undefined;
+
+	for (;;) {
+		const response = await queryPageWithRetry(
+			query,
+			{
+				view,
+				limit: pageLimit,
+				timeframe: { from: window.from, to: upper },
+				...(offset !== undefined && {
+					offset,
+					offsetDirection: 'next' as const
+				})
+			},
+			sleep
+		);
+
+		const page = pageRowsOf(response, view);
+
+		if (page.length === 0) {
+			break;
+		}
+
+		const fresh = page.filter((row) => {
+			const id = cursorOf(row);
+
+			return id === undefined || !seen.has(id);
+		});
+
+		for (const row of fresh) {
+			const id = cursorOf(row);
+
+			if (id !== undefined) {
+				seen.add(id);
+			}
+		}
+
+		rows.push(...fresh);
+		onPage(fresh.length);
+
+		const next = smallestCursor(page, cursorOf);
+
+		if (next !== undefined && (offset === undefined || next < offset)) {
+			offset = next;
+			continue;
+		}
+
+		// The cursor cannot move any lower within this bound. Step the bound
+		// below the oldest timestamp seen and start a fresh cursor beneath it;
+		// everything at or above that timestamp is already collected.
+		const oldest = oldestTimestamp(page, timestampOf);
+
+		if (oldest === undefined || oldest <= window.from) {
+			break;
+		}
+
+		upper = oldest - 1;
+		offset = undefined;
+	}
+
+	return rows;
+}
+
+// Walks a telemetry view a page at a time. A view whose rows carry a cursor
+// id pages by cursor; otherwise the walk steps the timeframe's upper bound
+// back to the oldest row's own millisecond: stepping past it would drop the
+// rows sharing that millisecond which did not fit the page, exactly the
+// bursts a push incident produces. The boundary millisecond is re-read on
 // the next page and its already-collected rows dropped by content. The walk
 // ends on an empty page or one that yields nothing new; the view caps a page
 // below the requested limit, so a short page alone does not mean the window
@@ -1373,9 +1513,22 @@ export async function fetchPaged(
 	view: 'events' | 'traces',
 	window: TimeWindow,
 	timestampOf: (row: unknown) => number | undefined,
+	cursorOf: ((row: unknown) => string | undefined) | undefined,
 	onPage: PageProgress,
 	sleep: Sleep = defaultSleep
 ): Promise<unknown[]> {
+	if (cursorOf !== undefined) {
+		return fetchByCursor(
+			query,
+			view,
+			window,
+			cursorOf,
+			timestampOf,
+			onPage,
+			sleep
+		);
+	}
+
 	const rows: unknown[] = [];
 	let upper = window.to;
 	let boundary = new Set<string>();
@@ -1391,10 +1544,7 @@ export async function fetchPaged(
 			sleep
 		);
 
-		const page =
-			view === 'events'
-				? (response.events?.events ?? [])
-				: (response.traces ?? []);
+		const page = pageRowsOf(response, view);
 		const fresh = page.filter((row) => !boundary.has(JSON.stringify(row)));
 
 		if (fresh.length === 0) {
@@ -1511,6 +1661,21 @@ const timestampOf: Record<TelemetryView, (row: unknown) => number | undefined> =
 		traces: (row) => traceSchema.safeParse(row).data?.traceStartMs
 	};
 
+const eventCursorSchema = z.object({
+	$metadata: z.object({ id: z.string() })
+});
+
+// An event's id is the API's pagination cursor. The traces view ignores the
+// offset parameter and replays its first page, so it has no cursor extractor
+// and pages by stepping the timeframe instead.
+const cursorOf: Record<
+	TelemetryView,
+	((row: unknown) => string | undefined) | undefined
+> = {
+	events: (row) => eventCursorSchema.safeParse(row).data?.$metadata.id,
+	traces: undefined
+};
+
 // Both views and every slice share one bounded pool of in-flight queries.
 // Disjoint slices need no dedup; their rows are concatenated per view.
 async function fetchTelemetry(
@@ -1550,6 +1715,7 @@ async function fetchTelemetry(
 			view,
 			slice,
 			timestampOf[view],
+			cursorOf[view],
 			(pageRows) => {
 				progress[view].rows += pageRows;
 				onProgress(view, progress[view], slices.length);
