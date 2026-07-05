@@ -74,6 +74,16 @@ export class LockfileDriftError extends CodedError {
 	}
 }
 
+export class FakeHashRecordedError extends CodedError {
+	constructor() {
+		super(
+			`${hashesFileName} records the placeholder store hash left by an ` +
+				'interrupted update. Run `pnpm update:flake-deps` to refresh it.'
+		);
+		this.name = 'FakeHashRecordedError';
+	}
+}
+
 export class StoreFetchFailedError extends CodedError {
 	constructor(public readonly output: string) {
 		super(`fetching the pnpm store failed:\n${output}`);
@@ -82,8 +92,14 @@ export class StoreFetchFailedError extends CodedError {
 }
 
 export class UnstableStoreHashError extends CodedError {
-	constructor() {
-		super('the pnpm store hash changed between two consecutive fetches');
+	constructor(
+		public readonly first: string,
+		public readonly second: string
+	) {
+		super(
+			'the pnpm store hash changed between two consecutive fetches: ' +
+				`${first} and then ${second}`
+		);
 		this.name = 'UnstableStoreHashError';
 	}
 }
@@ -128,6 +144,10 @@ export function checkFlakeDependencies(workspace: Workspace): void {
 	const digest = sriSha256(workspace.readLockfile());
 	const hashes = parseDependenciesHashes(workspace.readHashesFile());
 
+	if (hashes.store === fakeStoreHash) {
+		throw new FakeHashRecordedError();
+	}
+
 	if (hashes.lockfile !== digest) {
 		throw new LockfileDriftError(hashes.lockfile, digest);
 	}
@@ -149,12 +169,29 @@ export function updateFlakeDependencies(
 	fetcher: StoreFetcher
 ): UpdateOutcome {
 	const digest = sriSha256(workspace.readLockfile());
-	const current = parseDependenciesHashes(workspace.readHashesFile());
+	const originalText = workspace.readHashesFile();
+	const current = parseDependenciesHashes(originalText);
 
-	if (current.lockfile === digest) {
+	if (current.lockfile === digest && current.store !== fakeStoreHash) {
 		return { kind: 'already-current', store: current.store };
 	}
 
+	try {
+		return refetchStoreHash(workspace, fetcher, digest, current);
+	} catch (error) {
+		// A failure must not leave the placeholder or an unverified hash on
+		// disk: whatever ran the update may commit the file regardless.
+		workspace.writeHashesFile(originalText);
+		throw error;
+	}
+}
+
+function refetchStoreHash(
+	workspace: Workspace,
+	fetcher: StoreFetcher,
+	digest: string,
+	current: DependenciesHashes
+): UpdateOutcome {
 	workspace.writeHashesFile(
 		serialiseDependenciesHashes({ lockfile: digest, store: fakeStoreHash })
 	);
@@ -169,8 +206,10 @@ export function updateFlakeDependencies(
 		serialiseDependenciesHashes({ lockfile: digest, store: resolved })
 	);
 
-	if (fetcher.resolveHash() !== undefined) {
-		throw new UnstableStoreHashError();
+	const confirming = fetcher.resolveHash();
+
+	if (confirming !== undefined) {
+		throw new UnstableStoreHashError(resolved, confirming);
 	}
 
 	return {
