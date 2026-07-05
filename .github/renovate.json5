@@ -1,0 +1,19 @@
+{
+	$schema: 'https://docs.renovatebot.com/renovate-schema.json',
+
+	// The org-wide configuration from underwhelmingperformance/.github is
+	// applied as self-hosted defaults to every repository, and this file is
+	// merged on top of it. Only cupboard-specific additions belong here.
+
+	// The flake builds from a pnpm store pinned by the fixed-output hash in
+	// pnpm-deps-hash.json, so a bare pnpm-lock.yaml bump leaves the hash stale
+	// and every flake build failing. Refresh the recorded pair on the same
+	// branch. The command must be permitted by `allowedCommands` in the
+	// Renovate workflow in underwhelmingperformance/.github.
+	postUpgradeTasks: {
+		commands: ['pnpm update:flake-deps'],
+		fileFilters: ['pnpm-deps-hash.json'],
+		executionMode: 'branch',
+		installTools: { nix: {} }
+	}
+}
