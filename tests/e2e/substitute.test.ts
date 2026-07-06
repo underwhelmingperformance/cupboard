@@ -181,16 +181,20 @@ describe('Nix substitution', () => {
 			);
 			await harness.server.stageObject(upload.r2Key, tampered);
 
-			const error = await rejectedBy(() =>
-				harness.client.commit(
+			const error = await rejectedBy(async () => {
+				const outcome = await harness.client.commit(
 					{
 						uploadId: upload.uploadId,
 						storePathHash: upload.storePathHash,
 						narHash: upload.narHash
 					},
-					{ wait: true }
-				)
-			);
+					{}
+				);
+
+				// The commit acks first; the tampered bytes fail the background
+				// verification, so the mismatch surfaces on the verdict.
+				await outcome.settled;
+			});
 
 			expectUploadVerificationFailed(error);
 			expect({

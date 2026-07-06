@@ -13,6 +13,7 @@ import {
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
 import {
+	type CommitOutcome,
 	type CommitSessionTarget,
 	type CommitSocket,
 	runCommitSession
@@ -64,7 +65,6 @@ async function rejectedBy<T extends Error>(
 }
 
 interface SessionTestOptions {
-	readonly wait?: boolean;
 	readonly timeoutSeconds?: number;
 	readonly signal?: AbortSignal;
 	readonly keepaliveMs?: number;
@@ -98,7 +98,6 @@ function openSessionOver(
 		{},
 		{
 			path,
-			wait: options.wait ?? true,
 			timeoutSeconds: options.timeoutSeconds ?? 600,
 			signal: options.signal,
 			keepaliveMs: options.keepaliveMs,
@@ -115,6 +114,23 @@ function openSession(
 	return openSessionOver([socket], options);
 }
 
+// The commit ack without its `settled` promise, so a test can assert the prompt
+// disposition structurally.
+async function ackOf(
+	commit: Promise<CommitOutcome>
+): Promise<Omit<CommitOutcome, 'settled'>> {
+	const { storePathHash, narHash, status } = await commit;
+
+	return { storePathHash, narHash, status };
+}
+
+// The verdict promise a commit ack carries.
+async function settledOf(commit: Promise<CommitOutcome>): Promise<void> {
+	const outcome = await commit;
+
+	return outcome.settled;
+}
+
 describe('runCommitSession', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
@@ -124,10 +140,10 @@ describe('runCommitSession', () => {
 		vi.useRealTimers();
 	});
 
-	it('settles a commit on a settled frame and leaves the socket open', async () => {
+	it('acks a commit on a settled frame and leaves the socket open', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
-		const settled = session.commit(target);
+		const commit = session.commit(target);
 
 		socket.emit('open');
 		socket.emit(
@@ -139,11 +155,12 @@ describe('runCommitSession', () => {
 			})
 		);
 
-		await expect(settled).resolves.toStrictEqual({
+		await expect(ackOf(commit)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'already-present'
 		});
+		await expect(settledOf(commit)).resolves.toBeUndefined();
 		expect(socket.closed).toBe(false);
 
 		session.close();
@@ -182,26 +199,28 @@ describe('runCommitSession', () => {
 			frame({ ev: 'verdict', uploadId: 'upload-a', status: 'servable' })
 		);
 
-		await expect(second).resolves.toStrictEqual({
+		await expect(ackOf(second)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'committed'
 		});
-		await expect(first).resolves.toStrictEqual({
+		await expect(ackOf(first)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
-			status: 'committed'
+			status: 'pending'
 		});
+		await expect(settledOf(first)).resolves.toBeUndefined();
+		await expect(settledOf(second)).resolves.toBeUndefined();
 		expect(socket.sent).toStrictEqual([
 			commitOp('upload-a'),
 			commitOp('upload-b')
 		]);
 	});
 
-	it('reports a deferred upload as pending without waiting when wait is off', async () => {
+	it('acks a deferred upload as pending on its deferred frame', async () => {
 		const socket = new FakeCommitSocket();
-		const session = openSession(socket, { wait: false });
-		const settled = session.commit(target);
+		const session = openSession(socket);
+		const ack = session.commit(target);
 
 		socket.emit('open');
 		socket.emit(
@@ -209,7 +228,7 @@ describe('runCommitSession', () => {
 			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
 
-		await expect(settled).resolves.toStrictEqual({
+		await expect(ackOf(ack)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'pending'
@@ -231,14 +250,15 @@ describe('runCommitSession', () => {
 			frame({ ev: 'verdict', uploadId, status: 'servable' })
 		);
 
-		await expect(settled).resolves.toStrictEqual({
+		await expect(ackOf(settled)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
-			status: 'committed'
+			status: 'pending'
 		});
+		await expect(settledOf(settled)).resolves.toBeUndefined();
 	});
 
-	it('settles committed on a servable verdict that arrives before the deferred frame', async () => {
+	it('acks committed on a servable verdict that arrives before the deferred frame', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const settled = session.commit(target);
@@ -251,11 +271,12 @@ describe('runCommitSession', () => {
 			frame({ ev: 'verdict', uploadId, status: 'servable' })
 		);
 
-		await expect(settled).resolves.toStrictEqual({
+		await expect(ackOf(settled)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'committed'
 		});
+		await expect(settledOf(settled)).resolves.toBeUndefined();
 	});
 
 	it.each(['mismatch', 'over-quota', 'absent'] as const)(
@@ -272,7 +293,15 @@ describe('runCommitSession', () => {
 			);
 			socket.emit('message', frame({ ev: 'verdict', uploadId, status }));
 
-			const error = await rejectedBy(settled, UploadVerificationFailedError);
+			await expect(ackOf(settled)).resolves.toStrictEqual({
+				storePathHash,
+				narHash,
+				status: 'pending'
+			});
+			const error = await rejectedBy(
+				settledOf(settled),
+				UploadVerificationFailedError
+			);
 
 			expect({
 				name: error.name,
@@ -381,11 +410,12 @@ describe('runCommitSession', () => {
 			frame({ ev: 'verdict', uploadId, status: 'servable' })
 		);
 
-		await expect(settled).resolves.toStrictEqual({
+		await expect(ackOf(settled)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
-			status: 'committed'
+			status: 'pending'
 		});
+		await expect(settledOf(settled)).resolves.toBeUndefined();
 		expect({ first: first.sent, second: second.sent }).toStrictEqual({
 			first: [commitOp(uploadId)],
 			second: [JSON.stringify({ op: 'subscribe', uploadIds: [uploadId] })]
@@ -414,11 +444,12 @@ describe('runCommitSession', () => {
 			})
 		);
 
-		await expect(settled).resolves.toStrictEqual({
+		await expect(ackOf(settled)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'committed'
 		});
+		await expect(settledOf(settled)).resolves.toBeUndefined();
 		expect({ first: first.sent, second: second.sent }).toStrictEqual({
 			first: [commitOp(uploadId)],
 			second: [commitOp(uploadId)]
@@ -451,7 +482,8 @@ describe('runCommitSession', () => {
 			'message',
 			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
 		);
-		const rejection = rejectedBy(settled, UploadWaitTimeoutError);
+		const outcome = await settled;
+		const rejection = rejectedBy(outcome.settled, UploadWaitTimeoutError);
 		await vi.advanceTimersByTimeAsync(30_000);
 
 		const error = await rejection;
@@ -484,11 +516,12 @@ describe('runCommitSession', () => {
 			})
 		);
 
-		await expect(settled).resolves.toStrictEqual({
+		await expect(ackOf(settled)).resolves.toStrictEqual({
 			storePathHash,
 			narHash,
 			status: 'committed'
 		});
+		await expect(settledOf(settled)).resolves.toBeUndefined();
 		expect(socket.sent).toStrictEqual([commitOp(uploadId), 'ping', 'ping']);
 	});
 

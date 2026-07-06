@@ -456,6 +456,26 @@ describe('CupboardClient.commit', () => {
 		narHash: response.narHash
 	});
 
+	it('closes the one-shot session when the server rejects with an error frame', async () => {
+		let socket: FakeCommitSocket | undefined;
+		const { client } = commitClient([
+			(scripted) => {
+				socket = scripted;
+				sendFrame(scripted, {
+					ev: 'error',
+					uploadId: 'upload-app',
+					status: 507,
+					message: 'over quota'
+				});
+			}
+		]);
+
+		await expect(
+			client.commit('write-token', target('upload-app'))
+		).rejects.toBeInstanceOf(CupboardHttpError);
+		expect(socket?.closed).toBe(true);
+	});
+
 	it('commits over a wss socket carrying the bearer token on the upgrade', async () => {
 		const { client, connections } = commitClient([
 			(socket) => {
@@ -463,7 +483,10 @@ describe('CupboardClient.commit', () => {
 			}
 		]);
 
-		const result = await client.commit('write-token', target('upload-app'));
+		const { settled, ...result } = await client.commit(
+			'write-token',
+			target('upload-app')
+		);
 
 		expect({ result, connections: connections() }).toStrictEqual({
 			result: response,
@@ -474,6 +497,7 @@ describe('CupboardClient.commit', () => {
 				}
 			]
 		});
+		await expect(settled).resolves.toBeUndefined();
 	});
 
 	it('scopes the commit socket through a named cache', async () => {
@@ -516,7 +540,10 @@ describe('CupboardClient.commit', () => {
 			refresh: () => Promise.resolve('fresh-token')
 		};
 
-		const result = await client.commit(provider, target('upload-app'));
+		const { settled, ...result } = await client.commit(
+			provider,
+			target('upload-app')
+		);
 
 		expect({ result, connections: connections() }).toStrictEqual({
 			result: response,
@@ -531,6 +558,7 @@ describe('CupboardClient.commit', () => {
 				}
 			]
 		});
+		await expect(settled).resolves.toBeUndefined();
 	});
 });
 

@@ -1,5 +1,4 @@
 import {
-	type CommitResponse,
 	commitSessionFrameSchema,
 	type CommitSessionRequest
 } from '@cupboard/protocol/upload';
@@ -57,9 +56,7 @@ export interface CommitSessionTarget {
 export interface CommitSessionOptions {
 	/** The route path the socket was opened on, for error messages. */
 	readonly path: string;
-	/** Park for the verification verdict on a deferred upload. */
-	readonly wait: boolean;
-	/** Bounds how long a parked upload waits for its verdict. */
+	/** Bounds how long a deferred upload's `settled` waits for its verdict. */
 	readonly timeoutSeconds: number;
 	readonly signal?: AbortSignal;
 	readonly keepaliveMs?: number;
@@ -69,17 +66,34 @@ export interface CommitSessionOptions {
 	readonly reconnectBackoffMs?: number;
 }
 
+/**
+ * A committed path's prompt disposition plus the promise of its eventual
+ * verdict. `commit` resolves this as soon as the server acknowledges the path
+ * (its row is reserved), so retention can be recorded before any wait; `settled`
+ * resolves once the path is servable and rejects on a failed verdict. For a
+ * reuse or inline commit (`committed`) `settled` is already resolved.
+ */
+export interface CommitOutcome {
+	readonly storePathHash: string;
+	readonly narHash: string;
+	readonly status: 'committed' | 'pending' | 'already-present';
+	readonly settled: Promise<void>;
+}
+
 /** A push's commit session: many paths commit over one socket. */
 export interface CommitSession {
-	commit(target: CommitSessionTarget): Promise<CommitResponse>;
+	commit(target: CommitSessionTarget): Promise<CommitOutcome>;
 	/** Closes the socket; safe once every commit has settled. */
 	close(): void;
 }
 
 interface SessionEntry {
 	readonly target: CommitSessionTarget;
-	readonly resolve: (response: CommitResponse) => void;
-	readonly reject: (error: Error) => void;
+	readonly resolveAck: (outcome: CommitOutcome) => void;
+	readonly rejectAck: (error: Error) => void;
+	readonly settled: Promise<void>;
+	readonly settleServable: () => void;
+	readonly settleFailed: (error: Error) => void;
 	// A `deferred` frame has arrived, so the server holds a durable row for this
 	// upload. A reconnect resumes such an id with `subscribe`, where a since-gone
 	// row safely means it committed; an un-acked id is re-sent as `commit`
@@ -94,6 +108,34 @@ const defaultReconnectBackoffMs = 500;
 const maxReconnectBackoffMs = 5000;
 const keepaliveRequest = 'ping';
 const keepaliveResponse = 'pong';
+
+// Awaits a promise solely to observe a rejection no caller did, so an unawaited
+// `settled` never surfaces as an unhandled rejection.
+async function ignoreRejection(promise: Promise<unknown>): Promise<void> {
+	try {
+		await promise;
+	} catch {
+		// Intentionally ignored: the caller sees the rejection if it awaits.
+	}
+}
+
+// A verdict promise with its resolver and rejecter, the `settled` half of a
+// commit outcome.
+function deferredSettle(): {
+	readonly settled: Promise<void>;
+	readonly settleServable: () => void;
+	readonly settleFailed: (error: Error) => void;
+} {
+	const { promise, resolve, reject } = Promise.withResolvers<undefined>();
+
+	return {
+		settled: promise,
+		settleServable: () => {
+			resolve(undefined);
+		},
+		settleFailed: reject
+	};
+}
 
 /**
  * Runs a push's commit session over one socket. Each `commit` registers a path,
@@ -172,7 +214,13 @@ export function runCommitSession(
 		teardown();
 
 		for (const entry of entries) {
-			entry.reject(error);
+			// An acked entry's caller already holds its `settled`; an un-acked one is
+			// still awaiting the commit reply, so its ack rejects instead.
+			if (entry.acked) {
+				entry.settleFailed(error);
+			} else {
+				entry.rejectAck(error);
+			}
 		}
 	};
 
@@ -215,8 +263,16 @@ export function runCommitSession(
 
 		switch (frame.ev) {
 			case 'settled': {
+				// An immediate commit (a reuse or an inline verify) is already
+				// servable, so its verdict settles at once.
 				finishEntry(frame.uploadId, (entry) => {
-					entry.resolve(frame.response);
+					entry.settleServable();
+					entry.resolveAck({
+						storePathHash: frame.response.storePathHash,
+						narHash: frame.response.narHash,
+						status: frame.response.status,
+						settled: entry.settled
+					});
 				});
 
 				return;
@@ -229,20 +285,17 @@ export function runCommitSession(
 					return;
 				}
 
-				if (!options.wait) {
-					finishEntry(frame.uploadId, () => {
-						entry.resolve({
-							storePathHash: frame.storePathHash,
-							narHash: frame.narHash,
-							status: 'pending'
-						});
-					});
-
-					return;
-				}
-
+				// The server holds a durable row now: ack the disposition so the
+				// caller can record retention, and keep the entry to carry the
+				// verdict its `settled` promise resolves on.
 				entry.acked = true;
 				entry.deadline ??= armDeadline(frame.uploadId);
+				entry.resolveAck({
+					storePathHash: frame.storePathHash,
+					narHash: frame.narHash,
+					status: 'pending',
+					settled: entry.settled
+				});
 
 				return;
 			}
@@ -266,22 +319,38 @@ export function runCommitSession(
 				}
 
 				if (frame.status === 'servable') {
-					finishEntry(frame.uploadId, () => {
-						entry.resolve({
-							storePathHash: entry.target.storePathHash,
-							narHash: entry.target.narHash,
-							status: 'committed'
-						});
+					finishEntry(frame.uploadId, (settling) => {
+						settling.settleServable();
+
+						// A verdict can race ahead of the deferred frame; with no ack
+						// yet, resolve it now from the target's identity: servable is
+						// committed.
+						if (!settling.acked) {
+							settling.resolveAck({
+								storePathHash: settling.target.storePathHash,
+								narHash: settling.target.narHash,
+								status: 'committed',
+								settled: settling.settled
+							});
+						}
 					});
 
 					return;
 				}
 
 				const status = frame.status;
-				finishEntry(frame.uploadId, () => {
-					entry.reject(
-						new UploadVerificationFailedError(frame.uploadId, status)
+				finishEntry(frame.uploadId, (settling) => {
+					const error = new UploadVerificationFailedError(
+						frame.uploadId,
+						status
 					);
+					settling.settleFailed(error);
+
+					// A failure racing ahead of the deferred frame has no `pending`
+					// disposition to report, so the ack itself rejects.
+					if (!settling.acked) {
+						settling.rejectAck(error);
+					}
 				});
 
 				return;
@@ -290,9 +359,18 @@ export function runCommitSession(
 			case 'error': {
 				const { status, message } = frame;
 				finishEntry(frame.uploadId, (entry) => {
-					entry.reject(
-						new CupboardHttpError('GET', options.path, status, message)
+					const error = new CupboardHttpError(
+						'GET',
+						options.path,
+						status,
+						message
 					);
+
+					if (entry.acked) {
+						entry.settleFailed(error);
+					} else {
+						entry.rejectAck(error);
+					}
 				});
 			}
 		}
@@ -364,7 +442,9 @@ export function runCommitSession(
 	function armDeadline(uploadId: string): NodeJS.Timeout {
 		const deadline = setTimeout(() => {
 			finishEntry(uploadId, (entry) => {
-				entry.reject(new UploadWaitTimeoutError(1, options.timeoutSeconds));
+				entry.settleFailed(
+					new UploadWaitTimeoutError(1, options.timeoutSeconds)
+				);
 			});
 		}, options.timeoutSeconds * 1000);
 		deadline.unref();
@@ -441,7 +521,7 @@ export function runCommitSession(
 		openConnection();
 	}
 
-	const commit = (target: CommitSessionTarget): Promise<CommitResponse> => {
+	const commit = (target: CommitSessionTarget): Promise<CommitOutcome> => {
 		if (failure !== undefined) {
 			return Promise.reject(failure);
 		}
@@ -452,11 +532,19 @@ export function runCommitSession(
 			);
 		}
 
-		return new Promise<CommitResponse>((resolve, reject) => {
+		return new Promise<CommitOutcome>((resolveAck, rejectAck) => {
+			const { settled, settleServable, settleFailed } = deferredSettle();
+			// A caller that never awaits `settled` (a `--no-wait` push, or an ack
+			// that never lands) must not surface its rejection as unhandled.
+			void ignoreRejection(settled);
+
 			outstanding.set(target.uploadId, {
 				target,
-				resolve,
-				reject,
+				resolveAck,
+				rejectAck,
+				settled,
+				settleServable,
+				settleFailed,
 				acked: false
 			});
 
