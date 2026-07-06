@@ -11,6 +11,7 @@ import {
 import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import {
@@ -23,7 +24,12 @@ import {
 	verifyClaimLeaseMs
 } from '../http/http.ts';
 
-import { mapWithConcurrency, maxOutgoingConnections } from './bulk.ts';
+import {
+	chunk,
+	mapWithConcurrency,
+	maxInClauseValues,
+	maxOutgoingConnections
+} from './bulk.ts';
 import { type CommitPipelineService } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
@@ -34,6 +40,32 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
+// The identity of a committed reference edge, so a reconcile can tell a committed
+// row from a reserved-but-unverified one (which reserve-at-commit also leaves in
+// `nar_infos`) without a per-row D1 read.
+function edgeKey(
+	cache: string,
+	storePathHash: string,
+	generation: number,
+	narHash: string
+): string {
+	return `${cache}\0${storePathHash}\0${String(generation)}\0${narHash}`;
+}
+
+// The rows a reconcile would act on: a missing NAR or narinfo object. Only these
+// need the committed-edge check, so a healthy pass reads no edges at all.
+function reconcileCandidates(
+	observations: readonly (RowObservation | undefined)[]
+): NarInfoRow[] {
+	return observations
+		.filter(
+			(observation): observation is RowObservation =>
+				observation !== undefined &&
+				(!observation.narPresent || !observation.objectPresent)
+		)
+		.map((observation) => observation.row);
+}
 
 // A committed row paired with what an R2 probe found for the two objects it
 // points at: its canonical NAR and its tenant narinfo object. The probe runs
@@ -673,17 +705,63 @@ export class VerificationService {
 		return present;
 	}
 
+	// The committed reference edges among `rows`, read in one chunked D1 query, so a
+	// reconcile can skip a reserved-but-unverified row. A deferred commit reserves
+	// its narinfo row before verification, so a row can sit in `nar_infos` with no
+	// edge; the verify pass, not this reconcile, owns such a row. Read outside any
+	// gate; a row that commits after this reads conservatively as uncommitted and is
+	// simply left for the next pass.
+	private async committedEdgeKeys(
+		rows: readonly NarInfoRow[]
+	): Promise<ReadonlySet<string>> {
+		if (rows.length === 0) {
+			return new Set();
+		}
+
+		const tenant = this.context.requireTenant();
+		const hashes = [...new Set(rows.map((row) => row.storePathHash))];
+		const keys = new Set<string>();
+
+		for (const batch of chunk(hashes, maxInClauseValues)) {
+			const edges = await this.context.d1
+				.select({
+					cache: d1Schema.blobReference.cache,
+					storePathHash: d1Schema.blobReference.storePathHash,
+					generation: d1Schema.blobReference.generation,
+					narHash: d1Schema.blobReference.narHash
+				})
+				.from(d1Schema.blobReference)
+				.where(
+					and(
+						eq(d1Schema.blobReference.tenant, tenant),
+						inArray(d1Schema.blobReference.storePathHash, batch)
+					)
+				)
+				.all();
+
+			for (const edge of edges) {
+				keys.add(
+					edgeKey(edge.cache, edge.storePathHash, edge.generation, edge.narHash)
+				);
+			}
+		}
+
+		return keys;
+	}
+
 	// Applies one row's probe under the caller's critical section. The generation
 	// re-check rejects any row a commit or delete changed during the probe, so a
 	// reconcile never acts on stale state: a NAR only reappears through a commit,
 	// which bumps the generation. A missing NAR removes the dangling narinfo; a
-	// present NAR with a missing object restores the object.
+	// present NAR with a missing object restores the object. A row with no committed
+	// edge is reserved, not yet verified, so it is left untouched.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	private async reconcileObservation(
 		logger: Logger,
 		observation: RowObservation,
-		origin: string | undefined
+		origin: string | undefined,
+		committedEdges: ReadonlySet<string>
 	): Promise<ReconcileOutcome> {
 		const {
 			row,
@@ -693,6 +771,19 @@ export class VerificationService {
 		const current = this.narInfoRow(row.cache, row.storePathHash);
 
 		if (current?.generation !== row.generation) {
+			return 'unchanged';
+		}
+
+		if (
+			!committedEdges.has(
+				edgeKey(
+					current.cache,
+					current.storePathHash,
+					current.generation,
+					current.narHash
+				)
+			)
+		) {
 			return 'unchanged';
 		}
 
@@ -766,6 +857,9 @@ export class VerificationService {
 				this.probeRow(logger, row, (target) => this.headNarInfoObject(target))
 			)
 		);
+		const committedEdges = await this.committedEdgeKeys(
+			reconcileCandidates(observations)
+		);
 
 		await this.context.criticalSection(async () => {
 			for (const observation of observations) {
@@ -773,7 +867,12 @@ export class VerificationService {
 					continue;
 				}
 
-				await this.reconcileObservation(logger, observation, origin);
+				await this.reconcileObservation(
+					logger,
+					observation,
+					origin,
+					committedEdges
+				);
 			}
 		});
 	}
@@ -852,6 +951,9 @@ export class VerificationService {
 		const observations = await Promise.all(
 			rows.map((row) => this.probeRow(logger, row, resolveObjectPresent))
 		);
+		const committedEdges = await this.committedEdgeKeys(
+			reconcileCandidates(observations)
+		);
 
 		// Apply the reconciles and advance the cursor in one short critical section.
 		// What remains inside the gate is fast synchronous SQLite plus the rare write
@@ -868,7 +970,8 @@ export class VerificationService {
 				const outcome = await this.reconcileObservation(
 					logger,
 					observation,
-					origin
+					origin,
+					committedEdges
 				);
 
 				if (outcome === 'removed') {

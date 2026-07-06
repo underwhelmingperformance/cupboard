@@ -19,6 +19,7 @@ import {
 	narBytes,
 	pushPath,
 	resetTestServer,
+	seedReservedNarInfo,
 	testServerFor,
 	uploadMetadata,
 	useTestServer
@@ -378,6 +379,38 @@ describe('background verification', () => {
 		} finally {
 			list.mockRestore();
 		}
+	});
+
+	it('leaves a reserved, unverified row that shares a committed NAR untouched', async () => {
+		await useTestServer('verify-reserved');
+		const token = await initialise();
+		const first = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'a'.repeat(32),
+			name: 'first'
+		});
+		await pushPath(token, first);
+
+		// A second path reserved at commit for the same NAR: its narinfo row exists
+		// but has no reference edge and no object yet. The verify pass, not the
+		// reconcile, owns it, so it must not be restored and served before its own
+		// bytes verify.
+		const second = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'f'.repeat(32),
+			name: 'second'
+		});
+		await seedReservedNarInfo(second, 0);
+
+		const report = await runVerify(token);
+		const secondObject = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, second.storePathHash)
+		);
+
+		expect({
+			narInfoObjectsRestored: report.narInfoObjectsRestored,
+			secondServed: secondObject !== null
+		}).toStrictEqual({ narInfoObjectsRestored: 0, secondServed: false });
 	});
 
 	afterEach(() => {
