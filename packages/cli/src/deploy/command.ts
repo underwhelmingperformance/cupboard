@@ -162,9 +162,7 @@ function bucketNameOf(config: DeploymentConfig): string {
  * case re-running signs in again for) a likely-stale login.
  */
 export type ClaimRefusalReason =
-	| 'ownership-or-secret'
-	| 'server-error'
-	| 'stale-login';
+	'ownership-or-secret' | 'server-error' | 'stale-login';
 
 // http-status-codes exposes its codes as an enum; widen the two compared
 // against a response's numeric status so the comparisons stay number to number.

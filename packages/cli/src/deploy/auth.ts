@@ -27,10 +27,7 @@ export class NoCloudflareAccountsError extends CliError {
 }
 
 export type CredentialSource =
-	| 'environment'
-	| 'cached login'
-	| 'wrangler'
-	| 'browser login';
+	'environment' | 'cached login' | 'wrangler' | 'browser login';
 
 export interface CloudflareCredential {
 	readonly token: string;

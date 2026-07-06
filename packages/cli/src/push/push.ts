@@ -111,8 +111,7 @@ export interface PushClient {
 const defaultWaitTimeoutSeconds = 600;
 
 export type PushNarArchive =
-	| ReadableStream<Uint8Array>
-	| AsyncIterable<Uint8Array>;
+	ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
 
 export type CompressNar = (nar: PushNarArchive) => NarUploadStream;
 

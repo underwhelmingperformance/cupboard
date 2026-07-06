@@ -127,8 +127,7 @@ export interface MaterialiseRequest {
  * decided.
  */
 export type BatchedMaterialiseOutcome =
-	| MaterialiseOutcome
-	| { readonly kind: 'gone' };
+	MaterialiseOutcome | { readonly kind: 'gone' };
 
 interface PendingMaterialise {
 	readonly request: MaterialiseRequest;

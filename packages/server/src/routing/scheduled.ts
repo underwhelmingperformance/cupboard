@@ -167,15 +167,14 @@ export async function enqueueMaintenanceJobs(
 		offboardTenantsPerTick
 	);
 	const messages: MaintenanceQueueMessage[] = [
-		...maintenanceTenants.map(
-			({ id }): MaintenanceQueueMessage => ({
-				kind: 'tenant-maintenance',
-				tenant: id
-			})
-		),
-		...offboardTenants.map(
-			({ id }): MaintenanceQueueMessage => ({ kind: 'offboard', tenant: id })
-		),
+		...maintenanceTenants.map(({ id }): MaintenanceQueueMessage => ({
+			kind: 'tenant-maintenance',
+			tenant: id
+		})),
+		...offboardTenants.map(({ id }): MaintenanceQueueMessage => ({
+			kind: 'offboard',
+			tenant: id
+		})),
 		{ kind: 'blob-reaper' },
 		{ kind: 'cas-reaper' },
 		{ kind: 'blob-demote' },

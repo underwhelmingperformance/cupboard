@@ -817,9 +817,7 @@ export class NarVerificationFailedError extends ServerHttpError {
 	constructor(
 		public readonly r2Key: string,
 		public readonly reason:
-			| 'nar-hash-mismatch'
-			| 'nar-size-mismatch'
-			| 'undecodable'
+			'nar-hash-mismatch' | 'nar-size-mismatch' | 'undecodable'
 	) {
 		super('Uploaded NAR does not match its declared hash or size');
 		this.name = 'NarVerificationFailedError';

@@ -160,13 +160,10 @@ describe('scheduled tenant pass failure records', () => {
 		// More than one batch of messages: a tenant-maintenance message per tenant
 		// followed by a trailing global pass, the order a live tick produces.
 		const messages: MaintenanceQueueMessage[] = [
-			...Array.from(
-				{ length: 120 },
-				(_, index): MaintenanceQueueMessage => ({
-					kind: 'tenant-maintenance',
-					tenant: tenantIdSchema.parse(`tenant-${String(index)}`)
-				})
-			),
+			...Array.from({ length: 120 }, (_, index): MaintenanceQueueMessage => ({
+				kind: 'tenant-maintenance',
+				tenant: tenantIdSchema.parse(`tenant-${String(index)}`)
+			})),
 			{ kind: 'blob-reaper' }
 		];
 		const attempted: MaintenanceQueueMessage[] = [];
