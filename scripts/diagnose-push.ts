@@ -1346,6 +1346,11 @@ const defaultSleep: Sleep = (ms) =>
 const telemetryQueryAttempts = 5;
 const telemetryRetryBaseDelayMs = 500;
 
+// The smallest a page shrinks to under repeated truncation, and the run of
+// clean pages that eases it back up; see {@link AdaptivePageLimit}.
+export const minPageLimit = 25;
+const relaxAfterCleanPages = 4;
+
 // The telemetry endpoint intermittently answers a bare 401 for a valid token,
 // and 429/5xx are ordinary transient refusals; all are worth a few retries
 // before the run fails.
@@ -1363,15 +1368,84 @@ function telemetryErrorStatus(error: unknown): number | undefined {
 	return typeof status === 'number' ? status : undefined;
 }
 
+// The telemetry endpoint caps a response body at about a megabyte and truncates
+// past it, so a page of large rows (a burst of fault logs, each carrying a
+// serialised error) arrives as an unterminated JSON body the SDK cannot parse.
+// The failure is a plain parse error, not an API status, so it is told apart by
+// its message.
+function isTruncatedBodyError(error: unknown): boolean {
+	return (
+		error instanceof Error &&
+		/invalid json response body|unterminated string|unexpected end of (json|input)/i.test(
+			error.message
+		)
+	);
+}
+
+// The row count of a page, adapted to the response-body cap the telemetry
+// endpoint truncates at. A truncated body means the rows overflowed the cap,
+// not that the timeframe was wrong, so the same page refetched with fewer rows
+// fits: the limit halves on each truncation, down to a floor. It eases back up
+// after a run of clean pages so the sparse remainder of a window is not walked
+// one tiny page at a time once a dense burst is behind it.
+class AdaptivePageLimit {
+	private limit = pageLimit;
+	private cleanPages = 0;
+
+	value(): number {
+		return this.limit;
+	}
+
+	// Halve the page after a truncated body. Returns false once the floor is
+	// reached, where a smaller page cannot help and the parse failure is real.
+	shrink(): boolean {
+		if (this.limit <= minPageLimit) {
+			return false;
+		}
+
+		this.limit = Math.max(minPageLimit, Math.floor(this.limit / 2));
+		this.cleanPages = 0;
+
+		return true;
+	}
+
+	// A page parsed cleanly. After a short run of them, ease the limit back up.
+	relax(): void {
+		if (this.limit >= pageLimit) {
+			return;
+		}
+
+		this.cleanPages += 1;
+
+		if (this.cleanPages >= relaxAfterCleanPages) {
+			this.limit = Math.min(pageLimit, this.limit * 2);
+			this.cleanPages = 0;
+		}
+	}
+}
+
 async function queryPageWithRetry(
 	query: TelemetryQuery,
-	parameters: Parameters<TelemetryQuery>[0],
+	parameters: Omit<Parameters<TelemetryQuery>[0], 'limit'>,
+	pageSize: AdaptivePageLimit,
 	sleep: Sleep
 ): Promise<TelemetryPageResponse> {
-	for (let attempt = 1; ; attempt += 1) {
+	let attempt = 0;
+
+	for (;;) {
 		try {
-			return await query(parameters);
+			const response = await query({ ...parameters, limit: pageSize.value() });
+			pageSize.relax();
+
+			return response;
 		} catch (error) {
+			// A truncation retry refetches the same page smaller; it is not a
+			// transient refusal, so it does not spend the retry budget.
+			if (isTruncatedBodyError(error) && pageSize.shrink()) {
+				continue;
+			}
+
+			attempt += 1;
 			const status = telemetryErrorStatus(error);
 
 			if (
@@ -1464,6 +1538,7 @@ async function fetchByCursor(
 	const rows: unknown[] = [];
 	const seen = new Set<string>();
 	const timestamps: number[] = [];
+	const pageSize = new AdaptivePageLimit();
 	let upper = window.to;
 	let offset: string | undefined;
 
@@ -1472,13 +1547,13 @@ async function fetchByCursor(
 			query,
 			{
 				view,
-				limit: pageLimit,
 				timeframe: { from: window.from, to: upper },
 				...(offset !== undefined && {
 					offset,
 					offsetDirection: 'next' as const
 				})
 			},
+			pageSize,
 			sleep
 		);
 
@@ -1580,6 +1655,7 @@ export async function fetchPaged(
 
 	const rows: unknown[] = [];
 	const timestamps: number[] = [];
+	const pageSize = new AdaptivePageLimit();
 	let upper = window.to;
 	let boundary = new Set<string>();
 
@@ -1588,9 +1664,9 @@ export async function fetchPaged(
 			query,
 			{
 				view,
-				limit: pageLimit,
 				timeframe: { from: window.from, to: upper }
 			},
+			pageSize,
 			sleep
 		);
 

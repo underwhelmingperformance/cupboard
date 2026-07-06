@@ -15,6 +15,7 @@ import {
 	fetchPaged,
 	hasSessionBoundary,
 	mergeBusy,
+	minPageLimit,
 	normalisePath,
 	type OperationGroup,
 	operationRows,
@@ -479,6 +480,74 @@ describe('fetchPaged', () => {
 			)
 		).rejects.toBeInstanceOf(Cloudflare.APIError);
 		expect(attempts).toBe(1);
+	});
+
+	it('steps a truncated page down repeatedly until the body fits', async () => {
+		// A page of large rows overflows the response-body cap and comes back
+		// truncated, so the SDK throws a parse error rather than an API status.
+		// One halving is not always enough: the walk keeps stepping the page down
+		// until the body fits, refetching the same timeframe each time, and loses
+		// no rows. The last limit repeats: it is sticky for the next page.
+		const limits: number[] = [];
+		const query: TelemetryQuery = (parameters) => {
+			limits.push(parameters.limit);
+
+			if (parameters.limit > 250) {
+				return Promise.reject(
+					new Error(
+						'invalid json response body reason: Unterminated string in JSON'
+					)
+				);
+			}
+
+			const page = parameters.timeframe.to === 1000 ? tracePage(1000, 10) : [];
+
+			return Promise.resolve({ traces: page });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'traces',
+			{ from: 0, to: 1000 },
+			timestampOf,
+			undefined,
+			noProgress,
+			noSleep
+		);
+
+		expect({ rowCount: rows.length, limits }).toStrictEqual({
+			rowCount: 10,
+			limits: [1000, 500, 250, 250]
+		});
+	});
+
+	it('surfaces a truncation that persists at the smallest page', async () => {
+		// A body that stays truncated even at the floor is a real parse failure,
+		// not an oversized page, so the walk steps all the way down and then
+		// surfaces it rather than shrinking forever.
+		const limits: number[] = [];
+		const query: TelemetryQuery = (parameters) => {
+			limits.push(parameters.limit);
+
+			return Promise.reject(
+				new Error(
+					'invalid json response body reason: Unterminated string in JSON'
+				)
+			);
+		};
+
+		await expect(
+			fetchPaged(
+				query,
+				'traces',
+				{ from: 0, to: 1000 },
+				timestampOf,
+				undefined,
+				noProgress,
+				noSleep
+			)
+		).rejects.toThrow('Unterminated string');
+		expect(limits).toStrictEqual([1000, 500, 250, 125, 62, 31, minPageLimit]);
 	});
 
 	it('pages a same-millisecond burst by its smallest id', async () => {
