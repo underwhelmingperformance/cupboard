@@ -1151,6 +1151,13 @@ export class CommitPipelineService {
 			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
 		}
 
+		// Reserve the narinfo row at commit so it exists before verification: a
+		// retention root set right after commit can reference it, and the
+		// reachability sweep keeps it through the verify window. The verify pass
+		// re-runs this idempotently (`mine`, same generation, no counter advance);
+		// a `lost` outcome writes no row, and the verify pass answers the waiter.
+		await this.reserveNarInfoRow(cache, metadata);
+
 		await this.requestVerification(logger, tenant);
 
 		return {
@@ -1326,6 +1333,8 @@ export class CommitPipelineService {
 	// yet materialised, so neither a newer recommit nor a concurrent commit that has
 	// already made the path servable is ever removed. Runs in a critical section so
 	// the object check and the delete cannot interleave with a materialisation.
+	// Returns whether it reclaimed: `false` means the row was already committed
+	// (its reference edge exists), so the caller must not treat it as a failure.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	async reclaimReservedRow(
@@ -1333,7 +1342,7 @@ export class CommitPipelineService {
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString
-	): Promise<void> {
+	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
 		const materialised = await this.context.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
@@ -1350,7 +1359,7 @@ export class CommitPipelineService {
 			.get();
 
 		if (materialised !== undefined) {
-			return;
+			return false;
 		}
 
 		await this.context.env.BLOBS.delete(
@@ -1368,6 +1377,8 @@ export class CommitPipelineService {
 				)
 			)
 			.run();
+
+		return true;
 	}
 
 	async verifyPendingNar(

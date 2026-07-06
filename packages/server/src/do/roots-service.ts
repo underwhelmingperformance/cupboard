@@ -218,31 +218,25 @@ export class RootsService {
 			ttlSeconds: body.ttlSeconds
 		};
 
-		// Activation gates on the serve predicate so a root never advertises a path
-		// that is not yet substitutable. The probe (repairing a merely-lost object)
-		// runs outside the gate, where its R2 heads and the rare heal do not stall
-		// the object; an unavailable target rejects without writing. The write then
-		// takes a short gate that re-confirms, with a synchronous row read, that no
-		// target was deleted since the probe: a delete is row-first and runs under
-		// the gate, so a row still present here cannot be mid-delete, and the write
-		// cannot interleave with one. Rejections are thrown after the section so a
-		// validation error does not reset the Durable Object.
+		// A root may reference any target whose narinfo row exists: reserved at
+		// commit, committed, or servable. A push records retention over a path that
+		// is still verifying, and the path becomes servable when the verify pass
+		// materialises it (`present` reflects that, staying false until then).
+		// `servableTargets` heals a merely-lost object and drives the per-target
+		// `present` flag; its R2 heads run outside the gate. The write takes a short
+		// gate that rejects only a target with no narinfo row (never uploaded, or
+		// deleted): a synchronous row read that, since a delete is row-first and runs
+		// under the gate, cannot interleave with one. Rejections are thrown after the
+		// section so a validation error does not reset the Durable Object.
 		const servable = await this.servableTargets(cache, requested.targets);
-		const unavailable = requested.targets
-			.filter((target) => !servable.has(target.storePathHash))
-			.map((target) => target.storePath);
-
-		if (unavailable.length > 0) {
-			throw new RootTargetsUnavailableError(rootName, unavailable);
-		}
 
 		const write = await this.context.criticalSection((): Promise<RootWrite> => {
-			const deleted = requested.targets
+			const absent = requested.targets
 				.filter((target) => !this.rowPresent(cache, target.storePathHash))
 				.map((target) => target.storePath);
 
-			if (deleted.length > 0) {
-				return Promise.resolve({ kind: 'rejected', unavailable: deleted });
+			if (absent.length > 0) {
+				return Promise.resolve({ kind: 'rejected', unavailable: absent });
 			}
 
 			return Promise.resolve({
@@ -331,5 +325,21 @@ export class RootsService {
 
 			return { name, removed: existing !== undefined };
 		});
+	}
+
+	// Drops a store path from every retention root's target set. A deferred upload
+	// that fails verification can never become servable, so a root must stop
+	// advertising it; the next push over that root rewrites its targets wholesale.
+	// One delete on the single writer, so it needs no gate.
+	pruneRetentionTargets(cache: string, storePathHash: StorePathHash): void {
+		this.context.db
+			.delete(schema.retentionRootTargets)
+			.where(
+				and(
+					eq(schema.retentionRootTargets.cache, cache),
+					eq(schema.retentionRootTargets.storePathHash, storePathHash)
+				)
+			)
+			.run();
 	}
 }

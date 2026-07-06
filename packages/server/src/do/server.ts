@@ -205,7 +205,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			this.commitPipeline,
 			this.deletionQueue,
 			this.narInfoObjects,
-			this.uploadState
+			this.uploadState,
+			// `this.roots` is assigned just below; the closure reads it at verdict
+			// time, long after construction.
+			(cache, storePathHash) => {
+				this.roots.pruneRetentionTargets(cache, storePathHash);
+			}
 		);
 		this.roots = new RootsService(
 			this.context,
