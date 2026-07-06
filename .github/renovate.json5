@@ -5,15 +5,26 @@
 	// applied as self-hosted defaults to every repository, and this file is
 	// merged on top of it. Only cupboard-specific additions belong here.
 
+	// Renovate branches must land the same tree `pnpm check` demands, or the
+	// bump opens a pull request that fails its own CI.
+	//
+	// A linter or formatter bump reformats the workspace: Prettier releases
+	// change how existing code prints, so a version bump alone leaves the tree
+	// failing `prettier --check`. Reprint it in place with `pnpm fix:format`.
+	//
 	// The flake builds from a pnpm store pinned by the fixed-output hash in
 	// pnpm-deps-hash.json, so a bare pnpm-lock.yaml bump leaves the hash stale
-	// and every flake build failing. Refresh the recorded pair on the same
-	// branch. `pnpm update:flake-deps` builds the flake, so it needs Nix: the
-	// Renovate workflow in underwhelmingperformance/.github installs a real Nix
-	// into the container and permits the command through `allowedCommands`.
+	// and every flake build failing. Refresh the recorded pair with
+	// `pnpm update:flake-deps`; it builds the flake, so it needs Nix, which the
+	// Renovate workflow in underwhelmingperformance/.github installs into the
+	// container. Both commands are permitted through `allowedCommands` there.
+	//
+	// Formatting ignores pnpm-lock.yaml, so the two tasks are independent; the
+	// hash refresh runs last so the recorded hash always matches the committed
+	// lockfile.
 	postUpgradeTasks: {
-		commands: ['pnpm update:flake-deps'],
-		fileFilters: ['pnpm-deps-hash.json'],
+		commands: ['pnpm fix:format', 'pnpm update:flake-deps'],
+		fileFilters: ['**'],
 		executionMode: 'branch'
 	}
 }
