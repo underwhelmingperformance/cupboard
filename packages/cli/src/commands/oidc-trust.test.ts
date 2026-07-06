@@ -275,7 +275,11 @@ describe('githubPrAddBody', () => {
 		).toStrictEqual({
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: tenantUrl,
-			claims: { repository_id: '1234', repository_owner_id: '5678' },
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				event_name: 'pull_request'
+			},
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
@@ -287,6 +291,12 @@ describe('githubPrAddBody', () => {
 		});
 	});
 
+	it('pins the pull-request event so the rule matches only PR tokens', () => {
+		const body = githubPrAddBody(tenantUrl, identity, { repo: 'acme/infra' });
+
+		expect(body.claims.event_name).toBe('pull_request');
+	});
+
 	it('omits attestation operations when --no-attest is given', () => {
 		expect(
 			githubPrAddBody(tenantUrl, identity, {
@@ -296,7 +306,11 @@ describe('githubPrAddBody', () => {
 		).toStrictEqual({
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: tenantUrl,
-			claims: { repository_id: '1234', repository_owner_id: '5678' },
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				event_name: 'pull_request'
+			},
 			permittedGrants: [
 				{
 					type: 'cupboard_cache',
