@@ -74,6 +74,20 @@ describe('collectSubstitutions', () => {
 		});
 	});
 
+	it('injects the github-tag template source', () => {
+		expect(
+			collectSubstitutions({ templateSource: 'github-tag', captures: [] })
+		).toStrictEqual({
+			tag: {
+				claim: 'ref',
+				capture: {
+					pattern: '^refs/tags/(?<tag>[a-z0-9][a-z0-9._-]*)$',
+					group: 'tag'
+				}
+			}
+		});
+	});
+
 	it('rejects an unknown template source', () => {
 		expect(() =>
 			collectSubstitutions({ templateSource: 'gitlab-mr', captures: [] })

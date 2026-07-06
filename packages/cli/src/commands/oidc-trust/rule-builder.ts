@@ -40,11 +40,19 @@ export type AllowShorthand = keyof typeof allowExpansions;
 
 // A named capture source baked into the CLI for a provider, so a common rule
 // needs no hand-written pattern. `github-pr` reads a GitHub Actions `ref` of the
-// form `refs/pull/<n>/merge` and binds the pull-request number to `{pr}`.
+// form `refs/pull/<n>/merge` and binds the pull-request number to `{pr}`;
+// `github-tag` reads `refs/tags/<name>` and binds the tag to `{tag}`.
 const templateSources = {
 	'github-pr': {
 		claim: 'ref',
 		pattern: '^refs/pull/(?<pr>[0-9]+)/merge$'
+	},
+	// The capture admits only cache-name characters, so a rendered `{tag}` cache
+	// or root is always a legal name; a tag outside that set does not match and
+	// is not trusted.
+	'github-tag': {
+		claim: 'ref',
+		pattern: '^refs/tags/(?<tag>[a-z0-9][a-z0-9._-]*)$'
 	}
 } as const;
 
