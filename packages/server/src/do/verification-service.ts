@@ -15,6 +15,8 @@ import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import {
 	narInfoObjectKey,
+	narInfoObjectKeyOf,
+	narInfoObjectPrefix,
 	narObjectKey,
 	narObjectKeyPrefix,
 	narObjectKeySuffix,
@@ -553,27 +555,122 @@ export class VerificationService {
 	// round-trips never block a concurrent commit or delete. A transient R2 fault
 	// drops the row from this pass, letting the batch continue. The narinfo object
 	// is only probed when its NAR is present: a missing NAR removes the row
-	// regardless of the narinfo object.
+	// regardless of the narinfo object. The narinfo-object presence is resolved by
+	// the caller: a targeted probe heads it directly; a scanning batch reads it from
+	// one bulk list (see {@link presentNarInfoObjects}).
 	private async probeRow(
 		logger: Logger,
-		row: NarInfoRow
+		row: NarInfoRow,
+		isObjectPresent: (row: NarInfoRow) => Promise<boolean>
 	): Promise<RowObservation | undefined> {
 		try {
-			const tenant = this.context.requireTenant();
 			const isNarPresent =
 				(await this.context.env.BLOBS.head(narObjectKey(row.narHash))) !== null;
-			const isObjectPresent =
-				isNarPresent &&
-				(await this.context.env.BLOBS.head(
-					narInfoObjectKey(tenant, row.storePathHash, row.cache)
-				)) !== null;
 
-			return { row, narPresent: isNarPresent, objectPresent: isObjectPresent };
+			return {
+				row,
+				narPresent: isNarPresent,
+				objectPresent: isNarPresent && (await isObjectPresent(row))
+			};
 		} catch (error) {
 			this.warnSkippedRow(logger, row, error);
 
 			return undefined;
 		}
+	}
+
+	// Heads a single narinfo object, the per-row presence check a targeted reconcile
+	// uses where the paths are arbitrary and too few to list.
+	private async headNarInfoObject(row: NarInfoRow): Promise<boolean> {
+		const key = narInfoObjectKey(
+			this.context.requireTenant(),
+			row.storePathHash,
+			row.cache
+		);
+
+		return (await this.context.env.BLOBS.head(key)) !== null;
+	}
+
+	// The narinfo objects present for a scanning reconcile batch, listed from the
+	// cursor position instead of a head per row. The scan walks
+	// `(cache, storePathHash)` in order, so within a cache the objects are a
+	// contiguous key range. The listing is bounded by the batch's last key, not a
+	// row count: an orphan object in the range (a delete whose object outlived its
+	// row) must not consume a slot and push a live row's object out of the window,
+	// which would read it absent and force a redundant restore. A row whose object
+	// the range genuinely omits reads absent, at worst prompting an idempotent
+	// restore.
+	private async presentNarInfoObjects(
+		logger: Logger,
+		rows: readonly NarInfoRow[],
+		candidateStartAfter: string | undefined
+	): Promise<ReadonlySet<string> | undefined> {
+		if (rows.length === 0) {
+			return new Set();
+		}
+
+		const tenant = this.context.requireTenant();
+		const prefix = narInfoObjectPrefix(tenant);
+
+		let minKey: string | undefined;
+		let lastKey = '';
+		for (const row of rows) {
+			const key = narInfoObjectKey(tenant, row.storePathHash, row.cache);
+
+			if (key > lastKey) {
+				lastKey = key;
+			}
+
+			if (minKey === undefined || key < minKey) {
+				minKey = key;
+			}
+		}
+
+		// The scan cursor walks `(cache, storePathHash)`, which diverges from R2 key
+		// order because a named cache nests its segment inside the shared narinfo
+		// prefix. Resume after the cursor only when every batch key sorts after it;
+		// otherwise a batch key before the cursor would be skipped, so list from the
+		// start (still bounded by the last key).
+		const startAfter =
+			candidateStartAfter !== undefined &&
+			minKey !== undefined &&
+			candidateStartAfter < minKey
+				? candidateStartAfter
+				: undefined;
+
+		const present = new Set<string>();
+		let cursor: string | undefined;
+		let isDone = false;
+
+		try {
+			while (!isDone) {
+				const listed = await this.context.env.BLOBS.list(
+					cursor === undefined ? { prefix, startAfter } : { prefix, cursor }
+				);
+				const inRange = listed.objects.filter(
+					(object) => object.key <= lastKey
+				);
+
+				for (const object of inRange) {
+					present.add(object.key);
+				}
+
+				// A filtered object (past the batch's last key) or an untruncated page
+				// ends the scan.
+				isDone = inRange.length < listed.objects.length || !listed.truncated;
+				cursor = listed.truncated ? listed.cursor : undefined;
+			}
+		} catch (error) {
+			// A transient list fault must not abort the whole reconcile; fall back to
+			// a per-row head, which keeps each row's own fault isolation.
+			logger.warn('narinfo object listing failed; falling back to heads', {
+				error
+			});
+
+			return undefined;
+		}
+
+		return present;
 	}
 
 	// Applies one row's probe under the caller's critical section. The generation
@@ -665,7 +762,9 @@ export class VerificationService {
 		}
 
 		const observations = await Promise.all(
-			rows.map((row) => this.probeRow(logger, row))
+			rows.map((row) =>
+				this.probeRow(logger, row, (target) => this.headNarInfoObject(target))
+			)
 		);
 
 		await this.context.criticalSection(async () => {
@@ -726,9 +825,32 @@ export class VerificationService {
 
 		// Probe R2 for every row outside any critical section, so the batch's
 		// round-trips never block a concurrent commit or delete. A transient R2
-		// fault on one row drops it from this pass, letting the batch continue.
+		// fault on one row drops it from this pass, letting the batch continue. The
+		// narinfo objects come from one bounded list at the cursor, not a head per
+		// row; a list fault falls back to per-row heads. The per-row NAR head stays,
+		// since a `blob_state` proxy would hide the object-versus-fact drift this
+		// reconcile exists to heal.
+		const tenant = this.context.requireTenant();
+		const startAfter =
+			fromCache === '' && fromHash === ''
+				? undefined
+				: narInfoObjectKeyOf(tenant, fromCache, fromHash);
+		const presentObjects = await this.presentNarInfoObjects(
+			logger,
+			rows,
+			startAfter
+		);
+		const resolveObjectPresent =
+			presentObjects === undefined
+				? (target: NarInfoRow) => this.headNarInfoObject(target)
+				: (target: NarInfoRow) =>
+						Promise.resolve(
+							presentObjects.has(
+								narInfoObjectKey(tenant, target.storePathHash, target.cache)
+							)
+						);
 		const observations = await Promise.all(
-			rows.map((row) => this.probeRow(logger, row))
+			rows.map((row) => this.probeRow(logger, row, resolveObjectPresent))
 		);
 
 		// Apply the reconciles and advance the cursor in one short critical section.

@@ -155,23 +155,39 @@ export function narInfoCachePath(
 	return `/t/${tenant}${suffix}`;
 }
 
-// The sole narinfo-key constructor: never inline the prefix elsewhere. A narinfo's
+// The sole narinfo-key constructors: never inline the prefix elsewhere. A narinfo's
 // materialised R2 object is tenant-namespaced, so distrusting tenants never share a
 // narinfo object even for the same store-path hash; the NAR bytes it points at stay
 // in the shared, content-addressed `nar/<narHash>` namespace. A named cache nests a
 // further segment. Store path hashes never contain a slash, so the shapes cannot
 // collide.
+
+// The R2 prefix under which all of a tenant's narinfo objects live, across every
+// cache. A reconcile lists this to find the present objects for a batch.
+export function narInfoObjectPrefix(tenant: string): string {
+	return `t/${tenant}/narinfo/`;
+}
+
+// The narinfo object key from plain string components, so a listing cursor
+// (stored as text) can build the same key a `StorePathHash` would without a
+// cast. {@link narInfoObjectKey} is the typed entry point over this.
+export function narInfoObjectKeyOf(
+	tenant: string,
+	cache: string,
+	storePathHash: string
+): string {
+	const suffix =
+		cache === DEFAULT_CACHE ? storePathHash : `${cache}/${storePathHash}`;
+
+	return `${narInfoObjectPrefix(tenant)}${suffix}`;
+}
+
 export function narInfoObjectKey(
 	tenant: string,
 	storePathHash: StorePathHash,
 	cache: string = DEFAULT_CACHE
 ): string {
-	const suffix =
-		cache === DEFAULT_CACHE
-			? `narinfo/${storePathHash}`
-			: `narinfo/${cache}/${storePathHash}`;
-
-	return `t/${tenant}/${suffix}`;
+	return narInfoObjectKeyOf(tenant, cache, storePathHash);
 }
 
 export function parseNarName(name: string): NixSha256HashString | undefined {
