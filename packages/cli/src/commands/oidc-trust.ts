@@ -41,6 +41,16 @@ interface GithubPrOptions {
 	readonly attest?: boolean;
 }
 
+interface GithubTagOptions {
+	readonly repo: string;
+	readonly audience?: string;
+	readonly cacheTemplate?: string;
+	readonly rootTemplate?: string;
+	readonly jobWorkflowRef?: string;
+	// Commander's `--no-attest` leaves this `true` unless the flag is passed.
+	readonly attest?: boolean;
+}
+
 interface GithubBranchOptions {
 	readonly repo: string;
 	readonly branch: string;
@@ -344,6 +354,57 @@ export function githubPrAddBody(
 	});
 }
 
+// Assemble the per-tag rule for a GitHub repository, pinning its immutable
+// numeric ids and the `tag` ref type so only a tag build matches, whether the
+// tag was pushed or a release published it. A build of tag <name> pushes to its
+// own `<name>` cache and writes the matching retention root
+// `github:<owner>/<repo>/<name>/`, both keyed on the tag captured from the
+// `ref` claim.
+export function githubTagAddBody(
+	url: string,
+	identity: RepositoryIdentity,
+	options: GithubTagOptions
+): OidcTrustAddBody {
+	const cacheTemplate = options.cacheTemplate ?? '{tag}';
+
+	// Pin the tag ref type so this rule matches only tag tokens and never a
+	// branch or pull-request token, which would otherwise let it be selected
+	// ahead of the rule meant for those events.
+	const claims: Record<string, ClaimMatch> = {
+		repository_id: String(identity.repositoryId),
+		repository_owner_id: String(identity.repositoryOwnerId),
+		ref_type: 'tag'
+	};
+
+	// Pinning the workflow is an optional extra restriction on top of the ref
+	// type and the `{tag}` capture on the bindings below.
+	if (options.jobWorkflowRef !== undefined) {
+		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
+	}
+
+	return buildAddBody({
+		issuer: githubActionsIssuer,
+		audience: options.audience ?? url,
+		claims,
+		permittedGrants: [
+			buildCacheGrant({
+				cacheTemplate,
+				// The tag's root nests its cache name under the repository, so the
+				// captured `{tag}` resolves in both bindings.
+				rootTemplate:
+					options.rootTemplate ??
+					`github:${identity.fullName}/${cacheTemplate}/`,
+				allow: withAttest(['push', 'root'], options.attest),
+				substitutions: collectSubstitutions({
+					templateSource: 'github-tag',
+					captures: []
+				})
+			})
+		],
+		display: { provider: 'github', repository: identity.fullName }
+	});
+}
+
 // Assemble the branch rule for a GitHub repository: pushes to `branch` publish
 // to the tenant's default cache, scoped to the retention root the push action
 // writes by default, `github:<owner>/<repo>/<branch>/`. The trigger branch is
@@ -475,7 +536,7 @@ function buildOidcTrustCommands(
 		)
 		.option(
 			'--template-source <name>',
-			'a built-in capture source, e.g. github-pr (binds {pr} from the ref claim)'
+			'a built-in capture source: github-pr (binds {pr}) or github-tag (binds {tag}) from the ref claim'
 		)
 		.option(
 			'--from-file <path>',
@@ -553,6 +614,57 @@ function buildOidcTrustCommands(
 
 				await runOidcTrustAdd(
 					githubPrAddBody(url, identity, options),
+					reporter,
+					plane.clientFor(url, programOptions)
+				);
+			});
+
+		oidcTrust
+			.command('add-github-tag')
+			.description(
+				"Trust a GitHub repository's tag builds to push to a cache named for the tag, one per release."
+			)
+			.argument('<url>', plane.urlArgument)
+			.requiredOption('--repo <owner/name>', 'the GitHub repository')
+			.option(
+				'--audience <audience>',
+				'expected token audience (default: the tenant URL)'
+			)
+			.option(
+				'--cache-template <template>',
+				'the per-tag cache template (default: {tag})'
+			)
+			.option(
+				'--root-template <template>',
+				'the per-tag retention root (default: github:<owner>/<repo>/{tag}/)'
+			)
+			.option(
+				'--job-workflow-ref <value>',
+				'also require the job_workflow_ref claim (owner/repo/path@ref); without @ref it matches the file at any ref'
+			)
+			.option(
+				'--no-attest',
+				'do not let the workflow attach build attestations'
+			)
+			.addHelpText(
+				'after',
+				[
+					'',
+					'Example:',
+					"  # Trust this repository's tag builds to push to a cache named",
+					'  # for the tag, e.g. v1.2.3',
+					'  cupboard oidc-trust add-github-tag https://cupboard.example.workers.dev/t/acme \\',
+					'    --repo acme/infra'
+				].join('\n')
+			)
+			.action(async (url: string, options: GithubTagOptions) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const identity = await reporter.phase('Resolving repository', () =>
+					lookupRepository(options.repo)
+				);
+
+				await runOidcTrustAdd(
+					githubTagAddBody(url, identity, options),
 					reporter,
 					plane.clientFor(url, programOptions)
 				);

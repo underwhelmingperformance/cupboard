@@ -16,6 +16,7 @@ import {
 	claimsForAdd,
 	githubBranchAddBody,
 	githubPrAddBody,
+	githubTagAddBody,
 	type OidcTrustClient,
 	runOidcTrustAdd,
 	runOidcTrustList,
@@ -46,6 +47,25 @@ const prCacheBinding = {
 const prRootBinding = {
 	equalsTemplate: 'github:acme/infra/pr-{pr}/',
 	substitutions: prSubstitutions,
+	validate: 'rootName'
+};
+const tagSubstitutions = {
+	tag: {
+		claim: 'ref',
+		capture: {
+			pattern: '^refs/tags/(?<tag>[a-z0-9][a-z0-9._-]*)$',
+			group: 'tag'
+		}
+	}
+};
+const tagCacheBinding = {
+	equalsTemplate: '{tag}',
+	substitutions: tagSubstitutions,
+	validate: 'cacheName'
+};
+const tagRootBinding = {
+	equalsTemplate: 'github:acme/infra/{tag}/',
+	substitutions: tagSubstitutions,
 	validate: 'rootName'
 };
 
@@ -316,6 +336,61 @@ describe('githubPrAddBody', () => {
 					type: 'cupboard_cache',
 					actions: [...uploadActions, 'root:set'],
 					resources: { cache: prCacheBinding, root: prRootBinding }
+				}
+			],
+			display: { provider: 'github', repository: 'acme/infra' }
+		});
+	});
+});
+
+describe('githubTagAddBody', () => {
+	it('grants push, root and attestation by default, scoped to the per-tag cache and root', () => {
+		expect(
+			githubTagAddBody(tenantUrl, identity, { repo: 'acme/infra' })
+		).toStrictEqual({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenantUrl,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				ref_type: 'tag'
+			},
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: [...uploadActions, ...attestActions, 'root:set'],
+					resources: { cache: tagCacheBinding, root: tagRootBinding }
+				}
+			],
+			display: { provider: 'github', repository: 'acme/infra' }
+		});
+	});
+
+	it('pins the tag ref type so the rule matches only tag tokens', () => {
+		const body = githubTagAddBody(tenantUrl, identity, { repo: 'acme/infra' });
+
+		expect(body.claims.ref_type).toBe('tag');
+	});
+
+	it('omits attestation operations when --no-attest is given', () => {
+		expect(
+			githubTagAddBody(tenantUrl, identity, {
+				repo: 'acme/infra',
+				attest: false
+			})
+		).toStrictEqual({
+			issuer: 'https://token.actions.githubusercontent.com',
+			audience: tenantUrl,
+			claims: {
+				repository_id: '1234',
+				repository_owner_id: '5678',
+				ref_type: 'tag'
+			},
+			permittedGrants: [
+				{
+					type: 'cupboard_cache',
+					actions: [...uploadActions, 'root:set'],
+					resources: { cache: tagCacheBinding, root: tagRootBinding }
 				}
 			],
 			display: { provider: 'github', repository: 'acme/infra' }
