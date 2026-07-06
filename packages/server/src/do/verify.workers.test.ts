@@ -351,6 +351,45 @@ describe('background verification', () => {
 		}).toStrictEqual({ first: 0, second: 0 });
 	});
 
+	it('heads a divergent batch instead of rescanning the whole prefix', async () => {
+		await useTestServer('verify-divergent');
+		const token = await initialise();
+
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: 'z'.repeat(32),
+				name: 'z'
+			})
+		);
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: 'b'.repeat(32),
+				name: 'b'
+			}),
+			'aa'
+		);
+
+		// Advance the cursor onto the default 'z' row.
+		await runVerify(token, 1);
+
+		// The next batch is the named cache, whose object sorts before the 'z'
+		// cursor. Resuming from the cursor would skip it and listing from the start
+		// would rescan the prefix, so the batch heads each row: it must not list.
+		const list = vi.spyOn(env.BLOBS, 'list');
+
+		try {
+			await runVerify(token, 1);
+
+			expect(list).not.toHaveBeenCalled();
+		} finally {
+			list.mockRestore();
+		}
+	});
+
 	it('falls back to per-row heads when the narinfo object listing fails', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });

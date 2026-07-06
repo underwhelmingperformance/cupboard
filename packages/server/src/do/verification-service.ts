@@ -670,15 +670,20 @@ export class VerificationService {
 
 		// The scan cursor walks `(cache, storePathHash)`, which diverges from R2 key
 		// order because a named cache nests its segment inside the shared narinfo
-		// prefix. Resume after the cursor only when every batch key sorts after it;
-		// otherwise a batch key before the cursor would be skipped, so list from the
-		// start (still bounded by the last key).
-		const startAfter =
+		// prefix. Resuming after the cursor is only safe when every batch key sorts
+		// after it. When a batch key sorts at or before the cursor (a named cache the
+		// cursor has already passed in scan order), resuming would skip it and listing
+		// from the start could rescan the whole prefix, so fall back to a head per row
+		// for this batch instead.
+		if (
 			candidateStartAfter !== undefined &&
 			minKey !== undefined &&
-			candidateStartAfter < minKey
-				? candidateStartAfter
-				: undefined;
+			candidateStartAfter >= minKey
+		) {
+			return undefined;
+		}
+
+		const startAfter = candidateStartAfter;
 
 		const present = new Set<string>();
 		let cursor: string | undefined;
