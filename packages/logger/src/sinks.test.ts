@@ -67,6 +67,28 @@ describe('cloudflareSink', () => {
 		);
 	});
 
+	it('surfaces a wrapped error’s cause chain', () => {
+		const error = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		const root = new Error('D1_ERROR: no such column: reconciled_at');
+		const wrapped = new Error('Failed query: delete from x', { cause: root });
+
+		cloudflareSink()(
+			record({
+				level: 'error',
+				message: ['failed'],
+				properties: { error: wrapped }
+			})
+		);
+
+		expect(error).toHaveBeenCalledWith(
+			expect.objectContaining({
+				errorMessage: 'Failed query: delete from x',
+				errorCause: 'Error: D1_ERROR: no such column: reconciled_at',
+				errorCauseStack: root.stack
+			})
+		);
+	});
+
 	it('stringifies a non-Error error value', () => {
 		const error = vi.spyOn(console, 'error').mockImplementation(vi.fn());
 
