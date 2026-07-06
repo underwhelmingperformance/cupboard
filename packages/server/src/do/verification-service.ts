@@ -1174,12 +1174,11 @@ export class VerificationService {
 			// A reuse commit that crashed after reserving its narinfo row leaves that
 			// row behind; with the canonical object gone it can never materialise, and
 			// a root may already reference it (as not-present). Reclaim it before
-			// dropping the marker; the edge check spares a row a concurrent pass has
-			// since committed.
+			// dropping the marker.
 			const reserved = this.narInfoRow(pending.cache, metadata.storePathHash);
 
 			if (reserved?.narHash === metadata.narHash) {
-				await this.context.criticalSection(() =>
+				const wasReclaimed = await this.context.criticalSection(() =>
 					this.commitPipeline.reclaimReservedRow(
 						pending.cache,
 						metadata.storePathHash,
@@ -1187,6 +1186,15 @@ export class VerificationService {
 						metadata.narHash
 					)
 				);
+
+				// A concurrent pass has already committed this generation (its edge
+				// exists), so the missing verdict is stale and the path serves. Clear
+				// the stuck row and answer servable, without pruning its root.
+				if (!wasReclaimed) {
+					this.uploadState.clearPendingUpload(pending.id);
+					this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+					return;
+				}
 			}
 
 			await this.uploadState.clearPendingUploadAndStaging(
