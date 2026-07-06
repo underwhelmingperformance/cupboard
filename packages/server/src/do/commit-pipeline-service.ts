@@ -152,17 +152,18 @@ class MaterialiseFlushOutcomeMissingError extends Error {
 }
 
 /**
- * The shared facts a materialisation decides on, probed outside the critical
- * section so their round-trips never hold the gate: the tenant's publish
- * status and quota basis, the canonical blob's compressed metadata and object
- * presence, and whether the tenant already holds the hash (no fresh charge).
- * The gate re-checks only what the single writer owns (the generation fence
- * and the in-memory offboarding flag); a probe going stale converges through
- * the same paths a concurrent delete always could, and the quota CHECK
- * constraint remains the authoritative guard behind the probed decision.
+ * The per-path facts a materialisation decides on, probed outside the critical
+ * section so their round-trips never hold the gate: the canonical blob's
+ * compressed metadata and object presence, and whether the tenant already holds
+ * the hash (no fresh charge). The tenant account (publish status and quota
+ * basis) is not here: it is tenant-wide, so a flush reads it once for its whole
+ * batch, not once per path. The gate re-checks only what the single
+ * writer owns (the generation fence and the in-memory offboarding flag); a probe
+ * going stale converges through the same paths a concurrent delete always could,
+ * and the quota CHECK constraint remains the authoritative guard behind the
+ * probed decision.
  */
 export interface MaterialisationProbe {
-	readonly account: TenantAccount | undefined;
 	readonly blob: CanonicalBlobFacts | undefined;
 	readonly isCanonicalPresent: boolean;
 	readonly isOwned: boolean;
@@ -669,7 +670,10 @@ export class CommitPipelineService {
 	// live row, and the advisory quota decision. A chargeable request comes back
 	// with its narinfo rendered and the canonical facts its charge uses;
 	// everything else settles with its outcome here, before any charge.
-	private materialiseFence(request: MaterialiseRequest):
+	private materialiseFence(
+		request: MaterialiseRequest,
+		account: TenantAccount | undefined
+	):
 		| {
 				readonly outcome: Exclude<MaterialiseOutcome, { kind: 'materialised' }>;
 		  }
@@ -686,7 +690,7 @@ export class CommitPipelineService {
 		// from landing behind a drain pass. The single rule, publish only while
 		// the tenant is active, covers suspended, offboarding, offboarded and a
 		// missing row alike.
-		if (this.context.offboarding || probe.account?.status !== 'active') {
+		if (this.context.offboarding || account?.status !== 'active') {
 			return { outcome: { kind: 'tenant-inactive' } };
 		}
 
@@ -724,7 +728,7 @@ export class CommitPipelineService {
 		// existing encoding and so can differ from the staged size the negotiate
 		// pre-check used. Refusing here lets the caller reclaim the reserved row;
 		// the charge batch re-fences the decision.
-		if (isOverQuota(probe.account, probe.isOwned, probe.blob.fileSize)) {
+		if (isOverQuota(account, probe.isOwned, probe.blob.fileSize)) {
 			return { outcome: { kind: 'over-quota' } };
 		}
 
@@ -742,7 +746,8 @@ export class CommitPipelineService {
 	// back re-runs each charge on its own, so only the offenders refuse.
 	// Returns one outcome per request, in order.
 	private async settleMaterialiseFlushLocked(
-		requests: readonly MaterialiseRequest[]
+		requests: readonly MaterialiseRequest[],
+		account: TenantAccount | undefined
 	): Promise<(BatchedMaterialiseOutcome | undefined)[]> {
 		const outcomes: (BatchedMaterialiseOutcome | undefined)[] = Array.from({
 			length: requests.length
@@ -763,7 +768,7 @@ export class CommitPipelineService {
 				continue;
 			}
 
-			const fenced = this.materialiseFence(request);
+			const fenced = this.materialiseFence(request, account);
 
 			if ('outcome' in fenced) {
 				outcomes[index] = fenced.outcome;
@@ -835,11 +840,18 @@ export class CommitPipelineService {
 		let batch: PendingMaterialise[] = [];
 		let outcomes: (BatchedMaterialiseOutcome | undefined)[] = [];
 
+		// The tenant account is tenant-wide, so one read outside the gate serves
+		// every settle this flush collects; the charge batch is the authoritative
+		// quota fence, so a value made stale by a prior flush's charges only softens
+		// this advisory check.
+		const account = await this.tenantAccount(this.context.requireTenant());
+
 		try {
 			await this.context.criticalSection(async () => {
 				batch = this.materialiseQueue.splice(0, materialiseFlushCap);
 				outcomes = await this.settleMaterialiseFlushLocked(
-					batch.map((item) => item.request)
+					batch.map((item) => item.request),
+					account
 				);
 			});
 		} catch (error) {
@@ -1075,17 +1087,20 @@ export class CommitPipelineService {
 
 		const canonicalKey = narObjectKey(metadata.narHash);
 
-		// The shared facts a commit decides on, probed once in one parallel wave:
-		// the advisory quota check reads them here and a reuse's materialise gate
-		// takes the same probe, so a commit never re-reads its account, blob state
-		// or canonical presence. A reuse's staged key is the canonical object
-		// itself, whose presence the probe already answers, so only a fresh upload
-		// heads its private staging object.
-		const [probe, stagedObject] = await Promise.all([
+		// The facts a commit decides on, probed once in one parallel wave: the
+		// advisory quota check reads them here, and a reuse's materialise gate takes
+		// the same per-path probe, so a commit never re-reads its blob state or
+		// canonical presence. The tenant account rides alongside for the quota
+		// pre-check; the reuse gate reads its own in the flush. A reuse's staged key
+		// is the canonical object itself, whose presence the probe already answers,
+		// so only a fresh upload heads its private staging object.
+		const tenant = this.context.requireTenant();
+		const [probe, stagedObject, account] = await Promise.all([
 			this.probeMaterialisation(metadata),
 			pending.r2Key === canonicalKey
 				? undefined
-				: this.context.env.BLOBS.head(pending.r2Key)
+				: this.context.env.BLOBS.head(pending.r2Key),
+			this.tenantAccount(tenant)
 		]);
 
 		// The staged object must exist before a commit can verify or promote it; its
@@ -1109,12 +1124,11 @@ export class CommitPipelineService {
 		// authoritative decision is made against the canonical size in
 		// materialiseServable, so a concurrent promote that changes the size cannot
 		// let an over-quota commit through.
-		const tenant = this.context.requireTenant();
 		const estimate = probe.blob?.fileSize ?? stagedSize;
 
 		if (
-			probe.account !== undefined &&
-			isOverQuota(probe.account, probe.isOwned, estimate)
+			account !== undefined &&
+			isOverQuota(account, probe.isOwned, estimate)
 		) {
 			throw new QuotaExceededError(tenant);
 		}
@@ -1292,8 +1306,7 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation
 	): Promise<MaterialisationProbe> {
 		const tenant = this.context.requireTenant();
-		const [account, blob, canonical, isOwned] = await Promise.all([
-			this.tenantAccount(tenant),
+		const [blob, canonical, isOwned] = await Promise.all([
 			this.context.d1
 				.select({
 					fileHash: d1Schema.blobState.fileHash,
@@ -1307,7 +1320,7 @@ export class CommitPipelineService {
 			this.ownsHash(tenant, metadata.narHash)
 		]);
 
-		return { account, blob, isCanonicalPresent: canonical !== null, isOwned };
+		return { blob, isCanonicalPresent: canonical !== null, isOwned };
 	}
 
 	// Whether this upload's reserved generation is already fully committed and
