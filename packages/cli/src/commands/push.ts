@@ -78,7 +78,7 @@ export function registerPushCommand(
 		.option('--no-attest', 'skip attestation attachment for this push')
 		.option(
 			'--no-wait',
-			'return once uploaded without waiting for deferred blobs to become servable (records no retention over still-pending paths)'
+			'return once uploaded and committed, without waiting for deferred blobs to become servable (retention is still recorded)'
 		)
 		.option(
 			'--wait-timeout <duration>',

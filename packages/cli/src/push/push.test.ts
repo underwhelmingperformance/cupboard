@@ -41,7 +41,8 @@ function fallbackCommitResponse() {
 	return {
 		storePathHash: StorePath.hash(appPath),
 		narHash: appDigest.narHash.toString(),
-		status: 'committed' as const
+		status: 'committed' as const,
+		settled: Promise.resolve()
 	};
 }
 
@@ -87,7 +88,8 @@ describe('runPush', () => {
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
-						status: 'committed'
+						status: 'committed',
+						settled: Promise.resolve()
 					});
 				},
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
@@ -422,6 +424,85 @@ describe('runPush', () => {
 		});
 	});
 
+	it('re-negotiates when a deferred verdict settles absent in the wait phase', async () => {
+		let negotiations = 0;
+		const uploadedKeys: string[] = [];
+		const commitAttempts: string[] = [];
+		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
+
+		// The deferred verdict rejects `absent` on `settled`, not on the ack, so only
+		// the wait phase's re-drive recovers it. Assert-and-observe the rejection so
+		// it is never unhandled before the wait phase awaits it.
+		const absentVerdict = Promise.reject(
+			new UploadVerificationFailedError('upload-defer', 'absent')
+		);
+		const absentObserved = expect(absentVerdict).rejects.toBeInstanceOf(
+			UploadVerificationFailedError
+		);
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				negotiate() {
+					negotiations += 1;
+
+					// The re-negotiate finds the path already in the store, so the
+					// re-drive needs no fresh upload.
+					if (negotiations === 1) {
+						return Promise.resolve({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-defer',
+									r2Key,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						});
+					}
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'skip',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString()
+							}
+						]
+					});
+				},
+				async uploadNar(key, body) {
+					await collectReadableStream(body);
+					uploadedKeys.push(key);
+				},
+				commit(target) {
+					commitAttempts.push(target.uploadId);
+
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						status: 'pending' as const,
+						settled: absentVerdict
+					});
+				},
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		// The push succeeds: the absent verdict re-negotiated and the store already
+		// held the path, so no verification failure is reported.
+		expect({ negotiations, uploadedKeys, commitAttempts }).toStrictEqual({
+			negotiations: 2,
+			uploadedKeys: [r2Key],
+			commitAttempts: ['upload-defer']
+		});
+		await absentObserved;
+	});
+
 	it('with --dry-run, reports the plan without uploading or committing', async () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
@@ -486,7 +567,7 @@ describe('runPush', () => {
 		});
 	});
 
-	it('with --no-wait, returns with pending paths and records no retention', async () => {
+	it('with --no-wait, records retention over pending paths without waiting', async () => {
 		const results: ResultRow[][] = [];
 		const warnings: { label: string; value?: string }[] = [];
 		const clientCalls: unknown[] = [];
@@ -523,7 +604,8 @@ describe('runPush', () => {
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
-						status: 'pending'
+						status: 'pending',
+						settled: Promise.resolve()
 					});
 				},
 				setRoot() {
@@ -541,23 +623,20 @@ describe('runPush', () => {
 			clientCalls: [
 				{ method: 'negotiate', paths: [appPath] },
 				{ method: 'uploadNar' },
-				{ method: 'commit' }
+				{ method: 'commit' },
+				{ method: 'setRoot' }
 			],
 			results: [
 				[
 					{ label: 'Uploaded paths', value: '1' },
 					{ label: 'Already cached', value: '0' },
 					{ label: 'Skipped', value: '0' },
-					{ label: 'Bytes uploaded', value: '14 B' }
+					{ label: 'Bytes uploaded', value: '14 B' },
+					{ label: 'Pinned paths', value: '1' },
+					{ label: 'Pin expiry', value: 'permanent' }
 				]
 			],
-			warnings: [
-				{
-					label: 'pending verification',
-					value:
-						'1 path(s) await server-side verification; retention not recorded (omit --no-wait to wait and record it)'
-				}
-			]
+			warnings: []
 		});
 	});
 
@@ -595,7 +674,8 @@ describe('runPush', () => {
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
-						status: 'committed'
+						status: 'committed',
+						settled: Promise.resolve()
 					});
 				},
 				setRoot(name, body) {
@@ -966,7 +1046,8 @@ describe('runPush', () => {
 					Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
-						status: 'committed'
+						status: 'committed',
+						settled: Promise.resolve()
 					}),
 				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
 			} satisfies PushClient,
@@ -1079,7 +1160,7 @@ describe('runPush', () => {
 				{
 					label: 'incomplete',
 					value:
-						'1 path(s) failed; retention not recorded, re-run cupboard push to finish'
+						'1 path(s) failed to commit; retention not recorded, re-run cupboard push to finish'
 				}
 			]
 		});
@@ -1332,7 +1413,8 @@ describe('runPush', () => {
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
-						status: 'committed'
+						status: 'committed',
+						settled: Promise.resolve()
 					});
 				},
 				setRoot(name, body) {
@@ -1458,7 +1540,8 @@ describe('runPush', () => {
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
-						status: 'committed'
+						status: 'committed',
+						settled: Promise.resolve()
 					});
 				},
 				setRoot(name, body) {
@@ -1472,7 +1555,7 @@ describe('runPush', () => {
 
 		expect({ events, commitOptions }).toStrictEqual({
 			events: ['negotiate', 'uploadNar', 'commit', 'setRoot'],
-			commitOptions: [{ wait: true, timeoutSeconds: 30 }]
+			commitOptions: [{ timeoutSeconds: 30 }]
 		});
 	});
 
@@ -1536,9 +1619,83 @@ describe('runPush', () => {
 			{
 				label: 'incomplete',
 				value:
-					'1 path(s) failed; retention not recorded, re-run cupboard push to finish'
+					'1 path(s) failed to commit; retention not recorded, re-run cupboard push to finish'
 			}
 		]);
+	});
+
+	it('records retention, then fails a deferred upload whose verdict fails', async () => {
+		const warnings: { label: string; value?: string }[] = [];
+		const events: string[] = [];
+
+		// The deferred verdict fails after the ack. Assert its rejection, which also
+		// observes it from creation so the gap before the wait phase awaits it never
+		// surfaces an unhandled rejection.
+		const failedVerdict = Promise.reject(
+			new UploadVerificationFailedError('upload-app', 'mismatch')
+		);
+		const verdictFailed = expect(failedVerdict).rejects.toBeInstanceOf(
+			UploadVerificationFailedError
+		);
+
+		const options = {
+			client: {
+				...deferredUpload(events),
+				commit() {
+					events.push('commit');
+
+					return Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						status: 'pending' as const,
+						settled: failedVerdict
+					});
+				},
+				setRoot(name, body) {
+					events.push('setRoot');
+
+					return Promise.resolve(rootSummary({ name, ...body }));
+				}
+			} satisfies PushClient,
+			...deferredDependencies()
+		} satisfies PushDependencies;
+
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([], warnings), options);
+				return { pushed: true };
+			} catch (error_: unknown) {
+				expect(error_).toBeInstanceOf(PushIncompleteError);
+
+				if (error_ instanceof PushIncompleteError) {
+					return {
+						error: { name: error_.name, failedPaths: error_.failedPaths }
+					};
+				}
+
+				return { pushed: true };
+			}
+		})();
+
+		// Retention is recorded before the wait, so the failed verdict does not undo
+		// it (the server prunes the failed target); the push still fails loudly.
+		expect({ outcome, events }).toStrictEqual({
+			outcome: {
+				error: {
+					name: PushIncompleteError.name,
+					failedPaths: [StorePath.basename(appPath)]
+				}
+			},
+			events: ['negotiate', 'uploadNar', 'commit', 'setRoot']
+		});
+
+		expect(warnings).toStrictEqual([
+			{
+				label: 'verification failed',
+				value: `${StorePath.basename(appPath)}: An uploaded NAR did not match the hash it declared. Re-run cupboard push to retry.`
+			}
+		]);
+		await verdictFailed;
 	});
 
 	it('uploads what it can, skips retention, and fails when an upload fails', async () => {
@@ -1584,7 +1741,8 @@ describe('runPush', () => {
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
 						narHash: appDigest.narHash.toString(),
-						status: 'committed'
+						status: 'committed',
+						settled: Promise.resolve()
 					});
 				},
 				setRoot(_name, body) {
@@ -1665,7 +1823,8 @@ function deferredUpload(
 			return Promise.resolve({
 				storePathHash: StorePath.hash(appPath),
 				narHash: appDigest.narHash.toString(),
-				status: 'pending'
+				status: 'pending' as const,
+				settled: Promise.resolve()
 			});
 		}
 	};

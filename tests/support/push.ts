@@ -65,7 +65,7 @@ export async function pushStorePaths(
 		}
 
 		if (decision.action !== 'skip') {
-			await context.client.commit(
+			const outcome = await context.client.commit(
 				{
 					uploadId: decision.uploadId,
 					storePathHash: decision.storePathHash,
@@ -73,6 +73,11 @@ export async function pushStorePaths(
 				},
 				{}
 			);
+
+			// A deferred commit acks first and settles once the background
+			// verification makes the path servable. Tests read the path straight
+			// after pushing, so wait for that verdict rather than racing it.
+			await outcome.settled;
 		}
 	}
 }

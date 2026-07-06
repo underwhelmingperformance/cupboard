@@ -20,7 +20,6 @@ import type {
 	RootSummary
 } from '@cupboard/protocol/retention';
 import {
-	type CommitResponse,
 	type UploadDecision,
 	type UploadNegotiateRequest,
 	type UploadNegotiateResponse
@@ -36,7 +35,7 @@ import { z } from 'zod';
 
 import { isAbortError } from '../abort.ts';
 import type { CommitOptions, CommitTarget } from '../client/client.ts';
-import type { CommitSession } from '../client/commit-socket.ts';
+import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { isStaleUploadError } from '../client/rpc-errors.ts';
 import {
 	AttestationBundleInvalidError,
@@ -96,7 +95,7 @@ export interface PushClient {
 	// Streams one NAR's compressed bytes to its staging key. The server derives
 	// the file hash and size from the bytes, so the upload carries no metadata.
 	uploadNar(r2Key: string, body: ReadableStream<Uint8Array>): Promise<void>;
-	commit(target: CommitTarget, options: CommitOptions): Promise<CommitResponse>;
+	commit(target: CommitTarget, options: CommitOptions): Promise<CommitOutcome>;
 	// Opens one commit session for the whole push. Optional so a minimal client
 	// can rely on the per-path `commit`; the push uses it when present to commit
 	// every path over a single socket.
@@ -131,7 +130,7 @@ type UploadDecisionOf<A extends UploadDecision['action']> = Extract<
 interface PushFailure {
 	readonly storePathHash: string;
 	readonly storePath: string;
-	readonly stage: 'upload' | 'commit';
+	readonly stage: 'upload' | 'commit' | 'verify';
 	readonly reason: string;
 }
 
@@ -323,7 +322,6 @@ async function runPushFlow(
 		...negotiation.uploads.filter((decision) => isReusedBlobCommit(decision))
 	].filter((decision) => !failedUploadIds.has(decision.uploadId));
 	const commitOptions: CommitOptions = {
-		wait: shouldWait,
 		timeoutSeconds: waitTimeoutSeconds
 	};
 	const session = await client.openCommitSession?.(commitOptions);
@@ -335,11 +333,12 @@ async function runPushFlow(
 		compressNar,
 		options: commitOptions
 	};
-	const commit = await reporter.progress(
-		'Committing metadata',
-		{ total: commitDecisions.length },
-		async (bar) => {
-			try {
+
+	try {
+		const commit = await reporter.progress(
+			'Committing metadata',
+			{ total: commitDecisions.length },
+			async (bar) => {
 				const settled = await Promise.allSettled(
 					commitDecisions.map(async (decision) => {
 						try {
@@ -350,10 +349,16 @@ async function runPushFlow(
 					})
 				);
 
-				// Pending uploads are collected by store-path hash, so a re-negotiated
-				// upload id still resolves to its path for the retention and
-				// attestation gates below.
-				const pending: string[] = [];
+				// A pending path is committed (its row is reserved) but not yet
+				// servable; its `settled` promise carries the verdict the wait phase
+				// awaits, and its decision lets the wait phase re-drive an `absent`
+				// verdict. Collected by store-path hash, so a re-negotiated upload id
+				// still resolves to its path.
+				const pending: {
+					decision: UploadDecisionOf<'upload' | 'commit'>;
+					storePathHash: string;
+					settled: Promise<void>;
+				}[] = [];
 				let committed = 0;
 
 				for (const [index, result] of settled.entries()) {
@@ -386,7 +391,11 @@ async function runPushFlow(
 					}
 
 					if (result.value.status === 'pending') {
-						pending.push(result.value.storePathHash);
+						pending.push({
+							decision,
+							storePathHash: result.value.storePathHash,
+							settled: result.value.settled
+						});
 					} else {
 						committed += 1;
 					}
@@ -395,92 +404,127 @@ async function runPushFlow(
 				bar.fact('committed', formatCount(committed));
 
 				return { pending };
-			} finally {
-				session?.close();
 			}
-		}
-	);
-
-	// Retention is recorded only over a complete, servable push: a failed path
-	// would leave the root pinning a closure that cannot be substituted, and the
-	// `--no-wait` deferred case already withholds it for the same reason.
-	const isIncomplete = failures.length > 0;
-	const shouldDeferRetention =
-		isIncomplete || (!shouldWait && commit.pending.length > 0);
-
-	// Attestations cannot attach to a path that did not commit, so skip the
-	// failed paths as well as any still awaiting verification.
-	const unservableStorePathHashes = new Set<string>(
-		failures.map((failure) => failure.storePathHash)
-	);
-	if (!shouldWait && commit.pending.length > 0) {
-		for (const storePathHash of commit.pending) {
-			unservableStorePathHashes.add(storePathHash);
-		}
-	}
-
-	if (isIncomplete) {
-		reporter.warn(
-			'incomplete',
-			`${formatCount(failures.length)} path(s) failed; retention not recorded, re-run cupboard push to finish`
 		);
-	} else if (!shouldWait && commit.pending.length > 0) {
-		reporter.warn(
-			'pending verification',
-			`${formatCount(commit.pending.length)} path(s) await server-side verification; retention not recorded (omit --no-wait to wait and record it)`
-		);
-	}
 
-	const attestationRows = await attachPushedAttestations(closure, reporter, {
-		client,
-		enabled: dependencies.attest ?? true,
-		sources: dependencies.attestations ?? [],
-		readBundle:
-			dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
-		pendingStorePathHashes: unservableStorePathHashes
-	});
+		// Retention is recorded over every committed path, including one still
+		// verifying: a reserved row backs it, so the root binds now and does not
+		// depend on the client surviving the wait. Only a hard commit failure
+		// withholds it, since such a path has no row to reference.
+		const isIncomplete = failures.length > 0;
 
-	const retentionRows = shouldDeferRetention
-		? []
-		: await reporter.phase(
-				retention.kind === 'pins'
-					? 'Pinning pushed paths'
-					: 'Updating retention root',
-				(ctx) => recordRetention(retention, client, ctx)
+		if (isIncomplete) {
+			reporter.warn(
+				'incomplete',
+				`${formatCount(failures.length)} path(s) failed to commit; retention not recorded, re-run cupboard push to finish`
 			);
+		}
 
-	const uploadedPaths = negotiation.uploads.filter((decision) =>
-		isUpload(decision)
-	).length;
-	const reusedBlobs = negotiation.uploads.filter((decision) =>
-		isReusedBlobCommit(decision)
-	).length;
-	const skipped = negotiation.uploads.filter((decision) =>
-		isSkip(decision)
-	).length;
-
-	reporter.result({
-		kind: 'push-summary',
-		data: { uploadedPaths, reusedBlobs, skipped, uploadedBytes, failures },
-		rows: [
-			{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
-			{ label: 'Already cached', value: formatCount(reusedBlobs) },
-			{ label: 'Skipped', value: formatCount(skipped) },
-			{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
-			...attestationRows,
-			...retentionRows,
-			...(failures.length > 0
-				? [{ label: 'Failed', value: formatCount(failures.length) }]
-				: [])
-		]
-	});
-
-	// The good paths committed, but the push as a whole did not finish: fail
-	// loudly and non-zero so nothing downstream treats the cache as complete.
-	if (failures.length > 0) {
-		throw new PushIncompleteError(
-			failures.map((failure) => StorePath.basename(failure.storePath))
+		// Attestations attach to a committed narinfo row; a failed path has none.
+		const unservableStorePathHashes = new Set<string>(
+			failures.map((failure) => failure.storePathHash)
 		);
+
+		const attestationRows = await attachPushedAttestations(closure, reporter, {
+			client,
+			enabled: dependencies.attest ?? true,
+			sources: dependencies.attestations ?? [],
+			readBundle:
+				dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
+			pendingStorePathHashes: unservableStorePathHashes
+		});
+
+		const retentionRows = isIncomplete
+			? []
+			: await reporter.phase(
+					retention.kind === 'pins'
+						? 'Pinning pushed paths'
+						: 'Updating retention root',
+					(ctx) => recordRetention(retention, client, ctx)
+				);
+
+		// Retention is durable now, so the wait only reports the verdicts: it fails
+		// the push loudly if a deferred path fails verification. `--no-wait` leaves
+		// them to settle server-side and reports them pending.
+		if (shouldWait && commit.pending.length > 0) {
+			await reporter.progress(
+				'Verifying uploads',
+				{ total: commit.pending.length },
+				async (bar) => {
+					const verdicts = await Promise.allSettled(
+						commit.pending.map(async (entry) => {
+							try {
+								await awaitDeferredVerdict(entry, commitContext);
+							} finally {
+								bar.advance(1);
+							}
+						})
+					);
+
+					for (const [index, result] of verdicts.entries()) {
+						const entry = commit.pending[index];
+
+						if (entry === undefined || result.status === 'fulfilled') {
+							continue;
+						}
+
+						if (isAbortError(result.reason)) {
+							throw result.reason;
+						}
+
+						const storePath =
+							storePathByHash.get(entry.storePathHash) ?? entry.storePathHash;
+						const reason = failureReason(result.reason);
+						failures.push({
+							storePathHash: entry.storePathHash,
+							storePath,
+							stage: 'verify',
+							reason
+						});
+						bar.warn(
+							'verification failed',
+							`${StorePath.basename(storePath)}: ${reason}`
+						);
+					}
+				}
+			);
+		}
+
+		const uploadedPaths = negotiation.uploads.filter((decision) =>
+			isUpload(decision)
+		).length;
+		const reusedBlobs = negotiation.uploads.filter((decision) =>
+			isReusedBlobCommit(decision)
+		).length;
+		const skipped = negotiation.uploads.filter((decision) =>
+			isSkip(decision)
+		).length;
+
+		reporter.result({
+			kind: 'push-summary',
+			data: { uploadedPaths, reusedBlobs, skipped, uploadedBytes, failures },
+			rows: [
+				{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
+				{ label: 'Already cached', value: formatCount(reusedBlobs) },
+				{ label: 'Skipped', value: formatCount(skipped) },
+				{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
+				...attestationRows,
+				...retentionRows,
+				...(failures.length > 0
+					? [{ label: 'Failed', value: formatCount(failures.length) }]
+					: [])
+			]
+		});
+
+		// The good paths committed, but the push as a whole did not finish: fail
+		// loudly and non-zero so nothing downstream treats the cache as complete.
+		if (failures.length > 0) {
+			throw new PushIncompleteError(
+				failures.map((failure) => StorePath.basename(failure.storePath))
+			);
+		}
+	} finally {
+		session?.close();
 	}
 }
 
@@ -879,7 +923,7 @@ interface CommitContext {
 function commitVia(
 	context: CommitContext,
 	target: CommitTarget
-): Promise<CommitResponse> {
+): Promise<CommitOutcome> {
 	if (context.session === undefined) {
 		return context.client.commit(target, context.options);
 	}
@@ -916,7 +960,7 @@ function isAbsentVerdict(error: unknown): boolean {
 async function commitNegotiated(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext
-): Promise<CommitResponse> {
+): Promise<CommitOutcome> {
 	try {
 		return await commitVia(context, commitTarget(decision));
 	} catch (error) {
@@ -928,6 +972,30 @@ async function commitNegotiated(
 	}
 }
 
+// Awaits a deferred path's verdict, recovering an `absent` verdict the way a
+// commit-time loss does: renegotiate and re-drive the path, then await the fresh
+// verdict. Retention is already recorded over the path, so a successful re-drive
+// needs nothing more; a second loss, or any other failure, propagates so the
+// wait phase reports it.
+async function awaitDeferredVerdict(
+	entry: {
+		readonly decision: UploadDecisionOf<'upload' | 'commit'>;
+		readonly settled: Promise<void>;
+	},
+	context: CommitContext
+): Promise<void> {
+	try {
+		await entry.settled;
+	} catch (error) {
+		if (isAbortError(error) || !isAbsentVerdict(error)) {
+			throw error;
+		}
+
+		const redriven = await redriveExpiredCommit(entry.decision, context);
+		await redriven.settled;
+	}
+}
+
 // Re-drives a path whose commit slot was reaped from wherever its fresh decision
 // puts it: a reuse commits straight away; a fresh upload re-streams the NAR
 // before committing; a path the store now already holds needs nothing. The
@@ -935,7 +1003,7 @@ async function commitNegotiated(
 async function redriveExpiredCommit(
 	decision: UploadDecisionOf<'upload' | 'commit'>,
 	context: CommitContext
-): Promise<CommitResponse> {
+): Promise<CommitOutcome> {
 	const pathInfo = findNegotiatedPath(context.negotiated, decision);
 	const renegotiation = await context.client.negotiate({
 		paths: [prepareStorePathNegotiation(pathInfo)]
@@ -954,10 +1022,12 @@ async function redriveExpiredCommit(
 	}
 
 	if (isSkip(fresh)) {
+		// Already in the store: nothing to verify, so it is servable at once.
 		return {
 			storePathHash: fresh.storePathHash,
 			narHash: fresh.narHash,
-			status: 'committed'
+			status: 'committed',
+			settled: Promise.resolve()
 		};
 	}
 

@@ -16,7 +16,6 @@ import {
 	type SignupRequest,
 	signupResponseSchema
 } from '@cupboard/protocol/signup';
-import { type CommitResponse } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
@@ -30,6 +29,7 @@ import {
 } from '../errors.ts';
 
 import {
+	type CommitOutcome,
 	type CommitSession,
 	type CommitSocketConnect,
 	runCommitSession
@@ -135,7 +135,6 @@ export class CupboardClient {
 			bearerHeaders(bearer),
 			{
 				path,
-				wait: options.wait ?? true,
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
 				signal: this.signal
 			}
@@ -256,19 +255,42 @@ export class CupboardClient {
 		token: AccessCredential,
 		target: CommitTarget,
 		options: CommitOptions = {}
-	): Promise<CommitResponse> {
+	): Promise<CommitOutcome> {
 		throwIfAborted(this.signal);
 
 		const settle = async (
 			bearer: string | undefined
-		): Promise<CommitResponse> => {
+		): Promise<CommitOutcome> => {
 			const session = this.connectCommitSession(bearer, options);
 
+			let outcome: CommitOutcome;
 			try {
-				return await session.commit(target);
-			} finally {
+				outcome = await session.commit(target);
+			} catch (error) {
+				// The ack itself failed (a pre-ack error frame that tears down only
+				// this entry, or a refused upgrade). Close the one-shot session so its
+				// socket never leaks; close is idempotent when a failure already tore
+				// it down.
 				session.close();
+				throw error;
 			}
+
+			// The ack is in; keep the one-shot session open until the verdict
+			// settles, then close it. The caller still observes a failed verdict on
+			// `outcome.settled`; this awaits only to gate the close.
+			const closeOnceSettled = async (): Promise<void> => {
+				try {
+					await outcome.settled;
+				} catch {
+					// Failed or timed out: closing the session is all this arm owes.
+				} finally {
+					session.close();
+				}
+			};
+
+			void closeOnceSettled();
+
+			return outcome;
 		};
 
 		try {
@@ -396,8 +418,6 @@ export interface CommitTarget {
 }
 
 export interface CommitOptions {
-	/** Park for the verification verdict on a deferred upload (the default). */
-	readonly wait?: boolean;
 	/** Bounds how long a parked upload waits for its verdict. */
 	readonly timeoutSeconds?: number;
 }
