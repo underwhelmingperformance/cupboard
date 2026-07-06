@@ -1310,6 +1310,41 @@ export class CommitPipelineService {
 		return { account, blob, isCanonicalPresent: canonical !== null, isOwned };
 	}
 
+	// Whether this upload's reserved generation is already fully committed and
+	// serving: its reference edge exists (the generation-scoped proof that these
+	// bytes verified, promoted and charged, since the edge is written only by the
+	// charge) and its narinfo object is published. A re-claimed row that reads true
+	// here had only its clear-marker step interrupted, so it needs its bookkeeping
+	// finished, not a re-decode and re-materialise. Keys on the per-generation edge,
+	// never shared blob presence, so a superseded or lost generation reads false.
+	// The D1 and R2 reads run outside any critical section.
+	async isGenerationCommitted(
+		cache: string,
+		metadata: ParsedUploadPathNegotiation,
+		generation: number
+	): Promise<boolean> {
+		const tenant = this.context.requireTenant();
+		const edgeFilter = and(
+			eq(d1Schema.blobReference.tenant, tenant),
+			eq(d1Schema.blobReference.cache, cache),
+			eq(d1Schema.blobReference.storePathHash, metadata.storePathHash),
+			eq(d1Schema.blobReference.generation, generation),
+			eq(d1Schema.blobReference.narHash, metadata.narHash)
+		);
+		const [edge, object] = await Promise.all([
+			this.context.d1
+				.select({ narHash: d1Schema.blobReference.narHash })
+				.from(d1Schema.blobReference)
+				.where(edgeFilter)
+				.get(),
+			this.context.env.BLOBS.head(
+				narInfoObjectKey(tenant, metadata.storePathHash, cache)
+			)
+		]);
+
+		return edge !== undefined && object !== null;
+	}
+
 	// Materialises a reserved narinfo through the shared flush queue: concurrent
 	// settles (socket commits and verify-pass verdicts alike) share one gate and
 	// one combined charge batch per flush, so a push of hundreds of paths costs

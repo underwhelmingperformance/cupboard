@@ -219,6 +219,10 @@ export class VerificationService {
 			return;
 		}
 
+		if (await this.finaliseIfAlreadyCommitted(pending, metadata, reserved)) {
+			return;
+		}
+
 		// A returned `{ok:false}` (a hash/size mismatch or an undecodable frame) is a
 		// definitive content failure that reclaims the reserved row. A thrown error
 		// splits two ways: a definitively absent staging object cannot reappear, so it
@@ -279,6 +283,34 @@ export class VerificationService {
 		}
 
 		return reserved.generation;
+	}
+
+	// Short-circuits a re-claimed upload whose bytes already verified and
+	// materialised: only its clear-marker step was interrupted, so the whole
+	// decode/promote/materialise saga would re-run to no effect. When the reserved
+	// generation is already committed and serving, finish the bookkeeping instead,
+	// the same tail a fresh materialise's success runs. Returns whether it settled
+	// the upload here.
+	private async finaliseIfAlreadyCommitted(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: ParsedUploadPathNegotiation,
+		generation: number
+	): Promise<boolean> {
+		const isCommitted = await this.commitPipeline.isGenerationCommitted(
+			pending.cache,
+			metadata,
+			generation
+		);
+
+		if (!isCommitted) {
+			return false;
+		}
+
+		this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+		this.uploadState.clearPendingUpload(pending.id);
+		await this.deleteStagingObject(pending);
+
+		return true;
 	}
 
 	// The post-verify half of the saga, shared by the on-DO cron path and the
@@ -919,6 +951,10 @@ export class VerificationService {
 		const generation = await this.reservePendingRow(pending, metadata);
 
 		if (generation === undefined) {
+			return;
+		}
+
+		if (await this.finaliseIfAlreadyCommitted(pending, metadata, generation)) {
 			return;
 		}
 
