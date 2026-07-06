@@ -520,6 +520,33 @@ export function detectSession(
 	return { from, to };
 }
 
+/**
+ * Whether the timestamps collected so far already contain a gap wider than
+ * `gapMs`. A view is walked newest-first, so once such a gap opens every row
+ * still to come is older than it: the trailing session is fully bracketed and
+ * the walk can stop without paging the rest of the search window.
+ */
+export function hasSessionBoundary(
+	timestamps: readonly number[],
+	gapMs: number
+): boolean {
+	if (timestamps.length < 2) {
+		return false;
+	}
+
+	const sorted = timestamps.toSorted((a, b) => a - b);
+
+	for (let index = 1; index < sorted.length; index += 1) {
+		const gap = (sorted[index] ?? 0) - (sorted[index - 1] ?? 0);
+
+		if (gap > gapMs) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
 export function percentile(
 	sortedAscending: readonly number[],
 	p: number
@@ -1431,10 +1458,12 @@ async function fetchByCursor(
 	cursorOf: (row: unknown) => string | undefined,
 	timestampOf: (row: unknown) => number | undefined,
 	onPage: PageProgress,
-	sleep: Sleep
+	sleep: Sleep,
+	stopAtGapMs: number | undefined
 ): Promise<unknown[]> {
 	const rows: unknown[] = [];
 	const seen = new Set<string>();
+	const timestamps: number[] = [];
 	let upper = window.to;
 	let offset: string | undefined;
 
@@ -1476,6 +1505,20 @@ async function fetchByCursor(
 		rows.push(...fresh);
 		onPage(fresh.length);
 
+		if (stopAtGapMs !== undefined) {
+			for (const row of fresh) {
+				const at = timestampOf(row);
+
+				if (at !== undefined) {
+					timestamps.push(at);
+				}
+			}
+
+			if (hasSessionBoundary(timestamps, stopAtGapMs)) {
+				break;
+			}
+		}
+
 		const next = smallestCursor(page, cursorOf);
 
 		if (next !== undefined && (offset === undefined || next < offset)) {
@@ -1515,7 +1558,12 @@ export async function fetchPaged(
 	timestampOf: (row: unknown) => number | undefined,
 	cursorOf: ((row: unknown) => string | undefined) | undefined,
 	onPage: PageProgress,
-	sleep: Sleep = defaultSleep
+	sleep: Sleep = defaultSleep,
+	// In session mode the walk stops once the collected rows bracket a gap this
+	// wide: the trailing session is then complete and the older rows behind it
+	// would only be filtered back out. Left undefined for a fixed `--since`
+	// window, which is fetched to its end.
+	stopAtGapMs?: number
 ): Promise<unknown[]> {
 	if (cursorOf !== undefined) {
 		return fetchByCursor(
@@ -1525,11 +1573,13 @@ export async function fetchPaged(
 			cursorOf,
 			timestampOf,
 			onPage,
-			sleep
+			sleep,
+			stopAtGapMs
 		);
 	}
 
 	const rows: unknown[] = [];
+	const timestamps: number[] = [];
 	let upper = window.to;
 	let boundary = new Set<string>();
 
@@ -1562,6 +1612,20 @@ export async function fetchPaged(
 
 		rows.push(...fresh);
 		onPage(fresh.length);
+
+		if (stopAtGapMs !== undefined) {
+			for (const row of fresh) {
+				const at = timestampOf(row);
+
+				if (at !== undefined) {
+					timestamps.push(at);
+				}
+			}
+
+			if (hasSessionBoundary(timestamps, stopAtGapMs)) {
+				break;
+			}
+		}
 
 		const oldest = Math.min(...fresh.map((row) => timestampOf(row) ?? upper));
 
@@ -1652,6 +1716,7 @@ type TelemetryView = 'events' | 'traces';
 
 interface ViewProgress {
 	rows: number;
+	pages: number;
 	slicesDone: number;
 }
 
@@ -1678,22 +1743,30 @@ const cursorOf: Record<
 
 // Both views and every slice share one bounded pool of in-flight queries.
 // Disjoint slices need no dedup; their rows are concatenated per view.
+//
+// In session mode (`stopAtGapMs` set) the window is left whole rather than
+// sliced: each view is walked newest-first and stops at the first gap this wide,
+// so only the trailing session is fetched instead of the entire search window.
+// This relies on a request emitting its log and its trace together, so a quiet
+// gap in one view is a quiet gap in the other. A fixed `--since` window is
+// sliced and fetched in full.
 async function fetchTelemetry(
 	client: Cloudflare,
 	accountId: string,
 	worker: string,
 	window: TimeWindow,
+	stopAtGapMs: number | undefined,
 	onProgress: (
 		view: TelemetryView,
 		progress: ViewProgress,
 		sliceCount: number
 	) => void
 ): Promise<Record<TelemetryView, unknown[]>> {
-	const slices = sliceWindow(window);
+	const slices = stopAtGapMs === undefined ? sliceWindow(window) : [window];
 	const views: readonly TelemetryView[] = ['events', 'traces'];
 	const progress: Record<TelemetryView, ViewProgress> = {
-		events: { rows: 0, slicesDone: 0 },
-		traces: { rows: 0, slicesDone: 0 }
+		events: { rows: 0, pages: 0, slicesDone: 0 },
+		traces: { rows: 0, pages: 0, slicesDone: 0 }
 	};
 	const out: Record<TelemetryView, unknown[]> = { events: [], traces: [] };
 
@@ -1718,8 +1791,11 @@ async function fetchTelemetry(
 			cursorOf[view],
 			(pageRows) => {
 				progress[view].rows += pageRows;
+				progress[view].pages += 1;
 				onProgress(view, progress[view], slices.length);
-			}
+			},
+			defaultSleep,
+			stopAtGapMs
 		);
 		progress[view].slicesDone += 1;
 		onProgress(view, progress[view], slices.length);
@@ -1798,6 +1874,12 @@ async function main(): Promise<void> {
 			? `${String(lookbackMinutes / 60)}h`
 			: `${String(lookbackMinutes)}m`;
 
+	// Without a fixed `--since`, only the most recent session is reported, so the
+	// fetch stops at the first gap this wide rather than draining the whole
+	// search window.
+	const stopAtGapMs =
+		options.sinceMinutes === undefined ? options.gapMs : undefined;
+
 	const { rawEvents, rawTraces } = await reporter.phase(
 		`Fetching ${lookbackLabel} of logs and traces (account ${accountId})`,
 		async (context) => {
@@ -1806,10 +1888,16 @@ async function main(): Promise<void> {
 				accountId,
 				options.worker,
 				searchWindow,
+				stopAtGapMs,
 				(view, progress, sliceCount) => {
+					const slices =
+						sliceCount > 1
+							? ` · ${String(progress.slicesDone)}/${String(sliceCount)} slices`
+							: '';
+
 					context.fact(
 						view,
-						`${formatCount(progress.rows)} (${String(progress.slicesDone)}/${String(sliceCount)} slices)`
+						`${formatCount(progress.rows)} rows · ${String(progress.pages)} pages${slices}`
 					);
 				}
 			);

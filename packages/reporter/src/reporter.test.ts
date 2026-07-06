@@ -82,6 +82,45 @@ describe('createReporter', () => {
 		]);
 	});
 
+	it('emits throttled interim progress events while a long phase runs', async () => {
+		let clock = 0;
+		const { events, reporter } = jsonReporter(() => clock);
+
+		const value = await reporter.phase('Fetching', (phase) => {
+			phase.fact('rows', '1k'); // t=0, just started: no interim event yet
+			clock = 2000;
+			phase.fact('rows', '2k'); // a full interval on: emits the facts so far
+			clock = 2500;
+			phase.fact('rows', '3k'); // 500ms since the last emit: throttled, no event
+			clock = 4000;
+			phase.fact('rows', '4k'); // another interval on: emits again
+			return 'done';
+		});
+
+		expect(value).toBe('done');
+		expect(withoutDurations(events())).toStrictEqual([
+			{
+				event: 'progress',
+				label: 'Fetching',
+				durationMs: 'number',
+				facts: { rows: '2k' }
+			},
+			{
+				event: 'progress',
+				label: 'Fetching',
+				durationMs: 'number',
+				facts: { rows: '4k' }
+			},
+			{
+				durationMs: 'number',
+				event: 'phase',
+				facts: { rows: '4k' },
+				label: 'Fetching',
+				status: 'ok'
+			}
+		]);
+	});
+
 	it('emits a warning raised inside a phase as its own warn event', async () => {
 		const { events, reporter } = jsonReporter();
 
