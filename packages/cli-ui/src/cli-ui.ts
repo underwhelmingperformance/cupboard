@@ -37,6 +37,7 @@ import { type BrowserMessages, openBrowser } from './open-browser.ts';
 /** A picocolors palette with its colour enablement fixed at creation. */
 type Colours = ReturnType<typeof pc.createColors>;
 
+export { clackSink } from './clack-sink.ts';
 export { type BrowserMessages, openBrowser } from './open-browser.ts';
 export { resolveReporterMode } from './reporter-mode.ts';
 

@@ -8,6 +8,7 @@
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
 		"@eslint/js": "10.0.1",
+		"@logtape/lint": "^2.2.3",
 		"@types/node": "^25.9.1",
 		"@types/ws": "^8.18.1",
 		"cloudflare": "^6.4.0",

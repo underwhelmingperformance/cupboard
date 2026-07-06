@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -70,7 +71,7 @@ describe('batched verify fault isolation', () => {
 		try {
 			// The pass must not throw, so a poison verdict cannot fail and retry the
 			// whole message.
-			await verifyTenant(env, currentServerTenant(), 10);
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			put.mockRestore();
 		}
@@ -116,7 +117,7 @@ describe('batched verify fault isolation', () => {
 
 		try {
 			// The pass must not throw and must leave the upload for a retry.
-			await verifyTenant(env, currentServerTenant(), 10);
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			prepare.mockRestore();
 		}
@@ -158,7 +159,7 @@ describe('batched verify fault isolation', () => {
 		try {
 			// A full batch of two whose applies all fail: the gate sees claims equal to
 			// the batch size but nothing applied.
-			await verifyTenant(env, currentServerTenant(), 2);
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 2);
 		} finally {
 			put.mockRestore();
 		}

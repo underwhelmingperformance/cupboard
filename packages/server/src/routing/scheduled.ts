@@ -1,3 +1,4 @@
+import { type Logger, rootLogger } from '@cupboard/logger';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
@@ -60,8 +61,9 @@ const casDemoteCursorKey = 'reaper:cas-demote-cursor';
 type CronDatabase = DrizzleD1Database<typeof d1Schema>;
 type TenantCronPass =
 	typeof d1Schema.tenantMaintenanceFailure.$inferSelect.pass;
-type MaintainTenant = (env: Env, id: TenantId) => Promise<void>;
+type MaintainTenant = (logger: Logger, env: Env, id: TenantId) => Promise<void>;
 type DrainTenant = (
+	logger: Logger,
 	env: Env,
 	id: TenantId,
 	drainLimit: number,
@@ -79,11 +81,14 @@ interface ExecuteMaintenanceQueueOptions {
 	readonly maintainTenant?: MaintainTenant;
 	readonly verifyTenant?: MaintainTenant;
 	readonly drainTenant?: DrainTenant;
-	readonly runBlobReaper?: (env: Env) => Promise<unknown>;
-	readonly runCasReaper?: (env: Env) => Promise<unknown>;
-	readonly runReaperDemote?: (env: Env) => Promise<unknown>;
-	readonly runCasReaperDemote?: (env: Env) => Promise<unknown>;
-	readonly runControlKeyRetirement?: (env: Env) => Promise<unknown>;
+	readonly runBlobReaper?: (logger: Logger, env: Env) => Promise<unknown>;
+	readonly runCasReaper?: (logger: Logger, env: Env) => Promise<unknown>;
+	readonly runReaperDemote?: (logger: Logger, env: Env) => Promise<unknown>;
+	readonly runCasReaperDemote?: (logger: Logger, env: Env) => Promise<unknown>;
+	readonly runControlKeyRetirement?: (
+		logger: Logger,
+		env: Env
+	) => Promise<unknown>;
 }
 
 const maxStoredErrorLength = 4096;
@@ -118,20 +123,20 @@ export type MaintenanceQueueMessage =
  * pass runs independently of the others' outcome, and their failures are surfaced
  * together so neither a stalled sweep nor a stalled reaper is silently swallowed.
  */
-export async function runCronTick(env: Env): Promise<void> {
+export async function runCronTick(logger: Logger, env: Env): Promise<void> {
 	const failures: unknown[] = [];
 
 	// Sequential, not concurrent: the reaper runs on its reserved budget after the
 	// fan-out so a long fan-out cannot starve it, and each pass is isolated so one
 	// stalling does not hold back the next.
 	for (const pass of [
-		() => runCronSweep(env),
-		() => runOffboardSweep(env),
-		() => runBlobReaper(env),
-		() => runCasReaper(env),
-		() => runReaperDemote(env),
-		() => runCasReaperDemote(env),
-		() => runControlKeyRetirement(env)
+		() => runCronSweep(logger, env),
+		() => runOffboardSweep(logger, env),
+		() => runBlobReaper(logger, env),
+		() => runCasReaper(logger, env),
+		() => runReaperDemote(logger, env),
+		() => runCasReaperDemote(logger, env),
+		() => runControlKeyRetirement(logger, env)
 	]) {
 		try {
 			await pass();
@@ -226,28 +231,39 @@ export async function handleMaintenanceQueue(
 	batch: MessageBatch,
 	env: Env
 ): Promise<void> {
+	const logger = rootLogger().with({ worker: 'scheduled', queue: batch.queue });
+
 	for (const message of batch.messages) {
+		const messageLogger = logger.with({
+			messageId: message.id,
+			attempts: message.attempts
+		});
 		const parsed = maintenanceQueueMessageSchema.safeParse(message.body);
 
 		if (!parsed.success) {
-			logInvalidMaintenanceQueueMessage(batch, message, parsed.error);
+			logInvalidMaintenanceQueueMessage(messageLogger, parsed.error);
 			message.ack();
 			continue;
 		}
 
-		const decision = await executeMaintenanceQueueMessage(env, parsed.data);
+		const decision = await executeMaintenanceQueueMessage(
+			messageLogger,
+			env,
+			parsed.data
+		);
 
 		if (decision.action === 'ack') {
 			message.ack();
 			continue;
 		}
 
-		logMaintenanceQueueRetry(batch, message, parsed.data, decision);
+		logMaintenanceQueueRetry(messageLogger, parsed.data, decision);
 		message.retry({ delaySeconds: decision.delaySeconds });
 	}
 }
 
 export async function executeMaintenanceQueueMessage(
+	logger: Logger,
 	env: Env,
 	message: MaintenanceQueueMessage,
 	options: ExecuteMaintenanceQueueOptions = {}
@@ -256,6 +272,7 @@ export async function executeMaintenanceQueueMessage(
 		switch (message.kind) {
 			case 'tenant-maintenance': {
 				return await executeTenantMaintenanceMessage(
+					logger,
 					env,
 					message.tenant,
 					options.maintainTenant ?? maintainTenant
@@ -264,34 +281,42 @@ export async function executeMaintenanceQueueMessage(
 			case 'tenant-verify': {
 				// A commit asked for this pass because it stored a blob pending
 				// verification, so it runs regardless of the maintenance cadence.
-				await (options.verifyTenant ?? verifyTenant)(env, message.tenant);
+				await (options.verifyTenant ?? verifyTenant)(
+					logger,
+					env,
+					message.tenant
+				);
 				return { action: 'ack' };
 			}
 			case 'offboard': {
 				return await executeOffboardMessage(
+					logger,
 					env,
 					message.tenant,
 					options.drainTenant ?? drainTenant
 				);
 			}
 			case 'blob-reaper': {
-				await (options.runBlobReaper ?? runBlobReaper)(env);
+				await (options.runBlobReaper ?? runBlobReaper)(logger, env);
 				return { action: 'ack' };
 			}
 			case 'cas-reaper': {
-				await (options.runCasReaper ?? runCasReaper)(env);
+				await (options.runCasReaper ?? runCasReaper)(logger, env);
 				return { action: 'ack' };
 			}
 			case 'blob-demote': {
-				await (options.runReaperDemote ?? runReaperDemote)(env);
+				await (options.runReaperDemote ?? runReaperDemote)(logger, env);
 				return { action: 'ack' };
 			}
 			case 'cas-demote': {
-				await (options.runCasReaperDemote ?? runCasReaperDemote)(env);
+				await (options.runCasReaperDemote ?? runCasReaperDemote)(logger, env);
 				return { action: 'ack' };
 			}
 			case 'control-key-retirement': {
-				await (options.runControlKeyRetirement ?? runControlKeyRetirement)(env);
+				await (options.runControlKeyRetirement ?? runControlKeyRetirement)(
+					logger,
+					env
+				);
 				return { action: 'ack' };
 			}
 		}
@@ -305,28 +330,18 @@ export async function executeMaintenanceQueueMessage(
 }
 
 function logInvalidMaintenanceQueueMessage(
-	batch: MessageBatch,
-	message: Message,
+	logger: Logger,
 	error: z.ZodError
 ): void {
-	console.warn('maintenance queue message rejected', {
-		queue: batch.queue,
-		messageId: message.id,
-		attempts: message.attempts,
-		issues: error.issues
-	});
+	logger.warn('maintenance queue message rejected', { issues: error.issues });
 }
 
 function logMaintenanceQueueRetry(
-	batch: MessageBatch,
-	message: Message,
+	logger: Logger,
 	body: MaintenanceQueueMessage,
 	decision: Extract<MaintenanceQueueDecision, { readonly action: 'retry' }>
 ): void {
-	console.error('maintenance queue message retrying', {
-		queue: batch.queue,
-		messageId: message.id,
-		attempts: message.attempts,
+	logger.error('maintenance queue message retrying', {
 		delaySeconds: decision.delaySeconds,
 		reason: decision.reason,
 		...maintenanceQueueMessageLogFields(body)
@@ -351,6 +366,7 @@ function maintenanceQueueMessageLogFields(message: MaintenanceQueueMessage): {
  * collected.
  */
 export function runBlobReaper(
+	logger: Logger,
 	env: Env,
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
@@ -358,6 +374,7 @@ export function runBlobReaper(
 }
 
 export function runCasReaper(
+	logger: Logger,
 	env: Env,
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
@@ -372,17 +389,24 @@ export function runCasReaper(
  * facts. Returns how many shared facts it demoted.
  */
 export function runReaperDemote(
+	logger: Logger,
 	env: Env,
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
-	return blobReaper(env).demoteMissingBlobs(batchSize, demoteCursor(env));
+	return blobReaper(env).demoteMissingBlobs(
+		logger,
+		batchSize,
+		demoteCursor(env)
+	);
 }
 
 export function runCasReaperDemote(
+	logger: Logger,
 	env: Env,
 	batchSize: number = blobReaperBatchSize
 ): Promise<number> {
 	return blobReaper(env).demoteMissingCasObjects(
+		logger,
 		batchSize,
 		casDemoteCursor(env)
 	);
@@ -451,6 +475,7 @@ class TenantCasReferenceDemoter implements CasReferenceDemoter {
  * one tenant. Per-tenant failures are all surfaced.
  */
 export async function runOffboardSweep(
+	logger: Logger,
 	env: Env,
 	tenantLimit: number = offboardTenantsPerTick,
 	drainLimit: number = offboardDrainChunk,
@@ -461,7 +486,7 @@ export async function runOffboardSweep(
 	const tenants = await selectOffboardTenants(database, tenantLimit);
 
 	const results = await Promise.allSettled(
-		tenants.map(({ id }) => drain(env, id, drainLimit, rounds))
+		tenants.map(({ id }) => drain(logger, env, id, drainLimit, rounds))
 	);
 
 	await recordTenantPassOutcomes(database, 'offboard', tenants, results);
@@ -498,6 +523,7 @@ function selectOffboardTenants(
 // looping lets a large tenant reclaim many chunks per tick while the round cap keeps
 // the tick within its subrequest budget.
 async function drainTenant(
+	logger: Logger,
 	env: Env,
 	id: TenantId,
 	drainLimit: number,
@@ -557,6 +583,7 @@ async function finaliseTenant(env: Env, id: TenantId): Promise<void> {
  * not wedge the sweep.
  */
 export async function runCronSweep(
+	logger: Logger,
 	env: Env,
 	batchSize: number = maintenanceBatchSize,
 	maintain: MaintainTenant = maintainTenant
@@ -570,7 +597,7 @@ export async function runCronSweep(
 	const results = await settleWithConcurrency(
 		batch,
 		maintenanceConcurrency,
-		({ id }) => maintain(env, id)
+		({ id }) => maintain(logger, env, id)
 	);
 
 	await recordTenantPassOutcomes(database, 'maintenance', batch, results);
@@ -623,7 +650,7 @@ async function settleWithConcurrency<T>(
 	return results;
 }
 
-function maintainTenant(env: Env, id: TenantId): Promise<void> {
+function maintainTenant(logger: Logger, env: Env, id: TenantId): Promise<void> {
 	const server = tenantServer(env, id);
 
 	return runScheduledMaintenance(
@@ -662,6 +689,7 @@ export class VerdictRecorder {
 	private failure: { readonly error: unknown } | undefined;
 
 	constructor(
+		private readonly logger: Logger,
 		private readonly record: (
 			results: readonly VerificationResult[]
 		) => Promise<number>,
@@ -703,10 +731,10 @@ export class VerdictRecorder {
 				return await this.record(batch);
 			} catch (error) {
 				lastError = error;
-				console.warn('verification verdicts not recorded', {
+				this.logger.warn('verification verdicts not recorded', {
 					count: batch.length,
 					attempt: attempt + 1,
-					error: error instanceof Error ? error.message : String(error)
+					error
 				});
 			}
 		}
@@ -788,6 +816,7 @@ async function promoteAndReport(
 // leaves the row for the next pass (the consumer simply does not report it); a
 // definitively missing staging object fails it terminally.
 export async function verifyTenant(
+	logger: Logger,
 	env: Env,
 	id: TenantId,
 	batchSize: number = verifyClaimBatchSize,
@@ -802,8 +831,9 @@ export async function verifyTenant(
 	// Verdicts record as they are reached: a waiter unparks as soon as its own
 	// upload settles, and an invocation dying mid-pass keeps everything already
 	// recorded.
-	const recorder = new VerdictRecorder((results) =>
-		server.recordVerifications(results)
+	const recorder = new VerdictRecorder(
+		logger.with({ job: 'verify-verdicts' }),
+		(results) => server.recordVerifications(results)
 	);
 
 	// Reuse rows need no decode: their bytes are the shared canonical object,
@@ -897,6 +927,7 @@ export async function verifyTenant(
 }
 
 async function executeTenantMaintenanceMessage(
+	logger: Logger,
 	env: Env,
 	tenant: TenantId,
 	maintain: MaintainTenant
@@ -911,7 +942,7 @@ async function executeTenantMaintenanceMessage(
 		| { readonly status: 'fulfilled'; readonly value: undefined }
 		| { readonly status: 'rejected'; readonly reason: unknown };
 	try {
-		await maintain(env, tenant);
+		await maintain(logger, env, tenant);
 		result = { status: 'fulfilled', value: undefined };
 	} catch (error: unknown) {
 		result = { status: 'rejected', reason: error };
@@ -929,6 +960,7 @@ async function executeTenantMaintenanceMessage(
 }
 
 async function executeOffboardMessage(
+	logger: Logger,
 	env: Env,
 	tenant: TenantId,
 	drain: DrainTenant
@@ -941,7 +973,13 @@ async function executeOffboardMessage(
 			| { readonly status: 'fulfilled'; readonly value: undefined }
 			| { readonly status: 'rejected'; readonly reason: unknown };
 		try {
-			await drain(env, tenant, offboardDrainChunk, offboardRoundsPerTick);
+			await drain(
+				logger,
+				env,
+				tenant,
+				offboardDrainChunk,
+				offboardRoundsPerTick
+			);
 			result = { status: 'fulfilled', value: undefined };
 		} catch (error: unknown) {
 			result = { status: 'rejected', reason: error };
@@ -1099,7 +1137,7 @@ async function settleAuthKeyRetirement(
 	}
 }
 
-function runControlKeyRetirement(env: Env): Promise<number> {
+function runControlKeyRetirement(logger: Logger, env: Env): Promise<number> {
 	const retireDate = new Date();
 	const now = retireDate.toISOString();
 

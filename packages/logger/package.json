@@ -1,12 +1,8 @@
 {
-	"name": "@cupboard/cli-ui",
+	"name": "@cupboard/logger",
 	"version": "0.0.0",
 	"dependencies": {
-		"@clack/core": "^1.4.1",
-		"@clack/prompts": "^1.5.1",
-		"@cupboard/logger": "workspace:*",
-		"@cupboard/reporter": "workspace:*",
-		"picocolors": "^1.1.1"
+		"@logtape/logtape": "^2.2.3"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",
@@ -14,7 +10,8 @@
 		"vitest": "^4.1.8"
 	},
 	"exports": {
-		".": "./src/cli-ui.ts",
+		".": "./src/config.ts",
+		"./sinks": "./src/sinks.ts",
 		"./testing": "./src/testing.ts"
 	},
 	"license": "AGPL-3.0-or-later",

@@ -1,12 +1,21 @@
 import {
+	clackSink,
 	type CliUi,
 	ConfirmationRequiredError,
 	createCliUi,
 	resolveReporterMode
 } from '@cupboard/cli-ui';
+import {
+	configureLogging,
+	type Logger,
+	rootLogger,
+	type Sink
+} from '@cupboard/logger';
+import { jsonLinesSink } from '@cupboard/logger/sinks';
 import type { Reporter, ReporterMode } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
+import pc from 'picocolors';
 import { z } from 'zod';
 
 import { isAbortError } from './abort.ts';
@@ -57,6 +66,33 @@ function parseOutputMode(value: string): ReporterMode {
 	return parsed.data;
 }
 
+// The LogTape sink diagnostics flow through for a run: clack narration in
+// terminal mode (sharing the UI's colour setting) or line-delimited JSON on
+// stderr in machine mode, so structured logs never contaminate stdout.
+function loggingSink(mode: ReporterMode, colour: boolean | undefined): Sink {
+	if (mode === 'terminal') {
+		return clackSink(pc.createColors(colour ?? pc.isColorSupported));
+	}
+
+	return jsonLinesSink((line) => process.stderr.write(line));
+}
+
+// The command-scoped logger for the run in progress, set once the invoked
+// subcommand is known (the `preAction` hook). Held on an object so the hook
+// updates a field on it; before a command begins, callers fall back to the bare
+// root logger.
+const commandLoggerState: { logger?: Logger } = {};
+
+/**
+ * The logger for the running command: the application root logger tagged with
+ * the invoked subcommand's name, so every record it emits carries `command`.
+ * Handlers call this to obtain a logger without threading one through their
+ * signatures; it falls back to {@link rootLogger} before a command has begun.
+ */
+export function commandLogger(): Logger {
+	return commandLoggerState.logger ?? rootLogger();
+}
+
 export interface ProgramOptions {
 	readonly signal?: AbortSignal;
 }
@@ -91,6 +127,17 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 			outputError: () => {
 				// The top-level funnel reports the failure; commander stays silent.
 			}
+		})
+		// The one place a run's output mode and colour are settled: the global flags
+		// have parsed and the invoked subcommand is known, so configure logging once
+		// (idempotent) and scope the root logger to the command for its handler.
+		.hook('preAction', (_thisCommand, actionCommand) => {
+			const mode = reporterModeFromGlobals(command);
+
+			configureLogging({ sink: loggingSink(mode, colourFromGlobals(command)) });
+			commandLoggerState.logger = rootLogger().with({
+				command: actionCommand.name()
+			});
 		});
 
 	registerDeployCommand(program, options);

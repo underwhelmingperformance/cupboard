@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
@@ -154,7 +155,7 @@ describe('offboarding drain', () => {
 		);
 
 		await offboardTenant(id);
-		await runOffboardSweep(env);
+		await runOffboardSweep(rootLogger(), env);
 
 		const drained = {
 			edges: await tenantEdges(id),
@@ -167,9 +168,9 @@ describe('offboarding drain', () => {
 		};
 
 		// The reaper collects the freed shared blob across its grace.
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 
 		expect({
 			drained,
@@ -213,7 +214,7 @@ describe('offboarding drain', () => {
 
 		// One row and one object per tick: the first tick cannot finish, so the tenant
 		// stays `offboarding` with residue and is not finalised early.
-		await runOffboardSweep(env, 10, 1, 1);
+		await runOffboardSweep(rootLogger(), env, 10, 1, 1);
 
 		const midRow = await tenantRow(id);
 		const midDrain = {
@@ -224,8 +225,8 @@ describe('offboarding drain', () => {
 		};
 
 		// Further ticks drain the remainder and finalise the tenant.
-		await runOffboardSweep(env, 10, 1, 1);
-		await runOffboardSweep(env, 10, 1, 1);
+		await runOffboardSweep(rootLogger(), env, 10, 1, 1);
+		await runOffboardSweep(rootLogger(), env, 10, 1, 1);
 
 		const finalRow = await tenantRow(id);
 
@@ -410,9 +411,9 @@ describe('offboarding drain', () => {
 
 		// The whole tick: the maintenance sweep skips the offboarding tenant, the
 		// offboard pass drains and finalises it, and the reaper arms its freed blob.
-		await runCronTick(env);
+		await runCronTick(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
-		await runCronTick(env);
+		await runCronTick(rootLogger(), env);
 
 		const row = await tenantRow(id);
 

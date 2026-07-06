@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
 	type TenantId,
@@ -122,7 +123,7 @@ describe('reaper demote routing failure', () => {
 		const routed: TenantId[] = [];
 		const demoted = await reaperWith(
 			recordingDemoter(new Set([tenant]), routed)
-		).demoteMissingBlobs(10, staticCursor());
+		).demoteMissingBlobs(rootLogger(), 10, staticCursor());
 
 		expect({
 			demoted,
@@ -145,7 +146,7 @@ describe('reaper demote routing failure', () => {
 		const routed: TenantId[] = [];
 		const demoted = await reaperWith(
 			recordingDemoter(new Set([failing.tenant]), routed)
-		).demoteMissingBlobs(10, staticCursor());
+		).demoteMissingBlobs(rootLogger(), 10, staticCursor());
 
 		expect({
 			demoted,
@@ -176,7 +177,7 @@ describe('reaper demote routing failure', () => {
 		const routed: TenantId[] = [];
 		const demoted = await reaperWith(
 			recordingDemoter(new Set([failing.tenant]), routed)
-		).demoteMissingBlobs(10, staticCursor());
+		).demoteMissingBlobs(rootLogger(), 10, staticCursor());
 
 		expect({
 			demoted,

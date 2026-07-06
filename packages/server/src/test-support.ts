@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
@@ -2066,9 +2067,9 @@ export async function reapBlobsPastGrace(): Promise<void> {
 	// retires edges. Then the Worker reaper arms the now-unreferenced blobs and,
 	// past the grace, collects them.
 	await currentServer().runGarbageCollection();
-	await runBlobReaper(env);
+	await runBlobReaper(rootLogger(), env);
 	vi.setSystemTime(afterGrace());
-	await runBlobReaper(env);
+	await runBlobReaper(rootLogger(), env);
 }
 
 export async function fetchNarInfo(

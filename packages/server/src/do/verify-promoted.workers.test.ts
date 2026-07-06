@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -122,7 +123,7 @@ describe('consumer verify pass', () => {
 		await putNarBytes(upload.r2Key, nar);
 		await markUploadPendingVerification(upload.uploadId);
 
-		await verifyTenant(env, currentServerTenant(), 10);
+		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({
 			verdict: await pendingUploadVerdict(upload.uploadId),
@@ -158,7 +159,7 @@ describe('consumer verify pass', () => {
 			);
 
 		try {
-			await verifyTenant(env, currentServerTenant(), 10);
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			get.mockRestore();
 		}
@@ -169,7 +170,7 @@ describe('consumer verify pass', () => {
 		}).toStrictEqual({ first: undefined, second: 'pending' });
 
 		// With the fault gone, the next pass settles the remainder.
-		await verifyTenant(env, currentServerTenant(), 10);
+		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({
 			first: await pendingUploadVerdict(first.uploadId),
@@ -212,7 +213,7 @@ describe('consumer verify pass', () => {
 		const get = vi.spyOn(env.BLOBS, 'get');
 
 		try {
-			await verifyTenant(env, currentServerTenant(), 10);
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			get.mockRestore();
 		}
@@ -268,7 +269,7 @@ describe('consumer verify pass', () => {
 		// waiter is told absent and re-drives the push).
 		await env.BLOBS.delete(narObjectKey(nar.narHash));
 
-		await verifyTenant(env, currentServerTenant(), 10);
+		await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 		expect({
 			verdict: await pendingUploadVerdict(reuse.uploadId),
@@ -329,12 +330,12 @@ describe('consumer verify pass', () => {
 			});
 
 		try {
-			await verifyTenant(env, currentServerTenant(), 10);
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 
 			expect(await pendingUploadVerdict(reuse.uploadId)).toBe('pending');
 
 			// With the fault gone, the very next pass settles it.
-			await verifyTenant(env, currentServerTenant(), 10);
+			await verifyTenant(rootLogger(), env, currentServerTenant(), 10);
 		} finally {
 			head.mockRestore();
 		}

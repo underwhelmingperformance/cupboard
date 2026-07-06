@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -56,7 +57,7 @@ describe('blob reaper', () => {
 
 		// The first pass arms the now-unreferenced blob but, the grace not yet
 		// elapsed, leaves both the fact and the object in place.
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 
 		expect({
 			blobState: await blobStateNarHashes(),
@@ -68,7 +69,7 @@ describe('blob reaper', () => {
 
 		// Past the grace, the second pass collects the fact and then the object.
 		vi.setSystemTime(afterGrace());
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 
 		expect({
 			blobState: await blobStateNarHashes(),
@@ -87,8 +88,8 @@ describe('blob reaper', () => {
 		await seedBlobStates(narHashes);
 		await seedCasObjects(digests);
 
-		await runBlobReaper(env);
-		await runCasReaper(env);
+		await runBlobReaper(rootLogger(), env);
+		await runCasReaper(rootLogger(), env);
 
 		const armedUntil = new Date(
 			testBase.getTime() + blobReaperGraceMs
@@ -136,13 +137,13 @@ describe('blob reaper', () => {
 		// drained this tenant's presence edge, so negotiate is oracle-safe and tells
 		// it to re-upload; the promote adopts the surviving canonical object and
 		// clears the grace timer, re-referencing the hash.
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		await commitPath(token, second, nar);
 
 		// Past the original grace, the reaper must not collect it: it is referenced
 		// again, and its timer was cleared.
 		vi.setSystemTime(afterGrace());
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 
 		const served = await fetchNarInfo(second.storePathHash);
 

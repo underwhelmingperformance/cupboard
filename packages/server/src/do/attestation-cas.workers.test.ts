@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	predicateTypeSchema,
 	sha256HexDigestSchema,
@@ -400,9 +401,9 @@ describe('attestation CAS lifecycle', () => {
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
 
-		const armed = await runCasReaper(env, 10);
+		const armed = await runCasReaper(rootLogger(), env, 10);
 		vi.setSystemTime(new Date(Date.now() + blobReaperGraceMs + 1));
-		const collected = await runCasReaper(env, 10);
+		const collected = await runCasReaper(rootLogger(), env, 10);
 
 		expect({
 			armed,
@@ -417,7 +418,7 @@ describe('attestation CAS lifecycle', () => {
 		const stagingKey = await stageAttestationBundle('re-reference-arm', bytes);
 		const measured = await currentServer().measureAttestationBundle(stagingKey);
 		await currentServer().promoteAttestationBundle(stagingKey, measured);
-		const armed = await runCasReaper(env, 10);
+		const armed = await runCasReaper(rootLogger(), env, 10);
 
 		await fileAttestationReference({
 			uploadId: 're-reference-bind',
@@ -430,7 +431,7 @@ describe('attestation CAS lifecycle', () => {
 
 		expect({
 			armed,
-			collected: await runCasReaper(env, 10),
+			collected: await runCasReaper(rootLogger(), env, 10),
 			rows: await casObjectRows()
 		}).toStrictEqual({
 			armed: 0,
@@ -451,7 +452,7 @@ describe('attestation CAS lifecycle', () => {
 		});
 		await env.BLOBS.delete(casObjectKey(bundle.digest));
 
-		expect(await runCasReaperDemote(env, 10)).toBe(1);
+		expect(await runCasReaperDemote(rootLogger(), env, 10)).toBe(1);
 		expect({
 			objects: await casObjectRows(),
 			refs: await attestationReferenceRows(),

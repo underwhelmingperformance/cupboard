@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import { narFingerprint } from '@cupboard/nix-store/narinfo';
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
@@ -218,6 +219,7 @@ export class CommitPipelineService {
 	// blob was reaped between negotiate and now, reclaim the row and report it gone:
 	// a narinfo with no backing object must never be served.
 	private async commitReusedBlob(
+		logger: Logger,
 		cache: string,
 		uploadId: string,
 		metadata: ParsedUploadPathNegotiation,
@@ -233,7 +235,7 @@ export class CommitPipelineService {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
 
-		const outcome = await this.materialiseBatched({
+		const outcome = await this.materialiseBatched(logger, {
 			cache,
 			metadata,
 			generation: reserved.generation,
@@ -829,7 +831,7 @@ export class CommitPipelineService {
 	// (a D1 fault surviving the individual retries) rejects every waiter it
 	// carried; each caller's own error handling answers its client, and the
 	// saga markers keep the settles re-drivable.
-	private async flushMaterialiseQueue(): Promise<void> {
+	private async flushMaterialiseQueue(logger: Logger): Promise<void> {
 		let batch: PendingMaterialise[] = [];
 		let outcomes: (BatchedMaterialiseOutcome | undefined)[] = [];
 
@@ -851,7 +853,7 @@ export class CommitPipelineService {
 
 			// The waiters' own surfaces carry no detail, so this log line is the
 			// record of what took the flush down.
-			console.error('materialise flush failed', {
+			logger.error('materialise flush failed', {
 				settles: failed.length,
 				error
 			});
@@ -878,10 +880,10 @@ export class CommitPipelineService {
 	// Drains the queue a flush at a time. An uncontended settle flushes alone
 	// with no added latency; under load, where gates queue behind one another,
 	// each flush's wait collects the burst that shares it.
-	private async drainMaterialiseQueue(): Promise<void> {
+	private async drainMaterialiseQueue(logger: Logger): Promise<void> {
 		try {
 			while (this.materialiseQueue.length > 0) {
-				await this.flushMaterialiseQueue();
+				await this.flushMaterialiseQueue(logger);
 			}
 		} finally {
 			this.materialiseDrain = undefined;
@@ -902,7 +904,7 @@ export class CommitPipelineService {
 	// drain and a concurrent deferral collapse onto one message that claims each
 	// row once. A failed send clears the guard so the next deferral retries; a
 	// sent message no pass ever claims goes stale and the next deferral re-sends.
-	async requestVerification(tenant: TenantId): Promise<void> {
+	async requestVerification(logger: Logger, tenant: TenantId): Promise<void> {
 		const now = Date.now();
 
 		// The backstop arms regardless of the single-flight guard: a deferral
@@ -924,14 +926,15 @@ export class CommitPipelineService {
 			await this.context.env.MAINTENANCE_QUEUE.send(message);
 		} catch (error) {
 			this.verifyRequestedAt = undefined;
-			console.warn('verification request not enqueued', {
-				tenant,
-				error: error instanceof Error ? error.message : String(error)
-			});
+			logger.warn('verification request not enqueued', { tenant, error });
 		}
 	}
 
-	async commit(cache: string, uploadId: string): Promise<CommitOutcome> {
+	async commit(
+		logger: Logger,
+		cache: string,
+		uploadId: string
+	): Promise<CommitOutcome> {
 		// A commit settling after offboarding began must publish nothing: refuse
 		// before deferring, so the writer hears a stopped write immediately.
 		if (this.context.offboarding) {
@@ -1004,7 +1007,7 @@ export class CommitPipelineService {
 				// within its wait window. A `committing` reuse saga that crashed before
 				// settling never requested one, so the hourly sweep would otherwise be
 				// its only re-drive.
-				await this.requestVerification(this.context.requireTenant());
+				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
 					kind: 'deferred',
@@ -1046,7 +1049,7 @@ export class CommitPipelineService {
 				// won); the socket is driven to completion without waiting for the
 				// commit timeout.
 				this.uploadState.markUploadPending(uploadId);
-				await this.requestVerification(this.context.requireTenant());
+				await this.requestVerification(logger, this.context.requireTenant());
 
 				return {
 					kind: 'deferred',
@@ -1129,7 +1132,7 @@ export class CommitPipelineService {
 		// passed verify-before-serve when it was first promoted, so bind it without
 		// re-verifying its bytes.
 		if (pending.r2Key === canonicalKey) {
-			return this.commitReusedBlob(cache, uploadId, metadata, probe);
+			return this.commitReusedBlob(logger, cache, uploadId, metadata, probe);
 		}
 
 		// Verify-before-serve for a fresh upload staged under a private key. One
@@ -1148,7 +1151,7 @@ export class CommitPipelineService {
 			throw new NarTooLargeError(metadata.narSize, verifiableMaxBytes);
 		}
 
-		await this.requestVerification(tenant);
+		await this.requestVerification(logger, tenant);
 
 		return {
 			kind: 'deferred',
@@ -1308,11 +1311,12 @@ export class CommitPipelineService {
 	// the authoritative guard, exactly as it is for a lone settle. The returned
 	// narinfo's object is the caller's to publish, after the flush.
 	async materialiseBatched(
+		logger: Logger,
 		request: MaterialiseRequest
 	): Promise<BatchedMaterialiseOutcome> {
 		return new Promise<BatchedMaterialiseOutcome>((resolve, reject) => {
 			this.materialiseQueue.push({ request, resolve, reject });
-			this.materialiseDrain ??= this.drainMaterialiseQueue();
+			this.materialiseDrain ??= this.drainMaterialiseQueue(logger);
 		});
 	}
 

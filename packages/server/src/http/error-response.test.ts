@@ -1,5 +1,6 @@
+import { type Capture, startCapture } from '@cupboard/logger/testing';
 import { Hono } from 'hono';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { UnauthenticatedError } from '../errors.ts';
 
@@ -16,19 +17,14 @@ function appThatThrows(error: unknown): Hono {
 }
 
 describe('serverErrorHandler', () => {
-	const logged: unknown[][] = [];
+	let capture: Capture;
 
 	beforeEach(() => {
-		logged.length = 0;
-		vi.spyOn(console, 'error').mockImplementation(
-			(...logArguments: unknown[]) => {
-				logged.push(logArguments);
-			}
-		);
+		capture = startCapture();
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
+		capture.stop();
 	});
 
 	it('maps a modelled ServerHttpError to its status and message', async () => {
@@ -39,7 +35,7 @@ describe('serverErrorHandler', () => {
 		expect({
 			status: response.status,
 			body: await response.text(),
-			logged
+			logged: capture.logs
 		}).toStrictEqual({
 			status: 401,
 			body: 'Unauthorised\n',
@@ -82,9 +78,12 @@ describe('serverErrorHandler', () => {
 
 		await appThatThrows(boom).request('/', { headers: { 'cf-ray': 'ray-9' } });
 
-		expect(logged).toStrictEqual([
-			['Unhandled server error', { ray: 'ray-9', error: boom }]
-		]);
+		expect(capture.logs).toHaveLength(1);
+		expect(capture.logs[0]).toMatchObject({
+			level: 'error',
+			message: 'unhandled server error',
+			properties: { ray: 'ray-9', error: boom }
+		});
 	});
 
 	it.each([
@@ -106,7 +105,7 @@ describe('serverErrorHandler', () => {
 				status: response.status,
 				retryAfter: response.headers.get('retry-after'),
 				body: await response.text(),
-				errorLogged: logged
+				errorLogged: capture.logs.filter((entry) => entry.level === 'error')
 			}).toStrictEqual({
 				status: 503,
 				retryAfter: '5',

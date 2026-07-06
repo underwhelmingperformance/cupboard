@@ -5,7 +5,7 @@ import process from 'node:process';
 // same call prints the plain message. The data after the `::level::` separator
 // must escape the characters the command syntax reserves.
 // https://docs.github.com/actions/reference/workflow-commands-for-github-actions
-type AnnotationLevel = 'notice' | 'warning' | 'error';
+type AnnotationLevel = 'debug' | 'notice' | 'warning' | 'error';
 
 function escapeData(message: string): string {
 	return message
@@ -22,6 +22,14 @@ function annotate(level: AnnotationLevel, message: string): void {
 
 	const stream = level === 'error' ? process.stderr : process.stdout;
 	stream.write(`${message}\n`);
+}
+
+/**
+ * Reports diagnostic detail: a `debug` command under Actions, shown in the run
+ * log only when step debugging is enabled. Outside Actions it prints plainly.
+ */
+export function debug(message: string): void {
+	annotate('debug', message);
 }
 
 /** Reports an informational message: a `notice` annotation under Actions. */

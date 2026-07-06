@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import { cacheFromSelector } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReport } from '@cupboard/protocol/reports';
@@ -22,7 +23,7 @@ const os = implement(tenantContract)
 		try {
 			return await next();
 		} catch (error) {
-			throw bridgedError(error, context.request);
+			throw bridgedError(context.logger, error);
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {
@@ -152,10 +153,11 @@ export const tenantRouter = os.router({
 	},
 	gc: {
 		runAll: os.gc.runAll.handler(({ context }) =>
-			collectGarbage(context.request, context.services)
+			collectGarbage(context.logger, context.request, context.services)
 		),
 		runCache: os.gc.runCache.handler(({ input, context }) =>
 			collectGarbage(
+				context.logger,
 				context.request,
 				context.services,
 				cacheFromSelector(input.cacheName)
@@ -164,7 +166,7 @@ export const tenantRouter = os.router({
 	},
 	verify: {
 		run: os.verify.run.handler(({ input, context }) =>
-			runVerify(context.request, context.services, input.limit)
+			runVerify(context.logger, context.request, context.services, input.limit)
 		)
 	},
 	uploads: {
@@ -208,6 +210,7 @@ export const tenantRouter = os.router({
 // public URL, so it skips purging and relies on the narinfo TTL and the
 // orphan-blob grace window instead.
 async function collectGarbage(
+	logger: Logger,
 	request: Request,
 	services: TenantRpcServices,
 	cache?: string
@@ -217,7 +220,11 @@ async function collectGarbage(
 
 	return {
 		ok: true,
-		...(await services.garbageCollection.collectGarbage(cache, purgeOrigin))
+		...(await services.garbageCollection.collectGarbage(
+			logger,
+			cache,
+			purgeOrigin
+		))
 	};
 }
 
@@ -226,6 +233,7 @@ async function collectGarbage(
 // internal origin skips it. The requested limit is clamped to the server's
 // batch ceiling.
 async function runVerify(
+	logger: Logger,
 	request: Request,
 	services: TenantRpcServices,
 	limit: number | undefined
@@ -234,5 +242,5 @@ async function runVerify(
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const batch = Math.min(limit ?? verificationBatchSize, verificationBatchSize);
 
-	return services.verification.verify(purgeOrigin, batch);
+	return services.verification.verify(logger, purgeOrigin, batch);
 }

@@ -3,6 +3,7 @@
 	"workspaces": {
 		"packages/cli": {},
 		"packages/cli-ui": {},
+		"packages/logger": {},
 		"packages/nix-store": {},
 		"packages/protocol": {},
 		"packages/reporter": {},

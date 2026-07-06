@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { describe, expect, it, vi } from 'vitest';
 
 import { type VerificationResult } from '../do/verification-service.ts';
@@ -12,7 +13,7 @@ describe('VerdictRecorder', () => {
 	it('coalesces verdicts added while a flush is in flight', async () => {
 		const batches: VerificationResult[][] = [];
 		const resolvers: ((applied: number) => void)[] = [];
-		const recorder = new VerdictRecorder((results) => {
+		const recorder = new VerdictRecorder(rootLogger(), (results) => {
 			batches.push([...results]);
 
 			return new Promise((resolve) => {
@@ -47,6 +48,7 @@ describe('VerdictRecorder', () => {
 			(count: number) => Promise.resolve(count)
 		];
 		const recorder = new VerdictRecorder(
+			rootLogger(),
 			(results) => {
 				batches.push([...results]);
 				const outcome = outcomes.at(0);
@@ -75,7 +77,7 @@ describe('VerdictRecorder', () => {
 	it('stops and surfaces a failure the retries cannot clear', async () => {
 		const outage = new Error('record outage');
 		const record = vi.fn(() => Promise.reject(outage));
-		const recorder = new VerdictRecorder(record, 3, 0);
+		const recorder = new VerdictRecorder(rootLogger(), record, 3, 0);
 
 		recorder.add(verdict('a'));
 		await expect(recorder.settle()).rejects.toBe(outage);
@@ -93,7 +95,9 @@ describe('VerdictRecorder', () => {
 	});
 
 	it('settles to zero with nothing recorded', async () => {
-		const recorder = new VerdictRecorder(() => Promise.resolve(0));
+		const recorder = new VerdictRecorder(rootLogger(), () =>
+			Promise.resolve(0)
+		);
 
 		expect(await recorder.settle()).toBe(0);
 	});

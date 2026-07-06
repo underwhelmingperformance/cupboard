@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -128,7 +129,7 @@ describe('batched commit settles', () => {
 								throw new Error('the committed path has no narinfo row');
 							}
 
-							return pipeline.materialiseBatched({
+							return pipeline.materialiseBatched(rootLogger(), {
 								cache: '',
 								metadata,
 								generation,

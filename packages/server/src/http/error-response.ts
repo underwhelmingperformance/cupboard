@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import type { Context, ErrorHandler } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
@@ -7,6 +8,7 @@ import {
 	ServerHttpError,
 	TenantDispatchInterruptedError
 } from '../errors.ts';
+import { rootLogger } from '../observability/logging.ts';
 
 // Maps a thrown error to an HTTP response: an OAuth error to its RFC 6749 JSON
 // body, any other `ServerHttpError` to its status and message. Anything else
@@ -53,15 +55,28 @@ export const serverErrorHandler: ErrorHandler = (error, context) => {
 	}
 
 	if (isRuntimeRetryable(error)) {
-		const ray = context.req.raw.headers.get('cf-ray') ?? undefined;
-
-		console.warn('Retryable dispatch fault', { ray, error });
+		loggerFor(context).warn('retryable dispatch fault', { error });
 
 		return serverHttpErrorResponse(new TenantDispatchInterruptedError(error));
 	}
 
 	return unmappedErrorResponse(error, context);
 };
+
+// The request logger seeded by the app's first middleware, or a fallback carrying
+// just the ray when the fault was raised before that middleware ran (a malformed
+// path, say). Either way the line lands in Workers observability keyed to the ray.
+function loggerFor(context: Context): Logger {
+	const seeded = (context.var as { logger?: Logger }).logger;
+
+	if (seeded !== undefined) {
+		return seeded;
+	}
+
+	const ray = context.req.raw.headers.get('cf-ray') ?? undefined;
+
+	return ray === undefined ? rootLogger() : rootLogger().with({ ray });
+}
 
 // The flags the Workers runtime sets on a fault it knows to be transient: a
 // Durable Object reset or overload that killed the request mid-flight.
@@ -96,7 +111,7 @@ function isRuntimeRetryable(error: unknown): boolean {
 function unmappedErrorResponse(error: unknown, context: Context): Response {
 	const ray = context.req.raw.headers.get('cf-ray') ?? undefined;
 
-	console.error('Unhandled server error', { ray, error });
+	loggerFor(context).error('unhandled server error', { error });
 
 	return Response.json(
 		{ error: 'internal_error', ...(ray !== undefined && { ray }) },

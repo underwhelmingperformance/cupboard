@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -284,7 +285,7 @@ describe('multi-tenant writes', () => {
 
 		// A batch of two: the first tick takes the two most-overdue (all NULL, so by
 		// slug tiebreaker acme and beta), maintains and stamps them; gamma is left.
-		await runCronSweep(env, 2);
+		await runCronSweep(rootLogger(), env, 2);
 		const afterFirst = {
 			acme: await servedAt('acme'),
 			beta: await servedAt('beta'),
@@ -295,7 +296,7 @@ describe('multi-tenant writes', () => {
 
 		// The second tick: gamma is now the most overdue (still NULL, while acme and
 		// beta carry a stamp), so it is maintained next.
-		await runCronSweep(env, 2);
+		await runCronSweep(rootLogger(), env, 2);
 		const gammaAfterSecond = await servedAt('gamma');
 
 		expect({
@@ -329,7 +330,7 @@ async function runQueuedMaintenanceTick(): Promise<void> {
 	const messages = await enqueueMaintenanceJobs(env, queueCollector());
 
 	for (const message of messages) {
-		await executeMaintenanceQueueMessage(env, message);
+		await executeMaintenanceQueueMessage(rootLogger(), env, message);
 	}
 }
 

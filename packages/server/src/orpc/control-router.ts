@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
@@ -30,10 +31,11 @@ import { bridgedError } from './error-bridge.ts';
 const noPendingCache = (): Promise<string | undefined> =>
 	Promise.resolve(undefined);
 
-/** What a control procedure needs: the request (for auth and the public origin) and the Worker env. */
+/** What a control procedure needs: the request (for auth and the public origin), the Worker env, and the request logger. */
 export interface ControlOrpcContext {
 	readonly request: Request;
 	readonly env: Env;
+	readonly logger: Logger;
 }
 
 // Every control procedure runs behind the error bridge and the grant authoriser:
@@ -45,7 +47,7 @@ const os = implement(controlContract)
 		try {
 			return await next();
 		} catch (error) {
-			throw bridgedError(error, context.request);
+			throw bridgedError(context.logger, error);
 		}
 	})
 	.use(async ({ context, procedure, next }, input) => {

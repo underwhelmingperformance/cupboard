@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import {
 	nixSha256HashSchema,
 	rootNameSchema,
@@ -6,7 +7,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
@@ -34,23 +35,17 @@ async function sweepCost(
 	isLogged: boolean;
 	rowsRead: number;
 }> {
-	const lines: unknown[] = [];
-	const logSpy = vi
-		.spyOn(console, 'log')
-		.mockImplementation((message: unknown, fields: unknown) => {
-			if (message === 'method finished') {
-				lines.push(fields);
-			}
-		});
+	const capture = startCapture();
 
 	try {
 		await run();
 	} finally {
-		logSpy.mockRestore();
+		capture.stop();
 	}
 
-	const line = lines
-		.map((fields) => methodLineSchema.parse(fields))
+	const line = capture.logs
+		.filter((entry) => entry.message === 'method finished')
+		.map((entry) => methodLineSchema.parse(entry.properties))
 		.find((entry) => entry.method === method);
 
 	return { isLogged: line !== undefined, rowsRead: line?.rowsRead ?? -1 };

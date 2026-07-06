@@ -1,3 +1,5 @@
+import { rootLogger } from '@cupboard/logger';
+import { startCapture } from '@cupboard/logger/testing';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
@@ -68,25 +70,21 @@ function loggedIssueShape(issue: unknown): Readonly<Record<string, unknown>> {
 	);
 }
 
-// The rejected-message warning detail, with each issue's version-dependent
+// The rejected-message warning properties, with each issue's version-dependent
 // message dropped so the structural fields can be asserted deterministically.
 function warningDetailShape(
-	details: unknown
+	properties: Readonly<Record<string, unknown>>
 ): Readonly<Record<string, unknown>> {
-	if (typeof details !== 'object' || details === null) {
-		throw new TypeError('logged warning detail was not an object');
-	}
-
-	const fields: Record<string, unknown> = Object.fromEntries(
-		Object.entries(details)
-	);
-	const { issues } = fields;
+	const { issues } = properties;
 
 	if (!Array.isArray(issues)) {
 		throw new TypeError('logged warning detail had no issues array');
 	}
 
-	return { ...fields, issues: issues.map((issue) => loggedIssueShape(issue)) };
+	return {
+		...properties,
+		issues: issues.map((issue) => loggedIssueShape(issue))
+	};
 }
 
 describe('scheduled tenant pass failure records', () => {
@@ -296,10 +294,11 @@ describe('scheduled tenant pass failure records', () => {
 		const seen: string[] = [];
 		const decision = await runWithClock('2026-01-01T00:00:00.000Z', () =>
 			executeMaintenanceQueueMessage(
+				rootLogger(),
 				env,
 				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{
-					maintainTenant: (_env, id) => {
+					maintainTenant: (_logger, _env, id) => {
 						seen.push(id);
 
 						return Promise.resolve();
@@ -332,10 +331,11 @@ describe('scheduled tenant pass failure records', () => {
 		const seen: string[] = [];
 		const decision = await runWithClock('2026-01-01T00:00:00.000Z', () =>
 			executeMaintenanceQueueMessage(
+				rootLogger(),
 				env,
 				{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
 				{
-					verifyTenant: (_env, id) => {
+					verifyTenant: (_logger, _env, id) => {
 						seen.push(id);
 
 						return Promise.resolve();
@@ -352,6 +352,7 @@ describe('scheduled tenant pass failure records', () => {
 
 	it('retries a tenant-verify message whose pass fails', async () => {
 		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
 			env,
 			{ kind: 'tenant-verify', tenant: tenantIdSchema.parse('acme') },
 			{ verifyTenant: () => Promise.reject(new Error('verify failed')) }
@@ -370,6 +371,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		const decision = await runWithClock('2026-01-02T00:00:00.000Z', () =>
 			executeMaintenanceQueueMessage(
+				rootLogger(),
 				env,
 				{ kind: 'tenant-maintenance', tenant: tenantIdSchema.parse('acme') },
 				{
@@ -398,6 +400,7 @@ describe('scheduled tenant pass failure records', () => {
 
 	it('retries global queue work when the bounded pass fails', async () => {
 		const decision = await executeMaintenanceQueueMessage(
+			rootLogger(),
 			env,
 			{ kind: 'blob-reaper' },
 			{ runBlobReaper: () => Promise.reject(new Error('r2 unavailable')) }
@@ -417,7 +420,7 @@ describe('scheduled tenant pass failure records', () => {
 			tenantIdSchema.parse('retiring')
 		);
 
-		const decision = await executeMaintenanceQueueMessage(env, {
+		const decision = await executeMaintenanceQueueMessage(rootLogger(), env, {
 			kind: 'offboard',
 			tenant: tenantIdSchema.parse('retiring')
 		});
@@ -440,10 +443,11 @@ describe('scheduled tenant pass failure records', () => {
 		const decisions = await Promise.all(
 			['active', 'suspended', 'absent'].map((tenant) =>
 				executeMaintenanceQueueMessage(
+					rootLogger(),
 					env,
 					{ kind: 'offboard', tenant: tenantIdSchema.parse(tenant) },
 					{
-						drainTenant: (_env, id) => {
+						drainTenant: (_logger, _env, id) => {
 							seen.push(id);
 
 							return Promise.resolve();
@@ -481,18 +485,7 @@ describe('scheduled tenant pass failure records', () => {
 			],
 			actions
 		);
-		const warnings: unknown[][] = [];
-		const errors: unknown[][] = [];
-		const warn = vi
-			.spyOn(console, 'warn')
-			.mockImplementation((...logArguments: unknown[]) => {
-				warnings.push(logArguments);
-			});
-		const error = vi
-			.spyOn(console, 'error')
-			.mockImplementation((...logArguments: unknown[]) => {
-				errors.push(logArguments);
-			});
+		const capture = startCapture();
 
 		try {
 			await worker.queue(batch, {
@@ -503,17 +496,18 @@ describe('scheduled tenant pass failure records', () => {
 				}
 			});
 		} finally {
-			warn.mockRestore();
-			error.mockRestore();
+			capture.stop();
 		}
-		const warningLogs = warnings.map(([message, details]) => [
-			message,
-			warningDetailShape(details)
-		]);
+		const warnings = capture.logs
+			.filter((entry) => entry.level === 'warning')
+			.map((entry) => [entry.message, warningDetailShape(entry.properties)]);
+		const errors = capture.logs
+			.filter((entry) => entry.level === 'error')
+			.map((entry) => [entry.message, entry.properties]);
 
 		expect({
 			actions,
-			warnings: warningLogs,
+			warnings,
 			errors
 		}).toStrictEqual({
 			actions: [
@@ -530,6 +524,7 @@ describe('scheduled tenant pass failure records', () => {
 				[
 					'maintenance queue message rejected',
 					{
+						worker: 'scheduled',
 						queue: 'cupboard-maintenance',
 						messageId: 'invalid',
 						attempts: 1,
@@ -559,6 +554,7 @@ describe('scheduled tenant pass failure records', () => {
 				[
 					'maintenance queue message retrying',
 					{
+						worker: 'scheduled',
 						queue: 'cupboard-maintenance',
 						messageId: 'retry',
 						attempts: 1,
@@ -584,7 +580,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		await runWithClock('2026-01-01T00:00:00.000Z', () =>
-			runCronSweep(env, 10, (_env, tenant) => {
+			runCronSweep(rootLogger(), env, 10, (_logger, _env, tenant) => {
 				seen.push(tenant);
 
 				return Promise.resolve();
@@ -619,7 +615,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		await runWithClock('2026-01-01T00:00:00.000Z', () =>
-			runCronSweep(env, 10, (_env, id) => {
+			runCronSweep(rootLogger(), env, 10, (_logger, _env, id) => {
 				seen.push(id);
 
 				return Promise.resolve();
@@ -663,7 +659,7 @@ describe('scheduled tenant pass failure records', () => {
 
 		const seen: string[] = [];
 		await runWithClock('2026-01-01T00:00:00.000Z', () =>
-			runCronSweep(env, 10, (_env, id) => {
+			runCronSweep(rootLogger(), env, 10, (_logger, _env, id) => {
 				seen.push(id);
 
 				return Promise.resolve();
@@ -684,7 +680,7 @@ describe('scheduled tenant pass failure records', () => {
 		const firstFailure = new Error('maintenance failed');
 		const error = await runWithClock('2026-01-02T00:00:00.000Z', async () => {
 			try {
-				await runCronSweep(env, 2, (_env, id) => {
+				await runCronSweep(rootLogger(), env, 2, (_logger, _env, id) => {
 					seen.push(id);
 
 					if (id === 'acme') {
@@ -706,7 +702,7 @@ describe('scheduled tenant pass failure records', () => {
 		};
 
 		await runWithClock('2026-01-03T00:00:00.000Z', () =>
-			runCronSweep(env, 1, () => Promise.resolve())
+			runCronSweep(rootLogger(), env, 1, () => Promise.resolve())
 		);
 		const afterSuccess = await tenantMaintenanceFailureRow(
 			'acme',
@@ -764,7 +760,7 @@ describe('scheduled tenant pass failure records', () => {
 		let maxActive = 0;
 		const seen: string[] = [];
 
-		await runCronSweep(env, 5, async (_env, id) => {
+		await runCronSweep(rootLogger(), env, 5, async (_logger, _env, id) => {
 			seen.push(id);
 			active += 1;
 			maxActive = Math.max(maxActive, active);
@@ -788,15 +784,22 @@ describe('scheduled tenant pass failure records', () => {
 		const firstFailure = new TypeError('offboard failed');
 		const error = await runWithClock('2026-01-02T00:00:00.000Z', async () => {
 			try {
-				await runOffboardSweep(env, 2, 1, 1, (_env, id) => {
-					seen.push(id);
+				await runOffboardSweep(
+					rootLogger(),
+					env,
+					2,
+					1,
+					1,
+					(_logger, _env, id) => {
+						seen.push(id);
 
-					if (id === 'acme') {
-						return Promise.reject(firstFailure);
+						if (id === 'acme') {
+							return Promise.reject(firstFailure);
+						}
+
+						return Promise.resolve();
 					}
-
-					return Promise.resolve();
-				});
+				);
 				return;
 			} catch (error_: unknown) {
 				return error_;
@@ -808,7 +811,7 @@ describe('scheduled tenant pass failure records', () => {
 		};
 
 		await runWithClock('2026-01-03T00:00:00.000Z', () =>
-			runOffboardSweep(env, 1, 1, 1, () => Promise.resolve())
+			runOffboardSweep(rootLogger(), env, 1, 1, 1, () => Promise.resolve())
 		);
 		const afterSuccess = await tenantMaintenanceFailureRow('acme', 'offboard');
 

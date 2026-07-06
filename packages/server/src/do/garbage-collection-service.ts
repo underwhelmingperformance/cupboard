@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import {
 	referencesSchema,
 	type StorePathHash,
@@ -331,7 +332,10 @@ export class GarbageCollectionService {
 	// its `staging/<pushId>/` credential beyond what it negotiated, and the
 	// remnants of pushes whose rows have already been reaped. Bounded per run and
 	// gated on an upload-grace age so an in-flight upload survives.
-	private async reclaimOrphanStaging(now: Date): Promise<number> {
+	private async reclaimOrphanStaging(
+		logger: Logger,
+		now: Date
+	): Promise<number> {
 		const orphanBefore = now.getTime() - orphanStagingGraceMs;
 		const { keys, wasCapped } =
 			await this.collectOrphanStagingKeys(orphanBefore);
@@ -339,19 +343,24 @@ export class GarbageCollectionService {
 		await deleteObjects(this.context.env.BLOBS, keys);
 
 		if (wasCapped) {
-			console.warn(
-				`orphan staging sweep reclaimed ${String(keys.length)} objects and hit the per-run cap; the next sweep and the bucket lifecycle rule reclaim the rest`
-			);
+			logger.warn('orphan staging sweep hit the per-run cap', {
+				reclaimed: keys.length
+			});
 		}
 
 		return keys.length;
 	}
 
 	async collectGarbage(
+		logger: Logger,
 		cache?: string,
 		purgeOrigin?: string,
 		sweepLimit: number = maxPathsSweptPerRun
 	): Promise<GarbageCollectionOutcome> {
+		const log = logger.with({
+			job: 'garbage-collection',
+			...(cache !== undefined && { cache })
+		});
 		const startedAt = new Date();
 		const now = startedAt.toISOString();
 
@@ -453,7 +462,10 @@ export class GarbageCollectionService {
 		// critical section. It reconciles against the live pending rows by their
 		// keys, not a snapshot taken earlier, and skips anything within the upload
 		// grace, so a row created while it runs is never mistaken for an orphan.
-		const orphanStagingDeleted = await this.reclaimOrphanStaging(startedAt);
+		const orphanStagingDeleted = await this.reclaimOrphanStaging(
+			log,
+			startedAt
+		);
 
 		return { ...reaped, orphanStagingDeleted };
 	}

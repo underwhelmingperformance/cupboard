@@ -1,7 +1,8 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
@@ -129,27 +130,21 @@ describe('db cost meter', () => {
 	it('logs the row cost of a request handled through the entrypoint', async () => {
 		const token = await initialise();
 
-		const costFields: unknown[] = [];
-		const logSpy = vi
-			.spyOn(console, 'log')
-			.mockImplementation((message: unknown, fields: unknown) => {
-				if (message === 'request finished') {
-					costFields.push(fields);
-				}
-			});
+		const capture = startCapture();
 
 		try {
 			await negotiateUploads(token, [uploadMetadata({ fileSize: 1 })]);
 		} finally {
-			logSpy.mockRestore();
+			capture.stop();
 		}
 
 		// The meter is integrated into the entrypoint, not just exercised in
 		// isolation, so a real request emits one cost line reporting the exact rows
 		// the request moved. A mis-count that stayed positive would slip past a
 		// `> 0` assertion.
-		const negotiate = costFields
-			.map((fields) => costLineSchema.parse(fields))
+		const negotiate = capture.logs
+			.filter((entry) => entry.message === 'request finished')
+			.map((entry) => costLineSchema.parse(entry.properties))
 			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
 
 		expect({
@@ -166,14 +161,7 @@ describe('db cost meter', () => {
 	it('logs the cost line with a 500 status when the request fails', async () => {
 		const token = await initialise();
 
-		const costFields: unknown[] = [];
-		const logSpy = vi
-			.spyOn(console, 'log')
-			.mockImplementation((message: unknown, fields: unknown) => {
-				if (message === 'request finished') {
-					costFields.push(fields);
-				}
-			});
+		const capture = startCapture();
 
 		try {
 			await runInDurableObject(currentServer(), async (instance) => {
@@ -189,14 +177,15 @@ describe('db cost meter', () => {
 				return negotiateViaInstance(instance, token, 'a'.repeat(32));
 			});
 		} finally {
-			logSpy.mockRestore();
+			capture.stop();
 		}
 
 		// A failed request still emits its cost line: the meter settles in a `finally`,
 		// and `fetch` reports the 500 the failed body resolved to with the rows it had
 		// already read.
-		const negotiate = costFields
-			.map((fields) => costLineSchema.parse(fields))
+		const negotiate = capture.logs
+			.filter((entry) => entry.message === 'request finished')
+			.map((entry) => costLineSchema.parse(entry.properties))
 			.find((cost) => cost.method === 'POST' && cost.path.endsWith('/uploads'));
 
 		expect({
