@@ -314,6 +314,72 @@ describe('background verification', () => {
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
 	});
 
+	it('does not falsely restore a named-cache object the cursor sorts after', async () => {
+		await useTestServer('verify-crossorder');
+		const token = await initialise();
+
+		// A default-cache hash that sorts after a named cache's name, so in R2 key
+		// order the named-cache object (`narinfo/aa/…`) sorts before the default one
+		// (`narinfo/zzz…`), the opposite of the (cache, storePathHash) scan order.
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: 'z'.repeat(32),
+				name: 'z'
+			})
+		);
+		await pushPath(
+			token,
+			uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: 'b'.repeat(32),
+				name: 'b'
+			}),
+			'aa'
+		);
+
+		// One row per batch: the second batch (the named cache) resumes after the
+		// default 'z' cursor, whose key sorts after the named-cache object.
+		const first = await runVerify(token, 1);
+		const second = await runVerify(token, 1);
+
+		expect({
+			first: first.narInfoObjectsRestored,
+			second: second.narInfoObjectsRestored
+		}).toStrictEqual({ first: 0, second: 0 });
+	});
+
+	it('falls back to per-row heads when the narinfo object listing fails', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+
+		await pushPath(token, metadata);
+		await env.BLOBS.delete(
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+		);
+
+		// The bulk narinfo-object listing fails, so the reconcile must fall back to a
+		// per-row head and still restore the missing object, rather than aborting.
+		const list = vi
+			.spyOn(env.BLOBS, 'list')
+			.mockRejectedValue(new Error('r2 list unavailable'));
+
+		try {
+			const report = await runVerify(token);
+			const restored = await env.BLOBS.head(
+				narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+			);
+
+			expect({
+				restored: restored !== null,
+				narInfoObjectsRestored: report.narInfoObjectsRestored
+			}).toStrictEqual({ restored: true, narInfoObjectsRestored: 1 });
+		} finally {
+			list.mockRestore();
+		}
+	});
+
 	afterEach(() => {
 		vi.useRealTimers();
 	});
