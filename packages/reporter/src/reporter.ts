@@ -170,11 +170,28 @@ function createJsonReporter(
 		async phase(label, body) {
 			const facts: Record<string, string> = {};
 			const startedAt = now();
+			// Measured from the start, so a phase short enough to finish within one
+			// interval emits no interim event, only the final summary.
+			let lastEmitAt = startedAt;
 
 			try {
 				const value = await body({
 					fact(factLabel, factValue) {
 						facts[factLabel] = String(factValue);
+
+						const at = now();
+
+						if (at - lastEmitAt < progressIntervalMs) {
+							return;
+						}
+
+						lastEmitAt = at;
+						emit({
+							event: 'progress',
+							label,
+							durationMs: at - startedAt,
+							facts
+						});
 					},
 					warn: emitWarn
 				});

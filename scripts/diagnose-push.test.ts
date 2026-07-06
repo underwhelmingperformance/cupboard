@@ -13,6 +13,7 @@ import {
 	canonicalPath,
 	detectSession,
 	fetchPaged,
+	hasSessionBoundary,
 	mergeBusy,
 	normalisePath,
 	type OperationGroup,
@@ -574,6 +575,76 @@ describe('fetchPaged', () => {
 		]);
 	});
 
+	it('stops the timeframe walk once the collected rows bracket a gap', async () => {
+		// Session mode passes a stop gap: after the second page the collected
+		// timestamps span a gap wider than it, so the trailing session is complete
+		// and the walk stops without asking for the empty third page.
+		let requests = 0;
+		const pages = [
+			[{ timestamp: 1000 }, { timestamp: 950 }],
+			[{ timestamp: 950 }, { timestamp: -2000 }],
+			[]
+		];
+		const query: TelemetryQuery = () => {
+			requests += 1;
+
+			return Promise.resolve({ traces: pages.shift() ?? [] });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'traces',
+			{ from: -10_000, to: 1000 },
+			timestampOf,
+			undefined,
+			noProgress,
+			noSleep,
+			1000
+		);
+
+		expect({ rows, requests }).toStrictEqual({
+			rows: [{ timestamp: 1000 }, { timestamp: 950 }, { timestamp: -2000 }],
+			requests: 2
+		});
+	});
+
+	it('stops the cursor walk once the collected rows bracket a gap', async () => {
+		let requests = 0;
+		const pages = [
+			[
+				{ timestamp: 1000, id: 'd' },
+				{ timestamp: 950, id: 'c' }
+			],
+			[{ timestamp: -2000, id: 'a' }],
+			[]
+		];
+		const query: TelemetryQuery = () => {
+			requests += 1;
+
+			return Promise.resolve({ events: { events: pages.shift() ?? [] } });
+		};
+
+		const rows = await fetchPaged(
+			query,
+			'events',
+			{ from: -10_000, to: 1000 },
+			timestampOf,
+			cursorOf,
+			noProgress,
+			noSleep,
+			1000
+		);
+
+		expect({ rows, requests }).toStrictEqual({
+			rows: [
+				{ timestamp: 1000, id: 'd' },
+				{ timestamp: 950, id: 'c' },
+				{ timestamp: -2000, id: 'a' }
+			],
+			requests: 2
+		});
+	});
+
 	it('steps the bound below the oldest row when the cursor stalls', async () => {
 		// The view refuses to page a dense millisecond: given the offset it keeps
 		// answering the same page, its smallest id never dropping below the
@@ -704,6 +775,17 @@ describe('detectSession', () => {
 			from: 0,
 			to: 1300
 		});
+	});
+});
+
+describe('hasSessionBoundary', () => {
+	it.each([
+		['is false with fewer than two points', [5], false],
+		['is false when every gap is within the limit', [0, 500, 900, 1300], false],
+		['is true when a gap exceeds the limit', [0, 500, 2000], true],
+		['ignores the order of the points', [11_000, 0, 500], true]
+	])('%s', (_label, timestamps, expected) => {
+		expect(hasSessionBoundary(timestamps, 1000)).toBe(expected);
 	});
 });
 
