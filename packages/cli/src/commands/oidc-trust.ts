@@ -303,13 +303,20 @@ export function githubPrAddBody(
 ): OidcTrustAddBody {
 	const cacheTemplate = options.cacheTemplate ?? 'pr-{pr}';
 
+	// Pin the pull-request event so this rule matches only PR tokens. A tenant
+	// often trusts the same repository for several events, a tagged release or a
+	// branch push, with a rule for each. Selection routes a token to a single
+	// rule by its claims, so a PR rule that pinned only the repository ids would
+	// also match a release or push token and could be chosen ahead of the rule
+	// meant for that event.
 	const claims: Record<string, ClaimMatch> = {
 		repository_id: String(identity.repositoryId),
-		repository_owner_id: String(identity.repositoryOwnerId)
+		repository_owner_id: String(identity.repositoryOwnerId),
+		event_name: 'pull_request'
 	};
 
-	// Pinning the workflow is an optional extra restriction; the pull-request
-	// event is already gated by the `{pr}` capture on the bindings below.
+	// Pinning the workflow is an optional extra restriction on top of the event
+	// and the `{pr}` capture on the bindings below.
 	if (options.jobWorkflowRef !== undefined) {
 		claims.job_workflow_ref = jobWorkflowReferenceClaim(options.jobWorkflowRef);
 	}
