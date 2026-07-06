@@ -317,12 +317,9 @@ export const substitutionSchema = z
 		capture: captureSchema.optional(),
 		slug: z.literal(true).optional()
 	})
-	.refine(
-		(value) => !(value.capture !== undefined && value.slug !== undefined),
-		{
-			message: 'a substitution uses at most one of capture or slug'
-		}
-	);
+	.refine((value) => value.capture === undefined || value.slug === undefined, {
+		message: 'a substitution uses at most one of capture or slug'
+	});
 export type Substitution = z.infer<typeof substitutionSchema>;
 
 const substitutionMapSchema = z

@@ -269,7 +269,7 @@ export function createCloudflareApi(
 ): CloudflareApi {
 	const account = { account_id: accountId };
 
-	const hasBucket = async (name: string): Promise<boolean> => {
+	const bucketExists = async (name: string): Promise<boolean> => {
 		const list = await client.r2.buckets.list(account);
 
 		return (list.buckets ?? []).some((bucket) => bucket.name === name);
@@ -286,10 +286,10 @@ export function createCloudflareApi(
 			return accounts;
 		},
 
-		r2BucketExists: hasBucket,
+		r2BucketExists: bucketExists,
 
 		async ensureR2Bucket(name) {
-			if (await hasBucket(name)) {
+			if (await bucketExists(name)) {
 				return;
 			}
 

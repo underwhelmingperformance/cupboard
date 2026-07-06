@@ -636,16 +636,15 @@ export class DeletionQueueService {
 				);
 			});
 
-			let isNarScheduledForDeletion = false;
+			let narScheduledForDeletion = false;
 
 			try {
-				({ narScheduledForDeletion: isNarScheduledForDeletion } =
-					await this.deleteQueuedNarInfo(
-						row.cache,
-						storePathHash,
-						row.generation,
-						origin
-					));
+				({ narScheduledForDeletion } = await this.deleteQueuedNarInfo(
+					row.cache,
+					storePathHash,
+					row.generation,
+					origin
+				));
 			} catch {
 				// the durable queue row remains for GC to retry
 			}
@@ -653,7 +652,7 @@ export class DeletionQueueService {
 			return {
 				storePathHash,
 				deleted: true,
-				narScheduledForDeletion: isNarScheduledForDeletion
+				narScheduledForDeletion
 			};
 		});
 	}

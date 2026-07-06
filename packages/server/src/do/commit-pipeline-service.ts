@@ -378,7 +378,7 @@ export class CommitPipelineService {
 	): boolean {
 		// A null verdict is an inline commit mid-flight; `committing` and
 		// `pending` are sagas the verification pass re-drives.
-		const isAwaiting = or(
+		const awaitingVerdict = or(
 			isNull(schema.pendingUploads.verdict),
 			inArray(schema.pendingUploads.verdict, ['committing', 'pending'])
 		);
@@ -387,7 +387,7 @@ export class CommitPipelineService {
 			eq(schema.pendingUploads.narHash, narHash),
 			ne(schema.pendingUploads.id, uploadId),
 			gte(schema.pendingUploads.expiresAt, nowIso),
-			isAwaiting
+			awaitingVerdict
 		);
 		const rival = this.context.db
 			.select({ id: schema.pendingUploads.id })
