@@ -297,7 +297,7 @@ export class RootTargetsUnavailableError extends ServerHttpError {
 		public readonly targets: readonly string[]
 	) {
 		super(
-			`Cannot activate root: ${String(targets.length)} target(s) are not yet servable`
+			`Cannot set root: ${String(targets.length)} target(s) have no uploaded path`
 		);
 		this.name = 'RootTargetsUnavailableError';
 	}

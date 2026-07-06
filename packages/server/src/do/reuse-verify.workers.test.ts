@@ -9,8 +9,10 @@ import {
 	fetchNarInfo,
 	initialise,
 	markUploadPendingVerification,
+	narInfoGeneration,
 	negotiateUploads,
 	resetTestServer,
+	seedReservedNarInfo,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -70,5 +72,44 @@ describe('deferred reuse verification', () => {
 			firstNarHash: nar.narHash,
 			secondNarHash: nar.narHash
 		});
+	});
+
+	it('reclaims a crashed reuse commit’s reserved row when its canonical object is gone', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('reuse-orphan');
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		await commitPath(token, first, nar);
+
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: 'b'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+		await markUploadPendingVerification(reuse.uploadId);
+
+		// A reuse commit that crashed after reserving second's narinfo row, then the
+		// shared canonical object vanished, so the reuse can never materialise.
+		await seedReservedNarInfo(second, 0);
+		await env.BLOBS.delete(narObjectKey(nar.narHash));
+
+		await currentServer().recordMissingObject(reuse.uploadId);
+
+		// The stranded reserved row is reclaimed, so no root can reference a dead
+		// target and no reconcile pass has to clean it up later.
+		expect(await narInfoGeneration(second.storePathHash)).toBeUndefined();
 	});
 });

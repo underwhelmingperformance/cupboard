@@ -1,31 +1,71 @@
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { eq } from 'drizzle-orm';
+import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { pendingUploads } from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	clearBlobStorage,
+	commitUpload,
+	currentServer,
+	deferFreshUpload,
 	deleteBlobState,
 	expectSingleUploadDecision,
 	initialise,
 	listRoots,
 	markUploadPendingVerification,
 	narBytes,
+	narInfoGeneration,
 	negotiateUploads,
 	pushPath,
 	putNarBytes,
 	resetTestServer,
 	setRoot,
 	testBase,
-	uploadMetadata
+	uploadMetadata,
+	verifiableNar
 } from '../test-support.ts';
 
-// A retention root must never advertise a path that is not yet substitutable.
-// Activation gates each target on the same predicate the read path serves on: the
-// materialised narinfo R2 object exists, repairing a merely-lost object first. A
-// pending or demoted target is rejected, and `present` reflects that same predicate.
+type PendingRow = typeof pendingUploads.$inferSelect;
+
+async function snapshotPendingRow(uploadId: string): Promise<PendingRow> {
+	const row = await runInDurableObject(currentServer(), (_instance, state) =>
+		drizzle(state.storage, { schema: { pendingUploads } })
+			.select()
+			.from(pendingUploads)
+			.where(eq(pendingUploads.id, uploadId))
+			.get()
+	);
+
+	if (row === undefined) {
+		throw new Error(`no pending row for ${uploadId}`);
+	}
+
+	return row;
+}
+
+// Re-plants a cleared pending row as still awaiting its verdict, the state an
+// eviction leaves when the object published but the clear-marker step never ran.
+async function replantStuckPending(row: PendingRow): Promise<void> {
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		drizzle(state.storage, { schema: { pendingUploads } })
+			.insert(pendingUploads)
+			.values({ ...row, verdict: 'pending', claimedAt: undefined })
+			.run();
+	});
+}
+
+// A retention root may reference any target backed by a committed narinfo row,
+// including one still verifying, so a push records retention before the background
+// pass materialises the path. A target with no row at all is rejected. `present`
+// reflects the serve predicate (the materialised narinfo object, repairing a
+// merely-lost one first), so it reads false until the target verifies.
 
 describe('root activation gating', () => {
 	beforeEach(async () => {
@@ -35,7 +75,7 @@ describe('root activation gating', () => {
 		await clearBlobStorage();
 	});
 
-	it('refuses to root a path whose upload is still pending verification', async () => {
+	it('refuses to root a target with no committed narinfo row', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
 		const upload = expectSingleUploadDecision(
@@ -43,7 +83,8 @@ describe('root activation gating', () => {
 			metadata
 		);
 		await putNarBytes(upload.r2Key);
-		// Deferred to the background pass: staged and pending, never yet servable.
+		// Negotiated and staged, but never committed, so no narinfo row backs the
+		// path: a root cannot reference it.
 		await markUploadPendingVerification(upload.uploadId);
 
 		const response = await authorisedFetch(
@@ -60,6 +101,135 @@ describe('root activation gating', () => {
 		expect({ status: response.status, roots }).toStrictEqual({
 			status: StatusCodes.CONFLICT,
 			roots: []
+		});
+	});
+
+	it('roots a still-verifying deferred commit, present once it materialises', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+		// A deferred commit reserves the narinfo row before verification, so the
+		// root binds now and the target reads `present: false` until the pass
+		// materialises the object.
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+
+		const reserved = await setRoot(token, {
+			name: 'main',
+			targets: [metadata.storePath]
+		});
+
+		await currentServer().runVerification();
+		const { roots: activated } = await listRoots(token);
+
+		const target = {
+			storePathHash: metadata.storePathHash,
+			storePath: metadata.storePath
+		};
+		expect({
+			reserved: reserved.targets,
+			activated: activated.at(0)?.targets
+		}).toStrictEqual({
+			reserved: [{ ...target, present: false }],
+			activated: [{ ...target, present: true }]
+		});
+	});
+
+	it('keeps a rooted still-verifying path through a GC sweep', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
+
+		// A sweep landing in the verify window must spare the reserved,
+		// still-unmaterialised row: the root reaches it and its upload is in flight.
+		// This is the regression for a rooted path being collected before it served.
+		await currentServer().runGarbageCollection();
+		await currentServer().runVerification();
+
+		const served = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
+		);
+		const { roots } = await listRoots(token);
+
+		expect({
+			served: served !== null,
+			present: roots.at(0)?.targets.at(0)?.present
+		}).toStrictEqual({ served: true, present: true });
+	});
+
+	it('prunes a rooted target whose verification fails', async () => {
+		const token = await initialise();
+		const good = await verifiableNar('prune-good');
+		const wrong = await verifiableNar('prune-wrong');
+		// Bytes whose checksum matches the declared fileHash but which decompress to a
+		// different NAR than the declared narHash: a background mismatch.
+		const metadata = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			narHash: good.narHash,
+			narSize: good.narSize,
+			fileHash: wrong.fileHash,
+			fileSize: wrong.narBytes.byteLength
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key, wrong);
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
+
+		// The NAR-hash check fails, so the target can never become servable and is
+		// dropped from the root.
+		await currentServer().runVerification();
+
+		const { roots } = await listRoots(token);
+		expect(roots.at(0)?.targets ?? []).toStrictEqual([]);
+	});
+
+	it('keeps a rooted target when a straggling mismatch loses to its own commit', async () => {
+		const token = await initialise();
+		const upload = await deferFreshUpload(token, 'straggler', 'c'.repeat(32));
+		const staged = await snapshotPendingRow(upload.uploadId);
+
+		await currentServer().runVerification();
+		await setRoot(token, {
+			name: 'main',
+			targets: [upload.metadata.storePath]
+		});
+
+		// Delete only the narinfo object, so the already-committed short-circuit
+		// (which needs the object present) does not fire; the reference edge still
+		// proves the path committed. A straggling mismatch verdict on the re-planted
+		// row must not retire the row's root, since these bytes are servable.
+		await env.BLOBS.delete(
+			narInfoObjectKey(fixtureTenant, upload.metadata.storePathHash)
+		);
+		await replantStuckPending(staged);
+
+		await currentServer().recordVerification(upload.uploadId, {
+			ok: false,
+			reason: 'nar-hash-mismatch',
+			actualNarHash: upload.nar.narHash
+		});
+
+		const { roots } = await listRoots(token);
+		expect({
+			generation: await narInfoGeneration(upload.metadata.storePathHash),
+			targets: (roots.at(0)?.targets ?? []).map(
+				(target) => target.storePathHash
+			)
+		}).toStrictEqual({
+			generation: 0,
+			targets: [upload.metadata.storePathHash]
 		});
 	});
 

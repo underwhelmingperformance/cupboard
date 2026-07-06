@@ -172,7 +172,14 @@ export class VerificationService {
 		private readonly commitPipeline: CommitPipelineService,
 		private readonly deletionQueue: DeletionQueueService,
 		private readonly narInfoObjects: NarInfoObjectsService,
-		private readonly uploadState: UploadStateService
+		private readonly uploadState: UploadStateService,
+		// Drops a store path from every retention root when it fails verification, so
+		// a root set at commit over a still-verifying target does not keep a dead
+		// reference. Injected because the roots service is constructed after this one.
+		private readonly pruneRetentionTargets: (
+			cache: string,
+			storePathHash: StorePathHash
+		) => void
 	) {}
 
 	// Routes an upload's terminal verdict to the commit session waiting on it. The
@@ -421,14 +428,17 @@ export class VerificationService {
 	// Reclaims the reserved row a deferred upload never made servable and records its
 	// terminal verdict, so neither a stranded row nor a stuck marker survives. The
 	// verdict is `mismatch` for a failed NAR-hash check or `over-quota` for a quota
-	// rejection.
+	// rejection. If the reclaim finds the generation already committed (its edge
+	// exists, because a concurrent pass settled these bytes servable), this is not a
+	// failure: leave the row, the root and the waiter to that committer, so a
+	// straggling failure verdict never retires a path that serves.
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {
-		await this.context.criticalSection(() =>
+		const wasReclaimed = await this.context.criticalSection(() =>
 			this.commitPipeline.reclaimReservedRow(
 				pending.cache,
 				metadata.storePathHash,
@@ -436,12 +446,18 @@ export class VerificationService {
 				metadata.narHash
 			)
 		);
+
+		if (!wasReclaimed) {
+			return;
+		}
+
 		await this.uploadState.markUploadTerminal(
 			pending.id,
 			pending.r2Key,
 			metadata.narHash,
 			verdict
 		);
+		this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 		this.notifyWaiters(pending.id, pending.sessionId, verdict);
 	}
 
@@ -997,11 +1013,30 @@ export class VerificationService {
 		);
 
 		if (pending.r2Key === narObjectKey(metadata.narHash)) {
+			// A reuse commit that crashed after reserving its narinfo row leaves that
+			// row behind; with the canonical object gone it can never materialise, and
+			// a root may already reference it (as not-present). Reclaim it before
+			// dropping the marker; the edge check spares a row a concurrent pass has
+			// since committed.
+			const reserved = this.narInfoRow(pending.cache, metadata.storePathHash);
+
+			if (reserved?.narHash === metadata.narHash) {
+				await this.context.criticalSection(() =>
+					this.commitPipeline.reclaimReservedRow(
+						pending.cache,
+						metadata.storePathHash,
+						reserved.generation,
+						metadata.narHash
+					)
+				);
+			}
+
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash
 			);
+			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			return;
 		}
@@ -1012,6 +1047,7 @@ export class VerificationService {
 			metadata.narHash,
 			'mismatch'
 		);
+		this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 		this.notifyWaiters(pending.id, pending.sessionId, 'mismatch');
 	}
 }
