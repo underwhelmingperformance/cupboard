@@ -6,7 +6,7 @@ import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { pendingUploads } from '../db/schema.ts';
+import { pendingUploads, retentionRootTargets } from '../db/schema.ts';
 import { narInfoObjectKey } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -27,6 +27,7 @@ import {
 	putNarBytes,
 	resetTestServer,
 	setRoot,
+	suspendTenant,
 	testBase,
 	uploadMetadata,
 	verifiableNar
@@ -231,6 +232,36 @@ describe('root activation gating', () => {
 			generation: 0,
 			targets: [upload.metadata.storePathHash]
 		});
+	});
+
+	it('prunes a rooted pending path whose tenant goes inactive before verification', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'd'.repeat(32)
+		});
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId, DEFAULT_CACHE, { wait: false });
+		await setRoot(token, { name: 'main', targets: [metadata.storePath] });
+
+		// The tenant is suspended before the deferred path verifies, so it can never
+		// materialise; its root target must be pruned, not left dangling.
+		await suspendTenant(fixtureTenant);
+		await currentServer().runVerification();
+
+		const targets = await runInDurableObject(
+			currentServer(),
+			(_instance, state) =>
+				drizzle(state.storage, { schema: { retentionRootTargets } })
+					.select({ storePathHash: retentionRootTargets.storePathHash })
+					.from(retentionRootTargets)
+					.all()
+		);
+		expect(targets).toStrictEqual([]);
 	});
 
 	it('accepts a root whose narinfo object is missing but repairable', async () => {

@@ -432,7 +432,7 @@ export class VerificationService {
 		// unreferenced, uncharged object for it. The waiter hears `absent`, the
 		// same answer an inline commit's writes-stopped rejection amounts to.
 		if (outcome.kind === 'tenant-inactive') {
-			await this.context.criticalSection(() =>
+			const wasReclaimed = await this.context.criticalSection(() =>
 				this.commitPipeline.reclaimReservedRow(
 					pending.cache,
 					metadata.storePathHash,
@@ -440,11 +440,21 @@ export class VerificationService {
 					metadata.narHash
 				)
 			);
+
+			// A concurrent pass committed this generation before the tenant went
+			// inactive, so it serves; finish the bookkeeping without pruning.
+			if (!wasReclaimed) {
+				this.uploadState.clearPendingUpload(pending.id);
+				this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+				return;
+			}
+
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash
 			);
+			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			return;
 		}
