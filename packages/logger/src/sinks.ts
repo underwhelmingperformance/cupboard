@@ -32,8 +32,70 @@ function messageOf(record: LogRecord): string {
 		.join('');
 }
 
-// Explodes an `error` field into indexed sub-fields, so its name, message and
-// stack are each queryable in Workers Logs.
+// A non-Error cause rendered for the log without risking a `[object Object]`.
+function renderCause(value: unknown): string {
+	if (typeof value === 'string') {
+		return value;
+	}
+
+	if (
+		typeof value === 'number' ||
+		typeof value === 'boolean' ||
+		typeof value === 'bigint'
+	) {
+		return String(value);
+	}
+
+	if (typeof value === 'object' && value !== null) {
+		try {
+			return JSON.stringify(value);
+		} catch {
+			return Object.prototype.toString.call(value);
+		}
+	}
+
+	return Object.prototype.toString.call(value);
+}
+
+// Walks an error's `cause` chain, so a wrapped error surfaces the underlying
+// fault rather than only its wrapper. A driver such as drizzle rethrows a
+// D1 failure as `Failed query: …` with the real error on `cause`, so without this
+// the message that actually explains the failure never reaches the logs. Bounded
+// to guard against a cyclic chain.
+function causeChain(
+	error: Error
+): { readonly message: string; readonly stack?: string } | undefined {
+	const messages: string[] = [];
+	const seen = new Set<unknown>([error]);
+	let current: unknown = error.cause;
+	let root: Error | undefined;
+
+	while (current !== undefined && !seen.has(current) && messages.length < 8) {
+		seen.add(current);
+
+		if (current instanceof Error) {
+			messages.push(`${current.name}: ${current.message}`);
+			root = current;
+			current = current.cause;
+			continue;
+		}
+
+		messages.push(renderCause(current));
+		current = undefined;
+	}
+
+	if (messages.length === 0) {
+		return undefined;
+	}
+
+	return {
+		message: messages.join(' <- '),
+		...(root?.stack !== undefined && { stack: root.stack })
+	};
+}
+
+// Explodes an `error` field into indexed sub-fields, so its name, message, stack
+// and underlying cause are each queryable in Workers Logs.
 function expandError(
 	properties: Record<string, unknown>
 ): Record<string, unknown> {
@@ -44,11 +106,17 @@ function expandError(
 	const { error, ...rest } = properties;
 
 	if (error instanceof Error) {
+		const cause = causeChain(error);
+
 		return {
 			...rest,
 			errorName: error.name,
 			errorMessage: error.message,
-			...(error.stack !== undefined && { errorStack: error.stack })
+			...(error.stack !== undefined && { errorStack: error.stack }),
+			...(cause !== undefined && {
+				errorCause: cause.message,
+				...(cause.stack !== undefined && { errorCauseStack: cause.stack })
+			})
 		};
 	}
 
