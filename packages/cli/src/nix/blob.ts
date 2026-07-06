@@ -40,8 +40,7 @@ class HashingByteTransform {
 	// `createHash` can be finalised only once, so the result is cached: a stream
 	// whose hash is read more than once (a fake, or a retry) gets the same value.
 	private finalised:
-		| { readonly hash: NixSha256Hash; readonly size: number }
-		| undefined;
+		{ readonly hash: NixSha256Hash; readonly size: number } | undefined;
 
 	readonly stream: TransformStream<Uint8Array, Uint8Array>;
 

@@ -102,21 +102,19 @@ export const narInfoSchema = z
 		CA: optionalText,
 		Sig: z.array(lineScalar).default([])
 	})
-	.transform(
-		(fields): NarInfoFields => ({
-			storePath: fields.StorePath,
-			url: fields.URL,
-			compression: fields.Compression,
-			fileHash: fields.FileHash,
-			fileSize: fields.FileSize,
-			narHash: fields.NarHash,
-			narSize: fields.NarSize,
-			references: fields.References,
-			deriver: fields.Deriver,
-			ca: fields.CA,
-			sigs: fields.Sig
-		})
-	);
+	.transform((fields): NarInfoFields => ({
+		storePath: fields.StorePath,
+		url: fields.URL,
+		compression: fields.Compression,
+		fileHash: fields.FileHash,
+		fileSize: fields.FileSize,
+		narHash: fields.NarHash,
+		narSize: fields.NarSize,
+		references: fields.References,
+		deriver: fields.Deriver,
+		ca: fields.CA,
+		sigs: fields.Sig
+	}));
 
 export function parseNarInfo(source: string): NarInfo {
 	return NarInfo.fromFields(narInfoSchema.parse(parseFields(source)));

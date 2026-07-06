@@ -94,34 +94,19 @@ describe('attestation CAS lifecycle', () => {
 		function putLosingConditional(
 			objectKey: string,
 			value:
-				| ReadableStream
-				| ArrayBuffer
-				| ArrayBufferView
-				| string
-				| null
-				| Blob,
+				ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob,
 			options: R2PutOptions & { onlyIf: R2Conditional | Headers }
 		): Promise<R2Object | null>;
 		function putLosingConditional(
 			objectKey: string,
 			value:
-				| ReadableStream
-				| ArrayBuffer
-				| ArrayBufferView
-				| string
-				| null
-				| Blob,
+				ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob,
 			options?: R2PutOptions
 		): Promise<R2Object>;
 		function putLosingConditional(
 			objectKey: string,
 			value:
-				| ReadableStream
-				| ArrayBuffer
-				| ArrayBufferView
-				| string
-				| null
-				| Blob,
+				ReadableStream | ArrayBuffer | ArrayBufferView | string | null | Blob,
 			options?: R2PutOptions
 		): Promise<R2Object | null> {
 			putAttempts.push({

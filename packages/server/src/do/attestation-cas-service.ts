@@ -32,9 +32,7 @@ export interface AttestationReference {
 }
 
 export type AttestationReferenceOutcome =
-	| 'referenced'
-	| 'already-present'
-	| 'over-quota';
+	'referenced' | 'already-present' | 'over-quota';
 
 export class AttestationCasService {
 	constructor(private readonly context: ServerContext) {}

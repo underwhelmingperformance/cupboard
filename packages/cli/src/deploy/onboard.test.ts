@@ -115,9 +115,9 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 			}
 
 			const choice = z
-				.custom<
-					(typeof entries)[number]['value']
-				>((value) => value === scripted)
+				.custom<(typeof entries)[number]['value']>(
+					(value) => value === scripted
+				)
 				.parse(entries.find((entry) => entry.value === scripted)?.value);
 
 			return Promise.resolve(choice);

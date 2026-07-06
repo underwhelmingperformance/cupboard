@@ -152,7 +152,7 @@ export class CupboardClient {
 		const url = this.resolve('/token');
 		const body = new URLSearchParams(form).toString();
 
-		for (let retries = 0; ; ) {
+		for (let retries = 0; ;) {
 			throwIfAborted(this.signal);
 
 			let response: Response;

@@ -316,8 +316,7 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		const objectKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash);
 		const deleteObject = env.BLOBS.delete.bind(env.BLOBS);
 		let edgesAtObjectDelete:
-			| Awaited<ReturnType<typeof blobReferenceRows>>
-			| undefined;
+			Awaited<ReturnType<typeof blobReferenceRows>> | undefined;
 		const deleteWithSnapshot: typeof env.BLOBS.delete = async (key) => {
 			if (key === objectKey) {
 				edgesAtObjectDelete = await blobReferenceRows();

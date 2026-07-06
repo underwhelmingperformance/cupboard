@@ -1,7 +1,5 @@
 export type ByteSource =
-	| ReadableStream<Uint8Array>
-	| Iterable<Uint8Array>
-	| AsyncIterable<Uint8Array>;
+	ReadableStream<Uint8Array> | Iterable<Uint8Array> | AsyncIterable<Uint8Array>;
 
 export function byteStream(source: ByteSource): ReadableStream<Uint8Array> {
 	if (source instanceof ReadableStream) {

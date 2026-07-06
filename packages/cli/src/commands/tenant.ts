@@ -93,8 +93,7 @@ export function parseQuotaBytes(value: string): number {
 
 interface ReadCredentialSelection {
 	readonly read:
-		| undefined
-		| { readonly user: string; readonly password: string };
+		undefined | { readonly user: string; readonly password: string };
 	readonly generatedPassword: string | undefined;
 }
 

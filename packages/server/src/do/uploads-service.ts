@@ -121,8 +121,7 @@ export class UploadsService {
 		const now = new Date();
 		const expiresAt = new Date(now.getTime() + uploadTtlMs);
 		const pendingMetadata:
-			| ParsedUploadPathNegotiation
-			| ParsedUploadPathMetadata =
+			ParsedUploadPathNegotiation | ParsedUploadPathMetadata =
 			existingBlob === undefined
 				? metadata
 				: {

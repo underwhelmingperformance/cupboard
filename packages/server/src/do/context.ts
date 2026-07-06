@@ -52,8 +52,7 @@ export type SchemaDatabase = DrizzleSqliteDODatabase<typeof schema>;
 // Either the DO database or a transaction handle from db.transaction(...); both
 // expose the same query builder, so writes can be parameterised over the handle.
 export type SchemaWriter =
-	| SchemaDatabase
-	| Parameters<Parameters<SchemaDatabase['transaction']>[0]>[0];
+	SchemaDatabase | Parameters<Parameters<SchemaDatabase['transaction']>[0]>[0];
 
 // The owner's admin trust rule is seeded under a fixed id from deploy config;
 // the admin CRUD uses generated ids, so it never collides with this one.
