@@ -1,3 +1,5 @@
+import type { Logger } from '@cupboard/logger';
+
 import type { AccessClaims } from '../auth/auth.ts';
 import type { AttestationsService } from '../do/attestations-service.ts';
 import type { AuthKeysService } from '../do/auth-keys-service.ts';
@@ -52,4 +54,5 @@ export interface TenantRpcServices {
 export interface TenantOrpcContext {
 	readonly request: Request;
 	readonly services: TenantRpcServices;
+	readonly logger: Logger;
 }

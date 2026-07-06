@@ -1,3 +1,4 @@
+import { startCapture } from '@cupboard/logger/testing';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -112,20 +113,13 @@ describe('orphan staging reconciliation', () => {
 			)
 		);
 
-		const warnings: string[] = [];
-		const warnSpy = vi
-			.spyOn(console, 'warn')
-			.mockImplementation((message: unknown) => {
-				if (typeof message === 'string') {
-					warnings.push(message);
-				}
-			});
+		const capture = startCapture();
 
 		let result;
 		try {
 			result = await runGcResult();
 		} finally {
-			warnSpy.mockRestore();
+			capture.stop();
 		}
 
 		const remaining = await env.BLOBS.list({ prefix: 'staging/flood/' });
@@ -133,7 +127,9 @@ describe('orphan staging reconciliation', () => {
 		expect({
 			orphanStagingDeleted: result.orphanStagingDeleted,
 			remaining: remaining.objects.length,
-			warnedAboutCap: warnings.some((line) => line.includes('per-run cap'))
+			warnedAboutCap: capture.logs.some(
+				(entry) => entry.message === 'orphan staging sweep hit the per-run cap'
+			)
 		}).toStrictEqual({
 			orphanStagingDeleted: perRunCap,
 			remaining: total - perRunCap,

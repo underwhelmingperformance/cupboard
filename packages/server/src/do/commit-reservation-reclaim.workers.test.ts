@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -103,7 +104,7 @@ describe('dead reservation reclaim at commit', () => {
 			let didFail = false;
 
 			try {
-				await pipeline.commit('', doomed.uploadId);
+				await pipeline.commit(rootLogger(), '', doomed.uploadId);
 			} catch {
 				didFail = true;
 			}
@@ -131,7 +132,7 @@ describe('dead reservation reclaim at commit', () => {
 			retried
 		);
 		const outcome = await runInDurableObject(currentServer(), (instance) =>
-			pipelineFor(instance.context).commit('', fresh.uploadId)
+			pipelineFor(instance.context).commit(rootLogger(), '', fresh.uploadId)
 		);
 
 		expect(outcome).toStrictEqual({

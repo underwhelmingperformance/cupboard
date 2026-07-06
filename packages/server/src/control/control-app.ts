@@ -1,7 +1,9 @@
+import { type Logger } from '@cupboard/logger';
 import { Hono } from 'hono';
 
 import { serverErrorHandler } from '../http/error-response.ts';
 import { notFoundResponse } from '../http/http.ts';
+import { loggerMiddleware } from '../observability/logging.ts';
 import { controlOrpcHandler } from '../orpc/handler.ts';
 
 import {
@@ -13,6 +15,9 @@ import { handleSignup } from './signup.ts';
 
 interface ControlHonoEnv {
 	Bindings: Env;
+	Variables: {
+		logger: Logger;
+	};
 }
 
 // The bare-host control surface: the control plane's own OAuth issuer, entirely
@@ -22,6 +27,10 @@ function buildControlApp() {
 	const app = new Hono<ControlHonoEnv>();
 	app.onError(serverErrorHandler).notFound(() => notFoundResponse());
 
+	// Seed the request logger before any control route runs, so a fault raised in
+	// the handlers or the error handler is logged with the request's fields.
+	app.use(loggerMiddleware);
+
 	// The admin procedures declared in @cupboard/protocol/contract, served under
 	// the /control prefix. Their responses carry admin state, so they are never
 	// cached.
@@ -30,7 +39,11 @@ function buildControlApp() {
 			context.req.raw,
 			{
 				prefix: '/control',
-				context: { request: context.req.raw, env: context.env }
+				context: {
+					request: context.req.raw,
+					env: context.env,
+					logger: context.get('logger')
+				}
 			}
 		);
 

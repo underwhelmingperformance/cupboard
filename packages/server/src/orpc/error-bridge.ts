@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import { ORPCError } from '@orpc/server';
 import { StatusCodes } from 'http-status-codes';
 
@@ -24,11 +25,11 @@ const codeByStatus: Record<number, string> = {
  * typed); any other ServerHttpError keeps its status and message under the
  * matching generic code. An ORPCError (a defined contract error or an auth
  * rejection) passes through untouched. Anything else is an unexpected fault
- * oRPC will mask as a context-free 500, so it is logged with the request's ray
- * first, the way the wire routes' unmapped-error handler does, before being
- * returned unchanged for the handler's own 500 path.
+ * oRPC will mask as a context-free 500, so it is logged (through the request
+ * logger, which already carries the ray) the way the wire routes' unmapped-error
+ * handler does, before being returned unchanged for the handler's own 500 path.
  */
-export function bridgedError(error: unknown, request?: Request): unknown {
+export function bridgedError(logger: Logger, error: unknown): unknown {
 	if (error instanceof CacheNotEmptyError) {
 		return new ORPCError('CACHE_NOT_EMPTY', {
 			status: error.status,
@@ -48,8 +49,7 @@ export function bridgedError(error: unknown, request?: Request): unknown {
 		return error;
 	}
 
-	const ray = request?.headers.get('cf-ray') ?? undefined;
-	console.error('Unhandled server error', { ray, error });
+	logger.error('unhandled server error', { error });
 
 	return error;
 }

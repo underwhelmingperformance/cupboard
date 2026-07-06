@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
 	type Sha256HexDigest,
@@ -369,6 +370,7 @@ export class BlobReaperService {
 	// tenant, and returns the tenants whose routing failed. A failed tenant leaves
 	// its hashes' facts in place so the next pass re-drives them.
 	private async routeByTenant<T>(
+		log: Logger,
 		byTenant: ReadonlyMap<string, readonly T[]>,
 		send: (tenant: string, items: readonly T[]) => Promise<void>
 	): Promise<ReadonlySet<string>> {
@@ -386,10 +388,10 @@ export class BlobReaperService {
 					// failure: a tenant whose demote routing keeps failing must not be
 					// silently swallowed.
 					failed.add(tenant);
-					console.error('reaper demote routing failed', {
+					log.error('reaper demote routing failed', {
 						tenant,
 						count: items.length,
-						error: error instanceof Error ? error.message : String(error)
+						error
 					});
 				}
 			}
@@ -559,9 +561,11 @@ export class BlobReaperService {
 	// it stays the durable marker that re-drives an interrupted demote on the next
 	// pass. Returns how many shared facts it demoted.
 	async demoteMissingBlobs(
+		logger: Logger,
 		limit: number,
 		cursor: DemoteCursor
 	): Promise<number> {
+		const log = logger.with({ job: 'blob-reaper' });
 		const after = await cursor.read();
 		const batch = await this.demoteBatch(after, limit);
 
@@ -591,6 +595,7 @@ export class BlobReaperService {
 			missing.map((blob) => blob.narHash)
 		);
 		const failedTenants = await this.routeByTenant(
+			log,
 			demotionsByTenant,
 			(tenant, demotions) => this.demoter.demote(tenant, demotions)
 		);
@@ -612,9 +617,11 @@ export class BlobReaperService {
 	}
 
 	async demoteMissingCasObjects(
+		logger: Logger,
 		limit: number,
 		cursor: DemoteCursor
 	): Promise<number> {
+		const log = logger.with({ job: 'blob-reaper' });
 		const after = await cursor.read();
 		const batch = await this.demoteCasBatch(after, limit);
 		const next = batch.length < limit ? '' : (batch.at(-1)?.digest ?? '');
@@ -635,6 +642,7 @@ export class BlobReaperService {
 
 		const demotionsByTenant = await this.casReferencingDemotions(missing);
 		const failedTenants = await this.routeByTenant(
+			log,
 			demotionsByTenant,
 			(tenant, demotions) => this.casDemoter.demote(tenant, demotions)
 		);

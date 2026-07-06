@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	cacheFromSelector,
@@ -28,6 +29,12 @@ import {
 import { serverErrorHandler } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
+import {
+	loggerMiddleware,
+	requestLogger,
+	rootLogger
+} from '../observability/logging.ts';
+import { withSpan } from '../observability/span.ts';
 import { authoriseRequest } from '../orpc/authorise.ts';
 import { type TenantRpcServices } from '../orpc/context.ts';
 import { tenantOrpcHandler } from '../orpc/handler.ts';
@@ -223,6 +230,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private routes(): void {
 		this.app.onError(serverErrorHandler);
 
+		// Seed the request logger before any gate or route runs, so a fault refused
+		// before it matches a route is still logged with the request's fields.
+		this.app.use(loggerMiddleware);
+
 		// An unconfigured Durable Object has no identity to issue, verify or advertise
 		// under, so it serves nothing. This is
 		// input-gated: the control plane's `configure` RPC, which assigns the
@@ -242,7 +253,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			const { matched: isMatched, response } = await tenantOrpcHandler.handle(
 				context.req.raw,
 				{
-					context: { request: context.req.raw, services: this.rpcServices() }
+					context: {
+						request: context.req.raw,
+						services: this.rpcServices(),
+						logger: context.get('logger')
+					}
 				}
 			);
 
@@ -381,6 +396,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// socket stays open: a deferred upload's verdict arrives later over the same
 	// connection, and other ids keep committing. An error fails just this id.
 	private async runSessionCommit(
+		sessionLogger: Logger,
 		socket: WebSocket,
 		cache: string,
 		sessionId: string,
@@ -391,8 +407,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// before this returns still routes here.
 			this.uploadState.attachSession(uploadId, sessionId);
 
-			const outcome = await this.metered('commit', () =>
-				this.afterHotMutation(() => this.commitPipeline.commit(cache, uploadId))
+			const outcome = await this.metered('commit', (logger) =>
+				this.afterHotMutation(() =>
+					this.commitPipeline.commit(logger, cache, uploadId)
+				)
 			);
 
 			if (outcome.kind === 'settled') {
@@ -420,10 +438,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			if (!isKnown) {
 				// The frame carries no detail, so this log line is the only record
 				// of what actually failed.
-				console.error('commit failed with an internal fault', {
-					uploadId,
-					error
-				});
+				sessionLogger
+					.with({ uploadId })
+					.error('commit failed with an internal fault', { error });
 			}
 
 			sendCommitSessionFrame(socket, {
@@ -676,11 +693,20 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// run through here.
 	private metered<T>(
 		method: MeteredMethod,
-		body: () => Promise<T>
+		body: (logger: Logger) => Promise<T>
 	): Promise<T> {
-		return withRequestCost(body, (cost) => {
-			logMethodFinished(method, cost);
-		});
+		// The one place a direct RPC's logger is built; it is threaded into the body
+		// and the cost line, and every downstream call receives it as a parameter.
+		const logger = rootLogger().with({ method });
+
+		return withSpan('tenant-rpc', { method }, () =>
+			withRequestCost(
+				() => body(logger),
+				(cost) => {
+					logMethodFinished(logger, cost);
+				}
+			)
+		);
 	}
 
 	private initialise(): Promise<void> {
@@ -751,7 +777,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// Migration and seeding run before the first request opens its meter, so their
 		// rows land on no per-request line. Surface them once as the cold-start cost.
 		this.context.dbCost.settle();
-		logMethodFinished('initialise', {
+		logMethodFinished(rootLogger().with({ method: 'initialise' }), {
 			rowsRead: this.context.dbCost.rowsRead - rowsReadBefore,
 			rowsWritten: this.context.dbCost.rowsWritten - rowsWrittenBefore
 		});
@@ -765,9 +791,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async sweepGarbageOnce(
 		sweepLimit: number = maxPathsSweptPerRun
 	): Promise<void> {
-		const outcome = await this.metered('garbage-collection', () =>
+		const outcome = await this.metered('garbage-collection', (logger) =>
 			this.withMaintenanceEligibility(() =>
-				this.garbageCollection.collectGarbage(undefined, undefined, sweepLimit)
+				this.garbageCollection.collectGarbage(
+					logger,
+					undefined,
+					undefined,
+					sweepLimit
+				)
 			)
 		);
 
@@ -809,9 +840,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		const origin = await this.reconcileQueue.origin();
 
-		await this.metered('reconcile', () =>
+		await this.metered('reconcile', (logger) =>
 			this.withMaintenanceEligibility(() =>
-				this.verification.reconcileTargets(queued.values().toArray(), origin)
+				this.verification.reconcileTargets(
+					logger,
+					queued.values().toArray(),
+					origin
+				)
 			)
 		);
 
@@ -833,7 +868,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// pass; the request's staleness guard makes that a real send exactly when
 	// the previous one is presumed lost, and its arming starts the next backstop
 	// cycle. NAR decode never runs here: fresh rows wait for the queue consumer.
-	private async resumeVerifyBackstop(): Promise<void> {
+	private async resumeVerifyBackstop(backstopLogger: Logger): Promise<void> {
 		const dueAt = await this.ctx.storage.get<number>(verifyBackstopKey);
 
 		if (dueAt === undefined) {
@@ -862,29 +897,44 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			return;
 		}
 
-		await this.metered('verify-backstop', () =>
+		await this.metered('verify-backstop', (logger) =>
 			this.withMaintenanceEligibility(() =>
-				this.verification.settlePendingReuse(verifyBackstopReuseSettleLimit)
+				this.verification.settlePendingReuse(
+					logger,
+					verifyBackstopReuseSettleLimit
+				)
 			)
 		);
-		await this.commitPipeline.requestVerification(this.context.requireTenant());
+		await this.commitPipeline.requestVerification(
+			backstopLogger,
+			this.context.requireTenant()
+		);
 	}
 
 	async fetch(request: Request): Promise<Response> {
 		await this.initialise();
 
 		let status = StatusCodes.INTERNAL_SERVER_ERROR;
+		const { pathname } = new URL(request.url);
+		// Built once here, at the request boundary, for the cost line; the app's
+		// middleware seeds an equivalent logger onto the Hono context for the routes.
+		const logger = requestLogger(request);
 
-		return withRequestCost(
-			async () => {
-				const response = await this.app.fetch(request, this.env);
-				status = response.status;
+		return withSpan(
+			'tenant-request',
+			{ 'http.request.method': request.method, 'url.path': pathname },
+			() =>
+				withRequestCost(
+					async () => {
+						const response = await this.app.fetch(request, this.env);
+						status = response.status;
 
-				return response;
-			},
-			(cost) => {
-				logRequestFinished(request, status, cost);
-			}
+						return response;
+					},
+					(cost) => {
+						logRequestFinished(logger, status, cost);
+					}
+				)
 		);
 	}
 
@@ -906,10 +956,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// converge across firings while the gate stays free between them.
 	override async alarm(): Promise<void> {
 		await this.initialise();
+		// The alarm is a top-level entrypoint, so it seeds the logger the resume
+		// paths that log outside a metered block are threaded.
+		const logger = rootLogger().with({ trigger: 'alarm' });
 		await this.resumeGarbageCollection();
 		await this.reconcileNegotiatedOnce();
 		await this.resumeCacheTeardown();
-		await this.resumeVerifyBackstop();
+		await this.resumeVerifyBackstop(logger);
 	}
 
 	// Starts a cache teardown directly, the manual/test entry that the `caches`
@@ -957,10 +1010,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		// This pass will claim the pending rows, so re-arm the prompt-verify
 		// single-flight guard: a deferral after this point asks for its own pass.
 		this.commitPipeline.onVerificationPassStarted();
-		await this.metered('verification', () =>
+		await this.metered('verification', (logger) =>
 			this.withMaintenanceEligibility(async () => {
-				await this.verification.verifyPendingUploads(verificationBatchSize);
-				await this.verification.verifyBatch(undefined, verificationBatchSize);
+				await this.verification.verifyPendingUploads(
+					logger,
+					verificationBatchSize
+				);
+				await this.verification.verifyBatch(
+					logger,
+					undefined,
+					verificationBatchSize
+				);
 			})
 		);
 	}
@@ -1017,7 +1077,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// deferral collapse onto one message that claims each row once.
 	async requestVerificationPass(): Promise<void> {
 		await this.initialise();
-		await this.commitPipeline.requestVerification(this.context.requireTenant());
+		const logger = rootLogger().with({ rpc: 'request-verification-pass' });
+		await this.commitPipeline.requestVerification(
+			logger,
+			this.context.requireTenant()
+		);
 	}
 
 	// Settles a whole batch of verdicts in one call, so the queue consumer reports
@@ -1028,9 +1092,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		results: readonly VerificationResult[]
 	): Promise<number> {
 		await this.initialise();
-		return this.metered('record-verifications', () =>
+		return this.metered('record-verifications', (logger) =>
 			this.afterHotMutation(() =>
-				this.verification.recordVerifications(results)
+				this.verification.recordVerifications(logger, results)
 			)
 		);
 	}
@@ -1040,9 +1104,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		verification: NarVerification
 	): Promise<void> {
 		await this.initialise();
-		await this.metered('record-verification', () =>
+		await this.metered('record-verification', (logger) =>
 			this.afterHotMutation(() =>
-				this.verification.recordVerification(uploadId, verification)
+				this.verification.recordVerification(logger, uploadId, verification)
 			)
 		);
 	}
@@ -1251,7 +1315,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const { cache, sessionId } = attachment.data;
 
 		if (request.op === 'commit') {
-			await this.runSessionCommit(socket, cache, sessionId, request.uploadId);
+			// The socket message is a top-level entrypoint, so it seeds the logger the
+			// commit path is threaded.
+			const logger = rootLogger().with({ sessionId, cache });
+			await this.runSessionCommit(
+				logger,
+				socket,
+				cache,
+				sessionId,
+				request.uploadId
+			);
 			return;
 		}
 
@@ -1273,15 +1346,15 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 // among the fields. The DO is billed per row read, so surfacing rows read and
 // written per request makes a row-heavy request observable in the logs rather
 // than only on the daily bill. One DO backs one tenant, so the emitting object
-// already identifies the tenant.
+// already identifies the tenant. The request logger already carries the method
+// and path, so only the status and cost are added here. It is per-request
+// telemetry, so it logs at `debug`.
 function logRequestFinished(
-	request: Request,
+	logger: Logger,
 	status: number,
 	cost: DatabaseCost
 ): void {
-	console.log('request finished', {
-		method: request.method,
-		path: new URL(request.url).pathname,
+	logger.debug('request finished', {
 		status,
 		rowsRead: cost.rowsRead,
 		rowsWritten: cost.rowsWritten
@@ -1311,9 +1384,12 @@ type MeteredMethod =
 // The same line for a direct RPC entrypoint (the maintenance sweeps, configure,
 // the cold-start migration) that does not flow through `fetch` but still reads
 // Durable Object rows worth surfacing.
-function logMethodFinished(method: MeteredMethod, cost: DatabaseCost): void {
-	console.log('method finished', {
-		method,
+// The same cost line for a direct RPC entrypoint (the maintenance sweeps,
+// configure, the cold-start migration). These fire far more often than HTTP
+// requests — every cron tick and queue message — so it is the noisiest telemetry
+// and logs at `trace`, off by default and enabled only when investigating cost.
+function logMethodFinished(logger: Logger, cost: DatabaseCost): void {
+	logger.trace('method finished', {
 		rowsRead: cost.rowsRead,
 		rowsWritten: cost.rowsWritten
 	});

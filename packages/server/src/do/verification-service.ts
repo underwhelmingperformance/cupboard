@@ -1,3 +1,4 @@
+import { type Logger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
 	type StorePathHash
@@ -197,6 +198,7 @@ export class VerificationService {
 	// decode in the queue consumer off the DO thread and reaches `commitVerified`
 	// through `recordVerification` instead.
 	private async verifyAndCommitPending(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect
 	): Promise<void> {
 		const metadata = parseStoredUploadPathMetadata(
@@ -235,6 +237,7 @@ export class VerificationService {
 		}
 
 		await this.commitVerified(
+			logger,
 			pending,
 			metadata,
 			reserved,
@@ -276,6 +279,7 @@ export class VerificationService {
 	// row, a good one promotes the staging bytes into the shared CAS and
 	// materialises the servable object.
 	private async commitVerified(
+		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
@@ -306,7 +310,7 @@ export class VerificationService {
 		// its `blob_state` row exist; probing earlier would read them absent.
 		const probe = await this.commitPipeline.probeMaterialisation(metadata);
 
-		const outcome = await this.commitPipeline.materialiseBatched({
+		const outcome = await this.commitPipeline.materialiseBatched(logger, {
 			cache: pending.cache,
 			metadata,
 			generation,
@@ -470,13 +474,14 @@ export class VerificationService {
 	}
 
 	private warnSkippedRow(
+		logger: Logger,
 		row: typeof schema.narInfos.$inferSelect,
 		error: unknown
 	): void {
-		console.warn('verification skipped a narinfo row', {
+		logger.warn('verification skipped a narinfo row', {
 			cache: row.cache,
 			storePathHash: row.storePathHash,
-			error: error instanceof Error ? error.message : String(error)
+			error
 		});
 	}
 
@@ -501,7 +506,10 @@ export class VerificationService {
 	// drops the row from this pass, letting the batch continue. The narinfo object
 	// is only probed when its NAR is present: a missing NAR removes the row
 	// regardless of the narinfo object.
-	private async probeRow(row: NarInfoRow): Promise<RowObservation | undefined> {
+	private async probeRow(
+		logger: Logger,
+		row: NarInfoRow
+	): Promise<RowObservation | undefined> {
 		try {
 			const tenant = this.context.requireTenant();
 			const isNarPresent =
@@ -514,7 +522,7 @@ export class VerificationService {
 
 			return { row, narPresent: isNarPresent, objectPresent: isObjectPresent };
 		} catch (error) {
-			this.warnSkippedRow(row, error);
+			this.warnSkippedRow(logger, row, error);
 
 			return undefined;
 		}
@@ -528,6 +536,7 @@ export class VerificationService {
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	private async reconcileObservation(
+		logger: Logger,
 		observation: RowObservation,
 		origin: string | undefined
 	): Promise<ReconcileOutcome> {
@@ -555,7 +564,7 @@ export class VerificationService {
 					: 'unchanged';
 			}
 		} catch (error) {
-			this.warnSkippedRow(row, error);
+			this.warnSkippedRow(logger, row, error);
 		}
 
 		return 'unchanged';
@@ -595,6 +604,7 @@ export class VerificationService {
 	// narinfo object is restored and a lost NAR removed without the negotiate
 	// heading R2 on its hot path.
 	async reconcileTargets(
+		logger: Logger,
 		targets: readonly ReconcileTarget[],
 		origin: string | undefined
 	): Promise<void> {
@@ -607,7 +617,7 @@ export class VerificationService {
 		}
 
 		const observations = await Promise.all(
-			rows.map((row) => this.probeRow(row))
+			rows.map((row) => this.probeRow(logger, row))
 		);
 
 		await this.context.criticalSection(async () => {
@@ -616,7 +626,7 @@ export class VerificationService {
 					continue;
 				}
 
-				await this.reconcileObservation(observation, origin);
+				await this.reconcileObservation(logger, observation, origin);
 			}
 		});
 	}
@@ -624,15 +634,17 @@ export class VerificationService {
 	// One interactive verify pass: settle deferred uploads first, then run a
 	// bounded reconciling batch and report it.
 	async verify(
+		logger: Logger,
 		purgeOrigin: string | undefined,
 		limit: number
 	): Promise<VerifyReport> {
-		await this.verifyPendingUploads(limit);
+		await this.verifyPendingUploads(logger, limit);
 
-		return this.verifyBatch(purgeOrigin, limit);
+		return this.verifyBatch(logger, purgeOrigin, limit);
 	}
 
 	async verifyBatch(
+		logger: Logger,
 		origin: string | undefined,
 		limit: number
 	): Promise<VerifyReport> {
@@ -668,7 +680,7 @@ export class VerificationService {
 		// round-trips never block a concurrent commit or delete. A transient R2
 		// fault on one row drops it from this pass, letting the batch continue.
 		const observations = await Promise.all(
-			rows.map((row) => this.probeRow(row))
+			rows.map((row) => this.probeRow(logger, row))
 		);
 
 		// Apply the reconciles and advance the cursor in one short critical section.
@@ -683,7 +695,11 @@ export class VerificationService {
 					continue;
 				}
 
-				const outcome = await this.reconcileObservation(observation, origin);
+				const outcome = await this.reconcileObservation(
+					logger,
+					observation,
+					origin
+				);
 
 				if (outcome === 'removed') {
 					danglingNarInfosRemoved += 1;
@@ -732,7 +748,7 @@ export class VerificationService {
 	// staging object deleted (on a failure) inside one, so a `pending` path becomes
 	// servable only once its bytes are confirmed. Bounded per pass; the cron drives
 	// it.
-	async verifyPendingUploads(limit: number): Promise<void> {
+	async verifyPendingUploads(logger: Logger, limit: number): Promise<void> {
 		// Re-drive both deferred (`pending`) uploads awaiting their first verify and
 		// inline commits crashed mid-saga (`committing`); both finish through the same
 		// idempotent reserve→verify→promote→materialise path. Leased rows are a
@@ -754,7 +770,7 @@ export class VerificationService {
 
 		for (const pending of pendings) {
 			try {
-				await this.verifyAndCommitPending(pending);
+				await this.verifyAndCommitPending(logger, pending);
 			} catch {
 				// One upload's failure (a transient promote or commit error) must not
 				// starve the rest of the pass; free its lease and leave its marker
@@ -806,7 +822,7 @@ export class VerificationService {
 	// fresh-row backlog costs nothing to walk past, and the snapshot leases its
 	// rows synchronously: a consumer pass's claims are respected, and a
 	// consumer crossing this settle stays off its rows in turn.
-	async settlePendingReuse(limit: number): Promise<number> {
+	async settlePendingReuse(logger: Logger, limit: number): Promise<number> {
 		const now = new Date();
 		const pendings = this.context.db
 			.select()
@@ -833,7 +849,12 @@ export class VerificationService {
 
 		for (const pending of pendings) {
 			try {
-				await this.recordVerification(pending.id, { ok: true }, 'promote');
+				await this.recordVerification(
+					logger,
+					pending.id,
+					{ ok: true },
+					'promote'
+				);
 				settled += 1;
 			} catch (error) {
 				if (error instanceof UploadedObjectNotFoundError) {
@@ -847,10 +868,7 @@ export class VerificationService {
 				// A transient fault: free the lease and leave the row for the next
 				// pass without starving the rest.
 				this.releaseLease(pending.id);
-				console.warn('reuse settle failed', {
-					uploadId: pending.id,
-					error: error instanceof Error ? error.message : String(error)
-				});
+				logger.warn('reuse settle failed', { uploadId: pending.id, error });
 			}
 		}
 
@@ -863,6 +881,7 @@ export class VerificationService {
 	// idempotently, so a re-driven verify (the consumer may run a row twice) is
 	// safe.
 	async recordVerification(
+		logger: Logger,
 		uploadId: string,
 		verification: NarVerification,
 		promotion: PromotionState = 'promote'
@@ -888,6 +907,7 @@ export class VerificationService {
 		}
 
 		await this.commitVerified(
+			logger,
 			pending,
 			metadata,
 			generation,
@@ -908,6 +928,7 @@ export class VerificationService {
 	// how many verdicts actually applied, so the caller continues the drain only
 	// on real progress; a batch whose every apply fails backs off to the cron.
 	async recordVerifications(
+		logger: Logger,
 		results: readonly VerificationResult[]
 	): Promise<number> {
 		let applied = 0;
@@ -929,20 +950,22 @@ export class VerificationService {
 						await this.recordMissingObject(uploadId);
 					} else if (verdict.kind === 'promoted') {
 						await this.recordVerification(
+							logger,
 							uploadId,
 							{ ok: true },
 							'already-promoted'
 						);
 					} else {
-						await this.recordVerification(uploadId, verdict.verification);
+						await this.recordVerification(
+							logger,
+							uploadId,
+							verdict.verification
+						);
 					}
 
 					applied += 1;
 				} catch (error) {
-					console.warn('verification verdict not recorded', {
-						uploadId,
-						error: error instanceof Error ? error.message : String(error)
-					});
+					logger.warn('verification verdict not recorded', { uploadId, error });
 				}
 			}
 		);

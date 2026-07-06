@@ -1,3 +1,4 @@
+import { rootLogger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
 	type StorePathHash,
@@ -118,7 +119,7 @@ describe('reaper demote pass', () => {
 			edges: 1
 		});
 
-		const demoted = await runReaperDemote(env);
+		const demoted = await runReaperDemote(rootLogger(), env);
 
 		// The fact is gone and the narinfo de-materialised, so the read path stops
 		// serving a narinfo whose NAR is missing. The edge stays: the path still wants
@@ -155,7 +156,7 @@ describe('reaper demote pass', () => {
 			edges: 2
 		});
 
-		const demoted = await runReaperDemote(env);
+		const demoted = await runReaperDemote(rootLogger(), env);
 
 		expect({
 			demoted,
@@ -182,7 +183,7 @@ describe('reaper demote pass', () => {
 		const { tenant, metadata, narHash } =
 			await committedTenantPath('demote-present');
 
-		const demoted = await runReaperDemote(env);
+		const demoted = await runReaperDemote(rootLogger(), env);
 
 		expect({
 			demoted,
@@ -202,7 +203,7 @@ describe('reaper demote pass', () => {
 			await committedTenantPath('demote-heal');
 
 		await env.BLOBS.delete(narObjectKey(narHash));
-		await runReaperDemote(env);
+		await runReaperDemote(rootLogger(), env);
 
 		// A correct re-push re-promotes the shared object and re-materialises the
 		// narinfo, so the path serves again.

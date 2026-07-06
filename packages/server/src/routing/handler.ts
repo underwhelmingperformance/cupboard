@@ -25,6 +25,7 @@ import {
 	TextBody,
 	textResponse
 } from '../http/http.ts';
+import { loggerMiddleware } from '../observability/logging.ts';
 import {
 	cacheInfoResponse,
 	cacheScope,
@@ -51,6 +52,11 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 	app.onError(serverErrorHandler);
 	app.notFound(() => notFoundResponse());
+
+	// Seed the request logger for every worker request, before admission, so a
+	// fault refused early is still logged with the request's fields. The admission
+	// middleware narrows it with the tenant once the slug resolves.
+	app.use(loggerMiddleware);
 
 	// Deployment-level endpoints answer at the bare host regardless of tenancy: a
 	// liveness probe and the build version. They carry no tenant or cache prefix.
@@ -110,6 +116,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		context.set('tenant', route.tenant);
 		context.set('tenantEntry', entry);
 		context.set('tenantRest', route.rest);
+		context.set('logger', context.get('logger').with({ tenant: route.tenant }));
 
 		// A read may carry a `/cache/<name>/` prefix selecting a named cache; the
 		// bare root is the default cache. An unrecognised prefix is a 404.

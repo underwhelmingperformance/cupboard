@@ -1,6 +1,7 @@
 import { fileURLToPath } from 'node:url';
 
 import eslint from '@eslint/js';
+import { recommended as logtapeRecommended } from '@logtape/lint/eslint';
 import { defineConfig, includeIgnoreFile } from 'eslint/config';
 import eslintConfigPrettier from 'eslint-config-prettier/flat';
 import simpleImportSort from 'eslint-plugin-simple-import-sort';
@@ -72,6 +73,9 @@ export default defineConfig(
 	...ts.configs.strictTypeChecked,
 	...ts.configs.stylisticTypeChecked,
 	unicorn.configs.recommended,
+	// LogTape's own lint rules catch structured-logging mistakes: interpolated
+	// messages, unawaited logs, missing lazy evaluation. See https://logtape.org/lint/.
+	logtapeRecommended,
 	{
 		rules: {
 			'unicorn/name-replacements': [

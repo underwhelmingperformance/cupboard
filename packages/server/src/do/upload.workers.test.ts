@@ -1,3 +1,5 @@
+import { rootLogger } from '@cupboard/logger';
+import { startCapture } from '@cupboard/logger/testing';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
@@ -462,19 +464,12 @@ describe('upload flow', () => {
 	});
 
 	it('logs the row cost of the cold start and a settled commit', async () => {
-		const methodLines: unknown[] = [];
-		const logSpy = vi
-			.spyOn(console, 'log')
-			.mockImplementation((message: unknown, fields: unknown) => {
-				if (message === 'method finished') {
-					methodLines.push(fields);
-				}
-			});
+		const capture = startCapture();
 
 		try {
-			// `beforeEach` already initialised a server, so reset again under the spy:
-			// the fresh server's first request runs the cold-start migration where the
-			// log line is visible.
+			// `beforeEach` already initialised a server, so reset again under the
+			// capture: the fresh server's first request runs the cold-start migration
+			// where the log line is visible.
 			await resetTestServer();
 			const init = await bootstrap();
 			const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
@@ -483,7 +478,7 @@ describe('upload flow', () => {
 			await putNarBytes(upload.r2Key);
 			await commitUpload(init.token, upload.uploadId);
 		} finally {
-			logSpy.mockRestore();
+			capture.stop();
 		}
 
 		// The cold-start migration and the commit are the row-heavy entrypoints that
@@ -494,9 +489,9 @@ describe('upload flow', () => {
 		// closure, neither a stable behavioural quantity.
 		// The meter's row accounting is pinned exactly by the fetch-path and reconcile
 		// cost tests instead.
-		const byMethod = methodLines.map((fields) =>
-			methodLineSchema.parse(fields)
-		);
+		const byMethod = capture.logs
+			.filter((entry) => entry.message === 'method finished')
+			.map((entry) => methodLineSchema.parse(entry.properties));
 		const coldStart = byMethod.find((line) => line.method === 'initialise');
 		const commit = byMethod.find((line) => line.method === 'commit');
 
@@ -1551,7 +1546,7 @@ describe('upload flow', () => {
 		};
 
 		// A full batch leaves a row pending, so the pass chains one continuation.
-		await verifyTenant(env, tenant, 2);
+		await verifyTenant(rootLogger(), env, tenant, 2);
 		expect({
 			sent: sent.length,
 			servable: await servableCount()
@@ -1559,7 +1554,7 @@ describe('upload flow', () => {
 
 		// The continuation claims a short batch (the last row): it drains it and
 		// sends no further request.
-		await verifyTenant(env, tenant, 2);
+		await verifyTenant(rootLogger(), env, tenant, 2);
 		expect({
 			sent: sent.length,
 			servable: await servableCount()
@@ -2562,13 +2557,13 @@ describe('upload flow', () => {
 		});
 
 		// The first reaper pass arms the unreferenced blob but does not collect it.
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 
 		vi.setSystemTime(afterGrace());
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.toBeNull();
@@ -2604,9 +2599,9 @@ describe('upload flow', () => {
 
 		// The first reaper pass arms the now-unreferenced blob; the pass past the
 		// grace collects it.
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		await expect(
 			env.BLOBS.head(narObjectKey(second.narHash))
 		).resolves.toBeNull();
@@ -2635,17 +2630,17 @@ describe('upload flow', () => {
 		await deletePath(token, metadata.storePathHash);
 
 		// Arm the now-unreferenced blob, fixing its grace window.
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 
 		// A later reaper pass before the grace elapses must not collect it.
 		vi.setSystemTime(new Date(testBase.getTime() + 16 * 60 * 1000));
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.not.toBeNull();
 
 		vi.setSystemTime(afterGrace());
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.toBeNull();
@@ -2727,9 +2722,9 @@ describe('upload flow', () => {
 
 		// The edge is retired, so the blob is now unreferenced; the reaper arms it,
 		// then collects it past the grace.
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		vi.setSystemTime(afterGrace());
-		await runBlobReaper(env);
+		await runBlobReaper(rootLogger(), env);
 		await expect(
 			env.BLOBS.head(narObjectKey(metadata.narHash))
 		).resolves.toBeNull();
@@ -3332,7 +3327,7 @@ describe('upload flow', () => {
 			// The reaper arms the unreferenced blob; the grace not yet elapsed, the
 			// object stays.
 			expect({
-				deleted: await runBlobReaper(env),
+				deleted: await runBlobReaper(rootLogger(), env),
 				stored: (await env.BLOBS.head(narObjectKey(cNar.narHash))) !== null
 			}).toStrictEqual({
 				deleted: 0,
@@ -3342,7 +3337,7 @@ describe('upload flow', () => {
 			vi.setSystemTime(afterGrace());
 
 			// Past the grace the reaper collects the fact and then the object.
-			expect(await runBlobReaper(env)).toBe(1);
+			expect(await runBlobReaper(rootLogger(), env)).toBe(1);
 			await expect(
 				env.BLOBS.head(narObjectKey(cNar.narHash))
 			).resolves.toBeNull();
@@ -3485,7 +3480,7 @@ async function runQueuedMaintenanceTick(): Promise<void> {
 	const messages = await enqueueMaintenanceJobs(env, queueCollector());
 
 	for (const message of messages) {
-		await executeMaintenanceQueueMessage(env, message);
+		await executeMaintenanceQueueMessage(rootLogger(), env, message);
 	}
 }
 
