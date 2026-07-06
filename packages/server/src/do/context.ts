@@ -9,7 +9,10 @@ import {
 	oidcTrustDisplaySchema,
 	storedPermittedGrantsSchema
 } from '@cupboard/protocol/grants';
-import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
+import {
+	claimMatchSchema,
+	type OidcTrustSummary
+} from '@cupboard/protocol/oidc';
 import { type RetentionPolicySummary } from '@cupboard/protocol/retention';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
@@ -58,7 +61,11 @@ export type SchemaWriter =
 // the admin CRUD uses generated ids, so it never collides with this one.
 export const ownerRuleId = 'owner';
 
-export const storedClaimsSchema = z.record(z.string(), z.string());
+// A stored claim value is an exact string or a `{ pattern }` match, the same
+// shape the admin contract accepts and stores. Reading must admit every value
+// `addRule` can persist, or one pattern claim would fail every rule read on the
+// tenant, including the batch that token exchange matches against.
+export const storedClaimsSchema = z.record(z.string(), claimMatchSchema);
 
 export interface OwnerConfig {
 	readonly issuer: string;

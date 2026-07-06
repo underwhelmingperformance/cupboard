@@ -114,6 +114,44 @@ describe('oidc-trust admin API', () => {
 		});
 	});
 
+	it('round-trips a pattern claim through add and list', async () => {
+		const token = await adminToken();
+		const patternBody: OidcTrustAddBody = {
+			...additionBody,
+			claims: {
+				repository_owner_id: '5678',
+				job_workflow_ref: { pattern: '^acme/ci/.+@.+$' }
+			}
+		};
+
+		const added = await addRule(token, patternBody);
+		const summary = oidcTrustSummarySchema.parse(await added.json());
+		const list = await listRules(token);
+		const id = z.uuid().parse(summary.id);
+
+		const expected: OidcTrustSummary = {
+			id,
+			issuer: patternBody.issuer,
+			audience: patternBody.audience,
+			claims: patternBody.claims,
+			permittedGrants: patternBody.permittedGrants,
+			disabled: false
+		};
+
+		expect({
+			status: added.status,
+			summary,
+			rules: rulesById(await list.json())
+		}).toStrictEqual({
+			status: StatusCodes.OK,
+			summary: expected,
+			rules: {
+				owner: ownerSummary,
+				[id]: expected
+			}
+		});
+	});
+
 	it('shows a single rule by id', async () => {
 		const token = await adminToken();
 		const added = await addRule(token, additionBody);

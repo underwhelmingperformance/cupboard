@@ -3,6 +3,7 @@ import {
 	storedPermittedGrantsSchema
 } from '@cupboard/protocol/grants';
 import {
+	claimMatchSchema,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
@@ -24,7 +25,10 @@ import type { OidcTrustRule } from '../oidc/oidc-trust.ts';
 type Database = DrizzleD1Database<typeof d1Schema>;
 type ControlTrustRow = typeof d1Schema.controlTrust.$inferSelect;
 
-const storedClaimsSchema = z.record(z.string(), z.string());
+// Reading must admit every claim value the admin contract stores: an exact
+// string or a `{ pattern }` match. The subject guard below still requires an
+// exact string `sub`, so a pattern `sub` fails that check.
+const storedClaimsSchema = z.record(z.string(), claimMatchSchema);
 
 function ruleFromRow(row: ControlTrustRow): OidcTrustRule {
 	const fault = (cause: Error): StoredControlTrustInvalidError =>
