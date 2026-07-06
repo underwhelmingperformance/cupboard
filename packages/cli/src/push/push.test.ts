@@ -834,6 +834,66 @@ describe('runPush', () => {
 		]);
 	});
 
+	it('attaches a deferred path’s attestation only after committing and waiting', async () => {
+		// A deferred path has no committed narinfo row until its verdict settles, and
+		// the server refuses an attestation attach on such a path. So the attach must
+		// run after retention and the wait, not before: assert it follows `setRoot`.
+		const events: string[] = [];
+		const appHash = StorePath.hash(appPath);
+		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
+		const bundleDigest = sha256Hex(bundle);
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				...deferredUpload([]),
+				commit() {
+					return Promise.resolve({
+						storePathHash: appHash,
+						narHash: appDigest.narHash.toString(),
+						status: 'pending' as const,
+						settled: Promise.resolve()
+					});
+				},
+				setRoot: (name, body) => {
+					events.push('setRoot');
+
+					return Promise.resolve(rootSummary({ name, ...body }));
+				},
+				negotiateAttestations() {
+					return Promise.resolve({
+						bundles: [
+							{
+								action: 'upload',
+								storePathHash: appHash,
+								digest: bundleDigest,
+								uploadId: 'attestation-app',
+								r2Key: 'staging/attestations/attestation-app',
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					});
+				},
+				attachAttestation(uploadId) {
+					events.push(`attach:${uploadId}`);
+
+					return Promise.resolve({
+						storePathHash: appHash,
+						digest: bundleDigest,
+						predicateType: 'https://slsa.dev/provenance/v1',
+						status: 'attached'
+					});
+				}
+			} satisfies PushClient,
+			attestations: [{ path: 'app.sigstore.json' }],
+			readAttestationBundle: () => Promise.resolve(bundle),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		expect(events).toStrictEqual(['setRoot', 'attach:attestation-app']);
+	});
+
 	it('attaches a multi-subject bundle to every matching closure path', async () => {
 		const roots: SetRootCall[] = [];
 		const negotiations: Omit<AttestationNegotiateRequest, 'pushId'>[] = [];
@@ -1008,6 +1068,8 @@ describe('runPush', () => {
 			}
 		})();
 
+		// The pushed path is valid and retained; attestations attach after the wait,
+		// so a bad bundle rejects only after retention is recorded.
 		expect({ outcome, clientCalls, readBundles }).toStrictEqual({
 			outcome: {
 				error: {
@@ -1016,7 +1078,16 @@ describe('runPush', () => {
 					subjectDigests: [narDigestHex(otherDigest.narHash)]
 				}
 			},
-			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			],
 			readBundles: ['other.sigstore.json']
 		});
 	});

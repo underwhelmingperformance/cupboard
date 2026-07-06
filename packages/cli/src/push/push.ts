@@ -420,20 +420,6 @@ async function runPushFlow(
 			);
 		}
 
-		// Attestations attach to a committed narinfo row; a failed path has none.
-		const unservableStorePathHashes = new Set<string>(
-			failures.map((failure) => failure.storePathHash)
-		);
-
-		const attestationRows = await attachPushedAttestations(closure, reporter, {
-			client,
-			enabled: dependencies.attest ?? true,
-			sources: dependencies.attestations ?? [],
-			readBundle:
-				dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
-			pendingStorePathHashes: unservableStorePathHashes
-		});
-
 		const retentionRows = isIncomplete
 			? []
 			: await reporter.phase(
@@ -489,6 +475,28 @@ async function runPushFlow(
 				}
 			);
 		}
+
+		// Attestations attach only to a committed narinfo row, so they run after the
+		// wait, once a deferred path has verified and materialised. A path that
+		// failed (at commit or verification) has no such row, and `--no-wait` leaves
+		// its deferred paths pending, so both are skipped.
+		const unservableStorePathHashes = new Set<string>(
+			failures.map((failure) => failure.storePathHash)
+		);
+		if (!shouldWait) {
+			for (const entry of commit.pending) {
+				unservableStorePathHashes.add(entry.storePathHash);
+			}
+		}
+
+		const attestationRows = await attachPushedAttestations(closure, reporter, {
+			client,
+			enabled: dependencies.attest ?? true,
+			sources: dependencies.attestations ?? [],
+			readBundle:
+				dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
+			pendingStorePathHashes: unservableStorePathHashes
+		});
 
 		const uploadedPaths = negotiation.uploads.filter((decision) =>
 			isUpload(decision)
