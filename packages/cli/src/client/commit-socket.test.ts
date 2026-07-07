@@ -1,4 +1,7 @@
-import type { CommitSessionFrame } from '@cupboard/protocol/upload';
+import {
+	commitBatchMaxEntries,
+	type CommitSessionFrame
+} from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -12,10 +15,12 @@ import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
+import type { AdvertisedCapabilities } from './commit-socket.ts';
 import {
 	type CommitOutcome,
 	type CommitSessionTarget,
 	type CommitSocket,
+	parseCapabilities,
 	runCommitSession
 } from './commit-socket.ts';
 
@@ -70,6 +75,7 @@ interface SessionTestOptions {
 	readonly keepaliveMs?: number;
 	readonly maxReconnects?: number;
 	readonly reconnectBackoffMs?: number;
+	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 }
 
 // Hands the session a fresh socket per connection attempt, so a test can drop
@@ -102,7 +108,8 @@ function openSessionOver(
 			signal: options.signal,
 			keepaliveMs: options.keepaliveMs,
 			maxReconnects: options.maxReconnects,
-			reconnectBackoffMs: options.reconnectBackoffMs
+			reconnectBackoffMs: options.reconnectBackoffMs,
+			onCapabilities: options.onCapabilities
 		}
 	);
 }
@@ -376,7 +383,7 @@ describe('runCommitSession', () => {
 		const settled = session.commit(target);
 
 		socket.emit('open');
-		socket.emit('close', 1006);
+		socket.emit('close', 1006, '');
 
 		const error = await rejectedBy(settled, CommitSocketProtocolError);
 
@@ -399,7 +406,7 @@ describe('runCommitSession', () => {
 		);
 
 		// The socket drops while the upload is parked for its verdict.
-		first.emit('close', 1006);
+		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
 		// The reconnect resumes the acked id with a subscribe, and the replayed
@@ -430,7 +437,7 @@ describe('runCommitSession', () => {
 
 		// The socket drops before any frame, so the commit op may never have landed.
 		first.emit('open');
-		first.emit('close', 1006);
+		first.emit('close', 1006, '');
 		await vi.advanceTimersByTimeAsync(maxBackoffMs);
 
 		// The reconnect re-sends the commit, which settles over the new socket.
@@ -541,6 +548,679 @@ describe('runCommitSession', () => {
 		}).toStrictEqual({
 			error: { name: 'AbortError' },
 			socketClosed: true
+		});
+	});
+});
+
+function targetFor(id: string): CommitSessionTarget {
+	return { uploadId: id, storePathHash, narHash };
+}
+
+function batchOp(ids: readonly string[]): string {
+	return JSON.stringify({
+		op: 'commit-batch',
+		commits: ids.map((id) => ({ uploadId: id, storePathHash, narHash }))
+	});
+}
+
+// The server's side of an accepting upgrade that offers the batch op.
+function advertiseBatch(socket: FakeCommitSocket): void {
+	socket.emit('upgrade', {
+		headers: { 'x-cupboard-commit-capabilities': 'commit-batch' }
+	});
+}
+
+function settleBoth(socket: FakeCommitSocket, ids: readonly string[]): void {
+	for (const id of ids) {
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId: id,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+	}
+}
+
+// The 101's capabilities header switches the session onto the batched op: the
+// server offered it, so commits coalesce into `commit-batch` messages carrying
+// each path's identity. Without the advertisement (every case above) the
+// session speaks per-id `commit` ops.
+describe('batched commit ops', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('replays registered commits as one batch op when advertised', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const first = session.commit(targetFor('upload-a'));
+		const second = session.commit(targetFor('upload-b'));
+
+		advertiseBatch(socket);
+		socket.emit('open');
+		settleBoth(socket, ['upload-a', 'upload-b']);
+
+		await expect(ackOf(first)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		await expect(ackOf(second)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect(socket.sent).toStrictEqual([batchOp(['upload-a', 'upload-b'])]);
+	});
+
+	it('coalesces commits issued on an open socket into one batch op', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+
+		advertiseBatch(socket);
+		socket.emit('open');
+
+		const first = session.commit(targetFor('upload-a'));
+		const second = session.commit(targetFor('upload-b'));
+		// The coalescing flush runs on a microtask.
+		await Promise.resolve();
+
+		settleBoth(socket, ['upload-a', 'upload-b']);
+
+		await expect(ackOf(first)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		await expect(ackOf(second)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect(socket.sent).toStrictEqual([batchOp(['upload-a', 'upload-b'])]);
+	});
+
+	it('splits a burst past the batch cap into bounded ops', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const ids = Array.from(
+			{ length: commitBatchMaxEntries + 1 },
+			(_ignored, index) => `upload-${String(index)}`
+		);
+
+		advertiseBatch(socket);
+		socket.emit('open');
+
+		const commits = ids.map((id) => session.commit(targetFor(id)));
+		await Promise.resolve();
+		settleBoth(socket, ids);
+		await Promise.all(commits);
+
+		expect(socket.sent).toStrictEqual([
+			batchOp(ids.slice(0, commitBatchMaxEntries)),
+			batchOp(ids.slice(commitBatchMaxEntries))
+		]);
+	});
+
+	it('re-sends an un-acked id as a batch op on reconnect', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const settled = session.commit(target);
+
+		// The socket drops before any frame, so the op may never have landed.
+		advertiseBatch(first);
+		first.emit('open');
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// The reconnect re-sends the commit with its identity, which the server
+		// resolves even when the row settled and cleared before the drop.
+		advertiseBatch(second);
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'already-present' }
+			})
+		);
+
+		await expect(ackOf(settled)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'already-present'
+		});
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [batchOp([uploadId])],
+			second: [batchOp([uploadId])]
+		});
+	});
+
+	it('speaks per-id ops to a connection that advertised nothing', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(target);
+
+		// An upgrade response with no capabilities header: an older server.
+		socket.emit('upgrade', { headers: {} });
+		socket.emit('open');
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(ackOf(commit)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect(socket.sent).toStrictEqual([commitOp(uploadId)]);
+	});
+
+	it('fails the session when the server rejects an op it advertised', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(target);
+
+		advertiseBatch(socket);
+		socket.emit('open');
+		socket.emit('message', frame({ ev: 'unsupported', op: 'commit-batch' }));
+
+		await rejectedBy(commit, CommitSocketProtocolError);
+		expect(socket.closed).toBe(true);
+	});
+
+	it('replays per-id ops when reconnecting onto a socket that does not advertise batch', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const settled = session.commit(target);
+
+		advertiseBatch(first);
+		first.emit('open');
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// Second socket does not advertise commit-batch, so replay speaks per-id ops.
+		second.emit('upgrade', { headers: {} });
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(ackOf(settled)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [batchOp([uploadId])],
+			second: [commitOp(uploadId)]
+		});
+	});
+});
+
+describe('parseCapabilities', () => {
+	it.each([
+		['empty string', '', []],
+		['bare token', 'commit-batch', [['commit-batch', {}]]],
+		[
+			'token with one attribute',
+			'commit-batch;max=50',
+			[['commit-batch', { max: '50' }]]
+		],
+		[
+			'token with multiple attributes',
+			'foo;a=1;b=2',
+			[['foo', { a: '1', b: '2' }]]
+		],
+		[
+			'two tokens comma-separated',
+			'foo, commit-batch;max=50',
+			[
+				['foo', {}],
+				['commit-batch', { max: '50' }]
+			]
+		],
+		[
+			'two tokens whitespace-separated',
+			'foo commit-batch;max=50',
+			[
+				['foo', {}],
+				['commit-batch', { max: '50' }]
+			]
+		],
+		['attribute without value skipped', 'foo;novalue', [['foo', {}]]]
+	] as const)('%s', (_label, header, expected) => {
+		const result = parseCapabilities(header);
+		expect([...result]).toStrictEqual(expected);
+	});
+});
+
+describe('parameterised capability max', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('chunks at the advertised max when it is below the protocol bound', () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const ids = ['upload-a', 'upload-b', 'upload-c'];
+
+		for (const id of ids) {
+			void session.commit(targetFor(id));
+		}
+
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=2' }
+		});
+		socket.emit('open');
+
+		// 3 commits, max=2 → two batch ops
+		expect(socket.sent).toStrictEqual([
+			batchOp(['upload-a', 'upload-b']),
+			batchOp(['upload-c'])
+		]);
+
+		session.close();
+	});
+
+	it('uses the protocol bound when the advertised max is larger', () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const ids = Array.from(
+			{ length: commitBatchMaxEntries + 1 },
+			(_ignored, index) => `upload-${String(index)}`
+		);
+
+		for (const id of ids) {
+			void session.commit(targetFor(id));
+		}
+
+		// max=9999 is above the protocol bound, so the protocol bound wins.
+		socket.emit('upgrade', {
+			headers: {
+				'x-cupboard-commit-capabilities': `commit-batch;max=${String(commitBatchMaxEntries + 100)}`
+			}
+		});
+		socket.emit('open');
+
+		expect(socket.sent).toStrictEqual([
+			batchOp(ids.slice(0, commitBatchMaxEntries)),
+			batchOp(ids.slice(commitBatchMaxEntries))
+		]);
+
+		session.close();
+	});
+
+	it.each([
+		['non-numeric max', 'commit-batch;max=abc'],
+		['zero max', 'commit-batch;max=0'],
+		['negative max', 'commit-batch;max=-1']
+	])('falls back to the protocol bound for %s', (_label, capHeader) => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const ids = Array.from(
+			{ length: commitBatchMaxEntries + 1 },
+			(_ignored, index) => `upload-${String(index)}`
+		);
+
+		for (const id of ids) {
+			void session.commit(targetFor(id));
+		}
+
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': capHeader }
+		});
+		socket.emit('open');
+
+		expect(socket.sent).toStrictEqual([
+			batchOp(ids.slice(0, commitBatchMaxEntries)),
+			batchOp(ids.slice(commitBatchMaxEntries))
+		]);
+
+		session.close();
+	});
+});
+
+describe('unknown frame ev tolerance', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('ignores a frame whose ev is unknown and settles on the next valid frame', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(target);
+
+		socket.emit('open');
+		socket.emit(
+			'message',
+			JSON.stringify({ ev: 'future-unknown-ev', data: 'x' })
+		);
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(ackOf(commit)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		await expect(settledOf(commit)).resolves.toBeUndefined();
+	});
+
+	it('fails the session when a known ev frame does not match its schema', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(target);
+
+		socket.emit('open');
+		// 'settled' is a known ev but this frame is missing the required fields.
+		socket.emit('message', JSON.stringify({ ev: 'settled', uploadId }));
+
+		const error = await rejectedBy(commit, CommitSocketProtocolError);
+		expect({ name: error.name, path: error.path }).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path
+		});
+	});
+
+	it('fails the session on non-JSON text', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(target);
+
+		socket.emit('open');
+		socket.emit('message', 'not json at all');
+
+		const error = await rejectedBy(commit, CommitSocketProtocolError);
+		expect({ name: error.name, path: error.path }).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path
+		});
+	});
+});
+
+describe('onCapabilities callback', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('calls onCapabilities with the parsed map on open', () => {
+		const socket = new FakeCommitSocket();
+		const calls: AdvertisedCapabilities[] = [];
+		const session = openSession(socket, {
+			onCapabilities: (caps) => {
+				calls.push(caps);
+			}
+		});
+
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=50' }
+		});
+		socket.emit('open');
+
+		expect(calls).toHaveLength(1);
+		expect([...(calls[0]?.entries() ?? [])]).toStrictEqual([
+			['commit-batch', { max: '50' }]
+		]);
+
+		session.close();
+	});
+
+	it('calls onCapabilities with an empty map when no header was sent', () => {
+		const socket = new FakeCommitSocket();
+		const calls: AdvertisedCapabilities[] = [];
+		const session = openSession(socket, {
+			onCapabilities: (caps) => {
+				calls.push(caps);
+			}
+		});
+
+		// Upgrade with no capabilities header.
+		socket.emit('upgrade', { headers: {} });
+		socket.emit('open');
+
+		expect(calls).toHaveLength(1);
+		expect([...(calls[0]?.entries() ?? [])]).toStrictEqual([]);
+
+		session.close();
+	});
+
+	it('calls onCapabilities once per connection on reconnect', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const calls: AdvertisedCapabilities[] = [];
+		const session = openSessionOver([first, second], {
+			onCapabilities: (caps) => {
+				calls.push(caps);
+			}
+		});
+
+		advertiseBatch(first);
+		first.emit('open');
+
+		const commit = session.commit(target);
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		second.emit('upgrade', { headers: {} });
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await commit;
+
+		expect(calls).toHaveLength(2);
+		// First connection advertised commit-batch.
+		expect([...(calls[0]?.entries() ?? [])]).toStrictEqual([
+			['commit-batch', {}]
+		]);
+		// Second connection advertised nothing.
+		expect([...(calls[1]?.entries() ?? [])]).toStrictEqual([]);
+	});
+});
+
+describe('close code and reason', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('fails the session immediately on close code 1002 with no reconnect', async () => {
+		const first = new FakeCommitSocket();
+		// A second socket would throw if the session tried to reconnect.
+		const session = openSessionOver([first]);
+		const commit = session.commit(target);
+
+		first.emit('open');
+		first.emit('close', 1002, 'invalid commit request');
+
+		const error = await rejectedBy(commit, CommitSocketProtocolError);
+		expect({
+			name: error.name,
+			path: error.path,
+			closed: first.closed
+		}).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path,
+			closed: true
+		});
+	});
+
+	it('reconnects on close code 1006', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const commit = session.commit(target);
+
+		first.emit('open');
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(ackOf(commit)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+	});
+});
+
+describe('boundary conditions', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('replays exactly one op when the socket closes before the microtask flush', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+
+		first.emit('open');
+		const commit = session.commit(target);
+		// Drop before the microtask flush; the coalescing flush sees no open
+		// socket and sends nothing. The reconnect replays the entry once.
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(ackOf(commit)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		// Nothing reached the first socket (the flush ran after the close).
+		// The second socket replayed exactly one op.
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [],
+			second: [commitOp(uploadId)]
+		});
+	});
+
+	it('rejects an outstanding commit when reconnects exhaust', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second], { maxReconnects: 1 });
+
+		// Register before the first connection so there is outstanding work when the
+		// socket drops, keeping the session in the reconnect path rather than closing.
+		const commit = session.commit(target);
+
+		first.emit('open');
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// Second socket replays, then drops. Reconnect budget is now zero.
+		second.emit('open');
+		second.emit('close', 1006, '');
+
+		const error = await rejectedBy(commit, CommitSocketProtocolError);
+		expect({ name: error.name, path: error.path }).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path
+		});
+	});
+
+	it('non-batching reconnect sends bare per-id ops', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const commit = session.commit(target);
+
+		// Neither socket advertises commit-batch; bare commit ops are used
+		// throughout. On a reconnect, the bare op re-sends to the server even
+		// though the row may have settled and cleared before the drop; the server
+		// answers with an error frame in that case. This asymmetry is inherent to
+		// the non-batching path.
+		first.emit('open');
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		await expect(ackOf(commit)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'committed'
+		});
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [commitOp(uploadId)],
+			second: [commitOp(uploadId)]
 		});
 	});
 });

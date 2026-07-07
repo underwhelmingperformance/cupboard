@@ -16,6 +16,10 @@ import {
 	type SignupRequest,
 	signupResponseSchema
 } from '@cupboard/protocol/signup';
+import {
+	commitAcceptCapabilitiesHeader,
+	commitBatchCapability
+} from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { WebSocket } from 'ws';
 import { z } from 'zod';
@@ -29,6 +33,7 @@ import {
 } from '../errors.ts';
 
 import {
+	type AdvertisedCapabilities,
 	type CommitOutcome,
 	type CommitSession,
 	type CommitSocketConnect,
@@ -132,11 +137,15 @@ export class CupboardClient {
 		return runCommitSession(
 			this.connectSocket,
 			this.socketUrl(path),
-			bearerHeaders(bearer),
+			{
+				...bearerHeaders(bearer),
+				[commitAcceptCapabilitiesHeader]: commitBatchCapability
+			},
 			{
 				path,
 				timeoutSeconds: options.timeoutSeconds ?? defaultCommitWaitSeconds,
-				signal: this.signal
+				signal: this.signal,
+				onCapabilities: options.onCapabilities
 			}
 		);
 	}
@@ -420,6 +429,11 @@ export interface CommitTarget {
 export interface CommitOptions {
 	/** Bounds how long a parked upload waits for its verdict. */
 	readonly timeoutSeconds?: number;
+	/**
+	 * Called on each connection with the capabilities the server advertised in
+	 * the 101 response. Useful for logging the negotiated mode.
+	 */
+	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 }
 
 // Widened to `number` so a comparison against a plain response status is not an

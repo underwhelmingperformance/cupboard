@@ -1,7 +1,11 @@
 import {
+	commitBatchCapability,
+	commitBatchMaxEntries,
+	commitCapabilitiesHeader,
 	commitSessionFrameSchema,
 	type CommitSessionRequest
 } from '@cupboard/protocol/upload';
+import { chunk } from '@cupboard/shared/collections';
 
 import { abortReason } from '../abort.ts';
 import {
@@ -24,13 +28,25 @@ export interface UpgradeFailure {
 }
 
 /**
+ * The accepted upgrade's 101 response (a `ws` `IncomingMessage`), carrying the
+ * headers the server advertises its optional ops in.
+ */
+export interface UpgradeResponse {
+	readonly headers: Readonly<Record<string, string | string[] | undefined>>;
+}
+
+/**
  * The client half of a commit WebSocket. Structurally a subset of `ws`'s
  * `WebSocket`, so the real client and test fakes plug in alike.
  */
 export interface CommitSocket {
 	on(event: 'open', listener: () => void): unknown;
+	on(event: 'upgrade', listener: (response: UpgradeResponse) => void): unknown;
 	on(event: 'message', listener: (data: CommitSocketData) => void): unknown;
-	on(event: 'close', listener: (code: number) => void): unknown;
+	on(
+		event: 'close',
+		listener: (code: number, reason: CommitSocketData) => void
+	): unknown;
 	on(event: 'error', listener: (error: Error) => void): unknown;
 	on(
 		event: 'unexpected-response',
@@ -53,6 +69,17 @@ export interface CommitSessionTarget {
 	readonly narHash: string;
 }
 
+/**
+ * Parsed attributes for one capability token from the server's 101 response.
+ * A bare token (no semicolons) maps to an empty record.
+ */
+export type CapabilityAttributes = Readonly<Record<string, string>>;
+
+/**
+ * The capabilities the server advertised on a connection, keyed by token name.
+ */
+export type AdvertisedCapabilities = ReadonlyMap<string, CapabilityAttributes>;
+
 export interface CommitSessionOptions {
 	/** The route path the socket was opened on, for error messages. */
 	readonly path: string;
@@ -64,6 +91,11 @@ export interface CommitSessionOptions {
 	readonly maxReconnects?: number;
 	/** Base back-off before the first reconnect; doubles, jittered, then capped. */
 	readonly reconnectBackoffMs?: number;
+	/**
+	 * Called on each connection with the capabilities the server advertised in
+	 * the 101 response. Useful for logging the negotiated mode.
+	 */
+	readonly onCapabilities?: (capabilities: AdvertisedCapabilities) => void;
 }
 
 /**
@@ -108,6 +140,20 @@ const defaultReconnectBackoffMs = 500;
 const maxReconnectBackoffMs = 5000;
 const keepaliveRequest = 'ping';
 const keepaliveResponse = 'pong';
+// WebSocket close code for a server-side protocol rejection. Retrying cannot
+// heal it, so the session fails immediately on this code.
+const nonRetryableCloseCode = 1002;
+
+// The ev values whose frames carry mandatory fields the schema validates; an ev
+// absent from this set is treated as unknown and ignored for forward
+// compatibility with new server frame kinds.
+const knownEvs = new Set([
+	'settled',
+	'deferred',
+	'verdict',
+	'error',
+	'unsupported'
+]);
 
 // Awaits a promise solely to observe a rejection no caller did, so an unawaited
 // `settled` never surfaces as an unhandled rejection.
@@ -135,6 +181,86 @@ function deferredSettle(): {
 		},
 		settleFailed: reject
 	};
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function parseTokenAttributes(parts: readonly string[]): CapabilityAttributes {
+	const attributes: Record<string, string> = {};
+
+	for (const part of parts) {
+		const eqIndex = part.indexOf('=');
+
+		if (eqIndex === -1) {
+			continue;
+		}
+
+		const key = part.slice(0, eqIndex);
+		const value = part.slice(eqIndex + 1);
+
+		if (key !== '') {
+			attributes[key] = value;
+		}
+	}
+
+	return attributes;
+}
+
+/**
+ * Parses the value of the `x-cupboard-commit-capabilities` header into a map
+ * from token name to its attributes. Tokens are separated by commas or
+ * whitespace; each token is `name` or `name;key=value;...`. A bare token maps
+ * to an empty attributes record.
+ */
+export function parseCapabilities(header: string): AdvertisedCapabilities {
+	const result = new Map<string, CapabilityAttributes>();
+
+	for (const token of header.split(/[\s,]+/u)) {
+		if (token === '') {
+			continue;
+		}
+
+		const parts = token.split(';');
+		const name = parts[0];
+
+		if (name === undefined || name === '') {
+			continue;
+		}
+
+		result.set(name, parseTokenAttributes(parts.slice(1)));
+	}
+
+	return result;
+}
+
+// Resolves the effective batch size for a connection from its advertised
+// capabilities. Returns `undefined` when `commit-batch` was not advertised. A
+// non-numeric, non-positive, or absent `max` attribute uses the protocol default;
+// an advertised max larger than the protocol bound is capped.
+function resolvedBatchSize(
+	capabilities: AdvertisedCapabilities
+): number | undefined {
+	const attributes = capabilities.get(commitBatchCapability);
+
+	if (attributes === undefined) {
+		return undefined;
+	}
+
+	const maxAttribute = attributes.max;
+
+	if (maxAttribute === undefined) {
+		return commitBatchMaxEntries;
+	}
+
+	const parsed = Number(maxAttribute);
+
+	if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+		return commitBatchMaxEntries;
+	}
+
+	return Math.min(parsed, commitBatchMaxEntries);
 }
 
 /**
@@ -167,9 +293,77 @@ export function runCommitSession(
 	let keepalive: NodeJS.Timeout | undefined;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let reconnectsLeft = maxReconnects;
+	// Effective batch size for the current connection: a positive integer when the
+	// server advertised `commit-batch` (possibly with a `max` attribute), or
+	// `undefined` when it did not.
+	let effectiveBatchSize: number | undefined;
 
 	const sendNow = (request: CommitSessionRequest): void => {
 		socket?.send(JSON.stringify(request));
+	};
+
+	// Sends a set of commits in the shape this connection speaks: one
+	// `commit-batch` op per bounded chunk when the server offered it, a per-id
+	// `commit` op each otherwise.
+	//
+	// On a reconnect without `commit-batch`, a bare re-sent op may try to commit
+	// a row that already settled and cleared between the drop and the replay. The
+	// server answers with an error frame for such an id. There is no way to supply
+	// identity to the plain op against a server that does not advertise
+	// `commit-batch`, so this asymmetry is inherent to the non-batching path.
+	// Entry deadlines bound the window in which it can occur.
+	const sendCommits = (targets: readonly CommitSessionTarget[]): void => {
+		if (effectiveBatchSize === undefined) {
+			for (const target of targets) {
+				sendNow({ op: 'commit', uploadId: target.uploadId });
+			}
+
+			return;
+		}
+
+		for (const batch of chunk(targets, effectiveBatchSize)) {
+			sendNow({
+				op: 'commit-batch',
+				commits: batch.map((target) => ({
+					uploadId: target.uploadId,
+					storePathHash: target.storePathHash,
+					narHash: target.narHash
+				}))
+			});
+		}
+	};
+
+	// Commits registered while the socket is up coalesce over a microtask, so a
+	// burst issued in one tick (the reuse commits of a large push) lands in a
+	// handful of batch ops. A target whose entry settled or vanished before the
+	// flush is skipped; a drop before the flush discards the queue, since the
+	// reconnect replays every outstanding entry anyway.
+	let sendQueue: CommitSessionTarget[] = [];
+	let isFlushScheduled = false;
+
+	const flushSendQueue = (): void => {
+		isFlushScheduled = false;
+		const targets = sendQueue.filter((target) =>
+			outstanding.has(target.uploadId)
+		);
+		sendQueue = [];
+
+		if (!isOpened || isClosed || targets.length === 0) {
+			return;
+		}
+
+		sendCommits(targets);
+	};
+
+	const enqueueSend = (target: CommitSessionTarget): void => {
+		sendQueue.push(target);
+
+		if (isFlushScheduled) {
+			return;
+		}
+
+		isFlushScheduled = true;
+		queueMicrotask(flushSendQueue);
 	};
 
 	const clearKeepalive = (): void => {
@@ -246,7 +440,33 @@ export function runCommitSession(
 	};
 
 	const onFrame = (text: string): void => {
-		const parsed = commitSessionFrameSchema.safeParse(safeJsonParse(text));
+		const json = safeJsonParse(text);
+
+		if (!isJsonObject(json)) {
+			failSession(
+				new CommitSocketProtocolError(options.path, `unexpected frame: ${text}`)
+			);
+
+			return;
+		}
+
+		const event = json.ev;
+
+		if (typeof event !== 'string') {
+			failSession(
+				new CommitSocketProtocolError(options.path, `unexpected frame: ${text}`)
+			);
+
+			return;
+		}
+
+		// An ev not in the known set is from a future server version; ignore it.
+		// Entry deadlines bound the risk of a missed verdict.
+		if (!knownEvs.has(event)) {
+			return;
+		}
+
+		const parsed = commitSessionFrameSchema.safeParse(json);
 
 		if (!parsed.success) {
 			failSession(
@@ -372,16 +592,32 @@ export function runCommitSession(
 						entry.rejectAck(error);
 					}
 				});
+
+				return;
+			}
+
+			case 'unsupported': {
+				// The session only sends ops the server advertised, so a rejection
+				// names a broken server; the whole session rode on that op landing.
+				failSession(
+					new CommitSocketProtocolError(
+						options.path,
+						`the server rejected the ${frame.op} op it advertised`
+					)
+				);
 			}
 		}
 	};
 
 	// On every open (the first connect and each reconnect), drive the outstanding
 	// work onto the fresh socket: an acked id resumes with `subscribe`, an un-acked
-	// id is re-sent as `commit`. On the first open this is just a `commit` per
-	// registered path.
+	// id is re-sent as a commit. On the first open this is just the registered
+	// paths' commits. The re-sent commits carry the path identity when batching,
+	// so an id whose reply was lost on the drop still resolves via the path
+	// identity.
 	const replayOutstanding = (): void => {
 		const ackedIds: string[] = [];
+		const unacked: CommitSessionTarget[] = [];
 
 		for (const [uploadId, entry] of outstanding) {
 			if (entry.acked) {
@@ -389,8 +625,10 @@ export function runCommitSession(
 				continue;
 			}
 
-			sendNow({ op: 'commit', uploadId });
+			unacked.push(entry.target);
 		}
+
+		sendCommits(unacked);
 
 		if (ackedIds.length > 0) {
 			sendNow({ op: 'subscribe', uploadIds: ackedIds });
@@ -398,9 +636,10 @@ export function runCommitSession(
 	};
 
 	// A drop on an established socket is treated as transient: reconnect and
-	// replay, so a network blip does not lose the whole push. A refused upgrade
-	// is handled separately, as it will not heal on retry.
-	const onDrop = (error: Error): void => {
+	// replay, so a network blip does not lose the whole push. Code 1002 means the
+	// server rejected the request deliberately; reconnecting cannot fix it. A
+	// refused upgrade is handled separately, as it will not heal on retry.
+	const onDrop = (code: number, error: Error): void => {
 		if (isClosed) {
 			return;
 		}
@@ -412,6 +651,12 @@ export function runCommitSession(
 		// end, not a drop to recover from.
 		if (outstanding.size === 0) {
 			teardown();
+
+			return;
+		}
+
+		if (code === nonRetryableCloseCode) {
+			failSession(error);
 
 			return;
 		}
@@ -460,10 +705,24 @@ export function runCommitSession(
 
 	function openConnection(): void {
 		isOpened = false;
+		effectiveBatchSize = undefined;
+		// Captured per connection, so `onCapabilities` reports the negotiation of
+		// the connection whose `open` fired.
+		let connectionCaps: AdvertisedCapabilities = new Map();
 		socket = connect(url, headers);
+
+		// The upgrade response precedes the open, so the capability is known
+		// before anything is sent on this connection.
+		socket.on('upgrade', (response) => {
+			const raw = response.headers[commitCapabilitiesHeader];
+			const headerValue = Array.isArray(raw) ? raw.join(',') : (raw ?? '');
+			connectionCaps = parseCapabilities(headerValue);
+			effectiveBatchSize = resolvedBatchSize(connectionCaps);
+		});
 
 		socket.on('open', () => {
 			isOpened = true;
+			options.onCapabilities?.(connectionCaps);
 			replayOutstanding();
 
 			keepalive = setInterval(() => {
@@ -482,17 +741,16 @@ export function runCommitSession(
 			onFrame(text);
 		});
 
-		socket.on('close', () => {
-			onDrop(
-				new CommitSocketProtocolError(
-					options.path,
-					'the socket closed before every commit settled'
-				)
-			);
+		socket.on('close', (code, reason) => {
+			const message =
+				code === nonRetryableCloseCode
+					? `server closed the connection: ${String(code)} ${reason.toString()}`
+					: 'the socket closed before every commit settled';
+			onDrop(code, new CommitSocketProtocolError(options.path, message));
 		});
 
 		socket.on('error', (error) => {
-			onDrop(error);
+			onDrop(0, error);
 		});
 
 		socket.on('unexpected-response', (_request, response) => {
@@ -548,10 +806,11 @@ export function runCommitSession(
 				acked: false
 			});
 
-			// An open socket sends now; before the first open (or mid-reconnect) the
-			// op waits and `replayOutstanding` sends it when the socket comes up.
+			// An open socket enqueues onto the coalescing flush; before the first
+			// open (or mid-reconnect) the op waits and `replayOutstanding` sends it
+			// when the socket comes up.
 			if (isOpened) {
-				sendNow({ op: 'commit', uploadId: target.uploadId });
+				enqueueSend(target);
 			}
 		});
 	};
