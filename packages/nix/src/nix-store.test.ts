@@ -12,7 +12,8 @@ function info(
 		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32)),
 		narSize: 0,
 		references,
-		signatures: []
+		signatures: [],
+		ultimate: false
 	};
 }
 

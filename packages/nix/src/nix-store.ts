@@ -8,6 +8,12 @@ export interface NixValidPathInfo {
 	readonly deriver?: string;
 	readonly ca?: string;
 	readonly signatures: readonly string[];
+	/**
+	 * Whether this store registered the path as ultimately trusted, which Nix
+	 * sets for paths it built locally. A substituted path carries the
+	 * substituter's signatures instead.
+	 */
+	readonly ultimate: boolean;
 }
 
 /** A store backend: how a single path's info is fetched from this kind of store. */

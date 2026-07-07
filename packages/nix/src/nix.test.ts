@@ -21,7 +21,8 @@ function info(
 		narHash: NixSha256Hash.fromDigest(new Uint8Array(32)),
 		narSize: 1,
 		references,
-		signatures: []
+		signatures: [],
+		ultimate: false
 	};
 }
 
