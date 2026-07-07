@@ -301,36 +301,43 @@ export class AttestationCasService {
 							.where(repromotedFilter)
 					);
 
-		await this.context.d1
-			.delete(d1Schema.attestationReference)
-			.where(and(this.edgeFilter(tenant, reference), notRepromoted));
+		const edgeDeleteFilter = and(
+			this.edgeFilter(tenant, reference),
+			notRepromoted
+		);
+		const stillReferencedFilter = and(
+			eq(d1Schema.attestationReference.tenant, tenant),
+			eq(d1Schema.attestationReference.digest, reference.digest)
+		);
+		const presenceFilter = this.presenceFilter(tenant, reference.digest);
 
-		const stillReferenced = await this.context.d1
-			.select({ digest: d1Schema.attestationReference.digest })
-			.from(d1Schema.attestationReference)
-			.where(
-				and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.digest, reference.digest)
-				)
-			)
-			.get();
+		// Delete the edge, then read whether the digest is still referenced and its
+		// presence size, in one batch: its statements run sequentially in a
+		// transaction, so the reads see the post-delete state, and the eager presence
+		// read is discarded when the digest is still referenced.
+		const [, stillReferencedRows, presenceRows] = await this.context.d1.batch([
+			this.context.d1
+				.delete(d1Schema.attestationReference)
+				.where(edgeDeleteFilter),
+			this.context.d1
+				.select({ digest: d1Schema.attestationReference.digest })
+				.from(d1Schema.attestationReference)
+				.where(stillReferencedFilter),
+			this.context.d1
+				.select({ size: d1Schema.tenantCasBlob.size })
+				.from(d1Schema.tenantCasBlob)
+				.where(presenceFilter)
+		]);
 
-		if (stillReferenced !== undefined) {
+		if (stillReferencedRows[0] !== undefined) {
 			return;
 		}
 
-		const presence = await this.context.d1
-			.select({ size: d1Schema.tenantCasBlob.size })
-			.from(d1Schema.tenantCasBlob)
-			.where(this.presenceFilter(tenant, reference.digest))
-			.get();
+		const presence = presenceRows[0];
 
 		if (presence === undefined) {
 			return;
 		}
-
-		const presenceFilter = this.presenceFilter(tenant, reference.digest);
 		const presenceExists = exists(
 			this.context.d1
 				.select({ one: sql`1` })
