@@ -3335,7 +3335,15 @@ batched shape the client already has and cuts real DO-side cost: fewer
 `webSocketMessage` invocations, fewer DO SQLite transaction boundaries, and
 fewer `afterHotMutation` reconcile schedules per push. Because it is not on the
 D1 critical path it follows Phase 2 rather than blocking it, and its wire design
-must first answer three things the review surfaced:
+had to answer three things the review surfaced. All three are now resolved and
+the phase is landed: the 101 advertises the optional ops in
+`x-cupboard-commit-capabilities` and the client batches only when this
+connection's upgrade offered it; a well-formed unknown op answers a per-message
+`unsupported` frame naming it (garbage still closes the socket); the
+`commit-batch` op carries each entry's `storePathHash`/`narHash`, a gone row
+resolving against the path's narinfo row (`already-present` when it still holds
+these bytes, `absent` otherwise); and entries settle under bounded concurrency,
+each answering its own frame. The original analysis follows:
 
 - Capability handshake before the first send. The client sends its first commit
   op on socket open, before it could learn the server's capabilities. Today the
