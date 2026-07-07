@@ -24,27 +24,43 @@ type BlobStateRow = typeof d1Schema.blobState.$inferSelect;
 export class UploadStateService {
 	constructor(private readonly context: ServerContext) {}
 
-	private async ownedNarHashes(
+	// The `blob_state` rows for the hashes this tenant already owns a
+	// `tenant_blob` presence edge for. One join per chunk keeps a closure of any
+	// size to a bounded number of D1 reads, and joining on the tenant's own edge
+	// keeps reuse existence-oracle-safe: a hash the tenant has not itself
+	// uploaded never appears, even when another tenant holds identical bytes.
+	private async ownedBlobStates(
 		tenant: TenantId,
 		narHashes: readonly NixSha256HashString[]
-	): Promise<NixSha256HashString[]> {
+	): Promise<Map<NixSha256HashString, BlobStateRow>> {
+		const chunks = chunk(narHashes, maxInClauseValues);
+
 		const batches = await mapWithConcurrency(
-			chunk(narHashes, maxInClauseValues),
+			chunks,
 			maxOutgoingConnections,
-			(narHashBatch) =>
-				this.context.d1
-					.select({ narHash: d1Schema.tenantBlob.narHash })
+			(narHashBatch) => {
+				const filter = and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					inArray(d1Schema.tenantBlob.narHash, narHashBatch)
+				);
+
+				const joinOn = eq(
+					d1Schema.blobState.narHash,
+					d1Schema.tenantBlob.narHash
+				);
+
+				return this.context.d1
+					.select()
 					.from(d1Schema.tenantBlob)
-					.where(
-						and(
-							eq(d1Schema.tenantBlob.tenant, tenant),
-							inArray(d1Schema.tenantBlob.narHash, narHashBatch)
-						)
-					)
-					.all()
+					.innerJoin(d1Schema.blobState, joinOn)
+					.where(filter)
+					.all();
+			}
 		);
 
-		return batches.flat().map((row) => row.narHash);
+		const rows = batches.flat().map((row) => row.blob_state);
+
+		return new Map(rows.map((row) => [row.narHash, row]));
 	}
 
 	private async blobStatesByNarHash(
@@ -215,29 +231,24 @@ export class UploadStateService {
 		}
 
 		const tenant = this.context.requireTenant();
-		const owned = await this.ownedNarHashes(tenant, unique);
+		const blobStates = await this.ownedBlobStates(tenant, unique);
 
-		if (owned.length === 0) {
+		if (blobStates.size === 0) {
 			return reusable;
 		}
 
-		const blobStates = await this.blobStatesByNarHash(owned);
-		const candidates = owned.filter((narHash) => blobStates.has(narHash));
-
 		// Reusing is a fresh reference, so cancel any reaper grace timer the rows
 		// armed before a commit binds a new edge to the hash.
-		await this.clearReaperTimers(
-			candidates.filter(
-				(narHash) => blobStates.get(narHash)?.deleteAfter !== null
-			)
-		);
+		const fence = blobStates
+			.values()
+			.filter((state) => state.deleteAfter !== null)
+			.map((state) => state.narHash)
+			.toArray();
 
-		for (const narHash of candidates) {
-			const state = blobStates.get(narHash);
+		await this.clearReaperTimers(fence);
 
-			if (state !== undefined) {
-				reusable.set(narHash, state);
-			}
+		for (const [narHash, state] of blobStates) {
+			reusable.set(narHash, state);
 		}
 
 		return reusable;
