@@ -25,40 +25,40 @@ export class StatsService {
 			.where(eq(schema.pendingUploads.cache, cache))
 			.get();
 
-		const narObjects = await this.context.d1
-			.select({
-				narHash: d1Schema.blobReference.narHash,
-				fileSize: d1Schema.blobState.fileSize
-			})
-			.from(d1Schema.blobReference)
-			.innerJoin(
-				d1Schema.blobState,
-				eq(d1Schema.blobReference.narHash, d1Schema.blobState.narHash)
-			)
-			.where(
-				and(
-					eq(d1Schema.blobReference.tenant, tenant),
-					eq(d1Schema.blobReference.cache, cache)
+		const narFilter = and(
+			eq(d1Schema.blobReference.tenant, tenant),
+			eq(d1Schema.blobReference.cache, cache)
+		);
+		const casFilter = and(
+			eq(d1Schema.attestationReference.tenant, tenant),
+			eq(d1Schema.attestationReference.cache, cache)
+		);
+
+		// Two independent joins for the same cache; read them in one round-trip.
+		const [narObjects, casObjects] = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					narHash: d1Schema.blobReference.narHash,
+					fileSize: d1Schema.blobState.fileSize
+				})
+				.from(d1Schema.blobReference)
+				.innerJoin(
+					d1Schema.blobState,
+					eq(d1Schema.blobReference.narHash, d1Schema.blobState.narHash)
 				)
-			)
-			.all();
-		const casObjects = await this.context.d1
-			.select({
-				digest: d1Schema.attestationReference.digest,
-				size: d1Schema.casObject.size
-			})
-			.from(d1Schema.attestationReference)
-			.innerJoin(
-				d1Schema.casObject,
-				eq(d1Schema.attestationReference.digest, d1Schema.casObject.digest)
-			)
-			.where(
-				and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache)
+				.where(narFilter),
+			this.context.d1
+				.select({
+					digest: d1Schema.attestationReference.digest,
+					size: d1Schema.casObject.size
+				})
+				.from(d1Schema.attestationReference)
+				.innerJoin(
+					d1Schema.casObject,
+					eq(d1Schema.attestationReference.digest, d1Schema.casObject.digest)
 				)
-			)
-			.all();
+				.where(casFilter)
+		]);
 		const narSizes = uniqueSizes(
 			narObjects.map((row) => ({ key: row.narHash, size: row.fileSize }))
 		);
