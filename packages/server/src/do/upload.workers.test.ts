@@ -7,6 +7,11 @@ import {
 	DEFAULT_CACHE,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import {
+	commitBatchCapabilityToken,
+	commitCapabilitiesHeader,
+	type ParsedCommitSessionFrame
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
@@ -100,6 +105,18 @@ function byUploadId(
 	right: { readonly uploadId: string }
 ): number {
 	return left.uploadId.localeCompare(right.uploadId);
+}
+
+// The per-id identity a session frame names, for order-insensitive assertions.
+// An `unsupported` frame names no upload, so it reads as an empty id.
+function frameIdentity(frame: ParsedCommitSessionFrame): {
+	readonly ev: string;
+	readonly uploadId: string;
+} {
+	return {
+		ev: frame.ev,
+		uploadId: 'uploadId' in frame ? frame.uploadId : ''
+	};
 }
 
 function publicKeyShape(publicKey: string): {
@@ -1099,9 +1116,7 @@ describe('upload flow', () => {
 		session.socket.close();
 
 		expect(
-			frames
-				.map((frame) => ({ ev: frame.ev, uploadId: frame.uploadId }))
-				.toSorted(byUploadId)
+			frames.map((frame) => frameIdentity(frame)).toSorted(byUploadId)
 		).toStrictEqual(
 			[
 				{ ev: 'deferred', uploadId: a.uploadId },
@@ -1130,7 +1145,7 @@ describe('upload flow', () => {
 		const second = await openCommitSession(token);
 		second.send({ op: 'subscribe', uploadIds: [upload.uploadId] });
 		const replay = await second.nextFrame();
-		expect({ ev: replay.ev, uploadId: replay.uploadId }).toStrictEqual({
+		expect(frameIdentity(replay)).toStrictEqual({
 			ev: 'deferred',
 			uploadId: upload.uploadId
 		});
@@ -1167,9 +1182,324 @@ describe('upload flow', () => {
 		const replay = await session.nextFrame();
 		session.socket.close();
 
-		expect({ ev: replay.ev, uploadId: replay.uploadId }).toStrictEqual({
+		expect(frameIdentity(replay)).toStrictEqual({
 			ev: 'verdict',
 			uploadId: upload.uploadId
+		});
+	});
+
+	it('advertises the batch capability on the session upgrade', async () => {
+		const token = await initialise();
+		const response = await fetchPath('/cache/_default/commit', {
+			headers: {
+				authorization: `Bearer ${token}`,
+				upgrade: 'websocket'
+			}
+		});
+		response.webSocket?.accept();
+		response.webSocket?.close();
+
+		expect({
+			status: response.status,
+			capabilities: response.headers.get(commitCapabilitiesHeader)
+		}).toStrictEqual({
+			status: StatusCodes.SWITCHING_PROTOCOLS,
+			capabilities: commitBatchCapabilityToken
+		});
+	});
+
+	it('advertises the parameterised batch capability through the worker hop', async () => {
+		const token = await initialiseViaWorker();
+		const response = await handlerFetch(`/t/${fixtureTenant}/commit`, {
+			headers: {
+				authorization: `Bearer ${token}`,
+				upgrade: 'websocket'
+			}
+		});
+		response.webSocket?.accept();
+		response.webSocket?.close();
+
+		expect({
+			status: response.status,
+			capabilities: response.headers.get(commitCapabilitiesHeader)
+		}).toStrictEqual({
+			status: StatusCodes.SWITCHING_PROTOCOLS,
+			capabilities: commitBatchCapabilityToken
+		});
+	});
+
+	it('answers every entry of a batched commit with its own frame', async () => {
+		const token = await initialise();
+		const metaA = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			name: 'a',
+			narHash: nixSha256Hash('a'),
+			fileSize: narBytes.byteLength
+		});
+		const metaB = uploadMetadata({
+			storePathHash: 'b'.repeat(32),
+			name: 'b',
+			narHash: nixSha256Hash('b'),
+			fileSize: narBytes.byteLength
+		});
+		const negotiated = await negotiateUploads(token, [metaA, metaB]);
+		const [a, b] = [metaA, metaB].map((metadata) =>
+			expectSingleUploadDecision(
+				{
+					uploads: negotiated.uploads.filter(
+						(decision) => decision.storePathHash === metadata.storePathHash
+					)
+				},
+				metadata
+			)
+		);
+
+		if (a === undefined || b === undefined) {
+			throw new Error('both uploads must negotiate');
+		}
+
+		await putNarBytes(a.r2Key);
+		await putNarBytes(b.r2Key);
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: a.uploadId,
+					storePathHash: metaA.storePathHash,
+					narHash: metaA.narHash
+				},
+				{
+					uploadId: b.uploadId,
+					storePathHash: metaB.storePathHash,
+					narHash: metaB.narHash
+				}
+			]
+		});
+		const frames = [await session.nextFrame(), await session.nextFrame()];
+		session.socket.close();
+
+		expect(
+			frames.map((frame) => frameIdentity(frame)).toSorted(byUploadId)
+		).toStrictEqual(
+			[
+				{ ev: 'deferred', uploadId: a.uploadId },
+				{ ev: 'deferred', uploadId: b.uploadId }
+			].toSorted(byUploadId)
+		);
+	});
+
+	it('settles both entries of a batch durably even when the client closes mid-batch', async () => {
+		const token = await initialise();
+		const { metadata: metaA, nar: narA } = await verifiablePath(
+			'dead-socket-a',
+			{
+				storePathHash: 'a'.repeat(32),
+				name: 'a'
+			}
+		);
+		const { metadata: metaB, nar: narB } = await verifiablePath(
+			'dead-socket-b',
+			{
+				storePathHash: 'b'.repeat(32),
+				name: 'b'
+			}
+		);
+		const negotiated = await negotiateUploads(token, [metaA, metaB]);
+		const [a, b] = [metaA, metaB].map((metadata) =>
+			expectSingleUploadDecision(
+				{
+					uploads: negotiated.uploads.filter(
+						(decision) => decision.storePathHash === metadata.storePathHash
+					)
+				},
+				metadata
+			)
+		);
+
+		if (a === undefined || b === undefined) {
+			throw new Error('both uploads must negotiate');
+		}
+
+		await putNarBytes(a.r2Key, narA);
+		await putNarBytes(b.r2Key, narB);
+
+		// Open a session, then close the server-side socket BEFORE handling the
+		// batch, so every frame the handler sends lands on a dead socket. The
+		// handler is invoked directly and awaited, so the test observes its
+		// completion with no timing sensitivity: the entries must have settled
+		// durably by the time it returns.
+		await openCommitSession(token);
+
+		const batchMessage = JSON.stringify({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: a.uploadId,
+					storePathHash: metaA.storePathHash,
+					narHash: metaA.narHash
+				},
+				{
+					uploadId: b.uploadId,
+					storePathHash: metaB.storePathHash,
+					narHash: metaB.narHash
+				}
+			]
+		});
+
+		await runInDurableObject(currentServer(), async (instance, state) => {
+			const [serverSocket] = state.getWebSockets();
+
+			if (serverSocket === undefined) {
+				throw new Error('the session left no server-side socket');
+			}
+
+			serverSocket.close();
+			await instance.webSocketMessage(serverSocket, batchMessage);
+		});
+
+		await currentServer().runVerification();
+
+		expect({
+			a: await pendingUploadVerdict(a.uploadId),
+			b: await pendingUploadVerdict(b.uploadId)
+		}).toStrictEqual({ a: undefined, b: undefined });
+	});
+
+	it('answers an unknown op with an unsupported frame, keeping the session', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		const session = await openCommitSession(token);
+		session.socket.send(JSON.stringify({ op: 'compress-all', level: 19 }));
+		const reply = await session.nextFrame();
+
+		// The socket survived the unknown op: a known op on the same session still
+		// answers.
+		session.send({ op: 'subscribe', uploadIds: [upload.uploadId] });
+		const replay = await session.nextFrame();
+		session.socket.close();
+
+		expect({ reply, replayed: frameIdentity(replay) }).toStrictEqual({
+			reply: { ev: 'unsupported', op: 'compress-all' },
+			replayed: { ev: 'verdict', uploadId: upload.uploadId }
+		});
+	});
+
+	it('resolves a re-sent batched entry whose row cleared as already-present', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+
+		// Commit fully, so the pending row is cleared: the state a reconnect
+		// re-sending an entry whose `settled` frame was lost finds.
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'settled',
+			uploadId: upload.uploadId,
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			}
+		});
+	});
+
+	it('answers a batched entry whose row and path are both gone as absent', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			storePathHash: 'f'.repeat(32),
+			name: 'gone',
+			narHash: nixSha256Hash('g'),
+			fileSize: narBytes.byteLength
+		});
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: 'never-existed',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'verdict',
+			uploadId: 'never-existed',
+			status: 'absent'
+		});
+	});
+
+	it('answers a re-sent entry as absent when the pending row is gone but only a reservation holds the path', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			storePathHash: 'c'.repeat(32),
+			name: 'reserved-only',
+			narHash: nixSha256Hash('c'),
+			fileSize: narBytes.byteLength
+		});
+
+		// Plant a narinfo row for this path with no committed reference edge,
+		// the state a mid-saga reservation leaves: the row exists but no D1 edge
+		// makes it servable.
+		await seedReservedNarInfo(metadata);
+
+		// The pending row for this uploadId never existed (simulating a re-sent
+		// entry whose original pending row was reaped), so `resolveGoneCommit` runs.
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: 'reservation-only-upload',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		// The narinfo row matches the narHash but has no committed reference edge,
+		// so the upload has not been committed; the entry must answer `absent`,
+		// not `already-present`.
+		expect(frame).toStrictEqual({
+			ev: 'verdict',
+			uploadId: 'reservation-only-upload',
+			status: 'absent'
 		});
 	});
 
