@@ -1,6 +1,7 @@
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { sql } from 'drizzle-orm';
+import { type BatchItem } from 'drizzle-orm/batch';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -84,21 +85,72 @@ export async function promoteVerifiedBlob(
 	target: PromotionTarget,
 	blob: CanonicalBlob | undefined
 ): Promise<CanonicalBlob> {
+	const { canonical, upsert } = await stagePromotedBlob(
+		d1,
+		blobs,
+		stagingKey,
+		target,
+		blob
+	);
+
+	// Record the shared fact together with the object, so `blob_state` exists
+	// exactly when the canonical R2 object does.
+	await upsert.run();
+
+	return canonical;
+}
+
+/**
+ * A promotion that has done its per-object R2 work but not yet written the
+ * shared `blob_state` fact: the caller applies the {@link upsert}, either on its
+ * own or collected with others into one D1 batch, so a pass promoting many
+ * objects settles their facts in a single write after the per-object R2 work.
+ */
+interface StagedBlobPromotion {
+	readonly canonical: CanonicalBlob;
+	readonly upsert: BlobStateUpsert;
+}
+
+// The `blob_state` upsert kept runnable on its own and passable to `d1.batch`.
+export type BlobStateUpsert = BatchItem<'sqlite'> & {
+	run: () => Promise<unknown>;
+};
+
+/**
+ * Promotes verified staging bytes into the shared CAS as {@link
+ * promoteVerifiedBlob} does, but returns the `blob_state` upsert for the caller
+ * to apply, so many promotions can share one D1 write.
+ */
+export async function stagePromotedBlob(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	blobs: R2Bucket,
+	stagingKey: string,
+	target: PromotionTarget,
+	blob: CanonicalBlob | undefined
+): Promise<StagedBlobPromotion> {
 	const canonical = await ensureCanonicalObject(
 		blobs,
 		stagingKey,
 		target.narHash,
 		blob
 	);
+
+	return { canonical, upsert: blobStateUpsert(d1, target, canonical) };
+}
+
+// Builds the `blob_state` upsert for a promoted object. The first writer for a
+// hash fixes the metadata; a concurrent or repeated promotion keeps it, but
+// clears any reaper grace timer, since promoting is a fresh reference to the
+// hash. A verified frame is always zstd, the only encoding the server stores.
+function blobStateUpsert(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	target: PromotionTarget,
+	canonical: CanonicalBlob
+): BlobStateUpsert {
 	const now = new Date();
 	const verifiedAt = now.toISOString();
 
-	// Record the shared fact together with the object, so `blob_state` exists
-	// exactly when the canonical R2 object does. The first writer for a hash
-	// fixes the metadata; a concurrent or repeated promotion keeps it, but clears
-	// any reaper grace timer, since promoting is a fresh reference to the hash.
-	// A verified frame is always zstd, the only encoding the server stores.
-	await d1
+	return d1
 		.insert(d1Schema.blobState)
 		.values({
 			narHash: target.narHash,
@@ -115,8 +167,5 @@ export async function promoteVerifiedBlob(
 			// demote pass fences its delete on: a demote that scanned the old row will
 			// not delete the freshly re-promoted one.
 			set: { deleteAfter: sql`null`, verifiedAt }
-		})
-		.run();
-
-	return canonical;
+		});
 }
