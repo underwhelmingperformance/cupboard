@@ -318,7 +318,11 @@ describe('blob_ref / tenant_blob reference edges', () => {
 		let edgesAtObjectDelete:
 			Awaited<ReturnType<typeof blobReferenceRows>> | undefined;
 		const deleteWithSnapshot: typeof env.BLOBS.delete = async (key) => {
-			if (key === objectKey) {
+			const willDeleteObject = Array.isArray(key)
+				? key.includes(objectKey)
+				: key === objectKey;
+
+			if (willDeleteObject) {
 				edgesAtObjectDelete = await blobReferenceRows();
 			}
 

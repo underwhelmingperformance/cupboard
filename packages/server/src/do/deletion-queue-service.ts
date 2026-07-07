@@ -247,19 +247,26 @@ export class DeletionQueueService {
 	// Runs inside the caller's critical section; must not open its own.
 	async flushQueuedNarInfoDeletions(origin?: string): Promise<number> {
 		const queued = this.context.db.select().from(schema.narInfoDeletions).all();
-		let deleted = 0;
+
+		// Group by cache so each cache's queue drains through the batched teardown
+		// retirement, whose generation fence and origin purge match the per-path
+		// form with a bounded number of round-trips per cache.
+		const byCache = new Map<string, TornDownNarInfo[]>();
 
 		for (const entry of queued) {
-			const { objectDeleted: isObjectDeleted } = await this.deleteQueuedNarInfo(
-				entry.cache,
-				entry.storePathHash,
-				entry.generation,
-				origin
-			);
+			const entries = byCache.get(entry.cache) ?? [];
+			entries.push({
+				storePathHash: entry.storePathHash,
+				generation: entry.generation,
+				narHash: entry.narHash
+			});
+			byCache.set(entry.cache, entries);
+		}
 
-			if (isObjectDeleted) {
-				deleted += 1;
-			}
+		let deleted = 0;
+
+		for (const [cache, entries] of byCache) {
+			deleted += await this.retireTornDownNarInfos(cache, entries, origin);
 		}
 
 		return deleted;
@@ -368,16 +375,18 @@ export class DeletionQueueService {
 	// sub-chunk, one presence sweep per hash sub-chunk, and a synchronous queue
 	// clear. A path recommitted since its row was removed keeps its live object
 	// (the generation fence skips its object delete), while the captured
-	// generation's edge and references are still retired.
+	// generation's edge and references are still retired. Returns how many served
+	// objects it deleted: the entries whose generation the DO's live row had not
+	// superseded.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	async retireTornDownNarInfos(
 		cache: string,
 		entries: readonly TornDownNarInfo[],
 		origin?: string
-	): Promise<void> {
+	): Promise<number> {
 		if (entries.length === 0) {
-			return;
+			return 0;
 		}
 
 		const tenant = this.context.requireTenant();
@@ -578,6 +587,8 @@ export class DeletionQueueService {
 				)
 				.run();
 		}
+
+		return removable.length;
 	}
 
 	deleteStorePath(
