@@ -8,7 +8,12 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
-import { commitSessionRequestSchema } from '@cupboard/protocol/upload';
+import {
+	commitBatchCapabilityToken,
+	commitCapabilitiesHeader,
+	commitSessionRequestSchema,
+	type ParsedCommitBatchEntry
+} from '@cupboard/protocol/upload';
 import { DurableObject } from 'cloudflare:workers';
 import { eq, or } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -24,6 +29,7 @@ import {
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	TenantNotConfiguredError,
+	UploadNotFoundError,
 	ZstdUnavailableError
 } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
@@ -52,6 +58,7 @@ import {
 	type CasReferenceDemotion,
 	type NarInfoDemotion
 } from './blob-reaper-service.ts';
+import { mapWithConcurrency, maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import {
 	CommitPipelineService,
@@ -394,18 +401,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			commitSessionAttachmentSchema.parse({ cache, sessionId })
 		);
 
-		return new Response(undefined, { status: 101, webSocket: client });
+		// Advertise the optional ops on the 101 so a capable client batches only
+		// against a server that offered it; a server that does not list an op never
+		// receives it.
+		return new Response(undefined, {
+			status: 101,
+			webSocket: client,
+			headers: { [commitCapabilitiesHeader]: commitBatchCapabilityToken }
+		});
 	}
 
 	// Commits one upload over the session and replies with a per-id frame. The
 	// socket stays open: a deferred upload's verdict arrives later over the same
-	// connection, and other ids keep committing. An error fails just this id.
+	// connection, and other ids keep committing. An error fails just this id. A
+	// batched entry carries the path identity from negotiation, so a row already
+	// gone (a re-sent entry whose reply was lost on a drop) resolves against the
+	// path's narinfo row; the lost reply is not an error.
 	private async runSessionCommit(
 		sessionLogger: Logger,
 		socket: WebSocket,
 		cache: string,
 		sessionId: string,
-		uploadId: string
+		uploadId: string,
+		identity?: Pick<ParsedCommitBatchEntry, 'storePathHash' | 'narHash'>
 	): Promise<void> {
 		try {
 			// Record the session before the commit can defer, so a verdict reached
@@ -435,6 +453,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				narHash: outcome.narHash
 			});
 		} catch (error) {
+			if (error instanceof UploadNotFoundError && identity !== undefined) {
+				await this.resolveGoneCommit(socket, cache, uploadId, identity);
+				return;
+			}
+
 			// A ServerHttpError carries a client-facing message; anything else is an
 			// internal fault whose detail must not leak over the socket, matching the
 			// platform 500 the HTTP error handler rethrows to.
@@ -455,6 +478,44 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				message: isKnown ? error.message : 'internal error'
 			});
 		}
+	}
+
+	// Answers a batched commit whose pending row is gone. The pending row may be
+	// absent because verification committed the upload (the expected case on a
+	// reconnect re-send), or because the reaper deleted an unanswered expired row
+	// before the client ever received a reply. The path's narinfo row holding the
+	// same narHash AND carrying a committed reference edge confirms the upload
+	// reached a servable state; anything else re-drives the client with `absent`.
+	private async resolveGoneCommit(
+		socket: WebSocket,
+		cache: string,
+		uploadId: string,
+		identity: Pick<ParsedCommitBatchEntry, 'storePathHash' | 'narHash'>
+	): Promise<void> {
+		const committed = await this.narInfoObjects.committedNarInfoRow(
+			cache,
+			identity.storePathHash
+		);
+
+		if (committed?.narHash === identity.narHash) {
+			sendCommitSessionFrame(socket, {
+				ev: 'settled',
+				uploadId,
+				response: {
+					storePathHash: identity.storePathHash,
+					narHash: identity.narHash,
+					status: 'already-present'
+				}
+			});
+
+			return;
+		}
+
+		sendCommitSessionFrame(socket, {
+			ev: 'verdict',
+			uploadId,
+			status: 'absent'
+		});
 	}
 
 	// Re-attaches a reconnected session to ids still outstanding and replays each
@@ -1308,27 +1369,63 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		const text =
 			typeof message === 'string' ? message : new TextDecoder().decode(message);
-		let request;
+		const parsed = commitSessionRequestSchema.safeParse(safeJsonParse(text));
 
-		try {
-			request = commitSessionRequestSchema.parse(JSON.parse(text));
-		} catch {
+		if (!parsed.success) {
+			// A well-formed op this server does not know gets a per-message reply
+			// naming it, so a newer client degrades gracefully; garbage (unparseable
+			// JSON, or a known op with a broken shape) still closes the socket, since
+			// it speaks for a client this session cannot trust.
+			const unknown = unknownSessionOp(text);
+
+			if (unknown !== undefined) {
+				sendCommitSessionFrame(socket, { ev: 'unsupported', op: unknown });
+				return;
+			}
+
 			socket.close(1002, 'invalid commit request');
 			return;
 		}
 
+		const request = parsed.data;
 		const { cache, sessionId } = attachment.data;
 
 		if (request.op === 'commit') {
 			// The socket message is a top-level entrypoint, so it seeds the logger the
 			// commit path is threaded.
-			const logger = rootLogger().with({ sessionId, cache });
+			const logger = rootLogger().with({ sessionId, cache, op: request.op });
 			await this.runSessionCommit(
 				logger,
 				socket,
 				cache,
 				sessionId,
 				request.uploadId
+			);
+			return;
+		}
+
+		if (request.op === 'commit-batch') {
+			// Every entry answers its own frame: a failing commit answers that id
+			// while its chunk-mates proceed, and the bounded concurrency keeps an
+			// entry parked on the materialise flush from head-of-line-blocking the
+			// rest. Concurrent settles share the flush gate, so a chunk lands in a
+			// handful of combined charge batches.
+			const logger = rootLogger().with({ sessionId, cache, op: request.op });
+			await mapWithConcurrency(
+				request.commits,
+				maxOutgoingConnections,
+				(entry) =>
+					this.runSessionCommit(
+						logger,
+						socket,
+						cache,
+						sessionId,
+						entry.uploadId,
+						{
+							storePathHash: entry.storePathHash,
+							narHash: entry.narHash
+						}
+					)
 			);
 			return;
 		}
@@ -1345,6 +1442,40 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	webSocketError(socket: WebSocket): void {
 		socket.close(1011, 'socket error');
 	}
+}
+
+function safeJsonParse(text: string): unknown {
+	try {
+		return JSON.parse(text);
+	} catch {
+		return undefined;
+	}
+}
+
+// The ops this build's session schema knows, derived from the schema so the
+// set cannot drift from it.
+const knownSessionOps = new Set<string>(
+	commitSessionRequestSchema.options.map((option) => option.shape.op.value)
+);
+
+// Distinguishes an op from a later protocol from a broken message: a JSON
+// object naming an op outside this build's schema is the former and earns a
+// per-message `unsupported` reply; anything else is the latter and closes the
+// socket. Returns the unknown op's name, or undefined for garbage.
+function unknownSessionOp(text: string): string | undefined {
+	const body = safeJsonParse(text);
+
+	if (typeof body !== 'object' || body === null || !('op' in body)) {
+		return undefined;
+	}
+
+	const op = body.op;
+
+	if (typeof op !== 'string' || knownSessionOps.has(op)) {
+		return undefined;
+	}
+
+	return op;
 }
 
 // Emits a line when a request finishes, carrying its Durable Object SQLite cost

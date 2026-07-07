@@ -184,13 +184,64 @@ export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
 
 // The multiplexed commit session: one socket per push carries every path's
 // commit, so each request and frame names the upload it concerns. The client
-// sends `commit` to settle one id and `subscribe` to re-attach a reconnected
-// socket to ids still outstanding; the server answers with a per-id frame whose
-// `ev` mirrors the single-socket protocol's events.
+// sends `commit` to settle one id, `commit-batch` to settle a chunk of ids in
+// one message, and `subscribe` to re-attach a reconnected socket to ids still
+// outstanding; the server answers with a per-id frame whose `ev` mirrors the
+// single-socket protocol's events.
 const uploadIdsSchema = z.array(z.string());
+
+// The response header on the commit session's 101 listing the optional ops this
+// server accepts. A client sends `commit-batch` only when the server listed it,
+// so a batching client degrades to per-id `commit` ops against a server that
+// does not advertise, which would close the socket on an op it cannot parse.
+export const commitCapabilitiesHeader = 'x-cupboard-commit-capabilities';
+
+// The request header the client includes on the upgrade to declare which
+// optional ops it understands. A follow-up wires the client to this constant.
+export const commitAcceptCapabilitiesHeader = 'x-cupboard-accept-capabilities';
+
+// The capability name for `commit-batch`. This is the bare token name that
+// clients look up in the parsed capability map; the server advertises it
+// with attributes via `commitBatchCapabilityToken`.
+export const commitBatchCapability = 'commit-batch';
+
+// Bounds one `commit-batch` message. Each entry is a few hundred bytes, so the
+// cap keeps a message far below the socket's limits while still collapsing a
+// burst of commits into a handful of messages.
+//
+// Wire-freeze: this constant is encoded in the capability token the server
+// advertises on every 101. Any change to this value, or to the shape of a
+// known op's schema, needs a NEW capability token so older servers (which close
+// on schema violations) and newer clients can coexist safely.
+export const commitBatchMaxEntries = 100;
+
+// The parameterised capability token the server includes in the 101 header.
+// Carries the entry cap so a client receiving it knows the maximum batch size
+// this server accepts without needing a separate negotiation round-trip.
+// Build from the shared constants; never hand-code the string.
+export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String(commitBatchMaxEntries)}`;
+
+// One batched commit: the upload to settle plus the path identity the client
+// holds from negotiation. The identity lets a reconnect re-send an entry whose
+// reply was lost: the server resolves a since-gone row against the path's
+// committed narinfo and answers `already-present`, where a bare id could only
+// fail as unknown.
+//
+// Wire-freeze: any change to this schema's shape or the `commitBatchMaxEntries`
+// bound is a breaking change that requires a new capability token.
+const commitBatchEntrySchema = z.strictObject({
+	uploadId: z.string(),
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema
+});
+export type ParsedCommitBatchEntry = z.output<typeof commitBatchEntrySchema>;
 
 export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 	z.strictObject({ op: z.literal('commit'), uploadId: z.string() }),
+	z.strictObject({
+		op: z.literal('commit-batch'),
+		commits: z.array(commitBatchEntrySchema).min(1).max(commitBatchMaxEntries)
+	}),
 	z.strictObject({
 		op: z.literal('subscribe'),
 		uploadIds: uploadIdsSchema
@@ -223,6 +274,14 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 		uploadId: z.string(),
 		status: z.number().int(),
 		message: z.string()
+	}),
+	// Answers a well-formed op this server does not know, naming it, so a newer
+	// client degrades per message where a close would drop the whole session. Only
+	// ever sent in reply to such an op, which a client of this version or older
+	// never sends, so no deployed client meets a frame it cannot parse.
+	z.strictObject({
+		ev: z.literal('unsupported'),
+		op: z.string()
 	})
 ]);
 export type ParsedCommitSessionFrame = z.output<
