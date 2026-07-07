@@ -155,4 +155,68 @@ describe('batched commit settles', () => {
 			batches.mockRestore();
 		}
 	});
+
+	it('reads a set of probe facts in two concurrent batches, then probes from memory', async () => {
+		const token = await initialise();
+
+		const paths = await Promise.all(
+			['a', 'b', 'c'].map(async (letter, index) => {
+				const nar = await verifiableNar(`prefetch-${letter}`);
+				const metadata = uploadMetadata({
+					name: `prefetch-${String(index)}`,
+					storePathHash: letter.repeat(32),
+					narHash: nar.narHash,
+					fileHash: nar.fileHash,
+					fileSize: nar.narBytes.byteLength,
+					narSize: nar.narSize
+				});
+				await commitPath(token, metadata, nar);
+
+				return metadata;
+			})
+		);
+
+		const narHashes = paths.map((metadata) => metadata.narHash);
+		const [head] = paths;
+
+		if (head === undefined) {
+			throw new Error('the set needs at least one path');
+		}
+
+		const counts = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const pipeline = pipelineFor(instance.context);
+				const batches = vi.spyOn(env.CUPBOARD_DB, 'batch');
+
+				try {
+					const prefetched =
+						await pipeline.prefetchMaterialisationFacts(narHashes);
+					const prefetchBatches = batches.mock.calls.length;
+
+					// A probe handed the prefetched facts pays only its R2 head, no D1
+					// batch of its own.
+					batches.mockClear();
+					await pipeline.probeMaterialisation(
+						head,
+						prefetched.get(head.narHash)
+					);
+
+					return {
+						prefetchBatches,
+						probeBatches: batches.mock.calls.length,
+						facts: prefetched.size
+					};
+				} finally {
+					batches.mockRestore();
+				}
+			}
+		);
+
+		expect(counts).toStrictEqual({
+			prefetchBatches: 2,
+			probeBatches: 0,
+			facts: 3
+		});
+	});
 });
