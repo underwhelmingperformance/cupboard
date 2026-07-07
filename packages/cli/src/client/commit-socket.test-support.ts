@@ -1,13 +1,15 @@
 import type {
 	CommitSocket,
 	CommitSocketData,
-	UpgradeFailure
+	UpgradeFailure,
+	UpgradeResponse
 } from './commit-socket.ts';
 
 interface CommitSocketEvents {
 	open: [];
+	upgrade: [response: UpgradeResponse];
 	message: [data: CommitSocketData];
-	close: [code: number];
+	close: [code: number, reason: CommitSocketData];
 	error: [error: Error];
 	'unexpected-response': [request: unknown, response: UpgradeFailure];
 }
@@ -56,6 +58,7 @@ export class FakeCommitSocket
 	constructor() {
 		super({
 			open: [],
+			upgrade: [],
 			message: [],
 			close: [],
 			error: [],

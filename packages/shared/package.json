@@ -18,6 +18,7 @@
 		"vitest": "^4.1.8"
 	},
 	"exports": {
+		"./collections": "./src/collections.ts",
 		"./errors": "./src/errors.ts",
 		"./in-toto": "./src/in-toto.ts",
 		"./octokit": "./src/octokit.ts",
