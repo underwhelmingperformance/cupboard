@@ -191,47 +191,38 @@ export class OffboardingService {
 	}
 
 	private async hasResidue(tenant: TenantId): Promise<boolean> {
-		const edge = await this.context.d1
-			.select({ tenant: d1Schema.blobReference.tenant })
-			.from(d1Schema.blobReference)
-			.where(eq(d1Schema.blobReference.tenant, tenant))
-			.limit(1)
-			.get();
+		// The terminal (fully-drained) pass checks all four tables anyway, so read
+		// them in one batch.
+		const [edge, presence, attestation, casPresence] =
+			await this.context.d1.batch([
+				this.context.d1
+					.select({ tenant: d1Schema.blobReference.tenant })
+					.from(d1Schema.blobReference)
+					.where(eq(d1Schema.blobReference.tenant, tenant))
+					.limit(1),
+				this.context.d1
+					.select({ tenant: d1Schema.tenantBlob.tenant })
+					.from(d1Schema.tenantBlob)
+					.where(eq(d1Schema.tenantBlob.tenant, tenant))
+					.limit(1),
+				this.context.d1
+					.select({ tenant: d1Schema.attestationReference.tenant })
+					.from(d1Schema.attestationReference)
+					.where(eq(d1Schema.attestationReference.tenant, tenant))
+					.limit(1),
+				this.context.d1
+					.select({ tenant: d1Schema.tenantCasBlob.tenant })
+					.from(d1Schema.tenantCasBlob)
+					.where(eq(d1Schema.tenantCasBlob.tenant, tenant))
+					.limit(1)
+			]);
 
-		if (edge !== undefined) {
-			return true;
-		}
-
-		const presence = await this.context.d1
-			.select({ tenant: d1Schema.tenantBlob.tenant })
-			.from(d1Schema.tenantBlob)
-			.where(eq(d1Schema.tenantBlob.tenant, tenant))
-			.limit(1)
-			.get();
-
-		if (presence !== undefined) {
-			return true;
-		}
-
-		const attestation = await this.context.d1
-			.select({ tenant: d1Schema.attestationReference.tenant })
-			.from(d1Schema.attestationReference)
-			.where(eq(d1Schema.attestationReference.tenant, tenant))
-			.limit(1)
-			.get();
-
-		if (attestation !== undefined) {
-			return true;
-		}
-
-		const casPresence = await this.context.d1
-			.select({ tenant: d1Schema.tenantCasBlob.tenant })
-			.from(d1Schema.tenantCasBlob)
-			.where(eq(d1Schema.tenantCasBlob.tenant, tenant))
-			.limit(1)
-			.get();
-
-		return casPresence !== undefined;
+		return (
+			edge.length > 0 ||
+			presence.length > 0 ||
+			attestation.length > 0 ||
+			casPresence.length > 0
+		);
 	}
 
 	// Marks this tenant offboarding so the verify-restore path stops re-materialising
