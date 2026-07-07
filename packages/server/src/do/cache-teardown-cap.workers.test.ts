@@ -22,7 +22,8 @@ import {
 	tenantBlobRows,
 	tenantUsageRow,
 	uploadMetadata,
-	useTestServer
+	useTestServer,
+	verifiableNar
 } from '../test-support.ts';
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
@@ -134,23 +135,32 @@ describe('cache teardown', () => {
 		await useTestServer('teardown-batch');
 		const { token } = await bootstrap();
 
-		// Enough paths that the fenced edge retirement spans several parameter
-		// sub-chunks; a count that fits one sub-chunk would leave the chunking
-		// unexercised.
+		// Enough paths that the presence sweep spans several parameter sub-chunks.
+		// Each path must carry a distinct narHash so the IN list does not collapse
+		// to a single value; verifiableNar produces self-consistent compressed bytes
+		// whose decompressed content actually hashes to the declared narHash.
 		const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
-		const paths = Array.from({ length: 95 }, (_, index) => {
+		const nars = await Promise.all(
+			Array.from({ length: 95 }, (_, index) => verifiableNar(String(index)))
+		);
+		const paths = nars.map((nar, index) => {
 			const suffix =
 				alphabet.charAt(Math.floor(index / 32)) + alphabet.charAt(index % 32);
 
 			return uploadMetadata({
-				fileSize: narBytes.byteLength,
+				fileSize: nar.narBytes.byteLength,
 				storePathHash: `${'0'.repeat(30)}${suffix}`,
-				name: `path-${suffix}`
+				name: `path-${suffix}`,
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				narSize: nar.narSize
 			});
 		});
 
-		for (const metadata of paths) {
-			await pushPath(token, metadata, 'builds');
+		const pathsWithNars = paths.map((p, index) => [p, nars[index]] as const);
+
+		for (const [metadata, nar] of pathsWithNars) {
+			await pushPath(token, metadata, 'builds', nar);
 		}
 
 		const response = await authorisedFetch('/caches/builds?force=true', token, {
