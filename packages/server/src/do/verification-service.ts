@@ -25,6 +25,7 @@ import {
 } from '../http/http.ts';
 
 import {
+	batchNonEmpty,
 	chunk,
 	mapWithConcurrency,
 	maxInClauseValues,
@@ -735,10 +736,15 @@ export class VerificationService {
 
 		const tenant = this.context.requireTenant();
 		const hashes = [...new Set(rows.map((row) => row.storePathHash))];
-		const keys = new Set<string>();
 
-		for (const batch of chunk(hashes, maxInClauseValues)) {
-			const edges = await this.context.d1
+		const hashChunks = chunk(hashes, maxInClauseValues);
+		const queries = hashChunks.map((hashChunk) => {
+			const edgeFilter = and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				inArray(d1Schema.blobReference.storePathHash, hashChunk)
+			);
+
+			return this.context.d1
 				.select({
 					cache: d1Schema.blobReference.cache,
 					storePathHash: d1Schema.blobReference.storePathHash,
@@ -746,14 +752,15 @@ export class VerificationService {
 					narHash: d1Schema.blobReference.narHash
 				})
 				.from(d1Schema.blobReference)
-				.where(
-					and(
-						eq(d1Schema.blobReference.tenant, tenant),
-						inArray(d1Schema.blobReference.storePathHash, batch)
-					)
-				)
-				.all();
+				.where(edgeFilter);
+		});
 
+		// One D1 round-trip covers every chunk; each stays within the parameter cap.
+		const chunkResults = await batchNonEmpty(this.context.d1, queries);
+
+		const keys = new Set<string>();
+
+		for (const edges of chunkResults) {
 			for (const edge of edges) {
 				keys.add(
 					edgeKey(edge.cache, edge.storePathHash, edge.generation, edge.narHash)
