@@ -22,6 +22,7 @@ import {
 import { parseStored } from '../http/parse.ts';
 
 import {
+	batchNonEmpty,
 	chunk,
 	mapWithConcurrency,
 	maxInClauseValues,
@@ -31,6 +32,14 @@ import { type ServerContext } from './context.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
+
+// A committed reference edge as read from D1: the path, the generation the row
+// must still name, and the NAR hash it points at.
+interface CommittedReferenceEdge {
+	readonly storePathHash: StorePathHash;
+	readonly generation: number;
+	readonly narHash: NixSha256HashString;
+}
 
 // The canonical compressed metadata a narinfo advertises, the subset of
 // `blob_state` {@link NarInfoObjectsService.buildNarInfo} needs.
@@ -144,7 +153,8 @@ export class NarInfoObjectsService {
 	// copy.
 	private async materialiseIfRecoverable(
 		cache: string,
-		storePathHash: StorePathHash
+		storePathHash: StorePathHash,
+		committedEdges?: readonly CommittedReferenceEdge[]
 	): Promise<void> {
 		// A tenant being offboarded must not have its objects re-materialised, or the
 		// drain would chase an object this path recreated behind it.
@@ -163,7 +173,10 @@ export class NarInfoObjectsService {
 			)
 			.get();
 
-		if (row === undefined || !(await this.hasCommittedReference(cache, row))) {
+		if (
+			row === undefined ||
+			!(await this.rowStillCommitted(cache, row, committedEdges))
+		) {
 			await this.context.env.BLOBS.delete(
 				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
 			);
@@ -187,6 +200,31 @@ export class NarInfoObjectsService {
 		}
 
 		await this.putNarInfoObject(cache, storePathHash, narInfo);
+	}
+
+	// Whether the row's exact version is still committed. Given a batch of edges
+	// already read from D1 it first checks the snapshot in memory; if the
+	// snapshot does not match, a fresh single-row D1 read confirms before
+	// returning false, so a generation the snapshot predates does not cause a
+	// false negative. Without a snapshot it goes directly to the D1 read.
+	private async rowStillCommitted(
+		cache: string,
+		row: NarInfoRow,
+		committedEdges: readonly CommittedReferenceEdge[] | undefined
+	): Promise<boolean> {
+		if (committedEdges === undefined) {
+			return this.hasCommittedReference(cache, row);
+		}
+
+		if (
+			this.committedReferencesFrom(committedEdges, [row]).has(row.storePathHash)
+		) {
+			return true;
+		}
+
+		// The snapshot may predate a commit that advanced this row's generation.
+		// Confirm with a fresh D1 read before treating the absence as uncommitted.
+		return this.hasCommittedReference(cache, row);
 	}
 
 	// {@link demoteUnbacked}'s body, run inside the critical section so the
@@ -332,10 +370,11 @@ export class NarInfoObjectsService {
 	// Opens its own critical section; callers must be outside one.
 	async isServable(
 		cache: string,
-		storePathHash: StorePathHash
+		storePathHash: StorePathHash,
+		committedEdges?: readonly CommittedReferenceEdge[]
 	): Promise<boolean> {
 		return this.context.criticalSection(() =>
-			this.isServableLocked(cache, storePathHash)
+			this.isServableLocked(cache, storePathHash, committedEdges)
 		);
 	}
 
@@ -344,9 +383,10 @@ export class NarInfoObjectsService {
 	// without a delete racing across an `await`.
 	async isServableLocked(
 		cache: string,
-		storePathHash: StorePathHash
+		storePathHash: StorePathHash,
+		committedEdges?: readonly CommittedReferenceEdge[]
 	): Promise<boolean> {
-		await this.materialiseIfRecoverable(cache, storePathHash);
+		await this.materialiseIfRecoverable(cache, storePathHash, committedEdges);
 
 		const object = await this.context.env.BLOBS.head(
 			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
@@ -389,12 +429,30 @@ export class NarInfoObjectsService {
 			return new Set();
 		}
 
-		const tenant = this.context.requireTenant();
-		const storePathHashes = rows.map((row) => row.storePathHash);
+		const edges = await this.committedReferenceEdges(
+			cache,
+			rows.map((row) => row.storePathHash)
+		);
 
-		const batches = await mapWithConcurrency(
-			chunk(storePathHashes, maxInClauseValues),
-			maxOutgoingConnections,
+		return this.committedReferencesFrom(edges, rows);
+	}
+
+	// The committed reference edges D1 holds for `storePathHashes`, read in a
+	// single chunked batch that stays under D1's bound-parameter cap. {@link
+	// committedReferences} pairs these with live rows; a caller that heals per
+	// path can also thread them into {@link isServable} so the gated re-check
+	// settles in memory.
+	async committedReferenceEdges(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<CommittedReferenceEdge[]> {
+		if (storePathHashes.length === 0) {
+			return [];
+		}
+
+		const tenant = this.context.requireTenant();
+
+		const queries = chunk(storePathHashes, maxInClauseValues).map(
 			(storePathHashBatch) =>
 				this.context.d1
 					.select({
@@ -410,10 +468,36 @@ export class NarInfoObjectsService {
 							inArray(d1Schema.blobReference.storePathHash, storePathHashBatch)
 						)
 					)
-					.all()
 		);
 
-		return this.committedReferencesFrom(batches.flat(), rows);
+		const results = await batchNonEmpty(this.context.d1, queries);
+		return results.flat();
+	}
+
+	// The committed narinfo rows for `storePathHashes`, read from the DO's own
+	// SQLite in chunks that stay under the bound-parameter cap. A caller pairs
+	// these live rows with {@link committedReferenceEdges} to decide committedness.
+	narInfoRowsFor(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): NarInfoRow[] {
+		if (storePathHashes.length === 0) {
+			return [];
+		}
+
+		return chunk(storePathHashes, maxInClauseValues).flatMap(
+			(storePathHashBatch) =>
+				this.context.db
+					.select()
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cache, cache),
+							inArray(schema.narInfos.storePathHash, storePathHashBatch)
+						)
+					)
+					.all()
+		);
 	}
 
 	// The pure comparison half of {@link committedReferences}: which of `rows`
@@ -421,11 +505,7 @@ export class NarInfoObjectsService {
 	// Object's own live SQLite state, so an edge read before a recommit bumped
 	// a generation simply fails to match, failing towards "not committed".
 	committedReferencesFrom(
-		edges: readonly {
-			readonly storePathHash: StorePathHash;
-			readonly generation: number;
-			readonly narHash: NixSha256HashString;
-		}[],
+		edges: readonly CommittedReferenceEdge[],
 		rows: readonly NarInfoRow[]
 	): Set<StorePathHash> {
 		const committed = new Set<StorePathHash>();
