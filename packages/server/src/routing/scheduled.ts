@@ -1,5 +1,9 @@
 import { type Logger, rootLogger } from '@cupboard/logger';
-import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	type NixSha256HashString,
+	type TenantId,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -8,7 +12,10 @@ import {
 	type NarVerification,
 	verifyDecompressedNar
 } from '../blob/nar-verify.ts';
-import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
+import {
+	type BlobStateUpsert,
+	stagePromotedBlob
+} from '../blob/promote-blob.ts';
 import { retireScheduledControlKeys } from '../control/control-key-store.ts';
 import {
 	deleteTenantMember,
@@ -24,7 +31,11 @@ import {
 	type NarInfoDemoter,
 	type NarInfoDemotion
 } from '../do/blob-reaper-service.ts';
-import { mapWithConcurrency, maxOutgoingConnections } from '../do/bulk.ts';
+import {
+	batchNonEmpty,
+	mapWithConcurrency,
+	maxOutgoingConnections
+} from '../do/bulk.ts';
 import {
 	type PendingVerification,
 	type VerificationResult
@@ -672,6 +683,11 @@ const verifyDecodeConcurrency = 4;
 const recordAttempts = 3;
 const recordRetryDelayMs = 500;
 
+// How many times the promotion batch retries a D1 fault before falling back to
+// per-statement execution. The shape mirrors the recorder's retry loop.
+const promotionBatchAttempts = 3;
+const promotionBatchRetryDelayMs = 500;
+
 /**
  * Buffers verdicts as they are reached and records them incrementally: one
  * `recordVerifications` RPC in flight at a time, verdicts completing meanwhile
@@ -770,16 +786,32 @@ export class VerdictRecorder {
 	}
 }
 
-// Promotes one fresh claim's verified bytes and reports the verdict. A promote
-// the consumer completed spares the settle its own; one that fails falls back
-// to the plain verified verdict, so the decode is never wasted and the settle
-// promotes as before.
-async function promoteAndReport(
-	database: DrizzleD1Database<typeof d1Schema>,
+// A claim whose R2 promote has succeeded, holding the `blob_state` upsert for
+// the pass to apply as one batch. The verdict is deferred until the batch
+// settles, so every claim receives a verdict even when the batch faults:
+// {@link onSuccess} once the fact lands, {@link onFailure} otherwise.
+interface PendingPromotion {
+	readonly upsert: BlobStateUpsert;
+	readonly onSuccess: VerificationResult;
+	readonly onFailure: VerificationResult;
+}
+
+// Either a verdict to record now, or a promotion whose upsert the pass batches.
+type PromotionOutcome =
+	| { readonly kind: 'verdict'; readonly result: VerificationResult }
+	| { readonly kind: 'promotion'; readonly promotion: PendingPromotion };
+
+// Promotes one fresh claim's verified bytes and returns either a verdict to
+// record now or a pending promotion whose upsert the pass batches. A promote the
+// consumer completed spares the settle its own; one whose R2 work fails falls
+// back to the plain verified verdict, so the decode is never wasted and the
+// settle runs its own promote on the DO thread.
+async function stagePromotionForClaim(
+	database: CronDatabase,
 	blobs: R2Bucket,
 	claim: PendingVerification,
 	verification: NarVerification
-): Promise<VerificationResult> {
+): Promise<PromotionOutcome> {
 	const fallback: VerificationResult = {
 		uploadId: claim.uploadId,
 		verdict: { kind: 'verified', verification }
@@ -790,11 +822,11 @@ async function promoteAndReport(
 		verification.fileHash === undefined ||
 		verification.fileSize === undefined
 	) {
-		return fallback;
+		return { kind: 'verdict', result: fallback };
 	}
 
 	try {
-		await promoteVerifiedBlob(
+		const { upsert } = await stagePromotedBlob(
 			database,
 			blobs,
 			claim.r2Key,
@@ -802,9 +834,88 @@ async function promoteAndReport(
 			{ fileHash: verification.fileHash, fileSize: verification.fileSize }
 		);
 
-		return { uploadId: claim.uploadId, verdict: { kind: 'promoted' } };
+		return {
+			kind: 'promotion',
+			promotion: {
+				upsert,
+				onSuccess: { uploadId: claim.uploadId, verdict: { kind: 'promoted' } },
+				onFailure: fallback
+			}
+		};
 	} catch {
-		return fallback;
+		return { kind: 'verdict', result: fallback };
+	}
+}
+
+// Applies a pass's collected `blob_state` upserts as one D1 batch, with retries
+// on transient faults and a per-statement fallback if retries are exhausted.
+// Reports each claim's success verdict when its upsert lands, and its failure
+// verdict when it does not. The upserts are idempotent `onConflictDoUpdate`s, so
+// retrying and falling back per-statement are both safe.
+async function recordPromotionBatch(
+	logger: Logger,
+	database: CronDatabase,
+	recorder: VerdictRecorder,
+	promotions: readonly PendingPromotion[]
+): Promise<void> {
+	if (promotions.length === 0) {
+		return;
+	}
+
+	const upserts = promotions.map((promotion) => promotion.upsert);
+
+	// Attempt the batch with retries, mirroring the recorder's retry shape.
+	let wasBatchApplied = false;
+
+	for (let attempt = 0; attempt < promotionBatchAttempts; attempt += 1) {
+		if (attempt > 0) {
+			await new Promise((resolve) =>
+				setTimeout(resolve, promotionBatchRetryDelayMs)
+			);
+		}
+
+		try {
+			await batchNonEmpty(database, upserts);
+			wasBatchApplied = true;
+			break;
+		} catch (error) {
+			logger.warn('promotion batch not applied', {
+				count: upserts.length,
+				attempt: attempt + 1,
+				error
+			});
+		}
+	}
+
+	if (wasBatchApplied) {
+		for (const promotion of promotions) {
+			recorder.add(promotion.onSuccess);
+		}
+
+		return;
+	}
+
+	// Retries exhausted: fall back per-statement so one poisoned upsert cannot
+	// sink its batch-mates. Each is individually idempotent, and the concurrency
+	// stays bounded so the fallback does not fan a whole pass's statements at a
+	// database that just refused the batch.
+	const applied = await mapWithConcurrency(
+		upserts,
+		maxOutgoingConnections,
+		async (upsert) => {
+			try {
+				await upsert.run();
+				return true;
+			} catch {
+				return false;
+			}
+		}
+	);
+
+	for (const [index, promotion] of promotions.entries()) {
+		recorder.add(
+			applied[index] === true ? promotion.onSuccess : promotion.onFailure
+		);
 	}
 }
 
@@ -836,31 +947,55 @@ export async function verifyTenant(
 		(results) => server.recordVerifications(results)
 	);
 
+	// Pin all claimed hashes immediately: clear any reaper grace timer so the
+	// reaper cannot delete an armed row (and its canonical R2 object) before the
+	// pass-end upsert re-arms it via `delete_after = NULL`. The pin only affects
+	// rows that already exist; missing rows are fine (their upsert inserts later).
+	await pinClaimedNarHashes(
+		database,
+		claims.map((claim) => claim.narHash)
+	);
+
+	const reuseClaims = claims.filter((claim) => claim.reuse);
+	const freshClaims = claims.filter((claim) => !claim.reuse);
+
 	// Reuse rows need no decode: their bytes are the shared canonical object,
-	// verified when it was first promoted. Promote each (a canonical head plus
-	// the blob_state upsert) ahead of the decodes, so the cheap rows are never
-	// hostage to the expensive ones.
+	// verified when it was first promoted. Promote each (a canonical head) ahead
+	// of the decodes, so the cheap rows are never hostage to the expensive ones,
+	// and collect their `blob_state` upserts to settle in one D1 batch.
+	const reusePromotions: PendingPromotion[] = [];
+
 	await mapWithConcurrency(
-		claims.filter((claim) => claim.reuse),
+		reuseClaims,
 		maxOutgoingConnections,
 		async (claim) => {
 			try {
-				await promoteVerifiedBlob(
+				const { upsert } = await stagePromotedBlob(
 					database,
 					env.BLOBS,
 					claim.r2Key,
 					{ narHash: claim.narHash, narSize: claim.narSize },
 					undefined
 				);
-				recorder.add({
-					uploadId: claim.uploadId,
-					verdict: { kind: 'promoted' }
+				reusePromotions.push({
+					upsert,
+					onSuccess: {
+						uploadId: claim.uploadId,
+						verdict: { kind: 'promoted' }
+					},
+					// The canonical head succeeded, so a claim whose upsert ultimately
+					// fails still settles: the verified verdict has the settle run its
+					// own promote on the DO thread.
+					onFailure: {
+						uploadId: claim.uploadId,
+						verdict: { kind: 'verified', verification: { ok: true } }
+					}
 				});
 			} catch (error) {
-				// A vanished canonical object cannot reappear: the row can never
-				// settle, so report it gone and let the settle answer the waiter
-				// so the settle answers the waiter without waiting for the commit timeout. Anything
-				// else is transient; hand the claim back for a prompt retry.
+				// A vanished canonical object cannot reappear, so report it gone and
+				// let the settle answer the waiter without waiting for the commit
+				// timeout. Anything else is transient; hand the claim back for a
+				// prompt retry.
 				recorder.add({
 					uploadId: claim.uploadId,
 					verdict:
@@ -872,8 +1007,12 @@ export async function verifyTenant(
 		}
 	);
 
+	await recordPromotionBatch(logger, database, recorder, reusePromotions);
+
+	const freshPromotions: PendingPromotion[] = [];
+
 	await mapWithConcurrency(
-		claims.filter((claim) => !claim.reuse),
+		freshClaims,
 		verifyDecodeConcurrency,
 		async (claim) => {
 			try {
@@ -895,9 +1034,19 @@ export async function verifyTenant(
 					{ narHash: claim.narHash, narSize: claim.narSize }
 				);
 
-				recorder.add(
-					await promoteAndReport(database, env.BLOBS, claim, verification)
+				const outcome = await stagePromotionForClaim(
+					database,
+					env.BLOBS,
+					claim,
+					verification
 				);
+
+				if (outcome.kind === 'promotion') {
+					freshPromotions.push(outcome.promotion);
+					return;
+				}
+
+				recorder.add(outcome.result);
 			} catch {
 				// A transient fetch or decode fault: hand the claim back so the next
 				// pass retries promptly on the next cycle.
@@ -908,6 +1057,8 @@ export async function verifyTenant(
 			}
 		}
 	);
+
+	await recordPromotionBatch(logger, database, recorder, freshPromotions);
 
 	const applied = await recorder.settle();
 
@@ -924,6 +1075,30 @@ export async function verifyTenant(
 	if (truncated && isProgressed) {
 		await server.requestVerificationPass();
 	}
+}
+
+// Clears the reaper grace timer on any claimed hashes that already have a
+// `blob_state` row, so the reaper cannot evict a row between the claim and the
+// pass-end upsert that would re-arm it. Missing rows are unaffected.
+async function pinClaimedNarHashes(
+	database: CronDatabase,
+	narHashes: readonly NixSha256HashString[]
+): Promise<void> {
+	if (narHashes.length === 0) {
+		return;
+	}
+
+	const chunks = chunk(narHashes, maxInClauseValues);
+
+	await batchNonEmpty(
+		database,
+		chunks.map((batch) =>
+			database
+				.update(d1Schema.blobState)
+				.set({ deleteAfter: sql`null` })
+				.where(inArray(d1Schema.blobState.narHash, batch))
+		)
+	);
 }
 
 async function executeTenantMaintenanceMessage(
