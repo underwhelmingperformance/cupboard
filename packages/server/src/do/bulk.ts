@@ -1,3 +1,6 @@
+import { type BatchItem } from 'drizzle-orm/batch';
+import { type DrizzleD1Database } from 'drizzle-orm/d1';
+
 // D1 admits at most 100 bound parameters per query, so an `IN (...)` list is
 // chunked below that with headroom for the fixed parameters a query also binds
 // (a tenant, a cache). The DO's own SQLite tolerates far more, but the same
@@ -34,6 +37,26 @@ export async function deleteObjects(
 	for (const batch of chunk(keys, maxR2DeleteKeys)) {
 		await bucket.delete(batch);
 	}
+}
+
+/**
+ * Runs `queries` as a single D1 batch, returning an empty array without any D1
+ * call when the input is empty.
+ */
+export async function batchNonEmpty<
+	U extends BatchItem<'sqlite'>,
+	TSchema extends Record<string, unknown>
+>(
+	database: DrizzleD1Database<TSchema>,
+	queries: readonly U[]
+): Promise<U['_']['result'][]> {
+	const [first, ...rest] = queries;
+
+	if (first === undefined) {
+		return [];
+	}
+
+	return database.batch([first, ...rest]);
 }
 
 /**

@@ -12,12 +12,7 @@ import { z } from 'zod';
 import { pushIdSigningKey } from '../blob/push-credential.ts';
 import { verifyPushId } from '../blob/push-id.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import {
-	chunk,
-	mapWithConcurrency,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from '../do/bulk.ts';
+import { batchNonEmpty, chunk, maxInClauseValues } from '../do/bulk.ts';
 import { type NegotiateHints } from '../do/negotiate-hints.ts';
 
 // The most paths a negotiate may carry for the Worker to compute hints. The
@@ -107,61 +102,60 @@ async function readHints(
 	narHashes: readonly NixSha256HashString[],
 	storePathHashes: readonly StorePathHash[]
 ): Promise<NegotiateHints> {
-	const [blobStatePages, ownedPages, edgePages] = await Promise.all([
-		mapWithConcurrency(
-			chunk(narHashes, maxInClauseValues),
-			maxOutgoingConnections,
-			(batch) =>
-				database
-					.select({
-						narHash: d1Schema.blobState.narHash,
-						fileHash: d1Schema.blobState.fileHash,
-						fileSize: d1Schema.blobState.fileSize,
-						compression: d1Schema.blobState.compression,
-						narSize: d1Schema.blobState.narSize,
-						deleteAfter: d1Schema.blobState.deleteAfter
-					})
-					.from(d1Schema.blobState)
-					.where(inArray(d1Schema.blobState.narHash, batch))
-					.all()
-		),
-		mapWithConcurrency(
-			chunk(narHashes, maxInClauseValues),
-			maxOutgoingConnections,
-			(batch) =>
-				database
-					.select({ narHash: d1Schema.tenantBlob.narHash })
-					.from(d1Schema.tenantBlob)
-					.where(
-						and(
-							eq(d1Schema.tenantBlob.tenant, tenant),
-							inArray(d1Schema.tenantBlob.narHash, batch)
-						)
-					)
-					.all()
-		),
-		cache === undefined
-			? undefined
-			: mapWithConcurrency(
-					chunk(storePathHashes, maxInClauseValues),
-					maxOutgoingConnections,
-					(batch) =>
-						database
-							.select({
-								storePathHash: d1Schema.blobReference.storePathHash,
-								generation: d1Schema.blobReference.generation,
-								narHash: d1Schema.blobReference.narHash
-							})
-							.from(d1Schema.blobReference)
-							.where(
-								and(
-									eq(d1Schema.blobReference.tenant, tenant),
-									eq(d1Schema.blobReference.cache, cache),
-									inArray(d1Schema.blobReference.storePathHash, batch)
-								)
-							)
-							.all()
+	// The 90-parameter `IN` cap forces one statement per chunk, but D1 counts
+	// each `.all()` as a separate queued request, and a large negotiate can issue
+	// hundreds at once. A single `batch()` carries every chunk in one round-trip,
+	// so the whole hint read is one request to D1 regardless of the path count.
+	const blobStateQueries = chunk(narHashes, maxInClauseValues).map((keys) =>
+		database
+			.select({
+				narHash: d1Schema.blobState.narHash,
+				fileHash: d1Schema.blobState.fileHash,
+				fileSize: d1Schema.blobState.fileSize,
+				compression: d1Schema.blobState.compression,
+				narSize: d1Schema.blobState.narSize,
+				deleteAfter: d1Schema.blobState.deleteAfter
+			})
+			.from(d1Schema.blobState)
+			.where(inArray(d1Schema.blobState.narHash, keys))
+	);
+	const ownedQueries = chunk(narHashes, maxInClauseValues).map((keys) =>
+		database
+			.select({ narHash: d1Schema.tenantBlob.narHash })
+			.from(d1Schema.tenantBlob)
+			.where(
+				and(
+					eq(d1Schema.tenantBlob.tenant, tenant),
+					inArray(d1Schema.tenantBlob.narHash, keys)
 				)
+			)
+	);
+	const edgeQueries =
+		cache === undefined
+			? []
+			: chunk(storePathHashes, maxInClauseValues).map((keys) =>
+					database
+						.select({
+							storePathHash: d1Schema.blobReference.storePathHash,
+							generation: d1Schema.blobReference.generation,
+							narHash: d1Schema.blobReference.narHash
+						})
+						.from(d1Schema.blobReference)
+						.where(
+							and(
+								eq(d1Schema.blobReference.tenant, tenant),
+								eq(d1Schema.blobReference.cache, cache),
+								inArray(d1Schema.blobReference.storePathHash, keys)
+							)
+						)
+				);
+
+	const [blobStatePages, ownedPages, edgePages] = await Promise.all([
+		batchNonEmpty(database, blobStateQueries),
+		batchNonEmpty(database, ownedQueries),
+		cache === undefined
+			? Promise.resolve(undefined)
+			: batchNonEmpty(database, edgeQueries)
 	]);
 
 	return {
