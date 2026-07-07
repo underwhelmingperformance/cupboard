@@ -149,12 +149,31 @@ export class RootsService {
 			await this.narInfoObjects.existingNarInfoObjects(cache, hashes)
 		);
 
-		for (const hash of hashes) {
-			if (servable.has(hash)) {
+		const missing = hashes.filter((hash) => !servable.has(hash));
+
+		if (missing.length === 0) {
+			return servable;
+		}
+
+		// Settle every missing target's committed-ness in one chunked D1 read, so
+		// only a genuinely committed target falls through to the gated heal. The
+		// same edges thread into that heal, sparing it a per-path committed read.
+		const rows = this.narInfoObjects.narInfoRowsFor(cache, missing);
+		const committedEdges = await this.narInfoObjects.committedReferenceEdges(
+			cache,
+			missing
+		);
+		const committed = this.narInfoObjects.committedReferencesFrom(
+			committedEdges,
+			rows
+		);
+
+		for (const hash of missing) {
+			if (!committed.has(hash)) {
 				continue;
 			}
 
-			if (await this.narInfoObjects.isServable(cache, hash)) {
+			if (await this.narInfoObjects.isServable(cache, hash, committedEdges)) {
 				servable.add(hash);
 			}
 		}
