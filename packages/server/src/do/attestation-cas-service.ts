@@ -68,9 +68,10 @@ export class AttestationCasService {
 		digest: Sha256HexDigest,
 		size: number
 	): Promise<boolean> {
-		// Read the usage counters and the presence of this digest together; the
-		// presence read has no side effect, so reading it eagerly costs one request
-		// instead of two even when the usage row settles the answer first.
+		// Read the usage counters and this digest's presence together; the presence
+		// read has no side effect, so it is safe to take eagerly even when the
+		// usage row settles the answer first.
+		const usageFilter = eq(d1Schema.tenantUsage.tenant, tenant);
 		const [usageRows, ownedRows] = await this.context.d1.batch([
 			this.context.d1
 				.select({
@@ -79,28 +80,14 @@ export class AttestationCasService {
 					quotaBytes: d1Schema.tenantUsage.quotaBytes
 				})
 				.from(d1Schema.tenantUsage)
-				.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+				.where(usageFilter),
 			this.context.d1
 				.select({ digest: d1Schema.tenantCasBlob.digest })
 				.from(d1Schema.tenantCasBlob)
 				.where(this.presenceFilter(tenant, digest))
 		]);
 
-		const usage = usageRows[0];
-
-		if (usage === undefined) {
-			return false;
-		}
-
-		if (usage.quotaBytes === null) {
-			return false;
-		}
-
-		if (ownedRows.length > 0) {
-			return false;
-		}
-
-		return usage.bytes + usage.casBytes + size > usage.quotaBytes;
+		return this.overQuotaForCharge(usageRows[0], ownedRows.length > 0, size);
 	}
 
 	private edgeFilter(tenant: TenantId, reference: AttestationReference) {
@@ -247,11 +234,33 @@ export class AttestationCasService {
 		return 'referenced';
 	}
 
-	async wouldExceedQuota(
-		digest: Sha256HexDigest,
+	// The pure quota decision for charging `size` new bytes: a caller that has read
+	// the tenant's usage counters and this digest's presence (a present digest is
+	// already charged, so it never re-charges) evaluates it without a further read.
+	overQuotaForCharge(
+		usage:
+			| {
+					readonly bytes: number;
+					readonly casBytes: number;
+					readonly quotaBytes: number | null;
+			  }
+			| undefined,
+		isOwned: boolean,
 		size: number
-	): Promise<boolean> {
-		return this.overQuota(this.context.requireTenant(), digest, size);
+	): boolean {
+		if (usage === undefined) {
+			return false;
+		}
+
+		if (usage.quotaBytes === null) {
+			return false;
+		}
+
+		if (isOwned) {
+			return false;
+		}
+
+		return usage.bytes + usage.casBytes + size > usage.quotaBytes;
 	}
 
 	async hasCapturedReference(

@@ -21,7 +21,7 @@ import {
 	DsseDecodeError,
 	inTotoStatementSchema
 } from '@cupboard/shared/in-toto';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { StatusCodes } from 'http-status-codes';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -53,6 +53,13 @@ import {
 	type AttestationReference,
 	type MeasuredAttestationBundle
 } from './attestation-cas-service.ts';
+import {
+	batchNonEmpty,
+	chunk,
+	mapWithConcurrency,
+	maxInClauseValues,
+	maxOutgoingConnections
+} from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 
@@ -74,17 +81,69 @@ export class AttestationsService {
 		measured: MeasuredAttestationBundle,
 		parsed: ParsedAttestationBundle
 	): Promise<AttestationAttachResponse> {
-		const row = await this.narInfoObjects.committedNarInfoRow(
-			cache,
-			pending.storePathHash
+		const tenant = this.context.requireTenant();
+		const narInfoFilter = and(
+			eq(schema.narInfos.cache, cache),
+			eq(schema.narInfos.storePathHash, pending.storePathHash)
 		);
+		const narInfoRow = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(narInfoFilter)
+			.get();
 
-		if (row === undefined) {
+		if (narInfoRow === undefined) {
 			await this.clearPendingUploadAndStaging(pending);
 			throw new AttestationPathNotFoundError(pending.storePathHash);
 		}
 
-		const expectedSubject = narHashDigestHex(row.narHash);
+		// One round-trip covers every independent in-gate read the decision needs:
+		// the committed-reference edge that fixes the captured generation, the
+		// tenant's status, and the usage and presence counters the quota check
+		// consults before a CAS object is promoted.
+		const committedReferenceFilter = and(
+			eq(d1Schema.blobReference.tenant, tenant),
+			eq(d1Schema.blobReference.cache, cache),
+			eq(d1Schema.blobReference.storePathHash, narInfoRow.storePathHash),
+			eq(d1Schema.blobReference.generation, narInfoRow.generation),
+			eq(d1Schema.blobReference.narHash, narInfoRow.narHash)
+		);
+		const tenantStatusFilter = eq(d1Schema.tenant.id, tenant);
+		const usageFilter = eq(d1Schema.tenantUsage.tenant, tenant);
+		const presenceFilter = and(
+			eq(d1Schema.tenantCasBlob.tenant, tenant),
+			eq(d1Schema.tenantCasBlob.digest, measured.digest)
+		);
+		const [committedRows, statusRows, usageRows, ownedRows] =
+			await this.context.d1.batch([
+				this.context.d1
+					.select({ narHash: d1Schema.blobReference.narHash })
+					.from(d1Schema.blobReference)
+					.where(committedReferenceFilter),
+				this.context.d1
+					.select({ status: d1Schema.tenant.status })
+					.from(d1Schema.tenant)
+					.where(tenantStatusFilter),
+				this.context.d1
+					.select({
+						bytes: d1Schema.tenantUsage.bytes,
+						casBytes: d1Schema.tenantUsage.casBytes,
+						quotaBytes: d1Schema.tenantUsage.quotaBytes
+					})
+					.from(d1Schema.tenantUsage)
+					.where(usageFilter),
+				this.context.d1
+					.select({ digest: d1Schema.tenantCasBlob.digest })
+					.from(d1Schema.tenantCasBlob)
+					.where(presenceFilter)
+			]);
+
+		if (committedRows.length === 0) {
+			await this.clearPendingUploadAndStaging(pending);
+			throw new AttestationPathNotFoundError(pending.storePathHash);
+		}
+
+		const expectedSubject = narHashDigestHex(narInfoRow.narHash);
 		const matchingSubject = parsed.subjectDigests.find(
 			(digest) => digest === expectedSubject
 		);
@@ -92,32 +151,33 @@ export class AttestationsService {
 		if (matchingSubject === undefined) {
 			await this.clearPendingUploadAndStaging(pending);
 			throw new AttestationSubjectMismatchError(
-				row.narHash,
+				narInfoRow.narHash,
 				parsed.subjectDigests[0] ?? ''
 			);
 		}
 
-		if (!(await this.tenantActive())) {
+		if (statusRows[0]?.status !== 'active') {
 			await this.clearPendingUploadAndStaging(pending);
-			throw new TenantWritesStoppedError(
-				this.context.requireTenant(),
-				'inactive'
-			);
+			throw new TenantWritesStoppedError(tenant, 'inactive');
 		}
 
 		if (
-			await this.attestationCas.wouldExceedQuota(measured.digest, measured.size)
+			this.attestationCas.overQuotaForCharge(
+				usageRows[0],
+				ownedRows.length > 0,
+				measured.size
+			)
 		) {
 			await this.clearPendingUploadAndStaging(pending);
-			throw new QuotaExceededError(this.context.requireTenant());
+			throw new QuotaExceededError(tenant);
 		}
 
 		await this.attestationCas.promoteMeasuredBundle(pending.r2Key, measured);
 
 		const reference: AttestationReference = {
 			cache,
-			storePathHash: row.storePathHash,
-			generation: row.generation,
+			storePathHash: narInfoRow.storePathHash,
+			generation: narInfoRow.generation,
 			predicateType: parsed.predicateType,
 			digest: measured.digest
 		};
@@ -128,10 +188,14 @@ export class AttestationsService {
 
 		if (outcome === 'over-quota') {
 			await this.clearPendingUploadAndStaging(pending);
-			throw new QuotaExceededError(this.context.requireTenant());
+			throw new QuotaExceededError(tenant);
 		}
 
-		await this.materialiseList(cache, pending.storePathHash);
+		await this.materialiseList(
+			cache,
+			pending.storePathHash,
+			narInfoRow.generation
+		);
 		await this.clearPendingUploadAndStaging(pending);
 
 		return {
@@ -183,30 +247,6 @@ export class AttestationsService {
 			.delete(schema.pendingAttestations)
 			.where(eq(schema.pendingAttestations.id, pending.id))
 			.run();
-	}
-
-	private async hasOwnBundleReference(
-		cache: string,
-		storePathHash: StorePathHash,
-		generation: number,
-		digest: Sha256HexDigest
-	): Promise<boolean> {
-		const tenant = this.context.requireTenant();
-		const reference = await this.context.d1
-			.select({ digest: d1Schema.attestationReference.digest })
-			.from(d1Schema.attestationReference)
-			.where(
-				and(
-					eq(d1Schema.attestationReference.tenant, tenant),
-					eq(d1Schema.attestationReference.cache, cache),
-					eq(d1Schema.attestationReference.storePathHash, storePathHash),
-					eq(d1Schema.attestationReference.generation, generation),
-					eq(d1Schema.attestationReference.digest, digest)
-				)
-			)
-			.get();
-
-		return reference !== undefined;
 	}
 
 	private async hasOwnBundleReferenceInCache(
@@ -284,16 +324,6 @@ export class AttestationsService {
 			);
 	}
 
-	private async tenantActive(): Promise<boolean> {
-		const row = await this.context.d1
-			.select({ status: d1Schema.tenant.status })
-			.from(d1Schema.tenant)
-			.where(eq(d1Schema.tenant.id, this.context.requireTenant()))
-			.get();
-
-		return row?.status === 'active';
-	}
-
 	private async serveTenantObject(
 		request: Request,
 		key: string,
@@ -325,6 +355,87 @@ export class AttestationsService {
 		});
 	}
 
+	// The `(storePathHash, generation, digest)` keys of this tenant's attestation
+	// edges for `digests`, read set-wise in a handful of chunked queries.
+	private async filedReferenceKeys(
+		cache: string,
+		digests: readonly Sha256HexDigest[]
+	): Promise<Set<string>> {
+		if (digests.length === 0) {
+			return new Set();
+		}
+
+		const tenant = this.context.requireTenant();
+		const queries = chunk([...new Set(digests)], maxInClauseValues).map(
+			(digestBatch) => {
+				const filter = and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					eq(d1Schema.attestationReference.cache, cache),
+					inArray(d1Schema.attestationReference.digest, digestBatch)
+				);
+
+				return this.context.d1
+					.select({
+						storePathHash: d1Schema.attestationReference.storePathHash,
+						generation: d1Schema.attestationReference.generation,
+						digest: d1Schema.attestationReference.digest
+					})
+					.from(d1Schema.attestationReference)
+					.where(filter);
+			}
+		);
+
+		const pages = await batchNonEmpty(this.context.d1, queries);
+
+		return new Set(
+			pages
+				.flat()
+				.map((edge) =>
+					attestationReferenceKey(
+						edge.storePathHash,
+						edge.generation,
+						edge.digest
+					)
+				)
+		);
+	}
+
+	// The subset of `digests` whose shared CAS object is both recorded and present:
+	// one chunked `cas_object` read followed by a bounded fan-out of `head` reads,
+	// the set-wise form of {@link hasAvailableBundle}.
+	private async availableDigests(
+		digests: readonly Sha256HexDigest[]
+	): Promise<Set<Sha256HexDigest>> {
+		if (digests.length === 0) {
+			return new Set();
+		}
+
+		const queries = chunk([...new Set(digests)], maxInClauseValues).map(
+			(digestBatch) =>
+				this.context.d1
+					.select({ digest: d1Schema.casObject.digest })
+					.from(d1Schema.casObject)
+					.where(inArray(d1Schema.casObject.digest, digestBatch))
+		);
+
+		const recordedPages = await batchNonEmpty(this.context.d1, queries);
+		const recorded = recordedPages.flat().map((row) => row.digest);
+		const present = await mapWithConcurrency(
+			recorded,
+			maxOutgoingConnections,
+			async (digest) =>
+				(await this.context.env.BLOBS.head(casObjectKey(digest))) === null
+					? undefined
+					: digest
+		);
+
+		return new Set(
+			present.filter(
+				(digest): digest is Sha256HexDigest => digest !== undefined
+			)
+		);
+	}
+
 	async negotiate(
 		cache: string,
 		body: ParsedAttestationNegotiateRequest
@@ -333,24 +444,56 @@ export class AttestationsService {
 			throw new InvalidPushIdError();
 		}
 
+		const storePathHashes = [
+			...new Set(body.bundles.map((bundle) => bundle.storePathHash))
+		];
+		const narInfoRows = this.narInfoObjects.narInfoRowsFor(
+			cache,
+			storePathHashes
+		);
+
+		const committed = await this.narInfoObjects.committedReferences(
+			cache,
+			narInfoRows
+		);
+		const rowByStorePathHash = new Map<
+			StorePathHash,
+			(typeof narInfoRows)[number]
+		>();
+
+		for (const row of narInfoRows) {
+			rowByStorePathHash.set(row.storePathHash, row);
+		}
+
+		// Only a committed row can skip, so the set-wise own-reference and
+		// availability reads need cover just those bundles' digests.
+		const skipCandidates = body.bundles.filter((bundle) =>
+			committed.has(bundle.storePathHash)
+		);
+		const candidateDigests = skipCandidates.map((bundle) => bundle.digest);
+		const [filedReferenceKeys, availableDigests] = await Promise.all([
+			this.filedReferenceKeys(cache, candidateDigests),
+			this.availableDigests(candidateDigests)
+		]);
+
 		const bundles: AttestationDecision[] = [];
 
 		for (const bundle of body.bundles) {
-			const row = await this.narInfoObjects.committedNarInfoRow(
-				cache,
-				bundle.storePathHash
-			);
-
-			if (
+			const row = committed.has(bundle.storePathHash)
+				? rowByStorePathHash.get(bundle.storePathHash)
+				: undefined;
+			const isAlreadyHeld =
 				row !== undefined &&
-				(await this.hasOwnBundleReference(
-					cache,
-					row.storePathHash,
-					row.generation,
-					bundle.digest
-				)) &&
-				(await this.hasAvailableBundle(bundle.digest))
-			) {
+				filedReferenceKeys.has(
+					attestationReferenceKey(
+						row.storePathHash,
+						row.generation,
+						bundle.digest
+					)
+				) &&
+				availableDigests.has(bundle.digest);
+
+			if (isAlreadyHeld) {
 				bundles.push({
 					action: 'skip',
 					storePathHash: bundle.storePathHash,
@@ -395,15 +538,6 @@ export class AttestationsService {
 		uploadId: string
 	): Promise<AttestationAttachResponse> {
 		const pending = await this.pendingUpload(cache, uploadId);
-		const initialRow = await this.narInfoObjects.committedNarInfoRow(
-			cache,
-			pending.storePathHash
-		);
-
-		if (initialRow === undefined) {
-			await this.clearPendingUploadAndStaging(pending);
-			throw new AttestationPathNotFoundError(pending.storePathHash);
-		}
 
 		let measured: MeasuredAttestationBundle;
 
@@ -491,21 +625,26 @@ export class AttestationsService {
 		);
 	}
 
+	// Renders this path's descriptor list from its filed edges. A caller that has
+	// already resolved the committed generation under the gate passes it in, sparing
+	// the committed-row read; callers without one leave it undefined and it is read.
 	async materialiseList(
 		cache: string,
-		storePathHash: StorePathHash
+		storePathHash: StorePathHash,
+		generation?: number
 	): Promise<void> {
-		const row = await this.narInfoObjects.committedNarInfoRow(
-			cache,
-			storePathHash
-		);
 		const key = attestationListObjectKey(
 			this.context.requireTenant(),
 			storePathHash,
 			cache
 		);
+		const committedRow =
+			generation === undefined
+				? await this.narInfoObjects.committedNarInfoRow(cache, storePathHash)
+				: undefined;
+		const resolvedGeneration = generation ?? committedRow?.generation;
 
-		if (row === undefined) {
+		if (resolvedGeneration === undefined) {
 			await this.context.env.BLOBS.delete(key);
 			return;
 		}
@@ -513,7 +652,7 @@ export class AttestationsService {
 		const descriptors = await this.descriptorsFor(
 			cache,
 			storePathHash,
-			row.generation
+			resolvedGeneration
 		);
 
 		if (descriptors.length === 0) {
@@ -607,6 +746,16 @@ function parseAttestationBundle(bytes: Uint8Array): ParsedAttestationBundle {
 
 function narHashDigestHex(narHash: NixSha256HashString): Sha256HexDigest {
 	return NixSha256Hash.parse(narHash).digestHex();
+}
+
+// Identifies an attestation edge by the three columns negotiate matches a bundle
+// against: the path, its committed generation, and the bundle digest it points at.
+function attestationReferenceKey(
+	storePathHash: StorePathHash,
+	generation: number,
+	digest: Sha256HexDigest
+): string {
+	return `${storePathHash} ${String(generation)} ${digest}`;
 }
 
 function notFound(): Response {
