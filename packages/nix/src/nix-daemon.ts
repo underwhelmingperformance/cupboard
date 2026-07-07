@@ -56,6 +56,7 @@ interface UnkeyedDaemonPathInfo {
 	readonly narSize: number;
 	readonly ca?: string;
 	readonly signatures: readonly string[];
+	readonly ultimate: boolean;
 }
 
 export abstract class NixDaemonError extends Error {}
@@ -395,7 +396,7 @@ class NixDaemonConnection {
 		const references = await this.readStringSet();
 		await this.readInteger();
 		const narSize = await this.readInteger();
-		await this.readBoolean();
+		const isUltimate = await this.readBoolean();
 		const signatures = await this.readStringSet();
 		const ca = emptyStringToUndefined(await this.readString());
 
@@ -405,7 +406,8 @@ class NixDaemonConnection {
 			references,
 			narSize,
 			ca,
-			signatures
+			signatures,
+			ultimate: isUltimate
 		};
 	}
 
@@ -560,7 +562,8 @@ class NixDaemonConnection {
 			references: pathInfo.references,
 			deriver: pathInfo.deriver,
 			ca: pathInfo.ca,
-			signatures: pathInfo.signatures
+			signatures: pathInfo.signatures,
+			ultimate: pathInfo.ultimate
 		};
 	}
 }

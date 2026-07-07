@@ -68,7 +68,8 @@ describe('NixDaemonStoreClient', () => {
 							references: [libraryPath, runtimePath],
 							deriver: '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv',
 							ca: 'fixed:r:sha256:hash',
-							signatures: ['cache:first', 'cache:second']
+							signatures: ['cache:first', 'cache:second'],
+							ultimate: true
 						}
 					})
 				)
@@ -81,7 +82,8 @@ describe('NixDaemonStoreClient', () => {
 			references: [libraryPath, runtimePath],
 			deriver: '/nix/store/4123456789abcdfghijklmnpqrsvwxyz-app.drv',
 			ca: 'fixed:r:sha256:hash',
-			signatures: ['cache:first', 'cache:second']
+			signatures: ['cache:first', 'cache:second'],
+			ultimate: true
 		});
 	});
 
@@ -243,6 +245,7 @@ interface FakePathInfo {
 	readonly deriver?: string;
 	readonly ca?: string;
 	readonly signatures: readonly string[];
+	readonly ultimate?: boolean;
 }
 
 class FakeDaemonTransport implements NixDaemonTransport {
@@ -344,7 +347,7 @@ function queryPathInfoResponse(
 	response.writeStringSet(pathInfo.references);
 	response.writeInteger(1);
 	response.writeInteger(pathInfo.narSize);
-	response.writeBoolean(false);
+	response.writeBoolean(pathInfo.ultimate ?? false);
 	response.writeStringSet(pathInfo.signatures);
 	response.writeString(pathInfo.ca ?? '');
 
@@ -396,7 +399,8 @@ function pathInfo(
 		references,
 		deriver: undefined,
 		ca: undefined,
-		signatures: []
+		signatures: [],
+		ultimate: false
 	};
 }
 

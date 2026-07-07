@@ -29,6 +29,7 @@ export interface NixStoreRow {
 	readonly hash: string;
 	readonly narSize: number;
 	readonly deriver: string | undefined;
+	readonly ultimate: boolean;
 	readonly sigs: string | undefined;
 	readonly ca: string | undefined;
 }
@@ -89,6 +90,7 @@ function requirePathInfo(
 		narSize: row.narSize,
 		references: database.references(row.id),
 		signatures: splitSignatures(row.sigs),
+		ultimate: row.ultimate,
 		...(deriver !== undefined && { deriver }),
 		...(ca !== undefined && { ca })
 	};
@@ -147,6 +149,7 @@ export function nixStoreDatabaseFromSqlite(
 				hash: text(row.hash, 'hash'),
 				narSize: optionalInteger(row.narSize) ?? 0,
 				deriver: optionalText(row.deriver),
+				ultimate: optionalInteger(row.ultimate) === 1,
 				sigs: optionalText(row.sigs),
 				ca: optionalText(row.ca)
 			};

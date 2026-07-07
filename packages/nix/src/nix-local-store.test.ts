@@ -28,6 +28,7 @@ const rowA: NixStoreRow = {
 	hash: hashA,
 	narSize: 100,
 	deriver: deriverA,
+	ultimate: true,
 	sigs: sigsA,
 	ca: undefined
 };
@@ -37,6 +38,7 @@ const rowB: NixStoreRow = {
 	hash: hashB,
 	narSize: 50,
 	deriver: undefined,
+	ultimate: false,
 	sigs: undefined,
 	ca: caB
 };
@@ -68,6 +70,7 @@ const infoA: NixValidPathInfo = {
 	narSize: 100,
 	references: referencesA,
 	signatures: ['cache-1:sigaaa', 'cache-2:sigbbb'],
+	ultimate: true,
 	deriver: deriverA
 };
 
@@ -77,6 +80,7 @@ const infoB: NixValidPathInfo = {
 	narSize: 50,
 	references: referencesB,
 	signatures: [],
+	ultimate: false,
 	ca: caB
 };
 
@@ -121,7 +125,7 @@ function seededDatabase(): DatabaseSync {
 		.run();
 
 	// Each row leaves a different column NULL by omitting it, so the adapter is
-	// exercised on an absent deriver, sigs and ca.
+	// exercised on an absent deriver, ultimate, sigs and ca.
 	database
 		.prepare(
 			'insert into ValidPaths (id, path, hash, registrationTime, deriver, narSize, ultimate, sigs) values (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -129,9 +133,9 @@ function seededDatabase(): DatabaseSync {
 		.run(1, pathA, hashA, 0, deriverA, 100, 1, sigsA);
 	database
 		.prepare(
-			'insert into ValidPaths (id, path, hash, registrationTime, narSize, ultimate, ca) values (?, ?, ?, ?, ?, ?, ?)'
+			'insert into ValidPaths (id, path, hash, registrationTime, narSize, ca) values (?, ?, ?, ?, ?, ?)'
 		)
-		.run(2, pathB, hashB, 0, 50, 0, caB);
+		.run(2, pathB, hashB, 0, 50, caB);
 
 	const insertReference = database.prepare(
 		'insert into Refs (referrer, reference) values (?, ?)'

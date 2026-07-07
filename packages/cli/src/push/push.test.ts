@@ -2042,7 +2042,8 @@ function pathInfo(
 		narHash: narDigest.narHash,
 		narSize: narDigest.narSize,
 		references,
-		signatures: []
+		signatures: [],
+		ultimate: true
 	};
 }
 
