@@ -31,7 +31,10 @@ import {
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';
-import { type CommitPipelineService } from './commit-pipeline-service.ts';
+import {
+	type CommitPipelineService,
+	type PrefetchedMaterialisationFacts
+} from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
@@ -124,6 +127,14 @@ export type PromotionState = 'promote' | 'already-promoted';
 export interface VerificationResult {
 	readonly uploadId: string;
 	readonly verdict: VerificationVerdict;
+}
+
+// A claimed upload that reserved, verified and promoted in a batch pass's first
+// phase, ready to materialise in the second once the batch's probe facts are read.
+interface PreparedSettle {
+	readonly pending: typeof schema.pendingUploads.$inferSelect;
+	readonly metadata: ParsedUploadPathNegotiation;
+	readonly generation: number;
 }
 
 // Whether a row is still awaiting its verdict. A terminal row is retained
@@ -239,10 +250,13 @@ export class VerificationService {
 	// hash-check the staging bytes here, then commit. The prompt path runs the
 	// decode in the queue consumer off the DO thread and reaches `commitVerified`
 	// through `recordVerification` instead.
-	private async verifyAndCommitPending(
-		logger: Logger,
+	// Phase A of a batch settle: reserve, verify and promote one claimed upload,
+	// returning it ready to materialise. A settle that finishes here (the path was
+	// lost, already committed, its object definitively absent, or its verdict
+	// failed) returns undefined and is not carried into the materialise phase.
+	private async prepareAndPromote(
 		pending: typeof schema.pendingUploads.$inferSelect
-	): Promise<void> {
+	): Promise<PreparedSettle | undefined> {
 		const metadata = parseStoredUploadPathMetadata(
 			pending.id,
 			pending.metadataJson
@@ -251,11 +265,11 @@ export class VerificationService {
 		const reserved = await this.reservePendingRow(pending, metadata);
 
 		if (reserved === undefined) {
-			return;
+			return undefined;
 		}
 
 		if (await this.finaliseIfAlreadyCommitted(pending, metadata, reserved)) {
-			return;
+			return undefined;
 		}
 
 		// A returned `{ok:false}` (a hash/size mismatch or an undecodable frame) is a
@@ -276,20 +290,25 @@ export class VerificationService {
 		} catch (error) {
 			if (error instanceof UploadedObjectNotFoundError) {
 				await this.failReservedUpload(pending, metadata, reserved);
-				return;
+				return undefined;
 			}
 
 			throw error;
 		}
 
-		await this.commitVerified(
-			logger,
+		const wasPromoted = await this.promoteForCommit(
 			pending,
 			metadata,
 			reserved,
 			verification,
 			'promote'
 		);
+
+		if (!wasPromoted) {
+			return undefined;
+		}
+
+		return { pending, metadata, generation: reserved };
 	}
 
 	// Reserves the narinfo row before committing a verified upload: a fresh deferred
@@ -358,11 +377,44 @@ export class VerificationService {
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		verification: NarVerification,
-		promotion: PromotionState
+		promotion: PromotionState,
+		prefetched?: PrefetchedMaterialisationFacts
 	): Promise<void> {
+		const wasPromoted = await this.promoteForCommit(
+			pending,
+			metadata,
+			generation,
+			verification,
+			promotion
+		);
+
+		if (!wasPromoted) {
+			return;
+		}
+
+		await this.materialiseVerified(
+			logger,
+			pending,
+			metadata,
+			generation,
+			prefetched
+		);
+	}
+
+	// A failed verdict reclaims the reserved row and settles the upload; a good one
+	// promotes the staging bytes into the shared CAS. Returns whether the upload
+	// survived to materialise. Split from the materialise half so a batch pass can
+	// promote its whole claim before reading the probe facts once.
+	private async promoteForCommit(
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: ParsedUploadPathNegotiation,
+		generation: number,
+		verification: NarVerification,
+		promotion: PromotionState
+	): Promise<boolean> {
 		if (!verification.ok) {
 			await this.failReservedUpload(pending, metadata, generation);
-			return;
+			return false;
 		}
 
 		// Promote outside the critical section: streaming the staging bytes into the
@@ -380,11 +432,51 @@ export class VerificationService {
 			await this.uploadState.promoteStagingBlob(pending.r2Key, metadata, blob);
 		}
 
+		return true;
+	}
+
+	// Reads a whole batch's probe facts for its materialise phase, degrading to
+	// undefined on a fault so each row falls back to its own fresh probe under
+	// the per-row guards: one transient D1 blip costs the batched read, never
+	// the pass.
+	private async prefetchedFactsFor(
+		logger: Logger,
+		ready: readonly PreparedSettle[]
+	): Promise<
+		Map<NixSha256HashString, PrefetchedMaterialisationFacts> | undefined
+	> {
+		try {
+			return await this.commitPipeline.prefetchMaterialisationFacts(
+				ready.map((item) => item.metadata.narHash)
+			);
+		} catch (error) {
+			logger.warn(
+				'prefetch materialisation facts failed; falling back to per-path probes',
+				{ error }
+			);
+			return undefined;
+		}
+	}
+
+	// The materialise half of the settle: probe the canonical facts and settle the
+	// reserved narinfo through the shared flush. A batch pass passes the probe facts
+	// it read for the whole claim; a lone settle passes none and the probe reads
+	// them fresh.
+	private async materialiseVerified(
+		logger: Logger,
+		pending: typeof schema.pendingUploads.$inferSelect,
+		metadata: ParsedUploadPathNegotiation,
+		generation: number,
+		prefetched?: PrefetchedMaterialisationFacts
+	): Promise<void> {
 		// Probed after the promote, which is what makes the canonical object and
 		// its `blob_state` row exist; probing earlier would read them absent.
-		const probe = await this.commitPipeline.probeMaterialisation(metadata);
+		const probe = await this.commitPipeline.probeMaterialisation(
+			metadata,
+			prefetched
+		);
 
-		const outcome = await this.commitPipeline.materialiseBatched(logger, {
+		let outcome = await this.commitPipeline.materialiseBatched(logger, {
 			cache: pending.cache,
 			metadata,
 			generation,
@@ -413,11 +505,47 @@ export class VerificationService {
 			return;
 		}
 
-		// Over quota on the canonical size: reclaim the reserved row and record a
-		// terminal `over-quota` verdict, the same shape as an inline over-quota commit.
-		// Otherwise a later verify pass, scanning narInfos, would restore its object and
-		// make an unreferenced, uncharged path servable.
+		// Over quota on the canonical size: if the probe came from a prefetch batch,
+		// its `isOwned` flag may be stale (a sibling settled first and charged the
+		// blob, so the tenant already owns it). Re-probe once with a fresh read and
+		// retry; only a second over-quota result is terminal. The reserve and charge
+		// guards are idempotent, so one retry is safe.
+		if (outcome.kind === 'over-quota' && prefetched !== undefined) {
+			const freshProbe =
+				await this.commitPipeline.probeMaterialisation(metadata);
+			const retried = await this.commitPipeline.materialiseBatched(logger, {
+				cache: pending.cache,
+				metadata,
+				generation,
+				probe: freshProbe,
+				mustOwnBlob: false,
+				isStillSettleable: () => {
+					const current = this.context.db
+						.select()
+						.from(schema.pendingUploads)
+						.where(eq(schema.pendingUploads.id, pending.id))
+						.get();
+
+					return current !== undefined && isAwaitingVerdict(current);
+				}
+			});
+
+			// A concurrent pass may have settled the upload during the re-probe; its
+			// fate is decided, so this apply stops exactly as the first outcome's
+			// gone check does.
+			if (retried.kind === 'gone') {
+				return;
+			}
+
+			// Swap in the fresh outcome so the handlers below decide on it. A second
+			// over-quota falls through to the terminal block.
+			outcome = retried;
+		}
+
 		if (outcome.kind === 'over-quota') {
+			// Reclaim the reserved row and record a terminal verdict. Otherwise a later
+			// verify pass, scanning narInfos, would restore its object and make an
+			// unreferenced, uncharged path servable.
 			await this.failReservedUpload(
 				pending,
 				metadata,
@@ -1063,15 +1191,45 @@ export class VerificationService {
 			now
 		);
 
+		// Phase A: reserve, verify and promote each claimed upload, collecting the
+		// survivors that reach materialise. A per-upload failure frees its lease and
+		// leaves its marker for the next pass, so it does not starve the rest.
+		const ready: PreparedSettle[] = [];
+
 		for (const pending of pendings) {
 			try {
-				await this.verifyAndCommitPending(logger, pending);
+				const prepared = await this.prepareAndPromote(pending);
+
+				if (prepared !== undefined) {
+					ready.push(prepared);
+				}
 			} catch {
-				// One upload's failure (a transient promote or commit error) must not
-				// starve the rest of the pass; free its lease and leave its marker
-				// for the next pass.
 				this.releaseLease(pending.id);
-				continue;
+			}
+		}
+
+		if (ready.length === 0) {
+			return;
+		}
+
+		// Read every promoted path's canonical facts and ownership once, in two
+		// chunked queries, then materialise each from memory: the pass's per-path D1
+		// reads collapse from O(paths) to O(chunks). The facts are read once before
+		// phase B and can go stale across the batch; the charge batch remains the
+		// authoritative fence for status and quota, and the over-quota retry re-probes.
+		const prefetched = await this.prefetchedFactsFor(logger, ready);
+
+		for (const item of ready) {
+			try {
+				await this.materialiseVerified(
+					logger,
+					item.pending,
+					item.metadata,
+					item.generation,
+					prefetched?.get(item.metadata.narHash)
+				);
+			} catch {
+				this.releaseLease(item.pending.id);
 			}
 		}
 	}

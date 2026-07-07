@@ -27,6 +27,7 @@ import {
 	commitUploadRejection,
 	CommitVerdictError,
 	currentServer,
+	deferFreshUpload,
 	deletePath,
 	expectSingleUploadDecision,
 	fileAttestationReference,
@@ -448,6 +449,56 @@ describe('per-tenant quota', () => {
 		await currentServer().runGarbageCollection();
 
 		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+	});
+
+	it('materialises both deferred paths that share a narHash when quota fits one charge', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('quota-shared-hash');
+
+		// Two distinct store paths backed by the same NAR bytes. Both are staged and
+		// deferred before either is verified, so the prefetch reads isOwned: false for
+		// both. The first path to materialise charges the blob; the second's prefetched
+		// isOwned flag is then stale and would double-count the charge. The retry with
+		// a fresh probe sees isOwned: true and passes under quota.
+		const first = await deferFreshUpload(
+			token,
+			'quota-shared-hash',
+			'a'.repeat(32)
+		);
+		const second = await deferFreshUpload(
+			token,
+			'quota-shared-hash',
+			'b'.repeat(32)
+		);
+
+		// Quota that fits exactly one charge of the blob.
+		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength });
+
+		await currentServer().runVerification();
+
+		const firstServable = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, first.metadata.storePathHash)
+		);
+		const secondServable = await env.BLOBS.head(
+			narInfoObjectKey(fixtureTenant, second.metadata.storePathHash)
+		);
+
+		expect({
+			firstServable: firstServable !== null,
+			secondServable: secondServable !== null,
+			usage: await tenantUsageRow()
+		}).toStrictEqual({
+			firstServable: true,
+			secondServable: true,
+			usage: {
+				bytes: nar.narBytes.byteLength,
+				narinfos: 2,
+				blobs: 1,
+				casBytes: 0,
+				casBlobs: 0,
+				quotaBytes: nar.narBytes.byteLength
+			}
+		});
 	});
 });
 

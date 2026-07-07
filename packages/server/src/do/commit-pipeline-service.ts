@@ -47,6 +47,7 @@ import {
 import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 
 import { armAlarmNoLaterThan } from './alarm.ts';
+import { batchNonEmpty, chunk, maxInClauseValues } from './bulk.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
 import {
 	type MaterialiseOutcome,
@@ -166,6 +167,15 @@ class MaterialiseFlushOutcomeMissingError extends Error {
 export interface MaterialisationProbe {
 	readonly blob: CanonicalBlobFacts | undefined;
 	readonly isCanonicalPresent: boolean;
+	readonly isOwned: boolean;
+}
+
+// The two D1 facts a probe reads for one narHash: its canonical `blob_state` and
+// this tenant's presence. A batch read supplies these for a whole claimed set at
+// once, so a per-path probe reads neither from D1; the R2 head that decides
+// `isCanonicalPresent` has no batch form and stays per path.
+export interface PrefetchedMaterialisationFacts {
+	readonly blob: CanonicalBlobFacts | undefined;
 	readonly isOwned: boolean;
 }
 
@@ -1303,8 +1313,29 @@ export class CommitPipelineService {
 	// section so the D1 and R2 round-trips never hold the gate; see
 	// {@link MaterialisationProbe}. Must not open its own critical section.
 	async probeMaterialisation(
-		metadata: ParsedUploadPathNegotiation
+		metadata: ParsedUploadPathNegotiation,
+		prefetched?: PrefetchedMaterialisationFacts
 	): Promise<MaterialisationProbe> {
+		// When a caller batch-read the D1 facts for its whole claimed set, use them
+		// and pay only the per-path R2 head, which has no batch form. The facts were
+		// read once before phase B and can be stale by the time this path is reached.
+		// Safety: phase A's promote upserts blob_state and re-arms deleteAfter = NULL
+		// for every batch member, so a batch member's canonical row cannot be reaped
+		// mid-pass (the reaper needs a fresh arm plus its grace period). The charge
+		// batch remains the authoritative fence for status and quota; a stale isOwned
+		// that causes an over-quota result triggers a fresh re-probe and one retry.
+		if (prefetched !== undefined) {
+			const canonical = await this.context.env.BLOBS.head(
+				narObjectKey(metadata.narHash)
+			);
+
+			return {
+				blob: prefetched.blob,
+				isCanonicalPresent: canonical !== null,
+				isOwned: prefetched.isOwned
+			};
+		}
+
 		const tenant = this.context.requireTenant();
 		const canonicalFilter = eq(d1Schema.blobState.narHash, metadata.narHash);
 		const ownedFilter = and(
@@ -1339,6 +1370,77 @@ export class CommitPipelineService {
 			isCanonicalPresent: canonical !== null,
 			isOwned: ownedRows.length > 0
 		};
+	}
+
+	// Batch-reads the two D1 probe facts, the canonical `blob_state` and this
+	// tenant's presence, for a whole claimed set of narHashes in two chunked `IN`
+	// queries, keyed for a per-path probe to read from memory. A settle pass reads
+	// this once before phase B, so each path's probe pays only its R2 head and the
+	// pass's D1 reads fall from O(paths) to 2 (one concurrent batch per table,
+	// regardless of chunk count). The facts can go stale across the batch; the
+	// charge batch remains the authoritative fence for status and quota.
+	async prefetchMaterialisationFacts(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Map<NixSha256HashString, PrefetchedMaterialisationFacts>> {
+		const tenant = this.context.requireTenant();
+		const unique = [...new Set(narHashes)];
+
+		const blobByHash = new Map<NixSha256HashString, CanonicalBlobFacts>();
+		const ownedHashes = new Set<NixSha256HashString>();
+
+		const blobStateQueries = chunk(unique, maxInClauseValues).map((batch) =>
+			this.context.d1
+				.select({
+					narHash: d1Schema.blobState.narHash,
+					fileHash: d1Schema.blobState.fileHash,
+					fileSize: d1Schema.blobState.fileSize,
+					compression: d1Schema.blobState.compression
+				})
+				.from(d1Schema.blobState)
+				.where(inArray(d1Schema.blobState.narHash, batch))
+		);
+
+		const tenantBlobQueries = chunk(unique, maxInClauseValues).map((batch) =>
+			this.context.d1
+				.select({ narHash: d1Schema.tenantBlob.narHash })
+				.from(d1Schema.tenantBlob)
+				.where(
+					and(
+						eq(d1Schema.tenantBlob.tenant, tenant),
+						inArray(d1Schema.tenantBlob.narHash, batch)
+					)
+				)
+		);
+
+		const [blobResults, ownedResults] = await Promise.all([
+			batchNonEmpty(this.context.d1, blobStateQueries),
+			batchNonEmpty(this.context.d1, tenantBlobQueries)
+		]);
+
+		for (const rows of blobResults) {
+			for (const row of rows) {
+				blobByHash.set(row.narHash, {
+					fileHash: row.fileHash,
+					fileSize: row.fileSize,
+					compression: row.compression
+				});
+			}
+		}
+
+		for (const rows of ownedResults) {
+			for (const row of rows) {
+				ownedHashes.add(row.narHash);
+			}
+		}
+
+		const facts = unique.map(
+			(narHash): [NixSha256HashString, PrefetchedMaterialisationFacts] => [
+				narHash,
+				{ blob: blobByHash.get(narHash), isOwned: ownedHashes.has(narHash) }
+			]
+		);
+
+		return new Map(facts);
 	}
 
 	// Whether this upload's reserved generation is already fully committed and

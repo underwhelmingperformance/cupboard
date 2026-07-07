@@ -133,6 +133,30 @@ describe('batched verify fault isolation', () => {
 		}).toStrictEqual({ verdict: 'pending', isSameInstance: true });
 	});
 
+	it('settles uploads when the prefetch D1 batch faults and falls back to per-path probes', async () => {
+		const token = await initialise();
+		const upload = await deferUpload(token, 'prefetch-fault', 'a'.repeat(32));
+
+		// Reject the first D1 batch call (the prefetch's blobState query) then
+		// let subsequent calls through, so per-path probes succeed.
+		const originalBatch = env.CUPBOARD_DB.batch.bind(env.CUPBOARD_DB);
+		const batch = vi
+			.spyOn(env.CUPBOARD_DB, 'batch')
+			.mockImplementationOnce(() =>
+				Promise.reject(new Error('simulated D1 prefetch fault'))
+			)
+			.mockImplementation(originalBatch);
+
+		try {
+			await currentServer().runVerification();
+		} finally {
+			batch.mockRestore();
+		}
+
+		// The pass degraded to per-path probes and still settled the upload.
+		expect(await pendingUploadVerdict(upload.uploadId)).toBeUndefined();
+	});
+
 	it('backs off without a continuation when a full batch applies nothing', async () => {
 		const token = await initialise();
 		const first = await deferUpload(token, 'all-fail-a', 'a'.repeat(32));
