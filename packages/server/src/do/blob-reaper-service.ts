@@ -23,6 +23,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
 
 import {
+	batchNonEmpty,
 	chunk,
 	deleteObjects,
 	mapWithConcurrency,
@@ -129,19 +130,22 @@ export class BlobReaperService {
 
 		// The candidate batch can exceed D1's bound-parameter limit, so the arm
 		// update runs per chunk. Each chunk re-checks the timer is still unset, so
-		// a commit clearing it between chunks wins.
-		for (const batch of chunk(candidateHashes, maxInClauseValues)) {
-			await this.d1
+		// a commit clearing it between chunks wins. The chunks go in one D1 batch,
+		// so all chunks cost a single round-trip.
+		const chunks = chunk(candidateHashes, maxInClauseValues);
+		const queries = chunks.map((hashes) => {
+			const fence = and(
+				inArray(d1Schema.blobState.narHash, hashes),
+				isNull(d1Schema.blobState.deleteAfter)
+			);
+
+			return this.d1
 				.update(d1Schema.blobState)
 				.set({ deleteAfter: deletionTime })
-				.where(
-					and(
-						inArray(d1Schema.blobState.narHash, batch),
-						isNull(d1Schema.blobState.deleteAfter)
-					)
-				)
-				.run();
-		}
+				.where(fence);
+		});
+
+		await batchNonEmpty(this.d1, queries);
 	}
 
 	// Collects armed shared blobs whose grace has elapsed. Each is removed by a
@@ -230,19 +234,22 @@ export class BlobReaperService {
 
 		// The candidate batch can exceed D1's bound-parameter limit, so the arm
 		// update runs per chunk. Each chunk re-checks the timer is still unset, so
-		// an attach clearing it between chunks wins.
-		for (const batch of chunk(candidateDigests, maxInClauseValues)) {
-			await this.d1
+		// an attach clearing it between chunks wins. The chunks go in one D1 batch,
+		// so all chunks cost a single round-trip.
+		const chunks = chunk(candidateDigests, maxInClauseValues);
+		const queries = chunks.map((digests) => {
+			const fence = and(
+				inArray(d1Schema.casObject.digest, digests),
+				isNull(d1Schema.casObject.deleteAfter)
+			);
+
+			return this.d1
 				.update(d1Schema.casObject)
 				.set({ deleteAfter: deletionTime })
-				.where(
-					and(
-						inArray(d1Schema.casObject.digest, batch),
-						isNull(d1Schema.casObject.deleteAfter)
-					)
-				)
-				.run();
-		}
+				.where(fence);
+		});
+
+		await batchNonEmpty(this.d1, queries);
 	}
 
 	private async collectExpiredCasObjects(
@@ -423,9 +430,9 @@ export class BlobReaperService {
 	private async deleteFencedBlobStates(
 		rows: readonly { narHash: NixSha256HashString; verifiedAt: string }[]
 	): Promise<number> {
-		let demoted = 0;
-
-		for (const batch of chunk(rows, maxFencedDeleteRows)) {
+		// The chunks go in one D1 batch, so all chunks cost a single round-trip.
+		const chunks = chunk(rows, maxFencedDeleteRows);
+		const queries = chunks.map((batch) => {
 			const match = or(
 				...batch.map((row) =>
 					and(
@@ -434,16 +441,16 @@ export class BlobReaperService {
 					)
 				)
 			);
-			const removed = await this.d1
+
+			return this.d1
 				.delete(d1Schema.blobState)
 				.where(match)
-				.returning({ narHash: d1Schema.blobState.narHash })
-				.all();
+				.returning({ narHash: d1Schema.blobState.narHash });
+		});
 
-			demoted += removed.length;
-		}
+		const results = await batchNonEmpty(this.d1, queries);
 
-		return demoted;
+		return results.reduce((demoted, removed) => demoted + removed.length, 0);
 	}
 
 	// One keyset page of `blob_state` after the cursor, the Drizzle cursor-pagination
@@ -470,9 +477,9 @@ export class BlobReaperService {
 	private async deleteFencedCasObjects(
 		rows: readonly { digest: Sha256HexDigest; storedAt: string }[]
 	): Promise<number> {
-		let demoted = 0;
-
-		for (const batch of chunk(rows, maxFencedDeleteRows)) {
+		// The chunks go in one D1 batch, so all chunks cost a single round-trip.
+		const chunks = chunk(rows, maxFencedDeleteRows);
+		const queries = chunks.map((batch) => {
 			const match = or(
 				...batch.map((row) =>
 					and(
@@ -481,16 +488,16 @@ export class BlobReaperService {
 					)
 				)
 			);
-			const removed = await this.d1
+
+			return this.d1
 				.delete(d1Schema.casObject)
 				.where(match)
-				.returning({ digest: d1Schema.casObject.digest })
-				.all();
+				.returning({ digest: d1Schema.casObject.digest });
+		});
 
-			demoted += removed.length;
-		}
+		const results = await batchNonEmpty(this.d1, queries);
 
-		return demoted;
+		return results.reduce((demoted, removed) => demoted + removed.length, 0);
 	}
 
 	private demoteCasBatch(
