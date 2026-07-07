@@ -521,6 +521,57 @@ describe('attestation attach and reads', () => {
 			stagingPresent: false
 		});
 	});
+
+	it('decides correctly when the bundle count exceeds one chunk width', async () => {
+		// 91 distinct storePathHashes crosses the maxInClauseValues (90) boundary
+		// in narInfoRowsFor, so this pins the chunked DO SQLite read in negotiate.
+		const { token, metadata, bundle, digest } = await committedPathBundle();
+		await attachBundle(token, metadata.storePathHash, bundle);
+
+		const uncommittedHashes = Array.from({ length: 90 }, () =>
+			uniqueStorePathHash()
+		);
+		const fakeDigest = sha256HexDigestSchema.parse('ab'.repeat(32));
+		const bundles = [
+			{ storePathHash: metadata.storePathHash, digest },
+			...uncommittedHashes.map((storePathHash) => ({
+				storePathHash,
+				digest: fakeDigest
+			}))
+		];
+
+		const response = await authorisedWorkerFetch(
+			'/cache/_default/attestations',
+			token,
+			{
+				body: JSON.stringify({ pushId: testPushId, bundles }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			}
+		);
+		expect(response.status).toBe(StatusCodes.OK);
+		const body = attestationNegotiateResponseSchema.parse(
+			await response.json()
+		);
+		const decisions = body.bundles.map((b) =>
+			attestationDecisionSchema.parse(b)
+		);
+
+		const skipDecisions = decisions.filter((d) => d.action === 'skip');
+		const uploadDecisions = decisions.filter((d) => d.action === 'upload');
+
+		expect({
+			totalDecisions: decisions.length,
+			skipCount: skipDecisions.length,
+			uploadCount: uploadDecisions.length,
+			skip: skipDecisions
+		}).toStrictEqual({
+			totalDecisions: 91,
+			skipCount: 1,
+			uploadCount: 90,
+			skip: [{ action: 'skip', storePathHash: metadata.storePathHash, digest }]
+		});
+	});
 });
 
 async function committedPathBundle(): Promise<{
