@@ -3226,6 +3226,208 @@ authorisation is not addressed here: reads stay public or netrc-gated, and PR
 caches are public-read, so the write boundary alone keeps an untrusted build
 from reaching the default cache.
 
+## D1 request budget and the batched commit
+
+### Context
+
+A large push overloaded the control-plane D1 with
+`D1_ERROR: D1 DB is overloaded. Too many requests queued.` D1's binding is a
+network service: every `.get()/.run()/.all()` is a separate request, and the
+database sheds load when its inbound queue grows too long. The constraint is
+request _count_, not query size or row count, and Cloudflare's own guidance for
+the error is to send fewer requests, not to retry. D1 already auto-retries
+read-only queries itself, so a naive application-level backoff mostly adds to
+the queue it is waiting on.
+
+The push amplifies request count because it fans a closure of thousands of paths
+into per-path D1 work. Negotiate is already one request for the whole set; the
+per-path fan-out is in the commit and the verify pass. This section plans the
+reduction from per-path requests towards a near-constant per-push read budget,
+which server-side batching achieves without any wire change.
+
+### What is and is not per path
+
+A push does three things per path because the _data_ is per path, and none of
+them touch D1: it uploads each NAR's bytes (R2), decodes and hashes each NAR to
+verify it (CPU), and signs each narinfo fingerprint (CPU). These stay per path.
+
+The D1 work is not inherently per path. The commit and settle read the same
+three facts for a path, all point-reads keyed on its hash: the canonical
+`blob_state`, this tenant's `tenant_blob` presence, and the tenant account
+(status and quota basis). They are per path only because the commit and verify
+code is a per-path loop. Negotiate proves the alternative:
+`computeNegotiateHints` reads every path's `blob_state`, ownership, and edges
+for the whole body in a handful of chunked `IN` queries, once.
+
+The other per-path work is not D1. The reserve (`reserveNarInfoRow`) writes the
+DO's own SQLite, not the control-plane D1. The charge is already batched: the
+materialise flush coalesces up to `materialiseFlushCap` concurrent settles into
+one D1 batch. So the D1 request budget of a push is dominated almost entirely by
+the per-path _reads_; the reserves are local and the charge is already one
+request per flush. Cutting the reads is the whole job.
+
+### The arc
+
+Two phases fix the D1 budget, both server-only: the first is mechanical and
+lands incrementally, the second removes the per-path reads and clears the
+overload on its own. A third phase, a batched-commit protocol, follows them; a
+review found it is not a D1 lever, so it is scoped as a DO-side and wire
+evolution rather than part of the budget, but it is planned.
+
+Phase 1: batch what stays per call. Collapse each remaining fan-out of separate
+statements into one `batch()` round-trip: the negotiate hint reads, the commit
+and settle probe (canonical state and ownership together), the reaper's per-row
+expiry deletes into chunked `IN ... RETURNING`, the offboarding residue probes,
+the edge-retirement reads, and the stats reads. This cuts the cost _per call_
+and is safe in isolation; it does not change how many times a call is made.
+Largely done.
+
+Phase 2: read the batch's facts once, no wire change. This is the fix. The
+verify pass already claims a _batch_ of pending uploads before it settles them
+one by one; have it read every claimed path's `blob_state` and ownership in two
+chunked `IN` queries and the account once, build lookup maps, and settle each
+path from memory, collapsing O(paths) D1 reads to O(1). The batched facts are
+read once before the settle loop and can go stale across the batch (two paths
+sharing one narHash see each other's charges only in the authoritative charge
+fence, not in the prefetched ownership), so a settle that reads `over-quota`
+from prefetched facts re-probes fresh once before going terminal, the charge
+batch stays the authoritative fence for status and quota, and the reaper cannot
+collect a batch member mid-pass because the pass re-arms every claimed hash's
+grace timer up front. The commit path can do the same for its own claimed batch.
+Effect: push-time D1 reads go from O(paths) to a small constant, with no change
+to the client or the contract, and this alone is expected to clear the overload.
+
+What Phase 2 does _not_ do is cache the negotiate's reads across the push. An
+earlier draft proposed the DO reuse the front Worker's hint reads at commit
+time; a review killed it, and the reasons are worth recording so it is not
+re-proposed:
+
+- The charge does not re-fence the blob _content_ facts. `materialiseFence`
+  builds the served narInfo from `probe.blob`, and the charge credits
+  `probe.blob.fileSize` verbatim; only tenant status and quota are re-checked
+  (the `tenant_usage` CHECK). So a stale `fileSize` is a silent mis-charge
+  within quota, and a stale `fileHash`/`compression` is baked into a served
+  narInfo that clients then fail to decompress or verify. "Advisory, re-fenced
+  by the charge" is true for status and quota, not for blob content.
+- `blob_state` is a _global_ table, written by other tenants' promotes and
+  mutated by the reaper, with no invalidation channel to a tenant's DO. The
+  negotiate-to-commit window is push-long (minutes, well past the staging TTL),
+  so a cached snapshot is routinely stale by commit.
+
+So blob-content reads on the reuse settle stay fresh (they are cheap: still
+O(chunks), not O(paths)), and no shared-fact cache outlives the fresh batched
+read that produced it. If the `(narHash → fileHash, fileSize, compression)`
+mapping is ever made a hard, enforced immutable invariant (content-addressed,
+compression parameters pinned across deploys), the freshness requirement on the
+content facts can be revisited; until then it holds.
+
+### Phase 3: batched commit, a follow-up protocol evolution
+
+An earlier draft made this the third D1 phase, on the premise that "the per-path
+reserves remain" after Phase 2. That premise is wrong: the reserve writes
+DO-local SQLite, not D1, and the reuse charge already batches through the flush,
+so batching the client's commit ops does not reduce D1 request count, and Phase
+2 resolves the overload on its own. The batched commit is therefore not part of
+the D1 budget; it is a separate evolution.
+
+It is still planned, as the last phase, because it makes the wire match the
+batched shape the client already has and cuts real DO-side cost: fewer
+`webSocketMessage` invocations, fewer DO SQLite transaction boundaries, and
+fewer `afterHotMutation` reconcile schedules per push. Because it is not on the
+D1 critical path it follows Phase 2 rather than blocking it, and its wire design
+must first answer three things the review surfaced:
+
+- Capability handshake before the first send. The client sends its first commit
+  op on socket open, before it could learn the server's capabilities. Today the
+  server rejects any op it cannot parse by closing the socket outright
+  (`webSocketMessage` runs `commitSessionRequestSchema.parse` and, on failure,
+  `socket.close(1002)`); it never skips a frame and keeps the socket alive. So
+  an old server meeting a new op shape hangs up, the client reads a drop, and it
+  reconnect-loops until it fails the push. Two moves together fix this:
+  advertise the capability on the 101 (a `Sec-WebSocket-Protocol` echo, or a
+  server hello the client awaits) so a new client only batches when the server
+  offered it, and make the server answer an unknown op with a per-message error
+  frame instead of closing, so this-or-later servers degrade gracefully. The
+  handshake is the load bearing half, since already-deployed servers still
+  close; the tolerant reply is cheap forward-compatibility for the next
+  evolution.
+- Reconnect idempotency for synchronously-settled ids. Re-committing an un-acked
+  id after a drop is idempotent for a still-pending row, but a reuse or
+  already-present id whose `settled` frame was lost has had its pending row
+  cleared, so a bare re-commit hits `UploadNotFoundError` and fails a path that
+  actually succeeded. The op must carry per-id identity (`storePathHash`,
+  `narHash`, which the client already holds) so a gone row resolves against the
+  committed narInfo and answers `already-present`, as the `subscribe` path
+  already does.
+- Per-id decomposition inside a chunk. Error attribution stays per id, so a
+  chunk is not a client-visible transaction: a reserve that loses to a rival or
+  hits a fence answers that id's frame while its chunk-mates proceed, and the
+  server must decompose a failing reserve batch per id rather than roll the
+  chunk back. Intra-chunk processing needs defined concurrency so a settle
+  parked on the flush gate does not head-of-line-block its chunk-mates.
+
+### Invariants preserved
+
+- Verify before serve: a path serves only once its own bytes verified. Phase 2
+  moves reads off the per-path loop; it does not let an unverified path publish.
+  The verify pass and the materialised-object gate are unchanged.
+- Fresh where the charge does not re-fence: tenant status and quota may be read
+  advisory and re-checked by the charge, but blob content facts are read fresh
+  at the settle, because the charge trusts them verbatim.
+- Per-path verdicts and retention: each id still reaches a terminal verdict, and
+  retention is still recorded per the durable-retention contract.
+
+### Implementation sequence
+
+1. Phase 1 batches (mostly landed): negotiate hints, commit/settle probe, reaper
+   expiry deletes, offboarding residue, edge retirement, stats.
+2. Verify-pass read hoist: claim the batch, read its `blob_state`/ownership in
+   two `IN` queries and the account once, settle each path from the maps. This
+   is the phase that clears the D1 overload; measure the per-push read count
+   before and after.
+3. Commit-path batched read for its own claimed batch, fresh (no cross-push
+   cache).
+4. Batched-commit protocol: the capability handshake and tolerant reply, the
+   chunked commit op carrying per-id identity, per-id reserve decomposition and
+   intra-chunk concurrency, and the client's chunk boundary. Follows Phase 2,
+   which clears the overload, and lands the three questions above before the
+   wire changes.
+
+### Verification
+
+- Measure per-push D1 request count from Workers observability before and after
+  phase 2 (the diagnostic OAuth app reads invocation telemetry); the target is
+  flat in path count.
+- A large-closure push over a warm and a cold cache completes without a
+  `D1 DB is overloaded` shed at the concurrency the incident hit.
+- Existing commit, reuse, verify, and quota suites stay green.
+
+### Out of scope and risks
+
+- Sharding the control plane across databases is not planned; the read reduction
+  is expected to keep a single D1 within its queue.
+- Reusing the negotiate reads at commit time is explicitly rejected (see Phase
+  2); the content facts must be read fresh.
+- The batched-commit protocol is out of the D1-budget scope: it is a DO-side and
+  wire evolution that follows the read reduction, not a D1 fix.
+
+### Review pass
+
+An adversarially verified multi-agent review of the whole branch confirmed 47
+findings, all fixed on the branch before merge. The headline was a teardown
+presence-sweep statement binding 186 parameters against D1's cap of 100,
+invisible locally because the test pool's SQLite allows 32,766; a node-level
+guard now builds every chunked statement at full width and pins its parameter
+count, closing the class. The other clusters: the gone-row and reconnect
+resolutions fence on the committed reference (including the new
+`subscribe-identity` op); the batched settles handle prefetched-fact staleness
+(over-quota re-probe, fault isolation, an up-front reaper pin for claimed
+hashes); the promotion batch retries and falls back per statement; capability
+tokens are parameterised with the wire-freeze rule recorded; D1 overloads answer
+as retryable 503s on HTTP and the commit socket, which the client honours per
+entry; and the client windows its in-flight batch messages with a per-instance
+entry bound as the server backstop.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.
