@@ -51,6 +51,15 @@ export interface TenantEntry {
 	readonly readVerifier?: TenantReadVerifier;
 }
 
+// An admitted tenant's entry, with whether it was read fresh from D1 this
+// request. A fresh entry's status is authoritative, so a write need not re-read
+// it; a cached one may lag a suspend within its TTL, so a write still confirms
+// the status against D1.
+export interface TenantAdmission {
+	readonly entry: TenantEntry;
+	readonly fresh: boolean;
+}
+
 // The slice of the execution context admission needs: deferred row-cache writes.
 // A structural subset of `ExecutionContext`, matching the read path, so a Hono
 // `executionCtx` passes without the global-type mismatch.
@@ -231,7 +240,7 @@ async function readTenantEntry(
 	env: Env,
 	ctx: DeferredContext,
 	slug: TenantId
-): Promise<TenantEntry | undefined> {
+): Promise<TenantAdmission | undefined> {
 	const cacheKey = rowCacheKey(slug);
 	const cached = await caches.default.match(cacheKey);
 
@@ -239,7 +248,7 @@ async function readTenantEntry(
 		const parsed = tenantEntrySchema.safeParse(await cached.json());
 
 		if (parsed.success) {
-			return parsed.data;
+			return { entry: parsed.data, fresh: false };
 		}
 	}
 
@@ -260,7 +269,7 @@ async function readTenantEntry(
 		ctx.waitUntil(caches.default.put(cacheKey, cachedResponse));
 	}
 
-	return entry;
+	return { entry, fresh: true };
 }
 
 // Resolves a tenant slug through the layered gate, returning its authoritative
@@ -271,7 +280,7 @@ export async function admitTenant(
 	env: Env,
 	ctx: DeferredContext,
 	slug: TenantId
-): Promise<TenantEntry | undefined> {
+): Promise<TenantAdmission | undefined> {
 	const filter = await loadMembershipFilter(env, ctx);
 
 	if (filter !== undefined && !filter.has(slug)) {

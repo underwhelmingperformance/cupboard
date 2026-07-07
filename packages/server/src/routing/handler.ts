@@ -34,7 +34,7 @@ import {
 	serveNarInfo
 } from '../read/read.ts';
 
-import { admitTenant } from './admission.ts';
+import { admitTenant, type TenantEntry } from './admission.ts';
 import { tenantServer } from './durable-object.ts';
 import { type WorkerHonoEnv } from './hono-env.ts';
 import { computeNegotiateHints } from './negotiate-hints.ts';
@@ -85,9 +85,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	//
 	// Suspension and offboarding stop reads here, bounded by the manifest TTL:
 	// once the republished manifest marks the tenant non-active, the read path
-	// serves nothing for it. Writes stop at once through the authoritative D1
-	// status read in the dispatch fallback; reads stop as the manifest entry
-	// propagates, the eventual half of the lifecycle contract.
+	// serves nothing for it. Writes stop on a fresh admission's authoritative D1
+	// read, or are reconfirmed against D1 on a cached admission; reads stop as
+	// the manifest entry propagates, the eventual half of the lifecycle contract.
 	app.use('/t/:tenant/*', async (context, next) => {
 		const requestUrl = new URL(context.req.url);
 		const route = parseTenantPath(requestUrl.pathname);
@@ -96,15 +96,17 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			return notFoundResponse();
 		}
 
-		const entry = await admitTenant(
+		const admission = await admitTenant(
 			context.env,
 			context.executionCtx,
 			route.tenant
 		);
 
-		if (entry === undefined) {
+		if (admission === undefined) {
 			return notFoundResponse();
 		}
+
+		const { entry, fresh } = admission;
 
 		const isRead =
 			context.req.method === 'GET' || context.req.method === 'HEAD';
@@ -115,6 +117,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 
 		context.set('tenant', route.tenant);
 		context.set('tenantEntry', entry);
+		context.set('tenantEntryFresh', fresh);
 		context.set('tenantRest', route.rest);
 		context.set('logger', context.get('logger').with({ tenant: route.tenant }));
 
@@ -307,9 +310,23 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	// facts.
 	app.on('POST', '/t/:tenant/cache/:cacheName/uploads', async (context) => {
 		const tenant = context.get('tenant');
+		const writeStatus = admittedWriteStatus(context);
 		const selector = cacheSelectorSchema.safeParse(
 			context.req.param('cacheName')
 		);
+
+		// A fresh admission that already knows the tenant is not active skips the
+		// hint reads and dispatches plainly; the gate in dispatch stays the
+		// authoritative refusal.
+		if (writeStatus !== undefined && writeStatus !== 'active') {
+			return dispatchTenant(
+				innerRequest(context),
+				context.env,
+				tenant,
+				writeStatus
+			);
+		}
+
 		// The hints clone the body, so they are read before `innerRequest` wraps
 		// the raw request for dispatch.
 		const hints = await computeNegotiateHints(
@@ -332,13 +349,18 @@ function buildApp(): Hono<WorkerHonoEnv> {
 			}
 		}
 
-		return dispatchTenant(inner, context.env, tenant);
+		return dispatchTenant(inner, context.env, tenant, writeStatus);
 	});
 
 	// Everything else under the tenant subtree dispatches to the Durable Object,
 	// registered last so the read routes above answer first.
 	app.all('/t/:tenant/*', (context) =>
-		dispatchTenant(innerRequest(context), context.env, context.get('tenant'))
+		dispatchTenant(
+			innerRequest(context),
+			context.env,
+			context.get('tenant'),
+			admittedWriteStatus(context)
+		)
 	);
 
 	// The bare host is the control surface: the control plane's own auth.
@@ -385,19 +407,33 @@ function innerRequest(context: Context<WorkerHonoEnv>): Request {
 async function dispatchTenant(
 	inner: Request,
 	env: Env,
-	tenant: TenantId
+	tenant: TenantId,
+	// The status from admission, passed only when admission read it fresh from D1
+	// this request; a cached admission passes undefined so the status is reconfirmed
+	// against D1 before a write, keeping a suspend timely within the cache TTL.
+	admittedStatus?: TenantEntry['status']
 ): Promise<Response> {
 	if (!isTenantWrite(inner)) {
 		return tenantServer(env, tenant).fetch(inner);
 	}
 
-	const status = await tenantStatus(env, tenant);
+	const status = admittedStatus ?? (await tenantStatus(env, tenant));
 
 	if (status !== 'active') {
 		throw new TenantWritesStoppedError(tenant, status ?? 'unknown');
 	}
 
 	return tenantServer(env, tenant).fetch(inner);
+}
+
+// The admitted status to hand `dispatchTenant`: the entry's status when admission
+// read it fresh from D1, otherwise undefined so the write reconfirms against D1.
+function admittedWriteStatus(
+	context: Context<WorkerHonoEnv>
+): TenantEntry['status'] | undefined {
+	return context.get('tenantEntryFresh')
+		? context.get('tenantEntry').status
+		: undefined;
 }
 
 // Whether a tenant request mutates state. Reads never do; the token exchange is an

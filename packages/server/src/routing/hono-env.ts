@@ -15,6 +15,9 @@ export interface WorkerHonoEnv {
 		logger: Logger;
 		tenant: TenantId;
 		tenantEntry: TenantEntry;
+		// Whether `tenantEntry` was read fresh from D1 this request; a write trusts
+		// its status only then, and otherwise reconfirms against D1.
+		tenantEntryFresh: boolean;
 		tenantRest: string;
 		cache: string;
 	};
