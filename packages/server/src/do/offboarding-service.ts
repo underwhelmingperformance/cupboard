@@ -4,7 +4,7 @@ import { and, asc, eq, inArray, or, type SQL } from 'drizzle-orm';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
-import { chunk } from './bulk.ts';
+import { batchNonEmpty, chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
 // D1 caps a query at 100 bound parameters. A composite-key delete binds the
@@ -86,14 +86,14 @@ export class OffboardingService {
 			return;
 		}
 
-		for (const batch of chunk(references, blobReferenceDeleteChunk)) {
+		const deletes = chunk(references, blobReferenceDeleteChunk).map((batch) => {
 			const inBatch = or(...batch.map((row) => blobReferenceMatch(row)));
+			const keyFilter = and(eq(d1Schema.blobReference.tenant, tenant), inBatch);
 
-			await this.context.d1
-				.delete(d1Schema.blobReference)
-				.where(and(eq(d1Schema.blobReference.tenant, tenant), inBatch))
-				.run();
-		}
+			return this.context.d1.delete(d1Schema.blobReference).where(keyFilter);
+		});
+
+		await batchNonEmpty(this.context.d1, deletes);
 	}
 
 	private async deletePresenceBatch(
@@ -152,14 +152,23 @@ export class OffboardingService {
 			return;
 		}
 
-		for (const batch of chunk(references, attestationReferenceDeleteChunk)) {
-			const inBatch = or(...batch.map((row) => attestationReferenceMatch(row)));
+		const deletes = chunk(references, attestationReferenceDeleteChunk).map(
+			(batch) => {
+				const inBatch = or(
+					...batch.map((row) => attestationReferenceMatch(row))
+				);
+				const keyFilter = and(
+					eq(d1Schema.attestationReference.tenant, tenant),
+					inBatch
+				);
 
-			await this.context.d1
-				.delete(d1Schema.attestationReference)
-				.where(and(eq(d1Schema.attestationReference.tenant, tenant), inBatch))
-				.run();
-		}
+				return this.context.d1
+					.delete(d1Schema.attestationReference)
+					.where(keyFilter);
+			}
+		);
+
+		await batchNonEmpty(this.context.d1, deletes);
 	}
 
 	private async deleteCasPresenceBatch(
