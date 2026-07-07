@@ -11,6 +11,7 @@ import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { Hono } from 'hono';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { controlTenantCreate } from '../control/control-plane.ts';
@@ -42,17 +43,20 @@ async function admitWithFaults(
 	const entry = await admitTenant(faultyEnv, ctx, tenantIdSchema.parse(slug));
 	await waitOnExecutionContext(ctx);
 
-	return entry;
+	return entry?.entry;
 }
 
 function database(): ReturnType<typeof drizzleD1<typeof d1Schema>> {
 	return drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
 }
 
-function createBody(id: string): ParsedTenantCreateBody {
+function createBody(
+	id: string,
+	readMode: 'public' | 'private' = 'private'
+): ParsedTenantCreateBody {
 	return tenantCreateBodySchema.parse({
 		id,
-		readMode: 'private',
+		readMode,
 		ownerIssuer: 'https://idp.test',
 		ownerSubject: 'owner',
 		ownerAudience: 'aud'
@@ -64,7 +68,19 @@ async function admit(slug: string): Promise<TenantEntry | undefined> {
 	const entry = await admitTenant(env, ctx, tenantIdSchema.parse(slug));
 	await waitOnExecutionContext(ctx);
 
-	return entry;
+	return entry?.entry;
+}
+
+// Reads the public tenant once so its active entry lands in the row cache, so a
+// following admission serves it from cache and the write reconfirms the status.
+async function primeRowCache(slug: string): Promise<void> {
+	const ctx = createExecutionContext();
+	await worker.fetch(
+		new Request(`https://cache.example/t/${slug}/prime`),
+		env,
+		ctx
+	);
+	await waitOnExecutionContext(ctx);
 }
 
 describe('layered admission gate', () => {
@@ -250,13 +266,21 @@ describe('layered admission gate', () => {
 		}).toStrictEqual({ status: 503, retryAfterSeconds: 5 });
 	});
 
-	// The dispatch write gate's status read shares the admission read's exposure:
-	// it sits on every tenant write. These drive it through the real Worker, with
-	// the faults confined to the gate's own query so admission itself stays
-	// healthy.
+	// The dispatch write gate reconfirms the status against D1 only when admission
+	// served the entry from the row cache, so a suspend stays timely within the
+	// cache TTL. A public tenant is cached, so priming the cache with a read drives
+	// a later write through the gate query; these confine the faults to that query
+	// so admission itself stays healthy.
 	const statusGateQuery = 'select "status" from "tenant"';
 
-	async function writeWithGateFaults(failures: number): Promise<Response> {
+	// A public slug distinct from the private `acme` the other cases use, so priming
+	// its entry into the shared row cache never leaks a cached status onto them.
+	const gateSlug = 'gate-public';
+
+	async function writeWithGateFaults(
+		failures: number,
+		slug: string
+	): Promise<Response> {
 		const ctx = createExecutionContext();
 		const faultyEnv = {
 			...env,
@@ -266,7 +290,7 @@ describe('layered admission gate', () => {
 			})
 		};
 		const response = await worker.fetch(
-			new Request('https://cache.example/t/acme/gate-probe', {
+			new Request(`https://cache.example/t/${slug}/gate-probe`, {
 				method: 'POST'
 			}),
 			faultyEnv,
@@ -278,10 +302,11 @@ describe('layered admission gate', () => {
 	}
 
 	it('retries a transient fault on the write gate status read', async () => {
-		await ensureTenant(database(), createBody('acme'), now);
+		await ensureTenant(database(), createBody(gateSlug, 'public'), now);
 		await refreshTenantMembership(env);
+		await primeRowCache(gateSlug);
 
-		const response = await writeWithGateFaults(1);
+		const response = await writeWithGateFaults(1, gateSlug);
 
 		// Past the gate, the unconfigured tenant object answers however it will;
 		// what matters is the gate did not surface its blip as a retryable refusal.
@@ -289,15 +314,54 @@ describe('layered admission gate', () => {
 	});
 
 	it('maps a persistent write gate fault to a retryable refusal', async () => {
-		await ensureTenant(database(), createBody('acme'), now);
+		await ensureTenant(database(), createBody(gateSlug, 'public'), now);
 		await refreshTenantMembership(env);
+		await primeRowCache(gateSlug);
 
-		const response = await writeWithGateFaults(Number.MAX_SAFE_INTEGER);
+		const response = await writeWithGateFaults(
+			Number.MAX_SAFE_INTEGER,
+			gateSlug
+		);
 
 		expect({
 			status: response.status,
 			retryAfter: response.headers.get('retry-after')
 		}).toStrictEqual({ status: 503, retryAfter: '5' });
+	});
+
+	it('trusts a fresh admission status, sparing the write gate read', async () => {
+		await ensureTenant(database(), createBody('acme'), now);
+		await refreshTenantMembership(env);
+
+		// A private tenant is never cached, so admission reads it fresh and the write
+		// trusts that status: the gate query never runs, so faulting it has no effect.
+		const response = await writeWithGateFaults(Number.MAX_SAFE_INTEGER, 'acme');
+
+		expect(response.headers.get('retry-after')).toBeNull();
+	});
+
+	it('reconfirms a cached status so a suspend still stops a write', async () => {
+		await ensureTenant(database(), createBody(gateSlug, 'public'), now);
+		await refreshTenantMembership(env);
+		await primeRowCache(gateSlug);
+		await setTenantStatus(
+			database(),
+			tenantIdSchema.parse(gateSlug),
+			'suspended'
+		);
+
+		const ctx = createExecutionContext();
+		const response = await worker.fetch(
+			new Request(`https://cache.example/t/${gateSlug}/gate-probe`, {
+				method: 'POST'
+			}),
+			env,
+			ctx
+		);
+		await waitOnExecutionContext(ctx);
+
+		// The cache still holds the active entry; the gate's re-read sees the suspend.
+		expect(response.status).toBe(StatusCodes.FORBIDDEN);
 	});
 
 	it('answers the admission refusal as a 503 with Retry-After', async () => {
