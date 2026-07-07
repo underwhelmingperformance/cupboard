@@ -1348,16 +1348,24 @@ export class VerificationService {
 		);
 
 		let settled = 0;
+		const ready: PreparedSettle[] = [];
 
+		// Phase A: reserve and promote each reuse row against its canonical object.
+		// A row settled here (lost or already committed) counts at once; a promoted
+		// survivor is collected to materialise once the batch's facts are read.
 		for (const pending of pendings) {
 			try {
-				await this.recordVerification(
-					logger,
+				const prepared = await this.prepareRecordedVerdict(
 					pending.id,
 					{ ok: true },
 					'promote'
 				);
-				settled += 1;
+
+				if (prepared === undefined) {
+					settled += 1;
+				} else {
+					ready.push(prepared);
+				}
 			} catch (error) {
 				if (error instanceof UploadedObjectNotFoundError) {
 					// The canonical object is gone and cannot reappear: answer the
@@ -1371,6 +1379,35 @@ export class VerificationService {
 				// pass without starving the rest.
 				this.releaseLease(pending.id);
 				logger.warn('reuse settle failed', { uploadId: pending.id, error });
+			}
+		}
+
+		if (ready.length === 0) {
+			return settled;
+		}
+
+		// Read every survivor's canonical facts once, then materialise from memory:
+		// a reuse backlog settles with O(chunks) probe reads, not one per row. The
+		// facts can go stale across the batch; the charge batch remains the
+		// authoritative fence and the over-quota retry re-probes.
+		const prefetched = await this.prefetchedFactsFor(logger, ready);
+
+		for (const item of ready) {
+			try {
+				await this.materialiseVerified(
+					logger,
+					item.pending,
+					item.metadata,
+					item.generation,
+					prefetched?.get(item.metadata.narHash)
+				);
+				settled += 1;
+			} catch (error) {
+				this.releaseLease(item.pending.id);
+				logger.warn('reuse settle failed', {
+					uploadId: item.pending.id,
+					error
+				});
 			}
 		}
 
