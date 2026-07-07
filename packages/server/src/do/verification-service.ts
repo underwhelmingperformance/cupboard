@@ -311,6 +311,55 @@ export class VerificationService {
 		return { pending, metadata, generation: reserved };
 	}
 
+	// Phase A of recording a queue-consumer verdict: read the row, reserve, verify
+	// it is not already committed, and promote. Returns the upload ready to
+	// materialise, or undefined when it settled here (a vanished or already-decided
+	// row, a lost path, or a failed verdict). A batch pass collects the survivors,
+	// reads their probe facts once, then materialises them from memory.
+	private async prepareRecordedVerdict(
+		uploadId: string,
+		verification: NarVerification,
+		promotion: PromotionState
+	): Promise<PreparedSettle | undefined> {
+		const pending = this.context.db
+			.select()
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		if (pending === undefined || !isAwaitingVerdict(pending)) {
+			return undefined;
+		}
+
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+		const generation = await this.reservePendingRow(pending, metadata);
+
+		if (generation === undefined) {
+			return undefined;
+		}
+
+		if (await this.finaliseIfAlreadyCommitted(pending, metadata, generation)) {
+			return undefined;
+		}
+
+		const wasPromoted = await this.promoteForCommit(
+			pending,
+			metadata,
+			generation,
+			verification,
+			promotion
+		);
+
+		if (!wasPromoted) {
+			return undefined;
+		}
+
+		return { pending, metadata, generation };
+	}
+
 	// Reserves the narinfo row before committing a verified upload: a fresh deferred
 	// upload gets its first row, a crashed or re-driven commit finds its own
 	// (`mine`). A different version holding the path (`lost`) means this upload can
@@ -1339,37 +1388,21 @@ export class VerificationService {
 		verification: NarVerification,
 		promotion: PromotionState = 'promote'
 	): Promise<void> {
-		const pending = this.context.db
-			.select()
-			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.get();
-
-		if (pending === undefined || !isAwaitingVerdict(pending)) {
-			return;
-		}
-
-		const metadata = parseStoredUploadPathMetadata(
-			pending.id,
-			pending.metadataJson
-		);
-		const generation = await this.reservePendingRow(pending, metadata);
-
-		if (generation === undefined) {
-			return;
-		}
-
-		if (await this.finaliseIfAlreadyCommitted(pending, metadata, generation)) {
-			return;
-		}
-
-		await this.commitVerified(
-			logger,
-			pending,
-			metadata,
-			generation,
+		const prepared = await this.prepareRecordedVerdict(
+			uploadId,
 			verification,
 			promotion
+		);
+
+		if (prepared === undefined) {
+			return;
+		}
+
+		await this.materialiseVerified(
+			logger,
+			prepared.pending,
+			prepared.metadata,
+			prepared.generation
 		);
 	}
 
@@ -1390,6 +1423,12 @@ export class VerificationService {
 	): Promise<number> {
 		let applied = 0;
 
+		// Phase A: read, reserve, verify and promote each verdict concurrently. A
+		// verdict settled here (missing, a lost path, an already-committed row, or a
+		// failed verdict) is progress and counts at once; a promoted survivor is
+		// collected to materialise once the batch's probe facts are read.
+		const ready: PreparedSettle[] = [];
+
 		await mapWithConcurrency(
 			results,
 			maxOutgoingConnections,
@@ -1405,27 +1444,61 @@ export class VerificationService {
 
 					if (verdict.kind === 'missing') {
 						await this.recordMissingObject(uploadId);
-					} else if (verdict.kind === 'promoted') {
-						await this.recordVerification(
-							logger,
-							uploadId,
-							{ ok: true },
-							'already-promoted'
-						);
-					} else {
-						await this.recordVerification(
-							logger,
-							uploadId,
-							verdict.verification
-						);
+						applied += 1;
+						return;
 					}
 
-					applied += 1;
+					const verification: NarVerification =
+						verdict.kind === 'promoted' ? { ok: true } : verdict.verification;
+					const promotion: PromotionState =
+						verdict.kind === 'promoted' ? 'already-promoted' : 'promote';
+					const prepared = await this.prepareRecordedVerdict(
+						uploadId,
+						verification,
+						promotion
+					);
+
+					if (prepared === undefined) {
+						applied += 1;
+						return;
+					}
+
+					ready.push(prepared);
 				} catch (error) {
 					logger.warn('verification verdict not recorded', { uploadId, error });
 				}
 			}
 		);
+
+		if (ready.length === 0) {
+			return applied;
+		}
+
+		// Read every promoted survivor's canonical facts once, then materialise each
+		// from memory: a large verdict batch costs O(chunks) probe reads, not one per
+		// path. A materialise fault leaves the row for the next pass, so it does not
+		// count towards the continuation gate. The facts can go stale across the
+		// batch; the charge batch remains the authoritative fence and the over-quota
+		// retry re-probes.
+		const prefetched = await this.prefetchedFactsFor(logger, ready);
+
+		await mapWithConcurrency(ready, maxOutgoingConnections, async (item) => {
+			try {
+				await this.materialiseVerified(
+					logger,
+					item.pending,
+					item.metadata,
+					item.generation,
+					prefetched?.get(item.metadata.narHash)
+				);
+				applied += 1;
+			} catch (error) {
+				logger.warn('verification verdict not recorded', {
+					uploadId: item.pending.id,
+					error
+				});
+			}
+		});
 
 		return applied;
 	}
