@@ -1,9 +1,11 @@
 import {
 	type NixSha256HashString,
-	type StorePathHash
+	type StorePathHash,
+	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
 import { and, eq, exists, inArray, notExists, or, sql } from 'drizzle-orm';
+import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
@@ -32,6 +34,56 @@ export interface TornDownNarInfo {
 // generation), so the OR-of-AND list is chunked to stay within D1's
 // bound-parameter limit with headroom for the fixed tenant and cache.
 const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
+
+// The presence sweep credit UPDATE embeds droppableFilter twice (in the
+// droppedBytes and droppedCount subqueries), each binding tenant(1) + IN(N) +
+// the notExists subquery's tenant(1) = N+2 parameters. The two embeds plus
+// updatedAt(1) and the outer WHERE tenant(1) total 2(N+2)+2 = 2N+6 parameters.
+// Solving 2N+6 <= 100 gives N <= 47; 45 matches maxFencedRetireRows and leaves
+// a margin.
+export const maxTeardownPresenceChunk = 45;
+
+// Builds the credit UPDATE and presence DELETE for one narHash sub-chunk of a
+// teardown sweep. The UPDATE credits back the exact bytes and count the DELETE
+// drops, computed as subqueries over the same `droppableFilter`: the batch runs
+// its update before its delete in one transaction, so the subqueries read the
+// rows the delete then removes and the credit matches the drop with no separate
+// read. Exported for the D1 parameter guard test.
+export function teardownPresenceBatch(
+	d1: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	narHashes: readonly NixSha256HashString[],
+	now: string
+) {
+	const stillReferenced = d1
+		.select({ narHash: d1Schema.blobReference.narHash })
+		.from(d1Schema.blobReference)
+		.where(
+			and(
+				eq(d1Schema.blobReference.tenant, tenant),
+				eq(d1Schema.blobReference.narHash, d1Schema.tenantBlob.narHash)
+			)
+		);
+	const droppableFilter = and(
+		eq(d1Schema.tenantBlob.tenant, tenant),
+		inArray(d1Schema.tenantBlob.narHash, narHashes),
+		notExists(stillReferenced)
+	);
+	const droppedBytes = sql`coalesce((select sum(${d1Schema.tenantBlob.fileSize}) from ${d1Schema.tenantBlob} where ${droppableFilter}), 0)`;
+	const droppedCount = sql`coalesce((select count(*) from ${d1Schema.tenantBlob} where ${droppableFilter}), 0)`;
+
+	return {
+		update: d1
+			.update(d1Schema.tenantUsage)
+			.set({
+				bytes: sql`${d1Schema.tenantUsage.bytes} - ${droppedBytes}`,
+				blobs: sql`${d1Schema.tenantUsage.blobs} - ${droppedCount}`,
+				updatedAt: now
+			})
+			.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+		presenceDelete: d1.delete(d1Schema.tenantBlob).where(droppableFilter)
+	};
+}
 
 export class DeletionQueueService {
 	constructor(
@@ -478,54 +530,14 @@ export class DeletionQueueService {
 		// batch cannot be interleaved by another charge.
 		const narHashes = [...new Set(entries.map((entry) => entry.narHash))];
 
-		for (const batch of chunk(narHashes, maxInClauseValues)) {
-			const stillReferenced = this.context.d1
-				.select({ narHash: d1Schema.blobReference.narHash })
-				.from(d1Schema.blobReference)
-				.where(
-					and(
-						eq(d1Schema.blobReference.tenant, tenant),
-						eq(d1Schema.blobReference.narHash, d1Schema.tenantBlob.narHash)
-					)
-				);
-			const droppableFilter = and(
-				eq(d1Schema.tenantBlob.tenant, tenant),
-				inArray(d1Schema.tenantBlob.narHash, batch),
-				notExists(stillReferenced)
+		for (const batch of chunk(narHashes, maxTeardownPresenceChunk)) {
+			const { update, presenceDelete } = teardownPresenceBatch(
+				this.context.d1,
+				tenant,
+				batch,
+				now
 			);
-			const droppable = await this.context.d1
-				.select({
-					narHash: d1Schema.tenantBlob.narHash,
-					fileSize: d1Schema.tenantBlob.fileSize
-				})
-				.from(d1Schema.tenantBlob)
-				.where(droppableFilter)
-				.all();
-
-			if (droppable.length === 0) {
-				continue;
-			}
-
-			const bytes = droppable.reduce((total, row) => total + row.fileSize, 0);
-			const dropFilter = and(
-				eq(d1Schema.tenantBlob.tenant, tenant),
-				inArray(
-					d1Schema.tenantBlob.narHash,
-					droppable.map((row) => row.narHash)
-				)
-			);
-
-			await this.context.d1.batch([
-				this.context.d1
-					.update(d1Schema.tenantUsage)
-					.set({
-						bytes: sql`${d1Schema.tenantUsage.bytes} - ${bytes}`,
-						blobs: sql`${d1Schema.tenantUsage.blobs} - ${droppable.length}`,
-						updatedAt: now
-					})
-					.where(eq(d1Schema.tenantUsage.tenant, tenant)),
-				this.context.d1.delete(d1Schema.tenantBlob).where(dropFilter)
-			]);
+			await this.context.d1.batch([update, presenceDelete]);
 		}
 
 		// Attestation references are rare on most paths; read them per sub-chunk
