@@ -68,15 +68,25 @@ export class AttestationCasService {
 		digest: Sha256HexDigest,
 		size: number
 	): Promise<boolean> {
-		const usage = await this.context.d1
-			.select({
-				bytes: d1Schema.tenantUsage.bytes,
-				casBytes: d1Schema.tenantUsage.casBytes,
-				quotaBytes: d1Schema.tenantUsage.quotaBytes
-			})
-			.from(d1Schema.tenantUsage)
-			.where(eq(d1Schema.tenantUsage.tenant, tenant))
-			.get();
+		// Read the usage counters and the presence of this digest together; the
+		// presence read has no side effect, so reading it eagerly costs one request
+		// instead of two even when the usage row settles the answer first.
+		const [usageRows, ownedRows] = await this.context.d1.batch([
+			this.context.d1
+				.select({
+					bytes: d1Schema.tenantUsage.bytes,
+					casBytes: d1Schema.tenantUsage.casBytes,
+					quotaBytes: d1Schema.tenantUsage.quotaBytes
+				})
+				.from(d1Schema.tenantUsage)
+				.where(eq(d1Schema.tenantUsage.tenant, tenant)),
+			this.context.d1
+				.select({ digest: d1Schema.tenantCasBlob.digest })
+				.from(d1Schema.tenantCasBlob)
+				.where(this.presenceFilter(tenant, digest))
+		]);
+
+		const usage = usageRows[0];
 
 		if (usage === undefined) {
 			return false;
@@ -86,13 +96,7 @@ export class AttestationCasService {
 			return false;
 		}
 
-		const owned = await this.context.d1
-			.select({ digest: d1Schema.tenantCasBlob.digest })
-			.from(d1Schema.tenantCasBlob)
-			.where(this.presenceFilter(tenant, digest))
-			.get();
-
-		if (owned !== undefined) {
+		if (ownedRows.length > 0) {
 			return false;
 		}
 
