@@ -1306,21 +1306,39 @@ export class CommitPipelineService {
 		metadata: ParsedUploadPathNegotiation
 	): Promise<MaterialisationProbe> {
 		const tenant = this.context.requireTenant();
-		const [blob, canonical, isOwned] = await Promise.all([
-			this.context.d1
-				.select({
-					fileHash: d1Schema.blobState.fileHash,
-					fileSize: d1Schema.blobState.fileSize,
-					compression: d1Schema.blobState.compression
-				})
-				.from(d1Schema.blobState)
-				.where(eq(d1Schema.blobState.narHash, metadata.narHash))
-				.get(),
-			this.context.env.BLOBS.head(narObjectKey(metadata.narHash)),
-			this.ownsHash(tenant, metadata.narHash)
+		const canonicalFilter = eq(d1Schema.blobState.narHash, metadata.narHash);
+		const ownedFilter = and(
+			eq(d1Schema.tenantBlob.tenant, tenant),
+			eq(d1Schema.tenantBlob.narHash, metadata.narHash)
+		);
+
+		// The canonical facts and the presence check are both keyed on the hash and
+		// independent, so read them in one D1 batch; the R2 head runs alongside.
+		const [d1Rows, canonical] = await Promise.all([
+			this.context.d1.batch([
+				this.context.d1
+					.select({
+						fileHash: d1Schema.blobState.fileHash,
+						fileSize: d1Schema.blobState.fileSize,
+						compression: d1Schema.blobState.compression
+					})
+					.from(d1Schema.blobState)
+					.where(canonicalFilter),
+				this.context.d1
+					.select({ narHash: d1Schema.tenantBlob.narHash })
+					.from(d1Schema.tenantBlob)
+					.where(ownedFilter)
+			]),
+			this.context.env.BLOBS.head(narObjectKey(metadata.narHash))
 		]);
 
-		return { blob, isCanonicalPresent: canonical !== null, isOwned };
+		const [blobRows, ownedRows] = d1Rows;
+
+		return {
+			blob: blobRows[0],
+			isCanonicalPresent: canonical !== null,
+			isOwned: ownedRows.length > 0
+		};
 	}
 
 	// Whether this upload's reserved generation is already fully committed and

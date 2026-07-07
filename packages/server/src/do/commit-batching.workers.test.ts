@@ -108,6 +108,9 @@ describe('batched commit settles', () => {
 					}
 
 					const probe = await pipeline.probeMaterialisation(head);
+					// The probe reads its shared facts in one batch of its own; discount
+					// it so the count measures only the charge the flush settles.
+					batches.mockClear();
 					const rows = instance.context.db
 						.select({
 							storePathHash: schema.narInfos.storePathHash,
