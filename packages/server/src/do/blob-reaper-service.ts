@@ -163,26 +163,34 @@ export class BlobReaperService {
 			.limit(limit)
 			.all();
 		const removedKeys: string[] = [];
+		const referencedHashes = this.d1
+			.select({ narHash: d1Schema.blobReference.narHash })
+			.from(d1Schema.blobReference);
 
-		for (const blob of expired) {
-			const referencedHashes = this.d1
-				.select({ narHash: d1Schema.blobReference.narHash })
-				.from(d1Schema.blobReference);
+		// One compare-and-delete per chunk; the fence still re-checks armed,
+		// elapsed and unreferenced atomically for each row, so a blob
+		// re-referenced or re-armed since the scan is never taken, and
+		// `RETURNING` reports exactly which rows the fence let go.
+		const hashChunks = chunk(
+			expired.map((blob) => blob.narHash),
+			maxInClauseValues
+		);
+
+		for (const hashes of hashChunks) {
+			const fence = and(
+				inArray(d1Schema.blobState.narHash, hashes),
+				isNotNull(d1Schema.blobState.deleteAfter),
+				lte(d1Schema.blobState.deleteAfter, nowIso),
+				notInArray(d1Schema.blobState.narHash, referencedHashes)
+			);
 			const removed = await this.d1
 				.delete(d1Schema.blobState)
-				.where(
-					and(
-						eq(d1Schema.blobState.narHash, blob.narHash),
-						isNotNull(d1Schema.blobState.deleteAfter),
-						lte(d1Schema.blobState.deleteAfter, nowIso),
-						notInArray(d1Schema.blobState.narHash, referencedHashes)
-					)
-				)
+				.where(fence)
 				.returning({ narHash: d1Schema.blobState.narHash })
 				.all();
 
-			if (removed.length > 0) {
-				removedKeys.push(narObjectKey(blob.narHash));
+			for (const row of removed) {
+				removedKeys.push(narObjectKey(row.narHash));
 			}
 		}
 
@@ -254,26 +262,33 @@ export class BlobReaperService {
 			.limit(limit)
 			.all();
 		const removedKeys: string[] = [];
+		const referencedDigests = this.d1
+			.select({ digest: d1Schema.attestationReference.digest })
+			.from(d1Schema.attestationReference);
 
-		for (const object of expired) {
-			const referencedDigests = this.d1
-				.select({ digest: d1Schema.attestationReference.digest })
-				.from(d1Schema.attestationReference);
+		// One compare-and-delete per chunk; the fence still re-checks each row's
+		// armed, elapsed and unreferenced state, and `RETURNING` reports exactly
+		// which rows it let go.
+		const digestChunks = chunk(
+			expired.map((object) => object.digest),
+			maxInClauseValues
+		);
+
+		for (const digests of digestChunks) {
+			const fence = and(
+				inArray(d1Schema.casObject.digest, digests),
+				isNotNull(d1Schema.casObject.deleteAfter),
+				lte(d1Schema.casObject.deleteAfter, nowIso),
+				notInArray(d1Schema.casObject.digest, referencedDigests)
+			);
 			const removed = await this.d1
 				.delete(d1Schema.casObject)
-				.where(
-					and(
-						eq(d1Schema.casObject.digest, object.digest),
-						isNotNull(d1Schema.casObject.deleteAfter),
-						lte(d1Schema.casObject.deleteAfter, nowIso),
-						notInArray(d1Schema.casObject.digest, referencedDigests)
-					)
-				)
+				.where(fence)
 				.returning({ digest: d1Schema.casObject.digest })
 				.all();
 
-			if (removed.length > 0) {
-				removedKeys.push(casObjectKey(object.digest));
+			for (const row of removed) {
+				removedKeys.push(casObjectKey(row.digest));
 			}
 		}
 
