@@ -86,44 +86,42 @@ export class DeletionQueueService {
 			this.context.d1.delete(d1Schema.blobReference).where(edgeFilter)
 		]);
 
-		const stillReferenced = await this.context.d1
-			.select({ narHash: d1Schema.blobReference.narHash })
-			.from(d1Schema.blobReference)
-			.where(
-				and(
-					eq(d1Schema.blobReference.tenant, tenant),
-					eq(d1Schema.blobReference.narHash, narHash)
-				)
-			)
-			.get();
-
-		if (stillReferenced !== undefined) {
-			return;
-		}
-
-		// The tenant's last edge for this hash is gone: read the charged size, then
-		// credit the bytes and the unique-blob count and drop the presence row in one
-		// atomic batch. The credit is gated on the presence still existing, so a replay
-		// does not double-credit.
-		const presence = await this.context.d1
-			.select({ fileSize: d1Schema.tenantBlob.fileSize })
-			.from(d1Schema.tenantBlob)
-			.where(
-				and(
-					eq(d1Schema.tenantBlob.tenant, tenant),
-					eq(d1Schema.tenantBlob.narHash, narHash)
-				)
-			)
-			.get();
-
-		if (presence === undefined) {
-			return;
-		}
-
+		const hashReferencedFilter = and(
+			eq(d1Schema.blobReference.tenant, tenant),
+			eq(d1Schema.blobReference.narHash, narHash)
+		);
 		const presenceFilter = and(
 			eq(d1Schema.tenantBlob.tenant, tenant),
 			eq(d1Schema.tenantBlob.narHash, narHash)
 		);
+
+		// Read whether any edge still references the hash and, eagerly, the presence
+		// row's charged size in one round-trip. The presence read is a harmless
+		// point-read discarded when the hash is still referenced, so reading it
+		// alongside costs nothing but the request it saves.
+		const [stillReferencedRows, presenceRows] = await this.context.d1.batch([
+			this.context.d1
+				.select({ narHash: d1Schema.blobReference.narHash })
+				.from(d1Schema.blobReference)
+				.where(hashReferencedFilter),
+			this.context.d1
+				.select({ fileSize: d1Schema.tenantBlob.fileSize })
+				.from(d1Schema.tenantBlob)
+				.where(presenceFilter)
+		]);
+
+		if (stillReferencedRows[0] !== undefined) {
+			return;
+		}
+
+		// The tenant's last edge for this hash is gone: credit the bytes and the
+		// unique-blob count and drop the presence row in one atomic batch, gated on
+		// the presence still existing so a replay does not double-credit.
+		const presence = presenceRows[0];
+
+		if (presence === undefined) {
+			return;
+		}
 
 		const presenceExists = exists(
 			this.context.d1
