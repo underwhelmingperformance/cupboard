@@ -20,6 +20,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import { buildStampMaintainedStatement } from '../routing/scheduled.ts';
 
 import { maxInClauseValues } from './bulk.ts';
 import {
@@ -285,6 +286,17 @@ describe('D1 bound-parameter guard', () => {
 				);
 
 			expect(query.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+	});
+
+	describe('maintenance stamp UPDATE (routing/scheduled)', () => {
+		it('stampMaintained UPDATE stays within 100 params at maxInClauseValues', () => {
+			const tenantIds = Array.from({ length: maxInClauseValues }, (_, index) =>
+				tenantIdSchema.parse(`tenant-${String(index)}`)
+			);
+			const update = buildStampMaintainedStatement(database, tenantIds, now);
+
+			expect(update.toSQL().params.length).toBeLessThanOrEqual(100);
 		});
 	});
 

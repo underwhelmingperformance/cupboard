@@ -33,7 +33,9 @@ import {
 } from '../do/blob-reaper-service.ts';
 import {
 	batchNonEmpty,
+	chunk,
 	mapWithConcurrency,
+	maxInClauseValues,
 	maxOutgoingConnections
 } from '../do/bulk.ts';
 import {
@@ -1240,6 +1242,21 @@ function tenantMaintenanceDueCondition() {
 	);
 }
 
+/**
+ * Builds the UPDATE stamping one chunk of tenants' `last_maintained_at`.
+ * Exported for the D1 parameter guard test.
+ */
+export function buildStampMaintainedStatement(
+	database: CronDatabase,
+	tenantIds: readonly TenantId[],
+	maintainedAt: string
+) {
+	return database
+		.update(d1Schema.tenant)
+		.set({ lastMaintainedAt: maintainedAt })
+		.where(inArray(d1Schema.tenant.id, tenantIds));
+}
+
 // Stamps the maintained batch so the next tick advances to the next-oldest tenants.
 // Stamped after the passes run and regardless of their outcome, so a failing tenant
 // is not retried until the cycle comes round again, while a whole-tick crash before
@@ -1255,16 +1272,13 @@ async function stampMaintained(
 	const maintainedDate = new Date();
 	const maintainedAt = maintainedDate.toISOString();
 
-	await database
-		.update(d1Schema.tenant)
-		.set({ lastMaintainedAt: maintainedAt })
-		.where(
-			inArray(
-				d1Schema.tenant.id,
-				batch.map((entry) => entry.id)
-			)
-		)
-		.run();
+	const tenantIds = batch.map((entry) => entry.id);
+	const chunks = chunk(tenantIds, maxInClauseValues);
+	const queries = chunks.map((ids) =>
+		buildStampMaintainedStatement(database, ids, maintainedAt)
+	);
+
+	await batchNonEmpty(database, queries);
 }
 
 /**
