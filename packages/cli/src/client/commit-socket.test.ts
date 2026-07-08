@@ -350,6 +350,117 @@ describe('runCommitSession', () => {
 		});
 	});
 
+	it.each([503, 429])(
+		'retries a %i error frame and resolves the entry on a subsequent settled frame',
+		async (retryStatus) => {
+			const socket = new FakeCommitSocket();
+			const session = openSession(socket);
+			const commit = session.commit(target);
+
+			socket.emit('open');
+			socket.emit(
+				'message',
+				frame({
+					ev: 'error',
+					uploadId,
+					status: retryStatus,
+					message: 'overloaded'
+				})
+			);
+
+			// The entry must not have resolved or rejected yet — it is waiting for the retry.
+			let hasResolved = false;
+			let hasRejected = false;
+			void commit.then(
+				() => {
+					hasResolved = true;
+				},
+				() => {
+					hasRejected = true;
+				}
+			);
+			await Promise.resolve();
+			expect({ hasResolved, hasRejected }).toStrictEqual({
+				hasResolved: false,
+				hasRejected: false
+			});
+
+			// Advance past the retry delay, then deliver a settled frame.
+			await vi.advanceTimersByTimeAsync(5000);
+			socket.emit(
+				'message',
+				frame({
+					ev: 'settled',
+					uploadId,
+					response: { storePathHash, narHash, status: 'committed' }
+				})
+			);
+
+			await expect(ackOf(commit)).resolves.toStrictEqual({
+				storePathHash,
+				narHash,
+				status: 'committed'
+			});
+		}
+	);
+
+	it('fails the entry after exhausting retries on repeated retryable error frames', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(target);
+
+		// Register the rejection handler before driving any frames so the rejection
+		// is caught even when it fires synchronously inside advanceTimersByTimeAsync.
+		const rejection = rejectedBy(commit, CupboardHttpError);
+
+		socket.emit('open');
+
+		// Send one more error frame than the retry cap; the last one terminates.
+		// maxEntryRetries = 3, so 4 total error frames exhaust the budget.
+		for (let index = 0; index < 4; index += 1) {
+			socket.emit(
+				'message',
+				frame({ ev: 'error', uploadId, status: 503, message: 'overloaded' })
+			);
+			await vi.advanceTimersByTimeAsync(5000);
+		}
+
+		const error = await rejection;
+
+		expect({
+			name: error.name,
+			status: error.status
+		}).toStrictEqual({
+			name: 'CupboardHttpError',
+			status: 503
+		});
+	});
+
+	it('treats a non-retryable error frame status as terminal with no retry', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const commit = session.commit(target);
+
+		socket.emit('open');
+		socket.emit(
+			'message',
+			frame({ ev: 'error', uploadId, status: 404, message: 'unknown upload' })
+		);
+
+		const error = await rejectedBy(commit, CupboardHttpError);
+
+		expect({
+			name: error.name,
+			status: error.status,
+			sentAfterError: socket.sent.length
+		}).toStrictEqual({
+			name: 'CupboardHttpError',
+			status: 404,
+			// The session sent one commit op on open; no retry op after the terminal error.
+			sentAfterError: 1
+		});
+	});
+
 	it('fails every commit when the upgrade is refused', async () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
