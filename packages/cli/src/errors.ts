@@ -351,6 +351,22 @@ export class AttestationSubjectNotPushedError extends CliError {
 	}
 }
 
+export class AttestationDivergedPathError extends CliError {
+	constructor(
+		public readonly storePath: string,
+		public readonly localNarHash: string,
+		public readonly cacheNarHash: string
+	) {
+		super(
+			`Attestation describes ${storePath} as ${localNarHash}, but the cache ` +
+				`holds ${cacheNarHash} for it: the same store path was realised with ` +
+				`different bytes, so the attestation cannot attach. Delete the cached ` +
+				`path and push again, or drop the attestation.`
+		);
+		this.name = 'AttestationDivergedPathError';
+	}
+}
+
 export class AttestationUploadUnavailableError extends CliError {
 	constructor(public readonly method: string) {
 		super(`Push client does not support attestation uploads: ${method}`);
