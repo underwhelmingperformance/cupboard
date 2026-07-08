@@ -650,6 +650,7 @@ export function runCommitSession(
 		// The server closes the socket once nothing is outstanding; that is a clean
 		// end, not a drop to recover from.
 		if (outstanding.size === 0) {
+			isClosed = true;
 			teardown();
 
 			return;
