@@ -24,8 +24,10 @@ import { z } from 'zod';
 import migrations from '../../drizzle/migrations.js';
 import { type NarVerification } from '../blob/nar-verify.ts';
 import * as schema from '../db/schema.ts';
+import { isD1Overload } from '../db/transient.ts';
 import {
 	CommitUpgradeRequiredError,
+	DatabaseOverloadedError,
 	R2PresignConfigurationMissingError,
 	ServerHttpError,
 	TenantNotConfiguredError,
@@ -461,6 +463,17 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		} catch (error) {
 			if (error instanceof UploadNotFoundError && identity !== undefined) {
 				await this.resolveGoneCommit(socket, cache, uploadId, identity);
+				return;
+			}
+
+			if (isD1Overload(error)) {
+				const overload = new DatabaseOverloadedError(error);
+				sendCommitSessionFrame(socket, {
+					ev: 'error',
+					uploadId,
+					status: overload.status,
+					message: overload.message
+				});
 				return;
 			}
 

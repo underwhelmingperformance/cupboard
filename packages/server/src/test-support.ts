@@ -718,6 +718,8 @@ export interface FlakyD1Plan {
 	failures: number;
 	/** Restricts the faults to matching queries; every query when absent. */
 	readonly matches?: (query: string) => boolean;
+	/** The error message to throw; defaults to 'transient D1 fault'. */
+	readonly message?: string;
 }
 
 /**
@@ -729,7 +731,7 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 		prepare(query) {
 			if (plan.failures > 0 && (plan.matches?.(query) ?? true)) {
 				plan.failures -= 1;
-				throw new Error('transient D1 fault');
+				throw new Error(plan.message ?? 'transient D1 fault');
 			}
 
 			return inner.prepare(query);
