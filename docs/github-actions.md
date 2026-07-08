@@ -138,14 +138,19 @@ steps:
 ```
 
 `paths` is newline-delimited and accepts the same store paths, derivations, and
-installables as `actions/push`. The action outputs `bundle-path`, the signed
-bundle covering every resolved path, alongside `checksums-file` and
-`subject-count`. `id-token: write` lets the action obtain its Sigstore signing
-certificate, and `attestations: write` records the attestation on the
-repository.
+installables as `actions/push`. Only paths the runner's store built become
+subjects. A path substituted from a cache was not built by this run, so
+attesting it would record a false provenance claim; the action skips it with a
+warning. When no path qualifies, nothing is signed and `bundle-path` is empty,
+which `actions/push` accepts as no attestations.
 
-Because the bundle carries every path as a subject, a later `cupboard push`
-files it against each matching path in the pushed closure.
+The action outputs `bundle-path`, the signed bundle covering every qualifying
+path, alongside `checksums-file` and `subject-count`. `id-token: write` lets the
+action obtain its Sigstore signing certificate, and `attestations: write`
+records the attestation on the repository.
+
+Because the bundle carries every attested path as a subject, a later
+`cupboard push` files it against each matching path in the pushed closure.
 
 ## Build, attest, and push
 

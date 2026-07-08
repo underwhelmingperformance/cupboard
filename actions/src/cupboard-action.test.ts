@@ -3,12 +3,15 @@ import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import type { NixValidPathInfo } from '@cupboard/nix';
+import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import type { VerifiedBundle } from '@cupboard/shared/sigstore';
 import { describe, expect, it } from 'vitest';
 
 import {
 	assetNameFor,
+	attestationSubjects,
 	attestInputs,
 	buildPushArguments,
 	cachePublicKeyRequestHeaders,
@@ -140,6 +143,50 @@ describe('renderChecksums', () => {
 				'1111111111111111111111111111111111111111111111111111111111111111',
 			'3123456789abcdfghijklmnpqrsvwxyz-runtime':
 				'2222222222222222222222222222222222222222222222222222222222222222'
+		});
+	});
+});
+
+function attestPathInfo(
+	storePath: string,
+	digestByte: number,
+	isUltimate: boolean
+): NixValidPathInfo {
+	return {
+		storePath,
+		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte)),
+		narSize: 1,
+		references: [],
+		signatures: isUltimate ? [] : ['cache-1:signature'],
+		ultimate: isUltimate
+	};
+}
+
+describe('attestationSubjects', () => {
+	const builtPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
+	const substitutedPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
+
+	it('emits subjects for built paths and skips substituted ones', () => {
+		const partitioned = attestationSubjects([
+			attestPathInfo(builtPath, 0xaa, true),
+			attestPathInfo(substitutedPath, 0xbb, false)
+		]);
+
+		expect(partitioned).toStrictEqual({
+			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
+			skipped: [substitutedPath]
+		});
+	});
+
+	it('emits no subjects when every path was substituted', () => {
+		const partitioned = attestationSubjects([
+			attestPathInfo(builtPath, 0xaa, false),
+			attestPathInfo(substitutedPath, 0xbb, false)
+		]);
+
+		expect(partitioned).toStrictEqual({
+			subjects: [],
+			skipped: [builtPath, substitutedPath]
 		});
 	});
 });

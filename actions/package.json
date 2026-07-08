@@ -11,6 +11,7 @@
 		"semver": "^7.8.5"
 	},
 	"devDependencies": {
+		"@cupboard/nix-store": "workspace:*",
 		"@types/semver": "^7.7.1"
 	},
 	"license": "AGPL-3.0-or-later",
