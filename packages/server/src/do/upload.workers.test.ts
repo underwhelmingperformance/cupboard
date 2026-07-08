@@ -1367,6 +1367,76 @@ describe('upload flow', () => {
 		}).toStrictEqual({ a: undefined, b: undefined });
 	});
 
+	it('settles both batch messages when they are sent back-to-back', async () => {
+		const token = await initialise();
+		const metaA = uploadMetadata({
+			storePathHash: 'n'.repeat(32),
+			name: 'batch-bound-a',
+			narHash: nixSha256Hash('n'),
+			fileSize: narBytes.byteLength
+		});
+		const metaB = uploadMetadata({
+			storePathHash: 'p'.repeat(32),
+			name: 'batch-bound-b',
+			narHash: nixSha256Hash('p'),
+			fileSize: narBytes.byteLength
+		});
+		const negotiated = await negotiateUploads(token, [metaA, metaB]);
+		const [a, b] = [metaA, metaB].map((metadata) =>
+			expectSingleUploadDecision(
+				{
+					uploads: negotiated.uploads.filter(
+						(decision) => decision.storePathHash === metadata.storePathHash
+					)
+				},
+				metadata
+			)
+		);
+
+		if (a === undefined || b === undefined) {
+			throw new Error('both uploads must negotiate');
+		}
+
+		await putNarBytes(a.r2Key);
+		await putNarBytes(b.r2Key);
+
+		// Two separate commit-batch messages sent back-to-back: the per-DO semaphore
+		// must queue the second message's entries without dropping them.
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: a.uploadId,
+					storePathHash: metaA.storePathHash,
+					narHash: metaA.narHash
+				}
+			]
+		});
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: b.uploadId,
+					storePathHash: metaB.storePathHash,
+					narHash: metaB.narHash
+				}
+			]
+		});
+
+		const frames = [await session.nextFrame(), await session.nextFrame()];
+		session.socket.close();
+
+		expect(
+			frames.map((frame) => frameIdentity(frame)).toSorted(byUploadId)
+		).toStrictEqual(
+			[
+				{ ev: 'deferred', uploadId: a.uploadId },
+				{ ev: 'deferred', uploadId: b.uploadId }
+			].toSorted(byUploadId)
+		);
+	});
+
 	it('answers an unknown op with an unsupported frame, keeping the session', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
