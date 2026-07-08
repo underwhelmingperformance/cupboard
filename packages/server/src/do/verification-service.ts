@@ -228,15 +228,36 @@ export class VerificationService {
 		) => void
 	) {}
 
+	// The current session id for an upload, re-read from the row at notify time so
+	// a reconnect that re-pointed the row via `attachSession` between the settle's
+	// read and its notify receives the verdict. Falls back to `captured` when the
+	// row is already gone, which means the upload cleared while this pass was
+	// working it and the captured id is as good as any.
+	private currentSessionId(
+		uploadId: string,
+		captured: string | null
+	): string | null {
+		const row = this.context.db
+			.select({ sessionId: schema.pendingUploads.sessionId })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		return row === undefined ? captured : row.sessionId;
+	}
+
 	// Routes an upload's terminal verdict to the commit session waiting on it. The
-	// session id is the socket's hibernation tag, read from the row, so the lookup
-	// finds the waiter even after the object was evicted between the deferral and
-	// this pass. The session stays open: it carries the other ids in the push too.
+	// session id is resolved from the live row at notify time, so a client reconnect
+	// that re-pointed the row's session id via `attachSession` between the settle
+	// reading the row and reaching this notify receives the verdict. The session
+	// stays open: it carries the other ids in the push too.
 	private notifyWaiters(
 		uploadId: string,
-		sessionId: string | null,
+		capturedSessionId: string | null,
 		status: ParsedUploadStatusResponse['status']
 	): void {
+		const sessionId = this.currentSessionId(uploadId, capturedSessionId);
+
 		if (sessionId === null) {
 			return;
 		}
@@ -376,12 +397,12 @@ export class VerificationService {
 		);
 
 		if (reserved.kind === 'lost') {
+			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash
 			);
-			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			return undefined;
 		}
 
@@ -622,18 +643,18 @@ export class VerificationService {
 			// A concurrent pass committed this generation before the tenant went
 			// inactive, so it serves; finish the bookkeeping without pruning.
 			if (!wasReclaimed) {
-				this.uploadState.clearPendingUpload(pending.id);
 				this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+				this.uploadState.clearPendingUpload(pending.id);
 				return;
 			}
 
+			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash
 			);
 			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
-			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			return;
 		}
 
@@ -661,9 +682,9 @@ export class VerificationService {
 		// A concurrent recommit took the path or the blob vanished, so this upload
 		// lost: clear its marker. Any blob it promoted that no edge now references is
 		// left for the reaper to collect.
+		this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
-		this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 	}
 
 	// Reclaims an upload's private staging object once its saga settles. A reuse
@@ -1584,19 +1605,19 @@ export class VerificationService {
 				// exists), so the missing verdict is stale and the path serves. Clear
 				// the stuck row and answer servable, without pruning its root.
 				if (!wasReclaimed) {
-					this.uploadState.clearPendingUpload(pending.id);
 					this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+					this.uploadState.clearPendingUpload(pending.id);
 					return;
 				}
 			}
 
+			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
 				metadata.narHash
 			);
 			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
-			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
 			return;
 		}
 
