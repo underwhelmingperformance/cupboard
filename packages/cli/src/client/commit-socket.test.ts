@@ -1120,6 +1120,40 @@ describe('close code and reason', () => {
 	});
 });
 
+describe('late commit after clean close', () => {
+	it('rejects a commit issued after the server closes the socket with nothing outstanding', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+
+		// Open and close with no outstanding commits: the server ended cleanly.
+		socket.emit('open');
+		socket.emit('close', 1000, '');
+
+		// A commit issued now finds the session closed.
+		const lateCommit = session.commit(target);
+		const error = await rejectedBy(lateCommit, CommitSocketProtocolError);
+		expect({ name: error.name, path: error.path }).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path
+		});
+	});
+
+	it('rejects a commit after explicit session close', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+
+		socket.emit('open');
+		session.close();
+
+		const lateCommit = session.commit(target);
+		const error = await rejectedBy(lateCommit, CommitSocketProtocolError);
+		expect({ name: error.name, path: error.path }).toStrictEqual({
+			name: 'CommitSocketProtocolError',
+			path
+		});
+	});
+});
+
 describe('boundary conditions', () => {
 	beforeEach(() => {
 		vi.useFakeTimers();
