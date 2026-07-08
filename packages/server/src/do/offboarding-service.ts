@@ -1,10 +1,11 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
 import { and, asc, eq, inArray, or, type SQL } from 'drizzle-orm';
+import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 
-import { batchNonEmpty, chunk } from './bulk.ts';
+import { batchNonEmpty, chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
 // D1 caps a query at 100 bound parameters. A composite-key delete binds the
@@ -42,6 +43,44 @@ export function attestationReferenceMatch(
 		eq(d1Schema.attestationReference.predicateType, row.predicateType),
 		eq(d1Schema.attestationReference.digest, row.digest)
 	);
+}
+
+/**
+ * Builds the DELETE removing one chunk of presence rows by narHash.
+ * Exported for the D1 parameter guard test.
+ */
+export function buildTenantBlobDeleteStatement(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	narHashes: readonly (typeof d1Schema.tenantBlob.$inferSelect.narHash)[]
+) {
+	return database
+		.delete(d1Schema.tenantBlob)
+		.where(
+			and(
+				eq(d1Schema.tenantBlob.tenant, tenant),
+				inArray(d1Schema.tenantBlob.narHash, narHashes)
+			)
+		);
+}
+
+/**
+ * Builds the DELETE removing one chunk of CAS presence rows by digest.
+ * Exported for the D1 parameter guard test.
+ */
+export function buildTenantCasBlobDeleteStatement(
+	database: DrizzleD1Database<typeof d1Schema>,
+	tenant: TenantId,
+	digests: readonly (typeof d1Schema.tenantCasBlob.$inferSelect.digest)[]
+) {
+	return database
+		.delete(d1Schema.tenantCasBlob)
+		.where(
+			and(
+				eq(d1Schema.tenantCasBlob.tenant, tenant),
+				inArray(d1Schema.tenantCasBlob.digest, digests)
+			)
+		);
 }
 
 // Drains a tenant being offboarded. The Durable Object is the single writer of its
@@ -112,16 +151,12 @@ export class OffboardingService {
 		}
 
 		const narHashes = blobs.map((blob) => blob.narHash);
+		const chunks = chunk(narHashes, maxInClauseValues);
+		const deletes = chunks.map((hashes) =>
+			buildTenantBlobDeleteStatement(this.context.d1, tenant, hashes)
+		);
 
-		await this.context.d1
-			.delete(d1Schema.tenantBlob)
-			.where(
-				and(
-					eq(d1Schema.tenantBlob.tenant, tenant),
-					inArray(d1Schema.tenantBlob.narHash, narHashes)
-				)
-			)
-			.run();
+		await batchNonEmpty(this.context.d1, deletes);
 	}
 
 	private async deleteAttestationReferenceBatch(
@@ -187,16 +222,12 @@ export class OffboardingService {
 		}
 
 		const digests = blobs.map((blob) => blob.digest);
+		const chunks = chunk(digests, maxInClauseValues);
+		const deletes = chunks.map((digestChunk) =>
+			buildTenantCasBlobDeleteStatement(this.context.d1, tenant, digestChunk)
+		);
 
-		await this.context.d1
-			.delete(d1Schema.tenantCasBlob)
-			.where(
-				and(
-					eq(d1Schema.tenantCasBlob.tenant, tenant),
-					inArray(d1Schema.tenantCasBlob.digest, digests)
-				)
-			)
-			.run();
+		await batchNonEmpty(this.context.d1, deletes);
 	}
 
 	private async hasResidue(tenant: TenantId): Promise<boolean> {

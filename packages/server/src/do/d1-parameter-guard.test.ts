@@ -32,7 +32,9 @@ import {
 	attestationReferenceMatch,
 	blobReferenceDeleteChunk,
 	type BlobReferenceKey,
-	blobReferenceMatch
+	blobReferenceMatch,
+	buildTenantBlobDeleteStatement,
+	buildTenantCasBlobDeleteStatement
 } from './offboarding-service.ts';
 
 // A D1Database stub whose methods throw: query building via .toSQL() never
@@ -283,6 +285,24 @@ describe('D1 bound-parameter guard', () => {
 				);
 
 			expect(query.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+	});
+
+	describe('offboarding presence deletes (offboarding-service)', () => {
+		it('tenant_blob DELETE stays within 100 params at maxInClauseValues', () => {
+			const narHashList = narHashes(maxInClauseValues);
+			const del = buildTenantBlobDeleteStatement(database, tenant, narHashList);
+
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+
+		it('tenant_cas_blob DELETE stays within 100 params at maxInClauseValues', () => {
+			const digests = Array.from({ length: maxInClauseValues }, () =>
+				sha256HexDigestSchema.parse('0'.repeat(64))
+			);
+			const del = buildTenantCasBlobDeleteStatement(database, tenant, digests);
+
+			expect(del.toSQL().params.length).toBeLessThanOrEqual(100);
 		});
 	});
 });
