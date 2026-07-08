@@ -11,20 +11,20 @@ import { type ServerContext } from './context.ts';
 // tenant plus the key columns of each row in the batch, so each batch is split
 // to stay under the cap: three key columns for a blob reference edge, five for
 // an attestation reference edge.
-const blobReferenceDeleteChunk = 30;
-const attestationReferenceDeleteChunk = 18;
+export const blobReferenceDeleteChunk = 30;
+export const attestationReferenceDeleteChunk = 18;
 
-type BlobReferenceKey = Pick<
+export type BlobReferenceKey = Pick<
 	typeof d1Schema.blobReference.$inferSelect,
 	'cache' | 'storePathHash' | 'generation'
 >;
 
-type AttestationReferenceKey = Pick<
+export type AttestationReferenceKey = Pick<
 	typeof d1Schema.attestationReference.$inferSelect,
 	'cache' | 'storePathHash' | 'generation' | 'predicateType' | 'digest'
 >;
 
-function blobReferenceMatch(row: BlobReferenceKey): SQL | undefined {
+export function blobReferenceMatch(row: BlobReferenceKey): SQL | undefined {
 	return and(
 		eq(d1Schema.blobReference.cache, row.cache),
 		eq(d1Schema.blobReference.storePathHash, row.storePathHash),
@@ -32,7 +32,7 @@ function blobReferenceMatch(row: BlobReferenceKey): SQL | undefined {
 	);
 }
 
-function attestationReferenceMatch(
+export function attestationReferenceMatch(
 	row: AttestationReferenceKey
 ): SQL | undefined {
 	return and(
