@@ -1,5 +1,8 @@
+import { chunk } from '@cupboard/shared/collections';
 import { type BatchItem } from 'drizzle-orm/batch';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
+
+export { chunk } from '@cupboard/shared/collections';
 
 // D1 admits at most 100 bound parameters per query, so an `IN (...)` list is
 // chunked below that with headroom for the fixed parameters a query also binds
@@ -14,17 +17,6 @@ export const maxOutgoingConnections = 6;
 
 // R2 deletes up to 1000 keys in a single `delete` call; a larger set is split.
 export const maxR2DeleteKeys = 1000;
-
-/** Splits `items` into consecutive runs of at most `size`. */
-export function chunk<T>(items: readonly T[], size: number): T[][] {
-	const chunks: T[][] = [];
-
-	for (let start = 0; start < items.length; start += size) {
-		chunks.push(items.slice(start, start + size));
-	}
-
-	return chunks;
-}
 
 /**
  * Deletes `keys` from `bucket` in as few `delete` calls as R2's per-call key
