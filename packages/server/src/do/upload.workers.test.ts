@@ -1437,6 +1437,59 @@ describe('upload flow', () => {
 		);
 	});
 
+	it('settles a burst of per-id commit ops within the shared entry bound', async () => {
+		const token = await initialise();
+		const alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
+		const metadatas = Array.from({ length: 10 }, (_, index) =>
+			uploadMetadata({
+				storePathHash: alphabet.charAt(index).repeat(32),
+				name: `per-id-${String(index)}`,
+				narHash: nixSha256Hash(alphabet.charAt(index)),
+				fileSize: narBytes.byteLength
+			})
+		);
+		const negotiated = await negotiateUploads(token, metadatas);
+		const uploads = metadatas.map((metadata) =>
+			expectSingleUploadDecision(
+				{
+					uploads: negotiated.uploads.filter(
+						(decision) => decision.storePathHash === metadata.storePathHash
+					)
+				},
+				metadata
+			)
+		);
+
+		for (const upload of uploads) {
+			await putNarBytes(upload.r2Key);
+		}
+
+		// Ten per-id ops sent back-to-back, the shape a client without the batch
+		// capability fans out. The shared entry bound queues the excess; every op
+		// must still answer its own frame.
+		const session = await openCommitSession(token);
+
+		for (const upload of uploads) {
+			session.send({ op: 'commit', uploadId: upload.uploadId });
+		}
+
+		const frames = [];
+
+		for (const _upload of uploads) {
+			frames.push(await session.nextFrame());
+		}
+
+		session.socket.close();
+
+		expect(
+			frames.map((frame) => frameIdentity(frame)).toSorted(byUploadId)
+		).toStrictEqual(
+			uploads
+				.map((upload) => ({ ev: 'deferred', uploadId: upload.uploadId }))
+				.toSorted(byUploadId)
+		);
+	});
+
 	it('answers an unknown op with an unsupported frame, keeping the session', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
