@@ -4,6 +4,7 @@ import { eq } from 'drizzle-orm';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as schema from '../db/schema.ts';
+import { narObjectKey } from '../http/http.ts';
 import {
 	commitPath,
 	currentServer,
@@ -11,6 +12,7 @@ import {
 	initialise,
 	negotiateUploads,
 	resetTestServer,
+	seedReservedNarInfo,
 	uploadMetadata,
 	verifiableNar
 } from '../test-support.ts';
@@ -142,6 +144,126 @@ describe('dead reservation reclaim at commit', () => {
 				narHash: retried.narHash,
 				status: 'committed'
 			}
+		});
+	});
+});
+
+// The `mine` outcome from `reserveNarInfoRow` arises when the narinfo row
+// already exists with matching content (same narHash, narSize, storePath,
+// references). This happens for a reuse commit that replays before its
+// original has finished. The commit must proceed through materialise
+// using the existing generation, not call `concedeToWinner`.
+describe('reuse commit handles mine outcome from reserveNarInfoRow', () => {
+	beforeEach(resetTestServer);
+
+	it('settles a reuse commit whose narinfo row was already reserved by the same upload', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('mine-outcome');
+
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, first, nar);
+
+		// A second path reuses the same canonical blob.
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: 'b'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+
+		// Plant a narinfo reservation for the second path with the same content,
+		// as if this upload's original commit attempt reserved the row and then
+		// stalled before materialising. On the replay, `reserveNarInfoRow` sees
+		// the row with matching fields and returns `mine`.
+		await seedReservedNarInfo(second);
+
+		const outcome = await runInDurableObject(currentServer(), (instance) =>
+			pipelineFor(instance.context).commit(rootLogger(), '', reuse.uploadId)
+		);
+
+		// Must settle as committed (materialised from the existing reservation),
+		// not return `already-present` as if it conceded to a different winner.
+		expect(outcome).toStrictEqual({
+			kind: 'settled',
+			response: {
+				storePathHash: second.storePathHash,
+				narHash: second.narHash,
+				status: 'committed'
+			}
+		});
+	});
+});
+
+// `concedeToWinner` is reached when a concurrent commit won the narinfo
+// reservation. If that winner has not yet materialised (no D1 blobReference
+// edge), `committedNarInfoRow` returns undefined; `already-present` would
+// assert a servable path nothing serves. The concede must answer `deferred`
+// and leave the upload row intact for the verify pass to settle.
+describe('concedeToWinner defers when no committed winner exists', () => {
+	beforeEach(resetTestServer);
+
+	it('returns deferred when the winning narinfo reservation has not yet materialised', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('concede-no-winner');
+
+		const first = uploadMetadata({
+			name: 'first',
+			storePathHash: 'a'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		// Commit the first path so its canonical blob is in R2.
+		await commitPath(token, first, nar);
+
+		// A second path reuses the same canonical blob.
+		const second = uploadMetadata({
+			name: 'second',
+			storePathHash: 'b'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const reuse = expectSingleCommitDecision(
+			await negotiateUploads(token, [second]),
+			second
+		);
+
+		// Call `concedeToWinner` directly with the reuse upload's metadata and
+		// the canonical staging key. No D1 `blobReference` edge exists for the
+		// second path yet, so `committedNarInfoRow` returns undefined and the
+		// call must return `deferred`, not `already-present`.
+		const outcome = await runInDurableObject(currentServer(), (instance) =>
+			pipelineFor(instance.context).concedeToWinner(
+				'',
+				reuse.uploadId,
+				second,
+				narObjectKey(second.narHash)
+			)
+		);
+
+		// The winner has not materialised: must defer, not answer already-present.
+		expect(outcome).toStrictEqual({
+			kind: 'deferred',
+			storePathHash: second.storePathHash,
+			narHash: second.narHash
 		});
 	});
 });

@@ -49,6 +49,7 @@ import type { MaintenanceQueueMessage } from '../routing/scheduled.ts';
 import { armAlarmNoLaterThan } from './alarm.ts';
 import { batchNonEmpty, chunk, maxInClauseValues } from './bulk.ts';
 import { type CacheAdminService } from './cache-admin-service.ts';
+import { sendCommitSessionFrame } from './commit-socket.ts';
 import {
 	type MaterialiseOutcome,
 	type ReserveOutcome,
@@ -225,6 +226,40 @@ export class CommitPipelineService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
+	// Sends a `verdict/servable` frame to any commit session parked on this
+	// upload. The row's session id is re-read at notify time, so a reconnect that
+	// re-pointed the row via `attachSession` after the saga read it receives the
+	// verdict. `excludeSessionId` is the session that initiated the commit; it
+	// receives the result via the return value, so it is skipped even when the
+	// row still names it.
+	private notifyUploadWaiters(
+		uploadId: string,
+		excludeSessionId: string | null | undefined
+	): void {
+		const row = this.context.db
+			.select({ sessionId: schema.pendingUploads.sessionId })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+		const sessionId = row?.sessionId;
+
+		if (sessionId === undefined || sessionId === null) {
+			return;
+		}
+
+		if (sessionId === excludeSessionId) {
+			return;
+		}
+
+		for (const socket of this.context.ctx.getWebSockets(sessionId)) {
+			sendCommitSessionFrame(socket, {
+				ev: 'verdict',
+				uploadId,
+				status: 'servable'
+			});
+		}
+	}
+
 	// Commits a reuse of a blob already in the verified CAS: reserve the row, then
 	// materialise from the existing canonical object and `blob_state`. If the shared
 	// blob was reaped between negotiate and now, reclaim the row and report it gone:
@@ -237,19 +272,25 @@ export class CommitPipelineService {
 		// The caller's probe of the shared facts, taken alongside its advisory
 		// checks. It may be stale by the gate below; the charge batch is the
 		// authoritative guard.
-		probe: MaterialisationProbe
+		probe: MaterialisationProbe,
+		committingSessionId: string | null | undefined
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
 
-		if (reserved.kind !== 'reserved') {
+		if (reserved.kind === 'lost') {
 			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
 		}
+
+		// `mine` means this same upload-id already holds the reservation, a
+		// same-uploadId replay racing its original. Proceed through materialise with
+		// the existing generation, mirroring how the verify path handles `mine`.
+		const generation = reserved.generation;
 
 		const outcome = await this.materialiseBatched(logger, {
 			cache,
 			metadata,
-			generation: reserved.generation,
+			generation,
 			probe,
 			mustOwnBlob: true
 		});
@@ -260,13 +301,13 @@ export class CommitPipelineService {
 			await this.narInfoObjects.publishNarInfoObject(
 				cache,
 				metadata.storePathHash,
-				reserved.generation,
+				generation,
 				metadata.narHash,
 				outcome.narInfo
 			);
 
-			// A reuse commit settles synchronously, so its upload row is cleared
-			// immediately.
+			// Notify any session parked behind this saga before clearing the row.
+			this.notifyUploadWaiters(uploadId, committingSessionId);
 			this.uploadState.clearPendingUpload(uploadId);
 
 			return {
@@ -288,7 +329,7 @@ export class CommitPipelineService {
 				this.reclaimReservedRow(
 					cache,
 					metadata.storePathHash,
-					reserved.generation,
+					generation,
 					metadata.narHash
 				)
 			);
@@ -300,55 +341,36 @@ export class CommitPipelineService {
 			);
 		}
 
-		await this.context.criticalSection(() =>
+		// blob-gone: reclaim the reserved row only when it was not already committed
+		// by a concurrent saga.
+		const wasReclaimed = await this.context.criticalSection(() =>
 			this.reclaimReservedRow(
 				cache,
 				metadata.storePathHash,
-				reserved.generation,
+				generation,
 				metadata.narHash
 			)
 		);
+
+		if (!wasReclaimed) {
+			// A concurrent commit already materialised this generation; the object
+			// serves. Clear the upload row without disturbing the committed row.
+			this.notifyUploadWaiters(uploadId, committingSessionId);
+			this.uploadState.clearPendingUpload(uploadId);
+
+			return {
+				kind: 'settled',
+				response: {
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					status: 'committed'
+				}
+			};
+		}
+
 		this.uploadState.clearPendingUpload(uploadId);
 
 		throw new UploadedObjectNotFoundError(canonicalKey);
-	}
-
-	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
-	// winner's object is materialised, reclaims this upload's staging object, and
-	// reports already-present with the winner's narHash. Any blob this upload
-	// promoted but no edge now references is left for the reaper to collect.
-	private async concedeToWinner(
-		cache: string,
-		uploadId: string,
-		metadata: ParsedUploadPathNegotiation,
-		stagingKey: string
-	): Promise<CommitOutcome> {
-		const winner = await this.narInfoObjects.committedNarInfoRow(
-			cache,
-			metadata.storePathHash
-		);
-
-		if (winner !== undefined) {
-			await this.narInfoObjects.ensureNarInfoObject(
-				cache,
-				winner.storePathHash
-			);
-		}
-
-		await this.uploadState.clearPendingUploadAndStaging(
-			uploadId,
-			stagingKey,
-			metadata.narHash
-		);
-
-		return {
-			kind: 'settled',
-			response: {
-				storePathHash: metadata.storePathHash,
-				narHash: winner?.narHash ?? metadata.narHash,
-				status: 'already-present'
-			}
-		};
 	}
 
 	// The tenant's publish gate and quota basis in one read. The status is the
@@ -912,6 +934,51 @@ export class CommitPipelineService {
 		}
 	}
 
+	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
+	// winner's object is materialised, reclaims this upload's staging object, and
+	// reports already-present with the winner's narHash. Any blob this upload
+	// promoted but no edge now references is left for the reaper to collect.
+	// When no committed winner exists yet (the winning upload is still verifying),
+	// the upload stays live so the verify pass can settle it.
+	async concedeToWinner(
+		cache: string,
+		uploadId: string,
+		metadata: ParsedUploadPathNegotiation,
+		stagingKey: string
+	): Promise<CommitOutcome> {
+		const winner = await this.narInfoObjects.committedNarInfoRow(
+			cache,
+			metadata.storePathHash
+		);
+
+		if (winner === undefined) {
+			// The row is held by a saga that has not yet committed. Leave the upload
+			// row intact so the verify pass can drive it to a terminal verdict.
+			return {
+				kind: 'deferred',
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash
+			};
+		}
+
+		await this.narInfoObjects.ensureNarInfoObject(cache, winner.storePathHash);
+
+		await this.uploadState.clearPendingUploadAndStaging(
+			uploadId,
+			stagingKey,
+			metadata.narHash
+		);
+
+		return {
+			kind: 'settled',
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: winner.narHash,
+				status: 'already-present'
+			}
+		};
+	}
+
 	// A verification pass is about to claim the pending rows, satisfying the
 	// outstanding request. Clear the guard before the snapshot is taken: the pass
 	// starting now has already chosen its rows, so a deferral after this point
@@ -1152,11 +1219,30 @@ export class CommitPipelineService {
 		// marker.
 		this.uploadState.markUploadCommitting(uploadId);
 
+		// Capture the session that initiated this commit so it can be excluded
+		// from `notifyUploadWaiters` inside `commitReusedBlob`: the committing
+		// session receives the result via the return value, not through the
+		// notify path, and sending it a `verdict` frame before the `settled`
+		// return would break the session's expected frame sequence.
+		const committingRow = this.context.db
+			.select({ sessionId: schema.pendingUploads.sessionId })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+		const committingSessionId = committingRow?.sessionId;
+
 		// A reuse binds a new narinfo to a blob already in the verified CAS. It
 		// passed verify-before-serve when it was first promoted, so bind it without
 		// re-verifying its bytes.
 		if (pending.r2Key === canonicalKey) {
-			return this.commitReusedBlob(logger, cache, uploadId, metadata, probe);
+			return this.commitReusedBlob(
+				logger,
+				cache,
+				uploadId,
+				metadata,
+				probe,
+				committingSessionId
+			);
 		}
 
 		// Verify-before-serve for a fresh upload staged under a private key. One
