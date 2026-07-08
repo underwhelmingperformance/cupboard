@@ -133,6 +133,10 @@ interface SessionEntry {
 	// instead, since its op may never have reached the server.
 	acked: boolean;
 	deadline?: NodeJS.Timeout;
+	// How many times this entry has been retried after a retryable error frame,
+	// and the timer of a retry not yet sent, cleared with the deadline.
+	retryAttempts: number;
+	retryTimer?: NodeJS.Timeout;
 }
 
 const defaultKeepaliveMs = 30_000;
@@ -144,6 +148,15 @@ const keepaliveResponse = 'pong';
 // WebSocket close code for a server-side protocol rejection. Retrying cannot
 // heal it, so the session fails immediately on this code.
 const nonRetryableCloseCode = 1002;
+
+// Status codes that indicate a transient server overload: a short per-entry
+// backoff and re-send may succeed where an immediate retry would not.
+const retryableErrorStatuses = new Set([429, 503]);
+// How many times one entry is re-sent before its error is treated as terminal.
+const maxEntryRetries = 3;
+// Base delay in ms before the first entry retry; doubles per attempt (no jitter,
+// so the retry fires promptly in tests that use fake timers).
+const entryRetryBaseMs = 500;
 
 // The ev values whose frames carry mandatory fields the schema validates; an ev
 // absent from this set is treated as unknown and ignored for forward
@@ -392,6 +405,10 @@ export function runCommitSession(
 			if (entry.deadline !== undefined) {
 				clearTimeout(entry.deadline);
 			}
+
+			if (entry.retryTimer !== undefined) {
+				clearTimeout(entry.retryTimer);
+			}
 		}
 
 		options.signal?.removeEventListener('abort', onAbort);
@@ -438,6 +455,10 @@ export function runCommitSession(
 
 		if (entry.deadline !== undefined) {
 			clearTimeout(entry.deadline);
+		}
+
+		if (entry.retryTimer !== undefined) {
+			clearTimeout(entry.retryTimer);
 		}
 
 		outstanding.delete(uploadId);
@@ -582,8 +603,32 @@ export function runCommitSession(
 			}
 
 			case 'error': {
-				const { status, message } = frame;
-				finishEntry(frame.uploadId, (entry) => {
+				const { uploadId: errorUploadId, status, message } = frame;
+				const entry = outstanding.get(errorUploadId);
+
+				if (entry === undefined) {
+					return;
+				}
+
+				if (
+					retryableErrorStatuses.has(status) &&
+					entry.retryAttempts < maxEntryRetries
+				) {
+					entry.retryAttempts += 1;
+					const attempt = entry.retryAttempts;
+					const delay = entryRetryBaseMs * 2 ** (attempt - 1);
+					entry.retryTimer = setTimeout(() => {
+						entry.retryTimer = undefined;
+
+						if (outstanding.has(errorUploadId) && isOpened && !isClosed) {
+							sendCommits([entry.target]);
+						}
+					}, delay);
+					entry.retryTimer.unref();
+					return;
+				}
+
+				finishEntry(errorUploadId, (finishing) => {
 					const error = new CupboardHttpError(
 						'GET',
 						options.path,
@@ -591,10 +636,10 @@ export function runCommitSession(
 						message
 					);
 
-					if (entry.acked) {
-						entry.settleFailed(error);
+					if (finishing.acked) {
+						finishing.settleFailed(error);
 					} else {
-						entry.rejectAck(error);
+						finishing.rejectAck(error);
 					}
 				});
 
@@ -829,7 +874,8 @@ export function runCommitSession(
 				settled,
 				settleServable,
 				settleFailed,
-				acked: false
+				acked: false,
+				retryAttempts: 0
 			});
 
 			// An open socket enqueues onto the coalescing flush; before the first
