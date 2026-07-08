@@ -149,6 +149,13 @@ const keepaliveResponse = 'pong';
 // heal it, so the session fails immediately on this code.
 const nonRetryableCloseCode = 1002;
 
+// Maximum number of commit-batch messages in flight at once. Once this many
+// are outstanding, further chunks queue until any frame for an in-flight chunk
+// arrives (the ANY-frame rule: one frame means the server parsed the message
+// and is processing its entries concurrently, so it counts as done for windowing
+// purposes).
+const maxInFlightBatchMessages = 2;
+
 // Status codes that indicate a transient server overload: a short per-entry
 // backoff and re-send may succeed where an immediate retry would not.
 const retryableErrorStatuses = new Set([429, 503]);
@@ -320,6 +327,62 @@ export function runCommitSession(
 		socket?.send(JSON.stringify(request));
 	};
 
+	// Window state for the batch path. Each in-flight chunk is tracked by a set
+	// of its uploadIds; any frame for a member of that set counts as an ack (the
+	// ANY-frame rule), removing the chunk from the window and releasing the next
+	// queued chunk. Per-id ops are not windowed.
+	//
+	// Both structures are cleared on reconnect (openConnection resets them), so
+	// replayOutstanding sends through a fresh window each time.
+	const inFlightChunks = new Map<string, Set<string>>();
+	const uploadIdToChunkKey = new Map<string, string>();
+	let pendingBatchChunks: CommitSessionTarget[][] = [];
+
+	const sendBatchChunk = (batch: readonly CommitSessionTarget[]): void => {
+		const chunkKey = batch[0]?.uploadId ?? '';
+		const ids = new Set(batch.map((t) => t.uploadId));
+		inFlightChunks.set(chunkKey, ids);
+
+		for (const id of ids) {
+			uploadIdToChunkKey.set(id, chunkKey);
+		}
+
+		sendNow({
+			op: 'commit-batch',
+			commits: batch.map((target) => ({
+				uploadId: target.uploadId,
+				storePathHash: target.storePathHash,
+				narHash: target.narHash
+			}))
+		});
+	};
+
+	const releaseChunkForUploadId = (uploadId: string): void => {
+		const chunkKey = uploadIdToChunkKey.get(uploadId);
+
+		if (chunkKey === undefined) {
+			return;
+		}
+
+		const ids = inFlightChunks.get(chunkKey);
+
+		if (ids === undefined) {
+			return;
+		}
+
+		for (const id of ids) {
+			uploadIdToChunkKey.delete(id);
+		}
+
+		inFlightChunks.delete(chunkKey);
+
+		const next = pendingBatchChunks.shift();
+
+		if (next !== undefined && isOpened && !isClosed) {
+			sendBatchChunk(next);
+		}
+	};
+
 	// Sends a set of commits in the shape this connection speaks: one
 	// `commit-batch` op per bounded chunk when the server offered it, a per-id
 	// `commit` op each otherwise.
@@ -340,14 +403,11 @@ export function runCommitSession(
 		}
 
 		for (const batch of chunk(targets, effectiveBatchSize)) {
-			sendNow({
-				op: 'commit-batch',
-				commits: batch.map((target) => ({
-					uploadId: target.uploadId,
-					storePathHash: target.storePathHash,
-					narHash: target.narHash
-				}))
-			});
+			if (inFlightChunks.size < maxInFlightBatchMessages) {
+				sendBatchChunk(batch);
+			} else {
+				pendingBatchChunks.push(batch);
+			}
 		}
 	};
 
@@ -506,6 +566,12 @@ export function runCommitSession(
 		// again; only a run of drops with nothing in between exhausts it.
 		reconnectsLeft = maxReconnects;
 		const frame = parsed.data;
+
+		// Any frame for an upload id counts as an ack for that chunk's window slot,
+		// releasing the next queued batch chunk. The unsupported ev carries no id.
+		if ('uploadId' in frame) {
+			releaseChunkForUploadId(frame.uploadId);
+		}
 
 		switch (frame.ev) {
 			case 'settled': {
@@ -776,6 +842,11 @@ export function runCommitSession(
 		isOpened = false;
 		effectiveBatchSize = undefined;
 		hasSubscribeIdentity = false;
+		// Window state from the previous connection is stale; replayOutstanding
+		// sends all outstanding work afresh through the new window.
+		inFlightChunks.clear();
+		uploadIdToChunkKey.clear();
+		pendingBatchChunks = [];
 		// Captured per connection, so `onCapabilities` reports the negotiation of
 		// the connection whose `open` fired.
 		let connectionCaps: AdvertisedCapabilities = new Map();

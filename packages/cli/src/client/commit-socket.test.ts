@@ -368,7 +368,7 @@ describe('runCommitSession', () => {
 				})
 			);
 
-			// The entry must not have resolved or rejected yet — it is waiting for the retry.
+			// The entry must not have resolved or rejected yet: it is waiting for the retry.
 			let hasResolved = false;
 			let hasRejected = false;
 			void commit.then(
@@ -885,6 +885,107 @@ describe('batched commit ops', () => {
 			first: [batchOp([uploadId])],
 			second: [commitOp(uploadId)]
 		});
+	});
+});
+
+// Three single-entry chunks for windowing tests: the window cap (2) fills on
+// the first two, leaving the third to queue until a frame arrives.
+const windowTestIds = ['upload-w0', 'upload-w1', 'upload-w2'] as const;
+
+describe('batch message windowing', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('holds the third chunk until a frame arrives for any entry of the first', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const [id0, id1, id2] = windowTestIds;
+		const commits = windowTestIds.map((id) => session.commit(targetFor(id)));
+
+		// Advertise batch with max=1 so each entry lands in its own chunk.
+		socket.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=1' }
+		});
+		socket.emit('open');
+
+		// Only the first two chunks go out immediately.
+		expect(socket.sent).toStrictEqual([batchOp([id0]), batchOp([id1])]);
+
+		// A frame for an entry in the first chunk releases the third.
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId: id0,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		expect(socket.sent).toStrictEqual([
+			batchOp([id0]),
+			batchOp([id1]),
+			batchOp([id2])
+		]);
+
+		settleBoth(socket, [id1, id2]);
+		await Promise.all(commits);
+
+		session.close();
+	});
+
+	it('replays a queued-but-unsent chunk exactly once on reconnect, not double-sending', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const [id0, id1, id2] = windowTestIds;
+		const commits = windowTestIds.map((id) => session.commit(targetFor(id)));
+
+		first.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=1' }
+		});
+		first.emit('open');
+
+		// Two chunks sent, one queued.
+		expect(first.sent).toStrictEqual([batchOp([id0]), batchOp([id1])]);
+
+		// Drop before the third chunk was sent; reconnect replays all three through
+		// a fresh window without ever having sent the third to the first socket.
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// Reconnect sends all outstanding entries through a fresh window.
+		second.emit('upgrade', {
+			headers: { 'x-cupboard-commit-capabilities': 'commit-batch;max=1' }
+		});
+		second.emit('open');
+
+		// All three ids are outstanding, so the new window sends the first two
+		// immediately and queues the third again.
+		expect(second.sent).toStrictEqual([batchOp([id0]), batchOp([id1])]);
+
+		// A frame for the first entry releases the window slot, sending the third.
+		second.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId: id0,
+				response: { storePathHash, narHash, status: 'committed' }
+			})
+		);
+
+		expect(second.sent).toStrictEqual([
+			batchOp([id0]),
+			batchOp([id1]),
+			batchOp([id2])
+		]);
+
+		settleBoth(second, [id1, id2]);
+		await Promise.all(commits);
 	});
 });
 
@@ -1442,7 +1543,7 @@ describe('boundary conditions', () => {
 		const session = openSessionOver([first, second], { maxReconnects: 1 });
 
 		// Register before the first connection so there is outstanding work when the
-		// socket drops, keeping the session in the reconnect path rather than closing.
+		// socket drops, so the drop enters the reconnect path.
 		const commit = session.commit(target);
 
 		first.emit('open');
