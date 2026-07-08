@@ -2,11 +2,13 @@ name: Attest cupboard store paths
 description:
   Produce a Sigstore build-provenance bundle whose in-toto subjects are the NAR
   hashes of the given Nix store paths, ready to attach with the push action.
+  Only paths this machine built become subjects; a substituted path is skipped
+  with a warning, since the run cannot truthfully claim its provenance.
 inputs:
   paths:
     description:
       Newline-delimited local Nix store paths, derivations, or installables to
-      attest.
+      attest. Paths the local store did not build are skipped.
     required: true
   checksums-file:
     description:
@@ -18,13 +20,17 @@ inputs:
     required: false
 outputs:
   bundle-path:
-    description: Path to the generated Sigstore attestation bundle.
+    description:
+      Path to the generated Sigstore attestation bundle. Empty when no given
+      path was built by this machine, in which case nothing is signed.
     value: ${{ steps.attest.outputs.bundle-path }}
   checksums-file:
     description: Path to the generated subject checksums file.
     value: ${{ steps.subjects.outputs.checksums-file }}
   subject-count:
-    description: Number of store paths recorded as attestation subjects.
+    description:
+      Number of store paths recorded as attestation subjects. Counts only the
+      paths this machine built.
     value: ${{ steps.subjects.outputs.subject-count }}
 runs:
   using: composite
@@ -65,8 +71,11 @@ runs:
         --disable-warning=ExperimentalWarning
         "$GITHUB_ACTION_PATH/../src/main.ts" attest
 
+    # A run with no locally built path has nothing it can truthfully attest,
+    # and the provenance action rejects an empty subject list.
     - name: Attest subjects
       id: attest
+      if: ${{ steps.subjects.outputs.subject-count != '0' }}
       uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
       with:
         subject-checksums: ${{ steps.subjects.outputs.checksums-file }}

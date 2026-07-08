@@ -10,7 +10,7 @@ import {
 import path from 'node:path';
 import { arch, env, platform } from 'node:process';
 
-import { Nix } from '@cupboard/nix';
+import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import {
 	identityPolicy,
@@ -874,17 +874,36 @@ function resolveStorePaths(nix: Nix, paths: readonly string[]): string[] {
 	return paths.map((storePath) => nix.toStorePath(storePath));
 }
 
-async function resolveStorePathDigests(
-	nix: Nix,
-	paths: readonly string[]
-): Promise<StorePathDigest[]> {
-	return Promise.all(
-		paths.map(async (storePath) => {
-			const info = await nix.queryPathInfo(storePath);
+interface AttestationSubjects {
+	readonly subjects: readonly StorePathDigest[];
+	readonly skipped: readonly string[];
+}
 
-			return { storePath: info.storePath, sha256: info.narHash.digestHex() };
-		})
-	);
+/**
+ * Partition resolved path infos into attestation subjects and skipped store
+ * paths. Only a path the local store registered as ultimately trusted was
+ * built by this machine; attesting a substituted or copied path would claim
+ * build provenance for bytes the machine merely downloaded, so it is skipped.
+ */
+export function attestationSubjects(
+	infos: readonly NixValidPathInfo[]
+): AttestationSubjects {
+	const subjects: StorePathDigest[] = [];
+	const skipped: string[] = [];
+
+	for (const info of infos) {
+		if (!info.ultimate) {
+			skipped.push(info.storePath);
+			continue;
+		}
+
+		subjects.push({
+			storePath: info.storePath,
+			sha256: info.narHash.digestHex()
+		});
+	}
+
+	return { subjects, skipped };
 }
 
 export function renderChecksums(digests: readonly StorePathDigest[]): string {
@@ -919,14 +938,25 @@ export async function attestAction(
 	environment: Environment = env
 ): Promise<void> {
 	const inputs = attestInputs(environment);
-	const digests = await resolveStorePathDigests(Nix.open(), inputs.paths);
+	const nix = Nix.open();
+	const infos = await Promise.all(
+		inputs.paths.map((storePath) => nix.queryPathInfo(storePath))
+	);
+	const { subjects, skipped } = attestationSubjects(infos);
+
+	for (const storePath of skipped) {
+		annotations.warning(
+			`Not attesting ${storePath}: this machine did not build it, so this run cannot claim its provenance`
+		);
+	}
+
 	const checksumsFile = path.resolve(inputs.checksumsFile);
 
 	await mkdir(path.dirname(checksumsFile), { recursive: true });
-	await writeFile(checksumsFile, renderChecksums(digests));
+	await writeFile(checksumsFile, renderChecksums(subjects));
 
 	await setOutput(environment, 'checksums-file', checksumsFile);
-	await setOutput(environment, 'subject-count', String(digests.length));
+	await setOutput(environment, 'subject-count', String(subjects.length));
 }
 
 export function setupInputs(environment: Environment): SetupInputs {
