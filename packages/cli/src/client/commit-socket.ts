@@ -3,7 +3,8 @@ import {
 	commitBatchMaxEntries,
 	commitCapabilitiesHeader,
 	commitSessionFrameSchema,
-	type CommitSessionRequest
+	type CommitSessionRequest,
+	subscribeIdentityCapability
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
 
@@ -297,6 +298,10 @@ export function runCommitSession(
 	// server advertised `commit-batch` (possibly with a `max` attribute), or
 	// `undefined` when it did not.
 	let effectiveBatchSize: number | undefined;
+	// Whether the current connection's server advertised `subscribe-identity`.
+	// When true, reconnect replays send acked ids through the identity-carrying
+	// op, so a row that settled and cleared during the drop resolves by identity.
+	let hasSubscribeIdentity = false;
 
 	const sendNow = (request: CommitSessionRequest): void => {
 		socket?.send(JSON.stringify(request));
@@ -610,18 +615,18 @@ export function runCommitSession(
 	};
 
 	// On every open (the first connect and each reconnect), drive the outstanding
-	// work onto the fresh socket: an acked id resumes with `subscribe`, an un-acked
-	// id is re-sent as a commit. On the first open this is just the registered
-	// paths' commits. The re-sent commits carry the path identity when batching,
-	// so an id whose reply was lost on the drop still resolves via the path
-	// identity.
+	// work onto the fresh socket: an acked id resumes with `subscribe` (or
+	// `subscribe-identity` when advertised), an un-acked id is re-sent as a commit.
+	// On the first open this is just the registered paths' commits. The re-sent
+	// commits carry the path identity when batching, so an id whose reply was lost
+	// on the drop still resolves via the path identity.
 	const replayOutstanding = (): void => {
-		const ackedIds: string[] = [];
+		const ackedTargets: CommitSessionTarget[] = [];
 		const unacked: CommitSessionTarget[] = [];
 
-		for (const [uploadId, entry] of outstanding) {
+		for (const [, entry] of outstanding) {
 			if (entry.acked) {
-				ackedIds.push(uploadId);
+				ackedTargets.push(entry.target);
 				continue;
 			}
 
@@ -630,8 +635,26 @@ export function runCommitSession(
 
 		sendCommits(unacked);
 
-		if (ackedIds.length > 0) {
-			sendNow({ op: 'subscribe', uploadIds: ackedIds });
+		if (ackedTargets.length === 0) {
+			return;
+		}
+
+		if (hasSubscribeIdentity) {
+			for (const batch of chunk(ackedTargets, commitBatchMaxEntries)) {
+				sendNow({
+					op: 'subscribe-identity',
+					entries: batch.map((target) => ({
+						uploadId: target.uploadId,
+						storePathHash: target.storePathHash,
+						narHash: target.narHash
+					}))
+				});
+			}
+		} else {
+			sendNow({
+				op: 'subscribe',
+				uploadIds: ackedTargets.map((target) => target.uploadId)
+			});
 		}
 	};
 
@@ -707,6 +730,7 @@ export function runCommitSession(
 	function openConnection(): void {
 		isOpened = false;
 		effectiveBatchSize = undefined;
+		hasSubscribeIdentity = false;
 		// Captured per connection, so `onCapabilities` reports the negotiation of
 		// the connection whose `open` fired.
 		let connectionCaps: AdvertisedCapabilities = new Map();
@@ -719,6 +743,7 @@ export function runCommitSession(
 			const headerValue = Array.isArray(raw) ? raw.join(',') : (raw ?? '');
 			connectionCaps = parseCapabilities(headerValue);
 			effectiveBatchSize = resolvedBatchSize(connectionCaps);
+			hasSubscribeIdentity = connectionCaps.has(subscribeIdentityCapability);
 		});
 
 		socket.on('open', () => {

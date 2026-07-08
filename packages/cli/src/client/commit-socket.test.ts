@@ -777,6 +777,133 @@ describe('batched commit ops', () => {
 	});
 });
 
+function subscribeIdentityOp(ids: readonly string[]): string {
+	return JSON.stringify({
+		op: 'subscribe-identity',
+		entries: ids.map((id) => ({ uploadId: id, storePathHash, narHash }))
+	});
+}
+
+// Emits an upgrade that advertises both commit-batch and subscribe-identity.
+function advertiseBoth(socket: FakeCommitSocket): void {
+	socket.emit('upgrade', {
+		headers: {
+			'x-cupboard-commit-capabilities':
+				'commit-batch;max=100,subscribe-identity'
+		}
+	});
+}
+
+describe('subscribe-identity', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('replays acked ids via subscribe-identity when both tokens are advertised', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const settled = session.commit(target);
+
+		advertiseBoth(first);
+		first.emit('open');
+		first.emit(
+			'message',
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
+		);
+
+		// Socket drops while the upload is parked.
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// Reconnect advertises both tokens: acked id replays via subscribe-identity.
+		advertiseBoth(second);
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({ ev: 'verdict', uploadId, status: 'servable' })
+		);
+
+		await expect(ackOf(settled)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'pending'
+		});
+		await expect(settledOf(settled)).resolves.toBeUndefined();
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [batchOp([uploadId])],
+			second: [subscribeIdentityOp([uploadId])]
+		});
+	});
+
+	it('falls back to bare subscribe when only commit-batch is advertised', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const settled = session.commit(target);
+
+		advertiseBatch(first);
+		first.emit('open');
+		first.emit(
+			'message',
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
+		);
+
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		// Second connection only offers commit-batch, not subscribe-identity.
+		advertiseBatch(second);
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({ ev: 'verdict', uploadId, status: 'servable' })
+		);
+
+		await expect(settledOf(settled)).resolves.toBeUndefined();
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [batchOp([uploadId])],
+			second: [JSON.stringify({ op: 'subscribe', uploadIds: [uploadId] })]
+		});
+	});
+
+	it('settles an acked entry when a settled frame arrives for it', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const settled = session.commit(target);
+
+		advertiseBoth(socket);
+		socket.emit('open');
+		// The deferred frame acks the entry.
+		socket.emit(
+			'message',
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
+		);
+		// A settled/already-present frame arrives for the acked id.
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'already-present' }
+			})
+		);
+
+		await expect(ackOf(settled)).resolves.toStrictEqual({
+			storePathHash,
+			narHash,
+			status: 'pending'
+		});
+		await expect(settledOf(settled)).resolves.toBeUndefined();
+
+		session.close();
+	});
+});
+
 describe('parseCapabilities', () => {
 	it.each([
 		['empty string', '', []],
