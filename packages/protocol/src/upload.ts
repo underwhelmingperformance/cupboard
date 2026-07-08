@@ -221,15 +221,37 @@ export const commitBatchMaxEntries = 100;
 // Build from the shared constants; never hand-code the string.
 export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String(commitBatchMaxEntries)}`;
 
-// One batched commit: the upload to settle plus the path identity the client
-// holds from negotiation. The identity lets a reconnect re-send an entry whose
-// reply was lost: the server resolves a since-gone row against the path's
-// committed narinfo and answers `already-present`, where a bare id could only
-// fail as unknown.
+// The capability name for `subscribe-identity`. A client looks this up in the
+// parsed capability map; the server advertises it so a capable client replays
+// acked ids through the identity-carrying op, which resolves a gone row by the
+// path's committed narinfo.
+//
+// Wire-freeze: the op's entry schema reuses `commitBatchEntrySchema` and is
+// bounded by `commitBatchMaxEntries`. Any change to that shape or bound needs a
+// new capability token.
+export const subscribeIdentityCapability = 'subscribe-identity';
+
+// The bare capability token the server includes in the 101 header alongside the
+// commit-batch token. No attributes are needed: the entry shape and bound are
+// shared with `commit-batch` and are already encoded in that token.
+export const subscribeIdentityCapabilityToken = subscribeIdentityCapability;
+
+// The full value of the `x-cupboard-commit-capabilities` header the server
+// sends on every 101 response. Build from the shared constants so no call site
+// hand-codes the combined string.
+export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscribeIdentityCapabilityToken}`;
+
+// One identity-carrying entry shared by `commit-batch` and `subscribe-identity`.
+// Carries the upload to settle or resume plus the path identity the client holds
+// from negotiation. The identity lets a reconnect re-send an entry whose reply
+// was lost: the server resolves a since-gone row against the path's committed
+// narinfo and answers `already-present`, where a bare id could only fail as
+// unknown.
 //
 // Wire-freeze: any change to this schema's shape or the `commitBatchMaxEntries`
-// bound is a breaking change that requires a new capability token.
-const commitBatchEntrySchema = z.strictObject({
+// bound is a breaking change that requires a new capability token for each op
+// that uses it.
+export const commitBatchEntrySchema = z.strictObject({
 	uploadId: z.string(),
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema
@@ -245,6 +267,13 @@ export const commitSessionRequestSchema = z.discriminatedUnion('op', [
 	z.strictObject({
 		op: z.literal('subscribe'),
 		uploadIds: uploadIdsSchema
+	}),
+	// Wire-freeze: entries reuse `commitBatchEntrySchema` and are bounded by
+	// `commitBatchMaxEntries`; the server advertises `subscribe-identity` only
+	// when it handles this op, so an older server never receives it.
+	z.strictObject({
+		op: z.literal('subscribe-identity'),
+		entries: z.array(commitBatchEntrySchema).min(1).max(commitBatchMaxEntries)
 	})
 ]);
 export type ParsedCommitSessionRequest = z.output<
