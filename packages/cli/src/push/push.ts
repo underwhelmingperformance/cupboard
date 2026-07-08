@@ -39,6 +39,7 @@ import type { CommitOutcome, CommitSession } from '../client/commit-socket.ts';
 import { isStaleUploadError } from '../client/rpc-errors.ts';
 import {
 	AttestationBundleInvalidError,
+	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
 	AttestationUploadUnavailableError,
 	PushIncompleteError,
@@ -228,6 +229,17 @@ async function runPushFlow(
 			return response;
 		}
 	);
+
+	const divergent = divergentSkips(closure, negotiation.uploads);
+
+	for (const skip of divergent.values()) {
+		reporter.warn(
+			'divergent',
+			`${StorePath.basename(skip.storePath)}: local NAR ${skip.localNarHash} ` +
+				`differs from the cached copy ${skip.cacheNarHash}; the cache keeps ` +
+				`its copy`
+		);
+	}
 
 	if (dependencies.dryRun === true) {
 		reportDryRun(reporter, negotiation, retention);
@@ -495,7 +507,8 @@ async function runPushFlow(
 			sources: dependencies.attestations ?? [],
 			readBundle:
 				dependencies.readAttestationBundle ?? defaultReadAttestationBundle,
-			pendingStorePathHashes: unservableStorePathHashes
+			pendingStorePathHashes: unservableStorePathHashes,
+			divergent
 		});
 
 		const uploadedPaths = negotiation.uploads.filter((decision) =>
@@ -595,6 +608,7 @@ interface AttachAttestationsDependencies {
 	readonly sources: readonly PushAttestationSource[];
 	readonly readBundle: ReadAttestationBundle;
 	readonly pendingStorePathHashes: ReadonlySet<string>;
+	readonly divergent: ReadonlyMap<string, DivergentSkip>;
 }
 
 interface PreparedAttestationBundle {
@@ -746,6 +760,21 @@ async function prepareAttestationBundles(
 		}
 
 		for (const pathInfo of matched) {
+			// The bundle describes the local bytes, but the cache committed a
+			// different NAR for this store path, so the attach can never succeed:
+			// fail here, before any bundle uploads, with both hashes named.
+			const diverged = dependencies.divergent.get(
+				StorePath.hash(pathInfo.storePath)
+			);
+
+			if (diverged !== undefined) {
+				throw new AttestationDivergedPathError(
+					diverged.storePath,
+					diverged.localNarHash,
+					diverged.cacheNarHash
+				);
+			}
+
 			recordPreparedBundle(pathInfo, digest, bytes, seen, prepared);
 		}
 	}
@@ -1073,6 +1102,46 @@ function verifyNarMetadata(
 		pathInfo.narSize,
 		digest.narSize
 	);
+}
+
+// A skip decision whose committed NAR differs from the local path's: the two
+// sides realised the same store path with different bytes, so the build is not
+// reproducible. The cache keeps its copy, and an attestation over the local
+// bytes can never attach to it.
+interface DivergentSkip {
+	readonly storePath: string;
+	readonly localNarHash: string;
+	readonly cacheNarHash: string;
+}
+
+function divergentSkips(
+	closure: readonly NixValidPathInfo[],
+	decisions: readonly UploadDecision[]
+): ReadonlyMap<string, DivergentSkip> {
+	const localByStorePathHash = new Map<string, NixValidPathInfo>(
+		closure.map((info) => [StorePath.hash(info.storePath), info])
+	);
+	const divergent = new Map<string, DivergentSkip>();
+
+	for (const decision of decisions) {
+		if (!isSkip(decision)) {
+			continue;
+		}
+
+		const local = localByStorePathHash.get(decision.storePathHash);
+
+		if (local === undefined || local.narHash.toString() === decision.narHash) {
+			continue;
+		}
+
+		divergent.set(decision.storePathHash, {
+			storePath: local.storePath,
+			localNarHash: local.narHash.toString(),
+			cacheNarHash: decision.narHash
+		});
+	}
+
+	return divergent;
 }
 
 // The closure indexed by the pair a negotiation decision names, so resolving a

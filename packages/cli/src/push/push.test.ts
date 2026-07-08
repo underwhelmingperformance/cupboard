@@ -14,6 +14,7 @@ import { z } from 'zod';
 
 import type { CommitOptions } from '../client/client.ts';
 import {
+	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
 	CupboardHttpError,
 	PushIncompleteError,
@@ -1092,6 +1093,99 @@ describe('runPush', () => {
 		});
 	});
 
+	it('warns when the cache holds a different NAR for a skipped path', async () => {
+		const cacheDigest = digest(9, 999);
+		const warnings: { label: string; value?: string }[] = [];
+		const results: ResultRow[][] = [];
+		const clientCalls: unknown[] = [];
+
+		await runPush([appPath], reporter(results, warnings), {
+			client: divergentSkipClient(
+				cacheDigest.narHash.toString(),
+				[],
+				clientCalls
+			),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect({ clientCalls, warnings }).toStrictEqual({
+			clientCalls: [
+				{ method: 'negotiate', paths: [appPath] },
+				{
+					method: 'setRoot',
+					fields: {
+						name: `pin:${StorePath.hash(appPath)}`,
+						targets: [appPath]
+					}
+				}
+			],
+			warnings: [
+				{
+					label: 'divergent',
+					value:
+						`${StorePath.basename(appPath)}: local NAR ` +
+						`${appDigest.narHash.toString()} differs from the cached copy ` +
+						`${cacheDigest.narHash.toString()}; the cache keeps its copy`
+				}
+			]
+		});
+	});
+
+	it('rejects attaching an attestation for a path whose cached NAR differs', async () => {
+		const cacheDigest = digest(9, 999);
+		const bundle = sigstoreBundleBytes(narDigestHex(appDigest.narHash));
+		const clientCalls: unknown[] = [];
+		const attestationNegotiations: unknown[] = [];
+
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([]), {
+					client: {
+						...divergentSkipClient(
+							cacheDigest.narHash.toString(),
+							[],
+							clientCalls
+						),
+						negotiateAttestations(body) {
+							attestationNegotiations.push(body);
+
+							return Promise.resolve({ bundles: [] });
+						}
+					},
+					attestations: [{ path: 'app.sigstore.json' }],
+					readAttestationBundle: () => Promise.resolve(bundle),
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+				});
+				return { pushed: true };
+			} catch (error_: unknown) {
+				const error = z.instanceof(AttestationDivergedPathError).parse(error_);
+
+				return {
+					error: {
+						name: error.name,
+						storePath: error.storePath,
+						localNarHash: error.localNarHash,
+						cacheNarHash: error.cacheNarHash
+					}
+				};
+			}
+		})();
+
+		// The bundle describes the local bytes, which the cache does not hold, so
+		// the attach can never succeed: fail before any attestation negotiation.
+		expect({ outcome, attestationNegotiations }).toStrictEqual({
+			outcome: {
+				error: {
+					name: AttestationDivergedPathError.name,
+					storePath: appPath,
+					localNarHash: appDigest.narHash.toString(),
+					cacheNarHash: cacheDigest.narHash.toString()
+				}
+			},
+			attestationNegotiations: []
+		});
+	});
+
 	it('compresses and hashes uploaded NARs in a single pass', async () => {
 		const archives: FakeNarArchive[] = [];
 
@@ -2146,6 +2240,33 @@ function skipClient(roots: SetRootCall[], clientCalls: unknown[]): PushClient {
 			roots.push({ fields });
 
 			return Promise.resolve(rootSummary(fields));
+		}
+	};
+}
+
+// A cache that already holds every negotiated path, but with a NAR hash other
+// than the one the client computed locally: the two sides realised the same
+// store path with different bytes.
+function divergentSkipClient(
+	cacheNarHash: string,
+	roots: SetRootCall[],
+	clientCalls: unknown[]
+): PushClient {
+	return {
+		...skipClient(roots, clientCalls),
+		negotiate(body) {
+			clientCalls.push({
+				method: 'negotiate',
+				paths: body.paths.map((path) => path.storePath)
+			});
+
+			return Promise.resolve({
+				uploads: body.paths.map((path) => ({
+					action: 'skip' as const,
+					storePathHash: path.storePathHash,
+					narHash: cacheNarHash
+				}))
+			});
 		}
 	};
 }
