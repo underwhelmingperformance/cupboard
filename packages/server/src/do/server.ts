@@ -172,8 +172,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private isReconcileDue = false;
 	private reconcileDrain: Promise<void> | undefined;
 
-	// Caps the total number of commit-batch entries running concurrently across
-	// all in-flight messages, keeping the sum within one message's own bound.
+	// Caps the total number of commits running concurrently across all in-flight
+	// session messages, batched entries and per-id ops alike, keeping the sum
+	// within one batch message's own bound.
 	private readonly commitEntrySemaphore = new CountingSemaphore(
 		maxOutgoingConnections
 	);
@@ -1494,15 +1495,25 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		if (request.op === 'commit') {
 			// The socket message is a top-level entrypoint, so it seeds the logger the
-			// commit path is threaded.
+			// commit path is threaded. The per-id op shares the batch entries' bound:
+			// a client that speaks only this op fans one message per path, so without
+			// a slot per commit a large push's burst of messages runs unbounded and
+			// queues enough control-plane reads to make the database shed.
 			const logger = rootLogger().with({ sessionId, cache, op: request.op });
-			await this.runSessionCommit(
-				logger,
-				socket,
-				cache,
-				sessionId,
-				request.uploadId
-			);
+			await this.commitEntrySemaphore.acquire();
+
+			try {
+				await this.runSessionCommit(
+					logger,
+					socket,
+					cache,
+					sessionId,
+					request.uploadId
+				);
+			} finally {
+				this.commitEntrySemaphore.release();
+			}
+
 			return;
 		}
 
