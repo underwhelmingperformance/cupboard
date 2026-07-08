@@ -128,6 +128,40 @@ export const gcContinuationKey = 'maintenance:gc-pending';
 // fresh rows always wait for the queue consumer's off-thread decode.
 const verifyBackstopReuseSettleLimit = 16;
 
+// Bounds the number of tasks that may run concurrently. Callers `acquire` a
+// slot before starting work and `release` it when done; excess callers wait
+// until a slot is free.
+class CountingSemaphore {
+	private slots: number;
+	private readonly waiters: ((value: undefined) => void)[] = [];
+
+	constructor(limit: number) {
+		this.slots = limit;
+	}
+
+	acquire(): Promise<undefined> {
+		if (this.slots > 0) {
+			this.slots -= 1;
+			return Promise.resolve(undefined);
+		}
+
+		const { promise, resolve } = Promise.withResolvers<undefined>();
+		this.waiters.push(resolve);
+		return promise;
+	}
+
+	release(): void {
+		const next = this.waiters.shift();
+
+		if (next === undefined) {
+			this.slots += 1;
+			return;
+		}
+
+		next(undefined);
+	}
+}
+
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
 	private migrationPromise: Promise<void> | undefined;
@@ -137,6 +171,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// {@link CupboardServer.scheduleMaintenanceReconcile}.
 	private isReconcileDue = false;
 	private reconcileDrain: Promise<void> | undefined;
+
+	// Caps the total number of commit-batch entries running concurrently across
+	// all in-flight messages, keeping the sum within one message's own bound.
+	private readonly commitEntrySemaphore = new CountingSemaphore(
+		maxOutgoingConnections
+	);
 
 	private readonly authKeys: AuthKeysService;
 	private readonly attestationCas: AttestationCasService;
@@ -1498,22 +1538,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			await mapWithConcurrency(
 				request.commits,
 				maxOutgoingConnections,
-				(entry) =>
-					this.runSessionCommit(
-						logger,
-						socket,
-						cache,
-						sessionId,
-						entry.uploadId,
-						{
-							storePathHash: entry.storePathHash,
-							narHash: entry.narHash
-						},
-						{
-							prefetched: batchPrefetched?.get(entry.narHash),
-							account: batchAccount
-						}
-					)
+				async (entry) => {
+					await this.commitEntrySemaphore.acquire();
+
+					try {
+						await this.runSessionCommit(
+							logger,
+							socket,
+							cache,
+							sessionId,
+							entry.uploadId,
+							{
+								storePathHash: entry.storePathHash,
+								narHash: entry.narHash
+							},
+							{
+								prefetched: batchPrefetched?.get(entry.narHash),
+								account: batchAccount
+							}
+						);
+					} finally {
+						this.commitEntrySemaphore.release();
+					}
+				}
 			);
 			return;
 		}
