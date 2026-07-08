@@ -91,7 +91,7 @@ export type CommitOutcome =
 // The tenant's publish status and quota basis, read together by
 // {@link CommitPipelineService.tenantAccount}. The usage columns are nullable
 // because the left join may find no usage row.
-interface TenantAccount {
+export interface TenantAccount {
 	readonly status: (typeof d1Schema.tenant.$inferSelect)['status'];
 	readonly bytes: number | null;
 	readonly casBytes: number | null;
@@ -273,7 +273,13 @@ export class CommitPipelineService {
 		// checks. It may be stale by the gate below; the charge batch is the
 		// authoritative guard.
 		probe: MaterialisationProbe,
-		committingSessionId: string | null | undefined
+		committingSessionId: string | null | undefined,
+		// Whether the probe was supplied from a batch prefetch. An over-quota outcome
+		// with a prefetched probe may reflect stale `isOwned`: a sibling entry in the
+		// same batch charged the blob first, making the tenant its new owner. Re-probe
+		// fresh and retry exactly once before treating it as terminal; the re-probe and
+		// the retry are each idempotent.
+		isProbeFromPrefetch: boolean
 	): Promise<CommitOutcome> {
 		const canonicalKey = narObjectKey(metadata.narHash);
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
@@ -287,13 +293,29 @@ export class CommitPipelineService {
 		// the existing generation, mirroring how the verify path handles `mine`.
 		const generation = reserved.generation;
 
-		const outcome = await this.materialiseBatched(logger, {
+		let outcome = await this.materialiseBatched(logger, {
 			cache,
 			metadata,
 			generation,
 			probe,
 			mustOwnBlob: true
 		});
+
+		// Over quota on a prefetched probe: the prefetched `isOwned` can be stale when
+		// two entries in one batch share a narHash: the sibling that settled first
+		// charged the blob and became the owner. Re-probe fresh and retry once; the
+		// charge batch remains the authoritative fence. The same shape as
+		// `materialiseVerified`'s over-quota retry.
+		if (outcome.kind === 'over-quota' && isProbeFromPrefetch) {
+			const freshProbe = await this.probeMaterialisation(metadata);
+			outcome = await this.materialiseBatched(logger, {
+				cache,
+				metadata,
+				generation,
+				probe: freshProbe,
+				mustOwnBlob: true
+			});
+		}
 
 		if (outcome.kind === 'materialised') {
 			// The object publishes after the gate; the marker clears only once it
@@ -936,6 +958,16 @@ export class CommitPipelineService {
 
 	// Answers a commit that lost its narinfo to a concurrent winner: ensures the
 	// winner's object is materialised, reclaims this upload's staging object, and
+	/**
+	 * The tenant's advisory publish status and quota basis, for a batch caller
+	 * that reads the account once and passes it into each entry's commit. The
+	 * charge batch remains the authoritative fence; this is the same read
+	 * {@link commit} performs internally when no advisory account is supplied.
+	 */
+	async readTenantAccount(): Promise<TenantAccount | undefined> {
+		return this.tenantAccount(this.context.requireTenant());
+	}
+
 	// reports already-present with the winner's narHash. Any blob this upload
 	// promoted but no edge now references is left for the reaper to collect.
 	// When no committed winner exists yet (the winning upload is still verifying),
@@ -1022,7 +1054,16 @@ export class CommitPipelineService {
 	async commit(
 		logger: Logger,
 		cache: string,
-		uploadId: string
+		uploadId: string,
+		// Advisory values a batch caller reads once for the whole message. When
+		// present, `commit` uses them for its probe and quota pre-check and skips its
+		// own D1 reads for those. The charge batch remains the authoritative fence for
+		// status and quota; a stale advisory value only softens the pre-check, never
+		// bypasses the authoritative guard.
+		advisory?: {
+			readonly prefetched?: PrefetchedMaterialisationFacts;
+			readonly account?: TenantAccount;
+		}
 	): Promise<CommitOutcome> {
 		// A commit settling after offboarding began must publish nothing: refuse
 		// before deferring, so the writer hears a stopped write immediately.
@@ -1163,21 +1204,23 @@ export class CommitPipelineService {
 		}
 
 		const canonicalKey = narObjectKey(metadata.narHash);
-
-		// The facts a commit decides on, probed once in one parallel wave: the
-		// advisory quota check reads them here, and a reuse's materialise gate takes
-		// the same per-path probe, so a commit never re-reads its blob state or
-		// canonical presence. The tenant account rides alongside for the quota
-		// pre-check; the reuse gate reads its own in the flush. A reuse's staged key
-		// is the canonical object itself, whose presence the probe already answers,
-		// so only a fresh upload heads its private staging object.
 		const tenant = this.context.requireTenant();
+
+		// The facts a commit decides on: the blob state and canonical presence for
+		// the probe, and the tenant's publish status and quota basis. When an advisory
+		// prefetch and account are supplied (a batch caller read them once for the
+		// whole message), use them to skip the per-entry D1 reads; only the per-path
+		// R2 head for a fresh upload's staged object is always per-entry. The charge
+		// batch remains the authoritative fence for status and quota; the advisory
+		// values only soften the pre-check. A reuse's staged key is the canonical
+		// object itself, whose presence the probe already answers, so only a fresh
+		// upload heads its private staging object.
 		const [probe, stagedObject, account] = await Promise.all([
-			this.probeMaterialisation(metadata),
+			this.probeMaterialisation(metadata, advisory?.prefetched),
 			pending.r2Key === canonicalKey
 				? undefined
 				: this.context.env.BLOBS.head(pending.r2Key),
-			this.tenantAccount(tenant)
+			advisory?.account ?? this.tenantAccount(tenant)
 		]);
 
 		// The staged object must exist before a commit can verify or promote it; its
@@ -1241,7 +1284,8 @@ export class CommitPipelineService {
 				uploadId,
 				metadata,
 				probe,
-				committingSessionId
+				committingSessionId,
+				advisory?.prefetched !== undefined
 			);
 		}
 

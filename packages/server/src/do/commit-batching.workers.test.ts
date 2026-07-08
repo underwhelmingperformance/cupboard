@@ -11,6 +11,8 @@ import {
 	expectSingleCommitDecision,
 	initialise,
 	negotiateUploads,
+	openCommitSession,
+	provisionFixtureTenant,
 	resetTestServer,
 	uploadMetadata,
 	verifiableNar
@@ -218,5 +220,146 @@ describe('batched commit settles', () => {
 			probeBatches: 0,
 			facts: 3
 		});
+	});
+
+	it('a commit-batch of reuse entries pays two prefetch D1 batches plus one charge flush, not one probe per entry', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('socket-prefetch');
+		const paths = ['a', 'b', 'c'].map((letter, index) =>
+			uploadMetadata({
+				name: `socket-prefetch-${String(index)}`,
+				storePathHash: letter.repeat(32),
+				narHash: nar.narHash,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength,
+				narSize: nar.narSize
+			})
+		);
+		const [first, ...rest] = paths;
+
+		if (first === undefined) {
+			throw new Error('the batch needs at least one path');
+		}
+
+		// Commit the first path so its canonical blob is in the CAS; the rest
+		// negotiate as reuse commits sharing that blob.
+		await commitPath(token, first, nar);
+
+		const reuseEntries: {
+			uploadId: string;
+			metadata: (typeof rest)[number];
+		}[] = [];
+
+		for (const metadata of rest) {
+			const decision = expectSingleCommitDecision(
+				await negotiateUploads(token, [metadata]),
+				metadata
+			);
+			reuseEntries.push({ uploadId: decision.uploadId, metadata });
+		}
+
+		// Spy on D1 batch calls. The commit-batch handler prefetches facts for the
+		// whole message (2 D1 batches), each entry's probe reads from memory (0
+		// per-entry D1 batches), and the shared materialise flush settles all entries
+		// in one charge batch (1 D1 batch). Total: 3 batch calls regardless of the
+		// number of entries.
+		const batches = vi.spyOn(env.CUPBOARD_DB, 'batch');
+
+		try {
+			const session = await openCommitSession(token);
+			session.send({
+				op: 'commit-batch',
+				commits: reuseEntries.map(({ uploadId, metadata }) => ({
+					uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}))
+			});
+
+			for (const _ of reuseEntries) {
+				await session.nextFrame();
+			}
+
+			session.socket.close();
+
+			expect(batches.mock.calls.length).toBe(3);
+		} finally {
+			batches.mockRestore();
+		}
+	});
+
+	it('both entries of a batch sharing one narHash settle when quota fits exactly one blob charge', async () => {
+		const nar = await verifiableNar('shared-hash-quota');
+
+		// Commit the first path so the tenant owns the blob with bytes = fileSize.
+		// Quota is then set to exactly fileSize, leaving no headroom for a second
+		// charge. Paths B and C negotiate as reuse commits (the tenantBlob row
+		// already exists), so the batch's prefetch reads isOwned=true for both and
+		// the materialise flush skips the byte credit, so both settle with no
+		// over-quota event.
+		await provisionFixtureTenant({ quotaBytes: nar.narBytes.byteLength });
+		const token = await initialise();
+
+		const pathA = uploadMetadata({
+			storePathHash: 'a'.repeat(32),
+			name: 'shared-hash-a',
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const pathB = uploadMetadata({
+			storePathHash: 'b'.repeat(32),
+			name: 'shared-hash-b',
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+		const pathC = uploadMetadata({
+			storePathHash: 'c'.repeat(32),
+			name: 'shared-hash-c',
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, pathA, nar);
+
+		// B and C negotiate as reuse commits: the tenant already owns the blob, so
+		// findReusableBlobs returns it for both.
+		const decisionB = expectSingleCommitDecision(
+			await negotiateUploads(token, [pathB]),
+			pathB
+		);
+		const decisionC = expectSingleCommitDecision(
+			await negotiateUploads(token, [pathC]),
+			pathC
+		);
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: decisionB.uploadId,
+					storePathHash: pathB.storePathHash,
+					narHash: pathB.narHash
+				},
+				{
+					uploadId: decisionC.uploadId,
+					storePathHash: pathC.storePathHash,
+					narHash: pathC.narHash
+				}
+			]
+		});
+
+		const frames = [await session.nextFrame(), await session.nextFrame()];
+		session.socket.close();
+
+		expect(
+			frames.map((f) => f.ev).toSorted((a, b) => a.localeCompare(b))
+		).toStrictEqual(['settled', 'settled']);
 	});
 });

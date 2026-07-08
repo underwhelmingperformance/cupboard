@@ -62,6 +62,8 @@ import { mapWithConcurrency, maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import {
 	CommitPipelineService,
+	type PrefetchedMaterialisationFacts,
+	type TenantAccount,
 	verifyBackstopKey
 } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
@@ -423,7 +425,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: string,
 		sessionId: string,
 		uploadId: string,
-		identity?: Pick<ParsedCommitBatchEntry, 'storePathHash' | 'narHash'>
+		identity?: Pick<ParsedCommitBatchEntry, 'storePathHash' | 'narHash'>,
+		advisory?: {
+			readonly prefetched?: PrefetchedMaterialisationFacts;
+			readonly account?: TenantAccount;
+		}
 	): Promise<void> {
 		try {
 			// Record the session before the commit can defer, so a verdict reached
@@ -432,7 +438,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 			const outcome = await this.metered('commit', (logger) =>
 				this.afterHotMutation(() =>
-					this.commitPipeline.commit(logger, cache, uploadId)
+					this.commitPipeline.commit(logger, cache, uploadId, advisory)
 				)
 			);
 
@@ -1454,6 +1460,28 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			// rest. Concurrent settles share the flush gate, so a chunk lands in a
 			// handful of combined charge batches.
 			const logger = rootLogger().with({ sessionId, cache, op: request.op });
+
+			// Prefetch the D1 probe facts and the tenant account once for the whole
+			// message, so each entry's commit pays only its per-path R2 head and the
+			// message's D1 reads stay bounded whatever its size. Both reads are
+			// advisory: the charge batch remains the authoritative fence for status
+			// and quota. A fault in either read degrades to per-entry fresh reads.
+			const narHashes = request.commits.map((entry) => entry.narHash);
+			let batchPrefetched:
+				Map<string, PrefetchedMaterialisationFacts> | undefined;
+			let batchAccount: TenantAccount | undefined;
+
+			try {
+				const [prefetched, account] = await Promise.all([
+					this.commitPipeline.prefetchMaterialisationFacts(narHashes),
+					this.commitPipeline.readTenantAccount()
+				]);
+				batchPrefetched = prefetched;
+				batchAccount = account;
+			} catch {
+				// D1 fault: degrade to per-entry reads.
+			}
+
 			await mapWithConcurrency(
 				request.commits,
 				maxOutgoingConnections,
@@ -1467,6 +1495,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 						{
 							storePathHash: entry.storePathHash,
 							narHash: entry.narHash
+						},
+						{
+							prefetched: batchPrefetched?.get(entry.narHash),
+							account: batchAccount
 						}
 					)
 			);
