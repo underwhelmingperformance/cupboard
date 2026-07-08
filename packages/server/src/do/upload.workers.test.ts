@@ -8,8 +8,8 @@ import {
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import {
-	commitBatchCapabilityToken,
 	commitCapabilitiesHeader,
+	commitCapabilitiesValue,
 	type ParsedCommitSessionFrame
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -1188,7 +1188,7 @@ describe('upload flow', () => {
 		});
 	});
 
-	it('advertises the batch capability on the session upgrade', async () => {
+	it('advertises commit-batch and subscribe-identity on the session upgrade', async () => {
 		const token = await initialise();
 		const response = await fetchPath('/cache/_default/commit', {
 			headers: {
@@ -1204,11 +1204,11 @@ describe('upload flow', () => {
 			capabilities: response.headers.get(commitCapabilitiesHeader)
 		}).toStrictEqual({
 			status: StatusCodes.SWITCHING_PROTOCOLS,
-			capabilities: commitBatchCapabilityToken
+			capabilities: commitCapabilitiesValue
 		});
 	});
 
-	it('advertises the parameterised batch capability through the worker hop', async () => {
+	it('advertises both capabilities through the worker hop', async () => {
 		const token = await initialiseViaWorker();
 		const response = await handlerFetch(`/t/${fixtureTenant}/commit`, {
 			headers: {
@@ -1224,7 +1224,7 @@ describe('upload flow', () => {
 			capabilities: response.headers.get(commitCapabilitiesHeader)
 		}).toStrictEqual({
 			status: StatusCodes.SWITCHING_PROTOCOLS,
-			capabilities: commitBatchCapabilityToken
+			capabilities: commitCapabilitiesValue
 		});
 	});
 
@@ -1501,6 +1501,124 @@ describe('upload flow', () => {
 			uploadId: 'reservation-only-upload',
 			status: 'absent'
 		});
+	});
+
+	it('subscribe-identity: a gone row whose path committed answers already-present', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+
+		// Commit fully so the pending row clears, leaving a committed narinfo row.
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'subscribe-identity',
+			entries: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'settled',
+			uploadId: upload.uploadId,
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			}
+		});
+	});
+
+	it('subscribe-identity: a gone row with only a reservation answers absent', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({
+			storePathHash: 'd'.repeat(32),
+			name: 'sub-identity-reserved',
+			narHash: nixSha256Hash('d'),
+			fileSize: narBytes.byteLength
+		});
+
+		// Plant a narinfo row for this path with no committed reference edge.
+		await seedReservedNarInfo(metadata);
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'subscribe-identity',
+			entries: [
+				{
+					uploadId: 'sub-identity-gone-upload',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'verdict',
+			uploadId: 'sub-identity-gone-upload',
+			status: 'absent'
+		});
+	});
+
+	it('subscribe-identity: an entry whose pending row exists replays deferred and routes the verdict to the new socket', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+
+		// Commit on one session so it defers, then close that socket.
+		const first = await openCommitSession(token);
+		first.send({ op: 'commit', uploadId: upload.uploadId });
+		const deferred = await first.nextFrame();
+		expect(deferred.ev).toBe('deferred');
+		first.socket.close();
+
+		// A reconnected session replays with subscribe-identity; the pending row
+		// exists, so it re-emits deferred and re-attaches the session.
+		const second = await openCommitSession(token);
+		second.send({
+			op: 'subscribe-identity',
+			entries: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const replay = await second.nextFrame();
+		expect(frameIdentity(replay)).toStrictEqual({
+			ev: 'deferred',
+			uploadId: upload.uploadId
+		});
+
+		// The verdict routes to the reconnected socket.
+		await currentServer().runVerification();
+		const verdict = await second.nextFrame();
+		second.socket.close();
+
+		if (verdict.ev !== 'verdict') {
+			throw new Error(`expected a verdict frame, got ${verdict.ev}`);
+		}
+
+		expect(verdict.status).toBe('servable');
 	});
 
 	it('does not strand a reserved row when an in-flight commit is retried', async () => {

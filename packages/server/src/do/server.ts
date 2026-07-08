@@ -9,8 +9,8 @@ import {
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
 import {
-	commitBatchCapabilityToken,
 	commitCapabilitiesHeader,
+	commitCapabilitiesValue,
 	commitSessionRequestSchema,
 	type ParsedCommitBatchEntry
 } from '@cupboard/protocol/upload';
@@ -407,7 +407,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		return new Response(undefined, {
 			status: 101,
 			webSocket: client,
-			headers: { [commitCapabilitiesHeader]: commitBatchCapabilityToken }
+			headers: { [commitCapabilitiesHeader]: commitCapabilitiesValue }
 		});
 	}
 
@@ -518,11 +518,53 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	// Replays one still-present pending row to a reconnected session: reject a
+	// row from another cache, re-point the row at this socket so a verdict from
+	// here on routes to it, then re-emit `deferred` for a row still awaiting its
+	// verdict or replay the terminal verdict. Shared by both subscribe ops, which
+	// differ only in how they answer a row that is gone.
+	private replaySubscribedRow(
+		socket: WebSocket,
+		cache: string,
+		sessionId: string,
+		uploadId: string,
+		row: typeof schema.pendingUploads.$inferSelect
+	): void {
+		if (row.cache !== cache) {
+			sendCommitSessionFrame(socket, {
+				ev: 'error',
+				uploadId,
+				status: StatusCodes.NOT_FOUND,
+				message: 'unknown upload'
+			});
+			return;
+		}
+
+		this.uploadState.attachSession(uploadId, sessionId);
+		const status = uploadStatusOf(row);
+
+		if (status === 'pending') {
+			const metadata = parseStoredUploadPathMetadata(
+				uploadId,
+				row.metadataJson
+			);
+			sendCommitSessionFrame(socket, {
+				ev: 'deferred',
+				uploadId,
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash
+			});
+			return;
+		}
+
+		sendCommitSessionFrame(socket, { ev: 'verdict', uploadId, status });
+	}
+
 	// Re-attaches a reconnected session to ids still outstanding and replays each
-	// one's current durable state: a still-pending upload re-emits `deferred` so
-	// the client re-arms its wait, a terminal row replays its verdict, and a row
-	// already cleared was committed (every clear path leaves a servable path), so
-	// it replays `servable`.
+	// one's current durable state. A gone row answers `servable`: with only a bare
+	// id the settle's outcome cannot be told apart, and a committed path is the
+	// common clear. A client that holds the path identity resolves a gone row
+	// precisely through the `subscribe-identity` op instead.
 	private replaySubscribe(
 		socket: WebSocket,
 		cache: string,
@@ -545,35 +587,36 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				continue;
 			}
 
-			if (row.cache !== cache) {
-				sendCommitSessionFrame(socket, {
-					ev: 'error',
-					uploadId,
-					status: StatusCodes.NOT_FOUND,
-					message: 'unknown upload'
-				});
+			this.replaySubscribedRow(socket, cache, sessionId, uploadId, row);
+		}
+	}
+
+	// Re-attaches a reconnected session to identity-carrying entries. An entry
+	// whose pending row still exists replays exactly as `subscribe` does; one
+	// whose row is gone resolves through the same committed-reference check as
+	// `resolveGoneCommit`, so a row that cleared because verification committed
+	// the path answers `already-present` and any other absence (a reaped row, a
+	// path now holding other bytes) answers `absent`.
+	private async replaySubscribeIdentity(
+		socket: WebSocket,
+		cache: string,
+		sessionId: string,
+		entries: readonly ParsedCommitBatchEntry[]
+	): Promise<void> {
+		for (const entry of entries) {
+			const { uploadId } = entry;
+			const row = this.context.db
+				.select()
+				.from(schema.pendingUploads)
+				.where(eq(schema.pendingUploads.id, uploadId))
+				.get();
+
+			if (row === undefined) {
+				await this.resolveGoneCommit(socket, cache, uploadId, entry);
 				continue;
 			}
 
-			// Re-point the row at this socket so a verdict from here on routes to it.
-			this.uploadState.attachSession(uploadId, sessionId);
-			const status = uploadStatusOf(row);
-
-			if (status === 'pending') {
-				const metadata = parseStoredUploadPathMetadata(
-					uploadId,
-					row.metadataJson
-				);
-				sendCommitSessionFrame(socket, {
-					ev: 'deferred',
-					uploadId,
-					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash
-				});
-				continue;
-			}
-
-			sendCommitSessionFrame(socket, { ev: 'verdict', uploadId, status });
+			this.replaySubscribedRow(socket, cache, sessionId, uploadId, row);
 		}
 	}
 
@@ -1426,6 +1469,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 							narHash: entry.narHash
 						}
 					)
+			);
+			return;
+		}
+
+		if (request.op === 'subscribe-identity') {
+			await this.replaySubscribeIdentity(
+				socket,
+				cache,
+				sessionId,
+				request.entries
 			);
 			return;
 		}
