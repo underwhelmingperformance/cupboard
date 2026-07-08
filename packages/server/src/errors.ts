@@ -660,6 +660,19 @@ export class TenantAdmissionUnavailableError extends ServerHttpError {
 	}
 }
 
+// D1 sheds load under sustained pressure by throwing an overload error with no
+// structured code. The fault is transient, so callers that wait briefly may
+// succeed; the refusal is a 503 carrying Retry-After for them to honour.
+export class DatabaseOverloadedError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor(public override readonly cause: unknown) {
+		super('Database is temporarily overloaded');
+		this.name = 'DatabaseOverloadedError';
+	}
+}
+
 // An authoritative shared-fact read behind a serve kept failing. Refusing
 // retryably is safer than answering from absence: a missing-object answer
 // would read as the path not existing and send the client off to rebuild it.

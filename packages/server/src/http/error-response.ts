@@ -3,7 +3,9 @@ import type { Context, ErrorHandler } from 'hono';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
+import { isD1Overload } from '../db/transient.ts';
 import {
+	DatabaseOverloadedError,
 	OAuthError,
 	ServerHttpError,
 	TenantDispatchInterruptedError
@@ -44,14 +46,18 @@ function serverHttpErrorResponse(error: ServerHttpError): Response {
 	});
 }
 
-// Hono error handler carrying the same mapping. A fault the runtime marks
-// retryable is a transient refusal, not a server fault; anything else we do
-// not model is answered by {@link unmappedErrorResponse}.
+// Hono error handler carrying the same mapping. A D1 overload or a fault the
+// runtime marks retryable is a transient refusal, not a server fault; anything
+// else we do not model is answered by {@link unmappedErrorResponse}.
 export const serverErrorHandler: ErrorHandler = (error, context) => {
 	const mapped = errorResponse(error);
 
 	if (mapped !== undefined) {
 		return mapped;
+	}
+
+	if (isD1Overload(error)) {
+		return serverHttpErrorResponse(new DatabaseOverloadedError(error));
 	}
 
 	if (isRuntimeRetryable(error)) {

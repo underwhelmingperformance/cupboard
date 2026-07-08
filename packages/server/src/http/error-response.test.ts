@@ -124,4 +124,36 @@ describe('serverErrorHandler', () => {
 
 		expect(response.status).toBe(500);
 	});
+
+	it.each([
+		{
+			name: 'direct overload message',
+			error: new Error(
+				'D1_ERROR: D1 DB is overloaded. Too many requests queued.'
+			)
+		},
+		{
+			name: 'overload message in cause chain',
+			error: new Error('query failed', {
+				cause: new Error(
+					'D1_ERROR: D1 DB is overloaded. Too many requests queued.'
+				)
+			})
+		}
+	])(
+		'maps a D1 overload fault to a retryable 503 ($name)',
+		async ({ error }) => {
+			const response = await appThatThrows(error).request('/');
+
+			expect({
+				status: response.status,
+				retryAfter: response.headers.get('retry-after'),
+				body: await response.text()
+			}).toStrictEqual({
+				status: 503,
+				retryAfter: '5',
+				body: 'Database is temporarily overloaded\n'
+			});
+		}
+	);
 });
