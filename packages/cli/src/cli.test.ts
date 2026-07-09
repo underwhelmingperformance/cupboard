@@ -94,6 +94,37 @@ describe('buildProgram', () => {
 			])
 		).rejects.toBeInstanceOf(CommanderError);
 	});
+
+	it('displays help as a usage error for a bare invocation', async () => {
+		const program = buildProgram();
+
+		program.configureOutput({
+			writeErr() {
+				return;
+			},
+			writeOut() {
+				return;
+			}
+		});
+
+		let result: unknown;
+
+		try {
+			await program.parseAsync(['node', 'cupboard']);
+			result = { kind: 'parsed' as const };
+		} catch (error_: unknown) {
+			result = error_;
+		}
+
+		expect(result).toBeInstanceOf(CommanderError);
+
+		if (result instanceof CommanderError) {
+			expect({ code: result.code, exitCode: result.exitCode }).toStrictEqual({
+				code: 'commander.help',
+				exitCode: 1
+			});
+		}
+	});
 });
 
 const noop = (): void => {
@@ -149,16 +180,25 @@ describe('reportCliFailure', () => {
 		expect(errors).toStrictEqual([]);
 	});
 
-	it('stays silent when commander merely displayed help', () => {
-		const { reporter, errors } = fakeReporter();
+	it.each([
+		{
+			name: 'an explicit --help/help request',
+			error: new CommanderError(0, 'commander.helpDisplayed', '(outputHelp)')
+		},
+		{
+			name: 'a bare invocation with no subcommand',
+			error: new CommanderError(1, 'commander.help', '(outputHelp)')
+		}
+	])(
+		'stays silent when commander merely displayed help ($name)',
+		({ error }) => {
+			const { reporter, errors } = fakeReporter();
 
-		reportCliFailure(
-			reporter,
-			new CommanderError(0, 'commander.helpDisplayed', '(outputHelp)')
-		);
+			reportCliFailure(reporter, error);
 
-		expect(errors).toStrictEqual([]);
-	});
+			expect(errors).toStrictEqual([]);
+		}
+	);
 
 	it('reports a commander usage error', () => {
 		const { reporter, errors } = fakeReporter();

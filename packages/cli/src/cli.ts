@@ -249,8 +249,15 @@ export function reportCliFailure(reporter: Reporter, error: unknown): void {
 		return;
 	}
 
-	// Displaying help or the version is a clean exit, not a failure to report.
-	if (error instanceof CommanderError && error.exitCode === 0) {
+	// Commander has already rendered help for these: an explicit `--help`/`help`
+	// request (`commander.helpDisplayed`, exit 0) and a bare invocation with no
+	// subcommand, which commander treats as a usage error and exits 1
+	// (`commander.help`). Either way, the funnel would only add a redundant
+	// `(outputHelp)` line.
+	if (
+		error instanceof CommanderError &&
+		error.code.startsWith('commander.help')
+	) {
 		return;
 	}
 
