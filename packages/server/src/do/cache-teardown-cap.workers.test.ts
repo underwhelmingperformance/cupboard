@@ -159,8 +159,21 @@ describe('cache teardown', () => {
 
 		const pathsWithNars = paths.map((p, index) => [p, nars[index]] as const);
 
-		for (const [metadata, nar] of pathsWithNars) {
-			await pushPath(token, metadata, 'builds', nar);
+		// The paths are independent, so seed them with bounded concurrency: the
+		// sequential negotiate/upload/commit round-trips, not the teardown under
+		// test, dominate the wall-clock. The bound keeps the commit fan-in well
+		// short of a D1 overload of its own.
+		const pushConcurrency = 16;
+		for (
+			let start = 0;
+			start < pathsWithNars.length;
+			start += pushConcurrency
+		) {
+			await Promise.all(
+				pathsWithNars
+					.slice(start, start + pushConcurrency)
+					.map(([metadata, nar]) => pushPath(token, metadata, 'builds', nar))
+			);
 		}
 
 		const response = await authorisedFetch('/caches/builds?force=true', token, {
