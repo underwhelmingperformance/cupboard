@@ -65,6 +65,14 @@ const internalError = (): Response =>
 		}
 	);
 
+// A raw gateway failure from the edge, not a Worker oRPC envelope: transient, so
+// it is retried, and its body is surfaced verbatim.
+const badGateway = (): Response =>
+	new Response('Bad gateway\n', {
+		status: StatusCodes.BAD_GATEWAY,
+		headers: { 'cf-ray': 'a113b23c78faf6c2' }
+	});
+
 describe('tenantRpc', () => {
 	it('keeps the tenant path prefix and sends the bound credential', async () => {
 		const { fetcher, captured } = capturingFetcher([
@@ -158,13 +166,13 @@ describe('tenantRpc', () => {
 		]);
 	});
 
-	it('retries an unmapped 5xx and returns the eventual success', async () => {
+	it('retries a transient gateway failure and returns the eventual success', async () => {
 		vi.useFakeTimers();
 
 		try {
 			const { fetcher, captured } = capturingFetcher([
-				internalError,
-				internalError,
+				badGateway,
+				badGateway,
 				() => Response.json({ caches: [] })
 			]);
 			const rpc = tenantRpc('https://cupboard.test/t/acme', {
@@ -184,14 +192,14 @@ describe('tenantRpc', () => {
 		}
 	});
 
-	it('surfaces the ray id and decoded message once the retry budget is spent', async () => {
+	it('surfaces the ray id once the retry budget is spent', async () => {
 		vi.useFakeTimers();
 
 		try {
 			// One attempt plus the four retries: every one fails, so the error
 			// surfaces after the final attempt.
 			const { fetcher, captured } = capturingFetcher(
-				Array.from({ length: 5 }, () => internalError)
+				Array.from({ length: 5 }, () => badGateway)
 			);
 			const rpc = tenantRpc('https://cupboard.test/t/acme', {
 				credential: 'admin-token',
@@ -215,13 +223,42 @@ describe('tenantRpc', () => {
 				}).toStrictEqual({
 					method: 'GET',
 					path: '/t/acme/caches',
-					status: StatusCodes.INTERNAL_SERVER_ERROR,
-					body: 'Internal server error',
+					status: StatusCodes.BAD_GATEWAY,
+					body: 'Bad gateway',
 					ray: 'a113b23c78faf6c2'
 				});
 			}
 		} finally {
 			vi.useRealTimers();
+		}
+	});
+
+	it('does not retry a 500, surfacing its decoded message at once', async () => {
+		const { fetcher, captured } = capturingFetcher([internalError]);
+		const rpc = tenantRpc('https://cupboard.test/t/acme', {
+			credential: 'admin-token',
+			fetcher
+		});
+
+		const rejected = await rejectedBy(() => rpc.caches.list());
+
+		expect(rejected).toBeInstanceOf(CupboardHttpError);
+		expect(captured.length).toBe(1);
+
+		if (rejected instanceof CupboardHttpError) {
+			expect({
+				method: rejected.method,
+				path: rejected.path,
+				status: rejected.status,
+				body: rejected.body,
+				ray: rejected.ray
+			}).toStrictEqual({
+				method: 'GET',
+				path: '/t/acme/caches',
+				status: StatusCodes.INTERNAL_SERVER_ERROR,
+				body: 'Internal server error',
+				ray: 'a113b23c78faf6c2'
+			});
 		}
 	});
 

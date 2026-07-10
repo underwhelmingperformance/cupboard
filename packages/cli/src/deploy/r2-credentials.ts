@@ -1,5 +1,7 @@
 import { AwsClient } from 'aws4fetch';
 
+import { resilientFetcher } from '../client/transport.ts';
+
 import { type DeployUi, terminalLink } from './ui.ts';
 
 export interface R2Credentials {
@@ -115,7 +117,7 @@ export async function checkR2Credentials(
 		readonly bucketName: string;
 		readonly credentials: R2Credentials;
 	},
-	fetcher: typeof fetch = fetch
+	fetcher: typeof fetch = resilientFetcher()
 ): Promise<R2CredentialCheck> {
 	const client = new AwsClient({
 		accessKeyId: options.credentials.accessKeyId,

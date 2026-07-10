@@ -3,6 +3,7 @@ import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import { cachePrefixFor, CupboardClient } from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { resilientFetcher } from '../client/transport.ts';
 
 import { credentialSession } from './credential-session.ts';
 import { type PushClient } from './push.ts';
@@ -35,7 +36,7 @@ export function pushClientFor(
 	});
 	const raw = new CupboardClient(
 		new URL(url),
-		options.fetcher ?? fetch,
+		resilientFetcher(options.fetcher ?? fetch),
 		cachePrefixFor(cache),
 		options.signal
 	);

@@ -5,6 +5,7 @@ import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
 import { z } from 'zod';
 
 import { abortable, delayMs, throwIfAborted } from '../abort.ts';
+import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
 export interface OidcLoginErrorOptions {
@@ -191,7 +192,7 @@ const endpointsSchema = z.object({
  */
 export async function discoverOidcLogin(
 	issuer: string,
-	fetcher: typeof fetch = fetch,
+	fetcher: typeof fetch = resilientFetcher(),
 	signal?: AbortSignal
 ): Promise<OidcLoginEndpoints> {
 	throwIfAborted(signal);
@@ -303,7 +304,7 @@ export async function loopbackLogin(
 ): Promise<string> {
 	throwIfAborted(options.signal);
 
-	const fetcher = options.fetcher ?? fetch;
+	const fetcher = options.fetcher ?? resilientFetcher();
 	const obtained = await obtainAuthorizationCode({
 		authorizationEndpoint: options.endpoints.authorizationEndpoint,
 		clientId: options.clientId,
@@ -643,7 +644,7 @@ export async function deviceLogin(
 		});
 	}
 
-	const fetcher = options.fetcher ?? fetch;
+	const fetcher = options.fetcher ?? resilientFetcher();
 	const now = options.now ?? Date.now;
 
 	const authorization = await requestDeviceCode(

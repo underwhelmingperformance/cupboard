@@ -1,5 +1,17 @@
 import { InvalidWorkerUrlError, UnreachableHostError } from '../errors.ts';
 
+import { retryingFetcher } from './retry.ts';
+
+/**
+ * A fetcher carrying the client's shared resilience: a transient failure retries
+ * with back-off, and a network fault that outlives the retries surfaces as a
+ * typed {@link UnreachableHostError} naming the host. This is the fetcher every
+ * remote call should use unless it has its own retry loop.
+ */
+export function resilientFetcher(fetcher: typeof fetch = fetch): typeof fetch {
+	return reachableFetcher(retryingFetcher(fetcher));
+}
+
 /**
  * Parse a Worker URL, turning a malformed value into a typed usage error that
  * naming the offending input.
