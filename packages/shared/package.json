@@ -22,6 +22,7 @@
 		"./errors": "./src/errors.ts",
 		"./in-toto": "./src/in-toto.ts",
 		"./octokit": "./src/octokit.ts",
+		"./retry": "./src/retry.ts",
 		"./sigstore": "./src/sigstore.ts",
 		"./slsa": "./src/slsa.ts"
 	},

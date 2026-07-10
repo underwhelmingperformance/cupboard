@@ -1,7 +1,5 @@
 import { StatusCodes } from 'http-status-codes';
 
-import { throwIfAborted } from '../abort.ts';
-
 // A long push makes thousands of calls against one single-threaded Durable
 // Object and streams as many blobs, so an occasional gateway blip or dropped
 // connection is expected. A few backed-off retries keep one such blip from
@@ -45,7 +43,7 @@ export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
 		let retries = 0;
 
 		for (;;) {
-			throwIfAborted(signal);
+			signal?.throwIfAborted();
 
 			const attempt = input instanceof Request ? input.clone() : input;
 

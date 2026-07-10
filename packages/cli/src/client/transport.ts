@@ -1,6 +1,6 @@
-import { InvalidWorkerUrlError, UnreachableHostError } from '../errors.ts';
+import { retryingFetcher } from '@cupboard/shared/retry';
 
-import { retryingFetcher } from './retry.ts';
+import { InvalidWorkerUrlError, UnreachableHostError } from '../errors.ts';
 
 /**
  * A fetcher carrying the client's shared resilience: a transient failure retries

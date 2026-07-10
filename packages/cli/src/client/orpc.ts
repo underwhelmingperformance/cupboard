@@ -1,5 +1,11 @@
 import { controlContract, tenantContract } from '@cupboard/protocol/contract';
 import {
+	backoffDelay,
+	isTransientResponse,
+	maxTransientRetries,
+	transientResponseDelay
+} from '@cupboard/shared/retry';
+import {
 	createORPCClient,
 	createORPCErrorFromJson,
 	isORPCErrorJson
@@ -19,12 +25,6 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
-import {
-	backoffDelay,
-	isTransientResponse,
-	maxTransientRetries,
-	transientResponseDelay
-} from './retry.ts';
 import { parseWorkerUrl, reachableFetcher } from './transport.ts';
 
 /**

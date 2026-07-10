@@ -1,6 +1,7 @@
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import type { CommitSessionFrame } from '@cupboard/protocol/upload';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -219,11 +220,14 @@ const bare = (status: number) => () => new Response('', { status });
 
 describe('CupboardClient token retry', () => {
 	it.each([
-		{ label: 'a 503 carrying Retry-After', failure: marked(503) },
-		{ label: 'a bare 503', failure: bare(503) },
-		{ label: 'a 502', failure: bare(502) },
-		{ label: 'a 504', failure: bare(504) },
-		{ label: 'a 429', failure: bare(429) }
+		{
+			label: 'a 503 carrying Retry-After',
+			failure: marked(StatusCodes.SERVICE_UNAVAILABLE)
+		},
+		{ label: 'a bare 503', failure: bare(StatusCodes.SERVICE_UNAVAILABLE) },
+		{ label: 'a 502', failure: bare(StatusCodes.BAD_GATEWAY) },
+		{ label: 'a 504', failure: bare(StatusCodes.GATEWAY_TIMEOUT) },
+		{ label: 'a 429', failure: bare(StatusCodes.TOO_MANY_REQUESTS) }
 	])('retries $label and returns the eventual token', async ({ failure }) => {
 		vi.useFakeTimers();
 
@@ -268,8 +272,8 @@ describe('CupboardClient token retry', () => {
 	});
 
 	it.each([
-		{ label: 'a 500 invariant', status: 500 },
-		{ label: 'a 507 over quota', status: 507 }
+		{ label: 'a 500 invariant', status: StatusCodes.INTERNAL_SERVER_ERROR },
+		{ label: 'a 507 over quota', status: StatusCodes.INSUFFICIENT_STORAGE }
 	])('does not retry $label, surfacing it at once', async ({ status }) => {
 		const { client, attempted } = scriptedClient([
 			() => new Response('boom\n', { status, headers: { 'cf-ray': 'ray-1' } })
@@ -299,7 +303,7 @@ describe('CupboardClient token retry', () => {
 		try {
 			// One attempt plus the four retries, all refused.
 			const { client, attempted } = scriptedClient(
-				Array.from({ length: 5 }, () => marked(503))
+				Array.from({ length: 5 }, () => marked(StatusCodes.SERVICE_UNAVAILABLE))
 			);
 
 			const pending = rejectedBy(() => exchange(client));
@@ -309,7 +313,7 @@ describe('CupboardClient token retry', () => {
 			expectCupboardHttpError(error);
 			expect({ attempts: attempted(), status: error.status }).toStrictEqual({
 				attempts: 5,
-				status: 503
+				status: StatusCodes.SERVICE_UNAVAILABLE
 			});
 		} finally {
 			vi.useRealTimers();
@@ -322,7 +326,7 @@ describe('CupboardClient token retry', () => {
 		try {
 			const controller = new AbortController();
 			const { client, attempted } = scriptedClient(
-				[marked(503)],
+				[marked(StatusCodes.SERVICE_UNAVAILABLE)],
 				controller.signal
 			);
 
