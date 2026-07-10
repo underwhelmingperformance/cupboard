@@ -94,8 +94,11 @@ export class ControlTrustSubjectRequiredError extends ServerHttpError {
 	}
 }
 
+// A missing deployment configuration is a server-side fault an operator must
+// fix; a client cannot clear it by retrying, so it joins the other
+// missing-configuration faults as a 500.
 export class ControlNotConfiguredError extends ServerHttpError {
-	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor() {
 		super('The control plane is not configured');
@@ -148,8 +151,12 @@ export class TenantNotFoundError extends ServerHttpError {
 	}
 }
 
+// Creation configures a tenant's Durable Object before it admits the slug, so
+// reaching an admitted tenant whose object was never configured is a broken
+// provisioning invariant: a server fault an operator resolves by re-running the
+// idempotent create, not a client condition and not one a retry clears.
 export class TenantNotConfiguredError extends ServerHttpError {
-	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 
 	constructor() {
 		super('Tenant is not configured');

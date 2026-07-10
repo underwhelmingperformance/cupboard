@@ -253,14 +253,14 @@ describe('control plane POST /signup', () => {
 		});
 	});
 
-	it('reports 503 when the signup issuer is unconfigured, issuing nothing', async () => {
+	it('reports 500 when the signup issuer is unconfigured, issuing nothing', async () => {
 		const response = await postSignup(
 			{ subject_token: 'x' },
 			{ CUPBOARD_SIGNUP_ISSUER: '' }
 		);
 		await response.text();
 
-		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 	});
 
 	it('reports 503 when the configured issuer is unavailable', async () => {

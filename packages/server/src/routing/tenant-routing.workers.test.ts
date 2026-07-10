@@ -108,7 +108,7 @@ describe('tenant routing', () => {
 		});
 	});
 
-	it('returns 503 for an admitted tenant whose Durable Object is unconfigured', async () => {
+	it('returns 500 for an admitted tenant whose Durable Object is unconfigured', async () => {
 		await provisionNamedTenant('gamma', { configure: false });
 
 		const jwks = await handlerFetch('/t/gamma/.well-known/jwks.json');
@@ -119,8 +119,8 @@ describe('tenant routing', () => {
 		// Both the key set and the AS metadata route to the Durable Object, so an
 		// unconfigured tenant advertises no identity.
 		expect({ jwks: jwks.status, asMetadata: asMetadata.status }).toStrictEqual({
-			jwks: StatusCodes.SERVICE_UNAVAILABLE,
-			asMetadata: StatusCodes.SERVICE_UNAVAILABLE
+			jwks: StatusCodes.INTERNAL_SERVER_ERROR,
+			asMetadata: StatusCodes.INTERNAL_SERVER_ERROR
 		});
 	});
 
