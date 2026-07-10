@@ -283,7 +283,7 @@ export async function provisionFixtureTenant(
  * optionally configures its Durable Object with its path-based issuer, and
  * seeds the membership filter and marker. Returns the tenant's issuer URL. Pass
  * `configure: false` to admit a slug whose Durable Object stays unconfigured, so a
- * test can prove that the route 503s on an unconfigured identity.
+ * test can prove that the route 500s on an unconfigured identity.
  */
 export async function provisionNamedTenant(
 	name: string,

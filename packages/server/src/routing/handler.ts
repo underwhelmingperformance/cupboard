@@ -137,7 +137,7 @@ function buildApp(): Hono<WorkerHonoEnv> {
 	});
 
 	// OAuth discovery (RFC 8414) and the auth public keys both proxy to the
-	// tenant's Durable Object, so an admitted but unconfigured tenant returns 503
+	// tenant's Durable Object, so an admitted but unconfigured tenant returns 500
 	// here, advertising and serving no identity until one has been assigned.
 	// The object builds the metadata from its own request, so the
 	// issuer stays the tenant's path-based URL.

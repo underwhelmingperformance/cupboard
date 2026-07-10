@@ -53,7 +53,7 @@ export class AuthKeysService {
 
 	// Identity is the sole source for the issuer and audience the tenant issues and
 	// verifies under. An unconfigured Durable Object has no identity and cannot issue
-	// or verify; an unconfigured tenant always fails with a 503.
+	// or verify; an unconfigured tenant always fails with a 500.
 	private requireIdentity(): TenantIdentity {
 		const identity = this.tenantIdentity.current();
 
@@ -161,7 +161,7 @@ export class AuthKeysService {
 	}
 
 	// RFC 8414 authorization-server metadata. Served from the Durable Object (not the
-	// edge) so an unconfigured tenant 503s through the fetch guard and advertises
+	// edge) so an unconfigured tenant 500s through the fetch guard and advertises
 	// no identity until one has been assigned. The endpoints are built from
 	// the request's own path-based URL, which provisioning stamps as the issuer, so
 	// the advertised issuer equals the `iss` of a token this tenant issues.

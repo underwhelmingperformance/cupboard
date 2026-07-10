@@ -249,7 +249,7 @@ describe('control plane POST /token', () => {
 		{ name: 'the wrapping secret', override: { CONTROL_KEY_WRAP_SECRET: '' } },
 		{ name: 'the audience', override: { CUPBOARD_CONTROL_AUDIENCE: '' } }
 	])(
-		'reports 503 when $name is not configured, issuing nothing',
+		'reports 500 when $name is not configured, issuing nothing',
 		async ({ override }) => {
 			const response = await postToken(
 				{
@@ -261,7 +261,7 @@ describe('control plane POST /token', () => {
 			);
 			await response.text();
 
-			expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+			expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 		}
 	);
 
@@ -287,7 +287,7 @@ describe('control plane POST /token', () => {
 		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 	});
 
-	it('reports 503 for authorization-server metadata when the control audience is unset', async () => {
+	it('reports 500 for authorization-server metadata when the control audience is unset', async () => {
 		const response = await controlFetch(
 			'/.well-known/oauth-authorization-server',
 			undefined,
@@ -295,7 +295,7 @@ describe('control plane POST /token', () => {
 		);
 		await response.text();
 
-		expect(response.status).toBe(StatusCodes.SERVICE_UNAVAILABLE);
+		expect(response.status).toBe(StatusCodes.INTERNAL_SERVER_ERROR);
 	});
 
 	it('publishes the control JWKS, distinct from any tenant key', async () => {

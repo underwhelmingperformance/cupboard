@@ -45,7 +45,7 @@ export class OidcTrustService {
 
 	private ownerConfig(): OwnerConfig | undefined {
 		// The assigned identity is the sole owner source: an unconfigured Durable
-		// Object has no owner rule to seed (and 503s before it serves anyway).
+		// Object has no owner rule to seed (and 500s before it serves anyway).
 		const identity = this.tenantIdentity.current();
 
 		if (identity === undefined) {
