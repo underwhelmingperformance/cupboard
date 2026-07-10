@@ -1,8 +1,16 @@
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
-import { CliAbortError } from '../errors.ts';
-
 import { isTransientResponse, retryingFetcher } from './retry.ts';
+
+// Stands in for a caller's typed abort reason (the CLI aborts with its own
+// error class); the wrapper must surface it unchanged.
+class TestAbortError extends Error {
+	constructor() {
+		super('aborted');
+		this.name = 'TestAbortError';
+	}
+}
 
 // A fetcher scripted with a fixed sequence of outcomes, recording every attempt
 // so a test can assert how many times it was called and what it received.
@@ -43,20 +51,20 @@ async function rejectedBy(run: () => Promise<unknown>): Promise<unknown> {
 	return undefined;
 }
 
-const ok = () => new Response('ok', { status: 200 });
+const ok = () => new Response('ok', { status: StatusCodes.OK });
 const status = (code: number) => () => new Response('', { status: code });
 
 describe('isTransientResponse', () => {
 	it.each([
-		{ code: 429, transient: true },
-		{ code: 502, transient: true },
-		{ code: 503, transient: true },
-		{ code: 504, transient: true },
-		{ code: 500, transient: false },
-		{ code: 507, transient: false },
-		{ code: 400, transient: false },
-		{ code: 404, transient: false },
-		{ code: 200, transient: false }
+		{ code: StatusCodes.TOO_MANY_REQUESTS, transient: true },
+		{ code: StatusCodes.BAD_GATEWAY, transient: true },
+		{ code: StatusCodes.SERVICE_UNAVAILABLE, transient: true },
+		{ code: StatusCodes.GATEWAY_TIMEOUT, transient: true },
+		{ code: StatusCodes.INTERNAL_SERVER_ERROR, transient: false },
+		{ code: StatusCodes.INSUFFICIENT_STORAGE, transient: false },
+		{ code: StatusCodes.BAD_REQUEST, transient: false },
+		{ code: StatusCodes.NOT_FOUND, transient: false },
+		{ code: StatusCodes.OK, transient: false }
 	])('treats $code as transient=$transient', ({ code, transient }) => {
 		expect(isTransientResponse(new Response('', { status: code }))).toBe(
 			transient
@@ -65,44 +73,49 @@ describe('isTransientResponse', () => {
 });
 
 describe('retryingFetcher', () => {
-	it.each([429, 502, 503, 504])(
-		'retries a %i and returns the eventual success',
-		async (code) => {
-			vi.useFakeTimers();
+	it.each([
+		StatusCodes.TOO_MANY_REQUESTS,
+		StatusCodes.BAD_GATEWAY,
+		StatusCodes.SERVICE_UNAVAILABLE,
+		StatusCodes.GATEWAY_TIMEOUT
+	])('retries a %i and returns the eventual success', async (code) => {
+		vi.useFakeTimers();
 
-			try {
-				const { fetcher, attempts } = scriptedFetcher([
-					status(code),
-					status(code),
-					ok
-				]);
+		try {
+			const { fetcher, attempts } = scriptedFetcher([
+				status(code),
+				status(code),
+				ok
+			]);
 
-				const pending = retryingFetcher(fetcher)('https://x.test');
-				await vi.advanceTimersByTimeAsync(60_000);
-				const response = await pending;
-
-				expect({ status: response.status, attempts: attempts() }).toStrictEqual(
-					{ status: 200, attempts: 3 }
-				);
-			} finally {
-				vi.useRealTimers();
-			}
-		}
-	);
-
-	it.each([400, 404, 500, 507])(
-		'does not retry a %i, returning it at once',
-		async (code) => {
-			const { fetcher, attempts } = scriptedFetcher([status(code)]);
-
-			const response = await retryingFetcher(fetcher)('https://x.test');
+			const pending = retryingFetcher(fetcher)('https://x.test');
+			await vi.advanceTimersByTimeAsync(60_000);
+			const response = await pending;
 
 			expect({ status: response.status, attempts: attempts() }).toStrictEqual({
-				status: code,
-				attempts: 1
+				status: StatusCodes.OK,
+				attempts: 3
 			});
+		} finally {
+			vi.useRealTimers();
 		}
-	);
+	});
+
+	it.each([
+		StatusCodes.BAD_REQUEST,
+		StatusCodes.NOT_FOUND,
+		StatusCodes.INTERNAL_SERVER_ERROR,
+		StatusCodes.INSUFFICIENT_STORAGE
+	])('does not retry a %i, returning it at once', async (code) => {
+		const { fetcher, attempts } = scriptedFetcher([status(code)]);
+
+		const response = await retryingFetcher(fetcher)('https://x.test');
+
+		expect({ status: response.status, attempts: attempts() }).toStrictEqual({
+			status: code,
+			attempts: 1
+		});
+	});
 
 	it('retries a network fault and returns the eventual success', async () => {
 		vi.useFakeTimers();
@@ -118,7 +131,7 @@ describe('retryingFetcher', () => {
 			const response = await pending;
 
 			expect({ status: response.status, attempts: attempts() }).toStrictEqual({
-				status: 200,
+				status: StatusCodes.OK,
 				attempts: 2
 			});
 		} finally {
@@ -132,7 +145,7 @@ describe('retryingFetcher', () => {
 		try {
 			// One attempt plus the four retries, all refused.
 			const { fetcher, attempts } = scriptedFetcher(
-				Array.from({ length: 5 }, () => status(503))
+				Array.from({ length: 5 }, () => status(StatusCodes.SERVICE_UNAVAILABLE))
 			);
 
 			const pending = retryingFetcher(fetcher)('https://x.test');
@@ -140,7 +153,7 @@ describe('retryingFetcher', () => {
 			const response = await pending;
 
 			expect({ status: response.status, attempts: attempts() }).toStrictEqual({
-				status: 503,
+				status: StatusCodes.SERVICE_UNAVAILABLE,
 				attempts: 5
 			});
 		} finally {
@@ -152,7 +165,10 @@ describe('retryingFetcher', () => {
 		vi.useFakeTimers();
 
 		try {
-			const { fetcher, attempts, bodies } = scriptedFetcher([status(503), ok]);
+			const { fetcher, attempts, bodies } = scriptedFetcher([
+				status(StatusCodes.SERVICE_UNAVAILABLE),
+				ok
+			]);
 			const request = new Request('https://x.test', {
 				method: 'POST',
 				body: 'payload'
@@ -177,7 +193,10 @@ describe('retryingFetcher', () => {
 		try {
 			const { fetcher, attempts } = scriptedFetcher([
 				() =>
-					new Response('', { status: 503, headers: { 'retry-after': '2' } }),
+					new Response('', {
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						headers: { 'retry-after': '2' }
+					}),
 				ok
 			]);
 
@@ -200,7 +219,10 @@ describe('retryingFetcher', () => {
 		try {
 			const { fetcher, attempts } = scriptedFetcher([
 				() =>
-					new Response('', { status: 503, headers: { 'retry-after': '3600' } }),
+					new Response('', {
+						status: StatusCodes.SERVICE_UNAVAILABLE,
+						headers: { 'retry-after': '3600' }
+					}),
 				ok
 			]);
 
@@ -222,17 +244,20 @@ describe('retryingFetcher', () => {
 
 		try {
 			const controller = new AbortController();
-			const { fetcher, attempts } = scriptedFetcher([status(503), ok]);
+			const { fetcher, attempts } = scriptedFetcher([
+				status(StatusCodes.SERVICE_UNAVAILABLE),
+				ok
+			]);
 
 			const pending = rejectedBy(() =>
 				retryingFetcher(fetcher)('https://x.test', {
 					signal: controller.signal
 				})
 			);
-			controller.abort(new CliAbortError());
+			controller.abort(new TestAbortError());
 			await vi.advanceTimersByTimeAsync(60_000);
 
-			expect(await pending).toBeInstanceOf(CliAbortError);
+			expect(await pending).toBeInstanceOf(TestAbortError);
 			expect(attempts()).toBe(1);
 		} finally {
 			vi.useRealTimers();
