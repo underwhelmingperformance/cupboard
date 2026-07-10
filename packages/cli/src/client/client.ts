@@ -45,13 +45,7 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
-import {
-	backoffDelay,
-	isTransientResponse,
-	maxTransientRetries,
-	transientResponseDelay
-} from './retry.ts';
-import { parseWorkerUrl, reachableFetcher } from './transport.ts';
+import { parseWorkerUrl, resilientFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
 
@@ -64,7 +58,7 @@ export class CupboardClient {
 
 		return new CupboardClient(
 			parseWorkerUrl(value),
-			reachableFetcher(fetch),
+			resilientFetcher(fetch),
 			cachePrefixFor(resolved.cache ?? DEFAULT_CACHE),
 			resolved.signal
 		);
@@ -150,55 +144,35 @@ export class CupboardClient {
 		);
 	}
 
-	// A failed token grant fails the whole CI run or push behind it, so a
-	// transient refusal (a control-plane blip, an unreachable issuer) is retried
-	// with backoff. A 503 is only retried when the server marks it temporary
-	// with a Retry-After.
+	// A failed token grant fails the whole CI run or push behind it. The client's
+	// fetcher already retries a transient refusal (a network fault, a gateway
+	// blip, an overloaded 503) with backoff, so this only maps a settled non-ok
+	// response to a typed error.
 	private async postTokenForm(
 		form: Readonly<Record<string, string>>
 	): Promise<Response> {
+		throwIfAborted(this.signal);
+
 		const url = this.resolve('/token');
 		const body = new URLSearchParams(form).toString();
+		const response = await this.fetcher(url, {
+			method: 'POST',
+			headers: { 'content-type': 'application/x-www-form-urlencoded' },
+			body,
+			signal: this.signal
+		});
 
-		for (let retries = 0; ;) {
-			throwIfAborted(this.signal);
-
-			let response: Response;
-			try {
-				response = await this.fetcher(url, {
-					method: 'POST',
-					headers: { 'content-type': 'application/x-www-form-urlencoded' },
-					body,
-					signal: this.signal
-				});
-			} catch (error) {
-				if (this.signal?.aborted === true || retries >= maxTransientRetries) {
-					throw error;
-				}
-
-				retries += 1;
-				await backoffDelay(retries, this.signal);
-				continue;
-			}
-
-			if (isTransientResponse(response) && retries < maxTransientRetries) {
-				retries += 1;
-				await transientResponseDelay(response, retries, this.signal);
-				continue;
-			}
-
-			if (!response.ok) {
-				throw new CupboardHttpError(
-					'POST',
-					'/token',
-					response.status,
-					await response.text(),
-					rayOf(response)
-				);
-			}
-
-			return response;
+		if (!response.ok) {
+			throw new CupboardHttpError(
+				'POST',
+				'/token',
+				response.status,
+				await response.text(),
+				rayOf(response)
+			);
 		}
+
+		return response;
 	}
 
 	private async parseJson<S extends z.ZodType>(

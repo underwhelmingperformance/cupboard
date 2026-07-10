@@ -15,6 +15,8 @@ import {
 	type VerifyResult
 } from '@cupboard/shared/sigstore';
 
+import { resilientFetcher } from '../client/transport.ts';
+
 export interface LocalAttestationVerifyOptions extends AttestationPolicyOptions {
 	readonly bundles: readonly string[];
 	readonly narHash: string;
@@ -82,7 +84,7 @@ export async function verifyRemoteAttestations(
 	dependencies: AttestationVerifyDependencies = {}
 ): Promise<readonly VerifyResult[]> {
 	const policy = identityPolicy(options);
-	const fetcher = dependencies.fetch ?? fetch;
+	const fetcher = dependencies.fetch ?? resilientFetcher();
 	const base = cacheUrl(options.url, options.cache);
 	const readHeaders = readAuthHeaders(options);
 	const narInfo = await fetchNarInfo(

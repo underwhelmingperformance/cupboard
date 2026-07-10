@@ -16,6 +16,7 @@ import {
 	FakeCommitSocket,
 	FakeUpgradeFailure
 } from './commit-socket.test-support.ts';
+import { resilientFetcher } from './transport.ts';
 
 interface CapturedRequest {
 	readonly url: string;
@@ -186,7 +187,7 @@ function scriptedClient(
 
 	const client = new CupboardClient(
 		new URL('https://cupboard.test'),
-		() => {
+		resilientFetcher(() => {
 			const next = attempts[attempted];
 			attempted += 1;
 
@@ -195,7 +196,7 @@ function scriptedClient(
 			}
 
 			return Promise.resolve(next());
-		},
+		}),
 		'',
 		signal
 	);
@@ -209,25 +210,20 @@ const exchange = (client: CupboardClient) =>
 		'urn:ietf:params:oauth:token-type:id_token'
 	);
 
-const markedTransient = (status: number) => () =>
+const marked = (status: number) => () =>
 	new Response('Temporarily unavailable\n', {
 		status,
 		headers: { 'retry-after': '5' }
 	});
-const bareUnavailable = () =>
-	new Response('boom\n', { status: 503, headers: { 'cf-ray': 'ray-1' } });
+const bare = (status: number) => () => new Response('', { status });
 
 describe('CupboardClient token retry', () => {
 	it.each([
-		{ label: 'a 503 carrying Retry-After', failure: markedTransient(503) },
-		{
-			label: 'an unmapped 500',
-			failure: () => new Response('', { status: 500 })
-		},
-		{
-			label: 'an unmapped 502',
-			failure: () => new Response('', { status: 502 })
-		}
+		{ label: 'a 503 carrying Retry-After', failure: marked(503) },
+		{ label: 'a bare 503', failure: bare(503) },
+		{ label: 'a 502', failure: bare(502) },
+		{ label: 'a 504', failure: bare(504) },
+		{ label: 'a 429', failure: bare(429) }
 	])('retries $label and returns the eventual token', async ({ failure }) => {
 		vi.useFakeTimers();
 
@@ -271,8 +267,13 @@ describe('CupboardClient token retry', () => {
 		}
 	});
 
-	it('does not retry a 503 without Retry-After', async () => {
-		const { client, attempted } = scriptedClient([bareUnavailable]);
+	it.each([
+		{ label: 'a 500 invariant', status: 500 },
+		{ label: 'a 507 over quota', status: 507 }
+	])('does not retry $label, surfacing it at once', async ({ status }) => {
+		const { client, attempted } = scriptedClient([
+			() => new Response('boom\n', { status, headers: { 'cf-ray': 'ray-1' } })
+		]);
 
 		const error = await rejectedBy(() => exchange(client));
 
@@ -287,7 +288,7 @@ describe('CupboardClient token retry', () => {
 			attempts: 1,
 			method: 'POST',
 			path: '/token',
-			status: 503,
+			status,
 			ray: 'ray-1'
 		});
 	});
@@ -298,7 +299,7 @@ describe('CupboardClient token retry', () => {
 		try {
 			// One attempt plus the four retries, all refused.
 			const { client, attempted } = scriptedClient(
-				Array.from({ length: 5 }, () => markedTransient(503))
+				Array.from({ length: 5 }, () => marked(503))
 			);
 
 			const pending = rejectedBy(() => exchange(client));
@@ -321,7 +322,7 @@ describe('CupboardClient token retry', () => {
 		try {
 			const controller = new AbortController();
 			const { client, attempted } = scriptedClient(
-				[markedTransient(503)],
+				[marked(503)],
 				controller.signal
 			);
 

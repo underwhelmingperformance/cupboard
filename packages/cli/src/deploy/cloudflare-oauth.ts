@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { throwIfAborted } from '../abort.ts';
 import { decodeJwtPayload } from '../auth/jwt.ts';
 import { obtainAuthorizationCode, postForm } from '../auth/oidc-login.ts';
+import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
 /** Base of every failure mode of the Cloudflare browser login. */
@@ -136,7 +137,7 @@ export async function cloudflareLogin(
 ): Promise<CloudflareGrant> {
 	throwIfAborted(options.signal);
 
-	const fetcher = options.fetcher ?? fetch;
+	const fetcher = options.fetcher ?? resilientFetcher();
 	const now = options.now ?? Date.now;
 
 	const obtained = await obtainAuthorizationCode({
@@ -176,7 +177,7 @@ export async function cloudflareLogin(
  */
 export async function refreshCloudflareGrant(
 	previous: CloudflareGrant,
-	fetcher: typeof fetch = fetch,
+	fetcher: typeof fetch = resilientFetcher(),
 	now: () => number = Date.now,
 	signal?: AbortSignal
 ): Promise<CloudflareGrant | undefined> {

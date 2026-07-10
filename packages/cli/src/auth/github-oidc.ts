@@ -3,6 +3,7 @@ import { env } from 'node:process';
 import { z } from 'zod';
 
 import { throwIfAborted } from '../abort.ts';
+import { resilientFetcher } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
 // The OIDC token request endpoint and bearer GitHub Actions injects when a
@@ -81,7 +82,7 @@ export async function fetchGithubOidcToken(options: {
 	const url = new URL(requestUrl);
 	url.searchParams.set('audience', options.audience);
 
-	const fetcher = options.fetcher ?? fetch;
+	const fetcher = options.fetcher ?? resilientFetcher();
 	const response = await fetcher(url, {
 		headers: { authorization: `Bearer ${requestToken}` },
 		signal: options.signal

@@ -1,33 +1,76 @@
 import { StatusCodes } from 'http-status-codes';
 
+import { throwIfAborted } from '../abort.ts';
+
 // A long push makes thousands of calls against one single-threaded Durable
-// Object and streams as many blobs, so an occasional unmapped 5xx or dropped
+// Object and streams as many blobs, so an occasional gateway blip or dropped
 // connection is expected. A few backed-off retries keep one such blip from
 // failing the whole push.
 export const maxTransientRetries = 4;
 const baseRetryDelayMs = 250;
 const maxRetryDelayMs = 5000;
 
-const serviceUnavailable: number = StatusCodes.SERVICE_UNAVAILABLE;
-const insufficientStorage: number = StatusCodes.INSUFFICIENT_STORAGE;
-const serverErrorThreshold: number = StatusCodes.INTERNAL_SERVER_ERROR;
+// The statuses that mean "make the same request again": a rate limit and the
+// gateway/overload conditions a server clears on its own. A deterministic
+// refusal keeps its own status and is never in this set: a `500` invariant, an
+// over-quota `507`, or any 4xx surfaces to the caller on the first response.
+// `Retry-After`, when present, only sets how long to wait, never whether.
+const retryableStatuses = new Set<number>([
+	StatusCodes.TOO_MANY_REQUESTS,
+	StatusCodes.BAD_GATEWAY,
+	StatusCodes.SERVICE_UNAVAILABLE,
+	StatusCodes.GATEWAY_TIMEOUT
+]);
+
+/** Whether a wire response is a transient server failure worth retrying. */
+export function isTransientResponse(response: Response): boolean {
+	return retryableStatuses.has(response.status);
+}
 
 /**
- * Whether a wire response is a transient server failure worth retrying. An
- * unmapped 5xx is transient by default. A 503 is a deterministic refusal (an
- * unconfigured tenant) unless the server marks it temporary with a
- * `Retry-After`; an over-quota 507 is always deterministic.
+ * Wraps a fetcher so a transient failure retries with back-off: a network fault
+ * (DNS, refused or reset connection) or a {@link isTransientResponse} status
+ * backs off and repeats, up to {@link maxTransientRetries} times, so a single
+ * gateway blip does not fail the call. A deterministic response is returned on
+ * its first attempt for the caller to handle. The wait honours the server's
+ * `Retry-After` when present (capped) and is abort-aware, so a Ctrl-C during it
+ * is prompt.
+ *
+ * A `Request` input is cloned per attempt so its body survives a retry; callers
+ * that retry a body must pass it as re-readable bytes, not a one-shot stream.
  */
-export function isTransientResponse(response: Response): boolean {
-	if (response.status === serviceUnavailable) {
-		return response.headers.has('retry-after');
-	}
+export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
+	return async (input, init) => {
+		const signal = init?.signal ?? undefined;
+		let retries = 0;
 
-	if (response.status === insufficientStorage) {
-		return false;
-	}
+		for (;;) {
+			throwIfAborted(signal);
 
-	return response.status >= serverErrorThreshold;
+			const attempt = input instanceof Request ? input.clone() : input;
+
+			let response: Response;
+			try {
+				response = await fetcher(attempt, init);
+			} catch (error) {
+				if (signal?.aborted === true || retries >= maxTransientRetries) {
+					throw error;
+				}
+
+				retries += 1;
+				await backoffDelay(retries, signal);
+				continue;
+			}
+
+			if (isTransientResponse(response) && retries < maxTransientRetries) {
+				retries += 1;
+				await transientResponseDelay(response, retries, signal);
+				continue;
+			}
+
+			return response;
+		}
+	};
 }
 
 /**
