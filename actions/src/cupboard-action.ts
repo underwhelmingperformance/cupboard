@@ -12,6 +12,7 @@ import { arch, env, platform } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { createOctokitClient } from '@cupboard/shared/octokit';
+import { retryingFetcher } from '@cupboard/shared/retry';
 import {
 	identityPolicy,
 	resultFor,
@@ -547,7 +548,7 @@ async function downloadAsset(
 	destination: string,
 	githubToken: string
 ): Promise<void> {
-	const response = await fetch(asset.url, {
+	const response = await retryingFetcher(fetch)(asset.url, {
 		headers: requestHeaders(githubToken, {
 			accept: 'application/octet-stream'
 		})
@@ -828,9 +829,10 @@ function environmentFileBlock(name: string, value: string): string {
 async function fetchTrustedPublicKey(
 	inputs: ConfigureNixInputs
 ): Promise<string> {
-	const response = await fetch(cachePublicKeyUrl(inputs.cacheUrl), {
-		headers: cachePublicKeyRequestHeaders()
-	});
+	const response = await retryingFetcher(fetch)(
+		cachePublicKeyUrl(inputs.cacheUrl),
+		{ headers: cachePublicKeyRequestHeaders() }
+	);
 
 	if (!response.ok) {
 		throw new CachePublicKeyError(
