@@ -111,15 +111,16 @@ already exists; `actions/attest` below produces one with the right subjects:
       ./dist/result.intoto.jsonl
 ```
 
-## `actions/attest`
+## `actions/build-paths` and `actions/attest`
 
 `actions/push` attaches a bundle but does not create one. cupboard files a
 bundle against a store path only when the bundle's in-toto subject digest equals
 that path's NAR hash. An attestation built over a file's own digest, which is
 what `actions/attest-build-provenance` records by default, therefore does not
-match. `actions/attest` produces a matching bundle: it resolves each path with
-`nix path-info`, records the NAR hashes as subjects, and signs a single SLSA
-build-provenance attestation over all of them.
+match. `actions/build-paths` builds the requested installables and writes a
+current-run receipt recording which final outputs Nix actually built. The attest
+action verifies those paths and NAR hashes against the live store, then signs a
+single SLSA build-provenance attestation over them.
 
 ```yaml
 permissions:
@@ -129,20 +130,23 @@ permissions:
 
 steps:
   - uses: actions/checkout@v6
-  - run: nix build .#package
+  - id: build
+    uses: owner/repo/actions/build-paths@v1
+    with:
+      installables: .#package
   - id: attest
     uses: owner/repo/actions/attest@v1
     with:
-      paths: |
-        ./result
+      receipt-file: ${{ steps.build.outputs.receipt-file }}
 ```
 
-`paths` is newline-delimited and accepts the same store paths, derivations, and
-installables as `actions/push`. Only paths the runner's store built become
-subjects. A path substituted from a cache was not built by this run, so
-attesting it would record a false provenance claim; the action skips it with a
-warning. When no path qualifies, nothing is signed and `bundle-path` is empty,
-which `actions/push` accepts as no attestations.
+`installables` is newline-delimited. The build action retries three times and
+outputs the realised `paths`, a `paths-file`, and the `receipt-file` consumed by
+the attest action. A path substituted from a cache or already present from an
+earlier run is not recorded as built. Outputs returned by a remote builder are
+rebuilt and compared with `nix build --rebuild` before they qualify. When no
+path qualifies, nothing is signed and `bundle-path` is empty, which
+`actions/push` accepts as no attestations.
 
 The action outputs `bundle-path`, the signed bundle covering every qualifying
 path, alongside `checksums-file` and `subject-count`. `id-token: write` lets the
@@ -169,25 +173,26 @@ steps:
   - uses: owner/repo/actions/setup@v1
     with:
       cache-url: https://cupboard.example.workers.dev/t/<slug>
-  - run: nix build .#package
+  - id: build
+    uses: owner/repo/actions/build-paths@v1
+    with:
+      installables: .#package
   - id: attest
     uses: owner/repo/actions/attest@v1
     with:
-      paths: |
-        ./result
+      receipt-file: ${{ steps.build.outputs.receipt-file }}
   - uses: owner/repo/actions/push@v1
     with:
       url: https://cupboard.example.workers.dev/t/<slug>
-      paths: |
-        ./result
+      paths: ${{ steps.build.outputs.paths }}
       attestations: ${{ steps.attest.outputs.bundle-path }}
 ```
 
-`setup` adds the cache as a substituter for the build, `attest` signs the
-provenance over the built paths' NAR hashes, and `push` uploads the paths and
-files the bundle against them. Pushing needs an `oidc_trust` rule on the tenant
-that accepts this repository's GitHub Actions token, added with
-`cupboard oidc-trust`.
+`setup` adds the cache as a substituter, `build-paths` records what this run
+built, `attest` signs those paths' NAR hashes, and `push` uploads the paths and
+files the bundle against them. Pushing needs a trust rule on the tenant that
+accepts this repository's GitHub Actions token, added with
+`cupboard oidc-trust`; see [docs/trust-rules.md](./trust-rules.md).
 
 ## The reusable workflow
 
@@ -228,6 +233,167 @@ The remaining inputs: `installable` picks what to build (the default is `.`, the
 flake at the repository root), `attest` turns provenance signing off for tenants
 that do not accept it, `runs-on` picks the runner, and `trusted-public-key` and
 `cupboard-version` pass through to `actions/setup`.
+
+### Publishing a target manifest
+
+`cupboard-flake-publish.yml` publishes a set of flake outputs while avoiding
+work the cache already holds. Its `targets` input names a flake output that
+evaluates to a list such as:
+
+```nix
+[
+  {
+    attr = ".#packages.x86_64-linux.server";
+    system = "x86_64-linux";
+    os = "ubuntu-latest";
+    remote = true;
+    rootSuffix = "x86_64-linux/server";
+  }
+  {
+    attr = ".#darwinConfigurations.laptop.system";
+    system = "aarch64-darwin";
+    os = "macos-latest";
+    remote = false;
+    bestEffort = true;
+    rootSuffix = "aarch64-darwin/darwin-laptop";
+    outputs = ["out"];
+  }
+]
+```
+
+`outputs` defaults to `["out"]` and `bestEffort` to `false`. A best-effort
+target does not fail the whole matrix when its build fails, and one that fails
+to evaluate is planned as a direct build, so the failure surfaces in its own
+job. `os` selects the runner; the manifest is evaluated from the flake and is
+therefore pull-request-controlled, so every label it uses must be named in the
+`CUPBOARD_RUNNERS` repository variable, set through repository settings where a
+pull request cannot reach. Labels are printable ASCII without spaces; GitHub
+compares them case-insensitively, and that comparison is only exact within
+ASCII, so anything wider is refused. Nothing is allowed by default, not even
+GitHub-hosted labels: a self-hosted runner can carry any label, so the permitted
+set is entirely the operator's, and a `label@group` entry additionally pins the
+label to a runner group (see "Runner provenance" below). `remote` marks a group
+that realises its derivations on the configured remote builders: those jobs
+build with `--max-jobs 0` and apply the `builders` specification, the
+`builder_ssh_key` and `builder_ssh_config` secrets, and the
+`builder-known-hosts` input.
+
+### Runner provenance
+
+A label is a spelling, not a provenance claim: GitHub routes a job to any runner
+carrying the requested labels, and self-hosted runners accept arbitrary manually
+assigned labels, hosted-sounding names included. GitHub's boundary for pinning
+where a job may land is the runner group. The workflow therefore takes its
+runner configuration only from repository variables, which a pull request cannot
+edit, and two of them must be set before the workflow runs:
+
+- `CUPBOARD_RUNNERS` names every `runs-on` label the target manifest may use,
+  separated by whitespace or commas. A bare entry (`ubuntu-latest`) permits the
+  spelling and routes by label alone; an entry written as `label@group`
+  (`nix-builder@build-farm`) routes that label to the named runner group as
+  `runs-on: { group, labels }`. Labels and group names must each be one or more
+  printable ASCII characters excluding spaces, commas and `@`, a narrower
+  contract than GitHub's: labels because case-insensitive matching is only exact
+  within ASCII, `@` because it separates the two, and the rest as this syntax's
+  own grammar. Rename a group that cannot be expressed. Example:
+
+  ```text
+  ubuntu-latest, macos-14, nix-builder@build-farm
+  ```
+
+- `CUPBOARD_PLAN_RUNNER` is the plan job's own `runs-on` value, as JSON, and it
+  is required: the plan job holds the input SSH key, read credentials and OIDC
+  permission while evaluating pull-request-controlled Nix, so it has no fallback
+  runner. Either a plain label or a group selector:
+
+  ```text
+  "ubuntu-latest"
+  {"group":"trusted","labels":["ubuntu-latest"]}
+  ```
+
+Bare labels remain vulnerable to collisions: a self-hosted runner registered
+with a permitted spelling is eligible for those jobs. Either qualify every entry
+with a runner group, or enforce the boundary in the organisation's runner policy
+by restricting self-hosted runner groups away from the repositories that call
+this workflow and disallowing repository-level runner registration.
+
+Call the workflow with the cache and root prefix for the current event:
+
+```yaml
+jobs:
+  publish:
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: owner/cupboard/.github/workflows/cupboard-flake-publish.yml@main
+    with:
+      url: https://cupboard.example.workers.dev/t/acme
+      targets: .#cupboardOutputs
+      cache: pr-${{ github.event.pull_request.number }}
+      root-prefix: github:acme/app/pr-${{ github.event.pull_request.number }}
+      ttl: 14d
+      nix-config: .#nix.substituterConfig
+      builders: ssh://builds.example.com x86_64-linux,aarch64-linux - 100 1
+    secrets:
+      builder_ssh_key: ${{ secrets.BUILDER_SSH_KEY }}
+      input_ssh_key: ${{ secrets.FLAKE_INPUT_SSH_KEY }}
+```
+
+Any builder Nix can reach over SSH works. `builder_ssh_config` carries per-host
+connection settings as ssh_config Host blocks, and it is a secret so
+authentication material may appear in it. nixbuild.net's auth tokens, for
+example, travel in the SSH connection environment:
+
+```yaml
+secrets:
+  builder_ssh_config: |
+    Host eu.nixbuild.net
+      User authtoken
+      PreferredAuthentications none
+      SetEnv NIXBUILDNET_TOKEN=${{ secrets.NIXBUILD_TOKEN }}
+```
+
+For a tenant whose reads are private, also pass `read_user` and `read_password`
+as workflow secrets. `actions/setup`'s netrc file only covers Nix's own
+substituter reads, so the plan job's own cache probes need the same credentials
+passed through separately: `actions/plan` accepts them as
+`read-user`/`read-password` and sends them as an HTTP `Authorization: Basic`
+header on every narinfo probe.
+
+The plan first asks cupboard to retain each target whose output paths are
+already servable. Those targets get no runner job. For the remaining targets,
+Nix's derivation JSON identifies outputs referenced by more than one target. An
+uncached shared output is built and pushed once before the target matrix fans
+out. Paths already served by cupboard are not seeded.
+
+Most output-addressed derivations expose their store path during evaluation.
+When Nix deliberately leaves a shared output path unknown, the planner groups
+the affected targets on one runner so Nix realises that derivation once. Their
+normal target jobs then substitute the result from cupboard and establish the
+individual retention roots. This fallback is based on the derivation graph; it
+does not guess from changed source files or attribute names. Like seeding, the
+grouped build is best-effort: when it fails, each affected target's own job
+retries the work and reports its own result.
+
+`cupboard-version` pins the CLI release the jobs install, and `maximise-space`
+(default `true`) reclaims runner disk space before building; disable it on
+self-hosted runners, where the reclamation would be destructive.
+
+The workflow accepts `push: false` for a build-only validation run. In that mode
+it does not inspect the cache or derivation graph, and builds every target
+directly without attesting or publishing it.
+
+The jobs belong to cupboard's reusable workflow, while the standard repository
+and ref claims still describe the caller. A trust rule that restricts
+`job_workflow_ref` must therefore name
+`owner/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main`
+and keep its caller repository and ref restrictions. [GitHub documents this
+called-workflow claim][github-oidc-reusable-workflows] separately from the
+standard caller claims.
+
+[github-oidc-reusable-workflows]:
+  https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows
 
 Always reference the workflow as `@main`, not by a local path. The tenant's
 trust rule can then require that pushes come from this exact file on `main`, so

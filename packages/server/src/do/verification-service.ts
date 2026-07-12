@@ -8,6 +8,7 @@ import {
 	type ParsedUploadPathNegotiation,
 	type ParsedUploadStatusResponse
 } from '@cupboard/protocol/upload';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 
 import { type NarVerification } from '../blob/nar-verify.ts';
@@ -27,7 +28,6 @@ import {
 import {
 	batchNonEmpty,
 	chunk,
-	mapWithConcurrency,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';

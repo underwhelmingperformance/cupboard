@@ -1,15 +1,21 @@
 import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import {
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
+	CacheProbeError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
 	CommandFailedError,
 	CupboardReportedError,
+	DerivationGraphShapeError,
+	DerivationNodeMissingError,
+	DerivationRootCountError,
+	DuplicateGroupKeyError,
 	GithubApiError,
 	InvalidChecksumLineError,
 	InvalidInputError,
@@ -17,8 +23,16 @@ import {
 	MissingChecksumError,
 	MissingInputError,
 	NoReleaseFoundError,
+	PublishPlanInvariantError,
+	PublishTargetsJsonError,
+	PublishTargetsSchemaError,
 	PushSummaryMissingError,
 	ReleaseAssetNotFoundError,
+	RootEnsureCommandError,
+	RootEnsureResultInvalidError,
+	RootEnsureResultMissingError,
+	TargetEvaluationError,
+	TargetEvaluationResponseError,
 	UnsupportedPlatformError
 } from './errors.ts';
 
@@ -92,6 +106,71 @@ describe('action errors', () => {
 		[
 			'CachePublicKeyEmptyResponseError',
 			new CachePublicKeyEmptyResponseError('https://cache.example.test/pubkey'),
+			genericExitCode
+		],
+		[
+			'PublishTargetsJsonError',
+			new PublishTargetsJsonError(new SyntaxError('bad JSON')),
+			usageExitCode
+		],
+		[
+			'PublishTargetsSchemaError',
+			new PublishTargetsSchemaError(new z.ZodError([])),
+			usageExitCode
+		],
+		[
+			'TargetEvaluationError',
+			new TargetEvaluationError('.#app', { cause: new Error('failed') }),
+			genericExitCode
+		],
+		[
+			'TargetEvaluationResponseError',
+			new TargetEvaluationResponseError('.#app', new SyntaxError('bad JSON')),
+			genericExitCode
+		],
+		[
+			'DerivationGraphShapeError',
+			new DerivationGraphShapeError('.#app', { cause: new z.ZodError([]) }),
+			genericExitCode
+		],
+		[
+			'DerivationRootCountError',
+			new DerivationRootCountError('.#app', 2),
+			genericExitCode
+		],
+		[
+			'DerivationNodeMissingError',
+			new DerivationNodeMissingError('.#app', '/nix/store/app.drv'),
+			genericExitCode
+		],
+		[
+			'DuplicateGroupKeyError',
+			new DuplicateGroupKeyError('seed-a'),
+			genericExitCode
+		],
+		[
+			'RootEnsureCommandError',
+			new RootEnsureCommandError('main', { cause: new Error('failed') }),
+			genericExitCode
+		],
+		[
+			'RootEnsureResultMissingError',
+			new RootEnsureResultMissingError('main'),
+			genericExitCode
+		],
+		[
+			'RootEnsureResultInvalidError',
+			new RootEnsureResultInvalidError('main', { cause: new Error('bad') }),
+			genericExitCode
+		],
+		[
+			'PublishPlanInvariantError',
+			new PublishPlanInvariantError('index 0'),
+			genericExitCode
+		],
+		[
+			'CacheProbeError',
+			new CacheProbeError('/nix/store/path', 500),
 			genericExitCode
 		],
 		[
@@ -297,5 +376,93 @@ describe('CommandFailedError', () => {
 		});
 
 		expect(error.cause).toBe(cause);
+	});
+});
+
+describe('TargetEvaluationError', () => {
+	it('carries the attribute and the evaluator failure as its cause', () => {
+		const cause = new Error('cannot fetch the private input');
+		const error = new TargetEvaluationError('.#app', { cause });
+
+		expect({ attribute: error.attribute, cause: error.cause }).toStrictEqual({
+			attribute: '.#app',
+			cause
+		});
+	});
+});
+
+describe('DerivationGraphShapeError', () => {
+	it('carries the attribute and the parse failure as its cause', () => {
+		const cause = new z.ZodError([]);
+		const error = new DerivationGraphShapeError('.#app', { cause });
+
+		expect({ attribute: error.attribute, cause: error.cause }).toStrictEqual({
+			attribute: '.#app',
+			cause
+		});
+	});
+});
+
+describe('DerivationRootCountError', () => {
+	it('carries the attribute and the root count', () => {
+		const error = new DerivationRootCountError('.#app', 2);
+
+		expect({ attribute: error.attribute, count: error.count }).toStrictEqual({
+			attribute: '.#app',
+			count: 2
+		});
+	});
+});
+
+describe('DerivationNodeMissingError', () => {
+	it('carries the attribute and the missing derivation path', () => {
+		const error = new DerivationNodeMissingError('.#app', '/nix/store/app.drv');
+
+		expect({
+			attribute: error.attribute,
+			drvPath: error.drvPath
+		}).toStrictEqual({ attribute: '.#app', drvPath: '/nix/store/app.drv' });
+	});
+});
+
+describe('DuplicateGroupKeyError', () => {
+	it('carries the colliding key', () => {
+		expect(new DuplicateGroupKeyError('seed-a').key).toBe('seed-a');
+	});
+});
+
+describe('PublishPlanInvariantError', () => {
+	it('carries the missing subject', () => {
+		expect(new PublishPlanInvariantError('index 0').subject).toBe('index 0');
+	});
+});
+
+describe('RootEnsureCommandError', () => {
+	it('carries the root and the runner failure as its cause', () => {
+		const cause = new Error('spawn cupboard ENOENT');
+		const error = new RootEnsureCommandError('main', { cause });
+
+		expect({ root: error.root, cause: error.cause }).toStrictEqual({
+			root: 'main',
+			cause
+		});
+	});
+});
+
+describe('RootEnsureResultMissingError', () => {
+	it('carries the root', () => {
+		expect(new RootEnsureResultMissingError('main').root).toBe('main');
+	});
+});
+
+describe('RootEnsureResultInvalidError', () => {
+	it('carries the root and the parse failure as its cause', () => {
+		const cause = new Error('malformed result line');
+		const error = new RootEnsureResultInvalidError('main', { cause });
+
+		expect({ root: error.root, cause: error.cause }).toStrictEqual({
+			root: 'main',
+			cause
+		});
 	});
 });

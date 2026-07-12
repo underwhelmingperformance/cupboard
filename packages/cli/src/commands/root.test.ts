@@ -4,6 +4,7 @@ import {
 } from '@cupboard/cli-ui/testing';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type {
+	RootEnsureResponse,
 	RootListResponse,
 	RootRemoveResponse,
 	RootSetResponse,
@@ -15,12 +16,14 @@ import { describe, expect, it } from 'vitest';
 import {
 	describeExpiry,
 	type RootClient,
+	runRootEnsure,
 	runRootList,
 	runRootRemove,
 	runRootSet
 } from './root.ts';
 
 type SetRootInput = Parameters<RootClient['set']>[0];
+type EnsureRootInput = Parameters<RootClient['ensure']>[0];
 
 const target = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 
@@ -128,6 +131,65 @@ describe('runRootSet', () => {
 					targets: ['/tmp/nope']
 				}
 			]
+		});
+	});
+});
+
+describe('runRootEnsure', () => {
+	it.each([
+		{
+			name: 'a retained root',
+			response: {
+				status: 'retained',
+				root: summary({ name: 'main', targets: [presentTarget()] })
+			} satisfies RootEnsureResponse,
+			expectedRows: [
+				{ label: 'Root', value: 'main' },
+				{ label: 'Status', value: 'retained' },
+				{ label: 'Expiry', value: 'permanent' }
+			]
+		},
+		{
+			name: 'a build requirement',
+			response: {
+				status: 'build-required',
+				unavailable: [target]
+			} satisfies RootEnsureResponse,
+			expectedRows: [
+				{ label: 'Root', value: 'main' },
+				{ label: 'Status', value: 'build required' },
+				{ label: 'Unavailable', value: target }
+			]
+		}
+	])('reports $name', async ({ response, expectedRows }) => {
+		const calls: EnsureRootInput[] = [];
+		const results: ResultRow[][] = [];
+
+		await runRootEnsure(
+			'_default',
+			'main',
+			[target],
+			604_800,
+			reporter(results),
+			{
+				ensure(input) {
+					calls.push(input);
+
+					return Promise.resolve(response);
+				}
+			}
+		);
+
+		expect({ calls, results }).toStrictEqual({
+			calls: [
+				{
+					cacheName: '_default',
+					name: 'main',
+					targets: [target],
+					ttlSeconds: 604_800
+				}
+			],
+			results: [expectedRows]
 		});
 	});
 });
@@ -262,6 +324,18 @@ function removeClient(
 	calls: { cacheName: string; name: string }[]
 ): RootClient {
 	return {
+		ensure: (input) =>
+			Promise.resolve({
+				status: 'retained',
+				root: summary({
+					name: input.name,
+					targets: input.targets.map((storePath) => ({
+						storePathHash: StorePath.hash(storePath),
+						present: true,
+						storePath
+					}))
+				})
+			}),
 		set: (input) =>
 			Promise.resolve(
 				summary({

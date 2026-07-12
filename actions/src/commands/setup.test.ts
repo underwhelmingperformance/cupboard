@@ -42,6 +42,7 @@ describe('resolveSetupInputs', () => {
 		includePrereleases: true,
 		githubToken: '',
 		releaseRepository: 'owner/cupboard',
+		expectedSourceCommit: '',
 		installDirectory: '/runner/temp/cupboard-bin',
 		addToPath: true,
 		cacheUrl: '',
@@ -89,6 +90,15 @@ describe('resolveSetupInputs', () => {
 			includePrereleases: resolved.includePrereleases,
 			addToPath: resolved.addToPath
 		}).toStrictEqual({ includePrereleases: false, addToPath: false });
+	});
+
+	it('preserves the expected release source commit', () => {
+		const resolved = resolveSetupInputs(
+			{ ...baseOptions, expectedSourceCommit: 'a'.repeat(40) },
+			environment
+		);
+
+		expect(resolved.expectedSourceCommit).toBe('a'.repeat(40));
 	});
 
 	it.each([

@@ -1,4 +1,5 @@
 import {
+	type NixSha256HashString,
 	type RootName,
 	type StorePathHash,
 	type StorePathString
@@ -6,6 +7,7 @@ import {
 import { byCodeUnit, resolveRootTargets } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedRootSetBody,
+	type RootEnsureResponse,
 	type RootListResponse,
 	type RootRemoveResponse,
 	type RootSetResponse,
@@ -26,6 +28,13 @@ interface StoredRoot {
 	readonly expiresAt: string | undefined;
 	readonly createdAt: string;
 	readonly updatedAt: string;
+}
+
+// A narinfo row's exact version, snapshotted off-gate so a gated re-check can
+// tell an unchanged row from one a delete-and-recommit replaced.
+interface TargetIdentity {
+	readonly generation: number;
+	readonly narHash: NixSha256HashString;
 }
 
 type RootWrite =
@@ -181,6 +190,36 @@ export class RootsService {
 		return servable;
 	}
 
+	// The exact identity behind each of `targets` that {@link servableTargets}
+	// finds servable, snapshotted synchronously before that probe's R2 heads and
+	// D1 reads run. `ensureRoot` revalidates this snapshot inside the write gate,
+	// so a delete-and-recommit landing during the probe cannot be answered
+	// `retained`: a hash whose row is gone by snapshot time is excluded here the
+	// same as one that never had a row.
+	private async servableTargetIdentities(
+		cache: string,
+		targets: readonly { storePathHash: StorePathHash }[]
+	): Promise<ReadonlyMap<StorePathHash, TargetIdentity>> {
+		const hashes = [...new Set(targets.map((target) => target.storePathHash))];
+		const snapshot = new Map(
+			this.narInfoObjects
+				.narInfoRowsFor(cache, hashes)
+				.map((row) => [
+					row.storePathHash,
+					{ generation: row.generation, narHash: row.narHash }
+				])
+		);
+		const servable = await this.servableTargets(cache, targets);
+
+		return new Map(
+			[...servable].flatMap((hash) => {
+				const identity = snapshot.get(hash);
+
+				return identity === undefined ? [] : [[hash, identity] as const];
+			})
+		);
+	}
+
 	// Whether a committed narinfo row still exists for this path, a synchronous DO
 	// SQLite read. A delete is row-first and runs under the gate, so a row still
 	// present inside the write gate cannot be mid-delete; this is the cheap
@@ -198,6 +237,42 @@ export class RootsService {
 				)
 				.get() !== undefined
 		);
+	}
+
+	// The store paths among `targets` whose current row no longer matches the
+	// identity `servableTargetIdentities` snapshotted off-gate: the row is gone,
+	// or a recommit changed its generation or narHash. A synchronous DO SQLite
+	// read, so this settles inside the same critical section as the write it
+	// gates.
+	private mismatchedTargets(
+		cache: string,
+		targets: readonly {
+			storePathHash: StorePathHash;
+			storePath: StorePathString;
+		}[],
+		expected: ReadonlyMap<StorePathHash, TargetIdentity>
+	): readonly string[] {
+		const current = new Map(
+			this.narInfoObjects
+				.narInfoRowsFor(
+					cache,
+					targets.map((target) => target.storePathHash)
+				)
+				.map((row) => [row.storePathHash, row])
+		);
+
+		return targets
+			.filter((target) => {
+				const expectedIdentity = expected.get(target.storePathHash);
+				const currentRow = current.get(target.storePathHash);
+
+				return (
+					expectedIdentity === undefined ||
+					currentRow?.generation !== expectedIdentity.generation ||
+					currentRow.narHash !== expectedIdentity.narHash
+				);
+			})
+			.map((target) => target.storePath);
 	}
 
 	private rootSummaryFrom(
@@ -226,33 +301,50 @@ export class RootsService {
 		};
 	}
 
-	async setRoot(
-		cache: string,
+	private buildRootSetCommand(
 		rootName: RootName,
 		body: ParsedRootSetBody
-	): Promise<RootSetResponse> {
-		const requested: RootSetCommand = {
+	): RootSetCommand {
+		return {
 			name: rootName,
 			targets: resolveRootTargets(body.targets),
 			ttlSeconds: body.ttlSeconds
 		};
+	}
 
-		// A root may reference any target whose narinfo row exists: reserved at
-		// commit, committed, or servable. A push records retention over a path that
-		// is still verifying, and the path becomes servable when the verify pass
-		// materialises it (`present` reflects that, staying false until then).
-		// `servableTargets` heals a merely-lost object and drives the per-target
-		// `present` flag; its R2 heads run outside the gate. The write takes a short
-		// gate that rejects only a target with no narinfo row (never uploaded, or
-		// deleted): a synchronous row read that, since a delete is row-first and runs
-		// under the gate, cannot interleave with one. Rejections are thrown after the
-		// section so a validation error does not reset the Durable Object.
-		const servable = await this.servableTargets(cache, requested.targets);
-
-		const write = await this.context.criticalSection((): Promise<RootWrite> => {
-			const absent = requested.targets
-				.filter((target) => !this.rowPresent(cache, target.storePathHash))
-				.map((target) => target.storePath);
+	// A root may reference any target whose narinfo row exists: reserved at
+	// commit, committed, or servable. A push records retention over a path that
+	// is still verifying, and the path becomes servable when the verify pass
+	// materialises it (`present` reflects that, staying false until then).
+	// `servableTargets` heals a merely-lost object and drives the per-target
+	// `present` flag; its R2 heads run outside this gate. Without
+	// `expectedIdentities` (the `setRoot` path) the gate rejects only a target
+	// with no narinfo row (never uploaded, or deleted): a synchronous row read
+	// that, since a delete is row-first and runs under the gate, cannot
+	// interleave with one. With `expectedIdentities` (the `ensureRoot` path)
+	// the gate additionally refuses a target whose row's generation or narHash
+	// has moved on from the snapshot the caller took off-gate, so a
+	// delete-and-recommit landing during that probe cannot be answered
+	// `retained` for content the probe never actually verified. The section
+	// returns a rejected outcome rather than throwing, so the caller decides
+	// how to report it once the gate has closed: a validation error surfaced
+	// only after the section does not reset the Durable Object.
+	private async gatedRootWrite(
+		cache: string,
+		requested: RootSetCommand,
+		expectedIdentities?: ReadonlyMap<StorePathHash, TargetIdentity>
+	): Promise<RootWrite> {
+		return this.context.criticalSection((): Promise<RootWrite> => {
+			const absent =
+				expectedIdentities === undefined
+					? requested.targets
+							.filter((target) => !this.rowPresent(cache, target.storePathHash))
+							.map((target) => target.storePath)
+					: this.mismatchedTargets(
+							cache,
+							requested.targets,
+							expectedIdentities
+						);
 
 			if (absent.length > 0) {
 				return Promise.resolve({ kind: 'rejected', unavailable: absent });
@@ -263,6 +355,16 @@ export class RootsService {
 				stored: this.writeRoot(cache, requested)
 			});
 		});
+	}
+
+	async setRoot(
+		cache: string,
+		rootName: RootName,
+		body: ParsedRootSetBody
+	): Promise<RootSetResponse> {
+		const requested = this.buildRootSetCommand(rootName, body);
+		const servable = await this.servableTargets(cache, requested.targets);
+		const write = await this.gatedRootWrite(cache, requested);
 
 		if (write.kind === 'rejected') {
 			throw new RootTargetsUnavailableError(rootName, write.unavailable);
@@ -275,6 +377,45 @@ export class RootsService {
 			requested.targets,
 			servable
 		);
+	}
+
+	async ensureRoot(
+		cache: string,
+		rootName: RootName,
+		body: ParsedRootSetBody
+	): Promise<RootEnsureResponse> {
+		const requested = this.buildRootSetCommand(rootName, body);
+		const identities = await this.servableTargetIdentities(
+			cache,
+			requested.targets
+		);
+		const unavailable = requested.targets
+			.filter((target) => !identities.has(target.storePathHash))
+			.map((target) => target.storePath);
+
+		if (unavailable.length > 0) {
+			return { status: 'build-required', unavailable };
+		}
+
+		const write = await this.gatedRootWrite(cache, requested, identities);
+
+		if (write.kind === 'rejected') {
+			return {
+				status: 'build-required',
+				unavailable: [...write.unavailable]
+			};
+		}
+
+		return {
+			status: 'retained',
+			root: this.rootSummaryFrom(
+				rootName,
+				write.stored,
+				write.stored.updatedAt,
+				requested.targets,
+				new Set(identities.keys())
+			)
+		};
 	}
 
 	async listRoots(cache: string): Promise<RootListResponse> {

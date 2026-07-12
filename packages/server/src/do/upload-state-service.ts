@@ -3,6 +3,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type ParsedUploadPathNegotiation } from '@cupboard/protocol/upload';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
@@ -10,12 +11,7 @@ import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey } from '../http/http.ts';
 
-import {
-	chunk,
-	mapWithConcurrency,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from './bulk.ts';
+import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type CanonicalBlob } from './upload-metadata.ts';
 

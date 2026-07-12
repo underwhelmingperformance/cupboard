@@ -52,6 +52,18 @@ function putRoot(token: string, name: string): Promise<Response> {
 	);
 }
 
+function ensureRoot(token: string, name: string): Promise<Response> {
+	return authorisedFetch(
+		`/cache/_default/roots/${encodeURIComponent(name)}/ensure`,
+		token,
+		{
+			body: JSON.stringify({ targets: [target] }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		}
+	);
+}
+
 describe('cb_roots enforcement at PUT /roots', () => {
 	beforeEach(resetTestServer);
 
@@ -140,5 +152,22 @@ describe('cb_roots enforcement at PUT /roots', () => {
 		const response = await putRoot(token, 'github:anything/at-all');
 
 		expect(response.status).toBe(StatusCodes.OK);
+	});
+
+	it('applies the same root constraint to ensure', async () => {
+		const admin = await initialise();
+		await pushPath(admin, targetMetadata);
+		const token = await issueServerSignedToken(
+			cacheWriteGrants(['github:owner/repo']),
+			'ci'
+		);
+
+		const permitted = await ensureRoot(token, 'github:owner/repo');
+		const refused = await ensureRoot(token, 'github:owner/other');
+
+		expect([permitted.status, refused.status]).toStrictEqual([
+			StatusCodes.OK,
+			StatusCodes.FORBIDDEN
+		]);
 	});
 });

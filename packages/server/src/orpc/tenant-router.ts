@@ -134,6 +134,13 @@ export const tenantRouter = os.router({
 				{ targets: input.targets, ttlSeconds: input.ttlSeconds }
 			)
 		),
+		ensure: os.roots.ensure.handler(({ input, context }) =>
+			context.services.roots.ensureRoot(
+				cacheFromSelector(input.cacheName),
+				input.name,
+				{ targets: input.targets, ttlSeconds: input.ttlSeconds }
+			)
+		),
 		remove: os.roots.remove.handler(({ input, context }) =>
 			context.services.roots.removeRoot(
 				cacheFromSelector(input.cacheName),

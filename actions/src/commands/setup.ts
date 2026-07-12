@@ -37,6 +37,7 @@ export interface SetupOptions {
 	readonly includePrereleases?: string;
 	readonly githubToken?: string;
 	readonly releaseRepository?: string;
+	readonly expectedSourceCommit?: string;
 	readonly installDir?: string;
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
@@ -52,6 +53,7 @@ export interface SetupInputs {
 	readonly includePrereleases: boolean;
 	readonly githubToken: string;
 	readonly releaseRepository: string;
+	readonly expectedSourceCommit: string;
 	readonly installDirectory: string;
 	readonly addToPath: boolean;
 	readonly cacheUrl: string;
@@ -94,6 +96,10 @@ export function registerSetupCommand(
 		.option(
 			'--release-repository <repository>',
 			'repository that publishes cupboard release assets'
+		)
+		.option(
+			'--expected-source-commit <commit>',
+			'require the release to have been built from this full commit id'
 		)
 		.option(
 			'--install-dir <directory>',
@@ -161,6 +167,7 @@ export function resolveSetupInputs(
 			environment.GITHUB_ACTION_REPOSITORY ??
 			environment.GITHUB_REPOSITORY ??
 			fallbackReleaseRepository,
+		expectedSourceCommit: provided(options.expectedSourceCommit) ?? '',
 		installDirectory:
 			provided(options.installDir) ??
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
@@ -191,7 +198,10 @@ export async function setupAction(
 			version: inputs.version,
 			includePrereleases: inputs.includePrereleases,
 			githubToken: inputs.githubToken,
-			environment
+			environment,
+			...(inputs.expectedSourceCommit !== '' && {
+				expectedSourceCommit: inputs.expectedSourceCommit
+			})
 		},
 		reporter
 	);

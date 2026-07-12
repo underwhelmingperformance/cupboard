@@ -36,6 +36,7 @@ export interface PushOptions {
 	readonly includePrereleases?: string;
 	readonly githubToken?: string;
 	readonly releaseRepository?: string;
+	readonly expectedSourceCommit?: string;
 	readonly installDir?: string;
 	readonly cache?: string;
 	readonly audience?: string;
@@ -51,6 +52,7 @@ export interface PushInputs {
 	readonly includePrereleases: boolean;
 	readonly githubToken: string;
 	readonly releaseRepository: string;
+	readonly expectedSourceCommit: string;
 	readonly installDirectory: string;
 	readonly url: string;
 	readonly paths: readonly string[];
@@ -105,6 +107,10 @@ export function registerPushCommand(
 			'repository that publishes cupboard release assets'
 		)
 		.option(
+			'--expected-source-commit <commit>',
+			'require the release to have been built from this full commit id'
+		)
+		.option(
 			'--install-dir <directory>',
 			'directory for the downloaded cupboard binary'
 		)
@@ -156,6 +162,7 @@ export function resolvePushInputs(
 			environment.GITHUB_ACTION_REPOSITORY ??
 			environment.GITHUB_REPOSITORY ??
 			fallbackReleaseRepository,
+		expectedSourceCommit: provided(options.expectedSourceCommit) ?? '',
 		installDirectory:
 			provided(options.installDir) ??
 			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
@@ -190,7 +197,10 @@ export async function pushAction(
 			version: inputs.version,
 			includePrereleases: inputs.includePrereleases,
 			githubToken: inputs.githubToken,
-			environment
+			environment,
+			...(inputs.expectedSourceCommit !== '' && {
+				expectedSourceCommit: inputs.expectedSourceCommit
+			})
 		},
 		reporter
 	);

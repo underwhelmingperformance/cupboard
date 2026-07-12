@@ -20,6 +20,11 @@ inputs:
   release-repository:
     description: Repository that publishes cupboard release assets.
     required: false
+  expected-source-commit:
+    description:
+      Full commit id the installed release must have been built from. Requires
+      an exact cupboard-version.
+    required: false
   install-dir:
     description: Directory for the downloaded cupboard binary.
     required: false
@@ -92,6 +97,7 @@ runs:
         GH_TOKEN: ${{ inputs.github-token || github.token }}
         RELEASE_REPOSITORY:
           ${{ inputs.release-repository || github.action_repository }}
+        EXPECTED_SOURCE_COMMIT: ${{ inputs.expected-source-commit }}
         INSTALL_DIR: ${{ inputs.install-dir }}
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         CACHE_URL: ${{ inputs.cache-url }}
@@ -106,6 +112,7 @@ runs:
           --include-prereleases "$INCLUDE_PRERELEASES"
           --github-token "$GH_TOKEN"
           --release-repository "$RELEASE_REPOSITORY"
+          --expected-source-commit "$EXPECTED_SOURCE_COMMIT"
           --install-dir "$INSTALL_DIR"
           --add-to-path "$ADD_TO_PATH"
           --cache-url "$CACHE_URL"

@@ -5,6 +5,7 @@ import {
 import { z } from 'zod';
 
 import {
+	rootEnsureResponseSchema,
 	rootListResponseSchema,
 	rootRemoveResponseSchema,
 	rootSetBodySchema,
@@ -40,6 +41,22 @@ export const rootsContract = {
 			})
 		)
 		.output(rootSetResponseSchema),
+
+	ensure: baseProcedure
+		.meta({
+			requires: 'root:set',
+			resource: { cache: { field: 'cacheName' }, root: { field: 'name' } },
+			maintenance: true
+		})
+		.route({ method: 'POST', path: '/cache/{cacheName}/roots/{name}/ensure' })
+		.input(
+			z.strictObject({
+				cacheName: cacheSelectorSchema,
+				name: rootNameSchema,
+				...rootSetBodySchema.shape
+			})
+		)
+		.output(rootEnsureResponseSchema),
 
 	remove: baseProcedure
 		.meta({

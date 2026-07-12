@@ -41,6 +41,10 @@ This is a pnpm workspace.
 - Install pre-commit hooks with `pre-commit install`. The hooks run upstream
   file hygiene checks plus the workspace dependency, format, lint, Knip, and
   type gates before commits.
+- Never suppress or weaken a linter rule to avoid an applicable finding. A
+  narrowly scoped suppression is permitted for a demonstrable tool false
+  positive when the configuration cites authoritative evidence and an upstream
+  issue. Remove it once the pinned tool supports the construct.
 
 ## Coding Standards
 

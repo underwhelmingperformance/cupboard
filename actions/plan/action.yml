@@ -1,0 +1,142 @@
+name: Plan cupboard flake publication
+description:
+  Evaluate a typed flake target manifest, retain targets already held by the
+  cache, and group missing shared derivations for one-time seeding.
+inputs:
+  targets:
+    description: JSON target manifest to evaluate.
+    required: true
+  url:
+    description: cupboard Worker URL.
+    required: true
+  cupboard-path:
+    description: Path to the cupboard binary installed by actions/setup.
+    required: true
+  root-prefix:
+    description: Retention-root prefix prepended to every target rootSuffix.
+    required: true
+  cache:
+    description: Named cache to inspect and publish to.
+    required: false
+  ttl:
+    description: TTL applied when retaining an already cached target.
+    required: false
+  read-user:
+    description: Username for private cache reads.
+    required: false
+  read-password:
+    description: Password for private cache reads.
+    required: false
+  audience:
+    description: GitHub OIDC audience. Defaults to url.
+    required: false
+  plan-file:
+    description: Destination for the detailed JSON plan.
+    required: false
+  optimise:
+    description:
+      Inspect the cache and derivation graph. False emits every target directly.
+    required: false
+    default: 'true'
+  runners:
+    description: >-
+      Every runs-on label the target manifest may use, separated by whitespace
+      or commas; a label not named here fails the plan. An entry written as
+      label@group routes the label to the named runner group, pinning provenance
+      rather than spelling; a bare label matches any runner carrying it. Labels
+      and group names must each be one or more printable ASCII characters
+      excluding spaces, commas and the @ separator, and labels compare
+      case-insensitively. The manifest is evaluated from the flake and is
+      therefore pull-request-controlled, and a self-hosted runner can carry any
+      label, so nothing is allowed by default. This value must come from an
+      administrative boundary a pull request cannot edit, such as a repository
+      or organisation variable; the reusable workflow passes the
+      CUPBOARD_RUNNERS repository variable.
+    required: false
+outputs:
+  plan-file:
+    description: Detailed plan consumed by seed and fallback jobs.
+    value: ${{ steps.plan.outputs.plan-file }}
+  seed-matrix:
+    description: Dynamic matrix for shared prerequisite groups.
+    value: ${{ steps.plan.outputs.seed-matrix }}
+  target-matrix:
+    description: Dynamic matrix for independent targets.
+    value: ${{ steps.plan.outputs.target-matrix }}
+  fallback-matrix:
+    description: Dynamic matrix for targets sharing unknown output paths.
+    value: ${{ steps.plan.outputs.fallback-matrix }}
+  retained-count:
+    description: Number of targets retained without a build.
+    value: ${{ steps.plan.outputs.retained-count }}
+  seed-count:
+    description: Number of shared prerequisite groups to build.
+    value: ${{ steps.plan.outputs.seed-count }}
+  target-count:
+    description: Number of target builds that remain.
+    value: ${{ steps.plan.outputs.target-count }}
+  fallback-count:
+    description: Number of unknown-output fallback groups to build.
+    value: ${{ steps.plan.outputs.fallback-count }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned pnpm version
+      id: pnpm
+      shell: bash
+      env:
+        # renovate: datasource=npm depName=pnpm
+        PNPM_VERSION: '11.13.1'
+      run: echo "version=${PNPM_VERSION}" | tee -a "${GITHUB_OUTPUT}"
+
+    - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      with:
+        version: ${{ steps.pnpm.outputs.version }}
+        # Point pnpm/action-setup's manifest lookup at this action's own
+        # manifest, not the caller's checkout, whose pinned pnpm would
+        # otherwise conflict with `version`. Parity between this pin and the
+        # workspace manifest is enforced by scripts/action-tool-parity.test.ts.
+        package_json_file: ${{ github.action_path }}/../../package.json
+
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      with:
+        node-version: 24.18.0
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../..
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+
+    - name: Plan publication
+      id: plan
+      shell: bash
+      env:
+        TARGETS: ${{ inputs.targets }}
+        URL: ${{ inputs.url }}
+        CUPBOARD_PATH: ${{ inputs.cupboard-path }}
+        ROOT_PREFIX: ${{ inputs.root-prefix }}
+        CACHE: ${{ inputs.cache }}
+        TTL: ${{ inputs.ttl }}
+        READ_USER: ${{ inputs.read-user }}
+        READ_PASSWORD: ${{ inputs.read-password }}
+        AUDIENCE: ${{ inputs.audience }}
+        PLAN_FILE: ${{ inputs.plan-file }}
+        OPTIMISE: ${{ inputs.optimise }}
+        RUNNERS: ${{ inputs.runners }}
+      run: |
+        args=(plan
+          --targets "$TARGETS"
+          --url "$URL"
+          --cupboard-path "$CUPBOARD_PATH"
+          --root-prefix "$ROOT_PREFIX"
+          --cache "$CACHE"
+          --ttl "$TTL"
+          --read-user "$READ_USER"
+          --read-password "$READ_PASSWORD"
+          --audience "$AUDIENCE"
+          --plan-file "$PLAN_FILE"
+          --optimise "$OPTIMISE"
+          --runners "$RUNNERS")
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

@@ -2,13 +2,11 @@ name: Attest cupboard store paths
 description:
   Produce a Sigstore build-provenance bundle whose in-toto subjects are the NAR
   hashes of the given Nix store paths, ready to attach with the push action.
-  Only paths this machine built become subjects; a substituted path is skipped
-  with a warning, since the run cannot truthfully claim its provenance.
+  Only paths recorded by actions/build-paths during this workflow run become
+  subjects.
 inputs:
-  paths:
-    description:
-      Newline-delimited local Nix store paths, derivations, or installables to
-      attest. Paths the local store did not build are skipped.
+  receipt-file:
+    description: Current-run receipt produced by actions/build-paths.
     required: true
   checksums-file:
     description:
@@ -64,13 +62,13 @@ runs:
       id: subjects
       shell: bash
       env:
-        PATHS: ${{ inputs.paths }}
+        RECEIPT_FILE: ${{ inputs.receipt-file }}
         CHECKSUMS_FILE: ${{ inputs.checksums-file }}
       run: |
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" attest \
-          --paths "$PATHS" \
+          --receipt-file "$RECEIPT_FILE" \
           --checksums-file "$CHECKSUMS_FILE"
 
     # A run with no locally built path has nothing it can truthfully attest,

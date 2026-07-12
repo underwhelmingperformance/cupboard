@@ -4,6 +4,7 @@ import {
 	type Sha256HexDigest,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	and,
 	asc,
@@ -26,7 +27,6 @@ import {
 	batchNonEmpty,
 	chunk,
 	deleteObjects,
-	mapWithConcurrency,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';

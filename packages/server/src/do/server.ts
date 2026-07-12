@@ -17,6 +17,7 @@ import {
 	commitSessionRequestSchema,
 	type ParsedCommitBatchEntry
 } from '@cupboard/protocol/upload';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
 import { eq, or } from 'drizzle-orm';
 import { Hono } from 'hono';
@@ -63,7 +64,7 @@ import {
 	type CasReferenceDemotion,
 	type NarInfoDemotion
 } from './blob-reaper-service.ts';
-import { mapWithConcurrency, maxOutgoingConnections } from './bulk.ts';
+import { maxOutgoingConnections } from './bulk.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import {
 	CommitPipelineService,

@@ -1,0 +1,72 @@
+name: Build cupboard store paths
+description:
+  Build Nix installables and record which final outputs this workflow run built.
+inputs:
+  installables:
+    description: Newline-delimited Nix installables to build.
+    required: true
+  keep-going:
+    description: Continue after an individual build failure.
+    required: false
+    default: 'false'
+  max-jobs:
+    description: Maximum local build jobs. Empty uses the Nix default.
+    required: false
+  allow-failure:
+    description: Return successfully when all three attempts fail.
+    required: false
+    default: 'false'
+outputs:
+  paths:
+    description: Newline-delimited realised output paths.
+    value: ${{ steps.build.outputs.paths }}
+  paths-file:
+    description: File containing the realised output paths.
+    value: ${{ steps.build.outputs.paths-file }}
+  receipt-file:
+    description: Current-run build receipt consumed by actions/attest.
+    value: ${{ steps.build.outputs.receipt-file }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve the pinned toolchain
+      id: toolchain
+      shell: bash
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        node_version="$(tr -d '\r\n' < "$GITHUB_ACTION_PATH/../../.node-version")"
+        test -n "$version" && test -n "$node_version"
+        echo "pnpm-version=$version" >> "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" >> "$GITHUB_OUTPUT"
+
+    - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
+      with:
+        version: ${{ steps.toolchain.outputs.pnpm-version }}
+        package_json_file: ${{ github.action_path }}/../../package.json
+
+    - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      with:
+        node-version: ${{ steps.toolchain.outputs.node-version }}
+
+    - name: Install action dependencies
+      shell: bash
+      working-directory: ${{ github.action_path }}/../..
+      run: pnpm install --filter @cupboard/action... --prod --frozen-lockfile
+
+    - name: Build installables
+      id: build
+      shell: bash
+      env:
+        INSTALLABLES: ${{ inputs.installables }}
+        KEEP_GOING: ${{ inputs.keep-going }}
+        MAX_JOBS: ${{ inputs.max-jobs }}
+        ALLOW_FAILURE: ${{ inputs.allow-failure }}
+      run: |
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" build \
+          --installables "$INSTALLABLES" \
+          --keep-going "$KEEP_GOING" \
+          --max-jobs "$MAX_JOBS" \
+          --allow-failure "$ALLOW_FAILURE"

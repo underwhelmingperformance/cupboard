@@ -1,6 +1,7 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import type {
+	RootEnsureResponse,
 	RootListResponse,
 	RootRemoveResponse,
 	RootSetResponse,
@@ -13,8 +14,10 @@ import {
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth/auth.ts';
+import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
+import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseTtl } from '../duration.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -22,6 +25,11 @@ import { tenantUrlArgument } from '../url-argument.ts';
 interface RootSetOptions {
 	readonly ttl?: number;
 	readonly cache?: string;
+}
+
+interface RootEnsureOptions extends RootSetOptions {
+	readonly githubOidc?: boolean;
+	readonly audience?: string;
 }
 
 interface RootOptions {
@@ -41,6 +49,12 @@ export interface RootClient {
 		targets: string[];
 		ttlSeconds?: number;
 	}): Promise<RootSetResponse>;
+	ensure(input: {
+		cacheName: string;
+		name: string;
+		targets: string[];
+		ttlSeconds?: number;
+	}): Promise<RootEnsureResponse>;
 	list(input: { cacheName: string }): Promise<RootListResponse>;
 	remove(input: {
 		cacheName: string;
@@ -56,6 +70,65 @@ export function registerRootCommands(
 		.command('root')
 		.description(
 			'Manage retention roots: named channels of store paths to keep.'
+		);
+
+	root
+		.command('ensure')
+		.description(
+			'Retain targets already present in the cache, or report that a build is required. ' +
+				'Both outcomes exit 0; the reported status says which happened.'
+		)
+		.argument('<url>', tenantUrlArgument)
+		.argument('<name>', 'root name, e.g. github:owner/repo/main')
+		.argument('<store-path...>', 'one or more top-level store paths to retain')
+		.option(
+			'--ttl <duration>',
+			'expire the root after this duration (e.g. 7d, 12h)',
+			parseTtl
+		)
+		.option('--cache <name>', 'target a named cache rather than the default')
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)'
+		)
+		.action(
+			async (
+				url: string,
+				name: string,
+				targets: string[],
+				options: RootEnsureOptions
+			) => {
+				const reporter = commandUi(program, programOptions).reporter();
+				const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
+				const credential = await authenticateForPush(
+					CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+					{
+						githubOidc: options.githubOidc,
+						audience: options.audience ?? url,
+						authorizationDetails: rootEnsureAuthorizationDetails({
+							cacheSelector: cacheName,
+							root: name
+						})
+					}
+				);
+				const rpc = tenantRpc(url, {
+					credential,
+					signal: programOptions.signal
+				});
+
+				await runRootEnsure(
+					cacheName,
+					name,
+					targets,
+					options.ttl,
+					reporter,
+					rpc.roots
+				);
+			}
 		);
 
 	root
@@ -146,6 +219,44 @@ export function registerRootCommands(
 				rpc.roots
 			);
 		});
+}
+
+export async function runRootEnsure(
+	cacheName: string,
+	name: string,
+	targets: readonly string[],
+	ttlSeconds: number | undefined,
+	reporter: Reporter,
+	client: Pick<RootClient, 'ensure'>
+): Promise<void> {
+	const result = await reporter.phase('Checking retention root', () =>
+		client.ensure({
+			cacheName,
+			name,
+			targets: [...targets],
+			...(ttlSeconds !== undefined && { ttlSeconds })
+		})
+	);
+
+	reporter.result({
+		kind: 'root-ensure',
+		data: result,
+		rows:
+			result.status === 'retained'
+				? [
+						{ label: 'Root', value: result.root.name },
+						{ label: 'Status', value: 'retained' },
+						{ label: 'Expiry', value: describeExpiry(result.root) }
+					]
+				: [
+						{ label: 'Root', value: name },
+						{ label: 'Status', value: 'build required' },
+						...result.unavailable.map((storePath) => ({
+							label: 'Unavailable',
+							value: storePath
+						}))
+					]
+	});
 }
 
 export async function runRootSet(

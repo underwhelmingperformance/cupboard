@@ -4,6 +4,7 @@ import {
 	storePathBasenameSchema,
 	type StorePathHash,
 	storePathHashSchema,
+	storePathPattern,
 	type StorePathString
 } from './scalars.ts';
 
@@ -29,6 +30,10 @@ export function storePathBasename(path: string): string | undefined {
 	const basename = path.split('/').at(-1);
 
 	return basename === undefined || basename === '' ? undefined : basename;
+}
+
+export function validStorePath(path: string): string | undefined {
+	return storePathPattern.test(path) ? path : undefined;
 }
 
 export function storePathHashOf(path: string): string | undefined {

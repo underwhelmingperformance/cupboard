@@ -4,6 +4,7 @@ import {
 	retentionPolicyAddBodySchema,
 	retentionPolicyListResponseSchema,
 	retentionPolicyRemoveResponseSchema,
+	rootEnsureResponseSchema,
 	rootSetBodySchema
 } from './retention.ts';
 
@@ -41,6 +42,36 @@ describe('rootSetBodySchema', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(rootSetBodySchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('rootEnsureResponseSchema', () => {
+	it.each([
+		{
+			name: 'a retained root',
+			value: {
+				status: 'retained',
+				root: {
+					name: 'main',
+					expired: false,
+					createdAt: '2026-07-10T00:00:00.000Z',
+					updatedAt: '2026-07-10T00:00:00.000Z',
+					targets: [
+						{
+							storePathHash,
+							storePath,
+							present: true
+						}
+					]
+				}
+			}
+		},
+		{
+			name: 'a build requirement',
+			value: { status: 'build-required', unavailable: [storePath] }
+		}
+	])('accepts $name', ({ value }) => {
+		expect(rootEnsureResponseSchema.parse(value)).toStrictEqual(value);
 	});
 });
 

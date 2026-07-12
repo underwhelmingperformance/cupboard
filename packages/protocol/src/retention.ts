@@ -37,6 +37,20 @@ export type ParsedRootSummary = z.output<typeof rootSummarySchema>;
 export const rootSetResponseSchema = rootSummarySchema;
 export type ParsedRootSetResponse = z.output<typeof rootSetResponseSchema>;
 
+export const rootEnsureResponseSchema = z.discriminatedUnion('status', [
+	z.strictObject({
+		status: z.literal('retained'),
+		root: rootSummarySchema
+	}),
+	z.strictObject({
+		status: z.literal('build-required'),
+		unavailable: z.array(storePathSchema).min(1)
+	})
+]);
+export type ParsedRootEnsureResponse = z.output<
+	typeof rootEnsureResponseSchema
+>;
+
 export const rootListResponseSchema = z.strictObject({
 	roots: z.array(rootSummarySchema)
 });
@@ -117,6 +131,7 @@ export type RootSetBody = z.input<typeof rootSetBodySchema>;
 export type RootTarget = z.input<typeof rootTargetSchema>;
 export type RootSummary = z.input<typeof rootSummarySchema>;
 export type RootSetResponse = z.input<typeof rootSetResponseSchema>;
+export type RootEnsureResponse = z.input<typeof rootEnsureResponseSchema>;
 export type RootListResponse = z.input<typeof rootListResponseSchema>;
 export type RootRemoveResponse = z.input<typeof rootRemoveResponseSchema>;
 export type RetentionPolicyAddBody = z.input<

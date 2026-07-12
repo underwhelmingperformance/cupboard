@@ -16,6 +16,7 @@ import {
 	type AttestationNegotiateResponse,
 	type ParsedAttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	decodeDsseStatement,
 	DsseDecodeError,
@@ -56,7 +57,6 @@ import {
 import {
 	batchNonEmpty,
 	chunk,
-	mapWithConcurrency,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';

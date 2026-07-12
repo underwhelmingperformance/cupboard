@@ -35,6 +35,7 @@ import {
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { z } from 'zod';
 
 import { isAbortError } from '../abort.ts';
@@ -56,8 +57,6 @@ import { byteStream, countingByteStream } from '../io/byte-stream.ts';
 import { compressNarToStream, type NarUploadStream } from '../nix/blob.ts';
 import { NarArchive, type NarDigest } from '../nix/nar.ts';
 import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
-
-import { runWithConcurrency } from './pool.ts';
 
 export interface PushDependencies {
 	readonly nix?: Nix;
@@ -287,7 +286,7 @@ async function runPushFlow(
 				`${formatCount(done)}/${formatCount(uploadDecisions.length)}`
 			);
 
-			await runWithConcurrency(
+			await mapWithConcurrency(
 				uploadDecisions,
 				dependencies.uploadConcurrency ?? defaultUploadConcurrency,
 				async (decision) => {
@@ -698,7 +697,7 @@ async function attachPushedAttestations(
 		// The bundles all address the same tenant, so they upload under the same
 		// bound as blob uploads; sending them one at a time pays a round-trip per
 		// bundle.
-		await runWithConcurrency(
+		await mapWithConcurrency(
 			toUpload,
 			defaultUploadConcurrency,
 			async (decision) => {
@@ -721,7 +720,7 @@ async function attachPushedAttestations(
 		const attachStep = log.group('attach');
 		let attached = 0;
 
-		await runWithConcurrency(
+		await mapWithConcurrency(
 			toUpload,
 			defaultUploadConcurrency,
 			async (decision) => {
@@ -887,7 +886,7 @@ async function recordRetention(
 	// order-independently.
 	const summaries: RootSummary[] = [];
 
-	await runWithConcurrency(
+	await mapWithConcurrency(
 		retention.requests,
 		defaultUploadConcurrency,
 		async ({ name, body }) => {

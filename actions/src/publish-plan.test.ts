@@ -1,0 +1,1247 @@
+import {
+	storePathSchema,
+	type StorePathString
+} from '@cupboard/nix-store/scalars';
+import { describe, expect, it } from 'vitest';
+
+import {
+	CacheProbeError,
+	DerivationGraphShapeError,
+	DerivationRootCountError,
+	DuplicateGroupKeyError,
+	DuplicateRunnerLabelError,
+	TargetEvaluationError
+} from './errors.ts';
+import {
+	assertDistinctGroupKeys,
+	availableCachePaths,
+	cacheProbePaths,
+	derivationUses,
+	disallowedRunners,
+	evaluateTargets,
+	evaluationFromJson,
+	joinRoot,
+	type NixEvaluator,
+	parseRunnerRoutes,
+	planPublish,
+	type PublishTarget,
+	publishTargetSchema,
+	publishTargetsSchema,
+	type RunnerRoute,
+	type TargetEvaluation
+} from './publish-plan.ts';
+
+function storePath(value: string): StorePathString {
+	return storePathSchema.parse(value);
+}
+
+const sharedPath = storePath(
+	'/nix/store/11111111111111111111111111111111-shared'
+);
+const firstPath = storePath(
+	'/nix/store/22222222222222222222222222222222-first'
+);
+const secondPath = storePath(
+	'/nix/store/33333333333333333333333333333333-second'
+);
+const sharedOutPath = storePath(
+	'/nix/store/66666666666666666666666666666666-shared-out'
+);
+const sharedDevelopmentPath = storePath(
+	'/nix/store/77777777777777777777777777777777-shared-dev'
+);
+
+describe('planPublish', () => {
+	it('skips retained targets and seeds an uncached shared output once', () => {
+		const retained = target('retained');
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			evaluation(
+				retained,
+				'retained',
+				storePath('/nix/store/44444444444444444444444444444444-retained'),
+				sharedPath
+			),
+			evaluation(first, 'first', firstPath, sharedPath),
+			evaluation(second, 'second', secondPath, sharedPath)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(['retained']),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: ['retained'],
+			targets: ['first', 'second'],
+			seedGroups: [
+				{
+					key: 'seed-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+					targets: ['.#first', '.#second'],
+					candidates: [
+						{
+							drvPath: '/nix/store/shared.drv',
+							output: 'out',
+							path: sharedPath
+						}
+					]
+				}
+			],
+			fallbackGroups: []
+		});
+	});
+
+	it('does not seed an output shared with a retained target when only one target is pending', () => {
+		const retained = target('retained');
+		const first = target('first');
+		const evaluations = [
+			evaluation(
+				retained,
+				'retained',
+				storePath('/nix/store/44444444444444444444444444444444-retained'),
+				sharedPath
+			),
+			evaluation(first, 'first', firstPath, sharedPath)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(['retained']),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: ['retained'],
+			targets: ['first'],
+			seedGroups: [],
+			fallbackGroups: []
+		});
+	});
+
+	it('does not seed a shared output already held by the cache', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			evaluation(first, 'first', firstPath, sharedPath),
+			evaluation(second, 'second', secondPath, sharedPath)
+		];
+
+		expect(
+			planPublish({
+				evaluations,
+				retainedRoots: new Set(),
+				availablePaths: new Set([sharedPath]),
+				uses: derivationUses(evaluations)
+			}).seedGroups
+		).toStrictEqual([]);
+	});
+
+	// The readable key parts are hyphen-joined and may themselves contain
+	// hyphens, so the tuple hash must keep look-alike contexts apart: one
+	// group per execution context, never a shared key.
+	it('keys look-alike execution contexts distinctly', () => {
+		const contextOne = { system: 'a-b', os: 'c', remote: false };
+		const contextTwo = { system: 'a', os: 'b-c', remote: false };
+		const evaluations = [
+			evaluation(
+				{ ...target('first'), ...contextOne },
+				'first',
+				firstPath,
+				sharedPath
+			),
+			evaluation(
+				{ ...target('second'), ...contextOne },
+				'second',
+				secondPath,
+				sharedPath
+			),
+			evaluation(
+				{ ...target('third'), ...contextTwo },
+				'third',
+				storePath('/nix/store/88888888888888888888888888888888-third'),
+				sharedPath
+			),
+			evaluation(
+				{ ...target('fourth'), ...contextTwo },
+				'fourth',
+				storePath('/nix/store/99999999999999999999999999999999-fourth'),
+				sharedPath
+			)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(plan.seedGroups.map((group) => group.key)).toStrictEqual([
+			'seed-a-b-c-local-95a1aeafcadc39aa',
+			'seed-a-b-c-local-b24fcbf955fc0001'
+		]);
+	});
+
+	// The digest is long but not injective, so the plan refuses outright if
+	// two groups ever emit one key rather than let them merge in the matrix
+	// and race one retention root.
+	it('rejects a plan whose groups collide on one key', () => {
+		expect(() => {
+			assertDistinctGroupKeys([{ key: 'seed-a' }, { key: 'seed-a' }]);
+		}).toThrow(DuplicateGroupKeyError);
+	});
+
+	it('accepts distinct group keys', () => {
+		expect(() => {
+			assertDistinctGroupKeys([{ key: 'seed-a' }, { key: 'seed-b' }]);
+		}).not.toThrow();
+	});
+
+	// GitHub compares runner labels case-insensitively, so case-variant
+	// spellings of one label are one execution context: a shared output must
+	// seed once for both, under one canonical group key.
+	it('seeds a shared output once for case-variant spellings of one label', () => {
+		const first = target('first');
+		const second = { ...target('second'), os: 'UBUNTU-LATEST' };
+		const evaluations = [
+			evaluation(first, 'first', firstPath, sharedPath),
+			evaluation(second, 'second', secondPath, sharedPath)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: [],
+			targets: ['first', 'second'],
+			seedGroups: [
+				{
+					key: 'seed-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+					targets: ['.#first', '.#second'],
+					candidates: [
+						{
+							drvPath: '/nix/store/shared.drv',
+							output: 'out',
+							path: sharedPath
+						}
+					]
+				}
+			],
+			fallbackGroups: []
+		});
+	});
+
+	it('groups unknown shared outputs once for case-variant spellings of one label', () => {
+		const first = target('first');
+		const second = { ...target('second'), os: 'UBUNTU-LATEST' };
+		const evaluations = [
+			evaluation(first, 'first', firstPath, undefined),
+			evaluation(second, 'second', secondPath, undefined)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: [],
+			targets: ['first', 'second'],
+			seedGroups: [],
+			fallbackGroups: [
+				{
+					key: 'fallback-x86_64-linux-1',
+					targets: ['first', 'second']
+				}
+			]
+		});
+	});
+
+	it('co-locates targets sharing an output whose path is unknown', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			evaluation(first, 'first', firstPath, undefined),
+			evaluation(second, 'second', secondPath, undefined)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: [],
+			targets: ['first', 'second'],
+			seedGroups: [],
+			fallbackGroups: [
+				{
+					key: 'fallback-x86_64-linux-1',
+					targets: ['first', 'second']
+				}
+			]
+		});
+	});
+
+	it('includes unevaluated targets as direct builds', () => {
+		const first = target('first');
+		const evaluations = [evaluation(first, 'first', firstPath, sharedPath)];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations),
+			unevaluated: [target('broken')]
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: [],
+			targets: ['first', 'broken'],
+			seedGroups: [],
+			fallbackGroups: []
+		});
+	});
+
+	it('does not group shared derivations across execution contexts', () => {
+		const first = target('first');
+		const second = { ...target('second'), remote: false };
+		const evaluations = [
+			evaluation(first, 'first', firstPath, undefined),
+			evaluation(second, 'second', secondPath, undefined)
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: [],
+			targets: ['first', 'second'],
+			seedGroups: [],
+			fallbackGroups: []
+		});
+	});
+});
+
+describe('cacheProbePaths', () => {
+	it('includes target paths and shared outputs but not private prerequisites', () => {
+		const first = target('first');
+		const second = target('second');
+		const firstEvaluation = evaluation(first, 'first', firstPath, sharedPath);
+		const secondEvaluation = evaluation(
+			second,
+			'second',
+			secondPath,
+			sharedPath
+		);
+		const firstNodes = new Map(firstEvaluation.nodes);
+		firstNodes.set('/nix/store/first-only.drv', {
+			drvPath: '/nix/store/first-only.drv',
+			inputs: new Map(),
+			outputs: [
+				{
+					name: 'out',
+					path: storePath(
+						'/nix/store/44444444444444444444444444444444-first-only'
+					)
+				}
+			]
+		});
+		const firstWithPrivatePrerequisite = {
+			...firstEvaluation,
+			nodes: firstNodes
+		};
+
+		const evaluations = [firstWithPrivatePrerequisite, secondEvaluation];
+
+		expect(
+			cacheProbePaths(evaluations, derivationUses(evaluations))
+		).toStrictEqual([firstPath, secondPath, sharedPath]);
+	});
+});
+
+describe('derivationUses', () => {
+	it('records a use only for outputs a dependent actually names', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			multiOutputEvaluation(first, 'first', firstPath, ['out']),
+			multiOutputEvaluation(second, 'second', secondPath, ['out'])
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect({
+			plan: serialisePlan(plan),
+			probePaths: cacheProbePaths(evaluations, derivationUses(evaluations))
+		}).toStrictEqual({
+			plan: {
+				retained: [],
+				targets: ['first', 'second'],
+				seedGroups: [
+					{
+						key: 'seed-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+						targets: ['.#first', '.#second'],
+						candidates: [
+							{
+								drvPath: '/nix/store/shared-multi.drv',
+								output: 'out',
+								path: sharedOutPath
+							}
+						]
+					}
+				],
+				fallbackGroups: []
+			},
+			probePaths: [firstPath, secondPath, sharedOutPath]
+		});
+	});
+
+	it('seeds every output dependents consume', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			multiOutputEvaluation(first, 'first', firstPath, ['out', 'dev']),
+			multiOutputEvaluation(second, 'second', secondPath, ['out', 'dev'])
+		];
+
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set(),
+			uses: derivationUses(evaluations)
+		});
+
+		expect(serialisePlan(plan)).toStrictEqual({
+			retained: [],
+			targets: ['first', 'second'],
+			seedGroups: [
+				{
+					key: 'seed-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+					targets: ['.#first', '.#second'],
+					candidates: [
+						{
+							drvPath: '/nix/store/shared-multi.drv',
+							output: 'dev',
+							path: sharedDevelopmentPath
+						},
+						{
+							drvPath: '/nix/store/shared-multi.drv',
+							output: 'out',
+							path: sharedOutPath
+						}
+					]
+				}
+			],
+			fallbackGroups: []
+		});
+	});
+});
+
+describe('evaluateTargets', () => {
+	const app = { ...target('app'), bestEffort: false };
+	const home = target('home');
+	const appNode = {
+		env: { out: firstPath },
+		inputs: { drvs: { 'dep.drv': { dynamicOutputs: {}, outputs: ['out'] } } },
+		outputs: { out: { path: firstPath.replace('/nix/store/', '') } }
+	};
+	const dependencyNode = {
+		env: { out: sharedPath },
+		inputs: { drvs: {} },
+		outputs: { out: { path: sharedPath.replace('/nix/store/', '') } }
+	};
+	const rootGraph = { derivations: { 'app.drv': appNode } };
+	const recursiveGraph = {
+		derivations: { 'app.drv': appNode, 'dep.drv': dependencyNode }
+	};
+
+	function graphEvaluator(calls: string[][]): NixEvaluator {
+		return (arguments_) => {
+			calls.push([...arguments_]);
+
+			if (arguments_.includes('.#home')) {
+				return Promise.reject(new Error('cannot fetch the private input'));
+			}
+
+			return Promise.resolve({
+				stdout: JSON.stringify(
+					arguments_.includes('-r') ? recursiveGraph : rootGraph
+				)
+			});
+		};
+	}
+
+	it('confines an evaluation failure to the closure target that caused it', async () => {
+		const calls: string[][] = [];
+
+		const result = await evaluateTargets([app, home], graphEvaluator(calls));
+
+		expect({
+			evaluated: result.evaluations.map(
+				(entry) => `${entry.target.attr} from ${entry.rootDrvPath}`
+			),
+			unevaluated: result.unevaluated.map((entry) => ({
+				attr: entry.target.attr,
+				reason: entry.reason
+			})),
+			recursiveCall: calls.at(-1)
+		}).toStrictEqual({
+			evaluated: ['.#app from /nix/store/app.drv'],
+			unevaluated: [
+				{
+					attr: '.#home',
+					reason: 'Could not evaluate .#home: cannot fetch the private input'
+				}
+			],
+			recursiveCall: ['derivation', 'show', '-r', '--', '.#app']
+		});
+	});
+
+	it('fails when a strict target cannot be evaluated', async () => {
+		const broken = { ...target('home'), bestEffort: false };
+
+		await expect(evaluateTargets([broken], graphEvaluator([]))).rejects.toThrow(
+			TargetEvaluationError
+		);
+	});
+
+	const recursiveFailureEvaluator: NixEvaluator = (arguments_) => {
+		if (arguments_.includes('-r') && arguments_.includes('.#home')) {
+			return Promise.reject(new Error('cannot fetch the private input'));
+		}
+
+		return Promise.resolve({
+			stdout: JSON.stringify(
+				arguments_.includes('-r') ? recursiveGraph : rootGraph
+			)
+		});
+	};
+
+	const rootOnlyEvaluator: NixEvaluator = (arguments_) =>
+		arguments_.includes('-r')
+			? Promise.reject(new Error('the recursive show failed'))
+			: Promise.resolve({ stdout: JSON.stringify(rootGraph) });
+
+	it('confines a recursive evaluation failure to the best-effort target', async () => {
+		const result = await evaluateTargets(
+			[app, home],
+			recursiveFailureEvaluator
+		);
+
+		expect({
+			evaluated: result.evaluations.map((entry) => entry.target.attr),
+			unevaluated: result.unevaluated.map((entry) => ({
+				attr: entry.target.attr,
+				reason: entry.reason
+			}))
+		}).toStrictEqual({
+			evaluated: ['.#app'],
+			unevaluated: [
+				{
+					attr: '.#home',
+					reason: 'Could not evaluate .#home: cannot fetch the private input'
+				}
+			]
+		});
+	});
+
+	it('fails when a strict target cannot be recursively evaluated', async () => {
+		await expect(evaluateTargets([app], rootOnlyEvaluator)).rejects.toThrow(
+			TargetEvaluationError
+		);
+	});
+
+	it('skips the recursive pass when every target fails to evaluate', async () => {
+		const calls: string[][] = [];
+
+		const result = await evaluateTargets([home], graphEvaluator(calls));
+
+		expect({
+			evaluations: result.evaluations,
+			unevaluated: result.unevaluated.map((entry) => entry.target.attr),
+			calls: calls.length
+		}).toStrictEqual({
+			evaluations: [],
+			unevaluated: ['.#home'],
+			calls: 1
+		});
+	});
+});
+
+describe('evaluationFromJson', () => {
+	it('parses Determinate derivation JSON and identifies the graph root', () => {
+		const parsed = evaluationFromJson(target('app'), {
+			derivations: {
+				'dep.drv': {
+					env: { out: sharedPath },
+					inputs: { drvs: {} },
+					outputs: {
+						out: { path: sharedPath.replace('/nix/store/', '') }
+					}
+				},
+				'app.drv': {
+					env: { out: firstPath },
+					inputs: {
+						drvs: { 'dep.drv': { dynamicOutputs: {}, outputs: ['out'] } }
+					},
+					outputs: { out: {} }
+				}
+			}
+		});
+
+		expect({
+			rootDrvPath: parsed.rootDrvPath,
+			targetPaths: parsed.targetPaths,
+			nodes: parsed.nodes
+				.values()
+				.map((node) => ({
+					drvPath: node.drvPath,
+					inputs: node.inputs.entries().toArray(),
+					outputs: node.outputs
+				}))
+				.toArray()
+		}).toStrictEqual({
+			rootDrvPath: '/nix/store/app.drv',
+			targetPaths: [firstPath],
+			nodes: [
+				{
+					drvPath: '/nix/store/app.drv',
+					inputs: [['/nix/store/dep.drv', ['out']]],
+					outputs: [{ name: 'out', path: firstPath }]
+				},
+				{
+					drvPath: '/nix/store/dep.drv',
+					inputs: [],
+					outputs: [{ name: 'out', path: sharedPath }]
+				}
+			]
+		});
+	});
+
+	it('leaves a content-addressed placeholder output without a path', () => {
+		const parsed = evaluationFromJson(target('app'), {
+			derivations: {
+				'app.drv': {
+					env: {
+						out: '/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9'
+					},
+					inputs: { drvs: {} },
+					outputs: { out: {} }
+				}
+			}
+		});
+
+		expect({
+			targetPaths: parsed.targetPaths,
+			nodes: parsed.nodes
+				.values()
+				.map((node) => ({
+					drvPath: node.drvPath,
+					inputs: node.inputs.entries().toArray(),
+					outputs: node.outputs
+				}))
+				.toArray()
+		}).toStrictEqual({
+			targetPaths: [],
+			nodes: [
+				{
+					drvPath: '/nix/store/app.drv',
+					inputs: [],
+					outputs: [{ name: 'out' }]
+				}
+			]
+		});
+	});
+
+	it('accepts the bare drvPath map layout', () => {
+		const parsed = evaluationFromJson(target('app'), {
+			'app.drv': {
+				env: { out: firstPath },
+				inputs: { drvs: {} },
+				outputs: { out: {} }
+			}
+		});
+
+		expect({
+			rootDrvPath: parsed.rootDrvPath,
+			targetPaths: parsed.targetPaths
+		}).toStrictEqual({
+			rootDrvPath: '/nix/store/app.drv',
+			targetPaths: [firstPath]
+		});
+	});
+
+	it.each([
+		{ name: 'a graph that is not an object', value: 'not a derivation graph' },
+		{
+			name: 'a malformed derivation node',
+			value: { derivations: { 'app.drv': 'not a node' } }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(() => evaluationFromJson(target('app'), value)).toThrow(
+			DerivationGraphShapeError
+		);
+	});
+
+	it.each([
+		{ name: 'no derivations', value: { derivations: {} } },
+		{
+			name: 'more than one root derivation',
+			value: {
+				derivations: {
+					'a.drv': { env: {}, inputs: { drvs: {} }, outputs: { out: {} } },
+					'b.drv': { env: {}, inputs: { drvs: {} }, outputs: { out: {} } }
+				}
+			}
+		}
+	])('rejects a graph with $name', ({ value }) => {
+		expect(() => evaluationFromJson(target('app'), value)).toThrow(
+			DerivationRootCountError
+		);
+	});
+});
+
+describe('publishTargetSchema', () => {
+	it.each([
+		{ field: 'attr', value: '--refresh' },
+		{ field: 'attr', value: '.#app\n--refresh' },
+		{ field: 'outputs', value: ['--refresh'] },
+		{ field: 'outputs', value: ['out\nEOF'] }
+	])('rejects an unsafe $field value', ({ field, value }) => {
+		const result = publishTargetSchema.safeParse({
+			...target('app'),
+			[field]: value
+		});
+
+		expect(result.success).toBe(false);
+	});
+
+	it('deduplicates repeated output names, keeping first occurrence order', () => {
+		expect(
+			publishTargetSchema.parse({
+				attr: '.#app',
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: true,
+				bestEffort: true,
+				rootSuffix: 'app',
+				outputs: ['out', 'out']
+			})
+		).toStrictEqual({
+			attr: '.#app',
+			system: 'x86_64-linux',
+			os: 'ubuntu-latest',
+			remote: true,
+			bestEffort: true,
+			rootSuffix: 'app',
+			outputs: ['out']
+		});
+	});
+
+	it('treats targets as strict unless the manifest opts them out', () => {
+		expect(
+			publishTargetSchema.parse({
+				attr: '.#app',
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: true,
+				rootSuffix: 'app'
+			})
+		).toStrictEqual({
+			attr: '.#app',
+			system: 'x86_64-linux',
+			os: 'ubuntu-latest',
+			remote: true,
+			bestEffort: false,
+			rootSuffix: 'app',
+			outputs: ['out']
+		});
+	});
+});
+
+// GitHub compares labels with .NET ordinal case folding, which JavaScript
+// cannot reproduce outside ASCII, so non-ASCII labels are refused outright.
+describe('runner label validation', () => {
+	it('rejects a non-ASCII os label in the manifest', () => {
+		const result = publishTargetSchema.safeParse({
+			...target('app'),
+			os: '\u{3A3}-runner'
+		});
+
+		expect(result.success).toBe(false);
+	});
+});
+
+describe('publishTargetsSchema', () => {
+	it('accepts targets with distinct root suffixes', () => {
+		const targets = [target('first'), target('second')];
+
+		expect(publishTargetsSchema.parse(targets)).toStrictEqual(targets);
+	});
+
+	it('rejects a duplicate rootSuffix, naming it on the offending entry', () => {
+		const targets = [
+			target('first'),
+			{ ...target('second'), rootSuffix: 'first' }
+		];
+		const result = publishTargetsSchema.safeParse(targets);
+
+		expect(result.success).toBe(false);
+
+		if (result.success) {
+			return;
+		}
+
+		expect(
+			result.error.issues.map((issue) => ({
+				path: issue.path,
+				code: issue.code
+			}))
+		).toStrictEqual([{ path: [1, 'rootSuffix'], code: 'custom' }]);
+	});
+
+	// `app`, `/app` and `app/` all join to the same root, so a manifest
+	// spelling one suffix two ways would let one target's ensured root stand
+	// in for the other's while only one of them is actually rooted.
+	it.each([
+		{ spelling: '/app', canonical: 'app' },
+		{ spelling: 'app/', canonical: 'app' }
+	])(
+		'rejects a suffix equivalent to an earlier one ($spelling)',
+		({ spelling, canonical }) => {
+			const targets = [
+				target(canonical),
+				{ ...target('second'), rootSuffix: spelling }
+			];
+			const result = publishTargetsSchema.safeParse(targets);
+
+			expect(result.success).toBe(false);
+
+			if (result.success) {
+				return;
+			}
+
+			expect(
+				result.error.issues.map((issue) => ({
+					path: issue.path,
+					code: issue.code
+				}))
+			).toStrictEqual([{ path: [1, 'rootSuffix'], code: 'custom' }]);
+		}
+	);
+
+	it('parses suffixes to their canonical form', () => {
+		const targets = [
+			{ ...target('first'), rootSuffix: '/first' },
+			{ ...target('second'), rootSuffix: 'second/' }
+		];
+
+		expect(publishTargetsSchema.parse(targets)).toStrictEqual([
+			target('first'),
+			target('second')
+		]);
+	});
+
+	it('rejects a suffix that is nothing but slashes', () => {
+		const targets = [{ ...target('first'), rootSuffix: '//' }];
+
+		expect(publishTargetsSchema.safeParse(targets).success).toBe(false);
+	});
+});
+
+// The manifest is pull-request-controlled, so its runner labels must never
+// reach `runs-on` unchecked: every permitted label comes from the
+// operator-controlled allow-list, with nothing built in.
+describe('disallowedRunners', () => {
+	it.each([
+		{
+			name: 'rejects every label when nothing is allowed',
+			os: ['ubuntu-latest', 'self-hosted'],
+			allowed: [],
+			disallowed: ['ubuntu-latest', 'self-hosted']
+		},
+		{
+			name: 'accepts exactly the labels the operator names',
+			os: ['ubuntu-latest', 'macos-14'],
+			allowed: ['ubuntu-latest', 'macos-14'],
+			disallowed: []
+		},
+		{
+			name: 'rejects a label outside the named set',
+			os: ['ubuntu-latest', 'self-hosted'],
+			allowed: ['ubuntu-latest'],
+			disallowed: ['self-hosted']
+		},
+		{
+			name: 'deduplicates the offending labels',
+			os: ['gpu', 'gpu', 'self-hosted'],
+			allowed: [],
+			disallowed: ['gpu', 'self-hosted']
+		}
+	])('$name', ({ os, allowed, disallowed }) => {
+		const targets = os.map((label, index) => ({
+			...target(`suffix-${String(index)}`),
+			os: label
+		}));
+
+		expect(disallowedRunners(targets, new Set(allowed))).toStrictEqual(
+			disallowed
+		);
+	});
+});
+
+// A bare entry routes by label spelling, which any runner can carry; a
+// group-qualified entry pins the named runner group, the provenance boundary
+// GitHub offers.
+describe('parseRunnerRoutes', () => {
+	it('routes bare labels to themselves and qualified labels to their group', () => {
+		expect(
+			parseRunnerRoutes('ubuntu-latest, nix-builder@build-farm macos-14')
+		).toStrictEqual(
+			new Map<string, RunnerRoute>([
+				['ubuntu-latest', 'ubuntu-latest'],
+				['nix-builder', { group: 'build-farm', labels: ['nix-builder'] }],
+				['macos-14', 'macos-14']
+			])
+		);
+	});
+
+	it('parses an empty allow-list to no routes', () => {
+		expect(parseRunnerRoutes('')).toStrictEqual(new Map());
+	});
+
+	// A later duplicate would silently win, so a group pin could vanish
+	// depending on entry order; both orderings must fail instead. GitHub
+	// matches labels case-insensitively, so a case variant is the same label.
+	it.each([
+		{
+			name: 'bare after group-qualified',
+			source: 'nix-builder@trusted nix-builder'
+		},
+		{
+			name: 'group-qualified after bare',
+			source: 'nix-builder nix-builder@trusted'
+		},
+		{ name: 'identical bare entries', source: 'ubuntu-latest ubuntu-latest' },
+		{
+			name: 'case variant after group-qualified',
+			source: 'nix-builder@trusted NIX-BUILDER'
+		},
+		{
+			name: 'group-qualified after case variant',
+			source: 'NIX-BUILDER nix-builder@trusted'
+		}
+	])('rejects a duplicate label ($name)', ({ source }) => {
+		expect(() => parseRunnerRoutes(source)).toThrow(DuplicateRunnerLabelError);
+	});
+
+	it('keys routes by canonical label while keeping the entry spelling', () => {
+		expect(parseRunnerRoutes('Nix-Builder@Trusted')).toStrictEqual(
+			new Map<string, RunnerRoute>([
+				['nix-builder', { group: 'Trusted', labels: ['Nix-Builder'] }]
+			])
+		);
+	});
+
+	it('allows a case-variant manifest label for a named runner', () => {
+		const targets = [{ ...target('suffix'), os: 'UBUNTU-LATEST' }];
+
+		expect(
+			disallowedRunners(targets, new Set(['ubuntu-latest']))
+		).toStrictEqual([]);
+	});
+});
+
+describe('joinRoot', () => {
+	// The ensure calls and the push matrix both construct target roots through
+	// this one function, so every equivalent spelling of a prefix and suffix
+	// must produce one byte-identical root.
+	it.each([
+		{ prefix: 'github:owner/repo/main', suffix: 'app' },
+		{ prefix: 'github:owner/repo/main', suffix: '/app' },
+		{ prefix: 'github:owner/repo/main', suffix: 'app/' },
+		{ prefix: 'github:owner/repo/main/', suffix: 'app' }
+	])('joins $prefix and $suffix to one root', ({ prefix, suffix }) => {
+		expect(joinRoot(prefix, suffix)).toBe('github:owner/repo/main/app');
+	});
+});
+
+describe('availableCachePaths', () => {
+	it('returns only paths whose narinfo is available', async () => {
+		const requests: string[] = [];
+		const headers: (HeadersInit | undefined)[] = [];
+		const available = await availableCachePaths({
+			baseUrl: 'https://cupboard.example/t/acme',
+			cache: 'pr-1',
+			paths: [firstPath, secondPath],
+			fetcher: (input, init) => {
+				const url =
+					typeof input === 'string'
+						? input
+						: input instanceof URL
+							? input.href
+							: input.url;
+				requests.push(url);
+				headers.push(init?.headers);
+
+				return Promise.resolve(
+					new Response(undefined, {
+						status: url.includes('22222222222222222222222222222222') ? 200 : 404
+					})
+				);
+			}
+		});
+
+		expect({
+			available: available.values().toArray(),
+			requests,
+			headers
+		}).toStrictEqual({
+			available: [firstPath],
+			requests: [
+				'https://cupboard.example/t/acme/cache/pr-1/22222222222222222222222222222222.narinfo',
+				'https://cupboard.example/t/acme/cache/pr-1/33333333333333333333333333333333.narinfo'
+			],
+			headers: [undefined, undefined]
+		});
+	});
+
+	// A probe answer other than 200 or 404 is not evidence of absence:
+	// treating it as a miss would replan an available path as a fresh build
+	// and publish over it, so the probe fails closed and the plan never
+	// constructs. A transient refusal is retried before that; a deterministic
+	// one fails on its first response.
+	it.each([
+		{ name: 'a deterministic 500 without retrying', status: 500, attempts: 1 },
+		{ name: 'a deterministic 403 without retrying', status: 403, attempts: 1 },
+		{
+			name: 'a persistent transient 503 after retries',
+			status: 503,
+			attempts: 5
+		}
+	])(
+		'fails closed on $name, naming the path and status',
+		async ({ status, attempts }) => {
+			let observedAttempts = 0;
+			let thrown: unknown;
+
+			try {
+				await availableCachePaths({
+					baseUrl: 'https://cupboard.example/t/acme',
+					cache: 'pr-1',
+					paths: [firstPath],
+					fetcher: () => {
+						observedAttempts += 1;
+
+						return Promise.resolve(new Response(undefined, { status }));
+					}
+				});
+			} catch (error) {
+				thrown = error;
+			}
+
+			const probeError = thrown instanceof CacheProbeError ? thrown : undefined;
+
+			expect({
+				storePath: probeError?.storePath,
+				status: probeError?.status,
+				observedAttempts
+			}).toStrictEqual({
+				storePath: firstPath,
+				status,
+				observedAttempts: attempts
+			});
+		}
+	);
+
+	it('retries a transient probe refusal and keeps the plan alive', async () => {
+		let attempts = 0;
+
+		const available = await availableCachePaths({
+			baseUrl: 'https://cupboard.example/t/acme',
+			cache: 'pr-1',
+			paths: [firstPath],
+			fetcher: () => {
+				attempts += 1;
+
+				return Promise.resolve(
+					new Response(undefined, { status: attempts === 1 ? 503 : 200 })
+				);
+			}
+		});
+
+		expect({ available: available.values().toArray(), attempts }).toStrictEqual(
+			{ available: [firstPath], attempts: 2 }
+		);
+	});
+
+	it('sends a basic-auth Authorization header on every probe when read credentials are supplied', async () => {
+		const headers: (HeadersInit | undefined)[] = [];
+
+		await availableCachePaths({
+			baseUrl: 'https://cupboard.example/t/acme',
+			cache: 'pr-1',
+			paths: [firstPath, secondPath],
+			credentials: { user: 'reader', password: 'secret' },
+			fetcher: (_input, init) => {
+				headers.push(init?.headers);
+
+				return Promise.resolve(new Response(undefined, { status: 404 }));
+			}
+		});
+
+		expect(headers).toStrictEqual([
+			{
+				authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+			},
+			{
+				authorization: `Basic ${Buffer.from('reader:secret').toString('base64')}`
+			}
+		]);
+	});
+
+	it('trims a padded cache name, matching the URL the substituter would use', async () => {
+		const requests: string[] = [];
+
+		await availableCachePaths({
+			baseUrl: 'https://cupboard.example/t/acme',
+			cache: ' pr-1 ',
+			paths: [firstPath],
+			fetcher: (input) => {
+				const url =
+					typeof input === 'string'
+						? input
+						: input instanceof URL
+							? input.href
+							: input.url;
+				requests.push(url);
+
+				return Promise.resolve(new Response(undefined, { status: 404 }));
+			}
+		});
+
+		expect(requests).toStrictEqual([
+			'https://cupboard.example/t/acme/cache/pr-1/22222222222222222222222222222222.narinfo'
+		]);
+	});
+});
+
+function target(rootSuffix: string): PublishTarget {
+	return {
+		attr: `.#${rootSuffix}`,
+		system: 'x86_64-linux',
+		os: 'ubuntu-latest',
+		remote: true,
+		bestEffort: true,
+		rootSuffix,
+		outputs: ['out']
+	};
+}
+
+function evaluation(
+	target_: PublishTarget,
+	name: string,
+	path: StorePathString,
+	shared: StorePathString | undefined
+): TargetEvaluation {
+	return {
+		target: target_,
+		rootDrvPath: `/nix/store/${name}.drv`,
+		targetPaths: [path],
+		nodes: new Map([
+			[
+				'/nix/store/shared.drv',
+				{
+					drvPath: '/nix/store/shared.drv',
+					inputs: new Map(),
+					outputs: [
+						{ name: 'out', ...(shared !== undefined && { path: shared }) }
+					]
+				}
+			],
+			[
+				`/nix/store/${name}.drv`,
+				{
+					drvPath: `/nix/store/${name}.drv`,
+					inputs: new Map([['/nix/store/shared.drv', ['out']]]),
+					outputs: [{ name: 'out', path }]
+				}
+			]
+		])
+	};
+}
+
+// An evaluation whose target depends on a two-output shared derivation,
+// naming only the given subset of its outputs as an input — so a dependent
+// that names just `out` never turns the unreferenced `dev` output into a use.
+function multiOutputEvaluation(
+	target_: PublishTarget,
+	name: string,
+	path: StorePathString,
+	consumedOutputs: readonly string[]
+): TargetEvaluation {
+	return {
+		target: target_,
+		rootDrvPath: `/nix/store/${name}.drv`,
+		targetPaths: [path],
+		nodes: new Map([
+			[
+				'/nix/store/shared-multi.drv',
+				{
+					drvPath: '/nix/store/shared-multi.drv',
+					inputs: new Map(),
+					outputs: [
+						{ name: 'out', path: sharedOutPath },
+						{ name: 'dev', path: sharedDevelopmentPath }
+					]
+				}
+			],
+			[
+				`/nix/store/${name}.drv`,
+				{
+					drvPath: `/nix/store/${name}.drv`,
+					inputs: new Map([['/nix/store/shared-multi.drv', consumedOutputs]]),
+					outputs: [{ name: 'out', path }]
+				}
+			]
+		])
+	};
+}
+
+function serialisePlan(plan: ReturnType<typeof planPublish>): unknown {
+	return {
+		retained: plan.retained.map((entry) => entry.rootSuffix),
+		targets: plan.targets.map((entry) => entry.rootSuffix),
+		seedGroups: plan.seedGroups.map((group) => ({
+			key: group.key,
+			targets: group.targets,
+			candidates: group.candidates
+		})),
+		fallbackGroups: plan.fallbackGroups.map((group) => ({
+			key: group.key,
+			targets: group.targets.map((entry) => entry.rootSuffix)
+		}))
+	};
+}
