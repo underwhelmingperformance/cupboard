@@ -13,6 +13,11 @@ export interface PushGrantIntent {
 	readonly root?: string;
 }
 
+export interface RootEnsureGrantIntent {
+	readonly cacheSelector: string;
+	readonly root: string;
+}
+
 const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
@@ -38,6 +43,20 @@ export function pushAuthorizationDetails(
 			actions,
 			cache: intent.cacheSelector,
 			...(intent.root !== undefined && { root: intent.root })
+		}
+	]);
+}
+
+/** The root-scoped authority a CI preflight needs to retain an existing path. */
+export function rootEnsureAuthorizationDetails(
+	intent: RootEnsureGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['root:set'],
+			cache: intent.cacheSelector,
+			root: intent.root
 		}
 	]);
 }

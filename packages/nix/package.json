@@ -3,6 +3,7 @@
 	"version": "0.0.0",
 	"dependencies": {
 		"@cupboard/nix-store": "workspace:*",
+		"@cupboard/shared": "workspace:*",
 		"re2js": "^2.8.3"
 	},
 	"devDependencies": {

@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
@@ -6,9 +6,10 @@ import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
+import { type BuildReceipt, buildReceiptSchema } from '../build-receipt.ts';
 import { InvalidInputError } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
-import { collectLines, provided } from '../options.ts';
+import { provided } from '../options.ts';
 
 interface StorePathDigest {
 	readonly storePath: string;
@@ -16,12 +17,12 @@ interface StorePathDigest {
 }
 
 export interface AttestOptions {
-	readonly paths: readonly string[];
+	readonly receiptFile?: string;
 	readonly checksumsFile?: string;
 }
 
 export interface AttestInputs {
-	readonly paths: readonly string[];
+	readonly receiptFile: string;
 	readonly checksumsFile: string;
 }
 
@@ -30,27 +31,39 @@ interface AttestationSubjects {
 	readonly skipped: readonly string[];
 }
 
-/**
- * Partition resolved path infos into attestation subjects and skipped store
- * paths. Only a path the local store registered as ultimately trusted was
- * built by this machine; attesting a substituted or copied path would claim
- * build provenance for bytes the machine merely downloaded, so it is skipped.
- */
+/** Partition path infos according to a current-run build receipt. */
 export function attestationSubjects(
-	infos: readonly NixValidPathInfo[]
+	infos: readonly NixValidPathInfo[],
+	receipt: BuildReceipt
 ): AttestationSubjects {
 	const subjects: StorePathDigest[] = [];
-	const skipped: string[] = [];
+	const receiptSubjects = new Map(
+		receipt.subjects.map((subject) => [subject.storePath, subject])
+	);
+	const skipped = receipt.paths.filter(
+		(storePath) => !receiptSubjects.has(storePath)
+	);
 
 	for (const info of infos) {
-		if (!info.ultimate) {
-			skipped.push(info.storePath);
+		const built = receiptSubjects.get(info.storePath);
+		if (built === undefined) {
 			continue;
+		}
+		const digest = info.narHash.digestHex();
+		if (digest !== built.narHash) {
+			throw new Error(
+				`NAR hash for ${info.storePath} changed after the build receipt was written`
+			);
+		}
+		if (info.deriver !== built.derivation) {
+			throw new Error(
+				`Deriver for ${info.storePath} changed after the build receipt was written`
+			);
 		}
 
 		subjects.push({
 			storePath: info.storePath,
-			sha256: info.narHash.digestHex()
+			sha256: digest
 		});
 	}
 
@@ -73,11 +86,9 @@ export function registerAttestCommand(
 		.description(
 			'Resolve the attestation subjects for the given store paths this machine built.'
 		)
-		.option(
-			'--paths <path>',
-			'local Nix store path, derivation or installable to attest (repeatable, or newline-delimited)',
-			collectLines,
-			[]
+		.requiredOption(
+			'--receipt-file <path>',
+			'current-run receipt produced by the build action'
 		)
 		.option(
 			'--checksums-file <path>',
@@ -90,15 +101,13 @@ export function resolveAttestInputs(
 	options: AttestOptions,
 	environment: Environment
 ): AttestInputs {
-	if (options.paths.length === 0) {
-		throw new InvalidInputError(
-			'paths',
-			'paths is required and must contain at least one path'
-		);
+	const receiptFile = provided(options.receiptFile);
+	if (receiptFile === undefined) {
+		throw new InvalidInputError('receipt-file', 'receipt-file is required');
 	}
 
 	return {
-		paths: options.paths,
+		receiptFile,
 		checksumsFile:
 			provided(options.checksumsFile) ??
 			path.join(
@@ -115,15 +124,18 @@ export async function attestAction(
 	reporter: Reporter = createGithubReporter()
 ): Promise<void> {
 	const inputs = resolveAttestInputs(options, environment);
+	const receipt = buildReceiptSchema.parse(
+		JSON.parse(await readFile(inputs.receiptFile, 'utf8'))
+	);
 	const nix = Nix.open();
 	const infos = await Promise.all(
-		inputs.paths.map((storePath) => nix.queryPathInfo(storePath))
+		receipt.paths.map((storePath) => nix.queryPathInfo(storePath))
 	);
-	const { subjects, skipped } = attestationSubjects(infos);
+	const { subjects, skipped } = attestationSubjects(infos, receipt);
 
 	for (const storePath of skipped) {
 		reporter.warn(
-			`Not attesting ${storePath}: this machine did not build it, so this run cannot claim its provenance`
+			`Not attesting ${storePath}: this workflow run did not build it`
 		);
 	}
 

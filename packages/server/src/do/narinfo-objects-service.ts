@@ -6,6 +6,7 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -25,7 +26,6 @@ import {
 	batchNonEmpty,
 	chunk,
 	deleteObjects,
-	mapWithConcurrency,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';

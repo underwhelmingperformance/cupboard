@@ -51,33 +51,3 @@ export async function batchNonEmpty<
 
 	return database.batch([first, ...rest]);
 }
-
-/**
- * Maps `items` through `task` with at most `limit` running at once, preserving
- * input order in the result. Workers share one iterator, so each pulls the next
- * item as it frees up; a bounded pool keeps a fan-out of I/O within the
- * platform's simultaneous-connection cap without issuing requests serially.
- */
-export async function mapWithConcurrency<T, R>(
-	items: readonly T[],
-	limit: number,
-	task: (item: T, index: number) => Promise<R>
-): Promise<R[]> {
-	const results: R[] = [];
-	const entries = items.map((item, index): readonly [T, number] => [
-		item,
-		index
-	]);
-	const iterator = entries[Symbol.iterator]();
-
-	const runWorker = async (): Promise<void> => {
-		for (const [item, index] of iterator) {
-			results[index] = await task(item, index);
-		}
-	};
-
-	const workerCount = Math.min(Math.max(limit, 1), items.length);
-	await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
-
-	return results;
-}

@@ -1,6 +1,25 @@
 import { InvalidInputError } from './errors.ts';
 import { parseLines } from './inputs.ts';
 
+function hasControlCharacter(value: string): boolean {
+	for (const character of value) {
+		const codePoint = character.codePointAt(0);
+		if (
+			codePoint !== undefined &&
+			(codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f))
+		) {
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/** Whether a value is safe to pass to Nix as a positional argument. */
+export function isNixPositionalArgument(value: string): boolean {
+	return !value.startsWith('-') && !hasControlCharacter(value);
+}
+
 /**
  * A trimmed, non-empty option value, or `undefined` when the flag was absent or
  * blank. An empty string reaches a handler as "not provided", so the same

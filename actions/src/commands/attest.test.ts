@@ -1,4 +1,3 @@
-import type { NixValidPathInfo } from '@cupboard/nix';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { describe, expect, it } from 'vitest';
 
@@ -39,18 +38,15 @@ describe('renderChecksums', () => {
 	});
 });
 
-function attestPathInfo(
-	storePath: string,
-	digestByte: number,
-	isUltimate: boolean
-): NixValidPathInfo {
+function attestPathInfo(storePath: string, digestByte: number) {
 	return {
 		storePath,
+		deriver: `${storePath}.drv`,
 		narHash: NixSha256Hash.fromDigest(Buffer.alloc(32, digestByte)),
 		narSize: 1,
 		references: [],
-		signatures: isUltimate ? [] : ['cache-1:signature'],
-		ultimate: isUltimate
+		signatures: [],
+		ultimate: false
 	};
 }
 
@@ -58,11 +54,23 @@ describe('attestationSubjects', () => {
 	const builtPath = '/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app';
 	const substitutedPath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-lib';
 
-	it('emits subjects for built paths and skips substituted ones', () => {
-		const partitioned = attestationSubjects([
-			attestPathInfo(builtPath, 0xaa, true),
-			attestPathInfo(substitutedPath, 0xbb, false)
-		]);
+	it('emits only paths named by the current build receipt', () => {
+		const partitioned = attestationSubjects(
+			[attestPathInfo(builtPath, 0xaa), attestPathInfo(substitutedPath, 0xbb)],
+			{
+				version: 1,
+				paths: [builtPath, substitutedPath],
+				subjects: [
+					{
+						storePath: builtPath,
+						narHash: 'aa'.repeat(32),
+						derivation: `${builtPath}.drv`,
+						attempt: 1,
+						attemptId: 'one'
+					}
+				]
+			}
+		);
 
 		expect(partitioned).toStrictEqual({
 			subjects: [{ storePath: builtPath, sha256: 'aa'.repeat(32) }],
@@ -70,55 +78,61 @@ describe('attestationSubjects', () => {
 		});
 	});
 
-	it('emits no subjects when every path was substituted', () => {
-		const partitioned = attestationSubjects([
-			attestPathInfo(builtPath, 0xaa, false),
-			attestPathInfo(substitutedPath, 0xbb, false)
-		]);
-
-		expect(partitioned).toStrictEqual({
-			subjects: [],
-			skipped: [builtPath, substitutedPath]
-		});
+	it('rejects a NAR hash that changed after the receipt was written', () => {
+		expect(() =>
+			attestationSubjects([attestPathInfo(builtPath, 0xbb)], {
+				version: 1,
+				paths: [builtPath],
+				subjects: [
+					{
+						storePath: builtPath,
+						narHash: 'aa'.repeat(32),
+						derivation: `${builtPath}.drv`,
+						attempt: 1,
+						attemptId: 'one'
+					}
+				]
+			})
+		).toThrow(/NAR hash/u);
 	});
 });
 
 describe('resolveAttestInputs', () => {
-	const paths = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo';
+	const receiptFile = '/runner/temp/build-receipt.json';
 
 	it('defaults the checksums file under RUNNER_TEMP when none is given', () => {
 		const inputs = resolveAttestInputs(
-			{ paths: [paths] },
+			{ receiptFile },
 			{ RUNNER_TEMP: '/runner/temp' }
 		);
 
 		expect(inputs).toStrictEqual({
-			paths: [paths],
+			receiptFile,
 			checksumsFile: '/runner/temp/cupboard-attestations/subjects.txt'
 		});
 	});
 
 	it('honours an explicit checksums file', () => {
 		const inputs = resolveAttestInputs(
-			{ paths: [paths], checksumsFile: '/somewhere/subjects.txt' },
+			{ receiptFile, checksumsFile: '/somewhere/subjects.txt' },
 			{ RUNNER_TEMP: '/runner/temp' }
 		);
 
 		expect(inputs).toStrictEqual({
-			paths: [paths],
+			receiptFile,
 			checksumsFile: '/somewhere/subjects.txt'
 		});
 	});
 
-	it('requires at least one path', () => {
+	it('requires a build receipt', () => {
 		expect(() =>
-			resolveAttestInputs({ paths: [] }, { RUNNER_TEMP: '/runner/temp' })
+			resolveAttestInputs({}, { RUNNER_TEMP: '/runner/temp' })
 		).toThrow(InvalidInputError);
 	});
 
 	it('does not require RUNNER_TEMP when the checksums file is explicit', () => {
 		const inputs = resolveAttestInputs(
-			{ paths: [paths], checksumsFile: '/explicit/subjects.txt' },
+			{ receiptFile, checksumsFile: '/explicit/subjects.txt' },
 			{}
 		);
 

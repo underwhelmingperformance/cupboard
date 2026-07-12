@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import { InvalidStorePathError } from './errors.ts';
 import { storePathSchema } from './scalars.ts';
-import { resolveRootTargets, StorePath } from './store-path.ts';
+import { resolveRootTargets, StorePath, validStorePath } from './store-path.ts';
 
 const app = storePathSchema.parse(
 	'/nix/store/0123456789abcdfghijklmnpqrsvwxyz-app'
@@ -36,6 +36,24 @@ describe('StorePath', () => {
 		}
 	])('rejects $name on construction', ({ value }) => {
 		expect(() => new StorePath(value)).toThrow(InvalidStorePathError);
+	});
+});
+
+describe('validStorePath', () => {
+	it.each([
+		{ name: 'a well-formed store path', value: app, expected: app },
+		{
+			name: 'a bare hash placeholder with no store prefix',
+			value: '/1rz4g4znpzjwh1xymhjpm42vipw92pr73vdgl6xs1hycac8kf2n9',
+			expected: undefined
+		},
+		{
+			name: 'a store path with no name',
+			value: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz',
+			expected: undefined
+		}
+	])('returns $expected for $name', ({ value, expected }) => {
+		expect(validStorePath(value)).toBe(expected);
 	});
 });
 

@@ -20,6 +20,7 @@
 	},
 	"exports": {
 		"./collections": "./src/collections.ts",
+		"./concurrency": "./src/concurrency.ts",
 		"./errors": "./src/errors.ts",
 		"./github-actions": "./src/github-actions.ts",
 		"./http": "./src/http.ts",

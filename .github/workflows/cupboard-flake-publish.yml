@@ -1,0 +1,504 @@
+# Build a typed set of flake outputs, seeding shared cache misses once before
+# target-specific jobs fan out, then publish every result under its own root.
+name: cupboard flake publish
+
+on:
+  workflow_call:
+    inputs:
+      url:
+        description: cupboard tenant URL.
+        required: true
+        type: string
+      targets:
+        description: Flake attribute containing the cupboard target manifest.
+        required: false
+        default: '.#cupboardOutputs'
+        type: string
+      cache:
+        description: Named cache to publish to; empty selects the default cache.
+        required: false
+        default: ''
+        type: string
+      root-prefix:
+        description: Prefix prepended to each target's rootSuffix.
+        required: true
+        type: string
+      ttl:
+        description: Retention TTL such as 14d; empty retains permanently.
+        required: false
+        default: ''
+        type: string
+      cupboard-version:
+        description:
+          cupboard release used by the actions. Pass the release tag the caller
+          pins this workflow with; the workflow code already comes from that
+          tag, so one value keeps the code and the CLI it drives from skewing.
+        required: true
+        type: string
+      maximise-space:
+        description:
+          Reclaim runner disk space before building by deleting preinstalled
+          software (language toolchains, Android/.NET SDKs, docker images) from
+          the runner image. Destructive and not undone by the run, so it is an
+          explicit opt-in; enable it only on ephemeral GitHub-hosted runners,
+          whose images it is safe to strip.
+        required: false
+        default: false
+        type: boolean
+      push:
+        description: Attest and publish results; false only builds each target.
+        required: false
+        default: true
+        type: boolean
+      nix-config:
+        description:
+          Flake installable that evaluates to extra nix.conf text for builders.
+        required: false
+        default: ''
+        type: string
+      builders:
+        description:
+          nix.conf builders specification used by remote target groups.
+        required: false
+        default: ''
+        type: string
+      builder-known-hosts:
+        description:
+          known_hosts lines for the remote builders. Hosts they name are pinned;
+          other hosts are accepted on first connection.
+        required: false
+        default: ''
+        type: string
+    secrets:
+      builder_ssh_key:
+        description: SSH private key authenticating to the remote builders.
+        required: false
+      builder_ssh_config:
+        description:
+          ssh_config text for the remote builder connections, scoped under Host
+          blocks. Carries connection-environment secrets such as auth tokens.
+        required: false
+      input_ssh_key:
+        description: SSH key used while evaluating private flake inputs.
+        required: false
+      read_user:
+        description: Basic-auth credentials for tenants whose reads are private.
+        required: false
+      read_password:
+        description: Basic-auth credentials for tenants whose reads are private.
+        required: false
+
+permissions: {}
+
+jobs:
+  plan:
+    name: Plan the publication
+    # The plan job receives the input SSH key, read credentials and OIDC
+    # permission, and evaluates pull-request-controlled Nix, so its runner
+    # comes only from protected configuration: the required JSON repository
+    # variable names a label ("ubuntu-latest") or pins a runner group
+    # ({"group":"trusted","labels":["ubuntu-latest"]}). Unset, the job fails
+    # at runner selection, before any secret flows; there is no fallback,
+    # because a label-only default could route to any self-hosted runner
+    # carrying that spelling. See the runner provenance section in the docs.
+    runs-on: ${{ fromJSON(vars.CUPBOARD_PLAN_RUNNER) }}
+    permissions:
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the retention-root ensure calls
+    outputs:
+      seed-matrix: ${{ steps.plan.outputs.seed-matrix }}
+      seed-count: ${{ steps.plan.outputs.seed-count }}
+      target-matrix: ${{ steps.plan.outputs.target-matrix }}
+      target-count: ${{ steps.plan.outputs.target-count }}
+      fallback-matrix: ${{ steps.plan.outputs.fallback-matrix }}
+      fallback-count: ${{ steps.plan.outputs.fallback-count }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      # Checked out at the called workflow's own commit, not `main`, so a
+      # tagged or SHA-pinned caller executes matching action code.
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard
+          persist-credentials: false
+
+      - uses: ./.cupboard/actions/prepare
+        with:
+          ssh-key: ${{ secrets.input_ssh_key }}
+          nix-config: ${{ inputs.nix-config }}
+
+      - uses: ./.cupboard/actions/setup
+        id: setup
+        with:
+          cache-url: ${{ inputs.url }}
+          cache: ${{ inputs.cache }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit: ${{ job.workflow_sha }}
+          release-repository: underwhelmingperformance/cupboard
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
+
+      - name: Evaluate target manifest
+        id: targets
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          manifest=$(nix eval --json "${TARGETS}")
+          echo "manifest=${manifest}" >> "${GITHUB_OUTPUT}"
+
+      - uses: ./.cupboard/actions/plan
+        id: plan
+        with:
+          targets: ${{ steps.targets.outputs.manifest }}
+          url: ${{ inputs.url }}
+          cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
+          cache: ${{ inputs.cache }}
+          root-prefix: ${{ inputs.root-prefix }}
+          ttl: ${{ inputs.ttl }}
+          optimise: ${{ inputs.push }}
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
+          # A workflow input would be caller-controlled, and on pull_request
+          # the caller workflow runs from the PR branch: a PR could grant its
+          # own manifest a privileged runner. A repository variable can only
+          # be set through repository settings, which a PR cannot edit.
+          runners: ${{ vars.CUPBOARD_RUNNERS }}
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cupboard-publish-plan
+          path: ${{ steps.plan.outputs.plan-file }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Summarise plan
+        env:
+          RETAINED: ${{ steps.plan.outputs.retained-count }}
+          PLAN_FILE: ${{ steps.plan.outputs.plan-file }}
+        run: |
+          {
+            echo '## Cupboard publication plan'
+            echo
+            echo "- Retained without building: ${RETAINED}"
+            echo "- Shared seed groups: $(jq '[.seedGroups[] | select(.key | startswith("seed"))] | length' "${PLAN_FILE}")"
+            echo "- Adopted through the reuse view: $(jq '[.seedGroups[] | select(.key | startswith("adopt"))] | length' "${PLAN_FILE}")"
+            echo "- Destination-resident shared outputs: $(jq '.destinationIntermediates | length' "${PLAN_FILE}")"
+            echo "- Independent targets: $(jq '.targets | length' "${PLAN_FILE}")"
+            echo "- Unknown-output fallback groups: $(jq '.fallbackGroups | length' "${PLAN_FILE}")"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  seed:
+    name: ${{ matrix.key }}
+    needs: plan
+    if: ${{ needs.plan.outputs.seed-count != '0' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.seed-matrix) }}
+    runs-on: ${{ matrix.runsOn }}
+    permissions:
+      attestations: write # record build provenance on the repository
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard
+          persist-credentials: false
+
+      - uses: ./.cupboard/actions/prepare
+        with:
+          ssh-key: ${{ secrets.input_ssh_key }}
+          nix-config: ${{ inputs.nix-config }}
+          maximise-space: ${{ inputs.maximise-space }}
+          remote: ${{ matrix.remote }}
+          builders: ${{ inputs.builders }}
+          builder-ssh-key: ${{ secrets.builder_ssh_key }}
+          builder-ssh-config: ${{ secrets.builder_ssh_config }}
+          builder-known-hosts: ${{ inputs.builder-known-hosts }}
+
+      - uses: ./.cupboard/actions/setup
+        with:
+          cache-url: ${{ inputs.url }}
+          cache: ${{ inputs.cache }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit: ${{ job.workflow_sha }}
+          release-repository: underwhelmingperformance/cupboard
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cupboard-publish-plan
+          path: ${{ runner.temp }}/cupboard-plan
+
+      - name: Resolve seed installables
+        id: installables
+        env:
+          GROUP: ${{ matrix.key }}
+        run: |
+          set -euo pipefail
+          plan=$(find "${RUNNER_TEMP}/cupboard-plan" -type f -name '*.json' -print -quit)
+
+          attrs=()
+          while IFS= read -r attr; do
+            attrs+=("${attr}")
+          done < <(jq -r --arg group "${GROUP}" '.seedGroups[] | select(.key == $group) | .targets[]' "${plan}")
+          if [ "${#attrs[@]}" -gt 0 ]; then
+            nix derivation show -r -- "${attrs[@]}" > /dev/null
+          fi
+
+          candidates=()
+          while IFS= read -r candidate; do
+            candidates+=("${candidate}")
+          done < <(jq -r --arg group "${GROUP}" '.seedGroups[] | select(.key == $group) | .candidates[] | "\(.drvPath)^\(.output)"' "${plan}")
+          delimiter=CUPBOARD_INSTALLABLES
+          while true; do
+            collision=false
+            for record in "${candidates[@]}"; do
+              if [[ "${record}" == "${delimiter}" ]]; then
+                collision=true
+                break
+              fi
+            done
+            if [[ "${collision}" == false ]]; then
+              break
+            fi
+            delimiter="${delimiter}_"
+          done
+          {
+            echo "value<<${delimiter}"
+            printf '%s\n' "${candidates[@]}"
+            echo "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # A remote copy can truncate after some paths have arrived. The build
+      # action keeps one receipt across all three attempts, so those paths stay
+      # attributable even when a retry finds them already valid.
+      - uses: ./.cupboard/actions/build-paths
+        id: build
+        with:
+          installables: ${{ steps.installables.outputs.value }}
+          keep-going: 'true'
+          max-jobs: ${{ matrix.remote && '0' || '' }}
+          allow-failure: 'true'
+
+      - uses: ./.cupboard/actions/attest
+        id: attest
+        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        with:
+          receipt-file: ${{ steps.build.outputs.receipt-file }}
+
+      - uses: ./.cupboard/actions/push
+        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        with:
+          url: ${{ inputs.url }}
+          paths: ${{ steps.build.outputs.paths }}
+          cache: ${{ inputs.cache }}
+          root:
+            ${{ inputs.root-prefix }}/_cupboard-seed/${{ github.run_id }}/${{
+            matrix.key }}
+          ttl: 24h
+          attestations: ${{ steps.attest.outputs.bundle-path }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit: ${{ job.workflow_sha }}
+          release-repository: underwhelmingperformance/cupboard
+
+  fallback:
+    name: ${{ matrix.key }}
+    needs: plan
+    if: ${{ needs.plan.outputs.fallback-count != '0' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.fallback-matrix) }}
+    runs-on: ${{ matrix.runsOn }}
+    permissions:
+      attestations: write # record build provenance on the repository
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard
+          persist-credentials: false
+
+      - uses: ./.cupboard/actions/prepare
+        with:
+          ssh-key: ${{ secrets.input_ssh_key }}
+          nix-config: ${{ inputs.nix-config }}
+          maximise-space: ${{ inputs.maximise-space }}
+          remote: ${{ matrix.remote }}
+          builders: ${{ inputs.builders }}
+          builder-ssh-key: ${{ secrets.builder_ssh_key }}
+          builder-ssh-config: ${{ secrets.builder_ssh_config }}
+          builder-known-hosts: ${{ inputs.builder-known-hosts }}
+
+      - uses: ./.cupboard/actions/setup
+        with:
+          cache-url: ${{ inputs.url }}
+          cache: ${{ inputs.cache }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit: ${{ job.workflow_sha }}
+          release-repository: underwhelmingperformance/cupboard
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: cupboard-publish-plan
+          path: ${{ runner.temp }}/cupboard-plan
+
+      - name: Resolve fallback installables
+        id: installables
+        env:
+          GROUP: ${{ matrix.key }}
+        run: |
+          set -euo pipefail
+          plan=$(find "${RUNNER_TEMP}/cupboard-plan" -type f -name '*.json' -print -quit)
+
+          attrs=()
+          while IFS= read -r attr; do
+            attrs+=("${attr}")
+          done < <(jq -r --arg group "${GROUP}" '.fallbackGroups[] | select(.key == $group) | .targets[] | "\(.attr)^\(.outputs | join(","))"' "${plan}")
+          delimiter=CUPBOARD_INSTALLABLES
+          while true; do
+            collision=false
+            for record in "${attrs[@]}"; do
+              if [[ "${record}" == "${delimiter}" ]]; then
+                collision=true
+                break
+              fi
+            done
+            if [[ "${collision}" == false ]]; then
+              break
+            fi
+            delimiter="${delimiter}_"
+          done
+          {
+            echo "value<<${delimiter}"
+            printf '%s\n' "${attrs[@]}"
+            echo "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - uses: ./.cupboard/actions/build-paths
+        id: build
+        with:
+          installables: ${{ steps.installables.outputs.value }}
+          keep-going: 'true'
+          max-jobs: ${{ matrix.remote && '0' || '' }}
+          allow-failure: 'true'
+
+      - uses: ./.cupboard/actions/attest
+        id: attest
+        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        with:
+          receipt-file: ${{ steps.build.outputs.receipt-file }}
+
+      - uses: ./.cupboard/actions/push
+        if: ${{ inputs.push && steps.build.outputs.paths != '' }}
+        with:
+          url: ${{ inputs.url }}
+          paths: ${{ steps.build.outputs.paths }}
+          cache: ${{ inputs.cache }}
+          root:
+            ${{ inputs.root-prefix }}/_cupboard-seed/${{ github.run_id }}/${{
+            matrix.key }}
+          ttl: 24h
+          attestations: ${{ steps.attest.outputs.bundle-path }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit: ${{ job.workflow_sha }}
+          release-repository: underwhelmingperformance/cupboard
+
+  target:
+    needs: [plan, seed, fallback]
+    # The targets run whatever became of the best-effort seed and fallback
+    # warm-ups, but a cancelled run must not keep building and publishing.
+    if:
+      ${{ !cancelled() && needs.plan.result == 'success' &&
+      needs.plan.outputs.target-count != '0' }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.target-matrix) }}
+    name: ${{ matrix.attr }}
+    runs-on: ${{ matrix.runsOn }}
+    continue-on-error: ${{ matrix.bestEffort }}
+    permissions:
+      attestations: write # record build provenance on the repository
+      contents: read # check out the flake source
+      id-token: write # OIDC token for the cache push and Sigstore signing
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .cupboard
+          persist-credentials: false
+
+      - uses: ./.cupboard/actions/prepare
+        with:
+          ssh-key: ${{ secrets.input_ssh_key }}
+          nix-config: ${{ inputs.nix-config }}
+          maximise-space: ${{ inputs.maximise-space }}
+          remote: ${{ matrix.remote }}
+          builders: ${{ inputs.builders }}
+          builder-ssh-key: ${{ secrets.builder_ssh_key }}
+          builder-ssh-config: ${{ secrets.builder_ssh_config }}
+          builder-known-hosts: ${{ inputs.builder-known-hosts }}
+
+      - uses: ./.cupboard/actions/setup
+        with:
+          cache-url: ${{ inputs.url }}
+          cache: ${{ inputs.cache }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit: ${{ job.workflow_sha }}
+          release-repository: underwhelmingperformance/cupboard
+          read-user: ${{ secrets.read_user }}
+          read-password: ${{ secrets.read_password }}
+
+      - uses: ./.cupboard/actions/build-paths
+        id: build
+        with:
+          installables: ${{ matrix.attr }}^${{ join(matrix.outputs, ',') }}
+          max-jobs: ${{ matrix.remote && '0' || '' }}
+
+      - uses: ./.cupboard/actions/attest
+        id: attest
+        if: ${{ inputs.push }}
+        with:
+          receipt-file: ${{ steps.build.outputs.receipt-file }}
+
+      - uses: ./.cupboard/actions/push
+        if: ${{ inputs.push }}
+        with:
+          url: ${{ inputs.url }}
+          paths: ${{ steps.build.outputs.paths }}
+          cache: ${{ inputs.cache }}
+          # The plan action computes each target's root with the same
+          # construction its ensure calls use, so the ensured root and the
+          # published root cannot drift apart.
+          root: ${{ matrix.root }}
+          ttl: ${{ inputs.ttl }}
+          attestations: ${{ steps.attest.outputs.bundle-path }}
+          cupboard-version: ${{ inputs.cupboard-version }}
+          expected-source-commit: ${{ job.workflow_sha }}
+          release-repository: underwhelmingperformance/cupboard

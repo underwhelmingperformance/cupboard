@@ -4,6 +4,7 @@ import {
 	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, asc, eq, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -34,7 +35,6 @@ import {
 import {
 	batchNonEmpty,
 	chunk,
-	mapWithConcurrency,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from '../do/bulk.ts';

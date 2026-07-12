@@ -3,6 +3,7 @@ import {
 	type CheckDiscrepancy,
 	type CheckReport
 } from '@cupboard/protocol/reports';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { asc, count, inArray } from 'drizzle-orm';
 
 import { verifyDecompressedNar } from '../blob/nar-verify.ts';
@@ -20,12 +21,7 @@ import {
 	narObjectKey
 } from '../http/http.ts';
 
-import {
-	chunk,
-	mapWithConcurrency,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from './bulk.ts';
+import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
 interface BlobFact {

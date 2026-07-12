@@ -1,4 +1,5 @@
 import type { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 
 export interface NixValidPathInfo {
 	readonly storePath: string;
@@ -50,7 +51,11 @@ export async function resolveClosureBy(
 	let frontier = claimUnseen(roots, claimed);
 
 	while (frontier.length > 0) {
-		const infos = await queryFrontier(frontier, concurrency, queryPathInfo);
+		const infos = await mapWithConcurrency(
+			frontier,
+			concurrency,
+			queryPathInfo
+		);
 		const references: string[] = [];
 
 		for (const info of infos) {
@@ -87,36 +92,6 @@ function claimUnseen(
 	}
 
 	return next;
-}
-
-// Queries one frontier with a bounded number of queries in flight. Order is not
-// preserved, which is fine: the caller folds the results into a map and sorts at
-// the end.
-async function queryFrontier(
-	frontier: readonly string[],
-	concurrency: number,
-	queryPathInfo: (storePath: string) => Promise<NixValidPathInfo>
-): Promise<NixValidPathInfo[]> {
-	const infos: NixValidPathInfo[] = [];
-	let cursor = 0;
-
-	const worker = async (): Promise<void> => {
-		for (;;) {
-			const storePath = frontier[cursor];
-			cursor += 1;
-
-			if (storePath === undefined) {
-				return;
-			}
-
-			infos.push(await queryPathInfo(storePath));
-		}
-	};
-
-	const workerCount = Math.min(Math.max(concurrency, 1), frontier.length);
-	await Promise.all(Array.from({ length: workerCount }, () => worker()));
-
-	return infos;
 }
 
 export abstract class NixStoreError extends Error {}

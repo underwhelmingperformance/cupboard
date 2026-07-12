@@ -18,10 +18,13 @@ import {
 	InvalidInputError,
 	MalformedReleaseResponseError,
 	NoReleaseFoundError,
+	ReleaseCoordinateMismatchError,
 	UnsupportedPlatformError
 } from './errors.ts';
 import {
+	assertExpectedSourceCommit,
 	assetNameFor,
+	expectedSourceCommitFor,
 	fetchRelease,
 	normaliseVersion,
 	parseChecksums,
@@ -47,6 +50,41 @@ describe('normaliseVersion', () => {
 			expect(() => normaliseVersion(version)).toThrow(InvalidInputError);
 		}
 	);
+});
+
+describe('expectedSourceCommitFor', () => {
+	it('normalises a full commit for an exact release', () => {
+		expect(expectedSourceCommitFor('v1.2.3', 'A'.repeat(40))).toBe(
+			'a'.repeat(40)
+		);
+	});
+
+	it('allows an action without a release coordinate', () => {
+		expect(expectedSourceCommitFor('latest', undefined)).toBeUndefined();
+	});
+
+	it.each([
+		['latest', 'a'.repeat(40)],
+		['v1.2.3', 'short']
+	])('rejects version %s with commit %s', (version, commit) => {
+		expect(() => expectedSourceCommitFor(version, commit)).toThrow(
+			InvalidInputError
+		);
+	});
+});
+
+describe('assertExpectedSourceCommit', () => {
+	it('accepts the release built from the expected workflow commit', () => {
+		expect(() => {
+			assertExpectedSourceCommit('v1.2.3', 'a'.repeat(40), 'a'.repeat(40));
+		}).not.toThrow();
+	});
+
+	it('rejects a release built from another workflow commit', () => {
+		expect(() => {
+			assertExpectedSourceCommit('v1.2.3', 'b'.repeat(40), 'a'.repeat(40));
+		}).toThrow(ReleaseCoordinateMismatchError);
+	});
 });
 
 describe('splitRepository', () => {

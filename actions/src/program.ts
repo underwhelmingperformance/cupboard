@@ -11,6 +11,8 @@ import { workflowCommands } from '@cupboard/shared/github-actions';
 import { Command, CommanderError } from 'commander';
 
 import { registerAttestCommand } from './commands/attest.ts';
+import { registerBuildCommand } from './commands/build.ts';
+import { registerPlanCommand } from './commands/plan.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerSetupCommand } from './commands/setup.ts';
 import { wasAlreadyReported } from './errors.ts';
@@ -19,10 +21,10 @@ import type { Environment } from './inputs.ts';
 type GithubActions = Pick<ReturnType<typeof workflowCommands>, 'error'>;
 
 /**
- * The `cupboard-action` command: the composite GitHub Action's `setup`, `push`
- * and `attest` steps run through it, with the runner-contract environment
- * threaded to each subcommand so its handler can resolve runner-derived
- * defaults.
+ * The `cupboard-action` command: the composite GitHub Action's `setup`, `push`,
+ * `attest` and `plan` steps run through it, with the runner-contract
+ * environment threaded to each subcommand so its handler can resolve
+ * runner-derived defaults.
  */
 export function buildProgram(environment: Environment = env): Command {
 	const program = new Command()
@@ -41,6 +43,8 @@ export function buildProgram(environment: Environment = env): Command {
 	registerSetupCommand(program, environment);
 	registerPushCommand(program, environment);
 	registerAttestCommand(program, environment);
+	registerBuildCommand(program, environment);
+	registerPlanCommand(program, environment);
 
 	return program;
 }

@@ -14,6 +14,7 @@ import {
 	verifyBundle
 } from '@cupboard/shared/sigstore';
 import { slsaSourceCommit } from '@cupboard/shared/slsa';
+import { StatusCodes } from 'http-status-codes';
 import semverValid from 'semver/functions/valid.js';
 import { z } from 'zod';
 
@@ -30,6 +31,7 @@ import {
 	MissingChecksumError,
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
+	ReleaseCoordinateMismatchError,
 	UnsupportedPlatformError
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
@@ -51,6 +53,7 @@ export interface InstallCupboardOptions {
 	readonly includePrereleases: boolean;
 	readonly githubToken: string;
 	readonly environment: Environment;
+	readonly expectedSourceCommit?: string;
 }
 
 export interface InstalledCupboard {
@@ -59,6 +62,8 @@ export interface InstalledCupboard {
 }
 
 export const fallbackReleaseRepository = 'cupboard/cupboard';
+
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
 
 const releasePlatforms = new Map([
 	['darwin', 'macos'],
@@ -93,6 +98,50 @@ export function normaliseVersion(version: string): string {
 	}
 
 	return normalised;
+}
+
+export function expectedSourceCommitFor(
+	version: string,
+	expectedSourceCommit: string | undefined
+): string | undefined {
+	if (expectedSourceCommit === undefined) {
+		return undefined;
+	}
+
+	if (normaliseVersion(version) === 'latest') {
+		throw new InvalidInputError(
+			'cupboard-version',
+			'cupboard-version must be an exact release when expected-source-commit is set'
+		);
+	}
+
+	const normalised = expectedSourceCommit.trim().toLowerCase();
+
+	if (!/^[a-f\d]{40}$/u.test(normalised)) {
+		throw new InvalidInputError(
+			'expected-source-commit',
+			'expected-source-commit must be a full 40-character Git commit id'
+		);
+	}
+
+	return normalised;
+}
+
+export function assertExpectedSourceCommit(
+	tagName: string,
+	sourceCommit: string,
+	expectedSourceCommit: string | undefined
+): void {
+	if (
+		expectedSourceCommit !== undefined &&
+		sourceCommit !== expectedSourceCommit
+	) {
+		throw new ReleaseCoordinateMismatchError(
+			tagName,
+			expectedSourceCommit,
+			sourceCommit
+		);
+	}
 }
 
 export function assetNameFor(
@@ -177,6 +226,10 @@ export async function installCupboard(
 	options: InstallCupboardOptions,
 	reporter: Reporter
 ): Promise<InstalledCupboard> {
+	const expectedSourceCommit = expectedSourceCommitFor(
+		options.version,
+		options.expectedSourceCommit
+	);
 	const release = await reporter.phase(
 		'Resolve cupboard release',
 		async (phase) => {
@@ -215,6 +268,11 @@ export async function installCupboard(
 			options,
 			archivePath,
 			release.tagName
+		);
+		assertExpectedSourceCommit(
+			release.tagName,
+			builtFrom,
+			expectedSourceCommit
 		);
 		phase.fact('Built from', builtFrom);
 	});
@@ -487,7 +545,7 @@ async function listAttestations(
 
 		return data.attestations ?? [];
 	} catch (error) {
-		if (error instanceof RequestError && error.status === 404) {
+		if (error instanceof RequestError && error.status === notFoundStatus) {
 			return [];
 		}
 

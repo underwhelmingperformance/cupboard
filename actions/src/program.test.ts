@@ -1,11 +1,12 @@
 import { markErrorReported } from '@cupboard/reporter';
-import { usageExitCode } from '@cupboard/shared/errors';
+import { genericExitCode, usageExitCode } from '@cupboard/shared/errors';
 import { CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
 import {
 	CupboardReportedError,
-	InvalidInputError
+	InvalidInputError,
+	RootEnsureCommandError
 } from './errors.ts';
 import { buildProgram, reportActionFailure, runAction } from './program.ts';
 
@@ -106,6 +107,28 @@ describe('runAction', () => {
 		expect({ annotations, exitCode }).toStrictEqual({
 			annotations: ['tenant denied the push'],
 			exitCode: 3
+		});
+	});
+
+	it('does not duplicate a planner child annotation after wrapping it', () => {
+		const annotations: string[] = [];
+		const error = new RootEnsureCommandError('github:owner/repo/main', {
+			cause: new Error('cupboard exited 1'),
+			wasReported: true
+		});
+
+		const exitCode = reportActionFailure(
+			{
+				error(message) {
+					annotations.push(message);
+				}
+			},
+			error
+		);
+
+		expect({ annotations, exitCode }).toStrictEqual({
+			annotations: [],
+			exitCode: genericExitCode
 		});
 	});
 

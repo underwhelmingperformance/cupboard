@@ -69,6 +69,7 @@ describe('resolvePushInputs', () => {
 		includePrereleases: true,
 		githubToken: '',
 		releaseRepository: 'owner/cupboard',
+		expectedSourceCommit: '',
 		installDirectory: '/runner/temp/cupboard-bin',
 		url,
 		paths: [storePath],
@@ -83,6 +84,15 @@ describe('resolvePushInputs', () => {
 
 	it('applies defaults when optional flags are absent', () => {
 		expect(resolvePushInputs(baseOptions, environment)).toStrictEqual(defaults);
+	});
+
+	it('preserves the expected release source commit', () => {
+		const resolved = resolvePushInputs(
+			{ ...baseOptions, expectedSourceCommit: 'a'.repeat(40) },
+			environment
+		);
+
+		expect(resolved.expectedSourceCommit).toBe('a'.repeat(40));
 	});
 
 	it('treats blank flag values as unset and applies the defaults', () => {

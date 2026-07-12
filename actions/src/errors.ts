@@ -4,6 +4,7 @@ import {
 	genericExitCode,
 	UsageError
 } from '@cupboard/shared/errors';
+import { z } from 'zod';
 
 export class MissingInputError extends UsageError {
 	constructor(public readonly input: string) {
@@ -147,6 +148,19 @@ export class AttestationSourceMismatchError extends CodedError {
 	}
 }
 
+export class ReleaseCoordinateMismatchError extends CodedError {
+	constructor(
+		public readonly tagName: string,
+		public readonly expectedSourceCommit: string,
+		public readonly sourceCommit: string
+	) {
+		super(
+			`release ${tagName} was built from ${sourceCommit}, but the action expects ${expectedSourceCommit}`
+		);
+		this.name = 'ReleaseCoordinateMismatchError';
+	}
+}
+
 export class CachePublicKeyRequestFailedError extends CodedError {
 	constructor(
 		public readonly url: string,
@@ -161,6 +175,186 @@ export class CachePublicKeyEmptyResponseError extends CodedError {
 	constructor(public readonly url: string) {
 		super('cache public key response was empty');
 		this.name = 'CachePublicKeyEmptyResponseError';
+	}
+}
+
+export class PublishTargetsJsonError extends UsageError {
+	constructor(public override readonly cause: SyntaxError) {
+		super(`targets is not valid JSON: ${cause.message}`);
+		this.name = 'PublishTargetsJsonError';
+	}
+}
+
+export class DuplicateRunnerLabelError extends UsageError {
+	constructor(public readonly label: string) {
+		super(
+			`runner label '${label}' is configured more than once. Duplicate ` +
+				`entries make the routing order-dependent, and a bare duplicate ` +
+				`would silently replace a group-pinned route, so each label must ` +
+				`appear exactly once.`
+		);
+		this.name = 'DuplicateRunnerLabelError';
+	}
+}
+
+export class RunnerNotAllowedError extends UsageError {
+	constructor(public readonly labels: readonly string[]) {
+		super(
+			`the target manifest requests runner labels the workflow does not ` +
+				`allow: ${labels.join(', ')}. The manifest is evaluated from the ` +
+				`flake, so an arbitrary label would let a pull request route its ` +
+				`build onto a privileged runner; every permitted label must be ` +
+				`named in the CUPBOARD_RUNNERS repository variable, which only a ` +
+				`repository operator can edit. Add the labels there, and verify ` +
+				`locally with \`cupboard github check --manifest\`.`
+		);
+		this.name = 'RunnerNotAllowedError';
+	}
+}
+
+export class PublishTargetsSchemaError extends UsageError {
+	constructor(public override readonly cause: z.ZodError) {
+		super(
+			`Targets do not match the publish manifest:\n${z.prettifyError(cause)}`
+		);
+		this.name = 'PublishTargetsSchemaError';
+	}
+}
+
+export class TargetEvaluationError extends CodedError {
+	constructor(
+		public readonly attribute: string,
+		options: { readonly cause: unknown }
+	) {
+		super(`Could not evaluate ${attribute}`, withCause(options.cause));
+		this.name = 'TargetEvaluationError';
+	}
+}
+
+export class TargetEvaluationResponseError extends CodedError {
+	constructor(
+		public readonly attribute: string,
+		public override readonly cause: SyntaxError
+	) {
+		super(
+			`Nix returned invalid derivation JSON for ${attribute}: ${cause.message}`
+		);
+		this.name = 'TargetEvaluationResponseError';
+	}
+}
+
+export class DerivationGraphShapeError extends CodedError {
+	override readonly cause: z.ZodError;
+
+	constructor(
+		public readonly attribute: string,
+		options: { readonly cause: z.ZodError }
+	) {
+		super(
+			`Invalid derivation graph for ${attribute}:\n${z.prettifyError(options.cause)}`
+		);
+		this.name = 'DerivationGraphShapeError';
+		this.cause = options.cause;
+	}
+}
+
+export class DerivationRootCountError extends CodedError {
+	constructor(
+		public readonly attribute: string,
+		public readonly count: number
+	) {
+		super(
+			`Invalid derivation graph for ${attribute}: evaluated to ${String(count)} root derivations`
+		);
+		this.name = 'DerivationRootCountError';
+	}
+}
+
+export class DerivationNodeMissingError extends CodedError {
+	constructor(
+		public readonly attribute: string,
+		public readonly drvPath: string
+	) {
+		super(
+			`Invalid derivation graph for ${attribute}: does not contain ${drvPath}`
+		);
+		this.name = 'DerivationNodeMissingError';
+	}
+}
+
+export class RootEnsureCommandError extends CodedError {
+	readonly wasReported: boolean;
+
+	constructor(
+		public readonly root: string,
+		options: { readonly cause: unknown; readonly wasReported?: boolean }
+	) {
+		super(`Could not ensure retention root ${root}`, { cause: options.cause });
+		this.name = 'RootEnsureCommandError';
+		this.wasReported = options.wasReported ?? false;
+	}
+}
+
+export class RootEnsureResultMissingError extends CodedError {
+	constructor(public readonly root: string) {
+		super(`Cupboard recorded no result while ensuring ${root}`);
+		this.name = 'RootEnsureResultMissingError';
+	}
+}
+
+export class RootEnsureResultInvalidError extends CodedError {
+	constructor(
+		public readonly root: string,
+		options: { readonly cause: unknown }
+	) {
+		super(`Cupboard recorded an invalid result while ensuring ${root}`, {
+			cause: options.cause
+		});
+		this.name = 'RootEnsureResultInvalidError';
+	}
+}
+
+export class DuplicateGroupKeyError extends CodedError {
+	constructor(public readonly key: string) {
+		super(`Two publish plan groups share the key ${key}`);
+		this.name = 'DuplicateGroupKeyError';
+	}
+}
+
+export class PublishPlanInvariantError extends CodedError {
+	constructor(public readonly subject: string) {
+		super(`Publish planner invariant failed: missing ${subject}`);
+		this.name = 'PublishPlanInvariantError';
+	}
+}
+
+/**
+ * A publish matrix asks for more jobs than GitHub runs for a single matrix.
+ * Raised at plan time, naming the matrix and the counts, so the operator can
+ * split the manifest.
+ */
+export class MatrixJobLimitError extends UsageError {
+	constructor(
+		public readonly matrixName: string,
+		public readonly count: number,
+		public readonly limit: number
+	) {
+		super(
+			`the ${matrixName} matrix needs ${String(count)} jobs, but GitHub ` +
+				`runs at most ${String(limit)} jobs per matrix; split the publish ` +
+				`manifest across workflow runs`
+		);
+		this.name = 'MatrixJobLimitError';
+	}
+}
+
+export class CacheProbeError extends CodedError {
+	constructor(
+		public readonly storePath: string,
+		public readonly status: number
+	) {
+		super(`Could not check ${storePath} in the cache: HTTP ${String(status)}`);
+		this.name = 'CacheProbeError';
 	}
 }
 

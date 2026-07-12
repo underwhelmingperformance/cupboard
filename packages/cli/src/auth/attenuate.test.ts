@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { pushAuthorizationDetails } from './attenuate.ts';
+import {
+	pushAuthorizationDetails,
+	rootEnsureAuthorizationDetails
+} from './attenuate.ts';
 
 describe('pushAuthorizationDetails', () => {
 	it('requests only upload operations for a plain push', () => {
@@ -46,5 +49,23 @@ describe('pushAuthorizationDetails', () => {
 		});
 
 		expect(grant).toMatchObject({ cache: '_default' });
+	});
+});
+
+describe('rootEnsureAuthorizationDetails', () => {
+	it('requests only root:set for the exact cache and root', () => {
+		expect(
+			rootEnsureAuthorizationDetails({
+				cacheSelector: 'pr-1',
+				root: 'github:owner/repo/pr-1/x86_64-linux/app'
+			})
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['root:set'],
+				cache: 'pr-1',
+				root: 'github:owner/repo/pr-1/x86_64-linux/app'
+			}
+		]);
 	});
 });

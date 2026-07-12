@@ -4,6 +4,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { type DeletePathResponse } from '@cupboard/protocol/upload';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, exists, inArray, notExists, or, sql } from 'drizzle-orm';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -13,12 +14,7 @@ import { narInfoCachePath } from '../http/http.ts';
 
 import { type AttestationCasService } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
-import {
-	chunk,
-	mapWithConcurrency,
-	maxInClauseValues,
-	maxOutgoingConnections
-} from './bulk.ts';
+import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 

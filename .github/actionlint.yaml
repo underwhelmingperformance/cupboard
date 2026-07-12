@@ -1,0 +1,14 @@
+# GitHub documents `job.workflow_repository` and `job.workflow_sha`, including
+# this checkout pattern for a reusable workflow's own source:
+# https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#job-context
+# actionlint support is tracked upstream in issue #647 and pull request #696:
+# https://github.com/rhysd/actionlint/issues/647
+# https://github.com/rhysd/actionlint/pull/696
+#
+# The reusable publish workflow checks its own actions out with that pair, so
+# the unknown-property report is ignored for exactly that message and file.
+# Remove the entry once the pinned actionlint release models the properties.
+paths:
+  .github/workflows/cupboard-flake-publish.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'

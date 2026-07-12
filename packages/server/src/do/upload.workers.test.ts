@@ -3447,6 +3447,111 @@ describe('upload flow', () => {
 			});
 		});
 
+		it('ensures and renews an already servable target without rebuilding', async () => {
+			vi.setSystemTime(testBase);
+
+			const token = await initialise();
+			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, committed);
+
+			const response = await authorisedFetch(
+				'/cache/_default/roots/pr-1/ensure',
+				token,
+				{
+					body: JSON.stringify({
+						targets: [committed.storePath],
+						ttlSeconds: 604_800
+					}),
+					headers: { 'content-type': 'application/json' },
+					method: 'POST'
+				}
+			);
+			const body = await response.json();
+			const expiresAt = new Date(testBase.getTime() + 604_800 * 1000);
+
+			expect({ status: response.status, body }).toStrictEqual({
+				status: StatusCodes.OK,
+				body: {
+					status: 'retained',
+					root: {
+						name: 'pr-1',
+						expiresAt: expiresAt.toISOString(),
+						expired: false,
+						createdAt: testBase.toISOString(),
+						updatedAt: testBase.toISOString(),
+						targets: [
+							{
+								storePathHash: committed.storePathHash,
+								storePath: committed.storePath,
+								present: true
+							}
+						]
+					}
+				}
+			});
+		});
+
+		it('reports a build requirement without replacing the existing root', async () => {
+			const token = await initialise();
+			const committed = uploadMetadata({ fileSize: narBytes.byteLength });
+			await commitPath(token, committed);
+			const original = await setRoot(token, {
+				name: 'main',
+				targets: [committed.storePath]
+			});
+
+			const response = await authorisedFetch(
+				'/cache/_default/roots/main/ensure',
+				token,
+				{
+					body: JSON.stringify({ targets: [absentPath] }),
+					headers: { 'content-type': 'application/json' },
+					method: 'POST'
+				}
+			);
+			const body = await response.json();
+			const { roots } = await listRoots(token);
+
+			expect({ status: response.status, body, roots }).toStrictEqual({
+				status: StatusCodes.OK,
+				body: { status: 'build-required', unavailable: [absentPath] },
+				roots: [original]
+			});
+		});
+
+		// A delete is row-first, so a narinfo object can outlive its row. Such a
+		// target counts as servable outside the write gate, and only the row
+		// re-check inside the gate can reject it.
+		it('reports a build requirement for a target whose narinfo row is gone but whose object survives', async () => {
+			const token = await initialise();
+			const orphaned = uploadMetadata({ fileSize: narBytes.byteLength });
+			await env.BLOBS.put(
+				narInfoObjectKey(fixtureTenant, orphaned.storePathHash),
+				'orphaned'
+			);
+
+			const response = await authorisedFetch(
+				'/cache/_default/roots/main/ensure',
+				token,
+				{
+					body: JSON.stringify({ targets: [orphaned.storePath] }),
+					headers: { 'content-type': 'application/json' },
+					method: 'POST'
+				}
+			);
+			const body = await response.json();
+			const { roots } = await listRoots(token);
+
+			expect({ status: response.status, body, roots }).toStrictEqual({
+				status: StatusCodes.OK,
+				body: {
+					status: 'build-required',
+					unavailable: [orphaned.storePath]
+				},
+				roots: []
+			});
+		});
+
 		it('deduplicates repeated targets instead of erroring', async () => {
 			const token = await initialise();
 			const committed = uploadMetadata({
@@ -3532,11 +3637,22 @@ describe('upload flow', () => {
 				method: 'PUT'
 			});
 			const list = await fetchPath('/cache/_default/roots');
+			const ensure = await fetchPath('/cache/_default/roots/main/ensure', {
+				body: JSON.stringify({ targets: [target] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			});
 			const remove = await fetchPath('/cache/_default/roots/main', {
 				method: 'DELETE'
 			});
 
-			expect([set.status, list.status, remove.status]).toStrictEqual([
+			expect([
+				set.status,
+				ensure.status,
+				list.status,
+				remove.status
+			]).toStrictEqual([
+				StatusCodes.UNAUTHORIZED,
 				StatusCodes.UNAUTHORIZED,
 				StatusCodes.UNAUTHORIZED,
 				StatusCodes.UNAUTHORIZED
