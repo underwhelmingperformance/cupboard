@@ -2,11 +2,13 @@ import { ConfirmationRequiredError } from '@cupboard/cli-ui';
 import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
 import { type Command, CommanderError } from 'commander';
+import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { buildProgram, cliExitCode, reportCliFailure } from './cli.ts';
 import {
 	authExitCode,
+	CacheInfoUnavailableError,
 	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
@@ -52,6 +54,22 @@ describe('cliExitCode', () => {
 		{
 			name: 'a wait timeout',
 			error: new UploadWaitTimeoutError(1, 600),
+			expected: transientExitCode
+		},
+		{
+			name: 'a rate-limited cache-info response',
+			error: new CacheInfoUnavailableError(
+				'https://cupboard.example/nix-cache-info',
+				StatusCodes.TOO_MANY_REQUESTS
+			),
+			expected: transientExitCode
+		},
+		{
+			name: 'an unavailable cache-info response',
+			error: new CacheInfoUnavailableError(
+				'https://cupboard.example/nix-cache-info',
+				StatusCodes.SERVICE_UNAVAILABLE
+			),
 			expected: transientExitCode
 		},
 		{

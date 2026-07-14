@@ -13,17 +13,32 @@ import { type ServerContext } from './context.ts';
 import { type RetentionService } from './retention-service.ts';
 
 // The retention grace decision a negotiation captures on its pending upload.
-// `plan` records whether the client's request carried a retention plan, which
-// versions the grace facts the responses and commit frames may carry.
+// `reportsGrace` records whether the negotiation accepted the grace-facts
+// capability, which versions the responses and commit frames it may carry.
 // `graceSeconds` is the policy grace resolved at negotiation, absent when no
 // policy matched; zero marks the cache grace-managed without granting a
 // lasting deadline.
 export const graceDecisionSchema = z.strictObject({
-	plan: z.boolean(),
+	reportsGrace: z.boolean(),
 	graceSeconds: z.number().int().min(0).optional()
 });
 
 export type GraceDecision = z.output<typeof graceDecisionSchema>;
+
+// A rolling deployment can leave either representation in an in-flight
+// pending row. New writes use `reportsGrace`; reads normalise both shapes.
+const storedGraceDecisionSchema = z.union([
+	graceDecisionSchema,
+	z
+		.strictObject({
+			plan: z.boolean(),
+			graceSeconds: z.number().int().min(0).optional()
+		})
+		.transform(({ plan, graceSeconds }) => ({
+			reportsGrace: plan,
+			...(graceSeconds !== undefined && { graceSeconds })
+		}))
+]);
 
 export function serialiseGraceDecision(decision: GraceDecision): string {
 	return JSON.stringify(graceDecisionSchema.parse(decision));
@@ -41,7 +56,7 @@ export function parseStoredGraceDecision(
 		return undefined;
 	}
 
-	return graceDecisionSchema.parse(JSON.parse(source));
+	return storedGraceDecisionSchema.parse(JSON.parse(source));
 }
 
 // The captured policy fact a still-deferred upload reports: its deadline is

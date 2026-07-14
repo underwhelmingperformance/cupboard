@@ -7,23 +7,35 @@ import type {
 	RootSetBody,
 	RootSetResponse
 } from '@cupboard/protocol/retention';
-import type { UploadNegotiateRequest } from '@cupboard/protocol/upload';
-import { formatBytes, type Reporter, type ResultRow } from '@cupboard/reporter';
+import type {
+	UploadNegotiateRequest,
+	UploadPreviewRequest,
+	UploadPreviewResponse
+} from '@cupboard/protocol/upload';
+import {
+	formatBytes,
+	type Reporter,
+	type ResultPayload,
+	type ResultRow
+} from '@cupboard/reporter';
+import { ORPCError } from '@orpc/client';
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
-import type { CommitOptions } from '../client/client.ts';
+import type { CommitOptions, CommitTarget } from '../client/client.ts';
 import {
 	AttestationDivergedPathError,
 	AttestationSubjectNotPushedError,
 	CupboardHttpError,
 	PushIncompleteError,
 	PushNarMetadataMismatchError,
+	UploadGraceFactsUnsupportedError,
 	UploadVerificationFailedError
 } from '../errors.ts';
 import { byteStream } from '../io/byte-stream.ts';
 import type { NarUploadStream } from '../nix/blob.ts';
 import { type NarDigest, NixSha256Hash } from '../nix/nar.ts';
+import { prepareStorePathNegotiation } from '../nix/nix-store.ts';
 
 import {
 	type PushClient,
@@ -47,6 +59,45 @@ function fallbackCommitResponse() {
 	};
 }
 
+// The default `preview` a mutating-push fixture gets: mutating pushes never
+// call it, so a call here means the flow under test regressed into calling
+// preview instead of negotiate.
+function unexpectedPreviewCall(): Promise<UploadPreviewResponse> {
+	return Promise.reject(
+		new Error('preview should not be called during a mutating push')
+	);
+}
+
+// The `negotiate` twin a dry-run fixture gets: `--dry-run` never negotiates,
+// so a call here means the flow under test regressed into negotiating
+// instead of previewing.
+function unexpectedNegotiateCall(): Promise<never> {
+	return Promise.reject(
+		new Error('negotiate should not be called during a dry run')
+	);
+}
+
+// A dry run stages no bytes, commits nothing, and records no retention: these
+// three stand in for a fixture's `uploadNar`/`commit`/`setRoot` so a call to
+// any of them during `--dry-run` fails the test loudly.
+function unexpectedUploadNarCall(): Promise<never> {
+	return Promise.reject(
+		new Error('uploadNar should not be called during a dry run')
+	);
+}
+
+function unexpectedCommitCall(): Promise<never> {
+	return Promise.reject(
+		new Error('commit should not be called during a dry run')
+	);
+}
+
+function unexpectedSetRootCall(): Promise<never> {
+	return Promise.reject(
+		new Error('setRoot should not be called during a dry run')
+	);
+}
+
 describe('runPush', () => {
 	it('uploads missing blobs and commits uploaded metadata', async () => {
 		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
@@ -59,6 +110,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate(body) {
 					negotiations.push(body);
 
@@ -171,6 +223,7 @@ describe('runPush', () => {
 		await runPush(paths, reporter([]), {
 			uploadConcurrency: limit,
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate: (body) =>
 					Promise.resolve({
 						uploads: body.paths.map((path) => ({
@@ -221,6 +274,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate() {
 					negotiations += 1;
 					const uploadId = negotiations === 1 ? 'commit-stale' : 'commit-fresh';
@@ -281,6 +335,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate() {
 					negotiations += 1;
 
@@ -359,6 +414,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate() {
 					negotiations += 1;
 
@@ -443,6 +499,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate() {
 					negotiations += 1;
 
@@ -504,25 +561,24 @@ describe('runPush', () => {
 		await absentObserved;
 	});
 
-	it('with --dry-run, reports the plan without uploading or committing', async () => {
+	it('with --dry-run, previews without negotiating, uploading or committing', async () => {
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
+		const previews: UploadPreviewRequest[] = [];
 
 		await runPush([appPath], reporter(results), {
 			dryRun: true,
 			client: {
-				negotiate() {
-					clientCalls.push({ method: 'negotiate', paths: [appPath] });
+				negotiate: unexpectedNegotiateCall,
+				preview(body) {
+					previews.push(body);
 
 					return Promise.resolve({
 						uploads: [
 							{
 								action: 'upload',
 								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
+								narHash: appDigest.narHash.toString()
 							},
 							{
 								action: 'skip',
@@ -554,8 +610,32 @@ describe('runPush', () => {
 			})
 		});
 
-		expect({ clientCalls, results }).toStrictEqual({
-			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+		expect({ clientCalls, previews, results }).toStrictEqual({
+			clientCalls: [],
+			previews: [
+				{
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							narHash: appDigest.narHash.toString(),
+							narSize: 123,
+							references: [StorePath.basename(runtimePath)],
+							deriver: undefined,
+							ca: undefined
+						},
+						{
+							storePathHash: StorePath.hash(runtimePath),
+							storePath: runtimePath,
+							narHash: runtimeDigest.narHash.toString(),
+							narSize: 234,
+							references: [],
+							deriver: undefined,
+							ca: undefined
+						}
+					]
+				}
+			],
 			results: [
 				[
 					{ label: 'Would upload', value: '1' },
@@ -576,6 +656,7 @@ describe('runPush', () => {
 		await runPush([appPath], reporter(results, warnings), {
 			wait: false,
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate(body) {
 					clientCalls.push({
 						method: 'negotiate',
@@ -647,6 +728,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter(results), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate(body) {
 					clientCalls.push({
 						method: 'negotiate',
@@ -846,6 +928,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
+				preview: unexpectedPreviewCall,
 				...deferredUpload([]),
 				commit() {
 					return Promise.resolve({
@@ -1191,6 +1274,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate: () =>
 					Promise.resolve({
 						uploads: [
@@ -1246,6 +1330,7 @@ describe('runPush', () => {
 
 		const options = {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate(body) {
 					clientCalls.push({
 						method: 'negotiate',
@@ -1504,14 +1589,17 @@ describe('runPush', () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
 		const results: ResultRow[][] = [];
+		const warns: { label: string; value?: string }[] = [];
 
-		await runPush([appPath], reporter(results), {
+		await runPush([appPath], reporter(results, warns), {
 			client: skipClient(roots, clientCalls),
 			retain: false,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
-		expect({ clientCalls, roots, results }).toStrictEqual({
+		// An unretained push renders its per-path grace rows even when nothing
+		// matched, and warns: grace is the only thing that would keep the paths.
+		expect({ clientCalls, roots, results, warns }).toStrictEqual({
 			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
 			roots: [],
 			results: [
@@ -1520,31 +1608,158 @@ describe('runPush', () => {
 					{ label: 'Already cached', value: '0' },
 					{ label: 'Skipped', value: '1' },
 					{ label: 'Bytes uploaded', value: '0 B' },
-					{ label: 'Retention', value: 'none (--no-retain)' }
+					{ label: 'Retention', value: 'none (--no-retain)' },
+					{
+						label: StorePath.hash(appPath),
+						value: 'no retention grace policy matched'
+					}
 				]
+			],
+			warns: [
+				{
+					label: 'unretained',
+					value:
+						'no retention grace policy matched these paths; nothing retains them and the next collection can remove them'
+				}
 			]
 		});
 	});
 
+	it('caps the per-path rows for a closure larger than the row limit', async () => {
+		const storePaths = Array.from(
+			{ length: 22 },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+		);
+		const results: ResultRow[][] = [];
+		const store = nixStore(
+			Object.fromEntries(
+				storePaths.map((storePath) => [
+					storePath,
+					pathInfo(storePath, appDigest, [])
+				])
+			)
+		);
+
+		await runPush(storePaths, reporter(results, []), {
+			client: skipClient([], []),
+			retain: false,
+			nix: store
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Uploaded paths', value: '0' },
+				{ label: 'Already cached', value: '0' },
+				{ label: 'Skipped', value: '22' },
+				{ label: 'Bytes uploaded', value: '0 B' },
+				{ label: 'Retention', value: 'none (--no-retain)' },
+				...storePaths.slice(0, 20).map((storePath) => ({
+					label: StorePath.hash(storePath),
+					value: 'no retention grace policy matched'
+				})),
+				{
+					label: '…',
+					value: '2 more path(s); the full list is in the JSON output'
+				}
+			]
+		]);
+	});
+
+	it.each([
+		{ name: 'a named root', options: { root: 'main' } },
+		{ name: 'implicit pins', options: {} },
+		{
+			name: '--no-retain',
+			options: { retain: false }
+		}
+	])(
+		'keeps the retention choice out of the negotiate body for $name',
+		async ({ options }) => {
+			const bodies: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
+
+			await runPush([appPath], reporter([]), {
+				...options,
+				client: {
+					...skipClient([], []),
+					negotiate(body) {
+						bodies.push(body);
+
+						return Promise.resolve({
+							uploads: body.paths.map((path) => ({
+								action: 'skip',
+								storePathHash: path.storePathHash,
+								narHash: path.narHash
+							}))
+						});
+					}
+				},
+				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+			});
+
+			expect(bodies).toStrictEqual([
+				{
+					paths: [prepareStorePathNegotiation(pathInfo(appPath, appDigest, []))]
+				}
+			]);
+		}
+	);
+
 	it('with --no-retain --dry-run, reports the unretained row without a plan RPC', async () => {
 		const results: ResultRow[][] = [];
-		const clientCalls: unknown[] = [];
+		const previews: UploadPreviewRequest[] = [];
 
 		await runPush([appPath], reporter(results), {
 			dryRun: true,
 			retain: false,
-			client: skipClient([], clientCalls),
+			client: {
+				negotiate: unexpectedNegotiateCall,
+				preview(body) {
+					previews.push(body);
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'skip',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString()
+							}
+						]
+					});
+				},
+				uploadNar: unexpectedUploadNarCall,
+				commit: unexpectedCommitCall,
+				setRoot: unexpectedSetRootCall
+			} satisfies PushClient,
 			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
 		});
 
-		expect({ clientCalls, results }).toStrictEqual({
-			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+		expect({ previews, results }).toStrictEqual({
+			previews: [
+				{
+					paths: [
+						{
+							storePathHash: StorePath.hash(appPath),
+							storePath: appPath,
+							narHash: appDigest.narHash.toString(),
+							narSize: 123,
+							references: [],
+							deriver: undefined,
+							ca: undefined
+						}
+					]
+				}
+			],
 			results: [
 				[
 					{ label: 'Would upload', value: '0' },
 					{ label: 'Already cached', value: '0' },
 					{ label: 'Skipped', value: '1' },
-					{ label: 'Retention', value: 'none (--no-retain)' }
+					{ label: 'Retention', value: 'none (--no-retain)' },
+					{
+						label: StorePath.hash(appPath),
+						value: 'no retention grace policy matched'
+					}
 				]
 			]
 		});
@@ -1564,6 +1779,7 @@ describe('runPush', () => {
 				...(wait !== undefined && { wait }),
 				retain: false,
 				client: {
+					preview: unexpectedPreviewCall,
 					...deferredUpload(events),
 					setRoot(name, body) {
 						events.push('setRoot');
@@ -1582,7 +1798,11 @@ describe('runPush', () => {
 						{ label: 'Already cached', value: '0' },
 						{ label: 'Skipped', value: '0' },
 						{ label: 'Bytes uploaded', value: '14 B' },
-						{ label: 'Retention', value: 'none (--no-retain)' }
+						{ label: 'Retention', value: 'none (--no-retain)' },
+						{
+							label: StorePath.hash(appPath),
+							value: 'no retention grace policy matched'
+						}
 					]
 				]
 			});
@@ -1641,6 +1861,7 @@ describe('runPush', () => {
 
 		await runPush([appPath], reporter([]), {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate() {
 					events.push('negotiate');
 
@@ -1697,6 +1918,7 @@ describe('runPush', () => {
 		const clientCalls: unknown[] = [];
 
 		const client: PushClient = {
+			preview: unexpectedPreviewCall,
 			negotiate(body) {
 				clientCalls.push({
 					method: 'negotiate',
@@ -1784,6 +2006,7 @@ describe('runPush', () => {
 			wait: true,
 			waitTimeoutSeconds: 30,
 			client: {
+				preview: unexpectedPreviewCall,
 				...deferredUpload(events),
 				commit(_uploadId, options) {
 					events.push('commit');
@@ -1819,6 +2042,7 @@ describe('runPush', () => {
 
 		const options = {
 			client: {
+				preview: unexpectedPreviewCall,
 				...deferredUpload(events),
 				commit() {
 					events.push('commit');
@@ -1894,6 +2118,7 @@ describe('runPush', () => {
 
 		const options = {
 			client: {
+				preview: unexpectedPreviewCall,
 				...deferredUpload(events),
 				commit() {
 					events.push('commit');
@@ -1959,6 +2184,7 @@ describe('runPush', () => {
 
 		const options = {
 			client: {
+				preview: unexpectedPreviewCall,
 				negotiate: () =>
 					Promise.resolve({
 						uploads: [
@@ -2044,6 +2270,572 @@ describe('runPush', () => {
 			committed: ['upload-app'],
 			roots: []
 		});
+	});
+
+	it('reports a kept-until fact and an unmatched path together, in rows and JSON data', async () => {
+		const results: ResultRow[][] = [];
+		const payloads: ResultPayload[] = [];
+
+		await runPush([appPath, runtimePath], reporter(results, [], payloads), {
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate: (body) =>
+					Promise.resolve({
+						uploads: body.paths.map((path) =>
+							path.storePathHash === StorePath.hash(appPath)
+								? {
+										action: 'skip',
+										storePathHash: path.storePathHash,
+										narHash: path.narHash,
+										grace: { retainUntil: '2026-02-01T00:00:00.000Z' }
+									}
+								: {
+										action: 'upload',
+										storePathHash: path.storePathHash,
+										narHash: path.narHash,
+										uploadId: `upload-${path.storePathHash}`,
+										r2Key: `nar/${path.narHash}.nar.zst`,
+										expiresAt: '2026-05-18T12:00:00.000Z'
+									}
+						)
+					}),
+				async uploadNar(_r2Key, body) {
+					await collectReadableStream(body);
+				},
+				commit: () =>
+					Promise.resolve({
+						storePathHash: StorePath.hash(runtimePath),
+						narHash: runtimeDigest.narHash.toString(),
+						status: 'committed',
+						settled: Promise.resolve()
+					}),
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({
+				[appPath]: pathInfo(appPath, appDigest, []),
+				[runtimePath]: pathInfo(runtimePath, runtimeDigest, [])
+			}),
+			createNarArchive: () => new FakeNarArchive(runtimeDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		const appHash = StorePath.hash(appPath);
+		const runtimeHash = StorePath.hash(runtimePath);
+
+		expect({ results, data: payloads.at(-1)?.data }).toStrictEqual({
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '1' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Bytes uploaded', value: '14 B' },
+					{ label: 'Pinned paths', value: '2' },
+					{ label: 'Pin expiry', value: 'permanent' },
+					{ label: appHash, value: 'kept until 2026-02-01 00:00 UTC' },
+					{ label: runtimeHash, value: 'no retention grace policy matched' }
+				]
+			],
+			data: {
+				uploadedPaths: 1,
+				reusedBlobs: 0,
+				skipped: 1,
+				uploadedBytes: 14,
+				failures: [],
+				paths: [
+					{
+						storePathHash: appHash,
+						storePath: appPath,
+						outcome: 'already-present',
+						grace: { retainUntil: '2026-02-01T00:00:00.000Z' }
+					},
+					{
+						storePathHash: runtimeHash,
+						storePath: runtimePath,
+						outcome: 'committed'
+					}
+				]
+			}
+		});
+	});
+
+	it('reports a pending grace fact when --no-wait leaves a deferred upload unresolved', async () => {
+		const results: ResultRow[][] = [];
+		const payloads: ResultPayload[] = [];
+
+		await runPush([appPath], reporter(results, [], payloads), {
+			wait: false,
+			client: {
+				preview: unexpectedPreviewCall,
+				negotiate: () =>
+					Promise.resolve({
+						uploads: [
+							{
+								action: 'upload',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'upload-app',
+								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}
+						]
+					}),
+				async uploadNar(_r2Key, body) {
+					await collectReadableStream(body);
+				},
+				commit: () =>
+					Promise.resolve({
+						storePathHash: StorePath.hash(appPath),
+						narHash: appDigest.narHash.toString(),
+						status: 'pending',
+						settled: Promise.resolve(),
+						grace: { graceSeconds: 900 }
+					}),
+				setRoot: (name, body) => Promise.resolve(rootSummary({ name, ...body }))
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) }),
+			createNarArchive: () => new FakeNarArchive(appDigest),
+			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
+		});
+
+		const appHash = StorePath.hash(appPath);
+
+		expect({ results, data: payloads.at(-1)?.data }).toStrictEqual({
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '1' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '0' },
+					{ label: 'Bytes uploaded', value: '14 B' },
+					{ label: 'Pinned paths', value: '1' },
+					{ label: 'Pin expiry', value: 'permanent' },
+					{ label: appHash, value: 'pending (grace 900s)' }
+				]
+			],
+			data: {
+				uploadedPaths: 1,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 14,
+				failures: [],
+				paths: [
+					{
+						storePathHash: appHash,
+						storePath: appPath,
+						outcome: 'pending',
+						grace: { graceSeconds: 900 }
+					}
+				]
+			}
+		});
+	});
+
+	it('falls back to legacy reporting for a retained push when the server does not acknowledge grace facts', async () => {
+		const probes: string[] = [];
+		const bodies: UploadNegotiateRequest[] = [];
+		const commitTargets: CommitTarget[] = [];
+
+		await runPush([appPath], reporter([]), {
+			client: {
+				...skipClient([], []),
+				probeUploadGraceFacts(kind) {
+					probes.push(kind);
+
+					return Promise.resolve(false);
+				},
+				hasUploadGraceFacts: () => false,
+				negotiate(body) {
+					bodies.push({ pushId: 'push-1', ...body });
+
+					return Promise.resolve({
+						uploads: [
+							{
+								action: 'commit',
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								uploadId: 'reuse-app'
+							}
+						]
+					});
+				},
+				commit(target) {
+					commitTargets.push(target);
+
+					return Promise.resolve(fallbackCommitResponse());
+				}
+			},
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect({ probes, bodies, commitTargets }).toStrictEqual({
+			probes: [],
+			bodies: [
+				{
+					pushId: 'push-1',
+					paths: [prepareStorePathNegotiation(pathInfo(appPath, appDigest, []))]
+				}
+			],
+			commitTargets: [
+				{
+					uploadId: 'reuse-app',
+					storePathHash: StorePath.hash(appPath),
+					narHash: appDigest.narHash.toString()
+				}
+			]
+		});
+	});
+
+	it('refuses an unretained push before negotiating real paths when grace facts are unsupported', async () => {
+		const probes: string[] = [];
+
+		const pushed = runPush([appPath], reporter([]), {
+			retain: false,
+			client: {
+				...skipClient([], []),
+				probeUploadGraceFacts(kind) {
+					probes.push(kind);
+
+					return Promise.resolve(false);
+				},
+				negotiate: unexpectedNegotiateCall
+			},
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		await expect(pushed).rejects.toBeInstanceOf(
+			UploadGraceFactsUnsupportedError
+		);
+
+		expect(probes).toStrictEqual(['negotiate']);
+	});
+
+	it('refuses an unretained dry run before previewing real paths when grace facts are unsupported', async () => {
+		const probes: string[] = [];
+
+		const previewed = runPush([appPath], reporter([]), {
+			dryRun: true,
+			retain: false,
+			client: {
+				...skipClient([], []),
+				probeUploadGraceFacts(kind) {
+					probes.push(kind);
+
+					return Promise.resolve(false);
+				},
+				preview: unexpectedPreviewCall
+			},
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		await expect(previewed).rejects.toBeInstanceOf(
+			UploadGraceFactsUnsupportedError
+		);
+
+		expect(probes).toStrictEqual(['preview']);
+	});
+
+	// A contract-defined NOT_FOUND is the preview procedure itself refusing,
+	// not a missing route, so it is no evidence the server predates preview.
+	it('surfaces a contract-defined preview NOT_FOUND unchanged', async () => {
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([]), {
+					dryRun: true,
+					client: {
+						negotiate: unexpectedNegotiateCall,
+						preview: () =>
+							Promise.reject(new ORPCError('NOT_FOUND', { defined: true })),
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+				});
+
+				return { pushed: true };
+			} catch (error_: unknown) {
+				return {
+					isOrpcError: error_ instanceof ORPCError,
+					isWrapped: error_ instanceof UploadGraceFactsUnsupportedError
+				};
+			}
+		})();
+
+		expect(outcome).toStrictEqual({ isOrpcError: true, isWrapped: false });
+	});
+
+	it('wraps a 404 from preview as UploadGraceFactsUnsupportedError when the empty-closure probe 404s too', async () => {
+		const previewBodies: UploadPreviewRequest[] = [];
+
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([]), {
+					dryRun: true,
+					client: {
+						negotiate: unexpectedNegotiateCall,
+						preview(body) {
+							previewBodies.push(body);
+
+							return Promise.reject(new ORPCError('NOT_FOUND'));
+						},
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+				});
+
+				return { pushed: true };
+			} catch (error_: unknown) {
+				const error = z
+					.instanceof(UploadGraceFactsUnsupportedError)
+					.parse(error_);
+
+				return {
+					error: {
+						name: error.name,
+						causeIsOrpcError: error.cause instanceof ORPCError
+					}
+				};
+			}
+		})();
+
+		expect({
+			outcome,
+			probePaths: previewBodies.map((body) => body.paths.length)
+		}).toStrictEqual({
+			outcome: {
+				error: {
+					name: UploadGraceFactsUnsupportedError.name,
+					causeIsOrpcError: true
+				}
+			},
+			probePaths: [1, 0]
+		});
+	});
+
+	it('propagates the original preview 404 when the empty-closure probe answers', async () => {
+		const previewBodies: UploadPreviewRequest[] = [];
+
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([]), {
+					dryRun: true,
+					client: {
+						negotiate: unexpectedNegotiateCall,
+						preview(body) {
+							previewBodies.push(body);
+
+							if (body.paths.length === 0) {
+								return Promise.resolve({ uploads: [] });
+							}
+
+							return Promise.reject(new ORPCError('NOT_FOUND'));
+						},
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+				});
+
+				return { pushed: true };
+			} catch (error_: unknown) {
+				return {
+					isOrpcError: error_ instanceof ORPCError,
+					isWrapped: error_ instanceof UploadGraceFactsUnsupportedError
+				};
+			}
+		})();
+
+		expect({
+			outcome,
+			probePaths: previewBodies.map((body) => body.paths.length)
+		}).toStrictEqual({
+			outcome: { isOrpcError: true, isWrapped: false },
+			probePaths: [1, 0]
+		});
+	});
+
+	// An unknown tenant answers a routing-level 404 on every route, preview
+	// and its empty-closure probe alike, so the too-old diagnosis only stands
+	// once the tenant proves it answers at all.
+	it.each([
+		['does not answer', (): Promise<boolean> => Promise.resolve(false)],
+		['probe fails', (): Promise<boolean> => Promise.reject(new Error('down'))]
+	])(
+		'propagates the original preview 404 when the tenant %s',
+		async (_case, tenantServes) => {
+			const outcome = await (async () => {
+				try {
+					await runPush([appPath], reporter([]), {
+						dryRun: true,
+						client: {
+							negotiate: unexpectedNegotiateCall,
+							preview: () => Promise.reject(new ORPCError('NOT_FOUND')),
+							tenantServes,
+							uploadNar: unexpectedUploadNarCall,
+							commit: unexpectedCommitCall,
+							setRoot: unexpectedSetRootCall
+						} satisfies PushClient,
+						nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+					});
+
+					return { pushed: true };
+				} catch (error_: unknown) {
+					return {
+						isOrpcError: error_ instanceof ORPCError,
+						isWrapped: error_ instanceof UploadGraceFactsUnsupportedError
+					};
+				}
+			})();
+
+			expect(outcome).toStrictEqual({ isOrpcError: true, isWrapped: false });
+		}
+	);
+
+	it('diagnoses server-too-old when the tenant answers but preview is missing', async () => {
+		const outcome = await (async () => {
+			try {
+				await runPush([appPath], reporter([]), {
+					dryRun: true,
+					client: {
+						negotiate: unexpectedNegotiateCall,
+						preview: () => Promise.reject(new ORPCError('NOT_FOUND')),
+						tenantServes: () => Promise.resolve(true),
+						uploadNar: unexpectedUploadNarCall,
+						commit: unexpectedCommitCall,
+						setRoot: unexpectedSetRootCall
+					} satisfies PushClient,
+					nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+				});
+
+				return { pushed: true };
+			} catch (error_: unknown) {
+				return {
+					isWrapped: error_ instanceof UploadGraceFactsUnsupportedError
+				};
+			}
+		})();
+
+		expect(outcome).toStrictEqual({ isWrapped: true });
+	});
+
+	it('with --dry-run --no-retain, reports the policy a skip would extend without the unretained warning', async () => {
+		const results: ResultRow[][] = [];
+		const warns: { label: string; value?: string }[] = [];
+
+		await runPush([appPath], reporter(results, warns), {
+			dryRun: true,
+			retain: false,
+			client: {
+				negotiate: unexpectedNegotiateCall,
+				preview: () =>
+					Promise.resolve({
+						uploads: [
+							{
+								action: 'skip' as const,
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								grace: { graceSeconds: 86_400 }
+							}
+						]
+					}),
+				uploadNar: unexpectedUploadNarCall,
+				commit: unexpectedCommitCall,
+				setRoot: unexpectedSetRootCall
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect({ warns, pathRows: results[0]?.slice(-1) }).toStrictEqual({
+			warns: [],
+			pathRows: [
+				{
+					label: StorePath.hash(appPath),
+					value: 'a push would extend its grace 86,400s'
+				}
+			]
+		});
+	});
+
+	it('with --dry-run --no-retain, names a matched zero-grace policy in the row and the warning', async () => {
+		const results: ResultRow[][] = [];
+		const warns: { label: string; value?: string }[] = [];
+
+		await runPush([appPath], reporter(results, warns), {
+			dryRun: true,
+			retain: false,
+			client: {
+				negotiate: unexpectedNegotiateCall,
+				preview: () =>
+					Promise.resolve({
+						uploads: [
+							{
+								action: 'skip' as const,
+								storePathHash: StorePath.hash(appPath),
+								narHash: appDigest.narHash.toString(),
+								grace: { graceSeconds: 0 }
+							}
+						]
+					}),
+				uploadNar: unexpectedUploadNarCall,
+				commit: unexpectedCommitCall,
+				setRoot: unexpectedSetRootCall
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect({ warns, pathRows: results[0]?.slice(-1) }).toStrictEqual({
+			warns: [
+				{
+					label: 'unretained',
+					value:
+						'a zero-grace retention policy matched these paths; nothing retains them and the next collection can remove them'
+				}
+			],
+			pathRows: [
+				{
+					label: StorePath.hash(appPath),
+					value: 'matched a zero-grace policy; nothing retains it'
+				}
+			]
+		});
+	});
+
+	it('with --dry-run, warns when the cache holds a different NAR for a skipped path', async () => {
+		const cacheDigest = digest(9, 999);
+		const warns: { label: string; value?: string }[] = [];
+
+		await runPush([appPath], reporter([], warns), {
+			dryRun: true,
+			client: {
+				negotiate: unexpectedNegotiateCall,
+				preview: () =>
+					Promise.resolve({
+						uploads: [
+							{
+								action: 'skip' as const,
+								storePathHash: StorePath.hash(appPath),
+								narHash: cacheDigest.narHash.toString()
+							}
+						]
+					}),
+				uploadNar: unexpectedUploadNarCall,
+				commit: unexpectedCommitCall,
+				setRoot: unexpectedSetRootCall
+			} satisfies PushClient,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect(warns).toStrictEqual([
+			{
+				label: 'divergent',
+				value:
+					`${StorePath.basename(appPath)}: local NAR ` +
+					`${appDigest.narHash.toString()} differs from the cached copy ` +
+					`${cacheDigest.narHash.toString()}; the cache keeps its copy`
+			}
+		]);
 	});
 });
 
@@ -2299,6 +3091,7 @@ interface SetRootCall {
 
 function skipClient(roots: SetRootCall[], clientCalls: unknown[]): PushClient {
 	return {
+		preview: unexpectedPreviewCall,
 		negotiate(body) {
 			clientCalls.push({
 				method: 'negotiate',
@@ -2362,7 +3155,8 @@ function divergentSkipClient(
 
 function reporter(
 	results: ResultRow[][],
-	warnings: { label: string; value?: string }[] = []
+	warnings: { label: string; value?: string }[] = [],
+	payloads: ResultPayload[] = []
 ): Reporter {
 	const recordWarn = (label: string, value?: string): void => {
 		warnings.push({ label, value });
@@ -2413,6 +3207,7 @@ function reporter(
 			),
 		result(payload) {
 			results.push([...payload.rows]);
+			payloads.push(payload);
 		},
 		data() {
 			return;

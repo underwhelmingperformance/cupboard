@@ -7,6 +7,7 @@ import {
 	type ParsedUploadNegotiateRequest,
 	type ParsedUploadPathMetadata,
 	type ParsedUploadPathNegotiation,
+	type ParsedUploadPreviewRequest,
 	type PushCredential,
 	type UploadConfirmResponse,
 	type UploadDecision,
@@ -68,6 +69,14 @@ interface ClosureClassification {
 	readonly skippableRows: readonly NarInfoRow[];
 	readonly skippable: ReadonlySet<StorePathHash>;
 	readonly reusableByNarHash: ReadonlyMap<string, ReusableBlob>;
+}
+
+// What `classifyClosure` needs of a request body. Negotiate's body carries a
+// pushId beside the paths; preview's carries no pushId at all. Both satisfy
+// this narrower shape structurally, so shared classification never needs a
+// pushId, real or fabricated.
+interface ClosureRequest {
+	readonly paths: readonly ParsedUploadPathNegotiation[];
 }
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
@@ -205,7 +214,7 @@ export class UploadsService {
 	// hint set as a lost NAR would reconcile a healthy row away.
 	private async backedNarHashes(
 		facts: NegotiateFacts | undefined,
-		body: ParsedUploadNegotiateRequest,
+		body: ClosureRequest,
 		existingRows: readonly NarInfoRow[]
 	): Promise<ReadonlySet<NixSha256HashString>> {
 		const rowHashes = existingRows.map((row) => row.narHash);
@@ -246,7 +255,7 @@ export class UploadsService {
 	// only reports what it would do (preview) must never do that.
 	private async classifyClosure(
 		cache: string,
-		body: ParsedUploadNegotiateRequest,
+		body: ClosureRequest,
 		hints: NegotiateHints | undefined,
 		shouldClaim: boolean
 	): Promise<ClosureClassification> {
@@ -329,7 +338,8 @@ export class UploadsService {
 		cache: string,
 		body: ParsedUploadNegotiateRequest,
 		origin: string,
-		hints?: NegotiateHints
+		hints: NegotiateHints | undefined,
+		shouldReportGrace: boolean
 	): Promise<UploadNegotiateResponse> {
 		if (!(await this.context.pushCredentials().verify(body.pushId))) {
 			throw new InvalidPushIdError();
@@ -350,13 +360,12 @@ export class UploadsService {
 
 		// The grace in force is captured once per negotiation and stored with each
 		// pending upload, so a policy changed before the commit settles cannot
-		// alter what this negotiation promised. The request's retention plan
-		// versions the reply: grace facts are attached only when it was sent, so
-		// a plan-free request receives exactly the legacy decision shapes.
-		const isPlan = body.retention !== undefined;
+		// alter what this negotiation promised. Grace facts are attached only when
+		// the client declared the corresponding capability, preserving the exact
+		// legacy decision and commit-frame shapes otherwise.
 		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
 		const graceDecision: GraceDecision = {
-			plan: isPlan,
+			reportsGrace: shouldReportGrace,
 			...(resolvedGraceSeconds !== undefined && {
 				graceSeconds: resolvedGraceSeconds
 			})
@@ -367,8 +376,8 @@ export class UploadsService {
 				: { graceSeconds: resolvedGraceSeconds };
 
 		// An already-present decision is a successful publication too, so its
-		// grace is confirmed whether or not the request carried a plan; only
-		// the reported fact is plan-gated. One batched application covers every
+		// grace is confirmed whether or not the client accepted grace facts; only
+		// the reported fact is capability-gated. One batched application covers every
 		// skippable path, so a large already-present closure costs a bounded
 		// number of statements rather than one transaction per path. The
 		// skippable snapshot was read before awaited shared-facts checks, so a
@@ -407,7 +416,7 @@ export class UploadsService {
 					action: 'skip',
 					storePathHash: metadata.storePathHash,
 					narHash: existing.narHash,
-					...(isPlan && { grace: skipFact })
+					...(shouldReportGrace && { grace: skipFact })
 				});
 				continue;
 			}
@@ -439,7 +448,7 @@ export class UploadsService {
 			);
 
 			uploads.push(
-				isPlan ? { ...decision, grace: plannedGraceFact } : decision
+				shouldReportGrace ? { ...decision, grace: plannedGraceFact } : decision
 			);
 		}
 
@@ -470,13 +479,10 @@ export class UploadsService {
 	// always attached, since preview has no legacy shape to preserve.
 	async preview(
 		cache: string,
-		body: ParsedUploadNegotiateRequest,
-		hints?: NegotiateHints
+		body: ParsedUploadPreviewRequest,
+		hints: NegotiateHints | undefined,
+		shouldReportGrace: boolean
 	): Promise<UploadPreviewResponse> {
-		if (!(await this.context.pushCredentials().verify(body.pushId))) {
-			throw new InvalidPushIdError();
-		}
-
 		if (body.paths.length === 0) {
 			return { uploads: [] };
 		}
@@ -511,21 +517,30 @@ export class UploadsService {
 
 					// A skip with no stored deadline still reports the resolved
 					// policy: an empty fact strictly means no policy matched.
-					return {
+					const decision = {
 						action: 'skip',
 						storePathHash: metadata.storePathHash,
-						narHash: existing.narHash,
-						grace:
-							retainUntil === undefined ? plannedGraceFact : { retainUntil }
-					};
+						narHash: existing.narHash
+					} as const;
+
+					return shouldReportGrace
+						? {
+								...decision,
+								grace:
+									retainUntil === undefined ? plannedGraceFact : { retainUntil }
+							}
+						: decision;
 				}
 
-				return {
+				const decision = {
 					action: reusableByNarHash.has(metadata.narHash) ? 'commit' : 'upload',
 					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash,
-					grace: plannedGraceFact
-				};
+					narHash: metadata.narHash
+				} as const;
+
+				return shouldReportGrace
+					? { ...decision, grace: plannedGraceFact }
+					: decision;
 			})
 		};
 	}

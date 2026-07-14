@@ -104,20 +104,7 @@ export type PushCredential = z.input<typeof pushCredentialSchema>;
 // a legitimate push.
 export const uploadNegotiateMaxPaths = 100_000;
 
-// The retention plan a push resolved before authenticating. Its presence
-// versions the publication that follows it: grace facts appear on negotiate
-// decisions and commit frames only for uploads negotiated with a plan, so a
-// request without one receives exactly the legacy shapes an older client's
-// strict schemas already validate.
-export const uploadRetentionPlanSchema = z.strictObject({
-	kind: z.enum(['root', 'pins', 'none'])
-});
-export type ParsedUploadRetentionPlan = z.output<
-	typeof uploadRetentionPlanSchema
->;
-export type UploadRetentionPlan = z.input<typeof uploadRetentionPlanSchema>;
-
-// The retention grace fact a plan-carrying negotiation reports per decision:
+// The retention grace fact a capable negotiation reports per decision:
 // `retainUntil` is the deadline an already-present path was extended to before
 // the decision returned, and `graceSeconds` is the matched policy's grace,
 // either the captured grace a planned upload applies when it materialises or
@@ -138,8 +125,7 @@ export type ParsedUploadGraceFact = z.output<typeof uploadGraceFactSchema>;
 
 export const uploadNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,
-	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths),
-	retention: uploadRetentionPlanSchema.optional()
+	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
 });
 export type ParsedUploadNegotiateRequest = z.output<
 	typeof uploadNegotiateRequestSchema
@@ -193,11 +179,23 @@ export type ParsedUploadNegotiateResponse = z.output<
 	typeof uploadNegotiateResponseSchema
 >;
 
+// The preview request carries no pushId: a dry run creates no upload credential,
+// so no push id has been signed yet by the time it runs. Preview's
+// existence-oracle protection is the cache-scoped bearer grant plus the
+// classification's owned-edge check (it never reveals another tenant's blobs),
+// so it needs no separate proof of a live push.
+export const uploadPreviewRequestSchema = z.strictObject({
+	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
+});
+export type ParsedUploadPreviewRequest = z.output<
+	typeof uploadPreviewRequestSchema
+>;
+
 // A preview decision names the same action negotiate would plan, but carries
 // none of a real decision's upload machinery (no `uploadId`, `r2Key`, or
 // `expiresAt`): it stages nothing, so there is nothing for those fields to
-// address. `grace` is always present, since the procedure is new and carries
-// no legacy shape to preserve.
+// address. `grace` is present when the request accepted upload grace facts;
+// without that capability, decisions retain their legacy shape.
 export const uploadPreviewDecisionSchema = z.strictObject({
 	action: z.enum(['skip', 'commit', 'upload']),
 	storePathHash: storePathHashSchema,
@@ -288,9 +286,22 @@ const uploadIdsSchema = z.array(z.string());
 // does not advertise, which would close the socket on an op it cannot parse.
 export const commitCapabilitiesHeader = 'x-cupboard-commit-capabilities';
 
+// The response header on upload negotiation listing the optional response
+// semantics this server accepted for the request.
+export const uploadCapabilitiesHeader = 'x-cupboard-upload-capabilities';
+
+// The request header clients use to declare optional protocol semantics they
+// understand. It is shared by upload negotiation and the commit session.
+export const acceptCapabilitiesHeader = 'x-cupboard-accept-capabilities';
+
 // The request header the client includes on the upgrade to declare which
 // optional ops it understands. A follow-up wires the client to this constant.
-export const commitAcceptCapabilitiesHeader = 'x-cupboard-accept-capabilities';
+export const commitAcceptCapabilitiesHeader = acceptCapabilitiesHeader;
+
+// Opts an upload negotiation into grace facts on decisions and on the commit
+// frames belonging to pending uploads created by that negotiation.
+export const uploadGraceFactsCapability = 'upload-grace-facts';
+export const uploadCapabilitiesValue = uploadGraceFactsCapability;
 
 // The capability name for `commit-batch`. This is the bare token name that
 // clients look up in the parsed capability map; the server advertises it
@@ -351,8 +362,8 @@ export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscrib
 // narinfo and answers `already-present`, where a bare id could only fail as
 // unknown. `retention`, present only when the server advertised the
 // retention-marker attribute, additionally tells the server this upload
-// negotiated a retention plan, so that `already-present` answer can attach the
-// path's durable grace fact instead of none.
+// accepted grace facts, so that `already-present` answer can attach the path's
+// durable grace fact instead of none.
 //
 // Wire-freeze: any change to this schema's shape or the `commitBatchMaxEntries`
 // bound is a breaking change that requires a new capability token for each op
@@ -390,9 +401,8 @@ export type CommitSessionRequest = z.input<typeof commitSessionRequestSchema>;
 
 export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 	// The optional `grace` fields below are sent only for an upload whose
-	// negotiation carried a retention plan; the client that sent one parses
-	// them, and an upload negotiated without a plan receives exactly the legacy
-	// shapes, so no wire-freeze token is needed.
+	// negotiation accepted the upload-grace-facts capability. A client that did
+	// not opt in receives exactly the legacy shapes.
 	z.strictObject({
 		ev: z.literal('settled'),
 		uploadId: z.string(),
@@ -480,6 +490,7 @@ export type UploadDecision = z.input<typeof uploadDecisionSchema>;
 export type UploadNegotiateResponse = z.input<
 	typeof uploadNegotiateResponseSchema
 >;
+export type UploadPreviewRequest = z.input<typeof uploadPreviewRequestSchema>;
 export type UploadPreviewDecision = z.input<typeof uploadPreviewDecisionSchema>;
 export type UploadPreviewResponse = z.input<typeof uploadPreviewResponseSchema>;
 export type UploadConfirmRequest = z.input<typeof uploadConfirmRequestSchema>;

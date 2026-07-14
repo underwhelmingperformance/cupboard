@@ -99,9 +99,9 @@ export const narVerifyBudgetMs = 5 * 60 * 1000;
  * upload is stored pending verification (`deferred`) and the caller waits for
  * the verification pass's verdict. Failures are thrown.
  */
-// The optional `grace` fact is populated only for an upload negotiated with a
-// retention plan, mirroring the wire rule: a plan-free upload's frames keep
-// exactly the legacy shapes.
+// The optional `grace` fact is populated only for an upload that accepted
+// grace facts, mirroring the wire rule: a legacy upload's frames keep exactly
+// the legacy shapes.
 export type CommitOutcome =
 	| {
 			readonly kind: 'settled';
@@ -326,14 +326,14 @@ export class CommitPipelineService {
 			return;
 		}
 
-		// The grace fact is sent only for an upload negotiated with a retention
-		// plan, keeping a plan-free upload's frames on the legacy shape. The
+		// The grace fact is sent only for an upload that accepted grace facts,
+		// keeping a legacy upload's frames on the legacy shape. The
 		// deadline is read afresh from storage, the same fact every other
 		// servable verdict reports; the callers apply the captured grace before
 		// notifying, so the row it reads is current.
 		const graceDecision = parseStoredGraceDecision(row.graceDecisionJson);
 		const grace =
-			graceDecision?.plan === true
+			graceDecision?.reportsGrace === true
 				? storedGraceFact(
 						this.context.db,
 						row.cache,
@@ -441,7 +441,7 @@ export class CommitPipelineService {
 					narHash: metadata.narHash,
 					status: 'committed'
 				},
-				...(graceDecision?.plan === true && {
+				...(graceDecision?.reportsGrace === true && {
 					grace:
 						outcome.graceRetainUntil === undefined
 							? {}
@@ -525,7 +525,7 @@ export class CommitPipelineService {
 					narHash: metadata.narHash,
 					status: 'committed'
 				},
-				...(graceDecision?.plan === true && {
+				...(graceDecision?.reportsGrace === true && {
 					grace: confirmed.matched ? confirmed.fact : {}
 				})
 			};
@@ -1229,7 +1229,7 @@ export class CommitPipelineService {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash,
-					...(graceDecision?.plan === true && {
+					...(graceDecision?.reportsGrace === true && {
 						grace: capturedGraceFact(graceDecision)
 					})
 				};
@@ -1275,7 +1275,7 @@ export class CommitPipelineService {
 					narHash: winner.narHash,
 					status: 'already-present'
 				},
-				...(graceDecision?.plan === true && { grace: confirmed.fact })
+				...(graceDecision?.reportsGrace === true && { grace: confirmed.fact })
 			};
 		}
 
@@ -1290,7 +1290,7 @@ export class CommitPipelineService {
 			kind: 'deferred',
 			storePathHash: metadata.storePathHash,
 			narHash: metadata.narHash,
-			...(graceDecision?.plan === true && {
+			...(graceDecision?.reportsGrace === true && {
 				grace: capturedGraceFact(graceDecision)
 			})
 		};
@@ -1429,7 +1429,7 @@ export class CommitPipelineService {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash,
-					...(graceDecision?.plan === true && {
+					...(graceDecision?.reportsGrace === true && {
 						grace: capturedGraceFact(graceDecision)
 					})
 				};
@@ -1472,7 +1472,7 @@ export class CommitPipelineService {
 						kind: 'deferred',
 						storePathHash: metadata.storePathHash,
 						narHash: metadata.narHash,
-						...(graceDecision?.plan === true && {
+						...(graceDecision?.reportsGrace === true && {
 							grace: capturedGraceFact(graceDecision)
 						})
 					};
@@ -1491,7 +1491,7 @@ export class CommitPipelineService {
 						narHash: existingNarInfo.narHash,
 						status: 'already-present'
 					},
-					...(graceDecision?.plan === true && { grace: confirmed.fact })
+					...(graceDecision?.reportsGrace === true && { grace: confirmed.fact })
 				};
 			}
 
@@ -1509,7 +1509,7 @@ export class CommitPipelineService {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash,
-					...(graceDecision?.plan === true && {
+					...(graceDecision?.reportsGrace === true && {
 						grace: capturedGraceFact(graceDecision)
 					})
 				};
@@ -1646,7 +1646,7 @@ export class CommitPipelineService {
 			kind: 'deferred',
 			storePathHash: metadata.storePathHash,
 			narHash: metadata.narHash,
-			...(graceDecision?.plan === true && {
+			...(graceDecision?.reportsGrace === true && {
 				grace: capturedGraceFact(graceDecision)
 			})
 		};

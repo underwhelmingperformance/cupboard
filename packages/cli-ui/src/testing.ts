@@ -192,13 +192,15 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 
 /**
  * A {@link Reporter} that runs each phase, progress and steps body straight
- * through and collects the result rows and info messages, for asserting on a
- * command's output without a terminal. Warnings and the rest are discarded; a
- * test that needs them builds a bespoke reporter.
+ * through and collects the result rows, info messages and top-level warnings,
+ * for asserting on a command's output without a terminal. Phase-scoped
+ * warnings and the rest are discarded; a test that needs them builds a
+ * bespoke reporter.
  */
 export function capturingReporter(
 	results: ResultRow[][],
-	infos: string[] = []
+	infos: string[] = [],
+	warns: string[] = []
 ): Reporter {
 	return {
 		phase: (_label, body) => Promise.resolve(body({ fact: noop, warn: noop })),
@@ -215,7 +217,9 @@ export function capturingReporter(
 			}
 		},
 		data: noop,
-		warn: noop,
+		warn: (label, value) => {
+			warns.push(value === undefined ? label : `${label}: ${value}`);
+		},
 		info: (message) => {
 			infos.push(message);
 		},

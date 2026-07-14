@@ -305,6 +305,17 @@ function uploadVerificationMessage(status: UploadVerificationStatus): string {
 	}
 }
 
+export class UploadGraceFactsUnsupportedError extends CliError {
+	constructor(public override readonly cause: Error) {
+		super(
+			'This operation requires upload grace facts, but the server did not ' +
+				'acknowledge that capability. Upgrade the server before publishing ' +
+				'without retention or using this preview.'
+		);
+		this.name = 'UploadGraceFactsUnsupportedError';
+	}
+}
+
 export class PushIncompleteError extends CliError {
 	constructor(public readonly failedPaths: readonly string[]) {
 		super(

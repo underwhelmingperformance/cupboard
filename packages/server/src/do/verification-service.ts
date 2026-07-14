@@ -269,11 +269,11 @@ export class VerificationService {
 			return;
 		}
 
-		// The grace fact is sent only for an upload negotiated with a retention
-		// plan, keeping a plan-free upload's frames on the legacy shape.
+		// The grace fact is sent only for an upload that accepted grace facts,
+		// keeping a legacy upload's frames on the legacy shape.
 		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 		const grace =
-			graceDecision?.plan === true
+			graceDecision?.reportsGrace === true
 				? status === 'servable'
 					? this.servableGraceFact(pending)
 					: {}

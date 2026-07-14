@@ -1,6 +1,11 @@
+import {
+	storePathHashSchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
+import { uploadGraceFactSchema } from './upload.ts';
 
 // A storage check reconciles committed metadata against R2: a NAR blob is
 // missing, a narinfo R2 object is missing, or a deep file-hash recompute does
@@ -46,34 +51,6 @@ export const verifyReportSchema = z.strictObject({
 });
 export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
 
-// The `kind` under which `cupboard push` emits its final summary result. A
-// consumer that reads the reporter's result file addresses the summary by this
-// name.
-export const pushSummaryResultKind = 'push-summary';
-
-// A path the push could not upload or commit, and the stage it failed at,
-// carried in the push summary so a consumer can report each failure.
-export const pushFailureSchema = z.strictObject({
-	storePathHash: z.string(),
-	storePath: z.string(),
-	stage: z.enum(['upload', 'commit', 'verify']),
-	reason: z.string()
-});
-export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
-
-// The `data` behind a `push-summary` result: how many paths `cupboard push`
-// uploaded, reused from the cache or skipped, how many bytes it transferred, and
-// the paths that failed. The GitHub Action reads it back from the result file to
-// set its step outputs.
-export const pushSummarySchema = z.strictObject({
-	uploadedPaths: countSchema,
-	reusedBlobs: countSchema,
-	skipped: countSchema,
-	uploadedBytes: countSchema,
-	failures: z.array(pushFailureSchema)
-});
-export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
-
 // Whether the R2 credentials bound to the tenant script sign requests R2
 // accepts: the values cannot be read back, so the deployment proves them by
 // performing a signed probe itself. The probe runs inside a tenant's Durable
@@ -109,9 +86,56 @@ export type ParsedControlCheckReport = z.output<
 	typeof controlCheckReportSchema
 >;
 
+// The `kind` under which `cupboard push` emits its final summary result. A
+// consumer that reads the reporter's result file addresses the summary by this
+// name.
+export const pushSummaryResultKind = 'push-summary';
+
+// A path that failed to upload, commit or verify. The push presses on with the
+// rest, so a failure is reported alongside whatever succeeded, not in place of
+// it.
+export const pushFailureSchema = z.strictObject({
+	storePathHash: storePathHashSchema,
+	storePath: storePathSchema,
+	stage: z.enum(['upload', 'commit', 'verify']),
+	reason: z.string()
+});
+export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
+
+// One path's outcome and retention fact, mirroring `commitResponseSchema`'s
+// status values: `already-present` is a negotiate skip (already committed
+// before this push touched it); `committed` is a fresh upload or a reused blob
+// that settled; `pending` is a deferred upload the push did not wait for
+// (`--no-wait`). `grace` carries a materialised `retainUntil` for
+// `already-present` and `committed` outcomes, or the captured `graceSeconds`
+// for a `pending` one whose deadline is not yet known; absent when no policy
+// matched, or when the push carried no retention plan at all (an older
+// server's legacy response).
+export const pushSummaryPathSchema = z.strictObject({
+	storePathHash: storePathHashSchema,
+	storePath: storePathSchema.optional(),
+	outcome: z.enum(['committed', 'already-present', 'pending']),
+	grace: uploadGraceFactSchema.optional()
+});
+export type ParsedPushSummaryPath = z.output<typeof pushSummaryPathSchema>;
+
+// The push-summary result data a `cupboard push` emits, parsed back by the
+// actions so they can read uploaded/reused/skipped counts, failures, and each
+// path's retention fact without casting the reporter's untyped JSON.
+export const pushSummarySchema = z.strictObject({
+	uploadedPaths: countSchema,
+	reusedBlobs: countSchema,
+	skipped: countSchema,
+	uploadedBytes: countSchema,
+	failures: z.array(pushFailureSchema),
+	paths: z.array(pushSummaryPathSchema)
+});
+export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
+
 export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
 export type CheckReport = z.input<typeof checkReportSchema>;
 export type ControlCheckReport = z.input<typeof controlCheckReportSchema>;
 export type VerifyReport = z.input<typeof verifyReportSchema>;
 export type PushFailure = z.input<typeof pushFailureSchema>;
+export type PushSummaryPath = z.input<typeof pushSummaryPathSchema>;
 export type PushSummary = z.input<typeof pushSummarySchema>;
