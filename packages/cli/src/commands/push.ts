@@ -8,7 +8,9 @@ import { CupboardClient } from '../client/client.ts';
 import { parseTtl, parseWaitTimeout } from '../duration.ts';
 import {
 	AttestationsDisabledError,
-	InvalidUploadConcurrencyError
+	InvalidUploadConcurrencyError,
+	NoRetainConflictError,
+	OidcRetentionChoiceRequiredError
 } from '../errors.ts';
 import { runPush } from '../push/push.ts';
 import { pushClientFor } from '../push/push-client.ts';
@@ -26,6 +28,38 @@ interface PushOptions {
 	readonly attestation: readonly string[];
 	readonly uploadConcurrency?: number;
 	readonly dryRun?: boolean;
+	readonly retain?: boolean;
+}
+
+/**
+ * The retention plan a push must resolve before authenticating: `--no-retain`
+ * clashes with either `--root` or `--ttl`, and a mutating GitHub OIDC push must
+ * commit to a named root or explicit unretained publication before requesting a
+ * token, so a CI run never authenticates for a plan it cannot express. A dry run
+ * publishes nothing, so it is exempt from the OIDC choice.
+ */
+export function validateRetentionChoice(
+	options: Pick<
+		PushOptions,
+		'retain' | 'root' | 'ttl' | 'githubOidc' | 'dryRun'
+	>
+): void {
+	if (options.retain === false && options.root !== undefined) {
+		throw new NoRetainConflictError('--root');
+	}
+
+	if (options.retain === false && options.ttl !== undefined) {
+		throw new NoRetainConflictError('--ttl');
+	}
+
+	if (
+		options.githubOidc === true &&
+		options.dryRun !== true &&
+		options.root === undefined &&
+		options.retain !== false
+	) {
+		throw new OidcRetentionChoiceRequiredError();
+	}
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
@@ -68,6 +102,10 @@ export function registerPushCommand(
 			'expire the retained paths after this duration (e.g. 7d, 12h); default permanent',
 			parseTtl
 		)
+		.option(
+			'--no-retain',
+			"publish without any retention root or pin; kept only by the cache's retention grace policy, if one matches"
+		)
 		.option('--cache <name>', 'push to a named cache rather than the default')
 		.option(
 			'--attestation <bundle>',
@@ -108,13 +146,19 @@ export function registerPushCommand(
 				'',
 				'  # Push from CI with a GitHub Actions OIDC token',
 				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
-				'    --root github:acme/infra/main'
+				'    --root github:acme/infra/main',
+				'',
+				'  # Push a shared intermediate without pinning it',
+				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
+				'    --no-retain'
 			].join('\n')
 		)
 		.action(async (url: string, paths: string[], options: PushOptions) => {
 			if (options.attest === false && options.attestation.length > 0) {
 				throw new AttestationsDisabledError();
 			}
+
+			validateRetentionChoice(options);
 
 			const reporter = commandUi(program, programOptions).reporter();
 			const raw = CupboardClient.fromUrl(url, {
@@ -145,6 +189,7 @@ export function registerPushCommand(
 				attestations: options.attestation.map((path) => ({ path })),
 				...(options.root !== undefined && { root: options.root }),
 				...(options.ttl !== undefined && { ttlSeconds: options.ttl }),
+				...(options.retain !== undefined && { retain: options.retain }),
 				...(options.waitTimeout !== undefined && {
 					waitTimeoutSeconds: options.waitTimeout
 				}),

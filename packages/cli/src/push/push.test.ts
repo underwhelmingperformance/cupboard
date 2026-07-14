@@ -1500,6 +1500,95 @@ describe('runPush', () => {
 		});
 	});
 
+	it('with --no-retain, records no root or pin and reports the unretained row', async () => {
+		const roots: SetRootCall[] = [];
+		const clientCalls: unknown[] = [];
+		const results: ResultRow[][] = [];
+
+		await runPush([appPath], reporter(results), {
+			client: skipClient(roots, clientCalls),
+			retain: false,
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect({ clientCalls, roots, results }).toStrictEqual({
+			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+			roots: [],
+			results: [
+				[
+					{ label: 'Uploaded paths', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Bytes uploaded', value: '0 B' },
+					{ label: 'Retention', value: 'none (--no-retain)' }
+				]
+			]
+		});
+	});
+
+	it('with --no-retain --dry-run, reports the unretained row without a plan RPC', async () => {
+		const results: ResultRow[][] = [];
+		const clientCalls: unknown[] = [];
+
+		await runPush([appPath], reporter(results), {
+			dryRun: true,
+			retain: false,
+			client: skipClient([], clientCalls),
+			nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
+		});
+
+		expect({ clientCalls, results }).toStrictEqual({
+			clientCalls: [{ method: 'negotiate', paths: [appPath] }],
+			results: [
+				[
+					{ label: 'Would upload', value: '0' },
+					{ label: 'Already cached', value: '0' },
+					{ label: 'Skipped', value: '1' },
+					{ label: 'Retention', value: 'none (--no-retain)' }
+				]
+			]
+		});
+	});
+
+	it.each([
+		{ name: 'the default wait', wait: undefined },
+		{ name: '--no-wait', wait: false }
+	])(
+		'composes --no-retain with $name: no root is set either way',
+		async ({ wait }) => {
+			const events: string[] = [];
+
+			const results: ResultRow[][] = [];
+
+			await runPush([appPath], reporter(results), {
+				...(wait !== undefined && { wait }),
+				retain: false,
+				client: {
+					...deferredUpload(events),
+					setRoot(name, body) {
+						events.push('setRoot');
+
+						return Promise.resolve(rootSummary({ name, ...body }));
+					}
+				} satisfies PushClient,
+				...deferredDependencies()
+			});
+
+			expect({ events, results }).toStrictEqual({
+				events: ['negotiate', 'uploadNar', 'commit'],
+				results: [
+					[
+						{ label: 'Uploaded paths', value: '1' },
+						{ label: 'Already cached', value: '0' },
+						{ label: 'Skipped', value: '0' },
+						{ label: 'Bytes uploaded', value: '14 B' },
+						{ label: 'Retention', value: 'none (--no-retain)' }
+					]
+				]
+			});
+		}
+	);
+
 	it('derives a stable pin name when the same path is pushed again', async () => {
 		const roots: SetRootCall[] = [];
 		const clientCalls: unknown[] = [];
