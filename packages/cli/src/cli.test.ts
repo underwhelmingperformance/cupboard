@@ -379,4 +379,29 @@ describe('command help', () => {
 		expect(help).toContain('--cache');
 		expect(help).toContain('Example:');
 	});
+
+	it('lists the list, set and remove subcommands under reuse-view', () => {
+		const help = helpFor(['reuse-view']);
+
+		expect(help).toContain('list');
+		expect(help).toContain('set');
+		expect(help).toContain('remove');
+	});
+
+	it('shows the selector and priority options and an example for reuse-view set', () => {
+		const help = helpFor(['reuse-view', 'set']);
+
+		expect(help).toContain('--exact');
+		expect(help).toContain('--prefix');
+		expect(help).toContain('--priority');
+		expect(help).toContain('matches');
+		expect(help).toContain('every cache');
+		expect(help).toContain('Example:');
+	});
+
+	it('shows the confirmation option for reuse-view remove', () => {
+		const help = helpFor(['reuse-view', 'remove']);
+
+		expect(help).toContain('-y, --yes');
+	});
 });
