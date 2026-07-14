@@ -6,6 +6,8 @@ import {
 	AttestationNotFoundError,
 	AttestationSourceMismatchError,
 	AttestationVerificationFailedError,
+	CacheInfoFetchError,
+	CacheInfoInvalidError,
 	CacheProbeError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
@@ -33,6 +35,7 @@ import {
 	PublishTargetsSchemaError,
 	PushSummaryMissingError,
 	ReleaseAssetNotFoundError,
+	ReuseViewPriorityError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
@@ -192,6 +195,23 @@ describe('action errors', () => {
 			'PublishPlanInvariantError',
 			new PublishPlanInvariantError('index 0'),
 			genericExitCode
+		],
+		[
+			'CacheInfoFetchError',
+			new CacheInfoFetchError('destination', 'https://cache.example.test', 503),
+			genericExitCode
+		],
+		[
+			'CacheInfoInvalidError',
+			new CacheInfoInvalidError('view', 'https://cache.example.test', {
+				cause: new Error('boom')
+			}),
+			genericExitCode
+		],
+		[
+			'ReuseViewPriorityError',
+			new ReuseViewPriorityError(40, 40),
+			usageExitCode
 		],
 		[
 			'CacheProbeError',
@@ -464,6 +484,17 @@ describe('DuplicateGroupKeyError', () => {
 describe('PublishPlanInvariantError', () => {
 	it('carries the missing subject', () => {
 		expect(new PublishPlanInvariantError('index 0').subject).toBe('index 0');
+	});
+});
+
+describe('CacheInfoInvalidError', () => {
+	it('carries the causal error by reference', () => {
+		const cause = new Error('root cause');
+
+		expect(
+			new CacheInfoInvalidError('view', 'https://cache.example.test', { cause })
+				.cause
+		).toBe(cause);
 	});
 });
 

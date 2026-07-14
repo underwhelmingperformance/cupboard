@@ -66,6 +66,11 @@ For private reads, provide `read-user` and `read-password`. The action writes a
 private netrc file under `$RUNNER_TEMP`, sets mode `0600`, appends
 `netrc-file = ...` to the generated Nix config, and never echoes the password.
 
+`reuse-view` adds a named tenant reuse view as a second substituter, after the
+destination cache. Nix tries substituters in order, so setup fetches both
+`nix-cache-info` responses and refuses to configure the view unless its priority
+is numerically greater than the destination's, keeping the destination first.
+
 ## `actions/push`
 
 `actions/push` installs cupboard if needed, resolves the supplied paths with

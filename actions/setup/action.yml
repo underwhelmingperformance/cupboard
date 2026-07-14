@@ -47,6 +47,12 @@ inputs:
   read-password:
     description: Password for private cache reads.
     required: false
+  reuse-view:
+    description:
+      Named tenant reuse view to add as a second substituter, after the
+      destination cache. Refused unless the view's nix-cache-info priority is
+      numerically greater than the destination's.
+    required: false
   nix-config-file:
     description: Optional Nix config file to append to.
     required: false
@@ -102,6 +108,7 @@ runs:
         ADD_TO_PATH: ${{ inputs.add-to-path }}
         CACHE_URL: ${{ inputs.cache-url }}
         CACHE: ${{ inputs.cache }}
+        REUSE_VIEW: ${{ inputs.reuse-view }}
         TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
@@ -117,6 +124,7 @@ runs:
           --add-to-path "$ADD_TO_PATH"
           --cache-url "$CACHE_URL"
           --cache "$CACHE"
+          --reuse-view "$REUSE_VIEW"
           --trusted-public-key "$TRUSTED_PUBLIC_KEY"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"

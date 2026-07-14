@@ -3,15 +3,23 @@ import { chmod, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { env } from 'node:process';
 
+import {
+	CacheInfo,
+	isDestinationPreferred
+} from '@cupboard/nix-store/cache-info';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
+import { basicAuthHeader } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
 import {
+	CacheInfoFetchError,
+	CacheInfoInvalidError,
 	CachePublicKeyEmptyResponseError,
 	CachePublicKeyRequestFailedError,
-	InvalidInputError
+	InvalidInputError,
+	ReuseViewPriorityError
 } from '../errors.ts';
 import {
 	appendEnvironmentFile,
@@ -29,7 +37,8 @@ import {
 	cachePublicKeyRequestHeaders,
 	cachePublicKeyUrl,
 	cacheUrlFor,
-	isHttpUrl
+	isHttpUrl,
+	reuseViewUrlFor
 } from '../substituters.ts';
 
 export interface SetupOptions {
@@ -42,6 +51,7 @@ export interface SetupOptions {
 	readonly addToPath?: string;
 	readonly cacheUrl?: string;
 	readonly cache?: string;
+	readonly reuseView?: string;
 	readonly trustedPublicKey?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
@@ -58,6 +68,7 @@ export interface SetupInputs {
 	readonly addToPath: boolean;
 	readonly cacheUrl: string;
 	readonly cache: string;
+	readonly reuseView: string;
 	readonly trustedPublicKey: string;
 	readonly readUser: string;
 	readonly readPassword: string;
@@ -114,6 +125,10 @@ export function registerSetupCommand(
 			'cupboard Worker URL to add to Nix substituters'
 		)
 		.option('--cache <name>', 'named cache to read from')
+		.option(
+			'--reuse-view <name>',
+			'named tenant reuse view to add as a second substituter'
+		)
 		.option(
 			'--trusted-public-key <key>',
 			'Nix trusted public key for the cupboard cache'
@@ -174,6 +189,7 @@ export function resolveSetupInputs(
 		addToPath: isEnabled('add-to-path', options.addToPath, true),
 		cacheUrl,
 		cache: provided(options.cache) ?? '',
+		reuseView: provided(options.reuseView) ?? '',
 		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
 		readUser,
 		readPassword,
@@ -223,6 +239,77 @@ export async function setupAction(
 	await configureNix({ ...inputs, environment }, reporter);
 }
 
+interface CacheInfoFetchDependencies {
+	readonly fetch?: typeof fetch;
+}
+
+async function fetchCacheInfoPriority(
+	fetcher: typeof fetch,
+	url: string,
+	side: 'destination' | 'view',
+	headers: Readonly<Record<string, string>> | undefined
+): Promise<number> {
+	const response = await fetcher(`${url.replace(/\/+$/u, '')}/nix-cache-info`, {
+		...(headers !== undefined && { headers })
+	});
+
+	if (!response.ok) {
+		throw new CacheInfoFetchError(side, url, response.status);
+	}
+
+	try {
+		return CacheInfo.parse(await response.text()).priority;
+	} catch (error) {
+		throw new CacheInfoInvalidError(side, url, { cause: error });
+	}
+}
+
+export interface ResolveSubstitutersOptions {
+	readonly cacheUrl: string;
+	readonly cache: string;
+	readonly reuseView: string;
+	readonly readUser: string;
+	readonly readPassword: string;
+}
+
+/**
+ * The ordered substituter list for generated Nix config: the destination
+ * cache first, then, when a reuse view is configured, the view URL once its
+ * `nix-cache-info` priority has been checked against the destination's.
+ * Destination-before-view is an invariant (see PLAN.md, "Named tenant reuse
+ * views"): a divergent input-addressed path already adopted by the
+ * destination must never be replaced by a view candidate. Both fetches carry
+ * the Basic read credential when one is configured; the runner's netrc only
+ * covers Nix's own reads, not this check's.
+ */
+export async function resolveSubstituters(
+	options: ResolveSubstitutersOptions,
+	dependencies: CacheInfoFetchDependencies = {}
+): Promise<readonly string[]> {
+	const destinationUrl = cacheUrlFor(options.cacheUrl, options.cache);
+
+	if (options.reuseView === '') {
+		return [destinationUrl];
+	}
+
+	const viewUrl = reuseViewUrlFor(options.cacheUrl, options.reuseView);
+	const fetcher = retryingFetcher(dependencies.fetch ?? fetch);
+	const headers =
+		options.readPassword === ''
+			? undefined
+			: basicAuthHeader(options.readUser, options.readPassword);
+	const [destinationPriority, viewPriority] = await Promise.all([
+		fetchCacheInfoPriority(fetcher, destinationUrl, 'destination', headers),
+		fetchCacheInfoPriority(fetcher, viewUrl, 'view', headers)
+	]);
+
+	if (!isDestinationPreferred(destinationPriority, viewPriority)) {
+		throw new ReuseViewPriorityError(destinationPriority, viewPriority);
+	}
+
+	return [destinationUrl, viewUrl];
+}
+
 async function configureNix(
 	inputs: ConfigureNixInputs,
 	reporter: Reporter
@@ -231,7 +318,16 @@ async function configureNix(
 		inputs.trustedPublicKey === ''
 			? await fetchTrustedPublicKey(inputs, reporter)
 			: inputs.trustedPublicKey;
-	const substituter = cacheUrlFor(inputs.cacheUrl, inputs.cache);
+	// A private tenant's reuse view lives under the same host as its
+	// destination cache, so the netrc entry built below already covers it:
+	// netrc is host-scoped, not path-scoped.
+	const substituters = await resolveSubstituters({
+		cacheUrl: inputs.cacheUrl,
+		cache: inputs.cache,
+		reuseView: inputs.reuseView,
+		readUser: inputs.readUser,
+		readPassword: inputs.readPassword
+	});
 	const runnerTemporaryDirectory = requireEnvironment(
 		inputs.environment,
 		'RUNNER_TEMP'
@@ -246,7 +342,7 @@ async function configureNix(
 					runnerTemporaryDirectory
 				});
 	const nixConfig = new NixConfig(
-		substituter,
+		substituters,
 		trustedPublicKey,
 		netrcFile === undefined ? {} : { netrcFile }
 	).render();
