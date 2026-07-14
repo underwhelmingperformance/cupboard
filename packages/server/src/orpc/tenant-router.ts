@@ -107,6 +107,20 @@ export const tenantRouter = os.router({
 			context.services.retention.removeGracePolicy(input.id)
 		)
 	},
+	reuseViews: {
+		list: os.reuseViews.list.handler(({ context }) =>
+			context.services.reuseViews.listViews()
+		),
+		set: os.reuseViews.set.handler(({ input, context }) =>
+			context.services.reuseViews.setView(input.name, {
+				selectors: input.selectors,
+				...(input.priority !== undefined && { priority: input.priority })
+			})
+		),
+		remove: os.reuseViews.remove.handler(({ input, context }) =>
+			context.services.reuseViews.removeView(input.name)
+		)
+	},
 	oidcTrust: {
 		list: os.oidcTrust.list.handler(({ context }) =>
 			context.services.oidcTrust.listRules()

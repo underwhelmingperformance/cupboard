@@ -8,6 +8,9 @@ import {
 	retentionGrace,
 	retentionGracePolicies,
 	retentionPolicies,
+	reuseViewRevisionSeq,
+	reuseViews,
+	reuseViewSelectors,
 	verificationCursor
 } from '../db/schema.ts';
 import {
@@ -243,6 +246,90 @@ describe('migrations', () => {
 		);
 
 		expect(decision).toStrictEqual([{ id: 'u1', hasDecision: false }]);
+	});
+
+	it('gains the reuse-view tables and narinfo index at the latest migration, leaving an existing narinfo row untouched', async () => {
+		const storePathHash = 'a'.repeat(32);
+		const narInfoRow = {
+			cache: '',
+			store_path_hash: storePathHash,
+			store_path: `/nix/store/${storePathHash}-app`,
+			nar_hash: 'sha256:nar',
+			nar_size: 10,
+			references_json: '[]',
+			sigs_json: '[]',
+			generation: 0,
+			created_at: '2026-01-01T00:00:00.000Z'
+		};
+		const view = {
+			name: 'reuse',
+			revision: 1,
+			priority: 50,
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		};
+		const selector = { view: 'reuse', kind: 'exact' as const, pattern: 'pr-1' };
+		const revisionSeq = { name: 'reuse', nextRevision: 2 };
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-reuse-views'),
+			async (_instance, state) => {
+				// A narinfo row committed before the reuse-view work exists in the
+				// old shape; 0030 must add the new tables and index without
+				// touching it. The anchor is fixed so later migrations cannot
+				// silently retarget the test.
+				await migrateThrough(state, 29);
+				state.storage.sql.exec(
+					'INSERT INTO narinfo (cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+					narInfoRow.cache,
+					narInfoRow.store_path_hash,
+					narInfoRow.store_path,
+					narInfoRow.nar_hash,
+					narInfoRow.nar_size,
+					narInfoRow.references_json,
+					narInfoRow.sigs_json,
+					narInfoRow.created_at
+				);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				const after = drizzle(state.storage, {
+					schema: { reuseViews, reuseViewSelectors, reuseViewRevisionSeq }
+				});
+				after.insert(reuseViews).values(view).run();
+				after.insert(reuseViewSelectors).values(selector).run();
+				after.insert(reuseViewRevisionSeq).values(revisionSeq).run();
+
+				const narinfoIndexRows = state.storage.sql
+					.exec(
+						"SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'narinfo'"
+					)
+					.toArray();
+				const narinfoIndexNames = narinfoIndexRows.map((row) => row.name);
+
+				return {
+					narInfos: state.storage.sql
+						.exec(
+							'SELECT cache, store_path_hash, store_path, nar_hash, nar_size, references_json, sigs_json, generation, created_at FROM narinfo'
+						)
+						.toArray(),
+					views: after.select().from(reuseViews).all(),
+					selectors: after.select().from(reuseViewSelectors).all(),
+					revisionSeqs: after.select().from(reuseViewRevisionSeq).all(),
+					hasNarinfoIndex: narinfoIndexNames.includes(
+						'narinfo_store_path_hash_cache_idx'
+					)
+				};
+			}
+		);
+
+		expect(migrated).toStrictEqual({
+			narInfos: [narInfoRow],
+			views: [view],
+			selectors: [selector],
+			revisionSeqs: [revisionSeq],
+			hasNarinfoIndex: true
+		});
 	});
 
 	it('migrates and round-trips an OIDC trust rule', async () => {

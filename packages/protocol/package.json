@@ -24,6 +24,7 @@
 		"./oidc-issuer": "./src/oidc-issuer.ts",
 		"./reports": "./src/reports.ts",
 		"./retention": "./src/retention.ts",
+		"./reuse-views": "./src/reuse-views.ts",
 		"./signup": "./src/signup.ts",
 		"./tenants": "./src/tenants.ts",
 		"./upload": "./src/upload.ts"

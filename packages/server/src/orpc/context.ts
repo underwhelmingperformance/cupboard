@@ -11,6 +11,7 @@ import type { IntegrityCheckService } from '../do/integrity-check-service.ts';
 import type { NegotiateHints } from '../do/negotiate-hints.ts';
 import type { OidcTrustService } from '../do/oidc-trust-service.ts';
 import type { RetentionService } from '../do/retention-service.ts';
+import type { ReuseViewAdminService } from '../do/reuse-view-admin-service.ts';
 import type { RootsService } from '../do/roots-service.ts';
 import type { SigningKeysService } from '../do/signing-keys-service.ts';
 import type { StatsService } from '../do/stats-service.ts';
@@ -39,6 +40,7 @@ export interface TenantRpcServices {
 	readonly signingKeys: SigningKeysService;
 	readonly authKeys: AuthKeysService;
 	readonly retention: RetentionService;
+	readonly reuseViews: ReuseViewAdminService;
 	readonly oidcTrust: OidcTrustService;
 	readonly stats: StatsService;
 	readonly integrityCheck: IntegrityCheckService;

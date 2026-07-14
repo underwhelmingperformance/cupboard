@@ -17,6 +17,10 @@ import {
 	type GracePolicySummary,
 	type RetentionPolicySummary
 } from '@cupboard/protocol/retention';
+import {
+	type ParsedReuseViewSelector,
+	type ReuseViewSummary
+} from '@cupboard/protocol/reuse-views';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
@@ -305,5 +309,19 @@ export function gracePolicySummaryFromRow(
 		cachePrefix: row.cachePrefix,
 		graceSeconds: row.graceSeconds,
 		createdAt: row.createdAt
+	};
+}
+
+export function reuseViewSummaryFromRow(
+	row: typeof schema.reuseViews.$inferSelect,
+	selectors: readonly ParsedReuseViewSelector[]
+): ReuseViewSummary {
+	return {
+		name: row.name,
+		revision: row.revision,
+		priority: row.priority,
+		selectors: [...selectors],
+		createdAt: row.createdAt,
+		updatedAt: row.updatedAt
 	};
 }

@@ -6,6 +6,7 @@ import { oidcTrustContract } from './oidc-trust.ts';
 import { pathsContract } from './paths.ts';
 import { policiesContract } from './policies.ts';
 import { checkContract } from './reports.ts';
+import { reuseViewsContract } from './reuse-views.ts';
 import { rootsContract } from './roots.ts';
 import { statsContract } from './stats.ts';
 import { uploadsContract } from './uploads.ts';
@@ -22,6 +23,7 @@ export const tenantContract = {
 	caches: cachesContract,
 	keys: keysContract,
 	policies: policiesContract,
+	reuseViews: reuseViewsContract,
 	oidcTrust: oidcTrustContract,
 	stats: statsContract,
 	check: checkContract,

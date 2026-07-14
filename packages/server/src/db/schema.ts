@@ -34,7 +34,17 @@ export const narInfos = sqliteTable(
 		generation: integer('generation').notNull().default(0),
 		createdAt: text('created_at').notNull()
 	},
-	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
+	(table) => [
+		primaryKey({ columns: [table.cache, table.storePathHash] }),
+		// The reuse-view local lookup range-scans from a hash: an exact selector
+		// is a point lookup and a prefix selector is a range bounded by both the
+		// hash and the cache-name prefix, so this leads with `store_path_hash`
+		// rather than `cache` the way the primary key does.
+		index('narinfo_store_path_hash_cache_idx').on(
+			table.storePathHash,
+			table.cache
+		)
+	]
 );
 
 // The durable, strictly-increasing generation counter per store path. It is
@@ -325,4 +335,37 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 	displayJson: text('display_json'),
 	createdAt: text('created_at').notNull(),
 	disabledAt: text('disabled_at')
+});
+
+// A named reuse view: tenant configuration naming a set of caches another
+// cache's reads may substitute from. `revision` is issued by
+// `reuse_view_revision_seq`, its own persistent counter; source selectors
+// live in `reuse_view_selector`, keyed by name so a wholesale replace of a
+// view's selectors is a delete-and-reinsert under one name.
+export const reuseViews = sqliteTable('reuse_view', {
+	name: text('name').primaryKey(),
+	revision: integer('revision').notNull(),
+	priority: integer('priority').notNull(),
+	createdAt: text('created_at').notNull(),
+	updatedAt: text('updated_at').notNull()
+});
+
+export const reuseViewSelectors = sqliteTable(
+	'reuse_view_selector',
+	{
+		view: text('view').notNull(),
+		kind: text('kind', { enum: ['exact', 'prefix'] }).notNull(),
+		pattern: text('pattern').notNull()
+	},
+	(table) => [primaryKey({ columns: [table.view, table.kind, table.pattern] })]
+);
+
+// The durable, strictly-increasing revision counter per reuse-view name.
+// Mirrors `generation_seq`: it is NEVER deleted when the view it names is
+// removed, so a view recreated under the same name can never repeat a
+// revision. The read path's ABA fence (telling a genuine recreation apart
+// from no change at all) depends on that guarantee holding.
+export const reuseViewRevisionSeq = sqliteTable('reuse_view_revision_seq', {
+	name: text('name').primaryKey(),
+	nextRevision: integer('next_revision').notNull()
 });

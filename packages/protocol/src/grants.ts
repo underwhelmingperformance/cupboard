@@ -52,7 +52,10 @@ export const domainOperations = [
 	'oidc-trust:remove',
 	'policy:list',
 	'policy:add',
-	'policy:remove'
+	'policy:remove',
+	'reuse-view:list',
+	'reuse-view:set',
+	'reuse-view:remove'
 ] as const;
 
 // Control operations that act on a specific tenant (an exact slug).
@@ -113,6 +116,9 @@ export const operationSchema = z.enum([
 	'policy:list',
 	'policy:add',
 	'policy:remove',
+	'reuse-view:list',
+	'reuse-view:set',
+	'reuse-view:remove',
 	'control:check',
 	'control-key:list',
 	'control-key:rotate',

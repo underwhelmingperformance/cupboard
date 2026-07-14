@@ -115,6 +115,7 @@ import { OffboardingService } from './offboarding-service.ts';
 import { OidcTrustService } from './oidc-trust-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
+import { ReuseViewAdminService } from './reuse-view-admin-service.ts';
 import { RootsService } from './roots-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
@@ -232,6 +233,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly tenantIdentity: TenantIdentityService;
 	private readonly oidcTrust: OidcTrustService;
 	private readonly retention: RetentionService;
+	private readonly reuseViews: ReuseViewAdminService;
 	private readonly integrityCheck: IntegrityCheckService;
 	private readonly cacheAdmin: CacheAdminService;
 	private readonly garbageCollection: GarbageCollectionService;
@@ -269,6 +271,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.stats = new StatsService(this.context);
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
 		this.retention = new RetentionService(this.context);
+		this.reuseViews = new ReuseViewAdminService(this.context);
 		this.integrityCheck = new IntegrityCheckService(this.context);
 		this.cacheAdmin = new CacheAdminService(this.context, this.deletionQueue);
 		this.garbageCollection = new GarbageCollectionService(
@@ -834,6 +837,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			signingKeys: this.signingKeys,
 			authKeys: this.authKeys,
 			retention: this.retention,
+			reuseViews: this.reuseViews,
 			oidcTrust: this.oidcTrust,
 			stats: this.stats,
 			integrityCheck: this.integrityCheck,
