@@ -3,6 +3,7 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import {
+	type ParsedUploadGraceFact,
 	type ParsedUploadNegotiateRequest,
 	type ParsedUploadPathMetadata,
 	type ParsedUploadPathNegotiation,
@@ -23,6 +24,7 @@ import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
 import {
+	confirmGraceBatch,
 	type GraceDecision,
 	serialiseGraceDecision
 } from './grace-decision.ts';
@@ -294,34 +296,77 @@ export class UploadsService {
 
 		// The grace in force is captured once per negotiation and stored with each
 		// pending upload, so a policy changed before the commit settles cannot
-		// alter what this negotiation promised.
+		// alter what this negotiation promised. The request's retention plan
+		// versions the reply: grace facts are attached only when it was sent, so
+		// a plan-free request receives exactly the legacy decision shapes.
+		const isPlan = body.retention !== undefined;
 		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
 		const graceDecision: GraceDecision = {
-			plan: false,
+			plan: isPlan,
 			...(resolvedGraceSeconds !== undefined && {
 				graceSeconds: resolvedGraceSeconds
 			})
 		};
+		const plannedGraceFact: ParsedUploadGraceFact =
+			resolvedGraceSeconds === undefined
+				? {}
+				: { graceSeconds: resolvedGraceSeconds };
+
+		// An already-present decision is a successful publication too, so its
+		// grace is confirmed whether or not the request carried a plan; only
+		// the reported fact is plan-gated. One batched application covers every
+		// skippable path, so a large already-present closure costs a bounded
+		// number of statements rather than one transaction per path. The
+		// skippable snapshot was read before awaited shared-facts checks, so a
+		// row can have moved by now; a moved row is absent from the map, grants
+		// nothing, and reports the empty fact.
+		const skipFacts = confirmGraceBatch(
+			this.context,
+			this.retention,
+			cache,
+			skippableRows.map((row) => ({
+				storePathHash: row.storePathHash,
+				generation: row.generation,
+				narHash: row.narHash
+			})),
+			resolvedGraceSeconds
+		);
 
 		const uploads: UploadDecision[] = [];
 		const armedReuseHashes = new Set<NixSha256HashString>();
 
 		for (const metadata of body.paths) {
 			const existing = existingByStorePathHash.get(metadata.storePathHash);
+			const skipFact =
+				existing !== undefined && skippable.has(metadata.storePathHash)
+					? skipFacts.get(metadata.storePathHash)
+					: undefined;
 
-			if (existing !== undefined && skippable.has(metadata.storePathHash)) {
+			// A skip answers only from a row whose identity the batch just
+			// re-checked. A skippable row absent from the map moved during the
+			// shared-fact reads, so its snapshot no longer describes what holds
+			// the path: fall through and plan this push's own bytes, leaving the
+			// concurrent publication untouched — the commit saga arbitrates the
+			// race exactly as it does for any contested path.
+			if (existing !== undefined && skipFact !== undefined) {
 				uploads.push({
 					action: 'skip',
 					storePathHash: metadata.storePathHash,
-					narHash: existing.narHash
+					narHash: existing.narHash,
+					...(isPlan && { grace: skipFact })
 				});
 				continue;
 			}
 
 			// Committed, but no `blob_state` row backs its NAR: reconcile the stale
 			// narinfo so a re-upload at the requested hash heals it, then plan that
-			// upload.
-			if (existing !== undefined && committed.has(metadata.storePathHash)) {
+			// upload. A moved row is not stale — whatever holds the path now is a
+			// live concurrent publication — so it is planned without reconciling.
+			if (
+				existing !== undefined &&
+				!skippable.has(metadata.storePathHash) &&
+				committed.has(metadata.storePathHash)
+			) {
 				await this.deletionQueue.removeStaleNarInfo(existing, origin);
 			}
 
@@ -331,14 +376,16 @@ export class UploadsService {
 				armedReuseHashes.add(metadata.narHash);
 			}
 
+			const decision = this.planUpload(
+				cache,
+				body.pushId,
+				metadata,
+				reusableByNarHash.get(metadata.narHash),
+				graceDecision
+			);
+
 			uploads.push(
-				this.planUpload(
-					cache,
-					body.pushId,
-					metadata,
-					reusableByNarHash.get(metadata.narHash),
-					graceDecision
-				)
+				isPlan ? { ...decision, grace: plannedGraceFact } : decision
 			);
 		}
 

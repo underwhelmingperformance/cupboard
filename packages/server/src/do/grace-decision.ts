@@ -105,58 +105,114 @@ export function confirmGrace(
 	narHash: NixSha256HashString,
 	graceSeconds: number | undefined
 ): ConfirmedGrace {
-	// The identity re-check and the writes it authorises share one
-	// transaction, so a concurrent change to the row after its check extends
-	// nothing.
-	const isMatched = context.db.transaction((tx) => {
-		const current = tx
-			.select({
-				generation: schema.narInfos.generation,
-				narHash: schema.narInfos.narHash
-			})
-			.from(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.cache, cache),
-					eq(schema.narInfos.storePathHash, storePathHash)
+	const facts = confirmGraceBatch(
+		context,
+		retention,
+		cache,
+		[{ storePathHash, generation, narHash }],
+		graceSeconds
+	);
+	const fact = facts.get(storePathHash);
+
+	return fact === undefined ? { matched: false } : { matched: true, fact };
+}
+
+/**
+ * The batched form of {@link confirmGrace}: one identity re-check and one
+ * monotonic extension per chunk of rows, so confirming a whole closure costs
+ * a bounded number of statements rather than one transaction per path.
+ * Returns the stored fact for each store-path hash whose row still matched
+ * its expected identity; a mismatched or vanished row is absent from the map
+ * and has nothing applied.
+ */
+export function confirmGraceBatch(
+	context: ServerContext,
+	retention: RetentionService,
+	cache: string,
+	entries: readonly {
+		readonly storePathHash: StorePathHash;
+		readonly generation: number;
+		readonly narHash: NixSha256HashString;
+	}[],
+	graceSeconds: number | undefined
+): Map<StorePathHash, ParsedUploadGraceFact> {
+	// One deadline for the whole batch, computed up front so every matched row
+	// reports the same extension.
+	const retainUntil =
+		graceSeconds === undefined || graceSeconds === 0
+			? undefined
+			: new Date(Date.now() + graceSeconds * 1000).toISOString();
+	const matched: StorePathHash[] = [];
+
+	// The identity re-check and the writes it authorises share one transaction
+	// per chunk, so a concurrent change to a row after its check extends
+	// nothing. The chunk bound covers the re-check's IN-list; the extension
+	// chunks its own inserts.
+	for (const batch of chunk(entries, maxInClauseValues)) {
+		const batchHashes = batch.map((entry) => entry.storePathHash);
+
+		context.db.transaction((tx) => {
+			const rows = tx
+				.select({
+					storePathHash: schema.narInfos.storePathHash,
+					generation: schema.narInfos.generation,
+					narHash: schema.narInfos.narHash
+				})
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						inArray(schema.narInfos.storePathHash, batchHashes)
+					)
 				)
-			)
-			.get();
+				.all();
+			const byHash = new Map(rows.map((row) => [row.storePathHash, row]));
+			const chunkMatched = batch
+				.filter((entry) => {
+					const current = byHash.get(entry.storePathHash);
 
-		if (current?.generation !== generation || current.narHash !== narHash) {
-			return false;
-		}
+					return (
+						current?.generation === entry.generation &&
+						current.narHash === entry.narHash
+					);
+				})
+				.map((entry) => entry.storePathHash);
 
-		if (graceSeconds === undefined) {
-			return true;
-		}
+			matched.push(...chunkMatched);
 
-		retention.markCacheGraceManaged(cache, tx);
+			if (chunkMatched.length === 0 || graceSeconds === undefined) {
+				return;
+			}
 
-		if (graceSeconds > 0) {
-			retention.extendGraceDeadlines(
-				cache,
-				[storePathHash],
-				new Date(Date.now() + graceSeconds * 1000).toISOString(),
-				tx
-			);
-		}
+			retention.markCacheGraceManaged(cache, tx);
 
-		return true;
-	});
-
-	if (!isMatched) {
-		return { matched: false };
+			if (retainUntil !== undefined) {
+				retention.extendGraceDeadlines(cache, chunkMatched, retainUntil, tx);
+			}
+		});
 	}
 
-	if (graceSeconds === undefined || graceSeconds === 0) {
-		return { matched: true, fact: {} };
+	if (retainUntil === undefined) {
+		// A matched zero-grace policy is reported as such: an empty fact
+		// strictly means no policy matched.
+		const fact: ParsedUploadGraceFact =
+			graceSeconds === undefined ? {} : { graceSeconds };
+
+		return new Map(matched.map((storePathHash) => [storePathHash, fact]));
 	}
 
-	return {
-		matched: true,
-		fact: storedGraceFact(context.db, cache, storePathHash)
-	};
+	const deadlines = storedGraceDeadlines(context.db, cache, matched);
+
+	return new Map(
+		matched.map((storePathHash) => {
+			const stored = deadlines.get(storePathHash);
+
+			return [
+				storePathHash,
+				stored === undefined ? {} : { retainUntil: stored }
+			];
+		})
+	);
 }
 
 /**

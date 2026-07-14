@@ -1018,13 +1018,19 @@ function commitVia(
 	return context.session.commit(target);
 }
 
+// `negotiateWithPlan` always sends a `retention` field, even `{ kind: 'none' }`
+// for `--no-retain`, so every decision a push commits was negotiated with a
+// plan and its pending row's captured grace decision has `plan: true`. The
+// marker lets a reconnect that resolves a gone row by identity read the
+// path's durable grace fact instead of none.
 function commitTarget(
 	decision: UploadDecisionOf<'upload' | 'commit'>
 ): CommitTarget {
 	return {
 		uploadId: decision.uploadId,
 		storePathHash: decision.storePathHash,
-		narHash: decision.narHash
+		narHash: decision.narHash,
+		retention: true
 	};
 }
 

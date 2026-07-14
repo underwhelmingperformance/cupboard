@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	commitBatchCapabilityToken,
+	commitCapabilitiesValue,
 	commitSessionFrameSchema,
 	commitSessionRequestSchema,
+	retentionMarkerAttribute,
+	retentionMarkerAttributeValue,
 	statsResponseSchema,
+	subscribeIdentityCapabilityToken,
 	uploadDecisionSchema,
 	uploadGraceFactSchema,
 	uploadNegotiateMaxPaths,
@@ -239,5 +244,59 @@ describe('commit session schemas', () => {
 			commitSessionFrameSchema.safeParse({ ev: 'verdict', status: 'servable' })
 				.success
 		).toBe(false);
+	});
+
+	it.each([
+		{
+			op: 'commit-batch',
+			commits: [{ uploadId: 'upload-1', storePathHash, narHash }]
+		},
+		{
+			op: 'commit-batch',
+			commits: [
+				{ uploadId: 'upload-1', storePathHash, narHash, retention: true }
+			]
+		},
+		{
+			op: 'subscribe-identity',
+			entries: [{ uploadId: 'upload-1', storePathHash, narHash }]
+		},
+		{
+			op: 'subscribe-identity',
+			entries: [
+				{ uploadId: 'upload-1', storePathHash, narHash, retention: true }
+			]
+		}
+	])(
+		'accepts the $op request with and without the retention marker',
+		(value) => {
+			expect(commitSessionRequestSchema.parse(value)).toStrictEqual(value);
+		}
+	);
+
+	it('rejects a commit-batch entry with retention set to false', () => {
+		expect(
+			commitSessionRequestSchema.safeParse({
+				op: 'commit-batch',
+				commits: [
+					{ uploadId: 'upload-1', storePathHash, narHash, retention: false }
+				]
+			}).success
+		).toBe(false);
+	});
+
+	// The retention-marker attribute must be present on both tokens (they share
+	// the entry schema), so a client can send the marker on whichever op it
+	// uses without a separate capability check per op.
+	it('advertises the retention-marker attribute on both tokens', () => {
+		expect({
+			commitBatchCapabilityToken,
+			subscribeIdentityCapabilityToken,
+			commitCapabilitiesValue
+		}).toStrictEqual({
+			commitBatchCapabilityToken: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`,
+			subscribeIdentityCapabilityToken: `subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`,
+			commitCapabilitiesValue: `commit-batch;max=100;${retentionMarkerAttribute}=${retentionMarkerAttributeValue},subscribe-identity;${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`
+		});
 	});
 });

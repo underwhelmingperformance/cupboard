@@ -138,7 +138,8 @@ export type ParsedUploadGraceFact = z.output<typeof uploadGraceFactSchema>;
 
 export const uploadNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,
-	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths)
+	paths: z.array(uploadPathNegotiationSchema).max(uploadNegotiateMaxPaths),
+	retention: uploadRetentionPlanSchema.optional()
 });
 export type ParsedUploadNegotiateRequest = z.output<
 	typeof uploadNegotiateRequestSchema
@@ -147,7 +148,8 @@ export type ParsedUploadNegotiateRequest = z.output<
 export const uploadSkipDecisionSchema = z.strictObject({
 	action: z.literal('skip'),
 	storePathHash: storePathHashSchema,
-	narHash: nixSha256HashSchema
+	narHash: nixSha256HashSchema,
+	grace: uploadGraceFactSchema.optional()
 });
 export type ParsedUploadSkipDecision = z.output<
 	typeof uploadSkipDecisionSchema
@@ -157,7 +159,8 @@ export const uploadCommitDecisionSchema = z.strictObject({
 	action: z.literal('commit'),
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
-	uploadId: z.string()
+	uploadId: z.string(),
+	grace: uploadGraceFactSchema.optional()
 });
 export type ParsedUploadCommitDecision = z.output<
 	typeof uploadCommitDecisionSchema
@@ -169,7 +172,8 @@ export const uploadActionDecisionSchema = z.strictObject({
 	narHash: nixSha256HashSchema,
 	uploadId: z.string(),
 	r2Key: z.string(),
-	expiresAt: z.string()
+	expiresAt: z.string(),
+	grace: uploadGraceFactSchema.optional()
 });
 export type ParsedUploadActionDecision = z.output<
 	typeof uploadActionDecisionSchema
@@ -248,11 +252,20 @@ export const commitBatchCapability = 'commit-batch';
 // on schema violations) and newer clients can coexist safely.
 export const commitBatchMaxEntries = 100;
 
+// The attribute both tokens below carry once the server accepts the optional
+// `retention` marker on a `commitBatchEntrySchema` entry (see that schema's
+// wire-freeze note). A client checks for this attribute before ever setting
+// the marker, so a server that predates it -- whose schema is a
+// `strictObject` and would reject an unknown field -- never receives one.
+export const retentionMarkerAttribute = 'retention';
+export const retentionMarkerAttributeValue = '1';
+
 // The parameterised capability token the server includes in the 101 header.
 // Carries the entry cap so a client receiving it knows the maximum batch size
-// this server accepts without needing a separate negotiation round-trip.
-// Build from the shared constants; never hand-code the string.
-export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String(commitBatchMaxEntries)}`;
+// this server accepts without needing a separate negotiation round-trip, and
+// the retention-marker attribute so it knows the entry schema accepts the
+// marker. Build from the shared constants; never hand-code the string.
+export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String(commitBatchMaxEntries)};${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`;
 
 // The capability name for `subscribe-identity`. A client looks this up in the
 // parsed capability map; the server advertises it so a capable client replays
@@ -264,10 +277,12 @@ export const commitBatchCapabilityToken = `${commitBatchCapability};max=${String
 // new capability token.
 export const subscribeIdentityCapability = 'subscribe-identity';
 
-// The bare capability token the server includes in the 101 header alongside the
-// commit-batch token. No attributes are needed: the entry shape and bound are
-// shared with `commit-batch` and are already encoded in that token.
-export const subscribeIdentityCapabilityToken = subscribeIdentityCapability;
+// The capability token the server includes in the 101 header alongside the
+// commit-batch token. The entry shape and bound are shared with `commit-batch`
+// and are already encoded in that token; the retention-marker attribute is
+// repeated here since a `subscribe-identity` op is sent without a
+// `commit-batch` op ever having been.
+export const subscribeIdentityCapabilityToken = `${subscribeIdentityCapability};${retentionMarkerAttribute}=${retentionMarkerAttributeValue}`;
 
 // The full value of the `x-cupboard-commit-capabilities` header the server
 // sends on every 101 response. Build from the shared constants so no call site
@@ -279,7 +294,10 @@ export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscrib
 // from negotiation. The identity lets a reconnect re-send an entry whose reply
 // was lost: the server resolves a since-gone row against the path's committed
 // narinfo and answers `already-present`, where a bare id could only fail as
-// unknown.
+// unknown. `retention`, present only when the server advertised the
+// retention-marker attribute, additionally tells the server this upload
+// negotiated a retention plan, so that `already-present` answer can attach the
+// path's durable grace fact instead of none.
 //
 // Wire-freeze: any change to this schema's shape or the `commitBatchMaxEntries`
 // bound is a breaking change that requires a new capability token for each op
@@ -287,7 +305,8 @@ export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscrib
 export const commitBatchEntrySchema = z.strictObject({
 	uploadId: z.string(),
 	storePathHash: storePathHashSchema,
-	narHash: nixSha256HashSchema
+	narHash: nixSha256HashSchema,
+	retention: z.literal(true).optional()
 });
 export type ParsedCommitBatchEntry = z.output<typeof commitBatchEntrySchema>;
 
@@ -315,21 +334,28 @@ export type ParsedCommitSessionRequest = z.output<
 export type CommitSessionRequest = z.input<typeof commitSessionRequestSchema>;
 
 export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
+	// The optional `grace` fields below are sent only for an upload whose
+	// negotiation carried a retention plan; the client that sent one parses
+	// them, and an upload negotiated without a plan receives exactly the legacy
+	// shapes, so no wire-freeze token is needed.
 	z.strictObject({
 		ev: z.literal('settled'),
 		uploadId: z.string(),
-		response: commitResponseSchema
+		response: commitResponseSchema,
+		grace: uploadGraceFactSchema.optional()
 	}),
 	z.strictObject({
 		ev: z.literal('deferred'),
 		uploadId: z.string(),
 		storePathHash: storePathHashSchema,
-		narHash: nixSha256HashSchema
+		narHash: nixSha256HashSchema,
+		grace: uploadGraceFactSchema.optional()
 	}),
 	z.strictObject({
 		ev: z.literal('verdict'),
 		uploadId: z.string(),
-		status: uploadStatusSchema
+		status: uploadStatusSchema,
+		grace: uploadGraceFactSchema.optional()
 	}),
 	z.strictObject({
 		ev: z.literal('error'),

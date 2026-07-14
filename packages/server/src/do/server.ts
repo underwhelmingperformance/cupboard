@@ -4,7 +4,9 @@ import {
 	cacheFromSelector,
 	cachePrioritySchema,
 	cacheSelectorSchema,
-	DEFAULT_CACHE
+	DEFAULT_CACHE,
+	type NixSha256HashString,
+	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type {
@@ -15,7 +17,8 @@ import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
 	commitSessionRequestSchema,
-	type ParsedCommitBatchEntry
+	type ParsedCommitBatchEntry,
+	type ParsedUploadGraceFact
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
@@ -84,6 +87,12 @@ import {
 	GarbageCollectionService,
 	maxPathsSweptPerRun
 } from './garbage-collection-service.ts';
+import {
+	capturedGraceFact,
+	confirmGraceBatch,
+	parseStoredGraceDecision,
+	storedGraceFact
+} from './grace-decision.ts';
 import type { TenantHonoEnv } from './hono-env.ts';
 import { IntegrityCheckService } from './integrity-check-service.ts';
 import {
@@ -501,7 +510,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: string,
 		sessionId: string,
 		uploadId: string,
-		identity?: Pick<ParsedCommitBatchEntry, 'storePathHash' | 'narHash'>,
+		identity?: Pick<
+			ParsedCommitBatchEntry,
+			'storePathHash' | 'narHash' | 'retention'
+		>,
 		advisory?: {
 			readonly prefetched?: PrefetchedMaterialisationFacts;
 			readonly account?: TenantAccount;
@@ -522,7 +534,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				sendCommitSessionFrame(socket, {
 					ev: 'settled',
 					uploadId,
-					response: outcome.response
+					response: outcome.response,
+					...(outcome.grace !== undefined && { grace: outcome.grace })
 				});
 
 				return;
@@ -532,7 +545,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				ev: 'deferred',
 				uploadId,
 				storePathHash: outcome.storePathHash,
-				narHash: outcome.narHash
+				narHash: outcome.narHash,
+				...(outcome.grace !== undefined && { grace: outcome.grace })
 			});
 		} catch (error) {
 			if (error instanceof UploadNotFoundError && identity !== undefined) {
@@ -579,11 +593,21 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// before the client ever received a reply. The path's narinfo row holding the
 	// same narHash AND carrying a committed reference edge confirms the upload
 	// reached a servable state; anything else re-drives the client with `absent`.
+	// The pending row's captured grace decision is gone along with the row, so a
+	// `retention`-marked entry (a client that negotiated a plan for this upload)
+	// gets the same monotonic extension any already-present decision applies:
+	// the resent commit is this publication's claim on the path, so its
+	// deadline moves with it even when another push committed the path in the
+	// meantime. An unmarked entry gets the legacy shape, matching a plan-free
+	// publication.
 	private async resolveGoneCommit(
 		socket: WebSocket,
 		cache: string,
 		uploadId: string,
-		identity: Pick<ParsedCommitBatchEntry, 'storePathHash' | 'narHash'>
+		identity: Pick<
+			ParsedCommitBatchEntry,
+			'storePathHash' | 'narHash' | 'retention'
+		>
 	): Promise<void> {
 		const committed = await this.narInfoObjects.committedNarInfoRow(
 			cache,
@@ -598,7 +622,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					storePathHash: identity.storePathHash,
 					narHash: identity.narHash,
 					status: 'already-present'
-				}
+				},
+				...(identity.retention === true && {
+					grace: this.goneCommitGrace(cache, committed)
+				})
 			});
 
 			return;
@@ -609,6 +636,37 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			uploadId,
 			status: 'absent'
 		});
+	}
+
+	// The grace fact a gone pending row's already-present answer reports: the
+	// identity-checked extension every other already-present decision applies,
+	// falling back to the stored fact if the row changed under the check.
+	private goneCommitGrace(
+		cache: string,
+		committed: {
+			readonly storePathHash: StorePathHash;
+			readonly generation: number;
+			readonly narHash: NixSha256HashString;
+		}
+	): ParsedUploadGraceFact {
+		const facts = confirmGraceBatch(
+			this.context,
+			this.retention,
+			cache,
+			[
+				{
+					storePathHash: committed.storePathHash,
+					generation: committed.generation,
+					narHash: committed.narHash
+				}
+			],
+			this.retention.resolveGraceSeconds(cache)
+		);
+
+		return (
+			facts.get(committed.storePathHash) ??
+			storedGraceFact(this.context.db, cache, committed.storePathHash)
+		);
 	}
 
 	// Replays one still-present pending row to a reconnected session: reject a
@@ -635,6 +693,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.uploadState.attachSession(uploadId, sessionId);
 		const status = uploadStatusOf(row);
+		// The grace fact replays only for an upload negotiated with a retention
+		// plan, keeping a plan-free upload's frames on the legacy shape.
+		const graceDecision = parseStoredGraceDecision(row.graceDecisionJson);
 
 		if (status === 'pending') {
 			const metadata = parseStoredUploadPathMetadata(
@@ -645,12 +706,30 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				ev: 'deferred',
 				uploadId,
 				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash
+				narHash: metadata.narHash,
+				...(graceDecision?.plan === true && {
+					grace: capturedGraceFact(graceDecision)
+				})
 			});
 			return;
 		}
 
-		sendCommitSessionFrame(socket, { ev: 'verdict', uploadId, status });
+		sendCommitSessionFrame(socket, {
+			ev: 'verdict',
+			uploadId,
+			status,
+			...(graceDecision?.plan === true && {
+				grace:
+					status === 'servable'
+						? storedGraceFact(
+								this.context.db,
+								row.cache,
+								parseStoredUploadPathMetadata(uploadId, row.metadataJson)
+									.storePathHash
+							)
+						: {}
+			})
+		});
 	}
 
 	// Re-attaches a reconnected session to ids still outstanding and replays each
@@ -1725,7 +1804,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 							entry.uploadId,
 							{
 								storePathHash: entry.storePathHash,
-								narHash: entry.narHash
+								narHash: entry.narHash,
+								retention: entry.retention
 							},
 							{
 								prefetched: batchPrefetched?.get(entry.narHash),

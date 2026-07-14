@@ -488,13 +488,18 @@ describe('CupboardClient.commit', () => {
 			}
 		]);
 
-		const { settled, ...result } = await client.commit(
+		const { settled, settledGrace, ...result } = await client.commit(
 			'write-token',
 			target('upload-app')
 		);
 
-		expect({ result, connections: connections() }).toStrictEqual({
+		expect({
+			result,
+			settledGraceKind: typeof settledGrace,
+			connections: connections()
+		}).toStrictEqual({
 			result: response,
+			settledGraceKind: 'function',
 			connections: [
 				{
 					url: 'wss://cupboard.test/cache/_default/commit',
@@ -545,13 +550,18 @@ describe('CupboardClient.commit', () => {
 			refresh: () => Promise.resolve('fresh-token')
 		};
 
-		const { settled, ...result } = await client.commit(
+		const { settled, settledGrace, ...result } = await client.commit(
 			provider,
 			target('upload-app')
 		);
 
-		expect({ result, connections: connections() }).toStrictEqual({
+		expect({
+			result,
+			settledGraceKind: typeof settledGrace,
+			connections: connections()
+		}).toStrictEqual({
 			result: response,
+			settledGraceKind: 'function',
 			connections: [
 				{
 					url: 'wss://cupboard.test/cache/_default/commit',
