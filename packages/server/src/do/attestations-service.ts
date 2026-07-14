@@ -644,8 +644,12 @@ export class AttestationsService {
 				: undefined;
 		const resolvedGeneration = generation ?? committedRow?.generation;
 
+		// The list object is path-keyed, so its mutations order behind any
+		// abandoned mutation of the same key, exactly as the narinfo objects do.
 		if (resolvedGeneration === undefined) {
-			await this.context.env.BLOBS.delete(key);
+			await this.context.objectWrites.write([key], () =>
+				this.context.env.BLOBS.delete(key)
+			);
 			return;
 		}
 
@@ -656,17 +660,21 @@ export class AttestationsService {
 		);
 
 		if (descriptors.length === 0) {
-			await this.context.env.BLOBS.delete(key);
+			await this.context.objectWrites.write([key], () =>
+				this.context.env.BLOBS.delete(key)
+			);
 			return;
 		}
 
 		const body: AttestationList = { attestations: descriptors };
-		await this.context.env.BLOBS.put(key, `${JSON.stringify(body)}\n`, {
-			httpMetadata: {
-				contentType: 'application/json; charset=utf-8',
-				cacheControl: 'no-store'
-			}
-		});
+		await this.context.objectWrites.write([key], () =>
+			this.context.env.BLOBS.put(key, `${JSON.stringify(body)}\n`, {
+				httpMetadata: {
+					contentType: 'application/json; charset=utf-8',
+					cacheControl: 'no-store'
+				}
+			})
+		);
 	}
 
 	async removeReferencesForDigest(

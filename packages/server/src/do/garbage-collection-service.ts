@@ -364,6 +364,12 @@ export class GarbageCollectionService {
 		const startedAt = new Date();
 		const now = startedAt.toISOString();
 
+		// The staging objects the sweep reaps, deleted after the critical section
+		// closes so an R2 stall cannot hold the gate. The rows are removed under the
+		// gate; a delete that does not land leaves an object the orphan sweep
+		// reclaims, exactly as it backstops any untracked staging object.
+		let stagingKeys: string[] = [];
+
 		const reaped = await this.context.criticalSection(async () => {
 			// A `pending` or `committing` upload is a live commit saga (awaiting
 			// background verification, or a crashed inline commit the verify pass
@@ -396,16 +402,12 @@ export class GarbageCollectionService {
 			// An abandoned upload's private staging object is reclaimed directly; a
 			// reuse upload's r2Key is the shared canonical key, which the reaper owns,
 			// so it is left alone.
-			await deleteObjects(
-				this.context.env.BLOBS,
-				expiredUploads
+			stagingKeys = [
+				...expiredUploads
 					.filter((upload) => upload.r2Key !== narObjectKey(upload.narHash))
-					.map((upload) => upload.r2Key)
-			);
-			await deleteObjects(
-				this.context.env.BLOBS,
-				expiredAttestations.map((upload) => upload.r2Key)
-			);
+					.map((upload) => upload.r2Key),
+				...expiredAttestations.map((upload) => upload.r2Key)
+			];
 
 			this.context.db.delete(schema.pendingUploads).where(reapable).run();
 			this.context.db
@@ -458,10 +460,27 @@ export class GarbageCollectionService {
 			};
 		});
 
-		// The orphan sweep lists and deletes R2 objects, so it runs outside the
-		// critical section. It reconciles against the live pending rows by their
-		// keys, not a snapshot taken earlier, and skips anything within the upload
-		// grace, so a row created while it runs is never mistaken for an orphan.
+		// The reaped staging objects and the orphan sweep both delete R2 objects, so
+		// they run outside the critical section. The orphan sweep reconciles against
+		// the live pending rows by their keys, not a snapshot taken earlier, and
+		// skips anything within the upload grace, so a row created while it runs is
+		// never mistaken for an orphan.
+		//
+		// The rows were removed under the gate, so this delete is best-effort: a
+		// failure must not lose the outcome counters or skip the orphan sweep, which
+		// reclaims whatever did not land.
+		try {
+			await deleteObjects(this.context.env.BLOBS, stagingKeys);
+		} catch (error) {
+			log.warn(
+				'staging object delete did not land; orphan sweep will reclaim',
+				{
+					error,
+					stagedKeys: stagingKeys.length
+				}
+			);
+		}
+
 		const orphanStagingDeleted = await this.reclaimOrphanStaging(
 			log,
 			startedAt

@@ -220,7 +220,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.deletionQueue = new DeletionQueueService(
 			this.context,
 			this.attestationCas,
-			this.attestations
+			this.attestations,
+			this.narInfoObjects
 		);
 		this.reconcileQueue = new ReconcileQueueService(this.context);
 		this.signingKeys = new SigningKeysService(this.context);
@@ -1095,7 +1096,10 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			() =>
 				withRequestCost(
 					async () => {
-						const response = await this.app.fetch(request, this.env);
+						// The context's env carries the bounded R2/D1/Cache bindings, so
+						// every subrequest a route handler issues through `c.env` is bounded
+						// structurally, for any handler, not by convention.
+						const response = await this.app.fetch(request, this.context.env);
 						status = response.status;
 
 						return response;

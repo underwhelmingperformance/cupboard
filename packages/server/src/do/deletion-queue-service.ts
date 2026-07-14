@@ -9,18 +9,18 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narInfoCachePath, narInfoObjectKey } from '../http/http.ts';
+import { narInfoCachePath } from '../http/http.ts';
 
 import { type AttestationCasService } from './attestation-cas-service.ts';
 import { type AttestationsService } from './attestations-service.ts';
 import {
 	chunk,
-	deleteObjects,
 	mapWithConcurrency,
 	maxInClauseValues,
 	maxOutgoingConnections
 } from './bulk.ts';
 import { type SchemaWriter, type ServerContext } from './context.ts';
+import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 // One queued teardown deletion, the captured narinfo version its retirement is
 // fenced on.
@@ -89,7 +89,8 @@ export class DeletionQueueService {
 	constructor(
 		private readonly context: ServerContext,
 		private readonly attestationCas: AttestationCasService,
-		private readonly attestations: AttestationsService
+		private readonly attestations: AttestationsService,
+		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
 	// Retires the D1 reference edge for one captured narinfo version, then drops the
@@ -268,7 +269,7 @@ export class DeletionQueueService {
 		// and row cleanup, so a failed edge purge must not abort them. Other colos
 		// serve the stale narinfo until its TTL expires.
 		try {
-			await caches.default.delete(url);
+			await this.context.cache.delete(url);
 		} catch {
 			/* edge purge is best-effort */
 		}
@@ -385,9 +386,7 @@ export class DeletionQueueService {
 
 		const tenant = this.context.requireTenant();
 
-		await this.context.env.BLOBS.delete(
-			narInfoObjectKey(tenant, storePathHash, cache)
-		);
+		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
 
 		if (origin !== undefined) {
 			await this.purgeCachedNarInfo(
@@ -475,11 +474,9 @@ export class DeletionQueueService {
 
 		// The served objects go in bulk, then their edge-cache entries
 		// (best-effort, bounded fan-out).
-		await deleteObjects(
-			this.context.env.BLOBS,
-			removable.map((entry) =>
-				narInfoObjectKey(tenant, entry.storePathHash, cache)
-			)
+		await this.narInfoObjects.deleteNarInfoObjects(
+			cache,
+			removable.map((entry) => entry.storePathHash)
 		);
 
 		if (origin !== undefined) {

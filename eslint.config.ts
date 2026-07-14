@@ -224,13 +224,18 @@ export default defineConfig(
 		}
 	},
 	{
-		// `AsyncLocalStorage` (`node:async_hooks`) scopes the per-request database
-		// cost meter, so a request that interleaves with another on the same Durable
-		// Object never folds its rows into the other's logged figure. workerd exposes
-		// it under `nodejs_compat`; it is the sanctioned Node boundary for
-		// request-scoped metering. Only that one module is allowed: every other
-		// `node:*` import stays banned here as everywhere else.
-		files: ['packages/server/src/do/database-cost-meter.ts'],
+		// `AsyncLocalStorage` (`node:async_hooks`) scopes ambient per-request state
+		// so a request that interleaves with another on the same Durable Object
+		// never folds its state into the other's: the database cost meter uses it
+		// for row attribution, and the deadline scope uses it to bound every
+		// subrequest a critical section makes. workerd exposes it under
+		// `nodejs_compat`; it is the sanctioned Node boundary for this scoping. Only
+		// that one module is allowed: every other `node:*` import stays banned here
+		// as everywhere else.
+		files: [
+			'packages/server/src/do/database-cost-meter.ts',
+			'packages/server/src/do/deadline.ts'
+		],
 		rules: {
 			'no-restricted-imports': [
 				'error',

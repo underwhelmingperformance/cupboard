@@ -706,6 +706,27 @@ export class TenantDispatchInterruptedError extends ServerHttpError {
 	}
 }
 
+// A storage subrequest (R2, D1 or the Cache API) did not settle within its
+// deadline. The caller abandons it and refuses retryably rather than let a
+// stalled call hold the Durable Object's input gate to the ~30s
+// `blockConcurrencyWhile` reset that would fail every concurrent request. The
+// abandoned call is idempotent, so the client's retry resumes safely. The
+// `subrequest` label names the operation that timed out, for observability.
+// `abandoned` is the abandoned call's settled-signal, absent when the call was
+// never started.
+export class SubrequestTimeoutError extends ServerHttpError {
+	readonly status = StatusCodes.SERVICE_UNAVAILABLE;
+	override readonly retryAfterSeconds = 5;
+
+	constructor(
+		public readonly subrequest: string,
+		public readonly abandoned?: Promise<void>
+	) {
+		super('A storage subrequest timed out');
+		this.name = 'SubrequestTimeoutError';
+	}
+}
+
 export class AttestationUploadNotFoundError extends ServerHttpError {
 	readonly status = StatusCodes.NOT_FOUND;
 

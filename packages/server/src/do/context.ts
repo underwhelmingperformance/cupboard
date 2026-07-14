@@ -36,8 +36,11 @@ import { parseStored } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { type OidcTrustRule } from '../oidc/oidc-trust.ts';
 
+import { boundedBlobs, boundedCache, boundedD1 } from './bounded-io.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';
+import { criticalSectionBudgetMs, withDeadlineBudget } from './deadline.ts';
 import { NegotiateHintStore } from './negotiate-hints.ts';
+import { ObjectWriteOrder } from './object-write-order.ts';
 
 type WidenStringBindings<T> = {
 	readonly [Key in keyof T]: T[Key] extends string ? string : T[Key];
@@ -132,6 +135,12 @@ export class ServerContext {
 	private credentialIssuer: PushCredentialIssuer | undefined;
 	readonly db: SchemaDatabase;
 	readonly d1: DrizzleD1Database<typeof d1Schema>;
+	// The Cache API, bounded so a stalled purge cannot hold the input gate.
+	readonly cache: Cache;
+	// The deadline a critical section imposes on its subrequests. A field, not the
+	// bare constant, so a test can shorten it to exercise the timeout path without
+	// waiting the full budget.
+	gateBudgetMs = criticalSectionBudgetMs;
 	// Sums the rows this DO's SQLite reads and writes, so a request's cost can be
 	// logged when it ends and asserted on in tests.
 	readonly dbCost = new DatabaseCostMeter();
@@ -147,14 +156,22 @@ export class ServerContext {
 	// The Worker-staged negotiate hints awaiting their dispatch; see
 	// {@link NegotiateHintStore}.
 	readonly negotiateHints = new NegotiateHintStore();
+	// Orders the mutations of path-keyed R2 objects behind any abandoned
+	// (timed-out) mutation of the same key; see {@link ObjectWriteOrder}.
+	readonly objectWrites = new ObjectWriteOrder();
 
 	constructor(ctx: DurableObjectState, env: RuntimeEnv) {
 		this.ctx = ctx;
-		this.env = env;
+		// Every R2, D1 and Cache call the services make is bounded, so a stalled
+		// subrequest cannot hold this object's input gate to the ~30s
+		// `blockConcurrencyWhile` reset. R2 is reached through `env.BLOBS`, so the
+		// binding is replaced with a bounded one here rather than at every call site.
+		this.env = { ...env, BLOBS: boundedBlobs(env.BLOBS) };
 		this.db = drizzle(meteredStorage(ctx.storage, this.dbCost), { schema });
 		// The global shared-blob facts live in D1, readable and writable by every
 		// tenant DO and the Worker.
-		this.d1 = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		this.d1 = drizzleD1(boundedD1(env.CUPBOARD_DB), { schema: d1Schema });
+		this.cache = boundedCache(caches.default);
 	}
 
 	// A request-path critical section: arriving events are gated out while `run`
@@ -170,7 +187,10 @@ export class ServerContext {
 		const outcome = await this.ctx.blockConcurrencyWhile(
 			async (): Promise<Outcome> => {
 				try {
-					return { ok: true, value: await run() };
+					return {
+						ok: true,
+						value: await withDeadlineBudget(this.gateBudgetMs, run)
+					};
 				} catch (error) {
 					return { ok: false, error };
 				}

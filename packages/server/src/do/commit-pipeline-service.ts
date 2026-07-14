@@ -1660,9 +1660,7 @@ export class CommitPipelineService {
 			return false;
 		}
 
-		await this.context.env.BLOBS.delete(
-			narInfoObjectKey(tenant, storePathHash, cache)
-		);
+		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
 
 		this.context.db
 			.delete(schema.narInfos)
