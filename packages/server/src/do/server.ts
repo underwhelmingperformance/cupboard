@@ -7,7 +7,10 @@ import {
 	DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
-import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
+import type {
+	ParsedR2CredentialCheck,
+	VerifyReport
+} from '@cupboard/protocol/reports';
 import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
@@ -69,7 +72,11 @@ import {
 	verifyBackstopKey
 } from './commit-pipeline-service.ts';
 import { sendCommitSessionFrame } from './commit-socket.ts';
-import { type RuntimeEnv, ServerContext } from './context.ts';
+import {
+	type GarbageCollectionOutcome,
+	type RuntimeEnv,
+	ServerContext
+} from './context.ts';
 import { type DatabaseCost, withRequestCost } from './database-cost-meter.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
@@ -128,6 +135,9 @@ export const gcContinuationKey = 'maintenance:gc-pending';
 // fresh rows always wait for the queue consumer's off-thread decode.
 const verifyBackstopReuseSettleLimit = 16;
 
+// The maintenance passes serialised per kind on this instance.
+type MaintenanceKind = 'gc' | 'verify';
+
 // Bounds the number of tasks that may run concurrently. Callers `acquire` a
 // slot before starting work and `release` it when done; excess callers wait
 // until a slot is free.
@@ -164,6 +174,23 @@ class CountingSemaphore {
 
 export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly app = new Hono<TenantHonoEnv>();
+
+	// Serialises maintenance passes per kind on this instance. A Durable Object
+	// has one active instance, so the alarm, the cron/queue RPCs and the
+	// interactive admin path share these chains: a second driver of the same kind
+	// links its pass after the one ahead rather than piling both onto the input
+	// gate at once. Every pass runs; none is silently skipped.
+	private readonly maintenanceChains = new Map<
+		MaintenanceKind,
+		Promise<undefined>
+	>();
+
+	// The maintenance kinds a cron-driven pass is queued or running for. The cron
+	// entrypoints coalesce against it: while one is present a further cron tick for
+	// that kind returns at once, bounding the backlog to one queued cron pass per
+	// kind. The alarm resume and the interactive path do not use it; they always
+	// chain.
+	private readonly cronMaintenanceQueued = new Set<MaintenanceKind>();
 	private migrationPromise: Promise<void> | undefined;
 
 	// Whether a mutation is waiting on the next coalesced eligibility publish,
@@ -704,10 +731,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			integrityCheck: this.integrityCheck,
 			roots: this.roots,
 			deletionQueue: this.deletionQueue,
-			garbageCollection: this.garbageCollection,
+			runGarbageCollection: (logger, cache, purgeOrigin) =>
+				this.sweepGarbageInteractive(logger, cache, purgeOrigin),
 			uploads: this.uploads,
 			attestations: this.attestations,
-			verification: this.verification
+			runVerification: (logger, purgeOrigin, limit) =>
+				this.verifyInteractive(logger, purgeOrigin, limit)
 		};
 	}
 
@@ -953,6 +982,56 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
+	// Serialises maintenance passes of one kind: a caller registers its own
+	// completion marker as the kind's tail before awaiting the previous tail, then
+	// runs its body and returns or throws its result. The chain never rejects,
+	// because each link resolves its marker in the `finally`, so a failing body
+	// surfaces only to its own caller and the next link still runs.
+	private async runExclusiveMaintenance<T>(
+		kind: MaintenanceKind,
+		body: () => Promise<T>
+	): Promise<T> {
+		const previous = this.maintenanceChains.get(kind);
+		const { promise, resolve } = Promise.withResolvers<undefined>();
+		this.maintenanceChains.set(kind, promise);
+
+		if (previous !== undefined) {
+			await previous;
+		}
+
+		try {
+			return await body();
+		} finally {
+			resolve(undefined);
+
+			if (this.maintenanceChains.get(kind) === promise) {
+				this.maintenanceChains.delete(kind);
+			}
+		}
+	}
+
+	// The cron entrypoints coalesce through this: while a cron-driven pass of a
+	// kind is queued or running, a further cron tick for that kind returns at once
+	// rather than queuing a second. Dropping a tick is safe, since each pass arms
+	// its own continuation for leftover work and the next tick picks the tenant up
+	// again.
+	private async runCoalescedCronMaintenance(
+		kind: MaintenanceKind,
+		body: () => Promise<void>
+	): Promise<void> {
+		if (this.cronMaintenanceQueued.has(kind)) {
+			return;
+		}
+
+		this.cronMaintenanceQueued.add(kind);
+
+		try {
+			await this.runExclusiveMaintenance(kind, body);
+		} finally {
+			this.cronMaintenanceQueued.delete(kind);
+		}
+	}
+
 	// One bounded sweep. It records a continuation and arms an immediate alarm
 	// when either there is likely more to collect (the sweep stopped at the cap)
 	// or a capped narinfo-deletion backlog is still queued, so the remaining paths
@@ -974,6 +1053,18 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
+		await this.settleGarbageContinuation(outcome, sweepLimit);
+	}
+
+	// Records or clears the garbage-collection continuation after a sweep. It arms
+	// an immediate alarm when the sweep stopped at its cap or a capped
+	// narinfo-deletion backlog is still queued, so the leftover paths and deletions
+	// drain across firings; otherwise it clears the marker. Shared by the cron
+	// sweep and the interactive path.
+	private async settleGarbageContinuation(
+		outcome: GarbageCollectionOutcome,
+		sweepLimit: number
+	): Promise<void> {
 		const hasMoreToDrain =
 			outcome.pathsSwept >= sweepLimit ||
 			this.deletionQueue.hasQueuedNarInfoDeletions();
@@ -981,6 +1072,46 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		await (hasMoreToDrain
 			? this.armGarbageContinuation(sweepLimit)
 			: this.ctx.storage.delete(gcContinuationKey));
+	}
+
+	// The interactive garbage-collection pass the admin oRPC procedure reaches. It
+	// serialises against the cron sweep and the alarm resume through the same 'gc'
+	// chain and arms the continuation the same way, so a manual sweep that hits the
+	// per-run cap drains its remainder across alarm firings too. The metering and
+	// eligibility reconcile the cron sweep runs inline are supplied instead by the
+	// request meter and the oRPC maintenance hook the interactive request carries.
+	private sweepGarbageInteractive(
+		logger: Logger,
+		cache: string | undefined,
+		purgeOrigin: string | undefined
+	): Promise<GarbageCollectionOutcome> {
+		return this.runExclusiveMaintenance('gc', async () => {
+			const outcome = await this.garbageCollection.collectGarbage(
+				logger,
+				cache,
+				purgeOrigin
+			);
+
+			await this.settleGarbageContinuation(outcome, maxPathsSweptPerRun);
+
+			return outcome;
+		});
+	}
+
+	// The interactive verification pass the admin oRPC procedure reaches. It
+	// serialises against the cron verify pass through the same 'verify' chain and
+	// shares the deferred-verify guard reset: the pass claims the pending rows, so
+	// a deferral after it starts must request its own pass.
+	private verifyInteractive(
+		logger: Logger,
+		purgeOrigin: string | undefined,
+		limit: number
+	): Promise<VerifyReport> {
+		return this.runExclusiveMaintenance('verify', () => {
+			this.commitPipeline.onVerificationPassStarted();
+
+			return this.verification.verify(logger, purgeOrigin, limit);
+		});
 	}
 
 	private async armGarbageContinuation(sweepLimit: number): Promise<void> {
@@ -991,14 +1122,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// Resumes a garbage-collection sweep that stopped at its per-run cap. A run
 	// that did not stop at the cap left no continuation, so this is a no-op.
 	private async resumeGarbageCollection(): Promise<void> {
-		const sweepLimit = await this.ctx.storage.get<number>(gcContinuationKey);
+		const pending = await this.ctx.storage.get<number>(gcContinuationKey);
 
-		if (typeof sweepLimit !== 'number') {
+		// No continuation means no work: return without touching the chain, so an
+		// idle alarm costs nothing and never queues behind a concurrent sweep.
+		if (typeof pending !== 'number') {
 			return;
 		}
 
-		await this.ctx.storage.delete(gcContinuationKey);
-		await this.sweepGarbageOnce(sweepLimit);
+		await this.runExclusiveMaintenance('gc', async () => {
+			// Re-read under the chain: a sweep that ran while this pass waited may
+			// have drained the marker, in which case there is nothing left to resume.
+			const sweepLimit = await this.ctx.storage.get<number>(gcContinuationKey);
+
+			if (typeof sweepLimit !== 'number') {
+				return;
+			}
+
+			await this.ctx.storage.delete(gcContinuationKey);
+			await this.sweepGarbageOnce(sweepLimit);
+		});
 	}
 
 	// One bounded reconcile of the committed paths a recent negotiate queued. Like
@@ -1125,23 +1268,27 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// orphan-blob grace window.
 	async runGarbageCollection(sweepLimit?: number): Promise<void> {
 		await this.initialise();
-		await this.sweepGarbageOnce(sweepLimit);
+		await this.runCoalescedCronMaintenance('gc', () =>
+			this.sweepGarbageOnce(sweepLimit)
+		);
 	}
 
-	// Drives the bounded background loops the single DO alarm carries: resuming
-	// a capped garbage-collection sweep, reconciling the committed paths a
-	// recent negotiate queued, resuming a cache teardown, and the verify
-	// backstop. Each re-arms the alarm while it has work left, so the backlogs
-	// converge across firings while the gate stays free between them.
+	// Drives the bounded background loops the single DO alarm carries: reconciling
+	// the committed paths a recent negotiate queued, resuming a cache teardown, the
+	// verify backstop, and finally resuming a capped garbage-collection sweep. Each
+	// re-arms the alarm while it has work left, so the backlogs converge across
+	// firings while the gate stays free between them. Garbage collection resumes
+	// last so a queued gc pass, which may wait behind an interactive or cron sweep
+	// on the chain, cannot stall the other resume loops.
 	override async alarm(): Promise<void> {
 		await this.initialise();
 		// The alarm is a top-level entrypoint, so it seeds the logger the resume
 		// paths that log outside a metered block are threaded.
 		const logger = rootLogger().with({ trigger: 'alarm' });
-		await this.resumeGarbageCollection();
 		await this.reconcileNegotiatedOnce();
 		await this.resumeCacheTeardown();
 		await this.resumeVerifyBackstop(logger);
+		await this.resumeGarbageCollection();
 	}
 
 	// Starts a cache teardown directly, the manual/test entry that the `caches`
@@ -1186,22 +1333,24 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 	async runVerification(): Promise<void> {
 		await this.initialise();
-		// This pass will claim the pending rows, so re-arm the prompt-verify
-		// single-flight guard: a deferral after this point asks for its own pass.
-		this.commitPipeline.onVerificationPassStarted();
-		await this.metered('verification', (logger) =>
-			this.withMaintenanceEligibility(async () => {
-				await this.verification.verifyPendingUploads(
-					logger,
-					verificationBatchSize
-				);
-				await this.verification.verifyBatch(
-					logger,
-					undefined,
-					verificationBatchSize
-				);
-			})
-		);
+		await this.runCoalescedCronMaintenance('verify', async () => {
+			// This pass will claim the pending rows, so re-arm the prompt-verify
+			// single-flight guard: a deferral after this point asks for its own pass.
+			this.commitPipeline.onVerificationPassStarted();
+			await this.metered('verification', (logger) =>
+				this.withMaintenanceEligibility(async () => {
+					await this.verification.verifyPendingUploads(
+						logger,
+						verificationBatchSize
+					);
+					await this.verification.verifyBatch(
+						logger,
+						undefined,
+						verificationBatchSize
+					);
+				})
+			);
+		});
 	}
 
 	// The prompt verify path runs the CPU-bound NAR decode in the queue consumer,
