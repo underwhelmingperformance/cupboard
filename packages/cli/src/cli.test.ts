@@ -320,6 +320,10 @@ describe('command help', () => {
 		expect(help).toContain('Examples:');
 		expect(help).toContain('cupboard push');
 		expect(help).toContain('--dry-run');
+		expect(help).toContain(
+			'cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\\n' +
+				'    --root github:acme/infra/main'
+		);
 	});
 
 	it('shows local and remote examples for attest verify', () => {

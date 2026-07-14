@@ -466,6 +466,43 @@ cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
 The trailing slash on the root makes it a prefix, so one grant covers every
 per-system root beneath it.
 
+The flake publish workflow depends on that prefix. Each of its jobs exchanges
+its own OIDC token under the same trust rule: the plan job ensures a retention
+root for each already-cached target, and the seed, fallback and target jobs push
+and attest. Every root it writes, one per target and one per shared-output
+group, sits beneath the `root-prefix` the caller passes, so a single prefix
+grant covers them all. Trust it with the branch preset, pinning
+`job_workflow_ref` to cupboard's reusable file:
+
+```bash
+# Trust main's flake publish. The preset grants github:acme/app/main/, a
+# prefix covering every per-target and shared-output root the run writes.
+cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
+  --repo acme/app --branch main \
+  --job-workflow-ref owner/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main
+```
+
+Then call the workflow with a `root-prefix` that nests under the granted root,
+here `github:acme/app/main` beneath the grant `github:acme/app/main/`:
+
+```yaml
+jobs:
+  publish:
+    uses: owner/cupboard/.github/workflows/cupboard-flake-publish.yml@main
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    with:
+      url: https://cupboard.example.workers.dev/t/acme
+      root-prefix: github:acme/app/main
+```
+
+The `job_workflow_ref` names the file in `owner/cupboard`, where the reusable
+workflow lives, not the caller's repository. The plan and build jobs run inside
+cupboard's workflow, so that is the claim their token carries; the caller is
+still pinned, by the repository ids and `ref` the preset sets.
+
 Release builds usually go to a cache named after the tag, and no preset covers
 that. `--capture` builds the rule instead: it reads a value out of a token claim
 using a pattern with a named group, and that value fills the `{...}`

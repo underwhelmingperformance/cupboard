@@ -107,7 +107,8 @@ export function registerPushCommand(
 				'  cupboard push https://cache.example.workers.dev/t/acme ./result --dry-run',
 				'',
 				'  # Push from CI with a GitHub Actions OIDC token',
-				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result'
+				'  cupboard push --github-oidc https://cache.example.workers.dev/t/acme ./result \\',
+				'    --root github:acme/infra/main'
 			].join('\n')
 		)
 		.action(async (url: string, paths: string[], options: PushOptions) => {
