@@ -130,13 +130,46 @@ describe('planPublish', () => {
 			evaluation(second, 'second', secondPath, sharedPath)
 		];
 
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set([sharedPath]),
+			uses: derivationUses(evaluations)
+		});
+
+		// The omitted seed is recorded as a destination-resident intermediate so
+		// grace mode can refresh its deadline before relying on it.
+		expect({
+			seedGroups: plan.seedGroups,
+			destinationIntermediates: plan.destinationIntermediates
+		}).toStrictEqual({
+			seedGroups: [],
+			destinationIntermediates: [sharedPath]
+		});
+	});
+
+	it('records no intermediate for an available output that would never seed', () => {
+		const retained = target('retained');
+		const first = target('first');
+		const evaluations = [
+			evaluation(
+				retained,
+				'retained',
+				storePath(`/nix/store/${'4'.repeat(32)}-retained`),
+				sharedPath
+			),
+			evaluation(first, 'first', firstPath, sharedPath)
+		];
+
+		// Only one pending target uses the shared output, so it would not have
+		// been seeded even if it were missing; its availability is incidental.
 		expect(
 			planPublish({
 				evaluations,
-				retainedRoots: new Set(),
+				retainedRoots: new Set(['retained']),
 				availablePaths: new Set([sharedPath]),
 				uses: derivationUses(evaluations)
-			}).seedGroups
+			}).destinationIntermediates
 		).toStrictEqual([]);
 	});
 

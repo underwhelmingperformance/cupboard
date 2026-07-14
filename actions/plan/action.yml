@@ -38,6 +38,14 @@ inputs:
       Inspect the cache and derivation graph. False emits every target directly.
     required: false
     default: 'true'
+  intermediate-retention:
+    description: >-
+      How seed and fallback intermediates are retained. 'root' keeps the
+      temporary per-run seed roots; 'grace' relies on the destination cache's
+      retention grace policy and refreshes the deadline of every
+      destination-resident intermediate, failing unless each one is positive.
+    required: false
+    default: 'root'
   runners:
     description: >-
       Every runs-on label the target manifest may use, separated by whitespace
@@ -122,6 +130,7 @@ runs:
         AUDIENCE: ${{ inputs.audience }}
         PLAN_FILE: ${{ inputs.plan-file }}
         OPTIMISE: ${{ inputs.optimise }}
+        INTERMEDIATE_RETENTION: ${{ inputs.intermediate-retention }}
         RUNNERS: ${{ inputs.runners }}
       run: |
         args=(plan
@@ -136,6 +145,7 @@ runs:
           --audience "$AUDIENCE"
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"
+          --intermediate-retention "$INTERMEDIATE_RETENTION"
           --runners "$RUNNERS")
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \

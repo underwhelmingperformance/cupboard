@@ -11,6 +11,9 @@ import {
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
 	CommandFailedError,
+	ConfirmCommandError,
+	ConfirmResultInvalidError,
+	ConfirmResultMissingError,
 	CupboardReportedError,
 	DerivationGraphShapeError,
 	DerivationNodeMissingError,
@@ -147,6 +150,21 @@ describe('action errors', () => {
 		[
 			'DuplicateGroupKeyError',
 			new DuplicateGroupKeyError('seed-a'),
+			genericExitCode
+		],
+		[
+			'ConfirmCommandError',
+			new ConfirmCommandError({ cause: new Error('boom') }),
+			genericExitCode
+		],
+		[
+			'ConfirmResultMissingError',
+			new ConfirmResultMissingError(),
+			genericExitCode
+		],
+		[
+			'ConfirmResultInvalidError',
+			new ConfirmResultInvalidError({ cause: new Error('boom') }),
 			genericExitCode
 		],
 		[
@@ -440,6 +458,22 @@ describe('DuplicateGroupKeyError', () => {
 describe('PublishPlanInvariantError', () => {
 	it('carries the missing subject', () => {
 		expect(new PublishPlanInvariantError('index 0').subject).toBe('index 0');
+	});
+});
+
+describe('ConfirmCommandError', () => {
+	it('carries the causal error by reference', () => {
+		const cause = new Error('root cause');
+
+		expect(new ConfirmCommandError({ cause }).cause).toBe(cause);
+	});
+});
+
+describe('ConfirmResultInvalidError', () => {
+	it('carries the causal error by reference', () => {
+		const cause = new Error('root cause');
+
+		expect(new ConfirmResultInvalidError({ cause }).cause).toBe(cause);
 	});
 });
 

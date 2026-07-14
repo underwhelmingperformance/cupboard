@@ -15,6 +15,10 @@ import {
 	rootEnsureResponseSchema
 } from '@cupboard/protocol/retention';
 import {
+	type ParsedUploadConfirmResponse,
+	uploadConfirmResponseSchema
+} from '@cupboard/protocol/upload';
+import {
 	createGithubReporter,
 	parseReporterResults,
 	type Reporter,
@@ -25,6 +29,10 @@ import type { Command } from 'commander';
 import { z } from 'zod';
 
 import {
+	ConfirmCommandError,
+	ConfirmResultInvalidError,
+	ConfirmResultMissingError,
+	GraceDeadlineMissingError,
 	InvalidInputError,
 	MatrixJobLimitError,
 	MissingInputError,
@@ -114,6 +122,7 @@ export interface PlanOptions {
 	readonly cupboardPath?: string;
 	readonly planFile?: string;
 	readonly optimise?: string;
+	readonly intermediateRetention?: string;
 	readonly runners?: string;
 }
 
@@ -129,6 +138,7 @@ export interface PlanInputs {
 	readonly cupboardPath: string;
 	readonly planFile: string;
 	readonly optimise: boolean;
+	readonly intermediateRetention: 'root' | 'grace';
 	readonly runnerRoutes: ReadonlyMap<string, RunnerRoute>;
 	readonly temporaryDirectory: string;
 }
@@ -161,6 +171,10 @@ export function registerPlanCommand(
 		.option(
 			'--optimise <value>',
 			'inspect the cache and derivation graph: true or false'
+		)
+		.option(
+			'--intermediate-retention <value>',
+			"how seed and fallback intermediates are retained: 'root' or 'grace'"
 		)
 		.option(
 			'--runners <entries>',
@@ -224,6 +238,16 @@ export function resolvePlanInputs(
 		);
 	}
 
+	const intermediateRetention =
+		provided(options.intermediateRetention) ?? 'root';
+
+	if (intermediateRetention !== 'root' && intermediateRetention !== 'grace') {
+		throw new InvalidInputError(
+			'intermediate-retention',
+			"intermediate-retention must be 'root' or 'grace'"
+		);
+	}
+
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
 
 	return {
@@ -237,6 +261,7 @@ export function resolvePlanInputs(
 		audience: provided(options.audience) ?? url,
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),
+		intermediateRetention,
 		runnerRoutes,
 		temporaryDirectory,
 		planFile:
@@ -364,14 +389,25 @@ async function optimisedPlan(
 		evaluations,
 		availablePaths
 	);
-
-	return planPublish({
+	const plan = planPublish({
 		evaluations,
 		retainedRoots,
 		availablePaths,
 		uses,
 		unevaluated: unevaluated.map((failure) => failure.target)
 	});
+
+	// Grace mode must not rely on a destination-resident intermediate whose
+	// deadline is about to lapse: refresh each one and fail closed unless every
+	// deadline comes back positive.
+	if (inputs.intermediateRetention === 'grace') {
+		await confirmDestinationIntermediates(
+			inputs,
+			plan.destinationIntermediates
+		);
+	}
+
+	return plan;
 }
 
 function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
@@ -379,7 +415,8 @@ function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
 		retained: [],
 		targets,
 		seedGroups: [],
-		fallbackGroups: []
+		fallbackGroups: [],
+		destinationIntermediates: []
 	};
 }
 
@@ -550,6 +587,108 @@ function ensureResponse(
 	}
 
 	throw new RootEnsureResultMissingError(root);
+}
+
+// Refreshes the retention deadline of every destination-resident intermediate
+// through `cupboard confirm`, the publication-free half of grace mode's
+// fail-closed rule: an intermediate the plan omits from seeding must carry a
+// positive deadline before a later job relies on substituting it.
+export async function confirmDestinationIntermediates(
+	inputs: PlanInputs,
+	storePaths: readonly StorePathString[],
+	runner: EnsureRunner = defaultEnsureRunner
+): Promise<void> {
+	if (storePaths.length === 0) {
+		return;
+	}
+
+	const resultFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-confirm-${randomUUID()}.jsonl`
+	);
+	const arguments_ = [
+		'--output-mode',
+		'github',
+		'--no-colour',
+		'--result-file',
+		resultFile,
+		'confirm',
+		inputs.url,
+		...storePaths,
+		'--github-oidc',
+		'--audience',
+		inputs.audience
+	];
+
+	if (inputs.cache !== '') {
+		arguments_.push('--cache', inputs.cache);
+	}
+
+	try {
+		await runner(inputs.cupboardPath, arguments_);
+	} catch (error) {
+		const replayed = replayCapturedCommandOutput(error);
+
+		throw new ConfirmCommandError({
+			cause: error,
+			wasReported: replayed.wasReported
+		});
+	}
+
+	const response = confirmResponse(await readConfirmResults(resultFile));
+	const missing = response.paths
+		.filter((confirmed) => confirmed.grace?.retainUntil === undefined)
+		.map((confirmed) => ({
+			storePathHash: confirmed.storePathHash,
+			reason:
+				confirmed.grace?.graceSeconds === undefined
+					? ('no-policy-matched' as const)
+					: ('pending' as const)
+		}));
+
+	if (missing.length > 0) {
+		throw new GraceDeadlineMissingError(missing);
+	}
+}
+
+// A run that never opened its result file recorded no result; any other read
+// failure is the caller's environment misbehaving and propagates as itself.
+async function readConfirmResults(resultFile: string): Promise<string> {
+	try {
+		return await readFile(resultFile, 'utf8');
+	} catch (error) {
+		if (isFileNotFound(error)) {
+			throw new ConfirmResultMissingError();
+		}
+
+		throw error;
+	}
+}
+
+function confirmResponse(recorded: string): ParsedUploadConfirmResponse {
+	let events: readonly ReporterResultEvent[];
+
+	try {
+		events = parseReporterResults(recorded);
+	} catch (error) {
+		throw new ConfirmResultInvalidError({ cause: error });
+	}
+
+	for (const event of events) {
+		if (event.kind !== 'confirm-paths') {
+			continue;
+		}
+
+		const response = uploadConfirmResponseSchema.safeParse(event.data);
+
+		if (!response.success) {
+			throw new ConfirmResultInvalidError({ cause: response.error });
+		}
+
+		return response.data;
+	}
+
+	throw new ConfirmResultMissingError();
 }
 
 // Each target job's matrix entry carries the full root its push publishes
