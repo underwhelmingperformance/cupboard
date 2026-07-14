@@ -124,7 +124,13 @@ export type ReserveOutcome =
 // reserved row); `tenant-inactive` when the tenant is no longer active (suspended,
 // offboarding, offboarded, or gone) and the caller reclaims the reserved row.
 export type MaterialiseOutcome =
-	| { readonly kind: 'materialised'; readonly narInfo: NarInfo }
+	| {
+			readonly kind: 'materialised';
+			readonly narInfo: NarInfo;
+			// The grace deadline this materialisation extended the path to, when
+			// its captured decision granted one.
+			readonly graceRetainUntil?: string;
+	  }
 	| { readonly kind: 'superseded' }
 	| { readonly kind: 'blob-gone' }
 	| { readonly kind: 'over-quota' }

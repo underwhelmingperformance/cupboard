@@ -13,6 +13,7 @@ import {
 	useTestServer
 } from '../test-support.ts';
 
+import { storedGraceDeadlines } from './grace-decision.ts';
 import { RetentionService } from './retention-service.ts';
 
 const hashAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
@@ -68,5 +69,28 @@ describe('retention grace bounds', () => {
 			count: stored.length,
 			allExtended: stored.every((row) => row.retainUntil === retainUntil)
 		}).toStrictEqual({ count: hashCount, allExtended: true });
+	});
+
+	it('reads every hash back in one call, past the per-select IN-list bound', async () => {
+		await useTestServer('grace-bounds-read');
+
+		await runInDurableObject(currentServer(), (instance) => {
+			new RetentionService(instance.context).extendGraceDeadlines(
+				DEFAULT_CACHE,
+				hashes,
+				retainUntil
+			);
+		});
+
+		const storedValues = await runInDurableObject(currentServer(), (instance) =>
+			storedGraceDeadlines(instance.context.db, DEFAULT_CACHE, hashes)
+				.values()
+				.toArray()
+		);
+
+		expect({
+			count: storedValues.length,
+			values: [...new Set(storedValues)]
+		}).toStrictEqual({ count: hashCount, values: [retainUntil] });
 	});
 });

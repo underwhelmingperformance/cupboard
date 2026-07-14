@@ -1,8 +1,14 @@
 import { rootLogger } from '@cupboard/logger';
+import {
+	type NixSha256HashString,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
+import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
 import { narObjectKey } from '../http/http.ts';
 import {
@@ -24,6 +30,7 @@ import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 
@@ -48,7 +55,8 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 		new CacheAdminService(context, deletionQueue),
 		new SigningKeysService(context),
 		new UploadStateService(context),
-		narInfoObjects
+		narInfoObjects,
+		new RetentionService(context)
 	);
 }
 
@@ -253,6 +261,7 @@ describe('concedeToWinner defers when no committed winner exists', () => {
 		// call must return `deferred`, not `already-present`.
 		const outcome = await runInDurableObject(currentServer(), (instance) =>
 			pipelineFor(instance.context).concedeToWinner(
+				rootLogger(),
 				'',
 				reuse.uploadId,
 				second,
@@ -266,5 +275,153 @@ describe('concedeToWinner defers when no committed winner exists', () => {
 			storePathHash: second.storePathHash,
 			narHash: second.narHash
 		});
+	});
+});
+
+// The live local row decides a reclaim's outcome: a committed edge counts
+// only while the row still carries the reserved identity. After a delete and
+// recommit, a stale edge for the old generation can linger in D1 until the
+// deletion backlog drains, and treating it as proof of commitment would
+// settle an upload against a replaced row and discard its grace decision.
+async function seedEdge(
+	generation: number,
+	narHash: NixSha256HashString
+): Promise<void> {
+	await runInDurableObject(currentServer(), async (instance) => {
+		const database = drizzleD1(instance.context.env.CUPBOARD_DB, {
+			schema: d1Schema
+		});
+
+		await database.insert(d1Schema.blobReference).values({
+			tenant: instance.context.requireTenant(),
+			cache: '',
+			storePathHash: storePathHashSchema.parse('r4'.repeat(16)),
+			generation,
+			narHash
+		});
+	});
+}
+
+describe('reclaimReservedRow answers from the live row identity', () => {
+	beforeEach(resetTestServer);
+
+	it.each([
+		{
+			name: 'a matching committed row is committed-current and survives',
+			liveGeneration: 7,
+			edgeGeneration: 7,
+			outcome: 'committed-current',
+			survivingGeneration: 7,
+			graceSurvives: true
+		},
+		{
+			name: 'a matching uncommitted row is reclaimed and removed',
+			liveGeneration: 7,
+			edgeGeneration: undefined,
+			outcome: 'reclaimed',
+			survivingGeneration: undefined,
+			graceSurvives: false
+		},
+		{
+			name: 'a replaced row with a stale edge is superseded and survives',
+			liveGeneration: 8,
+			edgeGeneration: 7,
+			outcome: 'superseded',
+			survivingGeneration: 8,
+			graceSurvives: true
+		}
+	] as const)(
+		'$name',
+		async ({
+			liveGeneration,
+			edgeGeneration,
+			outcome,
+			survivingGeneration,
+			graceSurvives
+		}) => {
+			await initialise();
+
+			const metadata = uploadMetadata({
+				fileSize: 128,
+				storePathHash: 'r4'.repeat(16),
+				name: 'reclaimed'
+			});
+
+			await seedReservedNarInfo(metadata, liveGeneration);
+			// A grace deadline granted to the row must go with it: only a
+			// reclaim removes the row, so only a reclaim drops the deadline.
+			await runInDurableObject(currentServer(), (instance) => {
+				instance.context.db
+					.insert(schema.retentionGrace)
+					.values({
+						cache: '',
+						storePathHash: metadata.storePathHash,
+						retainUntil: '2026-06-01T00:00:00.000Z'
+					})
+					.run();
+			});
+
+			if (edgeGeneration !== undefined) {
+				await seedEdge(edgeGeneration, metadata.narHash);
+			}
+
+			const result = await runInDurableObject(currentServer(), (instance) =>
+				instance.context.criticalSection(() =>
+					pipelineFor(instance.context).reclaimReservedRow(
+						'',
+						metadata.storePathHash,
+						7,
+						metadata.narHash
+					)
+				)
+			);
+			const after = await runInDurableObject(currentServer(), (instance) => ({
+				surviving: instance.context.db
+					.select({ generation: schema.narInfos.generation })
+					.from(schema.narInfos)
+					.where(eq(schema.narInfos.storePathHash, metadata.storePathHash))
+					.get(),
+				grace: instance.context.db
+					.select({ storePathHash: schema.retentionGrace.storePathHash })
+					.from(schema.retentionGrace)
+					.where(
+						eq(schema.retentionGrace.storePathHash, metadata.storePathHash)
+					)
+					.get()
+			}));
+
+			expect({
+				result,
+				surviving: after.surviving?.generation,
+				graceSurvives: after.grace !== undefined
+			}).toStrictEqual({
+				result: outcome,
+				surviving: survivingGeneration,
+				graceSurvives
+			});
+		}
+	);
+
+	it('reports an already-vanished row as reclaimed', async () => {
+		await initialise();
+
+		const metadata = uploadMetadata({
+			fileSize: 128,
+			storePathHash: 'r4'.repeat(16),
+			name: 'vanished'
+		});
+
+		const result = await runInDurableObject(currentServer(), (instance) =>
+			instance.context.criticalSection(() =>
+				pipelineFor(instance.context).reclaimReservedRow(
+					'',
+					metadata.storePathHash,
+					7,
+					metadata.narHash
+				)
+			)
+		);
+
+		expect(result).toBe('reclaimed');
 	});
 });

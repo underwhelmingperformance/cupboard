@@ -51,6 +51,7 @@ import {
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
 	uploadPathMetadataSchema,
+	type UploadRetentionPlan,
 	type UploadStatusResponse,
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
@@ -1463,7 +1464,8 @@ export const testPushId = await issuePushId(
 export async function negotiateUploads(
 	token: string,
 	paths: readonly ParsedUploadPathMetadata[],
-	cache: string = DEFAULT_CACHE
+	cache: string = DEFAULT_CACHE,
+	retention?: UploadRetentionPlan
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedFetch(
 		cacheScopedPath(cache, '/uploads'),
@@ -1471,7 +1473,8 @@ export async function negotiateUploads(
 		{
 			body: JSON.stringify({
 				pushId: testPushId,
-				paths: paths.map((path) => uploadPathNegotiation(path))
+				paths: paths.map((path) => uploadPathNegotiation(path)),
+				...(retention !== undefined && { retention })
 			}),
 			headers: {
 				'content-type': 'application/json'

@@ -9,6 +9,7 @@ import {
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type CommitResponse,
+	type ParsedUploadGraceFact,
 	type ParsedUploadPathNegotiation
 } from '@cupboard/protocol/upload';
 import { withDeadline } from '@cupboard/shared/timeout';
@@ -57,7 +58,14 @@ import {
 	type ReserveOutcome,
 	type ServerContext
 } from './context.ts';
+import {
+	confirmGrace,
+	type GraceDecision,
+	parseStoredGraceDecision,
+	storedGraceDeadlines
+} from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { type RetentionService } from './retention-service.ts';
 import { type SigningKeysService } from './signing-keys-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
@@ -90,7 +98,11 @@ export const narVerifyBudgetMs = 5 * 60 * 1000;
  * the verification pass's verdict. Failures are thrown.
  */
 export type CommitOutcome =
-	| { readonly kind: 'settled'; readonly response: CommitResponse }
+	| {
+			readonly kind: 'settled';
+			readonly response: CommitResponse;
+			readonly grace?: ParsedUploadGraceFact;
+	  }
 	| {
 			readonly kind: 'deferred';
 			readonly storePathHash: StorePathHash;
@@ -125,6 +137,12 @@ export interface MaterialiseRequest {
 	readonly probe: MaterialisationProbe;
 	readonly mustOwnBlob: boolean;
 	/**
+	 * The retention grace decision captured when this upload was negotiated,
+	 * applied atomically with the materialisation. `undefined` is a row from
+	 * before the decision existed and grants nothing.
+	 */
+	readonly graceDecision: GraceDecision | undefined;
+	/**
 	 * Runs inside the flush gate before the fence; a false verdict settles the
 	 * request as `gone` (its row's fate was decided elsewhere) without charging.
 	 * Must be synchronous: the whole point of the shared gate is that nothing
@@ -151,6 +169,12 @@ interface PendingMaterialise {
 // and a handful of bound parameters each, kept well inside D1's per-batch
 // budgets. A larger burst drains over successive flushes.
 const materialiseFlushCap = 32;
+
+// How many times a concede re-resolves a winner that moved inside its await
+// window before deferring to the verify pass. Each retry needs a fresh
+// recommit to have landed inside the window, so real contention settles in
+// one or two; the cap only stops sustained churn from pinning one request.
+const concedeAttemptLimit = 3;
 
 // A flush produced no outcome for a request it carried: a programming error
 // (every fence and charge path assigns one). Surfacing it keeps the waiter
@@ -262,7 +286,8 @@ export class CommitPipelineService {
 		private readonly cacheAdmin: CacheAdminService,
 		private readonly signingKeysService: SigningKeysService,
 		private readonly uploadState: UploadStateService,
-		private readonly narInfoObjects: NarInfoObjectsService
+		private readonly narInfoObjects: NarInfoObjectsService,
+		private readonly retention: RetentionService
 	) {}
 
 	// Sends a `verdict/servable` frame to any commit session parked on this
@@ -308,6 +333,7 @@ export class CommitPipelineService {
 		cache: string,
 		uploadId: string,
 		metadata: ParsedUploadPathNegotiation,
+		graceDecision: GraceDecision | undefined,
 		// The caller's probe of the shared facts, taken alongside its advisory
 		// checks. It may be stale by the gate below; the charge batch is the
 		// authoritative guard.
@@ -324,7 +350,13 @@ export class CommitPipelineService {
 		const reserved = await this.reserveNarInfoRow(cache, metadata);
 
 		if (reserved.kind === 'lost') {
-			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
+			return this.concedeToWinner(
+				logger,
+				cache,
+				uploadId,
+				metadata,
+				canonicalKey
+			);
 		}
 
 		// `mine` means this same upload-id already holds the reservation, a
@@ -337,7 +369,8 @@ export class CommitPipelineService {
 			metadata,
 			generation,
 			probe,
-			mustOwnBlob: true
+			mustOwnBlob: true,
+			graceDecision
 		});
 
 		// Over quota on a prefetched probe: the prefetched `isOwned` can be stale when
@@ -352,7 +385,8 @@ export class CommitPipelineService {
 				metadata,
 				generation,
 				probe: freshProbe,
-				mustOwnBlob: true
+				mustOwnBlob: true,
+				graceDecision
 			});
 		}
 
@@ -382,7 +416,13 @@ export class CommitPipelineService {
 		}
 
 		if (outcome.kind === 'superseded') {
-			return this.concedeToWinner(cache, uploadId, metadata, canonicalKey);
+			return this.concedeToWinner(
+				logger,
+				cache,
+				uploadId,
+				metadata,
+				canonicalKey
+			);
 		}
 
 		if (outcome.kind === 'tenant-inactive') {
@@ -403,19 +443,42 @@ export class CommitPipelineService {
 		}
 
 		// blob-gone: reclaim the reserved row only when it was not already committed
-		// by a concurrent saga.
-		const wasReclaimed = await this.context.criticalSection(() =>
-			this.reclaimReservedRow(
+		// by a concurrent saga. A superseded row belongs to a replacement now, so
+		// this upload settles as committed only for its own still-current row. The
+		// grace confirmation runs inside the same gated callback as the identity
+		// proof: the input gate reopens the moment that callback completes, so a
+		// confirmation outside it could race a delete or recommit queued behind
+		// the gate. Applied together they are atomic, and the returned fact is
+		// the grant the winner's row actually holds.
+		const confirmed = await this.context.criticalSection(async () => {
+			const reclaim = await this.reclaimReservedRow(
 				cache,
 				metadata.storePathHash,
 				generation,
 				metadata.narHash
-			)
-		);
+			);
 
-		if (!wasReclaimed) {
-			// A concurrent commit already materialised this generation; the object
-			// serves. Clear the upload row without disturbing the committed row.
+			if (reclaim !== 'committed-current') {
+				return;
+			}
+
+			// A concurrent commit already materialised this generation; the
+			// object serves. This upload lost the race, so its own captured
+			// decision never ran; apply it against the winner's generation
+			// before any waiter hears the verdict and before the row holding
+			// the decision is cleared, or a positive policy would grant nothing.
+			return confirmGrace(
+				this.context,
+				this.retention,
+				cache,
+				metadata.storePathHash,
+				generation,
+				metadata.narHash,
+				graceDecision?.graceSeconds
+			);
+		});
+
+		if (confirmed !== undefined) {
 			this.notifyUploadWaiters(uploadId, committingSessionId);
 			this.uploadState.clearPendingUpload(uploadId);
 
@@ -425,7 +488,10 @@ export class CommitPipelineService {
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash,
 					status: 'committed'
-				}
+				},
+				...(graceDecision?.plan === true && {
+					grace: confirmed.matched ? confirmed.fact : {}
+				})
 			};
 		}
 
@@ -898,25 +964,110 @@ export class CommitPipelineService {
 						? { kind: 'materialised', narInfo: charge.narInfo }
 						: { kind: 'tenant-inactive' };
 			}
-
-			return outcomes;
+		} else {
+			for (const charge of chargeable) {
+				const single = await this.reserveEdgeAndCharge(
+					tenant,
+					charge.request.cache,
+					charge.request.metadata,
+					charge.request.generation,
+					charge.blob
+				);
+				outcomes[charge.index] =
+					single === 'charged'
+						? { kind: 'materialised', narInfo: charge.narInfo }
+						: { kind: single };
+			}
 		}
 
-		for (const charge of chargeable) {
-			const single = await this.reserveEdgeAndCharge(
-				tenant,
-				charge.request.cache,
-				charge.request.metadata,
-				charge.request.generation,
-				charge.blob
-			);
-			outcomes[charge.index] =
-				single === 'charged'
-					? { kind: 'materialised', narInfo: charge.narInfo }
-					: { kind: single };
-		}
+		this.applyCapturedGrace(requests, outcomes);
 
 		return outcomes;
+	}
+
+	// Applies each materialised request's captured grace decision inside the same
+	// gate that finalised its generation, so the collector can never observe the
+	// committed path without its deadline. A decision with no matching policy, or
+	// a row from before decisions existed, grants nothing; a zero grace marks the
+	// cache grace-managed without a lasting deadline. Grouped so one flush issues
+	// one extension per distinct cache and deadline.
+	private applyCapturedGrace(
+		requests: readonly MaterialiseRequest[],
+		outcomes: (BatchedMaterialiseOutcome | undefined)[]
+	): void {
+		const settledAt = Date.now();
+		const managedCaches = new Set<string>();
+		const extensions = new Map<
+			string,
+			{
+				readonly cache: string;
+				readonly retainUntil: string;
+				readonly entries: {
+					readonly index: number;
+					readonly hash: StorePathHash;
+				}[];
+			}
+		>();
+
+		for (const [index, request] of requests.entries()) {
+			if (outcomes[index]?.kind !== 'materialised') {
+				continue;
+			}
+
+			const graceSeconds = request.graceDecision?.graceSeconds;
+
+			if (graceSeconds === undefined) {
+				continue;
+			}
+
+			managedCaches.add(request.cache);
+
+			if (graceSeconds === 0) {
+				continue;
+			}
+
+			const retainUntil = new Date(
+				settledAt + graceSeconds * 1000
+			).toISOString();
+			const key = `${request.cache} ${retainUntil}`;
+			const group = extensions.get(key) ?? {
+				cache: request.cache,
+				retainUntil,
+				entries: []
+			};
+
+			group.entries.push({ index, hash: request.metadata.storePathHash });
+			extensions.set(key, group);
+		}
+
+		for (const cache of managedCaches) {
+			this.retention.markCacheGraceManaged(cache);
+		}
+
+		for (const group of extensions.values()) {
+			const hashes = group.entries.map((entry) => entry.hash);
+
+			this.retention.extendGraceDeadlines(
+				group.cache,
+				hashes,
+				group.retainUntil
+			);
+
+			// The upsert is monotonic, so storage may already hold a later
+			// deadline than the candidate above (an earlier longer policy, or a
+			// root transition); read it back so the reply and frames report the
+			// stored maximum rather than what this settle alone computed.
+			const stored = storedGraceDeadlines(this.context.db, group.cache, hashes);
+
+			for (const entry of group.entries) {
+				const outcome = outcomes[entry.index];
+				const retainUntil = stored.get(entry.hash);
+
+				if (outcome?.kind === 'materialised' && retainUntil !== undefined) {
+					outcomes[entry.index] = { ...outcome, graceRetainUntil: retainUntil };
+				}
+			}
+		}
 	}
 
 	// One flush: a single gate settles a whole batch, taken from the queue
@@ -1012,41 +1163,92 @@ export class CommitPipelineService {
 	// When no committed winner exists yet (the winning upload is still verifying),
 	// the upload stays live so the verify pass can settle it.
 	async concedeToWinner(
+		logger: Logger,
 		cache: string,
 		uploadId: string,
 		metadata: ParsedUploadPathNegotiation,
-		stagingKey: string
+		stagingKey: string,
+		graceDecision?: GraceDecision
 	): Promise<CommitOutcome> {
-		const winner = await this.narInfoObjects.committedNarInfoRow(
-			cache,
-			metadata.storePathHash
-		);
+		// Each retry needs a fresh recommit to have landed inside the window, so
+		// the loop settles as soon as the path holds still — but sustained churn
+		// must not keep one request re-resolving indefinitely, so past the cap
+		// the upload defers and the verify pass arbitrates.
+		for (let attempt = 0; attempt < concedeAttemptLimit; attempt += 1) {
+			const winner = await this.narInfoObjects.committedNarInfoRow(
+				cache,
+				metadata.storePathHash
+			);
 
-		if (winner === undefined) {
-			// The row is held by a saga that has not yet committed. Leave the upload
-			// row intact so the verify pass can drive it to a terminal verdict.
+			if (winner === undefined) {
+				// The row is held by a saga that has not yet committed. Leave the
+				// upload row intact, and request a prompt verification pass so the
+				// deferred socket is answered within its wait window rather than
+				// by the hourly sweep.
+				await this.requestVerification(logger, this.context.requireTenant());
+
+				return {
+					kind: 'deferred',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				};
+			}
+
+			await this.narInfoObjects.ensureNarInfoObject(
+				cache,
+				winner.storePathHash
+			);
+
+			// This upload lost the race, so its own captured decision never ran;
+			// apply it against the winner's generation before the row holding the
+			// decision is destroyed, or a crash in between would lose the grant.
+			const confirmed = confirmGrace(
+				this.context,
+				this.retention,
+				cache,
+				winner.storePathHash,
+				winner.generation,
+				winner.narHash,
+				graceDecision?.graceSeconds
+			);
+
+			// The winner was read before the object-heal await, so its row can
+			// have moved by now. A mismatch means whatever holds the path is not
+			// the winner this concede read: settling would report a stale row and
+			// silently drop the captured grant, so resolve the current winner and
+			// concede to that instead.
+			if (!confirmed.matched) {
+				continue;
+			}
+
+			await this.uploadState.clearPendingUploadAndStaging(
+				uploadId,
+				stagingKey,
+				metadata.narHash
+			);
+
 			return {
-				kind: 'deferred',
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash
+				kind: 'settled',
+				response: {
+					storePathHash: metadata.storePathHash,
+					narHash: winner.narHash,
+					status: 'already-present'
+				},
+				...(graceDecision?.plan === true && { grace: confirmed.fact })
 			};
 		}
 
-		await this.narInfoObjects.ensureNarInfoObject(cache, winner.storePathHash);
-
-		await this.uploadState.clearPendingUploadAndStaging(
-			uploadId,
-			stagingKey,
-			metadata.narHash
-		);
+		// The path moved on every attempt: leave the upload row (and its
+		// captured decision) intact and let the verify pass arbitrate once the
+		// churn subsides. The prompt pass is requested here for the same reason
+		// as the no-winner deferral above: the socket only hears `deferred`, so
+		// without one its answer would wait on the hourly sweep.
+		await this.requestVerification(logger, this.context.requireTenant());
 
 		return {
-			kind: 'settled',
-			response: {
-				storePathHash: metadata.storePathHash,
-				narHash: winner.narHash,
-				status: 'already-present'
-			}
+			kind: 'deferred',
+			storePathHash: metadata.storePathHash,
+			narHash: metadata.narHash
 		};
 	}
 
@@ -1127,6 +1329,7 @@ export class CommitPipelineService {
 			throw new UploadCacheMismatchError(uploadId, pending.cache, cache);
 		}
 
+		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 		const clock = new Date();
 		const nowIso = clock.toISOString();
 
@@ -1194,6 +1397,37 @@ export class CommitPipelineService {
 					cache,
 					existingNarInfo.storePathHash
 				);
+
+				// This upload lost the race, so its own captured decision never ran;
+				// apply it against the winner's generation before the row holding
+				// the decision is destroyed, or a crash in between would lose the
+				// grant.
+				const confirmed = confirmGrace(
+					this.context,
+					this.retention,
+					cache,
+					existingNarInfo.storePathHash,
+					existingNarInfo.generation,
+					existingNarInfo.narHash,
+					graceDecision?.graceSeconds
+				);
+
+				// The winner was read before the reference-check and heal awaits,
+				// so its row can have moved by now. Settling on it would report a
+				// stale row and silently drop the captured grant; the path is
+				// contested, so hand the upload to the verification pass to
+				// arbitrate, exactly as a live rival below is handled.
+				if (!confirmed.matched) {
+					this.uploadState.markUploadPending(uploadId);
+					await this.requestVerification(logger, this.context.requireTenant());
+
+					return {
+						kind: 'deferred',
+						storePathHash: metadata.storePathHash,
+						narHash: metadata.narHash
+					};
+				}
+
 				await this.uploadState.clearPendingUploadAndStaging(
 					uploadId,
 					pending.r2Key,
@@ -1206,7 +1440,8 @@ export class CommitPipelineService {
 						storePathHash: metadata.storePathHash,
 						narHash: existingNarInfo.narHash,
 						status: 'already-present'
-					}
+					},
+					...(graceDecision?.plan === true && { grace: confirmed.fact })
 				};
 			}
 
@@ -1322,6 +1557,7 @@ export class CommitPipelineService {
 				cache,
 				uploadId,
 				metadata,
+				parseStoredGraceDecision(pending.graceDecisionJson),
 				probe,
 				committingSessionId,
 				advisory?.prefetched !== undefined
@@ -1665,13 +1901,14 @@ export class CommitPipelineService {
 	}
 
 	// Removes a reserved narinfo row whose commit failed verification, leaving its
-	// burned generation in `generation_seq` (monotonic, never reused). Compare-and-
-	// delete on the captured `(generation, narHash)`, and only while the row is not
-	// yet materialised, so neither a newer recommit nor a concurrent commit that has
-	// already made the path servable is ever removed. Runs in a critical section so
-	// the object check and the delete cannot interleave with a materialisation.
-	// Returns whether it reclaimed: `false` means the row was already committed
-	// (its reference edge exists), so the caller must not treat it as a failure.
+	// burned generation in `generation_seq` (monotonic, never reused). The live
+	// local row decides the outcome: only while it still carries the reserved
+	// `(generation, narHash)` does a committed edge mean the path serves this
+	// reservation. A replaced row reports `superseded` whatever edges linger; a
+	// stale D1 edge for the old generation can outlive a delete and recommit
+	// until the deletion backlog drains, and proves nothing about the live row.
+	// Runs in a critical section so the identity read, the edge check and the
+	// delete cannot interleave with a materialisation.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	async reclaimReservedRow(
@@ -1679,7 +1916,30 @@ export class CommitPipelineService {
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString
-	): Promise<boolean> {
+	): Promise<'reclaimed' | 'committed-current' | 'superseded'> {
+		const current = this.context.db
+			.select({
+				generation: schema.narInfos.generation,
+				narHash: schema.narInfos.narHash
+			})
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		// A vanished row was reclaimed already; the outcome is idempotent.
+		if (current === undefined) {
+			return 'reclaimed';
+		}
+
+		if (current.generation !== generation || current.narHash !== narHash) {
+			return 'superseded';
+		}
+
 		const tenant = this.context.requireTenant();
 		const materialised = await this.context.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
@@ -1696,24 +1956,38 @@ export class CommitPipelineService {
 			.get();
 
 		if (materialised !== undefined) {
-			return false;
+			return 'committed-current';
 		}
 
 		await this.narInfoObjects.deleteNarInfoObject(cache, storePathHash);
 
-		this.context.db
-			.delete(schema.narInfos)
-			.where(
-				and(
-					eq(schema.narInfos.cache, cache),
-					eq(schema.narInfos.storePathHash, storePathHash),
-					eq(schema.narInfos.generation, generation),
-					eq(schema.narInfos.narHash, narHash)
+		// Every other removal path drops the path's grace deadline with its
+		// row; a reclaim must too, and in the same transaction, or a failed
+		// verification can leave a dangling deadline that wakes maintenance
+		// for nothing and over-retains a later recommit's closure.
+		this.context.db.transaction((tx) => {
+			tx.delete(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						eq(schema.narInfos.storePathHash, storePathHash),
+						eq(schema.narInfos.generation, generation),
+						eq(schema.narInfos.narHash, narHash)
+					)
 				)
-			)
-			.run();
+				.run();
 
-		return true;
+			tx.delete(schema.retentionGrace)
+				.where(
+					and(
+						eq(schema.retentionGrace.cache, cache),
+						eq(schema.retentionGrace.storePathHash, storePathHash)
+					)
+				)
+				.run();
+		});
+
+		return 'reclaimed';
 	}
 
 	// Fetches a staging object and decodes it, off the critical section: the

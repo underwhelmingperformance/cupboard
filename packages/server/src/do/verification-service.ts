@@ -38,8 +38,10 @@ import {
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
+import { confirmGrace, parseStoredGraceDecision } from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type ReconcileTarget } from './reconcile-queue-service.ts';
+import { type RetentionService } from './retention-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
@@ -219,6 +221,7 @@ export class VerificationService {
 		private readonly deletionQueue: DeletionQueueService,
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly uploadState: UploadStateService,
+		private readonly retention: RetentionService,
 		// Drops a store path from every retention root when it fails verification, so
 		// a root set at commit over a still-verifying target does not keep a dead
 		// reference. Injected because the roots service is constructed after this one.
@@ -430,6 +433,32 @@ export class VerificationService {
 			return false;
 		}
 
+		// The flush applies captured grace only after the durable charge, so an
+		// interruption between the two leaves a committed generation whose
+		// decision still sits on the pending row. Reapply it before the waiters
+		// hear the verdict and before the row holding it is cleared; the
+		// application is identity-checked and monotonic, so re-running an
+		// already-applied decision changes nothing.
+		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
+		const confirmed = confirmGrace(
+			this.context,
+			this.retention,
+			pending.cache,
+			metadata.storePathHash,
+			generation,
+			metadata.narHash,
+			graceDecision?.graceSeconds
+		);
+
+		// The row moved during the committed-edge check, so this "already
+		// committed" conclusion is stale: settling on it would report a row
+		// that no longer holds the path and drop the grant. Decline the
+		// short-circuit and let the ordinary saga re-verify against whatever
+		// holds the path now; its charge batch is the authoritative fence.
+		if (!confirmed.matched) {
+			return false;
+		}
+
 		this.notifyWaiters(pending.id, pending.sessionId, 'servable');
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
@@ -545,12 +574,14 @@ export class VerificationService {
 			metadata,
 			prefetched
 		);
+		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
 
 		let outcome = await this.commitPipeline.materialiseBatched(logger, {
 			cache: pending.cache,
 			metadata,
 			generation,
 			probe,
+			graceDecision,
 			// A deferred settle proved its bytes (a fresh decode, or a reuse row
 			// negotiate admitted when the presence edge existed), so ownership is
 			// not re-required here; the first commit of a hash is not yet owned.
@@ -589,6 +620,7 @@ export class VerificationService {
 				generation,
 				probe: freshProbe,
 				mustOwnBlob: false,
+				graceDecision,
 				isStillSettleable: () => {
 					const current = this.context.db
 						.select()
@@ -631,18 +663,39 @@ export class VerificationService {
 		// unreferenced, uncharged object for it. The waiter hears `absent`, the
 		// same answer an inline commit's writes-stopped rejection amounts to.
 		if (outcome.kind === 'tenant-inactive') {
-			const wasReclaimed = await this.context.criticalSection(() =>
-				this.commitPipeline.reclaimReservedRow(
+			// The grace confirmation runs inside the same gated callback as the
+			// identity proof: the input gate reopens the moment that callback
+			// completes, so a confirmation outside it could race a delete or
+			// recommit queued behind the gate.
+			const reclaim = await this.context.criticalSection(async () => {
+				const result = await this.commitPipeline.reclaimReservedRow(
 					pending.cache,
 					metadata.storePathHash,
 					generation,
 					metadata.narHash
-				)
-			);
+				);
+
+				// This upload lost the race, so its own captured decision never
+				// ran; apply it against the winning generation before notifying,
+				// or a positive policy would grant nothing.
+				if (result === 'committed-current') {
+					confirmGrace(
+						this.context,
+						this.retention,
+						pending.cache,
+						metadata.storePathHash,
+						generation,
+						metadata.narHash,
+						graceDecision?.graceSeconds
+					);
+				}
+
+				return result;
+			});
 
 			// A concurrent pass committed this generation before the tenant went
 			// inactive, so it serves; finish the bookkeeping without pruning.
-			if (!wasReclaimed) {
+			if (reclaim === 'committed-current') {
 				this.notifyWaiters(pending.id, pending.sessionId, 'servable');
 				this.uploadState.clearPendingUpload(pending.id);
 				return;
@@ -654,7 +707,14 @@ export class VerificationService {
 				pending.r2Key,
 				metadata.narHash
 			);
-			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+
+			// A superseded row belongs to a replacement that still holds the
+			// path, so its retention targets must survive; only a genuinely
+			// reclaimed path releases them.
+			if (reclaim === 'reclaimed') {
+				this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+			}
+
 			return;
 		}
 
@@ -713,7 +773,7 @@ export class VerificationService {
 		generation: number,
 		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {
-		const wasReclaimed = await this.context.criticalSection(() =>
+		const reclaim = await this.context.criticalSection(() =>
 			this.commitPipeline.reclaimReservedRow(
 				pending.cache,
 				metadata.storePathHash,
@@ -722,7 +782,10 @@ export class VerificationService {
 			)
 		);
 
-		if (!wasReclaimed) {
+		// A concurrent saga committed this upload's own row, so the failure is
+		// stale and the path serves; the settle that committed it owns the
+		// bookkeeping.
+		if (reclaim === 'committed-current') {
 			return;
 		}
 
@@ -732,7 +795,14 @@ export class VerificationService {
 			metadata.narHash,
 			verdict
 		);
-		this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+
+		// A superseded row belongs to a replacement that still holds the path,
+		// so its retention targets must survive; only a genuinely reclaimed
+		// path releases them.
+		if (reclaim === 'reclaimed') {
+			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+		}
+
 		this.notifyWaiters(pending.id, pending.sessionId, verdict);
 	}
 
@@ -1591,20 +1661,44 @@ export class VerificationService {
 			// dropping the marker.
 			const reserved = this.narInfoRow(pending.cache, metadata.storePathHash);
 
+			let reclaim: 'reclaimed' | 'committed-current' | 'superseded' =
+				'superseded';
+
 			if (reserved?.narHash === metadata.narHash) {
-				const wasReclaimed = await this.context.criticalSection(() =>
-					this.commitPipeline.reclaimReservedRow(
+				// The grace confirmation runs inside the same gated callback as
+				// the identity proof: the input gate reopens the moment that
+				// callback completes, so a confirmation outside it could race a
+				// delete or recommit queued behind the gate.
+				reclaim = await this.context.criticalSection(async () => {
+					const result = await this.commitPipeline.reclaimReservedRow(
 						pending.cache,
 						metadata.storePathHash,
 						reserved.generation,
 						metadata.narHash
-					)
-				);
+					);
+
+					// This upload lost the race, so its own captured decision
+					// never ran; apply it against the winning generation before
+					// notifying, or a positive policy would grant nothing.
+					if (result === 'committed-current') {
+						confirmGrace(
+							this.context,
+							this.retention,
+							pending.cache,
+							metadata.storePathHash,
+							reserved.generation,
+							metadata.narHash,
+							parseStoredGraceDecision(pending.graceDecisionJson)?.graceSeconds
+						);
+					}
+
+					return result;
+				});
 
 				// A concurrent pass has already committed this generation (its edge
 				// exists), so the missing verdict is stale and the path serves. Clear
 				// the stuck row and answer servable, without pruning its root.
-				if (!wasReclaimed) {
+				if (reclaim === 'committed-current') {
 					this.notifyWaiters(pending.id, pending.sessionId, 'servable');
 					this.uploadState.clearPendingUpload(pending.id);
 					return;
@@ -1617,7 +1711,14 @@ export class VerificationService {
 				pending.r2Key,
 				metadata.narHash
 			);
-			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+
+			// A superseded or recommitted row still holds the path, so its
+			// retention targets must survive; only a genuinely reclaimed path
+			// releases them.
+			if (reclaim === 'reclaimed') {
+				this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
+			}
+
 			return;
 		}
 

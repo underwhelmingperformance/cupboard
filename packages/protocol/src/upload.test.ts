@@ -5,6 +5,7 @@ import {
 	commitSessionRequestSchema,
 	statsResponseSchema,
 	uploadDecisionSchema,
+	uploadGraceFactSchema,
 	uploadNegotiateMaxPaths,
 	uploadNegotiateRequestSchema,
 	usageResponseSchema
@@ -129,6 +130,35 @@ describe('uploadDecisionSchema', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(uploadDecisionSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('uploadGraceFactSchema', () => {
+	it.each([
+		{ name: 'no policy fact', value: {} },
+		{
+			name: 'a stored deadline',
+			value: { retainUntil: '2026-01-02T00:00:00.000Z' }
+		},
+		{ name: 'a captured grace', value: { graceSeconds: 86_400 } },
+		{ name: 'a captured zero grace', value: { graceSeconds: 0 } }
+	])('accepts $name', ({ value }) => {
+		expect(uploadGraceFactSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'a deadline and a captured grace together',
+			value: { retainUntil: '2026-01-02T00:00:00.000Z', graceSeconds: 86_400 }
+		},
+		{
+			name: 'a grace beyond the root TTL bound',
+			value: { graceSeconds: 315_360_001 }
+		},
+		{ name: 'a negative grace', value: { graceSeconds: -1 } },
+		{ name: 'an unknown field', value: { extra: true } }
+	])('rejects $name', ({ value }) => {
+		expect(uploadGraceFactSchema.safeParse(value).success).toBe(false);
 	});
 });
 
