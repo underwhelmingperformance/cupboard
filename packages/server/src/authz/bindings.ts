@@ -5,7 +5,7 @@ import {
 import { applyTransform } from '@cupboard/protocol/capture';
 import {
 	type AuthorizationDetail,
-	isOperationSatisfiedByActions,
+	isOperationPermittedAtIssuance,
 	type Operation,
 	type PermittedGrant,
 	type Substitution
@@ -152,12 +152,12 @@ function isRootWithin(requested: string, granted: string): boolean {
 		: requested === granted;
 }
 
-function isActionsSubset(
+function isActionsPermittedAtIssuance(
 	requested: readonly Operation[],
 	permitted: readonly Operation[]
 ): boolean {
 	return requested.every((action) =>
-		isOperationSatisfiedByActions(permitted, action)
+		isOperationPermittedAtIssuance(permitted, action)
 	);
 }
 
@@ -174,7 +174,7 @@ function isGrantPermitted(
 		return false;
 	}
 
-	if (!isActionsSubset(requested.actions, permitted.actions)) {
+	if (!isActionsPermittedAtIssuance(requested.actions, permitted.actions)) {
 		return false;
 	}
 

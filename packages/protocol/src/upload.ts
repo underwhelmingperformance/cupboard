@@ -215,6 +215,39 @@ export type ParsedUploadPreviewResponse = z.output<
 	typeof uploadPreviewResponseSchema
 >;
 
+// One confirm request carries a bounded slice of a closure. Every distinct
+// hash costs an identity re-check and a monotonic extension inside chunked
+// statements on the tenant's single Durable Object, so the bound keeps one
+// request's work to a dozen or so transactions; the CLI splits a larger
+// closure across sequential requests.
+export const uploadConfirmMaxPaths = 1000;
+
+export const uploadConfirmRequestSchema = z.strictObject({
+	storePathHashes: z.array(storePathHashSchema).max(uploadConfirmMaxPaths)
+});
+export type ParsedUploadConfirmRequest = z.output<
+	typeof uploadConfirmRequestSchema
+>;
+
+// One confirmed path: `confirmed` is false for a store path with no committed
+// narinfo row (nothing to confirm), in which case `grace` is always absent,
+// since no extension happened.
+export const uploadConfirmedPathSchema = z.strictObject({
+	storePathHash: storePathHashSchema,
+	confirmed: z.boolean(),
+	grace: uploadGraceFactSchema.optional()
+});
+export type ParsedUploadConfirmedPath = z.output<
+	typeof uploadConfirmedPathSchema
+>;
+
+export const uploadConfirmResponseSchema = z.strictObject({
+	paths: z.array(uploadConfirmedPathSchema)
+});
+export type ParsedUploadConfirmResponse = z.output<
+	typeof uploadConfirmResponseSchema
+>;
+
 export const commitResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
@@ -449,6 +482,9 @@ export type UploadNegotiateResponse = z.input<
 >;
 export type UploadPreviewDecision = z.input<typeof uploadPreviewDecisionSchema>;
 export type UploadPreviewResponse = z.input<typeof uploadPreviewResponseSchema>;
+export type UploadConfirmRequest = z.input<typeof uploadConfirmRequestSchema>;
+export type UploadConfirmedPath = z.input<typeof uploadConfirmedPathSchema>;
+export type UploadConfirmResponse = z.input<typeof uploadConfirmResponseSchema>;
 export type CommitResponse = z.input<typeof commitResponseSchema>;
 export type StatsResponse = z.input<typeof statsResponseSchema>;
 export type UsageResponse = z.input<typeof usageResponseSchema>;

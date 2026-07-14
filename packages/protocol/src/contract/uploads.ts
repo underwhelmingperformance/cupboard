@@ -4,6 +4,8 @@ import { z } from 'zod';
 import {
 	pushCredentialSchema,
 	pushIdSchema,
+	uploadConfirmRequestSchema,
+	uploadConfirmResponseSchema,
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
 	uploadPreviewResponseSchema,
@@ -72,6 +74,27 @@ export const uploadsContract = {
 			})
 		)
 		.output(uploadPreviewResponseSchema),
+
+	// Confirms an unretained publication by store path without uploading bytes:
+	// the same exact-generation check and monotonic grace extension as an
+	// already-present negotiate decision, for a path a mutating push already
+	// committed. It mutates retention state (a successful confirm extends a
+	// grace deadline and can mark the cache grace-managed), so it carries
+	// `maintenance: true` like negotiate.
+	confirm: baseProcedure
+		.meta({
+			requires: 'upload:confirm',
+			resource: { cache: { field: 'cacheName' } },
+			maintenance: true
+		})
+		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/confirm' })
+		.input(
+			z.strictObject({
+				cacheName: cacheSelectorSchema,
+				...uploadConfirmRequestSchema.shape
+			})
+		)
+		.output(uploadConfirmResponseSchema),
 
 	// A deferred upload's status, polled by the uploadId the client holds; the
 	// id is unique across caches, so the cache is read from the pending row. A

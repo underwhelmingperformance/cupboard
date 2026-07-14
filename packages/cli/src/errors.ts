@@ -315,6 +315,36 @@ export class PushIncompleteError extends CliError {
 	}
 }
 
+export class PathsNotConfirmedError extends CliError {
+	constructor(public readonly storePaths: readonly string[]) {
+		super(
+			`${String(storePaths.length)} path(s) were not confirmed (not present ` +
+				`in the cache): ${storePaths.join(', ')}`
+		);
+		this.name = 'PathsNotConfirmedError';
+	}
+}
+
+/**
+ * A confirm closure larger than one request splits into sequential batches,
+ * and a later batch's request failed. The batches that answered have already
+ * extended their deadlines server-side; the counts say how far the run got.
+ */
+export class ConfirmIncompleteError extends CliError {
+	constructor(
+		public readonly confirmedBatches: number,
+		public readonly totalBatches: number,
+		public override readonly cause: unknown
+	) {
+		super(
+			`${String(confirmedBatches)} of ${String(totalBatches)} confirm ` +
+				`request(s) succeeded before one failed; paths reported confirmed ` +
+				`are already extended`
+		);
+		this.name = 'ConfirmIncompleteError';
+	}
+}
+
 export class CommitSocketProtocolError extends CliError {
 	constructor(
 		public readonly path: string,

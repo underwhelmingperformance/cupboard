@@ -3,9 +3,20 @@ import {
 	DEFAULT_CACHE,
 	rootNameSchema,
 	storePathHashSchema,
-	storePathSchema
+	storePathSchema,
+	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
+import {
+	type AuthorizationDetails,
+	authorizationDetailsSchema
+} from '@cupboard/protocol/grants';
+import {
+	uploadConfirmMaxPaths,
+	type UploadConfirmResponse,
+	uploadConfirmResponseSchema
+} from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
+import { env } from 'cloudflare:workers';
 import { and, eq, sql } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { StatusCodes } from 'http-status-codes';
@@ -13,15 +24,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narObjectKey } from '../http/http.ts';
+import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
 	bootstrap,
+	cacheWriteGrants,
 	clearBlobStorage,
 	commitUpload,
 	currentServer,
 	deletePath,
 	expectSingleUploadDecision,
+	flakyD1,
+	issueServerSignedToken,
 	markUploadPendingVerification,
 	narBytes,
 	narInfoGeneration,
@@ -47,7 +62,10 @@ import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
-import { parseStoredGraceDecision } from './grace-decision.ts';
+import {
+	confirmGraceBatch,
+	parseStoredGraceDecision
+} from './grace-decision.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
@@ -2293,6 +2311,51 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
+	// A gone pending row's already-present answer applies the same monotonic
+	// extension every other already-present decision does: even when another
+	// push committed the path without a plan (so no deadline is stored), the
+	// resent retention-marked entry is this publication's claim on the path.
+	it('extends the grace when a retention-marked entry resolves a row another push committed', async () => {
+		await useTestServer('wire-reconnect-extends');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('j'),
+			name: 'reconnect-extends'
+		});
+
+		// The path lands via a plan-free push, which stores no deadline.
+		await pushPath(token, metadata);
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: 'reaped-upload',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					retention: true
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'settled',
+			uploadId: 'reaped-upload',
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			},
+			grace: { retainUntil: dayAfterStart }
+		});
+	});
+
 	// An unmarked entry gets exactly the legacy shape even for an upload that did
 	// negotiate a plan: the marker, not the plan alone, gates the durable-fact
 	// read, so an old client's re-sent entry never trips a schema it predates.
@@ -2384,6 +2447,38 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 });
+
+function confirmOnlyGrants(
+	cacheSelector: string = WIRE_DEFAULT_CACHE
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:confirm'],
+			cache: cacheSelector
+		}
+	]);
+}
+
+async function confirmPaths(
+	token: string,
+	storePathHashes: readonly string[]
+): Promise<{ readonly status: number; readonly body: UploadConfirmResponse }> {
+	const response = await authorisedFetch(
+		`/cache/${WIRE_DEFAULT_CACHE}/uploads/confirm`,
+		token,
+		{
+			body: JSON.stringify({ storePathHashes }),
+			headers: { 'content-type': 'application/json' },
+			method: 'POST'
+		}
+	);
+
+	return {
+		status: response.status,
+		body: uploadConfirmResponseSchema.parse(await response.json())
+	};
+}
 
 class ForcedRollbackError extends Error {}
 
@@ -2517,6 +2612,527 @@ describe('grace transition atomicity', () => {
 			},
 			graceManaged: false,
 			deadlines: []
+		});
+	});
+});
+
+describe('confirming an unretained publication', () => {
+	beforeEach(resetTestServer);
+
+	// The shared clock starts at 2026-01-01T00:00:00Z, so a 24-hour grace from a
+	// confirmation processed immediately lands on the next midnight.
+	const dayGraceSeconds = 86_400;
+	const dayAfterStart = '2026-01-02T00:00:00.000Z';
+
+	it('extends a confirmed path to now+grace and reports the deadline', async () => {
+		await useTestServer('confirm-extends');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'confirmed'
+		});
+
+		await pushPath(token, path);
+
+		const confirmed = await confirmPaths(token, [path.storePathHash]);
+
+		expect(confirmed).toStrictEqual({
+			status: StatusCodes.OK,
+			body: {
+				paths: [
+					{
+						storePathHash: path.storePathHash,
+						confirmed: true,
+						grace: { retainUntil: dayAfterStart }
+					}
+				]
+			}
+		});
+	});
+
+	it('refuses a committed path whose canonical backing is gone', async () => {
+		await useTestServer('confirm-lost-backing');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'lost-backing'
+		});
+
+		await pushPath(token, path);
+
+		// A dropped blob_state row is the shape of a reaped canonical NAR; a path
+		// that can no longer be substituted must not be confirmed as kept. The
+		// publication itself already granted a deadline legitimately; the clock
+		// advances so a wrongful extension by the confirm would be visible.
+		const database = drizzleD1(env.CUPBOARD_DB, { schema: d1Schema });
+		await database
+			.delete(d1Schema.blobState)
+			.where(eq(d1Schema.blobState.narHash, path.narHash));
+		vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+
+		const confirmed = await confirmPaths(token, [path.storePathHash]);
+
+		expect({
+			confirmed,
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			confirmed: {
+				status: StatusCodes.OK,
+				body: {
+					paths: [{ storePathHash: path.storePathHash, confirmed: false }]
+				}
+			},
+			deadlines: [
+				{ storePathHash: path.storePathHash, retainUntil: dayAfterStart }
+			]
+		});
+	});
+
+	it('refuses a committed path whose canonical R2 object is gone', async () => {
+		await useTestServer('confirm-lost-r2-backing');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('c'),
+			name: 'lost-r2-backing'
+		});
+
+		await pushPath(token, path);
+		await env.BLOBS.delete(narObjectKey(path.narHash));
+		vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+
+		const confirmed = await confirmPaths(token, [path.storePathHash]);
+
+		expect({
+			confirmed,
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			confirmed: {
+				status: StatusCodes.OK,
+				body: {
+					paths: [{ storePathHash: path.storePathHash, confirmed: false }]
+				}
+			},
+			deadlines: [
+				{ storePathHash: path.storePathHash, retainUntil: dayAfterStart }
+			]
+		});
+	});
+
+	it('heals a missing tenant narinfo object before confirming', async () => {
+		await useTestServer('confirm-heals-narinfo');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('d'),
+			name: 'healed-narinfo'
+		});
+
+		await pushPath(token, path);
+		const key = narInfoObjectKey(fixtureTenant, path.storePathHash);
+		await env.BLOBS.delete(key);
+
+		const confirmed = await confirmPaths(token, [path.storePathHash]);
+		const restored = await env.BLOBS.head(key);
+
+		expect({ confirmed, metadata: restored?.customMetadata }).toStrictEqual({
+			confirmed: {
+				status: StatusCodes.OK,
+				body: {
+					paths: [
+						{
+							storePathHash: path.storePathHash,
+							confirmed: true,
+							grace: { retainUntil: dayAfterStart }
+						}
+					]
+				}
+			},
+			metadata: { generation: '0', narHash: path.narHash }
+		});
+	});
+
+	it('is idempotent and cannot shorten an already-extended deadline on retry', async () => {
+		await useTestServer('confirm-retry');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('f'),
+			name: 'retried'
+		});
+
+		await pushPath(token, path);
+
+		const graceOf = async (): Promise<unknown> => {
+			const confirmed = await confirmPaths(token, [path.storePathHash]);
+
+			return confirmed.body.paths[0]?.grace;
+		};
+
+		const first = await graceOf();
+
+		vi.setSystemTime(new Date('2026-01-01T00:02:00.000Z'));
+		const later = await graceOf();
+
+		vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+		const retried = await graceOf();
+
+		expect({ first, later, retried }).toStrictEqual({
+			first: { retainUntil: dayAfterStart },
+			later: { retainUntil: '2026-01-02T00:02:00.000Z' },
+			retried: { retainUntil: '2026-01-02T00:02:00.000Z' }
+		});
+	});
+
+	it('marks the cache grace-managed with a zero grace and reports the matched policy', async () => {
+		await useTestServer('confirm-zero');
+		const { token } = await bootstrap();
+		await addGracePolicy('', 0);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('g'),
+			name: 'zero'
+		});
+
+		await pushPath(token, path);
+
+		const confirmed = await confirmPaths(token, [path.storePathHash]);
+
+		expect({
+			paths: confirmed.body.paths,
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			paths: [
+				{
+					storePathHash: path.storePathHash,
+					confirmed: true,
+					grace: { graceSeconds: 0 }
+				}
+			],
+			graceManaged: true,
+			deadlines: []
+		});
+	});
+
+	it('leaves the cache unmanaged when no policy matches', async () => {
+		await useTestServer('confirm-no-policy');
+		const { token } = await bootstrap();
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('h'),
+			name: 'unmanaged'
+		});
+
+		await pushPath(token, path);
+
+		const confirmed = await confirmPaths(token, [path.storePathHash]);
+
+		expect({
+			paths: confirmed.body.paths,
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+		}).toStrictEqual({
+			paths: [
+				{ storePathHash: path.storePathHash, confirmed: true, grace: {} }
+			],
+			graceManaged: false
+		});
+	});
+
+	it('confirms false for an uncommitted or merely reserved path, extending nothing', async () => {
+		await useTestServer('confirm-uncommitted');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const untouched = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('i'),
+			name: 'untouched'
+		});
+		const reserved = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('j'),
+			name: 'reserved'
+		});
+
+		// Negotiated but never committed: a pending_upload row exists, but no
+		// narinfo row does.
+		await negotiateUploads(token, [reserved]);
+
+		const confirmed = await confirmPaths(token, [
+			untouched.storePathHash,
+			reserved.storePathHash
+		]);
+
+		expect({
+			paths: confirmed.body.paths,
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			paths: [
+				{ storePathHash: untouched.storePathHash, confirmed: false },
+				{ storePathHash: reserved.storePathHash, confirmed: false }
+			],
+			graceManaged: false,
+			deadlines: []
+		});
+	});
+
+	// The committed and backed checks await shared facts, so the narinfo row
+	// can move between its snapshot and the grace application. A moved row
+	// must confirm false: confirming true would hand the caller a deadline the
+	// path now committed does not hold.
+	it('confirms false when the row moves during the shared-fact checks', async () => {
+		await useTestServer('confirm-moved-row');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('n'),
+			name: 'moved'
+		});
+
+		await pushPath(token, path);
+
+		// The publication itself granted today's deadline legitimately; the
+		// clock advances so a wrongful extension by the confirm would show.
+		vi.setSystemTime(new Date('2026-01-01T00:05:00.000Z'));
+
+		// The blob_ref edge read is the first shared-fact query the confirm
+		// issues, so a recommit fired on its preparation lands after the
+		// snapshot and before the grace application.
+		const hash = storePathHashSchema.parse(path.storePathHash);
+		const response = await runInDurableObject(
+			currentServer(),
+			(instance, state) => {
+				const moveRow = (): void => {
+					instance.context.db
+						.update(schema.narInfos)
+						.set({ generation: sql`${schema.narInfos.generation} + 1` })
+						.where(
+							and(
+								eq(schema.narInfos.cache, DEFAULT_CACHE),
+								eq(schema.narInfos.storePathHash, hash)
+							)
+						)
+						.run();
+				};
+				const context = new ServerContext(state, {
+					...instance.context.env,
+					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
+						failures: 0,
+						matches: (query) => query.includes('blob_ref'),
+						onMatch: moveRow
+					})
+				});
+
+				return uploadsServiceFor(context).confirmPaths(DEFAULT_CACHE, [hash]);
+			}
+		);
+
+		expect({
+			paths: response.paths,
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			paths: [{ storePathHash: path.storePathHash, confirmed: false }],
+			deadlines: [
+				{ storePathHash: path.storePathHash, retainUntil: dayAfterStart }
+			]
+		});
+	});
+
+	// A duplicate-heavy confirm answers every requested entry but runs the
+	// work once per distinct hash: one identity-check transaction for the
+	// whole request, not one per path.
+	it('answers duplicate entries from one batched application', async () => {
+		await useTestServer('confirm-duplicates');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('p'),
+			name: 'duplicated'
+		});
+
+		await pushPath(token, path);
+
+		const hash = storePathHashSchema.parse(path.storePathHash);
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance) => {
+				const transactions = vi.spyOn(instance.context.db, 'transaction');
+				const uploads = uploadsServiceFor(instance.context);
+				const response = await uploads.confirmPaths(DEFAULT_CACHE, [
+					hash,
+					hash,
+					hash
+				]);
+				const transactionCount = transactions.mock.calls.length;
+
+				transactions.mockRestore();
+
+				return { response, transactionCount };
+			}
+		);
+
+		const confirmedEntry = {
+			storePathHash: path.storePathHash,
+			confirmed: true,
+			grace: { retainUntil: dayAfterStart }
+		};
+
+		expect({
+			...result,
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			response: { paths: [confirmedEntry, confirmedEntry, confirmedEntry] },
+			transactionCount: 1,
+			deadlines: [
+				{ storePathHash: path.storePathHash, retainUntil: dayAfterStart }
+			]
+		});
+	});
+
+	// The request bound is only safe if a request AT the bound does bounded
+	// work: the whole batch runs through chunked identity-check transactions,
+	// so the statement count scales with the chunk count, not the path count.
+	it('applies a batch at the request bound through chunked transactions', async () => {
+		await useTestServer('confirm-at-bound');
+		await bootstrap();
+
+		const narHash = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'template'
+		}).narHash;
+		// Base-32 store-path hashes built from decimal digits, every one
+		// distinct and schema-valid.
+		const hashes = Array.from({ length: uploadConfirmMaxPaths }, (_, index) =>
+			storePathHashSchema.parse(String(index).padStart(32, '0'))
+		);
+
+		const result = await runInDurableObject(currentServer(), (instance) => {
+			for (let start = 0; start < hashes.length; start += 10) {
+				instance.context.db
+					.insert(schema.narInfos)
+					.values(
+						hashes.slice(start, start + 10).map((storePathHash) => ({
+							cache: DEFAULT_CACHE,
+							storePathHash,
+							storePath: storePathSchema.parse(
+								`/nix/store/${storePathHash}-seeded`
+							),
+							narHash,
+							narSize: narBytes.byteLength,
+							referencesJson: '[]',
+							generation: 1,
+							createdAt: '2026-01-01T00:00:00.000Z'
+						}))
+					)
+					.run();
+			}
+
+			const transactions = vi.spyOn(instance.context.db, 'transaction');
+			const facts = confirmGraceBatch(
+				instance.context,
+				new RetentionService(instance.context),
+				DEFAULT_CACHE,
+				hashes.map((storePathHash) => ({
+					storePathHash,
+					generation: 1,
+					narHash
+				})),
+				86_400
+			);
+			const transactionCount = transactions.mock.calls.length;
+
+			transactions.mockRestore();
+
+			return { matched: facts.size, transactionCount };
+		});
+
+		const deadlines = await graceDeadlineRows(DEFAULT_CACHE);
+
+		expect({
+			...result,
+			deadlines: deadlines.length
+		}).toStrictEqual({
+			matched: uploadConfirmMaxPaths,
+			transactionCount: 12,
+			deadlines: uploadConfirmMaxPaths
+		});
+	});
+
+	it('refuses negotiate and commit to a confirm-only grant, and confirm to a commit-only grant', async () => {
+		await useTestServer('confirm-authz');
+		const { token } = await bootstrap();
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('k'),
+			name: 'authz'
+		});
+
+		await pushPath(token, path);
+
+		const confirmOnlyToken = await issueServerSignedToken(confirmOnlyGrants());
+		const commitToken = await issueServerSignedToken(cacheWriteGrants());
+
+		const negotiateResponse = await authorisedFetch(
+			`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+			confirmOnlyToken,
+			{
+				body: JSON.stringify({
+					pushId: testPushId,
+					paths: [uploadPathNegotiation(path)]
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			}
+		);
+		const commitResponse = await authorisedFetch(
+			`/cache/${WIRE_DEFAULT_CACHE}/commit`,
+			confirmOnlyToken,
+			{ headers: { upgrade: 'websocket' } }
+		);
+		// upload:commit is runtime authority over upload-specific state only; the
+		// implication to upload:confirm (a refresh reaching any already-committed
+		// path in the cache) is issuance-only, so a presented commit-only token
+		// must not reach confirm.
+		const confirmByCommitTokenResponse = await authorisedFetch(
+			`/cache/${WIRE_DEFAULT_CACHE}/uploads/confirm`,
+			commitToken,
+			{
+				body: JSON.stringify({ storePathHashes: [path.storePathHash] }),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			}
+		);
+
+		expect({
+			negotiateStatus: negotiateResponse.status,
+			commitStatus: commitResponse.status,
+			confirmByCommitTokenStatus: confirmByCommitTokenResponse.status
+		}).toStrictEqual({
+			negotiateStatus: StatusCodes.FORBIDDEN,
+			commitStatus: StatusCodes.FORBIDDEN,
+			confirmByCommitTokenStatus: StatusCodes.FORBIDDEN
 		});
 	});
 });

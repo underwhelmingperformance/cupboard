@@ -28,6 +28,7 @@ import { registerAuthKeyCommands } from './commands/auth-key.ts';
 import { registerCacheCommands } from './commands/cache.ts';
 import { registerCheckCommand } from './commands/check.ts';
 import { registerConfigCommand } from './commands/config.ts';
+import { registerConfirmCommand } from './commands/confirm.ts';
 import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
@@ -159,6 +160,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerStatsCommand(program, options);
 	registerDeleteCommand(program, options);
 	registerRootCommands(program, options);
+	registerConfirmCommand(program, options);
 	registerKeyCommands(program, options);
 	registerAuthKeyCommands(program, options);
 	registerControlKeyCommands(program, options);

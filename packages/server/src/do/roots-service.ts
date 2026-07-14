@@ -159,49 +159,15 @@ export class RootsService {
 	}
 
 	// The set of distinct target hashes that would serve, the same predicate the
-	// read path uses. The common case (the narinfo object is present) is settled by
-	// a bounded fan-out of R2 heads outside any critical section; only a target
-	// whose object is missing falls back to the gated heal-and-recheck, so a large
-	// root no longer heads, or heals, every path under the gate.
+	// read path uses.
 	private async servableTargets(
 		cache: string,
 		targets: readonly { storePathHash: StorePathHash }[]
 	): Promise<ReadonlySet<StorePathHash>> {
-		const hashes = [...new Set(targets.map((target) => target.storePathHash))];
-		const servable = new Set(
-			await this.narInfoObjects.existingNarInfoObjects(cache, hashes)
-		);
-
-		const missing = hashes.filter((hash) => !servable.has(hash));
-
-		if (missing.length === 0) {
-			return servable;
-		}
-
-		// Settle every missing target's committed-ness in one chunked D1 read, so
-		// only a genuinely committed target falls through to the gated heal. The
-		// same edges thread into that heal, sparing it a per-path committed read.
-		const rows = this.narInfoObjects.narInfoRowsFor(cache, missing);
-		const committedEdges = await this.narInfoObjects.committedReferenceEdges(
+		return this.narInfoObjects.servableStorePathHashes(
 			cache,
-			missing
+			targets.map((target) => target.storePathHash)
 		);
-		const committed = this.narInfoObjects.committedReferencesFrom(
-			committedEdges,
-			rows
-		);
-
-		for (const hash of missing) {
-			if (!committed.has(hash)) {
-				continue;
-			}
-
-			if (await this.narInfoObjects.isServable(cache, hash, committedEdges)) {
-				servable.add(hash);
-			}
-		}
-
-		return servable;
 	}
 
 	// The exact identity behind each of `targets` that {@link servableTargets}

@@ -18,6 +18,10 @@ export interface RootEnsureGrantIntent {
 	readonly root: string;
 }
 
+export interface ConfirmGrantIntent {
+	readonly cacheSelector: string;
+}
+
 const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
@@ -57,6 +61,25 @@ export function rootEnsureAuthorizationDetails(
 			actions: ['root:set'],
 			cache: intent.cacheSelector,
 			root: intent.root
+		}
+	]);
+}
+
+/**
+ * The confirm-scoped authority `cupboard confirm` needs: exactly
+ * `upload:confirm` on the target cache, never `upload:negotiate` or
+ * `upload:commit`, so the exchanged token can extend retention on an
+ * already-published path without uploading bytes or reaching a broader
+ * upload operation.
+ */
+export function confirmAuthorizationDetails(
+	intent: ConfirmGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:confirm'],
+			cache: intent.cacheSelector
 		}
 	]);
 }

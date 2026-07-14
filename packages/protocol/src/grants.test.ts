@@ -5,7 +5,8 @@ import {
 	authorizationDetailSchema,
 	isAuthorizationDetailCovered,
 	isCoveredByToken,
-	isOperationSatisfiedByActions,
+	isOperationPermittedAtIssuance,
+	isOperationSatisfiedByPresentedActions,
 	type Operation,
 	permittedGrantSchema,
 	type ResourceRequest,
@@ -46,7 +47,74 @@ const controlGrant = authorizationDetailSchema.parse({
 
 const wildcard = authorizationDetailSchema.parse({ type: 'cupboard_wildcard' });
 
-describe('isOperationSatisfiedByActions', () => {
+describe('isOperationPermittedAtIssuance', () => {
+	it.each<[string, Operation[], Operation, boolean]>([
+		[
+			'a negotiate action permits a requested preview',
+			['upload:negotiate'],
+			'upload:preview',
+			true
+		],
+		[
+			'a preview action does not permit a requested negotiate',
+			['upload:preview'],
+			'upload:negotiate',
+			false
+		],
+		[
+			'a preview action permits a requested preview',
+			['upload:preview'],
+			'upload:preview',
+			true
+		],
+		[
+			'a negotiate action permits a requested negotiate',
+			['upload:negotiate'],
+			'upload:negotiate',
+			true
+		],
+		[
+			'an unrelated action set does not permit a requested preview',
+			['upload:commit'],
+			'upload:preview',
+			false
+		],
+		[
+			'a negotiate action does not permit an unrelated requested operation',
+			['upload:negotiate'],
+			'upload:commit',
+			false
+		],
+		[
+			'a commit action does not permit a requested confirm',
+			['upload:commit'],
+			'upload:confirm',
+			false
+		],
+		[
+			'a confirm action does not permit a requested commit',
+			['upload:confirm'],
+			'upload:commit',
+			false
+		],
+		[
+			'a confirm action permits a requested confirm',
+			['upload:confirm'],
+			'upload:confirm',
+			true
+		],
+		[
+			'a negotiate action does not permit a requested confirm',
+			['upload:negotiate'],
+			'upload:confirm',
+			false
+		]
+	])('%s', (_name, actions, operation, expected) => {
+		expect(isOperationPermittedAtIssuance(actions, operation)).toBe(expected);
+	});
+});
+
+describe('isOperationSatisfiedByPresentedActions', () => {
 	it.each<[string, Operation[], Operation, boolean]>([
 		[
 			'a negotiate action covers a requested preview',
@@ -83,9 +151,35 @@ describe('isOperationSatisfiedByActions', () => {
 			['upload:negotiate'],
 			'upload:commit',
 			false
+		],
+		[
+			'a commit action does not cover a requested confirm at runtime',
+			['upload:commit'],
+			'upload:confirm',
+			false
+		],
+		[
+			'a confirm action does not cover a requested commit',
+			['upload:confirm'],
+			'upload:commit',
+			false
+		],
+		[
+			'a confirm action covers a requested confirm',
+			['upload:confirm'],
+			'upload:confirm',
+			true
+		],
+		[
+			'a negotiate action does not cover a requested confirm',
+			['upload:negotiate'],
+			'upload:confirm',
+			false
 		]
 	])('%s', (_name, actions, operation, expected) => {
-		expect(isOperationSatisfiedByActions(actions, operation)).toBe(expected);
+		expect(isOperationSatisfiedByPresentedActions(actions, operation)).toBe(
+			expected
+		);
 	});
 });
 
@@ -214,6 +308,26 @@ describe('isCoveredByToken', () => {
 					})
 				],
 				'upload:negotiate',
+				{ cache: 'pr-123' },
+				false
+			],
+			[
+				'a commit grant does not cover a requested confirm on the same cache',
+				[cacheGrant],
+				'upload:confirm',
+				{ cache: 'pr-123' },
+				false
+			],
+			[
+				'a confirm-only grant does not cover a requested commit',
+				[
+					authorizationDetailSchema.parse({
+						type: 'cupboard_cache',
+						actions: ['upload:confirm'],
+						cache: 'pr-123'
+					})
+				],
+				'upload:commit',
 				{ cache: 'pr-123' },
 				false
 			],

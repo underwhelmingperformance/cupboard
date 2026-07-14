@@ -352,4 +352,13 @@ describe('command help', () => {
 		expect(help).toContain('--grace');
 		expect(help).toContain('Example:');
 	});
+
+	it('shows the auth options and an example for confirm', () => {
+		const help = helpFor(['confirm']);
+
+		expect(help).toContain('--github-oidc');
+		expect(help).toContain('--audience');
+		expect(help).toContain('--cache');
+		expect(help).toContain('Example:');
+	});
 });

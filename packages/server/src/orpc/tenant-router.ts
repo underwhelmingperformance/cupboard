@@ -216,6 +216,12 @@ export const tenantRouter = os.router({
 				context.services.takeNegotiateHints(context.request)
 			)
 		),
+		confirm: os.uploads.confirm.handler(({ input, context }) =>
+			context.services.uploads.confirmPaths(
+				cacheFromSelector(input.cacheName),
+				input.storePathHashes
+			)
+		),
 		status: os.uploads.status.handler(({ input, context }) =>
 			context.services.uploads.uploadStatus(input.id)
 		)

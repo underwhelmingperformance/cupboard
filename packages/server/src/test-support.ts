@@ -721,6 +721,12 @@ export interface FlakyD1Plan {
 	readonly matches?: (query: string) => boolean;
 	/** The error message to throw; defaults to 'transient D1 fault'. */
 	readonly message?: string;
+	/**
+	 * Runs when a matching query is prepared, before any fault is applied: a
+	 * deterministic point for a test to interleave a concurrent mutation with
+	 * the code under test.
+	 */
+	readonly onMatch?: () => void;
 }
 
 /**
@@ -730,9 +736,13 @@ export interface FlakyD1Plan {
 export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 	return {
 		prepare(query) {
-			if (plan.failures > 0 && (plan.matches?.(query) ?? true)) {
-				plan.failures -= 1;
-				throw new Error(plan.message ?? 'transient D1 fault');
+			if (plan.matches?.(query) ?? true) {
+				plan.onMatch?.();
+
+				if (plan.failures > 0) {
+					plan.failures -= 1;
+					throw new Error(plan.message ?? 'transient D1 fault');
+				}
 			}
 
 			return inner.prepare(query);
