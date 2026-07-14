@@ -679,6 +679,14 @@ export class DeletionQueueService {
 						)
 					)
 					.run();
+				tx.delete(schema.retentionGrace)
+					.where(
+						and(
+							eq(schema.retentionGrace.cache, row.cache),
+							eq(schema.retentionGrace.storePathHash, storePathHash)
+						)
+					)
+					.run();
 				this.enqueueNarInfoDeletion(
 					tx,
 					row.cache,
@@ -740,6 +748,14 @@ export class DeletionQueueService {
 					and(
 						eq(schema.narInfos.cache, row.cache),
 						eq(schema.narInfos.storePathHash, row.storePathHash)
+					)
+				)
+				.run();
+			tx.delete(schema.retentionGrace)
+				.where(
+					and(
+						eq(schema.retentionGrace.cache, row.cache),
+						eq(schema.retentionGrace.storePathHash, row.storePathHash)
 					)
 				)
 				.run();

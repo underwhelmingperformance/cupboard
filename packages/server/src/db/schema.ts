@@ -237,9 +237,33 @@ export const retentionRootTargets = sqliteTable(
 	]
 );
 
+// A retention grace deadline: an internal, expiring reachability source the
+// collector walks exactly like a root target, so the deadline keeps the whole
+// closure its path references. Never user-visible; extended monotonically and
+// removed when it expires or its narinfo row is deleted.
+export const retentionGrace = sqliteTable(
+	'retention_grace',
+	{
+		cache: text('cache').notNull().default(''),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
+		retainUntil: text('retain_until').notNull()
+	},
+	(table) => [
+		primaryKey({ columns: [table.cache, table.storePathHash] }),
+		index('retention_grace_retain_until_idx').on(table.retainUntil)
+	]
+);
+
 export const caches = sqliteTable('cache', {
 	name: text('name').primaryKey(),
 	priority: integer('priority').$type<CachePriority>().notNull(),
+	// Set when the first grace-policy event applies to this cache and never
+	// cleared while the cache exists: the empty-cache collection guard stays off
+	// even if every policy is later removed, so a partially drained cache cannot
+	// strand between continuation runs.
+	graceManaged: integer('grace_managed', { mode: 'boolean' })
+		.notNull()
+		.default(false),
 	createdAt: text('created_at').notNull()
 });
 
