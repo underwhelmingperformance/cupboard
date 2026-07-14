@@ -41,6 +41,7 @@ import {
 import { registerPolicyCommands } from './commands/policy.ts';
 import { registerPubkeyCommand } from './commands/pubkey.ts';
 import { registerPushCommand } from './commands/push.ts';
+import { registerReuseViewCommands } from './commands/reuse-view.ts';
 import { registerRootCommands } from './commands/root.ts';
 import { registerStatsCommand } from './commands/stats.ts';
 import { registerTenantCommands } from './commands/tenant.ts';
@@ -168,6 +169,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerTenantCommands(program, options);
 	registerCacheCommands(program, options);
 	registerPolicyCommands(program, options);
+	registerReuseViewCommands(program, options);
 	registerOidcTrustCommands(program, options);
 	registerCheckCommand(program, options);
 

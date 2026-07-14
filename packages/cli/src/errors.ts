@@ -466,3 +466,17 @@ export class OidcRetentionChoiceRequiredError extends CliUsageError {
 		this.name = 'OidcRetentionChoiceRequiredError';
 	}
 }
+
+export class InvalidReuseViewPriorityError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(`Invalid priority (expected a non-negative integer): ${value}`);
+		this.name = 'InvalidReuseViewPriorityError';
+	}
+}
+
+export class ReuseViewSelectorRequiredError extends CliUsageError {
+	constructor() {
+		super('reuse-view set requires at least one --exact or --prefix selector');
+		this.name = 'ReuseViewSelectorRequiredError';
+	}
+}
