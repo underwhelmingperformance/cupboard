@@ -1,6 +1,10 @@
 import { z } from 'zod';
 
 import {
+	gracePolicyAddBodySchema,
+	gracePolicyListResponseSchema,
+	gracePolicyRemoveResponseSchema,
+	gracePolicySummarySchema,
 	retentionPolicyAddBodySchema,
 	retentionPolicyListResponseSchema,
 	retentionPolicyRemoveResponseSchema,
@@ -25,5 +29,22 @@ export const policiesContract = {
 		.meta({ requires: 'policy:remove' })
 		.route({ method: 'DELETE', path: '/policies/{id}' })
 		.input(z.strictObject({ id: z.string() }))
-		.output(retentionPolicyRemoveResponseSchema)
+		.output(retentionPolicyRemoveResponseSchema),
+
+	graceList: baseProcedure
+		.meta({ requires: 'policy:list' })
+		.route({ method: 'GET', path: '/policies/grace' })
+		.output(gracePolicyListResponseSchema),
+
+	graceAdd: baseProcedure
+		.meta({ requires: 'policy:add' })
+		.route({ method: 'POST', path: '/policies/grace' })
+		.input(gracePolicyAddBodySchema)
+		.output(gracePolicySummarySchema),
+
+	graceRemove: baseProcedure
+		.meta({ requires: 'policy:remove' })
+		.route({ method: 'DELETE', path: '/policies/grace/{id}' })
+		.input(z.strictObject({ id: z.string() }))
+		.output(gracePolicyRemoveResponseSchema)
 };

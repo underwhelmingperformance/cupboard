@@ -12,7 +12,8 @@ import {
 	integer,
 	primaryKey,
 	sqliteTable,
-	text
+	text,
+	unique
 } from 'drizzle-orm/sqlite-core';
 
 export const narInfos = sqliteTable(
@@ -249,6 +250,23 @@ export const retentionPolicies = sqliteTable('retention_policy', {
 	defaultTtlSeconds: integer('default_ttl_seconds').notNull(),
 	createdAt: text('created_at').notNull()
 });
+
+// A retention grace policy applies a grace period to every path successfully
+// published to a cache whose name starts with `cache_prefix`; the empty prefix
+// is the tenant-wide default. The prefix is unique so a publication resolves at
+// most one matching policy per cache, and the longest matching prefix wins.
+export const retentionGracePolicies = sqliteTable(
+	'retention_grace_policy',
+	{
+		id: text('id').primaryKey(),
+		cachePrefix: text('cache_prefix').notNull(),
+		graceSeconds: integer('grace_seconds').notNull(),
+		createdAt: text('created_at').notNull()
+	},
+	(table) => [
+		unique('retention_grace_policy_cache_prefix_unique').on(table.cachePrefix)
+	]
+);
 
 // Where the last background verification pass stopped, so the next pass resumes
 // from that point. A single `id = 'active'` row holding a composite

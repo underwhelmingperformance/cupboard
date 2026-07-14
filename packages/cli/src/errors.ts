@@ -88,6 +88,18 @@ export class InvalidTtlError extends CliUsageError {
 	}
 }
 
+export class InvalidGraceError extends CliUsageError {
+	constructor(
+		public readonly value: string,
+		public readonly maxSeconds: number
+	) {
+		super(
+			`Grace must be between 0 and ${String(maxSeconds)} seconds: ${value}`
+		);
+		this.name = 'InvalidGraceError';
+	}
+}
+
 export class InvalidWaitTimeoutError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(

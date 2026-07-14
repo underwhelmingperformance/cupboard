@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseTtl, parseWaitTimeout } from './duration.ts';
+import { parseGrace, parseTtl, parseWaitTimeout } from './duration.ts';
 import {
 	InvalidDurationError,
+	InvalidGraceError,
 	InvalidTtlError,
 	InvalidWaitTimeoutError
 } from './errors.ts';
@@ -33,6 +34,31 @@ describe('parseTtl', () => {
 		{ input: '4000w', why: 'above the ten-year cap' }
 	])('rejects $why as out of TTL bounds', ({ input }) => {
 		expect(() => parseTtl(input)).toThrow(InvalidTtlError);
+	});
+});
+
+describe('parseGrace', () => {
+	it.each([
+		{ input: '0s', seconds: 0 },
+		{ input: '45s', seconds: 45 },
+		{ input: '24h', seconds: 86_400 },
+		{ input: '14d', seconds: 1_209_600 }
+	])('parses $input as $seconds seconds', ({ input, seconds }) => {
+		expect(parseGrace(input)).toBe(seconds);
+	});
+
+	it.each([
+		{ input: '', why: 'empty' },
+		{ input: '7', why: 'no unit' },
+		{ input: 'd', why: 'no amount' },
+		{ input: '7y', why: 'unknown unit' },
+		{ input: '1.5d', why: 'non-integer amount' }
+	])('rejects $why input as a malformed duration', ({ input }) => {
+		expect(() => parseGrace(input)).toThrow(InvalidDurationError);
+	});
+
+	it('rejects a grace beyond the root TTL cap', () => {
+		expect(() => parseGrace('4000w')).toThrow(InvalidGraceError);
 	});
 });
 

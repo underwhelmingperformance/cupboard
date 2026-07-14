@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	oidcTrust,
+	retentionGracePolicies,
 	retentionPolicies,
 	verificationCursor
 } from '../db/schema.ts';
@@ -141,6 +142,37 @@ describe('migrations', () => {
 		);
 
 		expect(rows).toStrictEqual([cursor]);
+	});
+
+	it('gains the retention grace policy table at the latest migration', async () => {
+		const policy = {
+			id: 'g1',
+			cachePrefix: 'pr-',
+			graceSeconds: 86_400,
+			createdAt: '2026-01-01T00:00:00.000Z'
+		};
+
+		const rows = await runInDurableObject(
+			testServerFor('migration-retention-grace-policy'),
+			async (_instance, state) => {
+				// Stops just short of 0027, the migration that creates the
+				// grace-policy table, then applies the rest, so a seeded row can
+				// only round-trip if that migration created it. The anchor is
+				// fixed: a relative one would silently retarget the test at
+				// whatever migration lands next.
+				await migrateThrough(state, 26);
+				await migrateThrough(state, latestMigrationIndex);
+
+				const database = drizzle(state.storage, {
+					schema: { retentionGracePolicies }
+				});
+				database.insert(retentionGracePolicies).values(policy).run();
+
+				return database.select().from(retentionGracePolicies).all();
+			}
+		);
+
+		expect(rows).toStrictEqual([policy]);
 	});
 
 	it('migrates and round-trips an OIDC trust rule', async () => {

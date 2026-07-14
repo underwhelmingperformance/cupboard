@@ -94,6 +94,15 @@ export const tenantRouter = os.router({
 		),
 		remove: os.policies.remove.handler(({ input, context }) =>
 			context.services.retention.removePolicy(input.id)
+		),
+		graceList: os.policies.graceList.handler(({ context }) =>
+			context.services.retention.listGracePolicies()
+		),
+		graceAdd: os.policies.graceAdd.handler(({ input, context }) =>
+			context.services.retention.addGracePolicy(input)
+		),
+		graceRemove: os.policies.graceRemove.handler(({ input, context }) =>
+			context.services.retention.removeGracePolicy(input.id)
 		)
 	},
 	oidcTrust: {

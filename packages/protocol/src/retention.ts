@@ -1,7 +1,9 @@
 import {
+	cacheNamePrefixPattern,
 	cacheNameSchema,
 	DEFAULT_CACHE,
 	rootNameSchema,
+	rootTtlMaxSeconds,
 	storePathHashSchema,
 	storePathSchema,
 	ttlSecondsSchema
@@ -127,6 +129,57 @@ export type ParsedRetentionPolicyRemoveResponse = z.output<
 	typeof retentionPolicyRemoveResponseSchema
 >;
 
+// A retention grace policy applies its grace period to every path published to
+// a cache whose name starts with `cachePrefix`; the empty prefix is the
+// tenant-wide default, and the longest matching prefix wins. The prefix is
+// bounded by a cache name's own maximum length, since a longer prefix could
+// never match one.
+const gracePrefixMaxLength = 63;
+
+const graceSecondsSchema = z.number().int().min(0).max(rootTtlMaxSeconds);
+
+export const gracePolicyAddBodySchema = z.strictObject({
+	// The prefix must be a prefix of some legal cache name, or the policy
+	// could never match anything: a typo such as an uppercase letter would
+	// otherwise be stored and silently defeat the retention guarantee grace
+	// mode exists to provide.
+	cachePrefix: z
+		.string()
+		.max(gracePrefixMaxLength)
+		.regex(cacheNamePrefixPattern, {
+			message: 'cachePrefix must be a prefix of a valid cache name'
+		}),
+	graceSeconds: graceSecondsSchema
+});
+export type ParsedGracePolicyAddBody = z.output<
+	typeof gracePolicyAddBodySchema
+>;
+
+export const gracePolicySummarySchema = z.strictObject({
+	id: z.string(),
+	cachePrefix: z.string(),
+	graceSeconds: graceSecondsSchema,
+	createdAt: z.string()
+});
+export type ParsedGracePolicySummary = z.output<
+	typeof gracePolicySummarySchema
+>;
+
+export const gracePolicyListResponseSchema = z.strictObject({
+	policies: z.array(gracePolicySummarySchema)
+});
+export type ParsedGracePolicyListResponse = z.output<
+	typeof gracePolicyListResponseSchema
+>;
+
+export const gracePolicyRemoveResponseSchema = z.strictObject({
+	id: z.string(),
+	removed: z.boolean()
+});
+export type ParsedGracePolicyRemoveResponse = z.output<
+	typeof gracePolicyRemoveResponseSchema
+>;
+
 export type RootSetBody = z.input<typeof rootSetBodySchema>;
 export type RootTarget = z.input<typeof rootTargetSchema>;
 export type RootSummary = z.input<typeof rootSummarySchema>;
@@ -145,4 +198,12 @@ export type RetentionPolicyListResponse = z.input<
 >;
 export type RetentionPolicyRemoveResponse = z.input<
 	typeof retentionPolicyRemoveResponseSchema
+>;
+export type GracePolicyAddBody = z.input<typeof gracePolicyAddBodySchema>;
+export type GracePolicySummary = z.input<typeof gracePolicySummarySchema>;
+export type GracePolicyListResponse = z.input<
+	typeof gracePolicyListResponseSchema
+>;
+export type GracePolicyRemoveResponse = z.input<
+	typeof gracePolicyRemoveResponseSchema
 >;
