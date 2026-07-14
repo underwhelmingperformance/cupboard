@@ -43,6 +43,7 @@ import { parseTenantPath } from './tenant-routing.ts';
 
 const healthBody = new TextBody('ok\n');
 const versionBody = new TextBody(`${buildVersion}\n`);
+const uploadPreviewPathPattern = /^\/cache\/[^/]+\/uploads\/preview$/u;
 
 // Builds and wires the worker Hono app. The route registrations are side
 // effects, so they live inside this builder and not at module top level;
@@ -109,7 +110,9 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		const { entry, fresh } = admission;
 
 		const isRead =
-			context.req.method === 'GET' || context.req.method === 'HEAD';
+			context.req.method === 'GET' ||
+			context.req.method === 'HEAD' ||
+			isUploadPreviewRequest(context.req.method, route.rest);
 
 		if (isRead && entry.status !== 'active') {
 			return notFoundResponse();
@@ -436,10 +439,9 @@ function admittedWriteStatus(
 		: undefined;
 }
 
-// Whether a tenant request mutates state. Reads never do; the token exchange is an
-// auth-plane request available to any configured tenant, so it is not a write. A
-// WebSocket upgrade is a GET on the wire, but the only socket route is the commit,
-// a write, so upgrades are gated as writes.
+// Whether a tenant request mutates state. Reads, the token exchange and upload
+// preview do not. A WebSocket upgrade is a GET on the wire, but the only socket
+// route is the commit, a write, so upgrades are gated as writes.
 function isTenantWrite(inner: Request): boolean {
 	if (inner.headers.get('upgrade')?.toLowerCase() === 'websocket') {
 		return true;
@@ -450,7 +452,16 @@ function isTenantWrite(inner: Request): boolean {
 	}
 
 	const innerUrl = new URL(inner.url);
-	return innerUrl.pathname !== '/token';
+
+	if (innerUrl.pathname === '/token') {
+		return false;
+	}
+
+	return !isUploadPreviewRequest(inner.method, innerUrl.pathname);
+}
+
+function isUploadPreviewRequest(method: string, pathname: string): boolean {
+	return method === 'POST' && uploadPreviewPathPattern.test(pathname);
 }
 
 // The authoritative tenant status, read from D1 and not the KV manifest, so a

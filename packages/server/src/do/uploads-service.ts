@@ -10,6 +10,7 @@ import {
 	type PushCredential,
 	type UploadDecision,
 	type UploadNegotiateResponse,
+	type UploadPreviewResponse,
 	type UploadStatusResponse
 } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
@@ -26,7 +27,8 @@ import { type DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	confirmGraceBatch,
 	type GraceDecision,
-	serialiseGraceDecision
+	serialiseGraceDecision,
+	storedGraceDeadlines
 } from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
@@ -52,6 +54,20 @@ type ReusableBlob = Pick<
 // A pending upload, and a reuse upload's reclaim window, both live for fifteen
 // minutes from when they are negotiated.
 const uploadTtlMs = 15 * 60 * 1000;
+
+// The read-only classification `negotiate` and `preview` share: what a closure
+// looks like against the tenant's committed rows and shared blobs, before
+// either decides what to do about it. `committed` is broader than `skippable`
+// (a committed path can still lack its `blob_state` backing), so a caller that
+// heals a stale narinfo can tell the two apart.
+interface ClosureClassification {
+	readonly facts: NegotiateFacts | undefined;
+	readonly existingByStorePathHash: ReadonlyMap<StorePathHash, NarInfoRow>;
+	readonly committed: ReadonlySet<StorePathHash>;
+	readonly skippableRows: readonly NarInfoRow[];
+	readonly skippable: ReadonlySet<StorePathHash>;
+	readonly reusableByNarHash: ReadonlyMap<string, ReusableBlob>;
+}
 
 type PendingVerdict = (typeof schema.pendingUploads.$inferSelect)['verdict'];
 
@@ -209,50 +225,33 @@ export class UploadsService {
 		return new Set([...facts.backedNarHashes, ...present]);
 	}
 
-	// The status of a deferred upload, polled on the uploadId the client holds.
-	// Derived from the durable per-upload verdict: a row that is gone is
-	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
-	// while it still verifies (a null or in-flight verdict).
-	uploadStatus(uploadId: string): UploadStatusResponse {
-		const pending = this.context.db
-			.select({ verdict: schema.pendingUploads.verdict })
-			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, uploadId))
-			.get();
-
-		return { status: uploadStatusOf(pending) };
-	}
-
-	// Plans the per-path uploads for a whole closure from pure-database facts, so a
-	// closure of any size costs a bounded number of D1 queries and no R2 head on
-	// the hot path: a negotiate that headed R2 per path hit the per-invocation
-	// subrequest cap around a few hundred cached paths and broke large pushes.
+	// Classifies a closure from pure-database facts, so a closure of any size
+	// costs a bounded number of D1 queries and no R2 head on the hot path: a
+	// negotiate that headed R2 per path hit the per-invocation subrequest cap
+	// around a few hundred cached paths and broke large pushes.
 	//
 	// A `blob_state` row exists exactly while the canonical NAR object does, so it
 	// stands in for the head: a committed path whose row is present is skippable;
-	// one whose row is gone has lost its NAR, so its stale narinfo is reconciled
-	// here and the path re-plans an upload. The skippable closure is then queued
-	// for an off-hot-path reconcile (see {@link ReconcileQueueService}) that probes
-	// R2 and repairs any drift the database could not see, so a missing narinfo
-	// object is restored in one re-push and a genuinely lost NAR is removed for the
-	// next.
-	async negotiate(
+	// one whose row is gone has lost its NAR (`committed` still names it, so a
+	// caller that reconciles stale narinfos can tell the two apart from
+	// `skippable`). Shared by `negotiate`, which acts on the classification, and
+	// `preview`, which only reports it.
+	//
+	// `shouldClaim` selects the reusable-blob read's claiming or read-only twin
+	// (see {@link UploadStateService.findReusableBlobs} and {@link
+	// UploadStateService.peekReusableBlobs}): only a caller that will actually
+	// decide the closure (negotiate) may claim, since claiming un-arms a reaper
+	// timer over bytes it is about to bind a fresh reference to; a caller that
+	// only reports what it would do (preview) must never do that.
+	private async classifyClosure(
 		cache: string,
 		body: ParsedUploadNegotiateRequest,
-		origin: string,
-		hints?: NegotiateHints
-	): Promise<UploadNegotiateResponse> {
-		if (!(await this.context.pushCredentials().verify(body.pushId))) {
-			throw new InvalidPushIdError();
-		}
-
-		if (body.paths.length === 0) {
-			return { uploads: [] };
-		}
-
-		// With Worker-staged hints the shared-fact reads are already done, and
-		// negotiate spends no time on D1 for them; without (an older Worker, a
-		// lost or expired token) it reads its own.
+		hints: NegotiateHints | undefined,
+		shouldClaim: boolean
+	): Promise<ClosureClassification> {
+		// With Worker-staged hints the shared-fact reads are already done, and the
+		// caller spends no time on D1 for them; without (an older Worker, a lost or
+		// expired token) it reads its own.
 		const facts = hints === undefined ? undefined : factsFromHints(hints);
 
 		const existingByStorePathHash = this.existingNarInfos(
@@ -286,13 +285,67 @@ export class UploadsService {
 		// Only a path that will actually plan an upload needs a reusable blob, so a
 		// fully cached re-push (every path a skip) reads no reuse facts at all. The
 		// hinted map may cover skippable hashes too; only planned uploads read it.
+		const candidateNarHashes = body.paths
+			.filter((path) => !skippable.has(path.storePathHash))
+			.map((path) => path.narHash);
 		const reusableByNarHash: ReadonlyMap<string, ReusableBlob> =
 			facts?.reusableByNarHash ??
-			(await this.uploadState.findReusableBlobs(
-				body.paths
-					.filter((path) => !skippable.has(path.storePathHash))
-					.map((path) => path.narHash)
-			));
+			(await (shouldClaim
+				? this.uploadState.findReusableBlobs(candidateNarHashes)
+				: this.uploadState.peekReusableBlobs(candidateNarHashes)));
+
+		return {
+			facts,
+			existingByStorePathHash,
+			committed,
+			skippableRows,
+			skippable,
+			reusableByNarHash
+		};
+	}
+
+	// The status of a deferred upload, polled on the uploadId the client holds.
+	// Derived from the durable per-upload verdict: a row that is gone is
+	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
+	// while it still verifies (a null or in-flight verdict).
+	uploadStatus(uploadId: string): UploadStatusResponse {
+		const pending = this.context.db
+			.select({ verdict: schema.pendingUploads.verdict })
+			.from(schema.pendingUploads)
+			.where(eq(schema.pendingUploads.id, uploadId))
+			.get();
+
+		return { status: uploadStatusOf(pending) };
+	}
+
+	// Plans the per-path uploads for a whole closure. A stale narinfo (committed,
+	// but no `blob_state` row backs it) is reconciled here and its path re-plans
+	// an upload. The skippable closure is then queued for an off-hot-path
+	// reconcile (see {@link ReconcileQueueService}) that probes R2 and repairs any
+	// drift the database could not see, so a missing narinfo object is restored
+	// in one re-push and a genuinely lost NAR is removed for the next.
+	async negotiate(
+		cache: string,
+		body: ParsedUploadNegotiateRequest,
+		origin: string,
+		hints?: NegotiateHints
+	): Promise<UploadNegotiateResponse> {
+		if (!(await this.context.pushCredentials().verify(body.pushId))) {
+			throw new InvalidPushIdError();
+		}
+
+		if (body.paths.length === 0) {
+			return { uploads: [] };
+		}
+
+		const {
+			facts,
+			existingByStorePathHash,
+			committed,
+			skippableRows,
+			skippable,
+			reusableByNarHash
+		} = await this.classifyClosure(cache, body, hints, true);
 
 		// The grace in force is captured once per negotiation and stored with each
 		// pending upload, so a policy changed before the commit settles cannot
@@ -405,6 +458,75 @@ export class UploadsService {
 		);
 
 		return { uploads };
+	}
+
+	// The read-only twin of `negotiate`: classifies a closure exactly as
+	// negotiate would (skip / reuse-commit / fresh upload) without planning
+	// anything. It inserts no pending upload, heals no stale narinfo, queues no
+	// reconcile, clears no reaper timer, and extends no grace deadline; a skip
+	// reports the deadline already on the row, unstretched, and a commit or
+	// upload reports the grace a publication would currently capture. Facts are
+	// always attached, since preview has no legacy shape to preserve.
+	async preview(
+		cache: string,
+		body: ParsedUploadNegotiateRequest,
+		hints?: NegotiateHints
+	): Promise<UploadPreviewResponse> {
+		if (!(await this.context.pushCredentials().verify(body.pushId))) {
+			throw new InvalidPushIdError();
+		}
+
+		if (body.paths.length === 0) {
+			return { uploads: [] };
+		}
+
+		const { existingByStorePathHash, skippable, reusableByNarHash } =
+			await this.classifyClosure(cache, body, hints, false);
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
+		const plannedGraceFact: ParsedUploadGraceFact =
+			resolvedGraceSeconds === undefined
+				? {}
+				: { graceSeconds: resolvedGraceSeconds };
+		// One chunked read covers every skip answer: a large previewed closure
+		// must not cost a stored-deadline query per path.
+		const storedDeadlines = storedGraceDeadlines(
+			this.context.db,
+			cache,
+			body.paths
+				.map((metadata) => metadata.storePathHash)
+				.filter(
+					(storePathHash) =>
+						existingByStorePathHash.has(storePathHash) &&
+						skippable.has(storePathHash)
+				)
+		);
+
+		return {
+			uploads: body.paths.map((metadata) => {
+				const existing = existingByStorePathHash.get(metadata.storePathHash);
+
+				if (existing !== undefined && skippable.has(metadata.storePathHash)) {
+					const retainUntil = storedDeadlines.get(metadata.storePathHash);
+
+					// A skip with no stored deadline still reports the resolved
+					// policy: an empty fact strictly means no policy matched.
+					return {
+						action: 'skip',
+						storePathHash: metadata.storePathHash,
+						narHash: existing.narHash,
+						grace:
+							retainUntil === undefined ? plannedGraceFact : { retainUntil }
+					};
+				}
+
+				return {
+					action: reusableByNarHash.has(metadata.narHash) ? 'commit' : 'upload',
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					grace: plannedGraceFact
+				};
+			})
+		};
 	}
 
 	// Issues a push's upload credential, scoped to its staging prefix and the
