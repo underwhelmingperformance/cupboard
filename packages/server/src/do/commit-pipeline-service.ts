@@ -11,6 +11,7 @@ import {
 	type CommitResponse,
 	type ParsedUploadPathNegotiation
 } from '@cupboard/protocol/upload';
+import { withDeadline } from '@cupboard/shared/timeout';
 import {
 	and,
 	eq,
@@ -33,6 +34,7 @@ import * as schema from '../db/schema.ts';
 import {
 	NarTooLargeError,
 	QuotaExceededError,
+	SubrequestTimeoutError,
 	TenantWritesStoppedError,
 	UploadCacheMismatchError,
 	UploadedObjectNotFoundError,
@@ -73,6 +75,13 @@ export const verifyRequestStaleMs = 45_000;
 // waiters parked. The delay sits above `verifyRequestStaleMs` (see there).
 export const verifyBackstopKey = 'maintenance:verify-pending';
 export const verifyBackstopDelayMs = 60_000;
+
+// A stall guard for `verifyPendingNar`'s fetch-and-decode, which runs off the
+// critical section and so carries no deadline scope of its own. Generous
+// enough that a legitimately large NAR never hits it: the queue consumer does
+// the routine decode off the DO, so this path is only the backstop for a
+// stalled R2 body stream.
+export const narVerifyBudgetMs = 5 * 60 * 1000;
 
 /**
  * What a commit settled to at commit time: the path is served (`settled`,
@@ -196,6 +205,36 @@ function isOverQuota(
 		(account.bytes ?? 0) + (account.casBytes ?? 0) + fileSize >
 		account.quotaBytes
 	);
+}
+
+// A stalled body a verify has already piped through is locked, so calling
+// `cancel` on it directly only rejects; it never reaches R2's underlying
+// stream. Retaining the sole reader over `body` instead, and forwarding its
+// chunks through a fresh stream for the verifier to pipe, means the returned
+// `cancel` reaches the R2 stream regardless of what the verifier does with the
+// stream it was handed.
+function cancellableNarBody(body: ReadableStream<Uint8Array>): {
+	readonly stream: ReadableStream<Uint8Array>;
+	readonly cancel: (reason?: unknown) => Promise<void>;
+} {
+	const reader = body.getReader();
+	const stream = new ReadableStream<Uint8Array>({
+		async pull(controller) {
+			const { done, value } = await reader.read();
+
+			if (done) {
+				controller.close();
+				return;
+			}
+
+			controller.enqueue(value);
+		},
+		cancel(reason) {
+			return reader.cancel(reason);
+		}
+	});
+
+	return { stream, cancel: (reason) => reader.cancel(reason) };
 }
 
 export class CommitPipelineService {
@@ -1677,23 +1716,57 @@ export class CommitPipelineService {
 		return true;
 	}
 
+	// Fetches a staging object and decodes it, off the critical section: the
+	// object can be arbitrarily large, so this must never hold the DO's input
+	// gate. `budgetMs` bounds the fetch and decode together against a stalled R2
+	// body stream, which would otherwise hang the whole verification pass
+	// indefinitely; a test may shorten it below {@link narVerifyBudgetMs} to
+	// exercise the timeout without waiting the full budget.
 	async verifyPendingNar(
 		r2Key: string,
-		metadata: ParsedUploadPathNegotiation
+		metadata: ParsedUploadPathNegotiation,
+		budgetMs: number = narVerifyBudgetMs
 	): Promise<NarVerification> {
-		const object = await this.context.env.BLOBS.get(r2Key);
+		let cancelBody: ((reason?: unknown) => Promise<void>) | undefined;
 
-		if (object === null) {
-			throw new UploadedObjectNotFoundError(r2Key);
+		try {
+			return await withDeadline(
+				async () => {
+					const object = await this.context.env.BLOBS.get(r2Key);
+
+					if (object === null) {
+						throw new UploadedObjectNotFoundError(r2Key);
+					}
+
+					// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed only
+					// as `ReadableStream`; narrow it to the byte stream the verifier expects.
+					const body = object.body as ReadableStream<Uint8Array>;
+					const cancellable = cancellableNarBody(body);
+					cancelBody = cancellable.cancel;
+
+					return verifyDecompressedNar(cancellable.stream, {
+						narHash: metadata.narHash,
+						narSize: metadata.narSize
+					});
+				},
+				budgetMs,
+				(abandoned) => new SubrequestTimeoutError('nar.verify', abandoned)
+			);
+		} catch (error) {
+			// The decode loop reads from the fetched body forever unless told
+			// otherwise; cancelling it here lets the abandoned call settle promptly
+			// instead of leaving the R2 stream open for the rest of the isolate's
+			// life.
+			if (error instanceof SubrequestTimeoutError && cancelBody !== undefined) {
+				try {
+					await cancelBody();
+				} catch {
+					// Best-effort: the timeout still surfaces below regardless of how
+					// the cancel itself settles.
+				}
+			}
+
+			throw error;
 		}
-
-		// R2 object bodies are byte streams, but `R2ObjectBody.body` is typed only
-		// as `ReadableStream`; narrow it to the byte stream the verifier expects.
-		const body = object.body as ReadableStream<Uint8Array>;
-
-		return verifyDecompressedNar(body, {
-			narHash: metadata.narHash,
-			narSize: metadata.narSize
-		});
 	}
 }
