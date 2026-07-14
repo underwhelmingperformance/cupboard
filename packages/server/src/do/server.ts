@@ -13,6 +13,7 @@ import type {
 	ParsedR2CredentialCheck,
 	VerifyReport
 } from '@cupboard/protocol/reports';
+import { reuseViewNameSchema } from '@cupboard/protocol/reuse-views';
 import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
@@ -133,6 +134,18 @@ import {
 	type VerificationResult,
 	VerificationService
 } from './verification-service.ts';
+
+// A reuse-view miss: 404 and no-store, so a shared cache can never pin an
+// answer that a later view definition or commit would change.
+function reuseNotFound(): Response {
+	return new Response('Not found\n', {
+		status: StatusCodes.NOT_FOUND,
+		headers: {
+			'content-type': 'text/plain; charset=utf-8',
+			'cache-control': 'no-store'
+		}
+	});
+}
 
 // What a commit session socket carries across a hibernation wake: the cache it
 // was opened against and the id the verify pass routes its verdicts to.
@@ -436,6 +449,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				}
 			)
 		);
+
+		// A reuse view's nix-cache-info is rendered from its own stored priority.
+		// Every response is no-store, the misses included: a cached 404 for an
+		// unknown or unparseable view name would keep answering after the view
+		// is created, and no purge key covers it.
+		this.app.get('/reuse/:view/nix-cache-info', (context) => {
+			const view = reuseViewNameSchema.safeParse(context.req.param('view'));
+
+			if (!view.success) {
+				return reuseNotFound();
+			}
+
+			const body = this.reuseViews.cacheInfoBody(view.data);
+
+			if (body === undefined) {
+				return reuseNotFound();
+			}
+
+			return textResponse(context.req.raw, body, {
+				'content-type': 'text/x-nix-cache-info; charset=utf-8',
+				'cache-control': 'no-store'
+			});
+		});
 
 		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
 		// the tokens it issues. `/token` is unauthenticated: the subject token is
