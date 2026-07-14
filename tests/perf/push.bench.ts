@@ -168,7 +168,9 @@ function storeClientFor(source: NixStore): Nix {
 	): Promise<NixValidPathInfo> => {
 		const info = await source.pathInfo(storePath);
 
-		return { ...info, signatures: [] };
+		// The pool is built in the bench's own source store, which registers
+		// local builds as ultimately trusted.
+		return { ...info, signatures: [], ultimate: true };
 	};
 
 	return Nix.forStore(
