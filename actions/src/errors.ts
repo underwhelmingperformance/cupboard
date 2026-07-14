@@ -416,3 +416,52 @@ export function wasAlreadyReported(error: unknown): boolean {
 		error.wasReported === true
 	);
 }
+
+export class PushSummaryResponseError extends CodedError {
+	constructor(public override readonly cause: z.ZodError) {
+		super(
+			`Cupboard reported an invalid push summary:\n${z.prettifyError(cause)}`
+		);
+		this.name = 'PushSummaryResponseError';
+	}
+}
+
+export class LegacyPushSummaryError extends CodedError {
+	constructor(public readonly version: string) {
+		super(
+			`cupboard ${version} does not report the per-path retention facts required by require-grace`
+		);
+		this.name = 'LegacyPushSummaryError';
+	}
+}
+
+/**
+ * One path a `require-grace` push cannot account for: `no-policy-matched`
+ * names a path whose grace fact was empty (no cache policy covers it),
+ * `pending` one whose fact carried only a captured `graceSeconds`, still
+ * awaiting the deferred upload that would materialise its deadline.
+ */
+export interface MissingGracePath {
+	readonly storePathHash: string;
+	readonly storePath?: string;
+	readonly reason: 'no-policy-matched' | 'pending';
+}
+
+/**
+ * Raised when `require-grace` is set and the push report names at least one
+ * path with no positive grace deadline: the publication half of grace mode's
+ * fail-closed rule (see PLAN.md, "Planning and destination adoption").
+ */
+export class GraceDeadlineMissingError extends CodedError {
+	constructor(public readonly paths: readonly MissingGracePath[]) {
+		super(
+			`${String(paths.length)} path(s) lack a positive grace deadline: ` +
+				paths
+					.map(
+						(path) => `${path.storePath ?? path.storePathHash} (${path.reason})`
+					)
+					.join(', ')
+		);
+		this.name = 'GraceDeadlineMissingError';
+	}
+}

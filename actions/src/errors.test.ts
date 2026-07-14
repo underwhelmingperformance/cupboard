@@ -19,6 +19,7 @@ import {
 	GithubApiError,
 	InvalidChecksumLineError,
 	InvalidInputError,
+	LegacyPushSummaryError,
 	MalformedReleaseResponseError,
 	MissingChecksumError,
 	MissingInputError,
@@ -182,6 +183,11 @@ describe('action errors', () => {
 		[
 			'PushSummaryMissingError',
 			new PushSummaryMissingError(['push-plan']),
+			genericExitCode
+		],
+		[
+			'LegacyPushSummaryError',
+			new LegacyPushSummaryError('v0.0.13'),
 			genericExitCode
 		]
 	])('%s reports its name and exit code', (name, error, exitCode) => {

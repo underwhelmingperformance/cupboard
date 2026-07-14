@@ -15,11 +15,20 @@ import {
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { runCupboard } from '../cupboard-run.ts';
 import {
+	type CupboardResultProtocol,
+	type CupboardRunResult,
+	detectCupboardResultProtocol,
+	runCupboardWithProtocol
+} from '../cupboard-run.ts';
+import {
+	GraceDeadlineMissingError,
 	InvalidInputError,
+	LegacyPushSummaryError,
+	type MissingGracePath,
 	MissingInputError,
-	PushSummaryMissingError
+	PushSummaryMissingError,
+	PushSummaryResponseError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { collectLines, isEnabled, provided } from '../options.ts';
@@ -28,6 +37,8 @@ import {
 	installCupboard,
 	normaliseVersion
 } from '../release-install.ts';
+
+const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
 export interface PushOptions {
 	readonly url?: string;
@@ -42,7 +53,9 @@ export interface PushOptions {
 	readonly audience?: string;
 	readonly root?: string;
 	readonly ttl?: string;
+	readonly retain?: string;
 	readonly wait?: string;
+	readonly requireGrace?: string;
 	readonly waitTimeout?: string;
 	readonly attestations: readonly string[];
 }
@@ -60,10 +73,30 @@ export interface PushInputs {
 	readonly audience: string;
 	readonly root: string;
 	readonly ttl: string;
+	readonly retain: boolean;
 	readonly wait: boolean;
 	readonly waitTimeout: string;
 	readonly attestations: readonly string[];
+	readonly requireGrace: boolean;
 }
+
+interface RunPushCupboardOptions {
+	readonly binaryPath: string;
+	readonly arguments: readonly string[];
+	readonly environment: Environment;
+	readonly requireGrace: boolean;
+	readonly version: string;
+}
+
+interface RunPushCupboardDependencies {
+	readonly detectResultProtocol: typeof detectCupboardResultProtocol;
+	readonly run: typeof runCupboardWithProtocol;
+}
+
+const defaultRunPushCupboardDependencies: RunPushCupboardDependencies = {
+	detectResultProtocol: detectCupboardResultProtocol,
+	run: runCupboardWithProtocol
+};
 
 interface PushArgumentsOptions {
 	readonly url: string;
@@ -72,6 +105,7 @@ interface PushArgumentsOptions {
 	readonly root: string;
 	readonly cache: string;
 	readonly ttl: string;
+	readonly retain: boolean;
 	readonly wait: boolean;
 	readonly waitTimeout: string;
 	readonly attestations: readonly string[];
@@ -119,6 +153,14 @@ export function registerPushCommand(
 		.option('--root <root>', 'retention root for pushed paths')
 		.option('--ttl <ttl>', 'retention TTL such as 7d or 12h')
 		.option(
+			'--retain <value>',
+			'record retention for the pushed paths: true or false'
+		)
+		.option(
+			'--require-grace <value>',
+			'fail unless every pushed path reports a grace deadline: true or false'
+		)
+		.option(
 			'--wait <value>',
 			'wait for deferred blobs to become servable: true or false'
 		)
@@ -149,6 +191,40 @@ export function resolvePushInputs(
 		);
 	}
 
+	const isRetained = isEnabled('retain', options.retain, true);
+	const explicitRoot = provided(options.root);
+
+	// Unretained publication never conflicts with the action's own implicit
+	// default root: it simply suppresses it, the same way the CLI's
+	// `--no-retain` needs no `--root` to be given for it to take effect. It
+	// does conflict with an EXPLICITLY named root or ttl, since those ask for
+	// retention an unretained push then refuses to record.
+	if (!isRetained && explicitRoot !== undefined) {
+		throw new InvalidInputError(
+			'root',
+			'root cannot be combined with no-retain'
+		);
+	}
+
+	const explicitTtl = provided(options.ttl);
+
+	if (!isRetained && explicitTtl !== undefined) {
+		throw new InvalidInputError('ttl', 'ttl cannot be combined with no-retain');
+	}
+
+	const shouldWait = isEnabled('wait', options.wait, true);
+	const requiresGrace = isEnabled('require-grace', options.requireGrace, false);
+
+	// A still-verifying path has no concrete deadline to check; the reusable
+	// workflow always waits, so `require-grace` with an explicit `wait: false`
+	// can never be satisfied.
+	if (requiresGrace && !shouldWait) {
+		throw new InvalidInputError(
+			'require-grace',
+			'require-grace cannot be combined with wait: false'
+		);
+	}
+
 	return {
 		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
 		includePrereleases: isEnabled(
@@ -170,13 +246,16 @@ export function resolvePushInputs(
 		paths: options.paths,
 		cache: provided(options.cache) ?? '',
 		audience: provided(options.audience) ?? url,
-		root:
-			provided(options.root) ??
-			`github:${requireEnvironment(environment, 'GITHUB_REPOSITORY')}/${requireEnvironment(environment, 'GITHUB_REF_NAME')}`,
-		ttl: provided(options.ttl) ?? '',
-		wait: isEnabled('wait', options.wait, true),
+		root: isRetained
+			? (explicitRoot ??
+				`github:${requireEnvironment(environment, 'GITHUB_REPOSITORY')}/${requireEnvironment(environment, 'GITHUB_REF_NAME')}`)
+			: '',
+		ttl: explicitTtl ?? '',
+		retain: isRetained,
+		wait: shouldWait,
 		waitTimeout: provided(options.waitTimeout) ?? '10m',
-		attestations: options.attestations
+		attestations: options.attestations,
+		requireGrace: requiresGrace
 	};
 }
 
@@ -213,6 +292,7 @@ export async function pushAction(
 		root: inputs.root,
 		cache: inputs.cache,
 		ttl: inputs.ttl,
+		retain: inputs.retain,
 		wait: inputs.wait,
 		waitTimeout: inputs.waitTimeout,
 		attestations: inputs.attestations
@@ -221,13 +301,71 @@ export async function pushAction(
 	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
 	await setOutput(environment, 'cupboard-version', installedCupboard.version);
 
-	const results = await runCupboard(
-		installedCupboard.binaryPath,
-		arguments_,
-		environment
-	);
+	const run = await runPushCupboard({
+		binaryPath: installedCupboard.binaryPath,
+		arguments: arguments_,
+		environment,
+		requireGrace: inputs.requireGrace,
+		version: installedCupboard.version
+	});
+	const summary = requirePushSummary(run.results, run.protocol);
 
-	await publishPushOutputs(environment, requirePushSummary(results));
+	await publishPushOutputs(environment, summary);
+
+	if (inputs.requireGrace) {
+		const missing = pathsMissingGraceDeadline(summary);
+
+		if (missing.length > 0) {
+			throw new GraceDeadlineMissingError(missing);
+		}
+	}
+}
+
+export async function runPushCupboard(
+	options: RunPushCupboardOptions,
+	dependencies: RunPushCupboardDependencies = defaultRunPushCupboardDependencies
+): Promise<CupboardRunResult> {
+	const protocol = await dependencies.detectResultProtocol(options.binaryPath);
+
+	if (options.requireGrace) {
+		requireGraceResultProtocol(protocol, options.version);
+	}
+
+	return dependencies.run(
+		options.binaryPath,
+		options.arguments,
+		options.environment,
+		protocol
+	);
+}
+
+export function requireGraceResultProtocol(
+	protocol: CupboardResultProtocol,
+	version: string
+): void {
+	if (protocol === 'legacy-stderr') {
+		throw new LegacyPushSummaryError(version);
+	}
+}
+
+/**
+ * The publication half of grace mode's fail-closed rule (see PLAN.md,
+ * "Planning and destination adoption"): every path the push reports must
+ * carry a materialised `retainUntil`. A path whose `grace` fact is empty
+ * matched no cache policy; one that only carries `graceSeconds` is a deferred
+ * upload still awaiting the verdict that would materialise its deadline.
+ */
+export function pathsMissingGraceDeadline(
+	summary: ParsedPushSummary
+): readonly MissingGracePath[] {
+	return summary.paths
+		.filter((path) => path.grace?.retainUntil === undefined)
+		.map((path) => ({
+			storePathHash: path.storePathHash,
+			...(path.storePath !== undefined && { storePath: path.storePath }),
+			reason:
+				path.grace?.graceSeconds === undefined ? 'no-policy-matched' : 'pending'
+		}));
 }
 
 async function publishPushOutputs(
@@ -240,15 +378,37 @@ async function publishPushOutputs(
 	await setOutput(environment, 'uploaded-bytes', String(summary.uploadedBytes));
 }
 
-// A successful push always records its summary. Its absence means the run did
-// not report what it did, so there is nothing to publish and the action fails.
-function requirePushSummary(
-	results: readonly ReporterResultEvent[]
+// A successful push always records its summary, parsed against the protocol's
+// own schema so a shape the two sides do not agree on (a mismatched cupboard
+// version, say) fails loudly rather than reading as a vacuous pass. Its
+// absence means the run did not report what it did, so there is nothing to
+// publish and the action fails.
+export function requirePushSummary(
+	results: readonly ReporterResultEvent[],
+	protocol: CupboardResultProtocol = 'result-file'
 ): ParsedPushSummary {
 	for (const event of results) {
-		if (event.kind === pushSummaryResultKind) {
-			return pushSummarySchema.parse(event.data);
+		if (event.kind !== pushSummaryResultKind) {
+			continue;
 		}
+
+		if (protocol === 'legacy-stderr') {
+			const parsed = legacyPushSummarySchema.safeParse(event.data);
+
+			if (!parsed.success) {
+				throw new PushSummaryResponseError(parsed.error);
+			}
+
+			return { ...parsed.data, paths: [] };
+		}
+
+		const parsed = pushSummarySchema.safeParse(event.data);
+
+		if (!parsed.success) {
+			throw new PushSummaryResponseError(parsed.error);
+		}
+
+		return parsed.data;
 	}
 
 	throw new PushSummaryMissingError(results.map((event) => event.kind));
@@ -282,6 +442,10 @@ export function buildPushArguments(
 
 	if (options.ttl !== '') {
 		arguments_.push('--ttl', options.ttl);
+	}
+
+	if (!options.retain) {
+		arguments_.push('--no-retain');
 	}
 
 	if (!options.wait) {
