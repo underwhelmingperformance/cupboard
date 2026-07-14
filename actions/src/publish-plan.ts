@@ -11,8 +11,10 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
+import { fetchWithProbeDeadline } from './cache-probe.ts';
 import {
 	CacheProbeError,
 	DerivationGraphShapeError,
@@ -25,9 +27,11 @@ import {
 	TargetEvaluationResponseError
 } from './errors.ts';
 import { isNixPositionalArgument } from './options.ts';
-import { cacheUrlFor } from './substituters.ts';
+import { cacheUrlFor, reuseViewUrlFor } from './substituters.ts';
 
 const execFileAsync = promisify(execFile);
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
+
 export const maximumConcurrentCacheProbes = 32;
 
 export type NixEvaluator = (
@@ -311,6 +315,11 @@ export function planPublish(options: {
 	readonly evaluations: readonly TargetEvaluation[];
 	readonly retainedRoots: ReadonlySet<string>;
 	readonly availablePaths: ReadonlySet<StorePathString>;
+	// Paths substitutable through the configured reuse view; empty when no
+	// view is configured. A separate fact from destination availability: it
+	// changes where a shared output can be substituted from, never whether a
+	// target builds or what the destination retains.
+	readonly viewAvailablePaths?: ReadonlySet<StorePathString>;
 	readonly uses: ReadonlyMap<string, DerivationUse>;
 	readonly unevaluated?: readonly PublishTarget[];
 }): PublishPlan {
@@ -344,7 +353,8 @@ export function planPublish(options: {
 		pending,
 		pendingIndices,
 		fallbackTargets,
-		options.availablePaths
+		options.availablePaths,
+		options.viewAvailablePaths ?? new Set()
 	);
 	const fallbackGroups = fallbackIndices.map((indices, groupIndex) => {
 		const evaluations = indices.map((index) => requireIndex(pending, index));
@@ -448,6 +458,26 @@ export function cacheProbePaths(
 	const paths = new Set<StorePathString>(
 		evaluations.flatMap((evaluation) => evaluation.targetPaths)
 	);
+
+	for (const use of uses.values()) {
+		if (use.targets.size >= 2 && use.path !== undefined) {
+			paths.add(use.path);
+		}
+	}
+
+	return paths.values().toArray();
+}
+
+// The planner only ever consumes view availability for shared outputs whose
+// users are still pending once retention settles, but retention is not known
+// until the roots are ensured, after this probe. The probe therefore carries
+// every shared output with at least two manifest users, the smallest superset
+// the planner can consume; probing target paths against the view would load
+// the gated lookup for answers nothing reads.
+export function viewProbePaths(
+	uses: ReadonlyMap<string, DerivationUse>
+): StorePathString[] {
+	const paths = new Set<StorePathString>();
 
 	for (const use of uses.values()) {
 		if (use.targets.size >= 2 && use.path !== undefined) {
@@ -583,12 +613,17 @@ function seedGroupsFor(
 	pending: readonly TargetEvaluation[],
 	pendingIndices: ReadonlyMap<TargetEvaluation, number>,
 	fallbackTargets: ReadonlySet<number>,
-	availablePaths: ReadonlySet<StorePathString>
+	availablePaths: ReadonlySet<StorePathString>,
+	viewAvailablePaths: ReadonlySet<StorePathString>
 ): {
 	readonly seedGroups: SeedGroup[];
 	readonly destinationIntermediates: readonly StorePathString[];
 } {
-	const groups = new Map<
+	const buildGroups = new Map<
+		string,
+		{ evaluations: Set<number>; candidates: SeedCandidate[] }
+	>();
+	const adoptionGroups = new Map<
 		string,
 		{ evaluations: Set<number>; candidates: SeedCandidate[] }
 	>();
@@ -622,6 +657,14 @@ function seedGroupsFor(
 			continue;
 		}
 
+		// A view-only output stays in the seed matrix under its own adoption
+		// group: the seed job's nix build substitutes it from the configured
+		// view and the publish adopts it into the destination. It never joins
+		// the confirm set above, since view availability says nothing about
+		// what the destination retains.
+		const groups = viewAvailablePaths.has(use.path)
+			? adoptionGroups
+			: buildGroups;
 		const contextGroups = Map.groupBy(targetIndices, (index) =>
 			executionContextKey(requireIndex(pending, index).target)
 		);
@@ -631,7 +674,28 @@ function seedGroupsFor(
 		}
 	}
 
-	const seedGroups = groups
+	const seedGroups = [
+		...renderSeedGroups(buildGroups, 'seed', pending),
+		...renderSeedGroups(adoptionGroups, 'adopt', pending)
+	].toSorted((left, right) => left.key.localeCompare(right.key));
+
+	return {
+		seedGroups,
+		destinationIntermediates: [...destinationIntermediates].toSorted(
+			(left, right) => left.localeCompare(right)
+		)
+	};
+}
+
+function renderSeedGroups(
+	groups: ReadonlyMap<
+		string,
+		{ evaluations: Set<number>; candidates: SeedCandidate[] }
+	>,
+	prefix: 'seed' | 'adopt',
+	pending: readonly TargetEvaluation[]
+): SeedGroup[] {
+	return groups
 		.values()
 		.map((group): SeedGroup => {
 			const evaluationIndices = [...group.evaluations].toSorted(
@@ -640,7 +704,7 @@ function seedGroupsFor(
 			const first = requireIndex(pending, requireIndex(evaluationIndices, 0));
 
 			return {
-				key: groupKey('seed', first.target),
+				key: groupKey(prefix, first.target),
 				system: first.target.system,
 				os: first.target.os,
 				remote: first.target.remote,
@@ -654,15 +718,7 @@ function seedGroupsFor(
 				)
 			};
 		})
-		.toArray()
-		.toSorted((left, right) => left.key.localeCompare(right.key));
-
-	return {
-		seedGroups,
-		destinationIntermediates: [...destinationIntermediates].toSorted(
-			(left, right) => left.localeCompare(right)
-		)
-	};
+		.toArray();
 }
 
 function addSeedCandidate(
@@ -1003,19 +1059,48 @@ function absoluteStorePath(storePath: string): string {
 		: `/nix/store/${storePath}`;
 }
 
-export async function availableCachePaths(options: {
-	readonly baseUrl: string;
-	readonly cache: string;
+interface ProbeOptions {
 	readonly paths: readonly StorePathString[];
 	readonly credentials?: { readonly user: string; readonly password: string };
 	readonly fetcher?: typeof fetch;
-}): Promise<Set<StorePathString>> {
+}
+
+export function availableCachePaths(
+	options: ProbeOptions & {
+		readonly baseUrl: string;
+		readonly cache: string;
+	}
+): Promise<Set<StorePathString>> {
+	return availablePathsAt(cacheUrlFor(options.baseUrl, options.cache), options);
+}
+
+/**
+ * The subset of `paths` substitutable through a reuse view. View
+ * substitutability is a separate fact from destination availability: it says
+ * only that a build job can substitute the path, never that the destination
+ * holds or retains it.
+ */
+export function availableViewPaths(
+	options: ProbeOptions & {
+		readonly baseUrl: string;
+		readonly view: string;
+	}
+): Promise<Set<StorePathString>> {
+	return availablePathsAt(
+		reuseViewUrlFor(options.baseUrl, options.view),
+		options
+	);
+}
+
+async function availablePathsAt(
+	probeUrl: string,
+	options: ProbeOptions
+): Promise<Set<StorePathString>> {
 	// The probe fan-out touches every planned path, so across hundreds of HEAD
 	// requests a single gateway blip is expected somewhere; retrying transient
 	// refusals keeps one from failing the whole plan. A deterministic refusal
 	// still fails closed on its first response.
 	const fetcher = retryingFetcher(options.fetcher ?? fetch);
-	const cacheUrl = cacheUrlFor(options.baseUrl, options.cache);
 	const available = new Set<StorePathString>();
 	const headers =
 		options.credentials === undefined
@@ -1027,17 +1112,25 @@ export async function availableCachePaths(options: {
 		maximumConcurrentCacheProbes,
 		async (storePath) => {
 			const hash = StorePath.hash(storePath);
-			const response = await fetcher(`${cacheUrl}/${hash}.narinfo`, {
-				method: 'HEAD',
-				...(headers !== undefined && { headers })
-			});
+			const target = `${probeUrl}/${hash}.narinfo`;
+			// Bounded per request, retries included: a stalled connection must
+			// fail the probe promptly, not sit on undici's defaults.
+			const response = await fetchWithProbeDeadline(
+				fetcher,
+				target,
+				{
+					method: 'HEAD',
+					...(headers !== undefined && { headers })
+				},
+				({ ok, status }) => ({ ok, status })
+			);
 
 			if (response.ok) {
 				available.add(storePath);
 				return;
 			}
 
-			if (response.status !== 404) {
+			if (response.status !== notFoundStatus) {
 				throw new CacheProbeError(storePath, response.status);
 			}
 		}

@@ -837,6 +837,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		planFile: '/unused/cupboard-publish-plan.json',
 		optimise: true,
 		intermediateRetention: 'root',
+		reuseView: '',
 		runId: '12345',
 		runnerRoutes: new Map([['ubuntu-latest', 'ubuntu-latest']]),
 		temporaryDirectory: tmpdir(),
@@ -860,6 +861,12 @@ async function foreignKindRunner(
 	return { stdout: '', stderr: '' };
 }
 
+// The seed and fallback pushes publish with exactly what their matrix entry
+// carries, so the four combinations of retention mode and reuse view are
+// decided and proven here; the workflow yml interpolates these values without
+// conditionals. An adoption group (a view-only shared output joining an
+// `adopt-` keyed seed group) follows the same retention as any other group:
+// the reuse view never affects what the destination retains.
 describe('seed and fallback retention wiring', () => {
 	const seedGroup = {
 		key: 'x86_64-linux',
@@ -868,6 +875,10 @@ describe('seed and fallback retention wiring', () => {
 		remote: false,
 		targets: [storePath(`/nix/store/${'0'.repeat(32)}-app`)],
 		candidates: []
+	};
+	const adoptionGroup = {
+		...seedGroup,
+		key: 'adopt-x86_64-linux'
 	};
 	const fallbackGroup = {
 		key: 'fallback-x86_64-linux',
@@ -880,6 +891,17 @@ describe('seed and fallback retention wiring', () => {
 	it.each([
 		{
 			retention: 'root' as const,
+			reuseView: '',
+			expected: {
+				root: 'github:owner/repo/main/_cupboard-seed/12345/x86_64-linux',
+				ttl: '24h',
+				noRetain: false,
+				requireGrace: false
+			}
+		},
+		{
+			retention: 'root' as const,
+			reuseView: 'pr',
 			expected: {
 				root: 'github:owner/repo/main/_cupboard-seed/12345/x86_64-linux',
 				ttl: '24h',
@@ -889,33 +911,60 @@ describe('seed and fallback retention wiring', () => {
 		},
 		{
 			retention: 'grace' as const,
+			reuseView: '',
+			expected: { root: '', ttl: '', noRetain: true, requireGrace: true }
+		},
+		{
+			retention: 'grace' as const,
+			reuseView: 'pr',
 			expected: { root: '', ttl: '', noRetain: true, requireGrace: true }
 		}
-	])('decides $retention retention', ({ retention, expected }) => {
-		const inputs = planInputs({ intermediateRetention: retention });
-		const plan = {
-			retained: [],
-			targets: [],
-			seedGroups: [seedGroup],
-			fallbackGroups: [fallbackGroup],
-			destinationIntermediates: []
-		};
-		const fallbackRoot =
-			retention === 'root'
-				? {
-						...expected,
-						root: 'github:owner/repo/main/_cupboard-seed/12345/fallback-x86_64-linux'
-					}
-				: expected;
+	])(
+		'decides $retention retention with reuse view "$reuseView"',
+		({ retention, reuseView, expected }) => {
+			const inputs = planInputs({
+				intermediateRetention: retention,
+				reuseView
+			});
+			const groups =
+				reuseView === '' ? [seedGroup] : [seedGroup, adoptionGroup];
+			const plan = {
+				retained: [],
+				targets: [],
+				seedGroups: groups,
+				fallbackGroups: [fallbackGroup],
+				destinationIntermediates: []
+			};
+			const adoptionRoot =
+				retention === 'root'
+					? {
+							...expected,
+							root: 'github:owner/repo/main/_cupboard-seed/12345/adopt-x86_64-linux'
+						}
+					: expected;
+			const fallbackRoot =
+				retention === 'root'
+					? {
+							...expected,
+							root: 'github:owner/repo/main/_cupboard-seed/12345/fallback-x86_64-linux'
+						}
+					: expected;
 
-		expect({
-			seed: seedMatrix(inputs, plan),
-			fallback: fallbackMatrix(inputs, plan)
-		}).toStrictEqual({
-			seed: [groupEntry('x86_64-linux', expected)],
-			fallback: [groupEntry('fallback-x86_64-linux', fallbackRoot)]
-		});
-	});
+			expect({
+				seed: seedMatrix(inputs, plan),
+				fallback: fallbackMatrix(inputs, plan)
+			}).toStrictEqual({
+				seed:
+					reuseView === ''
+						? [groupEntry('x86_64-linux', expected)]
+						: [
+								groupEntry('x86_64-linux', expected),
+								groupEntry('adopt-x86_64-linux', adoptionRoot)
+							],
+				fallback: [groupEntry('fallback-x86_64-linux', fallbackRoot)]
+			});
+		}
+	);
 
 	it.each([
 		[

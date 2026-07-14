@@ -46,6 +46,14 @@ inputs:
       destination-resident intermediate, failing unless each one is positive.
     required: false
     default: 'root'
+  reuse-view:
+    description: >-
+      Named reuse view to probe for shared outputs missing from the destination.
+      A view-only output joins an adoption seed group whose build substitutes it
+      through the view before publishing it to the destination; view
+      availability never affects which targets build or what the destination
+      retains.
+    required: false
   runners:
     description: >-
       Every runs-on label the target manifest may use, separated by whitespace
@@ -127,6 +135,7 @@ runs:
         TTL: ${{ inputs.ttl }}
         READ_USER: ${{ inputs.read-user }}
         READ_PASSWORD: ${{ inputs.read-password }}
+        REUSE_VIEW: ${{ inputs.reuse-view }}
         AUDIENCE: ${{ inputs.audience }}
         PLAN_FILE: ${{ inputs.plan-file }}
         OPTIMISE: ${{ inputs.optimise }}
@@ -142,6 +151,7 @@ runs:
           --ttl "$TTL"
           --read-user "$READ_USER"
           --read-password "$READ_PASSWORD"
+          --reuse-view "$REUSE_VIEW"
           --audience "$AUDIENCE"
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"

@@ -48,6 +48,7 @@ import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { isEnabled, provided } from '../options.ts';
 import {
 	availableCachePaths,
+	availableViewPaths,
 	cacheProbePaths,
 	canonicalRunnerLabel,
 	derivationUses,
@@ -61,7 +62,8 @@ import {
 	type PublishTarget,
 	publishTargetsSchema,
 	type RunnerRoute,
-	type TargetEvaluation
+	type TargetEvaluation,
+	viewProbePaths
 } from '../publish-plan.ts';
 
 export type EnsureRunner = (
@@ -119,6 +121,7 @@ export interface PlanOptions {
 	readonly ttl?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
+	readonly reuseView?: string;
 	readonly audience?: string;
 	readonly cupboardPath?: string;
 	readonly planFile?: string;
@@ -140,6 +143,7 @@ export interface PlanInputs {
 	readonly planFile: string;
 	readonly optimise: boolean;
 	readonly intermediateRetention: 'root' | 'grace';
+	readonly reuseView: string;
 	readonly runId: string;
 	readonly runnerRoutes: ReadonlyMap<string, RunnerRoute>;
 	readonly temporaryDirectory: string;
@@ -168,6 +172,10 @@ export function registerPlanCommand(
 		.option('--ttl <ttl>', 'TTL applied when retaining a cached target')
 		.option('--read-user <user>', 'username for private cache reads')
 		.option('--read-password <password>', 'password for private cache reads')
+		.option(
+			'--reuse-view <name>',
+			'named tenant reuse view to probe for substitutable intermediates'
+		)
 		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
 		.option('--plan-file <path>', 'destination for the detailed JSON plan')
 		.option(
@@ -261,6 +269,7 @@ export function resolvePlanInputs(
 		ttl: provided(options.ttl) ?? '',
 		readUser,
 		readPassword,
+		reuseView: provided(options.reuseView) ?? '',
 		audience: provided(options.audience) ?? url,
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),
@@ -380,14 +389,30 @@ async function optimisedPlan(
 	}
 
 	const uses = derivationUses(evaluations);
+	const probePaths = cacheProbePaths(evaluations, uses);
+	const credentials =
+		inputs.readUser === ''
+			? {}
+			: {
+					credentials: { user: inputs.readUser, password: inputs.readPassword }
+				};
 	const availablePaths = await availableCachePaths({
 		baseUrl: inputs.url,
 		cache: inputs.cache,
-		paths: cacheProbePaths(evaluations, uses),
-		...(inputs.readUser !== '' && {
-			credentials: { user: inputs.readUser, password: inputs.readPassword }
-		})
+		paths: probePaths,
+		...credentials
 	});
+	// The view probe is a second, separate fact: it says where a shared
+	// output can be substituted from, never what the destination retains.
+	const viewAvailablePaths =
+		inputs.reuseView === ''
+			? undefined
+			: await availableViewPaths({
+					baseUrl: inputs.url,
+					view: inputs.reuseView,
+					paths: viewProbePaths(uses),
+					...credentials
+				});
 	const retainedRoots = await ensureAvailableTargets(
 		inputs,
 		evaluations,
@@ -397,6 +422,7 @@ async function optimisedPlan(
 		evaluations,
 		retainedRoots,
 		availablePaths,
+		...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
 		uses,
 		unevaluated: unevaluated.map((failure) => failure.target)
 	});
@@ -780,9 +806,8 @@ export function fallbackMatrix(
 	}));
 }
 
-// GitHub runs at most this many jobs for a single matrix, so an oversized
-// plan is refused here, where the matrix and the counts can be named, rather
-// than as an opaque rejection at dispatch.
+// GitHub runs at most this many jobs for a single matrix; an oversized plan
+// is refused at plan time with the matrix and the counts named.
 export const maximumMatrixJobs = 256;
 
 export function matrix(name: string, entries: readonly object[]): string {
