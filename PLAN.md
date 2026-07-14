@@ -929,8 +929,9 @@ subject token matches. Verification is uniform; `jose` does the cryptography.
 
 - [x] `cupboard push --github-oidc [--audience <aud>]` requests a GitHub Actions
       OIDC token (`id-token: write`) for cupboard's audience and exchanges it
-      for a root-scoped write JWT, with no stored cupboard secret. `--audience`
-      defaults to the Worker URL.
+      for a cache-scoped write JWT, narrowed to an exact root when the push uses
+      one, with no stored cupboard secret. `--audience` defaults to the Worker
+      URL.
 
 ### Key rotation and maintenance
 
@@ -3435,6 +3436,705 @@ tokens are parameterised with the wire-freeze rule recorded; D1 overloads answer
 as retryable 503s on HTTP and the commit socket, which the client honours per
 entry; and the client windows its in-flight batch messages with a per-instance
 entry bound as the server backstop.
+
+## Publish planning, retention grace, and tenant-wide reuse
+
+### Context
+
+The cache-aware publish feature (`actions/plan`, `cupboard-flake-publish.yml`)
+evaluates a flake's target manifest, retains each target the destination cache
+already serves, and builds every remaining target once. Outputs shared by two or
+more targets are built ahead of the target fan-out as seed groups; outputs whose
+paths Nix leaves unknown are co-located as fallback groups. The planner and the
+workflow shipped first. This section is the lifetime and substitution work that
+follows, and it removes a workaround the first cut left behind.
+
+The seed job pushes shared prerequisites that no target references yet, because
+the targets that reference them build later. The collector keeps a committed
+path only while it is reachable from a live retention root (see
+[Garbage collection](#garbage-collection)), so a freshly seeded path is
+collectable the moment it lands. The workflow papers over that by creating a
+short-lived root, `<prefix>/_cupboard-seed/<run_id>/<key>` at a 24h TTL, to hold
+the seeded paths across the build window. That root is a misuse of retention:
+its `_`-prefixed name and its TTL encode "keep this until the run's own roots
+take over", which is a fact about the run, not a retention anyone asked for. The
+TTL is a proxy for run duration, and a run that outlives it loses its
+intermediates mid-flight.
+
+A second problem is cross-cache reuse. A change (a nixpkgs bump, say) builds
+paths that the stable destination does not have and has never referenced: being
+absent there is the whole point of the change. A later main build should be able
+to substitute those verified paths from the PR cache and then adopt them into
+its own destination, rather than rebuilding them from scratch. A per-cache URL
+cannot provide that view without the client already knowing which cache holds
+the path.
+
+### Decisions
+
+Remove the seed root once the destination opts into its replacement. Solve the
+lifetime and visibility problems with three separate primitives whose names
+describe their real semantics.
+
+1. Explicit unretained publication. `cupboard push --no-retain` commits paths
+   without setting a named root or creating the implicit per-path pins that a
+   rootless push creates today. The retention choice is carried through the
+   push, so each successful path with a matching policy establishes its grace
+   deadline atomically with publication, including an already-present path that
+   the upload negotiation skips. Seed and fallback jobs use it after the
+   workflow caller opts into retention-grace mode, so the `_cupboard-seed` root,
+   its TTL, and those jobs' `root:set` grant then go away.
+
+2. Retention grace, configured by cache-name prefix. A grace deadline is an
+   internal, expiring reachability source. Every successfully published path
+   receives or refreshes a deadline when its cache has a matching policy,
+   regardless of whether that push also sets a root, and a root target receives
+   one when a root stops retaining it. Applying a grace policy marks the cache
+   as grace-managed; that state is durable and is not undone by later policy
+   removal. GC walks live grace deadlines exactly as it walks root targets, so
+   the whole referenced closure remains available for the configured grace
+   without pretending that a CI run asked for durable retention.
+
+3. Named tenant reuse views at `/t/<tenant>/reuse/<view>`. A tenant-domain
+   administrator defines each view in advance from exact cache names and cache-
+   name prefixes. The view merges the matching servable narinfos at read time
+   without becoming a stored cache or materialising derived state. It follows
+   the tenant's existing read mode: public tenants expose it publicly, while
+   private tenants require their existing Basic read credential. A reader opts
+   into a view explicitly and thereby trusts every writer able to publish to a
+   matching source cache. CI can use that view for substitution and availability
+   probes, then adopts what it consumes into its destination cache under the
+   destination's own roots or grace deadlines.
+
+The reuse view separates two questions that a single per-cache URL cannot
+answer: whether the tenant can substitute a path, and whether the destination
+has adopted and retained it. Nix query strings cannot select this view: it
+interprets an HTTP store URL's query parameters as store settings and does not
+forward an unknown `reuse=true` parameter. A stable named path is therefore the
+configuration and trust boundary rather than an on-the-fly query modifier.
+
+### Explicit unretained publication
+
+Omitting `--root` continues to mean what it means today for an interactive or
+manually authenticated push: create an implicit pin for every pushed path.
+Unretained publication is a third, explicit retention plan. `--no-retain` is
+incompatible with `--root` and `--ttl`, performs no root RPCs, and requests no
+root capability during an OIDC exchange. A mutating GitHub OIDC push must choose
+either `--root` or `--no-retain`; a dry run is exempt because it cannot create a
+root or publish a path. This keeps retention intent explicit in CI without
+expanding stored trust rules to authorise arbitrary content-derived pin names.
+The push protocol reports the publication grace deadline rather than making a
+second, post-publication grace deadline request. A client that understands grace
+facts advertises `upload-grace-facts` in the `x-cupboard-accept-capabilities`
+request header. A server that understands the extension acknowledges it in
+`x-cupboard-upload-capabilities` and may then add grace facts to negotiate and
+preview responses. Without both halves of that exchange, the server returns
+exactly the legacy shapes an older client's strict schemas already validate,
+while the publication still receives matching grace deadlines server-side. The
+commit channel is a WebSocket outside the oRPC contract and separately
+advertises whether its settled, deferred, and verdict frames may carry grace
+facts; the negotiation records the client's acceptance so a later commit or
+reconnect preserves the same response shape.
+
+The request header is an ordinary HTTP capability offer, so an older server
+ignores it and continues to accept the unchanged negotiate body. A newer client
+therefore falls back to the legacy report when a retained push reaches an older
+server. `--no-retain` cannot make that fallback safely because it depends on
+grace facts to prove the path has a positive lifetime. Before a mutating push
+negotiates the real closure, it sends a side-effect-free empty-closure
+negotiation and refuses to publish unless the server acknowledges
+`upload-grace-facts`; a dry run makes the same check through its read-only
+preview request. The grace policy itself applies to every successful publication
+in the cache; `--no-retain` controls root creation and, in grace-mode workflows,
+whether a positive grace deadline is required for success.
+
+Publication and its grace deadline are atomic per path, not across the whole
+multi-path push. Negotiation resolves the matching policy once and records its
+grace on a new or deferred commit before the cross-store commit saga proceeds.
+Successful materialisation computes `retain_until` from its materialisation time
+and the captured grace, then extends the deadline inside the same Durable Object
+critical section that finalises the exact narinfo generation. GC therefore
+cannot observe the committed path without its grace deadline. A policy changed
+or removed after acceptance does not weaken that accepted publication; a fresh
+negotiation uses the new policy. The repair path carries the captured grace
+through a crash. Failed verification removes the reservation and its pending
+grace intent without creating a live grace deadline.
+
+An already-present decision is also a successful publication for this purpose.
+The server resolves the current policy, checks the exact committed narinfo
+generation, marks the cache grace-managed when a policy matched, and extends its
+grace deadline in one gated operation before returning the skip decision. A
+retry is idempotent because the extension is monotonic. A push reports the
+effective `retain_until` for each materialised or already-present path, or that
+no positive grace policy matched. A deferred `--no-wait` path instead reports
+its captured grace and pending state because its materialisation time, and
+therefore its exact deadline, is not known yet. A generic unretained push may
+deliberately accept an unmanaged result; retention-grace workflow mode may not.
+
+Dry-run planning uses a separate, read-only upload preview procedure. It accepts
+the same path metadata needed to classify each path as already present,
+reusable, or requiring upload, but it creates no pending upload, issues no
+upload credential, creates no grace deadline, marks no cache grace-managed,
+clears no reaper timer, and queues no reconciliation. The preview shares the
+negotiation classification rules and existence-oracle protections, but returns
+only the actions and policy facts needed for reporting. It requires a distinct
+cache-scoped `upload:preview` action; that grant cannot call the mutating
+negotiate procedure. `cupboard push --dry-run` uses preview rather than
+negotiation, so previewing an already-present path cannot extend its lifetime.
+At issuance, a grant that covers `upload:negotiate` also covers `upload:preview`
+for the same cache: preview is a strict attenuation of negotiation, so existing
+stored trust rules authorise CI dry runs without being rewritten, while a rule
+may still grant only `upload:preview` to create a probe-only credential. The
+converse coverage does not hold. An older client that implements a dry run by
+negotiating and stopping still reaches the mutating procedure, and its
+already-present decisions extend grace deadlines like any other negotiation; the
+no-extension property belongs to the preview procedure, not to the flag.
+
+The CLI derives the retention plan before exchanging GitHub OIDC credentials,
+and the grant then matches the operation exactly. Every mutating push requests
+upload capabilities and, when enabled, attestation capabilities; its retention
+mode adds only the following authority:
+
+- A named-root push requests the cache upload capabilities and an exact
+  `root:set` grant for that root.
+- An explicit unretained push requests no root grant.
+- A dry run requests only `upload:preview` and no upload, attestation, or root
+  mutation grant.
+
+The retention plan is passed into the push rather than recomputed after
+authentication. The bundled actions always make the same explicit choice: target
+jobs use their named destination roots, grace-mode seed and fallback jobs use
+`--no-retain`, and root compatibility mode keeps its explicitly named temporary
+seed roots.
+
+Waiting and retention are independent. With the default wait, the command
+returns only after deferred commits become servable. With `--no-wait`, an
+accepted commit may still be verifying when the command returns; the existing
+in-flight protection spares its reserved row, the persisted grace intent
+survives the client, and successful materialisation creates the grace deadline.
+A failed verification creates neither a servable path nor a live grace deadline.
+The seed and fallback jobs keep the default wait because later jobs need to
+substitute their results.
+
+### Retention grace, precisely
+
+A grace deadline is keyed by cache and store-path hash and is stored as
+`retain_until`. It is not a user-visible root and grants no durable-retention
+intent. For a cache with a matching policy:
+
+- Successfully publishing a path extends its grace deadline to at least
+  `publication_at + grace`, where `publication_at` is the materialisation time
+  for a new generation and the gated confirmation time for an already-committed
+  generation. This applies to rooted pushes, implicit-pin pushes, and explicit
+  unretained pushes alike.
+- Replacing or removing a root extends the deadline of each target that stops
+  being retained by that root to at least `changed_at + grace`.
+- Expiring a root extends each target's deadline to at least
+  `expires_at + grace` before the expired root is removed.
+- Extending a grace deadline is monotonic: an earlier event cannot shorten an
+  existing deadline.
+
+The root transitions above occur in exactly three places: replacing a root's
+target set, removing a root, and the collector's deletion of expired roots
+before reachability is computed. Pruning an unusable path from every root after
+failed verification is none of them: the path never became servable, and it
+receives no grace deadline. Every transition resolves the policy in force when
+it is processed, since policies keep no history; an expiry's deadline stays
+anchored to the nominal `expires_at` even when the collector runs late, so a
+delayed sweep cannot extend retention. Maintenance eligibility already wakes the
+tenant at its earliest root expiry, so processing normally follows the expiry
+closely.
+
+The first event that applies a matching grace policy also marks the cache as
+grace-managed, including a zero-grace event. This is a one-way safety boundary:
+removing or changing the policy affects future deadlines but does not restore
+the legacy empty-cache guard or cancel captured publication grace and existing
+deadlines. A cache leaves grace-managed state only when the cache itself is
+deleted.
+
+GC starts its reachability traversal from the targets of live roots and live
+grace deadlines. A grace deadline therefore keeps the same transitive closure
+that its target kept; there is no per-reference mutation when a distant root
+moves. This also covers a root that is created and removed entirely between
+sweeps: its former targets still carry the deadline established by the removal,
+so their recovery window does not depend on GC having observed the root while it
+was live.
+
+Expired grace deadlines are removed before reachability is computed. Their
+expiry is a retention event, so a grace-managed cache may drain after its last
+deadline expires. The existing empty-cache guard remains only for a cache that
+has never become grace-managed. A configured grace of zero creates no lasting
+deadline, marks the cache as grace-managed, and makes an unreachable path
+immediately collectable. Removing a policy cannot strand a partially drained
+cache by re-enabling the guard between GC continuation runs.
+
+Grace deadlines avoid a new first-sight write across every unreachable narinfo.
+Once a deadline expires, deletion uses the existing per-run deletion cap and
+continuation; no new unbounded stamping or clearing pass is needed. The current
+reachability walk and committed-row scan still inspect their complete per-cache
+sets before that deletion cap is applied; retention grace does not make those
+existing phases incremental. The earliest `retain_until` participates in
+maintenance eligibility, so a tenant whose only deferred work is a grace
+deadline is woken when it expires.
+
+Retention grace has its own cache-prefix policy rather than sharing the existing
+root-TTL policy. An empty prefix is the tenant default; a longer matching prefix
+wins, so a `pr-` rule applies automatically to implicitly created PR caches.
+Root TTL remains selected by cache and root name and cannot shadow the grace
+accidentally. Updating or removing a policy changes only events accepted after
+that mutation. Pending publications retain the grace they captured at
+negotiation, and existing deadlines remain monotonic.
+
+The publication protocol also supports confirming an unretained publication by
+store path without uploading bytes. It uses the same exact-generation check and
+atomic grace extension as an already-present push decision, and cannot choose a
+deadline beyond the matching policy. It is a contract procedure guarded by a
+distinct cache-scoped `upload:confirm` action: the grant confines it to the
+named destination cache without conferring negotiation or commit authority, and,
+as with `upload:preview`, a grant that covers `upload:commit` covers it at
+issuance. The planner uses this primitive to refresh destination-resident
+intermediates before relying on them; anonymous reads and ordinary availability
+probes never extend retention.
+
+### Named tenant reuse views
+
+A reuse view implements `nix-cache-info` and narinfo reads beneath
+`/t/<tenant>/reuse/<view>`. It is tenant configuration, managed through a
+contract-first domain admin API and CLI, and contains a set of exact cache-name
+and cache-name-prefix selectors. An empty prefix means every current and future
+cache in the tenant; any prefix selector deliberately admits caches created
+after the view. Defining, updating, or deleting a view requires tenant-domain
+authority. Cache-scoped writers can contribute candidates through a matching
+cache but cannot change which caches a view trusts.
+
+The view is purely virtual. It stores no cache membership, narinfo, root, grace
+deadline, or derived candidate state, and changes to an underlying cache perform
+no view-specific work. An exact selector for a deleted cache simply matches
+nothing while that name is absent. If the cache is recreated under the same
+name, the exact selector matches it again. Exact selectors are deliberately
+name-stable because cache administration, write authority, and reads already
+identify a cache by tenant and name rather than by an incarnation identifier. A
+cache deletion is therefore not a grant revocation: an administrator removing a
+trust relationship must also update the view and revoke or disable the relevant
+credential or OIDC trust. A prefix selector includes future matching caches
+automatically. Each lookup filters the current committed rows by the current
+view definition, so the cost is proportional to the copies of the requested
+store-path hash rather than to every path held by the view's source caches.
+
+A virtual narinfo points at the tenant's existing canonical
+`/t/<tenant>/nar/...` route by rendering `URL: ../../nar/<nar-hash>.nar.zst`.
+The relative URL is resolved from the reuse view base and must be exercised by a
+real Nix substitution test; reusing the ordinary `URL: nar/...` rendering would
+incorrectly address `/t/<tenant>/reuse/<view>/nar/...`. Content-addressed NAR
+bytes retain their current tenant-scoped ownership check and immutable
+public-cache behaviour; a reuse view does not add a second NAR route. It uses
+the tenant's existing read mode and credential rather than introducing a second
+visibility boundary. A public tenant exposes configured views publicly. A
+private tenant's existing Basic credential guards each view exactly as it guards
+every stored cache.
+
+Reuse-view `nix-cache-info` and narinfo responses are always `no-store`,
+including for public tenants. An answer can change when the view definition
+changes, a matching cache introduces a conflicting candidate, or a candidate is
+collected, and the existing per-cache purge keys cannot invalidate it. Canonical
+NAR responses and ordinary per-cache responses keep their current cache
+behaviour. Cross-tenant isolation and the tenant-owned NAR presence check remain
+unchanged. A view stores its binary-cache priority explicitly, defaulting to 50,
+ten past the registry's default cache priority of 40; the anchor is fixed
+because a view spans caches whose individual priorities may differ. Nix tries
+lower numerical priorities first, so `actions/setup` reads both `nix-cache-info`
+responses and refuses to configure a view unless its priority is numerically
+greater than the destination's. It also emits the destination first.
+Destination-before-view is an invariant rather than an ordering preference: a
+divergent input-addressed path already adopted by the destination must never be
+replaced by a view candidate.
+
+On a reuse-view narinfo lookup, first enter the Durable Object gate and read the
+current view definition revision plus the local narinfo rows, queried once per
+selector so the work is bounded by the selector list rather than by every cache
+holding the hash. Snapshot the exact cache, store-path hash, generation, and NAR
+hash identities. These rows are possible candidates only: a local row carries no
+reservation state, so a generation reserved by an in-flight commit is
+indistinguishable here and is rejected by the exact-edge check below. Each
+selector fetches at most one more row than the configured candidate limit; if
+the distinct candidates exceed the limit, emit a structured candidate-limit
+event and answer with a cache miss instead of truncating or guessing.
+
+Outside the gate, query D1 in bounded batches for only those snapshotted
+`blob_ref` edges, the corresponding global `blob_state` facts, and the tenant's
+`tenant_blob` ownership facts, then probe each unique canonical NAR object with
+bounded concurrency. Re-enter the gate before rendering and verify that the view
+revision and every selected local identity are unchanged. Retain only identities
+backed by the exact committed edge, tenant ownership, and a live canonical
+object. A concurrent view change, deletion, or recommit therefore fails towards
+a miss rather than admitting a stale generation. Persistent D1 or R2 failure and
+overload are retryable service errors, not evidence that a path is absent.
+
+This lookup is a deliberate exception to the read architecture: ordinary narinfo
+and NAR serving never enters the Durable Object, and the Worker answers from
+materialised R2 objects and the edge cache alone. A Worker-only view was
+considered, enumerating candidate caches from the D1 `blob_ref` edges by tenant
+and store-path hash and merging the materialised per-cache narinfo objects from
+R2. It stays off the Durable Object, but it loses the definition-revision fence,
+re-parses rendered text where the gate compares stored fields, cannot heal a
+missing narinfo object, and needs view definitions distributed to the Worker
+through the admission manifest. Reuse lookups are opt-in, rarer than ordinary
+reads, and need exact answers, so they pay the Durable Object round trip
+instead. The gate is held only for synchronous row reads, and the lookup shares
+the tenant's single Durable Object with the commit path; that contention is why
+the load test below is a release gate.
+
+The API limits selector count and selector length, and the read path defines
+fixed bounds for candidate copies, D1 batch size, and concurrent R2 probes. The
+candidate limit is a safe optimisation boundary because a miss makes Nix try the
+next substituter or build locally. The planner's existing bounded HEAD
+concurrency remains, and the reuse endpoint is load-tested at that concurrency
+against a large closure so request amplification is an explicit release gate.
+
+Group the remaining candidates by the semantic fields signed into or carried by
+the narinfo: full store path, NAR hash and size, references, deriver, and CA
+metadata. Signature sets themselves may differ across key rotation and do not
+make two otherwise identical candidates conflict. For one semantic candidate,
+union and deduplicate the signatures from every matching row, then order them
+deterministically in the virtual response. Nix signatures cover the common
+fingerprint rather than the signature list, so this preserves every usable
+signature without making cache-name ordering choose a key generation.
+
+- No candidates is a cache miss.
+- One semantic candidate is served with the merged signature set. A
+  deterministic cache-name order selects the row that supplies otherwise
+  identical stored fields.
+- Conflicting candidates emit a structured integrity event, including the view
+  and source cache names, and are answered as a cache miss, not an error. Nix
+  then builds the path and the ordinary push adopts that result into the
+  destination cache.
+
+Conflicts are possible for an input-addressed store path because its name
+identifies the derivation inputs, not the output bytes. A non-reproducible
+build, incorrect client metadata, or a dishonest tenant writer can therefore
+produce different valid NARs or reference sets for the same store-path hash in
+different caches. Server-side NAR verification proves that bytes match the
+claimed NAR hash; it does not derive the expected output from an input-addressed
+path. A reuse view never guesses between such results.
+
+### Planning and destination adoption
+
+When a reader opts into a configured reuse view, the planner keeps destination
+availability and view substitutability as separate facts. A destination probe
+answers whether the path is already adopted there; a view probe answers only
+whether a build job can substitute it. The destination remains the retention
+boundary in both cases. Without an opted-in view, planning and substitution stay
+destination-only.
+
+- A complete target already servable from the destination is retained through
+  its ordinary target root and needs no build.
+- A complete target found only through the configured reuse view remains in the
+  target matrix. Its build substitutes the result, then its push adopts and
+  roots it in the destination.
+
+Intermediate handling is explicit in each of the four workflow modes:
+
+| Retention mode | Reuse view | Destination intermediate                                                | View-only intermediate                                                                                             | Missing intermediate                                                     |
+| -------------- | ---------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `root`         | absent     | Omit its seed with current behaviour                                    | Not applicable                                                                                                     | Build and publish beneath the 24-hour seed root                          |
+| `root`         | present    | Omit its seed with current behaviour                                    | Put it in an adoption seed group, substitute it, and publish beneath the 24-hour seed root                         | Build and publish beneath the 24-hour seed root                          |
+| `grace`        | absent     | Confirm it in the destination and require a positive refreshed deadline | Not applicable                                                                                                     | Build, publish with `--no-retain`, and require a positive grace deadline |
+| `grace`        | present    | Confirm it in the destination and require a positive refreshed deadline | Put it in an adoption seed group, substitute it, publish with `--no-retain`, and require a positive grace deadline | Build, publish with `--no-retain`, and require a positive grace deadline |
+
+Fallback groups follow the same publication rule as seed groups in their mode.
+The view changes where an intermediate can be substituted; it does not silently
+turn root compatibility mode into unretained publication.
+
+Grace-mode planning fails closed. Every intermediate omitted from the seed
+matrix or published by a seed or fallback job must report a positive effective
+`retain_until`. No matching policy, zero grace, a prefix mismatch, or policy
+removal before a fresh confirmation fails the run rather than silently falling
+back to unretained bytes. The push action enforces the publication half of this
+rule: it reads the push report and fails the job when any path lacks a positive
+deadline, so the CLI needs no workflow-mode flag. Grace mode keeps the default
+wait, since a still-verifying path has no deadline to check. A publication
+accepted before policy removal honours its captured grace. The `root`
+compatibility mode performs none of these checks and continues to use the
+24-hour seed roots, although any matching grace policy still applies normally to
+its successful publications.
+
+### PR lifecycle and cache deletion
+
+A trusted PR pushes to its own `pr-<n>` cache and refreshes expiring roots for
+its targets. Merge or close does not withdraw those roots early. A tenant
+administrator can define a reuse view with a `pr-` source prefix, and main's
+post-merge workflow can opt into that view. It then substitutes the PR's
+verified paths while those roots remain live and commits them into its
+destination under its own root. They are then durably part of the stable
+publication view.
+
+The PR roots expire through their ordinary TTL. When a matching grace policy is
+still in force as the collector processes the expiry, their former targets
+receive grace deadlines through the expiry transition, keeping the targets and
+their closure for the then-configured grace. An abandoned PR therefore lapses
+after its root TTL plus that grace. If no grace policy matches at that point, it
+may lapse at the root TTL instead. Neither case needs a close workflow, cache
+enumeration, or merge-order dependency. Keeping a merged PR's paths for the
+remainder of their requested TTL is expected retention, not a leak.
+
+Cache deletion already exists and is not part of this lifecycle. A genuinely
+isolated cache may still be force-removed through that operation; adding
+GitHub-OIDC invocation for such cleanup is separate work. Deletion removes the
+cache's grace deadlines and grace-managed marker without applying a
+root-transition deadline. An exact reuse selector remains as name-stable
+configuration, matches nothing while the cache is absent, and matches again if
+an administrator later recreates that cache name.
+
+### Data model
+
+- A separate retention-grace policy stores `cachePrefix` and `graceSeconds`.
+  Prefixes are unique, an empty prefix is permitted, and longest-prefix matching
+  selects the cache's grace.
+- The cache registry records whether each cache is grace-managed. Applying a
+  matching policy to a publication or root transition sets this marker even when
+  grace is zero. It is never cleared independently; deleting the cache deletes
+  the marker with it.
+- A `retention_grace` row stores `cache`, `storePathHash`, and `retainUntil`,
+  with a primary key on cache and store-path hash and an index on `retainUntil`
+  for maintenance eligibility. Deleting a narinfo also deletes its grace
+  deadline.
+- Every new or deferred commit durably records the grace resolved at negotiation
+  before it can be acknowledged. The verification and repair paths consume that
+  captured grace when materialising the exact generation, and terminal failure
+  clears it. An absent policy is recorded distinctly from zero grace. A pending
+  upload with no recorded decision, accepted before this scheme existed, is
+  treated as having matched no policy: it materialises without a grace deadline
+  and marks nothing grace-managed.
+- A `reuse_view` row stores its name, definition revision, and binary-cache
+  priority. The revision is issued by a persistent per-name sequence that, like
+  `generation_seq`, survives deletion: a view deleted and recreated under the
+  same name can never repeat a revision, so the final gated revalidation
+  distinguishes recreation from no change. Its source rows store the view,
+  selector kind (`exact` or `prefix`), and cache-name pattern. Selector count
+  and pattern length are bounded by the contract. The definition is tenant-local
+  configuration only: there is no materialised membership or derived narinfo
+  table. `reuse-view:list`, `reuse-view:set`, and `reuse-view:remove` are
+  tenant-domain capabilities rather than cache-scoped capabilities.
+- The reuse-view local lookup needs a composite index on (`store_path_hash`,
+  `cache`), since the existing narinfo primary key begins with cache. Each
+  selector queries it bounded: an exact selector is a point lookup on the
+  primary key, and a prefix selector is a range constrained by both the hash and
+  the cache-name prefix, fetching at most one more row than the candidate limit.
+  Caches are registered on demand without a count bound, so a lookup must never
+  scan every cache that holds the hash; a query-plan test enforces the index
+  access.
+- Batched candidate fencing uses exact tenant, cache, store-path hash,
+  generation, and NAR-hash identities against `blob_ref`, plus `tenant_blob` and
+  `blob_state`. Add a D1 `blob_ref` index beginning with tenant and store-path
+  hash only if query-plan verification shows that the existing primary-key
+  access cannot satisfy those bounded batches.
+
+### Invariants preserved
+
+- The root write gate is unchanged: a root may name a path whose narinfo row is
+  reserved, committed, or servable, and rejects only a path with no narinfo row.
+  Its `present` field reflects servability. Failed verification removes the
+  unusable row and prunes the target from every root.
+- Durable retention, destination adoption, and ordinary serving stay per-cache.
+  Only an explicitly configured reuse view crosses cache boundaries, under the
+  tenant's existing read boundary.
+- GC stays reachability-based. Grace deadlines are explicit, expiring traversal
+  roots; they do not change how references are followed.
+- Once a cache has applied a grace policy, policy removal cannot restore the
+  legacy empty-cache guard. Existing deadlines and accepted publication grace
+  survive policy changes.
+- A writer can influence a reuse view only through a cache selected by that
+  view. The administrator chooses those source caches; the reader separately
+  chooses whether to consume the view. An exact selector admits only that cache,
+  including a later incarnation with the same name, while a prefix selector
+  deliberately admits matching future cache names.
+- The destination is always a higher-priority substituter than its reuse view.
+  The view is a fallback source for paths absent from the destination, not an
+  alternative answer for a path the destination already serves.
+- A conflict in a reuse view degrades optimisation to a local build. It never
+  changes the destination cache's own answer and never fails publication.
+
+### Implementation sequence
+
+1. Add the retention-grace policy and contract-first admin API, durable
+   grace-managed cache marker, grace table, atomic grace extension,
+   root-transition updates, GC traversal source, zero/no-policy and
+   policy-mutation semantics, and maintenance deadline. A cache that never
+   applies a policy keeps existing root and GC behaviour.
+2. Add `cupboard push --no-retain`, carry the retention plan durably through
+   negotiation, commit, deferred verification and repair, and apply matching
+   grace deadlines to every successful publication, including rooted and
+   implicit-pin pushes. Cover captured grace across policy changes,
+   already-present decisions, the byte-free destination confirmation primitive
+   and its `upload:confirm` action, reporting of the effective deadline, and
+   both waiting modes. Add the separate read-only preview procedure and distinct
+   `upload:preview` action for dry runs. Require a mutating GitHub OIDC push to
+   select either a named root or explicit unretained publication, attenuate
+   named roots exactly, request no root grant for unretained publication, and
+   pass that same plan into publication.
+3. Add an `intermediate-retention` reusable-workflow input with `root` as the
+   compatibility default and `grace` as the opt-in. Grace mode uses confirmed
+   unretained publication for intermediates, fails unless every effective
+   deadline is positive, and requests no root grant for seed and fallback jobs.
+   The push action's no-retain input suppresses the implicit default root the
+   action otherwise derives, and rejects an explicitly supplied root or TTL. Its
+   plan job adds the `upload:confirm` capability that the confirmation procedure
+   requires alongside the `root:set` grant it already holds. Existing callers
+   keep the 24-hour seed root until they opt in.
+4. Add contract-first tenant-domain administration and CLI commands for named
+   reuse views and their exact and prefix source selectors, then add each view's
+   `nix-cache-info` and narinfo routes. Cover existing read-mode enforcement,
+   name-stable exact selectors, definition revisions, selector and candidate
+   limits, no-store responses, gated local snapshots, bounded D1 and R2 checks,
+   final gated revalidation, deterministic candidate resolution, merged
+   signature sets, the explicit `../../nar/...` canonical NAR URL, source-aware
+   structured conflict and candidate-limit reporting, conflict-as-miss
+   behaviour, and retryable dependency failures. View mutations and source-cache
+   mutations materialise no derived state.
+5. Add an optional `reuse-view` input to `actions/setup`, `actions/plan`, and
+   the reusable workflow. Empty is the compatibility default and keeps
+   substitution destination-only; a name explicitly adds
+   `/t/<tenant>/reuse/<view>` as a substituter while probing destination and
+   view availability separately. Add adoption seed groups for paths found only
+   in the view, confirm fresh grace deadlines for destination-resident
+   intermediates only in grace mode, and preserve the seed root in root
+   compatibility mode. Read both priorities and reject a view that would precede
+   or tie the destination. Setup sends the tenant's read credential on both
+   `nix-cache-info` requests when reads are private, and a response without a
+   `Priority` line is a configuration error rather than a silently assumed
+   default. This reader opt-in is independent of `intermediate-retention`:
+   either can be enabled without the other. Setup still obtains signing keys
+   from the tenant base URL; root ensure and every publication continue to name
+   the destination cache. Private tenants reuse their existing read secrets,
+   while public tenants need none.
+
+Step 2 depends on 1; step 3 depends on 2; step 4 is independent of the
+retention-grace work. Step 5 depends on 4, and its grace-mode confirmation path
+also depends on 3; reuse views otherwise compose with the root compatibility
+mode without waiting for retention grace.
+
+### Verification
+
+- CLI and action tests prove an unretained push writes no roots, requests no
+  root grant, rejects `--root` or `--ttl` combinations, and composes with both
+  waiting modes. A deferred `--no-wait` commit persists its intent before it is
+  acknowledged, keeps its captured grace across a policy change, and receives
+  its live grace deadline only when it becomes servable. A client that does not
+  offer `upload-grace-facts` receives from a grace-aware server the exact legacy
+  negotiate response and settled, deferred, and verdict frame shapes, proven
+  structurally for immediate, already-present, and deferred publication. Rooted,
+  implicit-pin, and unretained pushes made with an acknowledged capable server
+  all receive a matching publication grace deadline. An already-present decision
+  atomically refreshes its deadline before returning, and a retry cannot shorten
+  it. OIDC tests prove that a mutating push with neither `--root` nor
+  `--no-retain` is rejected before exchange, a named-root push receives only its
+  exact root grant, and an unretained push receives none. Dry-run tests prove
+  that preview requests only `upload:preview`, cannot call negotiate, and
+  creates no pending upload, credential, grace deadline, grace-managed marker,
+  timer change, or reconciliation, including for an already-present path under a
+  positive grace policy. Capability tests prove an old client receives
+  byte-identical legacy negotiate responses and commit frames from a new server,
+  a retained push from a new client falls back to the legacy report from an old
+  server, and an unretained push detects that old server through its negotiate
+  or preview preflight and fails before negotiating or publishing any real path.
+  A trust rule that covers `upload:negotiate` issues an `upload:preview` grant,
+  and one that covers `upload:commit` issues an `upload:confirm` grant, without
+  modification.
+- Grace tests cover no-policy legacy behaviour, configured zero, a new commit,
+  monotonic extension, root replacement, explicit removal, expiry, a root
+  created and removed between GC sweeps, transitive reachability, collection
+  after grace expiry, collection from a cache with no roots, cache-prefix
+  selection, and publication of the earliest deadline to maintenance
+  eligibility. Policy-mutation tests prove that removal does not clear existing
+  deadlines, accepted publications retain captured grace, zero grace permanently
+  marks the cache grace-managed, and removal during a capped drain cannot
+  re-enable the empty-cache guard. A pending upload with no recorded grace
+  decision materialises without a deadline and marks nothing grace-managed.
+  Existing GC tests continue to prove that an expired grace deadline with a
+  large closure drains through deletion continuations.
+- Workflow tests cover the safe `root` default and the opt-in `grace` mode,
+  including the absence of the seed root and root grant in grace mode. Grace
+  mode fails for an absent, zero, removed, or prefix-mismatched policy, while
+  root mode requires neither a grace policy nor a positive deadline result.
+  Tests exercise the full four-mode matrix: root or grace retention, each with
+  or without a reuse view, including view-only adoption groups in both retention
+  modes and preservation of the 24-hour seed root in root mode.
+- Reuse-view administration tests cover tenant-domain authorisation, exact and
+  prefix selectors, an empty all-cache prefix, priority, updates and deletion,
+  selector count and length boundaries, an exact selector whose cache is deleted
+  and recreated under the same name, and a prefix automatically admitting a
+  later cache. They also prove that view and source-cache mutations create no
+  derived membership or narinfo state.
+- Reuse-view read tests cover anonymous public reads, authenticated and
+  unauthenticated private reads, HEAD probes answered through the GET
+  registration, exclusion of a reserved generation that never committed,
+  exact-generation fencing, an identical candidate in one and several selected
+  caches, deterministic selection with merged and deduplicated signatures,
+  conflict-as-404 with a source-aware structured event, `no-store` virtual
+  metadata, the exact `URL: ../../nar/...` rendering, canonical NAR caching,
+  ordinary per-cache reads remaining unchanged, and cross-tenant isolation. Race
+  tests snapshot local identities across concurrent view changes, deletes, and
+  recommits, proving that final gated revalidation rejects stale generations,
+  and delete a view mid-lookup then recreate it under the same name, proving
+  that the recreated view's revision never repeats and the lookup fails towards
+  a miss. Candidate-limit tests prove that excess copies return a miss without
+  truncation, while persistent D1 or R2 faults and overload return a retryable
+  service error. Query-count and concurrency assertions enforce the D1 batch and
+  R2 probe bounds, and a query-plan assertion proves each selector's local read
+  uses the composite index rather than scanning every cache holding the hash. A
+  real Nix substitution test proves that the relative virtual URL reaches
+  `/t/<tenant>/nar/...` and never a reuse-view NAR route.
+- Planner and setup tests cover the empty destination-only default, explicit
+  reader opt-in, and separate destination and view availability sets. A
+  destination-resident intermediate with a nearly expired grace deadline is
+  refreshed before its seed is omitted; a view-only intermediate is assigned to
+  an adoption seed group; and a concurrent publication that turns an upload into
+  an already-present decision still establishes the new run's grace deadline.
+  The reuse input and intermediate-retention input compose in all four
+  combinations. Setup rejects equal or better view priority. A real Nix test
+  gives the destination and view divergent valid candidates for one
+  input-addressed path and proves that Nix selects the destination, while a path
+  absent from the destination still falls back to the view.
+- Load tests exercise a large planned closure at the planner's maximum HEAD
+  concurrency and Nix's normal substitution concurrency. They enforce the
+  candidate, D1 request, and R2 concurrency bounds and verify overload returns a
+  retryable response rather than an incorrect cache miss.
+- A workers adoption test commits a path only in a cache selected by a reuse
+  view, substitutes it through that view, then commits and roots it in cache B.
+  After the source cache's root and grace lapse, cache B continues to serve it.
+- End-to-end: a two-target flake where the shared dependency is seeded without a
+  root, receives a confirmed destination grace deadline, and is substituted by a
+  target job; and a nixpkgs-bump run where main explicitly opts into a view
+  selecting PR caches, substitutes the PR's paths, adopts them into its
+  destination rather than rebuilding them, then serves them there after the PR
+  roots expire.
+
+### Out of scope and risks
+
+- Early PR-root withdrawal and an adoption handshake are deferred. Ordinary root
+  TTL already bounds PR retention and gives main a robust adoption window
+  without cross-workflow coordination.
+- Content-addressed outputs still have no known path before they build, so they
+  keep using the fallback grouping and are not seeded; retention grace and reuse
+  views apply once they are committed like any other path.
+- Per-credential reuse-view visibility is deferred. Every configured view
+  follows the current tenant read boundary: all readers authorised for a private
+  tenant, or every reader of a public tenant, may use it. The administrator's
+  source selectors constrain which cache writers can influence its answers.
+- Materialised view membership, snapshots, and per-cache mutation fan-out are
+  deliberately excluded. A view always resolves current candidates at read time.
+- Reuse narinfo responses are deliberately `no-store` and each successful lookup
+  crosses Durable Object, D1, and R2 state. Candidate, batch, and concurrency
+  limits bound that cost; excess ambiguity becomes a cache miss, while
+  dependency failure remains a retryable service error. The large-closure load
+  gate must pass before the action enables reuse views by default anywhere.
+- A grace shorter than the slowest confirmed-publication-to-target interval can
+  lose the intermediate and cause a rebuild. Every run starts from a freshly
+  confirmed deadline, but grace remains a tunable optimisation margin, not a
+  correctness boundary.
+- GC deletion is capped and continued, but the existing reachability traversal
+  and committed-row scan are not incremental. A very large cache can therefore
+  still make one sweep expensive; bounding those existing phases is separate
+  garbage-collector work.
 
 ## Later features
 
