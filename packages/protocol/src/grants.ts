@@ -16,6 +16,7 @@ import { z } from 'zod';
 // form carries none, and the procedure's declared resource picks which.
 export const cacheOperations = [
 	'upload:negotiate',
+	'upload:preview',
 	'upload:status',
 	'upload:commit',
 	'attestation:negotiate',
@@ -81,6 +82,7 @@ export const controlOperations = [
 // Every operation, deduplicated (`gc:run`/`stats:read` span two grant types).
 export const operationSchema = z.enum([
 	'upload:negotiate',
+	'upload:preview',
 	'upload:status',
 	'upload:commit',
 	'attestation:negotiate',
@@ -189,6 +191,28 @@ function isRootWithin(requested: string, granted: string): boolean {
 		: requested === granted;
 }
 
+/**
+ * Whether a granted (or permitted) action set satisfies a requested operation:
+ * either the set carries the operation directly, or the operation is
+ * `upload:preview` and the set already carries `upload:negotiate`. Preview is
+ * a strict attenuation of negotiate (it stages nothing, so it can only ever do
+ * less), so any authority that reaches negotiate already reaches preview; the
+ * converse does not hold. The single rule behind every place an action set is
+ * matched against a requested operation: a presented token's grants, a stored
+ * trust rule's permitted grants, and the subset check attenuation and refresh
+ * narrowing use.
+ */
+export function isOperationSatisfiedByActions(
+	actions: readonly Operation[],
+	operation: Operation
+): boolean {
+	if (actions.includes(operation)) {
+		return true;
+	}
+
+	return operation === 'upload:preview' && actions.includes('upload:negotiate');
+}
+
 function isCoveredByGrant(
 	grant: AuthorizationDetail,
 	operation: Operation,
@@ -200,7 +224,7 @@ function isCoveredByGrant(
 
 	const actions: readonly Operation[] = grant.actions;
 
-	if (!actions.includes(operation)) {
+	if (!isOperationSatisfiedByActions(actions, operation)) {
 		return false;
 	}
 

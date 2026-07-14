@@ -13,6 +13,7 @@ import {
 	uploadGraceFactSchema,
 	uploadNegotiateMaxPaths,
 	uploadNegotiateRequestSchema,
+	uploadPreviewResponseSchema,
 	usageResponseSchema
 } from './upload.ts';
 
@@ -164,6 +165,56 @@ describe('uploadGraceFactSchema', () => {
 		{ name: 'an unknown field', value: { extra: true } }
 	])('rejects $name', ({ value }) => {
 		expect(uploadGraceFactSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('uploadPreviewResponseSchema', () => {
+	it.each([
+		{
+			name: 'skip with a stored deadline',
+			value: {
+				action: 'skip',
+				storePathHash,
+				narHash,
+				grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
+			}
+		},
+		{
+			name: 'commit with a captured grace',
+			value: {
+				action: 'commit',
+				storePathHash,
+				narHash,
+				grace: { graceSeconds: 86_400 }
+			}
+		},
+		{
+			name: 'upload with no matching policy',
+			value: { action: 'upload', storePathHash, narHash, grace: {} }
+		},
+		{
+			name: 'a decision with no grace field at all',
+			value: { action: 'upload', storePathHash, narHash }
+		}
+	])('accepts $name', ({ value }) => {
+		expect(
+			uploadPreviewResponseSchema.parse({ uploads: [value] })
+		).toStrictEqual({ uploads: [value] });
+	});
+
+	it.each([
+		{
+			name: 'an unknown action',
+			value: { action: 'destroy', storePathHash, narHash }
+		},
+		{
+			name: 'an upload decision carrying an uploadId',
+			value: { action: 'upload', storePathHash, narHash, uploadId: 'u1' }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(
+			uploadPreviewResponseSchema.safeParse({ uploads: [value] }).success
+		).toBe(false);
 	});
 });
 

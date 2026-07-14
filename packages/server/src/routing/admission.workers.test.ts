@@ -25,7 +25,13 @@ import { ensureTenant, setTenantStatus } from '../control/tenant-registry.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import { TenantAdmissionUnavailableError } from '../errors.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import { flakyD1 } from '../test-support.ts';
+import {
+	adminGrants,
+	flakyD1,
+	issueTokenForTenant,
+	provisionNamedTenant,
+	testServerFor
+} from '../test-support.ts';
 
 import worker from './handler.ts';
 
@@ -363,6 +369,92 @@ describe('layered admission gate', () => {
 		// The cache still holds the active entry; the gate's re-read sees the suspend.
 		expect(response.status).toBe(StatusCodes.FORBIDDEN);
 	});
+
+	it('keeps upload preview outside write admission while preserving the write gate', async () => {
+		const slug = 'preview-public';
+
+		await provisionNamedTenant(slug);
+		await primeRowCache(slug);
+		await setTenantStatus(database(), tenantIdSchema.parse(slug), 'suspended');
+
+		const request = async (
+			path: string,
+			method = 'POST'
+		): Promise<Response> => {
+			const ctx = createExecutionContext();
+
+			try {
+				return await worker.fetch(
+					new Request(`https://cache.example/t/${slug}${path}`, {
+						body: '{}',
+						headers: { 'content-type': 'application/json' },
+						method
+					}),
+					env,
+					ctx
+				);
+			} finally {
+				await waitOnExecutionContext(ctx);
+			}
+		};
+
+		const [preview, negotiate, previewPut, previewChild] = await Promise.all([
+			request('/cache/_default/uploads/preview'),
+			request('/cache/_default/uploads'),
+			request('/cache/_default/uploads/preview', 'PUT'),
+			request('/cache/_default/uploads/preview/child')
+		]);
+
+		expect({
+			preview: preview.status,
+			negotiate: negotiate.status,
+			previewPut: previewPut.status,
+			previewChild: previewChild.status
+		}).toStrictEqual({
+			preview: StatusCodes.UNAUTHORIZED,
+			negotiate: StatusCodes.FORBIDDEN,
+			previewPut: StatusCodes.FORBIDDEN,
+			previewChild: StatusCodes.FORBIDDEN
+		});
+	});
+
+	it.each([
+		{ status: 'suspended' as const },
+		{ status: 'offboarding' as const }
+	])(
+		'stops authenticated upload preview for a fresh $status tenant',
+		async ({ status }) => {
+			const slug = `preview-${status}`;
+			const issuer = await provisionNamedTenant(slug, { readMode: 'private' });
+			const token = await issueTokenForTenant(
+				testServerFor(slug),
+				issuer,
+				adminGrants()
+			);
+
+			await setTenantStatus(database(), tenantIdSchema.parse(slug), status);
+
+			const ctx = createExecutionContext();
+			const response = await worker.fetch(
+				new Request(
+					`https://cache.example/t/${slug}/cache/_default/uploads/preview`,
+					{
+						body: JSON.stringify({ paths: [] }),
+						headers: {
+							authorization: `Bearer ${token}`,
+							'content-type': 'application/json'
+						},
+						method: 'POST'
+					}
+				),
+				env,
+				ctx
+			);
+			await waitOnExecutionContext(ctx);
+
+			expect(response.status).toBe(StatusCodes.NOT_FOUND);
+		}
+	);
 
 	it('answers the admission refusal as a 503 with Retry-After', async () => {
 		const app = new Hono();

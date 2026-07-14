@@ -5,6 +5,7 @@ import {
 import { applyTransform } from '@cupboard/protocol/capture';
 import {
 	type AuthorizationDetail,
+	isOperationSatisfiedByActions,
 	type Operation,
 	type PermittedGrant,
 	type Substitution
@@ -155,7 +156,9 @@ function isActionsSubset(
 	requested: readonly Operation[],
 	permitted: readonly Operation[]
 ): boolean {
-	return requested.every((action) => permitted.includes(action));
+	return requested.every((action) =>
+		isOperationSatisfiedByActions(permitted, action)
+	);
 }
 
 function isGrantPermitted(

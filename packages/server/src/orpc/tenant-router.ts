@@ -205,6 +205,17 @@ export const tenantRouter = os.router({
 				context.services.takeNegotiateHints(context.request)
 			);
 		}),
+		preview: os.uploads.preview.handler(({ input, context }) =>
+			context.services.uploads.preview(
+				cacheFromSelector(input.cacheName),
+				{
+					pushId: input.pushId,
+					paths: input.paths,
+					...(input.retention !== undefined && { retention: input.retention })
+				},
+				context.services.takeNegotiateHints(context.request)
+			)
+		),
 		status: os.uploads.status.handler(({ input, context }) =>
 			context.services.uploads.uploadStatus(input.id)
 		)

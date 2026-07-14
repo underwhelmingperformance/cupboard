@@ -125,6 +125,40 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
+			name: 'a rule permitting upload:negotiate issues a requested upload:preview detail',
+			permitted: [
+				grant({
+					type: 'cupboard_cache',
+					actions: ['upload:negotiate'],
+					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+				})
+			],
+			requested: {
+				type: 'cupboard_cache',
+				actions: ['upload:preview'],
+				cache: 'pr-123'
+			},
+			claims: {},
+			expected: true
+		},
+		{
+			name: 'a rule permitting only upload:preview does not issue a requested upload:negotiate detail',
+			permitted: [
+				grant({
+					type: 'cupboard_cache',
+					actions: ['upload:preview'],
+					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+				})
+			],
+			requested: {
+				type: 'cupboard_cache',
+				actions: ['upload:negotiate'],
+				cache: 'pr-123'
+			},
+			claims: {},
+			expected: false
+		},
+		{
 			name: 'a same-as-cache root permits the cache as the root',
 			permitted: [prCacheGrant],
 			requested: {

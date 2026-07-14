@@ -5,6 +5,7 @@ import {
 	authorizationDetailSchema,
 	isAuthorizationDetailCovered,
 	isCoveredByToken,
+	isOperationSatisfiedByActions,
 	type Operation,
 	permittedGrantSchema,
 	type ResourceRequest,
@@ -44,6 +45,49 @@ const controlGrant = authorizationDetailSchema.parse({
 });
 
 const wildcard = authorizationDetailSchema.parse({ type: 'cupboard_wildcard' });
+
+describe('isOperationSatisfiedByActions', () => {
+	it.each<[string, Operation[], Operation, boolean]>([
+		[
+			'a negotiate action covers a requested preview',
+			['upload:negotiate'],
+			'upload:preview',
+			true
+		],
+		[
+			'a preview action does not cover a requested negotiate',
+			['upload:preview'],
+			'upload:negotiate',
+			false
+		],
+		[
+			'a preview action covers a requested preview',
+			['upload:preview'],
+			'upload:preview',
+			true
+		],
+		[
+			'a negotiate action covers a requested negotiate',
+			['upload:negotiate'],
+			'upload:negotiate',
+			true
+		],
+		[
+			'an unrelated action set does not cover a requested preview',
+			['upload:commit'],
+			'upload:preview',
+			false
+		],
+		[
+			'a negotiate action does not cover an unrelated requested operation',
+			['upload:negotiate'],
+			'upload:commit',
+			false
+		]
+	])('%s', (_name, actions, operation, expected) => {
+		expect(isOperationSatisfiedByActions(actions, operation)).toBe(expected);
+	});
+});
 
 describe('isCoveredByToken', () => {
 	it.each<[string, AuthorizationDetail[], Operation, ResourceRequest, boolean]>(
@@ -146,6 +190,32 @@ describe('isCoveredByToken', () => {
 				'control-key:rotate',
 				{},
 				true
+			],
+			[
+				'a negotiate grant covers a requested preview on the same cache',
+				[
+					authorizationDetailSchema.parse({
+						type: 'cupboard_cache',
+						actions: ['upload:negotiate'],
+						cache: 'pr-123'
+					})
+				],
+				'upload:preview',
+				{ cache: 'pr-123' },
+				true
+			],
+			[
+				'a preview-only grant does not cover a requested negotiate',
+				[
+					authorizationDetailSchema.parse({
+						type: 'cupboard_cache',
+						actions: ['upload:preview'],
+						cache: 'pr-123'
+					})
+				],
+				'upload:negotiate',
+				{ cache: 'pr-123' },
+				false
 			],
 			[
 				'wildcard covers a cache op',

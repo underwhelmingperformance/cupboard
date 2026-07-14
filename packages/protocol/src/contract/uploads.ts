@@ -6,6 +6,7 @@ import {
 	pushIdSchema,
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
+	uploadPreviewResponseSchema,
 	uploadStatusResponseSchema
 } from '../upload.ts';
 
@@ -50,6 +51,27 @@ export const uploadsContract = {
 			})
 		)
 		.output(uploadNegotiateResponseSchema),
+
+	// The read-only twin of negotiate: classifies a closure exactly as negotiate
+	// would, with the grace facts a report needs, without planning an upload,
+	// healing a stale narinfo, or extending any deadline. It requests the same
+	// body negotiate does (the signed pushId is the existence-oracle protection,
+	// so it stays required even though nothing is staged), and is never a
+	// mutation, so it carries no `maintenance` flag and never wakes the
+	// scheduler.
+	preview: baseProcedure
+		.meta({
+			requires: 'upload:preview',
+			resource: { cache: { field: 'cacheName' } }
+		})
+		.route({ method: 'POST', path: '/cache/{cacheName}/uploads/preview' })
+		.input(
+			z.strictObject({
+				cacheName: cacheSelectorSchema,
+				...uploadNegotiateRequestSchema.shape
+			})
+		)
+		.output(uploadPreviewResponseSchema),
 
 	// A deferred upload's status, polled by the uploadId the client holds; the
 	// id is unique across caches, so the cache is read from the pending row. A

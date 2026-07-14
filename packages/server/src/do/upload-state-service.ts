@@ -204,37 +204,49 @@ export class UploadStateService {
 			.run();
 	}
 
-	// The reusable shared blobs among `narHashes`, keyed by hash. Pure D1: a
-	// `blob_state` row exists exactly while the canonical object does, so its
-	// presence confirms reuse without an R2 head, and a closure of any size costs a
-	// bounded number of D1 queries for a closure of any size. Drift (a row
+	// The reusable shared blobs among `narHashes`, keyed by hash, read but not
+	// claimed. Pure D1: a `blob_state` row exists exactly while the canonical
+	// object does, so its presence confirms reuse without an R2 head, and a
+	// closure of any size costs a bounded number of D1 queries. Drift (a row
 	// outliving a reaped object) is healed off the hot path by the negotiated
 	// reconcile, which probes R2 and removes any narinfo whose NAR is gone.
 	//
 	// Existence-oracle-safe: reuse only hashes this tenant already holds its own
 	// presence edge for, never the global `blob_state`. A tenant that has not
 	// itself uploaded a hash is always told to upload, even when another tenant's
-	// identical verified bytes exist; the promote then dedups at rest. So negotiate
-	// never reveals whether another tenant has a blob.
-	async findReusableBlobs(
+	// identical verified bytes exist; the promote then dedups at rest. So a
+	// caller built on this never reveals whether another tenant has a blob.
+	// {@link findReusableBlobs} is the claiming twin a negotiate commits to.
+	async peekReusableBlobs(
 		narHashes: readonly NixSha256HashString[]
 	): Promise<Map<NixSha256HashString, BlobStateRow>> {
-		const reusable = new Map<NixSha256HashString, BlobStateRow>();
 		const unique = [...new Set(narHashes)];
 
 		if (unique.length === 0) {
-			return reusable;
+			return new Map();
 		}
 
 		const tenant = this.context.requireTenant();
-		const blobStates = await this.ownedBlobStates(tenant, unique);
+
+		return this.ownedBlobStates(tenant, unique);
+	}
+
+	// {@link peekReusableBlobs}'s claiming twin: the same reusable read, but
+	// followed by cancelling any reaper grace timer the returned rows armed,
+	// since a caller reaching this method is about to bind a fresh reference to
+	// each hash it returns. Only a caller that will actually decide those paths
+	// as reuse commits (negotiate) may call this; a caller that only reports
+	// what it would do (preview) must use {@link peekReusableBlobs} instead, so
+	// it never un-arms a timer over bytes nothing has committed to reusing.
+	async findReusableBlobs(
+		narHashes: readonly NixSha256HashString[]
+	): Promise<Map<NixSha256HashString, BlobStateRow>> {
+		const blobStates = await this.peekReusableBlobs(narHashes);
 
 		if (blobStates.size === 0) {
-			return reusable;
+			return blobStates;
 		}
 
-		// Reusing is a fresh reference, so cancel any reaper grace timer the rows
-		// armed before a commit binds a new edge to the hash.
 		const fence = blobStates
 			.values()
 			.filter((state) => state.deleteAfter !== null)
@@ -243,11 +255,7 @@ export class UploadStateService {
 
 		await this.clearReaperTimers(fence);
 
-		for (const [narHash, state] of blobStates) {
-			reusable.set(narHash, state);
-		}
-
-		return reusable;
+		return blobStates;
 	}
 
 	// Promotes verified staging bytes into the shared CAS; see

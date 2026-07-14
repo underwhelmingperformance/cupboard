@@ -193,6 +193,28 @@ export type ParsedUploadNegotiateResponse = z.output<
 	typeof uploadNegotiateResponseSchema
 >;
 
+// A preview decision names the same action negotiate would plan, but carries
+// none of a real decision's upload machinery (no `uploadId`, `r2Key`, or
+// `expiresAt`): it stages nothing, so there is nothing for those fields to
+// address. `grace` is always present, since the procedure is new and carries
+// no legacy shape to preserve.
+export const uploadPreviewDecisionSchema = z.strictObject({
+	action: z.enum(['skip', 'commit', 'upload']),
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema,
+	grace: uploadGraceFactSchema.optional()
+});
+export type ParsedUploadPreviewDecision = z.output<
+	typeof uploadPreviewDecisionSchema
+>;
+
+export const uploadPreviewResponseSchema = z.strictObject({
+	uploads: z.array(uploadPreviewDecisionSchema)
+});
+export type ParsedUploadPreviewResponse = z.output<
+	typeof uploadPreviewResponseSchema
+>;
+
 export const commitResponseSchema = z.strictObject({
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
@@ -425,6 +447,8 @@ export type UploadDecision = z.input<typeof uploadDecisionSchema>;
 export type UploadNegotiateResponse = z.input<
 	typeof uploadNegotiateResponseSchema
 >;
+export type UploadPreviewDecision = z.input<typeof uploadPreviewDecisionSchema>;
+export type UploadPreviewResponse = z.input<typeof uploadPreviewResponseSchema>;
 export type CommitResponse = z.input<typeof commitResponseSchema>;
 export type StatsResponse = z.input<typeof statsResponseSchema>;
 export type UsageResponse = z.input<typeof usageResponseSchema>;
