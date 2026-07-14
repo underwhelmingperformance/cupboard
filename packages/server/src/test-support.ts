@@ -1583,11 +1583,12 @@ export async function pushPathToTenant(
 	tenant: TenantId,
 	token: string,
 	metadata: ParsedUploadPathMetadata,
-	nar?: VerifiableNar
+	nar?: VerifiableNar,
+	cache: string = WIRE_DEFAULT_CACHE
 ): Promise<void> {
 	const negotiated = await tenantWorkerFetch(
 		tenant,
-		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+		`/cache/${cache}/uploads`,
 		token,
 		{
 			method: 'POST',
@@ -1600,15 +1601,21 @@ export async function pushPathToTenant(
 	);
 
 	expect(negotiated.status).toBe(StatusCodes.OK);
-	const decision = expectSingleUploadDecision(
-		uploadNegotiateResponseSchema.parse(await negotiated.json()),
-		metadata
+	const decision = singleDecision(
+		uploadNegotiateResponseSchema.parse(await negotiated.json())
 	);
 
-	await putNarBytes(decision.r2Key, nar);
+	if (decision.action === 'skip') {
+		return;
+	}
+
+	if (decision.action === 'upload') {
+		await putNarBytes(decision.r2Key, nar);
+	}
 
 	const committed = await commitUploadViaWorker(token, decision.uploadId, {
-		tenant
+		tenant,
+		cache
 	});
 
 	expect(committed.status).toBe('committed');
@@ -1963,10 +1970,16 @@ export async function commitUploadRejection(
 export async function commitUploadViaWorker(
 	token: string,
 	uploadId: string,
-	options: { readonly wait?: boolean; readonly tenant?: string } = {}
+	options: {
+		readonly wait?: boolean;
+		readonly tenant?: string;
+		readonly cache?: string;
+	} = {}
 ): Promise<CommitResponse> {
 	const tenant = tenantIdSchema.parse(options.tenant ?? fixtureTenant);
-	const response = await tenantWorkerFetch(tenant, '/commit', token, {
+	const socketPath =
+		options.cache === undefined ? '/commit' : `/cache/${options.cache}/commit`;
+	const response = await tenantWorkerFetch(tenant, socketPath, token, {
 		headers: { upgrade: 'websocket' }
 	});
 

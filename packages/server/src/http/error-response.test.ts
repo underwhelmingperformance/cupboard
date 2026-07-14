@@ -104,11 +104,13 @@ describe('serverErrorHandler', () => {
 			expect({
 				status: response.status,
 				retryAfter: response.headers.get('retry-after'),
+				cacheControl: response.headers.get('cache-control'),
 				body: await response.text(),
 				errorLogged: capture.logs.filter((entry) => entry.level === 'error')
 			}).toStrictEqual({
 				status: 503,
 				retryAfter: '5',
+				cacheControl: 'no-store',
 				body: 'Tenant is temporarily unavailable\n',
 				errorLogged: []
 			});
@@ -148,10 +150,12 @@ describe('serverErrorHandler', () => {
 			expect({
 				status: response.status,
 				retryAfter: response.headers.get('retry-after'),
+				cacheControl: response.headers.get('cache-control'),
 				body: await response.text()
 			}).toStrictEqual({
 				status: 503,
 				retryAfter: '5',
+				cacheControl: 'no-store',
 				body: 'Database is temporarily overloaded\n'
 			});
 		}

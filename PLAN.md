@@ -3806,7 +3806,10 @@ signature without making cache-name ordering choose a key generation.
 - Conflicting candidates emit a structured integrity event, including the view
   and source cache names, and are answered as a cache miss, not an error. Nix
   then builds the path and the ordinary push adopts that result into the
-  destination cache.
+  destination cache. Conflicts are decided against the candidate set the lookup
+  snapshots under the gate: a copy whose first commit lands after that snapshot
+  affects the next lookup (answers are `no-store`), exactly as a commit landing
+  just after the response would.
 
 Conflicts are possible for an input-addressed store path because its name
 identifies the derivation inputs, not the output bytes. A non-reproducible

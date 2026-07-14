@@ -306,13 +306,34 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		);
 	});
 
-	// Every other path under a reuse view is not yet implemented (the narinfo
-	// lookup is a later commit, and a view deliberately adds no second NAR
-	// route), but the subtree is still read-guarded here so an unauthorised
-	// request against a private tenant answers 401 rather than falling through
-	// unguarded to the dispatch fallback below. The 404 is no-store like every
-	// other reuse response, so a shared cache can never pin an answer for a
-	// view whose routes may exist on the next deploy.
+	// A reuse-view narinfo lookup: the Durable Object resolves it against the
+	// view definition and answers `no-store` for hits and misses alike, so
+	// this dispatches directly after the read guard and nothing is edge
+	// cached.
+	app.get(
+		String.raw`/t/:tenant/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
+		async (context) => {
+			const denied = await guardRead(
+				context.req.raw,
+				context.get('tenantEntry')
+			);
+
+			return (
+				denied ??
+				tenantServer(context.env, context.get('tenant')).fetch(
+					innerRequest(context)
+				)
+			);
+		}
+	);
+
+	// Every other path under a reuse view is not implemented (a view
+	// deliberately adds no second NAR route), but the subtree is still
+	// read-guarded here so an unauthorised request against a private tenant
+	// answers 401 rather than falling through unguarded to the dispatch
+	// fallback below. The 404 is no-store like every other reuse response, so
+	// a shared cache can never pin an answer for a view whose routes may exist
+	// on the next deploy.
 	app.get('/t/:tenant/reuse/*', async (context) => {
 		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
 
