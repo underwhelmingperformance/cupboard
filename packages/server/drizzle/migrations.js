@@ -28,6 +28,7 @@ import m0025 from './0025_drop_pending_upload_expected_size.sql';
 import m0026 from './0026_pending_upload_claimed_at.sql';
 import m0027 from './0027_grace_policy.sql';
 import m0028 from './0028_retention_grace.sql';
+import m0029 from './0029_pending_upload_grace_decision.sql';
 
 export default {
 	journal,
@@ -60,6 +61,7 @@ export default {
 		m0025,
 		m0026,
 		m0027,
-		m0028
+		m0028,
+		m0029
 	}
 };

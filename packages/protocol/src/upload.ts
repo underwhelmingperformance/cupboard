@@ -4,6 +4,7 @@ import {
 	nixSha256HashSchema,
 	positiveIntSchema,
 	referencesSchema,
+	rootTtlMaxSeconds,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -102,6 +103,38 @@ export type PushCredential = z.input<typeof pushCredentialSchema>;
 // cap sits well above any real closure, so it rejects only an abusive body, not
 // a legitimate push.
 export const uploadNegotiateMaxPaths = 100_000;
+
+// The retention plan a push resolved before authenticating. Its presence
+// versions the publication that follows it: grace facts appear on negotiate
+// decisions and commit frames only for uploads negotiated with a plan, so a
+// request without one receives exactly the legacy shapes an older client's
+// strict schemas already validate.
+export const uploadRetentionPlanSchema = z.strictObject({
+	kind: z.enum(['root', 'pins', 'none'])
+});
+export type ParsedUploadRetentionPlan = z.output<
+	typeof uploadRetentionPlanSchema
+>;
+export type UploadRetentionPlan = z.input<typeof uploadRetentionPlanSchema>;
+
+// The retention grace fact a plan-carrying negotiation reports per decision:
+// `retainUntil` is the deadline an already-present path was extended to before
+// the decision returned, and `graceSeconds` is the matched policy's grace,
+// either the captured grace a planned upload applies when it materialises or
+// the policy a read-only decision resolved (zero included). Both absent
+// strictly means no grace policy matched.
+export const uploadGraceFactSchema = z
+	.strictObject({
+		retainUntil: z.string().optional(),
+		graceSeconds: z.number().int().min(0).max(rootTtlMaxSeconds).optional()
+	})
+	.refine(
+		(fact) => fact.retainUntil === undefined || fact.graceSeconds === undefined,
+		{
+			message: 'a grace fact carries a deadline or a captured grace, never both'
+		}
+	);
+export type ParsedUploadGraceFact = z.output<typeof uploadGraceFactSchema>;
 
 export const uploadNegotiateRequestSchema = z.strictObject({
 	pushId: pushIdSchema,

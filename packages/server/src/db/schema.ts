@@ -87,7 +87,12 @@ export const pendingUploads = sqliteTable(
 		// consumer run) claims nothing already being worked. Null while unclaimed;
 		// a crashed pass's lease simply expires. A client re-drive resets it so
 		// the pass it requests need not wait the lease out.
-		claimedAt: text('claimed_at')
+		claimedAt: text('claimed_at'),
+		// The retention grace decision captured at negotiation, applied when this
+		// upload materialises. A policy changed afterwards does not alter it. Null
+		// on a row negotiated before the decision existed, which materialises as
+		// though no policy matched.
+		graceDecisionJson: text('grace_decision_json')
 	},
 	// The maintenance reconcile finds the soonest-expiring upload and probes for any
 	// still awaiting verification (an existence check, not a count); without these

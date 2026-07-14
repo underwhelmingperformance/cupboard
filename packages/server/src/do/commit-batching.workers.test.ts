@@ -25,6 +25,7 @@ import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { type ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
 
@@ -49,7 +50,8 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 		new CacheAdminService(context, deletionQueue),
 		new SigningKeysService(context),
 		new UploadStateService(context),
-		narInfoObjects
+		narInfoObjects,
+		new RetentionService(context)
 	);
 }
 
@@ -140,7 +142,8 @@ describe('batched commit settles', () => {
 								metadata,
 								generation,
 								probe,
-								mustOwnBlob: true
+								mustOwnBlob: true,
+								graceDecision: undefined
 							});
 						})
 					);

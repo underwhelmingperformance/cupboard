@@ -217,6 +217,34 @@ describe('migrations', () => {
 		});
 	});
 
+	it('carries a pre-decision pending upload through the grace-decision column', async () => {
+		const decision = await runInDurableObject(
+			testServerFor('migration-grace-decision'),
+			async (_instance, state) => {
+				// A pending upload from before 0029 has no grace-decision column;
+				// the migration must add it as NULL. The anchor is fixed so later
+				// migrations cannot silently retarget the test.
+				await migrateThrough(state, 28);
+				state.storage.sql.exec(
+					"INSERT INTO pending_upload (id, cache, nar_hash, r2_key, metadata_json, created_at, expires_at) VALUES ('u1', '', 'sha256:nar', 'staging/p/u1', '{}', '2026-01-01T00:00:00.000Z', '2026-01-01T00:15:00.000Z')"
+				);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				const rows = state.storage.sql
+					.exec('SELECT id, grace_decision_json FROM pending_upload')
+					.toArray();
+
+				return rows.map((row) => ({
+					id: row.id,
+					hasDecision: row.grace_decision_json !== null
+				}));
+			}
+		);
+
+		expect(decision).toStrictEqual([{ id: 'u1', hasDecision: false }]);
+	});
+
 	it('migrates and round-trips an OIDC trust rule', async () => {
 		const rule = {
 			id: 'r1',

@@ -22,6 +22,10 @@ import { narObjectKey, stagingObjectKey } from '../http/http.ts';
 import { chunk, maxInClauseValues } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
+import {
+	type GraceDecision,
+	serialiseGraceDecision
+} from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import {
 	factsFromHints,
@@ -29,6 +33,7 @@ import {
 	type NegotiateHints
 } from './negotiate-hints.ts';
 import { type ReconcileQueueService } from './reconcile-queue-service.ts';
+import { type RetentionService } from './retention-service.ts';
 import { commitMetadataFromPathAndBlob } from './upload-metadata.ts';
 import { type UploadStateService } from './upload-state-service.ts';
 
@@ -80,7 +85,8 @@ export class UploadsService {
 		private readonly uploadState: UploadStateService,
 		private readonly narInfoObjects: NarInfoObjectsService,
 		private readonly deletionQueue: DeletionQueueService,
-		private readonly reconcileQueue: ReconcileQueueService
+		private readonly reconcileQueue: ReconcileQueueService,
+		private readonly retention: RetentionService
 	) {}
 
 	// The committed narinfo rows for a closure, read in cache-scoped chunks that
@@ -115,7 +121,8 @@ export class UploadsService {
 		cache: string,
 		pushId: string,
 		metadata: ParsedUploadPathNegotiation,
-		existingBlob: ReusableBlob | undefined
+		existingBlob: ReusableBlob | undefined,
+		graceDecision: GraceDecision
 	): UploadDecision {
 		const uploadId = crypto.randomUUID();
 		const now = new Date();
@@ -147,7 +154,8 @@ export class UploadsService {
 				r2Key,
 				metadataJson: JSON.stringify(pendingMetadata),
 				createdAt: now.toISOString(),
-				expiresAt: expiresAt.toISOString()
+				expiresAt: expiresAt.toISOString(),
+				graceDecisionJson: serialiseGraceDecision(graceDecision)
 			})
 			.run();
 
@@ -284,6 +292,17 @@ export class UploadsService {
 					.map((path) => path.narHash)
 			));
 
+		// The grace in force is captured once per negotiation and stored with each
+		// pending upload, so a policy changed before the commit settles cannot
+		// alter what this negotiation promised.
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
+		const graceDecision: GraceDecision = {
+			plan: false,
+			...(resolvedGraceSeconds !== undefined && {
+				graceSeconds: resolvedGraceSeconds
+			})
+		};
+
 		const uploads: UploadDecision[] = [];
 		const armedReuseHashes = new Set<NixSha256HashString>();
 
@@ -317,7 +336,8 @@ export class UploadsService {
 					cache,
 					body.pushId,
 					metadata,
-					reusableByNarHash.get(metadata.narHash)
+					reusableByNarHash.get(metadata.narHash),
+					graceDecision
 				)
 			);
 		}
