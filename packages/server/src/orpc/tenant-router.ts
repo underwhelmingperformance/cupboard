@@ -220,11 +220,7 @@ async function collectGarbage(
 
 	return {
 		ok: true,
-		...(await services.garbageCollection.collectGarbage(
-			logger,
-			cache,
-			purgeOrigin
-		))
+		...(await services.runGarbageCollection(logger, cache, purgeOrigin))
 	};
 }
 
@@ -242,5 +238,5 @@ async function runVerify(
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const batch = Math.min(limit ?? verificationBatchSize, verificationBatchSize);
 
-	return services.verification.verify(logger, purgeOrigin, batch);
+	return services.runVerification(logger, purgeOrigin, batch);
 }
