@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	gracePolicyAddBodySchema,
+	gracePolicyListResponseSchema,
+	gracePolicyRemoveResponseSchema,
 	retentionPolicyAddBodySchema,
 	retentionPolicyListResponseSchema,
 	retentionPolicyRemoveResponseSchema,
@@ -133,6 +136,81 @@ describe('retention policy schemas', () => {
 		expect({
 			list: retentionPolicyListResponseSchema.parse({ policies: [policy] }),
 			remove: retentionPolicyRemoveResponseSchema.parse(remove)
+		}).toStrictEqual({
+			list: { policies: [policy] },
+			remove
+		});
+	});
+});
+
+describe('retention grace policy schemas', () => {
+	it.each([
+		{
+			name: 'a prefix and a positive grace',
+			value: { cachePrefix: 'pr-', graceSeconds: 86_400 },
+			expected: { cachePrefix: 'pr-', graceSeconds: 86_400 }
+		},
+		{
+			name: 'the empty (tenant-wide default) prefix',
+			value: { cachePrefix: '', graceSeconds: 86_400 },
+			expected: { cachePrefix: '', graceSeconds: 86_400 }
+		},
+		{
+			name: 'a zero grace',
+			value: { cachePrefix: 'pr-', graceSeconds: 0 },
+			expected: { cachePrefix: 'pr-', graceSeconds: 0 }
+		}
+	])('accepts add body: $name', ({ value, expected }) => {
+		expect(gracePolicyAddBodySchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
+		{
+			name: 'a negative grace',
+			value: { cachePrefix: 'pr-', graceSeconds: -1 }
+		},
+		{
+			name: 'a grace beyond the root TTL bound',
+			value: { cachePrefix: 'pr-', graceSeconds: 315_360_001 }
+		},
+		{
+			name: 'a fractional grace',
+			value: { cachePrefix: 'pr-', graceSeconds: 1.5 }
+		},
+		{
+			name: 'an unknown field',
+			value: { cachePrefix: 'pr-', graceSeconds: 0, extra: true }
+		},
+		// A prefix no cache name can start with silently matches nothing;
+		// rejecting it at the contract catches the typo at add time.
+		{
+			name: 'an upper-case prefix no cache name can carry',
+			value: { cachePrefix: 'PR-', graceSeconds: 86_400 }
+		},
+		{
+			name: 'a prefix with a leading separator',
+			value: { cachePrefix: '-pr', graceSeconds: 86_400 }
+		},
+		{
+			name: 'a prefix over the cache-name length bound',
+			value: { cachePrefix: 'a'.repeat(64), graceSeconds: 86_400 }
+		}
+	])('rejects add body: $name', ({ value }) => {
+		expect(gracePolicyAddBodySchema.safeParse(value).success).toBe(false);
+	});
+
+	it('accepts the list and remove responses', () => {
+		const policy = {
+			id: 'g1',
+			cachePrefix: 'pr-',
+			graceSeconds: 86_400,
+			createdAt: '2026-01-01T00:00:00.000Z'
+		};
+		const remove = { id: 'g1', removed: true };
+
+		expect({
+			list: gracePolicyListResponseSchema.parse({ policies: [policy] }),
+			remove: gracePolicyRemoveResponseSchema.parse(remove)
 		}).toStrictEqual({
 			list: { policies: [policy] },
 			remove

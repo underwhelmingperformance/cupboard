@@ -119,6 +119,13 @@ export const cacheNameSchema = z
 	.brand('CacheName');
 export type CacheName = z.infer<typeof cacheNameSchema>;
 
+// The characters and first-character restriction cacheNamePattern imposes on
+// a full cache name, without its length bound: a prefix may be shorter than
+// any real name, down to empty (which matches every cache), but every
+// character it does supply must belong to the same alphabet in the same
+// position, or no legal cache name could ever start with it.
+export const cacheNamePrefixPattern = /^([a-z0-9][a-z0-9._-]*)?$/;
+
 // The default cache's name on the wire. Its stored name is the empty string,
 // which cannot appear in a `/cache/{cacheName}/` path, so contract URLs spell
 // it `_default`. The leading underscore fails `cacheNamePattern`, so the alias

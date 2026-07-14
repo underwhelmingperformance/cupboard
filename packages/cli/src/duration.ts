@@ -5,6 +5,7 @@ import {
 
 import {
 	InvalidDurationError,
+	InvalidGraceError,
 	InvalidTtlError,
 	InvalidWaitTimeoutError
 } from './errors.ts';
@@ -40,6 +41,21 @@ export function parseTtl(input: string): number {
 
 	if (seconds < rootTtlMinSeconds || seconds > rootTtlMaxSeconds) {
 		throw new InvalidTtlError(input, rootTtlMinSeconds, rootTtlMaxSeconds);
+	}
+
+	return seconds;
+}
+
+/**
+ * Parses a retention-grace duration, sharing the root TTL's upper bound but
+ * allowing zero: a grace policy may configure a zero grace, unlike a root TTL,
+ * which cannot be zero.
+ */
+export function parseGrace(input: string): number {
+	const seconds = parseDurationSeconds(input);
+
+	if (seconds > rootTtlMaxSeconds) {
+		throw new InvalidGraceError(input, rootTtlMaxSeconds);
 	}
 
 	return seconds;

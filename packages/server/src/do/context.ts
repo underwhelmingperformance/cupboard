@@ -13,7 +13,10 @@ import {
 	claimMatchSchema,
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
-import { type RetentionPolicySummary } from '@cupboard/protocol/retention';
+import {
+	type GracePolicySummary,
+	type RetentionPolicySummary
+} from '@cupboard/protocol/retention';
 import { drizzle as drizzleD1, type DrizzleD1Database } from 'drizzle-orm/d1';
 import {
 	drizzle,
@@ -285,5 +288,16 @@ export function policySummaryFromRow(
 		scope: row.scope,
 		pattern: row.pattern,
 		ttlSeconds: row.defaultTtlSeconds
+	};
+}
+
+export function gracePolicySummaryFromRow(
+	row: typeof schema.retentionGracePolicies.$inferSelect
+): GracePolicySummary {
+	return {
+		id: row.id,
+		cachePrefix: row.cachePrefix,
+		graceSeconds: row.graceSeconds,
+		createdAt: row.createdAt
 	};
 }

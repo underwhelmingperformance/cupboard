@@ -336,4 +336,19 @@ describe('command help', () => {
 	it('notes that most commands need a login', () => {
 		expect(helpFor([])).toContain('cupboard login');
 	});
+
+	it('lists the retention grace subcommands under policy', () => {
+		const help = helpFor(['policy']);
+
+		expect(help).toContain('add-grace');
+		expect(help).toContain('remove-grace');
+	});
+
+	it('shows the cache-prefix and grace options for policy add-grace', () => {
+		const help = helpFor(['policy', 'add-grace']);
+
+		expect(help).toContain('--cache-prefix');
+		expect(help).toContain('--grace');
+		expect(help).toContain('Example:');
+	});
 });
