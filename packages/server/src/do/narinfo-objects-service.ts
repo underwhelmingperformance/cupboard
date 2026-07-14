@@ -24,6 +24,7 @@ import { parseStored } from '../http/parse.ts';
 import {
 	batchNonEmpty,
 	chunk,
+	deleteObjects,
 	mapWithConcurrency,
 	maxInClauseValues,
 	maxOutgoingConnections
@@ -128,9 +129,7 @@ export class NarInfoObjectsService {
 			row === undefined ||
 			!(await this.hasCommittedReference(cache, row))
 		) {
-			await this.context.env.BLOBS.delete(
-				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
-			);
+			await this.deleteNarInfoObject(cache, storePathHash);
 
 			return;
 		}
@@ -177,9 +176,7 @@ export class NarInfoObjectsService {
 			row === undefined ||
 			!(await this.rowStillCommitted(cache, row, committedEdges))
 		) {
-			await this.context.env.BLOBS.delete(
-				narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
-			);
+			await this.deleteNarInfoObject(cache, storePathHash);
 			return;
 		}
 
@@ -257,9 +254,7 @@ export class NarInfoObjectsService {
 			return;
 		}
 
-		await this.context.env.BLOBS.delete(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
-		);
+		await this.deleteNarInfoObject(cache, storePathHash);
 	}
 
 	// Publishes a freshly materialised narinfo's object, keeping the R2 put out
@@ -601,15 +596,58 @@ export class NarInfoObjectsService {
 		storePathHash: StorePathHash,
 		narInfo: NarInfo
 	): Promise<void> {
-		await this.context.env.BLOBS.put(
-			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache),
-			narInfo.render(),
-			{
+		const key = narInfoObjectKey(
+			this.context.requireTenant(),
+			storePathHash,
+			cache
+		);
+
+		await this.context.objectWrites.write([key], () =>
+			this.context.env.BLOBS.put(key, narInfo.render(), {
 				httpMetadata: {
 					contentType: 'text/x-nix-narinfo; charset=utf-8',
 					cacheControl: narInfoCacheControl
 				}
-			}
+			})
+		);
+	}
+
+	// Deletes one path's tenant narinfo object. Every narinfo-object delete
+	// routes through here or the bulk form: the objects are path-keyed and not
+	// healed on read, so the delete must order behind any abandoned mutation of
+	// the same key, or a zombie could destroy an object a later commit wrote.
+	async deleteNarInfoObject(
+		cache: string,
+		storePathHash: StorePathHash
+	): Promise<void> {
+		const key = narInfoObjectKey(
+			this.context.requireTenant(),
+			storePathHash,
+			cache
+		);
+
+		await this.context.objectWrites.write([key], () =>
+			this.context.env.BLOBS.delete(key)
+		);
+	}
+
+	// The bulk form of {@link deleteNarInfoObject}, one ordered R2 delete for a
+	// teardown chunk's paths.
+	async deleteNarInfoObjects(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<void> {
+		if (storePathHashes.length === 0) {
+			return;
+		}
+
+		const tenant = this.context.requireTenant();
+		const keys = storePathHashes.map((storePathHash) =>
+			narInfoObjectKey(tenant, storePathHash, cache)
+		);
+
+		await this.context.objectWrites.write(keys, () =>
+			deleteObjects(this.context.env.BLOBS, keys)
 		);
 	}
 }

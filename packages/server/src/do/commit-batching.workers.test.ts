@@ -40,7 +40,8 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 	const deletionQueue = new DeletionQueueService(
 		context,
 		attestationCas,
-		attestations
+		attestations,
+		narInfoObjects
 	);
 
 	return new CommitPipelineService(

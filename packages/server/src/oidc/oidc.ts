@@ -153,6 +153,10 @@ const oidcDiscoverySchema = z.object({
 	id_token_signing_alg_values_supported: z.array(z.string()).optional()
 });
 
+// Bounds the discovery fetch so a stalled issuer endpoint cannot hang the token
+// exchange. `fetch` honours an `AbortSignal`, so this is a real cancellation.
+const discoveryTimeoutMs = 15_000;
+
 /**
  * Fetches an issuer's OpenID Connect metadata to learn where its keys live and
  * which algorithms it signs with. The issuer URL alone configures a trust rule;
@@ -180,7 +184,8 @@ export async function fetchOidcDiscovery(
 		// substitute document. A 3xx fails the `ok` check below. (The JWKS fetch,
 		// run by jose, is likewise pinned to `redirect: 'manual'`.)
 		const response = await fetcher(issuerUrl.discoveryUrl, {
-			redirect: 'manual'
+			redirect: 'manual',
+			signal: AbortSignal.timeout(discoveryTimeoutMs)
 		});
 
 		if (!response.ok) {

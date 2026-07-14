@@ -24,7 +24,8 @@
 		"./octokit": "./src/octokit.ts",
 		"./retry": "./src/retry.ts",
 		"./sigstore": "./src/sigstore.ts",
-		"./slsa": "./src/slsa.ts"
+		"./slsa": "./src/slsa.ts",
+		"./timeout": "./src/timeout.ts"
 	},
 	"license": "AGPL-3.0-or-later",
 	"private": true,
