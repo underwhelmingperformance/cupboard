@@ -757,6 +757,44 @@ export function flakyD1(inner: D1Database, plan: FlakyD1Plan): D1Database {
 	};
 }
 
+export interface FlakyR2Plan {
+	failures: number;
+	/** The error message to throw; defaults to 'transient R2 fault'. */
+	readonly message?: string;
+	/**
+	 * Runs when a head probe is issued, before any fault is applied: a
+	 * deterministic point for a test to interleave a concurrent mutation with
+	 * the code under test.
+	 */
+	readonly onMatch?: () => void;
+}
+
+/**
+ * An R2 binding whose next `failures` head probes throw, then delegates: the
+ * shape of a transient storage fault under a presence check. Every other
+ * operation passes straight through.
+ */
+export function flakyR2(inner: R2Bucket, plan: FlakyR2Plan): R2Bucket {
+	return {
+		head(key) {
+			plan.onMatch?.();
+
+			if (plan.failures > 0) {
+				plan.failures -= 1;
+				throw new Error(plan.message ?? 'transient R2 fault');
+			}
+
+			return inner.head(key);
+		},
+		get: inner.get.bind(inner),
+		put: inner.put.bind(inner),
+		delete: inner.delete.bind(inner),
+		list: inner.list.bind(inner),
+		createMultipartUpload: inner.createMultipartUpload.bind(inner),
+		resumeMultipartUpload: inner.resumeMultipartUpload.bind(inner)
+	};
+}
+
 // Fetches a bare-host path through the real Worker (the control surface, with no
 // tenant prefix). A per-call env copy lets a test vary the control configuration.
 export async function controlFetch(
