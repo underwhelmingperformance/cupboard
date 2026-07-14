@@ -447,6 +447,15 @@ export class IntermediateRootInvalidError extends UsageError {
 		this.name = 'IntermediateRootInvalidError';
 	}
 }
+
+export class ProbeTimeoutError extends CodedError {
+	constructor(public readonly url: string) {
+		super(
+			`Timed out probing ${url}; the cache did not answer within the probe deadline`
+		);
+		this.name = 'ProbeTimeoutError';
+	}
+}
 export class CacheProbeError extends CodedError {
 	constructor(
 		public readonly storePath: string,

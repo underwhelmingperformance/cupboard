@@ -3,16 +3,19 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import { CacheInfoParseError } from '@cupboard/nix-store/errors';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import { probeDeadlineMs } from '../cache-probe.ts';
 import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
 	InvalidInputError,
+	ProbeTimeoutError,
 	ReuseViewPriorityError
 } from '../errors.ts';
 
 import {
+	fetchCachePublicKeyAt,
 	resolveSetupInputs,
 	resolveSubstituters,
 	type SetupOptions,
@@ -243,6 +246,49 @@ describe('resolveSubstituters', () => {
 		}
 	);
 
+	it('aborts stalled nix-cache-info bodies at the probe deadline', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const signals: AbortSignal[] = [];
+			const fetcher: typeof fetch = (_input, init) => {
+				const signal = init?.signal;
+
+				if (signal === undefined || signal === null) {
+					throw new Error('expected an abort signal');
+				}
+
+				signals.push(signal);
+				const body = new ReadableStream({
+					start(controller) {
+						signal.addEventListener(
+							'abort',
+							() => {
+								controller.error(new Error('response body aborted'));
+							},
+							{ once: true }
+						);
+					}
+				});
+
+				return Promise.resolve(new Response(body));
+			};
+			const pending = resolveSubstituters(
+				{ ...baseOptions, reuseView: 'reuse' },
+				{ fetch: fetcher }
+			);
+			const rejection =
+				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
+
+			await vi.advanceTimersByTimeAsync(30_000);
+			await rejection;
+
+			expect(signals.map(({ aborted }) => aborted)).toStrictEqual([true, true]);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it.each([
 		['destination', 'https://cache.example.test/nix-cache-info'],
 		['view', 'https://cache.example.test/reuse/reuse/nix-cache-info']
@@ -332,6 +378,79 @@ describe('resolveSubstituters', () => {
 	);
 });
 
+describe('fetchCachePublicKeyAt', () => {
+	it('fetches and trims the public key using the cache protocol headers', async () => {
+		let request:
+			| {
+					readonly url: string;
+					readonly headers: Readonly<Record<string, string>>;
+			  }
+			| undefined;
+		const url = 'https://cache.example.test/pubkey';
+		const publicKey = await fetchCachePublicKeyAt(url, (input, init) => {
+			request = {
+				url: requestUrl(input),
+				headers: Object.fromEntries(new Headers(init?.headers))
+			};
+
+			return Promise.resolve(new Response(' cache.example.test:key\n'));
+		});
+
+		expect({ publicKey, request }).toStrictEqual({
+			publicKey: 'cache.example.test:key',
+			request: {
+				url,
+				headers: {
+					accept: 'text/plain',
+					'user-agent': 'cupboard-action'
+				}
+			}
+		});
+	});
+
+	it('keeps the deadline active while reading the public key response body', async () => {
+		vi.useFakeTimers();
+
+		try {
+			let requestedUrl: string | undefined;
+			let receivedSignal: AbortSignal | undefined;
+			const fetcher: typeof fetch = (input, init) => {
+				requestedUrl = requestUrl(input);
+				receivedSignal = init?.signal ?? undefined;
+				const body = new ReadableStream({
+					start(controller) {
+						receivedSignal?.addEventListener(
+							'abort',
+							() => {
+								controller.error(new Error('response body aborted'));
+							},
+							{ once: true }
+						);
+					}
+				});
+
+				return Promise.resolve(new Response(body));
+			};
+			const url = 'https://cache.example.test/pubkey';
+			const pending = fetchCachePublicKeyAt(url, fetcher);
+			const rejection =
+				expect(pending).rejects.toBeInstanceOf(ProbeTimeoutError);
+
+			await vi.advanceTimersByTimeAsync(probeDeadlineMs);
+			await rejection;
+
+			expect({
+				requestedUrl,
+				aborted: receivedSignal?.aborted
+			}).toStrictEqual({
+				requestedUrl: url,
+				aborted: true
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
 describe('resolveSetupInputs reuse view', () => {
 	it('threads reuse-view through', () => {
 		const inputs = resolveSetupInputs(

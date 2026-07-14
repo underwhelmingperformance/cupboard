@@ -12,6 +12,7 @@
 		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
 		"commander": "^15.0.0",
+		"http-status-codes": "^2.3.0",
 		"semver": "^7.8.5",
 		"zod": "^4.4.3"
 	},

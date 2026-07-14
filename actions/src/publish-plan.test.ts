@@ -15,6 +15,7 @@ import {
 import {
 	assertDistinctGroupKeys,
 	availableCachePaths,
+	availableViewPaths,
 	cacheProbePaths,
 	derivationUses,
 	disallowedRunners,
@@ -28,7 +29,8 @@ import {
 	publishTargetSchema,
 	publishTargetsSchema,
 	type RunnerRoute,
-	type TargetEvaluation
+	type TargetEvaluation,
+	viewProbePaths
 } from './publish-plan.ts';
 
 function storePath(value: string): StorePathString {
@@ -43,6 +45,12 @@ const firstPath = storePath(
 );
 const secondPath = storePath(
 	'/nix/store/33333333333333333333333333333333-second'
+);
+const viewOnlyPath = storePath(
+	'/nix/store/44444444444444444444444444444444-viewonly'
+);
+const missingPath = storePath(
+	'/nix/store/55555555555555555555555555555555-missing'
 );
 const sharedOutPath = storePath(
 	'/nix/store/66666666666666666666666666666666-shared-out'
@@ -171,6 +179,116 @@ describe('planPublish', () => {
 				uses: derivationUses(evaluations)
 			}).destinationIntermediates
 		).toStrictEqual([]);
+	});
+
+	it('classifies shared outputs three ways when a view is configured', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			multiSharedEvaluation(first, 'first', firstPath),
+			multiSharedEvaluation(second, 'second', secondPath)
+		];
+
+		// The destination-resident output is also in the view: destination
+		// availability must win, so the confirm set is never view-fed.
+		const plan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths: new Set([sharedPath]),
+			viewAvailablePaths: new Set([sharedPath, viewOnlyPath]),
+			uses: derivationUses(evaluations)
+		});
+
+		expect({
+			plan: serialisePlan(plan),
+			destinationIntermediates: plan.destinationIntermediates
+		}).toStrictEqual({
+			plan: {
+				retained: [],
+				targets: ['first', 'second'],
+				seedGroups: [
+					{
+						key: 'adopt-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+						targets: ['.#first', '.#second'],
+						candidates: [
+							{
+								drvPath: '/nix/store/shared-viewonly.drv',
+								output: 'out',
+								path: viewOnlyPath
+							}
+						]
+					},
+					{
+						key: 'seed-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+						targets: ['.#first', '.#second'],
+						candidates: [
+							{
+								drvPath: '/nix/store/shared-missing.drv',
+								output: 'out',
+								path: missingPath
+							}
+						]
+					}
+				],
+				fallbackGroups: []
+			},
+			destinationIntermediates: [sharedPath]
+		});
+	});
+
+	it('plans the view-only output as an ordinary seed without a view', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			multiSharedEvaluation(first, 'first', firstPath),
+			multiSharedEvaluation(second, 'second', secondPath)
+		];
+		const options = {
+			evaluations,
+			retainedRoots: new Set<string>(),
+			availablePaths: new Set([sharedPath]),
+			uses: derivationUses(evaluations)
+		};
+
+		const withoutView = planPublish(options);
+		const withEmptyView = planPublish({
+			...options,
+			viewAvailablePaths: new Set()
+		});
+
+		// An absent view and an empty view plan identically, and every
+		// non-resident shared output seeds as a build.
+		expect({
+			withoutView: serialisePlan(withoutView),
+			identical: serialisePlan(withEmptyView),
+			destinationIntermediates: withoutView.destinationIntermediates
+		}).toStrictEqual({
+			withoutView: {
+				retained: [],
+				targets: ['first', 'second'],
+				seedGroups: [
+					{
+						key: 'seed-x86_64-linux-ubuntu-latest-remote-e196fc1bd181007f',
+						targets: ['.#first', '.#second'],
+						candidates: [
+							{
+								drvPath: '/nix/store/shared-missing.drv',
+								output: 'out',
+								path: missingPath
+							},
+							{
+								drvPath: '/nix/store/shared-viewonly.drv',
+								output: 'out',
+								path: viewOnlyPath
+							}
+						]
+					}
+				],
+				fallbackGroups: []
+			},
+			identical: serialisePlan(withoutView),
+			destinationIntermediates: [sharedPath]
+		});
 	});
 
 	// The readable key parts are hyphen-joined and may themselves contain
@@ -406,6 +524,21 @@ describe('cacheProbePaths', () => {
 		expect(
 			cacheProbePaths(evaluations, derivationUses(evaluations))
 		).toStrictEqual([firstPath, secondPath, sharedPath]);
+	});
+});
+
+describe('viewProbePaths', () => {
+	it('carries only shared outputs with at least two pending users', () => {
+		const first = target('first');
+		const second = target('second');
+		const evaluations = [
+			evaluation(first, 'first', firstPath, sharedPath),
+			evaluation(second, 'second', secondPath, sharedPath)
+		];
+
+		expect(viewProbePaths(derivationUses(evaluations))).toStrictEqual([
+			sharedPath
+		]);
 	});
 });
 
@@ -1155,6 +1288,40 @@ describe('availableCachePaths', () => {
 		]);
 	});
 
+	it('probes a reuse view beneath the tenant base', async () => {
+		const requests: string[] = [];
+		const available = await availableViewPaths({
+			baseUrl: 'https://cupboard.example/t/acme',
+			view: 'reuse',
+			paths: [firstPath, secondPath],
+			fetcher: (input) => {
+				const url =
+					typeof input === 'string'
+						? input
+						: input instanceof URL
+							? input.href
+							: input.url;
+				requests.push(url);
+
+				return Promise.resolve(
+					new Response(undefined, {
+						status: url.includes('22222222222222222222222222222222') ? 200 : 404
+					})
+				);
+			}
+		});
+
+		expect({ available: available.values().toArray(), requests }).toStrictEqual(
+			{
+				available: [firstPath],
+				requests: [
+					'https://cupboard.example/t/acme/reuse/reuse/22222222222222222222222222222222.narinfo',
+					'https://cupboard.example/t/acme/reuse/reuse/33333333333333333333333333333333.narinfo'
+				]
+			}
+		);
+	});
+
 	it('trims a padded cache name, matching the URL the substituter would use', async () => {
 		const requests: string[] = [];
 
@@ -1219,6 +1386,48 @@ function evaluation(
 				{
 					drvPath: `/nix/store/${name}.drv`,
 					inputs: new Map([['/nix/store/shared.drv', ['out']]]),
+					outputs: [{ name: 'out', path }]
+				}
+			]
+		])
+	};
+}
+
+// An evaluation whose target depends on three shared outputs, so one plan can
+// hold a destination-resident, a view-only, and a missing intermediate at
+// once.
+function multiSharedEvaluation(
+	target_: PublishTarget,
+	name: string,
+	path: StorePathString
+): TargetEvaluation {
+	const shared: readonly [string, StorePathString][] = [
+		['/nix/store/shared-resident.drv', sharedPath],
+		['/nix/store/shared-viewonly.drv', viewOnlyPath],
+		['/nix/store/shared-missing.drv', missingPath]
+	];
+
+	return {
+		target: target_,
+		rootDrvPath: `/nix/store/${name}.drv`,
+		targetPaths: [path],
+		nodes: new Map([
+			...shared.map(
+				([drvPath, outputPath]) =>
+					[
+						drvPath,
+						{
+							drvPath,
+							inputs: new Map<string, string[]>(),
+							outputs: [{ name: 'out', path: outputPath }]
+						}
+					] as const
+			),
+			[
+				`/nix/store/${name}.drv`,
+				{
+					drvPath: `/nix/store/${name}.drv`,
+					inputs: new Map(shared.map(([drvPath]) => [drvPath, ['out']])),
 					outputs: [{ name: 'out', path }]
 				}
 			]

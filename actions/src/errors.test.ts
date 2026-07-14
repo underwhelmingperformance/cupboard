@@ -30,6 +30,7 @@ import {
 	MissingChecksumError,
 	MissingInputError,
 	NoReleaseFoundError,
+	ProbeTimeoutError,
 	PublishPlanInvariantError,
 	PublishTargetsJsonError,
 	PublishTargetsSchemaError,
@@ -212,6 +213,11 @@ describe('action errors', () => {
 			'ReuseViewPriorityError',
 			new ReuseViewPriorityError(40, 40),
 			usageExitCode
+		],
+		[
+			'ProbeTimeoutError',
+			new ProbeTimeoutError('https://cache.example.test/x.narinfo'),
+			genericExitCode
 		],
 		[
 			'CacheProbeError',

@@ -119,6 +119,9 @@ importers:
       commander:
         specifier: ^15.0.0
         version: 15.0.0
+      http-status-codes:
+        specifier: ^2.3.0
+        version: 2.3.0
       semver:
         specifier: ^7.8.5
         version: 7.8.5

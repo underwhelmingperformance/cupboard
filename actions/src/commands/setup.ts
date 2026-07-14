@@ -13,6 +13,7 @@ import { basicAuthHeader } from '@cupboard/shared/http';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
+import { fetchWithProbeDeadline } from '../cache-probe.ts';
 import {
 	CacheInfoFetchError,
 	CacheInfoInvalidError,
@@ -249,19 +250,25 @@ async function fetchCacheInfoPriority(
 	side: 'destination' | 'view',
 	headers: Readonly<Record<string, string>> | undefined
 ): Promise<number> {
-	const response = await fetcher(`${url.replace(/\/+$/u, '')}/nix-cache-info`, {
-		...(headers !== undefined && { headers })
-	});
+	const target = `${url.replace(/\/+$/u, '')}/nix-cache-info`;
+	// Bounded per request, retries included: a stalled connection must fail
+	// promptly, not sit on undici's defaults.
+	return fetchWithProbeDeadline(
+		fetcher,
+		target,
+		{ ...(headers !== undefined && { headers }) },
+		async (response) => {
+			if (!response.ok) {
+				throw new CacheInfoFetchError(side, url, response.status);
+			}
 
-	if (!response.ok) {
-		throw new CacheInfoFetchError(side, url, response.status);
-	}
-
-	try {
-		return CacheInfo.parse(await response.text()).priority;
-	} catch (error) {
-		throw new CacheInfoInvalidError(side, url, { cause: error });
-	}
+			try {
+				return CacheInfo.parse(await response.text()).priority;
+			} catch (error) {
+				throw new CacheInfoInvalidError(side, url, { cause: error });
+			}
+		}
+	);
 }
 
 export interface ResolveSubstitutersOptions {
@@ -378,26 +385,39 @@ async function fetchTrustedPublicKey(
 	reporter: Reporter
 ): Promise<string> {
 	const url = cachePublicKeyUrl(inputs.cacheUrl);
-	const response = await retryingFetcher(fetch)(url, {
-		headers: cachePublicKeyRequestHeaders()
-	});
-
-	if (!response.ok) {
-		throw new CachePublicKeyRequestFailedError(url, response.status);
-	}
-
-	const publicKey = await response.text();
-	const trimmedPublicKey = publicKey.trim();
-
-	if (trimmedPublicKey === '') {
-		throw new CachePublicKeyEmptyResponseError(url);
-	}
+	const trimmedPublicKey = await fetchCachePublicKeyAt(url);
 
 	reporter.warn(
 		'No trusted-public-key was supplied; trusting the cache signing key from /pubkey for this run.'
 	);
 
 	return trimmedPublicKey;
+}
+
+/** Fetch and validate the signing key returned by a cache's public-key endpoint. */
+export async function fetchCachePublicKeyAt(
+	url: string,
+	fetcher: typeof fetch = fetch
+): Promise<string> {
+	return fetchWithProbeDeadline(
+		retryingFetcher(fetcher),
+		url,
+		{ headers: cachePublicKeyRequestHeaders() },
+		async (response) => {
+			if (!response.ok) {
+				throw new CachePublicKeyRequestFailedError(url, response.status);
+			}
+
+			const responseBody = await response.text();
+			const publicKey = responseBody.trim();
+
+			if (publicKey === '') {
+				throw new CachePublicKeyEmptyResponseError(url);
+			}
+
+			return publicKey;
+		}
+	);
 }
 
 export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
