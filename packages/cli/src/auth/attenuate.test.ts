@@ -50,6 +50,22 @@ describe('pushAuthorizationDetails', () => {
 
 		expect(grant).toMatchObject({ cache: '_default' });
 	});
+
+	// `--no-retain` carries no `root` on the grant intent, the same shape as a
+	// push that simply never names one: no separate "unretained" signal exists at
+	// this layer, since the CLI never requests root:set unless it names a root.
+	it('requests no root:set detail for an unretained (--no-retain) push', () => {
+		const [grant] = pushAuthorizationDetails({
+			cacheSelector: 'pr-1',
+			attest: false
+		});
+
+		expect(grant).toStrictEqual({
+			type: 'cupboard_cache',
+			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+			cache: 'pr-1'
+		});
+	});
 });
 
 describe('rootEnsureAuthorizationDetails', () => {

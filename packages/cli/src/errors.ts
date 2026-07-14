@@ -404,3 +404,24 @@ export class AttestationsDisabledError extends CliUsageError {
 		this.name = 'AttestationsDisabledError';
 	}
 }
+
+export class NoRetainConflictError extends CliUsageError {
+	constructor(public readonly flag: '--root' | '--ttl') {
+		super(`--no-retain cannot be combined with ${flag}`);
+		this.name = 'NoRetainConflictError';
+	}
+}
+
+export class OidcRetentionChoiceRequiredError extends CliUsageError {
+	constructor() {
+		super(
+			'A GitHub OIDC push must choose its retention. --root <name> keeps ' +
+				'the pushed paths under a named root this run owns: the choice for a ' +
+				"build's own outputs. --no-retain publishes them unretained, kept " +
+				"only by the destination cache's retention grace policy: the choice " +
+				'for grace-mode intermediates that later jobs substitute and root ' +
+				'themselves.'
+		);
+		this.name = 'OidcRetentionChoiceRequiredError';
+	}
+}

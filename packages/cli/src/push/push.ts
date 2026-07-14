@@ -63,6 +63,11 @@ export interface PushDependencies {
 	readonly client: PushClient;
 	readonly root?: string;
 	readonly ttlSeconds?: number;
+	// Whether this push retains what it publishes at all. Absent (or true) keeps
+	// today's behaviour: a named root with `root`, or an implicit pin per path
+	// otherwise. `false` is `--no-retain`: no root RPCs at all, so a path is kept
+	// only by whatever retention grace policy the cache has configured.
+	readonly retain?: boolean;
 	// `push` waits by default for deferred uploads to become servable before it
 	// records retention, since root activation only admits servable targets.
 	// `--no-wait` returns with the deferred uploads still pending.
@@ -152,7 +157,8 @@ export async function runPush(
 	const retention = planRetention(
 		paths,
 		dependencies.root,
-		dependencies.ttlSeconds
+		dependencies.ttlSeconds,
+		dependencies.retain ?? true
 	);
 	const nix = dependencies.nix ?? Nix.open();
 	const createNarArchive =
@@ -437,11 +443,8 @@ async function runPushFlow(
 
 		const retentionRows = isIncomplete
 			? []
-			: await reporter.phase(
-					retention.kind === 'pins'
-						? 'Pinning pushed paths'
-						: 'Updating retention root',
-					(ctx) => recordRetention(retention, client, ctx)
+			: await reporter.phase(retentionPhaseLabel(retention), (ctx) =>
+					recordRetention(retention, client, ctx)
 				);
 
 		// Retention is durable now, so the wait only reports the verdicts: it fails
@@ -588,6 +591,10 @@ function reportDryRun(
 }
 
 function retentionPlanRows(retention: RetentionPlan): ResultRow[] {
+	if (retention.kind === 'none') {
+		return [{ label: 'Retention', value: noRetainLabel }];
+	}
+
 	if (retention.kind === 'root') {
 		return [
 			{ label: 'Would set root', value: retention.name },
@@ -831,19 +838,29 @@ interface RootRequest {
 	readonly body: RootSetBody;
 }
 
+// The wording a push reports for `--no-retain`. The CLI cannot see whether the
+// cache has a matching retention grace policy, so it makes no claim about one.
+const noRetainLabel = 'none (--no-retain)';
+
 type RetentionPlan =
 	| {
 			readonly kind: 'root';
 			readonly name: string;
 			readonly request: RootRequest;
 	  }
-	| { readonly kind: 'pins'; readonly requests: readonly RootRequest[] };
+	| { readonly kind: 'pins'; readonly requests: readonly RootRequest[] }
+	| { readonly kind: 'none' };
 
 function planRetention(
 	paths: readonly string[],
 	root: string | undefined,
-	ttlSeconds: number | undefined
+	ttlSeconds: number | undefined,
+	shouldRetain: boolean
 ): RetentionPlan {
+	if (!shouldRetain) {
+		return { kind: 'none' };
+	}
+
 	const ttlFields = ttlSeconds === undefined ? {} : { ttlSeconds };
 
 	if (root !== undefined) {
@@ -863,11 +880,33 @@ function planRetention(
 	};
 }
 
+function retentionPhaseLabel(retention: RetentionPlan): string {
+	switch (retention.kind) {
+		case 'root': {
+			return 'Updating retention root';
+		}
+
+		case 'pins': {
+			return 'Pinning pushed paths';
+		}
+
+		case 'none': {
+			return 'Recording retention';
+		}
+	}
+}
+
 async function recordRetention(
 	retention: RetentionPlan,
 	client: PushClient,
 	ctx: PhaseContext
 ): Promise<readonly ResultRow[]> {
+	if (retention.kind === 'none') {
+		ctx.fact('retention', noRetainLabel);
+
+		return [{ label: 'Retention', value: noRetainLabel }];
+	}
+
 	if (retention.kind === 'root') {
 		const { name, body } = retention.request;
 		const summary = await client.setRoot(name, body);
