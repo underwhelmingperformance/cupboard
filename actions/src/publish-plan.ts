@@ -28,7 +28,7 @@ import { isNixPositionalArgument } from './options.ts';
 import { cacheUrlFor } from './substituters.ts';
 
 const execFileAsync = promisify(execFile);
-const maximumConcurrentCacheProbes = 32;
+export const maximumConcurrentCacheProbes = 32;
 
 export type NixEvaluator = (
 	arguments_: readonly string[]
