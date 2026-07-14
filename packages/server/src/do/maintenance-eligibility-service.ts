@@ -84,6 +84,17 @@ export class MaintenanceEligibilityService {
 		);
 	}
 
+	private earliestGraceExpiry(): string | undefined {
+		return (
+			this.context.db
+				.select({ retainUntil: schema.retentionGrace.retainUntil })
+				.from(schema.retentionGrace)
+				.orderBy(asc(schema.retentionGrace.retainUntil))
+				.limit(1)
+				.get()?.retainUntil ?? undefined
+		);
+	}
+
 	private earliestAuthKeyRetirement(): string | undefined {
 		return (
 			this.context.db
@@ -102,11 +113,13 @@ export class MaintenanceEligibilityService {
 	}
 
 	// The soonest deferred deadline once there is nothing due now: an upload or
-	// attestation expiry, a retention-root TTL, or an auth-key retirement.
+	// attestation expiry, a retention-root TTL, a retention-grace deadline, or an
+	// auth-key retirement.
 	private earliestFutureWake(): string | undefined {
 		return [
 			this.earliestUploadExpiry(),
 			this.earliestRootExpiry(),
+			this.earliestGraceExpiry(),
 			this.earliestAuthKeyRetirement()
 		]
 			.filter((value) => value !== undefined)

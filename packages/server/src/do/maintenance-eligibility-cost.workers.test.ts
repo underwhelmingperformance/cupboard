@@ -76,17 +76,18 @@ describe('upload negotiation cost', () => {
 		// The read is the same handful of rows whatever the backlog: assert the exact
 		// figure, so a constant baseline regression cannot hide behind an inequality.
 		expect({ emptyBacklogCost, largeBacklogCost }).toStrictEqual({
-			emptyBacklogCost: 12,
-			largeBacklogCost: 12
+			emptyBacklogCost: 13,
+			largeBacklogCost: 13
 		});
 	});
 
-	// The reconcile reaches the soonest-expiring upload, attestation, root and key
-	// retirement through the sweep indexes, and decides "due now" by existence rather
-	// than a count, so its read count is the same handful whatever the backlog. This
-	// is what makes the synchronous per-mutation reconcile affordable and what these
-	// indexes buy: drop any index those lookups ride and the matching scan becomes a
-	// full table scan, so the large-backlog figure climbs and the assertion fails.
+	// The reconcile reaches the soonest-expiring upload, attestation, root, grace
+	// deadline and key retirement through the sweep indexes, and decides "due now" by
+	// existence rather than a count, so its read count is the same handful whatever the
+	// backlog. This is what makes the synchronous per-mutation reconcile affordable and
+	// what these indexes buy: drop any index those lookups use and the matching scan
+	// becomes a full table scan, so the large-backlog figure climbs and the assertion
+	// fails.
 	it('reconciles without scanning the maintenance backlogs', async () => {
 		await initialise();
 
@@ -97,8 +98,8 @@ describe('upload negotiation cost', () => {
 		const largeBacklogCost = await reconcileCost();
 
 		expect({ smallBacklogCost, largeBacklogCost }).toStrictEqual({
-			smallBacklogCost: 8,
-			largeBacklogCost: 8
+			smallBacklogCost: 9,
+			largeBacklogCost: 9
 		});
 	});
 
@@ -233,8 +234,8 @@ describe('maintenance sweep cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 15,
-			largeBacklogCost: 15
+			smallBacklogCost: 16,
+			largeBacklogCost: 16
 		});
 	});
 });
@@ -321,9 +322,37 @@ async function seedPendingUploads(
 	});
 }
 
+// The Nix base32 alphabet (no e, o, t or u), for fabricating distinct
+// syntactically valid store-path hashes when a test seeds grace deadlines in
+// volume: `retention_grace`'s primary key is `(cache, store_path_hash)`, so
+// each seeded row needs its own hash. The counter is closed over rather than
+// module-level, so it advances across every call in this file and two backlogs
+// seeded into the same Durable Object (a small one followed by a large one)
+// never collide.
+const storePathHashAlphabet = '0123456789abcdfghijklmnpqrsvwxyz';
+
+const syntheticStorePathHash = (() => {
+	let counter = 0;
+
+	return () => {
+		let remaining = counter;
+		let suffix = '';
+
+		counter += 1;
+
+		for (let position = 0; position < 8; position += 1) {
+			suffix = storePathHashAlphabet.charAt(remaining % 32) + suffix;
+			remaining = Math.floor(remaining / 32);
+		}
+
+		return storePathHashSchema.parse(`${'0'.repeat(24)}${suffix}`);
+	};
+})();
+
 // Seeds a backlog in every table the reconcile reaches by index: the pending
-// uploads, plus the pending attestations, retention roots and retirable auth keys
-// whose soonest-expiry lookups ride the other sweep indexes.
+// uploads, plus the pending attestations, retention roots, retention grace
+// deadlines and retirable auth keys whose soonest-expiry lookups use the other
+// sweep indexes.
 async function seedReconcileBacklog(
 	count: number,
 	label: string
@@ -353,6 +382,14 @@ async function seedReconcileBacklog(
 					expiresAt: '2026-01-02T00:00:00.000Z',
 					createdAt: '2026-01-01T00:00:00.000Z',
 					updatedAt: '2026-01-01T00:00:00.000Z'
+				})
+				.run();
+			instance.context.db
+				.insert(schema.retentionGrace)
+				.values({
+					cache: '',
+					storePathHash: syntheticStorePathHash(),
+					retainUntil: '2026-01-02T00:00:00.000Z'
 				})
 				.run();
 			instance.context.db
