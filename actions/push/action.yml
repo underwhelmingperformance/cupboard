@@ -47,6 +47,12 @@ inputs:
   ttl:
     description: Retention TTL such as 7d or 12h.
     required: false
+  no-retain:
+    description:
+      Publish without any retention root or pin; kept only by the cache's
+      retention grace policy, if one matches. Conflicts with root and ttl.
+    required: false
+    default: 'false'
   wait:
     description: Wait for deferred blobs to become servable.
     required: false
@@ -58,6 +64,12 @@ inputs:
   attestations:
     description: Newline-delimited local Sigstore DSSE bundle paths to attach.
     required: false
+  require-grace:
+    description:
+      Fail unless every pushed path reports a positive retention grace deadline.
+      Requires wait to stay enabled.
+    required: false
+    default: 'false'
 outputs:
   cupboard-path:
     description: Path to the installed cupboard binary.
@@ -122,9 +134,16 @@ runs:
         AUDIENCE: ${{ inputs.audience }}
         ROOT: ${{ inputs.root }}
         TTL: ${{ inputs.ttl }}
+        # The program's option is `--retain`; only the two valid literals
+        # invert here, so any other value reaches the strict boolean parse
+        # unchanged and is refused there.
+        RETAIN:
+          ${{ inputs.no-retain == 'true' && 'false' || inputs.no-retain ==
+          'false' && 'true' || inputs.no-retain }}
         WAIT: ${{ inputs.wait }}
         WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
         ATTESTATIONS: ${{ inputs.attestations }}
+        REQUIRE_GRACE: ${{ inputs.require-grace }}
       run: |
         args=(push
           --url "$URL"
@@ -139,6 +158,8 @@ runs:
           --audience "$AUDIENCE"
           --root "$ROOT"
           --ttl "$TTL"
+          --retain "$RETAIN"
+          --require-grace "$REQUIRE_GRACE"
           --wait "$WAIT"
           --wait-timeout "$WAIT_TIMEOUT"
           --attestations "$ATTESTATIONS")
