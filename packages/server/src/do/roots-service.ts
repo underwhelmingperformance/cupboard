@@ -64,6 +64,15 @@ export class RootsService {
 
 		this.cacheAdmin.loadOrCreateCache(cache);
 
+		// The targets the replacement releases receive a grace deadline, so they
+		// are read before the wholesale delete below discards them.
+		const requested = new Set<string>(
+			request.targets.map((target) => target.storePathHash)
+		);
+		const released = this.rootTargetRows(cache, request.name)
+			.map((target) => target.storePathHash)
+			.filter((storePathHash) => !requested.has(storePathHash));
+
 		// Replace the root wholesale: a re-set fully declares the channel, so the
 		// old row and target set are dropped and rewritten. The createdAt of an
 		// existing channel is preserved; an absent expiry stores SQL NULL via the
@@ -118,6 +127,11 @@ export class RootsService {
 					}))
 				)
 				.run();
+
+			// Applied inside the same transaction as the delete above: a crash
+			// between the two could otherwise release these targets from the old
+			// root's retention with no deadline ever established.
+			this.retention.applyGraceTransition(cache, released, nowIso, tx);
 
 			return created;
 		});
@@ -454,6 +468,11 @@ export class RootsService {
 	}
 
 	removeRoot(cache: string, name: RootName): RootRemoveResponse {
+		const released = this.rootTargetRows(cache, name).map(
+			(target) => target.storePathHash
+		);
+		const nowIso = new Date().toISOString();
+
 		return this.context.db.transaction((tx) => {
 			const existing = tx
 				.select()
@@ -482,6 +501,11 @@ export class RootsService {
 					)
 				)
 				.run();
+
+			// Applied inside the same transaction as the delete above: a crash
+			// between the two could otherwise release these targets with no
+			// deadline ever established.
+			this.retention.applyGraceTransition(cache, released, nowIso, tx);
 
 			return { name, removed: existing !== undefined };
 		});

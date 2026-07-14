@@ -17,6 +17,7 @@ import {
 	type ServerContext
 } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
+import { type RetentionService } from './retention-service.ts';
 import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 
 // One sweep deletes at most this many committed paths before returning, so a
@@ -45,7 +46,8 @@ const maxOrphanReclaim = 1000;
 export class GarbageCollectionService {
 	constructor(
 		private readonly context: ServerContext,
-		private readonly deletionQueue: DeletionQueueService
+		private readonly deletionQueue: DeletionQueueService,
+		private readonly retention: RetentionService
 	) {}
 
 	private collectUnreachable(
@@ -59,7 +61,10 @@ export class GarbageCollectionService {
 		// Expire TTL'd roots first, regardless of whether a sweep follows, so an
 		// expiring channel always lapses. A NULL expiry (permanent) never matches.
 		const expiredRoots = this.context.db
-			.select({ name: schema.retentionRoots.name })
+			.select({
+				name: schema.retentionRoots.name,
+				expiresAt: schema.retentionRoots.expiresAt
+			})
 			.from(schema.retentionRoots)
 			.where(
 				and(
@@ -68,6 +73,33 @@ export class GarbageCollectionService {
 				)
 			)
 			.all();
+
+		// Each expiring root's targets receive a grace deadline before the root is
+		// removed, anchored to the root's nominal expiry rather than this sweep's
+		// time, so a late sweep cannot extend retention. The `lte` filter above
+		// cannot match a NULL expiry, so the narrowing here never drops a root.
+		const expiredRootTargets = expiredRoots.flatMap((root) =>
+			root.expiresAt === null
+				? []
+				: [
+						{
+							expiresAt: root.expiresAt,
+							targets: this.context.db
+								.select({
+									storePathHash: schema.retentionRootTargets.storePathHash
+								})
+								.from(schema.retentionRootTargets)
+								.where(
+									and(
+										eq(schema.retentionRootTargets.cache, cache),
+										eq(schema.retentionRootTargets.rootName, root.name)
+									)
+								)
+								.all()
+								.map((target) => target.storePathHash)
+						}
+					]
+		);
 
 		this.context.db.transaction((tx) => {
 			for (const root of expiredRoots) {
@@ -89,11 +121,25 @@ export class GarbageCollectionService {
 					)
 				)
 				.run();
+
+			// Applied inside the same transaction as the deletes above: a crash
+			// between the two could otherwise expire these roots with no deadline
+			// ever established for the targets they released.
+			for (const expired of expiredRootTargets) {
+				this.retention.applyGraceTransition(
+					cache,
+					expired.targets,
+					expired.expiresAt,
+					tx
+				);
+			}
 		});
 
 		// An expired grace deadline lapses before reachability is computed, so its
 		// expiry is a retention event exactly like an expiring root: the sweep that
-		// follows may collect what the deadline kept.
+		// follows may collect what the deadline kept. A deadline granted just above
+		// whose nominal window has already passed is reclaimed here in the same
+		// sweep.
 		this.context.db
 			.delete(schema.retentionGrace)
 			.where(
