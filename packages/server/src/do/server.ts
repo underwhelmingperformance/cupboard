@@ -27,7 +27,7 @@ import {
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
 import { eq, or } from 'drizzle-orm';
-import { Hono } from 'hono';
+import { type Context, Hono } from 'hono';
 import { createMiddleware } from 'hono/factory';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
@@ -47,7 +47,11 @@ import {
 } from '../errors.ts';
 import { hasAcceptedCapability } from '../http/capabilities.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
-import { textResponse, verificationBatchSize } from '../http/http.ts';
+import {
+	parseNarInfoName,
+	textResponse,
+	verificationBatchSize
+} from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
 import {
 	loggerMiddleware,
@@ -117,6 +121,7 @@ import { OidcTrustService } from './oidc-trust-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { ReuseViewAdminService } from './reuse-view-admin-service.ts';
+import { ReuseViewLookupService } from './reuse-view-lookup-service.ts';
 import { RootsService } from './roots-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { StatsService } from './stats-service.ts';
@@ -247,6 +252,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private readonly oidcTrust: OidcTrustService;
 	private readonly retention: RetentionService;
 	private readonly reuseViews: ReuseViewAdminService;
+	private readonly reuseLookup: ReuseViewLookupService;
 	private readonly integrityCheck: IntegrityCheckService;
 	private readonly cacheAdmin: CacheAdminService;
 	private readonly garbageCollection: GarbageCollectionService;
@@ -285,6 +291,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.oidcTrust = new OidcTrustService(this.context, this.tenantIdentity);
 		this.retention = new RetentionService(this.context);
 		this.reuseViews = new ReuseViewAdminService(this.context);
+		this.reuseLookup = new ReuseViewLookupService(this.context);
 		this.integrityCheck = new IntegrityCheckService(this.context);
 		this.cacheAdmin = new CacheAdminService(this.context, this.deletionQueue);
 		this.garbageCollection = new GarbageCollectionService(
@@ -450,6 +457,33 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
+		// Every answer under /reuse is no-store, the faults included: corrupt
+		// stored rows and shared-fact failures surface as thrown errors here,
+		// and a cached error would outlive its repair exactly as a cached miss
+		// would outlive the next commit. The handlers set the header on their
+		// own responses; this renders the thrown ones through the same mapping
+		// as the app's error handler and stamps whatever leaves the route.
+		const renderError: (
+			error: Error,
+			context: Context<TenantHonoEnv>
+		) => Response | Promise<Response> = serverErrorHandler;
+
+		this.app.use(
+			'/reuse/*',
+			createMiddleware<TenantHonoEnv>(async (context, next) => {
+				try {
+					await next();
+				} catch (error) {
+					context.res = await renderError(
+						error instanceof Error ? error : new Error(String(error)),
+						context
+					);
+				}
+
+				context.res.headers.set('cache-control', 'no-store');
+			})
+		);
+
 		// A reuse view's nix-cache-info is rendered from its own stored priority.
 		// Every response is no-store, the misses included: a cached 404 for an
 		// unknown or unparseable view name would keep answering after the view
@@ -472,6 +506,38 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				'cache-control': 'no-store'
 			});
 		});
+
+		// A reuse-view narinfo lookup: the one read that enters the gate, because
+		// it needs the definition-revision fence and the stored row fields. Both
+		// the hit and the miss are `no-store`: the answer changes when the view
+		// definition changes, a source cache commits a conflicting candidate, or
+		// a candidate is collected, and no purge key covers any of that.
+		this.app.get(
+			String.raw`/reuse/:view/:name{[0-9a-z]+\.narinfo}`,
+			async (context) => {
+				const view = reuseViewNameSchema.safeParse(context.req.param('view'));
+				const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
+
+				if (!view.success || storePathHash === undefined) {
+					return reuseNotFound();
+				}
+
+				const narInfo = await this.reuseLookup.lookup(
+					context.get('logger'),
+					view.data,
+					storePathHash
+				);
+
+				if (narInfo === undefined) {
+					return reuseNotFound();
+				}
+
+				return textResponse(context.req.raw, narInfo.render(), {
+					'content-type': 'text/x-nix-narinfo; charset=utf-8',
+					'cache-control': 'no-store'
+				});
+			}
+		);
 
 		// The OAuth 2.0 token-exchange endpoint and the auth key set that verifies
 		// the tokens it issues. `/token` is unauthenticated: the subject token is

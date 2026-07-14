@@ -35,10 +35,16 @@ function errorResponse(error: unknown): Response | undefined {
 }
 
 function serverHttpErrorResponse(error: ServerHttpError): Response {
+	// A retryable refusal must never be cached, on any route: a reader that
+	// stored this response would keep retrying against a cache instead of the
+	// origin, well past whatever made it transient.
 	const headers =
 		error.retryAfterSeconds === undefined
 			? undefined
-			: { 'retry-after': String(error.retryAfterSeconds) };
+			: {
+					'retry-after': String(error.retryAfterSeconds),
+					'cache-control': 'no-store'
+				};
 
 	return new Response(`${error.message}\n`, {
 		status: error.status,
