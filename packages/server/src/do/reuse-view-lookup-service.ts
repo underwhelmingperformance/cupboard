@@ -191,36 +191,36 @@ export class ReuseViewLookupService {
 		snapshot: GateSnapshot
 	): Promise<VerifiedCandidates> {
 		const { tenant, candidates } = snapshot;
+		const [first] = candidates;
+
+		if (first === undefined) {
+			return { candidates: [], blobs: new Map() };
+		}
+
+		const storePathHash = first.storePathHash;
 		const uniqueHashes = [
 			...new Set(candidates.map((candidate) => candidate.narHash))
 		];
-		const [edgeResults, states, owned] = await this.sharedFacts(async () => {
-			const storePathHash = candidates[0]?.storePathHash;
-
-			if (storePathHash === undefined) {
-				throw new RangeError('verifyOffGate needs at least one candidate');
-			}
-
-			// One point query per candidate, its exact `blob_ref` primary key
-			// (tenant, cache, store_path_hash, generation), rather than an IN-list
-			// over the candidate caches: a stale-generation edge a deletion backlog
-			// has not yet drained shares that IN-list's (tenant, cache) prefix, so
-			// only the exact generation keeps this bounded by the candidate count.
-			const edgeQueries = candidates.map((candidate) =>
-				this.context.d1
-					.select({ narHash: d1Schema.blobReference.narHash })
-					.from(d1Schema.blobReference)
-					.where(
-						and(
-							eq(d1Schema.blobReference.tenant, tenant),
-							eq(d1Schema.blobReference.cache, candidate.cache),
-							eq(d1Schema.blobReference.storePathHash, storePathHash),
-							eq(d1Schema.blobReference.generation, candidate.generation)
-						)
+		// One point query per candidate, its exact `blob_ref` primary key
+		// (tenant, cache, store_path_hash, generation), rather than an IN-list
+		// over the candidate caches: a stale-generation edge a deletion backlog
+		// has not yet drained shares that IN-list's (tenant, cache) prefix, so
+		// only the exact generation keeps this bounded by the candidate count.
+		const edgeQueries = candidates.map((candidate) =>
+			this.context.d1
+				.select({ narHash: d1Schema.blobReference.narHash })
+				.from(d1Schema.blobReference)
+				.where(
+					and(
+						eq(d1Schema.blobReference.tenant, tenant),
+						eq(d1Schema.blobReference.cache, candidate.cache),
+						eq(d1Schema.blobReference.storePathHash, storePathHash),
+						eq(d1Schema.blobReference.generation, candidate.generation)
 					)
-			);
-
-			return Promise.all([
+				)
+		);
+		const [edgeResults, states, owned] = await this.sharedFacts(() =>
+			Promise.all([
 				readWithOneRetry(() => batchNonEmpty(this.context.d1, edgeQueries)),
 				readWithOneRetry(() =>
 					this.context.d1
@@ -246,8 +246,8 @@ export class ReuseViewLookupService {
 						)
 						.all()
 				)
-			]);
-		});
+			])
+		);
 
 		const committedCaches = new Set(
 			candidates
