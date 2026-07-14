@@ -288,6 +288,62 @@ describe('maintenance eligibility projection', () => {
 		});
 	});
 
+	it('uses a live grace deadline as deferred work when nothing else is due', async () => {
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.retentionGrace)
+				.values({
+					cache: '',
+					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+					retainUntil: '2026-01-02T00:00:00.000Z'
+				})
+				.run();
+
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
+		});
+
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: '2026-01-02T00:00:00.000Z',
+			reconciledAt: now.toISOString()
+		});
+	});
+
+	it('wakes at the sooner of a grace deadline and a root expiry', async () => {
+		await runInDurableObject(currentServer(), (instance) => {
+			instance.context.db
+				.insert(schema.retentionGrace)
+				.values({
+					cache: '',
+					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+					retainUntil: '2026-01-05T00:00:00.000Z'
+				})
+				.run();
+			instance.context.db
+				.insert(schema.retentionRoots)
+				.values({
+					cache: '',
+					name: rootNameSchema.parse('release'),
+					expiresAt: '2026-01-03T00:00:00.000Z',
+					createdAt: '2026-01-01T00:00:00.000Z',
+					updatedAt: '2026-01-01T00:00:00.000Z'
+				})
+				.run();
+
+			const service = new MaintenanceEligibilityService(instance.context);
+
+			return service.reconcile(now);
+		});
+
+		expect(await eligibilityRow()).toStrictEqual({
+			tenant: fixtureTenant,
+			nextWakeAt: '2026-01-03T00:00:00.000Z',
+			reconciledAt: now.toISOString()
+		});
+	});
+
 	it('uses the earliest unretired auth-key retirement as deferred work', async () => {
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
