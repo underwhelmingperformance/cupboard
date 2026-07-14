@@ -1,3 +1,4 @@
+import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedReuseViewName,
@@ -208,5 +209,27 @@ export class ReuseViewAdminService {
 		});
 
 		return { name, removed: existing !== undefined };
+	}
+
+	/**
+	 * Renders a reuse view's nix-cache-info body from its stored priority, or
+	 * `undefined` when no view of that name exists.
+	 */
+	cacheInfoBody(name: string): string | undefined {
+		const row = this.context.db
+			.select({ priority: schema.reuseViews.priority })
+			.from(schema.reuseViews)
+			.where(eq(schema.reuseViews.name, name))
+			.get();
+
+		if (row === undefined) {
+			return undefined;
+		}
+
+		return new CacheInfo(
+			CacheInfo.default.storeDirectory,
+			CacheInfo.default.hasMassQuery,
+			row.priority
+		).render();
 	}
 }

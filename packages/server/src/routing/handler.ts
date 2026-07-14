@@ -290,6 +290,42 @@ function buildApp(): Hono<WorkerHonoEnv> {
 		}
 	);
 
+	// A reuse view's nix-cache-info: the Durable Object renders it from the
+	// view's own stored priority and already answers it `no-store`, so this
+	// dispatches directly rather than through `cacheInfoResponse` — that
+	// helper's default-cache edge render and private-only no-store rewrite are
+	// both wrong here.
+	app.get('/t/:tenant/reuse/:view/nix-cache-info', async (context) => {
+		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+
+		return (
+			denied ??
+			tenantServer(context.env, context.get('tenant')).fetch(
+				innerRequest(context)
+			)
+		);
+	});
+
+	// Every other path under a reuse view is not yet implemented (the narinfo
+	// lookup is a later commit, and a view deliberately adds no second NAR
+	// route), but the subtree is still read-guarded here so an unauthorised
+	// request against a private tenant answers 401 rather than falling through
+	// unguarded to the dispatch fallback below. The 404 is no-store like every
+	// other reuse response, so a shared cache can never pin an answer for a
+	// view whose routes may exist on the next deploy.
+	app.get('/t/:tenant/reuse/*', async (context) => {
+		const denied = await guardRead(context.req.raw, context.get('tenantEntry'));
+
+		if (denied !== undefined) {
+			return denied;
+		}
+
+		const response = notFoundResponse();
+		response.headers.set('cache-control', 'no-store');
+
+		return response;
+	});
+
 	// This tenant's narinfo signing key set, served uncached from its Durable
 	// Object so a rotation is visible immediately.
 	app.on(
