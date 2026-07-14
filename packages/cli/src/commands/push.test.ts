@@ -6,7 +6,11 @@ import {
 	OidcRetentionChoiceRequiredError
 } from '../errors.ts';
 
-import { registerPushCommand, validateRetentionChoice } from './push.ts';
+import {
+	pushCommandAuthorizationDetails,
+	registerPushCommand,
+	validateRetentionChoice
+} from './push.ts';
 
 describe('validateRetentionChoice', () => {
 	it.each([
@@ -74,6 +78,56 @@ async function parsePush(arguments_: readonly string[]): Promise<unknown> {
 		return error;
 	}
 }
+
+describe('pushCommandAuthorizationDetails', () => {
+	it.each([
+		{
+			name: 'a dry run requests only the read-only preview operation',
+			options: { dryRun: true, root: 'main' },
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:preview'],
+					cache: '_default'
+				}
+			]
+		},
+		{
+			name: 'a rooted push requests the full upload grant with its root',
+			options: { root: 'main' },
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: [
+						'upload:negotiate',
+						'upload:status',
+						'upload:commit',
+						'attestation:negotiate',
+						'attestation:attach',
+						'root:set'
+					],
+					cache: '_default',
+					root: 'main'
+				}
+			]
+		},
+		{
+			name: 'an unattested push omits the attestation operations',
+			options: { attest: false },
+			expected: [
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+					cache: '_default'
+				}
+			]
+		}
+	])('$name', ({ options, expected }) => {
+		expect(pushCommandAuthorizationDetails(options, '_default')).toStrictEqual(
+			expected
+		);
+	});
+});
 
 describe('push command', () => {
 	it('rejects --no-retain combined with --root before authenticating', async () => {

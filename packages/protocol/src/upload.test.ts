@@ -9,10 +9,13 @@ import {
 	retentionMarkerAttributeValue,
 	statsResponseSchema,
 	subscribeIdentityCapabilityToken,
+	uploadCapabilitiesHeader,
+	uploadCapabilitiesValue,
 	uploadConfirmMaxPaths,
 	uploadConfirmRequestSchema,
 	uploadConfirmResponseSchema,
 	uploadDecisionSchema,
+	uploadGraceFactsCapability,
 	uploadGraceFactSchema,
 	uploadNegotiateMaxPaths,
 	uploadNegotiateRequestSchema,
@@ -34,6 +37,16 @@ const negotiationPath = {
 };
 
 describe('uploadNegotiateRequestSchema', () => {
+	it('defines the upload grace-facts acknowledgement', () => {
+		expect({
+			header: uploadCapabilitiesHeader,
+			value: uploadCapabilitiesValue
+		}).toStrictEqual({
+			header: 'x-cupboard-upload-capabilities',
+			value: uploadGraceFactsCapability
+		});
+	});
+
 	it('accepts a well-formed request', () => {
 		const value = { pushId, paths: [negotiationPath] };
 
@@ -56,6 +69,10 @@ describe('uploadNegotiateRequestSchema', () => {
 		{
 			name: 'an unknown top-level key',
 			value: { paths: [], extra: 1 }
+		},
+		{
+			name: 'a body-level retention marker',
+			value: { paths: [], retention: { kind: 'none' } }
 		},
 		{
 			name: 'an unknown key inside a path',

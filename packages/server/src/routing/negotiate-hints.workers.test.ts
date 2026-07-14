@@ -1,5 +1,7 @@
 import {
+	acceptCapabilitiesHeader,
 	type ParsedUploadPathMetadata,
+	uploadGraceFactsCapability,
 	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
@@ -120,13 +122,15 @@ describe('computing negotiate hints', () => {
 		});
 	});
 
-	it('tolerates a retention plan in the negotiate body', async () => {
+	it('tolerates the grace-facts capability header', async () => {
 		const hints = await computeNegotiateHints(
-			probeRequest({
-				pushId: testPushId,
-				paths: [path],
-				retention: { kind: 'none' }
-			}),
+			probeRequest(
+				{ pushId: testPushId, paths: [path] },
+				{
+					authorization: 'Bearer junk',
+					[acceptCapabilitiesHeader]: uploadGraceFactsCapability
+				}
+			),
 			env,
 			fixtureTenant,
 			'_default'

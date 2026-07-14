@@ -34,6 +34,7 @@ import {
 	rootSetResponseSchema
 } from '@cupboard/protocol/retention';
 import {
+	acceptCapabilitiesHeader,
 	type CommitResponse,
 	commitSessionFrameSchema,
 	type CommitSessionRequest,
@@ -47,11 +48,11 @@ import {
 	type UploadCommitDecision,
 	uploadCommitDecisionSchema,
 	uploadDecisionSchema,
+	uploadGraceFactsCapability,
 	type UploadNegotiateResponse,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
 	uploadPathMetadataSchema,
-	type UploadRetentionPlan,
 	type UploadStatusResponse,
 	uploadStatusResponseSchema
 } from '@cupboard/protocol/upload';
@@ -1475,7 +1476,7 @@ export async function negotiateUploads(
 	token: string,
 	paths: readonly ParsedUploadPathMetadata[],
 	cache: string = DEFAULT_CACHE,
-	retention?: UploadRetentionPlan
+	shouldReportGrace = false
 ): Promise<UploadNegotiateResponse> {
 	const response = await authorisedFetch(
 		cacheScopedPath(cache, '/uploads'),
@@ -1483,11 +1484,13 @@ export async function negotiateUploads(
 		{
 			body: JSON.stringify({
 				pushId: testPushId,
-				paths: paths.map((path) => uploadPathNegotiation(path)),
-				...(retention !== undefined && { retention })
+				paths: paths.map((path) => uploadPathNegotiation(path))
 			}),
 			headers: {
-				'content-type': 'application/json'
+				'content-type': 'application/json',
+				...(shouldReportGrace && {
+					[acceptCapabilitiesHeader]: uploadGraceFactsCapability
+				})
 			},
 			method: 'POST'
 		}

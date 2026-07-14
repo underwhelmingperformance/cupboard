@@ -1,7 +1,11 @@
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import type { Command } from 'commander';
 
-import { pushAuthorizationDetails } from '../auth/attenuate.ts';
+import {
+	previewAuthorizationDetails,
+	pushAuthorizationDetails
+} from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
@@ -60,6 +64,26 @@ export function validateRetentionChoice(
 	) {
 		throw new OidcRetentionChoiceRequiredError();
 	}
+}
+
+/**
+ * The authority a push's token exchange requests. A CI exchange must name
+ * what it wants; a dry run publishes nothing, so it requests only the
+ * read-only preview operation, never a push's full upload grant.
+ */
+export function pushCommandAuthorizationDetails(
+	options: Pick<PushOptions, 'dryRun' | 'attest' | 'root'>,
+	cacheSelector: string
+): AuthorizationDetails {
+	if (options.dryRun === true) {
+		return previewAuthorizationDetails({ cacheSelector });
+	}
+
+	return pushAuthorizationDetails({
+		cacheSelector,
+		attest: options.attest !== false,
+		...(options.root !== undefined && { root: options.root })
+	});
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
@@ -166,16 +190,14 @@ export function registerPushCommand(
 				signal: programOptions.signal
 			});
 
+			const cacheSelector = selectorForCache(options.cache ?? DEFAULT_CACHE);
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? url,
-				// A CI exchange must name what it wants; request exactly this push's
-				// cache, with attestation and root operations only when used.
-				authorizationDetails: pushAuthorizationDetails({
-					cacheSelector: selectorForCache(options.cache ?? DEFAULT_CACHE),
-					attest: options.attest !== false,
-					...(options.root !== undefined && { root: options.root })
-				})
+				authorizationDetails: pushCommandAuthorizationDetails(
+					options,
+					cacheSelector
+				)
 			});
 
 			await runPush(paths, reporter, {

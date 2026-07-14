@@ -15,8 +15,9 @@ import type {
 	AttestationNegotiateResponse
 } from '@cupboard/protocol/attestations';
 import {
-	type PushSummary,
-	pushSummaryResultKind
+	type PushSummaryPath,
+	pushSummaryResultKind,
+	pushSummarySchema
 } from '@cupboard/protocol/reports';
 import type {
 	RootSetBody,
@@ -26,16 +27,22 @@ import type {
 import {
 	type UploadDecision,
 	type UploadNegotiateRequest,
-	type UploadNegotiateResponse
+	type UploadNegotiateResponse,
+	type UploadPreviewDecision,
+	type UploadPreviewRequest,
+	type UploadPreviewResponse
 } from '@cupboard/protocol/upload';
 import {
 	formatBytes,
 	formatCount,
+	formatTimestamp,
 	type PhaseContext,
 	type Reporter,
 	type ResultRow
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { ORPCError } from '@orpc/client';
+import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
 import { isAbortError } from '../abort.ts';
@@ -51,6 +58,7 @@ import {
 	PushNarMetadataMismatchError,
 	UnexpectedAttestationDecisionError,
 	UnexpectedUploadDecisionError,
+	UploadGraceFactsUnsupportedError,
 	UploadVerificationFailedError
 } from '../errors.ts';
 import { byteStream, countingByteStream } from '../io/byte-stream.ts';
@@ -101,6 +109,19 @@ export interface PushClient {
 	negotiate(
 		body: Omit<UploadNegotiateRequest, 'pushId'>
 	): Promise<UploadNegotiateResponse>;
+	// The read-only twin `--dry-run` drives instead of negotiate: no pushId to
+	// carry, since a dry run never requests an upload credential.
+	preview(body: UploadPreviewRequest): Promise<UploadPreviewResponse>;
+	// A no-path request checks whether the server acknowledges grace-aware
+	// upload reporting without creating upload state.
+	probeUploadGraceFacts?(kind: 'negotiate' | 'preview'): Promise<boolean>;
+	// Whether the most recent upload response acknowledged grace-aware
+	// reporting. Clients without transport metadata are treated as capable.
+	hasUploadGraceFacts?(): boolean;
+	// Whether the tenant answers at all, probed on a route every server
+	// version serves, so a routing-level 404 is never mistaken for a missing
+	// preview route.
+	tenantServes?(): Promise<boolean>;
 	// Streams one NAR's compressed bytes to its staging key. The server derives
 	// the file hash and size from the bytes, so the upload carries no metadata.
 	uploadNar(r2Key: string, body: ReadableStream<Uint8Array>): Promise<void>;
@@ -145,6 +166,90 @@ interface PushFailure {
 
 function failureReason(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+const notFoundStatus: number = StatusCodes.NOT_FOUND;
+
+async function requireUploadGraceFacts(
+	client: PushClient,
+	kind: 'negotiate' | 'preview'
+): Promise<void> {
+	if (client.probeUploadGraceFacts === undefined) {
+		return;
+	}
+
+	if (await client.probeUploadGraceFacts(kind)) {
+		return;
+	}
+
+	throw new UploadGraceFactsUnsupportedError(
+		new Error('The server did not acknowledge upload-grace-facts')
+	);
+}
+
+async function negotiateUpload(
+	client: PushClient,
+	paths: Omit<UploadNegotiateRequest, 'pushId'>['paths']
+): Promise<UploadNegotiateResponse> {
+	return client.negotiate({ paths });
+}
+
+// The read-only twin of `negotiateUpload`. A server that predates preview
+// has no such route at all, so it answers a generic, contract-undefined
+// `NOT_FOUND`; other conditions can too, so the rejection is diagnosed
+// with the same empty-closure probe negotiate uses: a current server answers
+// an empty preview, so only a probe that meets the same undefined `NOT_FOUND`
+// reads as too old, and any other probe answer leaves the original failure
+// the caller's to see. A defined `NOT_FOUND` would be the procedure itself
+// refusing over a missing resource, not a missing route, so it never enters
+// the diagnosis. An unknown tenant also answers a routing-level `NOT_FOUND`
+// on every route, so before the too-old diagnosis stands, the tenant itself
+// must answer something: a tenant that serves `nix-cache-info` but not
+// preview is genuinely too old, and one that serves neither surfaces its own
+// `NOT_FOUND` untranslated.
+async function previewUpload(
+	client: PushClient,
+	paths: UploadPreviewRequest['paths']
+): Promise<UploadPreviewResponse> {
+	try {
+		return await client.preview({ paths });
+	} catch (error) {
+		if (
+			error instanceof ORPCError &&
+			error.status === notFoundStatus &&
+			!error.defined
+		) {
+			try {
+				await client.preview({ paths: [] });
+			} catch (probeError) {
+				if (
+					probeError instanceof ORPCError &&
+					probeError.status === notFoundStatus &&
+					!probeError.defined &&
+					(await tenantAnswers(client))
+				) {
+					throw new UploadGraceFactsUnsupportedError(error);
+				}
+			}
+		}
+
+		throw error;
+	}
+}
+
+// Whether the tenant answers at all, for the too-old diagnosis above. A probe
+// failure is inconclusive, so it reads as not answering and the original
+// rejection surfaces instead of a misdiagnosis.
+async function tenantAnswers(client: PushClient): Promise<boolean> {
+	if (client.tenantServes === undefined) {
+		return true;
+	}
+
+	try {
+		return await client.tenantServes();
+	} catch {
+		return false;
+	}
 }
 
 export async function runPush(
@@ -217,12 +322,22 @@ async function runPushFlow(
 		}
 	);
 
-	const negotiation = await reporter.phase(
+	if (dependencies.dryRun === true) {
+		await reportDryRun(reporter, client, closure, retention);
+		return;
+	}
+
+	const { response: negotiation, hasGraceFacts } = await reporter.phase(
 		'Negotiating with cache',
 		async (ctx) => {
-			const response = await client.negotiate({
-				paths: closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
-			});
+			if (retention.kind === 'none') {
+				await requireUploadGraceFacts(client, 'negotiate');
+			}
+
+			const response = await negotiateUpload(
+				client,
+				closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
+			);
 			const uploadCount = response.uploads.filter((decision) =>
 				isUpload(decision)
 			).length;
@@ -235,25 +350,16 @@ async function runPushFlow(
 				)
 			);
 
-			return response;
+			return {
+				response,
+				hasGraceFacts: client.hasUploadGraceFacts?.() ?? true
+			};
 		}
 	);
 
 	const divergent = divergentSkips(closure, negotiation.uploads);
 
-	for (const skip of divergent.values()) {
-		reporter.warn(
-			'divergent',
-			`${StorePath.basename(skip.storePath)}: local NAR ${skip.localNarHash} ` +
-				`differs from the cached copy ${skip.cacheNarHash}; the cache keeps ` +
-				`its copy`
-		);
-	}
-
-	if (dependencies.dryRun === true) {
-		reportDryRun(reporter, negotiation, retention);
-		return;
-	}
+	warnDivergentSkips(reporter, divergent);
 
 	const uploadDecisions = negotiation.uploads.filter((item) => isUpload(item));
 
@@ -346,13 +452,18 @@ async function runPushFlow(
 		timeoutSeconds: waitTimeoutSeconds
 	};
 	const session = await client.openCommitSession?.(commitOptions);
+	// Keyed by store-path hash, refined in place as a deferred path settles or
+	// re-drives, so the push summary reads each path's latest outcome once every
+	// phase below has run.
+	const outcomes = new Map<string, CommitOutcome>();
 	const commitContext: CommitContext = {
 		client,
 		session,
 		negotiated,
 		createNarArchive,
 		compressNar,
-		options: commitOptions
+		options: commitOptions,
+		hasGraceFacts
 	};
 
 	try {
@@ -411,6 +522,8 @@ async function runPushFlow(
 						continue;
 					}
 
+					outcomes.set(result.value.storePathHash, result.value);
+
 					if (result.value.status === 'pending') {
 						pending.push({
 							decision,
@@ -458,7 +571,7 @@ async function runPushFlow(
 					const verdicts = await Promise.allSettled(
 						commit.pending.map(async (entry) => {
 							try {
-								await awaitDeferredVerdict(entry, commitContext);
+								await awaitDeferredVerdict(entry, commitContext, outcomes);
 							} finally {
 								bar.advance(1);
 							}
@@ -526,18 +639,48 @@ async function runPushFlow(
 		const skipped = negotiation.uploads.filter((decision) =>
 			isSkip(decision)
 		).length;
-
-		const summary: PushSummary = {
+		const failedStorePathHashes = new Set(
+			failures.map((failure) => failure.storePathHash)
+		);
+		const summaryPaths: PushSummaryPath[] = [
+			...negotiation.uploads
+				.filter((decision) => isSkip(decision))
+				.map((decision) => ({
+					storePathHash: decision.storePathHash,
+					storePath: storePathByHash.get(decision.storePathHash),
+					outcome: 'already-present' as const,
+					...(decision.grace !== undefined && { grace: decision.grace })
+				})),
+			...outcomes
+				.entries()
+				.filter(([storePathHash]) => !failedStorePathHashes.has(storePathHash))
+				.map(([storePathHash, outcome]) =>
+					committedOrPendingPath(
+						storePathHash,
+						outcome,
+						shouldWait,
+						storePathByHash
+					)
+				)
+		];
+		const summary = {
 			uploadedPaths,
 			reusedBlobs,
 			skipped,
 			uploadedBytes,
-			failures
+			failures,
+			paths: summaryPaths
 		};
+		// The summary is locally assembled, but a non-conforming server can
+		// contribute a failure entry the schema refuses (a bare hash as its
+		// store path, say); the report must still render and the push must
+		// still fail on its real error, so a validation failure downgrades to
+		// the unvalidated shape.
+		const validated = pushSummarySchema.safeParse(summary);
 
 		reporter.result({
 			kind: pushSummaryResultKind,
-			data: summary,
+			data: validated.success ? validated.data : summary,
 			rows: [
 				{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
 				{ label: 'Already cached', value: formatCount(reusedBlobs) },
@@ -545,11 +688,13 @@ async function runPushFlow(
 				{ label: 'Bytes uploaded', value: formatBytes(uploadedBytes) },
 				...attestationRows,
 				...retentionRows,
+				...pushSummaryPathRows(summaryPaths, retention),
 				...(failures.length > 0
 					? [{ label: 'Failed', value: formatCount(failures.length) }]
 					: [])
 			]
 		});
+		unretainedUngracedWarning(reporter, retention, summaryPaths);
 
 		// The good paths committed, but the push as a whole did not finish: fail
 		// loudly and non-zero so nothing downstream treats the cache as complete.
@@ -563,31 +708,265 @@ async function runPushFlow(
 	}
 }
 
-function reportDryRun(
+async function reportDryRun(
 	reporter: Reporter,
-	negotiation: UploadNegotiateResponse,
+	client: PushClient,
+	closure: readonly NixValidPathInfo[],
 	retention: RetentionPlan
-): void {
-	const wouldUpload = negotiation.uploads.filter((decision) =>
-		isUpload(decision)
+): Promise<void> {
+	const preview = await reporter.phase(
+		'Previewing against cache',
+		async (ctx) => {
+			if (retention.kind === 'none') {
+				await requireUploadGraceFacts(client, 'preview');
+			}
+
+			const response = await previewUpload(
+				client,
+				closure.map((pathInfo) => prepareStorePathNegotiation(pathInfo))
+			);
+
+			ctx.fact(
+				'upload',
+				formatCount(
+					response.uploads.filter((decision) => decision.action === 'upload')
+						.length
+				)
+			);
+			ctx.fact(
+				'skip',
+				formatCount(
+					response.uploads.filter((decision) => decision.action === 'skip')
+						.length
+				)
+			);
+
+			return response;
+		}
+	);
+
+	warnDivergentSkips(reporter, divergentSkips(closure, preview.uploads));
+
+	const wouldUpload = preview.uploads.filter(
+		(decision) => decision.action === 'upload'
 	).length;
-	const reusedBlobs = negotiation.uploads.filter((decision) =>
-		isReusedBlobCommit(decision)
+	const reusedBlobs = preview.uploads.filter(
+		(decision) => decision.action === 'commit'
 	).length;
-	const skipped = negotiation.uploads.filter((decision) =>
-		isSkip(decision)
+	const skipped = preview.uploads.filter(
+		(decision) => decision.action === 'skip'
 	).length;
 
 	reporter.result({
 		kind: 'push-plan',
-		data: { wouldUpload, reusedBlobs, skipped },
+		data: { wouldUpload, reusedBlobs, skipped, paths: preview.uploads },
 		rows: [
 			{ label: 'Would upload', value: formatCount(wouldUpload) },
 			{ label: 'Already cached', value: formatCount(reusedBlobs) },
 			{ label: 'Skipped', value: formatCount(skipped) },
-			...retentionPlanRows(retention)
+			...retentionPlanRows(retention),
+			...previewPathRows(preview.uploads, retention)
 		]
 	});
+	unretainedUngracedWarning(reporter, retention, preview.uploads);
+}
+
+// The wording a mutating push's committed and already-present rows use, and
+// the dry run's already-cached rows: `retainUntil` is a materialised
+// deadline, so it is reported as a fact rather than a projection.
+function graceRetainUntilRow(retainUntil: string): string {
+	return `kept until ${formatTimestamp(retainUntil)}`;
+}
+
+function pushSummaryPathRow(path: PushSummaryPath): ResultRow {
+	if (path.grace?.retainUntil !== undefined) {
+		return {
+			label: path.storePathHash,
+			value: graceRetainUntilRow(path.grace.retainUntil)
+		};
+	}
+
+	const graceSeconds = path.grace?.graceSeconds;
+
+	if (graceSeconds !== undefined && graceSeconds > 0) {
+		return {
+			label: path.storePathHash,
+			value:
+				path.outcome === 'pending'
+					? `pending (grace ${formatCount(graceSeconds)}s)`
+					: `captured grace ${formatCount(graceSeconds)}s`
+		};
+	}
+
+	if (graceSeconds === 0) {
+		return { label: path.storePathHash, value: zeroGraceRow };
+	}
+
+	return {
+		label: path.storePathHash,
+		value: 'no retention grace policy matched'
+	};
+}
+
+// One row per path, naming its retention grace fact. For a rooted or pinned
+// push the rows only render once the push shows at least one fact: an
+// ungraced cache (the common case) would otherwise pad the report with a
+// "no retention grace policy matched" row per path for no benefit. An
+// unretained push always renders them, because grace is the only thing that
+// would keep its paths: all-ungraced is exactly what the user must see. The
+// JSON `data.paths` carries the full per-path facts unconditionally either
+// way, for a consumer that always wants them.
+function pushSummaryPathRows(
+	paths: readonly PushSummaryPath[],
+	retention: RetentionPlan
+): readonly ResultRow[] {
+	if (
+		retention.kind !== 'none' &&
+		paths.every((path) => !hasGraceFact(path.grace))
+	) {
+		return [];
+	}
+
+	return cappedPathRows(paths.map((path) => pushSummaryPathRow(path)));
+}
+
+// The human report caps the per-path rows; the JSON output always lists
+// every path.
+const maxPathRows = 20;
+
+function cappedPathRows(rows: readonly ResultRow[]): readonly ResultRow[] {
+	if (rows.length <= maxPathRows) {
+		return rows;
+	}
+
+	return [
+		...rows.slice(0, maxPathRows),
+		{
+			label: '…',
+			value: `${formatCount(rows.length - maxPathRows)} more path(s); the full list is in the JSON output`
+		}
+	];
+}
+
+// The wording a matched zero-grace policy earns wherever a fact renders: the
+// policy exists, but it retains nothing.
+const zeroGraceRow = 'matched a zero-grace policy; nothing retains it';
+
+// The warning an unretained push earns when no path resolved a positive grace
+// fact: nothing retains what it just published. A matched zero-grace policy
+// still retains nothing, but it is named as such rather than as no policy.
+function unretainedUngracedWarning(
+	reporter: Reporter,
+	retention: RetentionPlan,
+	paths: readonly {
+		grace?: { retainUntil?: string; graceSeconds?: number };
+	}[]
+): void {
+	if (retention.kind !== 'none') {
+		return;
+	}
+
+	const hasPositiveFact = paths.some(
+		(path) =>
+			path.grace?.retainUntil !== undefined ||
+			(path.grace?.graceSeconds ?? 0) > 0
+	);
+
+	if (hasPositiveFact) {
+		return;
+	}
+
+	const isZeroMatched = paths.some((path) => path.grace?.graceSeconds === 0);
+
+	reporter.warn(
+		'unretained',
+		isZeroMatched
+			? 'a zero-grace retention policy matched these paths; nothing retains them and the next collection can remove them'
+			: 'no retention grace policy matched these paths; nothing retains them and the next collection can remove them'
+	);
+}
+
+function hasGraceFact(
+	grace: { retainUntil?: string; graceSeconds?: number } | undefined
+): boolean {
+	return grace?.retainUntil !== undefined || grace?.graceSeconds !== undefined;
+}
+
+// A dry run never commits anything, so `commit`/`upload` decisions carry only
+// the grace a real push would capture, never a materialised deadline; a
+// `skip` decision (an already-published path) reports the deadline already
+// stored, unstretched, or the policy the cache resolves when none is stored
+// yet, which a real push's already-present decision would extend into a
+// deadline.
+function previewPathRow(decision: UploadPreviewDecision): ResultRow {
+	if (decision.grace?.retainUntil !== undefined) {
+		return {
+			label: decision.storePathHash,
+			value: graceRetainUntilRow(decision.grace.retainUntil)
+		};
+	}
+
+	const graceSeconds = decision.grace?.graceSeconds;
+
+	if (graceSeconds !== undefined && graceSeconds > 0) {
+		return {
+			label: decision.storePathHash,
+			value:
+				decision.action === 'skip'
+					? `a push would extend its grace ${formatCount(graceSeconds)}s`
+					: `would capture grace ${formatCount(graceSeconds)}s`
+		};
+	}
+
+	if (graceSeconds === 0) {
+		return { label: decision.storePathHash, value: zeroGraceRow };
+	}
+
+	return {
+		label: decision.storePathHash,
+		value: 'no retention grace policy matched'
+	};
+}
+
+// The dry-run twin of `pushSummaryPathRows`, gated the same way: only once
+// the preview shows at least one path with a grace fact, except for an
+// unretained plan, whose rows always render.
+function previewPathRows(
+	decisions: readonly UploadPreviewDecision[],
+	retention: RetentionPlan
+): readonly ResultRow[] {
+	if (
+		retention.kind !== 'none' &&
+		decisions.every((decision) => !hasGraceFact(decision.grace))
+	) {
+		return [];
+	}
+
+	return cappedPathRows(decisions.map((decision) => previewPathRow(decision)));
+}
+
+// Resolves one committed or deferred path's final outcome and grace fact for
+// the push summary. A deferred path resolves to `committed` only once the
+// wait phase actually awaited its verdict; `--no-wait` leaves it `pending`
+// with the grace it captured at commit time, since its deadline is not yet
+// known.
+function committedOrPendingPath(
+	storePathHash: string,
+	outcome: CommitOutcome,
+	shouldWait: boolean,
+	storePathByHash: ReadonlyMap<string, string>
+): PushSummaryPath {
+	const isFinal = outcome.status !== 'pending' || shouldWait;
+	const grace = isFinal
+		? (outcome.settledGrace?.() ?? outcome.grace)
+		: outcome.grace;
+
+	return {
+		storePathHash,
+		storePath: storePathByHash.get(storePathHash),
+		outcome: isFinal ? 'committed' : 'pending',
+		...(grace !== undefined && { grace })
+	};
 }
 
 function retentionPlanRows(retention: RetentionPlan): ResultRow[] {
@@ -1003,6 +1382,7 @@ interface CommitContext {
 	readonly createNarArchive: (storePath: string) => PushNarArchive;
 	readonly compressNar: CompressNar;
 	readonly options: CommitOptions;
+	readonly hasGraceFacts: boolean;
 }
 
 // Commits one path over the push's shared session, falling back to a per-path
@@ -1018,19 +1398,15 @@ function commitVia(
 	return context.session.commit(target);
 }
 
-// `negotiateWithPlan` always sends a `retention` field, even `{ kind: 'none' }`
-// for `--no-retain`, so every decision a push commits was negotiated with a
-// plan and its pending row's captured grace decision has `plan: true`. The
-// marker lets a reconnect that resolves a gone row by identity read the
-// path's durable grace fact instead of none.
 function commitTarget(
-	decision: UploadDecisionOf<'upload' | 'commit'>
+	decision: UploadDecisionOf<'upload' | 'commit'>,
+	shouldReportGraceFacts: boolean
 ): CommitTarget {
 	return {
 		uploadId: decision.uploadId,
 		storePathHash: decision.storePathHash,
 		narHash: decision.narHash,
-		retention: true
+		...(shouldReportGraceFacts && { retention: true as const })
 	};
 }
 
@@ -1055,7 +1431,10 @@ async function commitNegotiated(
 	context: CommitContext
 ): Promise<CommitOutcome> {
 	try {
-		return await commitVia(context, commitTarget(decision));
+		return await commitVia(
+			context,
+			commitTarget(decision, context.hasGraceFacts)
+		);
 	} catch (error) {
 		if (!isStaleUploadError(error) && !isAbsentVerdict(error)) {
 			throw error;
@@ -1075,7 +1454,8 @@ async function awaitDeferredVerdict(
 		readonly decision: UploadDecisionOf<'upload' | 'commit'>;
 		readonly settled: Promise<void>;
 	},
-	context: CommitContext
+	context: CommitContext,
+	outcomes: Map<string, CommitOutcome>
 ): Promise<void> {
 	try {
 		await entry.settled;
@@ -1085,6 +1465,7 @@ async function awaitDeferredVerdict(
 		}
 
 		const redriven = await redriveExpiredCommit(entry.decision, context);
+		outcomes.set(redriven.storePathHash, redriven);
 		await redriven.settled;
 	}
 }
@@ -1098,9 +1479,9 @@ async function redriveExpiredCommit(
 	context: CommitContext
 ): Promise<CommitOutcome> {
 	const pathInfo = findNegotiatedPath(context.negotiated, decision);
-	const renegotiation = await context.client.negotiate({
-		paths: [prepareStorePathNegotiation(pathInfo)]
-	});
+	const renegotiation = await negotiateUpload(context.client, [
+		prepareStorePathNegotiation(pathInfo)
+	]);
 	const fresh = renegotiation.uploads.at(0);
 
 	if (fresh === undefined) {
@@ -1111,7 +1492,7 @@ async function redriveExpiredCommit(
 	}
 
 	if (isReusedBlobCommit(fresh)) {
-		return commitVia(context, commitTarget(fresh));
+		return commitVia(context, commitTarget(fresh, context.hasGraceFacts));
 	}
 
 	if (isSkip(fresh)) {
@@ -1120,7 +1501,8 @@ async function redriveExpiredCommit(
 			storePathHash: fresh.storePathHash,
 			narHash: fresh.narHash,
 			status: 'committed',
-			settled: Promise.resolve()
+			settled: Promise.resolve(),
+			...(fresh.grace !== undefined && { grace: fresh.grace })
 		};
 	}
 
@@ -1134,7 +1516,7 @@ async function redriveExpiredCommit(
 	await context.client.uploadNar(fresh.r2Key, upload.body);
 	verifyNarMetadata(pathInfo, upload.digest());
 
-	return commitVia(context, commitTarget(fresh));
+	return commitVia(context, commitTarget(fresh, context.hasGraceFacts));
 }
 
 function verifyNarMetadata(
@@ -1172,7 +1554,7 @@ interface DivergentSkip {
 
 function divergentSkips(
 	closure: readonly NixValidPathInfo[],
-	decisions: readonly UploadDecision[]
+	decisions: readonly (UploadDecision | UploadPreviewDecision)[]
 ): ReadonlyMap<string, DivergentSkip> {
 	const localByStorePathHash = new Map<string, NixValidPathInfo>(
 		closure.map((info) => [StorePath.hash(info.storePath), info])
@@ -1180,7 +1562,7 @@ function divergentSkips(
 	const divergent = new Map<string, DivergentSkip>();
 
 	for (const decision of decisions) {
-		if (!isSkip(decision)) {
+		if (decision.action !== 'skip') {
 			continue;
 		}
 
@@ -1198,6 +1580,23 @@ function divergentSkips(
 	}
 
 	return divergent;
+}
+
+// A skip whose cached NAR differs from the local bytes is not reproducible
+// as-is; the mutating push and the dry run warn identically, since the
+// preview's skip decisions carry the same cached hash.
+function warnDivergentSkips(
+	reporter: Reporter,
+	divergent: ReadonlyMap<string, DivergentSkip>
+): void {
+	for (const skip of divergent.values()) {
+		reporter.warn(
+			'divergent',
+			`${StorePath.basename(skip.storePath)}: local NAR ${skip.localNarHash} ` +
+				`differs from the cached copy ${skip.cacheNarHash}; the cache keeps ` +
+				`its copy`
+		);
+	}
 }
 
 // The closure indexed by the pair a negotiation decision names, so resolving a

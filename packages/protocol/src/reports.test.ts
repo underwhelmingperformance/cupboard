@@ -169,38 +169,79 @@ describe('verifyReportSchema', () => {
 });
 
 describe('pushSummarySchema', () => {
-	const failure = {
-		storePathHash: '0'.repeat(32),
-		storePath: '/nix/store/0000000000000000000000000000000000-foo',
-		stage: 'commit',
-		reason: 'D1 overloaded'
-	};
+	const storePath = `/nix/store/${storePathHash}-app`;
 
-	it('accepts a summary with failures', () => {
-		const value = {
-			uploadedPaths: 3,
-			reusedBlobs: 2,
-			skipped: 1,
-			uploadedBytes: 4096,
-			failures: [failure]
-		};
-
-		expect(pushSummarySchema.parse(value)).toStrictEqual(value);
-	});
-
-	it('accepts a clean summary with no failures', () => {
-		const value = {
-			uploadedPaths: 0,
-			reusedBlobs: 0,
-			skipped: 0,
-			uploadedBytes: 0,
-			failures: []
-		};
-
+	it.each([
+		{
+			name: 'a fully populated summary with every outcome and fact shape',
+			value: {
+				uploadedPaths: 1,
+				reusedBlobs: 1,
+				skipped: 1,
+				uploadedBytes: 1234,
+				failures: [
+					{
+						storePathHash,
+						storePath,
+						stage: 'verify',
+						reason: 'timed out'
+					}
+				],
+				paths: [
+					{
+						storePathHash,
+						storePath,
+						outcome: 'already-present',
+						grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
+					},
+					{ storePathHash, outcome: 'committed', grace: {} },
+					{
+						storePathHash,
+						outcome: 'pending',
+						grace: { graceSeconds: 86_400 }
+					}
+				]
+			}
+		},
+		{
+			name: 'an empty summary with no facts at all',
+			value: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [],
+				paths: []
+			}
+		}
+	])('accepts $name', ({ value }) => {
 		expect(pushSummarySchema.parse(value)).toStrictEqual(value);
 	});
 
 	it.each([
+		{
+			name: 'an unknown top-level key',
+			value: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [],
+				paths: [],
+				surprise: true
+			}
+		},
+		{
+			name: 'an unknown path outcome',
+			value: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [],
+				paths: [{ storePathHash, outcome: 'building' }]
+			}
+		},
 		{
 			name: 'a negative count',
 			value: {
@@ -208,28 +249,21 @@ describe('pushSummarySchema', () => {
 				reusedBlobs: 0,
 				skipped: 0,
 				uploadedBytes: 0,
-				failures: []
-			}
-		},
-		{
-			name: 'an unknown failure stage',
-			value: {
-				uploadedPaths: 0,
-				reusedBlobs: 0,
-				skipped: 0,
-				uploadedBytes: 0,
-				failures: [{ ...failure, stage: 'surprise' }]
-			}
-		},
-		{
-			name: 'an unknown key',
-			value: {
-				uploadedPaths: 0,
-				reusedBlobs: 0,
-				skipped: 0,
-				uploadedBytes: 0,
 				failures: [],
-				surprise: true
+				paths: []
+			}
+		},
+		{
+			name: 'a failure with an unknown stage',
+			value: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [
+					{ storePathHash, storePath, stage: 'download', reason: 'oops' }
+				],
+				paths: []
 			}
 		}
 	])('rejects $name', ({ value }) => {

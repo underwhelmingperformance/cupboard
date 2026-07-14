@@ -22,6 +22,10 @@ export interface ConfirmGrantIntent {
 	readonly cacheSelector: string;
 }
 
+export interface PreviewGrantIntent {
+	readonly cacheSelector: string;
+}
+
 const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
 
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
@@ -79,6 +83,24 @@ export function confirmAuthorizationDetails(
 		{
 			type: 'cupboard_cache',
 			actions: ['upload:confirm'],
+			cache: intent.cacheSelector
+		}
+	]);
+}
+
+/**
+ * The preview-scoped authority a `--dry-run` push needs: exactly
+ * `upload:preview` on the target cache, never `upload:negotiate` or
+ * `upload:commit`, so a dry run's exchanged token cannot stage or commit an
+ * upload even if the client asked it to.
+ */
+export function previewAuthorizationDetails(
+	intent: PreviewGrantIntent
+): AuthorizationDetails {
+	return authorizationDetailsSchema.parse([
+		{
+			type: 'cupboard_cache',
+			actions: ['upload:preview'],
 			cache: intent.cacheSelector
 		}
 	]);

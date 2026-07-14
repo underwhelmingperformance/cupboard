@@ -11,9 +11,14 @@ import {
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 import {
+	acceptCapabilitiesHeader,
+	uploadCapabilitiesHeader,
+	uploadCapabilitiesValue,
 	uploadConfirmMaxPaths,
 	type UploadConfirmResponse,
-	uploadConfirmResponseSchema
+	uploadConfirmResponseSchema,
+	uploadGraceFactsCapability,
+	uploadNegotiateResponseSchema
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
@@ -64,7 +69,8 @@ import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
 	confirmGraceBatch,
-	parseStoredGraceDecision
+	parseStoredGraceDecision,
+	serialiseGraceDecision
 } from './grace-decision.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { ReconcileQueueService } from './reconcile-queue-service.ts';
@@ -690,6 +696,25 @@ describe('retention grace at publication', () => {
 	const dayGraceSeconds = 86_400;
 	const dayAfterStart = '2026-01-02T00:00:00.000Z';
 
+	it('normalises grace decisions across a rolling deployment', () => {
+		const decision = {
+			reportsGrace: true,
+			graceSeconds: dayGraceSeconds
+		};
+
+		expect({
+			current: parseStoredGraceDecision(JSON.stringify(decision)),
+			rolling: parseStoredGraceDecision(
+				JSON.stringify({ plan: true, graceSeconds: dayGraceSeconds })
+			),
+			written: serialiseGraceDecision(decision)
+		}).toStrictEqual({
+			current: decision,
+			rolling: decision,
+			written: JSON.stringify(decision)
+		});
+	});
+
 	it('grants the deadline atomically with an immediate publication', async () => {
 		await useTestServer('publication-immediate');
 		const { token } = await bootstrap();
@@ -782,7 +807,7 @@ describe('retention grace at publication', () => {
 			beforeVerification,
 			afterVerification: await graceDeadlineRows(DEFAULT_CACHE)
 		}).toStrictEqual({
-			pendingDecision: { plan: false, graceSeconds: dayGraceSeconds },
+			pendingDecision: { reportsGrace: false, graceSeconds: dayGraceSeconds },
 			beforeVerification: [],
 			afterVerification: [
 				{ storePathHash: metadata.storePathHash, retainUntil: dayAfterStart }
@@ -949,9 +974,12 @@ describe('retention grace at publication', () => {
 		// or a root transition) before this commit's own candidate runs.
 		await seedGraceDeadline(DEFAULT_CACHE, reused.storePathHash, liveDeadline);
 
-		const negotiated = await negotiateUploads(token, [reused], DEFAULT_CACHE, {
-			kind: 'none'
-		});
+		const negotiated = await negotiateUploads(
+			token,
+			[reused],
+			DEFAULT_CACHE,
+			true
+		);
 		const decision = negotiated.uploads[0];
 
 		if (decision?.action !== 'commit') {
@@ -992,7 +1020,7 @@ describe('retention grace at publication', () => {
 		{
 			id: 'positive',
 			policySeconds: 3600,
-			plan: true,
+			reportsGrace: true,
 			expectManaged: true,
 			expectRetainUntil: '2026-01-01T01:00:00.000Z',
 			expectGrace: { retainUntil: '2026-01-01T01:00:00.000Z' }
@@ -1000,7 +1028,7 @@ describe('retention grace at publication', () => {
 		{
 			id: 'legacy',
 			policySeconds: undefined,
-			plan: false,
+			reportsGrace: false,
 			expectManaged: false,
 			expectRetainUntil: undefined,
 			expectGrace: undefined
@@ -1008,7 +1036,7 @@ describe('retention grace at publication', () => {
 		{
 			id: 'zero',
 			policySeconds: 0,
-			plan: true,
+			reportsGrace: true,
 			expectManaged: true,
 			expectRetainUntil: undefined,
 			expectGrace: { graceSeconds: 0 }
@@ -1018,7 +1046,7 @@ describe('retention grace at publication', () => {
 		async ({
 			id,
 			policySeconds,
-			plan,
+			reportsGrace: shouldReportGrace,
 			expectManaged,
 			expectRetainUntil,
 			expectGrace
@@ -1040,19 +1068,17 @@ describe('retention grace at publication', () => {
 				fileHash: nar.fileHash,
 				fileSize: nar.narBytes.byteLength
 			});
-			const retentionPlan = plan ? ({ kind: 'none' } as const) : undefined;
-
 			const first = await negotiateUploads(
 				token,
 				[metadata],
 				DEFAULT_CACHE,
-				retentionPlan
+				shouldReportGrace
 			);
 			const second = await negotiateUploads(
 				token,
 				[metadata],
 				DEFAULT_CACHE,
-				retentionPlan
+				shouldReportGrace
 			);
 			const winnerDecision = first.uploads[0];
 			const loserDecision = second.uploads[0];
@@ -1090,7 +1116,7 @@ describe('retention grace at publication', () => {
 				deadlines: await graceDeadlineRows(DEFAULT_CACHE)
 			}).toStrictEqual({
 				status: 'already-present',
-				hasGraceKey: plan,
+				hasGraceKey: shouldReportGrace,
 				grace: expectGrace,
 				graceManaged: expectManaged,
 				deadlines:
@@ -1138,7 +1164,7 @@ describe('retention grace at publication', () => {
 				'loser-upload',
 				uploadPathNegotiation(metadata),
 				narObjectKey(metadata.narHash),
-				{ plan: true, graceSeconds: 3600 }
+				{ reportsGrace: true, graceSeconds: 3600 }
 			)
 		);
 
@@ -1205,7 +1231,7 @@ describe('retention grace at publication', () => {
 						'loser-upload',
 						uploadPathNegotiation(metadata),
 						'staging/loser-upload',
-						{ plan: true, graceSeconds: 3600 }
+						{ reportsGrace: true, graceSeconds: 3600 }
 					);
 
 					return 'settled' as const;
@@ -1352,7 +1378,7 @@ describe('retention grace at publication', () => {
 					'loser-upload',
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
-					{ plan: true, graceSeconds: 3600 }
+					{ reportsGrace: true, graceSeconds: 3600 }
 				);
 
 				return { outcome, hasMoved };
@@ -1462,7 +1488,7 @@ describe('retention grace at publication', () => {
 					'loser-upload',
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
-					{ plan: true, graceSeconds: 3600 }
+					{ reportsGrace: true, graceSeconds: 3600 }
 				);
 
 				return { outcome, bumpCount };
@@ -1702,8 +1728,8 @@ async function pendingRowSnapshot(
 }
 
 // Narrows a negotiate response to its single `upload` decision, the reconnect
-// tests below use instead of `expectSingleUploadDecision`: a plan-carrying
-// response also carries a `grace` fact, which that helper's fixed shape does
+// tests below use instead of `expectSingleUploadDecision`: a capable response
+// also carries a `grace` fact, which that helper's fixed shape does
 // not expect.
 function plannedUploadDecision(
 	response: Awaited<ReturnType<typeof negotiateUploads>>
@@ -1725,9 +1751,44 @@ describe('retention grace facts on the wire', () => {
 
 	const dayGraceSeconds = 86_400;
 	const dayAfterStart = '2026-01-02T00:00:00.000Z';
-	const plan = { kind: 'none' } as const;
+	const shouldReportGrace = true;
 
-	it('keeps legacy decision shapes without a plan, attaching facts with one', async () => {
+	it.each([
+		{ reportsGrace: false, capabilities: undefined },
+		{ reportsGrace: true, capabilities: uploadCapabilitiesValue }
+	])(
+		'acknowledges grace facts only when requested ($reportsGrace)',
+		async ({ reportsGrace: shouldAcceptGraceFacts, capabilities }) => {
+			const { token } = await bootstrap();
+			const response = await authorisedFetch(
+				`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
+				token,
+				{
+					method: 'POST',
+					headers: {
+						'content-type': 'application/json',
+						...(shouldAcceptGraceFacts && {
+							[acceptCapabilitiesHeader]: uploadGraceFactsCapability
+						})
+					},
+					body: JSON.stringify({ pushId: testPushId, paths: [] })
+				}
+			);
+
+			expect({
+				status: response.status,
+				capabilities:
+					response.headers.get(uploadCapabilitiesHeader) ?? undefined,
+				body: uploadNegotiateResponseSchema.parse(await response.json())
+			}).toStrictEqual({
+				status: StatusCodes.OK,
+				capabilities,
+				body: { uploads: [] }
+			});
+		}
+	);
+
+	it('keeps legacy decision shapes without the capability, attaching facts with it', async () => {
 		await useTestServer('wire-decisions');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -1745,34 +1806,34 @@ describe('retention grace facts on the wire', () => {
 
 		await pushPath(token, committed);
 
-		const planless = await negotiateUploads(token, [committed, fresh]);
-		// The planless already-present decision still extended the deadline;
-		// only the reported fact is plan-gated.
-		const afterPlanless = await graceDeadlineRows(DEFAULT_CACHE);
-		const planned = await negotiateUploads(
+		const legacy = await negotiateUploads(token, [committed, fresh]);
+		// The legacy already-present decision still extended the deadline; only
+		// the reported fact is capability-gated.
+		const afterLegacy = await graceDeadlineRows(DEFAULT_CACHE);
+		const capable = await negotiateUploads(
 			token,
 			[committed, fresh],
 			DEFAULT_CACHE,
-			plan
+			shouldReportGrace
 		);
 
 		expect({
-			planlessFacts: planless.uploads.map((decision) => 'grace' in decision),
-			afterPlanless,
-			plannedFacts: planned.uploads.map((decision) => decision.grace)
+			legacyFacts: legacy.uploads.map((decision) => 'grace' in decision),
+			afterLegacy,
+			capableFacts: capable.uploads.map((decision) => decision.grace)
 		}).toStrictEqual({
-			planlessFacts: [false, false],
-			afterPlanless: [
+			legacyFacts: [false, false],
+			afterLegacy: [
 				{ storePathHash: committed.storePathHash, retainUntil: dayAfterStart }
 			],
-			plannedFacts: [
+			capableFacts: [
 				{ retainUntil: dayAfterStart },
 				{ graceSeconds: dayGraceSeconds }
 			]
 		});
 	});
 
-	it('carries the deadline on a settled frame only for a plan-carrying upload', async () => {
+	it('carries the deadline on a settled frame only for a capable upload', async () => {
 		await useTestServer('wire-settled');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -1792,7 +1853,7 @@ describe('retention grace facts on the wire', () => {
 
 		const settledFrameFor = async (
 			storePathHash: string,
-			retention?: typeof plan
+			shouldAcceptGraceFacts = false
 		): Promise<Record<string, unknown>> => {
 			const metadata = uploadMetadata({
 				storePathHash,
@@ -1807,7 +1868,7 @@ describe('retention grace facts on the wire', () => {
 				token,
 				[metadata],
 				DEFAULT_CACHE,
-				retention
+				shouldAcceptGraceFacts
 			);
 			const decision = response.uploads[0];
 
@@ -1824,19 +1885,19 @@ describe('retention grace facts on the wire', () => {
 			return frame;
 		};
 
-		const planned = await settledFrameFor(repeated('b'), plan);
-		const planless = await settledFrameFor(repeated('c'));
+		const capable = await settledFrameFor(repeated('b'), shouldReportGrace);
+		const legacy = await settledFrameFor(repeated('c'));
 
 		expect({
-			plannedEv: planned.ev,
-			plannedGrace: planned.grace,
-			planlessEv: planless.ev,
-			planlessHasGrace: 'grace' in planless
+			capableEv: capable.ev,
+			capableGrace: capable.grace,
+			legacyEv: legacy.ev,
+			legacyHasGrace: 'grace' in legacy
 		}).toStrictEqual({
-			plannedEv: 'settled',
-			plannedGrace: { retainUntil: dayAfterStart },
-			planlessEv: 'settled',
-			planlessHasGrace: false
+			capableEv: 'settled',
+			capableGrace: { retainUntil: dayAfterStart },
+			legacyEv: 'settled',
+			legacyHasGrace: false
 		});
 	});
 
@@ -1859,7 +1920,7 @@ describe('retention grace facts on the wire', () => {
 			token,
 			[metadata],
 			DEFAULT_CACHE,
-			plan
+			shouldReportGrace
 		);
 		const upload = decision.uploads[0];
 
@@ -1910,7 +1971,7 @@ describe('retention grace facts on the wire', () => {
 				token,
 				[path],
 				DEFAULT_CACHE,
-				plan
+				shouldReportGrace
 			);
 
 			return response.uploads[0]?.grace;
@@ -1956,7 +2017,12 @@ describe('retention grace facts on the wire', () => {
 			vi.spyOn(instance.context.db, 'transaction');
 		});
 
-		const response = await negotiateUploads(token, paths, DEFAULT_CACHE, plan);
+		const response = await negotiateUploads(
+			token,
+			paths,
+			DEFAULT_CACHE,
+			shouldReportGrace
+		);
 
 		const transactionCount = await runInDurableObject(
 			currentServer(),
@@ -2039,10 +2105,11 @@ describe('retention grace facts on the wire', () => {
 					DEFAULT_CACHE,
 					{
 						pushId: testPushId,
-						retention: plan,
 						paths: [uploadPathNegotiation(path)]
 					},
-					'https://cupboard.example'
+					'https://cupboard.example',
+					undefined,
+					shouldReportGrace
 				);
 			}
 		);
@@ -2059,7 +2126,7 @@ describe('retention grace facts on the wire', () => {
 
 	// A client that reconnects mid-commit re-points the pending row at its new
 	// session and parks; the saga that finishes the upload then answers that
-	// session with a verdict frame. The frame must carry the same plan-gated
+	// session with a verdict frame. The frame must carry the same capability-gated
 	// stored deadline every other verdict path reports, or a client enforcing
 	// grace deadlines would reject a publication whose deadline was written.
 	it('sends the stored deadline on a reattached session verdict frame', async () => {
@@ -2093,7 +2160,12 @@ describe('retention grace facts on the wire', () => {
 			fileSize: seed.narBytes.byteLength
 		});
 		const reuse = singleDecision(
-			await negotiateUploads(token, [contested], DEFAULT_CACHE, plan)
+			await negotiateUploads(
+				token,
+				[contested],
+				DEFAULT_CACHE,
+				shouldReportGrace
+			)
 		);
 
 		if (reuse.action !== 'commit') {
@@ -2114,7 +2186,12 @@ describe('retention grace facts on the wire', () => {
 			fileSize: parked.narBytes.byteLength
 		});
 		const parkedUpload = plannedUploadDecision(
-			await negotiateUploads(token, [parkedPath], DEFAULT_CACHE, plan)
+			await negotiateUploads(
+				token,
+				[parkedPath],
+				DEFAULT_CACHE,
+				shouldReportGrace
+			)
 		);
 
 		await putNarBytes(parkedUpload.r2Key, parked);
@@ -2218,7 +2295,7 @@ describe('retention grace facts on the wire', () => {
 	// A reconnect that re-sends a `commit-batch` (or `subscribe-identity`) entry
 	// for a row verification already cleared has no pending row left to read a
 	// captured grace decision from. A `retention`-marked entry tells the server
-	// this upload negotiated a plan, so `resolveGoneCommit` reads the durable
+	// this upload negotiated grace facts, so `resolveGoneCommit` reads the durable
 	// deadline the original commit recorded instead of answering with none.
 	it('attaches the durable deadline when a retention-marked commit-batch entry resolves a cleared row', async () => {
 		await useTestServer('wire-reconnect-grace');
@@ -2231,7 +2308,12 @@ describe('retention grace facts on the wire', () => {
 			name: 'reconnect-grace'
 		});
 		const upload = plannedUploadDecision(
-			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+			await negotiateUploads(
+				token,
+				[metadata],
+				DEFAULT_CACHE,
+				shouldReportGrace
+			)
 		);
 		await putNarBytes(upload.r2Key);
 
@@ -2268,7 +2350,7 @@ describe('retention grace facts on the wire', () => {
 	it('reports an empty fact when a retention-marked reconnect resolves a cleared row with no stored deadline', async () => {
 		await useTestServer('wire-reconnect-no-grace');
 		const { token } = await bootstrap();
-		// No grace policy: the plan-carrying negotiation captures no graceSeconds,
+		// No grace policy: the capable negotiation captures no graceSeconds,
 		// so the commit never writes a retention_grace row.
 
 		const metadata = uploadMetadata({
@@ -2277,7 +2359,12 @@ describe('retention grace facts on the wire', () => {
 			name: 'reconnect-no-grace'
 		});
 		const upload = plannedUploadDecision(
-			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+			await negotiateUploads(
+				token,
+				[metadata],
+				DEFAULT_CACHE,
+				shouldReportGrace
+			)
 		);
 		await putNarBytes(upload.r2Key);
 
@@ -2313,7 +2400,7 @@ describe('retention grace facts on the wire', () => {
 
 	// A gone pending row's already-present answer applies the same monotonic
 	// extension every other already-present decision does: even when another
-	// push committed the path without a plan (so no deadline is stored), the
+	// push committed the path without a grace policy (so no deadline is stored), the
 	// resent retention-marked entry is this publication's claim on the path.
 	it('extends the grace when a retention-marked entry resolves a row another push committed', async () => {
 		await useTestServer('wire-reconnect-extends');
@@ -2326,7 +2413,7 @@ describe('retention grace facts on the wire', () => {
 			name: 'reconnect-extends'
 		});
 
-		// The path lands via a plan-free push, which stores no deadline.
+		// The path lands via a push with no matching policy, which stores no deadline.
 		await pushPath(token, metadata);
 
 		const session = await openCommitSession(token);
@@ -2357,9 +2444,9 @@ describe('retention grace facts on the wire', () => {
 	});
 
 	// An unmarked entry gets exactly the legacy shape even for an upload that did
-	// negotiate a plan: the marker, not the plan alone, gates the durable-fact
+	// negotiate grace facts: the marker, not negotiation alone, gates the durable-fact
 	// read, so an old client's re-sent entry never trips a schema it predates.
-	it('keeps the legacy shape for a plan-carrying reconnect entry with no retention marker', async () => {
+	it('keeps the legacy shape for a capable reconnect entry with no retention marker', async () => {
 		await useTestServer('wire-reconnect-unmarked');
 		const { token } = await bootstrap();
 		await addGracePolicy('', dayGraceSeconds);
@@ -2370,7 +2457,12 @@ describe('retention grace facts on the wire', () => {
 			name: 'reconnect-unmarked'
 		});
 		const upload = plannedUploadDecision(
-			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+			await negotiateUploads(
+				token,
+				[metadata],
+				DEFAULT_CACHE,
+				shouldReportGrace
+			)
 		);
 		await putNarBytes(upload.r2Key);
 
@@ -2413,7 +2505,12 @@ describe('retention grace facts on the wire', () => {
 			name: 'reconnect-identity-grace'
 		});
 		const upload = plannedUploadDecision(
-			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+			await negotiateUploads(
+				token,
+				[metadata],
+				DEFAULT_CACHE,
+				shouldReportGrace
+			)
 		);
 		await putNarBytes(upload.r2Key);
 

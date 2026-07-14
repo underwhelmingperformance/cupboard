@@ -18,7 +18,10 @@ import {
 	commitCapabilitiesValue,
 	commitSessionRequestSchema,
 	type ParsedCommitBatchEntry,
-	type ParsedUploadGraceFact
+	type ParsedUploadGraceFact,
+	uploadCapabilitiesHeader,
+	uploadCapabilitiesValue,
+	uploadGraceFactsCapability
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
@@ -41,6 +44,7 @@ import {
 	UploadNotFoundError,
 	ZstdUnavailableError
 } from '../errors.ts';
+import { hasAcceptedCapability } from '../http/capabilities.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import { textResponse, verificationBatchSize } from '../http/http.ts';
 import { parseRequestValue } from '../http/parse.ts';
@@ -361,6 +365,26 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			);
 
 			if (isMatched) {
+				const pathname = new URL(context.req.url).pathname;
+				const isUploadGraceEndpoint =
+					context.req.method === 'POST' &&
+					(/^\/cache\/[^/]+\/uploads$/.test(pathname) ||
+						/^\/cache\/[^/]+\/uploads\/preview$/.test(pathname));
+
+				if (
+					isUploadGraceEndpoint &&
+					hasAcceptedCapability(context.req.raw, uploadGraceFactsCapability)
+				) {
+					const headers = new Headers(response.headers);
+					headers.set(uploadCapabilitiesHeader, uploadCapabilitiesValue);
+
+					return new Response(response.body, {
+						status: response.status,
+						statusText: response.statusText,
+						headers
+					});
+				}
+
 				return response;
 			}
 
@@ -594,11 +618,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// same narHash AND carrying a committed reference edge confirms the upload
 	// reached a servable state; anything else re-drives the client with `absent`.
 	// The pending row's captured grace decision is gone along with the row, so a
-	// `retention`-marked entry (a client that negotiated a plan for this upload)
+	// `retention`-marked entry (a client that accepted grace facts for this upload)
 	// gets the same monotonic extension any already-present decision applies:
 	// the resent commit is this publication's claim on the path, so its
 	// deadline moves with it even when another push committed the path in the
-	// meantime. An unmarked entry gets the legacy shape, matching a plan-free
+	// meantime. An unmarked entry gets the legacy shape, matching a legacy
 	// publication.
 	private async resolveGoneCommit(
 		socket: WebSocket,
@@ -693,8 +717,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 
 		this.uploadState.attachSession(uploadId, sessionId);
 		const status = uploadStatusOf(row);
-		// The grace fact replays only for an upload negotiated with a retention
-		// plan, keeping a plan-free upload's frames on the legacy shape.
+		// The grace fact replays only for an upload that accepted grace facts,
+		// keeping a legacy upload's frames on the legacy shape.
 		const graceDecision = parseStoredGraceDecision(row.graceDecisionJson);
 
 		if (status === 'pending') {
@@ -707,7 +731,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				uploadId,
 				storePathHash: metadata.storePathHash,
 				narHash: metadata.narHash,
-				...(graceDecision?.plan === true && {
+				...(graceDecision?.reportsGrace === true && {
 					grace: capturedGraceFact(graceDecision)
 				})
 			});
@@ -718,7 +742,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			ev: 'verdict',
 			uploadId,
 			status,
-			...(graceDecision?.plan === true && {
+			...(graceDecision?.reportsGrace === true && {
 				grace:
 					status === 'servable'
 						? storedGraceFact(

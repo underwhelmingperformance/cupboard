@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	confirmAuthorizationDetails,
+	previewAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails
 } from './attenuate.ts';
@@ -102,6 +103,26 @@ describe('confirmAuthorizationDetails', () => {
 
 	it('requests the default cache selector', () => {
 		const [grant] = confirmAuthorizationDetails({ cacheSelector: '_default' });
+
+		expect(grant).toMatchObject({ cache: '_default' });
+	});
+});
+
+describe('previewAuthorizationDetails', () => {
+	it('requests only upload:preview for the exact cache', () => {
+		expect(
+			previewAuthorizationDetails({ cacheSelector: 'pr-1' })
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:preview'],
+				cache: 'pr-1'
+			}
+		]);
+	});
+
+	it('requests the default cache selector', () => {
+		const [grant] = previewAuthorizationDetails({ cacheSelector: '_default' });
 
 		expect(grant).toMatchObject({ cache: '_default' });
 	});

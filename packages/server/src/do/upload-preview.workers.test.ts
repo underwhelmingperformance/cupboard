@@ -9,7 +9,11 @@ import {
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
 import {
+	acceptCapabilitiesHeader,
 	type ParsedUploadPathMetadata,
+	uploadCapabilitiesHeader,
+	uploadCapabilitiesValue,
+	uploadGraceFactsCapability,
 	type UploadPreviewResponse,
 	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
@@ -72,23 +76,33 @@ function negotiateOnlyGrants(
 async function previewUploads(
 	token: string,
 	paths: readonly ParsedUploadPathMetadata[],
-	cache: string = DEFAULT_CACHE
-): Promise<{ readonly status: number; readonly body: UploadPreviewResponse }> {
+	cache: string = DEFAULT_CACHE,
+	shouldReportGrace = true
+): Promise<{
+	readonly status: number;
+	readonly capabilities: string | undefined;
+	readonly body: UploadPreviewResponse;
+}> {
 	const response = await authorisedFetch(
 		`/cache/${selectorForCache(cache)}/uploads/preview`,
 		token,
 		{
 			body: JSON.stringify({
-				pushId: testPushId,
 				paths: paths.map((path) => uploadPathNegotiation(path))
 			}),
-			headers: { 'content-type': 'application/json' },
+			headers: {
+				'content-type': 'application/json',
+				...(shouldReportGrace && {
+					[acceptCapabilitiesHeader]: uploadGraceFactsCapability
+				})
+			},
 			method: 'POST'
 		}
 	);
 
 	return {
 		status: response.status,
+		capabilities: response.headers.get(uploadCapabilitiesHeader) ?? undefined,
 		body: uploadPreviewResponseSchema.parse(await response.json())
 	};
 }
@@ -158,6 +172,48 @@ async function sideEffectSnapshot(cache: string): Promise<{
 
 describe('upload preview', () => {
 	beforeEach(resetTestServer);
+
+	it.each([
+		{ reportsGrace: false, capabilities: undefined },
+		{ reportsGrace: true, capabilities: uploadCapabilitiesValue }
+	])(
+		'acknowledges grace facts only when requested ($reportsGrace)',
+		async ({ reportsGrace: shouldReportGrace, capabilities }) => {
+			const token = await initialise();
+			const preview = await previewUploads(
+				token,
+				[],
+				DEFAULT_CACHE,
+				shouldReportGrace
+			);
+
+			expect(preview).toStrictEqual({
+				status: StatusCodes.OK,
+				capabilities,
+				body: { uploads: [] }
+			});
+		}
+	);
+
+	it('preserves the legacy decision shape without the capability', async () => {
+		const token = await initialise();
+		await addGracePolicy(token, '', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('0'),
+			name: 'legacy-preview'
+		});
+		const preview = await previewUploads(token, [path], DEFAULT_CACHE, false);
+
+		expect(preview.body.uploads).toStrictEqual([
+			{
+				action: 'upload',
+				storePathHash: path.storePathHash,
+				narHash: path.narHash
+			}
+		]);
+	});
 
 	it('leaves pending uploads, grace state, and the reconcile queue exactly as before', async () => {
 		const token = await initialise();
@@ -392,6 +448,30 @@ describe('upload preview', () => {
 				grace: {}
 			}
 		]);
+	});
+
+	it('rejects a request body carrying a pushId', async () => {
+		const token = await initialise();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('8'),
+			name: 'no-push-id'
+		});
+
+		const response = await authorisedFetch(
+			`/cache/${selectorForCache(DEFAULT_CACHE)}/uploads/preview`,
+			token,
+			{
+				body: JSON.stringify({
+					pushId: testPushId,
+					paths: [uploadPathNegotiation(path)]
+				}),
+				headers: { 'content-type': 'application/json' },
+				method: 'POST'
+			}
+		);
+
+		expect(response.status).toBe(StatusCodes.BAD_REQUEST);
 	});
 
 	it('refuses negotiate to a preview-only grant but allows preview', async () => {

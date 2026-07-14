@@ -3,8 +3,10 @@ import { cacheFromSelector } from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import { type GcResponse } from '@cupboard/protocol/retention';
+import { uploadGraceFactsCapability } from '@cupboard/protocol/upload';
 import { implement } from '@orpc/server';
 
+import { hasAcceptedCapability } from '../http/capabilities.ts';
 import { internalOrigin, verificationBatchSize } from '../http/http.ts';
 
 import { authoriseRequest } from './authorise.ts';
@@ -198,22 +200,19 @@ export const tenantRouter = os.router({
 				cacheFromSelector(input.cacheName),
 				{
 					pushId: input.pushId,
-					paths: input.paths,
-					...(input.retention !== undefined && { retention: input.retention })
+					paths: input.paths
 				},
 				requestUrl.origin,
-				context.services.takeNegotiateHints(context.request)
+				context.services.takeNegotiateHints(context.request),
+				hasAcceptedCapability(context.request, uploadGraceFactsCapability)
 			);
 		}),
 		preview: os.uploads.preview.handler(({ input, context }) =>
 			context.services.uploads.preview(
 				cacheFromSelector(input.cacheName),
-				{
-					pushId: input.pushId,
-					paths: input.paths,
-					...(input.retention !== undefined && { retention: input.retention })
-				},
-				context.services.takeNegotiateHints(context.request)
+				{ paths: input.paths },
+				context.services.takeNegotiateHints(context.request),
+				hasAcceptedCapability(context.request, uploadGraceFactsCapability)
 			)
 		),
 		confirm: os.uploads.confirm.handler(({ input, context }) =>
