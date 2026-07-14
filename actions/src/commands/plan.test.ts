@@ -15,6 +15,7 @@ import {
 	ConfirmResultMissingError,
 	DuplicateRunnerLabelError,
 	GraceDeadlineMissingError,
+	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
 	RootEnsureCommandError,
@@ -32,12 +33,15 @@ import {
 	confirmDestinationIntermediates,
 	ensureAvailableTargets,
 	type EnsureRunner,
+	fallbackMatrix,
+	groupRetention,
 	matrix,
 	maximumMatrixJobs,
 	planAction,
 	type PlanInputs,
 	type PlanOptions,
-	resolvePlanInputs
+	resolvePlanInputs,
+	seedMatrix
 } from './plan.ts';
 
 function storePath(value: string): StorePathString {
@@ -68,6 +72,7 @@ describe('planAction', () => {
 
 		await planAction(baseOptions, {
 			RUNNER_TEMP: directory,
+			GITHUB_RUN_ID: '12345',
 			GITHUB_OUTPUT: output
 		});
 
@@ -109,7 +114,7 @@ describe('planAction', () => {
 				targets: JSON.stringify([{ ...target, os: 'nix-builder' }]),
 				runners: 'nix-builder@build-farm'
 			},
-			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output }
+			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output, GITHUB_RUN_ID: '12345' }
 		);
 
 		const outputs = await readFile(output, 'utf8');
@@ -135,7 +140,7 @@ describe('planAction', () => {
 				targets: JSON.stringify([{ ...target, os: 'NIX-BUILDER' }]),
 				runners: 'nix-builder@build-farm'
 			},
-			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output }
+			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output, GITHUB_RUN_ID: '12345' }
 		);
 
 		const outputs = await readFile(output, 'utf8');
@@ -152,7 +157,7 @@ describe('planAction', () => {
 		await expect(
 			planAction(
 				{ ...baseOptions, runners: 'ubuntu-latest \u{3A3}@trusted' },
-				{ RUNNER_TEMP: '/tmp' }
+				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
 		).rejects.toThrow(InvalidInputError);
 	});
@@ -161,7 +166,7 @@ describe('planAction', () => {
 		await expect(
 			planAction(
 				{ ...baseOptions, runners: 'ubuntu-latest@trusted ubuntu-latest' },
-				{ RUNNER_TEMP: '/tmp' }
+				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
 		).rejects.toThrow(DuplicateRunnerLabelError);
 	});
@@ -170,7 +175,7 @@ describe('planAction', () => {
 		await expect(
 			planAction(
 				{ ...baseOptions, runners: 'ubuntu-latest@' },
-				{ RUNNER_TEMP: '/tmp' }
+				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
 		).rejects.toThrow(InvalidInputError);
 	});
@@ -184,7 +189,7 @@ describe('planAction', () => {
 					...baseOptions,
 					targets: JSON.stringify([{ ...target, os: 'self-hosted' }])
 				},
-				{ RUNNER_TEMP: '/tmp' }
+				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
 		).rejects.toThrow(RunnerNotAllowedError);
 	});
@@ -201,6 +206,7 @@ describe('planAction', () => {
 				},
 				{
 					RUNNER_TEMP: directory,
+					GITHUB_RUN_ID: '12345',
 					GITHUB_OUTPUT: path.join(directory, 'output')
 				}
 			)
@@ -211,7 +217,7 @@ describe('planAction', () => {
 		await expect(
 			planAction(
 				{ ...baseOptions, optimise: 'perhaps' },
-				{ RUNNER_TEMP: '/tmp' }
+				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
 		).rejects.toThrow(InvalidInputError);
 	});
@@ -220,7 +226,7 @@ describe('planAction', () => {
 		await expect(
 			planAction(
 				{ ...baseOptions, intermediateRetention: 'pins' },
-				{ RUNNER_TEMP: '/tmp' }
+				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
 			)
 		).rejects.toThrow(InvalidInputError);
 	});
@@ -230,13 +236,16 @@ describe('planAction', () => {
 		['read-password is supplied without read-user', { readPassword: 'secret' }]
 	])('rejects when %s', async (_name, overrides) => {
 		await expect(
-			planAction({ ...baseOptions, ...overrides }, { RUNNER_TEMP: '/tmp' })
+			planAction(
+				{ ...baseOptions, ...overrides },
+				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
+			)
 		).rejects.toThrow(InvalidInputError);
 	});
 });
 
 describe('resolvePlanInputs', () => {
-	const environment = { RUNNER_TEMP: '/tmp' };
+	const environment = { RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' };
 
 	it('disables optimisation for a case-exact false', () => {
 		expect(
@@ -312,6 +321,24 @@ describe('resolvePlanInputs', () => {
 		expect(
 			resolvePlanInputs({ ...baseOptions, rootPrefix }, environment).rootPrefix
 		).toBe(rootPrefix);
+	});
+
+	it('retains intermediates by grace when asked', () => {
+		expect(
+			resolvePlanInputs(
+				{ ...baseOptions, intermediateRetention: 'grace' },
+				environment
+			).intermediateRetention
+		).toBe('grace');
+	});
+
+	it('rejects when intermediate-retention is not root or grace', () => {
+		expect(() =>
+			resolvePlanInputs(
+				{ ...baseOptions, intermediateRetention: 'rootish' },
+				environment
+			)
+		).toThrow(InvalidInputError);
 	});
 });
 
@@ -810,6 +837,7 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		planFile: '/unused/cupboard-publish-plan.json',
 		optimise: true,
 		intermediateRetention: 'root',
+		runId: '12345',
 		runnerRoutes: new Map([['ubuntu-latest', 'ubuntu-latest']]),
 		temporaryDirectory: tmpdir(),
 		...overrides
@@ -830,6 +858,94 @@ async function foreignKindRunner(
 	);
 
 	return { stdout: '', stderr: '' };
+}
+
+describe('seed and fallback retention wiring', () => {
+	const seedGroup = {
+		key: 'x86_64-linux',
+		system: 'x86_64-linux',
+		os: 'ubuntu-latest',
+		remote: false,
+		targets: [storePath(`/nix/store/${'0'.repeat(32)}-app`)],
+		candidates: []
+	};
+	const fallbackGroup = {
+		key: 'fallback-x86_64-linux',
+		system: 'x86_64-linux',
+		os: 'ubuntu-latest',
+		remote: false,
+		targets: []
+	};
+
+	it.each([
+		{
+			retention: 'root' as const,
+			expected: {
+				root: 'github:owner/repo/main/_cupboard-seed/12345/x86_64-linux',
+				ttl: '24h',
+				noRetain: false,
+				requireGrace: false
+			}
+		},
+		{
+			retention: 'grace' as const,
+			expected: { root: '', ttl: '', noRetain: true, requireGrace: true }
+		}
+	])('decides $retention retention', ({ retention, expected }) => {
+		const inputs = planInputs({ intermediateRetention: retention });
+		const plan = {
+			retained: [],
+			targets: [],
+			seedGroups: [seedGroup],
+			fallbackGroups: [fallbackGroup],
+			destinationIntermediates: []
+		};
+		const fallbackRoot =
+			retention === 'root'
+				? {
+						...expected,
+						root: 'github:owner/repo/main/_cupboard-seed/12345/fallback-x86_64-linux'
+					}
+				: expected;
+
+		expect({
+			seed: seedMatrix(inputs, plan),
+			fallback: fallbackMatrix(inputs, plan)
+		}).toStrictEqual({
+			seed: [groupEntry('x86_64-linux', expected)],
+			fallback: [groupEntry('fallback-x86_64-linux', fallbackRoot)]
+		});
+	});
+
+	it.each([
+		[
+			'a generated root is too long',
+			planInputs({
+				rootPrefix: 'p'.repeat(rootNameMaxLength - 1 - target.rootSuffix.length)
+			}),
+			'seed-x86_64-linux-ubuntu-latest-local-1234567890123456'
+		],
+		[
+			'a generated root contains a control character',
+			planInputs(),
+			'seed-x86_64-linux\nother'
+		]
+	] as const)('rejects when %s', (_name, inputs, key) => {
+		expect(() => groupRetention(inputs, key)).toThrow(
+			new IntermediateRootInvalidError(rootNameMaxLength)
+		);
+	});
+});
+
+function groupEntry(key: string, retentionValues: object): object {
+	return {
+		key,
+		system: 'x86_64-linux',
+		os: 'ubuntu-latest',
+		remote: false,
+		runsOn: 'ubuntu-latest',
+		...retentionValues
+	};
 }
 
 function confirmedPathsResultLine(

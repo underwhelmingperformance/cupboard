@@ -28,6 +28,16 @@ on:
         required: false
         default: ''
         type: string
+      intermediate-retention:
+        description:
+          How seed and fallback intermediates are retained. 'root' keeps the
+          temporary per-run seed roots at a 24h TTL; 'grace' relies on the
+          destination cache's retention grace policy instead. workflow_call
+          inputs have no enum, so an invalid value is caught by the plan action
+          before any push. Named destination roots are unaffected either way.
+        required: false
+        default: 'root'
+        type: string
       cupboard-version:
         description:
           cupboard release used by the actions. Pass the release tag the caller
@@ -160,6 +170,7 @@ jobs:
           cache: ${{ inputs.cache }}
           root-prefix: ${{ inputs.root-prefix }}
           ttl: ${{ inputs.ttl }}
+          intermediate-retention: ${{ inputs.intermediate-retention }}
           optimise: ${{ inputs.push }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
@@ -305,10 +316,12 @@ jobs:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
           cache: ${{ inputs.cache }}
-          root:
-            ${{ inputs.root-prefix }}/_cupboard-seed/${{ github.run_id }}/${{
-            matrix.key }}
-          ttl: 24h
+          # The plan action decides these per group; its tests prove the
+          # retention and reuse combinations.
+          root: ${{ matrix.root }}
+          ttl: ${{ matrix.ttl }}
+          no-retain: ${{ matrix.noRetain }}
+          require-grace: ${{ matrix.requireGrace }}
           attestations: ${{ steps.attest.outputs.bundle-path }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}
@@ -416,10 +429,12 @@ jobs:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
           cache: ${{ inputs.cache }}
-          root:
-            ${{ inputs.root-prefix }}/_cupboard-seed/${{ github.run_id }}/${{
-            matrix.key }}
-          ttl: 24h
+          # The plan action decides these per group; its tests prove the
+          # retention and reuse combinations.
+          root: ${{ matrix.root }}
+          ttl: ${{ matrix.ttl }}
+          no-retain: ${{ matrix.noRetain }}
+          require-grace: ${{ matrix.requireGrace }}
           attestations: ${{ steps.attest.outputs.bundle-path }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}

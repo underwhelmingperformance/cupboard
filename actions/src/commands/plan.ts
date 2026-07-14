@@ -33,6 +33,7 @@ import {
 	ConfirmResultInvalidError,
 	ConfirmResultMissingError,
 	GraceDeadlineMissingError,
+	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
 	MissingInputError,
@@ -139,6 +140,7 @@ export interface PlanInputs {
 	readonly planFile: string;
 	readonly optimise: boolean;
 	readonly intermediateRetention: 'root' | 'grace';
+	readonly runId: string;
 	readonly runnerRoutes: ReadonlyMap<string, RunnerRoute>;
 	readonly temporaryDirectory: string;
 }
@@ -249,6 +251,7 @@ export function resolvePlanInputs(
 	}
 
 	const temporaryDirectory = requireEnvironment(environment, 'RUNNER_TEMP');
+	const runId = requireEnvironment(environment, 'GITHUB_RUN_ID');
 
 	return {
 		targets,
@@ -262,6 +265,7 @@ export function resolvePlanInputs(
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),
 		intermediateRetention,
+		runId,
 		runnerRoutes,
 		temporaryDirectory,
 		planFile:
@@ -713,17 +717,56 @@ function targetMatrix(
 	}));
 }
 
-function seedMatrix(inputs: PlanInputs, plan: PublishPlan): readonly object[] {
+// The exact retention values a seed or fallback group's push publishes with,
+// decided here so every combination of retention mode and reuse view is
+// provable by tests: root mode keeps each
+// group's outputs under a temporary per-run seed root, grace mode publishes
+// them unretained and requires a positive grace deadline for each.
+export function groupRetention(
+	inputs: Pick<PlanInputs, 'intermediateRetention' | 'rootPrefix' | 'runId'>,
+	key: string
+): {
+	readonly root: string;
+	readonly ttl: string;
+	readonly noRetain: boolean;
+	readonly requireGrace: boolean;
+} {
+	if (inputs.intermediateRetention === 'grace') {
+		return { root: '', ttl: '', noRetain: true, requireGrace: true };
+	}
+
+	const root = joinRoot(
+		inputs.rootPrefix,
+		`_cupboard-seed/${inputs.runId}/${key}`
+	);
+
+	if (!rootNameSchema.safeParse(root).success) {
+		throw new IntermediateRootInvalidError(rootNameMaxLength);
+	}
+
+	return {
+		root,
+		ttl: '24h',
+		noRetain: false,
+		requireGrace: false
+	};
+}
+
+export function seedMatrix(
+	inputs: PlanInputs,
+	plan: PublishPlan
+): readonly object[] {
 	return plan.seedGroups.map((group) => ({
 		key: group.key,
 		system: group.system,
 		os: group.os,
 		remote: group.remote,
-		runsOn: runsOnFor(inputs, group.os)
+		runsOn: runsOnFor(inputs, group.os),
+		...groupRetention(inputs, group.key)
 	}));
 }
 
-function fallbackMatrix(
+export function fallbackMatrix(
 	inputs: PlanInputs,
 	plan: PublishPlan
 ): readonly object[] {
@@ -732,7 +775,8 @@ function fallbackMatrix(
 		system: group.system,
 		os: group.os,
 		remote: group.remote,
-		runsOn: runsOnFor(inputs, group.os)
+		runsOn: runsOnFor(inputs, group.os),
+		...groupRetention(inputs, group.key)
 	}));
 }
 

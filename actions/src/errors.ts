@@ -382,6 +382,16 @@ export class MatrixJobLimitError extends UsageError {
 	}
 }
 
+export class IntermediateRootInvalidError extends UsageError {
+	constructor(public readonly limit: number) {
+		super(
+			`the generated intermediate retention root is invalid; shorten root-prefix ` +
+				`and ensure system and runner labels contain no control characters so the ` +
+				`root is at most ${String(limit)} characters`
+		);
+		this.name = 'IntermediateRootInvalidError';
+	}
+}
 export class CacheProbeError extends CodedError {
 	constructor(
 		public readonly storePath: string,
