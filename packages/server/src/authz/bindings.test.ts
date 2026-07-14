@@ -159,6 +159,40 @@ describe('isGrantPermittedByRule', () => {
 			expected: false
 		},
 		{
+			name: 'a rule permitting only upload:commit does not issue a requested upload:confirm detail',
+			permitted: [
+				grant({
+					type: 'cupboard_cache',
+					actions: ['upload:commit'],
+					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+				})
+			],
+			requested: {
+				type: 'cupboard_cache',
+				actions: ['upload:confirm'],
+				cache: 'pr-123'
+			},
+			claims: {},
+			expected: false
+		},
+		{
+			name: 'a rule permitting only upload:confirm does not issue a requested upload:commit detail',
+			permitted: [
+				grant({
+					type: 'cupboard_cache',
+					actions: ['upload:confirm'],
+					resources: { cache: { exact: 'pr-123', validate: 'cacheName' } }
+				})
+			],
+			requested: {
+				type: 'cupboard_cache',
+				actions: ['upload:commit'],
+				cache: 'pr-123'
+			},
+			claims: {},
+			expected: false
+		},
+		{
 			name: 'a same-as-cache root permits the cache as the root',
 			permitted: [prCacheGrant],
 			requested: {

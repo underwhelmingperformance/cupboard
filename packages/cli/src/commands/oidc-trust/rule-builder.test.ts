@@ -35,6 +35,7 @@ describe('expandAllow', () => {
 				'upload:negotiate',
 				'upload:status',
 				'upload:commit',
+				'upload:confirm',
 				'attestation:negotiate',
 				'attestation:attach'
 			],
@@ -124,6 +125,7 @@ describe('buildCacheGrant', () => {
 				'upload:negotiate',
 				'upload:status',
 				'upload:commit',
+				'upload:confirm',
 				'root:set'
 			],
 			resources: {
@@ -148,7 +150,12 @@ describe('buildCacheGrant', () => {
 	it('defaults to the tenant default cache when none is named', () => {
 		expect(buildCacheGrant({ allow: ['push'] })).toStrictEqual({
 			type: 'cupboard_cache',
-			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+			actions: [
+				'upload:negotiate',
+				'upload:status',
+				'upload:commit',
+				'upload:confirm'
+			],
 			resources: { cache: { exact: '_default', validate: 'cacheName' } }
 		});
 	});
@@ -158,7 +165,12 @@ describe('buildCacheGrant', () => {
 			buildCacheGrant({ cache: 'acme-ci', allow: ['push'] })
 		).toStrictEqual({
 			type: 'cupboard_cache',
-			actions: ['upload:negotiate', 'upload:status', 'upload:commit'],
+			actions: [
+				'upload:negotiate',
+				'upload:status',
+				'upload:commit',
+				'upload:confirm'
+			],
 			resources: { cache: { exact: 'acme-ci', validate: 'cacheName' } }
 		});
 	});

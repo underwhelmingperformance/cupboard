@@ -709,6 +709,25 @@ describe('request and verify', () => {
 		});
 	});
 
+	// Commit authority is confined to upload-specific state, while confirmation
+	// can refresh any committed path in a cache.
+	it('refuses upload:confirm when the rule only names upload:commit', async () => {
+		const confirmRequest = [
+			{ type: 'cupboard_cache', actions: ['upload:confirm'], cache: 'ci' }
+		];
+		const { status, body } = await exchangeWith(JSON.stringify(confirmRequest));
+
+		expect({ status, shape: oauthErrorShape(body) }).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			shape: {
+				error: 'invalid_authorization_details',
+				error_description:
+					'the requested authorization_details are not permitted',
+				problem: 'not-permitted'
+			}
+		});
+	});
+
 	it('rejects a CI exchange that names no grants as invalid_request', async () => {
 		const subjectToken = await installTrustedIdp('write');
 		const response = await postToken({
@@ -842,6 +861,29 @@ describe('attenuation', () => {
 			otherCache: 'invalid_authorization_details',
 			otherCacheStatus: StatusCodes.BAD_REQUEST,
 			otherOp: 'invalid_authorization_details'
+		});
+	});
+
+	// upload:commit is trusted with upload-specific state; upload:confirm
+	// refreshes any already-committed path in the cache. A commit-only token
+	// must not attenuate into confirm authority it was never issued.
+	it('refuses to narrow a commit-only token into confirm authority', async () => {
+		const owner = await ownerToken();
+		const narrowResponse = await attenuate(owner, [
+			{ type: 'cupboard_cache', actions: ['upload:commit'], cache: 'pr-1' }
+		]);
+		const narrowed = tokenResponseSchema.parse(await narrowResponse.json());
+
+		const confirmAttempt = await attenuate(narrowed.access_token, [
+			{ type: 'cupboard_cache', actions: ['upload:confirm'], cache: 'pr-1' }
+		]);
+
+		expect({
+			status: confirmAttempt.status,
+			error: oauthErrorShape(await confirmAttempt.json()).error
+		}).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			error: 'invalid_authorization_details'
 		});
 	});
 

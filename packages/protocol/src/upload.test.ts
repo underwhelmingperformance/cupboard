@@ -9,6 +9,9 @@ import {
 	retentionMarkerAttributeValue,
 	statsResponseSchema,
 	subscribeIdentityCapabilityToken,
+	uploadConfirmMaxPaths,
+	uploadConfirmRequestSchema,
+	uploadConfirmResponseSchema,
 	uploadDecisionSchema,
 	uploadGraceFactSchema,
 	uploadNegotiateMaxPaths,
@@ -214,6 +217,82 @@ describe('uploadPreviewResponseSchema', () => {
 	])('rejects $name', ({ value }) => {
 		expect(
 			uploadPreviewResponseSchema.safeParse({ uploads: [value] }).success
+		).toBe(false);
+	});
+});
+
+describe('uploadConfirmRequestSchema', () => {
+	it('accepts a bounded list of store-path hashes', () => {
+		const value = { storePathHashes: [storePathHash] };
+
+		expect(uploadConfirmRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('accepts an empty list', () => {
+		const value = { storePathHashes: [] };
+
+		expect(uploadConfirmRequestSchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('accepts a list at the shared negotiate bound and rejects one above it', () => {
+		const atBound = {
+			storePathHashes: Array.from(
+				{ length: uploadConfirmMaxPaths },
+				() => storePathHash
+			)
+		};
+
+		expect({
+			atBound: uploadConfirmRequestSchema.safeParse(atBound).success,
+			aboveBound: uploadConfirmRequestSchema.safeParse({
+				storePathHashes: [...atBound.storePathHashes, storePathHash]
+			}).success
+		}).toStrictEqual({ atBound: true, aboveBound: false });
+	});
+
+	it.each([
+		{
+			name: 'a malformed store-path hash',
+			value: { storePathHashes: ['not-a-hash'] }
+		},
+		{
+			name: 'an unknown top-level key',
+			value: { storePathHashes: [storePathHash], extra: 1 }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(uploadConfirmRequestSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('uploadConfirmResponseSchema', () => {
+	it.each([
+		{
+			name: 'a confirmed path with a stored deadline',
+			value: {
+				storePathHash,
+				confirmed: true,
+				grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
+			}
+		},
+		{
+			name: 'a confirmed path with no matching policy',
+			value: { storePathHash, confirmed: true, grace: {} }
+		},
+		{
+			name: 'an unconfirmed path with no grace field',
+			value: { storePathHash, confirmed: false }
+		}
+	])('accepts $name', ({ value }) => {
+		expect(uploadConfirmResponseSchema.parse({ paths: [value] })).toStrictEqual(
+			{ paths: [value] }
+		);
+	});
+
+	it('rejects an unknown field on a confirmed path', () => {
+		expect(
+			uploadConfirmResponseSchema.safeParse({
+				paths: [{ storePathHash, confirmed: true, extra: 1 }]
+			}).success
 		).toBe(false);
 	});
 });

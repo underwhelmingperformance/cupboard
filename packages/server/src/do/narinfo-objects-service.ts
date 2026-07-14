@@ -27,7 +27,8 @@ import {
 	chunk,
 	deleteObjects,
 	maxInClauseValues,
-	maxOutgoingConnections
+	maxOutgoingConnections,
+	presentNarObjects
 } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
@@ -548,6 +549,56 @@ export class NarInfoObjectsService {
 					storePathHash !== undefined
 			)
 		);
+	}
+
+	// The distinct path hashes whose live row, exact committed reference and
+	// canonical R2 objects form a substitutable publication. R2 narinfo heads run
+	// before the row snapshot so a recommit during the probes fails towards the
+	// gated heal path. A missing or stale narinfo object is repaired when the
+	// canonical NAR still exists.
+	async servableStorePathHashes(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<ReadonlySet<StorePathHash>> {
+		const hashes = [...new Set(storePathHashes)];
+		const present = await this.existingNarInfoObjects(cache, hashes);
+		const rows = this.narInfoRowsFor(cache, hashes);
+		const committedEdges = await this.committedReferenceEdges(cache, hashes);
+		const committed = this.committedReferencesFrom(committedEdges, rows);
+		const committedRows = rows.filter((row) =>
+			committed.has(row.storePathHash)
+		);
+		const backed = await presentNarObjects(
+			this.context.env.BLOBS,
+			committedRows.map((row) => row.narHash)
+		);
+		const servable = new Set<StorePathHash>();
+		const hasCurrentObject = (row: NarInfoRow): boolean => {
+			const metadata = present.get(row.storePathHash);
+
+			return (
+				metadata?.generation === String(row.generation) &&
+				metadata.narHash === row.narHash
+			);
+		};
+
+		for (const row of committedRows) {
+			if (hasCurrentObject(row) && backed.has(row.narHash)) {
+				servable.add(row.storePathHash);
+			}
+		}
+
+		const recoverable = committedRows.filter(
+			(row) => !hasCurrentObject(row) && backed.has(row.narHash)
+		);
+
+		for (const row of recoverable) {
+			if (await this.isServable(cache, row.storePathHash, committedEdges)) {
+				servable.add(row.storePathHash);
+			}
+		}
+
+		return servable;
 	}
 
 	async committedNarInfoRow(

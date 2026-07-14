@@ -19,6 +19,7 @@ export const cacheOperations = [
 	'upload:preview',
 	'upload:status',
 	'upload:commit',
+	'upload:confirm',
 	'attestation:negotiate',
 	'attestation:attach',
 	'root:set',
@@ -85,6 +86,7 @@ export const operationSchema = z.enum([
 	'upload:preview',
 	'upload:status',
 	'upload:commit',
+	'upload:confirm',
 	'attestation:negotiate',
 	'attestation:attach',
 	'root:set',
@@ -191,26 +193,63 @@ function isRootWithin(requested: string, granted: string): boolean {
 		: requested === granted;
 }
 
-/**
- * Whether a granted (or permitted) action set satisfies a requested operation:
- * either the set carries the operation directly, or the operation is
- * `upload:preview` and the set already carries `upload:negotiate`. Preview is
- * a strict attenuation of negotiate (it stages nothing, so it can only ever do
- * less), so any authority that reaches negotiate already reaches preview; the
- * converse does not hold. The single rule behind every place an action set is
- * matched against a requested operation: a presented token's grants, a stored
- * trust rule's permitted grants, and the subset check attenuation and refresh
- * narrowing use.
- */
-export function isOperationSatisfiedByActions(
+// An operation that is a strict attenuation of a broader one at issuance: doing
+// less than the broader operation, never more, so a rule trusted with the
+// broader operation may mint an explicit grant for the narrower one without
+// naming it separately. `upload:preview` stages nothing an `upload:negotiate`
+// grant does not already reach.
+const impliedAtIssuance: Partial<Record<Operation, Operation>> = {
+	'upload:preview': 'upload:negotiate'
+};
+
+// An operation implied by a broader one a PRESENTED token already carries.
+// `upload:preview` is a strict read-only attenuation of `upload:negotiate` at
+// runtime as well as issuance.
+const impliedByPresentedAuthority: Partial<Record<Operation, Operation>> = {
+	'upload:preview': 'upload:negotiate'
+};
+
+function isOperationImplied(
 	actions: readonly Operation[],
-	operation: Operation
+	operation: Operation,
+	impliedBy: Partial<Record<Operation, Operation>>
 ): boolean {
 	if (actions.includes(operation)) {
 		return true;
 	}
 
-	return operation === 'upload:preview' && actions.includes('upload:negotiate');
+	const broaderOperation = impliedBy[operation];
+
+	return broaderOperation !== undefined && actions.includes(broaderOperation);
+}
+
+/**
+ * Whether a stored trust rule's permitted action set allows a requested
+ * operation to be minted at token issuance: either the set names the
+ * operation directly, or the operation is a strict attenuation of one the set
+ * already names (see {@link impliedAtIssuance}). Used only against a rule's
+ * permitted grants at exchange time, never against a presented token.
+ */
+export function isOperationPermittedAtIssuance(
+	actions: readonly Operation[],
+	operation: Operation
+): boolean {
+	return isOperationImplied(actions, operation, impliedAtIssuance);
+}
+
+/**
+ * Whether a set of actions a token actually carries authorises a requested
+ * operation at runtime: either the set carries the operation directly, or the
+ * operation is a strict read-only attenuation of one the set already carries
+ * (see {@link impliedByPresentedAuthority}). The rule behind every place a
+ * PRESENTED token's authority is checked: route authorisation, and the subset
+ * check attenuation and refresh narrowing use.
+ */
+export function isOperationSatisfiedByPresentedActions(
+	actions: readonly Operation[],
+	operation: Operation
+): boolean {
+	return isOperationImplied(actions, operation, impliedByPresentedAuthority);
 }
 
 function isCoveredByGrant(
@@ -224,7 +263,7 @@ function isCoveredByGrant(
 
 	const actions: readonly Operation[] = grant.actions;
 
-	if (!isOperationSatisfiedByActions(actions, operation)) {
+	if (!isOperationSatisfiedByPresentedActions(actions, operation)) {
 		return false;
 	}
 

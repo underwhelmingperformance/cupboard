@@ -28,10 +28,16 @@ export function jobWorkflowReferenceClaim(value: string): ClaimMatch {
 	return { pattern: `^${quotePatternLiteral(value)}@.+$` };
 }
 
-// The cache operations each `--allow` shorthand expands to. `push` and `attest`
-// are the upload and attestation conversations; `root` is a retention-root write.
+// The cache operations each `--allow` shorthand expands to. `push` includes
+// byte-free confirmation because cache-aware publication refreshes paths it can
+// already substitute; `attest` and `root` cover their own write conversations.
 const allowExpansions = {
-	push: ['upload:negotiate', 'upload:status', 'upload:commit'],
+	push: [
+		'upload:negotiate',
+		'upload:status',
+		'upload:commit',
+		'upload:confirm'
+	],
 	attest: ['attestation:negotiate', 'attestation:attach'],
 	root: ['root:set']
 } as const;

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
 	rootEnsureAuthorizationDetails
 } from './attenuate.ts';
@@ -83,5 +84,25 @@ describe('rootEnsureAuthorizationDetails', () => {
 				root: 'github:owner/repo/pr-1/x86_64-linux/app'
 			}
 		]);
+	});
+});
+
+describe('confirmAuthorizationDetails', () => {
+	it('requests only upload:confirm for the exact cache', () => {
+		expect(
+			confirmAuthorizationDetails({ cacheSelector: 'pr-1' })
+		).toStrictEqual([
+			{
+				type: 'cupboard_cache',
+				actions: ['upload:confirm'],
+				cache: 'pr-1'
+			}
+		]);
+	});
+
+	it('requests the default cache selector', () => {
+		const [grant] = confirmAuthorizationDetails({ cacheSelector: '_default' });
+
+		expect(grant).toMatchObject({ cache: '_default' });
 	});
 });

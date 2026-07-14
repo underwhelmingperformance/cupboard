@@ -8,6 +8,7 @@ import {
 	type ParsedUploadPathMetadata,
 	type ParsedUploadPathNegotiation,
 	type PushCredential,
+	type UploadConfirmResponse,
 	type UploadDecision,
 	type UploadNegotiateResponse,
 	type UploadPreviewResponse,
@@ -525,6 +526,78 @@ export class UploadsService {
 					narHash: metadata.narHash,
 					grace: plannedGraceFact
 				};
+			})
+		};
+	}
+
+	// Confirms an unretained publication by store path, without uploading bytes:
+	// the same conditions and monotonic grace extension a negotiate applies to
+	// an already-present decision, reused wholesale through {@link
+	// confirmGraceBatch}. A path confirms only while it is genuinely
+	// substitutable: it needs a committed reference edge, a live `blob_state`
+	// backing exactly as negotiate's skippable check does, and a row identity
+	// that still holds when the grace is applied, since a caller confirms a
+	// path precisely to rely on substituting it afterwards. Anything less
+	// confirms false and extends nothing.
+	async confirmPaths(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<UploadConfirmResponse> {
+		if (storePathHashes.length === 0) {
+			return { paths: [] };
+		}
+
+		// The work runs once per distinct hash; every occurrence in the request
+		// still gets its own response entry.
+		const uniqueHashes = [...new Set(storePathHashes)];
+		const existingByStorePathHash = this.existingNarInfos(cache, uniqueHashes);
+		const existingRows = existingByStorePathHash.values().toArray();
+		const [servable, backed] = await Promise.all([
+			this.narInfoObjects.servableStorePathHashes(cache, uniqueHashes),
+			this.uploadState.presentNarHashes(existingRows.map((row) => row.narHash))
+		]);
+		const resolvedGraceSeconds = this.retention.resolveGraceSeconds(cache);
+
+		const confirmable = uniqueHashes.flatMap((storePathHash) => {
+			const existing = existingByStorePathHash.get(storePathHash);
+
+			if (
+				existing === undefined ||
+				!servable.has(storePathHash) ||
+				!backed.has(existing.narHash)
+			) {
+				return [];
+			}
+
+			return [
+				{
+					storePathHash: existing.storePathHash,
+					generation: existing.generation,
+					narHash: existing.narHash
+				}
+			];
+		});
+		// The checks above awaited shared facts, so a row can have moved since
+		// its snapshot; the batch re-checks each row's identity and applies the
+		// grace only to the rows that still match. A moved row is absent from
+		// the map and confirms false.
+		const facts = confirmGraceBatch(
+			this.context,
+			this.retention,
+			cache,
+			confirmable,
+			resolvedGraceSeconds
+		);
+
+		return {
+			paths: storePathHashes.map((storePathHash) => {
+				const fact = facts.get(storePathHash);
+
+				if (fact === undefined) {
+					return { storePathHash, confirmed: false };
+				}
+
+				return { storePathHash, confirmed: true, grace: fact };
 			})
 		};
 	}

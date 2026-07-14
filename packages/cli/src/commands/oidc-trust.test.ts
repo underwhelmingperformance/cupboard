@@ -31,7 +31,12 @@ const identity: RepositoryIdentity = {
 	fullName: 'acme/infra'
 };
 const tenantUrl = 'https://cache.example.workers.dev/t/acme';
-const uploadActions = ['upload:negotiate', 'upload:status', 'upload:commit'];
+const uploadActions = [
+	'upload:negotiate',
+	'upload:status',
+	'upload:commit',
+	'upload:confirm'
+];
 const attestActions = ['attestation:negotiate', 'attestation:attach'];
 const prSubstitutions = {
 	pr: {
