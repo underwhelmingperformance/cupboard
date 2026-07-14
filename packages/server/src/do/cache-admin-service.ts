@@ -288,6 +288,12 @@ export class CacheAdminService {
 				tx.delete(schema.retentionRoots)
 					.where(eq(schema.retentionRoots.cache, cache))
 					.run();
+				// The grace deadlines die with the cache, and dropping the registry row
+				// drops its grace-managed marker: deletion is the one exit from
+				// grace-managed state, and no transition deadline applies.
+				tx.delete(schema.retentionGrace)
+					.where(eq(schema.retentionGrace.cache, cache))
+					.run();
 				tx.delete(schema.caches).where(eq(schema.caches.name, cache)).run();
 				// Drop in-flight uploads negotiated under this cache so a pending
 				// commit cannot resurrect it after teardown.

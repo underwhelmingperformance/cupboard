@@ -91,6 +91,19 @@ export class GarbageCollectionService {
 				.run();
 		});
 
+		// An expired grace deadline lapses before reachability is computed, so its
+		// expiry is a retention event exactly like an expiring root: the sweep that
+		// follows may collect what the deadline kept.
+		this.context.db
+			.delete(schema.retentionGrace)
+			.where(
+				and(
+					eq(schema.retentionGrace.cache, cache),
+					lte(schema.retentionGrace.retainUntil, now)
+				)
+			)
+			.run();
+
 		// Mark the closure reachable from the live roots within this cache.
 		// `visited` guards the traversal; `retainedCommitted` is the keep-set of
 		// committed paths that the sweep spares.
@@ -104,7 +117,16 @@ export class GarbageCollectionService {
 			.where(eq(schema.retentionRootTargets.cache, cache))
 			.all();
 
-		for (const target of rootTargets) {
+		// The grace deadlines still present are all live: the expired ones were
+		// deleted above. Each seeds the traversal exactly like a root target, so a
+		// deadline keeps the same transitive closure its path references.
+		const graceTargets = this.context.db
+			.select({ storePathHash: schema.retentionGrace.storePathHash })
+			.from(schema.retentionGrace)
+			.where(eq(schema.retentionGrace.cache, cache))
+			.all();
+
+		for (const target of [...rootTargets, ...graceTargets]) {
 			if (visited.has(target.storePathHash)) {
 				continue;
 			}
@@ -148,8 +170,14 @@ export class GarbageCollectionService {
 
 		// Guard: nothing committed is reachable in this cache and no root expired
 		// (no roots, or roots that only point at absent paths), so collecting would
-		// empty it without a retention event. Skip.
-		if (retainedCommitted.size === 0 && expiredRoots.length === 0) {
+		// empty it without a retention event. Skip. A grace-managed cache is
+		// exempt: grace deadlines manage its lifetime, so it may drain to empty
+		// once the last one has expired.
+		if (
+			retainedCommitted.size === 0 &&
+			expiredRoots.length === 0 &&
+			!this.cacheGraceManaged(cache)
+		) {
 			return { rootsExpired: expiredRoots.length, pathsSwept: 0 };
 		}
 
@@ -234,6 +262,18 @@ export class GarbageCollectionService {
 		}
 
 		return { rootsExpired: expiredRoots.length, pathsSwept };
+	}
+
+	// Read only when the sweep would otherwise skip an unreachable cache, so the
+	// common retained case costs no extra row.
+	private cacheGraceManaged(cache: string): boolean {
+		const row = this.context.db
+			.select({ graceManaged: schema.caches.graceManaged })
+			.from(schema.caches)
+			.where(eq(schema.caches.name, cache))
+			.get();
+
+		return row?.graceManaged ?? false;
 	}
 
 	// Walks a row's references, enqueuing each not-yet-visited reference hash for

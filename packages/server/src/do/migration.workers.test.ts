@@ -1,9 +1,11 @@
+import { storePathHashSchema } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
 
 import {
 	oidcTrust,
+	retentionGrace,
 	retentionGracePolicies,
 	retentionPolicies,
 	verificationCursor
@@ -173,6 +175,46 @@ describe('migrations', () => {
 		);
 
 		expect(rows).toStrictEqual([policy]);
+	});
+
+	it('gains the retention grace table and cache marker at the latest migration', async () => {
+		const deadline = {
+			cache: '',
+			storePathHash: storePathHashSchema.parse('a'.repeat(32)),
+			retainUntil: '2026-06-01T00:00:00.000Z'
+		};
+
+		const migrated = await runInDurableObject(
+			testServerFor('migration-retention-grace'),
+			async (_instance, state) => {
+				// A cache registered before the grace work exists in the old shape;
+				// 0028 must add the marker column without touching it. The anchor
+				// is fixed so later migrations cannot silently retarget the test.
+				await migrateThrough(state, 27);
+				state.storage.sql.exec(
+					"INSERT INTO cache (name, priority, created_at) VALUES ('builds', 40, '2026-01-01T00:00:00.000Z')"
+				);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				const database = drizzle(state.storage, {
+					schema: { retentionGrace }
+				});
+				database.insert(retentionGrace).values(deadline).run();
+
+				return {
+					deadlines: database.select().from(retentionGrace).all(),
+					caches: state.storage.sql
+						.exec('SELECT name, grace_managed FROM cache ORDER BY name')
+						.toArray()
+				};
+			}
+		);
+
+		expect(migrated).toStrictEqual({
+			deadlines: [deadline],
+			caches: [{ name: 'builds', grace_managed: 0 }]
+		});
 	});
 
 	it('migrates and round-trips an OIDC trust rule', async () => {

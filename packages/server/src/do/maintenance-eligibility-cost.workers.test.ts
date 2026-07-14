@@ -233,8 +233,8 @@ describe('maintenance sweep cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 14,
-			largeBacklogCost: 14
+			smallBacklogCost: 15,
+			largeBacklogCost: 15
 		});
 	});
 });
