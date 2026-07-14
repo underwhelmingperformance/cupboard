@@ -1,6 +1,9 @@
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
+import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { narInfoDeletions } from '../db/schema.ts';
 import {
 	bootstrap,
 	currentServer,
@@ -9,10 +12,15 @@ import {
 	pushPath,
 	resetTestServer,
 	setRoot,
+	syntheticNarHash,
+	syntheticStorePathHash,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
 
+import { chunk } from './bulk.ts';
+import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
+import { maxPathsSweptPerRun } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -21,6 +29,27 @@ async function continuationLimit(): Promise<number | undefined> {
 	return runInDurableObject(currentServer(), (_instance, state) =>
 		state.storage.get<number>(gcContinuationKey)
 	);
+}
+
+async function seedNarInfoDeletions(count: number): Promise<void> {
+	const createdAt = new Date().toISOString();
+	const rows = Array.from({ length: count }, (_unused, index) => ({
+		cache: DEFAULT_CACHE,
+		storePathHash: syntheticStorePathHash(index),
+		narHash: syntheticNarHash(index),
+		generation: 1,
+		createdAt
+	}));
+
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const database = drizzle(state.storage, { schema: { narInfoDeletions } });
+
+		// Each row binds five parameters, so the insert is chunked under the
+		// driver's bound-parameter limit.
+		for (const batch of chunk(rows, 18)) {
+			database.insert(narInfoDeletions).values(batch).run();
+		}
+	});
 }
 
 async function fireAlarm(): Promise<void> {
@@ -86,5 +115,48 @@ describe('garbage collection sweep cap', () => {
 
 		// The retained path is never swept.
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
+	});
+});
+
+describe('garbage collection narinfo-deletion continuation', () => {
+	beforeEach(resetTestServer);
+
+	it('arms the alarm while a narinfo-deletion backlog exceeds the flush cap', async () => {
+		const backlog = maxNarInfoDeletionsFlushedPerRun + 5;
+		await seedNarInfoDeletions(backlog);
+
+		// The sweep and the storage reads share one Durable Object turn, so the
+		// armed continuation alarm cannot fire and drain the backlog before it is
+		// observed. No committed paths are swept, so the continuation is armed
+		// solely by the queued narinfo-deletion backlog the capped flush leaves.
+		const observed = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.runGarbageCollection();
+
+				const remaining = drizzle(state.storage, {
+					schema: { narInfoDeletions }
+				})
+					.select({ storePathHash: narInfoDeletions.storePathHash })
+					.from(narInfoDeletions)
+					.all().length;
+
+				const observed = {
+					armed: (await state.storage.getAlarm()) !== null,
+					continuation: await state.storage.get<number>(gcContinuationKey),
+					remaining
+				};
+
+				await state.storage.deleteAlarm();
+
+				return observed;
+			}
+		);
+
+		expect(observed).toStrictEqual({
+			armed: true,
+			continuation: maxPathsSweptPerRun,
+			remaining: backlog - maxNarInfoDeletionsFlushedPerRun
+		});
 	});
 });

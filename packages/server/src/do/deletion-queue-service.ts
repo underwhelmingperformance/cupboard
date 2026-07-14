@@ -32,8 +32,14 @@ export interface TornDownNarInfo {
 
 // A fenced edge retirement binds two parameters per row (the path and its
 // generation), so the OR-of-AND list is chunked to stay within D1's
-// bound-parameter limit with headroom for the fixed tenant and cache.
-const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
+// bound-parameter limit with headroom for the fixed tenant and cache. Each such
+// chunk is also one durable-progress unit of a teardown drain.
+export const maxFencedRetireRows = Math.floor(maxInClauseValues / 2);
+
+// A capped flush retires at most this many queued deletions per pass: a few
+// fenced-retire chunks' worth, so one pass's gated subrequests stay well inside
+// the section budget while a backlog drains across alarm-resumed passes.
+export const maxNarInfoDeletionsFlushedPerRun = 4 * maxFencedRetireRows;
 
 // The presence sweep credit UPDATE embeds droppableFilter twice (in the
 // droppedBytes and droppedCount subqueries), each binding tenant(1) + IN(N) +
@@ -298,10 +304,25 @@ export class DeletionQueueService {
 	}
 
 	// Runs inside the caller's critical section; must not open its own.
-	async flushQueuedNarInfoDeletions(origin?: string): Promise<number> {
-		const queued = this.context.db.select().from(schema.narInfoDeletions).all();
+	async flushQueuedNarInfoDeletions(
+		origin?: string,
+		limit: number = maxNarInfoDeletionsFlushedPerRun
+	): Promise<number> {
+		// Read a capped, deterministically ordered slice grouped per cache, so one
+		// pass drains a bounded number of entries and a backlog carries over to the
+		// next alarm-resumed pass instead of holding the gate.
+		const queued = this.context.db
+			.select()
+			.from(schema.narInfoDeletions)
+			.orderBy(
+				schema.narInfoDeletions.cache,
+				schema.narInfoDeletions.storePathHash,
+				schema.narInfoDeletions.generation
+			)
+			.limit(limit)
+			.all();
 
-		// Group by cache so each cache's queue drains through the batched teardown
+		// Group by cache so each cache's slice drains through the batched teardown
 		// retirement, whose generation fence and origin purge match the per-path
 		// form with a bounded number of round-trips per cache.
 		const byCache = new Map<string, TornDownNarInfo[]>();
@@ -323,6 +344,20 @@ export class DeletionQueueService {
 		}
 
 		return deleted;
+	}
+
+	// Whether any teardown deletion is still queued, so a capped flush's caller
+	// re-arms only while there is more to retire. A real column is selected
+	// because a `select({ one: sql`1` })` probe reads as undefined even when rows
+	// exist under this driver.
+	hasQueuedNarInfoDeletions(): boolean {
+		const row = this.context.db
+			.select({ storePathHash: schema.narInfoDeletions.storePathHash })
+			.from(schema.narInfoDeletions)
+			.limit(1)
+			.get();
+
+		return row !== undefined;
 	}
 
 	// Runs inside the caller's critical section; must not open its own.
@@ -418,17 +453,20 @@ export class DeletionQueueService {
 		};
 	}
 
-	// Retires a whole chunk of a cache teardown's queued deletions in batched
-	// D1 operations: the per-path form costs three or four round-trips per path
-	// inside the gate, which for a large cache holds it for minutes. The chunk
-	// shares one removed cache, so the work batches cleanly: one bulk R2 delete
-	// for the narinfo objects, one fenced credit-and-delete batch per edge
-	// sub-chunk, one presence sweep per hash sub-chunk, and a synchronous queue
-	// clear. A path recommitted since its row was removed keeps its live object
-	// (the generation fence skips its object delete), while the captured
-	// generation's edge and references are still retired. Returns how many served
-	// objects it deleted: the entries whose generation the DO's live row had not
-	// superseded.
+	// Retires a cache teardown's queued deletions in batched D1 operations: the
+	// per-path form costs three or four round-trips per path inside the gate,
+	// which for a large cache holds it for minutes. The entries share one removed
+	// cache, so the work batches cleanly. Each chunk of `maxFencedRetireRows`
+	// runs a self-contained pipeline: its generation fence, one bulk R2 delete
+	// for the narinfo objects, its edge-cache purges, one fenced credit-and-delete
+	// batch, its presence sweep, its attestation retirement and list re-render,
+	// then a synchronous clear of exactly that chunk's queue rows. Because a chunk
+	// finishes before the next starts, a mid-pass SubrequestTimeoutError redoes at
+	// most one chunk on the next pass rather than the whole cache. A path
+	// recommitted since its row was removed keeps its live object (the generation
+	// fence skips its object delete), while the captured generation's edge and
+	// references are still retired. Returns how many served objects it deleted:
+	// the entries whose generation the DO's live row had not superseded.
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	async retireTornDownNarInfos(
@@ -444,53 +482,52 @@ export class DeletionQueueService {
 		const clock = new Date();
 		const now = clock.toISOString();
 
-		// The generation fence, against the DO's own live rows (synchronous).
-		const liveGenerations = new Map(
-			chunk(
-				entries.map((entry) => entry.storePathHash),
-				maxInClauseValues
-			).flatMap((batch) =>
-				this.context.db
-					.select({
-						storePathHash: schema.narInfos.storePathHash,
-						generation: schema.narInfos.generation
-					})
-					.from(schema.narInfos)
-					.where(
-						and(
-							eq(schema.narInfos.cache, cache),
-							inArray(schema.narInfos.storePathHash, batch)
-						)
-					)
-					.all()
-					.map((row) => [row.storePathHash, row.generation] as const)
-			)
-		);
-		const removable = entries.filter((entry) => {
-			const live = liveGenerations.get(entry.storePathHash);
+		let deletedObjects = 0;
 
-			return live === undefined || live === entry.generation;
-		});
-
-		// The served objects go in bulk, then their edge-cache entries
-		// (best-effort, bounded fan-out).
-		await this.narInfoObjects.deleteNarInfoObjects(
-			cache,
-			removable.map((entry) => entry.storePathHash)
-		);
-
-		if (origin !== undefined) {
-			await mapWithConcurrency(removable, maxOutgoingConnections, (entry) =>
-				this.purgeCachedNarInfo(
-					`${origin}${narInfoCachePath(tenant, entry.storePathHash, cache)}`
-				)
-			);
-		}
-
-		// Retire every captured edge, crediting the narinfo count by how many
-		// actually existed, atomically per sub-chunk so a replay cannot
-		// double-credit.
 		for (const batch of chunk(entries, maxFencedRetireRows)) {
+			// The generation fence, against the DO's own live rows (synchronous). A
+			// chunk never exceeds maxFencedRetireRows, well within the IN-clause
+			// limit, so the fence reads in one query.
+			const storePathHashes = batch.map((entry) => entry.storePathHash);
+			const liveRows = this.context.db
+				.select({
+					storePathHash: schema.narInfos.storePathHash,
+					generation: schema.narInfos.generation
+				})
+				.from(schema.narInfos)
+				.where(
+					and(
+						eq(schema.narInfos.cache, cache),
+						inArray(schema.narInfos.storePathHash, storePathHashes)
+					)
+				)
+				.all();
+			const liveGenerations = new Map(
+				liveRows.map((row) => [row.storePathHash, row.generation] as const)
+			);
+			const removable = batch.filter((entry) => {
+				const live = liveGenerations.get(entry.storePathHash);
+
+				return live === undefined || live === entry.generation;
+			});
+
+			// The served objects go in bulk, then their edge-cache entries
+			// (best-effort, bounded fan-out).
+			await this.narInfoObjects.deleteNarInfoObjects(
+				cache,
+				removable.map((entry) => entry.storePathHash)
+			);
+
+			if (origin !== undefined) {
+				await mapWithConcurrency(removable, maxOutgoingConnections, (entry) =>
+					this.purgeCachedNarInfo(
+						`${origin}${narInfoCachePath(tenant, entry.storePathHash, cache)}`
+					)
+				);
+			}
+
+			// Retire the chunk's captured edges, crediting the narinfo count by how
+			// many actually existed, atomically so a replay cannot double-credit.
 			const edgeFilter = and(
 				eq(d1Schema.blobReference.tenant, tenant),
 				eq(d1Schema.blobReference.cache, cache),
@@ -518,28 +555,29 @@ export class DeletionQueueService {
 					.where(eq(d1Schema.tenantUsage.tenant, tenant)),
 				this.context.d1.delete(d1Schema.blobReference).where(edgeFilter)
 			]);
-		}
 
-		// Drop the presence rows whose hashes the tenant no longer references
-		// anywhere, crediting bytes and blob counts by what is actually dropped.
-		// This runs in the caller's critical section and this Durable Object is
-		// the single writer of its tenant's presence rows, so the select and the
-		// batch cannot be interleaved by another charge.
-		const narHashes = [...new Set(entries.map((entry) => entry.narHash))];
+			// Drop the presence rows whose hashes the tenant no longer references
+			// anywhere, crediting bytes and blob counts by what is actually dropped.
+			// A presence row drops only once no reference edge remains anywhere, and
+			// a hash shared with a later chunk still has that chunk's edge until it
+			// runs, so sweeping per chunk keeps the credit exact. This runs in the
+			// caller's critical section and this Durable Object is the single writer
+			// of its tenant's presence rows, so the select and the batch cannot be
+			// interleaved by another charge.
+			const narHashes = [...new Set(batch.map((entry) => entry.narHash))];
 
-		for (const batch of chunk(narHashes, maxTeardownPresenceChunk)) {
-			const { update, presenceDelete } = teardownPresenceBatch(
-				this.context.d1,
-				tenant,
-				batch,
-				now
-			);
-			await this.context.d1.batch([update, presenceDelete]);
-		}
+			for (const hashes of chunk(narHashes, maxTeardownPresenceChunk)) {
+				const { update, presenceDelete } = teardownPresenceBatch(
+					this.context.d1,
+					tenant,
+					hashes,
+					now
+				);
+				await this.context.d1.batch([update, presenceDelete]);
+			}
 
-		// Attestation references are rare on most paths; read them per sub-chunk
-		// and retire each, re-rendering the affected paths' list objects.
-		for (const batch of chunk(entries, maxFencedRetireRows)) {
+			// Attestation references are rare on most paths; read the chunk's and
+			// retire each, re-rendering the affected paths' list objects.
 			const pairFilters = batch.map((entry) =>
 				and(
 					eq(d1Schema.attestationReference.storePathHash, entry.storePathHash),
@@ -576,12 +614,11 @@ export class DeletionQueueService {
 			for (const storePathHash of affected) {
 				await this.attestations.materialiseList(cache, storePathHash);
 			}
-		}
 
-		// The queue rows clear synchronously, exactly the retired (path,
-		// generation) pairs: a later-queued generation of the same path keeps its
-		// row, and with it the retirement it is still owed.
-		for (const batch of chunk(entries, maxFencedRetireRows)) {
+			// The chunk's queue rows clear synchronously, exactly the retired (path,
+			// generation) pairs: a later-queued generation of the same path keeps its
+			// row, and with it the retirement it is still owed. Clearing per chunk is
+			// what makes progress durable across a mid-pass timeout.
 			const retiredPairs = batch.map((entry) =>
 				and(
 					eq(schema.narInfoDeletions.storePathHash, entry.storePathHash),
@@ -595,9 +632,11 @@ export class DeletionQueueService {
 					and(eq(schema.narInfoDeletions.cache, cache), or(...retiredPairs))
 				)
 				.run();
+
+			deletedObjects += removable.length;
 		}
 
-		return removable.length;
+		return deletedObjects;
 	}
 
 	deleteStorePath(

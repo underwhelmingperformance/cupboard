@@ -905,6 +905,22 @@ export function syntheticNarHash(index: number): NixSha256HashString {
 	return nixSha256HashSchema.parse(`sha256:${'0'.repeat(44)}${suffix}`);
 }
 
+/**
+ * A deterministic, syntactically valid store-path hash derived from an index,
+ * whose lexical order tracks the index so a seeded backlog drains predictably.
+ */
+export function syntheticStorePathHash(index: number): StorePathHash {
+	let remaining = index;
+	let suffix = '';
+
+	for (let position = 0; position < 4; position += 1) {
+		suffix = nixBase32Alphabet.charAt(remaining % 32) + suffix;
+		remaining = Math.floor(remaining / 32);
+	}
+
+	return storePathHashSchema.parse(`${'0'.repeat(28)}${suffix}`);
+}
+
 /** A deterministic, syntactically valid CAS digest derived from an index. */
 export function syntheticCasDigest(index: number): Sha256HexDigest {
 	return sha256HexDigestSchema.parse(index.toString(16).padStart(64, '0'));
