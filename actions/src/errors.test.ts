@@ -20,6 +20,7 @@ import {
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
 	GithubApiError,
+	IntermediateRootInvalidError,
 	InvalidChecksumLineError,
 	InvalidInputError,
 	LegacyPushSummaryError,
@@ -46,6 +47,11 @@ describe('action errors', () => {
 		[
 			'InvalidInputError',
 			new InvalidInputError('version', 'bad'),
+			usageExitCode
+		],
+		[
+			'IntermediateRootInvalidError',
+			new IntermediateRootInvalidError(256),
 			usageExitCode
 		],
 		[

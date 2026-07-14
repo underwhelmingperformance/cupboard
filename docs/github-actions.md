@@ -376,6 +376,28 @@ does not guess from changed source files or attribute names. Like seeding, the
 grouped build is best-effort: when it fails, each affected target's own job
 retries the work and reports its own result.
 
+`intermediate-retention` chooses how the seed and fallback jobs keep the shared
+outputs they publish. The default, `root`, is today's behaviour: each shared
+output gets a temporary `_cupboard-seed/<run id>/<key>` root with a 24-hour TTL
+that simply expires; nothing removes it earlier once the run's target jobs have
+substituted the output. The opt-in `grace` instead publishes seed and fallback
+intermediates with no retention root at all, relying on the destination cache's
+own retention grace policy to keep them alive long enough for the target jobs to
+substitute; the plan job also refreshes the grace deadline of any shared output
+the destination already holds. This requires a matching policy on the
+destination cache first (`cupboard policy add-grace`), and the run fails closed:
+it stops the job if a published or already-cached intermediate has no positive
+grace deadline, rather than risk the target jobs substituting from bytes that
+could be collected before they run.
+
+The first publication accepted under a grace policy also marks the destination
+cache grace-managed, and the marker is permanent: it survives removing the
+policy. Garbage collection normally refuses to empty a cache without a retention
+event, but a grace-managed cache's lifetime is governed by its grace deadlines,
+so it may drain to empty once the last deadline has expired. Adding a grace
+policy is therefore a durable change to how the caches it covers are collected,
+not a setting the matching `remove-grace` fully undoes.
+
 `cupboard-version` pins the CLI release the jobs install, and `maximise-space`
 (default `true`) reclaims runner disk space before building; disable it on
 self-hosted runners, where the reclamation would be destructive.
@@ -502,6 +524,15 @@ The `job_workflow_ref` names the file in `owner/cupboard`, where the reusable
 workflow lives, not the caller's repository. The plan and build jobs run inside
 cupboard's workflow, so that is the claim their token carries; the caller is
 still pinned, by the repository ids and `ref` the preset sets.
+
+With `intermediate-retention: grace`, the seed and fallback jobs no longer write
+a root at all, so the prefix grant above only needs to cover the target jobs'
+named per-target roots; the trust rule itself needs no change, since an unused
+`root` allowance is harmless. The plan job's confirmation calls need
+`upload:confirm`, but any rule that already allows `push` (as both presets above
+do) grants it implicitly: `upload:commit` covers the narrower `upload:confirm`
+the same way it covers `upload:negotiate`, so no separate `--allow` is needed
+for grace mode.
 
 Release builds usually go to a cache named after the tag, and no preset covers
 that. `--capture` builds the rule instead: it reads a value out of a token claim
