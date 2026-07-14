@@ -59,10 +59,12 @@ import {
 	type ServerContext
 } from './context.ts';
 import {
+	capturedGraceFact,
 	confirmGrace,
 	type GraceDecision,
 	parseStoredGraceDecision,
-	storedGraceDeadlines
+	storedGraceDeadlines,
+	storedGraceFact
 } from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -97,6 +99,9 @@ export const narVerifyBudgetMs = 5 * 60 * 1000;
  * upload is stored pending verification (`deferred`) and the caller waits for
  * the verification pass's verdict. Failures are thrown.
  */
+// The optional `grace` fact is populated only for an upload negotiated with a
+// retention plan, mirroring the wire rule: a plan-free upload's frames keep
+// exactly the legacy shapes.
 export type CommitOutcome =
 	| {
 			readonly kind: 'settled';
@@ -107,6 +112,7 @@ export type CommitOutcome =
 			readonly kind: 'deferred';
 			readonly storePathHash: StorePathHash;
 			readonly narHash: NixSha256HashString;
+			readonly grace?: ParsedUploadGraceFact;
 	  };
 
 // The tenant's publish status and quota basis, read together by
@@ -301,13 +307,18 @@ export class CommitPipelineService {
 		excludeSessionId: string | null | undefined
 	): void {
 		const row = this.context.db
-			.select({ sessionId: schema.pendingUploads.sessionId })
+			.select({
+				sessionId: schema.pendingUploads.sessionId,
+				cache: schema.pendingUploads.cache,
+				metadataJson: schema.pendingUploads.metadataJson,
+				graceDecisionJson: schema.pendingUploads.graceDecisionJson
+			})
 			.from(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
 		const sessionId = row?.sessionId;
 
-		if (sessionId === undefined || sessionId === null) {
+		if (row === undefined || sessionId === undefined || sessionId === null) {
 			return;
 		}
 
@@ -315,11 +326,28 @@ export class CommitPipelineService {
 			return;
 		}
 
+		// The grace fact is sent only for an upload negotiated with a retention
+		// plan, keeping a plan-free upload's frames on the legacy shape. The
+		// deadline is read afresh from storage, the same fact every other
+		// servable verdict reports; the callers apply the captured grace before
+		// notifying, so the row it reads is current.
+		const graceDecision = parseStoredGraceDecision(row.graceDecisionJson);
+		const grace =
+			graceDecision?.plan === true
+				? storedGraceFact(
+						this.context.db,
+						row.cache,
+						parseStoredUploadPathMetadata(uploadId, row.metadataJson)
+							.storePathHash
+					)
+				: undefined;
+
 		for (const socket of this.context.ctx.getWebSockets(sessionId)) {
 			sendCommitSessionFrame(socket, {
 				ev: 'verdict',
 				uploadId,
-				status: 'servable'
+				status: 'servable',
+				...(grace !== undefined && { grace })
 			});
 		}
 	}
@@ -355,7 +383,8 @@ export class CommitPipelineService {
 				cache,
 				uploadId,
 				metadata,
-				canonicalKey
+				canonicalKey,
+				graceDecision
 			);
 		}
 
@@ -411,7 +440,13 @@ export class CommitPipelineService {
 					storePathHash: metadata.storePathHash,
 					narHash: metadata.narHash,
 					status: 'committed'
-				}
+				},
+				...(graceDecision?.plan === true && {
+					grace:
+						outcome.graceRetainUntil === undefined
+							? {}
+							: { retainUntil: outcome.graceRetainUntil }
+				})
 			};
 		}
 
@@ -421,7 +456,8 @@ export class CommitPipelineService {
 				cache,
 				uploadId,
 				metadata,
-				canonicalKey
+				canonicalKey,
+				graceDecision
 			);
 		}
 
@@ -1010,7 +1046,9 @@ export class CommitPipelineService {
 		>();
 
 		for (const [index, request] of requests.entries()) {
-			if (outcomes[index]?.kind !== 'materialised') {
+			const outcome = outcomes[index];
+
+			if (outcome?.kind !== 'materialised') {
 				continue;
 			}
 
@@ -1029,7 +1067,7 @@ export class CommitPipelineService {
 			const retainUntil = new Date(
 				settledAt + graceSeconds * 1000
 			).toISOString();
-			const key = `${request.cache} ${retainUntil}`;
+			const key = `${request.cache} ${retainUntil}`;
 			const group = extensions.get(key) ?? {
 				cache: request.cache,
 				retainUntil,
@@ -1190,7 +1228,10 @@ export class CommitPipelineService {
 				return {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash
+					narHash: metadata.narHash,
+					...(graceDecision?.plan === true && {
+						grace: capturedGraceFact(graceDecision)
+					})
 				};
 			}
 
@@ -1248,7 +1289,10 @@ export class CommitPipelineService {
 		return {
 			kind: 'deferred',
 			storePathHash: metadata.storePathHash,
-			narHash: metadata.narHash
+			narHash: metadata.narHash,
+			...(graceDecision?.plan === true && {
+				grace: capturedGraceFact(graceDecision)
+			})
 		};
 	}
 
@@ -1384,7 +1428,10 @@ export class CommitPipelineService {
 				return {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash
+					narHash: metadata.narHash,
+					...(graceDecision?.plan === true && {
+						grace: capturedGraceFact(graceDecision)
+					})
 				};
 			}
 
@@ -1424,7 +1471,10 @@ export class CommitPipelineService {
 					return {
 						kind: 'deferred',
 						storePathHash: metadata.storePathHash,
-						narHash: metadata.narHash
+						narHash: metadata.narHash,
+						...(graceDecision?.plan === true && {
+							grace: capturedGraceFact(graceDecision)
+						})
 					};
 				}
 
@@ -1458,7 +1508,10 @@ export class CommitPipelineService {
 				return {
 					kind: 'deferred',
 					storePathHash: metadata.storePathHash,
-					narHash: metadata.narHash
+					narHash: metadata.narHash,
+					...(graceDecision?.plan === true && {
+						grace: capturedGraceFact(graceDecision)
+					})
 				};
 			}
 
@@ -1557,7 +1610,7 @@ export class CommitPipelineService {
 				cache,
 				uploadId,
 				metadata,
-				parseStoredGraceDecision(pending.graceDecisionJson),
+				graceDecision,
 				probe,
 				committingSessionId,
 				advisory?.prefetched !== undefined
@@ -1592,7 +1645,10 @@ export class CommitPipelineService {
 		return {
 			kind: 'deferred',
 			storePathHash: metadata.storePathHash,
-			narHash: metadata.narHash
+			narHash: metadata.narHash,
+			...(graceDecision?.plan === true && {
+				grace: capturedGraceFact(graceDecision)
+			})
 		};
 	}
 

@@ -4,6 +4,9 @@ import {
 	commitCapabilitiesHeader,
 	commitSessionFrameSchema,
 	type CommitSessionRequest,
+	type ParsedUploadGraceFact,
+	retentionMarkerAttribute,
+	retentionMarkerAttributeValue,
 	subscribeIdentityCapability
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
@@ -64,11 +67,17 @@ export type CommitSocketConnect = (
 	headers: Readonly<Record<string, string>>
 ) => CommitSocket;
 
-/** A path to commit over the session, with the identity from negotiation. */
+/**
+ * A path to commit over the session, with the identity from negotiation.
+ * `retention`, true only when this upload negotiated a retention plan, lets a
+ * reconnect that resolves a gone row by identity ask the server for the
+ * path's durable grace fact instead of none.
+ */
 export interface CommitSessionTarget {
 	readonly uploadId: string;
 	readonly storePathHash: string;
 	readonly narHash: string;
+	readonly retention?: boolean;
 }
 
 /**
@@ -112,6 +121,13 @@ export interface CommitOutcome {
 	readonly narHash: string;
 	readonly status: 'committed' | 'pending' | 'already-present';
 	readonly settled: Promise<void>;
+	// The retention grace fact this outcome's frame carried, present only when
+	// the negotiation sent a retention plan: a deadline for a settled path, the
+	// captured grace for one still pending.
+	readonly grace?: ParsedUploadGraceFact;
+	// The grace fact of the terminal frame, readable once `settled` resolves: a
+	// deferred path's deadline arrives with its verdict, not its ack.
+	readonly settledGrace?: () => ParsedUploadGraceFact | undefined;
 }
 
 /** A push's commit session: many paths commit over one socket. */
@@ -138,6 +154,9 @@ interface SessionEntry {
 	// and the timer of a retry not yet sent, cleared with the deadline.
 	retryAttempts: number;
 	retryTimer?: NodeJS.Timeout;
+	// The grace fact of the last settled or verdict frame, exposed through the
+	// outcome's `settledGrace` once the entry settles.
+	verdictGrace?: ParsedUploadGraceFact;
 }
 
 const defaultKeepaliveMs = 30_000;
@@ -283,6 +302,21 @@ function resolvedBatchSize(
 	return Math.min(parsed, commitBatchMaxEntries);
 }
 
+// Whether the server advertised the retention-marker attribute on the given
+// capability token, so a client can set `retention: true` on an entry of the
+// op that token names without risking a `strictObject` rejection from a
+// server that predates the marker. The attribute's exact advertised value is
+// required, so an unrecognised variant reads as no marker at all.
+function hasRetentionMarker(
+	capabilities: AdvertisedCapabilities,
+	capability: string
+): boolean {
+	return (
+		capabilities.get(capability)?.[retentionMarkerAttribute] ===
+		retentionMarkerAttributeValue
+	);
+}
+
 /**
  * Runs a push's commit session over one socket. Each `commit` registers a path,
  * sends a `commit` op, and resolves when the path's per-id frame settles it: a
@@ -321,6 +355,13 @@ export function runCommitSession(
 	// When true, reconnect replays send acked ids through the identity-carrying
 	// op, so a row that settled and cleared during the drop resolves by identity.
 	let hasSubscribeIdentity = false;
+	// Whether the current connection's server accepts the `retention` marker on
+	// a `commit-batch` or `subscribe-identity` entry, respectively. A target
+	// negotiated with a retention plan sets the marker on an entry of that op
+	// only when the connection supports it, so a plan-carrying reconnect answers
+	// with the path's durable grace fact rather than none.
+	let hasBatchRetentionMarker = false;
+	let hasIdentityRetentionMarker = false;
 
 	const sendNow = (request: CommitSessionRequest): void => {
 		socket?.send(JSON.stringify(request));
@@ -351,7 +392,9 @@ export function runCommitSession(
 			commits: batch.map((target) => ({
 				uploadId: target.uploadId,
 				storePathHash: target.storePathHash,
-				narHash: target.narHash
+				narHash: target.narHash,
+				...(target.retention === true &&
+					hasBatchRetentionMarker && { retention: true as const })
 			}))
 		});
 	};
@@ -568,12 +611,15 @@ export function runCommitSession(
 				// An immediate commit (a reuse or an inline verify) is already
 				// servable, so its verdict settles at once.
 				finishEntry(frame.uploadId, (entry) => {
+					entry.verdictGrace = frame.grace;
 					entry.settleServable();
 					entry.resolveAck({
 						storePathHash: frame.response.storePathHash,
 						narHash: frame.response.narHash,
 						status: frame.response.status,
-						settled: entry.settled
+						settled: entry.settled,
+						...(frame.grace !== undefined && { grace: frame.grace }),
+						settledGrace: () => entry.verdictGrace
 					});
 				});
 
@@ -596,7 +642,9 @@ export function runCommitSession(
 					storePathHash: frame.storePathHash,
 					narHash: frame.narHash,
 					status: 'pending',
-					settled: entry.settled
+					settled: entry.settled,
+					...(frame.grace !== undefined && { grace: frame.grace }),
+					settledGrace: () => entry.verdictGrace
 				});
 
 				return;
@@ -622,6 +670,7 @@ export function runCommitSession(
 
 				if (frame.status === 'servable') {
 					finishEntry(frame.uploadId, (settling) => {
+						settling.verdictGrace = frame.grace;
 						settling.settleServable();
 
 						// A verdict can race ahead of the deferred frame; with no ack
@@ -632,7 +681,9 @@ export function runCommitSession(
 								storePathHash: settling.target.storePathHash,
 								narHash: settling.target.narHash,
 								status: 'committed',
-								settled: settling.settled
+								settled: settling.settled,
+								...(frame.grace !== undefined && { grace: frame.grace }),
+								settledGrace: () => settling.verdictGrace
 							});
 						}
 					});
@@ -747,7 +798,9 @@ export function runCommitSession(
 					entries: batch.map((target) => ({
 						uploadId: target.uploadId,
 						storePathHash: target.storePathHash,
-						narHash: target.narHash
+						narHash: target.narHash,
+						...(target.retention === true &&
+							hasIdentityRetentionMarker && { retention: true as const })
 					}))
 				});
 			}
@@ -832,6 +885,8 @@ export function runCommitSession(
 		isOpened = false;
 		effectiveBatchSize = undefined;
 		hasSubscribeIdentity = false;
+		hasBatchRetentionMarker = false;
+		hasIdentityRetentionMarker = false;
 		// Window state from the previous connection is stale; replayOutstanding
 		// sends all outstanding work afresh through the new window.
 		inFlightChunks.clear();
@@ -850,6 +905,14 @@ export function runCommitSession(
 			connectionCaps = parseCapabilities(headerValue);
 			effectiveBatchSize = resolvedBatchSize(connectionCaps);
 			hasSubscribeIdentity = connectionCaps.has(subscribeIdentityCapability);
+			hasBatchRetentionMarker = hasRetentionMarker(
+				connectionCaps,
+				commitBatchCapability
+			);
+			hasIdentityRetentionMarker = hasRetentionMarker(
+				connectionCaps,
+				subscribeIdentityCapability
+			);
 		});
 
 		socket.on('open', () => {

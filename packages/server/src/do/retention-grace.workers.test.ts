@@ -1,7 +1,9 @@
 import { rootLogger } from '@cupboard/logger';
 import {
 	DEFAULT_CACHE,
-	storePathHashSchema
+	rootNameSchema,
+	storePathHashSchema,
+	storePathSchema
 } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { and, eq, sql } from 'drizzle-orm';
@@ -16,6 +18,7 @@ import {
 	authorisedFetch,
 	bootstrap,
 	clearBlobStorage,
+	commitUpload,
 	currentServer,
 	deletePath,
 	expectSingleUploadDecision,
@@ -23,12 +26,15 @@ import {
 	narBytes,
 	narInfoGeneration,
 	negotiateUploads,
+	openCommitSession,
 	pendingUploadVerdict,
 	pushPath,
 	putNarBytes,
 	removeRoot,
 	resetTestServer,
 	setRoot,
+	singleDecision,
+	testPushId,
 	uploadMetadata,
 	uploadPathNegotiation,
 	useTestServer,
@@ -43,10 +49,12 @@ import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { parseStoredGraceDecision } from './grace-decision.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { ReconcileQueueService } from './reconcile-queue-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { gcContinuationKey } from './server.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
+import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -73,6 +81,33 @@ function pipelineFor(context: ServerContext): CommitPipelineService {
 		new SigningKeysService(context),
 		new UploadStateService(context),
 		narInfoObjects,
+		new RetentionService(context)
+	);
+}
+
+// The uploads service over a live instance's context, as the server itself
+// builds it.
+function uploadsServiceFor(context: ServerContext): UploadsService {
+	const narInfoObjects = new NarInfoObjectsService(context);
+	const attestationCas = new AttestationCasService(context);
+	const attestations = new AttestationsService(
+		context,
+		attestationCas,
+		narInfoObjects
+	);
+	const deletionQueue = new DeletionQueueService(
+		context,
+		attestationCas,
+		attestations,
+		narInfoObjects
+	);
+
+	return new UploadsService(
+		context,
+		new UploadStateService(context),
+		narInfoObjects,
+		deletionQueue,
+		new ReconcileQueueService(context),
 		new RetentionService(context)
 	);
 }
@@ -863,6 +898,196 @@ describe('retention grace at publication', () => {
 		}).toStrictEqual({ deadlines: [], graceManaged: false });
 	});
 
+	it('reports the stored maximum deadline, not the shorter candidate this commit alone computed', async () => {
+		await useTestServer('publication-stored-maximum');
+		await clearBlobStorage();
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const nar = await verifiableNar('publication-stored-maximum');
+		const seed = uploadMetadata({
+			storePathHash: repeated('h'),
+			name: 'seed',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		await pushPath(token, seed, DEFAULT_CACHE, nar);
+
+		const reused = uploadMetadata({
+			storePathHash: repeated('i'),
+			name: 'reused',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		// A later deadline already sits on this path (an earlier longer policy,
+		// or a root transition) before this commit's own candidate runs.
+		await seedGraceDeadline(DEFAULT_CACHE, reused.storePathHash, liveDeadline);
+
+		const negotiated = await negotiateUploads(token, [reused], DEFAULT_CACHE, {
+			kind: 'none'
+		});
+		const decision = negotiated.uploads[0];
+
+		if (decision?.action !== 'commit') {
+			throw new Error('the reused path must plan a commit');
+		}
+
+		const conversation = await openCommitSession(token);
+
+		conversation.send({ op: 'commit', uploadId: decision.uploadId });
+		const frame = await conversation.nextFrame();
+		conversation.socket.close();
+
+		if (frame.ev !== 'settled') {
+			throw new Error('the reused path must settle immediately');
+		}
+
+		expect({
+			frameGrace: frame.grace,
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			frameGrace: { retainUntil: liveDeadline },
+			deadlines: [
+				{ storePathHash: seed.storePathHash, retainUntil: dayAfterStart },
+				{ storePathHash: reused.storePathHash, retainUntil: liveDeadline }
+			]
+		});
+	});
+
+	// A concede answers success without ever running its own materialisation,
+	// so a naive implementation reports the winner's bytes but never applies
+	// the loser's own captured grace decision, leaving a positive policy
+	// ungranted whenever nothing else established a deadline. Drives a real
+	// concede deterministically: negotiate two upload ids for the identical
+	// metadata before either commits, settle the first (the winner), then
+	// commit the second — its own commit() call finds the row the winner just
+	// committed and concedes through the hasCommittedReference re-drive.
+	it.each([
+		{
+			id: 'positive',
+			policySeconds: 3600,
+			plan: true,
+			expectManaged: true,
+			expectRetainUntil: '2026-01-01T01:00:00.000Z',
+			expectGrace: { retainUntil: '2026-01-01T01:00:00.000Z' }
+		},
+		{
+			id: 'legacy',
+			policySeconds: undefined,
+			plan: false,
+			expectManaged: false,
+			expectRetainUntil: undefined,
+			expectGrace: undefined
+		},
+		{
+			id: 'zero',
+			policySeconds: 0,
+			plan: true,
+			expectManaged: true,
+			expectRetainUntil: undefined,
+			expectGrace: { graceSeconds: 0 }
+		}
+	] as const)(
+		'applies captured grace to a re-drive concede ($id)',
+		async ({
+			id,
+			policySeconds,
+			plan,
+			expectManaged,
+			expectRetainUntil,
+			expectGrace
+		}) => {
+			await useTestServer(`concede-redrive-${id}`);
+			const { token } = await bootstrap();
+
+			if (policySeconds !== undefined) {
+				await addGracePolicy('', policySeconds);
+			}
+
+			const nar = await verifiableNar(`concede-redrive-${id}`);
+			const metadata = uploadMetadata({
+				storePathHash: repeated('r'),
+				name: 'contested',
+				references: [],
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			const retentionPlan = plan ? ({ kind: 'none' } as const) : undefined;
+
+			const first = await negotiateUploads(
+				token,
+				[metadata],
+				DEFAULT_CACHE,
+				retentionPlan
+			);
+			const second = await negotiateUploads(
+				token,
+				[metadata],
+				DEFAULT_CACHE,
+				retentionPlan
+			);
+			const winnerDecision = first.uploads[0];
+			const loserDecision = second.uploads[0];
+
+			if (
+				winnerDecision?.action !== 'upload' ||
+				loserDecision?.action !== 'upload'
+			) {
+				throw new Error('both negotiations must plan a fresh upload');
+			}
+
+			await putNarBytes(winnerDecision.r2Key, nar);
+			// Handles both an immediate settlement and a deferred one that needs a
+			// verification pass; either way, the winner ends up fully committed.
+			await commitUpload(token, winnerDecision.uploadId);
+
+			const loserConversation = await openCommitSession(token);
+
+			loserConversation.send({
+				op: 'commit',
+				uploadId: loserDecision.uploadId
+			});
+			const loserFrame = await loserConversation.nextFrame();
+			loserConversation.socket.close();
+
+			if (loserFrame.ev !== 'settled') {
+				throw new Error('the loser must concede immediately, not defer');
+			}
+
+			expect({
+				status: loserFrame.response.status,
+				hasGraceKey: 'grace' in loserFrame,
+				grace: loserFrame.grace,
+				graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+				deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+			}).toStrictEqual({
+				status: 'already-present',
+				hasGraceKey: plan,
+				grace: expectGrace,
+				graceManaged: expectManaged,
+				deadlines:
+					expectRetainUntil === undefined
+						? []
+						: [
+								{
+									storePathHash: metadata.storePathHash,
+									retainUntil: expectRetainUntil
+								}
+							]
+			});
+		}
+	);
+
 	it('applies captured grace when a fresh reservation concedes to a committed winner', async () => {
 		await useTestServer('concede-to-winner');
 		const { token } = await bootstrap();
@@ -1127,7 +1352,8 @@ describe('retention grace at publication', () => {
 			outcome: {
 				kind: 'deferred',
 				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash
+				narHash: metadata.narHash,
+				grace: { graceSeconds: 3600 }
 			},
 			hasMoved: true,
 			deadlines: []
@@ -1235,7 +1461,8 @@ describe('retention grace at publication', () => {
 			outcome: {
 				kind: 'deferred',
 				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash
+				narHash: metadata.narHash,
+				grace: { graceSeconds: 3600 }
 			},
 			boundedBumps: true,
 			deadlines: []
@@ -1455,3 +1682,841 @@ async function pendingRowSnapshot(
 
 	return row;
 }
+
+// Narrows a negotiate response to its single `upload` decision, the reconnect
+// tests below use instead of `expectSingleUploadDecision`: a plan-carrying
+// response also carries a `grace` fact, which that helper's fixed shape does
+// not expect.
+function plannedUploadDecision(
+	response: Awaited<ReturnType<typeof negotiateUploads>>
+): Extract<ReturnType<typeof singleDecision>, { action: 'upload' }> {
+	const decision = singleDecision(response);
+
+	if (decision.action !== 'upload') {
+		throw new Error('expected a single upload decision');
+	}
+
+	return decision;
+}
+
+describe('retention grace facts on the wire', () => {
+	beforeEach(async () => {
+		await resetTestServer();
+		await clearBlobStorage();
+	});
+
+	const dayGraceSeconds = 86_400;
+	const dayAfterStart = '2026-01-02T00:00:00.000Z';
+	const plan = { kind: 'none' } as const;
+
+	it('keeps legacy decision shapes without a plan, attaching facts with one', async () => {
+		await useTestServer('wire-decisions');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const committed = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'committed'
+		});
+		const fresh = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'fresh'
+		});
+
+		await pushPath(token, committed);
+
+		const planless = await negotiateUploads(token, [committed, fresh]);
+		// The planless already-present decision still extended the deadline;
+		// only the reported fact is plan-gated.
+		const afterPlanless = await graceDeadlineRows(DEFAULT_CACHE);
+		const planned = await negotiateUploads(
+			token,
+			[committed, fresh],
+			DEFAULT_CACHE,
+			plan
+		);
+
+		expect({
+			planlessFacts: planless.uploads.map((decision) => 'grace' in decision),
+			afterPlanless,
+			plannedFacts: planned.uploads.map((decision) => decision.grace)
+		}).toStrictEqual({
+			planlessFacts: [false, false],
+			afterPlanless: [
+				{ storePathHash: committed.storePathHash, retainUntil: dayAfterStart }
+			],
+			plannedFacts: [
+				{ retainUntil: dayAfterStart },
+				{ graceSeconds: dayGraceSeconds }
+			]
+		});
+	});
+
+	it('carries the deadline on a settled frame only for a plan-carrying upload', async () => {
+		await useTestServer('wire-settled');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const nar = await verifiableNar('wire-settled');
+		const seed = uploadMetadata({
+			storePathHash: repeated('a'),
+			name: 'seed',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+
+		await pushPath(token, seed, DEFAULT_CACHE, nar);
+
+		const settledFrameFor = async (
+			storePathHash: string,
+			retention?: typeof plan
+		): Promise<Record<string, unknown>> => {
+			const metadata = uploadMetadata({
+				storePathHash,
+				name: `reuse-${storePathHash.slice(0, 4)}`,
+				references: [],
+				narHash: nar.narHash,
+				narSize: nar.narSize,
+				fileHash: nar.fileHash,
+				fileSize: nar.narBytes.byteLength
+			});
+			const response = await negotiateUploads(
+				token,
+				[metadata],
+				DEFAULT_CACHE,
+				retention
+			);
+			const decision = response.uploads[0];
+
+			if (decision?.action !== 'commit') {
+				throw new Error('the reuse path must plan a commit');
+			}
+
+			const conversation = await openCommitSession(token);
+
+			conversation.send({ op: 'commit', uploadId: decision.uploadId });
+			const frame = await conversation.nextFrame();
+			conversation.socket.close();
+
+			return frame;
+		};
+
+		const planned = await settledFrameFor(repeated('b'), plan);
+		const planless = await settledFrameFor(repeated('c'));
+
+		expect({
+			plannedEv: planned.ev,
+			plannedGrace: planned.grace,
+			planlessEv: planless.ev,
+			planlessHasGrace: 'grace' in planless
+		}).toStrictEqual({
+			plannedEv: 'settled',
+			plannedGrace: { retainUntil: dayAfterStart },
+			planlessEv: 'settled',
+			planlessHasGrace: false
+		});
+	});
+
+	it('reports the captured grace when deferred and the deadline on the verdict', async () => {
+		await useTestServer('wire-deferred');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const nar = await verifiableNar('wire-deferred');
+		const metadata = uploadMetadata({
+			storePathHash: repeated('d'),
+			name: 'deferred',
+			references: [],
+			narHash: nar.narHash,
+			narSize: nar.narSize,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength
+		});
+		const decision = await negotiateUploads(
+			token,
+			[metadata],
+			DEFAULT_CACHE,
+			plan
+		);
+		const upload = decision.uploads[0];
+
+		if (upload?.action !== 'upload') {
+			throw new Error('the fresh path must plan an upload');
+		}
+
+		await putNarBytes(upload.r2Key, nar);
+
+		const conversation = await openCommitSession(token);
+
+		conversation.send({ op: 'commit', uploadId: upload.uploadId });
+		const deferred = await conversation.nextFrame();
+		await currentServer().runVerification();
+		const verdict = await conversation.nextFrame();
+		conversation.socket.close();
+
+		if (deferred.ev !== 'deferred' || verdict.ev !== 'verdict') {
+			throw new Error('unexpected frame order');
+		}
+
+		expect({
+			deferredGrace: deferred.grace,
+			verdictStatus: verdict.status,
+			verdictGrace: verdict.grace
+		}).toStrictEqual({
+			deferredGrace: { graceSeconds: dayGraceSeconds },
+			verdictStatus: 'servable',
+			verdictGrace: { retainUntil: dayAfterStart }
+		});
+	});
+
+	it('cannot shorten an already-present deadline on a retried negotiation', async () => {
+		await useTestServer('wire-retry');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('f'),
+			name: 'retried'
+		});
+
+		await pushPath(token, path);
+
+		const factOf = async (): Promise<unknown> => {
+			const response = await negotiateUploads(
+				token,
+				[path],
+				DEFAULT_CACHE,
+				plan
+			);
+
+			return response.uploads[0]?.grace;
+		};
+
+		const first = await factOf();
+
+		vi.setSystemTime(new Date('2026-01-01T00:02:00.000Z'));
+		const later = await factOf();
+
+		vi.setSystemTime(new Date('2026-01-01T00:01:00.000Z'));
+		const retried = await factOf();
+
+		expect({ first, later, retried }).toStrictEqual({
+			first: { retainUntil: dayAfterStart },
+			later: { retainUntil: '2026-01-02T00:02:00.000Z' },
+			retried: { retainUntil: '2026-01-02T00:02:00.000Z' }
+		});
+	});
+
+	// Every already-present decision in one negotiation shares one batched
+	// grace application: the identity checks and extensions for the whole
+	// closure run through a single transaction, not one per path.
+	it('answers a multi-path already-present negotiation from one batched application', async () => {
+		await useTestServer('wire-skip-batch');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const paths = [repeated('y'), repeated('z'), repeated('v')].map(
+			(storePathHash, index) =>
+				uploadMetadata({
+					fileSize: narBytes.byteLength,
+					storePathHash,
+					name: `present-${String(index)}`
+				})
+		);
+
+		for (const path of paths) {
+			await pushPath(token, path);
+		}
+
+		await runInDurableObject(currentServer(), (instance) => {
+			vi.spyOn(instance.context.db, 'transaction');
+		});
+
+		const response = await negotiateUploads(token, paths, DEFAULT_CACHE, plan);
+
+		const transactionCount = await runInDurableObject(
+			currentServer(),
+			(instance) => {
+				// Spying on an already-spied method returns the existing spy, so
+				// this reads the count the negotiation accumulated above.
+				const transactions = vi.spyOn(instance.context.db, 'transaction');
+				const calls = transactions.mock.calls.length;
+
+				transactions.mockRestore();
+
+				return calls;
+			}
+		);
+
+		expect({ transactionCount, decisions: response.uploads }).toStrictEqual({
+			transactionCount: 1,
+			decisions: paths.map((path) => ({
+				action: 'skip',
+				storePathHash: path.storePathHash,
+				narHash: path.narHash,
+				grace: { retainUntil: dayAfterStart }
+			}))
+		});
+	});
+
+	// The skippable snapshot is read before awaited shared-fact checks, so a
+	// row can move inside the window. A skip from that snapshot would describe
+	// a row that no longer holds the path, and a legacy client would take it
+	// at face value and never push its bytes. A moved row must be planned like
+	// any other path.
+	it('plans a path whose row moves during negotiation instead of skipping it', async () => {
+		await useTestServer('wire-skip-moved');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('3'),
+			name: 'moved'
+		});
+
+		await pushPath(token, path);
+
+		// The blob_ref edge read is the first shared-fact query the negotiate
+		// awaits, so a recommit fired on its preparation lands after the
+		// snapshot and before the batched grace application.
+		const hash = storePathHashSchema.parse(path.storePathHash);
+		const response = await runInDurableObject(
+			currentServer(),
+			(instance, state) => {
+				let hasMoved = false;
+				const context = new ServerContext(state, {
+					...instance.context.env,
+					CUPBOARD_DB: prepareTappingD1(
+						instance.context.env.CUPBOARD_DB,
+						(query) =>
+							query.includes('blob_ref') || query.includes('blob_state'),
+						() => {
+							if (hasMoved) {
+								return;
+							}
+
+							hasMoved = true;
+							instance.context.db
+								.update(schema.narInfos)
+								.set({ generation: sql`${schema.narInfos.generation} + 1` })
+								.where(
+									and(
+										eq(schema.narInfos.cache, DEFAULT_CACHE),
+										eq(schema.narInfos.storePathHash, hash)
+									)
+								)
+								.run();
+						}
+					)
+				});
+
+				return uploadsServiceFor(context).negotiate(
+					DEFAULT_CACHE,
+					{
+						pushId: testPushId,
+						retention: plan,
+						paths: [uploadPathNegotiation(path)]
+					},
+					'https://cupboard.example'
+				);
+			}
+		);
+
+		expect(
+			response.uploads.map((decision) => ({
+				action: decision.action,
+				grace: 'grace' in decision ? decision.grace : undefined
+			}))
+		).toStrictEqual([
+			{ action: 'upload', grace: { graceSeconds: dayGraceSeconds } }
+		]);
+	});
+
+	// A client that reconnects mid-commit re-points the pending row at its new
+	// session and parks; the saga that finishes the upload then answers that
+	// session with a verdict frame. The frame must carry the same plan-gated
+	// stored deadline every other verdict path reports, or a client enforcing
+	// grace deadlines would reject a publication whose deadline was written.
+	it('sends the stored deadline on a reattached session verdict frame', async () => {
+		await useTestServer('wire-reattach-verdict');
+		await clearBlobStorage();
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		// A committed path whose blob the contested upload reuses, so its
+		// commit settles synchronously through the reuse saga.
+		const seed = await verifiableNar('reattach-seed');
+		const seeded = uploadMetadata({
+			storePathHash: repeated('4'),
+			name: 'seeded',
+			references: [],
+			narHash: seed.narHash,
+			narSize: seed.narSize,
+			fileHash: seed.fileHash,
+			fileSize: seed.narBytes.byteLength
+		});
+
+		await pushPath(token, seeded, DEFAULT_CACHE, seed);
+
+		const contested = uploadMetadata({
+			storePathHash: repeated('5'),
+			name: 'contested',
+			references: [],
+			narHash: seed.narHash,
+			narSize: seed.narSize,
+			fileHash: seed.fileHash,
+			fileSize: seed.narBytes.byteLength
+		});
+		const reuse = singleDecision(
+			await negotiateUploads(token, [contested], DEFAULT_CACHE, plan)
+		);
+
+		if (reuse.action !== 'commit') {
+			throw new Error('the contested upload must plan a blob reuse');
+		}
+
+		// A parked session whose id the pending row can be re-pointed at: its
+		// own deferred fresh upload writes its session id to that row, where
+		// the test can read it back.
+		const parked = await verifiableNar('reattach-parked');
+		const parkedPath = uploadMetadata({
+			storePathHash: repeated('7'),
+			name: 'parked',
+			references: [],
+			narHash: parked.narHash,
+			narSize: parked.narSize,
+			fileHash: parked.fileHash,
+			fileSize: parked.narBytes.byteLength
+		});
+		const parkedUpload = plannedUploadDecision(
+			await negotiateUploads(token, [parkedPath], DEFAULT_CACHE, plan)
+		);
+
+		await putNarBytes(parkedUpload.r2Key, parked);
+
+		const conversation = await openCommitSession(token);
+
+		conversation.send({ op: 'commit', uploadId: parkedUpload.uploadId });
+
+		const parkedFrame = await conversation.nextFrame();
+
+		if (parkedFrame.ev !== 'deferred') {
+			throw new Error('the parked upload must defer to the verify pass');
+		}
+
+		const parkedSessionId = await runInDurableObject(
+			currentServer(),
+			(instance) =>
+				instance.context.db
+					.select({ sessionId: schema.pendingUploads.sessionId })
+					.from(schema.pendingUploads)
+					.where(eq(schema.pendingUploads.id, parkedUpload.uploadId))
+					.get()?.sessionId ?? undefined
+		);
+
+		if (parkedSessionId === undefined) {
+			throw new Error('the parked commit must record its session');
+		}
+
+		// Drive the contested commit directly, re-pointing its row at the parked
+		// session on the saga's charge write: that runs after the saga captured
+		// its (session-less) committer and before it notifies, the shape of a
+		// reconnect attaching mid-commit. The parked session is then a
+		// reattached waiter, not the committer.
+		const outcome = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				let hasAttached = false;
+				const context = new ServerContext(state, {
+					...instance.context.env,
+					CUPBOARD_DB: prepareTappingD1(
+						instance.context.env.CUPBOARD_DB,
+						(query) => query.includes('blob_ref'),
+						() => {
+							if (hasAttached) {
+								return;
+							}
+
+							hasAttached = true;
+							instance.context.db
+								.update(schema.pendingUploads)
+								.set({ sessionId: parkedSessionId })
+								.where(eq(schema.pendingUploads.id, reuse.uploadId))
+								.run();
+						}
+					)
+				});
+
+				const settled = await pipelineFor(context).commit(
+					rootLogger(),
+					DEFAULT_CACHE,
+					reuse.uploadId
+				);
+
+				return { settled, hasAttached };
+			}
+		);
+
+		if (!outcome.hasAttached) {
+			throw new Error('the reattach tap never fired');
+		}
+
+		// The parked session may hear its own upload's verdict too; the frame
+		// under test is the contested upload's.
+		let frame = await conversation.nextFrame();
+
+		while (!('uploadId' in frame) || frame.uploadId !== reuse.uploadId) {
+			frame = await conversation.nextFrame();
+		}
+
+		conversation.socket.close();
+
+		expect({ settled: outcome.settled, frame }).toStrictEqual({
+			settled: {
+				kind: 'settled',
+				response: {
+					storePathHash: contested.storePathHash,
+					narHash: contested.narHash,
+					status: 'committed'
+				},
+				grace: { retainUntil: dayAfterStart }
+			},
+			frame: {
+				ev: 'verdict',
+				uploadId: reuse.uploadId,
+				status: 'servable',
+				grace: { retainUntil: dayAfterStart }
+			}
+		});
+	});
+
+	// A reconnect that re-sends a `commit-batch` (or `subscribe-identity`) entry
+	// for a row verification already cleared has no pending row left to read a
+	// captured grace decision from. A `retention`-marked entry tells the server
+	// this upload negotiated a plan, so `resolveGoneCommit` reads the durable
+	// deadline the original commit recorded instead of answering with none.
+	it('attaches the durable deadline when a retention-marked commit-batch entry resolves a cleared row', async () => {
+		await useTestServer('wire-reconnect-grace');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('g'),
+			name: 'reconnect-grace'
+		});
+		const upload = plannedUploadDecision(
+			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+		);
+		await putNarBytes(upload.r2Key);
+
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					retention: true
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'settled',
+			uploadId: upload.uploadId,
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			},
+			grace: { retainUntil: dayAfterStart }
+		});
+	});
+
+	it('reports an empty fact when a retention-marked reconnect resolves a cleared row with no stored deadline', async () => {
+		await useTestServer('wire-reconnect-no-grace');
+		const { token } = await bootstrap();
+		// No grace policy: the plan-carrying negotiation captures no graceSeconds,
+		// so the commit never writes a retention_grace row.
+
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('h'),
+			name: 'reconnect-no-grace'
+		});
+		const upload = plannedUploadDecision(
+			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+		);
+		await putNarBytes(upload.r2Key);
+
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					retention: true
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'settled',
+			uploadId: upload.uploadId,
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			},
+			grace: {}
+		});
+	});
+
+	// An unmarked entry gets exactly the legacy shape even for an upload that did
+	// negotiate a plan: the marker, not the plan alone, gates the durable-fact
+	// read, so an old client's re-sent entry never trips a schema it predates.
+	it('keeps the legacy shape for a plan-carrying reconnect entry with no retention marker', async () => {
+		await useTestServer('wire-reconnect-unmarked');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('i'),
+			name: 'reconnect-unmarked'
+		});
+		const upload = plannedUploadDecision(
+			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+		);
+		await putNarBytes(upload.r2Key);
+
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'settled',
+			uploadId: upload.uploadId,
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			}
+		});
+	});
+
+	it('attaches the durable deadline when a retention-marked subscribe-identity entry resolves a cleared row', async () => {
+		await useTestServer('wire-reconnect-identity-grace');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const metadata = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('j'),
+			name: 'reconnect-identity-grace'
+		});
+		const upload = plannedUploadDecision(
+			await negotiateUploads(token, [metadata], DEFAULT_CACHE, plan)
+		);
+		await putNarBytes(upload.r2Key);
+
+		const committed = await commitUpload(token, upload.uploadId);
+		expect(committed.status).toBe('committed');
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'subscribe-identity',
+			entries: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					retention: true
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'settled',
+			uploadId: upload.uploadId,
+			response: {
+				storePathHash: metadata.storePathHash,
+				narHash: metadata.narHash,
+				status: 'already-present'
+			},
+			grace: { retainUntil: dayAfterStart }
+		});
+	});
+});
+
+class ForcedRollbackError extends Error {}
+
+describe('grace transition atomicity', () => {
+	beforeEach(resetTestServer);
+
+	// Proves the mechanism confirmSkipGrace relies on, directly: the marker and
+	// the deadline extension both take a writer, and one transaction handle
+	// passed to both lands them together.
+	it('writes the marker and the deadline together through one transaction handle', async () => {
+		await useTestServer('grace-atomic-commit');
+		const hash = storePathHashSchema.parse(repeated('k'));
+
+		await runInDurableObject(currentServer(), (instance) => {
+			const retention = new RetentionService(instance.context);
+
+			instance.context.db.transaction((tx) => {
+				retention.markCacheGraceManaged(DEFAULT_CACHE, tx);
+				retention.extendGraceDeadlines(DEFAULT_CACHE, [hash], liveDeadline, tx);
+			});
+		});
+
+		expect({
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			graceManaged: true,
+			deadlines: [{ storePathHash: hash, retainUntil: liveDeadline }]
+		});
+	});
+
+	it('rolls back the marker together with the deadline when the transaction fails', async () => {
+		await useTestServer('grace-atomic-rollback');
+		const hash = storePathHashSchema.parse(repeated('l'));
+
+		await runInDurableObject(currentServer(), (instance) => {
+			const retention = new RetentionService(instance.context);
+
+			expect(() => {
+				instance.context.db.transaction((tx) => {
+					retention.markCacheGraceManaged(DEFAULT_CACHE, tx);
+					retention.extendGraceDeadlines(
+						DEFAULT_CACHE,
+						[hash],
+						liveDeadline,
+						tx
+					);
+					throw new ForcedRollbackError();
+				});
+			}).toThrow(ForcedRollbackError);
+		});
+
+		expect({
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE),
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({ graceManaged: false, deadlines: [] });
+	});
+
+	// Proves the same claim for a root transition specifically: writeRoot,
+	// removeRoot, and the GC expiry sweep all apply the grace transition inside
+	// the same transaction as the retention delete that releases the targets,
+	// mirroring the shape those methods use (delete the root and its targets,
+	// then apply the transition, through one handle).
+	it('rolls back a root deletion together with the grace transition it releases', async () => {
+		await useTestServer('grace-atomic-root-delete');
+		await addGracePolicy('', 3600);
+
+		const cache = DEFAULT_CACHE;
+		const name = rootNameSchema.parse('channel');
+		const hash = storePathHashSchema.parse(repeated('m'));
+		const storePath = storePathSchema.parse(`/nix/store/${repeated('m')}-x`);
+		const nowIso = '2026-01-01T00:00:00.000Z';
+
+		await runInDurableObject(currentServer(), (instance) => {
+			const retention = new RetentionService(instance.context);
+
+			instance.context.db
+				.insert(schema.retentionRoots)
+				.values({ cache, name, createdAt: nowIso, updatedAt: nowIso })
+				.run();
+			instance.context.db
+				.insert(schema.retentionRootTargets)
+				.values({ cache, rootName: name, storePathHash: hash, storePath })
+				.run();
+
+			expect(() => {
+				instance.context.db.transaction((tx) => {
+					tx.delete(schema.retentionRootTargets)
+						.where(
+							and(
+								eq(schema.retentionRootTargets.cache, cache),
+								eq(schema.retentionRootTargets.rootName, name)
+							)
+						)
+						.run();
+					tx.delete(schema.retentionRoots)
+						.where(
+							and(
+								eq(schema.retentionRoots.cache, cache),
+								eq(schema.retentionRoots.name, name)
+							)
+						)
+						.run();
+					retention.applyGraceTransition(cache, [hash], nowIso, tx);
+					throw new ForcedRollbackError();
+				});
+			}).toThrow(ForcedRollbackError);
+		});
+
+		const survivors = await runInDurableObject(currentServer(), (instance) => ({
+			root: instance.context.db
+				.select({ name: schema.retentionRoots.name })
+				.from(schema.retentionRoots)
+				.where(eq(schema.retentionRoots.cache, cache))
+				.all(),
+			targets: instance.context.db
+				.select({ storePathHash: schema.retentionRootTargets.storePathHash })
+				.from(schema.retentionRootTargets)
+				.where(eq(schema.retentionRootTargets.cache, cache))
+				.all()
+		}));
+
+		expect({
+			survivors,
+			graceManaged: await graceManagedMarker(cache),
+			deadlines: await graceDeadlineRows(cache)
+		}).toStrictEqual({
+			survivors: {
+				root: [{ name }],
+				targets: [{ storePathHash: hash }]
+			},
+			graceManaged: false,
+			deadlines: []
+		});
+	});
+});

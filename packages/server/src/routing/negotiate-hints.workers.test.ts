@@ -120,6 +120,25 @@ describe('computing negotiate hints', () => {
 		});
 	});
 
+	it('tolerates a retention plan in the negotiate body', async () => {
+		const hints = await computeNegotiateHints(
+			probeRequest({
+				pushId: testPushId,
+				paths: [path],
+				retention: { kind: 'none' }
+			}),
+			env,
+			fixtureTenant,
+			'_default'
+		);
+
+		expect(hints).toStrictEqual({
+			blobStates: [],
+			ownedNarHashes: [],
+			committedEdges: []
+		});
+	});
+
 	it('computes none without a bearer header', async () => {
 		const hints = await computeNegotiateHints(
 			probeRequest({ pushId: testPushId, paths: [path] }, {}),

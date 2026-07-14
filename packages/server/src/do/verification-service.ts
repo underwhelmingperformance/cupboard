@@ -5,6 +5,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import {
+	type ParsedUploadGraceFact,
 	type ParsedUploadPathNegotiation,
 	type ParsedUploadStatusResponse
 } from '@cupboard/protocol/upload';
@@ -38,7 +39,11 @@ import {
 import { sendCommitSessionFrame } from './commit-socket.ts';
 import { type ServerContext } from './context.ts';
 import { type DeletionQueueService } from './deletion-queue-service.ts';
-import { confirmGrace, parseStoredGraceDecision } from './grace-decision.ts';
+import {
+	confirmGrace,
+	parseStoredGraceDecision,
+	storedGraceFact
+} from './grace-decision.ts';
 import { type NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { type ReconcileTarget } from './reconcile-queue-service.ts';
 import { type RetentionService } from './retention-service.ts';
@@ -255,19 +260,50 @@ export class VerificationService {
 	// reading the row and reaching this notify receives the verdict. The session
 	// stays open: it carries the other ids in the push too.
 	private notifyWaiters(
-		uploadId: string,
-		capturedSessionId: string | null,
+		pending: typeof schema.pendingUploads.$inferSelect,
 		status: ParsedUploadStatusResponse['status']
 	): void {
-		const sessionId = this.currentSessionId(uploadId, capturedSessionId);
+		const sessionId = this.currentSessionId(pending.id, pending.sessionId);
 
 		if (sessionId === null) {
 			return;
 		}
 
+		// The grace fact is sent only for an upload negotiated with a retention
+		// plan, keeping a plan-free upload's frames on the legacy shape.
+		const graceDecision = parseStoredGraceDecision(pending.graceDecisionJson);
+		const grace =
+			graceDecision?.plan === true
+				? status === 'servable'
+					? this.servableGraceFact(pending)
+					: {}
+				: undefined;
+
 		for (const socket of this.context.ctx.getWebSockets(sessionId)) {
-			sendCommitSessionFrame(socket, { ev: 'verdict', uploadId, status });
+			sendCommitSessionFrame(socket, {
+				ev: 'verdict',
+				uploadId: pending.id,
+				status,
+				...(grace !== undefined && { grace })
+			});
 		}
+	}
+
+	// The deadline a servable verdict reports: the grace row its materialisation
+	// extended, read afresh so a replayed verdict reports the current deadline.
+	private servableGraceFact(
+		pending: typeof schema.pendingUploads.$inferSelect
+	): ParsedUploadGraceFact {
+		const metadata = parseStoredUploadPathMetadata(
+			pending.id,
+			pending.metadataJson
+		);
+
+		return storedGraceFact(
+			this.context.db,
+			pending.cache,
+			metadata.storePathHash
+		);
 	}
 
 	// The on-DO verify path, the hourly-cron backstop: reserve the row, decode and
@@ -400,7 +436,7 @@ export class VerificationService {
 		);
 
 		if (reserved.kind === 'lost') {
-			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
+			this.notifyWaiters(pending, 'absent');
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
@@ -459,7 +495,7 @@ export class VerificationService {
 			return false;
 		}
 
-		this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+		this.notifyWaiters(pending, 'servable');
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
 
@@ -696,12 +732,12 @@ export class VerificationService {
 			// A concurrent pass committed this generation before the tenant went
 			// inactive, so it serves; finish the bookkeeping without pruning.
 			if (reclaim === 'committed-current') {
-				this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+				this.notifyWaiters(pending, 'servable');
 				this.uploadState.clearPendingUpload(pending.id);
 				return;
 			}
 
-			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
+			this.notifyWaiters(pending, 'absent');
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
@@ -733,7 +769,7 @@ export class VerificationService {
 			// The parked sockets carry the verdict, and the narinfo itself is the
 			// durable evidence of success, so a settled upload leaves no residue:
 			// the row clears and the staging bytes go.
-			this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+			this.notifyWaiters(pending, 'servable');
 			this.uploadState.clearPendingUpload(pending.id);
 			await this.deleteStagingObject(pending);
 			return;
@@ -742,7 +778,7 @@ export class VerificationService {
 		// A concurrent recommit took the path or the blob vanished, so this upload
 		// lost: clear its marker. Any blob it promoted that no edge now references is
 		// left for the reaper to collect.
-		this.notifyWaiters(pending.id, pending.sessionId, 'absent');
+		this.notifyWaiters(pending, 'absent');
 		this.uploadState.clearPendingUpload(pending.id);
 		await this.deleteStagingObject(pending);
 	}
@@ -803,7 +839,7 @@ export class VerificationService {
 			this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
 		}
 
-		this.notifyWaiters(pending.id, pending.sessionId, verdict);
+		this.notifyWaiters(pending, verdict);
 	}
 
 	// Restore a missing narinfo object, re-confirming the NAR inside the critical
@@ -1699,13 +1735,13 @@ export class VerificationService {
 				// exists), so the missing verdict is stale and the path serves. Clear
 				// the stuck row and answer servable, without pruning its root.
 				if (reclaim === 'committed-current') {
-					this.notifyWaiters(pending.id, pending.sessionId, 'servable');
+					this.notifyWaiters(pending, 'servable');
 					this.uploadState.clearPendingUpload(pending.id);
 					return;
 				}
 			}
 
-			this.notifyWaiters(pending.id, pending.sessionId, 'absent');
+			this.notifyWaiters(pending, 'absent');
 			await this.uploadState.clearPendingUploadAndStaging(
 				pending.id,
 				pending.r2Key,
@@ -1729,6 +1765,6 @@ export class VerificationService {
 			'mismatch'
 		);
 		this.pruneRetentionTargets(pending.cache, metadata.storePathHash);
-		this.notifyWaiters(pending.id, pending.sessionId, 'mismatch');
+		this.notifyWaiters(pending, 'mismatch');
 	}
 }

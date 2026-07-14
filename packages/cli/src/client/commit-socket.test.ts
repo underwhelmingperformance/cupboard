@@ -1,5 +1,6 @@
 import {
 	commitBatchMaxEntries,
+	commitCapabilitiesValue,
 	type CommitSessionFrame
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -1113,6 +1114,174 @@ describe('subscribe-identity', () => {
 		await expect(settledOf(settled)).resolves.toBeUndefined();
 
 		session.close();
+	});
+});
+
+function batchOpWithRetention(ids: readonly string[]): string {
+	return JSON.stringify({
+		op: 'commit-batch',
+		commits: ids.map((id) => ({
+			uploadId: id,
+			storePathHash,
+			narHash,
+			retention: true
+		}))
+	});
+}
+
+function subscribeIdentityOpWithRetention(ids: readonly string[]): string {
+	return JSON.stringify({
+		op: 'subscribe-identity',
+		entries: ids.map((id) => ({
+			uploadId: id,
+			storePathHash,
+			narHash,
+			retention: true
+		}))
+	});
+}
+
+// Emits an upgrade whose capabilities are the real value the server sends,
+// which carries the retention-marker attribute on both tokens.
+function advertiseRetentionMarker(socket: FakeCommitSocket): void {
+	socket.emit('upgrade', {
+		headers: { 'x-cupboard-commit-capabilities': commitCapabilitiesValue }
+	});
+}
+
+describe('retention marker', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+	});
+
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	it('sets the marker on a commit-batch entry for a plan-carrying target when the server advertises it', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const settled = session.commit({ ...target, retention: true });
+
+		advertiseRetentionMarker(socket);
+		socket.emit('open');
+
+		expect(socket.sent).toStrictEqual([batchOpWithRetention([uploadId])]);
+
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'already-present' }
+			})
+		);
+		await settledOf(settled);
+		session.close();
+	});
+
+	// A disabled or unrecognised advertisement must read as no marker: only
+	// the exact advertised value proves the versioned handshake.
+	it('omits the marker when the advertised attribute carries a different value', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const settled = session.commit({ ...target, retention: true });
+
+		socket.emit('upgrade', {
+			headers: {
+				'x-cupboard-commit-capabilities': 'commit-batch;max=100;retention=0'
+			}
+		});
+		socket.emit('open');
+
+		expect(socket.sent).toStrictEqual([batchOp([uploadId])]);
+
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'already-present' }
+			})
+		);
+		await settledOf(settled);
+		session.close();
+	});
+
+	it('omits the marker on a commit-batch entry when the server does not advertise it', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const settled = session.commit({ ...target, retention: true });
+
+		// Advertises commit-batch, but not the retention-marker attribute: the
+		// shape a server that predates the marker sends.
+		advertiseBatch(socket);
+		socket.emit('open');
+
+		expect(socket.sent).toStrictEqual([batchOp([uploadId])]);
+
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'already-present' }
+			})
+		);
+		await settledOf(settled);
+		session.close();
+	});
+
+	it('never sets the marker for a target that did not negotiate a plan', async () => {
+		const socket = new FakeCommitSocket();
+		const session = openSession(socket);
+		const settled = session.commit(target);
+
+		advertiseRetentionMarker(socket);
+		socket.emit('open');
+
+		expect(socket.sent).toStrictEqual([batchOp([uploadId])]);
+
+		socket.emit(
+			'message',
+			frame({
+				ev: 'settled',
+				uploadId,
+				response: { storePathHash, narHash, status: 'already-present' }
+			})
+		);
+		await settledOf(settled);
+		session.close();
+	});
+
+	it('sets the marker on a subscribe-identity replay entry when the server advertises it', async () => {
+		const first = new FakeCommitSocket();
+		const second = new FakeCommitSocket();
+		const session = openSessionOver([first, second]);
+		const settled = session.commit({ ...target, retention: true });
+
+		advertiseRetentionMarker(first);
+		first.emit('open');
+		first.emit(
+			'message',
+			frame({ ev: 'deferred', uploadId, storePathHash, narHash })
+		);
+
+		first.emit('close', 1006, '');
+		await vi.advanceTimersByTimeAsync(maxBackoffMs);
+
+		advertiseRetentionMarker(second);
+		second.emit('open');
+		second.emit(
+			'message',
+			frame({ ev: 'verdict', uploadId, status: 'servable' })
+		);
+
+		await settledOf(settled);
+		expect({ first: first.sent, second: second.sent }).toStrictEqual({
+			first: [batchOpWithRetention([uploadId])],
+			second: [subscribeIdentityOpWithRetention([uploadId])]
+		});
 	});
 });
 

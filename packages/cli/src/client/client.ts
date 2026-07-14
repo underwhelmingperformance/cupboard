@@ -392,12 +392,15 @@ export interface CupboardClientOptions {
 /**
  * The upload a commit settles: its id and the path identity negotiated for it.
  * The identity lets the client report a verdict that races ahead of the server's
- * deferred frame.
+ * deferred frame. `retention`, true only when this upload negotiated a
+ * retention plan, lets a reconnect that resolves a gone row by identity ask
+ * the server for the path's durable grace fact.
  */
 export interface CommitTarget {
 	readonly uploadId: string;
 	readonly storePathHash: string;
 	readonly narHash: string;
+	readonly retention?: boolean;
 }
 
 export interface CommitOptions {
