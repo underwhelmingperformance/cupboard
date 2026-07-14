@@ -34,6 +34,11 @@ const domainGrant = authorizationDetailSchema.parse({
 	actions: ['signing-key:rotate', 'gc:run']
 });
 
+const reuseViewGrant = authorizationDetailSchema.parse({
+	type: 'cupboard_domain',
+	actions: ['reuse-view:set']
+});
+
 const tenantGrant = authorizationDetailSchema.parse({
 	type: 'cupboard_tenant',
 	actions: ['tenant:suspend'],
@@ -248,6 +253,27 @@ describe('isCoveredByToken', () => {
 				[domainGrant],
 				'gc:run',
 				{ cache: 'c' },
+				false
+			],
+			[
+				'domain reuse-view:set, deployment-wide',
+				[reuseViewGrant],
+				'reuse-view:set',
+				{},
+				true
+			],
+			[
+				'domain reuse-view:set does not cover a per-cache resource',
+				[reuseViewGrant],
+				'reuse-view:set',
+				{ cache: 'c' },
+				false
+			],
+			[
+				'domain reuse-view:set does not cover a different reuse-view op',
+				[reuseViewGrant],
+				'reuse-view:remove',
+				{},
 				false
 			],
 			[

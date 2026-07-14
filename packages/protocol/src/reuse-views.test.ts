@@ -1,0 +1,194 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+	reuseViewDefaultPriority,
+	reuseViewListResponseSchema,
+	reuseViewMaxSelectors,
+	reuseViewNameSchema,
+	reuseViewRemoveResponseSchema,
+	reuseViewSelectorSchema,
+	reuseViewSetBodySchema,
+	reuseViewSummarySchema
+} from './reuse-views.ts';
+
+describe('reuseViewNameSchema', () => {
+	it.each(['reuse', 'reuse-1', 'a'.repeat(63)])('accepts %s', (value) => {
+		expect(reuseViewNameSchema.safeParse(value).success).toBe(true);
+	});
+
+	it.each([
+		['the empty string', ''],
+		['an uppercase name', 'Reuse'],
+		['a name over the length bound', 'a'.repeat(64)],
+		['a name starting with a separator', '-reuse']
+	])('rejects %s', (_name, value) => {
+		expect(reuseViewNameSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('reuseViewSelectorSchema', () => {
+	it.each([
+		{
+			name: 'an exact selector naming a valid cache',
+			kind: 'exact',
+			pattern: 'pr-1'
+		},
+		{
+			name: 'an exact selector naming the default cache',
+			kind: 'exact',
+			pattern: '_default'
+		},
+		{ name: 'a prefix selector', kind: 'prefix', pattern: 'pr-' },
+		{
+			name: 'the empty prefix, matching every cache',
+			kind: 'prefix',
+			pattern: ''
+		},
+		{
+			name: 'a prefix that is itself a full valid cache name',
+			kind: 'prefix',
+			pattern: 'a'.repeat(63)
+		}
+	])('accepts $name', ({ kind, pattern }) => {
+		expect(reuseViewSelectorSchema.safeParse({ kind, pattern }).success).toBe(
+			true
+		);
+	});
+
+	it.each([
+		{
+			name: 'an exact selector with an invalid cache name',
+			kind: 'exact',
+			pattern: ''
+		},
+		{
+			name: 'an exact selector naming an uppercase cache',
+			kind: 'exact',
+			pattern: 'PR-1'
+		},
+		{
+			name: 'a pattern over the length bound',
+			kind: 'prefix',
+			pattern: 'a'.repeat(64)
+		},
+		{ name: 'an unknown kind', kind: 'wildcard', pattern: 'pr-' },
+		{
+			name: 'a prefix with an uppercase character',
+			kind: 'prefix',
+			pattern: 'Pr-'
+		},
+		{ name: 'a prefix containing a space', kind: 'prefix', pattern: 'pr 1' },
+		{ name: 'a prefix containing a slash', kind: 'prefix', pattern: 'pr/1' },
+		{
+			name: 'a prefix containing a Unicode character',
+			kind: 'prefix',
+			pattern: 'préfix'
+		},
+		{
+			name: 'a prefix starting with a separator',
+			kind: 'prefix',
+			pattern: '-pr'
+		}
+	])('rejects $name', ({ kind, pattern }) => {
+		expect(reuseViewSelectorSchema.safeParse({ kind, pattern }).success).toBe(
+			false
+		);
+	});
+});
+
+describe('reuseViewSetBodySchema', () => {
+	it('accepts a bounded, non-empty, deduplicated selector list with no priority', () => {
+		const value = {
+			selectors: [
+				{ kind: 'exact', pattern: 'pr-1' },
+				{ kind: 'prefix', pattern: 'pr-' }
+			]
+		};
+
+		expect(reuseViewSetBodySchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('accepts an explicit priority', () => {
+		const value = {
+			selectors: [{ kind: 'prefix', pattern: '' }],
+			priority: 10
+		};
+
+		expect(reuseViewSetBodySchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'an empty selector list',
+			value: { selectors: [] }
+		},
+		{
+			name: 'a selector count over the cap',
+			value: {
+				selectors: Array.from(
+					{ length: reuseViewMaxSelectors + 1 },
+					(_, index) => ({
+						kind: 'prefix',
+						pattern: `p${String(index)}`
+					})
+				)
+			}
+		},
+		{
+			name: 'a duplicated (kind, pattern) selector',
+			value: {
+				selectors: [
+					{ kind: 'prefix', pattern: 'pr-' },
+					{ kind: 'prefix', pattern: 'pr-' }
+				]
+			}
+		},
+		{
+			name: 'a negative priority',
+			value: { selectors: [{ kind: 'prefix', pattern: '' }], priority: -1 }
+		},
+		{
+			name: 'a fractional priority',
+			value: { selectors: [{ kind: 'prefix', pattern: '' }], priority: 1.5 }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(reuseViewSetBodySchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('reuseViewSummarySchema, list and remove responses', () => {
+	it('accepts a full summary and the list and remove responses built from it', () => {
+		const view = {
+			name: 'reuse',
+			revision: 1,
+			priority: reuseViewDefaultPriority,
+			selectors: [{ kind: 'exact', pattern: 'pr-1' }],
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		};
+		const remove = { name: 'reuse', removed: true };
+
+		expect({
+			summary: reuseViewSummarySchema.parse(view),
+			list: reuseViewListResponseSchema.parse({ views: [view] }),
+			remove: reuseViewRemoveResponseSchema.parse(remove)
+		}).toStrictEqual({
+			summary: view,
+			list: { views: [view] },
+			remove
+		});
+	});
+
+	it('rejects a summary with a revision below 1', () => {
+		const view = {
+			name: 'reuse',
+			revision: 0,
+			priority: reuseViewDefaultPriority,
+			selectors: [],
+			createdAt: '2026-01-01T00:00:00.000Z',
+			updatedAt: '2026-01-01T00:00:00.000Z'
+		};
+
+		expect(reuseViewSummarySchema.safeParse(view).success).toBe(false);
+	});
+});
