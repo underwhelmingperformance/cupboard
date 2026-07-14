@@ -2,11 +2,22 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { CacheInfoParseError } from '@cupboard/nix-store/errors';
 import { describe, expect, it } from 'vitest';
 
-import { InvalidInputError } from '../errors.ts';
+import {
+	CacheInfoFetchError,
+	CacheInfoInvalidError,
+	InvalidInputError,
+	ReuseViewPriorityError
+} from '../errors.ts';
 
-import { resolveSetupInputs, type SetupOptions, writeNetrc } from './setup.ts';
+import {
+	resolveSetupInputs,
+	resolveSubstituters,
+	type SetupOptions,
+	writeNetrc
+} from './setup.ts';
 
 describe('writeNetrc', () => {
 	it('writes a private netrc file scoped to the cache host', async () => {
@@ -47,6 +58,7 @@ describe('resolveSetupInputs', () => {
 		addToPath: true,
 		cacheUrl: '',
 		cache: '',
+		reuseView: '',
 		trustedPublicKey: '',
 		readUser: '',
 		readPassword: '',
@@ -124,5 +136,209 @@ describe('resolveSetupInputs', () => {
 		]
 	])('rejects when %s', (_name, options) => {
 		expect(() => resolveSetupInputs(options, {})).toThrow(InvalidInputError);
+	});
+});
+
+function requestUrl(input: RequestInfo | URL): string {
+	if (typeof input === 'string') {
+		return input;
+	}
+
+	return input instanceof URL ? input.href : input.url;
+}
+
+function cacheInfoBody(priority: number): string {
+	return `StoreDir: /nix/store\nWantMassQuery: 1\nPriority: ${String(priority)}\n`;
+}
+
+function stubFetch(
+	bodyFor: (url: string) => string,
+	options: {
+		readonly status?: (url: string) => number;
+		readonly authorizations?: (string | undefined)[];
+	} = {}
+): typeof fetch {
+	return (input, init) => {
+		const url = requestUrl(input);
+		const body = bodyFor(url);
+		const status = options.status?.(url) ?? 200;
+
+		options.authorizations?.push(
+			new Headers(init?.headers).get('authorization') ?? undefined
+		);
+
+		return Promise.resolve(new Response(body, { status }));
+	};
+}
+
+describe('resolveSubstituters', () => {
+	const baseOptions = {
+		cacheUrl: 'https://cache.example.test',
+		cache: '',
+		readUser: '',
+		readPassword: ''
+	};
+
+	it('performs no nix-cache-info fetches and returns the destination alone when no view is set', async () => {
+		const requests: string[] = [];
+		const fetcher = stubFetch((url) => {
+			requests.push(url);
+
+			return cacheInfoBody(40);
+		});
+
+		const substituters = await resolveSubstituters(
+			{ ...baseOptions, reuseView: '' },
+			{ fetch: fetcher }
+		);
+
+		expect({ requests, substituters }).toStrictEqual({
+			requests: [],
+			substituters: ['https://cache.example.test']
+		});
+	});
+
+	it.each([
+		{
+			label: 'a view priority greater than the destination configures it',
+			destinationPriority: 40,
+			viewPriority: 50,
+			refused: false
+		},
+		{
+			label: 'an equal priority is refused',
+			destinationPriority: 40,
+			viewPriority: 40,
+			refused: true
+		},
+		{
+			label: 'a lower view priority is refused',
+			destinationPriority: 40,
+			viewPriority: 30,
+			refused: true
+		}
+	] as const)(
+		'$label',
+		async ({ destinationPriority, viewPriority, refused }) => {
+			const fetcher = stubFetch((url) =>
+				cacheInfoBody(
+					url.includes('/reuse/') ? viewPriority : destinationPriority
+				)
+			);
+			const outcome = resolveSubstituters(
+				{ ...baseOptions, reuseView: 'reuse' },
+				{ fetch: fetcher }
+			);
+
+			if (refused) {
+				await expect(outcome).rejects.toBeInstanceOf(ReuseViewPriorityError);
+
+				return;
+			}
+
+			await expect(outcome).resolves.toStrictEqual([
+				'https://cache.example.test',
+				'https://cache.example.test/reuse/reuse'
+			]);
+		}
+	);
+
+	it.each([
+		['destination', 'https://cache.example.test/nix-cache-info'],
+		['view', 'https://cache.example.test/reuse/reuse/nix-cache-info']
+	] as const)(
+		'raises the invalid-document error for a priority-free %s response',
+		async (side, missingUrl) => {
+			const fetcher = stubFetch((url) =>
+				url === missingUrl
+					? 'StoreDir: /nix/store\nWantMassQuery: 1\n'
+					: cacheInfoBody(40)
+			);
+			let failure: unknown;
+
+			try {
+				await resolveSubstituters(
+					{ ...baseOptions, reuseView: 'reuse' },
+					{ fetch: fetcher }
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect(failure).toBeInstanceOf(CacheInfoInvalidError);
+
+			if (failure instanceof CacheInfoInvalidError) {
+				expect(failure.side).toBe(side);
+				expect(failure.cause).toBeInstanceOf(CacheInfoParseError);
+			}
+		}
+	);
+
+	it.each([
+		['destination', 'https://cache.example.test/nix-cache-info'],
+		['view', 'https://cache.example.test/reuse/reuse/nix-cache-info']
+	] as const)(
+		'raises a fetch error for a non-2xx %s response',
+		async (side, failingUrl) => {
+			const fetcher = stubFetch(() => cacheInfoBody(40), {
+				status: (url) => (url === failingUrl ? 503 : 200)
+			});
+			let failure: unknown;
+
+			try {
+				await resolveSubstituters(
+					{ ...baseOptions, reuseView: 'reuse' },
+					{ fetch: fetcher }
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect(failure).toBeInstanceOf(CacheInfoFetchError);
+
+			if (failure instanceof CacheInfoFetchError) {
+				expect(failure.side).toBe(side);
+			}
+		}
+	);
+
+	it.each([
+		[
+			'configured',
+			'alice',
+			'secret',
+			`Basic ${Buffer.from('alice:secret').toString('base64')}`
+		],
+		['not configured', '', '', undefined]
+	] as const)(
+		'sends the authorization header only when a read credential is %s',
+		async (_label, readUser, readPassword, expectedAuthorization) => {
+			const authorizations: (string | undefined)[] = [];
+			const fetcher = stubFetch(
+				(url) => cacheInfoBody(url.includes('/reuse/') ? 50 : 40),
+				{ authorizations }
+			);
+
+			await resolveSubstituters(
+				{ ...baseOptions, reuseView: 'reuse', readUser, readPassword },
+				{ fetch: fetcher }
+			);
+
+			expect(authorizations).toStrictEqual([
+				expectedAuthorization,
+				expectedAuthorization
+			]);
+		}
+	);
+});
+
+describe('resolveSetupInputs reuse view', () => {
+	it('threads reuse-view through', () => {
+		const inputs = resolveSetupInputs(
+			{ ...baseOptions, reuseView: 'reuse', installDir: '/opt/cupboard' },
+			{ GITHUB_ACTION_REPOSITORY: 'owner/cupboard' }
+		);
+
+		expect(inputs.reuseView).toBe('reuse');
 	});
 });

@@ -47,6 +47,16 @@ export class NetrcControlCharacterError extends ProtocolError {
 	}
 }
 
+// A nix-cache-info document missing or mis-typing one of its fields. `field`
+// names the first field that failed, so a consumer that must not guess a
+// default (a priority comparison, say) can report exactly what was absent.
+export class CacheInfoParseError extends ProtocolError {
+	constructor(public readonly field: string) {
+		super(`Invalid nix-cache-info: ${field}`);
+		this.name = 'CacheInfoParseError';
+	}
+}
+
 // Raised when a zstd stream cannot be decoded because its bytes are not a valid
 // frame, distinct from an error reading the underlying source. The server treats
 // this as a definitive verification failure (the bytes can never decode to the

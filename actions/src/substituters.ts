@@ -1,4 +1,4 @@
-import { cacheUrl } from '@cupboard/nix-store/cache-url';
+import { cacheUrl, reuseViewUrl } from '@cupboard/nix-store/cache-url';
 
 const cacheHeaders: Readonly<Record<string, string>> = {
 	accept: 'text/plain',
@@ -7,6 +7,15 @@ const cacheHeaders: Readonly<Record<string, string>> = {
 
 export function cacheUrlFor(baseUrl: string, cache: string): string {
 	return cacheUrl(baseUrl, cache.trim());
+}
+
+/**
+ * The URL for a named tenant reuse view. Unlike {@link cacheUrlFor}, this
+ * always hangs off the tenant base: a reuse view spans caches, so it has no
+ * per-cache prefix to nest under.
+ */
+export function reuseViewUrlFor(baseUrl: string, view: string): string {
+	return reuseViewUrl(baseUrl, view.trim());
 }
 
 /**

@@ -178,6 +178,61 @@ export class CachePublicKeyEmptyResponseError extends CodedError {
 	}
 }
 
+/**
+ * A `nix-cache-info` fetch the reuse-view priority check issued, for either
+ * the destination cache or the view, came back with a non-2xx status.
+ */
+export class CacheInfoFetchError extends CodedError {
+	constructor(
+		public readonly side: 'destination' | 'view',
+		public readonly url: string,
+		public readonly status: number
+	) {
+		super(
+			`failed to fetch nix-cache-info for the ${side} (${url}): HTTP ${String(status)}`
+		);
+		this.name = 'CacheInfoFetchError';
+	}
+}
+
+/**
+ * A `nix-cache-info` document the reuse-view priority check fetched failed to
+ * parse. Nix itself would default a missing priority to 30, but the check must
+ * not guess: it needs the real value to compare, so the parse failure carries
+ * through as the cause.
+ */
+export class CacheInfoInvalidError extends CodedError {
+	constructor(
+		public readonly side: 'destination' | 'view',
+		public readonly url: string,
+		options: { readonly cause: unknown }
+	) {
+		super(`nix-cache-info for the ${side} (${url}) is invalid`, {
+			cause: options.cause
+		});
+		this.name = 'CacheInfoInvalidError';
+	}
+}
+
+/**
+ * Raised when a configured reuse view's priority is not numerically greater
+ * than the destination's. Nix tries lower priorities first, so this is the
+ * destination-before-view invariant (see PLAN.md, "Named tenant reuse
+ * views"): a divergent input-addressed path already adopted by the
+ * destination must never be replaced by a view candidate.
+ */
+export class ReuseViewPriorityError extends UsageError {
+	constructor(
+		public readonly destinationPriority: number,
+		public readonly viewPriority: number
+	) {
+		super(
+			`reuse-view priority ${String(viewPriority)} must be numerically greater than the destination's ${String(destinationPriority)}`
+		);
+		this.name = 'ReuseViewPriorityError';
+	}
+}
+
 export class PublishTargetsJsonError extends UsageError {
 	constructor(public override readonly cause: SyntaxError) {
 		super(`targets is not valid JSON: ${cause.message}`);
