@@ -260,7 +260,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		this.cacheAdmin = new CacheAdminService(this.context, this.deletionQueue);
 		this.garbageCollection = new GarbageCollectionService(
 			this.context,
-			this.deletionQueue
+			this.deletionQueue,
+			this.retention
 		);
 		this.tokenExchange = new TokenExchangeService(
 			this.context,

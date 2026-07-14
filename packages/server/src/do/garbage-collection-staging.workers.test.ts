@@ -20,6 +20,7 @@ import { AttestationsService } from './attestations-service.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { GarbageCollectionService } from './garbage-collection-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+import { RetentionService } from './retention-service.ts';
 
 const uploadGraceMs = 15 * 60 * 1000;
 
@@ -134,7 +135,8 @@ describe('garbage collection best-effort staging deletes', () => {
 				);
 				const garbageCollection = new GarbageCollectionService(
 					instance.context,
-					deletionQueue
+					deletionQueue,
+					new RetentionService(instance.context)
 				);
 
 				return {

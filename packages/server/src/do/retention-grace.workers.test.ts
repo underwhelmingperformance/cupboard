@@ -16,11 +16,14 @@ import {
 	narBytes,
 	narInfoGeneration,
 	pushPath,
+	removeRoot,
 	resetTestServer,
+	setRoot,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
 
+import { RetentionService } from './retention-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
@@ -286,6 +289,283 @@ describe('retention grace deadlines in garbage collection', () => {
 			status: StatusCodes.OK,
 			deadlines: [],
 			registryRow: undefined
+		});
+	});
+});
+
+async function addGracePolicy(
+	cachePrefix: string,
+	graceSeconds: number
+): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		new RetentionService(instance.context).addGracePolicy({
+			cachePrefix,
+			graceSeconds
+		});
+	});
+}
+
+async function graceDeadlineRows(
+	cache: string
+): Promise<readonly { storePathHash: string; retainUntil: string }[]> {
+	return runInDurableObject(currentServer(), (instance) =>
+		instance.context.db
+			.select({
+				storePathHash: schema.retentionGrace.storePathHash,
+				retainUntil: schema.retentionGrace.retainUntil
+			})
+			.from(schema.retentionGrace)
+			.where(eq(schema.retentionGrace.cache, cache))
+			.orderBy(schema.retentionGrace.storePathHash)
+			.all()
+	);
+}
+
+async function graceManagedMarker(cache: string): Promise<boolean> {
+	return runInDurableObject(
+		currentServer(),
+		(instance) =>
+			instance.context.db
+				.select({ graceManaged: schema.caches.graceManaged })
+				.from(schema.caches)
+				.where(eq(schema.caches.name, cache))
+				.get()?.graceManaged ?? false
+	);
+}
+
+describe('retention grace transitions', () => {
+	beforeEach(resetTestServer);
+
+	// The shared clock starts at 2026-01-01T00:00:00Z, so a 24-hour grace from a
+	// transition processed immediately lands on the next midnight.
+	const dayGraceSeconds = 86_400;
+	const dayAfterStart = '2026-01-02T00:00:00.000Z';
+
+	it('grants deadlines to the targets a replacement releases', async () => {
+		await useTestServer('transition-replace');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'kept'
+		});
+		const released = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'released'
+		});
+
+		await pushPath(token, kept);
+		await pushPath(token, released);
+		await setRoot(token, {
+			name: 'channel',
+			targets: [kept.storePath, released.storePath]
+		});
+		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
+
+		expect({
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+		}).toStrictEqual({
+			deadlines: [
+				{ storePathHash: released.storePathHash, retainUntil: dayAfterStart }
+			],
+			graceManaged: true
+		});
+	});
+
+	it('grants no deadline to a released target whose path was deleted', async () => {
+		await useTestServer('transition-deleted');
+		const { token } = await bootstrap();
+
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('7'),
+			name: 'kept'
+		});
+		const deleted = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('8'),
+			name: 'deleted'
+		});
+
+		await pushPath(token, kept);
+		await pushPath(token, deleted);
+		await addGracePolicy('', dayGraceSeconds);
+		await setRoot(token, {
+			name: 'channel',
+			targets: [kept.storePath, deleted.storePath]
+		});
+		// The delete leaves the root's target row behind, so the removal below
+		// still releases the vanished hash; no deadline may back it.
+		await deletePath(token, deleted.storePathHash);
+		await removeRoot(token, 'channel');
+
+		expect(await graceDeadlineRows(DEFAULT_CACHE)).toStrictEqual([
+			{ storePathHash: kept.storePathHash, retainUntil: dayAfterStart }
+		]);
+	});
+
+	it('grants deadlines to every target of a removed root, surviving a sweep', async () => {
+		await useTestServer('transition-remove');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const first = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('1'),
+			name: 'first'
+		});
+		const second = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('2'),
+			name: 'second'
+		});
+
+		await pushPath(token, first);
+		await pushPath(token, second);
+		await setRoot(token, {
+			name: 'channel',
+			targets: [first.storePath, second.storePath]
+		});
+		await removeRoot(token, 'channel');
+		await runGc();
+
+		expect({
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
+			first: (await narInfoGeneration(first.storePathHash)) !== undefined,
+			second: (await narInfoGeneration(second.storePathHash)) !== undefined
+		}).toStrictEqual({
+			deadlines: [
+				{ storePathHash: first.storePathHash, retainUntil: dayAfterStart },
+				{ storePathHash: second.storePathHash, retainUntil: dayAfterStart }
+			],
+			first: true,
+			second: true
+		});
+	});
+
+	it('anchors an expiry transition at the nominal expiry, not the sweep', async () => {
+		await useTestServer('transition-expiry');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('3'),
+			name: 'expiring'
+		});
+
+		await pushPath(token, path);
+		await setRoot(token, {
+			name: 'channel',
+			targets: [path.storePath],
+			ttlSeconds: 3600
+		});
+
+		// The sweep runs an hour after the root's expiry; the deadline must still
+		// measure from the expiry itself.
+		vi.setSystemTime(new Date('2026-01-01T02:00:00.000Z'));
+		await runGc();
+
+		expect({
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
+			path: (await narInfoGeneration(path.storePathHash)) !== undefined,
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+		}).toStrictEqual({
+			deadlines: [
+				{
+					storePathHash: path.storePathHash,
+					retainUntil: '2026-01-02T01:00:00.000Z'
+				}
+			],
+			path: true,
+			graceManaged: true
+		});
+	});
+
+	it('cannot shorten a deadline with a later, earlier-anchored event', async () => {
+		await useTestServer('transition-monotonic');
+		await bootstrap();
+
+		const hash = storePathHashSchema.parse(repeated('7'));
+
+		await runInDurableObject(currentServer(), (instance) => {
+			const service = new RetentionService(instance.context);
+			service.extendGraceDeadlines('', [hash], '2026-03-01T00:00:00.000Z');
+			service.extendGraceDeadlines('', [hash], '2026-02-01T00:00:00.000Z');
+		});
+
+		expect(await graceDeadlineRows(DEFAULT_CACHE)).toStrictEqual([
+			{ storePathHash: hash, retainUntil: '2026-03-01T00:00:00.000Z' }
+		]);
+	});
+
+	it('marks the cache on a zero grace without granting a deadline', async () => {
+		await useTestServer('transition-zero');
+		const { token } = await bootstrap();
+		await addGracePolicy('', 0);
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('4'),
+			name: 'zero'
+		});
+
+		await pushPath(token, path);
+		await setRoot(token, { name: 'channel', targets: [path.storePath] });
+		await removeRoot(token, 'channel');
+
+		expect({
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+		}).toStrictEqual({ deadlines: [], graceManaged: true });
+	});
+
+	it('leaves a cache with no matching policy untouched', async () => {
+		await useTestServer('transition-no-policy');
+		const { token } = await bootstrap();
+
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('5'),
+			name: 'unmatched'
+		});
+
+		await pushPath(token, path);
+		await setRoot(token, { name: 'channel', targets: [path.storePath] });
+		await removeRoot(token, 'channel');
+
+		expect({
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE),
+			graceManaged: await graceManagedMarker(DEFAULT_CACHE)
+		}).toStrictEqual({ deadlines: [], graceManaged: false });
+	});
+
+	it('resolves the longest matching prefix', async () => {
+		await useTestServer('transition-longest-prefix');
+		await bootstrap();
+
+		const resolved = await runInDurableObject(currentServer(), (instance) => {
+			const service = new RetentionService(instance.context);
+			const withoutPolicies = service.resolveGraceSeconds('pr-5');
+
+			service.addGracePolicy({ cachePrefix: '', graceSeconds: 604_800 });
+			service.addGracePolicy({ cachePrefix: 'pr-', graceSeconds: 3600 });
+
+			return {
+				withoutPolicies,
+				prCache: service.resolveGraceSeconds('pr-5'),
+				otherCache: service.resolveGraceSeconds('builds')
+			};
+		});
+
+		expect(resolved).toStrictEqual({
+			withoutPolicies: undefined,
+			prCache: 3600,
+			otherCache: 604_800
 		});
 	});
 });
