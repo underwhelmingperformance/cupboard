@@ -953,11 +953,13 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	// One bounded sweep. Stopping at the cap means there is likely more to
-	// collect, so it records the cap and arms an immediate alarm; the gate is free
-	// between firings, so push requests interleave while the backlog drains across
-	// chunks. Each chunk holds the gate only for its own deletes. The cap is
-	// persisted so the alarm resumes with the bound the run started with.
+	// One bounded sweep. It records a continuation and arms an immediate alarm
+	// when either there is likely more to collect (the sweep stopped at the cap)
+	// or a capped narinfo-deletion backlog is still queued, so the remaining paths
+	// and deletions drain across firings. The gate is free between firings, so
+	// push requests interleave while the backlog drains across chunks, and each
+	// chunk holds the gate only for its own deletes. The cap is persisted so the
+	// alarm resumes with the bound the run started with.
 	private async sweepGarbageOnce(
 		sweepLimit: number = maxPathsSweptPerRun
 	): Promise<void> {
@@ -972,7 +974,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			)
 		);
 
-		await (outcome.pathsSwept >= sweepLimit
+		const hasMoreToDrain =
+			outcome.pathsSwept >= sweepLimit ||
+			this.deletionQueue.hasQueuedNarInfoDeletions();
+
+		await (hasMoreToDrain
 			? this.armGarbageContinuation(sweepLimit)
 			: this.ctx.storage.delete(gcContinuationKey));
 	}
