@@ -278,6 +278,10 @@ export interface PublishPlan {
 	readonly targets: readonly PublishTarget[];
 	readonly seedGroups: readonly SeedGroup[];
 	readonly fallbackGroups: readonly FallbackGroup[];
+	// Shared outputs that qualified for seeding but are already served by the
+	// destination, so their seeds are omitted. Grace mode confirms these before
+	// relying on them, refreshing each one's retention deadline.
+	readonly destinationIntermediates: readonly StorePathString[];
 }
 
 export interface UnevaluatedTarget {
@@ -335,7 +339,7 @@ export function planPublish(options: {
 		...pending.map((evaluation) => evaluation.target),
 		...(options.unevaluated ?? [])
 	];
-	const seedGroups = seedGroupsFor(
+	const { seedGroups, destinationIntermediates } = seedGroupsFor(
 		options.uses,
 		pending,
 		pendingIndices,
@@ -357,7 +361,13 @@ export function planPublish(options: {
 
 	assertDistinctGroupKeys([...seedGroups, ...fallbackGroups]);
 
-	return { retained, targets, seedGroups, fallbackGroups };
+	return {
+		retained,
+		targets,
+		seedGroups,
+		fallbackGroups,
+		destinationIntermediates
+	};
 }
 
 export function derivationUses(
@@ -574,14 +584,18 @@ function seedGroupsFor(
 	pendingIndices: ReadonlyMap<TargetEvaluation, number>,
 	fallbackTargets: ReadonlySet<number>,
 	availablePaths: ReadonlySet<StorePathString>
-): SeedGroup[] {
+): {
+	readonly seedGroups: SeedGroup[];
+	readonly destinationIntermediates: readonly StorePathString[];
+} {
 	const groups = new Map<
 		string,
 		{ evaluations: Set<number>; candidates: SeedCandidate[] }
 	>();
+	const destinationIntermediates = new Set<StorePathString>();
 
 	for (const use of uses.values()) {
-		if (use.path === undefined || availablePaths.has(use.path)) {
+		if (use.path === undefined) {
 			continue;
 		}
 
@@ -600,6 +614,14 @@ function seedGroupsFor(
 			continue;
 		}
 
+		// The qualification above is checked first, so this set holds exactly
+		// the outputs whose seeds the availability omitted, and nothing that
+		// would never have been seeded anyway.
+		if (availablePaths.has(use.path)) {
+			destinationIntermediates.add(use.path);
+			continue;
+		}
+
 		const contextGroups = Map.groupBy(targetIndices, (index) =>
 			executionContextKey(requireIndex(pending, index).target)
 		);
@@ -609,7 +631,7 @@ function seedGroupsFor(
 		}
 	}
 
-	return groups
+	const seedGroups = groups
 		.values()
 		.map((group): SeedGroup => {
 			const evaluationIndices = [...group.evaluations].toSorted(
@@ -634,6 +656,13 @@ function seedGroupsFor(
 		})
 		.toArray()
 		.toSorted((left, right) => left.key.localeCompare(right.key));
+
+	return {
+		seedGroups,
+		destinationIntermediates: [...destinationIntermediates].toSorted(
+			(left, right) => left.localeCompare(right)
+		)
+	};
 }
 
 function addSeedCandidate(

@@ -321,6 +321,40 @@ export class DuplicateGroupKeyError extends CodedError {
 	}
 }
 
+export class ConfirmCommandError extends CodedError {
+	readonly wasReported: boolean;
+
+	constructor(options: {
+		readonly cause: unknown;
+		readonly wasReported?: boolean;
+	}) {
+		super('Could not confirm the destination-resident paths', {
+			cause: options.cause
+		});
+		this.name = 'ConfirmCommandError';
+		this.wasReported = options.wasReported ?? false;
+	}
+}
+
+export class ConfirmResultMissingError extends CodedError {
+	constructor() {
+		super(
+			'Cupboard recorded no result while confirming the destination-resident paths'
+		);
+		this.name = 'ConfirmResultMissingError';
+	}
+}
+
+export class ConfirmResultInvalidError extends CodedError {
+	constructor(options: { readonly cause: unknown }) {
+		super(
+			'Cupboard recorded an invalid result while confirming the destination-resident paths',
+			{ cause: options.cause }
+		);
+		this.name = 'ConfirmResultInvalidError';
+	}
+}
+
 export class PublishPlanInvariantError extends CodedError {
 	constructor(public readonly subject: string) {
 		super(`Publish planner invariant failed: missing ${subject}`);

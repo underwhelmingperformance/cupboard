@@ -10,7 +10,11 @@ import {
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	ConfirmCommandError,
+	ConfirmResultInvalidError,
+	ConfirmResultMissingError,
 	DuplicateRunnerLabelError,
+	GraceDeadlineMissingError,
 	InvalidInputError,
 	MatrixJobLimitError,
 	RootEnsureCommandError,
@@ -25,6 +29,7 @@ import {
 } from '../publish-plan.ts';
 
 import {
+	confirmDestinationIntermediates,
 	ensureAvailableTargets,
 	type EnsureRunner,
 	matrix,
@@ -76,7 +81,8 @@ describe('planAction', () => {
 				retained: [],
 				targets: [{ ...target, bestEffort: false, outputs: ['out'] }],
 				seedGroups: [],
-				fallbackGroups: []
+				fallbackGroups: [],
+				destinationIntermediates: []
 			},
 			outputs:
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
@@ -205,6 +211,15 @@ describe('planAction', () => {
 		await expect(
 			planAction(
 				{ ...baseOptions, optimise: 'perhaps' },
+				{ RUNNER_TEMP: '/tmp' }
+			)
+		).rejects.toThrow(InvalidInputError);
+	});
+
+	it('rejects an unknown intermediate-retention value', async () => {
+		await expect(
+			planAction(
+				{ ...baseOptions, intermediateRetention: 'pins' },
 				{ RUNNER_TEMP: '/tmp' }
 			)
 		).rejects.toThrow(InvalidInputError);
@@ -607,6 +622,180 @@ describe('ensureAvailableTargets', () => {
 	);
 });
 
+describe('confirmDestinationIntermediates', () => {
+	let directory: string;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-confirm-'));
+	});
+
+	const intermediates = [
+		storePath(`/nix/store/${'1'.repeat(32)}-shared`),
+		storePath(`/nix/store/${'2'.repeat(32)}-tools`)
+	];
+
+	it('confirms every intermediate in one command and passes on deadlines', async () => {
+		let recorded: string[] = [];
+		const runner: EnsureRunner = async (command, arguments_) => {
+			recorded = [command, ...arguments_];
+			await writeFile(
+				resultFileArgument(arguments_),
+				confirmedPathsResultLine([
+					{
+						storePathHash: '1'.repeat(32),
+						confirmed: true,
+						grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
+					},
+					{
+						storePathHash: '2'.repeat(32),
+						confirmed: true,
+						grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
+					}
+				])
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await confirmDestinationIntermediates(
+			planInputs({
+				cache: 'builds',
+				intermediateRetention: 'grace',
+				temporaryDirectory: directory
+			}),
+			intermediates,
+			runner
+		);
+
+		expect(recorded).toStrictEqual([
+			'/unused/cupboard',
+			'--output-mode',
+			'github',
+			'--no-colour',
+			'--result-file',
+			resultFileArgument(recorded.slice(1)),
+			'confirm',
+			'https://cupboard.example/t/acme',
+			...intermediates,
+			'--github-oidc',
+			'--audience',
+			'https://cupboard.example/t/acme',
+			'--cache',
+			'builds'
+		]);
+	});
+
+	it('runs no command when there is nothing to confirm', async () => {
+		const calls: string[][] = [];
+		const runner: EnsureRunner = (command, arguments_) => {
+			calls.push([command, ...arguments_]);
+			return Promise.resolve({ stdout: '', stderr: '' });
+		};
+
+		await confirmDestinationIntermediates(
+			planInputs({ temporaryDirectory: directory }),
+			[],
+			runner
+		);
+
+		expect(calls).toStrictEqual([]);
+	});
+
+	it.each([
+		{
+			name: 'a path that matched no policy',
+			grace: {}
+		},
+		{
+			name: 'a still-pending deadline',
+			grace: { graceSeconds: 86_400 }
+		}
+	])('fails closed on $name', async ({ grace }) => {
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			await writeFile(
+				resultFileArgument(arguments_),
+				confirmedPathsResultLine([
+					{ storePathHash: '1'.repeat(32), confirmed: true, grace }
+				])
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await expect(
+			confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				runner
+			)
+		).rejects.toBeInstanceOf(GraceDeadlineMissingError);
+	});
+
+	it('maps a runner launch failure to a ConfirmCommandError carrying its cause', async () => {
+		const failure = new Error('spawn /missing/cupboard ENOENT');
+		const runner: EnsureRunner = () => Promise.reject(failure);
+		let thrown: unknown;
+
+		try {
+			await confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				runner
+			);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(ConfirmCommandError);
+
+		if (thrown instanceof ConfirmCommandError) {
+			expect(thrown.cause).toBe(failure);
+		}
+	});
+
+	it('rejects a run that records no confirmation result', async () => {
+		await expect(
+			confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				resultFreeRunner
+			)
+		).rejects.toBeInstanceOf(ConfirmResultMissingError);
+	});
+
+	it('rejects a recorded result of a different kind as missing', async () => {
+		await expect(
+			confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				foreignKindRunner
+			)
+		).rejects.toBeInstanceOf(ConfirmResultMissingError);
+	});
+
+	it.each([
+		['a malformed result line', 'not json\n'],
+		[
+			'confirmation data the schema refuses',
+			`${JSON.stringify({ kind: 'confirm-paths', data: { paths: 'all' } })}\n`
+		]
+	])('rejects %s as invalid', async (_name, line) => {
+		const runner: EnsureRunner = async (_command, arguments_) => {
+			await writeFile(resultFileArgument(arguments_), line);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await expect(
+			confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				runner
+			)
+		).rejects.toBeInstanceOf(ConfirmResultInvalidError);
+	});
+});
+
 function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 	return {
 		targets: [],
@@ -620,10 +809,40 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		cupboardPath: '/unused/cupboard',
 		planFile: '/unused/cupboard-publish-plan.json',
 		optimise: true,
+		intermediateRetention: 'root',
 		runnerRoutes: new Map([['ubuntu-latest', 'ubuntu-latest']]),
 		temporaryDirectory: tmpdir(),
 		...overrides
 	};
+}
+
+function resultFreeRunner(): Promise<{ stdout: string; stderr: string }> {
+	return Promise.resolve({ stdout: '', stderr: '' });
+}
+
+async function foreignKindRunner(
+	_command: string,
+	arguments_: readonly string[]
+): Promise<{ stdout: string; stderr: string }> {
+	await writeFile(
+		resultFileArgument(arguments_),
+		`${JSON.stringify({ kind: 'push-summary', data: {} })}\n`
+	);
+
+	return { stdout: '', stderr: '' };
+}
+
+function confirmedPathsResultLine(
+	paths: readonly {
+		readonly storePathHash: string;
+		readonly confirmed: boolean;
+		readonly grace?: {
+			readonly retainUntil?: string;
+			readonly graceSeconds?: number;
+		};
+	}[]
+): string {
+	return `${JSON.stringify({ kind: 'confirm-paths', data: { paths } })}\n`;
 }
 
 function evaluation(
