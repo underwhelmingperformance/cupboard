@@ -38,6 +38,15 @@ on:
         required: false
         default: 'root'
         type: string
+      reuse-view:
+        description:
+          Named tenant reuse view to opt into for shared intermediates missing
+          from the destination. setup refuses to configure a view whose
+          nix-cache-info priority ties or beats the destination's; empty
+          disables reading through a view.
+        required: false
+        default: ''
+        type: string
       cupboard-version:
         description:
           cupboard release used by the actions. Pass the release tag the caller
@@ -151,6 +160,7 @@ jobs:
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
+          reuse-view: ${{ inputs.reuse-view }}
 
       - name: Evaluate target manifest
         id: targets
@@ -179,6 +189,7 @@ jobs:
           # own manifest a privileged runner. A repository variable can only
           # be set through repository settings, which a PR cannot edit.
           runners: ${{ vars.CUPBOARD_RUNNERS }}
+          reuse-view: ${{ inputs.reuse-view }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -247,6 +258,7 @@ jobs:
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
+          reuse-view: ${{ inputs.reuse-view }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -371,6 +383,7 @@ jobs:
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
+          reuse-view: ${{ inputs.reuse-view }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -489,6 +502,7 @@ jobs:
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
+          reuse-view: ${{ inputs.reuse-view }}
 
       - uses: ./.cupboard/actions/build-paths
         id: build

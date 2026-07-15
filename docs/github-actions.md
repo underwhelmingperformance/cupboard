@@ -403,6 +403,11 @@ so it may drain to empty once the last deadline has expired. Adding a grace
 policy is therefore a durable change to how the caches it covers are collected,
 not a setting the matching `remove-grace` fully undoes.
 
+`reuse-view` opts the run into reading shared intermediates through a named
+tenant reuse view when the destination is missing them; see "Reading through a
+reuse view" below. Empty, the default, keeps planning and substitution
+destination-only.
+
 `cupboard-version` pins the CLI release the jobs install, and `maximise-space`
 (default `true`) reclaims runner disk space before building; disable it on
 self-hosted runners, where the reclamation would be destructive.
@@ -410,6 +415,89 @@ self-hosted runners, where the reclamation would be destructive.
 The workflow accepts `push: false` for a build-only validation run. In that mode
 it does not inspect the cache or derivation graph, and builds every target
 directly without attesting or publishing it.
+
+### Reading through a reuse view
+
+A named reuse view is a set of caches a reader may substitute from, defined once
+on the tenant with `cupboard reuse-view set`:
+
+```bash
+cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \
+  --prefix pr-
+```
+
+This view selects every cache whose name currently starts with `pr-`. A view
+holds no narinfo or membership of its own; it is a live selector over the caches
+it names, so a cache created, renamed, or recreated under a matching name is
+picked up without redefining the view.
+
+Passing `reuse-view` to `cupboard-flake-publish.yml` opts the run's
+`actions/setup` and `actions/plan` into it. `actions/setup` adds the view as a
+second Nix substituter, after the destination cache: Nix tries substituters in
+order, and setup fetches both `nix-cache-info` responses and refuses to
+configure the view unless its priority is numerically greater than the
+destination's, so the destination is always tried first. `actions/plan` probes
+the view for any target or shared intermediate the destination does not already
+hold. A hit there retains nothing by itself, since the destination stays the
+only retention boundary; it only lets the affected build job substitute the
+result instead of building it, and that job's own push still adopts and roots
+the result in the destination as usual.
+
+Every response under a view's URLs, hits, misses and faults alike, carries
+`cache-control: no-store`. A view's answer changes whenever its definition
+changes, a matching cache commits a conflicting candidate, or a candidate is
+collected, and no purge covers any of that, so neither the Cloudflare edge nor
+any intermediary may hold a copy. Reads through a view therefore always reach
+the origin; expect view-heavy runs to cost more origin traffic than reads from
+the destination cache.
+
+A view spans every cache its selectors currently match, so any writer with push
+access to one of those caches can influence what the view serves a reader.
+Cupboard resolves the risk this creates the same way for every candidate: when a
+store-path hash names more than one semantically distinct result across the
+view's caches, the lookup answers as a miss rather than guessing, and the
+affected target simply builds locally instead of substituting.
+
+Intermediate handling depends on both `intermediate-retention` and whether
+`reuse-view` is set:
+
+| Retention mode | Reuse view | Destination intermediate                  | View-only intermediate                                                             | Missing intermediate                                        |
+| -------------- | ---------- | ----------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| `root`         | absent     | Seed omitted; the destination serves it   | not applicable                                                                     | Built and kept under the 24-hour seed root                  |
+| `root`         | present    | Seed omitted; the destination serves it   | Substituted through the view, then kept under the 24-hour seed root                | Built and kept under the 24-hour seed root                  |
+| `grace`        | absent     | Confirmed with a refreshed grace deadline | not applicable                                                                     | Built, published with `--no-retain`, needs a grace deadline |
+| `grace`        | present    | Confirmed with a refreshed grace deadline | Substituted through the view, published with `--no-retain`, needs a grace deadline | Built, published with `--no-retain`, needs a grace deadline |
+
+A common shape adopts a pull request's build into `main`'s own publication. An
+administrator defines the view once, covering the per-PR caches the
+`add-github-pr` rule already routes builds to (see "Trust rules" below):
+
+```bash
+cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \
+  --prefix pr-
+```
+
+`main`'s post-merge workflow then opts into it:
+
+```yaml
+jobs:
+  publish:
+    uses: owner/cupboard/.github/workflows/cupboard-flake-publish.yml@main
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    with:
+      url: https://cupboard.example.workers.dev/t/acme
+      root-prefix: github:acme/app/main
+      reuse-view: reuse
+```
+
+If the merged commit's outputs already sit in the PR's cache from CI, the plan
+substitutes them through the view rather than rebuilding, then the seed or
+fallback job's push adopts and roots them in the destination under `main`'s own
+roots. A target the PR never built plans and builds exactly as it would without
+a view.
 
 The jobs belong to cupboard's reusable workflow, while the standard repository
 and ref claims still describe the caller. A trust rule that restricts
