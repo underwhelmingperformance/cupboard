@@ -3439,6 +3439,15 @@ entry bound as the server backstop.
 
 ## Publish planning, retention grace, and tenant-wide reuse
 
+Status: implemented on `feat/cache-aware-publish`. Retention grace, explicit
+unretained publication with its preview and confirmation procedures, the
+workflow grace mode, named reuse views with the gated lookup, and the reader
+opt-in all landed as specified. The load gate ran at the planner's probe
+concurrency with no retryable refusals, and the real-Nix suite covers grace
+publication and reuse-view substitution end to end. One addition beyond the
+section: the workspace check now typechecks the perf suite, closing a gap the
+load-gate work surfaced.
+
 ### Context
 
 The cache-aware publish feature (`actions/plan`, `cupboard-flake-publish.yml`)
@@ -4054,13 +4063,18 @@ mode without waiting for retention grace.
   decision materialises without a deadline and marks nothing grace-managed.
   Existing GC tests continue to prove that an expired grace deadline with a
   large closure drains through deletion continuations.
-- Workflow tests cover the safe `root` default and the opt-in `grace` mode,
+- Action tests cover the safe `root` default and the opt-in `grace` mode,
   including the absence of the seed root and root grant in grace mode. Grace
   mode fails for an absent, zero, removed, or prefix-mismatched policy, while
-  root mode requires neither a grace policy nor a positive deadline result.
-  Tests exercise the full four-mode matrix: root or grace retention, each with
-  or without a reuse view, including view-only adoption groups in both retention
-  modes and preservation of the 24-hour seed root in root mode.
+  root mode requires neither a grace policy nor a positive deadline result. The
+  plan action's tests exercise the full four-mode matrix as pure fixture proofs:
+  root or grace retention, each with or without a reuse view, including
+  view-only adoption groups in both retention modes and preservation of the
+  24-hour seed root in root mode. The seed and fallback pushes take their root,
+  TTL, no-retain and require-grace values from matrix entries the plan action
+  computes, so the same tests cover the exact values the workflow publishes
+  with; the yml interpolates them without conditionals and has no test harness
+  of its own.
 - Reuse-view administration tests cover tenant-domain authorisation, exact and
   prefix selectors, an empty all-cache prefix, priority, updates and deletion,
   selector count and length boundaries, an exact selector whose cache is deleted
@@ -4104,12 +4118,14 @@ mode without waiting for retention grace.
 - A workers adoption test commits a path only in a cache selected by a reuse
   view, substitutes it through that view, then commits and roots it in cache B.
   After the source cache's root and grace lapse, cache B continues to serve it.
-- End-to-end: a two-target flake where the shared dependency is seeded without a
-  root, receives a confirmed destination grace deadline, and is substituted by a
-  target job; and a nixpkgs-bump run where main explicitly opts into a view
-  selecting PR caches, substitutes the PR's paths, adopts them into its
-  destination rather than rebuilding them, then serves them there after the PR
-  roots expire.
+- End-to-end, the suite's coverage stops at the real-Nix reuse-view substitution
+  test. Two scenarios remain to be exercised as real workflow runs on this
+  repository, not by any harness: a two-target flake where the shared dependency
+  is seeded without a root, receives a confirmed destination grace deadline, and
+  is substituted by a target job; and a nixpkgs-bump run where main explicitly
+  opts into a view selecting PR caches, substitutes the PR's paths, adopts them
+  into its destination rather than rebuilding them, then serves them there after
+  the PR roots expire.
 
 ### Out of scope and risks
 
