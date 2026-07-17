@@ -3,16 +3,16 @@ import {
 	authorizationDetailsSchema,
 	isAuthorizationDetailCovered
 } from '@cupboard/protocol/grants';
+import {
+	isRuleInteractive,
+	type OidcClaims,
+	type OidcTrustRule
+} from '@cupboard/protocol/oidc-trust-match';
 
 import {
 	AuthorizationDetailsRequiredError,
 	InvalidAuthorizationDetailsError
 } from '../errors.ts';
-import {
-	isRuleInteractive,
-	type OidcClaims,
-	type OidcTrustRule
-} from '../oidc/oidc-trust.ts';
 
 import { isGrantPermittedByRule } from './bindings.ts';
 

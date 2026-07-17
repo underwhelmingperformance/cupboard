@@ -5,6 +5,10 @@ import {
 	type ParsedOidcTrustAddBody
 } from '@cupboard/protocol/oidc';
 import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
+import {
+	type OidcClaims,
+	type OidcTrustRule
+} from '@cupboard/protocol/oidc-trust-match';
 import { asc, eq, isNull, sql } from 'drizzle-orm';
 import type { JWTPayload } from 'jose';
 
@@ -22,7 +26,6 @@ import {
 	OidcKeysUnreachableError,
 	verifyInboundOidcToken
 } from '../oidc/oidc.ts';
-import { type OidcClaims, type OidcTrustRule } from '../oidc/oidc-trust.ts';
 
 import {
 	oidcTrustRuleFromRow,

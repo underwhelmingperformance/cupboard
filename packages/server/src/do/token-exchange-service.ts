@@ -9,6 +9,13 @@ import {
 	tokenRequestSchema,
 	type TokenResponse
 } from '@cupboard/protocol/oidc';
+import {
+	firstClaimMismatch,
+	isRuleInteractive,
+	matchOidcTrust,
+	type OidcClaims,
+	type OidcTrustRule
+} from '@cupboard/protocol/oidc-trust-match';
 import { and, eq } from 'drizzle-orm';
 
 import {
@@ -30,17 +37,13 @@ import {
 	RefreshTokenRequiredError,
 	StaleRefreshTokenError,
 	SubjectTokenRequiredError,
+	type SubjectTokenUntrustedError,
+	TenantSubjectTokenClaimMismatchError,
 	TenantSubjectTokenUntrustedError,
 	UnsupportedGrantTypeError,
 	UnsupportedSubjectTokenTypeError
 } from '../errors.ts';
 import { parseFormBody } from '../http/parse.ts';
-import {
-	isRuleInteractive,
-	matchOidcTrust,
-	type OidcClaims,
-	type OidcTrustRule
-} from '../oidc/oidc-trust.ts';
 
 import { type AuthKeysService } from './auth-keys-service.ts';
 import { type ServerContext } from './context.ts';
@@ -86,7 +89,7 @@ export class TokenExchangeService {
 		const rule = matchOidcTrust(this.oidcTrust.enabledOidcTrustRules(), claims);
 
 		if (rule === undefined) {
-			throw new TenantSubjectTokenUntrustedError();
+			throw await this.untrustedRefusal(claims, body.subject_token);
 		}
 
 		const verified = await this.oidcTrust.verifyInbound(
@@ -107,6 +110,68 @@ export class TokenExchangeService {
 			parseRequestedGrants(body.authorization_details),
 			{ issued_token_type: issuedAccessTokenType }
 		);
+	}
+
+	// The refusal for a token no rule matched. When a rule pins both GitHub
+	// repository ids to the token's claimed values, the refusal names that
+	// rule's first failing claim; anything else stays flat. The routing claims
+	// are unverified, so nothing is disclosed until the token's signature
+	// verifies against the candidate rule's issuer: only a genuine token from
+	// the pinned repository learns the rule's shape.
+	private async untrustedRefusal(
+		claims: OidcClaims,
+		subjectToken: string
+	): Promise<SubjectTokenUntrustedError> {
+		const candidate = this.repositoryPinnedCandidate(claims);
+
+		if (candidate === undefined) {
+			return new TenantSubjectTokenUntrustedError();
+		}
+
+		let verified: OidcClaims;
+		try {
+			verified = await this.oidcTrust.verifyInbound(candidate, subjectToken);
+		} catch {
+			// Verification failures and issuer trouble alike stay flat: the
+			// exchange is refused either way, and no claim value reaches an
+			// unverified caller. Reaching this verification at all is slower
+			// than the no-candidate refusal, so rule existence for a claimed
+			// repository id leaks through latency; PLAN.md's diagnostic-refusal
+			// risk bullet records that as accepted.
+			return new TenantSubjectTokenUntrustedError();
+		}
+
+		const mismatch = firstClaimMismatch(candidate, verified);
+
+		if (mismatch === undefined) {
+			return new TenantSubjectTokenUntrustedError();
+		}
+
+		return new TenantSubjectTokenClaimMismatchError(candidate.id, mismatch);
+	}
+
+	// The most specific enabled rule whose configured `repository_id` and
+	// `repository_owner_id` both exactly equal the token's claimed values.
+	private repositoryPinnedCandidate(
+		claims: OidcClaims
+	): OidcTrustRule | undefined {
+		const pins = ['repository_id', 'repository_owner_id'];
+
+		return this.oidcTrust
+			.enabledOidcTrustRules()
+			.filter((rule) =>
+				pins.every((name) => {
+					const expected = rule.claims[name];
+
+					return typeof expected === 'string' && expected === claims[name];
+				})
+			)
+			.toSorted(
+				(left, right) =>
+					Object.keys(right.claims).length - Object.keys(left.claims).length ||
+					left.id.localeCompare(right.id)
+			)
+			.at(0);
 	}
 
 	// Verifies a subject token against this tenant's own auth keys. A token that

@@ -1,3 +1,4 @@
+import { type ClaimMismatch } from '@cupboard/protocol/oidc-trust-match';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
 
@@ -320,11 +321,13 @@ export type OAuthErrorCode =
  * An OAuth 2.0 error (RFC 6749 §5.2). The `error` code and the message become
  * the `error` and `error_description` of a JSON envelope sent with `no-store`.
  * A concrete cause may also surface a `problem` that refines the RFC code for
- * clients that understand it.
+ * clients that understand it, and a structured `detail` carrying the facts of
+ * that problem.
  */
 export abstract class OAuthError extends ServerHttpError {
 	abstract readonly error: OAuthErrorCode;
 	readonly problem?: string;
+	readonly detail?: Readonly<Record<string, string>>;
 }
 
 /** `invalid_request`: the request is malformed or missing a parameter. */
@@ -455,7 +458,7 @@ export class SubjectTokenSubjectMissingError extends SubjectTokenInvalidError {
 
 /** No enabled trust rule matched the subject token. */
 export abstract class SubjectTokenUntrustedError extends InvalidGrantError {
-	readonly problem = 'subject-token-untrusted';
+	override readonly problem: string = 'subject-token-untrusted';
 }
 
 /** No tenant trust rule matched the subject token. */
@@ -463,6 +466,31 @@ export class TenantSubjectTokenUntrustedError extends SubjectTokenUntrustedError
 	constructor() {
 		super('No trust rule matches the subject token');
 		this.name = 'TenantSubjectTokenUntrustedError';
+	}
+}
+
+/**
+ * A trust rule pinned to the caller's repository ids refused the token over
+ * one configured claim. Raised only after the token's signature verified
+ * against that rule's issuer, so the diagnostic discloses rule shape only to
+ * the repository the rule already names; every other caller receives the flat
+ * {@link TenantSubjectTokenUntrustedError}.
+ */
+export class TenantSubjectTokenClaimMismatchError extends SubjectTokenUntrustedError {
+	override readonly problem = 'subject-token-claim-mismatch';
+	override readonly detail: Readonly<Record<string, string>>;
+
+	constructor(ruleId: string, mismatch: ClaimMismatch) {
+		super(
+			`Trust rule ${ruleId} does not match the subject token's ${mismatch.claim} claim`
+		);
+		this.name = 'TenantSubjectTokenClaimMismatchError';
+		this.detail = {
+			rule: ruleId,
+			claim: mismatch.claim,
+			expected: mismatch.expected,
+			...(mismatch.presented !== undefined && { presented: mismatch.presented })
+		};
 	}
 }
 

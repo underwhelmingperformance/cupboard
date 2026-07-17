@@ -9,6 +9,7 @@ import {
 	type OidcTrustSummary,
 	type ParsedOidcTrustAddBody
 } from '@cupboard/protocol/oidc';
+import type { OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
 import { asc, eq, isNull } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -20,7 +21,6 @@ import {
 	StoredControlTrustInvalidError
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
-import type { OidcTrustRule } from '../oidc/oidc-trust.ts';
 
 type Database = DrizzleD1Database<typeof d1Schema>;
 type ControlTrustRow = typeof d1Schema.controlTrust.$inferSelect;

@@ -13,6 +13,10 @@ import {
 	type OidcTrustSummary,
 	type ParsedOidcTrustAddBody
 } from '@cupboard/protocol/oidc';
+import {
+	matchOidcTrust,
+	type OidcTrustRule
+} from '@cupboard/protocol/oidc-trust-match';
 import type { ControlCheckReport } from '@cupboard/protocol/reports';
 import {
 	type MembershipRebuildResponse,
@@ -58,7 +62,6 @@ import {
 	OidcKeysUnreachableError,
 	verifyInboundOidcToken
 } from '../oidc/oidc.ts';
-import { matchOidcTrust, type OidcTrustRule } from '../oidc/oidc-trust.ts';
 import { tenantServer } from '../routing/durable-object.ts';
 
 import {

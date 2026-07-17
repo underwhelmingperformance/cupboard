@@ -45,7 +45,8 @@ import { TokenExchangeService } from './token-exchange-service.ts';
 const oauthErrorSchema = z.strictObject({
 	error: z.string(),
 	error_description: z.string().min(1),
-	problem: z.string().optional()
+	problem: z.string().optional(),
+	detail: z.record(z.string(), z.string()).optional()
 });
 
 function oauthErrorShape(value: unknown): z.infer<typeof oauthErrorSchema> {
@@ -1107,5 +1108,158 @@ describe('auth discovery endpoints', () => {
 				token_endpoint_auth_methods_supported: ['none']
 			}
 		});
+	});
+});
+
+// A GitHub-shaped branch rule pinning both repository ids, with an in-memory
+// issuer, so refusal diagnostics can be exercised without any network. `sign`
+// issues genuine tokens; `forge` signs the same claims with a key the issuer
+// never published.
+const githubIssuer = 'https://gh.test';
+const githubAudience = 'cupboard-aud';
+const branchRuleClaims = {
+	repository_id: '1234',
+	repository_owner_id: '5678',
+	ref: 'refs/heads/main',
+	job_workflow_ref:
+		'owner/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main'
+};
+
+async function installGithubBranchRule(): Promise<{
+	sign: (claims: Record<string, string>) => Promise<string>;
+	forge: (claims: Record<string, string>) => Promise<string>;
+}> {
+	const idp = await generateKeyPair('RS256', { extractable: true });
+	const forger = await generateKeyPair('RS256', { extractable: true });
+	const jwk = await exportJWK(idp.publicKey);
+
+	await runInDurableObject(currentServer(), async (_instance, state) => {
+		await migrateThrough(state, latestMigrationIndex);
+		drizzle(state.storage, { schema: { oidcTrust } })
+			.insert(oidcTrust)
+			.values({
+				id: 'github-main',
+				issuer: githubIssuer,
+				audience: githubAudience,
+				claimsJson: JSON.stringify(branchRuleClaims),
+				permittedGrantsJson: JSON.stringify(trustClassGrants.write),
+				createdAt: '2026-01-01T00:00:00.000Z'
+			})
+			.run();
+	});
+
+	vi.stubGlobal('fetch', (input: RequestInfo | URL) => {
+		const url = input instanceof Request ? input.url : String(input);
+
+		if (url === `${githubIssuer}/.well-known/openid-configuration`) {
+			return Promise.resolve(
+				Response.json({
+					issuer: githubIssuer,
+					jwks_uri: `${githubIssuer}/jwks`
+				})
+			);
+		}
+
+		if (url === `${githubIssuer}/jwks`) {
+			return Promise.resolve(
+				Response.json({ keys: [{ ...jwk, kid: 'idp', alg: 'RS256' }] })
+			);
+		}
+
+		return Promise.resolve(new Response('not found', { status: 404 }));
+	});
+
+	const signWith =
+		(key: CryptoKey) =>
+		(claims: Record<string, string>): Promise<string> =>
+			new SignJWT(claims)
+				.setProtectedHeader({ alg: 'RS256', kid: 'idp' })
+				.setIssuer(githubIssuer)
+				.setAudience(githubAudience)
+				.setSubject('repo:acme/app')
+				.setIssuedAt()
+				.setExpirationTime('5m')
+				.sign(key);
+
+	return { sign: signWith(idp.privateKey), forge: signWith(forger.privateKey) };
+}
+
+async function refusedExchange(
+	subjectToken: string
+): Promise<{ status: number; body: z.infer<typeof oauthErrorSchema> }> {
+	const response = await postToken({
+		grant_type: tokenExchangeGrantType,
+		subject_token: subjectToken,
+		subject_token_type: subjectTokenTypeIdToken
+	});
+
+	return {
+		status: response.status,
+		body: oauthErrorShape(await response.json())
+	};
+}
+
+describe('untrusted exchange diagnostics', () => {
+	beforeEach(resetTestServer);
+
+	afterEach(() => {
+		vi.unstubAllGlobals();
+	});
+
+	it('names the first failing claim for a verified token from the pinned repository', async () => {
+		const { sign } = await installGithubBranchRule();
+		const subjectToken = await sign({
+			...branchRuleClaims,
+			job_workflow_ref:
+				'acme/app/.github/workflows/cupboard-flake-publish.yml@refs/heads/main'
+		});
+
+		const refused = await refusedExchange(subjectToken);
+
+		expect(refused).toStrictEqual({
+			status: StatusCodes.BAD_REQUEST,
+			body: {
+				error: 'invalid_grant',
+				error_description:
+					"Trust rule github-main does not match the subject token's job_workflow_ref claim",
+				problem: 'subject-token-claim-mismatch',
+				detail: {
+					rule: 'github-main',
+					claim: 'job_workflow_ref',
+					expected: branchRuleClaims.job_workflow_ref,
+					presented:
+						'acme/app/.github/workflows/cupboard-flake-publish.yml@refs/heads/main'
+				}
+			}
+		});
+	});
+
+	it('stays flat for a token whose claimed repository matches no rule', async () => {
+		const { sign } = await installGithubBranchRule();
+		const subjectToken = await sign({
+			...branchRuleClaims,
+			repository_id: '9999',
+			ref: 'refs/heads/other'
+		});
+
+		const refused = await refusedExchange(subjectToken);
+
+		expect(refused.status).toBe(StatusCodes.BAD_REQUEST);
+		expect(refused.body.problem).toBe('subject-token-untrusted');
+		expect(refused.body.detail).toBeUndefined();
+	});
+
+	it('stays flat for a forged token claiming the pinned repository', async () => {
+		const { forge } = await installGithubBranchRule();
+		const subjectToken = await forge({
+			...branchRuleClaims,
+			ref: 'refs/heads/other'
+		});
+
+		const refused = await refusedExchange(subjectToken);
+
+		expect(refused.status).toBe(StatusCodes.BAD_REQUEST);
+		expect(refused.body.problem).toBe('subject-token-untrusted');
+		expect(refused.body.detail).toBeUndefined();
 	});
 });

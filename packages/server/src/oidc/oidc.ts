@@ -1,4 +1,5 @@
 import { isAllowedIssuerUrl, IssuerUrl } from '@cupboard/protocol/oidc-issuer';
+import type { OidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import {
 	createRemoteJWKSet,
 	customFetch,
@@ -9,8 +10,6 @@ import {
 	type JWTVerifyGetKey
 } from 'jose';
 import { z } from 'zod';
-
-import type { OidcClaims } from './oidc-trust.ts';
 
 // Inbound OIDC tokens are signed by the identity provider with an asymmetric
 // algorithm published in its JWKS. This allowlist is the outer bound: it rejects

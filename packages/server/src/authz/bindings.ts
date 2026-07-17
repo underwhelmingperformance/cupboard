@@ -10,8 +10,7 @@ import {
 	type PermittedGrant,
 	type Substitution
 } from '@cupboard/protocol/grants';
-
-import { type OidcClaims } from '../oidc/oidc-trust.ts';
+import { type OidcClaims } from '@cupboard/protocol/oidc-trust-match';
 
 // A trust rule's resource bindings are evaluated against the verified claims to
 // decide whether a requested grant is permitted. Rendering fails closed: a

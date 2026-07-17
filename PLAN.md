@@ -4308,8 +4308,8 @@ Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
   each sub-step is reported and left in place.
 - Check tests break each invariant in a fixture tenant and repository and assert
   the specific failure by error type, including the per-claim trust report; a
-  check with `gh` or Nix unavailable reports the unverified invariants by name
-  and exits distinctly from success.
+  check that is not given what an invariant needs (a root prefix, say) reports
+  the unverified invariant by name and exits distinctly from success.
 - Exchange tests prove a mismatched rule pinned to the caller's repository ids
   yields the diagnostic refusal naming the failing claim, and a token from any
   other repository receives the flat refusal unchanged.
@@ -4332,6 +4332,16 @@ Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
   says so.
 - Diagnostic refusals disclose rule shape to the repository the rule already
   pins. That is judged acceptable; the flat refusal remains for everyone else.
+  The claims that route a token to a rule are unverified, so the candidate
+  rule's issuer must verify the token's signature before any claim is disclosed:
+  claiming another repository's ids in a forged token earns only the flat
+  refusal. Issuer and audience mismatches also stay flat, since verification
+  pins both before the diagnostic is computed. A residual timing channel
+  remains: a claimed repository id that matches a rule triggers issuer discovery
+  and signature verification before the flat refusal, so whether some rule pins
+  a repository id can be inferred from response latency. Constant-work refusals
+  would tax every failed exchange and still wobble with issuer latency, so the
+  channel is accepted; claim values themselves stay undisclosed.
 - Presets encode the quickstart's conventions. Repositories with unusual cache
   or root layouts keep the explicit inputs, and the two paths share no
   derivation logic, so a preset change cannot silently alter an explicit caller.
