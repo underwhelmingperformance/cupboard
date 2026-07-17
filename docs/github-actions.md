@@ -30,6 +30,174 @@ Release API calls use `github-token`, which defaults to the workflow
 `github.token`. Public unauthenticated downloads work, but the token avoids
 unnecessary rate-limit failures.
 
+## Cache-aware flake publishing quickstart
+
+This is the shortest complete setup for publishing pull-request builds to
+short-lived `pr-<number>` caches, then reusing those builds when `main` is
+published. It also keeps shared intermediates through a tenant retention grace
+period instead of creating a temporary root for every workflow run.
+
+The example assumes that cupboard is deployed, the tenant exists, its reads are
+public, and `cupboard login` has stored its owner credential. See the [README
+quickstart][readme-quickstart] for deployment and tenant creation. The later
+sections cover private reads, remote builders and each setting in more detail.
+
+[readme-quickstart]: ../README.md#quick-start
+
+### 1. Choose the tenant, repository and release
+
+Set these shell variables once so the remaining commands can be copied without
+repeating them. Use a real cupboard release tag from the [releases page][].
+Pinning a tag is especially important while the available releases are
+prereleases: `latest` only selects a non-prerelease release.
+
+[releases page]: https://github.com/underwhelmingperformance/cupboard/releases
+
+```bash
+tenant=https://cupboard.example.workers.dev/t/acme
+repo=acme/app
+cupboard_version=vX.Y.Z
+workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main
+```
+
+### 2. Configure the tenant
+
+Give every cache a 24-hour retention grace period, define a view over the PR
+caches, and trust this repository's PR and `main` runs when they use cupboard's
+reusable workflow:
+
+```bash
+cupboard policy add-grace "$tenant" --cache-prefix '' --grace 24h
+
+cupboard reuse-view set "$tenant" pull-requests \
+  --prefix pr- --priority 50
+
+cupboard oidc-trust add-github-pr "$tenant" \
+  --repo "$repo" \
+  --job-workflow-ref "$workflow"
+
+cupboard oidc-trust add-github-branch "$tenant" \
+  --repo "$repo" --branch main \
+  --job-workflow-ref "$workflow"
+```
+
+The empty grace prefix covers the default cache and every named cache, including
+the per-PR caches. The grace period must be long enough for the workflow's plan,
+seed and target jobs to finish; 24 hours matches the reusable workflow's
+root-based fallback. The view's priority of 50 leaves the normal cache, whose
+default priority is 40, preferred.
+
+These trust commands resolve and pin the repository's immutable GitHub ids. The
+PR rule confines each pull request to its own cache and root; the branch rule
+confines `main` to the tenant's default cache and its own root prefix.
+
+### 3. Set the repository configuration
+
+The target manifest is repository code, so a pull request can change its runner
+labels. Store the tenant URL and release pin alongside the permitted labels and
+the plan job's runner as protected GitHub repository variables:
+
+```bash
+gh variable set CUPBOARD_URL \
+  --repo "$repo" --body "$tenant"
+
+gh variable set CUPBOARD_VERSION \
+  --repo "$repo" --body "$cupboard_version"
+
+gh variable set CUPBOARD_PLAN_RUNNER \
+  --repo "$repo" --body '"ubuntu-latest"'
+
+gh variable set CUPBOARD_RUNNERS \
+  --repo "$repo" --body 'ubuntu-latest,macos-latest'
+```
+
+Replace `vX.Y.Z` with the chosen release tag before running these commands.
+`CUPBOARD_PLAN_RUNNER` contains JSON, including the quotes around a plain label.
+`CUPBOARD_RUNNERS` must include every `os` label used by the target manifest.
+Use runner groups as described under "Runner provenance" when self-hosted
+runners are available to this repository.
+
+### 4. Declare the targets
+
+Expose a `cupboardOutputs` attribute from the flake. Each entry names an
+installable, its Nix system, its permitted GitHub runner label and the suffix
+used beneath the workflow's retention-root prefix:
+
+```nix
+cupboardOutputs = [
+  {
+    attr = ".#packages.x86_64-linux.default";
+    system = "x86_64-linux";
+    os = "ubuntu-latest";
+    remote = false;
+    rootSuffix = "x86_64-linux/default";
+  }
+];
+```
+
+Add further entries for the other outputs and systems the repository publishes.
+
+### 5. Call the reusable workflow
+
+Add a caller such as `.github/workflows/cupboard.yml`. PR runs publish to their
+own 14-day caches. A `main` run publishes to the default cache and reads through
+the PR reuse view, so an unchanged result built by the PR can be adopted instead
+of rebuilt:
+
+```yaml
+name: cupboard
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+jobs:
+  publish:
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@main
+    with:
+      url: ${{ vars.CUPBOARD_URL }}
+      targets: .#cupboardOutputs
+      cache:
+        ${{ github.event_name == 'pull_request' && format('pr-{0}',
+        github.event.number) || '' }}
+      root-prefix:
+        ${{ format('github:{0}/{1}', github.repository, github.event_name ==
+        'pull_request' && format('pr-{0}', github.event.number) ||
+        github.ref_name) }}
+      ttl: ${{ github.event_name == 'pull_request' && '14d' || '' }}
+      intermediate-retention: grace
+      reuse-view: ${{ github.event_name == 'push' && 'pull-requests' || '' }}
+      cupboard-version: ${{ vars.CUPBOARD_VERSION }}
+```
+
+The workflow uses the reuse view only for `main`; use the view for every event
+if PR-to-PR reuse is also wanted. The workflow reference and release tag are
+kept explicit so changes to cupboard do not silently alter a repository's CI.
+
+### 6. Verify the setup
+
+List the tenant configuration before opening the first pull request:
+
+```bash
+cupboard policy list "$tenant"
+cupboard reuse-view list "$tenant"
+cupboard oidc-trust list "$tenant"
+```
+
+The output should contain the tenant-wide 24-hour grace policy, the
+`pull-requests` view and one trust rule for PRs plus one for `main`. Open a pull
+request and confirm that the workflow publishes to `pr-<number>`. After merging
+it, the `main` run should plan already-published targets from the reuse view and
+retain them beneath `github:<owner>/<repo>/main` in the default cache.
+
 ## `actions/setup`
 
 `actions/setup` installs the cupboard binary and can export Nix binary cache
