@@ -54,6 +54,11 @@ cannot unwrap the control signing key it can read from shared D1.
   public key in `trusted-public-keys` can verify substitutions. Each tenant
   signs with its own key, so a substituter trusts a tenant only via that
   tenant's published key.
+- The admin contract's responses parse strictly on both sides, so a response
+  field addition is written for one skew direction only: the new field is
+  optional in the schema, a newer CLI accepts an older server's response without
+  it, and an older CLI against a newer server rejects the unknown field, which
+  is the supporting-older-clients non-goal above applied to our own CLI.
 
 ## Current state
 
@@ -4313,8 +4318,9 @@ Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
   derives is rejected.
 - Plan tests prove grace mode without a covering policy fails at plan time on a
   single-target manifest, where today's run passes green.
-- Contract tests prove the extended cache summary is additive: an older client
-  validates a newer server's response unchanged.
+- Contract tests prove the extended cache summary's grace fields are optional: a
+  summary without them, as an older server sends, still validates, so a newer
+  CLI degrades to rendering no grace state rather than failing the request.
 
 ### Out of scope and risks
 

@@ -70,11 +70,16 @@ describe('tenant contract round trip', () => {
 		});
 
 		expect({ created, listed, removed }).toStrictEqual({
-			created: { name: 'builds', priority: 30, storePaths: 0 },
+			created: {
+				name: 'builds',
+				priority: 30,
+				storePaths: 0,
+				graceManaged: false
+			},
 			listed: {
 				caches: [
-					{ name: '', priority: 40, storePaths: 0 },
-					{ name: 'builds', priority: 30, storePaths: 0 }
+					{ name: '', priority: 40, storePaths: 0, graceManaged: false },
+					{ name: 'builds', priority: 30, storePaths: 0, graceManaged: false }
 				]
 			},
 			removed: { name: 'builds', removed: true, storePathsRemoved: 0 }

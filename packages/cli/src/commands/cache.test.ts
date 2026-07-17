@@ -34,12 +34,19 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 }
 
 describe('runCacheList', () => {
-	it('reports a row per cache, labelling the default', async () => {
+	it('reports a row per cache, labelling the default and its grace state', async () => {
 		const results: ResultRow[][] = [];
 		const response: CacheListResponse = {
 			caches: [
-				{ name: '', priority: 40, storePaths: 0 },
-				{ name: 'builds', priority: 30, storePaths: 5 }
+				{ name: '', priority: 40, storePaths: 0, graceManaged: false },
+				{
+					name: 'builds',
+					priority: 30,
+					storePaths: 5,
+					graceManaged: true,
+					earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
+				},
+				{ name: 'drained', priority: 45, storePaths: 0, graceManaged: true }
 			]
 		};
 
@@ -50,7 +57,12 @@ describe('runCacheList', () => {
 		expect(results).toStrictEqual([
 			[
 				{ label: '(default)', value: 'priority 40; 0 path(s)' },
-				{ label: 'builds', value: 'priority 30; 5 path(s)' }
+				{
+					label: 'builds',
+					value:
+						'priority 30; 5 path(s); grace-managed; earliest deadline 2026-03-01 00:00 UTC'
+				},
+				{ label: 'drained', value: 'priority 45; 0 path(s); grace-managed' }
 			]
 		]);
 	});
@@ -170,6 +182,38 @@ describe('runCacheInspect', () => {
 				{ label: 'Cache', value: 'builds' },
 				{ label: 'Priority', value: '30' },
 				{ label: 'Store paths', value: '5' }
+			]
+		]);
+	});
+
+	it('reports the grace state when the server provides it', async () => {
+		const results: ResultRow[][] = [];
+
+		await runCacheInspect('builds', reporter(results), {
+			list: () =>
+				Promise.resolve({
+					caches: [
+						{
+							name: 'builds',
+							priority: 30,
+							storePaths: 5,
+							graceManaged: true,
+							earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
+						}
+					]
+				})
+		});
+
+		expect(results).toStrictEqual([
+			[
+				{ label: 'Cache', value: 'builds' },
+				{ label: 'Priority', value: '30' },
+				{ label: 'Store paths', value: '5' },
+				{ label: 'Grace managed', value: 'yes' },
+				{
+					label: 'Earliest grace deadline',
+					value: '2026-03-01 00:00 UTC'
+				}
 			]
 		]);
 	});
