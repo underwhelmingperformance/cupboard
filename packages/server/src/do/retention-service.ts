@@ -1,6 +1,7 @@
 import { type StorePathHash } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
+	type GraceCoverageResponse,
 	type GracePolicyListResponse,
 	type GracePolicyRemoveResponse,
 	type GracePolicySummary,
@@ -175,6 +176,16 @@ export class RetentionService {
 			id,
 			removed: existing !== undefined
 		};
+	}
+
+	// The coverage answer a grace-mode CI run reads before publishing anything:
+	// the same resolution a publication to the cache would be granted.
+	graceCoverage(cache: string): GraceCoverageResponse {
+		const graceSeconds = this.resolveGraceSeconds(cache);
+
+		return graceSeconds === undefined
+			? { covered: false }
+			: { covered: true, graceSeconds };
 	}
 
 	// The grace in force for a cache: the longest matching cache-name prefix

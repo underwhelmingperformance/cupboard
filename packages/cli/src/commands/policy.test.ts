@@ -16,6 +16,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	type PolicyClient,
+	runGraceCoverage,
 	runGracePolicyAdd,
 	runGracePolicyList,
 	runGracePolicyRemove,
@@ -32,6 +33,7 @@ function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 		graceList: () => Promise.resolve({ policies: [] }),
 		graceAdd: (body) => Promise.resolve({ id: 'g1', createdAt: '', ...body }),
 		graceRemove: ({ id }) => Promise.resolve({ id, removed: false }),
+		graceCoverage: () => Promise.resolve({ covered: false }),
 		...overrides
 	};
 }
@@ -287,6 +289,48 @@ describe('runGracePolicyRemove', () => {
 		}).toStrictEqual({
 			results: [],
 			cancellations: ['The retention grace policy was left in place.']
+		});
+	});
+});
+
+describe('runGraceCoverage', () => {
+	it.each([
+		{
+			name: 'a covered cache with its resolved grace',
+			coverage: { covered: true as const, graceSeconds: 86_400 },
+			rows: [
+				{ label: 'Cache', value: 'builds' },
+				{ label: 'Covered', value: 'yes' },
+				{ label: 'Grace (seconds)', value: '86,400' }
+			]
+		},
+		{
+			name: 'an uncovered cache without a grace row',
+			coverage: { covered: false as const },
+			rows: [
+				{ label: 'Cache', value: 'builds' },
+				{ label: 'Covered', value: 'no' }
+			]
+		}
+	])('reports $name', async ({ coverage, rows }) => {
+		const results: ResultRow[][] = [];
+		const requested: { cacheName: string }[] = [];
+
+		await runGraceCoverage(
+			'builds',
+			reporter(results),
+			policyClient({
+				graceCoverage(input) {
+					requested.push(input);
+
+					return Promise.resolve(coverage);
+				}
+			})
+		);
+
+		expect({ requested, results }).toStrictEqual({
+			requested: [{ cacheName: 'builds' }],
+			results: [rows]
 		});
 	});
 });

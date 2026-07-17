@@ -105,6 +105,11 @@ export const tenantRouter = os.router({
 		),
 		graceRemove: os.policies.graceRemove.handler(({ input, context }) =>
 			context.services.retention.removeGracePolicy(input.id)
+		),
+		graceCoverage: os.policies.graceCoverage.handler(({ input, context }) =>
+			context.services.retention.graceCoverage(
+				cacheFromSelector(input.cacheName)
+			)
 		)
 	},
 	reuseViews: {
