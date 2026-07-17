@@ -741,26 +741,12 @@ describe('confirmDestinationIntermediates', () => {
 		expect(calls).toStrictEqual([]);
 	});
 
-	it.each([
-		{
-			name: 'a path that matched no policy',
-			grace: {}
-		},
-		{
-			name: 'a still-pending deadline',
-			grace: { graceSeconds: 86_400 }
-		}
-	])('fails closed on $name', async ({ grace }) => {
-		const runner: EnsureRunner = async (_command, arguments_) => {
-			await writeFile(
-				resultFileArgument(arguments_),
-				confirmedPathsResultLine([
-					{ storePathHash: '1'.repeat(32), confirmed: true, grace }
-				])
-			);
-
-			return { stdout: '', stderr: '' };
-		};
+	// A confirmed path with no grace fact means the cache lost its covering
+	// policy: the cache-level error names the remedy, not a per-path reason.
+	it('fails closed with the cache-level error when a confirmed path has no fact', async () => {
+		const runner = confirmResultRunner([
+			{ storePathHash: '1'.repeat(32), confirmed: true, grace: {} }
+		]);
 
 		await expect(
 			confirmDestinationIntermediates(
@@ -768,7 +754,78 @@ describe('confirmDestinationIntermediates', () => {
 				intermediates,
 				runner
 			)
-		).rejects.toBeInstanceOf(GraceDeadlineMissingError);
+		).rejects.toBeInstanceOf(GracePolicyMissingError);
+	});
+
+	// A confirmed path whose fact names a zero-grace policy is a different
+	// condition from no policy at all, and its remedy is raising the value.
+	it('fails closed with the zero-grace error when the matched policy grants nothing', async () => {
+		const runner = confirmResultRunner([
+			{
+				storePathHash: '1'.repeat(32),
+				confirmed: true,
+				grace: { graceSeconds: 0 }
+			}
+		]);
+
+		await expect(
+			confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				runner
+			)
+		).rejects.toBeInstanceOf(ZeroGracePolicyError);
+	});
+
+	// The real CLI records the result and then exits non-zero for an
+	// unconfirmed path, so the classification must read the recorded result
+	// out of the failed run.
+	it('fails closed on a path no longer committed at the destination', async () => {
+		let failure: unknown;
+
+		try {
+			const runner = confirmResultRunner(
+				[{ storePathHash: '1'.repeat(32), confirmed: false }],
+				{ fails: true }
+			);
+
+			await confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				runner
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(GraceDeadlineMissingError);
+
+		if (failure instanceof GraceDeadlineMissingError) {
+			expect(failure.paths).toStrictEqual([
+				{ storePathHash: '1'.repeat(32), reason: 'not-present' }
+			]);
+		}
+	});
+
+	it('keeps a failure whose recorded result names nothing missing as a command error', async () => {
+		const runner = confirmResultRunner(
+			[
+				{
+					storePathHash: '1'.repeat(32),
+					confirmed: true,
+					grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
+				}
+			],
+			{ fails: true }
+		);
+
+		await expect(
+			confirmDestinationIntermediates(
+				planInputs({ temporaryDirectory: directory }),
+				intermediates,
+				runner
+			)
+		).rejects.toBeInstanceOf(ConfirmCommandError);
 	});
 
 	it('maps a runner launch failure to a ConfirmCommandError carrying its cause', async () => {
@@ -1007,6 +1064,31 @@ function groupEntry(key: string, retentionValues: object): object {
 		remote: false,
 		runsOn: 'ubuntu-latest',
 		...retentionValues
+	};
+}
+
+function confirmResultRunner(
+	paths: readonly {
+		readonly storePathHash: string;
+		readonly confirmed: boolean;
+		readonly grace?: {
+			readonly retainUntil?: string;
+			readonly graceSeconds?: number;
+		};
+	}[],
+	options: { readonly fails?: boolean } = {}
+): EnsureRunner {
+	return async (_command, arguments_) => {
+		await writeFile(
+			resultFileArgument(arguments_),
+			confirmedPathsResultLine(paths)
+		);
+
+		if (options.fails === true) {
+			throw new Error('cupboard exited 1');
+		}
+
+		return { stdout: '', stderr: '' };
 	};
 }
 

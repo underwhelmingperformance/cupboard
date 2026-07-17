@@ -798,27 +798,105 @@ export async function confirmDestinationIntermediates(
 		await runner(inputs.cupboardPath, arguments_);
 	} catch (error) {
 		const replayed = replayCapturedCommandOutput(error);
+		// An unconfirmed path makes the CLI exit non-zero after it has already
+		// recorded the per-path result, so the failure carries the
+		// classification's input; only a run with no recorded result stays a
+		// bare command error.
+		const recorded = await confirmResponseIfRecorded(resultFile);
 
+		if (recorded === undefined) {
+			throw new ConfirmCommandError({
+				cause: error,
+				wasReported: replayed.wasReported
+			});
+		}
+
+		classifyMissingGrace(inputs, recorded);
+
+		// The result names nothing missing, so the failure is something else;
+		// it stays a command error carrying the CLI's own failure.
 		throw new ConfirmCommandError({
 			cause: error,
 			wasReported: replayed.wasReported
 		});
 	}
 
-	const response = confirmResponse(await readConfirmResults(resultFile));
-	const missing = response.paths
-		.filter((confirmed) => confirmed.grace?.retainUntil === undefined)
-		.map((confirmed) => ({
-			storePathHash: confirmed.storePathHash,
-			reason:
-				confirmed.grace?.graceSeconds === undefined
-					? ('no-policy-matched' as const)
-					: ('pending' as const)
-		}));
+	classifyMissingGrace(
+		inputs,
+		confirmResponse(await readConfirmResults(resultFile))
+	);
+}
 
-	if (missing.length > 0) {
-		throw new GraceDeadlineMissingError(missing);
+// A confirmed path with no deadline means the cache itself has no usable
+// grace policy: the confirm endpoint answers an empty grace fact exactly when
+// no policy matched and names a matched zero-grace policy in `graceSeconds`,
+// and resolution is cache-level, so one such path implies every path and the
+// cache-level error names the actual remedy. An unconfirmed path is genuinely
+// per-path: the confirm no longer found it committed, which points at
+// reseeding.
+function classifyMissingGrace(
+	inputs: PlanInputs,
+	response: ParsedUploadConfirmResponse
+): void {
+	const missing = response.paths.filter(
+		(confirmed) => confirmed.grace?.retainUntil === undefined
+	);
+
+	if (
+		missing.some(
+			(confirmed) => confirmed.confirmed && confirmed.grace?.graceSeconds === 0
+		)
+	) {
+		throw new ZeroGracePolicyError(inputs.cache);
 	}
+
+	if (missing.some((confirmed) => confirmed.confirmed)) {
+		throw new GracePolicyMissingError(inputs.cache);
+	}
+
+	const perPath = missing.map((confirmed) => ({
+		storePathHash: confirmed.storePathHash,
+		reason: 'not-present' as const
+	}));
+
+	if (perPath.length > 0) {
+		throw new GraceDeadlineMissingError(perPath);
+	}
+}
+
+// The recorded confirm result of a failing run, when one exists: any absence
+// or malformation reads as "nothing recorded", since the run's own failure is
+// about to surface either way.
+async function confirmResponseIfRecorded(
+	resultFile: string
+): Promise<ParsedUploadConfirmResponse | undefined> {
+	let recorded: string;
+
+	try {
+		recorded = await readFile(resultFile, 'utf8');
+	} catch {
+		return undefined;
+	}
+
+	let events: readonly ReporterResultEvent[];
+
+	try {
+		events = parseReporterResults(recorded);
+	} catch {
+		return undefined;
+	}
+
+	for (const event of events) {
+		if (event.kind !== 'confirm-paths') {
+			continue;
+		}
+
+		const response = uploadConfirmResponseSchema.safeParse(event.data);
+
+		return response.success ? response.data : undefined;
+	}
+
+	return undefined;
 }
 
 // A run that never opened its result file recorded no result; any other read

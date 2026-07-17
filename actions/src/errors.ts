@@ -544,15 +544,18 @@ export class LegacyPushSummaryError extends CodedError {
 }
 
 /**
- * One path a `require-grace` push cannot account for: `no-policy-matched`
- * names a path whose grace fact was empty (no cache policy covers it),
+ * One path a `require-grace` publication cannot account for: `not-present`
+ * names a path the confirm no longer found committed at the destination, and
  * `pending` one whose fact carried only a captured `graceSeconds`, still
- * awaiting the deferred upload that would materialise its deadline.
+ * awaiting the deferred upload that would materialise its deadline. A path
+ * with no grace fact at all is not a per-path condition: grace resolution is
+ * cache-level, so an uncovered cache raises {@link GracePolicyMissingError}
+ * instead.
  */
 export interface MissingGracePath {
 	readonly storePathHash: string;
 	readonly storePath?: string;
-	readonly reason: 'no-policy-matched' | 'pending';
+	readonly reason: 'not-present' | 'pending';
 }
 
 /**
@@ -560,13 +563,23 @@ export interface MissingGracePath {
  * path with no positive grace deadline: the publication half of grace mode's
  * fail-closed rule (see PLAN.md, "Planning and destination adoption").
  */
+// The remedy each missing-grace reason points the operator at, rendered
+// alongside the reason so the failure is actionable without reading cupboard
+// source.
+const missingGraceRemedies: Record<MissingGracePath['reason'], string> = {
+	'not-present':
+		'no longer committed at the destination; rebuild or reseed the path',
+	pending: 'its deferred upload has not settled; retry once the push completes'
+};
+
 export class GraceDeadlineMissingError extends CodedError {
 	constructor(public readonly paths: readonly MissingGracePath[]) {
 		super(
 			`${String(paths.length)} path(s) lack a positive grace deadline: ` +
 				paths
 					.map(
-						(path) => `${path.storePath ?? path.storePathHash} (${path.reason})`
+						(path) =>
+							`${path.storePath ?? path.storePathHash} (${path.reason}: ${missingGraceRemedies[path.reason]})`
 					)
 					.join(', ')
 		);
@@ -609,7 +622,10 @@ export class GraceCoverageResultInvalidError extends CodedError {
  * The destination cache has no covering grace policy while the run publishes
  * with intermediate retention `grace`. Without a policy nothing keeps an
  * unretained intermediate alive, so the plan refuses before anything is
- * published, whether or not this run happens to produce one.
+ * published, whether or not this run happens to produce one; the fail-closed
+ * publication checks raise it too when a fact-less path shows the policy
+ * vanished mid-run, since resolution is cache-level and one such path
+ * implies every path.
  */
 export class GracePolicyMissingError extends CodedError {
 	constructor(public readonly cache: string) {
