@@ -15,6 +15,7 @@ import {
 
 import {
 	buildPushArguments,
+	hasUngracedPath,
 	pathsMissingGraceDeadline,
 	type PushOptions,
 	requireGraceResultProtocol,
@@ -277,16 +278,31 @@ describe('pathsMissingGraceDeadline', () => {
 		expect(pathsMissingGraceDeadline(summaryWithPaths([]))).toStrictEqual([]);
 	});
 
-	it('names a path whose grace fact is empty as unmatched', () => {
+	// A fact-less path is a cache-level condition, so the per-path report
+	// leaves it out and `hasUngracedPath` carries it instead.
+	it('reports a path whose grace fact is empty as ungraced, not per-path', () => {
+		const summary = summaryWithPaths([
+			{ storePathHash: storePathHashB, outcome: 'committed', grace: {} }
+		]);
+
+		expect({
+			ungraced: hasUngracedPath(summary),
+			missing: pathsMissingGraceDeadline(summary)
+		}).toStrictEqual({ ungraced: true, missing: [] });
+	});
+
+	it('reports a fully graced summary as not ungraced', () => {
 		expect(
-			pathsMissingGraceDeadline(
+			hasUngracedPath(
 				summaryWithPaths([
-					{ storePathHash: storePathHashB, outcome: 'committed', grace: {} }
+					{
+						storePathHash: storePathHashB,
+						outcome: 'committed',
+						grace: { retainUntil: '2026-01-02T00:00:00.000Z' }
+					}
 				])
 			)
-		).toStrictEqual([
-			{ storePathHash: storePathHashB, reason: 'no-policy-matched' }
-		]);
+		).toBe(false);
 	});
 
 	it('names a path whose grace is only captured so far as pending', () => {

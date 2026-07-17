@@ -23,6 +23,7 @@ import {
 } from '../cupboard-run.ts';
 import {
 	GraceDeadlineMissingError,
+	GracePolicyMissingError,
 	InvalidInputError,
 	LegacyPushSummaryError,
 	type MissingGracePath,
@@ -313,6 +314,13 @@ export async function pushAction(
 	await publishPushOutputs(environment, summary);
 
 	if (inputs.requireGrace) {
+		// A pushed path with no grace fact at all means no policy covers the
+		// cache; resolution is cache-level, so the cache-level error names the
+		// remedy.
+		if (hasUngracedPath(summary)) {
+			throw new GracePolicyMissingError(inputs.cache);
+		}
+
 		const missing = pathsMissingGraceDeadline(summary);
 
 		if (missing.length > 0) {
@@ -349,6 +357,19 @@ export function requireGraceResultProtocol(
 }
 
 /**
+ * Whether the push report carries any path with no grace fact at all: with
+ * `require-grace` that means no policy covers the cache, the cache-level
+ * condition {@link GracePolicyMissingError} models.
+ */
+export function hasUngracedPath(summary: ParsedPushSummary): boolean {
+	return summary.paths.some(
+		(path) =>
+			path.grace?.retainUntil === undefined &&
+			path.grace?.graceSeconds === undefined
+	);
+}
+
+/**
  * The publication half of grace mode's fail-closed rule (see PLAN.md,
  * "Planning and destination adoption"): every path the push reports must
  * carry a materialised `retainUntil`. A path whose `grace` fact is empty
@@ -359,12 +380,15 @@ export function pathsMissingGraceDeadline(
 	summary: ParsedPushSummary
 ): readonly MissingGracePath[] {
 	return summary.paths
-		.filter((path) => path.grace?.retainUntil === undefined)
+		.filter(
+			(path) =>
+				path.grace?.retainUntil === undefined &&
+				path.grace?.graceSeconds !== undefined
+		)
 		.map((path) => ({
 			storePathHash: path.storePathHash,
 			...(path.storePath !== undefined && { storePath: path.storePath }),
-			reason:
-				path.grace?.graceSeconds === undefined ? 'no-policy-matched' : 'pending'
+			reason: 'pending' as const
 		}));
 }
 
