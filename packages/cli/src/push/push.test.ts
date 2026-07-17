@@ -1478,7 +1478,7 @@ describe('runPush', () => {
 					{ label: 'Root', value: 'main' },
 					{
 						label: 'Root expiry',
-						value: 'expires 2026-01-15T00:00:00.000Z'
+						value: 'expires 2026-01-15 00:00 UTC'
 					}
 				]
 			]
@@ -1579,7 +1579,7 @@ describe('runPush', () => {
 					{ label: 'Skipped', value: '1' },
 					{ label: 'Bytes uploaded', value: '0 B' },
 					{ label: 'Pinned paths', value: '1' },
-					{ label: 'Pin expiry', value: 'expires 2026-01-15T00:00:00.000Z' }
+					{ label: 'Pin expiry', value: 'expires 2026-01-15 00:00 UTC' }
 				]
 			]
 		});
@@ -1912,7 +1912,7 @@ describe('runPush', () => {
 	});
 
 	it('reports an expiry range when expiring pins differ', async () => {
-		const expiries = ['2026-01-15T00:00:00.000Z', '2026-01-15T00:00:05.000Z'];
+		const expiries = ['2026-01-15T00:00:00.000Z', '2026-01-16T00:00:00.000Z'];
 		let call = 0;
 		const results: ResultRow[][] = [];
 		const clientCalls: unknown[] = [];
@@ -1990,8 +1990,7 @@ describe('runPush', () => {
 					{ label: 'Pinned paths', value: '2' },
 					{
 						label: 'Pin expiry',
-						value:
-							'expires 2026-01-15T00:00:00.000Z to 2026-01-15T00:00:05.000Z'
+						value: 'expires 2026-01-15 00:00 UTC to 2026-01-16 00:00 UTC'
 					}
 				]
 			]

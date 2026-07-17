@@ -1325,14 +1325,17 @@ async function recordRetention(
 function formatExpiry(summary: RootSummary): string {
 	return summary.expiresAt === undefined
 		? 'permanent'
-		: `expires ${summary.expiresAt}`;
+		: `expires ${formatTimestamp(summary.expiresAt)}`;
 }
 
 function describePinExpiry(summaries: readonly RootSummary[]): string {
+	// Compared after rendering: expiries that only differ beneath the rendered
+	// minute report as one value, not a range of two identical timestamps.
 	const expiries = summaries
 		.map((summary) => summary.expiresAt)
 		.filter((expiresAt) => expiresAt !== undefined)
-		.toSorted(byCodeUnit);
+		.toSorted(byCodeUnit)
+		.map((expiresAt) => formatTimestamp(expiresAt));
 	const earliest = expiries.at(0);
 	const latest = expiries.at(-1);
 
