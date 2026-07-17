@@ -2,21 +2,20 @@
 
 cupboard publishes self-contained binaries on GitHub Releases and provides
 composite actions for installing the binary and pushing build outputs from CI.
-The release workflow probes the ESM Node SEA path first, but the pinned Node
-24.16 preparation-blob path currently publishes CommonJS SEA binaries when the
-ESM smoke test fails. The composite actions bootstrap Node 24 for their small
-TypeScript helper and run it with Node's built-in type stripping, so there is no
-checked-in generated JavaScript action bundle.
+This guide covers setting a repository up and the tasks that follow: the
+quickstart, each action, the reusable workflows, and routine changes to a
+working setup.
 
-GitHub documents the latest release endpoint as the latest non-prerelease,
-non-draft release, and the action uses that endpoint when
-`cupboard-version: latest` is selected. GitHub artifact attestations are the
-default provenance path for public releases.
+The deeper material lives in its own documents and is linked where it matters:
 
-[github-latest-release]:
-  https://docs.github.com/en/rest/releases/releases#get-the-latest-release
-[github-artifact-attestations]:
-  https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations
+- [docs/trust-rules.md](./trust-rules.md): how CI authenticates, what a trust
+  rule matches, and rules beyond the presets.
+- [docs/runner-provenance.md](./runner-provenance.md): why runner configuration
+  is repository variables and what the label syntax guarantees.
+- [docs/reuse-views.md](./reuse-views.md): reuse-view read semantics and how the
+  workflow adopts earlier builds.
+- [docs/releases.md](./releases.md): how the binaries themselves are built and
+  attested.
 
 ## Version Selection
 
@@ -26,9 +25,13 @@ Both actions accept `cupboard-version`. The default is `latest`.
 - `1.2.3` is normalised to `v1.2.3` and resolved by tag.
 - `v1.2.3` is used as-is and resolved by tag.
 
-Release API calls use `github-token`, which defaults to the workflow
-`github.token`. Public unauthenticated downloads work, but the token avoids
-unnecessary rate-limit failures.
+GitHub documents the [latest release endpoint][github-latest-release] as the
+latest non-prerelease, non-draft release. Release API calls use `github-token`,
+which defaults to the workflow `github.token`. Public unauthenticated downloads
+work, but the token avoids unnecessary rate-limit failures.
+
+[github-latest-release]:
+  https://docs.github.com/en/rest/releases/releases#get-the-latest-release
 
 ## Cache-aware flake publishing quickstart
 
@@ -47,11 +50,7 @@ sections cover private reads, remote builders and each setting in more detail.
 ### 1. Choose the tenant, repository and release
 
 Set these shell variables once so the remaining commands can be copied without
-repeating them. Use a real cupboard release tag from the [releases page][].
-Pinning a tag is especially important while the available releases are
-prereleases: `latest` only selects a non-prerelease release.
-
-[releases page]: https://github.com/underwhelmingperformance/cupboard/releases
+repeating them.
 
 ```bash
 tenant=https://cupboard.example.workers.dev/t/acme
@@ -59,6 +58,20 @@ repo=acme/app
 cupboard_version=vX.Y.Z
 workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main
 ```
+
+Replace `vX.Y.Z` with a real cupboard release tag from the [releases page][]
+before continuing. Pinning a tag is especially important while the available
+releases are prereleases: `latest` only selects a non-prerelease release.
+
+The `workflow` value is matched, character for character, against the
+`job_workflow_ref` claim in the OIDC token of every CI push, so its exact shape
+matters: it names cupboard's repository, where the reusable workflow file lives,
+not your own, and it spells the ref in full as `refs/heads/main` even though
+your caller workflow will reference the same file as `@main`. Changing either
+part produces a trust rule that can never match, and every push is then refused.
+See [docs/trust-rules.md](./trust-rules.md) for how the claim works.
+
+[releases page]: https://github.com/underwhelmingperformance/cupboard/releases
 
 ### 2. Configure the tenant
 
@@ -84,8 +97,20 @@ cupboard oidc-trust add-github-branch "$tenant" \
 The empty grace prefix covers the default cache and every named cache, including
 the per-PR caches. The grace period must be long enough for the workflow's plan,
 seed and target jobs to finish; 24 hours matches the reusable workflow's
-root-based fallback. The view's priority of 50 leaves the normal cache, whose
-default priority is 40, preferred.
+root-based fallback.
+
+Adding a grace policy changes how the covered caches are collected, and the
+change is permanent: the first publication accepted under the policy marks its
+cache grace-managed, `policy remove-grace` does not unmark it, and a
+grace-managed cache whose last deadline lapses may be emptied by collection,
+which a cache without the marker never is. Apply the policy with the coverage
+you intend to keep.
+
+The view's priority of 50 sits above the destination cache's priority, which
+defaults to 40 on the server; Nix tries substituters lowest-priority-first, so
+this keeps the destination preferred. 50 is also the CLI's default, spelled out
+here because the relationship, view strictly above destination, is required:
+setup refuses a view that would tie or precede the destination.
 
 These trust commands resolve and pin the repository's immutable GitHub ids. The
 PR rule confines each pull request to its own cache and root; the branch rule
@@ -111,11 +136,11 @@ gh variable set CUPBOARD_RUNNERS \
   --repo "$repo" --body 'ubuntu-latest,macos-latest'
 ```
 
-Replace `vX.Y.Z` with the chosen release tag before running these commands.
 `CUPBOARD_PLAN_RUNNER` contains JSON, including the quotes around a plain label.
-`CUPBOARD_RUNNERS` must include every `os` label used by the target manifest.
-Use runner groups as described under "Runner provenance" when self-hosted
-runners are available to this repository.
+`CUPBOARD_RUNNERS` must include every `os` label used by the target manifest;
+nothing is permitted by default. Why runner configuration lives in variables,
+and the `label@group` syntax for self-hosted runners, is
+[docs/runner-provenance.md](./runner-provenance.md).
 
 ### 4. Declare the targets
 
@@ -167,16 +192,24 @@ jobs:
       targets: .#cupboardOutputs
       cache:
         ${{ github.event_name == 'pull_request' && format('pr-{0}',
-        github.event.number) || '' }}
+        github.event.pull_request.number) || '' }}
       root-prefix:
         ${{ format('github:{0}/{1}', github.repository, github.event_name ==
-        'pull_request' && format('pr-{0}', github.event.number) ||
+        'pull_request' && format('pr-{0}', github.event.pull_request.number) ||
         github.ref_name) }}
       ttl: ${{ github.event_name == 'pull_request' && '14d' || '' }}
       intermediate-retention: grace
       reuse-view: ${{ github.event_name == 'push' && 'pull-requests' || '' }}
       cupboard-version: ${{ vars.CUPBOARD_VERSION }}
 ```
+
+The `&&`/`||` pairs are GitHub Actions' substitute for a conditional expression:
+`condition && a || b` evaluates to `a` on a pull request and `b` otherwise,
+which only holds while every `a` is non-empty, as they all are here. Each
+expression picks the pull-request value or the branch value for one input, and
+the chosen cache name must stay consistent with what the PR trust rule routes:
+the rule confines each pull request to its `pr-<number>` cache, so the `cache`
+input computes exactly that name.
 
 The workflow uses the reuse view only for `main`; use the view for every event
 if PR-to-PR reuse is also wanted. The workflow reference and release tag are
@@ -197,6 +230,13 @@ The output should contain the tenant-wide 24-hour grace policy, the
 request and confirm that the workflow publishes to `pr-<number>`. After merging
 it, the `main` run should plan already-published targets from the reuse view and
 retain them beneath `github:<owner>/<repo>/main` in the default cache.
+
+Note that the listing shows the configuration exists, not that it will match a
+real run: a trust rule with a mis-spelled `job_workflow_ref` lists identically
+to a working one, and the first sign of the difference is every push being
+refused. If the first run's pushes are rejected, compare each rule's claims
+against [docs/trust-rules.md](./trust-rules.md) character by character before
+anything else.
 
 ## `actions/setup`
 
@@ -235,9 +275,8 @@ private netrc file under `$RUNNER_TEMP`, sets mode `0600`, appends
 `netrc-file = ...` to the generated Nix config, and never echoes the password.
 
 `reuse-view` adds a named tenant reuse view as a second substituter, after the
-destination cache. Nix tries substituters in order, so setup fetches both
-`nix-cache-info` responses and refuses to configure the view unless its priority
-is numerically greater than the destination's, keeping the destination first.
+destination cache. Setup verifies the two priorities keep the destination first;
+see [docs/reuse-views.md](./reuse-views.md) for the ordering rules.
 
 ## `actions/push`
 
@@ -437,58 +476,14 @@ evaluates to a list such as:
 `outputs` defaults to `["out"]` and `bestEffort` to `false`. A best-effort
 target does not fail the whole matrix when its build fails, and one that fails
 to evaluate is planned as a direct build, so the failure surfaces in its own
-job. `os` selects the runner; the manifest is evaluated from the flake and is
-therefore pull-request-controlled, so every label it uses must be named in the
-`CUPBOARD_RUNNERS` repository variable, set through repository settings where a
-pull request cannot reach. Labels are printable ASCII without spaces; GitHub
-compares them case-insensitively, and that comparison is only exact within
-ASCII, so anything wider is refused. Nothing is allowed by default, not even
-GitHub-hosted labels: a self-hosted runner can carry any label, so the permitted
-set is entirely the operator's, and a `label@group` entry additionally pins the
-label to a runner group (see "Runner provenance" below). `remote` marks a group
-that realises its derivations on the configured remote builders: those jobs
-build with `--max-jobs 0` and apply the `builders` specification, the
+job. `os` selects the runner, and every label the manifest uses must be named in
+the `CUPBOARD_RUNNERS` repository variable, with the plan job's own runner in
+`CUPBOARD_PLAN_RUNNER`; both are required, and the syntax and the reasoning are
+[docs/runner-provenance.md](./runner-provenance.md). `remote` marks a group that
+realises its derivations on the configured remote builders: those jobs build
+with `--max-jobs 0` and apply the `builders` specification, the
 `builder_ssh_key` and `builder_ssh_config` secrets, and the
 `builder-known-hosts` input.
-
-### Runner provenance
-
-A label is a spelling, not a provenance claim: GitHub routes a job to any runner
-carrying the requested labels, and self-hosted runners accept arbitrary manually
-assigned labels, hosted-sounding names included. GitHub's boundary for pinning
-where a job may land is the runner group. The workflow therefore takes its
-runner configuration only from repository variables, which a pull request cannot
-edit, and two of them must be set before the workflow runs:
-
-- `CUPBOARD_RUNNERS` names every `runs-on` label the target manifest may use,
-  separated by whitespace or commas. A bare entry (`ubuntu-latest`) permits the
-  spelling and routes by label alone; an entry written as `label@group`
-  (`nix-builder@build-farm`) routes that label to the named runner group as
-  `runs-on: { group, labels }`. Labels and group names must each be one or more
-  printable ASCII characters excluding spaces, commas and `@`, a narrower
-  contract than GitHub's: labels because case-insensitive matching is only exact
-  within ASCII, `@` because it separates the two, and the rest as this syntax's
-  own grammar. Rename a group that cannot be expressed. Example:
-
-  ```text
-  ubuntu-latest, macos-14, nix-builder@build-farm
-  ```
-
-- `CUPBOARD_PLAN_RUNNER` is the plan job's own `runs-on` value, as JSON, and it
-  is required: the plan job holds the input SSH key, read credentials and OIDC
-  permission while evaluating pull-request-controlled Nix, so it has no fallback
-  runner. Either a plain label or a group selector:
-
-  ```text
-  "ubuntu-latest"
-  {"group":"trusted","labels":["ubuntu-latest"]}
-  ```
-
-Bare labels remain vulnerable to collisions: a self-hosted runner registered
-with a permitted spelling is eligible for those jobs. Either qualify every entry
-with a runner group, or enforce the boundary in the organisation's runner policy
-by restricting self-hosted runner groups away from the repositories that call
-this workflow and disallowing repository-level runner registration.
 
 Call the workflow with the cache and root prefix for the current event:
 
@@ -563,18 +558,18 @@ it stops the job if a published or already-cached intermediate has no positive
 grace deadline, rather than risk the target jobs substituting from bytes that
 could be collected before they run.
 
-The first publication accepted under a grace policy also marks the destination
-cache grace-managed, and the marker is permanent: it survives removing the
-policy. Garbage collection normally refuses to empty a cache without a retention
-event, but a grace-managed cache's lifetime is governed by its grace deadlines,
-so it may drain to empty once the last deadline has expired. Adding a grace
-policy is therefore a durable change to how the caches it covers are collected,
-not a setting the matching `remove-grace` fully undoes.
+Two grace-mode behaviours are easy to miss. The fail-closed check runs on seed
+and fallback publications, and those jobs exist only when targets share outputs,
+so a manifest without shared outputs runs green whether or not a grace policy
+exists; the gap surfaces when a second target first shares an output. And a
+grace period shorter than the span from plan to the last target job does not
+fail anything: the collected intermediate is simply rebuilt, so the only symptom
+is the reuse quietly not happening.
 
 `reuse-view` opts the run into reading shared intermediates through a named
-tenant reuse view when the destination is missing them; see "Reading through a
-reuse view" below. Empty, the default, keeps planning and substitution
-destination-only.
+tenant reuse view when the destination is missing them; see
+[docs/reuse-views.md](./reuse-views.md). Empty, the default, keeps planning and
+substitution destination-only.
 
 `cupboard-version` pins the CLI release the jobs install, and `maximise-space`
 (default `true`) reclaims runner disk space before building; disable it on
@@ -584,267 +579,50 @@ The workflow accepts `push: false` for a build-only validation run. In that mode
 it does not inspect the cache or derivation graph, and builds every target
 directly without attesting or publishing it.
 
-### Reading through a reuse view
+## Common tasks
 
-A named reuse view is a set of caches a reader may substitute from, defined once
-on the tenant with `cupboard reuse-view set`:
+Routine changes to a working setup, and where each one's state lives.
 
-```bash
-cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \
-  --prefix pr-
-```
+### Move to a new cupboard release
 
-This view selects every cache whose name currently starts with `pr-`. A view
-holds no narinfo or membership of its own; it is a live selector over the caches
-it names, so a cache created, renamed, or recreated under a matching name is
-picked up without redefining the view.
-
-Passing `reuse-view` to `cupboard-flake-publish.yml` opts the run's
-`actions/setup` and `actions/plan` into it. `actions/setup` adds the view as a
-second Nix substituter, after the destination cache: Nix tries substituters in
-order, and setup fetches both `nix-cache-info` responses and refuses to
-configure the view unless its priority is numerically greater than the
-destination's, so the destination is always tried first. `actions/plan` probes
-the view for any target or shared intermediate the destination does not already
-hold. A hit there retains nothing by itself, since the destination stays the
-only retention boundary; it only lets the affected build job substitute the
-result instead of building it, and that job's own push still adopts and roots
-the result in the destination as usual.
-
-Every response under a view's URLs, hits, misses and faults alike, carries
-`cache-control: no-store`. A view's answer changes whenever its definition
-changes, a matching cache commits a conflicting candidate, or a candidate is
-collected, and no purge covers any of that, so neither the Cloudflare edge nor
-any intermediary may hold a copy. Reads through a view therefore always reach
-the origin; expect view-heavy runs to cost more origin traffic than reads from
-the destination cache.
-
-A view spans every cache its selectors currently match, so any writer with push
-access to one of those caches can influence what the view serves a reader.
-Cupboard resolves the risk this creates the same way for every candidate: when a
-store-path hash names more than one semantically distinct result across the
-view's caches, the lookup answers as a miss rather than guessing, and the
-affected target simply builds locally instead of substituting.
-
-Intermediate handling depends on both `intermediate-retention` and whether
-`reuse-view` is set:
-
-| Retention mode | Reuse view | Destination intermediate                  | View-only intermediate                                                             | Missing intermediate                                        |
-| -------------- | ---------- | ----------------------------------------- | ---------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| `root`         | absent     | Seed omitted; the destination serves it   | not applicable                                                                     | Built and kept under the 24-hour seed root                  |
-| `root`         | present    | Seed omitted; the destination serves it   | Substituted through the view, then kept under the 24-hour seed root                | Built and kept under the 24-hour seed root                  |
-| `grace`        | absent     | Confirmed with a refreshed grace deadline | not applicable                                                                     | Built, published with `--no-retain`, needs a grace deadline |
-| `grace`        | present    | Confirmed with a refreshed grace deadline | Substituted through the view, published with `--no-retain`, needs a grace deadline | Built, published with `--no-retain`, needs a grace deadline |
-
-A common shape adopts a pull request's build into `main`'s own publication. An
-administrator defines the view once, covering the per-PR caches the
-`add-github-pr` rule already routes builds to (see "Trust rules" below):
+The release pin lives in one place, the `CUPBOARD_VERSION` repository variable:
 
 ```bash
-cupboard reuse-view set https://cupboard.example.workers.dev/t/acme reuse \
-  --prefix pr-
+gh variable set CUPBOARD_VERSION --repo "$repo" --body vX.Y.Z
 ```
 
-`main`'s post-merge workflow then opts into it:
+Every job of the next run installs the new release. Nothing on the tenant refers
+to the release.
 
-```yaml
-jobs:
-  publish:
-    uses: owner/cupboard/.github/workflows/cupboard-flake-publish.yml@main
-    permissions:
-      attestations: write
-      contents: read
-      id-token: write
-    with:
-      url: https://cupboard.example.workers.dev/t/acme
-      root-prefix: github:acme/app/main
-      reuse-view: reuse
-```
+### Add a target or a platform
 
-If the merged commit's outputs already sit in the PR's cache from CI, the plan
-substitutes them through the view rather than rebuilding, then the seed or
-fallback job's push adopts and roots them in the destination under `main`'s own
-roots. A target the PR never built plans and builds exactly as it would without
-a view.
+Add the entry to the flake's `cupboardOutputs` list. If it introduces a new `os`
+label, add that label to `CUPBOARD_RUNNERS` first; a label the variable does not
+name fails the plan job. No tenant change is needed: caches are created on first
+push, and the existing root-prefix grant covers the new target's root.
 
-The jobs belong to cupboard's reusable workflow, while the standard repository
-and ref claims still describe the caller. A trust rule that restricts
-`job_workflow_ref` must therefore name
-`owner/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main`
-and keep its caller repository and ref restrictions. [GitHub documents this
-called-workflow claim][github-oidc-reusable-workflows] separately from the
-standard caller claims.
+### Add another repository to the same tenant
 
-[github-oidc-reusable-workflows]:
-  https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows
+The tenant-wide grace policy and the `pull-requests` view already cover any
+number of repositories. Run quickstart step 2's
+`cupboard github setup … --apply-variables` for the new repository: it adds that
+repository's trust rules and sets its variables, and reports the shared tenant
+state as unchanged. The equivalent individual commands are in
+[Manual configuration](#manual-configuration).
 
-Always reference the workflow as `@main`, not by a local path. The tenant's
-trust rule can then require that pushes come from this exact file on `main`, so
-a pull request cannot smuggle in an edited copy of the publish job and gain the
-rule's access.
+### Tighten or audit a trust rule
 
-## Trust rules
+`cupboard oidc-trust list "$tenant"` prints every rule with its claims and
+grants. Rules are immutable: to change one, add the corrected rule and remove
+the old one. What each claim pins, and how to restrict a rule further, is
+[docs/trust-rules.md](./trust-rules.md).
 
-A push from CI exchanges its GitHub Actions OIDC token for a cupboard token. The
-exchange succeeds only when a trust rule on the tenant both recognises the token
-and permits everything the push asks for. The exchange is all-or-nothing: if the
-push wants to attach attestations or set a retention root and the rule does not
-grant those, the whole exchange is refused, not narrowed.
+### A `main` run rebuilt something a PR already built
 
-A good rule pins identity on two axes. The repository is pinned by its immutable
-numeric ids (`repository_id` and `repository_owner_id`), so a rename cannot
-silently transfer trust and nobody reusing the freed-up name inherits it. The
-trigger is pinned by the `ref` claim, which is the branch (or pull request) that
-started the run, so only that branch's pushes are accepted. Optionally the
-workflow file is pinned too, by `job_workflow_ref`, as a further restriction.
-
-The `add-github-pr` and `add-github-branch` commands assemble these rules for
-the common cases. `add-github-pr` trusts pull-request builds and routes each one
-to its own short-lived cache (`pr-<number>`) and matching retention root
-(`github:<owner>/<repo>/pr-<number>/`), both keyed on the pull-request number,
-so one PR cannot reach another's paths. `add-github-branch` trusts pushes to one
-branch and publishes to the tenant's default cache under the retention root the
-push action writes by default, `github:<owner>/<repo>/<branch>/`; it pins the
-branch through the `ref` claim, so a sibling branch sharing a reusable workflow
-cannot match. Both look up the repository's ids for you, grant the push and the
-retention root, and grant attestation by default; pass `--no-attest` to withhold
-it, or `--root-template` to override the root.
-
-```bash
-# Per-PR rule: build the pull request, push to its own pr-<n> cache.
-cupboard oidc-trust add-github-pr https://cupboard.example.workers.dev/t/acme \
-  --repo acme/infra
-
-# Branch rule: pushes to main, requiring the reusable publish workflow,
-# publish to the default cache.
-cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
-  --repo acme/infra --branch main \
-  --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main
-```
-
-`--job-workflow-ref` is optional on both presets and restricts the rule further
-to the `job_workflow_ref` claim, the workflow file that issued the token,
-written `owner/repo/path@ref`. Give it with an `@ref` to match exactly, or
-without one to match that file at any ref; the latter is what a reusable
-workflow needs, since its ref is the file's own location rather than the branch
-being built, and the branch is already pinned by `ref`. It is named after the
-claim on purpose: `job_workflow_ref` is a different claim from `workflow` (the
-workflow's name) and `workflow_ref` (the calling workflow).
-
-For an issuer or claim shape the presets do not cover, the general
-`cupboard oidc-trust add` takes the issuer, audience, claims and grants
-directly. `--job-workflow-ref` sets the `job_workflow_ref` claim without
-spelling out `--claim`, and omitting `--cache` scopes the grant to the tenant's
-default cache:
-
-```bash
-cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
-  --issuer https://token.actions.githubusercontent.com \
-  --audience https://cupboard.example.workers.dev/t/acme \
-  --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main \
-  --allow push --allow attest --allow root \
-  --root github:acme/infra/main/
-```
-
-The trailing slash on the root makes it a prefix, so one grant covers every
-per-system root beneath it.
-
-The flake publish workflow depends on that prefix. Each of its jobs exchanges
-its own OIDC token under the same trust rule: the plan job ensures a retention
-root for each already-cached target, and the seed, fallback and target jobs push
-and attest. Every root it writes, one per target and one per shared-output
-group, sits beneath the `root-prefix` the caller passes, so a single prefix
-grant covers them all. Trust it with the branch preset, pinning
-`job_workflow_ref` to cupboard's reusable file:
-
-```bash
-# Trust main's flake publish. The preset grants github:acme/app/main/, a
-# prefix covering every per-target and shared-output root the run writes.
-cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
-  --repo acme/app --branch main \
-  --job-workflow-ref owner/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main
-```
-
-Then call the workflow with a `root-prefix` that nests under the granted root,
-here `github:acme/app/main` beneath the grant `github:acme/app/main/`:
-
-```yaml
-jobs:
-  publish:
-    uses: owner/cupboard/.github/workflows/cupboard-flake-publish.yml@main
-    permissions:
-      attestations: write
-      contents: read
-      id-token: write
-    with:
-      url: https://cupboard.example.workers.dev/t/acme
-      root-prefix: github:acme/app/main
-```
-
-The `job_workflow_ref` names the file in `owner/cupboard`, where the reusable
-workflow lives, not the caller's repository. The plan and build jobs run inside
-cupboard's workflow, so that is the claim their token carries; the caller is
-still pinned, by the repository ids and `ref` the preset sets.
-
-With `intermediate-retention: grace`, the seed and fallback jobs no longer write
-a root at all, so the prefix grant above only needs to cover the target jobs'
-named per-target roots; the trust rule itself needs no change, since an unused
-`root` allowance is harmless. The plan job's confirmation calls need
-`upload:confirm`, but any rule that already allows `push` (as both presets above
-do) grants it implicitly: `upload:commit` covers the narrower `upload:confirm`
-the same way it covers `upload:negotiate`, so no separate `--allow` is needed
-for grace mode.
-
-Release builds usually go to a cache named after the tag, and no preset covers
-that. `--capture` builds the rule instead: it reads a value out of a token claim
-using a pattern with a named group, and that value fills the `{...}`
-placeholders in `--cache-template` and `--root-template`. The pattern also acts
-as a filter: a token whose claim does not match is refused. This rule sends a
-build of tag `v1.2.3` to a cache called `v1.2.3`:
-
-```bash
-cupboard oidc-trust add https://cupboard.example.workers.dev/t/acme \
-  --issuer https://token.actions.githubusercontent.com \
-  --audience https://cupboard.example.workers.dev/t/acme \
-  --claim repository_id=123456 \
-  --claim repository_owner_id=7890 \
-  --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main \
-  --capture 'ref=^refs/tags/(?<tag>v[0-9][A-Za-z0-9.+-]*)$' \
-  --cache-template '{tag}' \
-  --root-template 'github:acme/infra/{tag}/' \
-  --allow push --allow attest --allow root
-```
-
-The two numeric id claims pin the repository the same way the presets do.
-`gh api repos/<owner>/<repo>` prints both: `.id` and `.owner.id`.
-
-## Binary Releases
-
-The release workflow publishes these assets for each version tag:
-
-- `cupboard-vX.Y.Z-linux-x64.tar.gz`
-- `cupboard-vX.Y.Z-linux-arm64.tar.gz`
-- `cupboard-vX.Y.Z-macos-x64.tar.gz`
-- `cupboard-vX.Y.Z-macos-arm64.tar.gz`
-- `checksums.txt`
-
-Each binary build tries the ESM path first: esbuild emits an ESM bundle, the SEA
-config sets `mainFormat: "module"`, postject injects the blob into a pinned Node
-24 binary, and the result is smoke-tested with `cupboard --version`,
-`cupboard push --help`, and `cupboard config`. With Node 24.16.0 today that
-smoke test fails because the preparation-blob path cannot execute ESM, so the
-script rebuilds the same asset as a CommonJS SEA. ESM SEA should become the
-published format once the pinned Node line supports it in the release path.
-
-Public releases require GitHub artifact attestations for release assets. Signed
-checksums are the fallback only for environments where GitHub attestations are
-unavailable.
-
-Secondary distribution channels can come later:
-
-- npm bin package for developer convenience.
-- Homebrew tap for macOS/manual installs.
-- Nix flake package for Nix users.
-
-Docker or OCI actions are not the primary path because they do not solve host
-Nix store or daemon access and do not help macOS runners.
+Check, in order: the run passed `reuse-view` (the quickstart's caller sets it
+for `push` events only); the PR's cache still exists and still matches the
+view's `pr-` prefix; the PR actually published the path (its own run's target
+jobs succeeded); and the grace or TTL window has not lapsed. If several PR
+caches hold semantically different results for the same path, the view answers
+with a miss on purpose and the run builds locally;
+[docs/reuse-views.md](./reuse-views.md) explains that conflict rule.
