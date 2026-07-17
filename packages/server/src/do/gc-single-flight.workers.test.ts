@@ -145,6 +145,34 @@ describe('garbage-collection maintenance serialisation', () => {
 		}
 	});
 
+	// A failing pass surfaces only to its own driver: the per-kind chain
+	// resolves its marker in the finally and the cron coalescing marker is
+	// cleared, so the next cron tick runs a fresh sweep instead of wedging
+	// behind the failure or coalescing into it.
+	it('recovers from a failing sweep, running the next cron pass', async () => {
+		await initialise();
+
+		class InjectedSweepError extends Error {}
+
+		const collect = vi
+			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
+			.mockRejectedValueOnce(new InjectedSweepError())
+			.mockResolvedValueOnce(gcOutcome);
+
+		try {
+			await runInDurableObject(currentServer(), async (instance) => {
+				await expect(instance.runGarbageCollection()).rejects.toBeInstanceOf(
+					InjectedSweepError
+				);
+				await instance.runGarbageCollection();
+			});
+
+			expect(collect.mock.calls.length).toStrictEqual(2);
+		} finally {
+			collect.mockRestore();
+		}
+	});
+
 	it('resumes a pending sweep from the alarm, running one bounded sweep', async () => {
 		await initialise();
 
