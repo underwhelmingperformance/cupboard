@@ -47,6 +47,20 @@ sections cover private reads, remote builders and each setting in more detail.
 
 [readme-quickstart]: ../README.md#quick-start
 
+`cupboard github setup` performs steps 2 and 3 in one idempotent command: it
+writes the grace policy, the `pull-requests` view and both trust rules, prints
+the four repository variables, and sets them through `gh` when passed
+`--apply-variables`. Re-running converges: state that already matches is left
+untouched, and state that differs is reported as drift, never replaced.
+
+```bash
+cupboard github setup "$tenant" --repo "$repo" \
+  --cupboard-version "$cupboard_version" --apply-variables
+```
+
+Steps 2 and 3 below are the manual equivalent, and they explain what the command
+writes and why; steps 4 to 6 apply either way.
+
 ### 1. Choose the tenant, repository and release
 
 Set these shell variables once so the remaining commands can be copied without

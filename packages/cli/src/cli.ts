@@ -32,6 +32,7 @@ import { registerConfirmCommand } from './commands/confirm.ts';
 import { registerControlKeyCommands } from './commands/control-key.ts';
 import { registerDeleteCommand } from './commands/delete.ts';
 import { registerDeployCommand } from './commands/deploy.ts';
+import { registerGithubCommands } from './commands/github.ts';
 import { registerKeyCommands } from './commands/key.ts';
 import { registerLoginCommand } from './commands/login.ts';
 import {
@@ -171,6 +172,7 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 	registerPolicyCommands(program, options);
 	registerReuseViewCommands(program, options);
 	registerOidcTrustCommands(program, options);
+	registerGithubCommands(program, options);
 	registerCheckCommand(program, options);
 
 	return program;

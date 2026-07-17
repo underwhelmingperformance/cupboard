@@ -480,3 +480,56 @@ export class ReuseViewSelectorRequiredError extends CliUsageError {
 		this.name = 'ReuseViewSelectorRequiredError';
 	}
 }
+
+export class CacheInfoUnavailableError extends CliError {
+	constructor(
+		public readonly target: string,
+		public readonly status: number
+	) {
+		super(`${target} answered HTTP ${String(status)}`);
+		this.name = 'CacheInfoUnavailableError';
+	}
+}
+
+export class CacheInfoUnparsableError extends CliError {
+	constructor(
+		public readonly target: string,
+		options: { readonly cause: unknown }
+	) {
+		super(`${target} did not answer with a parsable nix-cache-info body`, {
+			cause: options.cause
+		});
+		this.name = 'CacheInfoUnparsableError';
+	}
+}
+
+/**
+ * github setup found stored state that neither matches what it would write
+ * nor was replaced. The drifted steps are reported and left in place; the
+ * non-zero exit makes the divergence visible to scripts and CI.
+ */
+export class GithubSetupDriftError extends CliError {
+	constructor(public readonly steps: readonly string[]) {
+		super(
+			`Stored tenant state differs from what github setup would write: ${steps.join(', ')}. ` +
+				'Each drift row above names the diverging fields; setup never replaces ' +
+				'stored state, so resolve each (for a trust rule, remove it with ' +
+				'`cupboard oidc-trust remove`) and re-run setup to converge.'
+		);
+		this.name = 'GithubSetupDriftError';
+	}
+}
+
+/**
+ * The GitHub API calls that manage repository variables authenticate with a
+ * token from the environment; raised when neither variable supplies one.
+ */
+export class GithubTokenMissingError extends CliError {
+	constructor() {
+		super(
+			'Managing repository variables needs a GitHub token: set GH_TOKEN or ' +
+				'GITHUB_TOKEN, or set the variables yourself as the guide shows'
+		);
+		this.name = 'GithubTokenMissingError';
+	}
+}
