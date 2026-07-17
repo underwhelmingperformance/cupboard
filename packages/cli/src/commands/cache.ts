@@ -5,7 +5,12 @@ import type {
 	CacheRemoveResponse,
 	CacheSummary
 } from '@cupboard/protocol/caches';
-import { formatCount, type Reporter, type ResultRow } from '@cupboard/reporter';
+import {
+	formatCount,
+	formatTimestamp,
+	type Reporter,
+	type ResultRow
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -215,18 +220,51 @@ export async function runCacheInspect(
 }
 
 function cacheRow(summary: CacheSummary): ResultRow {
+	const parts = [
+		`priority ${String(summary.priority)}`,
+		`${formatCount(summary.storePaths)} path(s)`
+	];
+
+	if (summary.graceManaged === true) {
+		parts.push('grace-managed');
+	}
+
+	if (summary.earliestGraceDeadline !== undefined) {
+		parts.push(
+			`earliest deadline ${formatTimestamp(summary.earliestGraceDeadline)}`
+		);
+	}
+
 	return {
 		label: cacheLabel(summary.name),
-		value: `priority ${String(summary.priority)}; ${formatCount(summary.storePaths)} path(s)`
+		value: parts.join('; ')
 	};
 }
 
+// The grace rows only render when the server reports grace state, so a summary
+// from a server that predates it lists without them.
 function summaryRows(summary: CacheSummary): ResultRow[] {
-	return [
+	const rows: ResultRow[] = [
 		{ label: 'Cache', value: cacheLabel(summary.name) },
 		{ label: 'Priority', value: String(summary.priority) },
 		{ label: 'Store paths', value: formatCount(summary.storePaths) }
 	];
+
+	if (summary.graceManaged !== undefined) {
+		rows.push({
+			label: 'Grace managed',
+			value: summary.graceManaged ? 'yes' : 'no'
+		});
+	}
+
+	if (summary.earliestGraceDeadline !== undefined) {
+		rows.push({
+			label: 'Earliest grace deadline',
+			value: formatTimestamp(summary.earliestGraceDeadline)
+		});
+	}
+
+	return rows;
 }
 
 function cacheLabel(name: string): string {

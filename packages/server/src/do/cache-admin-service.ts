@@ -11,7 +11,7 @@ import {
 	type CacheRemoveResponse,
 	type CacheSummary
 } from '@cupboard/protocol/caches';
-import { count, eq, sql } from 'drizzle-orm';
+import { and, count, eq, gt, min, sql } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
 import { CacheNotEmptyError } from '../errors.ts';
@@ -84,6 +84,24 @@ export class CacheAdminService {
 		return queued.length;
 	}
 
+	// Deadlines are ISO-8601 UTC strings, so lexicographic min is chronological
+	// min and the string comparison against "now" selects only live rows.
+	private earliestLiveGraceDeadline(cache: string): string | undefined {
+		const now = new Date().toISOString();
+		const row = this.context.db
+			.select({ earliest: min(schema.retentionGrace.retainUntil) })
+			.from(schema.retentionGrace)
+			.where(
+				and(
+					eq(schema.retentionGrace.cache, cache),
+					gt(schema.retentionGrace.retainUntil, now)
+				)
+			)
+			.get();
+
+		return row?.earliest ?? undefined;
+	}
+
 	/** Renders a cache's nix-cache-info body from its registry priority. */
 	cacheInfoBody(cache: string): string {
 		const row = this.context.db
@@ -102,8 +120,43 @@ export class CacheAdminService {
 
 	listCaches(): CacheListResponse {
 		const registered = this.context.db.select().from(schema.caches).all();
+		const counts = new Map(
+			this.context.db
+				.select({ cache: schema.narInfos.cache, count: count() })
+				.from(schema.narInfos)
+				.groupBy(schema.narInfos.cache)
+				.all()
+				.map((row) => [row.cache, row.count])
+		);
+		const now = new Date().toISOString();
+		const earliestDeadlines = new Map(
+			this.context.db
+				.select({
+					cache: schema.retentionGrace.cache,
+					earliest: min(schema.retentionGrace.retainUntil)
+				})
+				.from(schema.retentionGrace)
+				.where(gt(schema.retentionGrace.retainUntil, now))
+				.groupBy(schema.retentionGrace.cache)
+				.all()
+				.flatMap((row) =>
+					row.earliest === null ? [] : [[row.cache, row.earliest] as const]
+				)
+		);
 		const caches = registered
-			.map((row) => this.cacheSummary(row.name, row.priority))
+			.map((row) => {
+				const earliestGraceDeadline = earliestDeadlines.get(row.name);
+
+				return {
+					name: row.name,
+					priority: row.priority,
+					storePaths: counts.get(row.name) ?? 0,
+					graceManaged: row.graceManaged,
+					...(earliestGraceDeadline !== undefined && {
+						earliestGraceDeadline
+					})
+				};
+			})
 			.toSorted((left, right) => byCodeUnit(left.name, right.name));
 
 		return { caches };
@@ -168,10 +221,19 @@ export class CacheAdminService {
 	}
 
 	cacheSummary(cache: string, priority: CachePriority): CacheSummary {
+		const managed = this.context.db
+			.select({ graceManaged: schema.caches.graceManaged })
+			.from(schema.caches)
+			.where(eq(schema.caches.name, cache))
+			.get();
+		const earliest = this.earliestLiveGraceDeadline(cache);
+
 		return {
 			name: cache,
 			priority,
-			storePaths: this.cacheStorePathCount(cache)
+			storePaths: this.cacheStorePathCount(cache),
+			graceManaged: managed?.graceManaged ?? false,
+			...(earliest !== undefined && { earliestGraceDeadline: earliest })
 		};
 	}
 

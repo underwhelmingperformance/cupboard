@@ -20,6 +20,24 @@ describe('cache schemas', () => {
 			name: 'the default cache summary',
 			value: { name: '', priority: 40, storePaths: 0 },
 			expected: { name: '', priority: 40, storePaths: 0 }
+		},
+		{
+			name: 'a grace-managed summary with an earliest deadline',
+			value: {
+				...summary,
+				graceManaged: true,
+				earliestGraceDeadline: '2026-06-01T00:00:00.000Z'
+			},
+			expected: {
+				...summary,
+				graceManaged: true,
+				earliestGraceDeadline: '2026-06-01T00:00:00.000Z'
+			}
+		},
+		{
+			name: 'a grace-managed summary with no live deadline',
+			value: { ...summary, graceManaged: false },
+			expected: { ...summary, graceManaged: false }
 		}
 	])('accepts $name', ({ value, expected }) => {
 		expect(cacheSummarySchema.parse(value)).toStrictEqual(expected);
@@ -37,6 +55,14 @@ describe('cache schemas', () => {
 		{
 			name: 'an unknown key',
 			value: { ...summary, surprise: true }
+		},
+		{
+			name: 'a non-boolean grace-managed flag',
+			value: { ...summary, graceManaged: 'yes' }
+		},
+		{
+			name: 'a non-string earliest grace deadline',
+			value: { ...summary, graceManaged: true, earliestGraceDeadline: 7 }
 		}
 	])('rejects $name', ({ value }) => {
 		expect(cacheSummarySchema.safeParse(value).success).toBe(false);

@@ -254,8 +254,10 @@ export const retentionRootTargets = sqliteTable(
 
 // A retention grace deadline: an internal, expiring reachability source the
 // collector walks exactly like a root target, so the deadline keeps the whole
-// closure its path references. Never user-visible; extended monotonically and
-// removed when it expires or its narinfo row is deleted.
+// closure its path references. Not durable retention anyone asked for: it is
+// extended monotonically, removed when it expires or its narinfo row is
+// deleted, and surfaced to admins only in aggregate, as a cache summary's
+// earliest live deadline.
 export const retentionGrace = sqliteTable(
 	'retention_grace',
 	{

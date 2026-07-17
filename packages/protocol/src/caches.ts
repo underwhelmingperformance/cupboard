@@ -4,11 +4,18 @@ import { z } from 'zod';
 import { countSchema } from './internal/counts.ts';
 
 // A cache summary names a cache (the empty string is the default), its Nix
-// priority and how many store paths it holds.
+// priority, how many store paths it holds, and its grace state: whether the
+// cache is permanently grace-managed, and the earliest live grace deadline
+// when one exists. The grace fields are optional so a summary from a server
+// that predates them still validates; the reverse skew, an older CLI's strict
+// parse against a newer server, is out of scope per the compatibility policy
+// (PLAN.md, "Compatibility").
 export const cacheSummarySchema = z.strictObject({
 	name: z.string(),
 	priority: cachePrioritySchema,
-	storePaths: countSchema
+	storePaths: countSchema,
+	graceManaged: z.boolean().optional(),
+	earliestGraceDeadline: z.string().optional()
 });
 export type ParsedCacheSummary = z.output<typeof cacheSummarySchema>;
 
