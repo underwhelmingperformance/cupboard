@@ -4,10 +4,12 @@ export class CacheInfo {
 	static readonly default = new CacheInfo('/nix/store', true, 40);
 
 	/**
-	 * Parses a `nix-cache-info` document. Every field the class carries must be
-	 * present and well-formed; a missing `Priority` is refused with
-	 * {@link CacheInfoParseError} so a consumer comparing priorities reads the
-	 * cache's real value, never a guessed default.
+	/**
+	 * Parses a `nix-cache-info` document. `StoreDir` and `Priority` are
+	 * required and refused with {@link CacheInfoParseError} when absent or
+	 * malformed, so a consumer comparing priorities reads the cache's real
+	 * value, never a guessed default. An absent `WantMassQuery` reads as
+	 * disabled and unknown lines are ignored.
 	 */
 	static parse(source: string): CacheInfo {
 		const fields = new Map<string, string>();
@@ -15,11 +17,14 @@ export class CacheInfo {
 		for (const line of source.split(/\r?\n/u)) {
 			const separator = line.indexOf(':');
 
-			if (separator === -1) {
+			if (separator <= 0) {
 				continue;
 			}
 
-			fields.set(line.slice(0, separator), line.slice(separator + 1).trim());
+			fields.set(
+				line.slice(0, separator).trim(),
+				line.slice(separator + 1).trim()
+			);
 		}
 
 		const storeDirectory = fields.get('StoreDir');
@@ -28,19 +33,25 @@ export class CacheInfo {
 			throw new CacheInfoParseError('StoreDir');
 		}
 
-		const massQuery = fields.get('WantMassQuery');
+		const massQuery = fields.get('WantMassQuery') ?? '0';
 
 		if (massQuery !== '0' && massQuery !== '1') {
 			throw new CacheInfoParseError('WantMassQuery');
 		}
 
-		const priority = fields.get('Priority');
+		const priorityText = fields.get('Priority');
 
-		if (priority === undefined || !/^\d+$/u.test(priority)) {
+		if (priorityText === undefined || !/^\d+$/u.test(priorityText)) {
 			throw new CacheInfoParseError('Priority');
 		}
 
-		return new CacheInfo(storeDirectory, massQuery === '1', Number(priority));
+		const priority = Number(priorityText);
+
+		if (!Number.isSafeInteger(priority)) {
+			throw new CacheInfoParseError('Priority');
+		}
+
+		return new CacheInfo(storeDirectory, massQuery === '1', priority);
 	}
 
 	constructor(
