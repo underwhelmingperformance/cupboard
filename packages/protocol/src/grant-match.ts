@@ -2,15 +2,16 @@ import {
 	cacheSelectorSchema,
 	rootNameSchema
 } from '@cupboard/nix-store/scalars';
-import { applyTransform } from '@cupboard/protocol/capture';
+
+import { applyTransform } from './capture.ts';
 import {
 	type AuthorizationDetail,
 	isOperationPermittedAtIssuance,
 	type Operation,
 	type PermittedGrant,
 	type Substitution
-} from '@cupboard/protocol/grants';
-import { type OidcClaims } from '@cupboard/protocol/oidc-trust-match';
+} from './grants.ts';
+import { type OidcClaims } from './oidc-trust-match.ts';
 
 // A trust rule's resource bindings are evaluated against the verified claims to
 // decide whether a requested grant is permitted. Rendering fails closed: a

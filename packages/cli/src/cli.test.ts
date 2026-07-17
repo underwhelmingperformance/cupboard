@@ -8,7 +8,8 @@ import { describe, expect, it } from 'vitest';
 import { buildProgram, cliExitCode, reportCliFailure } from './cli.ts';
 import {
 	authExitCode,
-	CacheInfoUnavailableError,
+	CacheInfoRateLimitedError,
+	CacheInfoServerError,
 	CliAbortError,
 	CupboardHttpError,
 	InvalidCacheNameError,
@@ -58,15 +59,14 @@ describe('cliExitCode', () => {
 		},
 		{
 			name: 'a rate-limited cache-info response',
-			error: new CacheInfoUnavailableError(
-				'https://cupboard.example/nix-cache-info',
-				StatusCodes.TOO_MANY_REQUESTS
+			error: new CacheInfoRateLimitedError(
+				'https://cupboard.example/nix-cache-info'
 			),
 			expected: transientExitCode
 		},
 		{
 			name: 'an unavailable cache-info response',
-			error: new CacheInfoUnavailableError(
+			error: new CacheInfoServerError(
 				'https://cupboard.example/nix-cache-info',
 				StatusCodes.SERVICE_UNAVAILABLE
 			),

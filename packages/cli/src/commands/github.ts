@@ -5,19 +5,31 @@ import {
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
+import { basicAuthHeader } from '@cupboard/shared/http';
 import type { Command } from 'commander';
+import { StatusCodes } from 'http-status-codes';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseGrace } from '../duration.ts';
 import {
+	CacheInfoRateLimitedError,
+	CacheInfoServerError,
 	CacheInfoUnavailableError,
 	CacheInfoUnparsableError,
-	GithubSetupDriftError
+	GithubSetupDriftError,
+	GraceTooShortError,
+	ReadCredentialPairError
 } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
+import { type GithubCheckOptions, runGithubCheck } from './github/check.ts';
+import {
+	minimumGraceSeconds,
+	pullRequestPrefix,
+	pullRequestViewName
+} from './github/convention.ts';
 import {
 	requireGithubToken,
 	type VariablesClient,
@@ -28,16 +40,8 @@ import { lookupRepository } from './oidc-trust/github.ts';
 import { type PolicyClient } from './policy.ts';
 import { type ReuseViewClient } from './reuse-view.ts';
 
-// The reusable workflow the quickstart trust rules pin, in the exact
-// `job_workflow_ref` claim spelling: cupboard's repository, since that is
-// where the reusable workflow file lives, and the full `refs/heads/main` ref.
-export const flakePublishWorkflowReference =
-	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main';
-
-// The view name and selector the guide's quickstart uses; setup encodes the
-// same convention so the two never drift.
-const pullRequestViewName = 'pull-requests';
-const pullRequestPrefix = 'pr-';
+const tooManyRequestsStatus: number = StatusCodes.TOO_MANY_REQUESTS;
+const serverErrorStatus: number = StatusCodes.INTERNAL_SERVER_ERROR;
 
 // The margin the view's priority sits above the destination's advertised
 // priority. Any strictly greater value keeps the destination preferred; the
@@ -53,6 +57,8 @@ export interface GithubSetupOptions {
 	readonly planRunner: string;
 	readonly workflowRef: string;
 	readonly applyVariables?: boolean;
+	readonly readUser?: string;
+	readonly readPassword?: string;
 }
 
 /**
@@ -84,22 +90,62 @@ export interface SetupStep {
 	readonly detail?: string;
 }
 
-async function defaultFetchCacheInfo(url: string): Promise<CacheInfo> {
-	const target = `${url.replace(/\/$/, '')}/nix-cache-info`;
-	const response = await fetch(target);
+export interface ReadCredentialOptions {
+	readonly readUser?: string;
+	readonly readPassword?: string;
+}
 
-	if (!response.ok) {
-		await response.text();
-		throw new CacheInfoUnavailableError(target, response.status);
+/**
+ * A `nix-cache-info` fetcher for the given read credential: a private
+ * tenant's read routes answer 401 without one, so setup and check thread the
+ * same Basic credential a reader would use. Supplying only half the pair is
+ * refused before any request.
+ */
+export function cacheInfoFetcher(
+	options: ReadCredentialOptions,
+	fetcher: typeof fetch = fetch
+): (url: string) => Promise<CacheInfo> {
+	if (
+		(options.readUser === undefined) !==
+		(options.readPassword === undefined)
+	) {
+		throw new ReadCredentialPairError();
 	}
 
-	const body = await response.text();
+	const headers =
+		options.readUser === undefined || options.readPassword === undefined
+			? undefined
+			: basicAuthHeader(options.readUser, options.readPassword);
 
-	try {
-		return CacheInfo.parse(body);
-	} catch (error) {
-		throw new CacheInfoUnparsableError(target, { cause: error });
-	}
+	return async (url: string) => {
+		const target = `${url.replace(/\/$/, '')}/nix-cache-info`;
+		const response = await fetcher(
+			target,
+			headers === undefined ? {} : { headers }
+		);
+
+		if (!response.ok) {
+			await response.text();
+
+			if (response.status === tooManyRequestsStatus) {
+				throw new CacheInfoRateLimitedError(target);
+			}
+
+			if (response.status >= serverErrorStatus) {
+				throw new CacheInfoServerError(target, response.status);
+			}
+
+			throw new CacheInfoUnavailableError(target, response.status);
+		}
+
+		const body = await response.text();
+
+		try {
+			return CacheInfo.parse(body);
+		} catch (error) {
+			throw new CacheInfoUnparsableError(target, { cause: error });
+		}
+	};
 }
 
 // One authenticated client covers every variable write of a setup run; the
@@ -318,9 +364,14 @@ export async function runGithubSetup(
 	dependencies: GithubSetupDependencies = {}
 ): Promise<void> {
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
-	const fetchCacheInfo = dependencies.fetchCacheInfo ?? defaultFetchCacheInfo;
+	const fetchCacheInfo =
+		dependencies.fetchCacheInfo ?? cacheInfoFetcher(options);
 	const setVariable = dependencies.setVariable ?? defaultSetVariable();
 	const graceSeconds = parseGrace(options.grace);
+
+	if (graceSeconds < minimumGraceSeconds) {
+		throw new GraceTooShortError(graceSeconds, minimumGraceSeconds);
+	}
 
 	const identity = await reporter.phase('Resolving repository', () =>
 		resolveRepository(options.repo)
@@ -446,6 +497,14 @@ export function registerGithubCommands(
 			'--apply-variables',
 			'Set the repository variables through gh instead of only printing them.'
 		)
+		.option(
+			'--read-user <user>',
+			'Basic read credential for tenants whose reads are private.'
+		)
+		.option(
+			'--read-password <password>',
+			'Basic read credential for tenants whose reads are private.'
+		)
 		.action(async (url: string, options: GithubSetupOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
@@ -458,5 +517,53 @@ export function registerGithubCommands(
 				reuseViews: rpc.reuseViews,
 				oidcTrust: rpc.oidcTrust
 			});
+		});
+
+	github
+		.command('check')
+		.description(
+			'Verify the invariants a publishing run depends on before its first CI run: trust-rule matching and grant coverage, grace coverage, reuse-view definition and priority, runner variables and labels, and root-prefix nesting.'
+		)
+		.argument('<url>', tenantUrlArgument)
+		.requiredOption('--repo <owner/name>', 'GitHub repository to verify.')
+		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
+		.requiredOption(
+			'--workflow-ref <owner/repo/path@ref>',
+			'The job_workflow_ref claim a run presents, at the release tag the caller workflow uses.'
+		)
+		.option(
+			'--manifest <path>',
+			'The evaluated target manifest (`nix eval --json .#cupboardOutputs`), for the runner-label check.'
+		)
+		.option(
+			'--root-prefix <value>',
+			"The caller workflow's root-prefix input, for the nesting check."
+		)
+		.option(
+			'--read-user <user>',
+			'Basic read credential for tenants whose reads are private.'
+		)
+		.option(
+			'--read-password <password>',
+			'Basic read credential for tenants whose reads are private.'
+		)
+		.action(async (url: string, options: GithubCheckOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const rpc = tenantRpc(url, {
+				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
+				signal: programOptions.signal
+			});
+
+			await runGithubCheck(
+				url,
+				options,
+				reporter,
+				{
+					policies: rpc.policies,
+					reuseViews: rpc.reuseViews,
+					oidcTrust: rpc.oidcTrust
+				},
+				{ fetchCacheInfo: cacheInfoFetcher(options) }
+			);
 		});
 }

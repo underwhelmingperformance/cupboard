@@ -1,3 +1,4 @@
+import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
 import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema,
@@ -13,8 +14,6 @@ import {
 	AuthorizationDetailsRequiredError,
 	InvalidAuthorizationDetailsError
 } from '../errors.ts';
-
-import { isGrantPermittedByRule } from './bindings.ts';
 
 /**
  * Parse the `authorization_details` form field a client sent. It is carried as
