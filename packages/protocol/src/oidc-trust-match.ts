@@ -55,7 +55,10 @@ function hasMatchingAudience(rule: OidcTrustRule, claims: OidcClaims): boolean {
 // A configured claim is satisfied only by a string claim matching its exact
 // value or pattern, so a numeric or structured claim never satisfies a
 // configured value by coincidence.
-function isClaimSatisfied(expected: ClaimMatch, actual: unknown): boolean {
+export function isClaimSatisfied(
+	expected: ClaimMatch,
+	actual: unknown
+): boolean {
 	if (typeof actual !== 'string') {
 		return false;
 	}

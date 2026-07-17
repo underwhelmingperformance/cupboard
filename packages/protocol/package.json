@@ -18,6 +18,7 @@
 		"./capture": "./src/capture.ts",
 		"./contract": "./src/contract/index.ts",
 		"./control-keys": "./src/control-keys.ts",
+		"./grant-match": "./src/grant-match.ts",
 		"./grants": "./src/grants.ts",
 		"./keys": "./src/keys.ts",
 		"./oidc": "./src/oidc.ts",

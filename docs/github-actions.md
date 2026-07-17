@@ -231,26 +231,37 @@ kept explicit so changes to cupboard do not silently alter a repository's CI.
 
 ### 6. Verify the setup
 
-List the tenant configuration before opening the first pull request:
+Check the invariants the first run depends on before opening a pull request:
 
 ```bash
-cupboard policy list "$tenant"
-cupboard reuse-view list "$tenant"
-cupboard oidc-trust list "$tenant"
+nix eval --json .#cupboardOutputs > /tmp/manifest.json
+
+cupboard github check "$tenant" --repo "$repo" \
+  --manifest /tmp/manifest.json \
+  --root-prefix "github:$repo/main"
 ```
 
-The output should contain the tenant-wide 24-hour grace policy, the
-`pull-requests` view and one trust rule for PRs plus one for `main`. Open a pull
-request and confirm that the workflow publishes to `pr-<number>`. After merging
-it, the `main` run should plan already-published targets from the reuse view and
-retain them beneath `github:<owner>/<repo>/main` in the default cache.
+The check evaluates the stored trust rules against the exact claims a real run
+of this repository presents, so a mis-spelled `job_workflow_ref` fails here, by
+name, instead of refusing every push on the first run, and it verifies that each
+matched rule's stored grants cover the caches and roots the run requests. It
+also verifies the grace policy's coverage and duration, the view's priority
+against the destination's as actually served, that `CUPBOARD_RUNNERS` permits
+every manifest label and `CUPBOARD_PLAN_RUNNER` parses, and that the root prefix
+nests under the granted root. An invariant it cannot verify in this environment
+(no GitHub token, no evaluated manifest) is reported by name and the exit is
+distinct from success.
 
-Note that the listing shows the configuration exists, not that it will match a
-real run: a trust rule with a mis-spelled `job_workflow_ref` lists identically
-to a working one, and the first sign of the difference is every push being
-refused. If the first run's pushes are rejected, compare each rule's claims
-against [docs/trust-rules.md](./trust-rules.md) character by character before
-anything else.
+Listing the configuration by hand remains available (`cupboard policy list`,
+`cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
+only that rows exist, not that they will match a real run.
+
+Open a pull request and confirm that the workflow publishes to `pr-<number>`.
+After merging it, the `main` run should plan already-published targets from the
+reuse view and retain them beneath `github:<owner>/<repo>/main` in the default
+cache. If a push is refused anyway, the refusal names the first failing claim
+when the token really is from this repository; compare it against
+[docs/trust-rules.md](./trust-rules.md).
 
 ## `actions/setup`
 

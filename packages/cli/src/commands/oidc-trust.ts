@@ -29,7 +29,8 @@ import {
 	jobWorkflowReferenceClaim as jobWorkflowReferenceClaim
 } from './oidc-trust/rule-builder.ts';
 
-const githubActionsIssuer = 'https://token.actions.githubusercontent.com';
+export const githubActionsIssuer =
+	'https://token.actions.githubusercontent.com';
 
 interface GithubPrOptions {
 	readonly repo: string;

@@ -7,9 +7,10 @@ import { z } from 'zod';
 
 // The CLI's own failure categories, layered on the shared generic (1) and usage
 // (2) codes. The values follow the BSD sysexits convention (77 EX_NOPERM, 75
-// EX_TEMPFAIL).
+// EX_TEMPFAIL, 69 EX_UNAVAILABLE).
 export const authExitCode = 77;
 export const transientExitCode = 75;
+export const unavailableExitCode = 69;
 
 export abstract class CliError extends CodedError {}
 
@@ -491,6 +492,33 @@ export class CacheInfoUnavailableError extends CliError {
 	}
 }
 
+export class CacheInfoRateLimitedError extends CliError {
+	constructor(public readonly target: string) {
+		super(`${target} rate limited the nix-cache-info request`);
+		this.name = 'CacheInfoRateLimitedError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
+export class CacheInfoServerError extends CliError {
+	constructor(
+		public readonly target: string,
+		public readonly status: number
+	) {
+		super(
+			`${target} answered HTTP ${String(status)} while serving nix-cache-info`
+		);
+		this.name = 'CacheInfoServerError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
 export class CacheInfoUnparsableError extends CliError {
 	constructor(
 		public readonly target: string,
@@ -531,5 +559,72 @@ export class GithubTokenMissingError extends CliError {
 				'GITHUB_TOKEN, or set the variables yourself as the guide shows'
 		);
 		this.name = 'GithubTokenMissingError';
+	}
+}
+
+export class GhUnavailableError extends CliError {
+	constructor() {
+		super('gh is not available to read repository variables');
+		this.name = 'GhUnavailableError';
+	}
+}
+
+export class InvalidManifestError extends CliUsageError {
+	constructor(
+		public readonly path: string,
+		options?: { readonly cause?: unknown }
+	) {
+		super(
+			`${path} is not a readable evaluated target manifest (a JSON array of targets with an os label)`,
+			options
+		);
+		this.name = 'InvalidManifestError';
+	}
+}
+
+/**
+ * A grace shorter than the supported minimum risks expiring while a run is
+ * still publishing; refused before any policy is stored.
+ */
+export class GraceTooShortError extends CliUsageError {
+	constructor(
+		public readonly graceSeconds: number,
+		public readonly minimumSeconds: number
+	) {
+		super(
+			`--grace must be at least ${String(minimumSeconds)} seconds; got ${String(graceSeconds)}`
+		);
+		this.name = 'GraceTooShortError';
+	}
+}
+
+/** Basic read credentials come as a pair; half a pair is a mistake. */
+export class ReadCredentialPairError extends CliUsageError {
+	constructor() {
+		super('--read-user and --read-password must be supplied together');
+		this.name = 'ReadCredentialPairError';
+	}
+}
+
+export class GithubCheckFailedError extends CliError {
+	constructor(public readonly checks: readonly string[]) {
+		super(`Configuration checks failed: ${checks.join(', ')}`);
+		this.name = 'GithubCheckFailedError';
+	}
+}
+
+/**
+ * Some invariants could not be verified in this environment (no `gh`, no
+ * evaluated manifest). Nothing failed, but a green run was not proven either,
+ * so the exit is EX_UNAVAILABLE rather than success.
+ */
+export class GithubCheckIncompleteError extends CliError {
+	constructor(public readonly checks: readonly string[]) {
+		super(`Could not verify: ${checks.join(', ')}`);
+		this.name = 'GithubCheckIncompleteError';
+	}
+
+	override get exitCode(): number {
+		return unavailableExitCode;
 	}
 }

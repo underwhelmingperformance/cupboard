@@ -1,13 +1,13 @@
+import { describe, expect, it } from 'vitest';
+
+import { isGrantPermittedByRule } from './grant-match.ts';
 import {
 	type AuthorizationDetail,
 	authorizationDetailSchema,
 	type PermittedGrant,
 	permittedGrantSchema
-} from '@cupboard/protocol/grants';
-import { type OidcClaims } from '@cupboard/protocol/oidc-trust-match';
-import { describe, expect, it } from 'vitest';
-
-import { isGrantPermittedByRule } from './bindings.ts';
+} from './grants.ts';
+import { type OidcClaims } from './oidc-trust-match.ts';
 
 function grant(value: unknown): PermittedGrant {
 	return permittedGrantSchema.parse(value);
