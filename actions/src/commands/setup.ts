@@ -145,7 +145,9 @@ export function resolveSetupInputs(
 	environment: Environment
 ): SetupInputs {
 	const readUser = provided(options.readUser) ?? '';
-	const readPassword = provided(options.readPassword) ?? '';
+	// The password is taken verbatim: surrounding whitespace is part of a
+	// credential, so only its complete absence means "no password".
+	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {
 		throw new InvalidInputError(

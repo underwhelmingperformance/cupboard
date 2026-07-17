@@ -451,6 +451,26 @@ describe('fetchCachePublicKeyAt', () => {
 		}
 	});
 });
+
+describe('resolveSetupInputs read credentials', () => {
+	it('preserves significant whitespace in the read password', () => {
+		const inputs = resolveSetupInputs(
+			{
+				...baseOptions,
+				readUser: 'alice',
+				readPassword: ' p w ',
+				installDir: '/opt/cupboard'
+			},
+			{ GITHUB_ACTION_REPOSITORY: 'owner/cupboard' }
+		);
+
+		expect({
+			readUser: inputs.readUser,
+			readPassword: inputs.readPassword
+		}).toStrictEqual({ readUser: 'alice', readPassword: ' p w ' });
+	});
+});
+
 describe('resolveSetupInputs reuse view', () => {
 	it('threads reuse-view through', () => {
 		const inputs = resolveSetupInputs(
