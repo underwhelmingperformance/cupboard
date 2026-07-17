@@ -180,6 +180,21 @@ export type ParsedGracePolicyRemoveResponse = z.output<
 	typeof gracePolicyRemoveResponseSchema
 >;
 
+// Whether a grace policy covers a cache: a covered cache carries the grace a
+// publication to it would resolve (the longest matching cache-name prefix
+// wins, the same resolution a push is granted), an uncovered cache carries
+// nothing.
+export const graceCoverageResponseSchema = z.discriminatedUnion('covered', [
+	z.strictObject({
+		covered: z.literal(true),
+		graceSeconds: graceSecondsSchema
+	}),
+	z.strictObject({ covered: z.literal(false) })
+]);
+export type ParsedGraceCoverageResponse = z.output<
+	typeof graceCoverageResponseSchema
+>;
+
 export type RootSetBody = z.input<typeof rootSetBodySchema>;
 export type RootTarget = z.input<typeof rootTargetSchema>;
 export type RootSummary = z.input<typeof rootSummarySchema>;
@@ -204,6 +219,7 @@ export type GracePolicySummary = z.input<typeof gracePolicySummarySchema>;
 export type GracePolicyListResponse = z.input<
 	typeof gracePolicyListResponseSchema
 >;
+export type GraceCoverageResponse = z.input<typeof graceCoverageResponseSchema>;
 export type GracePolicyRemoveResponse = z.input<
 	typeof gracePolicyRemoveResponseSchema
 >;

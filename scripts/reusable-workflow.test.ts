@@ -106,6 +106,32 @@ describe('cupboard build provenance', () => {
 });
 
 describe('cupboard flake publish output records', () => {
+	it('threads an internally generated artifact name through plan consumers', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect({
+			callerInput: contents.includes('      artifact-key:\n'),
+			planOutput: contents.includes(
+				'      plan-artifact-name: ${{ steps.plan.outputs.plan-artifact-name }}'
+			),
+			artifactNames:
+				contents.match(
+					/name: \$\{\{ needs\.plan\.outputs\.plan-artifact-name \}\}/gu
+				) ?? [],
+			uploadName: contents.includes(
+				'name: ${{ steps.plan.outputs.plan-artifact-name }}'
+			)
+		}).toStrictEqual({
+			callerInput: false,
+			planOutput: true,
+			artifactNames: Array.from(
+				{ length: 2 },
+				() => 'name: ${{ needs.plan.outputs.plan-artifact-name }}'
+			),
+			uploadName: true
+		});
+	});
+
 	it('chooses delimiters that cannot collide with installable records', async () => {
 		const contents = await readFile(flakeWorkflow, 'utf8');
 
@@ -121,6 +147,46 @@ describe('cupboard flake publish output records', () => {
 				'for record in "${candidates[@]}"; do',
 				'for record in "${attrs[@]}"; do'
 			]
+		});
+	});
+});
+
+describe('cupboard flake publish event preset', () => {
+	it('rejects line breaks before writing resolved outputs', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+		const validation =
+			'for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do';
+		const outputWrite = 'echo "cache=${CACHE}"';
+
+		expect({
+			validation: contents.includes(validation),
+			lineFeed: contents.includes(`"\${!name}" == *$'\\n'*`),
+			carriageReturn: contents.includes(`"\${!name}" == *$'\\r'*`),
+			beforeOutputs:
+				contents.indexOf(validation) < contents.indexOf(outputWrite)
+		}).toStrictEqual({
+			validation: true,
+			lineFeed: true,
+			carriageReturn: true,
+			beforeOutputs: true
+		});
+	});
+
+	it('refuses non-pull-request runs outside the trusted branch', async () => {
+		const contents = await readFile(flakeWorkflow, 'utf8');
+
+		expect({
+			branchInput: contents.includes('      branch:\n'),
+			trustedRefCheck: contents.includes(
+				'elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then'
+			),
+			unsupportedRefError: contents.includes(
+				"preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}"
+			)
+		}).toStrictEqual({
+			branchInput: true,
+			trustedRefCheck: true,
+			unsupportedRefError: true
 		});
 	});
 });

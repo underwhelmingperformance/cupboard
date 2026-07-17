@@ -1,3 +1,5 @@
+import { WIRE_DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { authorizationDetailsSchema } from '@cupboard/protocol/grants';
 import type {
 	GracePolicyListResponse,
 	GracePolicyRemoveResponse,
@@ -7,6 +9,7 @@ import type {
 	RootSetResponse
 } from '@cupboard/protocol/retention';
 import {
+	graceCoverageResponseSchema,
 	gracePolicyListResponseSchema,
 	gracePolicyRemoveResponseSchema,
 	gracePolicySummarySchema,
@@ -397,6 +400,96 @@ describe('retention grace policies', () => {
 		expect({ list: list.status, add: add.status }).toStrictEqual({
 			list: StatusCodes.FORBIDDEN,
 			add: StatusCodes.FORBIDDEN
+		});
+	});
+});
+
+async function graceCoverage(
+	token: string,
+	cacheSelector: string
+): Promise<{ readonly status: number; readonly body: unknown }> {
+	const response = await authorisedFetch(
+		`/cache/${encodeURIComponent(cacheSelector)}/grace-coverage`,
+		token
+	);
+
+	return { status: response.status, body: await response.json() };
+}
+
+describe('grace coverage', () => {
+	beforeEach(resetTestServer);
+
+	it('resolves the longest matching prefix per cache and answers misses as uncovered', async () => {
+		const token = await initialise();
+		await addGracePolicy(token, { cachePrefix: '', graceSeconds: 86_400 });
+		await addGracePolicy(token, { cachePrefix: 'pr-', graceSeconds: 3600 });
+
+		const pullRequestCache = await graceCoverage(token, 'pr-7');
+		const defaultCache = await graceCoverage(token, WIRE_DEFAULT_CACHE);
+
+		expect({ pullRequestCache, defaultCache }).toStrictEqual({
+			pullRequestCache: {
+				status: StatusCodes.OK,
+				body: graceCoverageResponseSchema.parse({
+					covered: true,
+					graceSeconds: 3600
+				})
+			},
+			defaultCache: {
+				status: StatusCodes.OK,
+				body: graceCoverageResponseSchema.parse({
+					covered: true,
+					graceSeconds: 86_400
+				})
+			}
+		});
+	});
+
+	it('answers uncovered when no policy matches', async () => {
+		const token = await initialise();
+
+		const coverage = await graceCoverage(token, WIRE_DEFAULT_CACHE);
+
+		expect(coverage).toStrictEqual({
+			status: StatusCodes.OK,
+			body: graceCoverageResponseSchema.parse({ covered: false })
+		});
+	});
+
+	it('is readable with a confirm-scoped token, without the policy-admin scope', async () => {
+		const adminToken = await initialise();
+		await addGracePolicy(adminToken, { cachePrefix: '', graceSeconds: 86_400 });
+		const confirmToken = await issueServerSignedToken(
+			authorizationDetailsSchema.parse([
+				{
+					type: 'cupboard_cache',
+					actions: ['upload:confirm'],
+					cache: WIRE_DEFAULT_CACHE
+				}
+			])
+		);
+		const commitOnlyToken = await issueServerSignedToken(cacheWriteGrants());
+
+		const coverage = await graceCoverage(confirmToken, WIRE_DEFAULT_CACHE);
+		const commitOnly = await graceCoverage(commitOnlyToken, WIRE_DEFAULT_CACHE);
+		const refusedList = await authorisedFetch('/policies/grace', confirmToken);
+
+		// The token that can confirm a publication can read coverage. A presented
+		// commit grant does not imply runtime confirm authority, so it cannot,
+		// and the policy-admin listing stays refused to both.
+		expect({
+			coverageStatus: coverage.status,
+			coverageBody: coverage.body,
+			commitOnlyStatus: commitOnly.status,
+			refusedListStatus: refusedList.status
+		}).toStrictEqual({
+			coverageStatus: StatusCodes.OK,
+			coverageBody: graceCoverageResponseSchema.parse({
+				covered: true,
+				graceSeconds: 86_400
+			}),
+			commitOnlyStatus: StatusCodes.FORBIDDEN,
+			refusedListStatus: StatusCodes.FORBIDDEN
 		});
 	});
 });

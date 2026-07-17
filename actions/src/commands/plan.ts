@@ -11,6 +11,8 @@ import {
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
 import {
+	graceCoverageResponseSchema,
+	type ParsedGraceCoverageResponse,
 	type ParsedRootEnsureResponse,
 	rootEnsureResponseSchema
 } from '@cupboard/protocol/retention';
@@ -32,7 +34,11 @@ import {
 	ConfirmCommandError,
 	ConfirmResultInvalidError,
 	ConfirmResultMissingError,
+	GraceCoverageCommandError,
+	GraceCoverageResultInvalidError,
+	GraceCoverageResultMissingError,
 	GraceDeadlineMissingError,
+	GracePolicyMissingError,
 	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
@@ -42,7 +48,8 @@ import {
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
-	RunnerNotAllowedError
+	RunnerNotAllowedError,
+	ZeroGracePolicyError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { isEnabled, provided } from '../options.ts';
@@ -56,6 +63,7 @@ import {
 	evaluateTargets,
 	isValidRunnerLabel,
 	joinRoot,
+	type NixEvaluator,
 	parseRunnerRoutes,
 	planPublish,
 	type PublishPlan,
@@ -147,6 +155,17 @@ export interface PlanInputs {
 	readonly runId: string;
 	readonly runnerRoutes: ReadonlyMap<string, RunnerRoute>;
 	readonly temporaryDirectory: string;
+}
+
+/**
+ * The processes the plan reaches out through, injectable so tests can drive
+ * the whole plan without a Nix store, a network or a cupboard binary.
+ */
+export interface PlanDependencies {
+	readonly evaluator?: NixEvaluator;
+	readonly fetcher?: typeof fetch;
+	readonly runner?: EnsureRunner;
+	readonly createArtifactName?: () => string;
 }
 
 export function registerPlanCommand(
@@ -366,21 +385,32 @@ function validateRunnerEntries(source: string): void {
 export async function planAction(
 	options: PlanOptions,
 	environment: Environment = env,
-	reporter: Reporter = createGithubReporter()
+	reporter: Reporter = createGithubReporter(),
+	dependencies: PlanDependencies = {}
 ): Promise<void> {
 	const inputs = resolvePlanInputs(options, environment);
 	const plan = inputs.optimise
-		? await optimisedPlan(inputs, reporter)
+		? await optimisedPlan(inputs, reporter, dependencies)
 		: unoptimisedPlan(inputs.targets);
 
-	await writePlan(environment, inputs, plan);
+	await writePlan(
+		environment,
+		inputs,
+		plan,
+		dependencies.createArtifactName?.() ??
+			`cupboard-publish-plan-${randomUUID()}`
+	);
 }
 
 async function optimisedPlan(
 	inputs: PlanInputs,
-	reporter: Reporter
+	reporter: Reporter,
+	dependencies: PlanDependencies
 ): Promise<PublishPlan> {
-	const { evaluations, unevaluated } = await evaluateTargets(inputs.targets);
+	const { evaluations, unevaluated } = await evaluateTargets(
+		inputs.targets,
+		dependencies.evaluator
+	);
 
 	for (const failure of unevaluated) {
 		reporter.warn(
@@ -396,11 +426,14 @@ async function optimisedPlan(
 			: {
 					credentials: { user: inputs.readUser, password: inputs.readPassword }
 				};
+	const fetcher =
+		dependencies.fetcher === undefined ? {} : { fetcher: dependencies.fetcher };
 	const availablePaths = await availableCachePaths({
 		baseUrl: inputs.url,
 		cache: inputs.cache,
 		paths: probePaths,
-		...credentials
+		...credentials,
+		...fetcher
 	});
 	// The view probe is a second, separate fact: it says where a shared
 	// output can be substituted from, never what the destination retains.
@@ -411,12 +444,22 @@ async function optimisedPlan(
 					baseUrl: inputs.url,
 					view: inputs.reuseView,
 					paths: viewProbePaths(uses),
-					...credentials
+					...credentials,
+					...fetcher
 				});
+	// Grace mode fails closed at plan time, in two halves. Coverage first: a
+	// destination with no usable grace policy keeps nothing alive, so the run
+	// refuses here, before the ensure calls below touch any retention root,
+	// whether or not this manifest happens to produce a shared intermediate.
+	if (inputs.intermediateRetention === 'grace') {
+		await verifyGraceCoverage(inputs, dependencies.runner);
+	}
+
 	const retainedRoots = await ensureAvailableTargets(
 		inputs,
 		evaluations,
-		availablePaths
+		availablePaths,
+		dependencies.runner
 	);
 	const plan = planPublish({
 		evaluations,
@@ -427,13 +470,14 @@ async function optimisedPlan(
 		unevaluated: unevaluated.map((failure) => failure.target)
 	});
 
-	// Grace mode must not rely on a destination-resident intermediate whose
-	// deadline is about to lapse: refresh each one and fail closed unless every
-	// deadline comes back positive.
+	// The second half: the intermediates that already reside at the
+	// destination have their deadlines refreshed, and the plan fails unless
+	// every deadline comes back positive.
 	if (inputs.intermediateRetention === 'grace') {
 		await confirmDestinationIntermediates(
 			inputs,
-			plan.destinationIntermediates
+			plan.destinationIntermediates,
+			dependencies.runner
 		);
 	}
 
@@ -453,11 +497,13 @@ function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {
 async function writePlan(
 	environment: Environment,
 	inputs: PlanInputs,
-	plan: PublishPlan
+	plan: PublishPlan,
+	artifactName: string
 ): Promise<void> {
 	await mkdir(path.dirname(inputs.planFile), { recursive: true });
 	await writeFile(inputs.planFile, `${JSON.stringify(plan, undefined, 2)}\n`);
 	await setOutput(environment, 'plan-file', inputs.planFile);
+	await setOutput(environment, 'plan-artifact-name', artifactName);
 	await setOutput(
 		environment,
 		'seed-matrix',
@@ -617,6 +663,100 @@ function ensureResponse(
 	}
 
 	throw new RootEnsureResultMissingError(root);
+}
+
+// Establishes, before anything is published, that a grace policy covers the
+// destination cache, through `cupboard policy grace-coverage` under the same
+// OIDC identity the confirm calls use.
+export async function verifyGraceCoverage(
+	inputs: PlanInputs,
+	runner: EnsureRunner = defaultEnsureRunner
+): Promise<void> {
+	const resultFile = path.join(
+		inputs.temporaryDirectory,
+		`cupboard-grace-coverage-${randomUUID()}.jsonl`
+	);
+	const arguments_ = [
+		'--output-mode',
+		'github',
+		'--no-colour',
+		'--result-file',
+		resultFile,
+		'policy',
+		'grace-coverage',
+		inputs.url,
+		'--github-oidc',
+		'--audience',
+		inputs.audience
+	];
+
+	if (inputs.cache !== '') {
+		arguments_.push('--cache', inputs.cache);
+	}
+
+	try {
+		await runner(inputs.cupboardPath, arguments_);
+	} catch (error) {
+		const replayed = replayCapturedCommandOutput(error);
+
+		throw new GraceCoverageCommandError({
+			cause: error,
+			wasReported: replayed.wasReported
+		});
+	}
+
+	const coverage = coverageResponse(await readCoverageResults(resultFile));
+
+	if (!coverage.covered) {
+		throw new GracePolicyMissingError(inputs.cache);
+	}
+
+	// A zero-grace policy covers the cache without ever materialising a
+	// deadline, so every publication would fail later with a per-path
+	// diagnosis pointing away from the real problem: the policy itself.
+	if (coverage.graceSeconds === 0) {
+		throw new ZeroGracePolicyError(inputs.cache);
+	}
+}
+
+// A run that never opened its result file recorded no result; any other read
+// failure is the caller's environment misbehaving and propagates as itself.
+async function readCoverageResults(resultFile: string): Promise<string> {
+	try {
+		return await readFile(resultFile, 'utf8');
+	} catch (error) {
+		if (isFileNotFound(error)) {
+			throw new GraceCoverageResultMissingError();
+		}
+
+		throw error;
+	}
+}
+
+function coverageResponse(recorded: string): ParsedGraceCoverageResponse {
+	let events: readonly ReporterResultEvent[];
+
+	try {
+		events = parseReporterResults(recorded);
+	} catch (error) {
+		throw new GraceCoverageResultInvalidError({ cause: error });
+	}
+
+	for (const event of events) {
+		if (event.kind !== 'grace-coverage') {
+			continue;
+		}
+
+		const response = graceCoverageResponseSchema.safeParse(event.data);
+
+		if (!response.success) {
+			throw new GraceCoverageResultInvalidError({ cause: response.error });
+		}
+
+		return response.data;
+	}
+
+	throw new GraceCoverageResultMissingError();
 }
 
 // Refreshes the retention deadline of every destination-resident intermediate

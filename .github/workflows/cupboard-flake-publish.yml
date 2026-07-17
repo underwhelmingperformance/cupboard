@@ -14,14 +14,38 @@ on:
         required: false
         default: '.#cupboardOutputs'
         type: string
+      preset:
+        description: >-
+          Derive cache, root-prefix and ttl from the triggering event instead of
+          passing them explicitly. 'pull-request-and-branch' gives a
+          pull_request run its own pr-<number> cache with a 14-day TTL and a run
+          on the configured branch the default cache, each under
+          github:<repository>/<cache or branch>. Other refs are refused before
+          planning. Applies reuse-view to branch runs only, announcing with a
+          notice when a pull-request run drops a configured view. Mutually
+          exclusive with cache, root-prefix and ttl; empty keeps the explicit
+          inputs.
+        required: false
+        default: ''
+        type: string
+      branch:
+        description:
+          Branch trusted for non-pull-request runs under the
+          pull-request-and-branch preset. Must match github setup --branch.
+        required: false
+        default: main
+        type: string
       cache:
         description: Named cache to publish to; empty selects the default cache.
         required: false
         default: ''
         type: string
       root-prefix:
-        description: Prefix prepended to each target's rootSuffix.
-        required: true
+        description:
+          Prefix prepended to each target's rootSuffix. Required unless a preset
+          derives it.
+        required: false
+        default: ''
         type: string
       ttl:
         description: Retention TTL such as 14d; empty retains permanently.
@@ -110,8 +134,121 @@ on:
 permissions: {}
 
 jobs:
+  # The repository variables every later job depends on, verified before any
+  # job asks for the configured runner: a `runs-on` expression cannot guard
+  # its own fromJSON, so a malformed CUPBOARD_PLAN_RUNNER would otherwise
+  # fail runner selection with a bare expression error before any step could
+  # print guidance. This job therefore runs on a statically named
+  # GitHub-hosted runner; it executes no caller-controlled code and holds no
+  # secret.
+  preflight:
+    name: Verify the repository variables
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: Verify the runner variables
+        env:
+          PLAN_RUNNER: ${{ vars.CUPBOARD_PLAN_RUNNER }}
+          RUNNERS: ${{ vars.CUPBOARD_RUNNERS }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PLAN_RUNNER}" ]; then
+            echo '::error::the CUPBOARD_PLAN_RUNNER repository variable is not set; run cupboard github setup, or set it per docs/github-actions.md'
+            exit 1
+          fi
+          if ! jq -e . > /dev/null 2>&1 <<< "${PLAN_RUNNER}"; then
+            echo '::error::CUPBOARD_PLAN_RUNNER is not JSON; a plain label needs its quotes, e.g. "ubuntu-latest"'
+            exit 1
+          fi
+          if [ -z "${RUNNERS}" ]; then
+            echo '::error::the CUPBOARD_RUNNERS repository variable is not set; no manifest runner label is permitted without it'
+            exit 1
+          fi
+
+  # Resolves the effective cache, root prefix, TTL and reuse view once, so a
+  # preset caller and an explicit caller feed every later job identically. No
+  # secret and no caller-controlled code reaches this job: it evaluates only
+  # workflow expressions over the event context.
+  configure:
+    name: Resolve the publication inputs
+    needs: preflight
+    # Preflight has proven the variable is set and parses, so this expression
+    # cannot fail; the runner comes only from protected configuration (see
+    # the plan job's comment for why there is no label-only fallback).
+    runs-on: ${{ fromJSON(vars.CUPBOARD_PLAN_RUNNER) }}
+    permissions: {}
+    outputs:
+      cache: ${{ steps.resolve.outputs.cache }}
+      root-prefix: ${{ steps.resolve.outputs.root-prefix }}
+      ttl: ${{ steps.resolve.outputs.ttl }}
+      reuse-view: ${{ steps.resolve.outputs.reuse-view }}
+    steps:
+      - name: Resolve inputs
+        id: resolve
+        env:
+          PRESET: ${{ inputs.preset }}
+          CACHE: ${{ inputs.cache }}
+          ROOT_PREFIX: ${{ inputs.root-prefix }}
+          TTL: ${{ inputs.ttl }}
+          REUSE_VIEW: ${{ inputs.reuse-view }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          for name in PRESET CACHE ROOT_PREFIX TTL REUSE_VIEW BRANCH; do
+            if [[ "${!name}" == *$'\n'* || "${!name}" == *$'\r'* ]]; then
+              echo "::error::${name} must not contain line breaks"
+              exit 1
+            fi
+          done
+          case "${PRESET}" in
+            '')
+              if [ -z "${ROOT_PREFIX}" ]; then
+                echo '::error::root-prefix is required when no preset derives it'
+                exit 1
+              fi
+              ;;
+            pull-request-and-branch)
+              # A caller either states the event arithmetic or delegates it,
+              # never half of each: a preset alongside any input it derives is
+              # refused.
+              if [ -n "${CACHE}${ROOT_PREFIX}${TTL}" ]; then
+                echo '::error::preset is mutually exclusive with cache, root-prefix and ttl'
+                exit 1
+              fi
+              if [ "${EVENT_NAME}" = pull_request ]; then
+                CACHE="pr-${PR_NUMBER}"
+                TTL=14d
+                if [ -n "${REUSE_VIEW}" ]; then
+                  echo "::notice::reuse-view '${REUSE_VIEW}' applies to non-pull-request runs; disabled for this run"
+                fi
+                REUSE_VIEW=''
+                ROOT_PREFIX="github:${REPOSITORY}/${CACHE}"
+              elif [ "${REF}" = "refs/heads/${BRANCH}" ]; then
+                ROOT_PREFIX="github:${REPOSITORY}/${BRANCH}"
+              else
+                echo "::error::preset 'pull-request-and-branch' accepts pull_request runs or refs/heads/${BRANCH}; got event '${EVENT_NAME}' on '${REF}'"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::unknown preset '${PRESET}'"
+              exit 1
+              ;;
+          esac
+          {
+            echo "cache=${CACHE}"
+            echo "root-prefix=${ROOT_PREFIX}"
+            echo "ttl=${TTL}"
+            echo "reuse-view=${REUSE_VIEW}"
+          } >> "${GITHUB_OUTPUT}"
+
   plan:
     name: Plan the publication
+    needs: configure
     # The plan job receives the input SSH key, read credentials and OIDC
     # permission, and evaluates pull-request-controlled Nix, so its runner
     # comes only from protected configuration: the required JSON repository
@@ -131,6 +268,7 @@ jobs:
       target-count: ${{ steps.plan.outputs.target-count }}
       fallback-matrix: ${{ steps.plan.outputs.fallback-matrix }}
       fallback-count: ${{ steps.plan.outputs.fallback-count }}
+      plan-artifact-name: ${{ steps.plan.outputs.plan-artifact-name }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -154,13 +292,13 @@ jobs:
         id: setup
         with:
           cache-url: ${{ inputs.url }}
-          cache: ${{ inputs.cache }}
+          cache: ${{ needs.configure.outputs.cache }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          reuse-view: ${{ inputs.reuse-view }}
+          reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - name: Evaluate target manifest
         id: targets
@@ -177,9 +315,9 @@ jobs:
           targets: ${{ steps.targets.outputs.manifest }}
           url: ${{ inputs.url }}
           cupboard-path: ${{ steps.setup.outputs.cupboard-path }}
-          cache: ${{ inputs.cache }}
-          root-prefix: ${{ inputs.root-prefix }}
-          ttl: ${{ inputs.ttl }}
+          cache: ${{ needs.configure.outputs.cache }}
+          root-prefix: ${{ needs.configure.outputs.root-prefix }}
+          ttl: ${{ needs.configure.outputs.ttl }}
           intermediate-retention: ${{ inputs.intermediate-retention }}
           optimise: ${{ inputs.push }}
           read-user: ${{ secrets.read_user }}
@@ -189,11 +327,11 @@ jobs:
           # own manifest a privileged runner. A repository variable can only
           # be set through repository settings, which a PR cannot edit.
           runners: ${{ vars.CUPBOARD_RUNNERS }}
-          reuse-view: ${{ inputs.reuse-view }}
+          reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cupboard-publish-plan
+          name: ${{ steps.plan.outputs.plan-artifact-name }}
           path: ${{ steps.plan.outputs.plan-file }}
           if-no-files-found: error
           retention-days: 1
@@ -216,7 +354,7 @@ jobs:
 
   seed:
     name: ${{ matrix.key }}
-    needs: plan
+    needs: [configure, plan]
     if: ${{ needs.plan.outputs.seed-count != '0' }}
     strategy:
       fail-fast: false
@@ -252,17 +390,17 @@ jobs:
       - uses: ./.cupboard/actions/setup
         with:
           cache-url: ${{ inputs.url }}
-          cache: ${{ inputs.cache }}
+          cache: ${{ needs.configure.outputs.cache }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          reuse-view: ${{ inputs.reuse-view }}
+          reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: cupboard-publish-plan
+          name: ${{ needs.plan.outputs.plan-artifact-name }}
           path: ${{ runner.temp }}/cupboard-plan
 
       - name: Resolve seed installables
@@ -327,7 +465,7 @@ jobs:
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
-          cache: ${{ inputs.cache }}
+          cache: ${{ needs.configure.outputs.cache }}
           # The plan action decides these per group; its tests prove the
           # retention and reuse combinations.
           root: ${{ matrix.root }}
@@ -341,7 +479,7 @@ jobs:
 
   fallback:
     name: ${{ matrix.key }}
-    needs: plan
+    needs: [configure, plan]
     if: ${{ needs.plan.outputs.fallback-count != '0' }}
     strategy:
       fail-fast: false
@@ -377,17 +515,17 @@ jobs:
       - uses: ./.cupboard/actions/setup
         with:
           cache-url: ${{ inputs.url }}
-          cache: ${{ inputs.cache }}
+          cache: ${{ needs.configure.outputs.cache }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          reuse-view: ${{ inputs.reuse-view }}
+          reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: cupboard-publish-plan
+          name: ${{ needs.plan.outputs.plan-artifact-name }}
           path: ${{ runner.temp }}/cupboard-plan
 
       - name: Resolve fallback installables
@@ -441,7 +579,7 @@ jobs:
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
-          cache: ${{ inputs.cache }}
+          cache: ${{ needs.configure.outputs.cache }}
           # The plan action decides these per group; its tests prove the
           # retention and reuse combinations.
           root: ${{ matrix.root }}
@@ -454,7 +592,7 @@ jobs:
           release-repository: underwhelmingperformance/cupboard
 
   target:
-    needs: [plan, seed, fallback]
+    needs: [configure, plan, seed, fallback]
     # The targets run whatever became of the best-effort seed and fallback
     # warm-ups, but a cancelled run must not keep building and publishing.
     if:
@@ -496,13 +634,13 @@ jobs:
       - uses: ./.cupboard/actions/setup
         with:
           cache-url: ${{ inputs.url }}
-          cache: ${{ inputs.cache }}
+          cache: ${{ needs.configure.outputs.cache }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}
           release-repository: underwhelmingperformance/cupboard
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          reuse-view: ${{ inputs.reuse-view }}
+          reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - uses: ./.cupboard/actions/build-paths
         id: build
@@ -521,12 +659,12 @@ jobs:
         with:
           url: ${{ inputs.url }}
           paths: ${{ steps.build.outputs.paths }}
-          cache: ${{ inputs.cache }}
+          cache: ${{ needs.configure.outputs.cache }}
           # The plan action computes each target's root with the same
           # construction its ensure calls use, so the ensured root and the
           # published root cannot drift apart.
           root: ${{ matrix.root }}
-          ttl: ${{ inputs.ttl }}
+          ttl: ${{ needs.configure.outputs.ttl }}
           attestations: ${{ steps.attest.outputs.bundle-path }}
           cupboard-version: ${{ inputs.cupboard-version }}
           expected-source-commit: ${{ job.workflow_sha }}

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	graceCoverageResponseSchema,
 	gracePolicyAddBodySchema,
 	gracePolicyListResponseSchema,
 	gracePolicyRemoveResponseSchema,
@@ -215,5 +216,39 @@ describe('retention grace policy schemas', () => {
 			list: { policies: [policy] },
 			remove
 		});
+	});
+});
+
+describe('graceCoverageResponseSchema', () => {
+	it.each([
+		{
+			name: 'a covered cache with its resolved grace',
+			value: { covered: true, graceSeconds: 86_400 },
+			expected: { covered: true, graceSeconds: 86_400 }
+		},
+		{
+			name: 'an uncovered cache',
+			value: { covered: false },
+			expected: { covered: false }
+		}
+	])('accepts $name', ({ value, expected }) => {
+		expect(graceCoverageResponseSchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it.each([
+		{
+			name: 'covered without a resolved grace',
+			value: { covered: true }
+		},
+		{
+			name: 'uncovered with a resolved grace',
+			value: { covered: false, graceSeconds: 86_400 }
+		},
+		{
+			name: 'an unknown key',
+			value: { covered: false, surprise: true }
+		}
+	])('rejects $name', ({ value }) => {
+		expect(graceCoverageResponseSchema.safeParse(value).success).toBe(false);
 	});
 });

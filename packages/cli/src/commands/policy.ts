@@ -1,5 +1,7 @@
 import type { CliUi } from '@cupboard/cli-ui';
+import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import {
+	type GraceCoverageResponse,
 	type GracePolicyAddBody,
 	type GracePolicyListResponse,
 	type GracePolicyRemoveResponse,
@@ -14,8 +16,10 @@ import {
 import { formatCount, type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
-import { cachedOwnerProvider } from '../auth/auth.ts';
+import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
+import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
 import { InvalidPolicyScopeError } from '../errors.ts';
@@ -28,6 +32,12 @@ interface PolicyAddOptions {
 interface PolicyAddGraceOptions {
 	readonly cachePrefix: string;
 	readonly grace: number;
+}
+
+interface GraceCoverageOptions {
+	readonly cache?: string;
+	readonly githubOidc?: boolean;
+	readonly audience?: string;
 }
 
 interface ConfirmableOptions {
@@ -46,6 +56,7 @@ export interface PolicyClient {
 	graceList(): Promise<GracePolicyListResponse>;
 	graceAdd(input: GracePolicyAddBody): Promise<GracePolicySummary>;
 	graceRemove(input: { id: string }): Promise<GracePolicyRemoveResponse>;
+	graceCoverage(input: { cacheName: string }): Promise<GraceCoverageResponse>;
 }
 
 function parseScope(value: string): RetentionPolicyScope {
@@ -185,6 +196,45 @@ export function registerPolicyCommands(
 		});
 
 	policy
+		.command('grace-coverage')
+		.description(
+			'Report whether a grace policy covers a cache and the grace a publication to it would resolve.'
+		)
+		.argument('<url>', tenantUrlArgument)
+		.option(
+			'--cache <name>',
+			'report coverage of a named cache rather than the default'
+		)
+		.option(
+			'--github-oidc',
+			'authenticate with a GitHub Actions OIDC token (default: the cached owner login)'
+		)
+		.option(
+			'--audience <audience>',
+			'OIDC audience to request with --github-oidc (default: the tenant URL)'
+		)
+		.action(async (url: string, options: GraceCoverageOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
+			const credential = await authenticateForPush(
+				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+				{
+					githubOidc: options.githubOidc,
+					audience: options.audience ?? url,
+					authorizationDetails: confirmAuthorizationDetails({
+						cacheSelector: cacheName
+					})
+				}
+			);
+			const rpc = tenantRpc(url, {
+				credential,
+				signal: programOptions.signal
+			});
+
+			await runGraceCoverage(cacheName, reporter, rpc.policies);
+		});
+
+	policy
 		.command('remove-grace')
 		.description('Remove a retention grace policy by id.')
 		.argument('<url>', tenantUrlArgument)
@@ -280,6 +330,33 @@ function policyRow(policy: RetentionPolicySummary): ResultRow {
 		label: policy.id,
 		value: `${policy.scope} ${policy.pattern}; ${formatCount(policy.ttlSeconds)}s`
 	};
+}
+
+export async function runGraceCoverage(
+	cacheName: string,
+	reporter: Reporter,
+	client: Pick<PolicyClient, 'graceCoverage'>
+): Promise<void> {
+	const coverage = await reporter.phase('Reading grace coverage', () =>
+		client.graceCoverage({ cacheName })
+	);
+
+	reporter.result({
+		kind: 'grace-coverage',
+		data: coverage,
+		rows: [
+			{ label: 'Cache', value: cacheName },
+			{ label: 'Covered', value: coverage.covered ? 'yes' : 'no' },
+			...(coverage.covered
+				? [
+						{
+							label: 'Grace (seconds)',
+							value: formatCount(coverage.graceSeconds)
+						}
+					]
+				: [])
+		]
+	});
 }
 
 export async function runGracePolicyList(

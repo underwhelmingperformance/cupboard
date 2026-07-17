@@ -22,6 +22,10 @@ import {
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
 	GithubApiError,
+	GraceCoverageCommandError,
+	GraceCoverageResultInvalidError,
+	GraceCoverageResultMissingError,
+	GracePolicyMissingError,
 	IntermediateRootInvalidError,
 	InvalidChecksumLineError,
 	InvalidInputError,
@@ -42,7 +46,8 @@ import {
 	RootEnsureResultMissingError,
 	TargetEvaluationError,
 	TargetEvaluationResponseError,
-	UnsupportedPlatformError
+	UnsupportedPlatformError,
+	ZeroGracePolicyError
 } from './errors.ts';
 
 describe('action errors', () => {
@@ -160,6 +165,31 @@ describe('action errors', () => {
 		[
 			'DuplicateGroupKeyError',
 			new DuplicateGroupKeyError('seed-a'),
+			genericExitCode
+		],
+		[
+			'GraceCoverageCommandError',
+			new GraceCoverageCommandError({ cause: new Error('boom') }),
+			genericExitCode
+		],
+		[
+			'GraceCoverageResultMissingError',
+			new GraceCoverageResultMissingError(),
+			genericExitCode
+		],
+		[
+			'GraceCoverageResultInvalidError',
+			new GraceCoverageResultInvalidError({ cause: new Error('boom') }),
+			genericExitCode
+		],
+		[
+			'GracePolicyMissingError',
+			new GracePolicyMissingError(''),
+			genericExitCode
+		],
+		[
+			'ZeroGracePolicyError',
+			new ZeroGracePolicyError('builds'),
 			genericExitCode
 		],
 		[

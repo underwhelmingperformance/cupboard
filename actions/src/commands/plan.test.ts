@@ -14,17 +14,23 @@ import {
 	ConfirmResultInvalidError,
 	ConfirmResultMissingError,
 	DuplicateRunnerLabelError,
+	GraceCoverageCommandError,
+	GraceCoverageResultInvalidError,
+	GraceCoverageResultMissingError,
 	GraceDeadlineMissingError,
+	GracePolicyMissingError,
 	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
-	RunnerNotAllowedError
+	RunnerNotAllowedError,
+	ZeroGracePolicyError
 } from '../errors.ts';
 import {
 	joinRoot,
+	type NixEvaluator,
 	publishTargetsSchema,
 	type TargetEvaluation
 } from '../publish-plan.ts';
@@ -41,7 +47,8 @@ import {
 	type PlanInputs,
 	type PlanOptions,
 	resolvePlanInputs,
-	seedMatrix
+	seedMatrix,
+	verifyGraceCoverage
 } from './plan.ts';
 
 function storePath(value: string): StorePathString {
@@ -70,11 +77,16 @@ describe('planAction', () => {
 		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
 		const output = path.join(directory, 'output');
 
-		await planAction(baseOptions, {
-			RUNNER_TEMP: directory,
-			GITHUB_RUN_ID: '12345',
-			GITHUB_OUTPUT: output
-		});
+		await planAction(
+			baseOptions,
+			{
+				RUNNER_TEMP: directory,
+				GITHUB_RUN_ID: '12345',
+				GITHUB_OUTPUT: output
+			},
+			undefined,
+			{ createArtifactName: () => 'cupboard-publish-plan-test' }
+		);
 
 		const plan: unknown = JSON.parse(
 			await readFile(path.join(directory, 'cupboard-publish-plan.json'), 'utf8')
@@ -91,6 +103,7 @@ describe('planAction', () => {
 			},
 			outputs:
 				`plan-file=${path.join(directory, 'cupboard-publish-plan.json')}\n` +
+				'plan-artifact-name=cupboard-publish-plan-test\n' +
 				'seed-matrix={"include":[]}\n' +
 				'target-matrix={"include":[{"attr":".#packages.x86_64-linux.app","system":"x86_64-linux","os":"ubuntu-latest","remote":true,"bestEffort":false,"rootSuffix":"x86_64-linux/app","outputs":["out"],"root":"github:owner/repo/main/x86_64-linux/app","runsOn":"ubuntu-latest"}]}\n' +
 				'fallback-matrix={"include":[]}\n' +
@@ -1092,3 +1105,188 @@ function buildRequiredResultLine(unavailable: readonly string[]): string {
 		data: { status: 'build-required', unavailable }
 	})}\n`;
 }
+
+const alwaysAvailableFetcher: typeof fetch = () =>
+	Promise.resolve(new Response('', { status: 200 }));
+
+function graceCoverageResultLine(data: unknown): string {
+	return `${JSON.stringify({ kind: 'grace-coverage', data })}\n`;
+}
+
+function coverageRunner(
+	data: unknown
+): (
+	command: string,
+	arguments_: readonly string[]
+) => Promise<{ stdout: string; stderr: string }> {
+	return async (_command, arguments_) => {
+		await writeFile(
+			resultFileArgument(arguments_),
+			graceCoverageResultLine(data)
+		);
+
+		return { stdout: '', stderr: '' };
+	};
+}
+
+describe('verifyGraceCoverage', () => {
+	let directory: string;
+
+	beforeEach(async () => {
+		directory = await mkdtemp(path.join(tmpdir(), 'cupboard-coverage-'));
+	});
+
+	it('passes a covered destination and threads the cache flag', async () => {
+		let recorded: string[] = [];
+		const runner: EnsureRunner = async (command, arguments_) => {
+			recorded = [command, ...arguments_];
+			await writeFile(
+				resultFileArgument(arguments_),
+				graceCoverageResultLine({ covered: true, graceSeconds: 86_400 })
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+
+		await verifyGraceCoverage(
+			planInputs({
+				cache: 'builds',
+				intermediateRetention: 'grace',
+				temporaryDirectory: directory
+			}),
+			runner
+		);
+
+		expect(recorded).toStrictEqual([
+			'/unused/cupboard',
+			'--output-mode',
+			'github',
+			'--no-colour',
+			'--result-file',
+			resultFileArgument(recorded.slice(1)),
+			'policy',
+			'grace-coverage',
+			'https://cupboard.example/t/acme',
+			'--github-oidc',
+			'--audience',
+			'https://cupboard.example/t/acme',
+			'--cache',
+			'builds'
+		]);
+	});
+
+	it('refuses an uncovered destination before anything is published', async () => {
+		await expect(
+			verifyGraceCoverage(
+				planInputs({
+					intermediateRetention: 'grace',
+					temporaryDirectory: directory
+				}),
+				coverageRunner({ covered: false })
+			)
+		).rejects.toBeInstanceOf(GracePolicyMissingError);
+	});
+
+	it('refuses an uncovered cache before any retention root is ensured', async () => {
+		const planDirectory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
+		const commands: string[] = [];
+		const runner: EnsureRunner = async (command, arguments_) => {
+			commands.push(arguments_[arguments_.indexOf('--result-file') + 3] ?? '');
+			await writeFile(
+				resultFileArgument(arguments_),
+				graceCoverageResultLine({ covered: false })
+			);
+
+			return { stdout: '', stderr: '' };
+		};
+		const appNode = {
+			env: { out: `/nix/store/${'1'.repeat(32)}-app` },
+			inputs: { drvs: {} },
+			outputs: { out: { path: `${'1'.repeat(32)}-app` } }
+		};
+		const evaluator: NixEvaluator = () =>
+			Promise.resolve({
+				stdout: JSON.stringify({ derivations: { 'app.drv': appNode } })
+			});
+
+		// Every probe answers 200, so the target counts as fully cached and a
+		// reachable ensure pass would have called `root ensure` for it.
+		await expect(
+			planAction(
+				{
+					...baseOptions,
+					optimise: 'true',
+					intermediateRetention: 'grace'
+				},
+				{
+					GITHUB_RUN_ID: '12345',
+					RUNNER_TEMP: planDirectory,
+					GITHUB_OUTPUT: path.join(planDirectory, 'output')
+				},
+				undefined,
+				{ evaluator, fetcher: alwaysAvailableFetcher, runner }
+			)
+		).rejects.toBeInstanceOf(GracePolicyMissingError);
+
+		expect(commands).toStrictEqual(['grace-coverage']);
+	});
+
+	it('refuses a covering policy whose grace is zero', async () => {
+		await expect(
+			verifyGraceCoverage(
+				planInputs({
+					intermediateRetention: 'grace',
+					temporaryDirectory: directory
+				}),
+				coverageRunner({ covered: true, graceSeconds: 0 })
+			)
+		).rejects.toBeInstanceOf(ZeroGracePolicyError);
+	});
+
+	it('wraps a failing coverage command', async () => {
+		const failure = new Error('spawn /missing/cupboard ENOENT');
+		let thrown: unknown;
+
+		try {
+			await verifyGraceCoverage(
+				planInputs({
+					intermediateRetention: 'grace',
+					temporaryDirectory: directory
+				}),
+				() => Promise.reject(failure)
+			);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(GraceCoverageCommandError);
+
+		if (thrown instanceof GraceCoverageCommandError) {
+			expect(thrown.cause).toBe(failure);
+		}
+	});
+
+	it('rejects a run that records no coverage result', async () => {
+		await expect(
+			verifyGraceCoverage(
+				planInputs({
+					intermediateRetention: 'grace',
+					temporaryDirectory: directory
+				}),
+				resultFreeRunner
+			)
+		).rejects.toBeInstanceOf(GraceCoverageResultMissingError);
+	});
+
+	it('rejects coverage data the schema refuses as invalid', async () => {
+		await expect(
+			verifyGraceCoverage(
+				planInputs({
+					intermediateRetention: 'grace',
+					temporaryDirectory: directory
+				}),
+				coverageRunner({ covered: 'maybe' })
+			)
+		).rejects.toBeInstanceOf(GraceCoverageResultInvalidError);
+	});
+});

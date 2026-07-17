@@ -73,6 +73,9 @@ outputs:
   plan-file:
     description: Detailed plan consumed by seed and fallback jobs.
     value: ${{ steps.plan.outputs.plan-file }}
+  plan-artifact-name:
+    description: Unique name for transferring this invocation's plan.
+    value: ${{ steps.plan.outputs.plan-artifact-name }}
   seed-matrix:
     description: Dynamic matrix for shared prerequisite groups.
     value: ${{ steps.plan.outputs.seed-matrix }}

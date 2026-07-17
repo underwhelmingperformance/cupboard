@@ -573,3 +573,64 @@ export class GraceDeadlineMissingError extends CodedError {
 		this.name = 'GraceDeadlineMissingError';
 	}
 }
+
+export class GraceCoverageCommandError extends CodedError {
+	readonly wasReported: boolean;
+
+	constructor(options: {
+		readonly cause: unknown;
+		readonly wasReported?: boolean;
+	}) {
+		super("Could not read the destination's grace coverage", {
+			cause: options.cause
+		});
+		this.name = 'GraceCoverageCommandError';
+		this.wasReported = options.wasReported ?? false;
+	}
+}
+
+export class GraceCoverageResultMissingError extends CodedError {
+	constructor() {
+		super('Cupboard recorded no grace coverage result');
+		this.name = 'GraceCoverageResultMissingError';
+	}
+}
+
+export class GraceCoverageResultInvalidError extends CodedError {
+	constructor(options: { readonly cause: unknown }) {
+		super('Cupboard recorded an invalid grace coverage result', {
+			cause: options.cause
+		});
+		this.name = 'GraceCoverageResultInvalidError';
+	}
+}
+
+/**
+ * The destination cache has no covering grace policy while the run publishes
+ * with intermediate retention `grace`. Without a policy nothing keeps an
+ * unretained intermediate alive, so the plan refuses before anything is
+ * published, whether or not this run happens to produce one.
+ */
+export class GracePolicyMissingError extends CodedError {
+	constructor(public readonly cache: string) {
+		super(
+			`No grace policy covers ${cache === '' ? 'the default cache' : `cache ${cache}`}: add one with \`cupboard policy add-grace\` or use intermediate-retention: root`
+		);
+		this.name = 'GracePolicyMissingError';
+	}
+}
+
+/**
+ * The grace policy covering the destination cache has a zero grace. Zero
+ * marks paths grace-managed without granting any deadline, so grace mode
+ * could never keep an unretained intermediate alive; the plan refuses with
+ * the policy named before any per-path failure.
+ */
+export class ZeroGracePolicyError extends CodedError {
+	constructor(public readonly cache: string) {
+		super(
+			`The grace policy covering ${cache === '' ? 'the default cache' : `cache ${cache}`} grants zero grace, which keeps nothing alive: raise it with \`cupboard policy add-grace\` or use intermediate-retention: root`
+		);
+		this.name = 'ZeroGracePolicyError';
+	}
+}
