@@ -1,10 +1,7 @@
-import { isPatternMatch } from '@cupboard/protocol/capture';
-import {
-	type OidcTrustDisplay,
-	type PermittedGrant
-} from '@cupboard/protocol/grants';
-import { type ClaimMatch } from '@cupboard/protocol/oidc';
-import { IssuerUrl } from '@cupboard/protocol/oidc-issuer';
+import { isPatternMatch } from './capture.ts';
+import { type OidcTrustDisplay, type PermittedGrant } from './grants.ts';
+import { type ClaimMatch } from './oidc.ts';
+import { IssuerUrl } from './oidc-issuer.ts';
 
 // A trust rule reduced to what matching and issuance need. The DO reads enabled
 // rows from `oidc_trust`, parses `claims_json`/`permitted_grants_json`, and
@@ -55,21 +52,23 @@ function hasMatchingAudience(rule: OidcTrustRule, claims: OidcClaims): boolean {
 		: Array.isArray(aud) && aud.includes(rule.audience);
 }
 
-// Every configured claim must be present and match its exact value or pattern.
-// Either way the token's claim must be a string, so a numeric or structured
-// claim never satisfies a configured value by coincidence.
+// A configured claim is satisfied only by a string claim matching its exact
+// value or pattern, so a numeric or structured claim never satisfies a
+// configured value by coincidence.
+function isClaimSatisfied(expected: ClaimMatch, actual: unknown): boolean {
+	if (typeof actual !== 'string') {
+		return false;
+	}
+
+	return typeof expected === 'string'
+		? actual === expected
+		: isPatternMatch(expected.pattern, actual);
+}
+
 function hasMatchingClaims(rule: OidcTrustRule, claims: OidcClaims): boolean {
-	return Object.entries(rule.claims).every(([name, expected]) => {
-		const actual = claims[name];
-
-		if (typeof actual !== 'string') {
-			return false;
-		}
-
-		return typeof expected === 'string'
-			? actual === expected
-			: isPatternMatch(expected.pattern, actual);
-	});
+	return Object.entries(rule.claims).every(([name, expected]) =>
+		isClaimSatisfied(expected, claims[name])
+	);
 }
 
 // More pinned claims is a tighter rule, so it wins over a looser one for the
@@ -114,4 +113,48 @@ export function matchOidcTrust(
 				left.id.localeCompare(right.id)
 		)
 		.at(0);
+}
+
+// One configured claim a token failed to satisfy: the claim's name, the
+// configured expectation (a pattern in its `pattern:` form), and the token's
+// value when it carried a string one.
+export interface ClaimMismatch {
+	readonly claim: string;
+	readonly expected: string;
+	readonly presented?: string;
+}
+
+/**
+ * Every configured claim of `rule` that `claims` does not satisfy, in
+ * claim-name order so the report is deterministic; empty when every
+ * configured claim matches. Issuer and audience are compared during matching
+ * and verification, not here, so a mismatch always names a configured claim.
+ */
+export function claimMismatches(
+	rule: OidcTrustRule,
+	claims: OidcClaims
+): ClaimMismatch[] {
+	return Object.entries(rule.claims)
+		.toSorted(([left], [right]) => left.localeCompare(right))
+		.filter(([name, expected]) => !isClaimSatisfied(expected, claims[name]))
+		.map(([name, expected]) => {
+			const presented = claims[name];
+
+			return {
+				claim: name,
+				expected:
+					typeof expected === 'string'
+						? expected
+						: `pattern:${expected.pattern}`,
+				...(typeof presented === 'string' && { presented })
+			};
+		});
+}
+
+/** The first entry of {@link claimMismatches}, for a single-claim report. */
+export function firstClaimMismatch(
+	rule: OidcTrustRule,
+	claims: OidcClaims
+): ClaimMismatch | undefined {
+	return claimMismatches(rule, claims).at(0);
 }

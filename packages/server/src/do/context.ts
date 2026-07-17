@@ -13,6 +13,7 @@ import {
 	claimMatchSchema,
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
+import { type OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
 import {
 	type GracePolicySummary,
 	type RetentionPolicySummary
@@ -41,7 +42,6 @@ import {
 } from '../errors.ts';
 import { parseStored } from '../http/parse.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
-import { type OidcTrustRule } from '../oidc/oidc-trust.ts';
 
 import { boundedBlobs, boundedCache, boundedD1 } from './bounded-io.ts';
 import { DatabaseCostMeter, meteredStorage } from './database-cost-meter.ts';

@@ -4,9 +4,8 @@ import {
 	type PermittedGrant,
 	permittedGrantSchema
 } from '@cupboard/protocol/grants';
+import { type OidcClaims } from '@cupboard/protocol/oidc-trust-match';
 import { describe, expect, it } from 'vitest';
-
-import { type OidcClaims } from '../oidc/oidc-trust.ts';
 
 import { isGrantPermittedByRule } from './bindings.ts';
 

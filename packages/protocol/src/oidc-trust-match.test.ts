@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { matchOidcTrust, type OidcTrustRule } from './oidc-trust.ts';
+import {
+	firstClaimMismatch,
+	matchOidcTrust,
+	type OidcTrustRule
+} from './oidc-trust-match.ts';
 
 const github = 'https://token.actions.githubusercontent.com';
 const audience = 'https://cache.example.workers.dev';
@@ -242,5 +246,79 @@ describe('matchOidcTrust', () => {
 		expect(matchOidcTrust([interactiveRule, specificCiRule], claims)?.id).toBe(
 			'owner'
 		);
+	});
+});
+
+describe('firstClaimMismatch', () => {
+	const rule: OidcTrustRule = {
+		id: 'branch',
+		issuer: github,
+		audience,
+		claims: {
+			repository_id: '1234',
+			repository_owner_id: '5678',
+			ref: 'refs/heads/main',
+			job_workflow_ref: { pattern: '^acme/infra/.+@.+$' }
+		},
+		permittedGrants: ciGrant('ci')
+	};
+	const matching = {
+		iss: github,
+		aud: audience,
+		repository_id: '1234',
+		repository_owner_id: '5678',
+		ref: 'refs/heads/main',
+		job_workflow_ref: 'acme/infra/.github/workflows/publish.yml@refs/heads/main'
+	};
+
+	it.each([
+		{
+			name: 'nothing when every configured claim matches',
+			claims: matching,
+			expected: undefined
+		},
+		{
+			name: 'a wrong exact value with the presented value',
+			claims: { ...matching, ref: 'refs/heads/other' },
+			expected: {
+				claim: 'ref',
+				expected: 'refs/heads/main',
+				presented: 'refs/heads/other'
+			}
+		},
+		{
+			name: 'a failed pattern in its pattern form',
+			claims: {
+				...matching,
+				job_workflow_ref:
+					'other/repo/.github/workflows/publish.yml@refs/heads/main'
+			},
+			expected: {
+				claim: 'job_workflow_ref',
+				expected: 'pattern:^acme/infra/.+@.+$',
+				presented: 'other/repo/.github/workflows/publish.yml@refs/heads/main'
+			}
+		},
+		{
+			name: 'an absent claim without a presented value',
+			claims: { ...matching, ref: undefined },
+			expected: { claim: 'ref', expected: 'refs/heads/main' }
+		},
+		{
+			name: 'a non-string claim without a presented value',
+			claims: { ...matching, repository_id: 1234 },
+			expected: { claim: 'repository_id', expected: '1234' }
+		},
+		{
+			name: 'the first mismatch in claim-name order when several fail',
+			claims: { ...matching, ref: 'refs/heads/other', repository_id: '9999' },
+			expected: {
+				claim: 'ref',
+				expected: 'refs/heads/main',
+				presented: 'refs/heads/other'
+			}
+		}
+	])('reports $name', ({ claims, expected }) => {
+		expect(firstClaimMismatch(rule, claims)).toStrictEqual(expected);
 	});
 });
