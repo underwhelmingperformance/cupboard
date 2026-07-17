@@ -4155,6 +4155,181 @@ mode without waiting for retention grace.
   still make one sweep expensive; bounding those existing phases is separate
   garbage-collector work.
 
+## GitHub onboarding: setup, checks, and event presets
+
+### Context
+
+Enabling cache-aware flake publishing for a repository currently spans four
+surfaces: cupboard CLI commands against the tenant, protected GitHub repository
+variables, a manifest attribute in the flake, and a caller workflow. The
+quickstart walks all four, but it is a copy-paste script whose correctness rests
+on invariants the operator maintains by hand and that the document explains only
+in deep-dive sections far from the commands that depend on them:
+
+- The trust rule's `--job-workflow-ref` must name cupboard's repository and the
+  exact `refs/heads/main` spelling, while the caller writes the same workflow as
+  `@main`. Claim matching is an exact string comparison, so normalising the two
+  spellings, or "correcting" the repository to the operator's own, produces a
+  rule that can never match. The exchange then refuses with a flat
+  untrusted-token error that names no claim, `oidc-trust list` shows the broken
+  rule as present and enabled, and every push is blocked opaquely.
+- The tenant-wide grace policy permanently marks every covered cache
+  grace-managed on its first grace event. The marker survives policy removal,
+  changes how the cache is collected, and is exposed by no contract procedure or
+  CLI column, so it can be neither anticipated at setup nor audited later.
+- Grace mode's fail-closed guarantee runs only on seed and fallback pushes,
+  which exist only when targets share outputs. On a single-target manifest a
+  missing or mis-scoped grace policy yields a fully green run, and a grace
+  period shorter than the run degrades silently to a rebuild.
+- The reuse view's priority must exceed the destination's, but the destination's
+  default of 40 is a server constant the operator never sets or sees, so the
+  quickstart's `--priority 50` reads as arbitrary.
+- The caller workflow computes the cache name, retention-root prefix, and TTL
+  with inline `&&`/`||` expressions that must stay consistent with what the
+  trust rules route, and the runner variables must stay consistent with the
+  manifest's labels. Every one of these pairs is checked nowhere before the
+  first CI run.
+
+The common shape: consequential configuration is written across surfaces with no
+procedure that derives it, no procedure that checks it, and failure feedback
+deferred to the first real run, sometimes silently past it.
+
+### Decisions
+
+Collapse the hand-maintained configuration into commands that derive it, verify
+it, and explain refusals, and move the event arithmetic into the reusable
+workflow.
+
+1. One setup command. `cupboard github setup` writes the whole tenant-side
+   configuration for a repository in a single idempotent invocation: the grace
+   policy, the pull-request reuse view, and both trust rules, with the
+   job-workflow-ref taken from the required `--workflow-ref`, pinned to the
+   release the caller workflow uses. Re-running converges and reports drift
+   instead of duplicating state. Runner choice is operator configuration, so
+   setup writes nothing on GitHub.
+2. One check command. `cupboard github check` verifies, before the first run,
+   every invariant that today fails at run time or not at all: that the stored
+   trust rules match the claims a real run of this repository will present and
+   their grants cover what the run requests, that the grace policy in force for
+   each destination cache shape clears a stated minimum, that the view's
+   priority strictly exceeds the destination's as actually served, and that the
+   caller's root prefix nests under the granted root. A check that cannot verify
+   something says so; it never passes by omission.
+3. Diagnostic refusals. When a token exchange fails and at least one stored rule
+   pins the caller's own repository ids, the refusal names that rule and the
+   first claim that failed to match. A token from any other repository keeps the
+   flat refusal, so rule shape is disclosed only to the repository it already
+   names. The claim matcher moves to a shared package so the check command and
+   the server evaluate rules identically.
+4. Event presets. The reusable workflow accepts a preset that derives the cache
+   name, retention-root prefix, and TTL from the triggering event: pull-request
+   runs get `pr-<number>`, a 14-day TTL, and the matching root prefix; branch
+   runs get the default cache and the branch's root prefix, with `reuse-view`
+   applied to branch runs only. A preset and the explicit inputs it replaces are
+   mutually exclusive, so a caller either states the arithmetic or delegates it,
+   never half of each. The caller workflow shrinks to the URL, the targets, the
+   version pin, and the retention mode.
+5. Grace made visible and pre-checked. The caches contract carries the
+   grace-managed flag and the cache's earliest live grace deadline, and
+   `cache list` and `cache inspect` render them, mirroring how roots surface
+   expiry. In grace mode the plan job verifies up front that a covering policy
+   exists on the destination, failing at plan time even when the run produces no
+   shared intermediate.
+6. Documentation split by audience. `docs/github-actions.md` becomes the
+   user-facing guide: the quickstart, the actions, and the common day-2 tasks,
+   with every invariant stated beside the command that depends on it, so the
+   guide never relies on a deep dive for the correctness of what it asks the
+   reader to do. The deep material moves to standalone documents the guide links
+   where relevant: trust rules and claim matching, runner provenance, reuse-view
+   read semantics and intermediate handling, and the release pipeline. The
+   examples use one view name and one pull-request-number expression throughout.
+
+### The setup command
+
+`cupboard github setup <tenant> --repo <owner/name>` performs, in order: add the
+tenant-wide grace policy (default 24 hours, `--grace` to override), define the
+`pull-requests` view over the `pr-` prefix with a priority read from the
+destination's live `nix-cache-info` rather than assumed, and add the
+pull-request and branch trust rules (default branch `main`, `--branch` to
+override) with the job-workflow-ref derived from the pinned cupboard release. It
+then prints the four repository variables with their required values and, with
+`--apply-variables`, sets them through `gh variable set`.
+
+Idempotency is structural: each sub-step compares the stored state against what
+it would write, leaves matching state untouched, and reports any non-matching
+state as drift rather than silently replacing it, so the command is safe to
+re-run after partial failure and usable as an audit. Every sub-step composes
+existing contract procedures; where a needed read procedure is missing, it is
+added to the contract first.
+
+### The check command
+
+`cupboard github check <tenant> --repo <owner/name>` evaluates each invariant
+independently and reports every failure, not just the first. Trust-rule checking
+assembles the claim set a genuine run would present, for both the pull-request
+and branch shapes, and evaluates the stored rules with the shared matcher,
+reporting per rule the first claim that fails and the stored against presented
+values. The runner check evaluates the target manifest from the flake and
+compares its labels against `CUPBOARD_RUNNERS`, and parses
+`CUPBOARD_PLAN_RUNNER` as JSON. Checks that need an external tool (`gh`, Nix
+evaluation) degrade by naming what they could not verify.
+
+### Implementation sequence
+
+1. Documentation: split `docs/github-actions.md` into the user-facing guide and
+   the deep-dive documents (trust rules, runner provenance, reuse views,
+   releases), fixing the drift in the process (one view name, one
+   pull-request-number expression, the version note beside the variable it
+   describes) and stating the destination priority default, the trust-rule ref
+   spelling, the grace-managed permanence, and the caller's expression pattern
+   inline in the guide.
+2. Extend the caches contract and CLI with the grace-managed flag and earliest
+   live grace deadline.
+3. Move trust-rule claim matching into the shared protocol layer and add the
+   scoped diagnostic refusal to the token exchange.
+4. Add `cupboard github setup`, adding any missing contract read procedures it
+   needs for idempotent comparison.
+5. Add `cupboard github check` on the shared matcher and the new read surfaces.
+6. Add the event preset to `cupboard-flake-publish.yml` and the plan job's
+   up-front grace-policy verification.
+
+Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
+4's read procedures. Steps 1, 2, 3, and 6 are independent of each other.
+
+### Verification
+
+- Setup tests prove a second run against converged state performs no writes,
+  proven structurally against the listed tenant state, and that induced drift in
+  each sub-step is reported and left in place.
+- Check tests break each invariant in a fixture tenant and repository and assert
+  the specific failure by error type, including the per-claim trust report; a
+  check with `gh` or Nix unavailable reports the unverified invariants by name
+  and exits distinctly from success.
+- Exchange tests prove a mismatched rule pinned to the caller's repository ids
+  yields the diagnostic refusal naming the failing claim, and a token from any
+  other repository receives the flat refusal unchanged.
+- Preset tests prove the derived cache, root prefix, and TTL for both event
+  shapes structurally, and that supplying a preset alongside any input it
+  derives is rejected.
+- Plan tests prove grace mode without a covering policy fails at plan time on a
+  single-target manifest, where today's run passes green.
+- Contract tests prove the extended cache summary is additive: an older client
+  validates a newer server's response unchanged.
+
+### Out of scope and risks
+
+- No web dashboard or hosted onboarding flow; inspection and setup stay in the
+  CLI.
+- The check command's GitHub-side reads depend on a GitHub token and its
+  manifest check on local Nix evaluation; both degrade to named unverified
+  invariants, so a green check is only as complete as its environment, and it
+  says so.
+- Diagnostic refusals disclose rule shape to the repository the rule already
+  pins. That is judged acceptable; the flat refusal remains for everyone else.
+- Presets encode the quickstart's conventions. Repositories with unusual cache
+  or root layouts keep the explicit inputs, and the two paths share no
+  derivation logic, so a preset change cannot silently alter an explicit caller.
+
 ## Later features
 
 - [ ] Import from an existing binary cache.
