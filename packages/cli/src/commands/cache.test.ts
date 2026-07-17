@@ -10,8 +10,11 @@ import type {
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
+import { InvalidCachePriorityError } from '../errors.ts';
+
 import {
 	type CacheClient,
+	parsePriority,
 	runCacheCreate,
 	runCacheInspect,
 	runCacheList,
@@ -32,6 +35,19 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 		...overrides
 	};
 }
+
+describe('parsePriority', () => {
+	it('accepts a decimal integer', () => {
+		expect(parsePriority('50')).toBe(50);
+	});
+
+	it.each([[''], ['1e2'], ['0x10'], ['-1'], ['1.5'], ['soon'], ['010']])(
+		"rejects '%s'",
+		(value) => {
+			expect(() => parsePriority(value)).toThrow(InvalidCachePriorityError);
+		}
+	);
+});
 
 describe('runCacheList', () => {
 	it('reports a row per cache, labelling the default and its grace state', async () => {

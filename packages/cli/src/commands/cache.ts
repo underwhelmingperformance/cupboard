@@ -42,10 +42,16 @@ export interface CacheClient {
 	}): Promise<CacheRemoveResponse>;
 }
 
-function parsePriority(value: string): number {
+export function parsePriority(value: string): number {
+	// Canonical decimal only: a leading zero is as non-canonical as hex or
+	// exponent forms, so it is rejected the same way.
+	if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
+		throw new InvalidCachePriorityError(value);
+	}
+
 	const priority = Number(value);
 
-	if (!Number.isSafeInteger(priority) || priority < 0) {
+	if (!Number.isSafeInteger(priority)) {
 		throw new InvalidCachePriorityError(value);
 	}
 
