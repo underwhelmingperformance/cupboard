@@ -127,11 +127,11 @@ importers:
         specifier: ^3.1075.0
         version: 3.1087.0(@aws-sdk/client-s3@3.1087.0)
       '@cloudflare/workers-auth':
-        specifier: ^0.4.0
-        version: 0.4.2(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
+        specifier: ^0.5.0
+        version: 0.5.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
       '@cloudflare/workers-utils':
-        specifier: ^0.26.0
-        version: 0.26.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
+        specifier: ^0.27.0
+        version: 0.27.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
       '@cupboard/cli-ui':
         specifier: workspace:*
         version: link:../cli-ui
@@ -623,8 +623,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@cloudflare/workers-auth@0.4.2':
-    resolution: {integrity: sha512-q3u7uX1EVPaaKqYepLthwOvnm6irVJj7BWI6lAatko9JvAdyNFWZuyDPI2rP2cXL128GHDzxUu2W2cgaVqNtJA==}
+  '@cloudflare/workers-auth@0.5.0':
+    resolution: {integrity: sha512-c8TaSTN4iWCE0JXFbwXcCPP1JLIVyWRsx8PC2EjNvEss8+QWej00k29zBQdWkREI+7ALWbDLxKclMlzCaVfTfA==}
     peerDependencies:
       msw: 2.12.4
       vitest: ^4.1.0
@@ -637,8 +637,8 @@ packages:
   '@cloudflare/workers-types@5.20260705.1':
     resolution: {integrity: sha512-My4wQdN7ZkM9PzPC92mdCRbdJivtcEiyCr5Qi5cgKxMk3hrULkmiIoI7ZrhGei+QHDlok+g5HSPMuDm62sdaMQ==}
 
-  '@cloudflare/workers-utils@0.26.0':
-    resolution: {integrity: sha512-M7LKJx5PJLA0dWpOO0RfQQ9D7gC75bmWLe9nCybp2599PXYdFJLQSsQmxpdfALdXWKLqQ7IW9b6JDHgifxqPWg==}
+  '@cloudflare/workers-utils@0.27.0':
+    resolution: {integrity: sha512-vzCu8ECrTXGYFrTZLbrar9JEEr6KfDNnc9PpYLNptpwqZ8Xo1WfnvUloy8sjwmWKD1DCA/dnqmwpCmwNbDgrtQ==}
     peerDependencies:
       vitest: ^4.1.0
     peerDependenciesMeta:
@@ -3880,16 +3880,16 @@ snapshots:
   '@cloudflare/workerd-windows-64@1.20260701.1':
     optional: true
 
-  '@cloudflare/workers-auth@0.4.2(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))':
+  '@cloudflare/workers-auth@0.5.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))':
     dependencies:
-      '@cloudflare/workers-utils': 0.26.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
+      '@cloudflare/workers-utils': 0.27.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))
       undici: 7.28.0
     optionalDependencies:
       vitest: 4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0))
 
   '@cloudflare/workers-types@5.20260705.1': {}
 
-  '@cloudflare/workers-utils@0.26.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))':
+  '@cloudflare/workers-utils@0.27.0(vitest@4.1.8(@types/node@25.9.1)(vite@8.1.3(@types/node@25.9.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.22.4)(yaml@2.9.0)))':
     dependencies:
       undici: 7.28.0
     optionalDependencies:
