@@ -9,7 +9,6 @@ import {
 	DerivationGraphShapeError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
-	DuplicateRunnerLabelError,
 	TargetEvaluationError
 } from './errors.ts';
 import {
@@ -18,17 +17,14 @@ import {
 	availableViewPaths,
 	cacheProbePaths,
 	derivationUses,
-	disallowedRunners,
 	evaluateTargets,
 	evaluationFromJson,
 	joinRoot,
 	type NixEvaluator,
-	parseRunnerRoutes,
 	planPublish,
 	type PublishTarget,
 	publishTargetSchema,
 	publishTargetsSchema,
-	type RunnerRoute,
 	type TargetEvaluation,
 	viewProbePaths
 } from './publish-plan.ts';
@@ -1040,106 +1036,6 @@ describe('publishTargetsSchema', () => {
 // The manifest is pull-request-controlled, so its runner labels must never
 // reach `runs-on` unchecked: every permitted label comes from the
 // operator-controlled allow-list, with nothing built in.
-describe('disallowedRunners', () => {
-	it.each([
-		{
-			name: 'rejects every label when nothing is allowed',
-			os: ['ubuntu-latest', 'self-hosted'],
-			allowed: [],
-			disallowed: ['ubuntu-latest', 'self-hosted']
-		},
-		{
-			name: 'accepts exactly the labels the operator names',
-			os: ['ubuntu-latest', 'macos-14'],
-			allowed: ['ubuntu-latest', 'macos-14'],
-			disallowed: []
-		},
-		{
-			name: 'rejects a label outside the named set',
-			os: ['ubuntu-latest', 'self-hosted'],
-			allowed: ['ubuntu-latest'],
-			disallowed: ['self-hosted']
-		},
-		{
-			name: 'deduplicates the offending labels',
-			os: ['gpu', 'gpu', 'self-hosted'],
-			allowed: [],
-			disallowed: ['gpu', 'self-hosted']
-		}
-	])('$name', ({ os, allowed, disallowed }) => {
-		const targets = os.map((label, index) => ({
-			...target(`suffix-${String(index)}`),
-			os: label
-		}));
-
-		expect(disallowedRunners(targets, new Set(allowed))).toStrictEqual(
-			disallowed
-		);
-	});
-});
-
-// A bare entry routes by label spelling, which any runner can carry; a
-// group-qualified entry pins the named runner group, the provenance boundary
-// GitHub offers.
-describe('parseRunnerRoutes', () => {
-	it('routes bare labels to themselves and qualified labels to their group', () => {
-		expect(
-			parseRunnerRoutes('ubuntu-latest, nix-builder@build-farm macos-14')
-		).toStrictEqual(
-			new Map<string, RunnerRoute>([
-				['ubuntu-latest', 'ubuntu-latest'],
-				['nix-builder', { group: 'build-farm', labels: ['nix-builder'] }],
-				['macos-14', 'macos-14']
-			])
-		);
-	});
-
-	it('parses an empty allow-list to no routes', () => {
-		expect(parseRunnerRoutes('')).toStrictEqual(new Map());
-	});
-
-	// A later duplicate would silently win, so a group pin could vanish
-	// depending on entry order; both orderings must fail instead. GitHub
-	// matches labels case-insensitively, so a case variant is the same label.
-	it.each([
-		{
-			name: 'bare after group-qualified',
-			source: 'nix-builder@trusted nix-builder'
-		},
-		{
-			name: 'group-qualified after bare',
-			source: 'nix-builder nix-builder@trusted'
-		},
-		{ name: 'identical bare entries', source: 'ubuntu-latest ubuntu-latest' },
-		{
-			name: 'case variant after group-qualified',
-			source: 'nix-builder@trusted NIX-BUILDER'
-		},
-		{
-			name: 'group-qualified after case variant',
-			source: 'NIX-BUILDER nix-builder@trusted'
-		}
-	])('rejects a duplicate label ($name)', ({ source }) => {
-		expect(() => parseRunnerRoutes(source)).toThrow(DuplicateRunnerLabelError);
-	});
-
-	it('keys routes by canonical label while keeping the entry spelling', () => {
-		expect(parseRunnerRoutes('Nix-Builder@Trusted')).toStrictEqual(
-			new Map<string, RunnerRoute>([
-				['nix-builder', { group: 'Trusted', labels: ['Nix-Builder'] }]
-			])
-		);
-	});
-
-	it('allows a case-variant manifest label for a named runner', () => {
-		const targets = [{ ...target('suffix'), os: 'UBUNTU-LATEST' }];
-
-		expect(
-			disallowedRunners(targets, new Set(['ubuntu-latest']))
-		).toStrictEqual([]);
-	});
-});
-
 describe('joinRoot', () => {
 	// The ensure calls and the push matrix both construct target roots through
 	// this one function, so every equivalent spelling of a prefix and suffix

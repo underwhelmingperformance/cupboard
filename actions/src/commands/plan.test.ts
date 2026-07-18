@@ -13,7 +13,6 @@ import {
 	ConfirmCommandError,
 	ConfirmResultInvalidError,
 	ConfirmResultMissingError,
-	DuplicateRunnerLabelError,
 	GraceCoverageCommandError,
 	GraceCoverageResultInvalidError,
 	GraceCoverageResultMissingError,
@@ -25,7 +24,6 @@ import {
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
-	RunnerNotAllowedError,
 	ZeroGracePolicyError
 } from '../errors.ts';
 import {
@@ -68,7 +66,6 @@ const baseOptions: PlanOptions = {
 	url: 'https://cupboard.example/t/acme',
 	cupboardPath: '/unused/cupboard',
 	rootPrefix: 'github:owner/repo/main',
-	runners: 'ubuntu-latest',
 	optimise: 'false'
 };
 
@@ -112,118 +109,6 @@ describe('planAction', () => {
 				'target-count=1\n' +
 				'fallback-count=0\n'
 		});
-	});
-
-	// A group-qualified allow-list entry pins the runner group in the matrix
-	// entry the job consumes, so provenance is part of the routed value, not
-	// just the label spelling.
-	it('routes a group-qualified label to its runner group in the matrix', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
-		const output = path.join(directory, 'output');
-
-		await planAction(
-			{
-				...baseOptions,
-				targets: JSON.stringify([{ ...target, os: 'nix-builder' }]),
-				runners: 'nix-builder@build-farm'
-			},
-			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output, GITHUB_RUN_ID: '12345' }
-		);
-
-		const outputs = await readFile(output, 'utf8');
-		const targetMatrixLine = outputs
-			.split('\n')
-			.find((line) => line.startsWith('target-matrix='));
-
-		expect(targetMatrixLine).toContain(
-			'"runsOn":{"group":"build-farm","labels":["nix-builder"]}'
-		);
-	});
-
-	// GitHub matches labels case-insensitively, so a case-variant manifest
-	// label must still receive the group-pinned route, never a bare fallback
-	// that would bypass the pin.
-	it('routes a case-variant manifest label through the group pin', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
-		const output = path.join(directory, 'output');
-
-		await planAction(
-			{
-				...baseOptions,
-				targets: JSON.stringify([{ ...target, os: 'NIX-BUILDER' }]),
-				runners: 'nix-builder@build-farm'
-			},
-			{ RUNNER_TEMP: directory, GITHUB_OUTPUT: output, GITHUB_RUN_ID: '12345' }
-		);
-
-		const outputs = await readFile(output, 'utf8');
-		const targetMatrixLine = outputs
-			.split('\n')
-			.find((line) => line.startsWith('target-matrix='));
-
-		expect(targetMatrixLine).toContain(
-			'"runsOn":{"group":"build-farm","labels":["nix-builder"]}'
-		);
-	});
-
-	it('rejects a non-ASCII runners entry', async () => {
-		await expect(
-			planAction(
-				{ ...baseOptions, runners: 'ubuntu-latest \u{3A3}@trusted' },
-				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
-			)
-		).rejects.toThrow(InvalidInputError);
-	});
-
-	it('rejects a duplicated runner label before planning', async () => {
-		await expect(
-			planAction(
-				{ ...baseOptions, runners: 'ubuntu-latest@trusted ubuntu-latest' },
-				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
-			)
-		).rejects.toThrow(DuplicateRunnerLabelError);
-	});
-
-	it('rejects a malformed runners entry', async () => {
-		await expect(
-			planAction(
-				{ ...baseOptions, runners: 'ubuntu-latest@' },
-				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
-			)
-		).rejects.toThrow(InvalidInputError);
-	});
-
-	// The manifest is pull-request-controlled: a label the operator's
-	// runners configuration does not name must fail the plan.
-	it('rejects a manifest runner label the workflow does not allow', async () => {
-		await expect(
-			planAction(
-				{
-					...baseOptions,
-					targets: JSON.stringify([{ ...target, os: 'self-hosted' }])
-				},
-				{ RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' }
-			)
-		).rejects.toThrow(RunnerNotAllowedError);
-	});
-
-	it('accepts a custom runner label named by the trusted runners input', async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), 'cupboard-plan-'));
-
-		await expect(
-			planAction(
-				{
-					...baseOptions,
-					targets: JSON.stringify([{ ...target, os: 'self-hosted' }]),
-					runners: 'self-hosted bigmem'
-				},
-				{
-					RUNNER_TEMP: directory,
-					GITHUB_RUN_ID: '12345',
-					GITHUB_OUTPUT: path.join(directory, 'output')
-				}
-			)
-		).resolves.toBeUndefined();
 	});
 
 	it('rejects an invalid optimisation input', async () => {
@@ -909,7 +794,6 @@ function planInputs(overrides: Partial<PlanInputs> = {}): PlanInputs {
 		intermediateRetention: 'root',
 		reuseView: '',
 		runId: '12345',
-		runnerRoutes: new Map([['ubuntu-latest', 'ubuntu-latest']]),
 		temporaryDirectory: tmpdir(),
 		...overrides
 	};

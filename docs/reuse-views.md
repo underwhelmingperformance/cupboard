@@ -93,7 +93,7 @@ cupboard reuse-view set https://cupboard.example.workers.dev/t/acme pull-request
 ```yaml
 jobs:
   publish:
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@main
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
     permissions:
       attestations: write
       contents: read
@@ -102,6 +102,7 @@ jobs:
       url: https://cupboard.example.workers.dev/t/acme
       root-prefix: github:acme/app/main
       reuse-view: pull-requests
+      cupboard-version: vX.Y.Z
 ```
 
 If the merged commit's outputs already sit in the PR's cache from CI, the plan

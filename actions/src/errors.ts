@@ -240,33 +240,6 @@ export class PublishTargetsJsonError extends UsageError {
 	}
 }
 
-export class DuplicateRunnerLabelError extends UsageError {
-	constructor(public readonly label: string) {
-		super(
-			`runner label '${label}' is configured more than once. Duplicate ` +
-				`entries make the routing order-dependent, and a bare duplicate ` +
-				`would silently replace a group-pinned route, so each label must ` +
-				`appear exactly once.`
-		);
-		this.name = 'DuplicateRunnerLabelError';
-	}
-}
-
-export class RunnerNotAllowedError extends UsageError {
-	constructor(public readonly labels: readonly string[]) {
-		super(
-			`the target manifest requests runner labels the workflow does not ` +
-				`allow: ${labels.join(', ')}. The manifest is evaluated from the ` +
-				`flake, so an arbitrary label would let a pull request route its ` +
-				`build onto a privileged runner; every permitted label must be ` +
-				`named in the CUPBOARD_RUNNERS repository variable, which only a ` +
-				`repository operator can edit. Add the labels there, and verify ` +
-				`locally with \`cupboard github check --manifest\`.`
-		);
-		this.name = 'RunnerNotAllowedError';
-	}
-}
-
 export class PublishTargetsSchemaError extends UsageError {
 	constructor(public override readonly cause: z.ZodError) {
 		super(

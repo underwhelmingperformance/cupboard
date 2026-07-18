@@ -4256,9 +4256,10 @@ tenant-wide grace policy (default 24 hours, `--grace` to override), define the
 `pull-requests` view over the `pr-` prefix with a priority read from the
 destination's live `nix-cache-info` rather than assumed, and add the
 pull-request and branch trust rules (default branch `main`, `--branch` to
-override) with the job-workflow-ref derived from the pinned cupboard release. It
-then prints the four repository variables with their required values and, with
-`--apply-variables`, sets them through `gh variable set`.
+override) with the job-workflow-ref derived from the pinned cupboard release.
+Everything it writes is tenant state; runner choice and the release pin are
+ordinary values in the operator's own workflow and flake files, so setup touches
+nothing on GitHub.
 
 Idempotency is structural: each sub-step compares the stored state against what
 it would write, leaves matching state untouched, and reports any non-matching
@@ -4274,10 +4275,9 @@ independently and reports every failure, not just the first. Trust-rule checking
 assembles the claim set a genuine run would present, for both the pull-request
 and branch shapes, and evaluates the stored rules with the shared matcher,
 reporting per rule the first claim that fails and the stored against presented
-values. The runner check evaluates the target manifest from the flake and
-compares its labels against `CUPBOARD_RUNNERS`, and parses
-`CUPBOARD_PLAN_RUNNER` as JSON. Checks that need an external tool (`gh`, Nix
-evaluation) degrade by naming what they could not verify.
+values. Where jobs run is operator configuration, so the check verifies
+tenant-side state only; a check that is missing an input (`--root-prefix`)
+degrades by naming what it could not verify.
 
 ### Implementation sequence
 
@@ -4326,10 +4326,14 @@ Step 4 depends on 2's read surfaces; step 5 depends on 3's shared matcher and on
 
 - No web dashboard or hosted onboarding flow; inspection and setup stay in the
   CLI.
-- The check command's GitHub-side reads depend on a GitHub token and its
-  manifest check on local Nix evaluation; both degrade to named unverified
-  invariants, so a green check is only as complete as its environment, and it
-  says so.
+- Repository identity is resolved through GitHub's API before either setup or
+  check can compare trust rules. The lookup uses `GH_TOKEN` or `GITHUB_TOKEN`
+  when available so private repositories work, and failure to authenticate or
+  resolve the repository is a hard error rather than an unverified invariant.
+  Runner choice remains operator configuration and is not inferred from or
+  checked against the local target manifest. Only an optional input needed for a
+  tenant-side invariant, such as `--root-prefix`, may leave that invariant
+  explicitly unverified.
 - Diagnostic refusals disclose rule shape to the repository the rule already
   pins. That is judged acceptable; the flat refusal remains for everyone else.
   The claims that route a token to a rule are unverified, so the candidate

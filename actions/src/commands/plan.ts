@@ -48,7 +48,6 @@ import {
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
-	RunnerNotAllowedError,
 	ZeroGracePolicyError
 } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
@@ -57,19 +56,14 @@ import {
 	availableCachePaths,
 	availableViewPaths,
 	cacheProbePaths,
-	canonicalRunnerLabel,
 	derivationUses,
-	disallowedRunners,
 	evaluateTargets,
-	isValidRunnerLabel,
 	joinRoot,
 	type NixEvaluator,
-	parseRunnerRoutes,
 	planPublish,
 	type PublishPlan,
 	type PublishTarget,
 	publishTargetsSchema,
-	type RunnerRoute,
 	type TargetEvaluation,
 	viewProbePaths
 } from '../publish-plan.ts';
@@ -135,7 +129,6 @@ export interface PlanOptions {
 	readonly planFile?: string;
 	readonly optimise?: string;
 	readonly intermediateRetention?: string;
-	readonly runners?: string;
 }
 
 export interface PlanInputs {
@@ -153,7 +146,6 @@ export interface PlanInputs {
 	readonly intermediateRetention: 'root' | 'grace';
 	readonly reuseView: string;
 	readonly runId: string;
-	readonly runnerRoutes: ReadonlyMap<string, RunnerRoute>;
 	readonly temporaryDirectory: string;
 }
 
@@ -205,10 +197,6 @@ export function registerPlanCommand(
 			'--intermediate-retention <value>',
 			"how seed and fallback intermediates are retained: 'root' or 'grace'"
 		)
-		.option(
-			'--runners <entries>',
-			'runner labels the manifest may use, as label or label@group entries'
-		)
 		.action((options: PlanOptions) => planAction(options, environment));
 }
 
@@ -217,16 +205,6 @@ export function resolvePlanInputs(
 	environment: Environment
 ): PlanInputs {
 	const targets = parseTargets(options.targets);
-	const runnersSource = provided(options.runners) ?? '';
-
-	validateRunnerEntries(runnersSource);
-
-	const runnerRoutes = parseRunnerRoutes(runnersSource);
-	const badRunners = disallowedRunners(targets, new Set(runnerRoutes.keys()));
-
-	if (badRunners.length > 0) {
-		throw new RunnerNotAllowedError(badRunners);
-	}
 
 	const url = provided(options.url);
 
@@ -294,7 +272,6 @@ export function resolvePlanInputs(
 		optimise: isEnabled('optimise', options.optimise, true),
 		intermediateRetention,
 		runId,
-		runnerRoutes,
 		temporaryDirectory,
 		planFile:
 			provided(options.planFile) ??
@@ -344,42 +321,6 @@ function parseTargets(source: string | undefined): readonly PublishTarget[] {
 	}
 
 	return targets.data;
-}
-
-// The manifest is pull-request-controlled, so its runner labels are checked
-// against the operator-controlled allow-list, with nothing built in, before
-// any matrix is emitted.
-function validateRunnerEntries(source: string): void {
-	const entries = source.split(/[\s,]+/u).filter((entry) => entry !== '');
-
-	for (const entry of entries) {
-		if (!/^[^@\s,]+(?:@[^@\s,]+)?$/u.test(entry)) {
-			throw new InvalidInputError(
-				'runners',
-				`runners entry '${entry}' must be a label or label@group`
-			);
-		}
-
-		const separator = entry.indexOf('@');
-		const label = separator === -1 ? entry : entry.slice(0, separator);
-
-		// The label restriction exists because case folding is only exact within
-		// ASCII; the group restriction is this syntax's own grammar, so a group
-		// name GitHub would accept (spaces included) must be renamed to use it.
-		if (!isValidRunnerLabel(label)) {
-			throw new InvalidInputError(
-				'runners',
-				`runner label '${label}' must be printable ASCII`
-			);
-		}
-
-		if (separator !== -1 && !isValidRunnerLabel(entry.slice(separator + 1))) {
-			throw new InvalidInputError(
-				'runners',
-				`runner group '${entry.slice(separator + 1)}' must be printable ASCII`
-			);
-		}
-	}
 }
 
 export async function planAction(
@@ -941,15 +882,10 @@ function confirmResponse(recorded: string): ParsedUploadConfirmResponse {
 
 // Each target job's matrix entry carries the full root its push publishes
 // under, computed by the same construction the ensure calls use, so the two
-// paths a target can take to retention name one root.
-// Every matrix entry carries the exact `runs-on` value its job uses, routed
-// through the operator's allow-list so a group-qualified entry pins the
-// runner group, not just the label spelling. Validation already proved every
-// label is named; the fallback to the bare label satisfies the type.
-function runsOnFor(inputs: PlanInputs, os: string): RunnerRoute {
-	return inputs.runnerRoutes.get(canonicalRunnerLabel(os)) ?? os;
-}
-
+// paths a target can take to retention name one root. The `runs-on` value is
+// the manifest's `os` label: the manifest is the operator's flake, so where
+// its targets build is operator configuration, exactly like the labels in
+// any hand-written workflow.
 function targetMatrix(
 	inputs: PlanInputs,
 	plan: PublishPlan
@@ -957,7 +893,7 @@ function targetMatrix(
 	return plan.targets.map((target) => ({
 		...target,
 		root: joinRoot(inputs.rootPrefix, target.rootSuffix),
-		runsOn: runsOnFor(inputs, target.os)
+		runsOn: target.os
 	}));
 }
 
@@ -1005,7 +941,7 @@ export function seedMatrix(
 		system: group.system,
 		os: group.os,
 		remote: group.remote,
-		runsOn: runsOnFor(inputs, group.os),
+		runsOn: group.os,
 		...groupRetention(inputs, group.key)
 	}));
 }
@@ -1019,7 +955,7 @@ export function fallbackMatrix(
 		system: group.system,
 		os: group.os,
 		remote: group.remote,
-		runsOn: runsOnFor(inputs, group.os),
+		runsOn: group.os,
 		...groupRetention(inputs, group.key)
 	}));
 }

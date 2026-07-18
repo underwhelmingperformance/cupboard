@@ -11,7 +11,6 @@ import { describe, expect, it } from 'vitest';
 import {
 	GithubCheckFailedError,
 	GithubCheckIncompleteError,
-	GithubTokenMissingError,
 	unavailableExitCode
 } from '../../errors.ts';
 import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
@@ -36,7 +35,6 @@ const options: GithubCheckOptions = {
 	repo: 'acme/app',
 	branch: 'main',
 	workflowRef: pinnedWorkflowReference,
-	manifest: 'manifest.json',
 	rootPrefix: 'github:acme/app/main'
 };
 
@@ -115,16 +113,8 @@ function checkClient(overrides: {
 	};
 }
 
-const manifestJson = JSON.stringify([
-	{ attr: '.#a', system: 'x86_64-linux', os: 'ubuntu-latest' },
-	{ attr: '.#b', system: 'aarch64-darwin', os: 'macos-latest' }
-]);
-
 function checkDependencies(overrides: {
 	viewPriority?: number;
-	variables?: Record<string, string>;
-	variablesUnreadable?: boolean;
-	manifest?: string;
 }): Parameters<typeof runGithubCheck>[4] {
 	return {
 		lookupRepository: () => Promise.resolve(identity),
@@ -133,20 +123,7 @@ function checkDependencies(overrides: {
 				target.includes('/reuse/')
 					? new CacheInfo('/nix/store', true, overrides.viewPriority ?? 50)
 					: new CacheInfo('/nix/store', true, 40)
-			),
-		readVariable(name) {
-			if (overrides.variablesUnreadable === true) {
-				return Promise.reject(new GithubTokenMissingError());
-			}
-
-			return Promise.resolve(
-				(overrides.variables ?? {
-					CUPBOARD_PLAN_RUNNER: '"ubuntu-latest"',
-					CUPBOARD_RUNNERS: 'ubuntu-latest, macos-latest'
-				})[name]
-			);
-		},
-		readManifestFile: () => Promise.resolve(overrides.manifest ?? manifestJson)
+			)
 	};
 }
 
@@ -171,8 +148,6 @@ describe('runGithubCheck', () => {
 			{ label: 'main trust rule', value: 'ok' },
 			{ label: 'grace policy', value: 'ok' },
 			{ label: 'reuse view', value: 'ok' },
-			{ label: 'plan runner variable', value: 'ok' },
-			{ label: 'runner labels', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' }
 		]);
 	});
@@ -356,8 +331,6 @@ describe('runGithubCheck', () => {
 					label: 'reuse view',
 					value: "failed: view priority 40 does not exceed the destination's 40"
 				},
-				{ label: 'plan runner variable', value: 'ok' },
-				{ label: 'runner labels', value: 'ok' },
 				{
 					label: 'root prefix',
 					value:
@@ -465,10 +438,10 @@ describe('runGithubCheck', () => {
 		try {
 			await runGithubCheck(
 				url,
-				{ ...options, manifest: undefined, rootPrefix: undefined },
+				{ ...options, rootPrefix: undefined },
 				reporter(results),
 				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
-				checkDependencies({ variablesUnreadable: true })
+				checkDependencies({})
 			);
 		} catch (error) {
 			failure = error;
@@ -479,7 +452,7 @@ describe('runGithubCheck', () => {
 			checks: failure.checks,
 			exitCode: failure.exitCode
 		}).toStrictEqual({
-			checks: ['plan runner variable', 'runner labels', 'root prefix'],
+			checks: ['root prefix'],
 			exitCode: unavailableExitCode
 		});
 	});
@@ -532,46 +505,6 @@ describe('runGithubCheck', () => {
 					'attestation:negotiate, attestation:attach, root:set on cache ' +
 					'_default with root github:acme/app/main/target; remove it and ' +
 					're-run setup'
-			}
-		});
-	});
-
-	it('fails a manifest label the runners variable does not permit', async () => {
-		const results: ResultRow[][] = [];
-
-		let failure: unknown;
-		try {
-			await runGithubCheck(
-				url,
-				options,
-				reporter(results),
-				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
-				checkDependencies({
-					variables: {
-						CUPBOARD_PLAN_RUNNER: 'ubuntu-latest',
-						CUPBOARD_RUNNERS: 'ubuntu-latest'
-					}
-				})
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectFailed(failure);
-		expect({
-			checks: failure.checks,
-			planRunner: findings(results)[4],
-			runnerLabels: findings(results)[5]
-		}).toStrictEqual({
-			checks: ['plan runner variable', 'runner labels'],
-			planRunner: {
-				label: 'plan runner variable',
-				value:
-					'failed: CUPBOARD_PLAN_RUNNER is not JSON; a plain label needs its quotes'
-			},
-			runnerLabels: {
-				label: 'runner labels',
-				value: 'failed: CUPBOARD_RUNNERS does not name macos-latest'
 			}
 		});
 	});

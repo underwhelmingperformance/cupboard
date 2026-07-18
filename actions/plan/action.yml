@@ -54,21 +54,6 @@ inputs:
       availability never affects which targets build or what the destination
       retains.
     required: false
-  runners:
-    description: >-
-      Every runs-on label the target manifest may use, separated by whitespace
-      or commas; a label not named here fails the plan. An entry written as
-      label@group routes the label to the named runner group, pinning provenance
-      rather than spelling; a bare label matches any runner carrying it. Labels
-      and group names must each be one or more printable ASCII characters
-      excluding spaces, commas and the @ separator, and labels compare
-      case-insensitively. The manifest is evaluated from the flake and is
-      therefore pull-request-controlled, and a self-hosted runner can carry any
-      label, so nothing is allowed by default. This value must come from an
-      administrative boundary a pull request cannot edit, such as a repository
-      or organisation variable; the reusable workflow passes the
-      CUPBOARD_RUNNERS repository variable.
-    required: false
 outputs:
   plan-file:
     description: Detailed plan consumed by seed and fallback jobs.
@@ -143,7 +128,6 @@ runs:
         PLAN_FILE: ${{ inputs.plan-file }}
         OPTIMISE: ${{ inputs.optimise }}
         INTERMEDIATE_RETENTION: ${{ inputs.intermediate-retention }}
-        RUNNERS: ${{ inputs.runners }}
       run: |
         args=(plan
           --targets "$TARGETS"
@@ -158,8 +142,7 @@ runs:
           --audience "$AUDIENCE"
           --plan-file "$PLAN_FILE"
           --optimise "$OPTIMISE"
-          --intermediate-retention "$INTERMEDIATE_RETENTION"
-          --runners "$RUNNERS")
+          --intermediate-retention "$INTERMEDIATE_RETENTION")
         node --experimental-transform-types \
           --disable-warning=ExperimentalWarning \
           "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

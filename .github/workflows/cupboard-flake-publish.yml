@@ -112,6 +112,15 @@ on:
         required: false
         default: ''
         type: string
+      plan-runner:
+        description: >-
+          Runner label for the configure and plan jobs. The plan job evaluates
+          the flake with the input SSH key and OIDC permission, so repositories
+          with self-hosted runners should keep this on a GitHub-hosted label or
+          route it through runner groups; see docs/runner-provenance.md.
+        required: false
+        default: ubuntu-latest
+        type: string
     secrets:
       builder_ssh_key:
         description: SSH private key authenticating to the remote builders.
@@ -134,48 +143,15 @@ on:
 permissions: {}
 
 jobs:
-  # The repository variables every later job depends on, verified before any
-  # job asks for the configured runner: a `runs-on` expression cannot guard
-  # its own fromJSON, so a malformed CUPBOARD_PLAN_RUNNER would otherwise
-  # fail runner selection with a bare expression error before any step could
-  # print guidance. This job therefore runs on a statically named
-  # GitHub-hosted runner; it executes no caller-controlled code and holds no
-  # secret.
-  preflight:
-    name: Verify the repository variables
-    runs-on: ubuntu-latest
-    permissions: {}
-    steps:
-      - name: Verify the runner variables
-        env:
-          PLAN_RUNNER: ${{ vars.CUPBOARD_PLAN_RUNNER }}
-          RUNNERS: ${{ vars.CUPBOARD_RUNNERS }}
-        run: |
-          set -euo pipefail
-          if [ -z "${PLAN_RUNNER}" ]; then
-            echo '::error::the CUPBOARD_PLAN_RUNNER repository variable is not set; run cupboard github setup, or set it per docs/github-actions.md'
-            exit 1
-          fi
-          if ! jq -e . > /dev/null 2>&1 <<< "${PLAN_RUNNER}"; then
-            echo '::error::CUPBOARD_PLAN_RUNNER is not JSON; a plain label needs its quotes, e.g. "ubuntu-latest"'
-            exit 1
-          fi
-          if [ -z "${RUNNERS}" ]; then
-            echo '::error::the CUPBOARD_RUNNERS repository variable is not set; no manifest runner label is permitted without it'
-            exit 1
-          fi
-
   # Resolves the effective cache, root prefix, TTL and reuse view once, so a
   # preset caller and an explicit caller feed every later job identically. No
   # secret and no caller-controlled code reaches this job: it evaluates only
   # workflow expressions over the event context.
   configure:
     name: Resolve the publication inputs
-    needs: preflight
-    # Preflight has proven the variable is set and parses, so this expression
-    # cannot fail; the runner comes only from protected configuration (see
-    # the plan job's comment for why there is no label-only fallback).
-    runs-on: ${{ fromJSON(vars.CUPBOARD_PLAN_RUNNER) }}
+    runs-on: ${{ inputs.plan-runner }}
+    # A hung leg must not burn the 360-minute default.
+    timeout-minutes: 10
     permissions: {}
     outputs:
       cache: ${{ steps.resolve.outputs.cache }}
@@ -250,14 +226,13 @@ jobs:
     name: Plan the publication
     needs: configure
     # The plan job receives the input SSH key, read credentials and OIDC
-    # permission, and evaluates pull-request-controlled Nix, so its runner
-    # comes only from protected configuration: the required JSON repository
-    # variable names a label ("ubuntu-latest") or pins a runner group
-    # ({"group":"trusted","labels":["ubuntu-latest"]}). Unset, the job fails
-    # at runner selection, before any secret flows; there is no fallback,
-    # because a label-only default could route to any self-hosted runner
-    # carrying that spelling. See the runner provenance section in the docs.
-    runs-on: ${{ fromJSON(vars.CUPBOARD_PLAN_RUNNER) }}
+    # permission, and evaluates the flake, so where it runs is the operator's
+    # choice like any other job: the label comes from the plan-runner input.
+    # Self-hosted estates should read docs/runner-provenance.md before
+    # pointing it at their own machines.
+    runs-on: ${{ inputs.plan-runner }}
+    # A hung leg must not burn the 360-minute default.
+    timeout-minutes: 30
     permissions:
       contents: read # check out the flake source
       id-token: write # OIDC token for the retention-root ensure calls
@@ -322,11 +297,6 @@ jobs:
           optimise: ${{ inputs.push }}
           read-user: ${{ secrets.read_user }}
           read-password: ${{ secrets.read_password }}
-          # A workflow input would be caller-controlled, and on pull_request
-          # the caller workflow runs from the PR branch: a PR could grant its
-          # own manifest a privileged runner. A repository variable can only
-          # be set through repository settings, which a PR cannot edit.
-          runners: ${{ vars.CUPBOARD_RUNNERS }}
           reuse-view: ${{ needs.configure.outputs.reuse-view }}
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -360,6 +330,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.seed-matrix) }}
     runs-on: ${{ matrix.runsOn }}
+    # A hung leg must not burn the 360-minute default.
+    timeout-minutes: 180
     permissions:
       attestations: write # record build provenance on the repository
       contents: read # check out the flake source
@@ -416,7 +388,11 @@ jobs:
             attrs+=("${attr}")
           done < <(jq -r --arg group "${GROUP}" '.seedGroups[] | select(.key == $group) | .targets[]' "${plan}")
           if [ "${#attrs[@]}" -gt 0 ]; then
-            nix derivation show -r -- "${attrs[@]}" > /dev/null
+            # Best-effort: an attribute that does not evaluate on this runner
+            # degrades exactly as a failed build of it would, through the
+            # keep-going retry loop below, not by failing the whole step.
+            nix derivation show -r -- "${attrs[@]}" > /dev/null ||
+              echo "::warning::some seed attributes did not evaluate on this runner"
           fi
 
           candidates=()
@@ -485,6 +461,8 @@ jobs:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.fallback-matrix) }}
     runs-on: ${{ matrix.runsOn }}
+    # A hung leg must not burn the 360-minute default.
+    timeout-minutes: 180
     permissions:
       attestations: write # record build provenance on the repository
       contents: read # check out the flake source
@@ -603,6 +581,8 @@ jobs:
       matrix: ${{ fromJSON(needs.plan.outputs.target-matrix) }}
     name: ${{ matrix.attr }}
     runs-on: ${{ matrix.runsOn }}
+    # A hung leg must not burn the 360-minute default.
+    timeout-minutes: 180
     continue-on-error: ${{ matrix.bestEffort }}
     permissions:
       attestations: write # record build provenance on the repository

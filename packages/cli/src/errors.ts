@@ -549,40 +549,6 @@ export class GithubSetupDriftError extends CliError {
 }
 
 /**
- * The GitHub API calls that manage repository variables authenticate with a
- * token from the environment; raised when neither variable supplies one.
- */
-export class GithubTokenMissingError extends CliError {
-	constructor() {
-		super(
-			'Managing repository variables needs a GitHub token: set GH_TOKEN or ' +
-				'GITHUB_TOKEN, or set the variables yourself as the guide shows'
-		);
-		this.name = 'GithubTokenMissingError';
-	}
-}
-
-export class GhUnavailableError extends CliError {
-	constructor() {
-		super('gh is not available to read repository variables');
-		this.name = 'GhUnavailableError';
-	}
-}
-
-export class InvalidManifestError extends CliUsageError {
-	constructor(
-		public readonly path: string,
-		options?: { readonly cause?: unknown }
-	) {
-		super(
-			`${path} is not a readable evaluated target manifest (a JSON array of targets with an os label)`,
-			options
-		);
-		this.name = 'InvalidManifestError';
-	}
-}
-
-/**
  * A grace shorter than the supported minimum risks expiring while a run is
  * still publishing; refused before any policy is stored.
  */
