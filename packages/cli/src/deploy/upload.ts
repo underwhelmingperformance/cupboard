@@ -95,8 +95,10 @@ function bindingsFor(
 /**
  * Build the multipart upload metadata for a Worker from its config, the resolved
  * resource ids, and the Durable Object migration to apply (if any). `vars`
- * become `plain_text` bindings; `keep_bindings: ['secret_text']` preserves
- * secrets set out of band across content uploads.
+ * become `plain_text` bindings; `keep_bindings` preserves secrets and
+ * variables set out of band across content uploads, the deploy-side half of
+ * the worker configurations' `keep_vars` (a binding this metadata names
+ * still deploys from here).
  */
 export function buildScriptMetadata(
 	worker: WorkerConfig,
@@ -111,7 +113,7 @@ export function buildScriptMetadata(
 			enabled: worker.observability,
 			...(worker.tracing && { traces: { enabled: true } })
 		},
-		keep_bindings: ['secret_text'],
+		keep_bindings: ['secret_text', 'plain_text'],
 		bindings: bindingsFor(worker, resources),
 		...(worker.cpuMs !== undefined && { limits: { cpu_ms: worker.cpuMs } }),
 		...(migration !== undefined && { migrations: migration })

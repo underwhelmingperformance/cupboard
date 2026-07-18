@@ -9,6 +9,9 @@
 	// wrapping secret is bound only on that Worker and is unreachable from here, which
 	// is what makes the control key Worker-only in fact and not just by convention.
 	"name": "cupboard-tenant",
+	// Deploys keep dashboard-defined variables instead of replacing the
+	// set with what this file lists.
+	"keep_vars": true,
 	"main": "src/tenant-worker.ts",
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],

@@ -11,6 +11,9 @@
 	// That separation is the isolation: the Durable Object runs in its own script and
 	// never binds `CONTROL_KEY_WRAP_SECRET`, so it cannot recover the control key.
 	"name": "cupboard",
+	// Deploys keep dashboard-defined variables instead of replacing the
+	// set with what this file lists.
+	"keep_vars": true,
 	"main": "src/worker.ts",
 	"compatibility_date": "2026-05-15",
 	"compatibility_flags": ["nodejs_compat"],

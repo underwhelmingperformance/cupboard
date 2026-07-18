@@ -63,7 +63,7 @@ describe('buildScriptMetadata', () => {
 			compatibility_date: '2026-05-15',
 			compatibility_flags: ['nodejs_compat'],
 			observability: { enabled: true, traces: { enabled: true } },
-			keep_bindings: ['secret_text'],
+			keep_bindings: ['secret_text', 'plain_text'],
 			limits: { cpu_ms: 300_000 },
 			migrations: { new_tag: 'v1', new_sqlite_classes: ['CupboardServer'] },
 			bindings: [
