@@ -1,50 +1,36 @@
 # Runner provenance
 
-Why the flake publish workflow takes its runner configuration from repository
-variables, and what the label and group syntax guarantees. The setup steps
-themselves are in [docs/github-actions.md](./github-actions.md).
+Where cupboard's publish jobs run is operator configuration, exactly as it is
+for any other workflow: the plan job's label comes from the reusable workflow's
+`plan-runner` input, and each target's label from the `os` field of the flake's
+target manifest. Both files belong to the operator, and cupboard does not police
+them. This document explains what that choice rests on and what repositories
+with self-hosted runners should do about it.
 
-A label is a spelling, not a provenance claim: GitHub routes a job to any runner
+The cache itself does not depend on where jobs run. Publishing is gated by OIDC
+trust rules: the exchange verifies the token's signed claims (repository,
+branch, workflow file and ref), so a pull request's run cannot publish to a
+protected cache from any machine, trusted or otherwise. Attestations record what
+ran and where, so provenance is verifiable after the fact rather than enforced
+up front.
+
+The machine is a different asset, and GitHub's own controls govern it. A label
+is a spelling, not a provenance claim: GitHub routes a job to any runner
 carrying the requested labels, and self-hosted runners accept arbitrary manually
-assigned labels, hosted-sounding names included. GitHub's boundary for pinning
-where a job may land is the runner group. The target manifest is evaluated from
-the flake and is therefore pull-request-controlled, so every label it uses must
-be named in configuration a pull request cannot reach. The workflow therefore
-takes its runner configuration only from repository variables, and two of them
-must be set before the workflow runs:
+assigned labels, hosted-sounding names included. On a `pull_request` event the
+workflow files themselves come from the pull request's merge ref, so no value
+written in a workflow file, this repository's or cupboard's, can be treated as
+operator-only. Repositories that only use GitHub-hosted runners need nothing
+further: misrouting a job among ephemeral hosted runners is harmless.
 
-- `CUPBOARD_RUNNERS` names every `runs-on` label the target manifest may use,
-  separated by whitespace or commas. A bare entry (`ubuntu-latest`) permits the
-  spelling and routes by label alone; an entry written as `label@group`
-  (`nix-builder@build-farm`) routes that label to the named runner group as
-  `runs-on: { group, labels }`. Labels and group names must each be one or more
-  printable ASCII characters excluding spaces, commas and `@`, a narrower
-  contract than GitHub's: labels because case-insensitive matching is only exact
-  within ASCII, `@` because it separates the two, and the rest as this syntax's
-  own grammar. Rename a group that cannot be expressed. Example:
+Repositories with self-hosted runners should enforce the boundary where GitHub
+provides it:
 
-  ```text
-  ubuntu-latest, macos-14, nix-builder@build-farm
-  ```
-
-- `CUPBOARD_PLAN_RUNNER` is the plan job's own `runs-on` value, as JSON, and it
-  is required: the plan job holds the input SSH key, read credentials and OIDC
-  permission while evaluating pull-request-controlled Nix, so it has no fallback
-  runner. Either a plain label or a group selector:
-
-  ```text
-  "ubuntu-latest"
-  {"group":"trusted","labels":["ubuntu-latest"]}
-  ```
-
-Nothing is allowed by default, not even GitHub-hosted labels: a self-hosted
-runner can carry any label, so the permitted set is entirely the operator's.
-Labels are printable ASCII without spaces; GitHub compares them
-case-insensitively, and that comparison is only exact within ASCII, so anything
-wider is refused.
-
-Bare labels remain vulnerable to collisions: a self-hosted runner registered
-with a permitted spelling is eligible for those jobs. Either qualify every entry
-with a runner group, or enforce the boundary in the organisation's runner policy
-by restricting self-hosted runner groups away from the repositories that call
-this workflow and disallowing repository-level runner registration.
+- Put self-hosted runners in runner groups, and restrict each group to the
+  repositories and workflows that need it. A group is GitHub's mechanism for
+  pinning where a job may land; a label never is.
+- Require approval for workflow runs from outside contributors, and do not
+  attach privileged runners to public repositories.
+- Keep runner-level credentials off the machines, or scope them to what the jobs
+  genuinely need: a runner executes whatever code the workflows that can reach
+  it carry.

@@ -21,7 +21,6 @@ import {
 	DerivationNodeMissingError,
 	DerivationRootCountError,
 	DuplicateGroupKeyError,
-	DuplicateRunnerLabelError,
 	PublishPlanInvariantError,
 	TargetEvaluationError,
 	TargetEvaluationResponseError
@@ -65,103 +64,14 @@ export function joinRoot(prefix: string, suffix: string): string {
 }
 
 /**
- * The `runs-on` value a permitted manifest label routes to: the label alone,
- * or a runner-group selector for a group-qualified entry.
- */
-export type RunnerRoute =
-	string | { readonly group: string; readonly labels: readonly string[] };
-
-/**
- * Parses the operator-controlled runner allow-list: entries separated by
- * whitespace or commas, each either a bare label or `label@group`. A bare
- * entry routes jobs by label alone, which GitHub matches against any runner
- * carrying that spelling; a group-qualified entry routes to the named runner
- * group, the boundary GitHub offers for pinning runner provenance rather
- * than spelling. Group names containing spaces cannot be expressed in this
- * syntax.
- */
-export function parseRunnerRoutes(source: string): Map<string, RunnerRoute> {
-	const routes = new Map<string, RunnerRoute>();
-
-	for (const entry of source.split(/[\s,]+/u)) {
-		if (entry === '') {
-			continue;
-		}
-
-		const separator = entry.indexOf('@');
-		const label = separator === -1 ? entry : entry.slice(0, separator);
-		// GitHub matches runner labels case-insensitively, so the canonical
-		// key is the lowercase spelling; the emitted selector keeps the
-		// operator's spelling.
-		const key = canonicalRunnerLabel(label);
-
-		// A later duplicate would silently win, making the configuration
-		// order-dependent: `label@group label` would drop the group pin, and
-		// a case variant of the label is the same runner label to GitHub.
-		if (routes.has(key)) {
-			throw new DuplicateRunnerLabelError(label);
-		}
-
-		if (separator === -1) {
-			routes.set(key, entry);
-			continue;
-		}
-
-		routes.set(key, { group: entry.slice(separator + 1), labels: [label] });
-	}
-
-	return routes;
-}
-
-/**
  * Whether a runner label may be used at all: printable ASCII with no spaces.
  * GitHub matches labels case-insensitively with .NET's ordinal comparison,
  * whose case folding differs from JavaScript's full case conversion outside
- * ASCII (the sharp s, the sigma family), so rather than approximate those
- * semantics, non-ASCII labels are refused everywhere a label enters: the
- * target manifest's `os` and the runner allow-list entries alike.
+ * ASCII (the sharp s, the sigma family), so a non-ASCII `os` label is
+ * refused when the manifest is parsed.
  */
 export function isValidRunnerLabel(label: string): boolean {
 	return /^[!-~]+$/u.test(label);
-}
-
-/**
- * The canonical form of a runner label: GitHub matches labels
- * case-insensitively, so every duplicate check, allow-list membership test,
- * route lookup and execution-context key compares this form, never the raw
- * spelling. Labels are validated as printable ASCII before they reach this,
- * where lowercasing is exactly the runner's ordinal case-insensitive model.
- */
-export function canonicalRunnerLabel(label: string): string {
-	return label.toLowerCase();
-}
-
-/**
- * The runner labels the given targets request that the operator-controlled
- * allow-list does not name, deduplicated in first-use order. The manifest is
- * evaluated from the flake, so it is pull-request-controlled: an unchecked
- * `os` would let a PR route untrusted build steps, disk reclamation, OIDC
- * permissions and builder secrets onto a privileged runner. No label is
- * built in, because a self-hosted runner can carry any label, hosted-sounding
- * names included: the complete permitted set comes from configuration only
- * an operator can edit. A non-empty result must fail the plan before any
- * matrix is emitted.
- */
-export function disallowedRunners(
-	targets: readonly PublishTarget[],
-	allowedRunners: ReadonlySet<string>
-): string[] {
-	const disallowed = new Map<string, string>();
-
-	for (const target of targets) {
-		const key = canonicalRunnerLabel(target.os);
-
-		if (!allowedRunners.has(key) && !disallowed.has(key)) {
-			disallowed.set(key, target.os);
-		}
-	}
-
-	return disallowed.values().toArray();
 }
 
 export const publishTargetSchema = z.strictObject({
@@ -1171,6 +1081,12 @@ export function assertDistinctGroupKeys(
 // merging two groups onto one key and one retention root. The canonical
 // label keeps the key equal across case-variant spellings of one runner
 // label, exactly as the grouping is.
+// GitHub matches runner labels case-insensitively, so grouping and keying
+// compare this canonical form, never the raw spelling.
+function canonicalRunnerLabel(label: string): string {
+	return label.toLowerCase();
+}
+
 function groupKey(prefix: 'seed' | 'adopt', target: PublishTarget): string {
 	const os = canonicalRunnerLabel(target.os);
 	const mode = target.remote ? 'remote' : 'local';

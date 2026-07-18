@@ -52,11 +52,13 @@ cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acm
 
 `--job-workflow-ref` is optional on both presets and restricts the rule further
 to the `job_workflow_ref` claim, the workflow file that issued the token,
-written `owner/repo/path@ref`. Give it with an `@ref` to match exactly, or
-without one to match that file at any ref; the latter is what a reusable
-workflow needs, since its ref is the file's own location rather than the branch
-being built, and the branch is already pinned by `ref`. It is named after the
-claim on purpose: `job_workflow_ref` is a different claim from `workflow` (the
+written `owner/repo/path@ref`. Give it with an `@ref` to match exactly: for
+`cupboard-flake-publish.yml` that is the release tag the caller pins, and for
+`cupboard-publish.yml`, which callers reference at `main`, it is
+`refs/heads/main`. Given without an `@ref` it matches that file at any ref, a
+deliberately weaker rule: every branch and release copy of the file is accepted,
+and only the `ref` claim still pins what was built. It is named after the claim
+on purpose: `job_workflow_ref` is a different claim from `workflow` (the
 workflow's name) and `workflow_ref` (the calling workflow).
 
 ## Reusable workflows
@@ -65,18 +67,23 @@ When a repository calls a reusable workflow, the jobs belong to the reusable
 workflow while the standard repository and ref claims still describe the caller.
 A trust rule that restricts `job_workflow_ref` must therefore name the file in
 the repository where the reusable workflow lives, for cupboard's own workflow
-`underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main`,
-and keep its caller repository and ref restrictions. [GitHub documents this
-called-workflow claim][github-oidc-reusable-workflows] separately from the
-standard caller claims.
+`underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/vX.Y.Z`
+at the release the caller pins, and keep its caller repository and ref
+restrictions. [GitHub documents this called-workflow
+claim][github-oidc-reusable-workflows] separately from the standard caller
+claims.
 
 [github-oidc-reusable-workflows]:
   https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows
 
-Always reference the workflow as `@main` in the caller, not by a local path. The
-tenant's trust rule can then require that pushes come from this exact file on
-`main`, so a pull request cannot smuggle in an edited copy of the publish job
-and gain the rule's access.
+Always reference `cupboard-flake-publish.yml` by its release tag in the caller,
+`@vX.Y.Z`, not by a local path. The tenant's trust rule can then require that
+pushes come from this exact file at that release, so a pull request cannot
+smuggle in an edited copy of the publish job and gain the rule's access, and one
+release pins the workflow code and the trust rule together.
+`cupboard-publish.yml` follows its own convention: callers reference it at
+`@main`, it fetches its action code from `main`, and its trust rules pin
+`refs/heads/main`.
 
 ## Writing a rule directly
 
@@ -113,7 +120,7 @@ grant covers them all. Trust it with the branch preset, pinning
 # prefix covering every per-target and shared-output root the run writes.
 cupboard oidc-trust add-github-branch https://cupboard.example.workers.dev/t/acme \
   --repo acme/app --branch main \
-  --job-workflow-ref underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/heads/main
+  --job-workflow-ref underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/vX.Y.Z
 ```
 
 Then call the workflow with a `root-prefix` that nests under the granted root,
@@ -122,7 +129,7 @@ here `github:acme/app/main` beneath the grant `github:acme/app/main/`:
 ```yaml
 jobs:
   publish:
-    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@main
+    uses: underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@vX.Y.Z
     permissions:
       attestations: write
       contents: read
@@ -130,6 +137,7 @@ jobs:
     with:
       url: https://cupboard.example.workers.dev/t/acme
       root-prefix: github:acme/app/main
+      cupboard-version: vX.Y.Z
 ```
 
 The `job_workflow_ref` names the file in `underwhelmingperformance/cupboard`,

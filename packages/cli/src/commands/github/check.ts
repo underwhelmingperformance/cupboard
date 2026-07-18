@@ -1,5 +1,3 @@
-import { readFile } from 'node:fs/promises';
-
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
@@ -18,7 +16,6 @@ import {
 } from '@cupboard/protocol/oidc-trust-match';
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
-import { z } from 'zod';
 
 import {
 	confirmAuthorizationDetails,
@@ -27,8 +24,7 @@ import {
 } from '../../auth/attenuate.ts';
 import {
 	GithubCheckFailedError,
-	GithubCheckIncompleteError,
-	InvalidManifestError
+	GithubCheckIncompleteError
 } from '../../errors.ts';
 import { githubActionsIssuer } from '../oidc-trust.ts';
 import {
@@ -43,17 +39,11 @@ import {
 	pullRequestPrefix,
 	pullRequestViewName
 } from './convention.ts';
-import {
-	requireGithubToken,
-	type VariablesClient,
-	variablesClient
-} from './variables.ts';
 
 export interface GithubCheckOptions {
 	readonly repo: string;
 	readonly branch: string;
 	readonly workflowRef: string;
-	readonly manifest?: string;
 	readonly rootPrefix?: string;
 	readonly readUser?: string;
 	readonly readPassword?: string;
@@ -70,14 +60,6 @@ export interface GithubCheckClient {
 export interface GithubCheckDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
 	readonly fetchCacheInfo: (url: string) => Promise<CacheInfo>;
-	/**
-	 * Reads a repository variable; `undefined` when the variable is not set.
-	 * Anything it throws (a missing token, an unauthorised or failed API call)
-	 * degrades the dependent checks to unverified, naming the cause, instead
-	 * of failing them.
-	 */
-	readonly readVariable?: (name: string) => Promise<string | undefined>;
-	readonly readManifestFile?: (path: string) => Promise<string>;
 }
 
 export interface CheckFinding {
@@ -367,154 +349,6 @@ async function checkReuseView(
 	return { check, status: 'ok' };
 }
 
-const runnerGroupSchema = z.strictObject({
-	group: z.string().min(1),
-	labels: z.array(z.string())
-});
-const planRunnerSchema = z.union([z.string().min(1), runnerGroupSchema]);
-
-const manifestSchema = z.array(z.looseObject({ os: z.string().min(1) }));
-
-// Splits CUPBOARD_RUNNERS into its permitted labels; a `label@group` entry
-// permits the label part. GitHub compares labels case-insensitively within
-// ASCII, so the comparison is lowercased.
-function permittedLabels(runners: string): Set<string> {
-	return new Set(
-		runners
-			.split(/[\s,]+/)
-			.filter((entry) => entry !== '')
-			.map((entry) => {
-				const at = entry.indexOf('@');
-
-				return (at === -1 ? entry : entry.slice(0, at)).toLowerCase();
-			})
-	);
-}
-
-// A variable that cannot be read is a fact about this environment, not about
-// the repository: the check degrades to unverified with the cause named.
-function unreadableDetail(error: unknown): string {
-	return error instanceof Error ? error.message : String(error);
-}
-
-async function checkPlanRunner(
-	readVariable: (name: string) => Promise<string | undefined>
-): Promise<CheckFinding> {
-	const check = 'plan runner variable';
-	let value: string | undefined;
-
-	try {
-		value = await readVariable('CUPBOARD_PLAN_RUNNER');
-	} catch (error) {
-		return { check, status: 'unverified', detail: unreadableDetail(error) };
-	}
-
-	if (value === undefined) {
-		return {
-			check,
-			status: 'failed',
-			detail: 'CUPBOARD_PLAN_RUNNER is not set; the plan job has no runner'
-		};
-	}
-
-	let parsed: unknown;
-
-	try {
-		parsed = JSON.parse(value);
-	} catch {
-		return {
-			check,
-			status: 'failed',
-			detail: 'CUPBOARD_PLAN_RUNNER is not JSON; a plain label needs its quotes'
-		};
-	}
-
-	if (!planRunnerSchema.safeParse(parsed).success) {
-		return {
-			check,
-			status: 'failed',
-			detail:
-				'CUPBOARD_PLAN_RUNNER must be a JSON string or {"group": ..., "labels": [...]}'
-		};
-	}
-
-	return { check, status: 'ok' };
-}
-
-async function checkRunnerLabels(
-	options: GithubCheckOptions,
-	readVariable: (name: string) => Promise<string | undefined>,
-	readManifestFile: (path: string) => Promise<string>
-): Promise<CheckFinding> {
-	const check = 'runner labels';
-
-	if (options.manifest === undefined) {
-		return {
-			check,
-			status: 'unverified',
-			detail:
-				'no --manifest given; evaluate the target manifest with `nix eval --json` and pass the file'
-		};
-	}
-
-	let runners: string | undefined;
-
-	try {
-		runners = await readVariable('CUPBOARD_RUNNERS');
-	} catch (error) {
-		return { check, status: 'unverified', detail: unreadableDetail(error) };
-	}
-
-	if (runners === undefined) {
-		return {
-			check,
-			status: 'failed',
-			detail: 'CUPBOARD_RUNNERS is not set; no manifest label is permitted'
-		};
-	}
-
-	let manifestText: string;
-
-	try {
-		manifestText = await readManifestFile(options.manifest);
-	} catch (error) {
-		throw new InvalidManifestError(options.manifest, { cause: error });
-	}
-
-	let manifestValue: unknown;
-
-	try {
-		manifestValue = JSON.parse(manifestText);
-	} catch (error) {
-		throw new InvalidManifestError(options.manifest, { cause: error });
-	}
-
-	const parsed = manifestSchema.safeParse(manifestValue);
-
-	if (!parsed.success) {
-		throw new InvalidManifestError(options.manifest, { cause: parsed.error });
-	}
-
-	const permitted = permittedLabels(runners);
-	const missing = [
-		...new Set(
-			parsed.data
-				.map((target) => target.os)
-				.filter((os) => !permitted.has(os.toLowerCase()))
-		)
-	];
-
-	if (missing.length > 0) {
-		return {
-			check,
-			status: 'failed',
-			detail: `CUPBOARD_RUNNERS does not name ${missing.join(', ')}`
-		};
-	}
-
-	return { check, status: 'ok' };
-}
-
 // The branch rule's root grant is a prefix; the caller's root-prefix must sit
 // beneath it or every root write of a run is refused.
 function checkRootPrefix(
@@ -544,20 +378,6 @@ function checkRootPrefix(
 	return { check, status: 'ok' };
 }
 
-// One authenticated client covers every variable read of a check run; the
-// token is only required once a read actually happens.
-function defaultReadVariable(
-	repository: string
-): (name: string) => Promise<string | undefined> {
-	let client: VariablesClient | undefined;
-
-	return (name) => {
-		client ??= variablesClient(requireGithubToken());
-
-		return client.read(repository, name);
-	};
-}
-
 export async function runGithubCheck(
 	url: string,
 	options: GithubCheckOptions,
@@ -566,10 +386,6 @@ export async function runGithubCheck(
 	dependencies: GithubCheckDependencies
 ): Promise<void> {
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
-	const readVariable =
-		dependencies.readVariable ?? defaultReadVariable(options.repo);
-	const readManifestFile =
-		dependencies.readManifestFile ?? ((path: string) => readFile(path, 'utf8'));
 
 	const identity = await reporter.phase('Resolving repository', () =>
 		resolveRepository(options.repo)
@@ -628,8 +444,6 @@ export async function runGithubCheck(
 		),
 		await checkGracePolicy(client),
 		await checkReuseView(url, client, dependencies.fetchCacheInfo),
-		await checkPlanRunner(readVariable),
-		await checkRunnerLabels(options, readVariable, readManifestFile),
 		checkRootPrefix(options, identity)
 	]);
 

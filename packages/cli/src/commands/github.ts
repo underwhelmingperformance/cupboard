@@ -30,11 +30,6 @@ import {
 	pullRequestPrefix,
 	pullRequestViewName
 } from './github/convention.ts';
-import {
-	requireGithubToken,
-	type VariablesClient,
-	variablesClient
-} from './github/variables.ts';
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import { lookupRepository } from './oidc-trust/github.ts';
 import { type PolicyClient } from './policy.ts';
@@ -52,11 +47,7 @@ export interface GithubSetupOptions {
 	readonly repo: string;
 	readonly branch: string;
 	readonly grace: string;
-	readonly cupboardVersion: string;
-	readonly runners: string;
-	readonly planRunner: string;
 	readonly workflowRef: string;
-	readonly applyVariables?: boolean;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 }
@@ -78,7 +69,6 @@ export interface GithubSetupClient {
 export interface GithubSetupDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
 	readonly fetchCacheInfo?: (url: string) => Promise<CacheInfo>;
-	readonly setVariable?: VariablesClient['set'];
 }
 
 // One converging step's outcome. `drift` means the stored state neither
@@ -145,18 +135,6 @@ export function cacheInfoFetcher(
 		} catch (error) {
 			throw new CacheInfoUnparsableError(target, { cause: error });
 		}
-	};
-}
-
-// One authenticated client covers every variable write of a setup run; the
-// token is only required once a write actually happens.
-function defaultSetVariable(): VariablesClient['set'] {
-	let client: VariablesClient | undefined;
-
-	return (repository, name, value) => {
-		client ??= variablesClient(requireGithubToken());
-
-		return client.set(repository, name, value);
 	};
 }
 
@@ -344,18 +322,6 @@ function ruleDifferences(
 	return differences;
 }
 
-function variableRows(
-	url: string,
-	options: GithubSetupOptions
-): readonly { name: string; value: string }[] {
-	return [
-		{ name: 'CUPBOARD_URL', value: url },
-		{ name: 'CUPBOARD_VERSION', value: options.cupboardVersion },
-		{ name: 'CUPBOARD_PLAN_RUNNER', value: options.planRunner },
-		{ name: 'CUPBOARD_RUNNERS', value: options.runners }
-	];
-}
-
 export async function runGithubSetup(
 	url: string,
 	options: GithubSetupOptions,
@@ -366,7 +332,6 @@ export async function runGithubSetup(
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
 	const fetchCacheInfo =
 		dependencies.fetchCacheInfo ?? cacheInfoFetcher(options);
-	const setVariable = dependencies.setVariable ?? defaultSetVariable();
 	const graceSeconds = parseGrace(options.grace);
 
 	if (graceSeconds < minimumGraceSeconds) {
@@ -418,16 +383,6 @@ export async function runGithubSetup(
 		}
 	);
 
-	const variables = variableRows(url, options);
-
-	if (options.applyVariables === true) {
-		await reporter.phase('Setting repository variables', async () => {
-			for (const variable of variables) {
-				await setVariable(options.repo, variable.name, variable.value);
-			}
-		});
-	}
-
 	const stepRows: ResultRow[] = steps.map((step) => ({
 		label: step.step,
 		value:
@@ -435,18 +390,11 @@ export async function runGithubSetup(
 				? step.outcome
 				: `${step.outcome}: ${step.detail}`
 	}));
-	const variableValueRows: ResultRow[] = variables.map((variable) => ({
-		label: variable.name,
-		value:
-			options.applyVariables === true
-				? `${variable.value} (set)`
-				: variable.value
-	}));
 
 	reporter.result({
 		kind: 'github-setup',
-		data: { steps, variables, applied: options.applyVariables === true },
-		rows: [...stepRows, ...variableValueRows]
+		data: { steps },
+		rows: stepRows
 	});
 
 	const drifted = steps.filter((step) => step.outcome === 'drift');
@@ -473,29 +421,11 @@ export function registerGithubCommands(
 		)
 		.argument('<url>', tenantUrlArgument)
 		.requiredOption('--repo <owner/name>', 'GitHub repository to trust.')
-		.requiredOption(
-			'--cupboard-version <tag>',
-			'cupboard release tag the workflow pins (the CUPBOARD_VERSION variable).'
-		)
 		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
 		.option('--grace <duration>', 'Tenant-wide retention grace period.', '24h')
-		.option(
-			'--runners <labels>',
-			'Permitted runner labels (the CUPBOARD_RUNNERS variable).',
-			'ubuntu-latest'
-		)
-		.option(
-			'--plan-runner <json>',
-			"The plan job's runner, as JSON (the CUPBOARD_PLAN_RUNNER variable).",
-			'"ubuntu-latest"'
-		)
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
 			'The job_workflow_ref claim the trust rules pin, in the exact claim spelling and at the release tag the caller workflow uses.'
-		)
-		.option(
-			'--apply-variables',
-			'Set the repository variables through gh instead of only printing them.'
 		)
 		.option(
 			'--read-user <user>',
@@ -522,7 +452,7 @@ export function registerGithubCommands(
 	github
 		.command('check')
 		.description(
-			'Verify the invariants a publishing run depends on before its first CI run: trust-rule matching and grant coverage, grace coverage, reuse-view definition and priority, runner variables and labels, and root-prefix nesting.'
+			'Verify the invariants a publishing run depends on before its first CI run: trust-rule matching and grant coverage, grace coverage, reuse-view definition and priority, and root-prefix nesting.'
 		)
 		.argument('<url>', tenantUrlArgument)
 		.requiredOption('--repo <owner/name>', 'GitHub repository to verify.')
@@ -530,10 +460,6 @@ export function registerGithubCommands(
 		.requiredOption(
 			'--workflow-ref <owner/repo/path@ref>',
 			'The job_workflow_ref claim a run presents, at the release tag the caller workflow uses.'
-		)
-		.option(
-			'--manifest <path>',
-			'The evaluated target manifest (`nix eval --json .#cupboardOutputs`), for the runner-label check.'
 		)
 		.option(
 			'--root-prefix <value>',

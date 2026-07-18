@@ -644,7 +644,6 @@ describe('runGithubSetup', () => {
 			}
 		});
 	});
-
 	it('reports disallowed same-trigger drift alongside an exact rule', async () => {
 		const results: ResultRow[][] = [];
 		const { client, recorded } = setupClient({
