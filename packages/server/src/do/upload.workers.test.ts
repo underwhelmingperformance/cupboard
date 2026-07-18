@@ -100,6 +100,8 @@ import {
 	workerFetch
 } from '../test-support.ts';
 
+import { NarInfoObjectsService } from './narinfo-objects-service.ts';
+
 function byUploadId(
 	left: { readonly uploadId: string },
 	right: { readonly uploadId: string }
@@ -246,6 +248,7 @@ describe('upload flow', () => {
 
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.restoreAllMocks();
 	});
 
 	it('serves public cache metadata routes from the Worker', async () => {
@@ -1556,6 +1559,132 @@ describe('upload flow', () => {
 		});
 	});
 
+	it('refuses to settle a re-sent entry against a superseded servability proof', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId);
+
+		const committedNarInfoRow = await runInDurableObject(
+			currentServer(),
+			(instance) =>
+				new NarInfoObjectsService(instance.context).committedNarInfoRow(
+					'',
+					metadata.storePathHash
+				)
+		);
+
+		if (committedNarInfoRow === undefined) {
+			throw new Error('expected a committed narinfo row');
+		}
+
+		const spy = vi
+			.spyOn(NarInfoObjectsService.prototype, 'committedNarInfoRow')
+			.mockResolvedValue({
+				...committedNarInfoRow,
+				generation: committedNarInfoRow.generation + 1
+			});
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+		spy.mockRestore();
+
+		expect(frame).toStrictEqual({
+			ev: 'verdict',
+			uploadId: upload.uploadId,
+			status: 'absent'
+		});
+	});
+
+	it('answers a re-sent entry as absent when its committed NAR has been lost', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId);
+		await env.BLOBS.delete(narObjectKey(metadata.narHash));
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect(frame).toStrictEqual({
+			ev: 'verdict',
+			uploadId: upload.uploadId,
+			status: 'absent'
+		});
+	});
+
+	it('repairs a lost narinfo object before settling a re-sent entry', async () => {
+		const token = await initialise();
+		const metadata = uploadMetadata({ fileSize: narBytes.byteLength });
+		const upload = expectSingleUploadDecision(
+			await negotiateUploads(token, [metadata]),
+			metadata
+		);
+		await putNarBytes(upload.r2Key);
+		await commitUpload(token, upload.uploadId);
+		const objectKey = narInfoObjectKey(fixtureTenant, metadata.storePathHash);
+		await env.BLOBS.delete(objectKey);
+
+		const session = await openCommitSession(token);
+		session.send({
+			op: 'commit-batch',
+			commits: [
+				{
+					uploadId: upload.uploadId,
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash
+				}
+			]
+		});
+		const frame = await session.nextFrame();
+		session.socket.close();
+
+		expect({
+			frame,
+			repaired: (await env.BLOBS.head(objectKey)) !== null
+		}).toStrictEqual({
+			frame: {
+				ev: 'settled',
+				uploadId: upload.uploadId,
+				response: {
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					status: 'already-present'
+				}
+			},
+			repaired: true
+		});
+	});
 	it('answers a batched entry whose row and path are both gone as absent', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({

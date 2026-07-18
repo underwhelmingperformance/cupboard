@@ -68,6 +68,11 @@ import { CommitPipelineService } from './commit-pipeline-service.ts';
 import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import {
+	maxExpiredRootTargetsPerRun,
+	maxPathsSweptPerRun,
+	maxRootsExpiredPerRun
+} from './garbage-collection-service.ts';
+import {
 	confirmGraceBatch,
 	parseStoredGraceDecision,
 	serialiseGraceDecision
@@ -82,6 +87,10 @@ import { UploadsService } from './uploads-service.ts';
 import { VerificationService } from './verification-service.ts';
 
 const repeated = (character: string): string => character.repeat(32);
+const tenantWideContinuation = {
+	scope: 'tenant',
+	sweepLimit: maxPathsSweptPerRun
+};
 
 // The pipeline over a live instance's context, as the server itself builds it.
 function pipelineFor(context: ServerContext): CommitPipelineService {
@@ -334,7 +343,7 @@ describe('retention grace deadlines in garbage collection', () => {
 			expect(await remaining()).toBe(0);
 			expect(
 				await runInDurableObject(currentServer(), (_instance, state) =>
-					state.storage.get<number>(gcContinuationKey)
+					state.storage.get(gcContinuationKey)
 				)
 			).toBeUndefined();
 		});
@@ -603,6 +612,235 @@ describe('retention grace transitions', () => {
 			],
 			path: true,
 			graceManaged: true
+		});
+	});
+
+	it('expires roots in bounded batches and resumes the remainder by alarm', async () => {
+		await useTestServer('transition-expiry-continuation');
+		const { token } = await bootstrap();
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('6'),
+			name: 'shared-target'
+		});
+
+		await pushPath(token, path);
+		await addGracePolicy('', dayGraceSeconds);
+
+		const rootCount = maxRootsExpiredPerRun + 1;
+		const firstExpiry = Date.now() - rootCount * 1000;
+		const finalDeadline = new Date(
+			firstExpiry + maxRootsExpiredPerRun * 1000 + dayGraceSeconds * 1000
+		).toISOString();
+
+		await runInDurableObject(currentServer(), (instance) => {
+			for (let index = 0; index < rootCount; index += 1) {
+				const name = rootNameSchema.parse(
+					`expired-${String(index).padStart(2, '0')}`
+				);
+				const expiresAt = new Date(firstExpiry + index * 1000).toISOString();
+
+				instance.context.db
+					.insert(schema.retentionRoots)
+					.values({
+						cache: DEFAULT_CACHE,
+						name,
+						expiresAt,
+						createdAt: expiresAt,
+						updatedAt: expiresAt
+					})
+					.run();
+				instance.context.db
+					.insert(schema.retentionRootTargets)
+					.values({
+						cache: DEFAULT_CACHE,
+						rootName: name,
+						storePathHash: path.storePathHash,
+						storePath: path.storePath
+					})
+					.run();
+			}
+		});
+
+		const resolveGrace = vi.spyOn(
+			RetentionService.prototype,
+			'resolveGraceSeconds'
+		);
+
+		try {
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					await instance.runGarbageCollection();
+
+					const firstPass = {
+						remainingRoots: instance.context.db
+							.select({ name: schema.retentionRoots.name })
+							.from(schema.retentionRoots)
+							.all().length,
+						continuation: await state.storage.get(gcContinuationKey),
+						policyResolutions: resolveGrace.mock.calls.length
+					};
+
+					await state.storage.deleteAlarm();
+					resolveGrace.mockClear();
+					await instance.alarm();
+
+					await state.storage.deleteAlarm();
+
+					return {
+						firstPass,
+						settled: {
+							remainingRoots: instance.context.db
+								.select({ name: schema.retentionRoots.name })
+								.from(schema.retentionRoots)
+								.all().length,
+							deadline: instance.context.db
+								.select({ retainUntil: schema.retentionGrace.retainUntil })
+								.from(schema.retentionGrace)
+								.get()?.retainUntil,
+							continuation: await state.storage.get(gcContinuationKey),
+							policyResolutions: resolveGrace.mock.calls.length
+						}
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				firstPass: {
+					remainingRoots: 1,
+					continuation: [tenantWideContinuation],
+					policyResolutions: 1
+				},
+				settled: {
+					remainingRoots: 0,
+					deadline: finalDeadline,
+					continuation: undefined,
+					policyResolutions: 1
+				}
+			});
+		} finally {
+			resolveGrace.mockRestore();
+		}
+	});
+
+	it('continues target batches within a stored root over the protocol limit', async () => {
+		await useTestServer('transition-expiry-target-continuation');
+		const { token } = await bootstrap();
+		await addGracePolicy('', dayGraceSeconds);
+		const path = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('0'),
+			name: 'retained-across-target-batches'
+		});
+		await pushPath(token, path);
+		const rootName = rootNameSchema.parse('oversized');
+		const expiresAt = new Date(Date.now() - 1000).toISOString();
+		const targetCount = maxExpiredRootTargetsPerRun + 1;
+
+		const observed = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				instance.context.db
+					.insert(schema.retentionRoots)
+					.values({
+						cache: DEFAULT_CACHE,
+						name: rootName,
+						expiresAt,
+						createdAt: expiresAt,
+						updatedAt: expiresAt
+					})
+					.run();
+				instance.context.db
+					.insert(schema.retentionRootTargets)
+					.values({
+						cache: DEFAULT_CACHE,
+						rootName,
+						storePathHash: path.storePathHash,
+						storePath: path.storePath
+					})
+					.run();
+				state.storage.sql.exec(
+					`WITH RECURSIVE numbers(value) AS (
+						VALUES (1)
+						UNION ALL
+						SELECT value + 1 FROM numbers WHERE value < ?
+					)
+					INSERT INTO retention_root_target (
+						cache, root_name, store_path_hash, store_path
+					)
+					SELECT ?, ?, printf('%032d', value),
+						'/nix/store/' || printf('%032d', value) || '-target'
+					FROM numbers`,
+					targetCount - 1,
+					DEFAULT_CACHE,
+					rootName
+				);
+
+				const stateSnapshot = (): {
+					readonly roots: number;
+					readonly targets: number;
+					readonly pathPresent: boolean;
+					readonly deadlines: number;
+				} => ({
+					roots:
+						instance.context.db
+							.select({ count: sql<number>`count(*)` })
+							.from(schema.retentionRoots)
+							.get()?.count ?? 0,
+					targets:
+						instance.context.db
+							.select({ count: sql<number>`count(*)` })
+							.from(schema.retentionRootTargets)
+							.get()?.count ?? 0,
+					pathPresent:
+						instance.context.db
+							.select({ storePathHash: schema.narInfos.storePathHash })
+							.from(schema.narInfos)
+							.where(eq(schema.narInfos.storePathHash, path.storePathHash))
+							.get() !== undefined,
+					deadlines:
+						instance.context.db
+							.select({ count: sql<number>`count(*)` })
+							.from(schema.retentionGrace)
+							.get()?.count ?? 0
+				});
+
+				await instance.runGarbageCollection();
+				const firstPass = {
+					...stateSnapshot(),
+					continuation: await state.storage.get(gcContinuationKey)
+				};
+
+				await state.storage.deleteAlarm();
+				await instance.alarm();
+				await state.storage.deleteAlarm();
+
+				return {
+					firstPass,
+					settled: {
+						...stateSnapshot(),
+						continuation: await state.storage.get(gcContinuationKey)
+					}
+				};
+			}
+		);
+
+		expect(observed).toStrictEqual({
+			firstPass: {
+				roots: 1,
+				targets: 1,
+				pathPresent: true,
+				deadlines: 1,
+				continuation: [tenantWideContinuation]
+			},
+			settled: {
+				roots: 0,
+				targets: 0,
+				pathPresent: true,
+				deadlines: 1,
+				continuation: undefined
+			}
 		});
 	});
 

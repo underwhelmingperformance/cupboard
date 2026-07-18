@@ -75,9 +75,9 @@ describe('db cost meter', () => {
 		});
 
 		// Writes are folded on their own accumulation, so pin a positive count: each
-		// insert writes the table row plus its primary-key, `expires_at` and `verdict`
-		// index entries, four per row across three rows.
-		expect(measured).toBe(12);
+		// insert writes the table row plus its primary-key, `expires_at`, `verdict`
+		// and garbage-collection path index entries, five per row across three rows.
+		expect(measured).toBe(15);
 	});
 
 	it('attributes rows to the request that read them, not a concurrent one', async () => {
@@ -154,7 +154,7 @@ describe('db cost meter', () => {
 		}).toStrictEqual({
 			status: StatusCodes.OK,
 			rowsRead: 14,
-			rowsWritten: 4
+			rowsWritten: 5
 		});
 	});
 

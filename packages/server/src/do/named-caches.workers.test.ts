@@ -1,4 +1,5 @@
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache, storePathSchema } from '@cupboard/nix-store/scalars';
+import { gcResponseSchema } from '@cupboard/protocol/retention';
 import {
 	type StatsResponse,
 	statsResponseSchema,
@@ -7,12 +8,17 @@ import {
 } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
+import { and, eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
 
 import { narInfos } from '../db/schema.ts';
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import {
+	internalOrigin,
+	narInfoObjectKey,
+	narObjectKey
+} from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	adminGrants,
@@ -23,6 +29,7 @@ import {
 	CommitSocketError,
 	commitUpload,
 	commitUploadRejection,
+	currentServer,
 	expectSingleUploadDecision,
 	issueServerSignedToken,
 	narBytes,
@@ -31,10 +38,17 @@ import {
 	pushPath,
 	putNarBytes,
 	resetTestServer,
+	syntheticNarHash,
+	syntheticStorePathHash,
 	testServerFor,
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
+
+import { chunk } from './bulk.ts';
+import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
+import { maxPathsSweptPerRun } from './garbage-collection-service.ts';
+import { gcContinuationKey } from './server.ts';
 
 function expectCommitSocketError(
 	error: unknown
@@ -79,6 +93,38 @@ async function usageForTenant(token: string): Promise<UsageResponse> {
 
 	expect(response.status).toBe(StatusCodes.OK);
 	return usageResponseSchema.parse(await response.json());
+}
+
+async function seedCollectablePaths(
+	cache: string,
+	count: number
+): Promise<void> {
+	const createdAt = new Date().toISOString();
+	const rows = Array.from({ length: count }, (_unused, index) => {
+		const storePathHash = syntheticStorePathHash(index);
+
+		return {
+			cache,
+			storePathHash,
+			storePath: storePathSchema.parse(
+				`/nix/store/${storePathHash}-overflow-${String(index)}`
+			),
+			narHash: syntheticNarHash(index),
+			narSize: narBytes.byteLength,
+			referencesJson: '[]',
+			sigsJson: '[]',
+			generation: 1,
+			createdAt
+		};
+	});
+
+	await runInDurableObject(currentServer(), (_instance, state) => {
+		const database = drizzle(state.storage, { schema: { narInfos } });
+
+		for (const batch of chunk(rows, 8)) {
+			database.insert(narInfos).values(batch).run();
+		}
+	});
 }
 
 describe('named caches', () => {
@@ -203,6 +249,118 @@ describe('named caches', () => {
 			sharedNarSurvives: true
 		});
 	});
+
+	it('resumes an overflowing cache sweep without collecting another cache', async () => {
+		await useTestServer('named-cache-gc-continuation');
+		const init = await bootstrap();
+		const keptInA = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'a'.repeat(32),
+			name: 'kept-a'
+		});
+		const keptInB = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'b'.repeat(32),
+			name: 'kept-b'
+		});
+		const collectableInB = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: 'c'.repeat(32),
+			name: 'collectable-b'
+		});
+
+		await pushPath(init.token, keptInA, 'a');
+		await pushPath(init.token, keptInB, 'b');
+		await pushPath(init.token, collectableInB, 'b');
+		await putRoot(init.token, 'a', 'channel', keptInA.storePath);
+		await putRoot(init.token, 'b', 'channel', keptInB.storePath);
+		await seedCollectablePaths('a', maxPathsSweptPerRun + 1);
+
+		const observed = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				const response = await instance.fetch(
+					new Request(new URL('/cache/a/gc', internalOrigin), {
+						method: 'POST',
+						headers: { authorization: `Bearer ${init.token}` }
+					})
+				);
+				const firstPass = {
+					status: response.status,
+					body: gcResponseSchema.parse(await response.json()),
+					continuation: await state.storage.get(gcContinuationKey)
+				};
+
+				for (let pass = 0; pass < 10; pass += 1) {
+					if ((await state.storage.get(gcContinuationKey)) === undefined) {
+						break;
+					}
+
+					await instance.alarm();
+				}
+				await state.storage.deleteAlarm();
+
+				const database = drizzle(state.storage, { schema: { narInfos } });
+				const cacheRows = database
+					.select({ cache: narInfos.cache })
+					.from(narInfos)
+					.all();
+				const isBCollectablePresent =
+					database
+						.select({ storePathHash: narInfos.storePathHash })
+						.from(narInfos)
+						.where(
+							and(
+								eq(narInfos.cache, 'b'),
+								eq(narInfos.storePathHash, collectableInB.storePathHash)
+							)
+						)
+						.get() !== undefined;
+
+				return {
+					firstPass,
+					afterContinuation: {
+						continuation: await state.storage.get(gcContinuationKey),
+						cacheCounts: {
+							a: cacheRows.filter((row) => row.cache === 'a').length,
+							b: cacheRows.filter((row) => row.cache === 'b').length
+						},
+						isBCollectablePresent
+					}
+				};
+			}
+		);
+
+		expect(observed).toStrictEqual({
+			firstPass: {
+				status: StatusCodes.OK,
+				body: {
+					ok: true,
+					pendingUploadsDeleted: 0,
+					pendingAttestationsDeleted: 0,
+					rootsExpired: 0,
+					pathsSwept: maxPathsSweptPerRun,
+					narInfosDeleted: maxNarInfoDeletionsFlushedPerRun,
+					orphanStagingDeleted: 0
+				},
+				continuation: [
+					{
+						scope: 'cache',
+						cache: 'a',
+						sweepLimit: maxPathsSweptPerRun
+					}
+				]
+			},
+			afterContinuation: {
+				continuation: undefined,
+				cacheCounts: {
+					a: 1,
+					b: 2
+				},
+				isBCollectablePresent: true
+			}
+		});
+	}, 30_000);
 
 	it('mirrors the per-route scope under a cache prefix', async () => {
 		await useTestServer('named-cache-scope');

@@ -864,6 +864,8 @@ export class VerificationService {
 		await this.narInfoObjects.putNarInfoObject(
 			row.cache,
 			row.storePathHash,
+			row.generation,
+			row.narHash,
 			narInfo
 		);
 

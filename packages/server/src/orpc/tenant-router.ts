@@ -272,10 +272,20 @@ async function collectGarbage(
 ): Promise<GcResponse> {
 	const { origin } = new URL(request.url);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
+	const outcome = await services.runGarbageCollection(
+		logger,
+		cache,
+		purgeOrigin
+	);
 
 	return {
 		ok: true,
-		...(await services.runGarbageCollection(logger, cache, purgeOrigin))
+		pendingUploadsDeleted: outcome.pendingUploadsDeleted,
+		pendingAttestationsDeleted: outcome.pendingAttestationsDeleted,
+		rootsExpired: outcome.rootsExpired,
+		pathsSwept: outcome.pathsSwept,
+		narInfosDeleted: outcome.narInfosDeleted,
+		orphanStagingDeleted: outcome.orphanStagingDeleted
 	};
 }
 

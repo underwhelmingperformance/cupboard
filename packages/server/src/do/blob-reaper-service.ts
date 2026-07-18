@@ -28,7 +28,8 @@ import {
 	chunk,
 	deleteObjects,
 	maxInClauseValues,
-	maxOutgoingConnections
+	maxOutgoingConnections,
+	presentNarObjects
 } from './bulk.ts';
 
 // One narinfo whose object the demote pass must take down: a tenant, the cache it
@@ -346,27 +347,6 @@ export class BlobReaperService {
 		return demotionsByTenant;
 	}
 
-	// The store-path hashes whose canonical NAR object is present, found with a
-	// bounded fan-out of concurrent `head` reads.
-	private async presentNarObjects(
-		narHashes: readonly NixSha256HashString[]
-	): Promise<ReadonlySet<NixSha256HashString>> {
-		const present = await mapWithConcurrency(
-			narHashes,
-			maxOutgoingConnections,
-			async (narHash) =>
-				(await this.blobs.head(narObjectKey(narHash))) === null
-					? undefined
-					: narHash
-		);
-
-		return new Set(
-			present.filter(
-				(narHash): narHash is NixSha256HashString => narHash !== undefined
-			)
-		);
-	}
-
 	// The digests whose CAS object is present, the attestation counterpart of
 	// {@link presentNarObjects}.
 	private async presentCasObjects(
@@ -601,7 +581,8 @@ export class BlobReaperService {
 			return 0;
 		}
 
-		const present = await this.presentNarObjects(
+		const present = await presentNarObjects(
+			this.blobs,
 			batch.map((blob) => blob.narHash)
 		);
 		const missing = batch.filter((blob) => !present.has(blob.narHash));

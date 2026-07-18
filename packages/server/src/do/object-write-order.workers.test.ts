@@ -172,7 +172,13 @@ describe('path-keyed object write ordering', () => {
 			// must not land first.
 			let didPutSettle = false;
 			const put = (async () => {
-				await service.putNarInfoObject(cache, storePathHash, narInfo);
+				await service.putNarInfoObject(
+					cache,
+					storePathHash,
+					row.generation,
+					row.narHash,
+					narInfo
+				);
 				didPutSettle = true;
 			})();
 

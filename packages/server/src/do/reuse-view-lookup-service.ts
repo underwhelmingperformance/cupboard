@@ -11,7 +11,6 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { type ParsedReuseViewName } from '@cupboard/protocol/reuse-views';
-import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, gte, inArray, lt } from 'drizzle-orm';
 
 import * as d1Schema from '../db/d1-schema.ts';
@@ -25,7 +24,7 @@ import {
 import { narObjectKey } from '../http/http.ts';
 import { parseStored } from '../http/parse.ts';
 
-import { batchNonEmpty, maxOutgoingConnections } from './bulk.ts';
+import { batchNonEmpty, presentNarObjects } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 import { storedSignaturesSchema } from './signing-keys.ts';
 
@@ -276,23 +275,10 @@ export class ReuseViewLookupService {
 				ownedHashes.has(candidate.narHash)
 		);
 
-		const probeHashes = [
-			...new Set(backed.map((candidate) => candidate.narHash))
-		];
-		const presentHashes = new Set<string>();
-		await this.sharedFacts(() =>
-			mapWithConcurrency(
-				probeHashes,
-				maxOutgoingConnections,
-				async (narHash) => {
-					const object = await this.context.env.BLOBS.head(
-						narObjectKey(narHash)
-					);
-
-					if (object !== null) {
-						presentHashes.add(narHash);
-					}
-				}
+		const presentHashes = await this.sharedFacts(() =>
+			presentNarObjects(
+				this.context.env.BLOBS,
+				backed.map((candidate) => candidate.narHash)
 			)
 		);
 

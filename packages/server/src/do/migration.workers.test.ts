@@ -332,6 +332,64 @@ describe('migrations', () => {
 		});
 	});
 
+	it('adds the root-expiry index without changing existing roots or targets', async () => {
+		const migrated = await runInDurableObject(
+			testServerFor('migration-root-expiry-index'),
+			async (_instance, state) => {
+				await migrateThrough(state, 30);
+				state.storage.sql.exec(
+					"INSERT INTO retention_root (cache, name, expires_at, created_at, updated_at) VALUES ('builds', 'main', '2026-02-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')"
+				);
+				state.storage.sql.exec(
+					"INSERT INTO retention_root_target (cache, root_name, store_path_hash, store_path) VALUES ('builds', 'main', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-app')"
+				);
+
+				await migrateThrough(state, latestMigrationIndex);
+
+				return {
+					roots: state.storage.sql
+						.exec(
+							'SELECT cache, name, expires_at FROM retention_root ORDER BY cache, name'
+						)
+						.toArray(),
+					targets: state.storage.sql
+						.exec(
+							'SELECT cache, root_name, store_path_hash, store_path FROM retention_root_target ORDER BY cache, root_name, store_path_hash'
+						)
+						.toArray(),
+					indexes: state.storage.sql
+						.exec(
+							"SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'retention_root' ORDER BY name"
+						)
+						.toArray()
+				};
+			}
+		);
+
+		expect(migrated).toStrictEqual({
+			roots: [
+				{
+					cache: 'builds',
+					name: 'main',
+					expires_at: '2026-02-01T00:00:00.000Z'
+				}
+			],
+			targets: [
+				{
+					cache: 'builds',
+					root_name: 'main',
+					store_path_hash: 'a'.repeat(32),
+					store_path: `/nix/store/${'a'.repeat(32)}-app`
+				}
+			],
+			indexes: [
+				{ name: 'retention_root_cache_expires_at_name_idx' },
+				{ name: 'retention_root_expires_at_idx' },
+				{ name: 'sqlite_autoindex_retention_root_1' }
+			]
+		});
+	});
+
 	it('migrates and round-trips an OIDC trust rule', async () => {
 		const rule = {
 			id: 'r1',

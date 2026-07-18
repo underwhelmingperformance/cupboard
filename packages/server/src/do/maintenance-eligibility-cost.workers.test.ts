@@ -234,8 +234,32 @@ describe('maintenance sweep cost', () => {
 			smallBacklogCost: smallBacklog.rowsRead,
 			largeBacklogCost: largeBacklog.rowsRead
 		}).toStrictEqual({
-			smallBacklogCost: 16,
-			largeBacklogCost: 16
+			smallBacklogCost: 45,
+			largeBacklogCost: 45
+		});
+	});
+
+	it('finds expired roots without scanning the live-root backlog', async () => {
+		await initialise();
+
+		await seedLiveRoots(3, 'small');
+		await seedExpiredRoot('expired-small');
+		const smallBacklog = await sweepCost('garbage-collection', () =>
+			currentServer().runGarbageCollection()
+		);
+
+		await seedLiveRoots(197, 'large');
+		await seedExpiredRoot('expired-large');
+		const largeBacklog = await sweepCost('garbage-collection', () =>
+			currentServer().runGarbageCollection()
+		);
+
+		expect({
+			smallBacklogCost: smallBacklog.rowsRead,
+			largeBacklogCost: largeBacklog.rowsRead
+		}).toStrictEqual({
+			smallBacklogCost: 50,
+			largeBacklogCost: 50
 		});
 	});
 });
@@ -274,6 +298,42 @@ async function reconcileCost(): Promise<number> {
 		dbCost.settle();
 
 		return dbCost.rowsRead - before;
+	});
+}
+
+async function seedLiveRoots(count: number, label: string): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		for (let index = 0; index < count; index += 1) {
+			const now = '2026-01-01T00:00:00.000Z';
+
+			instance.context.db
+				.insert(schema.retentionRoots)
+				.values({
+					cache: '',
+					name: rootNameSchema.parse(`${label}-${String(index)}`),
+					expiresAt: '2999-01-01T00:00:00.000Z',
+					createdAt: now,
+					updatedAt: now
+				})
+				.run();
+		}
+	});
+}
+
+async function seedExpiredRoot(name: string): Promise<void> {
+	await runInDurableObject(currentServer(), (instance) => {
+		const now = '2026-01-01T00:00:00.000Z';
+
+		instance.context.db
+			.insert(schema.retentionRoots)
+			.values({
+				cache: '',
+				name: rootNameSchema.parse(name),
+				expiresAt: now,
+				createdAt: now,
+				updatedAt: now
+			})
+			.run();
 	});
 }
 
