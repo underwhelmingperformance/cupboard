@@ -218,6 +218,20 @@
 			"when": 1784062744930,
 			"tag": "0030_reuse_views",
 			"breakpoints": true
+		},
+		{
+			"idx": 31,
+			"version": "6",
+			"when": 1784538975713,
+			"tag": "0031_retention_root_expiry_index",
+			"breakpoints": true
+		},
+		{
+			"idx": 32,
+			"version": "6",
+			"when": 1784557799912,
+			"tag": "0032_careful_chameleon",
+			"breakpoints": true
 		}
 	]
 }

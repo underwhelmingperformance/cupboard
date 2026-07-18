@@ -24,8 +24,24 @@ const gcOutcome = {
 	pendingAttestationsDeleted: 0,
 	rootsExpired: 0,
 	pathsSwept: 0,
+	hasMoreExpiredRoots: false,
+	hasMoreWork: false,
 	narInfosDeleted: 0,
 	orphanStagingDeleted: 0
+};
+const tenantWideContinuation = {
+	scope: 'tenant',
+	sweepLimit: maxPathsSweptPerRun
+};
+const scopedContinuation = (cache: string) => ({
+	scope: 'cache',
+	cache,
+	sweepLimit: maxPathsSweptPerRun
+});
+const cappedGcOutcome = {
+	...gcOutcome,
+	pathsSwept: maxPathsSweptPerRun,
+	hasMoreWork: true
 };
 
 const verifyReport = {
@@ -160,20 +176,42 @@ describe('garbage-collection maintenance serialisation', () => {
 			.mockResolvedValueOnce(gcOutcome);
 
 		try {
-			await runInDurableObject(currentServer(), async (instance) => {
-				await expect(instance.runGarbageCollection()).rejects.toBeInstanceOf(
-					InjectedSweepError
-				);
-				await instance.runGarbageCollection();
-			});
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					await expect(instance.runGarbageCollection()).rejects.toBeInstanceOf(
+						InjectedSweepError
+					);
+					const afterFailure = {
+						continuation: await state.storage.get(gcContinuationKey),
+						alarmArmed: (await state.storage.getAlarm()) !== null
+					};
 
-			expect(collect.mock.calls.length).toStrictEqual(2);
+					await instance.runGarbageCollection();
+
+					return {
+						afterFailure,
+						afterRecovery: {
+							continuation: await state.storage.get(gcContinuationKey),
+							calls: collect.mock.calls.length
+						}
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				afterFailure: {
+					continuation: [tenantWideContinuation],
+					alarmArmed: true
+				},
+				afterRecovery: { continuation: undefined, calls: 2 }
+			});
 		} finally {
 			collect.mockRestore();
 		}
 	});
 
-	it('resumes a pending sweep from the alarm, running one bounded sweep', async () => {
+	it('resumes a legacy numeric continuation tenant-wide', async () => {
 		await initialise();
 
 		const collect = vi
@@ -187,15 +225,253 @@ describe('garbage-collection maintenance serialisation', () => {
 					await state.storage.put(gcContinuationKey, maxPathsSweptPerRun);
 					await instance.alarm();
 
-					const continuation =
-						await state.storage.get<number>(gcContinuationKey);
+					const continuation = await state.storage.get(gcContinuationKey);
 					await state.storage.deleteAlarm();
 
-					return { continuation, calls: collect.mock.calls.length };
+					return {
+						continuation,
+						calls: collect.mock.calls.map(
+							([_logger, cache, purgeOrigin, sweepLimit]) => ({
+								cache,
+								purgeOrigin,
+								sweepLimit
+							})
+						)
+					};
 				}
 			);
 
-			expect(observed).toStrictEqual({ continuation: undefined, calls: 1 });
+			expect(observed).toStrictEqual({
+				continuation: undefined,
+				calls: [
+					{
+						cache: undefined,
+						purgeOrigin: undefined,
+						sweepLimit: maxPathsSweptPerRun
+					}
+				]
+			});
+		} finally {
+			collect.mockRestore();
+		}
+	});
+
+	it('keeps a cache-scoped continuation on failure and resumes that cache', async () => {
+		const token = await initialise();
+
+		class InjectedScopedSweepError extends Error {}
+
+		const collect = vi
+			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
+			.mockRejectedValueOnce(new InjectedScopedSweepError())
+			.mockResolvedValueOnce(gcOutcome);
+		const request = new Request(new URL('/cache/builds/gc', currentOrigin()), {
+			method: 'POST',
+			headers: { authorization: `Bearer ${token}` }
+		});
+
+		try {
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					const response = await instance.fetch(request);
+					const afterFailure = {
+						status: response.status,
+						continuation: await state.storage.get(gcContinuationKey),
+						alarmArmed: (await state.storage.getAlarm()) !== null
+					};
+
+					await instance.alarm();
+					await state.storage.deleteAlarm();
+
+					return {
+						afterFailure,
+						afterRecovery: {
+							continuation: await state.storage.get(gcContinuationKey),
+							cacheScopes: collect.mock.calls.map(([_logger, cache]) => cache)
+						}
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				afterFailure: {
+					status: StatusCodes.INTERNAL_SERVER_ERROR,
+					continuation: [
+						{
+							scope: 'cache',
+							cache: 'builds',
+							sweepLimit: maxPathsSweptPerRun
+						}
+					],
+					alarmArmed: true
+				},
+				afterRecovery: {
+					continuation: undefined,
+					cacheScopes: ['builds', 'builds']
+				}
+			});
+		} finally {
+			collect.mockRestore();
+		}
+	});
+
+	it('preserves another cache continuation when a scoped sweep drains', async () => {
+		const token = await initialise();
+		const collect = vi
+			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
+			.mockResolvedValue(gcOutcome);
+		const request = new Request(new URL('/cache/b/gc', currentOrigin()), {
+			method: 'POST',
+			headers: { authorization: `Bearer ${token}` }
+		});
+
+		try {
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					await state.storage.put(gcContinuationKey, [scopedContinuation('a')]);
+					const response = await instance.fetch(request);
+					const continuation = await state.storage.get(gcContinuationKey);
+					await state.storage.deleteAlarm();
+
+					return {
+						status: response.status,
+						continuation,
+						cacheScopes: collect.mock.calls.map(([_logger, cache]) => cache)
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				status: StatusCodes.OK,
+				continuation: [scopedContinuation('a')],
+				cacheScopes: ['b']
+			});
+		} finally {
+			collect.mockRestore();
+		}
+	});
+
+	it('queues distinct cache continuations and settles only the resumed scope', async () => {
+		const token = await initialise();
+		const collect = vi
+			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
+			.mockResolvedValueOnce(cappedGcOutcome)
+			.mockResolvedValue(gcOutcome);
+		const request = new Request(new URL('/cache/b/gc', currentOrigin()), {
+			method: 'POST',
+			headers: { authorization: `Bearer ${token}` }
+		});
+
+		try {
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					await state.storage.put(gcContinuationKey, [scopedContinuation('a')]);
+					const response = await instance.fetch(request);
+					const queued = await state.storage.get(gcContinuationKey);
+
+					await instance.alarm();
+					const afterA = await state.storage.get(gcContinuationKey);
+					await instance.alarm();
+					const afterB = await state.storage.get(gcContinuationKey);
+					await state.storage.deleteAlarm();
+
+					return {
+						status: response.status,
+						queued,
+						afterA,
+						afterB,
+						cacheScopes: collect.mock.calls.map(([_logger, cache]) => cache)
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				status: StatusCodes.OK,
+				queued: [scopedContinuation('a'), scopedContinuation('b')],
+				afterA: [scopedContinuation('b')],
+				afterB: undefined,
+				cacheScopes: ['b', 'a', 'b']
+			});
+		} finally {
+			collect.mockRestore();
+		}
+	});
+
+	it('keeps one tenant-wide continuation when scopes overlap', async () => {
+		const token = await initialise();
+		const collect = vi
+			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
+			.mockResolvedValue(cappedGcOutcome);
+		const request = new Request(new URL('/cache/b/gc', currentOrigin()), {
+			method: 'POST',
+			headers: { authorization: `Bearer ${token}` }
+		});
+
+		try {
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					await state.storage.put(gcContinuationKey, [scopedContinuation('a')]);
+					await instance.runGarbageCollection();
+					const widened = await state.storage.get(gcContinuationKey);
+
+					const response = await instance.fetch(request);
+					const afterScopedSweep = await state.storage.get(gcContinuationKey);
+					await state.storage.deleteAlarm();
+
+					return {
+						status: response.status,
+						widened,
+						afterScopedSweep
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				status: StatusCodes.OK,
+				widened: [tenantWideContinuation],
+				afterScopedSweep: [tenantWideContinuation]
+			});
+		} finally {
+			collect.mockRestore();
+		}
+	});
+
+	it('migrates and re-arms a legacy numeric continuation when resume fails', async () => {
+		await initialise();
+
+		class InjectedContinuationError extends Error {}
+
+		const collect = vi
+			.spyOn(GarbageCollectionService.prototype, 'collectGarbage')
+			.mockRejectedValue(new InjectedContinuationError());
+
+		try {
+			const observed = await runInDurableObject(
+				currentServer(),
+				async (instance, state) => {
+					await state.storage.put(gcContinuationKey, maxPathsSweptPerRun);
+
+					await expect(instance.alarm()).rejects.toBeInstanceOf(
+						InjectedContinuationError
+					);
+
+					const alarm = await state.storage.getAlarm();
+
+					return {
+						continuation: await state.storage.get(gcContinuationKey),
+						alarmArmed: alarm !== null
+					};
+				}
+			);
+
+			expect(observed).toStrictEqual({
+				continuation: [tenantWideContinuation],
+				alarmArmed: true
+			});
 		} finally {
 			collect.mockRestore();
 		}
@@ -233,8 +509,7 @@ describe('garbage-collection maintenance serialisation', () => {
 					blocked.resolve(true);
 					await Promise.all([cron, alarm]);
 
-					const continuation =
-						await state.storage.get<number>(gcContinuationKey);
+					const continuation = await state.storage.get(gcContinuationKey);
 					await state.storage.deleteAlarm();
 
 					return { continuation, calls: collect.mock.calls.length };

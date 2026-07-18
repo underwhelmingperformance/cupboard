@@ -164,6 +164,80 @@ const commitSessionAttachmentSchema = z.object({
 // backlog drains across successive alarm firings without holding the gate open.
 export const gcContinuationKey = 'maintenance:gc-pending';
 
+const garbageCollectionSweepLimitSchema = z.number().int().positive();
+const garbageCollectionContinuationSchema = z.discriminatedUnion('scope', [
+	z.object({
+		scope: z.literal('tenant'),
+		sweepLimit: garbageCollectionSweepLimitSchema
+	}),
+	z.object({
+		scope: z.literal('cache'),
+		cache: z.string(),
+		sweepLimit: garbageCollectionSweepLimitSchema
+	})
+]);
+const garbageCollectionContinuationsSchema = z
+	.array(garbageCollectionContinuationSchema)
+	.min(1);
+
+type GarbageCollectionContinuation = z.infer<
+	typeof garbageCollectionContinuationSchema
+>;
+
+function parseGarbageCollectionContinuations(
+	value: unknown
+): GarbageCollectionContinuation[] {
+	const legacy = garbageCollectionSweepLimitSchema.safeParse(value);
+
+	if (legacy.success) {
+		return [{ scope: 'tenant', sweepLimit: legacy.data }];
+	}
+
+	const parsed = garbageCollectionContinuationsSchema.safeParse(value);
+
+	if (parsed.success) {
+		return parsed.data;
+	}
+
+	const single = garbageCollectionContinuationSchema.safeParse(value);
+
+	return single.success ? [single.data] : [];
+}
+
+function garbageCollectionContinuation(
+	cache: string | undefined,
+	sweepLimit: number
+): GarbageCollectionContinuation {
+	return cache === undefined
+		? { scope: 'tenant', sweepLimit }
+		: { scope: 'cache', cache, sweepLimit };
+}
+
+function mergeGarbageCollectionContinuation(
+	pending: readonly GarbageCollectionContinuation[],
+	continuation: GarbageCollectionContinuation
+): GarbageCollectionContinuation[] {
+	// One entry per cache is enough: repeated sweeps resume the same backlog. A
+	// tenant-wide entry covers every cache and collapses the list to one.
+	if (continuation.scope === 'tenant') {
+		return [continuation];
+	}
+
+	const tenantWide = pending.find((candidate) => candidate.scope === 'tenant');
+
+	if (tenantWide !== undefined) {
+		return [tenantWide];
+	}
+
+	return [
+		...pending.filter(
+			(candidate) =>
+				candidate.scope !== 'cache' || candidate.cache !== continuation.cache
+		),
+		continuation
+	];
+}
+
 // How many decode-free reuse rows one verify-backstop firing settles locally;
 // fresh rows always wait for the queue consumer's off-thread decode.
 const verifyBackstopReuseSettleLimit = 16;
@@ -738,12 +812,29 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			'storePathHash' | 'narHash' | 'retention'
 		>
 	): Promise<void> {
-		const committed = await this.narInfoObjects.committedNarInfoRow(
-			cache,
+		const servable = await this.narInfoObjects.servableNarInfoVersions(cache, [
 			identity.storePathHash
-		);
+		]);
+		const proven = servable.get(identity.storePathHash);
 
-		if (committed?.narHash === identity.narHash) {
+		if (proven?.narHash === identity.narHash) {
+			const committed = await this.narInfoObjects.committedNarInfoRow(
+				cache,
+				identity.storePathHash
+			);
+
+			if (
+				committed?.generation !== proven.generation ||
+				committed.narHash !== proven.narHash
+			) {
+				sendCommitSessionFrame(socket, {
+					ev: 'verdict',
+					uploadId,
+					status: 'absent'
+				});
+
+				return;
+			}
 			sendCommitSessionFrame(socket, {
 				ev: 'settled',
 				uploadId,
@@ -1251,23 +1342,47 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// or a capped narinfo-deletion backlog is still queued, so the remaining paths
 	// and deletions drain across firings. The gate is free between firings, so
 	// push requests interleave while the backlog drains across chunks, and each
-	// chunk holds the gate only for its own deletes. The cap is persisted so the
-	// alarm resumes with the bound the run started with.
+	// chunk holds the gate only for its own deletes. The scope and cap are
+	// persisted so the alarm resumes the same work with the bound it started with.
 	private async sweepGarbageOnce(
-		sweepLimit: number = maxPathsSweptPerRun
+		sweepLimit: number = maxPathsSweptPerRun,
+		cache?: string
 	): Promise<void> {
-		const outcome = await this.metered('garbage-collection', (logger) =>
-			this.withMaintenanceEligibility(() =>
-				this.garbageCollection.collectGarbage(
-					logger,
-					undefined,
-					undefined,
-					sweepLimit
-				)
-			)
-		);
+		const continuation = garbageCollectionContinuation(cache, sweepLimit);
 
-		await this.settleGarbageContinuation(outcome, sweepLimit);
+		await this.runGarbagePass(
+			() =>
+				this.metered('garbage-collection', (logger) =>
+					this.withMaintenanceEligibility(() =>
+						this.garbageCollection.collectGarbage(
+							logger,
+							cache,
+							undefined,
+							sweepLimit
+						)
+					)
+				),
+			continuation
+		);
+	}
+
+	// Collection can commit a bounded expiry batch before later R2 or deletion
+	// work fails. Every driver therefore re-arms the continuation on failure; a
+	// successful pass settles it from the returned backlog facts.
+	private async runGarbagePass(
+		collect: () => Promise<GarbageCollectionOutcome>,
+		continuation: GarbageCollectionContinuation
+	): Promise<GarbageCollectionOutcome> {
+		try {
+			const outcome = await collect();
+			await this.settleGarbageContinuation(outcome, continuation);
+
+			return outcome;
+		} catch (error) {
+			await this.armGarbageContinuation(continuation);
+
+			throw error;
+		}
 	}
 
 	// Records or clears the garbage-collection continuation after a sweep. It arms
@@ -1277,15 +1392,14 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// sweep and the interactive path.
 	private async settleGarbageContinuation(
 		outcome: GarbageCollectionOutcome,
-		sweepLimit: number
+		continuation: GarbageCollectionContinuation
 	): Promise<void> {
 		const hasMoreToDrain =
-			outcome.pathsSwept >= sweepLimit ||
-			this.deletionQueue.hasQueuedNarInfoDeletions();
+			outcome.hasMoreWork || this.deletionQueue.hasQueuedNarInfoDeletions();
 
 		await (hasMoreToDrain
-			? this.armGarbageContinuation(sweepLimit)
-			: this.ctx.storage.delete(gcContinuationKey));
+			? this.armGarbageContinuation(continuation)
+			: this.clearGarbageContinuation(continuation));
 	}
 
 	// The interactive garbage-collection pass the admin oRPC procedure reaches. It
@@ -1299,17 +1413,12 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		cache: string | undefined,
 		purgeOrigin: string | undefined
 	): Promise<GarbageCollectionOutcome> {
-		return this.runExclusiveMaintenance('gc', async () => {
-			const outcome = await this.garbageCollection.collectGarbage(
-				logger,
-				cache,
-				purgeOrigin
-			);
-
-			await this.settleGarbageContinuation(outcome, maxPathsSweptPerRun);
-
-			return outcome;
-		});
+		return this.runExclusiveMaintenance('gc', () =>
+			this.runGarbagePass(
+				() => this.garbageCollection.collectGarbage(logger, cache, purgeOrigin),
+				garbageCollectionContinuation(cache, maxPathsSweptPerRun)
+			)
+		);
 	}
 
 	// The interactive verification pass the admin oRPC procedure reaches. It
@@ -1328,33 +1437,71 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		});
 	}
 
-	private async armGarbageContinuation(sweepLimit: number): Promise<void> {
-		await this.ctx.storage.put(gcContinuationKey, sweepLimit);
+	private async armGarbageContinuation(
+		continuation: GarbageCollectionContinuation
+	): Promise<void> {
+		const pending = parseGarbageCollectionContinuations(
+			await this.ctx.storage.get(gcContinuationKey)
+		);
+		await this.ctx.storage.put(
+			gcContinuationKey,
+			mergeGarbageCollectionContinuation(pending, continuation)
+		);
+		await this.ctx.storage.setAlarm(Date.now());
+	}
+
+	private async clearGarbageContinuation(
+		continuation: GarbageCollectionContinuation
+	): Promise<void> {
+		const pending = parseGarbageCollectionContinuations(
+			await this.ctx.storage.get(gcContinuationKey)
+		);
+		const remaining =
+			continuation.scope === 'tenant'
+				? []
+				: pending.filter(
+						(candidate) =>
+							candidate.scope !== 'cache' ||
+							candidate.cache !== continuation.cache
+					);
+
+		if (remaining.length === 0) {
+			await this.ctx.storage.delete(gcContinuationKey);
+			return;
+		}
+
+		await this.ctx.storage.put(gcContinuationKey, remaining);
 		await this.ctx.storage.setAlarm(Date.now());
 	}
 
 	// Resumes a garbage-collection sweep that stopped at its per-run cap. A run
 	// that did not stop at the cap left no continuation, so this is a no-op.
 	private async resumeGarbageCollection(): Promise<void> {
-		const pending = await this.ctx.storage.get<number>(gcContinuationKey);
+		const pending = parseGarbageCollectionContinuations(
+			await this.ctx.storage.get(gcContinuationKey)
+		);
 
 		// No continuation means no work: return without touching the chain, so an
 		// idle alarm costs nothing and never queues behind a concurrent sweep.
-		if (typeof pending !== 'number') {
+		if (pending.length === 0) {
 			return;
 		}
 
 		await this.runExclusiveMaintenance('gc', async () => {
 			// Re-read under the chain: a sweep that ran while this pass waited may
 			// have drained the marker, in which case there is nothing left to resume.
-			const sweepLimit = await this.ctx.storage.get<number>(gcContinuationKey);
+			const continuation = parseGarbageCollectionContinuations(
+				await this.ctx.storage.get(gcContinuationKey)
+			)[0];
 
-			if (typeof sweepLimit !== 'number') {
+			if (continuation === undefined) {
 				return;
 			}
 
-			await this.ctx.storage.delete(gcContinuationKey);
-			await this.sweepGarbageOnce(sweepLimit);
+			await this.sweepGarbageOnce(
+				continuation.sweepLimit,
+				continuation.scope === 'cache' ? continuation.cache : undefined
+			);
 		});
 	}
 

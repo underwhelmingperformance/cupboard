@@ -233,7 +233,12 @@ export const retentionRoots = sqliteTable(
 	// it a scan of every root.
 	(table) => [
 		primaryKey({ columns: [table.cache, table.name] }),
-		index('retention_root_expires_at_idx').on(table.expiresAt)
+		index('retention_root_expires_at_idx').on(table.expiresAt),
+		index('retention_root_cache_expires_at_name_idx').on(
+			table.cache,
+			table.expiresAt,
+			table.name
+		)
 	]
 );
 
@@ -269,6 +274,61 @@ export const retentionGrace = sqliteTable(
 		primaryKey({ columns: [table.cache, table.storePathHash] }),
 		index('retention_grace_retain_until_idx').on(table.retainUntil)
 	]
+);
+
+// A monotonically increasing revision for every cache input that can change
+// reachability. SQLite triggers maintain it independently of the write path, so
+// an incremental garbage-collection scan can detect any mutation between its
+// bounded chunks before it deletes from an obsolete mark set.
+export const garbageCollectionRevisions = sqliteTable(
+	'garbage_collection_revision',
+	{
+		cache: text('cache').primaryKey(),
+		revision: integer('revision').notNull().default(0)
+	}
+);
+
+export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
+	cache: text('cache').primaryKey(),
+	revision: integer('revision').notNull(),
+	phase: text('phase', {
+		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'sweep']
+	}).notNull(),
+	cursor: text('cursor').notNull().default(''),
+	markStorePathHash: text('mark_store_path_hash').$type<StorePathHash>(),
+	referenceCursor: integer('reference_cursor').notNull().default(-1),
+	allowEmptySweep: integer('allow_empty_sweep', { mode: 'boolean' })
+		.notNull()
+		.default(false)
+});
+
+export const garbageCollectionFrontier = sqliteTable(
+	'garbage_collection_frontier',
+	{
+		cache: text('cache').notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
+);
+
+export const garbageCollectionMarks = sqliteTable(
+	'garbage_collection_mark',
+	{
+		cache: text('cache').notNull(),
+		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
+	},
+	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
+);
+
+// A tenant-wide sweep advances through one cache at a time. The current cache
+// remains here until its incremental scan completes, then the next cache is
+// selected lexicographically without loading the complete cache registry.
+export const garbageCollectionTenantRuns = sqliteTable(
+	'garbage_collection_tenant_run',
+	{
+		id: integer('id').primaryKey(),
+		cache: text('cache').notNull()
+	}
 );
 
 export const caches = sqliteTable('cache', {

@@ -35,6 +35,51 @@ import { storedSignaturesSchema } from './signing-keys.ts';
 
 type NarInfoRow = typeof schema.narInfos.$inferSelect;
 
+interface NarInfoObjectVersion {
+	readonly generation: number;
+	readonly narHash: NixSha256HashString;
+}
+
+interface NarInfoObjectMetadata {
+	readonly [key: string]: string;
+	readonly generation: string;
+	readonly narHash: string;
+}
+
+function narInfoObjectMetadata(
+	version: NarInfoObjectVersion
+): NarInfoObjectMetadata {
+	return {
+		generation: String(version.generation),
+		narHash: version.narHash
+	};
+}
+
+function objectMetadata(
+	object: R2Object | null
+): NarInfoObjectMetadata | undefined {
+	const generation = object?.customMetadata?.generation;
+	const narHash = object?.customMetadata?.narHash;
+
+	if (generation === undefined || narHash === undefined) {
+		return undefined;
+	}
+
+	return { generation, narHash };
+}
+
+function isObjectVersion(
+	object: R2Object | null,
+	version: NarInfoObjectVersion
+): boolean {
+	const metadata = objectMetadata(object);
+
+	return (
+		metadata?.generation === String(version.generation) &&
+		metadata.narHash === version.narHash
+	);
+}
+
 // A committed reference edge as read from D1: the path, the generation the row
 // must still name, and the NAR hash it points at.
 interface CommittedReferenceEdge {
@@ -86,7 +131,13 @@ export class NarInfoObjectsService {
 			}
 		}
 
-		await this.putNarInfoObject(cache, storePathHash, narInfo);
+		await this.putNarInfoObject(
+			cache,
+			storePathHash,
+			generation,
+			narHash,
+			narInfo
+		);
 		await this.context.criticalSection(() =>
 			this.confirmPublishedObjectLocked(
 				cache,
@@ -143,14 +194,20 @@ export class NarInfoObjectsService {
 			return;
 		}
 
-		await this.putNarInfoObject(cache, storePathHash, narInfo);
+		await this.putNarInfoObject(
+			cache,
+			storePathHash,
+			row.generation,
+			row.narHash,
+			narInfo
+		);
 	}
 
-	// Re-materialises a lost narinfo object when the row, the matching reference
-	// edge, and the shared blob are still present. The caller must already hold the
-	// DO critical section: running against a freshly read row inside one is what
-	// stops a concurrent delete from being undone by re-materialising from a stale
-	// copy.
+	// Re-materialises a missing or stale narinfo object when the row, the matching
+	// reference edge, and the shared blob are still present. The caller must already
+	// hold the DO critical section: running against a freshly read row inside one is
+	// what stops a concurrent delete from being undone by re-materialising from a
+	// stale copy.
 	private async materialiseIfRecoverable(
 		cache: string,
 		storePathHash: StorePathHash,
@@ -185,7 +242,7 @@ export class NarInfoObjectsService {
 			narInfoObjectKey(this.context.requireTenant(), storePathHash, cache)
 		);
 
-		if (existing !== null) {
+		if (isObjectVersion(existing, row)) {
 			return;
 		}
 
@@ -197,7 +254,13 @@ export class NarInfoObjectsService {
 			return;
 		}
 
-		await this.putNarInfoObject(cache, storePathHash, narInfo);
+		await this.putNarInfoObject(
+			cache,
+			storePathHash,
+			row.generation,
+			row.narHash,
+			narInfo
+		);
 	}
 
 	// Whether the row's exact version is still committed. Given a batch of edges
@@ -256,6 +319,30 @@ export class NarInfoObjectsService {
 		}
 
 		await this.deleteNarInfoObject(cache, storePathHash);
+	}
+
+	// Rewrites legacy, missing, or stale objects with version metadata using a
+	// bounded fan-out. Publication happens outside the input gate and its normal
+	// post-publish fence repairs or removes an object if the row moved meanwhile.
+	private async repairNarInfoObjects(
+		cache: string,
+		rows: readonly NarInfoRow[]
+	): Promise<void> {
+		await mapWithConcurrency(rows, maxOutgoingConnections, async (row) => {
+			const narInfo = await this.narInfoFromRow(row);
+
+			if (narInfo === undefined) {
+				return;
+			}
+
+			await this.publishNarInfoObject(
+				cache,
+				row.storePathHash,
+				row.generation,
+				row.narHash,
+				narInfo
+			);
+		});
 	}
 
 	// Publishes a freshly materialised narinfo's object, keeping the R2 put out
@@ -524,42 +611,47 @@ export class NarInfoObjectsService {
 		return committed;
 	}
 
-	// The store-path hashes among `storePathHashes` whose tenant narinfo object is
-	// already materialised in R2, gathered with a bounded fan-out of `head` reads.
-	// A skip whose object is present needs no self-heal; only the absent ones do.
+	// The row identities recorded by the tenant narinfo objects in R2, gathered
+	// with a bounded fan-out of `head` reads. The caller matches these against its
+	// subsequent row snapshot, so a recommit during the probes fails towards heal.
 	async existingNarInfoObjects(
 		cache: string,
 		storePathHashes: readonly StorePathHash[]
-	): Promise<Set<StorePathHash>> {
+	): Promise<ReadonlyMap<StorePathHash, NarInfoObjectMetadata>> {
 		const tenant = this.context.requireTenant();
 		const present = await mapWithConcurrency(
 			[...new Set(storePathHashes)],
 			maxOutgoingConnections,
-			async (storePathHash) =>
-				(await this.context.env.BLOBS.head(
+			async (storePathHash) => {
+				const object = await this.context.env.BLOBS.head(
 					narInfoObjectKey(tenant, storePathHash, cache)
-				)) === null
+				);
+				const metadata = objectMetadata(object);
+
+				return metadata === undefined
 					? undefined
-					: storePathHash
+					: ([storePathHash, metadata] as const);
+			}
 		);
 
-		return new Set(
+		return new Map(
 			present.filter(
-				(storePathHash): storePathHash is StorePathHash =>
-					storePathHash !== undefined
+				(entry): entry is readonly [StorePathHash, NarInfoObjectMetadata] =>
+					entry !== undefined
 			)
 		);
 	}
 
-	// The distinct path hashes whose live row, exact committed reference and
-	// canonical R2 objects form a substitutable publication. R2 narinfo heads run
-	// before the row snapshot so a recommit during the probes fails towards the
-	// gated heal path. A missing or stale narinfo object is repaired when the
-	// canonical NAR still exists.
-	async servableStorePathHashes(
+	// The versioned paths whose live row, exact committed reference and canonical
+	// R2 objects form a substitutable publication. R2 narinfo heads run before the
+	// row snapshot so a recommit during the probes fails towards the gated heal
+	// path. Callers that settle work from this result revalidate the returned
+	// generation after the asynchronous probes. A missing or stale narinfo object
+	// is repaired when the canonical NAR still exists.
+	async servableNarInfoVersions(
 		cache: string,
 		storePathHashes: readonly StorePathHash[]
-	): Promise<ReadonlySet<StorePathHash>> {
+	): Promise<ReadonlyMap<StorePathHash, NarInfoObjectVersion>> {
 		const hashes = [...new Set(storePathHashes)];
 		const present = await this.existingNarInfoObjects(cache, hashes);
 		const rows = this.narInfoRowsFor(cache, hashes);
@@ -572,7 +664,7 @@ export class NarInfoObjectsService {
 			this.context.env.BLOBS,
 			committedRows.map((row) => row.narHash)
 		);
-		const servable = new Set<StorePathHash>();
+		const servable = new Map<StorePathHash, NarInfoObjectVersion>();
 		const hasCurrentObject = (row: NarInfoRow): boolean => {
 			const metadata = present.get(row.storePathHash);
 
@@ -584,7 +676,10 @@ export class NarInfoObjectsService {
 
 		for (const row of committedRows) {
 			if (hasCurrentObject(row) && backed.has(row.narHash)) {
-				servable.add(row.storePathHash);
+				servable.set(row.storePathHash, {
+					generation: row.generation,
+					narHash: row.narHash
+				});
 			}
 		}
 
@@ -592,13 +687,37 @@ export class NarInfoObjectsService {
 			(row) => !hasCurrentObject(row) && backed.has(row.narHash)
 		);
 
+		await this.repairNarInfoObjects(cache, recoverable);
+		const repaired = await this.existingNarInfoObjects(
+			cache,
+			recoverable.map((row) => row.storePathHash)
+		);
+
 		for (const row of recoverable) {
-			if (await this.isServable(cache, row.storePathHash, committedEdges)) {
-				servable.add(row.storePathHash);
+			const metadata = repaired.get(row.storePathHash);
+			if (
+				metadata?.generation === String(row.generation) &&
+				metadata.narHash === row.narHash
+			) {
+				servable.set(row.storePathHash, {
+					generation: row.generation,
+					narHash: row.narHash
+				});
 			}
 		}
 
 		return servable;
+	}
+
+	// Most callers need only membership; reconnect settlement uses the versioned
+	// form above because it must fence a same-NAR recommit.
+	async servableStorePathHashes(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): Promise<ReadonlySet<StorePathHash>> {
+		const versions = await this.servableNarInfoVersions(cache, storePathHashes);
+
+		return new Set(versions.keys());
 	}
 
 	async committedNarInfoRow(
@@ -645,6 +764,8 @@ export class NarInfoObjectsService {
 	async putNarInfoObject(
 		cache: string,
 		storePathHash: StorePathHash,
+		generation: number,
+		narHash: NixSha256HashString,
 		narInfo: NarInfo
 	): Promise<void> {
 		const key = narInfoObjectKey(
@@ -655,6 +776,7 @@ export class NarInfoObjectsService {
 
 		await this.context.objectWrites.write([key], () =>
 			this.context.env.BLOBS.put(key, narInfo.render(), {
+				customMetadata: narInfoObjectMetadata({ generation, narHash }),
 				httpMetadata: {
 					contentType: 'text/x-nix-narinfo; charset=utf-8',
 					cacheControl: narInfoCacheControl

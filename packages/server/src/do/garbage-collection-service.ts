@@ -1,17 +1,33 @@
 import { type Logger } from '@cupboard/logger';
 import {
-	referencesSchema,
+	type RootName,
+	storePathBasenameSchema,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
-import { and, eq, isNull, lt, lte, or } from 'drizzle-orm';
+import {
+	and,
+	asc,
+	eq,
+	gt,
+	inArray,
+	isNull,
+	lt,
+	lte,
+	or,
+	type SQL,
+	sql
+} from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
-import { StoredReferencesInvalidError } from '../errors.ts';
+import {
+	StoredReferencesInvalidError,
+	StoredReferencesJsonMalformedError,
+	StoredReferencesNotArrayError
+} from '../errors.ts';
 import { narObjectKey, stagingPrefix } from '../http/http.ts';
-import { parseStored } from '../http/parse.ts';
 
-import { deleteObjects } from './bulk.ts';
+import { chunk, deleteObjects, maxInClauseValues } from './bulk.ts';
 import {
 	type GarbageCollectionOutcome,
 	type ServerContext
@@ -25,6 +41,15 @@ import { parseStoredUploadPathMetadata } from './upload-metadata.ts';
 // stops at this cap the caller resumes it on an alarm, draining the backlog
 // across chunks.
 export const maxPathsSweptPerRun = 1000;
+
+// Root expiry drains targets in bounded batches. The root row remains until its
+// last target has moved to grace, so a larger or historical root resumes safely
+// without a separate cursor or a reachability gap.
+export const maxExpiredRootTargetsPerRun = 1000;
+
+// Empty and small roots should drain together, while the target cap above
+// remains the bound on path work.
+export const maxRootsExpiredPerRun = 32;
 
 // An upload credential is scoped to `staging/<pushId>/` and a client may write
 // any key beneath it, including keys it never negotiated. The negotiated keys
@@ -50,17 +75,130 @@ export class GarbageCollectionService {
 		private readonly retention: RetentionService
 	) {}
 
-	private collectUnreachable(
+	private currentRevision(cache: string): number {
+		this.context.db
+			.insert(schema.garbageCollectionRevisions)
+			.values({ cache, revision: 0 })
+			.onConflictDoNothing()
+			.run();
+
+		return (
+			this.context.db
+				.select({ revision: schema.garbageCollectionRevisions.revision })
+				.from(schema.garbageCollectionRevisions)
+				.where(eq(schema.garbageCollectionRevisions.cache, cache))
+				.get()?.revision ?? 0
+		);
+	}
+
+	private clearScan(cache: string): void {
+		this.context.db.transaction((tx) => {
+			tx.delete(schema.garbageCollectionFrontier)
+				.where(eq(schema.garbageCollectionFrontier.cache, cache))
+				.run();
+			tx.delete(schema.garbageCollectionMarks)
+				.where(eq(schema.garbageCollectionMarks.cache, cache))
+				.run();
+			tx.delete(schema.garbageCollectionScans)
+				.where(eq(schema.garbageCollectionScans.cache, cache))
+				.run();
+		});
+	}
+
+	private resetScan(cache: string, revision: number): void {
+		this.context.db.transaction((tx) => {
+			tx.delete(schema.garbageCollectionFrontier)
+				.where(eq(schema.garbageCollectionFrontier.cache, cache))
+				.run();
+			tx.delete(schema.garbageCollectionMarks)
+				.where(eq(schema.garbageCollectionMarks.cache, cache))
+				.run();
+			tx.insert(schema.garbageCollectionScans)
+				.values({
+					cache,
+					revision,
+					phase: 'expire-roots',
+					cursor: '',
+					referenceCursor: -1,
+					allowEmptySweep: false
+				})
+				.onConflictDoUpdate({
+					target: schema.garbageCollectionScans.cache,
+					set: {
+						revision,
+						phase: 'expire-roots',
+						cursor: '',
+						markStorePathHash: sql`null`,
+						referenceCursor: -1,
+						allowEmptySweep: false
+					}
+				})
+				.run();
+		});
+	}
+
+	private scan(
+		cache: string
+	): typeof schema.garbageCollectionScans.$inferSelect {
+		const revision = this.currentRevision(cache);
+		const stored = this.context.db
+			.select()
+			.from(schema.garbageCollectionScans)
+			.where(eq(schema.garbageCollectionScans.cache, cache))
+			.get();
+
+		if (stored?.revision !== revision) {
+			this.resetScan(cache, revision);
+			const reset = this.context.db
+				.select()
+				.from(schema.garbageCollectionScans)
+				.where(eq(schema.garbageCollectionScans.cache, cache))
+				.get();
+
+			if (reset === undefined) {
+				throw new Error('garbage-collection scan reset did not persist');
+			}
+
+			return reset;
+		}
+
+		return stored;
+	}
+
+	private updateScan(
 		cache: string,
-		now: string,
-		budget: number
+		set: Partial<
+			Pick<
+				typeof schema.garbageCollectionScans.$inferInsert,
+				'phase' | 'cursor' | 'referenceCursor' | 'allowEmptySweep' | 'revision'
+			>
+		> & {
+			readonly markStorePathHash?: StorePathHash | SQL;
+		}
+	): void {
+		this.context.db
+			.update(schema.garbageCollectionScans)
+			.set(set)
+			.where(eq(schema.garbageCollectionScans.cache, cache))
+			.run();
+	}
+
+	private synchroniseScanRevision(cache: string): void {
+		this.updateScan(cache, { revision: this.currentRevision(cache) });
+	}
+
+	private expireRoots(
+		cache: string,
+		now: string
 	): {
 		rootsExpired: number;
-		pathsSwept: number;
+		rootsInspected: number;
+		rootTargetsExpired: number;
+		hasMoreExpiredRoots: boolean;
 	} {
 		// Expire TTL'd roots first, regardless of whether a sweep follows, so an
 		// expiring channel always lapses. A NULL expiry (permanent) never matches.
-		const expiredRoots = this.context.db
+		const expiredRootCandidates = this.context.db
 			.select({
 				name: schema.retentionRoots.name,
 				expiresAt: schema.retentionRoots.expiresAt
@@ -72,218 +210,534 @@ export class GarbageCollectionService {
 					lte(schema.retentionRoots.expiresAt, now)
 				)
 			)
+			.orderBy(
+				asc(schema.retentionRoots.expiresAt),
+				asc(schema.retentionRoots.name)
+			)
+			.limit(maxRootsExpiredPerRun + 1)
 			.all();
+		const expiredRoots = expiredRootCandidates.slice(0, maxRootsExpiredPerRun);
+		const expiredRootNames = expiredRoots.map((root) => root.name);
+		const expiryByRoot = new Map(
+			expiredRoots.flatMap((root) =>
+				root.expiresAt === null ? [] : [[root.name, root.expiresAt] as const]
+			)
+		);
 
 		// Each expiring root's targets receive a grace deadline before the root is
 		// removed, anchored to the root's nominal expiry rather than this sweep's
 		// time, so a late sweep cannot extend retention. The `lte` filter above
 		// cannot match a NULL expiry, so the narrowing here never drops a root.
-		const expiredRootTargets = expiredRoots.flatMap((root) =>
-			root.expiresAt === null
+		const expiredRootTargetCandidates =
+			expiredRootNames.length === 0
 				? []
-				: [
-						{
-							expiresAt: root.expiresAt,
-							targets: this.context.db
-								.select({
-									storePathHash: schema.retentionRootTargets.storePathHash
-								})
-								.from(schema.retentionRootTargets)
-								.where(
-									and(
-										eq(schema.retentionRootTargets.cache, cache),
-										eq(schema.retentionRootTargets.rootName, root.name)
-									)
-								)
-								.all()
-								.map((target) => target.storePathHash)
-						}
-					]
+				: this.context.db
+						.select({
+							rootName: schema.retentionRootTargets.rootName,
+							storePathHash: schema.retentionRootTargets.storePathHash
+						})
+						.from(schema.retentionRootTargets)
+						.where(
+							and(
+								eq(schema.retentionRootTargets.cache, cache),
+								inArray(schema.retentionRootTargets.rootName, expiredRootNames)
+							)
+						)
+						.orderBy(
+							asc(schema.retentionRootTargets.rootName),
+							asc(schema.retentionRootTargets.storePathHash)
+						)
+						.limit(maxExpiredRootTargetsPerRun + 1)
+						.all();
+		const expiredRootTargets = expiredRootTargetCandidates.slice(
+			0,
+			maxExpiredRootTargetsPerRun
 		);
+		let rootsExpired = 0;
 
 		this.context.db.transaction((tx) => {
-			for (const root of expiredRoots) {
-				tx.delete(schema.retentionRootTargets)
+			// The deadline and target removal share one transaction: a crash between
+			// them could otherwise release a target with no grace source in its place.
+			this.retention.applyGraceTransitions(
+				cache,
+				expiredRootTargets.flatMap((target) => {
+					const anchorIso = expiryByRoot.get(target.rootName);
+
+					return anchorIso === undefined
+						? []
+						: [{ storePathHash: target.storePathHash, anchorIso }];
+				}),
+				tx
+			);
+
+			const hashesByRoot = new Map<RootName, StorePathHash[]>();
+
+			for (const target of expiredRootTargets) {
+				const hashes = hashesByRoot.get(target.rootName) ?? [];
+				hashes.push(target.storePathHash);
+				hashesByRoot.set(target.rootName, hashes);
+			}
+
+			for (const [rootName, storePathHashes] of hashesByRoot) {
+				for (const storePathHashBatch of chunk(
+					storePathHashes,
+					maxInClauseValues
+				)) {
+					tx.delete(schema.retentionRootTargets)
+						.where(
+							and(
+								eq(schema.retentionRootTargets.cache, cache),
+								eq(schema.retentionRootTargets.rootName, rootName),
+								inArray(
+									schema.retentionRootTargets.storePathHash,
+									storePathHashBatch
+								)
+							)
+						)
+						.run();
+				}
+			}
+
+			if (expiredRootNames.length === 0) {
+				return;
+			}
+
+			const remainingRoots = new Set<RootName>();
+
+			for (const rootName of expiredRootNames) {
+				const remaining = tx
+					.select({ storePathHash: schema.retentionRootTargets.storePathHash })
+					.from(schema.retentionRootTargets)
 					.where(
 						and(
 							eq(schema.retentionRootTargets.cache, cache),
-							eq(schema.retentionRootTargets.rootName, root.name)
+							eq(schema.retentionRootTargets.rootName, rootName)
+						)
+					)
+					.limit(1)
+					.get();
+
+				if (remaining !== undefined) {
+					remainingRoots.add(rootName);
+				}
+			}
+			const completedRoots = expiredRootNames.filter(
+				(rootName) => !remainingRoots.has(rootName)
+			);
+
+			for (const rootNameBatch of chunk(completedRoots, maxInClauseValues)) {
+				tx.delete(schema.retentionRoots)
+					.where(
+						and(
+							eq(schema.retentionRoots.cache, cache),
+							inArray(schema.retentionRoots.name, rootNameBatch)
 						)
 					)
 					.run();
 			}
 
-			tx.delete(schema.retentionRoots)
-				.where(
-					and(
-						eq(schema.retentionRoots.cache, cache),
-						lte(schema.retentionRoots.expiresAt, now)
-					)
-				)
-				.run();
-
-			// Applied inside the same transaction as the deletes above: a crash
-			// between the two could otherwise expire these roots with no deadline
-			// ever established for the targets they released.
-			for (const expired of expiredRootTargets) {
-				this.retention.applyGraceTransition(
-					cache,
-					expired.targets,
-					expired.expiresAt,
-					tx
-				);
-			}
+			rootsExpired = completedRoots.length;
 		});
+		const hasMoreExpiredRoots =
+			expiredRootCandidates.length > expiredRoots.length ||
+			expiredRoots.length > rootsExpired;
 
-		// An expired grace deadline lapses before reachability is computed, so its
-		// expiry is a retention event exactly like an expiring root: the sweep that
-		// follows may collect what the deadline kept. A deadline granted just above
-		// whose nominal window has already passed is reclaimed here in the same
-		// sweep.
-		this.context.db
-			.delete(schema.retentionGrace)
-			.where(
-				and(
-					eq(schema.retentionGrace.cache, cache),
-					lte(schema.retentionGrace.retainUntil, now)
-				)
-			)
-			.run();
+		return {
+			rootsExpired,
+			rootsInspected: expiredRoots.length,
+			rootTargetsExpired: expiredRootTargets.length,
+			hasMoreExpiredRoots
+		};
+	}
 
-		// Mark the closure reachable from the live roots within this cache.
-		// `visited` guards the traversal; `retainedCommitted` is the keep-set of
-		// committed paths that the sweep spares.
-		const visited = new Set<string>();
-		const retainedCommitted = new Set<string>();
-		const queue: StorePathHash[] = [];
+	private insertFrontier(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): void {
+		const batches = chunk(storePathHashes, Math.floor(maxInClauseValues / 2));
 
-		const rootTargets = this.context.db
-			.select({ storePathHash: schema.retentionRootTargets.storePathHash })
-			.from(schema.retentionRootTargets)
-			.where(eq(schema.retentionRootTargets.cache, cache))
-			.all();
+		for (const batch of batches) {
+			this.context.db
+				.insert(schema.garbageCollectionFrontier)
+				.values(batch.map((storePathHash) => ({ cache, storePathHash })))
+				.onConflictDoNothing()
+				.run();
+		}
+	}
 
-		// The grace deadlines still present are all live: the expired ones were
-		// deleted above. Each seeds the traversal exactly like a root target, so a
-		// deadline keeps the same transitive closure its path references.
-		const graceTargets = this.context.db
-			.select({ storePathHash: schema.retentionGrace.storePathHash })
-			.from(schema.retentionGrace)
-			.where(eq(schema.retentionGrace.cache, cache))
-			.all();
+	private advanceSeed(
+		cache: string,
+		phase: 'roots' | 'grace',
+		cursor: string,
+		budget: number
+	): { readonly used: number; readonly complete: boolean } {
+		const rows =
+			phase === 'roots'
+				? this.context.db
+						.selectDistinct({
+							storePathHash: schema.retentionRootTargets.storePathHash
+						})
+						.from(schema.retentionRootTargets)
+						.where(
+							and(
+								eq(schema.retentionRootTargets.cache, cache),
+								sql`${schema.retentionRootTargets.storePathHash} > ${cursor}`
+							)
+						)
+						.orderBy(asc(schema.retentionRootTargets.storePathHash))
+						.limit(budget + 1)
+						.all()
+				: this.context.db
+						.select({ storePathHash: schema.retentionGrace.storePathHash })
+						.from(schema.retentionGrace)
+						.where(
+							and(
+								eq(schema.retentionGrace.cache, cache),
+								sql`${schema.retentionGrace.storePathHash} > ${cursor}`
+							)
+						)
+						.orderBy(asc(schema.retentionGrace.storePathHash))
+						.limit(budget + 1)
+						.all();
+		const batch = rows.slice(0, budget);
 
-		for (const target of [...rootTargets, ...graceTargets]) {
-			if (visited.has(target.storePathHash)) {
-				continue;
-			}
+		this.insertFrontier(
+			cache,
+			batch.map((row) => row.storePathHash)
+		);
 
-			visited.add(target.storePathHash);
-			queue.push(storePathHashSchema.parse(target.storePathHash));
+		if (rows.length > batch.length) {
+			this.updateScan(cache, {
+				cursor: batch.at(-1)?.storePathHash ?? cursor
+			});
+			return { used: batch.length, complete: false };
 		}
 
-		while (queue.length > 0) {
-			const storePathHash = queue.pop();
+		this.updateScan(cache, {
+			phase: phase === 'roots' ? 'grace' : 'mark',
+			cursor: ''
+		});
 
-			if (storePathHash === undefined) {
+		return { used: batch.length, complete: true };
+	}
+
+	private existingMarks(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): ReadonlySet<StorePathHash> {
+		const marks = new Set<StorePathHash>();
+
+		for (const batch of chunk(storePathHashes, maxInClauseValues)) {
+			const rows = this.context.db
+				.select({ storePathHash: schema.garbageCollectionMarks.storePathHash })
+				.from(schema.garbageCollectionMarks)
+				.where(
+					and(
+						eq(schema.garbageCollectionMarks.cache, cache),
+						inArray(schema.garbageCollectionMarks.storePathHash, batch)
+					)
+				)
+				.all();
+
+			for (const row of rows) {
+				marks.add(row.storePathHash);
+			}
+		}
+
+		return marks;
+	}
+
+	private referenceHash(
+		storePathHash: StorePathHash,
+		reference: unknown
+	): StorePathHash {
+		try {
+			const basename = storePathBasenameSchema.parse(reference);
+			const separator = basename.indexOf('-');
+
+			return storePathHashSchema.parse(basename.slice(0, separator));
+		} catch (error) {
+			throw new StoredReferencesInvalidError(
+				storePathHash,
+				error instanceof Error ? error : new Error(String(error))
+			);
+		}
+	}
+
+	private validateReferencesContainer(
+		cache: string,
+		storePathHash: StorePathHash
+	): void {
+		const shape = this.context.db
+			.select({
+				referencesValid: sql<number>`json_valid(${schema.narInfos.referencesJson})`,
+				referencesType: sql<string | null>`CASE
+					WHEN json_valid(${schema.narInfos.referencesJson})
+					THEN json_type(${schema.narInfos.referencesJson})
+				END`
+			})
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		if (shape === undefined) {
+			return;
+		}
+
+		if (shape.referencesValid === 1 && shape.referencesType === 'array') {
+			return;
+		}
+
+		if (shape.referencesValid !== 1) {
+			throw new StoredReferencesJsonMalformedError(storePathHash);
+		}
+
+		throw new StoredReferencesNotArrayError(storePathHash);
+	}
+
+	private advanceMark(
+		cache: string,
+		budget: number
+	): { readonly used: number; readonly complete: boolean } {
+		let used = 0;
+
+		while (used < budget) {
+			const scan = this.scan(cache);
+			let storePathHash = scan.markStorePathHash;
+			let referenceCursor = scan.referenceCursor;
+
+			if (!storePathHash) {
+				const frontier = this.context.db
+					.select({
+						storePathHash: schema.garbageCollectionFrontier.storePathHash
+					})
+					.from(schema.garbageCollectionFrontier)
+					.where(eq(schema.garbageCollectionFrontier.cache, cache))
+					.orderBy(asc(schema.garbageCollectionFrontier.storePathHash))
+					.limit(1)
+					.get();
+
+				if (frontier === undefined) {
+					return { used, complete: this.finishMark(cache) };
+				}
+
+				const row = this.context.db
+					.select({ storePathHash: schema.narInfos.storePathHash })
+					.from(schema.narInfos)
+					.where(
+						and(
+							eq(schema.narInfos.cache, cache),
+							eq(schema.narInfos.storePathHash, frontier.storePathHash)
+						)
+					)
+					.get();
+
+				this.context.db.transaction((tx) => {
+					tx.delete(schema.garbageCollectionFrontier)
+						.where(
+							and(
+								eq(schema.garbageCollectionFrontier.cache, cache),
+								eq(
+									schema.garbageCollectionFrontier.storePathHash,
+									frontier.storePathHash
+								)
+							)
+						)
+						.run();
+					tx.insert(schema.garbageCollectionMarks)
+						.values({ cache, storePathHash: frontier.storePathHash })
+						.onConflictDoNothing()
+						.run();
+
+					if (row !== undefined) {
+						tx.update(schema.garbageCollectionScans)
+							.set({
+								markStorePathHash: row.storePathHash,
+								referenceCursor: -1
+							})
+							.where(eq(schema.garbageCollectionScans.cache, cache))
+							.run();
+					}
+				});
+				used += 1;
+
+				if (row === undefined) {
+					continue;
+				}
+
+				storePathHash = row.storePathHash;
+				referenceCursor = -1;
+
+				if (used >= budget) {
+					break;
+				}
+			}
+
+			this.validateReferencesContainer(cache, storePathHash);
+
+			const references = this.context.db.all<{
+				referenceIndex: number;
+				reference: unknown;
+			}>(sql`
+				SELECT CAST(json_each.key AS INTEGER) AS referenceIndex,
+				       json_each.value AS reference
+				FROM ${schema.narInfos}, json_each(${schema.narInfos.referencesJson})
+				WHERE ${schema.narInfos.cache} = ${cache}
+				  AND ${schema.narInfos.storePathHash} = ${storePathHash}
+				  AND CAST(json_each.key AS INTEGER) > ${referenceCursor}
+				ORDER BY CAST(json_each.key AS INTEGER)
+				LIMIT ${budget - used + 1}
+			`);
+			const batch = references.slice(0, budget - used);
+			const hashes = batch.map(({ reference }) =>
+				this.referenceHash(storePathHash, reference)
+			);
+			const marked = this.existingMarks(cache, hashes);
+
+			this.insertFrontier(
+				cache,
+				hashes.filter((hash) => hash !== storePathHash && !marked.has(hash))
+			);
+			used += batch.length;
+
+			if (references.length > batch.length) {
+				this.updateScan(cache, {
+					referenceCursor: batch.at(-1)?.referenceIndex ?? referenceCursor
+				});
 				break;
 			}
 
-			const row = this.context.db
-				.select({ referencesJson: schema.narInfos.referencesJson })
-				.from(schema.narInfos)
-				.where(
-					and(
-						eq(schema.narInfos.cache, cache),
-						eq(schema.narInfos.storePathHash, storePathHash)
+			this.updateScan(cache, {
+				markStorePathHash: sql`null`,
+				referenceCursor: -1
+			});
+		}
+
+		return { used, complete: false };
+	}
+
+	private finishMark(cache: string): boolean {
+		const scan = this.scan(cache);
+		const retained = this.context.db
+			.select({ storePathHash: schema.narInfos.storePathHash })
+			.from(schema.narInfos)
+			.innerJoin(
+				schema.garbageCollectionMarks,
+				and(
+					eq(schema.garbageCollectionMarks.cache, schema.narInfos.cache),
+					eq(
+						schema.garbageCollectionMarks.storePathHash,
+						schema.narInfos.storePathHash
 					)
 				)
-				.get();
+			)
+			.where(eq(schema.narInfos.cache, cache))
+			.limit(1)
+			.get();
 
-			if (row === undefined) {
-				continue;
-			}
-
-			retainedCommitted.add(storePathHash);
-
-			const references = parseStored(
-				referencesSchema,
-				row.referencesJson,
-				(cause) => new StoredReferencesInvalidError(storePathHash, cause)
-			);
-
-			this.enqueueReachableReferences(references, visited, queue);
+		if (retained === undefined && !scan.allowEmptySweep) {
+			this.clearScan(cache);
+			return true;
 		}
 
-		// Guard: nothing committed is reachable in this cache and no root expired
-		// (no roots, or roots that only point at absent paths), so collecting would
-		// empty it without a retention event. Skip. A grace-managed cache is
-		// exempt: grace deadlines manage its lifetime, so it may drain to empty
-		// once the last one has expired.
-		if (
-			retainedCommitted.size === 0 &&
-			expiredRoots.length === 0 &&
-			!this.cacheGraceManaged(cache)
-		) {
-			return { rootsExpired: expiredRoots.length, pathsSwept: 0 };
+		this.updateScan(cache, { phase: 'sweep', cursor: '' });
+		return false;
+	}
+
+	private inFlightHashes(
+		cache: string,
+		storePathHashes: readonly StorePathHash[]
+	): ReadonlySet<StorePathHash> {
+		if (storePathHashes.length === 0) {
+			return new Set();
 		}
 
-		// A narinfo row reserved by an in-flight commit saga (`committing`/`pending`)
-		// is not yet reachable from a root and carries no committed reference, so the
-		// reachability sweep would delete it during the deferred-commit promote window.
-		// Spare those rows; the verify pass owns them and either materialises or
-		// reclaims them, mirroring how the upload sweep spares their pending rows.
-		const inFlight = new Set<string>();
 		const reservedVerdict = or(
 			eq(schema.pendingUploads.verdict, 'committing'),
 			eq(schema.pendingUploads.verdict, 'pending')
 		);
+		const hashes = new Set<StorePathHash>();
 
-		const reservedUploads = this.context.db
-			.select({
-				id: schema.pendingUploads.id,
-				metadataJson: schema.pendingUploads.metadataJson
-			})
-			.from(schema.pendingUploads)
-			.where(and(eq(schema.pendingUploads.cache, cache), reservedVerdict))
-			.all();
+		for (const batch of chunk(storePathHashes, maxInClauseValues)) {
+			const rows = this.context.db
+				.select({
+					id: schema.pendingUploads.id,
+					metadataJson: schema.pendingUploads.metadataJson
+				})
+				.from(schema.pendingUploads)
+				.where(
+					and(
+						eq(schema.pendingUploads.cache, cache),
+						reservedVerdict,
+						inArray(
+							sql<string>`json_extract(${schema.pendingUploads.metadataJson}, '$.storePathHash')`,
+							batch
+						)
+					)
+				)
+				.all();
 
-		for (const upload of reservedUploads) {
-			try {
-				inFlight.add(
-					parseStoredUploadPathMetadata(upload.id, upload.metadataJson)
-						.storePathHash
-				);
-			} catch {
-				// An unparseable row cannot be matched to a reserved narinfo to spare;
-				// the verify pass re-drives or reclaims it, so omitting it is safe.
-				continue;
+			for (const row of rows) {
+				let storePathHash: StorePathHash | undefined;
+
+				try {
+					storePathHash = parseStoredUploadPathMetadata(
+						row.id,
+						row.metadataJson
+					).storePathHash;
+				} catch {
+					storePathHash = undefined;
+				}
+
+				if (storePathHash !== undefined) {
+					hashes.add(storePathHash);
+				}
 			}
 		}
 
-		const committed = this.context.db
+		return hashes;
+	}
+
+	private advanceSweep(
+		cache: string,
+		now: string,
+		cursor: string,
+		budget: number
+	): {
+		readonly used: number;
+		readonly pathsSwept: number;
+		readonly complete: boolean;
+	} {
+		const rows = this.context.db
 			.select({
 				storePathHash: schema.narInfos.storePathHash,
 				narHash: schema.narInfos.narHash,
 				generation: schema.narInfos.generation
 			})
 			.from(schema.narInfos)
-			.where(eq(schema.narInfos.cache, cache))
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					sql`${schema.narInfos.storePathHash} > ${cursor}`
+				)
+			)
+			.orderBy(asc(schema.narInfos.storePathHash))
+			.limit(budget + 1)
 			.all();
+		const batch = rows.slice(0, budget);
+		const hashes = batch.map((row) => row.storePathHash);
+		const marked = this.existingMarks(cache, hashes);
+		const inFlight = this.inFlightHashes(cache, hashes);
 		let pathsSwept = 0;
 
-		for (const path of committed) {
-			if (
-				retainedCommitted.has(path.storePathHash) ||
-				inFlight.has(path.storePathHash)
-			) {
+		for (const path of batch) {
+			if (marked.has(path.storePathHash) || inFlight.has(path.storePathHash)) {
 				continue;
-			}
-
-			// A later sweep (resumed by the alarm, or the next scheduled run) takes
-			// the remaining unreachable paths; stopping here keeps the gate hold
-			// bounded.
-			if (pathsSwept >= budget) {
-				break;
 			}
 
 			this.context.db.transaction((tx) => {
@@ -291,7 +745,8 @@ export class GarbageCollectionService {
 					.where(
 						and(
 							eq(schema.narInfos.cache, cache),
-							eq(schema.narInfos.storePathHash, path.storePathHash)
+							eq(schema.narInfos.storePathHash, path.storePathHash),
+							eq(schema.narInfos.generation, path.generation)
 						)
 					)
 					.run();
@@ -307,7 +762,163 @@ export class GarbageCollectionService {
 			pathsSwept += 1;
 		}
 
-		return { rootsExpired: expiredRoots.length, pathsSwept };
+		if (rows.length > batch.length) {
+			this.updateScan(cache, {
+				cursor: batch.at(-1)?.storePathHash ?? cursor
+			});
+			this.synchroniseScanRevision(cache);
+		} else {
+			this.clearScan(cache);
+		}
+
+		return {
+			used: batch.length,
+			pathsSwept,
+			complete: rows.length <= batch.length
+		};
+	}
+
+	private collectUnreachable(
+		cache: string,
+		now: string,
+		budget: number
+	): {
+		rootsExpired: number;
+		rootTargetsExpired: number;
+		pathsSwept: number;
+		hasMoreExpiredRoots: boolean;
+		hasMoreWork: boolean;
+	} {
+		let expiryRemaining = budget;
+		let seedRemaining = budget;
+		let markRemaining = budget;
+		let sweepRemaining = budget;
+		let rootsExpired = 0;
+		let rootTargetsExpired = 0;
+		let pathsSwept = 0;
+		let hasMoreExpiredRoots = false;
+
+		for (;;) {
+			const scan = this.scan(cache);
+
+			if (scan.phase === 'expire-roots') {
+				const expired = this.expireRoots(cache, now);
+				rootsExpired += expired.rootsExpired;
+				rootTargetsExpired += expired.rootTargetsExpired;
+				hasMoreExpiredRoots ||= expired.hasMoreExpiredRoots;
+				this.updateScan(cache, {
+					revision: this.currentRevision(cache),
+					allowEmptySweep:
+						scan.allowEmptySweep ||
+						expired.rootsExpired > 0 ||
+						this.cacheGraceManaged(cache),
+					...(!expired.hasMoreExpiredRoots && { phase: 'expire-grace' })
+				});
+
+				if (expired.hasMoreExpiredRoots) {
+					break;
+				}
+
+				continue;
+			}
+
+			if (scan.phase === 'expire-grace') {
+				const candidates = this.context.db
+					.select({ storePathHash: schema.retentionGrace.storePathHash })
+					.from(schema.retentionGrace)
+					.where(
+						and(
+							eq(schema.retentionGrace.cache, cache),
+							lte(schema.retentionGrace.retainUntil, now)
+						)
+					)
+					.orderBy(asc(schema.retentionGrace.storePathHash))
+					.limit(expiryRemaining + 1)
+					.all();
+				const batch = candidates.slice(0, expiryRemaining);
+
+				const deadlineBatches = chunk(
+					batch.map((row) => row.storePathHash),
+					maxInClauseValues
+				);
+
+				for (const hashes of deadlineBatches) {
+					this.context.db
+						.delete(schema.retentionGrace)
+						.where(
+							and(
+								eq(schema.retentionGrace.cache, cache),
+								inArray(schema.retentionGrace.storePathHash, hashes)
+							)
+						)
+						.run();
+				}
+				expiryRemaining -= batch.length;
+				this.updateScan(cache, {
+					revision: this.currentRevision(cache),
+					allowEmptySweep:
+						scan.allowEmptySweep || this.cacheGraceManaged(cache),
+					...(candidates.length <= batch.length && { phase: 'roots' })
+				});
+
+				if (candidates.length > batch.length) {
+					break;
+				}
+
+				continue;
+			}
+
+			if (scan.phase === 'roots' || scan.phase === 'grace') {
+				const seeded = this.advanceSeed(
+					cache,
+					scan.phase,
+					scan.cursor,
+					seedRemaining
+				);
+				seedRemaining -= seeded.used;
+
+				if (seedRemaining === 0 && !seeded.complete) {
+					break;
+				}
+
+				continue;
+			}
+
+			if (scan.phase === 'mark') {
+				const marked = this.advanceMark(cache, markRemaining);
+				markRemaining -= marked.used;
+
+				if (marked.complete) {
+					break;
+				}
+				if (markRemaining === 0) {
+					break;
+				}
+
+				continue;
+			}
+
+			const swept = this.advanceSweep(cache, now, scan.cursor, sweepRemaining);
+			sweepRemaining -= swept.used;
+			pathsSwept += swept.pathsSwept;
+
+			if (swept.complete || sweepRemaining === 0) {
+				break;
+			}
+		}
+
+		return {
+			rootsExpired,
+			rootTargetsExpired,
+			pathsSwept,
+			hasMoreExpiredRoots,
+			hasMoreWork:
+				this.context.db
+					.select({ cache: schema.garbageCollectionScans.cache })
+					.from(schema.garbageCollectionScans)
+					.where(eq(schema.garbageCollectionScans.cache, cache))
+					.get() !== undefined
+		};
 	}
 
 	// Read only when the sweep would otherwise skip an unreachable cache, so the
@@ -320,32 +931,6 @@ export class GarbageCollectionService {
 			.get();
 
 		return row?.graceManaged ?? false;
-	}
-
-	// Walks a row's references, enqueuing each not-yet-visited reference hash for
-	// the reachability traversal. Extracted from the traversal loop so each
-	// per-reference skip is a plain early return.
-	private enqueueReachableReferences(
-		references: readonly string[],
-		visited: Set<string>,
-		queue: StorePathHash[]
-	): void {
-		for (const reference of references) {
-			const separator = reference.indexOf('-');
-
-			if (separator <= 0) {
-				continue;
-			}
-
-			const referenceHash = reference.slice(0, separator);
-
-			if (visited.has(referenceHash)) {
-				continue;
-			}
-
-			visited.add(referenceHash);
-			queue.push(storePathHashSchema.parse(referenceHash));
-		}
 	}
 
 	// The r2Keys of every live pending upload and attestation: the staging objects
@@ -437,6 +1022,62 @@ export class GarbageCollectionService {
 		return keys.length;
 	}
 
+	private tenantSweepCache(): string | undefined {
+		const current = this.context.db
+			.select({ cache: schema.garbageCollectionTenantRuns.cache })
+			.from(schema.garbageCollectionTenantRuns)
+			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
+			.get();
+
+		if (current !== undefined) {
+			return current.cache;
+		}
+
+		const first = this.context.db
+			.select({ cache: schema.caches.name })
+			.from(schema.caches)
+			.orderBy(asc(schema.caches.name))
+			.limit(1)
+			.get();
+
+		if (first === undefined) {
+			return undefined;
+		}
+
+		this.context.db
+			.insert(schema.garbageCollectionTenantRuns)
+			.values({ id: 1, cache: first.cache })
+			.run();
+
+		return first.cache;
+	}
+
+	private advanceTenantSweep(cache: string): boolean {
+		const next = this.context.db
+			.select({ cache: schema.caches.name })
+			.from(schema.caches)
+			.where(gt(schema.caches.name, cache))
+			.orderBy(asc(schema.caches.name))
+			.limit(1)
+			.get();
+
+		if (next === undefined) {
+			this.context.db
+				.delete(schema.garbageCollectionTenantRuns)
+				.where(eq(schema.garbageCollectionTenantRuns.id, 1))
+				.run();
+			return false;
+		}
+
+		this.context.db
+			.update(schema.garbageCollectionTenantRuns)
+			.set({ cache: next.cache })
+			.where(eq(schema.garbageCollectionTenantRuns.id, 1))
+			.run();
+
+		return true;
+	}
+
 	async collectGarbage(
 		logger: Logger,
 		cache?: string,
@@ -508,41 +1149,42 @@ export class GarbageCollectionService {
 				.where(lt(schema.refreshTokens.expiresAt, now))
 				.run();
 
-			// Reachability GC is per-cache: each registered cache keeps its own
-			// closure. A bare /gc sweeps every cache; /cache/:name/gc sweeps one.
-			// Shared NAR blobs are retired only once globally unreferenced.
-			const sweepCaches =
-				cache === undefined
-					? this.context.db
-							.select({ name: schema.caches.name })
-							.from(schema.caches)
-							.all()
-							.map((row) => row.name)
-					: [cache];
-			let rootsExpired = 0;
-			let pathsSwept = 0;
+			// A tenant-wide run advances through one registered cache at a time; a
+			// scoped run works only its named cache. The selected cache's persistent
+			// mark/frontier state bounds this pass without re-reading earlier chunks.
+			const sweepCache = cache ?? this.tenantSweepCache();
+			const swept =
+				sweepCache === undefined
+					? {
+							rootsExpired: 0,
+							pathsSwept: 0,
+							hasMoreExpiredRoots: false,
+							hasMoreWork: false
+						}
+					: this.collectUnreachable(sweepCache, now, sweepLimit);
+			const hasMoreWork =
+				cache === undefined && sweepCache !== undefined && !swept.hasMoreWork
+					? this.advanceTenantSweep(sweepCache)
+					: swept.hasMoreWork;
 
-			for (const name of sweepCaches) {
-				const swept = this.collectUnreachable(
-					name,
-					now,
-					sweepLimit - pathsSwept
-				);
-				rootsExpired += swept.rootsExpired;
-				pathsSwept += swept.pathsSwept;
+			const narInfosDeleted =
+				await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin);
 
-				if (pathsSwept >= sweepLimit) {
-					break;
-				}
+			// Queue retirement may delete the swept paths' grace rows. It runs under
+			// the same gate, so absorbing that revision here cannot hide an external
+			// mutation and prevents the scan from restarting on its own cleanup.
+			if (sweepCache !== undefined && swept.hasMoreWork) {
+				this.synchroniseScanRevision(sweepCache);
 			}
 
 			return {
 				pendingUploadsDeleted: expiredUploads.length,
 				pendingAttestationsDeleted: expiredAttestations.length,
-				rootsExpired,
-				pathsSwept,
-				narInfosDeleted:
-					await this.deletionQueue.flushQueuedNarInfoDeletions(purgeOrigin)
+				rootsExpired: swept.rootsExpired,
+				pathsSwept: swept.pathsSwept,
+				hasMoreExpiredRoots: swept.hasMoreExpiredRoots,
+				hasMoreWork,
+				narInfosDeleted
 			};
 		});
 

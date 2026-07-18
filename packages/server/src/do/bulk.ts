@@ -1,6 +1,10 @@
+import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
 import { chunk } from '@cupboard/shared/collections';
+import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { type BatchItem } from 'drizzle-orm/batch';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
+
+import { narObjectKey } from '../http/http.ts';
 
 export { chunk } from '@cupboard/shared/collections';
 
@@ -50,4 +54,29 @@ export async function batchNonEmpty<
 	}
 
 	return database.batch([first, ...rest]);
+}
+
+/**
+ * The NAR hashes among `narHashes` whose canonical `nar/<narHash>.nar.zst`
+ * object is present, found with a bounded fan-out of concurrent `head` reads.
+ * A crash can leave `blob_state` recording a NAR whose object is gone, so a
+ * servability decision probes the object itself.
+ */
+export async function presentNarObjects(
+	blobs: R2Bucket,
+	narHashes: readonly NixSha256HashString[]
+): Promise<ReadonlySet<NixSha256HashString>> {
+	const unique = [...new Set(narHashes)];
+	const present = await mapWithConcurrency(
+		unique,
+		maxOutgoingConnections,
+		async (narHash) =>
+			(await blobs.head(narObjectKey(narHash))) === null ? undefined : narHash
+	);
+
+	return new Set(
+		present.filter(
+			(narHash): narHash is NixSha256HashString => narHash !== undefined
+		)
+	);
 }

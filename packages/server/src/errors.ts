@@ -567,6 +567,24 @@ export class StoredReferencesInvalidError extends ServerHttpError {
 	}
 }
 
+export class StoredReferencesJsonMalformedError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly storePathHash: string) {
+		super('Stored narinfo references are malformed JSON');
+		this.name = 'StoredReferencesJsonMalformedError';
+	}
+}
+
+export class StoredReferencesNotArrayError extends ServerHttpError {
+	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
+
+	constructor(public readonly storePathHash: string) {
+		super('Stored narinfo references are not an array');
+		this.name = 'StoredReferencesNotArrayError';
+	}
+}
+
 export class StoredSignaturesInvalidError extends ServerHttpError {
 	readonly status = StatusCodes.INTERNAL_SERVER_ERROR;
 

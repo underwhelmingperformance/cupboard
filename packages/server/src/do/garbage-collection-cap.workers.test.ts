@@ -5,6 +5,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { narInfoDeletions } from '../db/schema.ts';
 import {
+	StoredReferencesJsonMalformedError,
+	StoredReferencesNotArrayError
+} from '../errors.ts';
+import {
 	bootstrap,
 	currentServer,
 	narBytes,
@@ -24,10 +28,14 @@ import { maxPathsSweptPerRun } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
+const tenantWideContinuation = {
+	scope: 'tenant',
+	sweepLimit: maxPathsSweptPerRun
+};
 
-async function continuationLimit(): Promise<number | undefined> {
+async function continuation(): Promise<unknown> {
 	return runInDurableObject(currentServer(), (_instance, state) =>
-		state.storage.get<number>(gcContinuationKey)
+		state.storage.get(gcContinuationKey)
 	);
 }
 
@@ -56,6 +64,43 @@ async function fireAlarm(): Promise<void> {
 	// The handler is invoked directly: the continuation relies on the same entry
 	// point in production, and the test pool's alarm delivery is racy to observe.
 	await runInDurableObject(currentServer(), (instance) => instance.alarm());
+}
+
+interface ScanProgress {
+	readonly phase: string;
+	readonly revision: number;
+	readonly cursor: string;
+	readonly frontier: number;
+	readonly marks: number;
+}
+
+function scanProgress(state: DurableObjectState): ScanProgress | undefined {
+	const scan = state.storage.sql
+		.exec<{ phase: string; revision: number; cursor: string }>(
+			`SELECT phase, revision, cursor
+			 FROM garbage_collection_scan
+			 WHERE cache = ?`,
+			DEFAULT_CACHE
+		)
+		.toArray()[0];
+
+	if (scan === undefined) {
+		return undefined;
+	}
+
+	const count = (table: string): number =>
+		state.storage.sql
+			.exec<{ count: number }>(
+				`SELECT count(*) AS count FROM ${table} WHERE cache = ?`,
+				DEFAULT_CACHE
+			)
+			.toArray()[0]?.count ?? 0;
+
+	return {
+		...scan,
+		frontier: count('garbage_collection_frontier'),
+		marks: count('garbage_collection_mark')
+	};
 }
 
 describe('garbage collection sweep cap', () => {
@@ -110,12 +155,284 @@ describe('garbage collection sweep cap', () => {
 		await vi.waitFor(async () => {
 			await fireAlarm();
 			expect(await collectableRemaining()).toBe(0);
-			expect(await continuationLimit()).toBeUndefined();
+			expect(await continuation()).toBeUndefined();
 		});
 
 		// The retained path is never swept.
 		expect(await narInfoGeneration(kept.storePathHash)).not.toBeUndefined();
 	});
+
+	it('continues a reachability walk instead of rescanning its roots', async () => {
+		await useTestServer('gc-bounded-mark');
+		const { token } = await bootstrap();
+		const child = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('b'),
+			name: 'child',
+			references: []
+		});
+		const parent = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'parent',
+			references: [child.storePath.slice('/nix/store/'.length)]
+		});
+		const collectable = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('c'),
+			name: 'collectable',
+			references: []
+		});
+
+		await pushPath(token, child);
+		await pushPath(token, parent);
+		await pushPath(token, collectable);
+		await setRoot(token, { name: 'channel', targets: [parent.storePath] });
+
+		const progress = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.runGarbageCollection(1);
+				const seeded = scanProgress(state);
+				await state.storage.deleteAlarm();
+
+				await instance.alarm();
+				const parentMarked = scanProgress(state);
+				await state.storage.deleteAlarm();
+
+				await instance.alarm();
+				const closureMarked = scanProgress(state);
+				await state.storage.deleteAlarm();
+
+				return { seeded, parentMarked, closureMarked };
+			}
+		);
+		const revision = progress.seeded?.revision;
+
+		expect(typeof revision).toBe('number');
+
+		expect(progress).toStrictEqual({
+			seeded: {
+				phase: 'mark',
+				revision,
+				cursor: '',
+				frontier: 0,
+				marks: 1
+			},
+			parentMarked: {
+				phase: 'mark',
+				revision: progress.seeded?.revision,
+				cursor: '',
+				frontier: 1,
+				marks: 1
+			},
+			closureMarked: {
+				phase: 'mark',
+				revision: progress.seeded?.revision,
+				cursor: '',
+				frontier: 0,
+				marks: 2
+			}
+		});
+
+		await vi.waitFor(async () => {
+			await fireAlarm();
+			expect(await continuation()).toBeUndefined();
+		});
+
+		const generations = {
+			parent: await narInfoGeneration(parent.storePathHash),
+			child: await narInfoGeneration(child.storePathHash),
+			collectable: await narInfoGeneration(collectable.storePathHash)
+		};
+
+		expect(typeof generations.parent).toBe('number');
+		expect(typeof generations.child).toBe('number');
+		expect(generations.collectable).toBeUndefined();
+	});
+
+	it('restarts an in-progress walk when retention changes between chunks', async () => {
+		await useTestServer('gc-bounded-mutation');
+		const { token } = await bootstrap();
+		const kept = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'kept',
+			references: []
+		});
+		const newlyRetained = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('c'),
+			name: 'newly-retained',
+			references: []
+		});
+
+		await pushPath(token, kept);
+		await pushPath(token, newlyRetained);
+		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
+
+		const initial = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.runGarbageCollection(1);
+				const progress = scanProgress(state);
+				await state.storage.deleteAlarm();
+
+				return progress;
+			}
+		);
+
+		await setRoot(token, {
+			name: 'channel',
+			targets: [kept.storePath, newlyRetained.storePath]
+		});
+
+		const restarted = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.alarm();
+				const progress = scanProgress(state);
+				await state.storage.deleteAlarm();
+
+				return progress;
+			}
+		);
+		const initialRevision = initial?.revision;
+		const restartedRevision = restarted?.revision;
+
+		expect(typeof initialRevision).toBe('number');
+		expect(typeof restartedRevision).toBe('number');
+
+		expect({ initial, restarted }).toStrictEqual({
+			initial: {
+				phase: 'mark',
+				revision: initialRevision,
+				cursor: '',
+				frontier: 0,
+				marks: 1
+			},
+			restarted: {
+				phase: 'roots',
+				revision: restartedRevision,
+				cursor: kept.storePathHash,
+				frontier: 1,
+				marks: 0
+			}
+		});
+		expect(restartedRevision).toBeGreaterThan(initialRevision ?? 0);
+
+		await vi.waitFor(async () => {
+			await fireAlarm();
+			expect(await continuation()).toBeUndefined();
+		});
+
+		expect(await narInfoGeneration(newlyRetained.storePathHash)).toEqual(
+			expect.any(Number)
+		);
+	});
+
+	it('pages one high-fanout path across bounded mark chunks', async () => {
+		await useTestServer('gc-bounded-references');
+		const { token } = await bootstrap();
+		const references = Array.from(
+			{ length: 25 },
+			(_unused, index) => `${syntheticStorePathHash(index)}-reference`
+		);
+		const parent = uploadMetadata({
+			fileSize: narBytes.byteLength,
+			storePathHash: repeated('a'),
+			name: 'parent',
+			references
+		});
+
+		await pushPath(token, parent);
+		await setRoot(token, { name: 'channel', targets: [parent.storePath] });
+
+		const progress = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				await instance.runGarbageCollection(5);
+				const scan = state.storage.sql
+					.exec<{
+						phase: string;
+						markStorePathHash: string | null;
+						referenceCursor: number;
+					}>(
+						`SELECT phase,
+						        mark_store_path_hash AS markStorePathHash,
+						        reference_cursor AS referenceCursor
+						 FROM garbage_collection_scan
+						 WHERE cache = ?`,
+						DEFAULT_CACHE
+					)
+					.toArray()[0];
+				const frontier = state.storage.sql
+					.exec<{ count: number }>(
+						`SELECT count(*) AS count
+						 FROM garbage_collection_frontier
+						 WHERE cache = ?`,
+						DEFAULT_CACHE
+					)
+					.toArray()[0]?.count;
+
+				await state.storage.deleteAlarm();
+
+				return { scan, frontier };
+			}
+		);
+
+		expect(progress).toStrictEqual({
+			scan: {
+				phase: 'mark',
+				markStorePathHash: parent.storePathHash,
+				referenceCursor: 3
+			},
+			frontier: 4
+		});
+	});
+
+	it.each([
+		{
+			kind: 'malformed JSON',
+			server: 'gc-invalid-json',
+			stored: '{',
+			error: StoredReferencesJsonMalformedError
+		},
+		{
+			kind: 'a non-array container',
+			server: 'gc-invalid-container',
+			stored: JSON.stringify({ reference: `${repeated('b')}-child` }),
+			error: StoredReferencesNotArrayError
+		}
+	])(
+		'reports $kind as invalid stored references',
+		async ({ server, stored, error: ErrorClass }) => {
+			await useTestServer(server);
+			const { token } = await bootstrap();
+			const parent = uploadMetadata({
+				fileSize: narBytes.byteLength,
+				storePathHash: repeated('a'),
+				name: 'parent',
+				references: []
+			});
+
+			await pushPath(token, parent);
+			await setRoot(token, { name: 'channel', targets: [parent.storePath] });
+
+			await expect(
+				runInDurableObject(currentServer(), async (instance, state) => {
+					state.storage.sql.exec(
+						'UPDATE narinfo SET references_json = ? WHERE cache = ? AND store_path_hash = ?',
+						stored,
+						DEFAULT_CACHE,
+						parent.storePathHash
+					);
+
+					await instance.runGarbageCollection(10);
+				})
+			).rejects.toStrictEqual(new ErrorClass(parent.storePathHash));
+		}
+	);
 });
 
 describe('garbage collection narinfo-deletion continuation', () => {
@@ -143,7 +460,7 @@ describe('garbage collection narinfo-deletion continuation', () => {
 
 				const observed = {
 					armed: (await state.storage.getAlarm()) !== null,
-					continuation: await state.storage.get<number>(gcContinuationKey),
+					continuation: await state.storage.get(gcContinuationKey),
 					remaining
 				};
 
@@ -155,7 +472,7 @@ describe('garbage collection narinfo-deletion continuation', () => {
 
 		expect(observed).toStrictEqual({
 			armed: true,
-			continuation: maxPathsSweptPerRun,
+			continuation: [tenantWideContinuation],
 			remaining: backlog - maxNarInfoDeletionsFlushedPerRun
 		});
 	});

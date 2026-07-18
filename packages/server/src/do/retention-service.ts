@@ -29,6 +29,11 @@ import {
 // bound-parameter headroom as a single-column IN-list, spent three at a time.
 const maxGraceDeadlineRowsPerInsert = Math.floor(maxInClauseValues / 3);
 
+interface GraceTransition {
+	readonly storePathHash: StorePathHash;
+	readonly anchorIso: string;
+}
+
 export class RetentionService {
 	constructor(private readonly context: ServerContext) {}
 
@@ -57,6 +62,37 @@ export class RetentionService {
 		}
 
 		return storePathHashes.filter((storePathHash) => backed.has(storePathHash));
+	}
+
+	private extendGraceDeadlineEntries(
+		cache: string,
+		entries: readonly {
+			readonly storePathHash: StorePathHash;
+			readonly retainUntil: string;
+		}[],
+		writer: SchemaWriter
+	): void {
+		for (const batch of chunk(entries, maxGraceDeadlineRowsPerInsert)) {
+			writer
+				.insert(schema.retentionGrace)
+				.values(
+					batch.map(({ storePathHash, retainUntil }) => ({
+						cache,
+						storePathHash,
+						retainUntil
+					}))
+				)
+				.onConflictDoUpdate({
+					target: [
+						schema.retentionGrace.cache,
+						schema.retentionGrace.storePathHash
+					],
+					set: {
+						retainUntil: sql`max(${schema.retentionGrace.retainUntil}, excluded.retain_until)`
+					}
+				})
+				.run();
+		}
 	}
 
 	listPolicies(): RetentionPolicyListResponse {
@@ -216,27 +252,14 @@ export class RetentionService {
 		retainUntil: string,
 		writer: SchemaWriter = this.context.db
 	): void {
-		for (const batch of chunk(storePathHashes, maxGraceDeadlineRowsPerInsert)) {
+		this.extendGraceDeadlineEntries(
+			cache,
+			storePathHashes.map((storePathHash) => ({
+				storePathHash,
+				retainUntil
+			})),
 			writer
-				.insert(schema.retentionGrace)
-				.values(
-					batch.map((storePathHash) => ({
-						cache,
-						storePathHash,
-						retainUntil
-					}))
-				)
-				.onConflictDoUpdate({
-					target: [
-						schema.retentionGrace.cache,
-						schema.retentionGrace.storePathHash
-					],
-					set: {
-						retainUntil: sql`max(${schema.retentionGrace.retainUntil}, excluded.retain_until)`
-					}
-				})
-				.run();
-		}
+		);
 	}
 
 	// Takes a writer for the same reason as {@link extendGraceDeadlines}: a
@@ -266,7 +289,22 @@ export class RetentionService {
 		anchorIso: string,
 		writer: SchemaWriter = this.context.db
 	): void {
-		if (storePathHashes.length === 0) {
+		this.applyGraceTransitions(
+			cache,
+			storePathHashes.map((storePathHash) => ({ storePathHash, anchorIso })),
+			writer
+		);
+	}
+
+	// Applies a bounded set of root transitions together. A path released by
+	// several roots receives the latest candidate deadline, while policy
+	// resolution, narinfo filtering and deadline writes each happen once.
+	applyGraceTransitions(
+		cache: string,
+		transitions: readonly GraceTransition[],
+		writer: SchemaWriter = this.context.db
+	): void {
+		if (transitions.length === 0) {
 			return;
 		}
 
@@ -287,16 +325,43 @@ export class RetentionService {
 		// would wake maintenance for nothing and hand a recommitted path an
 		// inherited stale deadline. Only backed hashes receive one, read through
 		// the caller's writer so the check shares its transaction.
-		const backed = this.narinfoBackedHashes(cache, storePathHashes, writer);
+		const latestAnchorByHash = new Map<StorePathHash, string>();
+
+		for (const transition of transitions) {
+			const current = latestAnchorByHash.get(transition.storePathHash);
+
+			if (current === undefined || transition.anchorIso > current) {
+				latestAnchorByHash.set(transition.storePathHash, transition.anchorIso);
+			}
+		}
+
+		const backed = this.narinfoBackedHashes(
+			cache,
+			latestAnchorByHash.keys().toArray(),
+			writer
+		);
 
 		if (backed.length === 0) {
 			return;
 		}
 
-		const retainUntil = new Date(
-			new Date(anchorIso).getTime() + graceSeconds * 1000
-		).toISOString();
+		this.extendGraceDeadlineEntries(
+			cache,
+			backed.flatMap((storePathHash) => {
+				const anchorIso = latestAnchorByHash.get(storePathHash);
 
-		this.extendGraceDeadlines(cache, backed, retainUntil, writer);
+				return anchorIso === undefined
+					? []
+					: [
+							{
+								storePathHash,
+								retainUntil: new Date(
+									new Date(anchorIso).getTime() + graceSeconds * 1000
+								).toISOString()
+							}
+						];
+			}),
+			writer
+		);
 	}
 }
