@@ -144,9 +144,9 @@ export function resolveSetupInputs(
 	options: SetupOptions,
 	environment: Environment
 ): SetupInputs {
-	const readUser = provided(options.readUser) ?? '';
-	// The password is taken verbatim: surrounding whitespace is part of a
-	// credential, so only its complete absence means "no password".
+	// Both credential halves are taken verbatim: surrounding whitespace is
+	// part of a credential, so only its complete absence means "not set".
+	const readUser = options.readUser ?? '';
 	const readPassword = options.readPassword ?? '';
 
 	if (readUser !== '' && readPassword === '') {

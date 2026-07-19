@@ -478,11 +478,11 @@ describe('fetchCachePublicKeyAt', () => {
 });
 
 describe('resolveSetupInputs read credentials', () => {
-	it('preserves significant whitespace in the read password', () => {
+	it('preserves significant whitespace in both read credentials', () => {
 		const inputs = resolveSetupInputs(
 			{
 				...baseOptions,
-				readUser: 'alice',
+				readUser: ' alice ',
 				readPassword: ' p w ',
 				installDir: '/opt/cupboard'
 			},
@@ -492,7 +492,7 @@ describe('resolveSetupInputs read credentials', () => {
 		expect({
 			readUser: inputs.readUser,
 			readPassword: inputs.readPassword
-		}).toStrictEqual({ readUser: 'alice', readPassword: ' p w ' });
+		}).toStrictEqual({ readUser: ' alice ', readPassword: ' p w ' });
 	});
 });
 
