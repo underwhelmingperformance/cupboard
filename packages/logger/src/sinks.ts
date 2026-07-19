@@ -1,3 +1,10 @@
+import process from 'node:process';
+
+import {
+	type WorkflowCommands,
+	workflowCommands,
+	type WorkflowCommandStreams
+} from '@cupboard/shared/github-actions';
 import { type LogRecord, type Sink } from '@logtape/logtape';
 
 // The console method each LogTape level maps to. Workers Logs and a terminal
@@ -32,8 +39,8 @@ function messageOf(record: LogRecord): string {
 		.join('');
 }
 
-// A non-Error cause rendered for the log without risking a `[object Object]`.
-function renderCause(value: unknown): string {
+// A value rendered for the log without risking a `[object Object]`.
+function renderValue(value: unknown): string {
 	if (typeof value === 'string') {
 		return value;
 	}
@@ -80,7 +87,7 @@ function causeChain(
 			continue;
 		}
 
-		messages.push(renderCause(current));
+		messages.push(renderValue(current));
 		current = undefined;
 	}
 
@@ -132,17 +139,24 @@ function logObject(record: LogRecord): Record<string, unknown> {
 	};
 }
 
-function emitToConsole(record: LogRecord): void {
-	console[consoleMethodFor(record.level)](logObject(record));
+/** The slice of `console` the Workers sink calls, injectable for tests. */
+export interface ConsoleLike {
+	debug(payload: unknown): void;
+	info(payload: unknown): void;
+	warn(payload: unknown): void;
+	error(payload: unknown): void;
 }
 
 /**
- * A sink that hands a plain object to `console`, so Cloudflare Workers Logs
+ * A sink that hands a plain object to a console, so Cloudflare Workers Logs
  * indexes every field. The message stays a constant string under `msg`; all
- * variable data rides in the object's other keys.
+ * variable data rides in the object's other keys. The console is injectable
+ * for tests and defaults to the global one.
  */
-export function cloudflareSink(): Sink {
-	return emitToConsole;
+export function cloudflareSink(target: ConsoleLike = console): Sink {
+	return (record) => {
+		target[consoleMethodFor(record.level)](logObject(record));
+	};
 }
 
 /**
@@ -156,5 +170,69 @@ export function jsonLinesSink(write: (line: string) => void): Sink {
 		write(
 			`${JSON.stringify({ timestamp: record.timestamp, ...logObject(record) })}\n`
 		);
+	};
+}
+
+// A record's fields for a GitHub Actions log line: an `error` field expanded to
+// its name, message, stack and cause (see {@link expandError}), rendered as
+// space-separated `key=value` pairs so the structured context stays legible in
+// the run log.
+function actionFields(properties: Record<string, unknown>): string {
+	const parts: string[] = [];
+	const fields = expandError(properties);
+
+	for (const [key, value] of Object.entries(fields)) {
+		if (value === undefined) {
+			continue;
+		}
+
+		parts.push(`${key}=${renderValue(value)}`);
+	}
+
+	return parts.length === 0 ? '' : ` ${parts.join(' ')}`;
+}
+
+function emitToActions(
+	commands: WorkflowCommands,
+	out: { write(chunk: string): unknown },
+	record: LogRecord
+): void {
+	const line = `${messageOf(record)}${actionFields(record.properties)}`;
+
+	switch (record.level) {
+		case 'trace':
+		case 'debug': {
+			commands.debug(line);
+			return;
+		}
+		case 'info': {
+			out.write(`${line}\n`);
+			return;
+		}
+		case 'warning': {
+			commands.warning(line);
+			return;
+		}
+		case 'error':
+		case 'fatal': {
+			commands.error(line);
+			return;
+		}
+	}
+}
+
+/**
+ * A sink that emits records as GitHub Actions workflow commands: warnings and
+ * errors become annotations, trace and debug become `::debug::` (shown only when
+ * step debugging is enabled), and info prints as an ordinary log line. This is
+ * the action's counterpart to the Workers {@link cloudflareSink} and the CLI's
+ * {@link jsonLinesSink}.
+ */
+export function githubActionsSink(streams: WorkflowCommandStreams = {}): Sink {
+	const commands = workflowCommands(streams);
+	const out = streams.stdout ?? process.stdout;
+
+	return (record) => {
+		emitToActions(commands, out, record);
 	};
 }
