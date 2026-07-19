@@ -7,6 +7,7 @@ import {
 	storePathSchema,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
+import { rootSetMaxTargets } from '@cupboard/protocol/retention';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -21,6 +22,7 @@ import {
 	IntermediateRootInvalidError,
 	InvalidInputError,
 	MatrixJobLimitError,
+	PublishRootTargetLimitError,
 	RootEnsureCommandError,
 	RootEnsureResultInvalidError,
 	RootEnsureResultMissingError,
@@ -46,6 +48,7 @@ import {
 	type PlanOptions,
 	resolvePlanInputs,
 	seedMatrix,
+	validateIntermediateRootTargetLimits,
 	verifyGraceCoverage
 } from './plan.ts';
 
@@ -145,6 +148,35 @@ describe('planAction', () => {
 describe('resolvePlanInputs', () => {
 	const environment = { RUNNER_TEMP: '/tmp', GITHUB_RUN_ID: '12345' };
 
+	it('rejects a target whose root may receive too many outputs', () => {
+		const outputs = Array.from(
+			{ length: rootSetMaxTargets + 1 },
+			(_, index) => `output-${String(index)}`
+		);
+		let failure: unknown;
+
+		try {
+			resolvePlanInputs(
+				{
+					...baseOptions,
+					targets: JSON.stringify([{ ...target, outputs }])
+				},
+				environment
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toStrictEqual(
+			new PublishRootTargetLimitError(
+				'target',
+				target.attr,
+				rootSetMaxTargets + 1,
+				rootSetMaxTargets
+			)
+		);
+	});
+
 	it('disables optimisation for a case-exact false', () => {
 		expect(
 			resolvePlanInputs({ ...baseOptions, optimise: 'false' }, environment)
@@ -221,13 +253,38 @@ describe('resolvePlanInputs', () => {
 		).toBe(rootPrefix);
 	});
 
-	it('rejects when url is not an http(s) URL', () => {
+	it.each([
+		['is not an http(s) URL', 'cupboard.example/t/acme'],
+		['carries a fragment', 'https://cupboard.example/t/acme#copied']
+	])('rejects when url %s', (_name, url) => {
 		expect(() =>
-			resolvePlanInputs(
-				{ ...baseOptions, url: 'cupboard.example/t/acme' },
-				environment
-			)
+			resolvePlanInputs({ ...baseOptions, url }, environment)
 		).toThrow(InvalidInputError);
+	});
+
+	it('does not reproduce a rejected URL in its diagnostic', () => {
+		const secret = 'read-token';
+		let failure: unknown;
+
+		try {
+			resolvePlanInputs(
+				{
+					...baseOptions,
+					url: `https://cupboard.example/t/acme?token=${secret}`
+				},
+				environment
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toStrictEqual(
+			new InvalidInputError(
+				'url',
+				'url must be an http(s) URL with nothing beyond origin and path'
+			)
+		);
+		expect((failure as Error).message).not.toContain(secret);
 	});
 
 	it('retains intermediates by grace when asked', () => {
@@ -247,6 +304,110 @@ describe('resolvePlanInputs', () => {
 			)
 		).toThrow(InvalidInputError);
 	});
+});
+
+describe('intermediate root target limits', () => {
+	const pathValue = storePath(
+		`/nix/store/${'0'.repeat(32)}-shared-intermediate`
+	);
+	const seedPlan = {
+		seedGroups: [
+			{
+				key: 'seed-x86_64-linux',
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: false,
+				targets: ['.#app'],
+				candidates: Array.from(
+					{ length: rootSetMaxTargets + 1 },
+					(_, index) => ({
+						drvPath: `/nix/store/intermediate-${String(index)}.drv`,
+						output: 'out',
+						path: pathValue
+					})
+				)
+			}
+		],
+		fallbackGroups: []
+	};
+	const fallbackTargets = publishTargetsSchema.parse([
+		{
+			...target,
+			outputs: Array.from(
+				{ length: Math.floor(rootSetMaxTargets / 2) + 1 },
+				(_, index) => `first-${String(index)}`
+			)
+		},
+		{
+			...target,
+			attr: '.#packages.x86_64-linux.other',
+			rootSuffix: 'x86_64-linux/other',
+			outputs: Array.from(
+				{ length: Math.ceil(rootSetMaxTargets / 2) },
+				(_, index) => `second-${String(index)}`
+			)
+		}
+	]);
+	const fallbackPlan = {
+		seedGroups: [],
+		fallbackGroups: [
+			{
+				key: 'fallback-x86_64-linux-1',
+				system: 'x86_64-linux',
+				os: 'ubuntu-latest',
+				remote: false,
+				targets: fallbackTargets
+			}
+		]
+	};
+
+	it.each([
+		{
+			kind: 'seed group' as const,
+			identifier: 'seed-x86_64-linux',
+			plan: seedPlan
+		},
+		{
+			kind: 'fallback group' as const,
+			identifier: 'fallback-x86_64-linux-1',
+			plan: fallbackPlan
+		}
+	])(
+		'rejects an oversized root-retained $kind',
+		({ kind, identifier, plan }) => {
+			let failure: unknown;
+
+			try {
+				validateIntermediateRootTargetLimits(
+					{ intermediateRetention: 'root' },
+					plan
+				);
+			} catch (error) {
+				failure = error;
+			}
+
+			expect(failure).toStrictEqual(
+				new PublishRootTargetLimitError(
+					kind,
+					identifier,
+					rootSetMaxTargets + 1,
+					rootSetMaxTargets
+				)
+			);
+		}
+	);
+
+	it.each([seedPlan, fallbackPlan])(
+		'accepts an oversized intermediate group retained by grace',
+		(plan) => {
+			expect(() => {
+				validateIntermediateRootTargetLimits(
+					{ intermediateRetention: 'grace' },
+					plan
+				);
+			}).not.toThrow();
+		}
+	);
 });
 
 describe('matrix', () => {

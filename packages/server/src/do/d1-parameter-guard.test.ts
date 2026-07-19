@@ -1,7 +1,7 @@
-// Guards D1's 100-bound-parameter cap across every chunked statement this
-// server issues. Local SQLite (workerd and vitest-pool-workers) allows 32,766
-// variables, so worker tests never catch an overrun; only this plain node test
-// can catch them by inspecting .toSQL().params before any query executes.
+// Guards Cloudflare SQLite's 100-bound-parameter cap across every chunked
+// statement this server issues. Local SQLite (workerd and vitest-pool-workers)
+// allows 32,766 variables, so worker tests never catch an overrun; only this
+// plain node test can catch them by inspecting .toSQL().params before execution.
 //
 // For each statement, the test builds it at the maximum chunk width its
 // constant permits and asserts params.length <= 100. A production change that
@@ -11,8 +11,10 @@ import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
+	rootNameSchema,
 	sha256HexDigestSchema,
 	storePathHashSchema,
+	storePathSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { and, eq, inArray, or, sql } from 'drizzle-orm';
@@ -20,6 +22,7 @@ import { drizzle } from 'drizzle-orm/d1';
 import { describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
+import * as schema from '../db/schema.ts';
 import { buildStampMaintainedStatement } from '../routing/scheduled.ts';
 
 import { maxInClauseValues } from './bulk.ts';
@@ -37,6 +40,7 @@ import {
 	buildTenantBlobDeleteStatement,
 	buildTenantCasBlobDeleteStatement
 } from './offboarding-service.ts';
+import { maxRootTargetInsertRows } from './roots-service.ts';
 
 // A D1Database stub whose methods throw: query building via .toSQL() never
 // reaches the client, so nothing is ever executed.
@@ -67,6 +71,10 @@ const testNarHash = nixSha256HashSchema.parse(
 const testStorePathHash = storePathHashSchema.parse(
 	'00000000000000000000000000000000'
 );
+const testStorePath = storePathSchema.parse(
+	`/nix/store/${testStorePathHash}-fixture`
+);
+const testRootName = rootNameSchema.parse('main');
 
 function narHashes(count: number): NixSha256HashString[] {
 	return Array.from({ length: count }, () => testNarHash);
@@ -88,6 +96,21 @@ function fencedEdgeFilter(count: number) {
 }
 
 describe('D1 bound-parameter guard', () => {
+	describe('retention-root target writes (roots-service)', () => {
+		it('target INSERT stays within 100 params at maxRootTargetInsertRows', () => {
+			const query = database.insert(schema.retentionRootTargets).values(
+				Array.from({ length: maxRootTargetInsertRows }, () => ({
+					cache,
+					rootName: testRootName,
+					storePathHash: testStorePathHash,
+					storePath: testStorePath
+				}))
+			);
+
+			expect(query.toSQL().params.length).toBeLessThanOrEqual(100);
+		});
+	});
+
 	describe('teardown presence sweep (deletion-queue-service)', () => {
 		it('credit UPDATE stays within 100 params at maxTeardownPresenceChunk', () => {
 			const { update } = teardownPresenceBatch(

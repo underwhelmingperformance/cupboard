@@ -3,9 +3,10 @@ import { createHash } from 'node:crypto';
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { AttestationNegotiateRequest } from '@cupboard/protocol/attestations';
-import type {
-	RootSetBody,
-	RootSetResponse
+import {
+	type RootSetBody,
+	rootSetMaxTargets,
+	type RootSetResponse
 } from '@cupboard/protocol/retention';
 import type {
 	UploadNegotiateRequest,
@@ -41,6 +42,7 @@ import {
 	type PushClient,
 	type PushDependencies,
 	type PushNarArchive,
+	RootTargetLimitError,
 	runPush
 } from './push.ts';
 
@@ -99,6 +101,30 @@ function unexpectedSetRootCall(): Promise<never> {
 }
 
 describe('runPush', () => {
+	it('refuses an oversized named root before resolving or uploading paths', async () => {
+		const paths = Array.from(
+			{ length: rootSetMaxTargets + 1 },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-path-${String(index)}`
+		);
+
+		await expect(
+			runPush(paths, reporter([]), {
+				root: 'main',
+				nix: nixStore({}),
+				client: {
+					preview: unexpectedPreviewCall,
+					negotiate: unexpectedNegotiateCall,
+					uploadNar: unexpectedUploadNarCall,
+					commit: unexpectedCommitCall,
+					setRoot: unexpectedSetRootCall
+				}
+			})
+		).rejects.toStrictEqual(
+			new RootTargetLimitError(rootSetMaxTargets + 1, rootSetMaxTargets)
+		);
+	});
+
 	it('uploads missing blobs and commits uploaded metadata', async () => {
 		const negotiations: Omit<UploadNegotiateRequest, 'pushId'>[] = [];
 		const uploads: {

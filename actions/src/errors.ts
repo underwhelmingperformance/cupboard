@@ -421,6 +421,28 @@ export class IntermediateRootInvalidError extends UsageError {
 	}
 }
 
+export type PublishRootTargetKind = 'target' | 'seed group' | 'fallback group';
+
+export class PublishRootTargetLimitError extends UsageError {
+	constructor(
+		public readonly kind: PublishRootTargetKind,
+		public readonly identifier: string,
+		public readonly count: number,
+		public readonly limit: number
+	) {
+		const remedy =
+			kind === 'target'
+				? 'split its outputs across manifest targets with distinct rootSuffix values'
+				: "split the publish manifest across workflow runs or use intermediate-retention 'grace'";
+
+		super(
+			`the ${kind} ${identifier} may publish ${String(count)} paths to one ` +
+				`retention root, but a root accepts at most ${String(limit)}; ${remedy}`
+		);
+		this.name = 'PublishRootTargetLimitError';
+	}
+}
+
 export class ProbeTimeoutError extends CodedError {
 	constructor(public readonly url: string) {
 		super(

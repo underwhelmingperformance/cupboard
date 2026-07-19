@@ -9,7 +9,8 @@ import {
 	retentionPolicyListResponseSchema,
 	retentionPolicyRemoveResponseSchema,
 	rootEnsureResponseSchema,
-	rootSetBodySchema
+	rootSetBodySchema,
+	rootSetMaxTargets
 } from './retention.ts';
 
 const storePathHash = '0'.repeat(32);
@@ -29,6 +30,26 @@ describe('rootSetBodySchema', () => {
 		}
 	])('accepts $name', ({ value, expected }) => {
 		expect(rootSetBodySchema.parse(value)).toStrictEqual(expected);
+	});
+
+	it('accepts a target list at the bound', () => {
+		const targets = Array.from(
+			{ length: rootSetMaxTargets },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-name-${String(index)}`
+		);
+
+		expect(rootSetBodySchema.parse({ targets })).toStrictEqual({ targets });
+	});
+
+	it('rejects a target list over the bound', () => {
+		const targets = Array.from(
+			{ length: rootSetMaxTargets + 1 },
+			(_, index) =>
+				`/nix/store/${String(index).padStart(32, '0')}-name-${String(index)}`
+		);
+
+		expect(rootSetBodySchema.safeParse({ targets }).success).toBe(false);
 	});
 
 	it.each([
