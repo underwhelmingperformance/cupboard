@@ -9,9 +9,12 @@ import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
 import {
+	CliAbortError,
 	GithubCheckFailedError,
 	GithubCheckIncompleteError,
-	unavailableExitCode
+	unavailableExitCode,
+	WorkflowReferenceNotFoundError,
+	WorkflowReferenceUnpinnedError
 } from '../../errors.ts';
 import { githubBranchAddBody, githubPrAddBody } from '../oidc-trust.ts';
 import { type RepositoryIdentity } from '../oidc-trust/github.ts';
@@ -25,6 +28,8 @@ import {
 const url = 'https://cupboard.example.workers.dev/t/acme';
 const pinnedWorkflowReference =
 	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v1.2.3';
+const previousWorkflowReference =
+	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v1.2.2';
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
 	repositoryOwnerId: 5678,
@@ -118,6 +123,7 @@ function checkDependencies(overrides: {
 }): Parameters<typeof runGithubCheck>[4] {
 	return {
 		lookupRepository: () => Promise.resolve(identity),
+		verifyWorkflowReference: () => Promise.resolve(),
 		fetchCacheInfo: (target: string) =>
 			Promise.resolve(
 				target.includes('/reuse/')
@@ -132,6 +138,121 @@ function findings(results: ResultRow[][]): ResultRow[] {
 }
 
 describe('runGithubCheck', () => {
+	it('cancels a stalled repository lookup with the command signal', async () => {
+		const controller = new AbortController();
+		const reason = new CliAbortError();
+		const { promise: started, resolve: markStarted } =
+			Promise.withResolvers<true>();
+		const pending = runGithubCheck(
+			url,
+			options,
+			reporter([]),
+			checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+			{
+				...checkDependencies({}),
+				signal: controller.signal,
+				lookupRepository: (_repository, lookupOptions) => {
+					const signal = lookupOptions?.signal;
+
+					if (signal === undefined) {
+						return Promise.reject(new Error('missing command signal'));
+					}
+
+					markStarted(true);
+
+					return new Promise<RepositoryIdentity>((_resolve, reject) => {
+						signal.addEventListener(
+							'abort',
+							() => {
+								reject(reason);
+							},
+							{ once: true }
+						);
+					});
+				}
+			}
+		);
+
+		await started;
+		controller.abort(reason);
+
+		await expect(pending).rejects.toBe(reason);
+	});
+
+	it('verifies the new workflow reference while previous rules overlap', async () => {
+		const previousPrRule = storedRule(
+			'previous-pr',
+			githubPrAddBody(url, identity, {
+				repo: options.repo,
+				jobWorkflowRef: previousWorkflowReference
+			})
+		);
+		const previousBranchRule = storedRule(
+			'previous-branch',
+			githubBranchAddBody(url, identity, {
+				repo: options.repo,
+				branch: options.branch,
+				jobWorkflowRef: previousWorkflowReference
+			})
+		);
+
+		await expect(
+			runGithubCheck(
+				url,
+				options,
+				reporter([]),
+				checkClient({
+					graceSeconds: 86_400,
+					rules: [previousPrRule, previousBranchRule, prRule, branchRule]
+				}),
+				checkDependencies({})
+			)
+		).resolves.toBeUndefined();
+	});
+
+	it('refuses a bare workflow path before consulting the tenant', async () => {
+		const results: ResultRow[][] = [];
+
+		await expect(
+			runGithubCheck(
+				url,
+				{ ...options, workflowRef: 'acme/app/.github/workflows/publish.yml' },
+				reporter(results),
+				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+				checkDependencies({})
+			)
+		).rejects.toBeInstanceOf(WorkflowReferenceUnpinnedError);
+		expect(results).toStrictEqual([]);
+	});
+
+	it('refuses an unresolved workflow before consulting the tenant', async () => {
+		const results: ResultRow[][] = [];
+		let hasListed = false;
+		const client = checkClient({
+			graceSeconds: 86_400,
+			rules: [prRule, branchRule]
+		});
+		client.oidcTrust.list = () => {
+			hasListed = true;
+
+			return Promise.resolve({ rules: [] });
+		};
+
+		await expect(
+			runGithubCheck(url, options, reporter(results), client, {
+				...checkDependencies({}),
+				verifyWorkflowReference: () =>
+					Promise.reject(
+						new WorkflowReferenceNotFoundError(options.workflowRef)
+					)
+			})
+		).rejects.toBeInstanceOf(WorkflowReferenceNotFoundError);
+		expect({ hasListed, results }).toStrictEqual({
+			hasListed: false,
+			results: []
+		});
+	});
+
 	it('passes every check for a converged setup', async () => {
 		const results: ResultRow[][] = [];
 
@@ -150,6 +271,26 @@ describe('runGithubCheck', () => {
 			{ label: 'reuse view', value: 'ok' },
 			{ label: 'root prefix', value: 'ok' }
 		]);
+	});
+
+	it('propagates an abort while reading the reuse view', async () => {
+		const reason = new CliAbortError();
+
+		await expect(
+			runGithubCheck(
+				url,
+				options,
+				reporter([]),
+				checkClient({ graceSeconds: 86_400, rules: [prRule, branchRule] }),
+				{
+					...checkDependencies({}),
+					fetchCacheInfo: (target) =>
+						target.includes('/reuse/')
+							? Promise.reject(reason)
+							: Promise.resolve(new CacheInfo('/nix/store', true, 40))
+				}
+			)
+		).rejects.toBe(reason);
 	});
 
 	it.each([
@@ -206,8 +347,6 @@ describe('runGithubCheck', () => {
 						{ label: 'main trust rule', value: 'ok' },
 						{ label: 'grace policy', value: 'ok' },
 						{ label: 'reuse view', value: `failed: ${detail}` },
-						{ label: 'plan runner variable', value: 'ok' },
-						{ label: 'runner labels', value: 'ok' },
 						{ label: 'root prefix', value: 'ok' }
 					]
 				}
@@ -245,6 +384,39 @@ describe('runGithubCheck', () => {
 			label: 'grace policy',
 			value:
 				'failed: the 300s grace in force for the pr-1 cache is under 3600s and risks expiring mid-run'
+		});
+	});
+
+	it('checks an unshadowed PR cache when pr-1 has a longer exception', async () => {
+		const results: ResultRow[][] = [];
+
+		let failure: unknown;
+		try {
+			await runGithubCheck(
+				url,
+				options,
+				reporter(results),
+				checkClient({
+					graceSeconds: 86_400,
+					extraPolicies: [
+						{ cachePrefix: 'pr-', graceSeconds: 300 },
+						{ cachePrefix: 'pr-1', graceSeconds: 86_400 }
+					],
+					rules: [prRule, branchRule]
+				}),
+				checkDependencies({})
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectFailed(failure);
+		expect(
+			findings(results).find((row) => row.label === 'grace policy')
+		).toStrictEqual({
+			label: 'grace policy',
+			value:
+				'failed: the 300s grace in force for the pr-2 cache is under 3600s and risks expiring mid-run'
 		});
 	});
 

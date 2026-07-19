@@ -6,6 +6,7 @@ import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
 import { buildProgram, cliExitCode, reportCliFailure } from './cli.ts';
+import { GithubRateLimitError } from './commands/oidc-trust/github.ts';
 import {
 	authExitCode,
 	CacheInfoRateLimitedError,
@@ -70,6 +71,11 @@ describe('cliExitCode', () => {
 				'https://cupboard.example/nix-cache-info',
 				StatusCodes.SERVICE_UNAVAILABLE
 			),
+			expected: transientExitCode
+		},
+		{
+			name: 'an exhausted GitHub rate limit',
+			error: new GithubRateLimitError(),
 			expected: transientExitCode
 		},
 		{

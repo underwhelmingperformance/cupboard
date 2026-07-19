@@ -17,6 +17,7 @@ import {
 import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 
+import { isAbortError } from '../../abort.ts';
 import {
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
@@ -37,8 +38,10 @@ import { type ReuseViewClient } from '../reuse-view.ts';
 import {
 	minimumGraceSeconds,
 	pullRequestPrefix,
-	pullRequestViewName
+	pullRequestViewName,
+	requirePinnedWorkflowReference
 } from './convention.ts';
+import { verifyPinnedWorkflowReference } from './workflow-reference.ts';
 
 export interface GithubCheckOptions {
 	readonly repo: string;
@@ -60,6 +63,8 @@ export interface GithubCheckClient {
 export interface GithubCheckDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
 	readonly fetchCacheInfo: (url: string) => Promise<CacheInfo>;
+	readonly verifyWorkflowReference?: typeof verifyPinnedWorkflowReference;
+	readonly signal?: AbortSignal;
 }
 
 export interface CheckFinding {
@@ -240,6 +245,8 @@ function gracePolicyCaches(
 ): readonly string[] {
 	const caches = new Set<string>([DEFAULT_CACHE, `${pullRequestPrefix}1`]);
 	const pullRequestNumberPattern = /^[1-9][0-9]*$/u;
+	const firstDigits = '123456789';
+	const laterDigits = '0123456789';
 
 	for (const { cachePrefix } of policies) {
 		const pullRequestNumber = cachePrefix.slice(pullRequestPrefix.length);
@@ -249,6 +256,21 @@ function gracePolicyCaches(
 			pullRequestNumberPattern.test(pullRequestNumber)
 		) {
 			caches.add(cachePrefix);
+			caches.add(`${cachePrefix}0`);
+
+			let index = 0;
+			for (const digit of pullRequestNumber) {
+				const alternatives = index === 0 ? firstDigits : laterDigits;
+				const prefix = pullRequestNumber.slice(0, index);
+
+				for (const alternative of alternatives) {
+					if (alternative !== digit) {
+						caches.add(`${pullRequestPrefix}${prefix}${alternative}`);
+					}
+				}
+
+				index += 1;
+			}
 		}
 	}
 
@@ -330,7 +352,11 @@ async function checkReuseView(
 		view = await fetchCacheInfo(
 			`${url.replace(/\/$/, '')}/reuse/${pullRequestViewName}`
 		);
-	} catch {
+	} catch (error) {
+		if (isAbortError(error)) {
+			throw error;
+		}
+
 		return {
 			check,
 			status: 'failed',
@@ -386,9 +412,18 @@ export async function runGithubCheck(
 	dependencies: GithubCheckDependencies
 ): Promise<void> {
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
+	const verifyWorkflowReference =
+		dependencies.verifyWorkflowReference ?? verifyPinnedWorkflowReference;
+	const lookupOptions =
+		dependencies.signal === undefined ? {} : { signal: dependencies.signal };
+
+	requirePinnedWorkflowReference(options.workflowRef);
+	await reporter.phase('Verifying workflow reference', () =>
+		verifyWorkflowReference(options.workflowRef, lookupOptions)
+	);
 
 	const identity = await reporter.phase('Resolving repository', () =>
-		resolveRepository(options.repo)
+		resolveRepository(options.repo, lookupOptions)
 	);
 	const rules = await reporter.phase('Reading trust rules', async () => {
 		const listed = await client.oidcTrust.list();
