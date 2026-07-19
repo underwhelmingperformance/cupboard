@@ -1,4 +1,24 @@
+import { appendFileSync } from 'node:fs';
 import { stderr, stdout } from 'node:process';
+
+import { workflowCommands } from '@cupboard/shared/github-actions';
+import { z } from 'zod';
+
+const reportedErrors = new WeakSet<object>();
+
+/** Records that a diagnostic for an error has already been emitted. */
+export function markErrorReported(error: unknown): void {
+	if (typeof error === 'object' && error !== null) {
+		reportedErrors.add(error);
+	}
+}
+
+/** Whether a reporter has already emitted a diagnostic for an error. */
+export function wasErrorReported(error: unknown): boolean {
+	return (
+		typeof error === 'object' && error !== null && reportedErrors.has(error)
+	);
+}
 
 export interface PhaseContext {
 	fact(label: string, value: string | number): void;
@@ -106,8 +126,8 @@ export interface Reporter {
 	error(error: unknown): void;
 }
 
-/** Terminal (clack) or line-delimited JSON output. */
-export type ReporterMode = 'terminal' | 'json';
+/** Terminal (clack), line-delimited JSON, or GitHub Actions output. */
+export type ReporterMode = 'terminal' | 'json' | 'github';
 
 export interface ReporterOptions {
 	/**
@@ -124,6 +144,104 @@ export interface ReporterOptions {
 	readonly out?: NodeJS.WritableStream;
 	/** The clock used for durations and progress throttling; defaults to `Date.now`. */
 	readonly now?: () => number;
+	/**
+	 * An absolute path to append one JSONL result event to for every
+	 * {@link Reporter.result}, in every mode. Read the file back with
+	 * {@link parseReporterResults}.
+	 */
+	readonly resultFile?: string;
+}
+
+/** One result event as persisted to a `--result-file`, carrying its machine payload. */
+export const reporterResultEventSchema = z.strictObject({
+	kind: z.string(),
+	data: z.unknown()
+});
+
+export type ReporterResultEvent = z.infer<typeof reporterResultEventSchema>;
+
+/** Thrown by {@link parseReporterResults} for a line that is not a valid result event. */
+export class MalformedResultLineError extends Error {
+	constructor(readonly line: string) {
+		super('reporter result line is not a valid result event');
+		this.name = 'MalformedResultLineError';
+	}
+}
+
+/**
+ * Parses a `--result-file`'s contents into its result events, skipping blank
+ * lines. Throws a {@link MalformedResultLineError} on the first line that is not
+ * a JSON result event, so a corrupt file fails loudly rather than dropping data.
+ */
+export function parseReporterResults(
+	fileContents: string
+): ReporterResultEvent[] {
+	const events: ReporterResultEvent[] = [];
+
+	for (const line of fileContents.split('\n')) {
+		const trimmed = line.trim();
+
+		if (trimmed === '') {
+			continue;
+		}
+
+		const parsed = parseResultLine(trimmed);
+
+		if (parsed === undefined) {
+			throw new MalformedResultLineError(trimmed);
+		}
+
+		events.push(parsed);
+	}
+
+	return events;
+}
+
+function parseResultLine(line: string): ReporterResultEvent | undefined {
+	let value: unknown;
+
+	try {
+		value = JSON.parse(line);
+	} catch {
+		return undefined;
+	}
+
+	const result = reporterResultEventSchema.safeParse(value);
+
+	return result.success ? result.data : undefined;
+}
+
+/**
+ * Appends one result event to the JSONL result file. A reporter in any mode
+ * calls this for every {@link Reporter.result} when a `resultFile` is set, so a
+ * caller can read a run's results back with {@link parseReporterResults}.
+ */
+export function appendResultEvent(
+	resultFile: string,
+	payload: ResultPayload
+): void {
+	appendFileSync(
+		resultFile,
+		`${JSON.stringify({ kind: payload.kind, data: payload.data })}\n`
+	);
+}
+
+// A no-op when no result file is configured, otherwise an appender bound to it,
+// so each reporter's `result` can record unconditionally.
+function resultAppender(resultFile?: string): (payload: ResultPayload) => void {
+	if (resultFile === undefined) {
+		return () => {
+			/* no result file: nothing to persist */
+		};
+	}
+
+	return (payload) => {
+		appendResultEvent(resultFile, payload);
+	};
+}
+
+function warnText(label: string, value?: string): string {
+	return value === undefined ? label : `${label}: ${value}`;
 }
 
 // A long progress phase emits an interim `progress` event at most this often, so
@@ -139,7 +257,22 @@ export function createReporter(options: ReporterOptions = {}): Reporter {
 	return createJsonReporter(
 		options.stream ?? stderr,
 		options.out ?? stdout,
-		options.now ?? (() => Date.now())
+		options.now ?? (() => Date.now()),
+		resultAppender(options.resultFile)
+	);
+}
+
+/**
+ * The GitHub Actions reporter: phases and tasks become collapsible log groups,
+ * facts and results plain `label: value` lines within them, warnings, successes
+ * and failures the matching workflow-command annotations. Its output is the
+ * run log on stdout; it participates in the result file like the other modes.
+ */
+export function createGithubReporter(options: ReporterOptions = {}): Reporter {
+	return buildGithubReporter(
+		options.out ?? stdout,
+		options.now ?? (() => Date.now()),
+		resultAppender(options.resultFile)
 	);
 }
 
@@ -152,7 +285,8 @@ interface StepGroupRecord {
 function createJsonReporter(
 	stream: NodeJS.WritableStream,
 	out: NodeJS.WritableStream,
-	now: () => number
+	now: () => number,
+	recordResult: (payload: ResultPayload) => void
 ): Reporter {
 	function emit(event: Record<string, unknown>): void {
 		stream.write(`${JSON.stringify(event)}\n`);
@@ -339,6 +473,7 @@ function createJsonReporter(
 
 		result(payload) {
 			emit({ event: 'result', kind: payload.kind, data: payload.data });
+			recordResult(payload);
 		},
 
 		data(text) {
@@ -372,6 +507,185 @@ function describeError(error: unknown): { name: string; message: string } {
 	}
 
 	return { name: 'Error', message: String(error) };
+}
+
+function buildGithubReporter(
+	out: NodeJS.WritableStream,
+	now: () => number,
+	recordResult: (payload: ResultPayload) => void
+): Reporter {
+	const commands = workflowCommands({ stdout: out, stderr: out });
+	const line = (text: string): void => {
+		out.write(`${text}\n`);
+	};
+
+	const emitWarn = (label: string, value?: string): void => {
+		commands.warning(warnText(label, value));
+	};
+
+	const emitFacts = (facts: ReadonlyMap<string, string>): void => {
+		for (const [label, value] of facts) {
+			line(`${label}: ${value}`);
+		}
+	};
+
+	const addGroup = (name: string): StepGroup => {
+		line(`${name}:`);
+
+		return {
+			message: (message) => {
+				line(`  ${message}`);
+			},
+			success: (message) => {
+				line(`  ${message}`);
+			},
+			error: (message) => {
+				line(`  ${message}`);
+			}
+		};
+	};
+	const emitError = (error: unknown): void => {
+		if (wasErrorReported(error)) {
+			return;
+		}
+
+		commands.error(describeError(error).message);
+		markErrorReported(error);
+	};
+
+	return {
+		async phase(label, body) {
+			commands.group(label);
+
+			const facts = new Map<string, string>();
+
+			try {
+				const value = await body({
+					fact(factLabel, factValue) {
+						facts.set(factLabel, String(factValue));
+					},
+					warn: emitWarn
+				});
+
+				emitFacts(facts);
+				commands.endGroup();
+
+				return value;
+			} catch (error) {
+				emitFacts(facts);
+				emitError(error);
+				commands.endGroup();
+
+				throw error;
+			}
+		},
+
+		async progress(label, options, body) {
+			commands.group(label);
+
+			const facts = new Map<string, string>();
+			const startedAt = now();
+			// Measured from the start, so a phase short enough to finish within one
+			// interval emits no interim line, only the final summary.
+			let lastEmitAt = startedAt;
+			let completed = 0;
+
+			const summary = (): string =>
+				`${label}: ${String(completed)}/${String(options.total)}`;
+
+			try {
+				const value = await body({
+					advance(step = 1) {
+						completed += step;
+
+						const at = now();
+
+						if (at - lastEmitAt < progressIntervalMs) {
+							return;
+						}
+
+						lastEmitAt = at;
+						line(summary());
+					},
+					fact(factLabel, factValue) {
+						facts.set(factLabel, String(factValue));
+					},
+					warn: emitWarn
+				});
+
+				emitFacts(facts);
+				line(summary());
+				commands.endGroup();
+
+				return value;
+			} catch (error) {
+				emitFacts(facts);
+				emitError(error);
+				commands.endGroup();
+
+				throw error;
+			}
+		},
+
+		async steps(label, body) {
+			commands.group(label);
+
+			try {
+				const value = await body({
+					message: (message) => {
+						line(message);
+					},
+					group: addGroup,
+					warn: emitWarn
+				});
+
+				commands.endGroup();
+
+				return value;
+			} catch (error) {
+				emitError(error);
+				commands.endGroup();
+
+				throw error;
+			}
+		},
+
+		result(payload) {
+			if (payload.rows.length === 0) {
+				if (payload.empty !== undefined) {
+					line(payload.empty);
+				}
+			} else {
+				for (const row of payload.rows) {
+					line(`${row.label}: ${row.value}`);
+				}
+			}
+
+			recordResult(payload);
+		},
+
+		data(text) {
+			line(text);
+		},
+
+		warn: emitWarn,
+
+		info(message) {
+			line(message);
+		},
+
+		success(message) {
+			commands.notice(message);
+		},
+
+		step(message) {
+			line(message);
+		},
+
+		error(error) {
+			emitError(error);
+		}
+	};
 }
 
 export function formatDuration(milliseconds: number): string {

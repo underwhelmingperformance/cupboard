@@ -24,6 +24,8 @@ import {
 	updateSettings
 } from '@clack/prompts';
 import {
+	appendResultEvent,
+	createGithubReporter,
 	createReporter,
 	formatDuration,
 	type Reporter,
@@ -244,10 +246,46 @@ export interface CliUiOptions {
 	/** Where `data` payloads go; defaults to `process.stdout`. */
 	readonly out?: NodeJS.WritableStream;
 	/**
+	 * An absolute path to append one JSONL result event to per result, in every
+	 * mode (the CLI's `--result-file`).
+	 */
+	readonly resultFile?: string;
+	/**
 	 * Aborts the active spinner, bar or task so an interrupted command (Ctrl-C)
 	 * renders it as cancelled.
 	 */
 	readonly signal?: AbortSignal;
+}
+
+// The reporter for a UI's output mode: clack spinners in the terminal, GitHub
+// Actions workflow commands under a runner, or line-delimited JSON otherwise.
+// Every mode records to the result file when one is configured.
+function reporterFor(
+	mode: ReporterMode,
+	colours: Colours,
+	options: CliUiOptions
+): Reporter {
+	if (mode === 'terminal') {
+		return clackReporter(
+			colours,
+			options.out,
+			options.signal,
+			options.resultFile
+		);
+	}
+
+	if (mode === 'github') {
+		return createGithubReporter({
+			out: options.out,
+			resultFile: options.resultFile
+		});
+	}
+
+	return createReporter({
+		stream: options.stream,
+		out: options.out,
+		resultFile: options.resultFile
+	});
 }
 
 export function createCliUi(options: CliUiOptions): CliUi {
@@ -265,10 +303,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 	// the UI are output to the same place and must not corrupt each other's
 	// redraw. In machine mode it also means both paths emit the same structured
 	// events.
-	const reporter: Reporter =
-		mode === 'terminal'
-			? clackReporter(colours, options.out, options.signal)
-			: createReporter({ stream: options.stream, out: options.out });
+	const reporter: Reporter = reporterFor(mode, colours, options);
 
 	const browserMessages: BrowserMessages = {
 		info: (message) => {
@@ -555,7 +590,8 @@ function unitNotes(live?: (message: string) => void): UnitNotes {
 function clackReporter(
 	colours: Colours,
 	out: NodeJS.WritableStream = stdout,
-	signal?: AbortSignal
+	signal?: AbortSignal,
+	resultFile?: string
 ): Reporter {
 	return {
 		async phase(label, body) {
@@ -680,6 +716,10 @@ function clackReporter(
 		},
 
 		result(payload) {
+			if (resultFile !== undefined) {
+				appendResultEvent(resultFile, payload);
+			}
+
 			if (payload.rows.length === 0) {
 				if (payload.empty !== undefined) {
 					log.info(payload.empty);

@@ -12,7 +12,11 @@ import {
 	type Sink
 } from '@cupboard/logger';
 import { jsonLinesSink } from '@cupboard/logger/sinks';
-import type { Reporter, ReporterMode } from '@cupboard/reporter';
+import {
+	type Reporter,
+	type ReporterMode,
+	wasErrorReported
+} from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
 import { Command, CommanderError, InvalidArgumentError } from 'commander';
 import pc from 'picocolors';
@@ -45,11 +49,13 @@ import { cupboardVersion } from './version.ts';
 export interface GlobalOptions {
 	readonly outputMode?: ReporterMode;
 	readonly colour?: boolean;
+	readonly resultFile?: string;
 }
 
 const reporterModeSchema = z.enum([
 	'terminal',
-	'json'
+	'json',
+	'github'
 ]) satisfies z.ZodType<ReporterMode>;
 
 // Parse `--output-mode` into a `ReporterMode` at the flag boundary, so the rest
@@ -108,11 +114,15 @@ export function buildProgram(options: ProgramOptions = {}): Command {
 		.version(cupboardVersion)
 		.option(
 			'--output-mode <mode>',
-			'force the output mode: terminal (spinner) or json (line-delimited)',
+			'force the output mode: terminal (spinner), json (line-delimited) or github (workflow commands)',
 			parseOutputMode
 		)
 		.option('--colour', 'force ANSI colour output')
 		.option('--no-colour', 'disable ANSI colour output')
+		.option(
+			'--result-file <path>',
+			'append machine-readable result events (JSONL) to this file'
+		)
 		.addHelpText(
 			'after',
 			'\nMost commands act on a deployment and need a session first: ' +
@@ -170,6 +180,10 @@ export function colourFromGlobals(program: Command): boolean | undefined {
 	return program.opts<GlobalOptions>().colour;
 }
 
+function resultFileFromGlobals(program: Command): string | undefined {
+	return program.opts<GlobalOptions>().resultFile;
+}
+
 /**
  * The {@link CliUi} for a command: the output mode comes from `--output-mode`
  * and the environment, the colour from `--colour`/`--no-colour`, connected to
@@ -185,6 +199,7 @@ export function commandUi(
 	return createCliUi({
 		mode: reporterModeFromGlobals(program),
 		colour: colourFromGlobals(program),
+		resultFile: resultFileFromGlobals(program),
 		signal: options.signal,
 		...extra
 	});
@@ -249,14 +264,16 @@ export function reportCliFailure(reporter: Reporter, error: unknown): void {
 		return;
 	}
 
-	// Commander has already rendered help for these: an explicit `--help`/`help`
-	// request (`commander.helpDisplayed`, exit 0) and a bare invocation with no
-	// subcommand, which commander treats as a usage error and exits 1
-	// (`commander.help`). Either way, the funnel would only add a redundant
-	// `(outputHelp)` line.
+	if (wasErrorReported(error)) {
+		return;
+	}
+
+	// Commander has already rendered successful informational output or help.
+	// A bare invocation reports help with exit 1, so its code must be recognised
+	// separately from successful `--help` and `--version` exits.
 	if (
 		error instanceof CommanderError &&
-		error.code.startsWith('commander.help')
+		(error.exitCode === 0 || error.code.startsWith('commander.help'))
 	) {
 		return;
 	}

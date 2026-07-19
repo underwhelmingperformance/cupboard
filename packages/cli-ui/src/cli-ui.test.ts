@@ -1,8 +1,12 @@
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import process from 'node:process';
 import { Writable } from 'node:stream';
 
-import type { ReporterMode } from '@cupboard/reporter';
+import { parseReporterResults, type ReporterMode } from '@cupboard/reporter';
 import pc from 'picocolors';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
 	type CliUi,
@@ -233,6 +237,88 @@ describe('createCliUi machine narration', () => {
 				groups: [{ name: 'read', status: 'ok', messages: ['1 bundle'] }]
 			}
 		]);
+	});
+});
+
+describe('createCliUi reporter routing', () => {
+	it('routes github mode to the github reporter', () => {
+		const payload = captureStream();
+		const ui = createCliUi({
+			mode: 'github' satisfies ReporterMode,
+			interactive: false,
+			out: payload.stream
+		});
+
+		ui.reporter().result({
+			kind: 'push-summary',
+			data: { uploaded: 5 },
+			rows: [{ label: 'paths', value: '5' }]
+		});
+
+		expect(payload.written()).toBe('paths: 5\n');
+	});
+});
+
+describe('createCliUi result file', () => {
+	it.each(['json', 'github'] as const)(
+		'appends result events in %s mode',
+		(mode: ReporterMode) => {
+			const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-cli-ui-'));
+			const resultFile = path.join(directory, 'results.jsonl');
+			const payload = captureStream();
+			const diagnostics = captureStream();
+
+			try {
+				createCliUi({
+					mode,
+					interactive: false,
+					out: payload.stream,
+					stream: diagnostics.stream,
+					resultFile
+				})
+					.reporter()
+					.result({
+						kind: 'push-summary',
+						data: { uploaded: 5 },
+						rows: [{ label: 'paths', value: '5' }]
+					});
+
+				expect(
+					parseReporterResults(readFileSync(resultFile, 'utf8'))
+				).toStrictEqual([{ kind: 'push-summary', data: { uploaded: 5 } }]);
+			} finally {
+				rmSync(directory, { recursive: true, force: true });
+			}
+		}
+	);
+
+	it('appends result events in terminal mode', () => {
+		const directory = mkdtempSync(path.join(tmpdir(), 'cupboard-cli-ui-'));
+		const resultFile = path.join(directory, 'results.jsonl');
+		// Clack renders the result card straight to `process.stdout`; swallow it so
+		// the assertion is about the result file, not the terminal drawing.
+		vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+		try {
+			createCliUi({
+				mode: 'terminal' satisfies ReporterMode,
+				interactive: false,
+				resultFile
+			})
+				.reporter()
+				.result({
+					kind: 'push-summary',
+					data: { uploaded: 5 },
+					rows: [{ label: 'paths', value: '5' }]
+				});
+
+			expect(
+				parseReporterResults(readFileSync(resultFile, 'utf8'))
+			).toStrictEqual([{ kind: 'push-summary', data: { uploaded: 5 } }]);
+		} finally {
+			vi.restoreAllMocks();
+			rmSync(directory, { recursive: true, force: true });
+		}
 	});
 });
 
