@@ -21,6 +21,7 @@
 		"./collections": "./src/collections.ts",
 		"./errors": "./src/errors.ts",
 		"./github-actions": "./src/github-actions.ts",
+		"./http": "./src/http.ts",
 		"./in-toto": "./src/in-toto.ts",
 		"./octokit": "./src/octokit.ts",
 		"./retry": "./src/retry.ts",

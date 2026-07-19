@@ -96,6 +96,19 @@ describe('tenantRpc', () => {
 		});
 	});
 
+	it('removes redundant trailing slashes from the tenant base', async () => {
+		const { fetcher, captured } = capturingFetcher([
+			() => Response.json({ caches: [] })
+		]);
+		const rpc = tenantRpc('https://cupboard.test/t/acme///', { fetcher });
+
+		await rpc.caches.list();
+
+		expect(captured.map((request) => request.url)).toStrictEqual([
+			'https://cupboard.test/t/acme/caches'
+		]);
+	});
+
 	it('aborts before fetching when the signal is already aborted', async () => {
 		const { fetcher, captured } = capturingFetcher([]);
 		const controller = new AbortController();
@@ -345,5 +358,18 @@ describe('controlRpc', () => {
 				}
 			]
 		});
+	});
+
+	it('removes redundant trailing slashes before the control prefix', async () => {
+		const { fetcher, captured } = capturingFetcher([
+			() => Response.json({ tenants: [] })
+		]);
+		const rpc = controlRpc('https://cupboard.test///', { fetcher });
+
+		await rpc.tenants.list();
+
+		expect(captured.map((request) => request.url)).toStrictEqual([
+			'https://cupboard.test/control/tenants'
+		]);
 	});
 });

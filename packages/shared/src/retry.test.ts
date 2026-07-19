@@ -1,7 +1,12 @@
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
-import { isTransientResponse, retryingFetcher } from './retry.ts';
+import {
+	backoffDelay,
+	isTransientResponse,
+	reachableFetcher,
+	retryingFetcher
+} from './retry.ts';
 
 // Stands in for a caller's typed abort reason (the CLI aborts with its own
 // error class); the wrapper must surface it unchanged.
@@ -72,6 +77,33 @@ describe('isTransientResponse', () => {
 	});
 });
 
+describe('backoffDelay', () => {
+	it('removes its abort listener after the delay completes', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const controller = new AbortController();
+			const add = vi.spyOn(controller.signal, 'addEventListener');
+			const remove = vi.spyOn(controller.signal, 'removeEventListener');
+			const pending = backoffDelay(1, controller.signal);
+
+			await vi.advanceTimersByTimeAsync(60_000);
+			await pending;
+
+			const listener = add.mock.calls[0]?.[1];
+			expect({
+				added: add.mock.calls.length,
+				removed: remove.mock.calls
+			}).toStrictEqual({
+				added: 1,
+				removed: [['abort', listener]]
+			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
 describe('retryingFetcher', () => {
 	it.each([
 		StatusCodes.TOO_MANY_REQUESTS,
@@ -96,6 +128,34 @@ describe('retryingFetcher', () => {
 				status: StatusCodes.OK,
 				attempts: 3
 			});
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it('cancels every transient response body discarded for a retry', async () => {
+		vi.useFakeTimers();
+
+		try {
+			const cancelled: number[] = [];
+			const transient =
+				(attempt: number): (() => Response) =>
+				() =>
+					new Response(
+						new ReadableStream({
+							cancel: () => {
+								cancelled.push(attempt);
+							}
+						}),
+						{ status: StatusCodes.SERVICE_UNAVAILABLE }
+					);
+			const { fetcher } = scriptedFetcher([transient(1), transient(2), ok]);
+
+			const pending = retryingFetcher(fetcher)('https://x.test');
+			await vi.advanceTimersByTimeAsync(60_000);
+			await pending;
+
+			expect(cancelled).toStrictEqual([1, 2]);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -262,5 +322,49 @@ describe('retryingFetcher', () => {
 		} finally {
 			vi.useRealTimers();
 		}
+	});
+});
+
+class HostDownError extends Error {
+	constructor(
+		public readonly host: string,
+		public override readonly cause: TypeError
+	) {
+		super('host down');
+		this.name = 'HostDownError';
+	}
+}
+
+const failing: typeof fetch = () =>
+	Promise.reject(new TypeError('fetch failed'));
+
+describe('reachableFetcher', () => {
+	it('translates a network fault through the supplied error factory', async () => {
+		const fetcher = reachableFetcher(
+			failing,
+			(host, cause) => new HostDownError(host, cause)
+		);
+
+		let failure: unknown;
+		try {
+			await fetcher('https://cache.example.test/nix-cache-info');
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(HostDownError);
+		expect(failure instanceof HostDownError ? failure.host : undefined).toBe(
+			'cache.example.test'
+		);
+	});
+
+	it('lets a non-network failure propagate unchanged', async () => {
+		const abort = new DOMException('aborted', 'AbortError');
+		const fetcher = reachableFetcher(
+			() => Promise.reject(abort),
+			(host, cause) => new HostDownError(host, cause)
+		);
+
+		await expect(fetcher('https://cache.example.test/')).rejects.toBe(abort);
 	});
 });

@@ -1,4 +1,7 @@
-import { retryingFetcher } from '@cupboard/shared/retry';
+import {
+	reachableFetcher as sharedReachableFetcher,
+	retryingFetcher
+} from '@cupboard/shared/retry';
 
 import { InvalidWorkerUrlError, UnreachableHostError } from '../errors.ts';
 
@@ -17,11 +20,16 @@ export function resilientFetcher(fetcher: typeof fetch = fetch): typeof fetch {
  * naming the offending input.
  */
 export function parseWorkerUrl(value: string | URL): URL {
+	let url: URL;
 	try {
-		return new URL(value);
+		url = new URL(value);
 	} catch {
 		throw new InvalidWorkerUrlError(String(value));
 	}
+
+	url.pathname = url.pathname.replace(/\/+$/u, '') || '/';
+
+	return url;
 }
 
 /**
@@ -30,36 +38,8 @@ export function parseWorkerUrl(value: string | URL): URL {
  * is a `DOMException`, not a `TypeError`, so it propagates unchanged.
  */
 export function reachableFetcher(fetcher: typeof fetch): typeof fetch {
-	return async (input, init) => {
-		try {
-			return await fetcher(input, init);
-		} catch (error) {
-			if (error instanceof TypeError) {
-				throw new UnreachableHostError(hostOf(input), error);
-			}
-
-			throw error;
-		}
-	};
-}
-
-function hostOf(input: Parameters<typeof fetch>[0]): string {
-	if (typeof input === 'string') {
-		return safeHost(input);
-	}
-
-	if (input instanceof URL) {
-		return input.host;
-	}
-
-	return safeHost(input.url);
-}
-
-function safeHost(value: string): string {
-	try {
-		const url = new URL(value);
-		return url.host;
-	} catch {
-		return value;
-	}
+	return sharedReachableFetcher(
+		fetcher,
+		(host, cause) => new UnreachableHostError(host, cause)
+	);
 }
