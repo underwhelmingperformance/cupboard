@@ -2,9 +2,11 @@ import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { SubrequestTimeoutError } from '../errors.ts';
+import { SubrequestTimeoutError, UnboundableIoError } from '../errors.ts';
 import { OidcDiscoveryStore } from '../oidc/oidc.ts';
 import { currentServer, initialise, resetTestServer } from '../test-support.ts';
+
+import { boundedBlobs, boundedD1 } from './bounded-io.ts';
 
 // A gated subrequest that hangs must not hold the input gate to the runtime's
 // ~30s reset. The bounded-I/O layer times it out; the critical section releases
@@ -60,5 +62,27 @@ describe('bounded gated subrequest', () => {
 			isSameInstance: true,
 			afterTimeout: 'ok'
 		});
+	});
+});
+
+// A session or multipart handle issues its own network calls outside the
+// bounded proxies, so handing one out through a bounded wrapper would be a
+// silent escape from the per-call limit.
+describe('unboundable members', () => {
+	it('refuses an R2 multipart handle through the bounded bucket', () => {
+		const blobs = boundedBlobs(env.BLOBS);
+
+		expect(() => blobs.createMultipartUpload('unbounded-key')).toThrow(
+			UnboundableIoError
+		);
+		expect(() =>
+			blobs.resumeMultipartUpload('unbounded-key', 'upload-id')
+		).toThrow(UnboundableIoError);
+	});
+
+	it('refuses a D1 session through the bounded database', () => {
+		const database = boundedD1(env.CUPBOARD_DB);
+
+		expect(() => database.withSession()).toThrow(UnboundableIoError);
 	});
 });
