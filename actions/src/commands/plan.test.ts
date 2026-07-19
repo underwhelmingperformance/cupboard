@@ -221,6 +221,15 @@ describe('resolvePlanInputs', () => {
 		).toBe(rootPrefix);
 	});
 
+	it('rejects when url is not an http(s) URL', () => {
+		expect(() =>
+			resolvePlanInputs(
+				{ ...baseOptions, url: 'cupboard.example/t/acme' },
+				environment
+			)
+		).toThrow(InvalidInputError);
+	});
+
 	it('retains intermediates by grace when asked', () => {
 		expect(
 			resolvePlanInputs(

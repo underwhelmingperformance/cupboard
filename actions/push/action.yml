@@ -92,25 +92,43 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Resolve the pinned pnpm version
-      id: pnpm
+    - name: Resolve the pinned toolchain
+      id: toolchain
       shell: bash
-      env:
-        # renovate: datasource=npm depName=pnpm
-        PNPM_VERSION: '11.13.1'
-      run: echo "version=${PNPM_VERSION}" | tee -a "${GITHUB_OUTPUT}"
+      # The workspace manifest's packageManager field is the single pnpm pin;
+      # the release integrity suffix, when present, is not part of the version.
+      run: |
+        manifest="$GITHUB_ACTION_PATH/../../package.json"
+        node_version_file="$GITHUB_ACTION_PATH/../../.node-version"
+        version="$(sed -n 's/.*"packageManager": *"pnpm@\([^+"]*\).*/\1/p' "$manifest")"
+        if [ -z "$version" ]; then
+          echo "::error::package.json declares no pnpm packageManager pin"
+          exit 1
+        fi
+        if [ ! -r "$node_version_file" ]; then
+          echo "::error::.node-version is not readable"
+          exit 1
+        fi
+        node_version="$(tr -d '\r\n' < "$node_version_file")"
+        if [ -z "$node_version" ]; then
+          echo "::error::.node-version declares no Node version"
+          exit 1
+        fi
+        echo "pnpm-version=$version" | tee -a "$GITHUB_OUTPUT"
+        echo "node-version=$node_version" | tee -a "$GITHUB_OUTPUT"
 
     - uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 # v6.0.9
       with:
-        version: ${{ steps.pnpm.outputs.version }}
-        # pnpm/action-setup cross-checks a package.json and fails the run on a
-        # version mismatch. Point it at this action's own manifest, not the
-        # caller's checkout, whose pinned pnpm would otherwise break us.
+        version: ${{ steps.toolchain.outputs.pnpm-version }}
+        # Point pnpm/action-setup's manifest lookup at this action's own
+        # manifest, not the caller's checkout, whose pinned pnpm would
+        # otherwise conflict with `version`. Parity between this pin and the
+        # workspace manifest is enforced by scripts/action-tool-parity.test.ts.
         package_json_file: ${{ github.action_path }}/../../package.json
 
     - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
-        node-version: 24.18.0
+        node-version: ${{ steps.toolchain.outputs.node-version }}
 
     - name: Install action dependencies
       shell: bash
