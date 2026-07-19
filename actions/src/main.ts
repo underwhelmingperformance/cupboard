@@ -5,7 +5,7 @@ import { configureLogging, rootLogger } from '@cupboard/logger';
 import { CodedError, genericExitCode } from '@cupboard/shared/errors';
 import { workflowCommands } from '@cupboard/shared/github-actions';
 
-import { dispatch } from './cupboard-action.ts';
+import { dispatch } from './dispatch.ts';
 
 const githubActions = workflowCommands();
 
