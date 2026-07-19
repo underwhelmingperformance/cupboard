@@ -937,3 +937,16 @@ export class ZstdUnavailableError extends ServerHttpError {
 		this.name = 'ZstdUnavailableError';
 	}
 }
+
+/**
+ * A bounded I/O wrapper refused a member it cannot bound: sessions and
+ * multipart handles issue their own network calls outside the wrapper, so
+ * using one through it would silently escape the per-call limit. Take the
+ * handle from the raw binding instead, outside any critical section.
+ */
+export class UnboundableIoError extends Error {
+	constructor(public readonly member: string) {
+		super(`${member} cannot be bounded; use the raw binding off the gate`);
+		this.name = 'UnboundableIoError';
+	}
+}

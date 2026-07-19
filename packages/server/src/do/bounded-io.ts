@@ -1,3 +1,5 @@
+import { UnboundableIoError } from '../errors.ts';
+
 import { boundedSubrequest, unboundedCapMs } from './deadline.ts';
 
 // Wraps one async client method so every call is bounded (see
@@ -11,6 +13,15 @@ function bounded<A extends unknown[], R>(
 ): (...arguments_: A) => Promise<R> {
 	return (...arguments_: A) =>
 		boundedSubrequest(() => method(...arguments_), subrequest, capMs);
+}
+
+// Refuses a member whose network calls the bound cannot reach: a session or
+// multipart handle issues its own requests outside these proxies, so reaching
+// for one through a bounded wrapper would be a silent bypass.
+function unboundable(member: string): () => never {
+	return () => {
+		throw new UnboundableIoError(member);
+	};
 }
 
 // Passes through a non-intercepted member, binding methods to the real target so
@@ -51,6 +62,10 @@ export function boundedBlobs(bucket: R2Bucket): R2Bucket {
 				}
 				case 'list': {
 					return bounded(target.list.bind(target), 'r2.list');
+				}
+				case 'createMultipartUpload':
+				case 'resumeMultipartUpload': {
+					return unboundable(`r2.${property}`);
 				}
 				default: {
 					return passThrough(target, property);
@@ -146,6 +161,10 @@ export function boundedD1(database: D1Database): D1Database {
 				}
 				case 'exec': {
 					return bounded(target.exec.bind(target), 'd1.exec');
+				}
+				case 'withSession':
+				case 'dump': {
+					return unboundable(`d1.${property}`);
 				}
 				default: {
 					return passThrough(target, property);
