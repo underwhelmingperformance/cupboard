@@ -8,6 +8,7 @@ import {
 	type Operation,
 	type ResourceRequest
 } from '@cupboard/protocol/grants';
+import { z } from 'zod';
 
 import { type AccessClaims } from '../auth/auth.ts';
 import { InsufficientScopeError } from '../errors.ts';
@@ -15,29 +16,19 @@ import { InsufficientScopeError } from '../errors.ts';
 /** Resolves the cache a pending upload or attestation row was opened against. */
 export type PendingCacheResolver = (id: string) => Promise<string | undefined>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null;
-}
-
 function inputField(input: unknown, name: string): string | undefined {
-	if (!isRecord(input)) {
-		return undefined;
-	}
+	const direct = z.looseObject({ [name]: z.string() }).safeParse(input);
 
-	const direct = input[name];
-
-	if (typeof direct === 'string') {
-		return direct;
+	if (direct.success) {
+		return direct.data[name];
 	}
 
 	// A detailed input structure (a DELETE carrying a query) nests path params.
-	const parameters = input.params;
+	const nested = z
+		.looseObject({ params: z.looseObject({ [name]: z.string() }) })
+		.safeParse(input);
 
-	if (isRecord(parameters) && typeof parameters[name] === 'string') {
-		return parameters[name];
-	}
-
-	return undefined;
+	return nested.success ? nested.data.params[name] : undefined;
 }
 
 interface ResolvedResource {

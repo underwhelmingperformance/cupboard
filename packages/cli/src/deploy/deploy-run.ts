@@ -1,6 +1,7 @@
 import type { PhaseContext, Reporter, ResultRow } from '@cupboard/reporter';
 import { APIError } from 'cloudflare';
 import type { ScriptUpdateParams } from 'cloudflare/resources/workers/scripts/scripts';
+import { z } from 'zod';
 
 import type { DeploymentArtifact } from './artifact.ts';
 import type { WorkerBundle } from './bundle.ts';
@@ -297,12 +298,8 @@ function canonicalise(bindings: readonly unknown[]): string[] {
 }
 
 function isSecretBinding(binding: unknown): boolean {
-	return (
-		typeof binding === 'object' &&
-		binding !== null &&
-		'type' in binding &&
-		binding.type === 'secret_text'
-	);
+	return z.looseObject({ type: z.literal('secret_text') }).safeParse(binding)
+		.success;
 }
 
 // JSON with object keys sorted at every level, so two structurally equal

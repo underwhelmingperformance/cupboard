@@ -7,6 +7,7 @@ import {
 	subscribeIdentityCapability
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
+import { z } from 'zod';
 
 import { abortReason } from '../abort.ts';
 import {
@@ -204,9 +205,7 @@ function deferredSettle(): {
 	};
 }
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
+const frameEnvelopeSchema = z.looseObject({ ev: z.string() });
 
 function parseTokenAttributes(parts: readonly string[]): CapabilityAttributes {
 	const attributes: Record<string, string> = {};
@@ -527,18 +526,9 @@ export function runCommitSession(
 
 	const onFrame = (text: string): void => {
 		const json = safeJsonParse(text);
+		const envelope = frameEnvelopeSchema.safeParse(json);
 
-		if (!isJsonObject(json)) {
-			failSession(
-				new CommitSocketProtocolError(options.path, `unexpected frame: ${text}`)
-			);
-
-			return;
-		}
-
-		const event = json.ev;
-
-		if (typeof event !== 'string') {
+		if (!envelope.success) {
 			failSession(
 				new CommitSocketProtocolError(options.path, `unexpected frame: ${text}`)
 			);
@@ -548,7 +538,7 @@ export function runCommitSession(
 
 		// An ev not in the known set is from a future server version; ignore it.
 		// Entry deadlines bound the risk of a missed verdict.
-		if (!knownEvs.has(event)) {
+		if (!knownEvs.has(envelope.data.ev)) {
 			return;
 		}
 
