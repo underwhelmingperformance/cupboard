@@ -41,10 +41,12 @@ export interface LookupRepositoryOptions {
 }
 
 /**
- * Resolve a public repository's immutable numeric ids from `owner/name`. Uses a
- * conditional-request HTTP cache so repeated rule edits do not re-spend the
- * unauthenticated rate budget. Throws {@link RepositoryNotFoundError} for a 404
- * and {@link GithubRateLimitError} when the budget is exhausted.
+ * Resolve a repository's immutable numeric ids from `owner/name`. A GitHub
+ * token in `GH_TOKEN` or `GITHUB_TOKEN` authenticates the lookup when set,
+ * which a private repository needs; without one the lookup is public-only.
+ * Uses a conditional-request HTTP cache so repeated rule edits do not re-spend
+ * the rate budget. Throws {@link RepositoryNotFoundError} for a 404 and
+ * {@link GithubRateLimitError} when the budget is exhausted.
  */
 export async function lookupRepository(
 	repository: string,
@@ -60,7 +62,11 @@ export async function lookupRepository(
 	const repo = repository.slice(slash + 1);
 
 	const cachePath = path.join(cacheDirectory(), 'github');
+	const token = [process.env.GH_TOKEN, process.env.GITHUB_TOKEN].find(
+		(candidate) => candidate !== undefined && candidate !== ''
+	);
 	const octokit = createOctokitClient({
+		...(token !== undefined && { auth: token }),
 		request: { fetch: options.fetch ?? makeFetchHappen.defaults({ cachePath }) }
 	});
 
