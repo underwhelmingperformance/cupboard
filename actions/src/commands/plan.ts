@@ -14,7 +14,8 @@ import {
 	graceCoverageResponseSchema,
 	type ParsedGraceCoverageResponse,
 	type ParsedRootEnsureResponse,
-	rootEnsureResponseSchema
+	rootEnsureResponseSchema,
+	rootSetMaxTargets
 } from '@cupboard/protocol/retention';
 import {
 	type ParsedUploadConfirmResponse,
@@ -43,6 +44,7 @@ import {
 	InvalidInputError,
 	MatrixJobLimitError,
 	MissingInputError,
+	PublishRootTargetLimitError,
 	PublishTargetsJsonError,
 	PublishTargetsSchemaError,
 	RootEnsureCommandError,
@@ -229,6 +231,7 @@ export function resolvePlanInputs(
 	}
 
 	validateTargetRoots(rootPrefix, targets);
+	validateTargetOutputLimits(targets);
 
 	const cupboardPath = provided(options.cupboardPath);
 
@@ -303,6 +306,21 @@ function validateTargetRoots(
 		throw new InvalidInputError(
 			'root-prefix',
 			`root-prefix and rootSuffix for ${target.attr} must form a root name of at most ${String(rootNameMaxLength)} characters without control characters`
+		);
+	}
+}
+
+function validateTargetOutputLimits(targets: readonly PublishTarget[]): void {
+	for (const target of targets) {
+		if (target.outputs.length <= rootSetMaxTargets) {
+			continue;
+		}
+
+		throw new PublishRootTargetLimitError(
+			'target',
+			target.attr,
+			target.outputs.length,
+			rootSetMaxTargets
 		);
 	}
 }
@@ -404,6 +422,33 @@ async function optimisedPlan(
 	// whether or not this manifest happens to produce a shared intermediate.
 	if (inputs.intermediateRetention === 'grace') {
 		await verifyGraceCoverage(inputs, dependencies.runner);
+	} else {
+		// Removing retained targets can split fallback groups, but cannot enlarge
+		// them. Known outputs need a separate pass without fallback exclusions:
+		// a split fallback group can expose seed candidates that it hid.
+		const maximumFallbackPlan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths,
+			...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
+			uses,
+			unevaluated: unevaluated.map((failure) => failure.target)
+		});
+		const seedEligibleUses = new Map(
+			uses.entries().filter(([, use]) => use.path !== undefined)
+		);
+		const maximumSeedPlan = planPublish({
+			evaluations,
+			retainedRoots: new Set(),
+			availablePaths,
+			...(viewAvailablePaths !== undefined && { viewAvailablePaths }),
+			uses: seedEligibleUses,
+			unevaluated: unevaluated.map((failure) => failure.target)
+		});
+		validateIntermediateRootTargetLimits(inputs, {
+			seedGroups: maximumSeedPlan.seedGroups,
+			fallbackGroups: maximumFallbackPlan.fallbackGroups
+		});
 	}
 
 	const retainedRoots = await ensureAvailableTargets(
@@ -433,6 +478,48 @@ async function optimisedPlan(
 	}
 
 	return plan;
+}
+
+export function validateIntermediateRootTargetLimits(
+	inputs: Pick<PlanInputs, 'intermediateRetention'>,
+	plan: Pick<PublishPlan, 'seedGroups' | 'fallbackGroups'>
+): void {
+	if (inputs.intermediateRetention === 'grace') {
+		return;
+	}
+
+	for (const group of plan.seedGroups) {
+		validateIntermediateRootTargetLimit(
+			'seed group',
+			group.key,
+			group.candidates.length
+		);
+	}
+
+	for (const group of plan.fallbackGroups) {
+		const count = group.targets.reduce(
+			(total, target) => total + target.outputs.length,
+			0
+		);
+		validateIntermediateRootTargetLimit('fallback group', group.key, count);
+	}
+}
+
+function validateIntermediateRootTargetLimit(
+	kind: 'seed group' | 'fallback group',
+	identifier: string,
+	count: number
+): void {
+	if (count <= rootSetMaxTargets) {
+		return;
+	}
+
+	throw new PublishRootTargetLimitError(
+		kind,
+		identifier,
+		count,
+		rootSetMaxTargets
+	);
 }
 
 function unoptimisedPlan(targets: readonly PublishTarget[]): PublishPlan {

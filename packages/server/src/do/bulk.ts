@@ -8,10 +8,9 @@ import { narObjectKey } from '../http/http.ts';
 
 export { chunk } from '@cupboard/shared/collections';
 
-// D1 admits at most 100 bound parameters per query, so an `IN (...)` list is
-// chunked below that with headroom for the fixed parameters a query also binds
-// (a tenant, a cache). The DO's own SQLite tolerates far more, but the same
-// modest chunk keeps every batched read uniform.
+// Cloudflare's D1 and Durable Object SQLite runtimes admit at most 100 bound
+// parameters per query, so an `IN (...)` list is chunked below that with
+// headroom for the fixed parameters a query also binds (a tenant, a cache).
 export const maxInClauseValues = 90;
 
 // Cloudflare allows a Durable Object six simultaneous outgoing connections per

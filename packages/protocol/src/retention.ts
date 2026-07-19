@@ -12,8 +12,14 @@ import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
 
+// One root names a bounded target list. Ensuring a root probes each
+// distinct target's narinfo object and canonical NAR in R2 and rewrites the
+// root's target rows, so the bound keeps one request's probe fan-out and
+// statement size within what a single Durable Object request can serve.
+export const rootSetMaxTargets = 1000;
+
 export const rootSetBodySchema = z.strictObject({
-	targets: z.array(storePathSchema).min(1),
+	targets: z.array(storePathSchema).min(1).max(rootSetMaxTargets),
 	ttlSeconds: ttlSecondsSchema.optional()
 });
 export type ParsedRootSetBody = z.output<typeof rootSetBodySchema>;

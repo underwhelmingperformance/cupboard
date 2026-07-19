@@ -19,10 +19,11 @@ import {
 	pushSummaryResultKind,
 	pushSummarySchema
 } from '@cupboard/protocol/reports';
-import type {
-	RootSetBody,
-	RootSetResponse,
-	RootSummary
+import {
+	type RootSetBody,
+	rootSetMaxTargets,
+	type RootSetResponse,
+	type RootSummary
 } from '@cupboard/protocol/retention';
 import {
 	type UploadDecision,
@@ -41,6 +42,7 @@ import {
 	type ResultRow
 } from '@cupboard/reporter';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
+import { UsageError } from '@cupboard/shared/errors';
 import { ORPCError } from '@orpc/client';
 import { StatusCodes } from 'http-status-codes';
 import { z } from 'zod';
@@ -1234,6 +1236,19 @@ interface RootRequest {
 	readonly body: RootSetBody;
 }
 
+export class RootTargetLimitError extends UsageError {
+	constructor(
+		public readonly count: number,
+		public readonly limit: number
+	) {
+		super(
+			`the named root would contain ${String(count)} targets, but a root accepts ` +
+				`at most ${String(limit)}; split the paths across named roots`
+		);
+		this.name = 'RootTargetLimitError';
+	}
+}
+
 // The wording a push reports for `--no-retain`. The CLI cannot see whether the
 // cache has a matching retention grace policy, so it makes no claim about one.
 const noRetainLabel = 'none (--no-retain)';
@@ -1255,6 +1270,10 @@ function planRetention(
 ): RetentionPlan {
 	if (!shouldRetain) {
 		return { kind: 'none' };
+	}
+
+	if (root !== undefined && paths.length > rootSetMaxTargets) {
+		throw new RootTargetLimitError(paths.length, rootSetMaxTargets);
 	}
 
 	const ttlFields = ttlSeconds === undefined ? {} : { ttlSeconds };

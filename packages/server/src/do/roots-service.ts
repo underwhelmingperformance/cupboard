@@ -13,6 +13,7 @@ import {
 	type RootSetResponse,
 	type RootSummary
 } from '@cupboard/protocol/retention';
+import { chunk } from '@cupboard/shared/collections';
 import { and, eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -29,6 +30,10 @@ interface StoredRoot {
 	readonly createdAt: string;
 	readonly updatedAt: string;
 }
+
+// Each target contributes four values to its INSERT. Cloudflare SQLite admits
+// at most 100 bound parameters per query.
+export const maxRootTargetInsertRows = 25;
 
 // A narinfo row's exact version, snapshotted off-gate so a gated re-check can
 // tell an unchanged row from one a delete-and-recommit replaced.
@@ -117,16 +122,18 @@ export class RootsService {
 				})
 				.run();
 
-			tx.insert(schema.retentionRootTargets)
-				.values(
-					request.targets.map((target) => ({
-						cache,
-						rootName: request.name,
-						storePathHash: target.storePathHash,
-						storePath: target.storePath
-					}))
-				)
-				.run();
+			for (const targets of chunk(request.targets, maxRootTargetInsertRows)) {
+				tx.insert(schema.retentionRootTargets)
+					.values(
+						targets.map((target) => ({
+							cache,
+							rootName: request.name,
+							storePathHash: target.storePathHash,
+							storePath: target.storePath
+						}))
+					)
+					.run();
+			}
 
 			// Applied inside the same transaction as the delete above: a crash
 			// between the two could otherwise release these targets from the old
