@@ -377,14 +377,15 @@ async function runPushFlow(
 	);
 
 	let uploadedBytes = 0;
+	const onBytes = (count: number): void => {
+		uploadedBytes += count;
+	};
 	const uploadContext: UploadContext = {
 		client,
 		negotiated,
 		createNarArchive,
 		compressNar,
-		onBytes: (count) => {
-			uploadedBytes += count;
-		}
+		onBytes
 	};
 	const uploaded: UploadDecisionOf<'upload'>[] = [];
 
@@ -463,7 +464,8 @@ async function runPushFlow(
 		createNarArchive,
 		compressNar,
 		options: commitOptions,
-		hasGraceFacts
+		hasGraceFacts,
+		onBytes
 	};
 
 	try {
@@ -1386,6 +1388,7 @@ interface CommitContext {
 	readonly compressNar: CompressNar;
 	readonly options: CommitOptions;
 	readonly hasGraceFacts: boolean;
+	readonly onBytes: (count: number) => void;
 }
 
 // Commits one path over the push's shared session, falling back to a per-path
@@ -1516,7 +1519,10 @@ async function redriveExpiredCommit(
 		context.createNarArchive(pathInfo.storePath)
 	);
 
-	await context.client.uploadNar(fresh.r2Key, upload.body);
+	await context.client.uploadNar(
+		fresh.r2Key,
+		countingByteStream(upload.body, context.onBytes)
+	);
 	verifyNarMetadata(pathInfo, upload.digest());
 
 	return commitVia(context, commitTarget(fresh, context.hasGraceFacts));

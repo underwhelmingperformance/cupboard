@@ -270,9 +270,10 @@ describe('runPush', () => {
 		let negotiations = 0;
 		const uploadedKeys: string[] = [];
 		const commitAttempts: string[] = [];
+		const payloads: ResultPayload[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		await runPush([appPath], reporter([]), {
+		await runPush([appPath], reporter([], [], payloads), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -319,11 +320,26 @@ describe('runPush', () => {
 		expect({
 			negotiations,
 			uploadedKeys,
-			commitAttempts
+			commitAttempts,
+			summary: payloads.at(-1)?.data
 		}).toStrictEqual({
 			negotiations: 2,
 			uploadedKeys: [r2Key, r2Key],
-			commitAttempts: ['commit-stale', 'commit-fresh']
+			commitAttempts: ['commit-stale', 'commit-fresh'],
+			summary: {
+				uploadedPaths: 1,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 28,
+				failures: [],
+				paths: [
+					{
+						storePathHash: StorePath.hash(appPath),
+						storePath: appPath,
+						outcome: 'committed'
+					}
+				]
+			}
 		});
 	});
 
