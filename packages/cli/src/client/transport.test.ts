@@ -11,6 +11,17 @@ describe('parseWorkerUrl', () => {
 		);
 	});
 
+	it.each([
+		['a bare host', 'https://cupboard.example.workers.dev///', '/'],
+		[
+			'a tenant path',
+			'https://cupboard.example.workers.dev/t/acme///',
+			'/t/acme'
+		]
+	])('removes redundant trailing slashes from %s', (_name, value, pathname) => {
+		expect(parseWorkerUrl(value).pathname).toBe(pathname);
+	});
+
 	it('rejects a malformed URL with a typed usage error', () => {
 		expect(() => parseWorkerUrl('not a url')).toThrow(InvalidWorkerUrlError);
 	});

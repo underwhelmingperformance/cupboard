@@ -4,6 +4,7 @@ import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
+import { basicAuthHeader } from '@cupboard/shared/http';
 import {
 	type AttestationPolicyOptions,
 	type BundleVerifyOptions,
@@ -249,7 +250,7 @@ function readAuthHeaders(options: RemoteAttestationVerifyOptions): Headers {
 
 	headers.set(
 		'authorization',
-		`Basic ${Buffer.from(`${options.readUser}:${options.readPassword}`).toString('base64')}`
+		basicAuthHeader(options.readUser, options.readPassword).authorization
 	);
 
 	return headers;

@@ -72,8 +72,9 @@ export function retryingFetcher(fetcher: typeof fetch): typeof fetch {
 }
 
 /**
- * Waits before retrying a transient response: the server's `Retry-After` when
- * it names one (capped at the backoff ceiling), otherwise {@link backoffDelay}.
+ * Discards a transient response body, then waits before retrying: the server's
+ * `Retry-After` when it names one (capped at the backoff ceiling), otherwise
+ * {@link backoffDelay}.
  */
 export async function transientResponseDelay(
 	response: Response,
@@ -81,6 +82,7 @@ export async function transientResponseDelay(
 	signal?: AbortSignal
 ): Promise<void> {
 	const retryAfterSeconds = Number(response.headers.get('retry-after'));
+	await response.body?.cancel();
 
 	if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
 		await abortableSleep(
@@ -117,18 +119,64 @@ async function abortableSleep(
 	signal?: AbortSignal
 ): Promise<void> {
 	await new Promise<void>((resolve) => {
-		const timer = setTimeout(resolve, delay);
-		const onAbort = (): void => {
+		const settle = (): void => {
 			clearTimeout(timer);
+			signal?.removeEventListener('abort', settle);
 			resolve();
 		};
+		const timer = setTimeout(settle, delay);
 
 		if (signal?.aborted === true) {
-			onAbort();
+			settle();
 
 			return;
 		}
 
-		signal?.addEventListener('abort', onAbort, { once: true });
+		signal?.addEventListener('abort', settle, { once: true });
 	});
+}
+
+/**
+ * Wraps a fetcher so a network-level failure (a DNS lookup, a refused
+ * connection) surfaces as the caller's own typed error naming the host. An
+ * abort is a `DOMException`, so it propagates unchanged; only the `TypeError`
+ * fetch uses for network faults is translated.
+ */
+export function reachableFetcher(
+	fetcher: typeof fetch,
+	makeError: (host: string, cause: TypeError) => Error
+): typeof fetch {
+	return async (input, init) => {
+		try {
+			return await fetcher(input, init);
+		} catch (error) {
+			if (error instanceof TypeError) {
+				throw makeError(hostOf(input), error);
+			}
+
+			throw error;
+		}
+	};
+}
+
+function hostOf(input: Parameters<typeof fetch>[0]): string {
+	if (typeof input === 'string') {
+		return safeHost(input);
+	}
+
+	if (input instanceof URL) {
+		return input.host;
+	}
+
+	return safeHost(input.url);
+}
+
+function safeHost(value: string): string {
+	try {
+		const url = new URL(value);
+
+		return url.host;
+	} catch {
+		return value;
+	}
 }
