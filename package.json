@@ -36,7 +36,7 @@
 		"node": ">=24"
 	},
 	"license": "AGPL-3.0-or-later",
-	"packageManager": "pnpm@11.11.0",
+	"packageManager": "pnpm@11.13.1",
 	"private": true,
 	"scripts": {
 		"bench:push": "pnpm --filter @cupboard/server build-info && vitest bench --run --config tests/perf/vitest.config.ts",
