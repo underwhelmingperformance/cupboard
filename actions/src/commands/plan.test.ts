@@ -177,6 +177,18 @@ describe('resolvePlanInputs', () => {
 		);
 	});
 
+	it('preserves significant whitespace in both read credentials', () => {
+		const inputs = resolvePlanInputs(
+			{ ...baseOptions, readUser: ' alice ', readPassword: ' p w ' },
+			environment
+		);
+
+		expect({
+			readUser: inputs.readUser,
+			readPassword: inputs.readPassword
+		}).toStrictEqual({ readUser: ' alice ', readPassword: ' p w ' });
+	});
+
 	it('disables optimisation for a case-exact false', () => {
 		expect(
 			resolvePlanInputs({ ...baseOptions, optimise: 'false' }, environment)
