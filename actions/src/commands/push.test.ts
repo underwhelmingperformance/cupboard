@@ -157,6 +157,11 @@ describe('resolvePushInputs', () => {
 			{ ...baseOptions, url: 'cupboard.example/t/acme' },
 			InvalidInputError
 		],
+		[
+			'url carries a fragment',
+			{ ...baseOptions, url: 'https://cupboard.example/t/acme#copied' },
+			InvalidInputError
+		],
 		['paths is empty', { ...baseOptions, paths: [] }, InvalidInputError],
 		[
 			'include-prereleases is not true or false',
@@ -170,6 +175,28 @@ describe('resolvePushInputs', () => {
 		]
 	])('rejects when %s', (_name, options, error) => {
 		expect(() => resolvePushInputs(options, environment)).toThrow(error);
+	});
+
+	it('does not reproduce a rejected URL in its diagnostic', () => {
+		const secret = 'read-token';
+		let failure: unknown;
+
+		try {
+			resolvePushInputs(
+				{ ...baseOptions, url: `https://cupboard.example/t/acme#${secret}` },
+				environment
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toStrictEqual(
+			new InvalidInputError(
+				'url',
+				'url must be an http(s) URL with nothing beyond origin and path'
+			)
+		);
+		expect((failure as Error).message).not.toContain(secret);
 	});
 });
 

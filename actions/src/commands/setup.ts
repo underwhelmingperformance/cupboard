@@ -7,6 +7,7 @@ import {
 	CacheInfo,
 	isDestinationPreferred
 } from '@cupboard/nix-store/cache-info';
+import { publicKeyUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { basicAuthHeader } from '@cupboard/shared/http';
@@ -36,7 +37,6 @@ import {
 } from '../release-install.ts';
 import {
 	cachePublicKeyRequestHeaders,
-	cachePublicKeyUrl,
 	cacheUrlFor,
 	isHttpUrl,
 	reuseViewUrlFor
@@ -168,7 +168,7 @@ export function resolveSetupInputs(
 	if (cacheUrl !== '' && !isHttpUrl(cacheUrl)) {
 		throw new InvalidInputError(
 			'cache-url',
-			`cache-url must be an http(s) URL, got '${cacheUrl}'`
+			'cache-url must be an http(s) URL with nothing beyond origin and path'
 		);
 	}
 
@@ -386,7 +386,7 @@ async function fetchTrustedPublicKey(
 	inputs: ConfigureNixInputs,
 	reporter: Reporter
 ): Promise<string> {
-	const url = cachePublicKeyUrl(inputs.cacheUrl);
+	const url = publicKeyUrl(inputs.cacheUrl);
 	const trimmedPublicKey = await fetchCachePublicKeyAt(url);
 
 	reporter.warn(
