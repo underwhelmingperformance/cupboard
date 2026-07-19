@@ -1685,6 +1685,7 @@ describe('upload flow', () => {
 			repaired: true
 		});
 	});
+
 	it('answers a batched entry whose row and path are both gone as absent', async () => {
 		const token = await initialise();
 		const metadata = uploadMetadata({

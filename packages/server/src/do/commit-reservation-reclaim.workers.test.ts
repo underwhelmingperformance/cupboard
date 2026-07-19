@@ -15,6 +15,7 @@ import {
 	commitPath,
 	currentServer,
 	expectSingleCommitDecision,
+	flakyD1,
 	initialise,
 	negotiateUploads,
 	resetTestServer,
@@ -27,12 +28,81 @@ import { AttestationCasService } from './attestation-cas-service.ts';
 import { AttestationsService } from './attestations-service.ts';
 import { CacheAdminService } from './cache-admin-service.ts';
 import { CommitPipelineService } from './commit-pipeline-service.ts';
-import { type ServerContext } from './context.ts';
+import { ServerContext } from './context.ts';
 import { DeletionQueueService } from './deletion-queue-service.ts';
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 import { RetentionService } from './retention-service.ts';
 import { SigningKeysService } from './signing-keys-service.ts';
 import { UploadStateService } from './upload-state-service.ts';
+
+describe('committed narinfo identity', () => {
+	beforeEach(resetTestServer);
+
+	it('declines a committed edge when the local row moves during the D1 read', async () => {
+		const token = await initialise();
+		const nar = await verifiableNar('committed-row-moved');
+		const metadata = uploadMetadata({
+			name: 'moved',
+			storePathHash: 'm'.repeat(32),
+			narHash: nar.narHash,
+			fileHash: nar.fileHash,
+			fileSize: nar.narBytes.byteLength,
+			narSize: nar.narSize
+		});
+
+		await commitPath(token, metadata, nar);
+
+		const result = await runInDurableObject(
+			currentServer(),
+			async (instance, state) => {
+				let hasMoved = false;
+				const context = new ServerContext(state, {
+					...instance.context.env,
+					CUPBOARD_DB: flakyD1(instance.context.env.CUPBOARD_DB, {
+						failures: 0,
+						matches: (query) => query.includes('blob_ref'),
+						onMatch: () => {
+							if (hasMoved) {
+								return;
+							}
+
+							hasMoved = true;
+							const row = instance.context.db
+								.select({ generation: schema.narInfos.generation })
+								.from(schema.narInfos)
+								.where(
+									eq(schema.narInfos.storePathHash, metadata.storePathHash)
+								)
+								.get();
+
+							if (row === undefined) {
+								throw new Error('committed narinfo row is missing');
+							}
+
+							instance.context.db
+								.update(schema.narInfos)
+								.set({ generation: row.generation + 1 })
+								.where(
+									eq(schema.narInfos.storePathHash, metadata.storePathHash)
+								)
+								.run();
+						}
+					})
+				});
+				const row = await new NarInfoObjectsService(
+					context
+				).committedNarInfoRow(
+					'',
+					storePathHashSchema.parse(metadata.storePathHash)
+				);
+
+				return { hasMoved, row };
+			}
+		);
+
+		expect(result).toStrictEqual({ hasMoved: true, row: undefined });
+	});
+});
 
 // The pipeline over a live instance's context, as the server itself builds it.
 function pipelineFor(context: ServerContext): CommitPipelineService {

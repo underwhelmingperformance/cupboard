@@ -4,9 +4,7 @@ import {
 	cacheFromSelector,
 	cachePrioritySchema,
 	cacheSelectorSchema,
-	DEFAULT_CACHE,
-	type NixSha256HashString,
-	type StorePathHash
+	DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import type {
@@ -19,7 +17,6 @@ import {
 	commitCapabilitiesValue,
 	commitSessionRequestSchema,
 	type ParsedCommitBatchEntry,
-	type ParsedUploadGraceFact,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
 	uploadGraceFactsCapability
@@ -98,7 +95,6 @@ import {
 } from './garbage-collection-service.ts';
 import {
 	capturedGraceFact,
-	confirmGraceBatch,
 	parseStoredGraceDecision,
 	storedGraceFact
 } from './grace-decision.ts';
@@ -794,14 +790,16 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// absent because verification committed the upload (the expected case on a
 	// reconnect re-send), or because the reaper deleted an unanswered expired row
 	// before the client ever received a reply. The path's narinfo row holding the
-	// same narHash AND carrying a committed reference edge confirms the upload
-	// reached a servable state; anything else re-drives the client with `absent`.
-	// The pending row's captured grace decision is gone along with the row, so a
-	// `retention`-marked entry (a client that accepted grace facts for this upload)
-	// gets the same monotonic extension any already-present decision applies:
-	// the resent commit is this publication's claim on the path, so its
-	// deadline moves with it even when another push committed the path in the
-	// meantime. An unmarked entry gets the legacy shape, matching a legacy
+	// same narHash, carrying a committed reference edge and passing the shared
+	// servability predicate confirms the upload reached a servable state; anything
+	// else re-drives the client with `absent`.
+	// The pending row's captured grace decision is gone along with the row, and
+	// with it every durable proof that this session negotiated the upload, so a
+	// `retention`-marked entry (a client that accepted grace facts for this
+	// upload) is answered with the path's stored fact and nothing is extended:
+	// extending retention on a path the session did not push is upload:confirm
+	// authority, which a commit socket must not exercise on an uploadId it
+	// merely names. An unmarked entry gets the legacy shape, matching a legacy
 	// publication.
 	private async resolveGoneCommit(
 		socket: WebSocket,
@@ -844,7 +842,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 					status: 'already-present'
 				},
 				...(identity.retention === true && {
-					grace: this.goneCommitGrace(cache, committed)
+					grace: storedGraceFact(
+						this.context.db,
+						cache,
+						committed.storePathHash
+					)
 				})
 			});
 
@@ -856,37 +858,6 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			uploadId,
 			status: 'absent'
 		});
-	}
-
-	// The grace fact a gone pending row's already-present answer reports: the
-	// identity-checked extension every other already-present decision applies,
-	// falling back to the stored fact if the row changed under the check.
-	private goneCommitGrace(
-		cache: string,
-		committed: {
-			readonly storePathHash: StorePathHash;
-			readonly generation: number;
-			readonly narHash: NixSha256HashString;
-		}
-	): ParsedUploadGraceFact {
-		const facts = confirmGraceBatch(
-			this.context,
-			this.retention,
-			cache,
-			[
-				{
-					storePathHash: committed.storePathHash,
-					generation: committed.generation,
-					narHash: committed.narHash
-				}
-			],
-			this.retention.resolveGraceSeconds(cache)
-		);
-
-		return (
-			facts.get(committed.storePathHash) ??
-			storedGraceFact(this.context.db, cache, committed.storePathHash)
-		);
 	}
 
 	// Replays one still-present pending row to a reconnected session: reject a
