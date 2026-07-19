@@ -5,6 +5,7 @@ import process from 'node:process';
 import { Writable } from 'node:stream';
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import {
 	createGithubReporter,
@@ -187,14 +188,7 @@ describe('createReporter', () => {
 		expectReporterTestError(error);
 		expect({
 			error: { code: error.code },
-			events: withoutDurations(events()).map((event) =>
-				isRecord(event)
-					? {
-							...event,
-							error: event.error === undefined ? undefined : typeof event.error
-						}
-					: event
-			)
+			events: withoutErrorDetail(events())
 		}).toStrictEqual({
 			error: { code: 'build-failed' },
 			events: [
@@ -304,14 +298,7 @@ describe('createReporter', () => {
 		expectReporterTestError(error);
 		expect({
 			error: { code: error.code },
-			events: withoutDurations(events()).map((event) =>
-				isRecord(event)
-					? {
-							...event,
-							error: event.error === undefined ? undefined : typeof event.error
-						}
-					: event
-			)
+			events: withoutErrorDetail(events())
 		}).toStrictEqual({
 			error: { code: 'progress-failed' },
 			events: [
@@ -377,14 +364,7 @@ describe('createReporter', () => {
 		expectReporterTestError(error);
 		expect({
 			error: { code: error.code },
-			events: withoutDurations(events()).map((event) =>
-				isRecord(event)
-					? {
-							...event,
-							error: event.error === undefined ? undefined : typeof event.error
-						}
-					: event
-			)
+			events: withoutErrorDetail(events())
 		}).toStrictEqual({
 			error: { code: 'steps-failed' },
 			events: [
@@ -789,14 +769,32 @@ function jsonReporter(now?: () => number): {
 	};
 }
 
+const durationEventSchema = z.looseObject({ durationMs: z.number() });
+
 function withoutDurations(events: readonly unknown[]): readonly unknown[] {
-	return events.map((event) =>
-		isRecord(event) && typeof event.durationMs === 'number'
-			? { ...event, durationMs: 'number' }
-			: event
-	);
+	return events.map((event) => {
+		const parsed = durationEventSchema.safeParse(event);
+
+		return parsed.success ? { ...parsed.data, durationMs: 'number' } : event;
+	});
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
+const errorEventSchema = z.looseObject({ error: z.unknown().optional() });
+
+function withoutErrorDetail(events: readonly unknown[]): readonly unknown[] {
+	const durationless = withoutDurations(events);
+
+	return durationless.map((event) => {
+		const parsed = errorEventSchema.safeParse(event);
+
+		return parsed.success
+			? {
+					...parsed.data,
+					error:
+						parsed.data.error === undefined
+							? undefined
+							: typeof parsed.data.error
+				}
+			: event;
+	});
 }
