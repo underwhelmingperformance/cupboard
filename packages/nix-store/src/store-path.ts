@@ -4,6 +4,7 @@ import {
 	storePathBasenameSchema,
 	type StorePathHash,
 	storePathHashSchema,
+	storePathMaxLength,
 	storePathPattern,
 	type StorePathString
 } from './scalars.ts';
@@ -33,7 +34,11 @@ export function storePathBasename(path: string): string | undefined {
 }
 
 export function validStorePath(path: string): string | undefined {
-	return storePathPattern.test(path) ? path : undefined;
+	// The same length bound `storePathSchema` enforces, so a shape-valid but
+	// absurdly long name is refused here, at the input, not by a later parse.
+	return path.length <= storePathMaxLength && storePathPattern.test(path)
+		? path
+		: undefined;
 }
 
 export function storePathHashOf(path: string): string | undefined {

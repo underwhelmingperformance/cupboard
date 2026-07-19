@@ -51,6 +51,11 @@ describe('validStorePath', () => {
 			name: 'a store path with no name',
 			value: '/nix/store/0123456789abcdfghijklmnpqrsvwxyz',
 			expected: undefined
+		},
+		{
+			name: 'a shape-valid path longer than the schema bound',
+			value: `/nix/store/0123456789abcdfghijklmnpqrsvwxyz-${'n'.repeat(4096)}`,
+			expected: undefined
 		}
 	])('returns $expected for $name', ({ value, expected }) => {
 		expect(validStorePath(value)).toBe(expected);
