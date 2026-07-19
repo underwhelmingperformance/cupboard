@@ -426,9 +426,10 @@ describe('runPush', () => {
 		let negotiations = 0;
 		const uploadedKeys: string[] = [];
 		const commitAttempts: string[] = [];
+		const payloads: ResultPayload[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
-		await runPush([appPath], reporter([]), {
+		await runPush([appPath], reporter([], [], payloads), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -486,14 +487,31 @@ describe('runPush', () => {
 			compressNar: (nar) => fakeNarUpload(nar, digestForNar(nar))
 		});
 
+		// The re-drive replaced the reuse with a real upload, so the summary
+		// counts the work that actually happened.
 		expect({
 			negotiations,
 			uploadedKeys,
-			commitAttempts
+			commitAttempts,
+			summary: payloads.at(-1)?.data
 		}).toStrictEqual({
 			negotiations: 2,
 			uploadedKeys: [r2Key],
-			commitAttempts: ['reuse-absent', 'upload-fresh']
+			commitAttempts: ['reuse-absent', 'upload-fresh'],
+			summary: {
+				uploadedPaths: 1,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 14,
+				failures: [],
+				paths: [
+					{
+						storePathHash: StorePath.hash(appPath),
+						storePath: appPath,
+						outcome: 'committed'
+					}
+				]
+			}
 		});
 	});
 
@@ -501,6 +519,7 @@ describe('runPush', () => {
 		let negotiations = 0;
 		const uploadedKeys: string[] = [];
 		const commitAttempts: string[] = [];
+		const payloads: ResultPayload[] = [];
 		const r2Key = `nar/${appDigest.narHash.toString()}.nar.zst`;
 
 		// The deferred verdict rejects `absent` on `settled`, not on the ack, so only
@@ -513,7 +532,7 @@ describe('runPush', () => {
 			UploadVerificationFailedError
 		);
 
-		await runPush([appPath], reporter([]), {
+		await runPush([appPath], reporter([], [], payloads), {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate() {
@@ -569,10 +588,29 @@ describe('runPush', () => {
 
 		// The push succeeds: the absent verdict re-negotiated and the store already
 		// held the path, so no verification failure is reported.
-		expect({ negotiations, uploadedKeys, commitAttempts }).toStrictEqual({
+		expect({
+			negotiations,
+			uploadedKeys,
+			commitAttempts,
+			summary: payloads.at(-1)?.data
+		}).toStrictEqual({
 			negotiations: 2,
 			uploadedKeys: [r2Key],
-			commitAttempts: ['upload-defer']
+			commitAttempts: ['upload-defer'],
+			summary: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 1,
+				uploadedBytes: 14,
+				failures: [],
+				paths: [
+					{
+						storePathHash: StorePath.hash(appPath),
+						storePath: appPath,
+						outcome: 'already-present'
+					}
+				]
+			}
 		});
 		await absentObserved;
 	});
