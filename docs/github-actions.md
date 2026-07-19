@@ -89,11 +89,16 @@ cupboard github setup "$tenant" --repo "$repo" \
 ```
 
 The `--workflow-ref` pins the trust rules to the exact release tag the caller
-workflow below uses, so the workflow code, the CLI it drives, and the claims the
-tenant trusts all name one release.
+workflow below uses. Setup verifies through GitHub that the tag belongs to an
+immutable published release and that the workflow file exists there, so the
+workflow code, the CLI it drives, and the claims the tenant trusts all name one
+release.
 
 Re-running converges: state that already matches is left untouched, and state
-that differs is reported as drift, never replaced. What each piece of this
+that differs is reported as drift, never replaced. The one additive case is a
+rule from an earlier immutable cupboard release whose remaining claims and
+grants still match setup's shape; setup keeps that rule and adds the new release
+beside it so callers can move without an authority gap. What each piece of this
 configuration is, and the commands to write it by hand, are under
 [Manual configuration](#manual-configuration).
 
@@ -181,9 +186,9 @@ follow a different layout passes `cache`, `root-prefix` and `ttl` explicitly
 instead; the preset and those inputs are mutually exclusive, so the two never
 mix. The workflow reference and the `cupboard-version` input are pinned to one
 release, so the action code and the CLI it invokes upgrade together and a
-cupboard change never silently alters a repository's CI; moving to a new release
-means updating that one tag in the caller file and re-running setup with the
-matching `--workflow-ref`.
+cupboard change never silently alters a repository's CI.
+[Move to a new cupboard release](#move-to-a-new-cupboard-release) describes the
+overlap needed to change that tag without interrupting publishing.
 
 ### 5. Verify the setup
 
@@ -195,14 +200,17 @@ cupboard github check "$tenant" --repo "$repo" \
   --workflow-ref "underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/$cupboard_version"
 ```
 
-The check evaluates the stored trust rules against the exact claims a real run
-of this repository presents, so a mis-spelled `job_workflow_ref` fails here, by
-name, instead of refusing every push on the first run, and it verifies that each
-matched rule's stored grants cover the caches and roots the run requests. It
-also verifies the grace policy's coverage and duration, the view's priority
-against the destination's as actually served, and that the root prefix nests
-under the granted root. An invariant it cannot verify with what it was given (no
-`--root-prefix`, say) is reported by name and the exit is distinct from success.
+The check verifies through GitHub that `--workflow-ref` names a real workflow at
+an immutable release tag or full commit, then evaluates the stored trust rules
+against claims assembled from the supplied repository, branch and workflow
+reference. This catches a misspelt workflow path or release before the first
+run, and verifies that each matched rule's stored grants cover the caches and
+roots the run requests. It does not inspect the caller workflow, so the supplied
+reference must still match its `uses` line. The check also verifies the grace
+policy's coverage and duration, the view's priority against the destination's as
+actually served, and that the root prefix nests under the granted root. An
+invariant it cannot verify with what it was given (no `--root-prefix`, say) is
+reported by name and the exit is distinct from success.
 
 Listing the configuration by hand remains available (`cupboard policy list`,
 `cupboard reuse-view list`, `cupboard oidc-trust list`), but a listing shows
@@ -628,10 +636,41 @@ Routine changes to a working setup, and where each one's state lives.
 
 ### Move to a new cupboard release
 
-Update the release tag in the caller workflow file, in both places it appears
-(the `uses:` reference and the `cupboard-version` input), then re-run
-`cupboard github setup` with the matching `--workflow-ref` so the trust rules
-pin the new tag. Every job of the next run installs the new release.
+Establish the new trust before changing the caller. Keep the old and new tags in
+separate variables so each command names the intended release:
+
+```bash
+old_cupboard_version=vX.Y.Z
+new_cupboard_version=vA.B.C
+workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml
+
+cupboard github setup "$tenant" --repo "$repo" \
+  --workflow-ref "$workflow@refs/tags/$new_cupboard_version"
+cupboard github check "$tenant" --repo "$repo" \
+  --root-prefix "github:$repo/main" \
+  --workflow-ref "$workflow@refs/tags/$new_cupboard_version"
+```
+
+Setup recognises the old setup-managed rules by their otherwise identical claims
+and grants, re-verifies their release reference through GitHub, and adds the new
+immutable reference alongside them. Check then proves that a run carrying the
+new reference can obtain every grant it needs while the old caller still works.
+
+Update the caller workflow's `uses:` reference and `cupboard-version` input to
+`$new_cupboard_version`. Once runs using the old reference have finished, retire
+it explicitly:
+
+```bash
+cupboard github setup "$tenant" --repo "$repo" \
+  --workflow-ref "$workflow@refs/tags/$new_cupboard_version" \
+  --retire-workflow-ref "$workflow@refs/tags/$old_cupboard_version"
+```
+
+Retirement first confirms that both new rules are present. It removes only
+enabled rules that exactly match setup's expected claims and grants for the old
+reference; a drifted rule stops both retirements and must be inspected and
+removed explicitly. Repeat any non-default `--branch` or `--grace` values on
+both setup calls.
 
 ### Add a target or a platform
 

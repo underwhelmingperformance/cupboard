@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
+	GithubPermissionError,
 	GithubRateLimitError,
 	InvalidRepositoryError,
 	lookupRepository,
@@ -148,5 +149,73 @@ describe('lookupRepository', () => {
 		await expect(
 			lookupRepository('iainlane/cupboard', { fetch })
 		).rejects.toBeInstanceOf(GithubRateLimitError);
+	});
+
+	it('maps a secondary rate limit to a typed error', async () => {
+		const fetch = stubFetch(
+			repoUrl,
+			new Response(undefined, {
+				status: 403,
+				headers: {
+					'retry-after': '60',
+					'x-ratelimit-remaining': '1'
+				}
+			})
+		);
+
+		await expect(
+			lookupRepository('iainlane/cupboard', { fetch })
+		).rejects.toBeInstanceOf(GithubRateLimitError);
+	});
+
+	it('maps a non-exhausted forbidden response to a permission error', async () => {
+		const fetch = stubFetch(
+			repoUrl,
+			new Response(undefined, {
+				status: 403,
+				headers: { 'x-ratelimit-remaining': '1' }
+			})
+		);
+
+		await expect(
+			lookupRepository('iainlane/cupboard', { fetch })
+		).rejects.toStrictEqual(
+			new GithubPermissionError("repository 'iainlane/cupboard'")
+		);
+	});
+
+	it('cancels a stalled repository lookup with the caller signal', async () => {
+		const controller = new AbortController();
+		const reason = new Error('cancel repository lookup');
+		const { promise: started, resolve: markStarted } =
+			Promise.withResolvers<true>();
+		const fetch: typeof globalThis.fetch = (_input, init) => {
+			markStarted(true);
+
+			return new Promise<Response>((_resolve, reject) => {
+				init?.signal?.addEventListener(
+					'abort',
+					() => {
+						const abortReason: unknown = init.signal?.reason;
+
+						reject(
+							abortReason instanceof Error
+								? abortReason
+								: new Error('request aborted')
+						);
+					},
+					{ once: true }
+				);
+			});
+		};
+		const pending = lookupRepository('iainlane/cupboard', {
+			fetch,
+			signal: controller.signal
+		});
+
+		await started;
+		controller.abort(reason);
+
+		await expect(pending).rejects.toBe(reason);
 	});
 });

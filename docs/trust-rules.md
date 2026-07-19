@@ -76,9 +76,9 @@ claims.
 [github-oidc-reusable-workflows]:
   https://docs.github.com/en/actions/how-tos/secure-your-work/security-harden-deployments/oidc-with-reusable-workflows
 
-Always reference `cupboard-flake-publish.yml` by its release tag in the caller,
-`@vX.Y.Z`, not by a local path. The tenant's trust rule can then require that
-pushes come from this exact file at that release, so a pull request cannot
+Always reference `cupboard-flake-publish.yml` by an immutable release tag in the
+caller, `@vX.Y.Z`, not by a local path. The tenant's trust rule can then require
+that pushes come from this exact file at that release, so a pull request cannot
 smuggle in an edited copy of the publish job and gain the rule's access, and one
 release pins the workflow code and the trust rule together.
 `cupboard-publish.yml` follows its own convention: callers reference it at

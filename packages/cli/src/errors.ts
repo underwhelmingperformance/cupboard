@@ -519,6 +519,24 @@ export class CacheInfoServerError extends CliError {
 	}
 }
 
+export class CacheInfoTimeoutError extends CliError {
+	constructor(
+		public readonly target: string,
+		public readonly timeoutMs: number,
+		options: { readonly cause: unknown }
+	) {
+		super(
+			`${target} did not answer nix-cache-info within ${String(timeoutMs)}ms`,
+			{ cause: options.cause }
+		);
+		this.name = 'CacheInfoTimeoutError';
+	}
+
+	override get exitCode(): number {
+		return transientExitCode;
+	}
+}
+
 export class CacheInfoUnparsableError extends CliError {
 	constructor(
 		public readonly target: string,
@@ -561,6 +579,66 @@ export class GraceTooShortError extends CliUsageError {
 			`--grace must be at least ${String(minimumSeconds)} seconds; got ${String(graceSeconds)}`
 		);
 		this.name = 'GraceTooShortError';
+	}
+}
+
+/**
+ * A `job_workflow_ref` claim without an `@<ref>` becomes a pattern matching
+ * the workflow file at every ref, so edited workflow code would inherit the
+ * publishing authority the rule grants; the github commands require the
+ * exact claim spelling.
+ */
+export class WorkflowReferenceUnpinnedError extends CliUsageError {
+	constructor(public readonly reference: string) {
+		super(
+			`--workflow-ref must be the exact job_workflow_ref claim including its '@<ref>'; got '${reference}'`
+		);
+		this.name = 'WorkflowReferenceUnpinnedError';
+	}
+}
+
+export class WorkflowReferenceMalformedError extends CliUsageError {
+	constructor(public readonly reference: string) {
+		super(
+			`--workflow-ref must name a direct .github/workflows/*.yml or *.yaml file; got '${reference}'`
+		);
+		this.name = 'WorkflowReferenceMalformedError';
+	}
+}
+
+/**
+ * A mutable ref follows whatever it later names, so a trust rule pinning one
+ * trusts future edits to the workflow; the github commands accept only an
+ * immutable pin.
+ */
+export class WorkflowReferenceMutableError extends CliUsageError {
+	constructor(
+		public readonly reference: string,
+		public readonly pin: string
+	) {
+		super(
+			`--workflow-ref must pin a full commit id or an immutable release tag; got '${pin}' in '${reference}'`
+		);
+		this.name = 'WorkflowReferenceMutableError';
+	}
+}
+
+export class WorkflowReferenceNotFoundError extends CliUsageError {
+	constructor(public readonly reference: string) {
+		super(
+			`--workflow-ref does not resolve to a workflow file or published release on GitHub: '${reference}'`
+		);
+		this.name = 'WorkflowReferenceNotFoundError';
+	}
+}
+
+export class WorkflowReferenceRetirementConflictError extends CliUsageError {
+	constructor(public readonly reference: string) {
+		super(
+			'--retire-workflow-ref must name the previous workflow reference, not ' +
+				`the reference setup is establishing: '${reference}'`
+		);
+		this.name = 'WorkflowReferenceRetirementConflictError';
 	}
 }
 
