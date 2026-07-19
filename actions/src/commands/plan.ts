@@ -220,7 +220,7 @@ export function resolvePlanInputs(
 	if (!isHttpUrl(url)) {
 		throw new InvalidInputError(
 			'url',
-			`url must be an http(s) URL, got '${url}'`
+			'url must be an http(s) URL with nothing beyond origin and path'
 		);
 	}
 

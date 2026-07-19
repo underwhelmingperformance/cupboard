@@ -38,6 +38,16 @@ export class InvalidCacheUrlSegmentError extends ProtocolError {
 	}
 }
 
+// A base URL carrying credentials, a query or a fragment: the builders derive
+// their results from origin and path alone, so honouring such a base would
+// silently drop or missend what it carries.
+export class InvalidCacheUrlBaseError extends ProtocolError {
+	constructor() {
+		super('Cache base URL must carry nothing beyond origin and path');
+		this.name = 'InvalidCacheUrlBaseError';
+	}
+}
+
 // A netrc credential carrying a control character, which no quoting can encode
 // into a single netrc token.
 export class NetrcControlCharacterError extends ProtocolError {

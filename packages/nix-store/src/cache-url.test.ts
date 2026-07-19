@@ -1,7 +1,24 @@
 import { describe, expect, it } from 'vitest';
 
-import { cacheUrl, reuseViewUrl } from './cache-url.ts';
-import { InvalidCacheUrlSegmentError } from './errors.ts';
+import { cacheUrl, publicKeyUrl, reuseViewUrl } from './cache-url.ts';
+import {
+	InvalidCacheUrlBaseError,
+	InvalidCacheUrlSegmentError
+} from './errors.ts';
+
+// Every builder derives its result from the base's origin and path alone, so
+// a base smuggling anything else in, credentials that would be sent on every
+// request or a query or fragment that would corrupt the built URL, is refused
+// rather than partially honoured.
+const unusableBases = [
+	['a query string', 'https://cupboard.example.workers.dev/t/acme?tab=keys'],
+	['a fragment', 'https://cupboard.example.workers.dev/t/acme#copied'],
+	['an embedded username', 'https://ci@cupboard.example.workers.dev/t/acme'],
+	[
+		'embedded credentials',
+		'https://ci:secret@cupboard.example.workers.dev/t/acme'
+	]
+] as const;
 
 describe('cacheUrl', () => {
 	it.each([
@@ -53,6 +70,12 @@ describe('cacheUrl', () => {
 			).toThrow(InvalidCacheUrlSegmentError);
 		}
 	);
+
+	it.each(unusableBases)('refuses a base carrying %s', (_name, base) => {
+		expect(() => cacheUrl(base, 'builds')).toThrow(
+			new InvalidCacheUrlBaseError()
+		);
+	});
 });
 
 describe('reuseViewUrl', () => {
@@ -77,5 +100,37 @@ describe('reuseViewUrl', () => {
 		expect(() =>
 			reuseViewUrl('https://cupboard.example.workers.dev', view)
 		).toThrow(InvalidCacheUrlSegmentError);
+	});
+
+	it.each(unusableBases)('refuses a base carrying %s', (_name, base) => {
+		expect(() => reuseViewUrl(base, 'nightly')).toThrow(
+			InvalidCacheUrlBaseError
+		);
+	});
+});
+
+describe('publicKeyUrl', () => {
+	it.each([
+		{
+			name: 'appends the key path to a bare host',
+			base: 'https://cupboard.example.workers.dev',
+			expected: 'https://cupboard.example.workers.dev/pubkey'
+		},
+		{
+			name: 'preserves a tenant path prefix',
+			base: 'https://cupboard.example.workers.dev/t/acme',
+			expected: 'https://cupboard.example.workers.dev/t/acme/pubkey'
+		},
+		{
+			name: 'trims a trailing slash on the base',
+			base: 'https://cupboard.example.workers.dev/t/acme/',
+			expected: 'https://cupboard.example.workers.dev/t/acme/pubkey'
+		}
+	])('$name', ({ base, expected }) => {
+		expect(publicKeyUrl(base)).toBe(expected);
+	});
+
+	it.each(unusableBases)('refuses a base carrying %s', (_name, base) => {
+		expect(() => publicKeyUrl(base)).toThrow(InvalidCacheUrlBaseError);
 	});
 });
