@@ -3,22 +3,34 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix } from '@cupboard/nix';
+import type { Command } from 'commander';
 
 import { runCupboard } from '../cupboard-run.ts';
 import { InvalidInputError, MissingInputError } from '../errors.ts';
-import {
-	type Environment,
-	input,
-	isInputEnabled,
-	parseLines,
-	requireInput,
-	setOutput
-} from '../inputs.ts';
+import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
+import { collectLines, isEnabled, provided } from '../options.ts';
 import {
 	fallbackReleaseRepository,
 	installCupboard,
 	normaliseVersion
 } from '../release-install.ts';
+
+export interface PushOptions {
+	readonly url?: string;
+	readonly paths: readonly string[];
+	readonly cupboardVersion?: string;
+	readonly includePrereleases?: string;
+	readonly githubToken?: string;
+	readonly releaseRepository?: string;
+	readonly installDir?: string;
+	readonly cache?: string;
+	readonly audience?: string;
+	readonly root?: string;
+	readonly ttl?: string;
+	readonly wait?: string;
+	readonly waitTimeout?: string;
+	readonly attestations: readonly string[];
+}
 
 export interface PushInputs {
 	readonly version: string;
@@ -49,10 +61,109 @@ interface PushArgumentsOptions {
 	readonly attestations: readonly string[];
 }
 
+export function registerPushCommand(
+	program: Command,
+	environment: Environment = env
+): void {
+	program
+		.command('push')
+		.description(
+			'Push Nix store paths to a cupboard cache from GitHub Actions.'
+		)
+		.requiredOption('--url <url>', 'cupboard Worker URL')
+		.option(
+			'--paths <path>',
+			'local Nix store path, derivation or installable to push (repeatable, or newline-delimited)',
+			collectLines,
+			[]
+		)
+		.option(
+			'--cupboard-version <version>',
+			'cupboard version to install: latest or an exact version such as 1.2.3'
+		)
+		.option(
+			'--include-prereleases <value>',
+			'when resolving latest, consider prereleases: true or false'
+		)
+		.option('--github-token <token>', 'GitHub token used for release API calls')
+		.option(
+			'--release-repository <repository>',
+			'repository that publishes cupboard release assets'
+		)
+		.option(
+			'--install-dir <directory>',
+			'directory for the downloaded cupboard binary'
+		)
+		.option('--cache <name>', 'named cache to push to')
+		.option('--audience <audience>', 'GitHub OIDC audience (defaults to url)')
+		.option('--root <root>', 'retention root for pushed paths')
+		.option('--ttl <ttl>', 'retention TTL such as 7d or 12h')
+		.option(
+			'--wait <value>',
+			'wait for deferred blobs to become servable: true or false'
+		)
+		.option('--wait-timeout <timeout>', 'wait timeout for deferred blobs')
+		.option(
+			'--attestations <path>',
+			'local Sigstore DSSE bundle to attach (repeatable, or newline-delimited)',
+			collectLines,
+			[]
+		)
+		.action((options: PushOptions) => pushAction(options, environment));
+}
+
+export function resolvePushInputs(
+	options: PushOptions,
+	environment: Environment
+): PushInputs {
+	const url = provided(options.url);
+
+	if (url === undefined) {
+		throw new MissingInputError('url');
+	}
+
+	if (options.paths.length === 0) {
+		throw new InvalidInputError(
+			'paths',
+			'paths is required and must contain at least one path'
+		);
+	}
+
+	return {
+		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
+		includePrereleases: isEnabled(
+			'include-prereleases',
+			options.includePrereleases,
+			true
+		),
+		githubToken: provided(options.githubToken) ?? '',
+		releaseRepository:
+			provided(options.releaseRepository) ??
+			environment.GITHUB_ACTION_REPOSITORY ??
+			environment.GITHUB_REPOSITORY ??
+			fallbackReleaseRepository,
+		installDirectory:
+			provided(options.installDir) ??
+			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
+		url,
+		paths: options.paths,
+		cache: provided(options.cache) ?? '',
+		audience: provided(options.audience) ?? url,
+		root:
+			provided(options.root) ??
+			`github:${requireEnvironment(environment, 'GITHUB_REPOSITORY')}/${requireEnvironment(environment, 'GITHUB_REF_NAME')}`,
+		ttl: provided(options.ttl) ?? '',
+		wait: isEnabled('wait', options.wait, true),
+		waitTimeout: provided(options.waitTimeout) ?? '10m',
+		attestations: options.attestations
+	};
+}
+
 export async function pushAction(
+	options: PushOptions,
 	environment: Environment = env
 ): Promise<void> {
-	const inputs = pushInputs(environment);
+	const inputs = resolvePushInputs(options, environment);
 	const installDirectory = path.resolve(inputs.installDirectory);
 
 	await mkdir(installDirectory, { recursive: true });
@@ -127,58 +238,4 @@ export function buildPushArguments(
 	}
 
 	return arguments_;
-}
-
-export function pushInputs(environment: Environment): PushInputs {
-	const url = input(environment, 'URL');
-
-	if (url === '') {
-		throw new MissingInputError('url');
-	}
-
-	const paths = parseLines(input(environment, 'PATHS'));
-
-	if (paths.length === 0) {
-		throw new InvalidInputError(
-			'paths',
-			'paths is required and must contain at least one path'
-		);
-	}
-
-	return {
-		version: normaliseVersion(input(environment, 'CUPBOARD_VERSION', 'latest')),
-		includePrereleases: isInputEnabled(
-			environment,
-			'INCLUDE_PRERELEASES',
-			true
-		),
-		githubToken: input(environment, 'GITHUB_TOKEN'),
-		releaseRepository: input(
-			environment,
-			'RELEASE_REPOSITORY',
-			environment.GITHUB_ACTION_REPOSITORY ??
-				environment.GITHUB_REPOSITORY ??
-				fallbackReleaseRepository
-		),
-		installDirectory: input(environment, 'INSTALL_DIR', () =>
-			path.join(
-				requireInput(environment.RUNNER_TEMP, 'RUNNER_TEMP'),
-				'cupboard-bin'
-			)
-		),
-		url,
-		paths,
-		cache: input(environment, 'CACHE'),
-		audience: input(environment, 'AUDIENCE', url),
-		root: input(
-			environment,
-			'ROOT',
-			() =>
-				`github:${requireInput(environment.GITHUB_REPOSITORY, 'GITHUB_REPOSITORY')}/${requireInput(environment.GITHUB_REF_NAME, 'GITHUB_REF_NAME')}`
-		),
-		ttl: input(environment, 'TTL'),
-		wait: isInputEnabled(environment, 'WAIT', true),
-		waitTimeout: input(environment, 'WAIT_TIMEOUT', '10m'),
-		attestations: parseLines(input(environment, 'ATTESTATIONS'))
-	};
 }

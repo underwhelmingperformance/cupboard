@@ -87,20 +87,33 @@ runs:
       id: setup
       shell: bash
       env:
-        INPUT_CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
-        INPUT_INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
-        INPUT_GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
-        INPUT_RELEASE_REPOSITORY:
+        CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
+        INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
+        GH_TOKEN: ${{ inputs.github-token || github.token }}
+        RELEASE_REPOSITORY:
           ${{ inputs.release-repository || github.action_repository }}
-        INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
-        INPUT_ADD_TO_PATH: ${{ inputs.add-to-path }}
-        INPUT_CACHE_URL: ${{ inputs.cache-url }}
-        INPUT_CACHE: ${{ inputs.cache }}
-        INPUT_TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
-        INPUT_READ_USER: ${{ inputs.read-user }}
-        INPUT_READ_PASSWORD: ${{ inputs.read-password }}
-        INPUT_NIX_CONFIG_FILE: ${{ inputs.nix-config-file }}
-      run: >
-        node --experimental-transform-types
-        --disable-warning=ExperimentalWarning
-        "$GITHUB_ACTION_PATH/../src/main.ts" setup
+        INSTALL_DIR: ${{ inputs.install-dir }}
+        ADD_TO_PATH: ${{ inputs.add-to-path }}
+        CACHE_URL: ${{ inputs.cache-url }}
+        CACHE: ${{ inputs.cache }}
+        TRUSTED_PUBLIC_KEY: ${{ inputs.trusted-public-key }}
+        READ_USER: ${{ inputs.read-user }}
+        READ_PASSWORD: ${{ inputs.read-password }}
+        NIX_CONFIG_FILE: ${{ inputs.nix-config-file }}
+      run: |
+        args=(setup
+          --cupboard-version "$CUPBOARD_VERSION"
+          --include-prereleases "$INCLUDE_PRERELEASES"
+          --github-token "$GH_TOKEN"
+          --release-repository "$RELEASE_REPOSITORY"
+          --install-dir "$INSTALL_DIR"
+          --add-to-path "$ADD_TO_PATH"
+          --cache-url "$CACHE_URL"
+          --cache "$CACHE"
+          --trusted-public-key "$TRUSTED_PUBLIC_KEY"
+          --read-user "$READ_USER"
+          --read-password "$READ_PASSWORD"
+          --nix-config-file "$NIX_CONFIG_FILE")
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

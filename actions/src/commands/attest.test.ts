@@ -7,8 +7,8 @@ import { parseChecksums } from '../release-install.ts';
 
 import {
 	attestationSubjects,
-	attestInputs,
-	renderChecksums
+	renderChecksums,
+	resolveAttestInputs
 } from './attest.ts';
 
 describe('renderChecksums', () => {
@@ -83,15 +83,14 @@ describe('attestationSubjects', () => {
 	});
 });
 
-describe('attestInputs', () => {
+describe('resolveAttestInputs', () => {
 	const paths = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo';
 
 	it('defaults the checksums file under RUNNER_TEMP when none is given', () => {
-		const inputs = attestInputs({
-			INPUT_PATHS: paths,
-			INPUT_CHECKSUMS_FILE: '',
-			RUNNER_TEMP: '/runner/temp'
-		});
+		const inputs = resolveAttestInputs(
+			{ paths: [paths] },
+			{ RUNNER_TEMP: '/runner/temp' }
+		);
 
 		expect(inputs).toStrictEqual({
 			paths: [paths],
@@ -100,11 +99,10 @@ describe('attestInputs', () => {
 	});
 
 	it('honours an explicit checksums file', () => {
-		const inputs = attestInputs({
-			INPUT_PATHS: paths,
-			INPUT_CHECKSUMS_FILE: '/somewhere/subjects.txt',
-			RUNNER_TEMP: '/runner/temp'
-		});
+		const inputs = resolveAttestInputs(
+			{ paths: [paths], checksumsFile: '/somewhere/subjects.txt' },
+			{ RUNNER_TEMP: '/runner/temp' }
+		);
 
 		expect(inputs).toStrictEqual({
 			paths: [paths],
@@ -114,15 +112,15 @@ describe('attestInputs', () => {
 
 	it('requires at least one path', () => {
 		expect(() =>
-			attestInputs({ INPUT_PATHS: '', RUNNER_TEMP: '/runner/temp' })
+			resolveAttestInputs({ paths: [] }, { RUNNER_TEMP: '/runner/temp' })
 		).toThrow(InvalidInputError);
 	});
 
 	it('does not require RUNNER_TEMP when the checksums file is explicit', () => {
-		const inputs = attestInputs({
-			INPUT_PATHS: paths,
-			INPUT_CHECKSUMS_FILE: '/explicit/subjects.txt'
-		});
+		const inputs = resolveAttestInputs(
+			{ paths: [paths], checksumsFile: '/explicit/subjects.txt' },
+			{}
+		);
 
 		expect(inputs.checksumsFile).toBe('/explicit/subjects.txt');
 	});

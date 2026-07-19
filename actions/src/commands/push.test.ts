@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest';
 
 import { InvalidInputError, MissingInputError } from '../errors.ts';
 
-import { buildPushArguments, pushInputs } from './push.ts';
+import {
+	buildPushArguments,
+	type PushOptions,
+	resolvePushInputs
+} from './push.ts';
 
 describe('buildPushArguments', () => {
 	it('builds a GitHub OIDC push invocation', () => {
@@ -43,13 +47,17 @@ describe('buildPushArguments', () => {
 	});
 });
 
-describe('pushInputs', () => {
-	const url = 'https://cupboard.example/t/acme';
-	const storePath = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo';
+const url = 'https://cupboard.example/t/acme';
+const storePath = '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-foo';
 
-	const baseEnvironment = {
-		INPUT_URL: url,
-		INPUT_PATHS: storePath,
+const baseOptions: PushOptions = {
+	url,
+	paths: [storePath],
+	attestations: []
+};
+
+describe('resolvePushInputs', () => {
+	const environment = {
 		GITHUB_REPOSITORY: 'owner/repo',
 		GITHUB_REF_NAME: 'main',
 		GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
@@ -73,46 +81,60 @@ describe('pushInputs', () => {
 		attestations: []
 	};
 
-	it('applies defaults when optional inputs are absent', () => {
-		expect(pushInputs(baseEnvironment)).toStrictEqual(defaults);
+	it('applies defaults when optional flags are absent', () => {
+		expect(resolvePushInputs(baseOptions, environment)).toStrictEqual(defaults);
 	});
 
-	it('treats blank inputs as unset and applies the defaults', () => {
-		const blanked = {
-			...baseEnvironment,
-			INPUT_AUDIENCE: '',
-			INPUT_ROOT: ' ',
-			INPUT_WAIT: '',
-			INPUT_WAIT_TIMEOUT: '  '
+	it('treats blank flag values as unset and applies the defaults', () => {
+		const blanked: PushOptions = {
+			...baseOptions,
+			audience: '',
+			root: ' ',
+			waitTimeout: '  '
 		};
 
-		expect(pushInputs(blanked)).toStrictEqual(defaults);
+		expect(resolvePushInputs(blanked, environment)).toStrictEqual(defaults);
 	});
 
 	it('does not require git refs when root is explicit', () => {
-		const inputs = pushInputs({
-			INPUT_URL: url,
-			INPUT_PATHS: storePath,
-			INPUT_ROOT: 'github:explicit/root',
-			GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
-			RUNNER_TEMP: '/runner/temp'
-		});
+		const inputs = resolvePushInputs(
+			{ ...baseOptions, root: 'github:explicit/root' },
+			{
+				GITHUB_ACTION_REPOSITORY: 'owner/cupboard',
+				RUNNER_TEMP: '/runner/temp'
+			}
+		);
 
 		expect(inputs.root).toBe('github:explicit/root');
 	});
 
+	it('resolves boolean flag values', () => {
+		const resolved = resolvePushInputs(
+			{ ...baseOptions, includePrereleases: 'false', wait: 'false' },
+			environment
+		);
+
+		expect({
+			includePrereleases: resolved.includePrereleases,
+			wait: resolved.wait
+		}).toStrictEqual({ includePrereleases: false, wait: false });
+	});
+
 	it.each([
+		['url is missing', { ...baseOptions, url: undefined }, MissingInputError],
+		['url is blank', { ...baseOptions, url: '  ' }, MissingInputError],
+		['paths is empty', { ...baseOptions, paths: [] }, InvalidInputError],
 		[
-			'url is missing',
-			{ INPUT_PATHS: storePath, RUNNER_TEMP: '/runner/temp' },
-			MissingInputError
+			'include-prereleases is not true or false',
+			{ ...baseOptions, includePrereleases: 'yes' },
+			InvalidInputError
 		],
 		[
-			'paths is empty',
-			{ INPUT_URL: url, INPUT_PATHS: '  ', RUNNER_TEMP: '/runner/temp' },
+			'wait is not true or false',
+			{ ...baseOptions, wait: 'flase' },
 			InvalidInputError
 		]
-	])('rejects when %s', (_name, environment, error) => {
-		expect(() => pushInputs(environment)).toThrow(error);
+	])('rejects when %s', (_name, options, error) => {
+		expect(() => resolvePushInputs(options, environment)).toThrow(error);
 	});
 });
