@@ -152,6 +152,11 @@ describe('resolvePushInputs', () => {
 	it.each([
 		['url is missing', { ...baseOptions, url: undefined }, MissingInputError],
 		['url is blank', { ...baseOptions, url: '  ' }, MissingInputError],
+		[
+			'url is not an http(s) URL',
+			{ ...baseOptions, url: 'cupboard.example/t/acme' },
+			InvalidInputError
+		],
 		['paths is empty', { ...baseOptions, paths: [] }, InvalidInputError],
 		[
 			'include-prereleases is not true or false',

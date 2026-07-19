@@ -67,6 +67,7 @@ import {
 	type TargetEvaluation,
 	viewProbePaths
 } from '../publish-plan.ts';
+import { isHttpUrl } from '../substituters.ts';
 
 export type EnsureRunner = (
 	command: string,
@@ -210,6 +211,15 @@ export function resolvePlanInputs(
 
 	if (url === undefined) {
 		throw new MissingInputError('url');
+	}
+
+	// A malformed URL would otherwise surface much later as a confusing OIDC
+	// or fetch failure.
+	if (!isHttpUrl(url)) {
+		throw new InvalidInputError(
+			'url',
+			`url must be an http(s) URL, got '${url}'`
+		);
 	}
 
 	const rootPrefix = provided(options.rootPrefix);

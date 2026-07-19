@@ -38,6 +38,7 @@ import {
 	installCupboard,
 	normaliseVersion
 } from '../release-install.ts';
+import { isHttpUrl } from '../substituters.ts';
 
 const legacyPushSummarySchema = pushSummarySchema.omit({ paths: true });
 
@@ -183,6 +184,15 @@ export function resolvePushInputs(
 
 	if (url === undefined) {
 		throw new MissingInputError('url');
+	}
+
+	// A malformed URL would otherwise surface much later as a confusing OIDC
+	// or fetch failure.
+	if (!isHttpUrl(url)) {
+		throw new InvalidInputError(
+			'url',
+			`url must be an http(s) URL, got '${url}'`
+		);
 	}
 
 	if (options.paths.length === 0) {
