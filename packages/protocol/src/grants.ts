@@ -430,9 +430,7 @@ export type PermittedGrant = z.infer<typeof permittedGrantSchema>;
 
 const knownOperations: ReadonlySet<string> = new Set(operationSchema.options);
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null;
-}
+const grantWithActionsSchema = z.looseObject({ actions: z.array(z.unknown()) });
 
 // A grant a rule persisted under an earlier build may name an operation since
 // retired (a removed scope). Drop the unknown actions so the rule still
@@ -445,27 +443,26 @@ function withoutRetiredActions(grants: unknown): unknown {
 
 	const items: readonly unknown[] = grants;
 
-	const pruned = items.map((grant) => {
-		if (!isRecord(grant) || !Array.isArray(grant.actions)) {
-			return grant;
-		}
+	return items
+		.map((grant) => {
+			const parsed = grantWithActionsSchema.safeParse(grant);
 
-		const actions: readonly unknown[] = grant.actions;
+			if (!parsed.success) {
+				return grant;
+			}
 
-		return {
-			...grant,
-			actions: actions.filter(
-				(action) => typeof action === 'string' && knownOperations.has(action)
-			)
-		};
-	});
+			return {
+				...parsed.data,
+				actions: parsed.data.actions.filter(
+					(action) => typeof action === 'string' && knownOperations.has(action)
+				)
+			};
+		})
+		.filter((grant) => {
+			const parsed = grantWithActionsSchema.safeParse(grant);
 
-	return pruned.filter(
-		(grant) =>
-			!isRecord(grant) ||
-			!Array.isArray(grant.actions) ||
-			grant.actions.length > 0
-	);
+			return !parsed.success || parsed.data.actions.length > 0;
+		});
 }
 
 /**

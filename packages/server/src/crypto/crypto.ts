@@ -1,4 +1,5 @@
 import { bytesToBase64, bytesToHex } from '@cupboard/nix-store/encoding';
+import { z } from 'zod';
 
 const textEncoder = new TextEncoder();
 
@@ -77,27 +78,45 @@ export async function generateSigningKey(name: string): Promise<{
 	};
 }
 
-// A JWK names its key type in `kty`. That structural check is enough to hand a
-// typed key on; whether the key material is usable is decided when it is
-// imported for signing or verification.
-function isJsonWebKey(value: unknown): value is JsonWebKey {
-	return (
-		typeof value === 'object' &&
-		value !== null &&
-		'kty' in value &&
-		typeof value.kty === 'string'
-	);
-}
+const rsaOtherPrimeInfoSchema = z.object({
+	d: z.string().optional(),
+	r: z.string().optional(),
+	t: z.string().optional()
+});
+
+// The standard JWK fields, with only `kty` required; whether the key material
+// is usable is decided when it is imported for signing or verification.
+const jsonWebKeySchema = z.object({
+	kty: z.string(),
+	alg: z.string().optional(),
+	crv: z.string().optional(),
+	d: z.string().optional(),
+	dp: z.string().optional(),
+	dq: z.string().optional(),
+	e: z.string().optional(),
+	k: z.string().optional(),
+	n: z.string().optional(),
+	p: z.string().optional(),
+	q: z.string().optional(),
+	qi: z.string().optional(),
+	use: z.string().optional(),
+	x: z.string().optional(),
+	y: z.string().optional(),
+	ext: z.boolean().optional(),
+	key_ops: z.array(z.string()).optional(),
+	oth: z.array(rsaOtherPrimeInfoSchema).optional()
+}) satisfies z.ZodType<JsonWebKey>;
 
 // Deserialises a stored JSON Web Key.
 export function parseJwk(json: string): JsonWebKey {
 	const value: unknown = JSON.parse(json);
+	const parsed = jsonWebKeySchema.safeParse(value);
 
-	if (!isJsonWebKey(value)) {
+	if (!parsed.success) {
 		throw new TypeError('Stored JSON Web Key is malformed');
 	}
 
-	return value;
+	return parsed.data;
 }
 
 export async function signNixFingerprint(
