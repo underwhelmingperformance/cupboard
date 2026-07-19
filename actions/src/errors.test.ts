@@ -17,7 +17,6 @@ import {
 	MissingInputError,
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
-	UnknownCommandError,
 	UnsupportedPlatformError
 } from './errors.ts';
 
@@ -34,7 +33,6 @@ describe('action errors', () => {
 			new UnsupportedPlatformError('sunos', 'sparc'),
 			usageExitCode
 		],
-		['UnknownCommandError', new UnknownCommandError('frob'), usageExitCode],
 		['GithubApiError', new GithubApiError('boom'), genericExitCode],
 		[
 			'MalformedReleaseResponseError',

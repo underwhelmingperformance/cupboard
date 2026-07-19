@@ -92,22 +92,37 @@ runs:
       id: push
       shell: bash
       env:
-        INPUT_URL: ${{ inputs.url }}
-        INPUT_PATHS: ${{ inputs.paths }}
-        INPUT_CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
-        INPUT_INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
-        INPUT_GITHUB_TOKEN: ${{ inputs.github-token || github.token }}
-        INPUT_RELEASE_REPOSITORY:
+        URL: ${{ inputs.url }}
+        PATHS: ${{ inputs.paths }}
+        CUPBOARD_VERSION: ${{ inputs.cupboard-version }}
+        INCLUDE_PRERELEASES: ${{ inputs.include-prereleases }}
+        GH_TOKEN: ${{ inputs.github-token || github.token }}
+        RELEASE_REPOSITORY:
           ${{ inputs.release-repository || github.action_repository }}
-        INPUT_INSTALL_DIR: ${{ inputs.install-dir }}
-        INPUT_CACHE: ${{ inputs.cache }}
-        INPUT_AUDIENCE: ${{ inputs.audience }}
-        INPUT_ROOT: ${{ inputs.root }}
-        INPUT_TTL: ${{ inputs.ttl }}
-        INPUT_WAIT: ${{ inputs.wait }}
-        INPUT_WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
-        INPUT_ATTESTATIONS: ${{ inputs.attestations }}
-      run: >
-        node --experimental-transform-types
-        --disable-warning=ExperimentalWarning
-        "$GITHUB_ACTION_PATH/../src/main.ts" push
+        INSTALL_DIR: ${{ inputs.install-dir }}
+        CACHE: ${{ inputs.cache }}
+        AUDIENCE: ${{ inputs.audience }}
+        ROOT: ${{ inputs.root }}
+        TTL: ${{ inputs.ttl }}
+        WAIT: ${{ inputs.wait }}
+        WAIT_TIMEOUT: ${{ inputs.wait-timeout }}
+        ATTESTATIONS: ${{ inputs.attestations }}
+      run: |
+        args=(push
+          --url "$URL"
+          --paths "$PATHS"
+          --cupboard-version "$CUPBOARD_VERSION"
+          --include-prereleases "$INCLUDE_PRERELEASES"
+          --github-token "$GH_TOKEN"
+          --release-repository "$RELEASE_REPOSITORY"
+          --install-dir "$INSTALL_DIR"
+          --cache "$CACHE"
+          --audience "$AUDIENCE"
+          --root "$ROOT"
+          --ttl "$TTL"
+          --wait "$WAIT"
+          --wait-timeout "$WAIT_TIMEOUT"
+          --attestations "$ATTESTATIONS")
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" "${args[@]}"

@@ -1,6 +1,6 @@
 import { appendFile } from 'node:fs/promises';
 
-import { InvalidInputError, MissingInputError } from './errors.ts';
+import { MissingInputError } from './errors.ts';
 
 export type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -11,49 +11,17 @@ export function parseLines(value: string): string[] {
 		.filter((line) => line.length > 0);
 }
 
-type InputFallback = string | (() => string);
-
-export function input(
+/**
+ * Read a runner-contract variable (such as `RUNNER_TEMP`) that the workflow
+ * environment must supply, throwing {@link MissingInputError} when it is absent
+ * or empty.
+ */
+export function requireEnvironment(
 	environment: Environment,
-	name: string,
-	fallback: InputFallback = ''
+	name: string
 ): string {
-	const prefixedName = 'INPUT_' + name;
-	const value = (environment[prefixedName] ?? environment[name] ?? '').trim();
+	const value = environment[name];
 
-	if (value !== '') {
-		return value;
-	}
-
-	return typeof fallback === 'function' ? fallback() : fallback;
-}
-
-export function isInputEnabled(
-	environment: Environment,
-	name: string,
-	isEnabledByDefault: boolean
-): boolean {
-	const value = input(
-		environment,
-		name,
-		isEnabledByDefault ? 'true' : 'false'
-	).toLowerCase();
-
-	if (value === 'true') {
-		return true;
-	}
-
-	if (value === 'false') {
-		return false;
-	}
-
-	throw new InvalidInputError(
-		name.toLowerCase().replaceAll('_', '-'),
-		`${name.toLowerCase().replaceAll('_', '-')} must be true or false`
-	);
-}
-
-export function requireInput(value: string | undefined, name: string): string {
 	if (value === undefined || value === '') {
 		throw new MissingInputError(name);
 	}

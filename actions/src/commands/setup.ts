@@ -6,6 +6,7 @@ import { env } from 'node:process';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { workflowCommands } from '@cupboard/shared/github-actions';
 import { retryingFetcher } from '@cupboard/shared/retry';
+import type { Command } from 'commander';
 
 import {
 	CachePublicKeyEmptyResponseError,
@@ -15,11 +16,10 @@ import {
 import {
 	appendEnvironmentFile,
 	type Environment,
-	input,
-	isInputEnabled,
-	requireInput,
+	requireEnvironment,
 	setOutput
 } from '../inputs.ts';
+import { isEnabled, provided } from '../options.ts';
 import {
 	fallbackReleaseRepository,
 	installCupboard,
@@ -33,6 +33,21 @@ import {
 } from '../substituters.ts';
 
 const githubActions = workflowCommands();
+
+export interface SetupOptions {
+	readonly cupboardVersion?: string;
+	readonly includePrereleases?: string;
+	readonly githubToken?: string;
+	readonly releaseRepository?: string;
+	readonly installDir?: string;
+	readonly addToPath?: string;
+	readonly cacheUrl?: string;
+	readonly cache?: string;
+	readonly trustedPublicKey?: string;
+	readonly readUser?: string;
+	readonly readPassword?: string;
+	readonly nixConfigFile?: string;
+}
 
 export interface SetupInputs {
 	readonly version: string;
@@ -60,10 +75,112 @@ interface WriteNetrcOptions {
 	readonly runnerTemporaryDirectory: string;
 }
 
+export function registerSetupCommand(
+	program: Command,
+	environment: Environment = env
+): void {
+	program
+		.command('setup')
+		.description(
+			'Install cupboard and optionally export Nix binary cache configuration.'
+		)
+		.option(
+			'--cupboard-version <version>',
+			'cupboard version to install: latest or an exact version such as 1.2.3'
+		)
+		.option(
+			'--include-prereleases <value>',
+			'when resolving latest, consider prereleases: true or false'
+		)
+		.option('--github-token <token>', 'GitHub token used for release API calls')
+		.option(
+			'--release-repository <repository>',
+			'repository that publishes cupboard release assets'
+		)
+		.option(
+			'--install-dir <directory>',
+			'directory for the downloaded cupboard binary'
+		)
+		.option(
+			'--add-to-path <value>',
+			'add the install directory to PATH: true or false'
+		)
+		.option(
+			'--cache-url <url>',
+			'cupboard Worker URL to add to Nix substituters'
+		)
+		.option('--cache <name>', 'named cache to read from')
+		.option(
+			'--trusted-public-key <key>',
+			'Nix trusted public key for the cupboard cache'
+		)
+		.option('--read-user <user>', 'username for private cache reads')
+		.option('--read-password <password>', 'password for private cache reads')
+		.option('--nix-config-file <path>', 'Nix config file to append to')
+		.action((options: SetupOptions) => setupAction(options, environment));
+}
+
+export function resolveSetupInputs(
+	options: SetupOptions,
+	environment: Environment
+): SetupInputs {
+	const readUser = provided(options.readUser) ?? '';
+	const readPassword = provided(options.readPassword) ?? '';
+
+	if (readUser !== '' && readPassword === '') {
+		throw new InvalidInputError(
+			'read-password',
+			'read-password is required when read-user is supplied'
+		);
+	}
+
+	if (readPassword !== '' && readUser === '') {
+		throw new InvalidInputError(
+			'read-user',
+			'read-user is required when read-password is supplied'
+		);
+	}
+
+	const cacheUrl = provided(options.cacheUrl) ?? '';
+
+	if (cacheUrl !== '' && !isHttpUrl(cacheUrl)) {
+		throw new InvalidInputError(
+			'cache-url',
+			`cache-url must be an http(s) URL, got '${cacheUrl}'`
+		);
+	}
+
+	return {
+		version: normaliseVersion(provided(options.cupboardVersion) ?? 'latest'),
+		includePrereleases: isEnabled(
+			'include-prereleases',
+			options.includePrereleases,
+			true
+		),
+		githubToken: provided(options.githubToken) ?? '',
+		releaseRepository:
+			provided(options.releaseRepository) ??
+			environment.GITHUB_ACTION_REPOSITORY ??
+			environment.GITHUB_REPOSITORY ??
+			fallbackReleaseRepository,
+		installDirectory:
+			provided(options.installDir) ??
+			path.join(requireEnvironment(environment, 'RUNNER_TEMP'), 'cupboard-bin'),
+		addToPath: isEnabled('add-to-path', options.addToPath, true),
+		cacheUrl,
+		cache: provided(options.cache) ?? '',
+		trustedPublicKey: provided(options.trustedPublicKey) ?? '',
+		readUser,
+		readPassword,
+		nixConfigFile: provided(options.nixConfigFile) ?? ''
+	};
+}
+
 export async function setupAction(
+	options: SetupOptions,
 	environment: Environment = env
 ): Promise<void> {
-	const inputs = setupInputs(environment);
+	const inputs = resolveSetupInputs(options, environment);
 	const installDirectory = path.resolve(inputs.installDirectory);
 
 	await mkdir(installDirectory, { recursive: true });
@@ -100,8 +217,8 @@ async function configureNix(inputs: ConfigureNixInputs): Promise<void> {
 			? await fetchTrustedPublicKey(inputs)
 			: inputs.trustedPublicKey;
 	const substituter = cacheUrlFor(inputs.cacheUrl, inputs.cache);
-	const runnerTemporaryDirectory = requireInput(
-		inputs.environment.RUNNER_TEMP,
+	const runnerTemporaryDirectory = requireEnvironment(
+		inputs.environment,
 		'RUNNER_TEMP'
 	);
 	const netrcFile =
@@ -189,62 +306,4 @@ export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 	await chmod(netrcFile, 0o600);
 
 	return netrcFile;
-}
-
-export function setupInputs(environment: Environment): SetupInputs {
-	const readUser = input(environment, 'READ_USER');
-	const readPassword = input(environment, 'READ_PASSWORD');
-
-	if (readUser !== '' && readPassword === '') {
-		throw new InvalidInputError(
-			'read-password',
-			'read-password is required when read-user is supplied'
-		);
-	}
-
-	if (readPassword !== '' && readUser === '') {
-		throw new InvalidInputError(
-			'read-user',
-			'read-user is required when read-password is supplied'
-		);
-	}
-
-	const cacheUrl = input(environment, 'CACHE_URL');
-
-	if (cacheUrl !== '' && !isHttpUrl(cacheUrl)) {
-		throw new InvalidInputError(
-			'cache-url',
-			`cache-url must be an http(s) URL, got '${cacheUrl}'`
-		);
-	}
-
-	return {
-		version: normaliseVersion(input(environment, 'CUPBOARD_VERSION', 'latest')),
-		includePrereleases: isInputEnabled(
-			environment,
-			'INCLUDE_PRERELEASES',
-			true
-		),
-		githubToken: input(environment, 'GITHUB_TOKEN'),
-		releaseRepository: input(
-			environment,
-			'RELEASE_REPOSITORY',
-			environment.GITHUB_ACTION_REPOSITORY ??
-				environment.GITHUB_REPOSITORY ??
-				fallbackReleaseRepository
-		),
-		installDirectory: input(environment, 'INSTALL_DIR', () =>
-			path.join(
-				requireInput(environment.RUNNER_TEMP, 'RUNNER_TEMP'),
-				'cupboard-bin'
-			)
-		),
-		addToPath: isInputEnabled(environment, 'ADD_TO_PATH', true),
-		cacheUrl,
-		cache: input(environment, 'CACHE'),
-		trustedPublicKey: input(environment, 'TRUSTED_PUBLIC_KEY'),
-		readUser,
-		readPassword,
-		nixConfigFile: input(environment, 'NIX_CONFIG_FILE')
-	};
 }

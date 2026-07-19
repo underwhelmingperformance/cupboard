@@ -4,21 +4,22 @@ import { env } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { workflowCommands } from '@cupboard/shared/github-actions';
+import type { Command } from 'commander';
 
 import { InvalidInputError } from '../errors.ts';
-import {
-	type Environment,
-	input,
-	parseLines,
-	requireInput,
-	setOutput
-} from '../inputs.ts';
+import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
+import { collectLines, provided } from '../options.ts';
 
 const githubActions = workflowCommands();
 
 interface StorePathDigest {
 	readonly storePath: string;
 	readonly sha256: string;
+}
+
+export interface AttestOptions {
+	readonly paths: readonly string[];
+	readonly checksumsFile?: string;
 }
 
 export interface AttestInputs {
@@ -65,31 +66,56 @@ export function renderChecksums(digests: readonly StorePathDigest[]): string {
 		.concat('\n');
 }
 
-export function attestInputs(environment: Environment): AttestInputs {
-	const paths = parseLines(input(environment, 'PATHS'));
+export function registerAttestCommand(
+	program: Command,
+	environment: Environment = env
+): void {
+	program
+		.command('attest')
+		.description(
+			'Resolve the attestation subjects for the given store paths this machine built.'
+		)
+		.option(
+			'--paths <path>',
+			'local Nix store path, derivation or installable to attest (repeatable, or newline-delimited)',
+			collectLines,
+			[]
+		)
+		.option(
+			'--checksums-file <path>',
+			'where to write the generated subject checksums file'
+		)
+		.action((options: AttestOptions) => attestAction(options, environment));
+}
 
-	if (paths.length === 0) {
+export function resolveAttestInputs(
+	options: AttestOptions,
+	environment: Environment
+): AttestInputs {
+	if (options.paths.length === 0) {
 		throw new InvalidInputError(
 			'paths',
 			'paths is required and must contain at least one path'
 		);
 	}
 
-	const checksumsFile = input(environment, 'CHECKSUMS_FILE', () =>
-		path.join(
-			requireInput(environment.RUNNER_TEMP, 'RUNNER_TEMP'),
-			'cupboard-attestations',
-			'subjects.txt'
-		)
-	);
-
-	return { paths, checksumsFile };
+	return {
+		paths: options.paths,
+		checksumsFile:
+			provided(options.checksumsFile) ??
+			path.join(
+				requireEnvironment(environment, 'RUNNER_TEMP'),
+				'cupboard-attestations',
+				'subjects.txt'
+			)
+	};
 }
 
 export async function attestAction(
+	options: AttestOptions,
 	environment: Environment = env
 ): Promise<void> {
-	const inputs = attestInputs(environment);
+	const inputs = resolveAttestInputs(options, environment);
 	const nix = Nix.open();
 	const infos = await Promise.all(
 		inputs.paths.map((storePath) => nix.queryPathInfo(storePath))

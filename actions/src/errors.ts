@@ -31,13 +31,6 @@ export class UnsupportedPlatformError extends UsageError {
 	}
 }
 
-export class UnknownCommandError extends UsageError {
-	constructor(public readonly command: string) {
-		super(`expected setup, push or attest, got '${command}'`);
-		this.name = 'UnknownCommandError';
-	}
-}
-
 /** Builds `Error`'s options bag, omitting `cause` entirely when none was given. */
 function withCause(cause: unknown): ErrorOptions | undefined {
 	return cause === undefined ? undefined : { cause };

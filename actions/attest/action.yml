@@ -64,12 +64,14 @@ runs:
       id: subjects
       shell: bash
       env:
-        INPUT_PATHS: ${{ inputs.paths }}
-        INPUT_CHECKSUMS_FILE: ${{ inputs.checksums-file }}
-      run: >
-        node --experimental-transform-types
-        --disable-warning=ExperimentalWarning
-        "$GITHUB_ACTION_PATH/../src/main.ts" attest
+        PATHS: ${{ inputs.paths }}
+        CHECKSUMS_FILE: ${{ inputs.checksums-file }}
+      run: |
+        node --experimental-transform-types \
+          --disable-warning=ExperimentalWarning \
+          "$GITHUB_ACTION_PATH/../src/main.ts" attest \
+          --paths "$PATHS" \
+          --checksums-file "$CHECKSUMS_FILE"
 
     # A run with no locally built path has nothing it can truthfully attest,
     # and the provenance action rejects an empty subject list.
