@@ -9,7 +9,8 @@
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/nix-store": "workspace:*",
 		"@cupboard/shared": "workspace:*",
-		"semver": "^7.8.5"
+		"semver": "^7.8.5",
+		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@types/semver": "^7.7.1"

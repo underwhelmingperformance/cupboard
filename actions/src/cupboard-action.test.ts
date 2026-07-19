@@ -6,7 +6,11 @@ import path from 'node:path';
 import type { NixValidPathInfo } from '@cupboard/nix';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { createOctokitClient } from '@cupboard/shared/octokit';
-import type { VerifiedBundle } from '@cupboard/shared/sigstore';
+import {
+	AttestationPredicateTypeMismatchError,
+	AttestationSubjectMismatchError,
+	type VerifiedBundle
+} from '@cupboard/shared/sigstore';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -32,7 +36,9 @@ import {
 	writeNetrc
 } from './cupboard-action.ts';
 import {
-	AttestationError,
+	AttestationNotFoundError,
+	AttestationSourceMismatchError,
+	AttestationVerificationFailedError,
 	InvalidInputError,
 	MalformedReleaseResponseError,
 	MissingInputError,
@@ -357,6 +363,16 @@ function verifiedAs(digest: string, commit: string): VerifiedBundle {
 	};
 }
 
+async function rejectionOf(promise: Promise<unknown>): Promise<unknown> {
+	try {
+		await promise;
+
+		return undefined;
+	} catch (error: unknown) {
+		return error;
+	}
+}
+
 describe('verifyReleaseAttestation', () => {
 	it('accepts a bundle built by the release workflow from the tag commit', async () => {
 		const archive = await writeArchive();
@@ -372,14 +388,21 @@ describe('verifyReleaseAttestation', () => {
 
 	it('rejects a bundle built from a different commit', async () => {
 		const archive = await writeArchive();
-
-		await expect(
+		const error = await rejectionOf(
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
 				fetch: stubAttestationFetch([{ bundle: {} }]),
 				verify: () =>
 					Promise.resolve(verifiedAs(archive.digest, 'b'.repeat(40)))
 			})
-		).rejects.toThrow(AttestationError);
+		);
+
+		expect(error).toBeInstanceOf(AttestationVerificationFailedError);
+
+		if (!(error instanceof AttestationVerificationFailedError)) {
+			throw error;
+		}
+
+		expect(error.cause).toBeInstanceOf(AttestationSourceMismatchError);
 	});
 
 	it('rejects when there is no attestation', async () => {
@@ -389,7 +412,7 @@ describe('verifyReleaseAttestation', () => {
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
 				fetch: stubAttestationFetch([])
 			})
-		).rejects.toThrow(AttestationError);
+		).rejects.toThrow(AttestationNotFoundError);
 	});
 
 	it('accepts a later bundle after an earlier one fails to verify', async () => {
@@ -415,20 +438,26 @@ describe('verifyReleaseAttestation', () => {
 
 	it('rejects a bundle whose subject does not match the archive', async () => {
 		const archive = await writeArchive();
-
-		await expect(
+		const error = await rejectionOf(
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
 				fetch: stubAttestationFetch([{ bundle: {} }]),
 				verify: () =>
 					Promise.resolve(verifiedAs('f'.repeat(64), attestationTagCommit))
 			})
-		).rejects.toThrow(AttestationError);
+		);
+
+		expect(error).toBeInstanceOf(AttestationVerificationFailedError);
+
+		if (!(error instanceof AttestationVerificationFailedError)) {
+			throw error;
+		}
+
+		expect(error.cause).toBeInstanceOf(AttestationSubjectMismatchError);
 	});
 
 	it('rejects a bundle with the wrong predicate type', async () => {
 		const archive = await writeArchive();
-
-		await expect(
+		const error = await rejectionOf(
 			verifyReleaseAttestation(attestationOptions, archive.path, 'v1.0.0', {
 				fetch: stubAttestationFetch([{ bundle: {} }]),
 				verify: () =>
@@ -437,7 +466,15 @@ describe('verifyReleaseAttestation', () => {
 						predicateType: 'https://example.test/other'
 					})
 			})
-		).rejects.toThrow(AttestationError);
+		);
+
+		expect(error).toBeInstanceOf(AttestationVerificationFailedError);
+
+		if (!(error instanceof AttestationVerificationFailedError)) {
+			throw error;
+		}
+
+		expect(error.cause).toBeInstanceOf(AttestationPredicateTypeMismatchError);
 	});
 });
 

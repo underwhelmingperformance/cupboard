@@ -40,7 +40,11 @@ export function runCupboard(
 		});
 
 		child.once('error', (error) => {
-			reject(new CommandFailedError(binaryPath, child.exitCode, error.message));
+			reject(
+				new CommandFailedError(binaryPath, child.exitCode, error.message, {
+					cause: error
+				})
+			);
 		});
 
 		child.once('close', (code) => {

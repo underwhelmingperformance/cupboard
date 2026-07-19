@@ -4,6 +4,7 @@
 	"dependencies": {
 		"@octokit/plugin-retry": "^8.1.0",
 		"@octokit/plugin-throttling": "^11.0.3",
+		"@octokit/request-error": "^7.1.0",
 		"@octokit/rest": "^22.0.1",
 		"@sigstore/bundle": "^5.0.0",
 		"@sigstore/protobuf-specs": "^0.5.1",
