@@ -1,5 +1,6 @@
 import { readFile as nodeReadFile } from 'node:fs/promises';
 
+import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import { attestationListSchema } from '@cupboard/protocol/attestations';
@@ -309,18 +310,6 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 		bytes.byteOffset,
 		bytes.byteOffset + bytes.byteLength
 	) as ArrayBuffer;
-}
-
-function cacheUrl(url: string, cache: string | undefined): string {
-	const parsed = new URL(url);
-	const basePath = parsed.pathname.replace(/\/+$/, '');
-
-	parsed.pathname =
-		cache === undefined || cache === ''
-			? basePath
-			: `${basePath}/cache/${cache}`;
-
-	return trimRight(parsed.href);
 }
 
 function trimRight(value: string): string {

@@ -1,5 +1,6 @@
 import { env } from 'node:process';
 
+import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { cacheNameSchema, DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import { type Reporter } from '@cupboard/reporter';
@@ -28,19 +29,15 @@ export function cacheSubstituterUrl(
 	url: string,
 	cache: string | undefined
 ): string {
-	if (cache === undefined || cache === DEFAULT_CACHE) {
-		return url;
-	}
-
-	if (!cacheNameSchema.safeParse(cache).success) {
+	if (
+		cache !== undefined &&
+		cache !== DEFAULT_CACHE &&
+		!cacheNameSchema.safeParse(cache).success
+	) {
 		throw new InvalidCacheNameError(cache);
 	}
 
-	const substituter = new URL(url);
-	const basePath = substituter.pathname.replace(/\/+$/, '');
-	substituter.pathname = `${basePath}/cache/${cache}`;
-
-	return substituter.href;
+	return cacheUrl(url, cache);
 }
 
 export function runConfig(
@@ -59,13 +56,11 @@ export function runConfig(
 		return;
 	}
 
-	const { hostname } = new URL(url);
-
 	reporter.info(
 		[
 			'# Private cache: add this line to your Nix netrc-file ' +
 				'(e.g. ~/.config/nix/netrc):',
-			renderNetrc(hostname, credential.user, credential.password).trimEnd()
+			renderNetrc(new URL(url), credential.user, credential.password).trimEnd()
 		].join('\n')
 	);
 }

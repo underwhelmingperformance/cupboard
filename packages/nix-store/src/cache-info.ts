@@ -16,3 +16,18 @@ export class CacheInfo {
 		].join('\n');
 	}
 }
+
+// The gap by which a reuse view's priority is set below its destination cache,
+// so Nix prefers the destination while still consulting the view.
+export const viewPriorityMargin = 10;
+
+/**
+ * Whether a destination cache stays preferred over a reuse view: true when the
+ * view's priority is strictly greater, since Nix prefers the lower priority.
+ */
+export function isDestinationPreferred(
+	destinationPriority: number,
+	viewPriority: number
+): boolean {
+	return viewPriority > destinationPriority;
+}

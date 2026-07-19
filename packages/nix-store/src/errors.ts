@@ -28,6 +28,25 @@ export class InvalidSha256DigestLengthError extends ProtocolError {
 	}
 }
 
+// A cache or view name that cannot form a whole URL path segment: the empty
+// string, `.` or `..` would collapse or climb the path rather than address a
+// child of the cache base.
+export class InvalidCacheUrlSegmentError extends ProtocolError {
+	constructor(public readonly segment: string) {
+		super(`Invalid cache URL segment: ${segment}`);
+		this.name = 'InvalidCacheUrlSegmentError';
+	}
+}
+
+// A netrc credential carrying a control character, which no quoting can encode
+// into a single netrc token.
+export class NetrcControlCharacterError extends ProtocolError {
+	constructor() {
+		super('Netrc credentials must not contain control characters');
+		this.name = 'NetrcControlCharacterError';
+	}
+}
+
 // Raised when a zstd stream cannot be decoded because its bytes are not a valid
 // frame, distinct from an error reading the underlying source. The server treats
 // this as a definitive verification failure (the bytes can never decode to the
