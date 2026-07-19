@@ -14,7 +14,7 @@ import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { cacheUrl } from '@cupboard/nix-store/cache-url';
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { workflowCommands } from '@cupboard/shared/github-actions';
-import { createOctokitClient } from '@cupboard/shared/octokit';
+import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
 	identityPolicy,
@@ -24,16 +24,22 @@ import {
 } from '@cupboard/shared/sigstore';
 import { slsaSourceCommit } from '@cupboard/shared/slsa';
 import semverValid from 'semver/functions/valid.js';
+import { z } from 'zod';
 
 import { runCupboard } from './cupboard-run.ts';
 import {
-	AttestationError,
-	CachePublicKeyError,
-	ChecksumError,
+	AttestationNotFoundError,
+	AttestationSourceMismatchError,
+	AttestationVerificationFailedError,
+	CachePublicKeyEmptyResponseError,
+	CachePublicKeyRequestFailedError,
+	ChecksumMismatchError,
 	CommandFailedError,
 	GithubApiError,
+	InvalidChecksumLineError,
 	InvalidInputError,
 	MalformedReleaseResponseError,
+	MissingChecksumError,
 	MissingInputError,
 	NoReleaseFoundError,
 	ReleaseAssetNotFoundError,
@@ -207,7 +213,7 @@ export function parseChecksums(value: string): Map<string, string> {
 		const name = match?.groups?.name;
 
 		if (sha256 === undefined || name === undefined) {
-			throw new ChecksumError(`invalid checksum line: ${line}`);
+			throw new InvalidChecksumLineError(line);
 		}
 
 		checksums.set(name, sha256.toLowerCase());
@@ -285,6 +291,13 @@ export function buildPushArguments(
 
 	return arguments_;
 }
+
+const releaseAssetSchema = z.object({ name: z.string(), url: z.string() });
+
+const releaseResponseSchema = z.looseObject({
+	tag_name: z.string(),
+	assets: z.array(releaseAssetSchema)
+});
 
 const provenancePredicateType = 'https://slsa.dev/provenance/v1';
 const githubOidcIssuer = 'https://token.actions.githubusercontent.com';
@@ -412,7 +425,7 @@ async function installCupboard(
 	const expectedChecksum = checksums.get(assetName);
 
 	if (expectedChecksum === undefined) {
-		throw new ChecksumError(`checksums.txt does not contain ${assetName}`);
+		throw new MissingChecksumError(assetName);
 	}
 
 	await verifyChecksum(archivePath, expectedChecksum);
@@ -445,12 +458,13 @@ export async function fetchRelease(
 		version === 'latest'
 			? await octokit.rest.repos.getLatestRelease({ owner, repo })
 			: await octokit.rest.repos.getReleaseByTag({ owner, repo, tag: version });
+	const parsed = releaseResponseSchema.safeParse(data);
 
-	if (!isReleaseResponse(data)) {
-		throw new MalformedReleaseResponseError();
+	if (!parsed.success) {
+		throw new MalformedReleaseResponseError({ cause: parsed.error });
 	}
 
-	return releaseFromResponse(data);
+	return releaseFromResponse(parsed.data);
 }
 
 // `GET /releases/latest` only returns the latest stable release, so the newest
@@ -466,19 +480,25 @@ async function fetchNewestRelease(
 		repo,
 		per_page: 20
 	});
-	const release = data.find((item) => !item.draft && isReleaseResponse(item));
 
-	if (release === undefined) {
-		throw new NoReleaseFoundError(`${owner}/${repo}`);
+	for (const item of data) {
+		if (item.draft) {
+			continue;
+		}
+
+		const parsed = releaseResponseSchema.safeParse(item);
+
+		if (parsed.success) {
+			return releaseFromResponse(parsed.data);
+		}
 	}
 
-	return releaseFromResponse(release);
+	throw new NoReleaseFoundError(`${owner}/${repo}`);
 }
 
-function releaseFromResponse(response: {
-	readonly tag_name: string;
-	readonly assets: readonly ReleaseAsset[];
-}): Release {
+function releaseFromResponse(
+	response: z.infer<typeof releaseResponseSchema>
+): Release {
 	return {
 		tagName: response.tag_name,
 		assets: response.assets.map((asset) => ({
@@ -486,26 +506,6 @@ function releaseFromResponse(response: {
 			url: asset.url
 		}))
 	};
-}
-
-function isReleaseResponse(value: unknown): value is {
-	readonly tag_name: string;
-	readonly assets: readonly ReleaseAsset[];
-} {
-	if (!isRecord(value) || typeof value.tag_name !== 'string') {
-		return false;
-	}
-
-	if (!Array.isArray(value.assets)) {
-		return false;
-	}
-
-	return value.assets.every(
-		(asset) =>
-			isRecord(asset) &&
-			typeof asset.name === 'string' &&
-			typeof asset.url === 'string'
-	);
 }
 
 function findReleaseAsset(release: Release, name: string): ReleaseAsset {
@@ -530,9 +530,9 @@ async function downloadAsset(
 	});
 
 	if (!response.ok) {
-		throw new GithubApiError(
-			`failed to download ${asset.name}: ${String(response.status)}`
-		);
+		throw new GithubApiError(`failed to download ${asset.name}`, {
+			status: response.status
+		});
 	}
 
 	const bytes = Buffer.from(await response.arrayBuffer());
@@ -548,8 +548,10 @@ async function verifyChecksum(
 		.digest('hex');
 
 	if (actualChecksum !== expectedChecksum) {
-		throw new ChecksumError(
-			`checksum mismatch for ${path.basename(checksumPath)}: expected ${expectedChecksum}, got ${actualChecksum}`
+		throw new ChecksumMismatchError(
+			path.basename(checksumPath),
+			expectedChecksum,
+			actualChecksum
 		);
 	}
 }
@@ -575,7 +577,7 @@ export async function verifyReleaseAttestation(
 	);
 
 	if (bundles.length === 0) {
-		throw new AttestationError(`no attestation was found for ${archiveName}`);
+		throw new AttestationNotFoundError(archiveName);
 	}
 
 	const tagCommit = await fetchTagCommit(octokit, owner, repo, tagName);
@@ -585,7 +587,7 @@ export async function verifyReleaseAttestation(
 		),
 		certificateOidcIssuer: githubOidcIssuer
 	});
-	const failures: string[] = [];
+	let lastFailure: unknown;
 
 	for (const bundle of bundles) {
 		try {
@@ -606,13 +608,13 @@ export async function verifyReleaseAttestation(
 
 			return;
 		} catch (error) {
-			failures.push(error instanceof Error ? error.message : String(error));
+			lastFailure = error;
 		}
 	}
 
-	throw new AttestationError(
-		`could not verify the attestation for ${archiveName}: ${failures.join('; ')}`
-	);
+	throw new AttestationVerificationFailedError(archiveName, bundles.length, {
+		cause: lastFailure
+	});
 }
 
 interface ReleaseBundleVerification {
@@ -644,8 +646,10 @@ async function verifyOneReleaseBundle(
 	);
 
 	if (sourceCommit !== options.tagCommit) {
-		throw new AttestationError(
-			`built from ${String(sourceCommit)}, but tag ${options.tagName} points at ${options.tagCommit}`
+		throw new AttestationSourceMismatchError(
+			options.tagName,
+			options.tagCommit,
+			sourceCommit
 		);
 	}
 }
@@ -690,13 +694,14 @@ async function listAttestations(
 
 		return data.attestations ?? [];
 	} catch (error) {
-		if (isStatus(error, 404)) {
+		if (error instanceof RequestError && error.status === 404) {
 			return [];
 		}
 
-		throw new GithubApiError(
-			`failed to fetch attestations: ${errorStatusText(error)}`
-		);
+		throw new GithubApiError('failed to fetch attestations', {
+			status: error instanceof RequestError ? error.status : undefined,
+			cause: error
+		});
 	}
 }
 
@@ -716,7 +721,11 @@ async function fetchTagCommit(
 		return data.sha;
 	} catch (error) {
 		throw new GithubApiError(
-			`could not resolve the commit for tag ${tagName}: ${errorStatusText(error)}`
+			`could not resolve the commit for tag ${tagName}`,
+			{
+				status: error instanceof RequestError ? error.status : undefined,
+				cause: error
+			}
 		);
 	}
 }
@@ -738,16 +747,6 @@ export function splitRepository(
 	}
 
 	return [owner, name];
-}
-
-function isStatus(error: unknown, status: number): boolean {
-	return isRecord(error) && error.status === status;
-}
-
-function errorStatusText(error: unknown): string {
-	return isRecord(error) && typeof error.status === 'number'
-		? String(error.status)
-		: 'an unknown error';
 }
 
 async function configureNix(inputs: ConfigureNixInputs): Promise<void> {
@@ -804,22 +803,20 @@ function environmentFileBlock(name: string, value: string): string {
 async function fetchTrustedPublicKey(
 	inputs: ConfigureNixInputs
 ): Promise<string> {
-	const response = await retryingFetcher(fetch)(
-		cachePublicKeyUrl(inputs.cacheUrl),
-		{ headers: cachePublicKeyRequestHeaders() }
-	);
+	const url = cachePublicKeyUrl(inputs.cacheUrl);
+	const response = await retryingFetcher(fetch)(url, {
+		headers: cachePublicKeyRequestHeaders()
+	});
 
 	if (!response.ok) {
-		throw new CachePublicKeyError(
-			`failed to fetch cache public key: ${String(response.status)}`
-		);
+		throw new CachePublicKeyRequestFailedError(url, response.status);
 	}
 
 	const publicKey = await response.text();
 	const trimmedPublicKey = publicKey.trim();
 
 	if (trimmedPublicKey === '') {
-		throw new CachePublicKeyError('cache public key response was empty');
+		throw new CachePublicKeyEmptyResponseError(url);
 	}
 
 	githubActions.warning(
@@ -1136,7 +1133,9 @@ function run(command: string, arguments_: readonly string[]): void {
 	const result = spawnSync(command, [...arguments_], { stdio: 'inherit' });
 
 	if (result.error !== undefined) {
-		throw new CommandFailedError(command, result.status, result.error.message);
+		throw new CommandFailedError(command, result.status, result.error.message, {
+			cause: result.error
+		});
 	}
 
 	if (result.status === 0) {
@@ -1163,8 +1162,4 @@ export async function dispatch(
 	}
 
 	throw new UnknownCommandError(command ?? '');
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null;
 }

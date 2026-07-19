@@ -54,3 +54,5 @@ export function createOctokitClient(
 		retry: { doNotRetry: doNotRetryStatuses }
 	});
 }
+
+export { RequestError } from '@octokit/request-error';
