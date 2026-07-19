@@ -104,6 +104,9 @@ importers:
       '@cupboard/nix':
         specifier: workspace:*
         version: link:../packages/nix
+      '@cupboard/nix-store':
+        specifier: workspace:*
+        version: link:../packages/nix-store
       '@cupboard/shared':
         specifier: workspace:*
         version: link:../packages/shared
@@ -111,9 +114,6 @@ importers:
         specifier: ^7.8.5
         version: 7.8.5
     devDependencies:
-      '@cupboard/nix-store':
-        specifier: workspace:*
-        version: link:../packages/nix-store
       '@types/semver':
         specifier: ^7.7.1
         version: 7.7.1

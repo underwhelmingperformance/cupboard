@@ -19,14 +19,12 @@ import {
 	cacheUrlFor,
 	dispatch,
 	fetchRelease,
-	normaliseTrustedPublicKeys,
 	normaliseVersion,
 	parseChecksums,
 	parseLines,
 	pushInputs,
 	releaseWorkflowIdentityRegex,
 	renderChecksums,
-	renderNixConfig,
 	setupAction,
 	setupInputs,
 	splitRepository,
@@ -213,33 +211,6 @@ describe('cachePublicKeyUrl', () => {
 		['https://cache.example.test', 'https://cache.example.test/pubkey']
 	])('keeps the tenant path for %s', (cacheUrl, expected) => {
 		expect(cachePublicKeyUrl(cacheUrl)).toBe(expected);
-	});
-});
-
-describe('renderNixConfig', () => {
-	it('renders generated Nix config', () => {
-		expect(
-			renderNixConfig({
-				substituter: 'https://cache.example.test/cache/ci',
-				trustedPublicKey: 'cupboard-1:key\ncupboard-1:next-key',
-				netrcFile: '/tmp/cupboard-netrc'
-			})
-		).toBe(
-			[
-				'extra-substituters = https://cache.example.test/cache/ci',
-				'extra-trusted-public-keys = cupboard-1:key cupboard-1:next-key',
-				'netrc-file = /tmp/cupboard-netrc',
-				''
-			].join('\n')
-		);
-	});
-});
-
-describe('normaliseTrustedPublicKeys', () => {
-	it('collapses whitespace for rotating public keys', () => {
-		expect(
-			normaliseTrustedPublicKeys(' cupboard-1:old\ncupboard-1:new \t ')
-		).toBe('cupboard-1:old cupboard-1:new');
 	});
 });
 

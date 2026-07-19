@@ -11,6 +11,8 @@ import path from 'node:path';
 import { arch, env, platform } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import { cacheUrl } from '@cupboard/nix-store/cache-url';
+import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
 import { workflowCommands } from '@cupboard/shared/github-actions';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import { retryingFetcher } from '@cupboard/shared/retry';
@@ -111,12 +113,6 @@ interface InstalledCupboard {
 
 interface ConfigureNixInputs extends SetupInputs {
 	readonly environment: Environment;
-}
-
-interface NixConfigOptions {
-	readonly substituter: string;
-	readonly trustedPublicKey: string;
-	readonly netrcFile?: string;
 }
 
 interface PushArgumentsOptions {
@@ -221,13 +217,7 @@ export function parseChecksums(value: string): Map<string, string> {
 }
 
 export function cacheUrlFor(baseUrl: string, cache: string): string {
-	const trimmedBaseUrl = baseUrl.replace(/\/+$/u, '');
-
-	if (cache.trim() === '') {
-		return trimmedBaseUrl;
-	}
-
-	return `${trimmedBaseUrl}/cache/${encodeURIComponent(cache.trim())}`;
+	return cacheUrl(baseUrl, cache.trim());
 }
 
 /**
@@ -247,23 +237,6 @@ function isHttpUrl(value: string): boolean {
 	} catch {
 		return false;
 	}
-}
-
-export function renderNixConfig(options: NixConfigOptions): string {
-	const lines = [
-		`extra-substituters = ${options.substituter}`,
-		`extra-trusted-public-keys = ${normaliseTrustedPublicKeys(options.trustedPublicKey)}`
-	];
-
-	if (options.netrcFile !== undefined) {
-		lines.push(`netrc-file = ${options.netrcFile}`);
-	}
-
-	return `${lines.join('\n')}\n`;
-}
-
-export function normaliseTrustedPublicKeys(publicKey: string): string {
-	return publicKey.split(/\s+/).filter(Boolean).join(' ');
 }
 
 export function cachePublicKeyRequestHeaders(): Readonly<
@@ -796,11 +769,11 @@ async function configureNix(inputs: ConfigureNixInputs): Promise<void> {
 					readPassword: inputs.readPassword,
 					runnerTemporaryDirectory
 				});
-	const nixConfig = renderNixConfig({
+	const nixConfig = new NixConfig(
 		substituter,
 		trustedPublicKey,
-		...(netrcFile !== undefined && { netrcFile })
-	});
+		netrcFile === undefined ? {} : { netrcFile }
+	).render();
 	const generatedConfigFile = path.join(
 		runnerTemporaryDirectory,
 		'cupboard-nix.conf'
@@ -857,8 +830,6 @@ async function fetchTrustedPublicKey(
 }
 
 export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
-	const cacheUrl = new URL(options.cacheUrl);
-	const host = cacheUrl.host;
 	const netrcFile = path.join(
 		options.runnerTemporaryDirectory,
 		'cupboard-netrc'
@@ -866,7 +837,11 @@ export async function writeNetrc(options: WriteNetrcOptions): Promise<string> {
 
 	await writeFile(
 		netrcFile,
-		`machine ${host} login ${options.readUser} password ${options.readPassword}\n`,
+		renderNetrc(
+			new URL(options.cacheUrl),
+			options.readUser,
+			options.readPassword
+		),
 		{ mode: 0o600 }
 	);
 	await chmod(netrcFile, 0o600);

@@ -50,7 +50,7 @@ describe('Nix substitution from a private-read cache', () => {
 					const netrcFile = path.join(directory, 'netrc');
 					await writeFile(
 						netrcFile,
-						renderNetrc(server.url.hostname, readUser, readPassword)
+						renderNetrc(server.url, readUser, readPassword)
 					);
 
 					const base: RealiseOptions = {
