@@ -1,5 +1,6 @@
 import Cloudflare from 'cloudflare';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 
 import { fakeCliUi } from '../packages/cli-ui/src/testing.ts';
 import type { ResultRow } from '../packages/reporter/src/reporter.ts';
@@ -263,17 +264,16 @@ const noSleep = (): Promise<void> => Promise.resolve();
 const noProgress = (): void => {
 	/* progress unobserved */
 };
-const timestampOf = (row: unknown): number | undefined =>
-	typeof row === 'object' && row !== null && 'timestamp' in row
-		? Number(row.timestamp)
-		: undefined;
-const cursorOf = (row: unknown): string | undefined => {
-	if (typeof row !== 'object' || row === null || !('id' in row)) {
-		return undefined;
-	}
+const timestampRowSchema = z.object({ timestamp: z.unknown() });
+const timestampOf = (row: unknown): number | undefined => {
+	const timestamp = timestampRowSchema.safeParse(row).data?.timestamp;
 
-	return typeof row.id === 'string' ? row.id : undefined;
+	return timestamp === undefined ? undefined : Number(timestamp);
 };
+
+const cursorRowSchema = z.object({ id: z.string() });
+const cursorOf = (row: unknown): string | undefined =>
+	cursorRowSchema.safeParse(row).data?.id;
 
 function tracePage(from: number, count: number): { timestamp: number }[] {
 	return Array.from({ length: count }, (_, index) => ({

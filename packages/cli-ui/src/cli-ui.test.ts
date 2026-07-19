@@ -7,6 +7,7 @@ import { Writable } from 'node:stream';
 import { parseReporterResults, type ReporterMode } from '@cupboard/reporter';
 import pc from 'picocolors';
 import { describe, expect, it, vi } from 'vitest';
+import { z } from 'zod';
 
 import {
 	type CliUi,
@@ -36,16 +37,14 @@ function captureStream(): { stream: Writable; written: () => string } {
 	return { stream, written: () => chunks.join('') };
 }
 
-function withoutDurations(events: readonly unknown[]): readonly unknown[] {
-	return events.map((event) =>
-		isRecord(event) && typeof event.durationMs === 'number'
-			? { ...event, durationMs: 'number' }
-			: event
-	);
-}
+const durationEventSchema = z.looseObject({ durationMs: z.number() });
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
+function withoutDurations(events: readonly unknown[]): readonly unknown[] {
+	return events.map((event) => {
+		const parsed = durationEventSchema.safeParse(event);
+
+		return parsed.success ? { ...parsed.data, durationMs: 'number' } : event;
+	});
 }
 
 describe('formatRows', () => {

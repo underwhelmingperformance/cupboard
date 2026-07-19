@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
+import { z } from 'zod';
 
 import { temporaryRoot, withTemporaryDirectory } from './filesystem.ts';
 import { runCommand } from './process.ts';
@@ -154,21 +155,30 @@ async function isolatedEnvironment(home: string): Promise<NodeJS.ProcessEnv> {
 	};
 }
 
-interface PathInfoJson {
-	readonly narHash: string;
-	readonly narSize: number;
-	readonly references: readonly string[];
-	readonly ca?: string | null;
-	readonly deriver?: string | null;
-}
+const pathInfoJsonSchema = z.object({
+	narHash: z.string(),
+	narSize: z.number(),
+	references: z.array(z.string()),
+	ca: z.string().nullish(),
+	deriver: z.string().nullish()
+});
 
 function parsePathInfo(source: string, storePath: string): NixPathInfo {
-	const parsed = JSON.parse(source) as Record<string, unknown>;
-	const entry = parsed[storePath];
+	const document = z
+		.record(z.string(), z.unknown())
+		.safeParse(JSON.parse(source));
 
-	if (!isPathInfoJson(entry)) {
+	if (!document.success) {
 		throw new InvalidNixPathInfoError(storePath, source);
 	}
+
+	const parsed = pathInfoJsonSchema.safeParse(document.data[storePath]);
+
+	if (!parsed.success) {
+		throw new InvalidNixPathInfoError(storePath, source);
+	}
+
+	const entry = parsed.data;
 
 	return {
 		storePath,
@@ -178,21 +188,6 @@ function parsePathInfo(source: string, storePath: string): NixPathInfo {
 		ca: entry.ca ?? undefined,
 		deriver: entry.deriver ?? undefined
 	};
-}
-
-function isPathInfoJson(value: unknown): value is PathInfoJson {
-	if (typeof value !== 'object' || value === null) {
-		return false;
-	}
-
-	const record = value as Record<string, unknown>;
-
-	return (
-		typeof record.narHash === 'string' &&
-		typeof record.narSize === 'number' &&
-		Array.isArray(record.references) &&
-		record.references.every((reference) => typeof reference === 'string')
-	);
 }
 
 function sriToHash(value: string): NixSha256Hash {
