@@ -30,6 +30,8 @@ function manifestPnpmVersion(): string {
 		JSON.parse(readFileSync(manifestPath, 'utf8'))
 	);
 
+	// The field may carry a corepack integrity suffix (`+sha512.<hash>`);
+	// the actions install by bare version, so parity compares that.
 	return manifest.packageManager.replace(/^pnpm@/, '').replace(/\+[^+]*$/, '');
 }
 
