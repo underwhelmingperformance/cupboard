@@ -3,7 +3,11 @@ import {
 	retryingFetcher
 } from '@cupboard/shared/retry';
 
-import { InvalidWorkerUrlError, UnreachableHostError } from '../errors.ts';
+import {
+	InvalidWorkerUrlBaseError,
+	InvalidWorkerUrlError,
+	UnreachableHostError
+} from '../errors.ts';
 
 /**
  * A fetcher carrying the client's shared resilience: a transient failure retries
@@ -25,6 +29,19 @@ export function parseWorkerUrl(value: string | URL): URL {
 		url = new URL(value);
 	} catch {
 		throw new InvalidWorkerUrlError(String(value));
+	}
+
+	// Every route resolves under the base's origin and path, so a URL
+	// carrying anything else would corrupt or missend the requests built on
+	// it.
+	if (
+		(url.protocol !== 'http:' && url.protocol !== 'https:') ||
+		url.username !== '' ||
+		url.password !== '' ||
+		url.search !== '' ||
+		url.hash !== ''
+	) {
+		throw new InvalidWorkerUrlBaseError();
 	}
 
 	url.pathname = url.pathname.replace(/\/+$/u, '') || '/';

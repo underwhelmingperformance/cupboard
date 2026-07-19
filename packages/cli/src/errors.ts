@@ -120,6 +120,18 @@ export class InvalidWorkerUrlError extends CliUsageError {
 	}
 }
 
+/**
+ * A Worker URL carrying credentials, a query or a fragment. Every route
+ * resolves under the base's origin and path, so honouring such a URL would
+ * corrupt or missend the requests built on it.
+ */
+export class InvalidWorkerUrlBaseError extends CliUsageError {
+	constructor() {
+		super('Worker URL must carry nothing beyond origin and path');
+		this.name = 'InvalidWorkerUrlBaseError';
+	}
+}
+
 export class UnreachableHostError extends CliError {
 	constructor(
 		public readonly host: string,
