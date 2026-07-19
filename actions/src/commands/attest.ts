@@ -3,14 +3,12 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
-import { workflowCommands } from '@cupboard/shared/github-actions';
+import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { InvalidInputError } from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { collectLines, provided } from '../options.ts';
-
-const githubActions = workflowCommands();
 
 interface StorePathDigest {
 	readonly storePath: string;
@@ -113,7 +111,8 @@ export function resolveAttestInputs(
 
 export async function attestAction(
 	options: AttestOptions,
-	environment: Environment = env
+	environment: Environment = env,
+	reporter: Reporter = createGithubReporter()
 ): Promise<void> {
 	const inputs = resolveAttestInputs(options, environment);
 	const nix = Nix.open();
@@ -123,7 +122,7 @@ export async function attestAction(
 	const { subjects, skipped } = attestationSubjects(infos);
 
 	for (const storePath of skipped) {
-		githubActions.warning(
+		reporter.warn(
 			`Not attesting ${storePath}: this machine did not build it, so this run cannot claim its provenance`
 		);
 	}

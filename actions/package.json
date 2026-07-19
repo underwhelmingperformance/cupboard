@@ -8,6 +8,8 @@
 		"@cupboard/logger": "workspace:*",
 		"@cupboard/nix": "workspace:*",
 		"@cupboard/nix-store": "workspace:*",
+		"@cupboard/protocol": "workspace:*",
+		"@cupboard/reporter": "workspace:*",
 		"@cupboard/shared": "workspace:*",
 		"commander": "^15.0.0",
 		"semver": "^7.8.5",

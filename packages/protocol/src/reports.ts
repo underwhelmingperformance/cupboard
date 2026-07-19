@@ -46,6 +46,34 @@ export const verifyReportSchema = z.strictObject({
 });
 export type ParsedVerifyReport = z.output<typeof verifyReportSchema>;
 
+// The `kind` under which `cupboard push` emits its final summary result. A
+// consumer that reads the reporter's result file addresses the summary by this
+// name.
+export const pushSummaryResultKind = 'push-summary';
+
+// A path the push could not upload or commit, and the stage it failed at,
+// carried in the push summary so a consumer can report each failure.
+export const pushFailureSchema = z.strictObject({
+	storePathHash: z.string(),
+	storePath: z.string(),
+	stage: z.enum(['upload', 'commit', 'verify']),
+	reason: z.string()
+});
+export type ParsedPushFailure = z.output<typeof pushFailureSchema>;
+
+// The `data` behind a `push-summary` result: how many paths `cupboard push`
+// uploaded, reused from the cache or skipped, how many bytes it transferred, and
+// the paths that failed. The GitHub Action reads it back from the result file to
+// set its step outputs.
+export const pushSummarySchema = z.strictObject({
+	uploadedPaths: countSchema,
+	reusedBlobs: countSchema,
+	skipped: countSchema,
+	uploadedBytes: countSchema,
+	failures: z.array(pushFailureSchema)
+});
+export type ParsedPushSummary = z.output<typeof pushSummarySchema>;
+
 // Whether the R2 credentials bound to the tenant script sign requests R2
 // accepts: the values cannot be read back, so the deployment proves them by
 // performing a signed probe itself. The probe runs inside a tenant's Durable
@@ -85,3 +113,5 @@ export type CheckDiscrepancy = z.input<typeof checkDiscrepancySchema>;
 export type CheckReport = z.input<typeof checkReportSchema>;
 export type ControlCheckReport = z.input<typeof controlCheckReportSchema>;
 export type VerifyReport = z.input<typeof verifyReportSchema>;
+export type PushFailure = z.input<typeof pushFailureSchema>;
+export type PushSummary = z.input<typeof pushSummarySchema>;

@@ -107,6 +107,12 @@ importers:
       '@cupboard/nix-store':
         specifier: workspace:*
         version: link:../packages/nix-store
+      '@cupboard/protocol':
+        specifier: workspace:*
+        version: link:../packages/protocol
+      '@cupboard/reporter':
+        specifier: workspace:*
+        version: link:../packages/reporter
       '@cupboard/shared':
         specifier: workspace:*
         version: link:../packages/shared

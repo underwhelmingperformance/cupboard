@@ -4,7 +4,7 @@ import { chmod, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { arch, platform } from 'node:process';
 
-import { workflowCommands } from '@cupboard/shared/github-actions';
+import type { Reporter } from '@cupboard/reporter';
 import { createOctokitClient, RequestError } from '@cupboard/shared/octokit';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
@@ -33,8 +33,6 @@ import {
 	UnsupportedPlatformError
 } from './errors.ts';
 import { type Environment, parseLines } from './inputs.ts';
-
-const githubActions = workflowCommands();
 
 interface ReleaseAsset {
 	readonly name: string;
@@ -176,32 +174,56 @@ export function releaseWorkflowIdentityRegex(
 }
 
 export async function installCupboard(
-	options: InstallCupboardOptions
+	options: InstallCupboardOptions,
+	reporter: Reporter
 ): Promise<InstalledCupboard> {
-	const release = await fetchRelease(buildOctokit(options), options);
+	const release = await reporter.phase(
+		'Resolve cupboard release',
+		async (phase) => {
+			const resolved = await fetchRelease(buildOctokit(options), options);
+			phase.fact('Version', resolved.tagName);
+
+			return resolved;
+		}
+	);
+
 	const assetName = assetNameFor(release.tagName);
 	const binaryPath = path.join(options.installDirectory, 'cupboard');
-
 	const asset = findReleaseAsset(release, assetName);
 	const checksumAsset = findReleaseAsset(release, 'checksums.txt');
 	const archivePath = path.join(options.installDirectory, assetName);
 	const checksumsPath = path.join(options.installDirectory, 'checksums.txt');
 
-	await downloadAsset(asset, archivePath, options.githubToken);
-	await downloadAsset(checksumAsset, checksumsPath, options.githubToken);
+	await reporter.phase(`Download ${assetName}`, async () => {
+		await downloadAsset(asset, archivePath, options.githubToken);
+		await downloadAsset(checksumAsset, checksumsPath, options.githubToken);
+	});
 
-	const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
-	const expectedChecksum = checksums.get(assetName);
+	await reporter.phase('Verify checksum', async () => {
+		const checksums = parseChecksums(await readFile(checksumsPath, 'utf8'));
+		const expectedChecksum = checksums.get(assetName);
 
-	if (expectedChecksum === undefined) {
-		throw new MissingChecksumError(assetName);
-	}
+		if (expectedChecksum === undefined) {
+			throw new MissingChecksumError(assetName);
+		}
 
-	await verifyChecksum(archivePath, expectedChecksum);
-	await verifyReleaseAttestation(options, archivePath, release.tagName);
-	run('tar', ['-xzf', archivePath, '-C', options.installDirectory]);
-	await chmod(binaryPath, 0o755);
-	run(binaryPath, ['--version']);
+		await verifyChecksum(archivePath, expectedChecksum);
+	});
+
+	await reporter.phase('Verify release attestation', async (phase) => {
+		const builtFrom = await verifyReleaseAttestation(
+			options,
+			archivePath,
+			release.tagName
+		);
+		phase.fact('Built from', builtFrom);
+	});
+
+	await reporter.phase('Install cupboard binary', async () => {
+		run('tar', ['-xzf', archivePath, '-C', options.installDirectory]);
+		await chmod(binaryPath, 0o755);
+		run(binaryPath, ['--version']);
+	});
 
 	return {
 		binaryPath,
@@ -325,12 +347,18 @@ async function verifyChecksum(
 	}
 }
 
+/**
+ * Verify that the downloaded archive was built by the release repository's
+ * release workflow, and return the source commit the build came from (which
+ * equals the commit the tag points at). Throws when no published attestation
+ * verifies.
+ */
 export async function verifyReleaseAttestation(
 	options: Omit<InstallCupboardOptions, 'installDirectory'>,
 	archivePath: string,
 	tagName: string,
 	dependencies: VerifyReleaseDependencies = {}
-): Promise<void> {
+): Promise<string> {
 	const octokit = buildOctokit(options, dependencies.fetch);
 	const verify = dependencies.verify ?? verifyBundle;
 	const [owner, repo] = splitRepository(options.releaseRepository);
@@ -371,11 +399,7 @@ export async function verifyReleaseAttestation(
 				sourceRepository: options.releaseRepository
 			});
 
-			githubActions.notice(
-				`Verified ${archiveName}: built by the ${options.releaseRepository} release workflow from ${tagCommit}.`
-			);
-
-			return;
+			return tagCommit;
 		} catch (error) {
 			lastFailure = error;
 		}

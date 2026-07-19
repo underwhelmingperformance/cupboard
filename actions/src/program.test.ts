@@ -1,8 +1,13 @@
+import { markErrorReported } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
 import { CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
 
-import { buildProgram, runAction } from './program.ts';
+import {
+	CupboardReportedError,
+	InvalidInputError
+} from './errors.ts';
+import { buildProgram, reportActionFailure, runAction } from './program.ts';
 
 const noRunnerEnvironment = {};
 
@@ -43,6 +48,18 @@ describe('buildProgram', () => {
 		expectCommanderError(result);
 		expect(result.exitCode).toBe(0);
 	});
+
+	it('maps the build installables option into the typed command input', async () => {
+		await expect(
+			buildProgram(noRunnerEnvironment).parseAsync([
+				'node',
+				'cupboard-action',
+				'build',
+				'--installables',
+				''
+			])
+		).rejects.toBeInstanceOf(InvalidInputError);
+	});
 });
 
 describe('runAction', () => {
@@ -52,5 +69,63 @@ describe('runAction', () => {
 		['a missing required option', ['node', 'cupboard-action', 'push']]
 	])('maps %s to the usage exit code', async (_name, argv) => {
 		expect(await runAction(argv, noRunnerEnvironment)).toBe(usageExitCode);
+	});
+
+	it('does not annotate a result-file failure the child already reported', () => {
+		const annotations: string[] = [];
+		const error = new CupboardReportedError(3, [], undefined, true);
+
+		const exitCode = reportActionFailure(
+			{
+				error(message) {
+					annotations.push(message);
+				}
+			},
+			error
+		);
+
+		expect({ annotations, exitCode }).toStrictEqual({
+			annotations: [],
+			exitCode: 3
+		});
+	});
+
+	it('still annotates a legacy child failure converted from JSON output', () => {
+		const annotations: string[] = [];
+		const error = new CupboardReportedError(3, [], 'tenant denied the push');
+
+		const exitCode = reportActionFailure(
+			{
+				error(message) {
+					annotations.push(message);
+				}
+			},
+			error
+		);
+
+		expect({ annotations, exitCode }).toStrictEqual({
+			annotations: ['tenant denied the push'],
+			exitCode: 3
+		});
+	});
+
+	it('does not annotate a failure a reporter phase already annotated', () => {
+		const annotations: string[] = [];
+		const error = new InvalidInputError('input', 'phase failed');
+		markErrorReported(error);
+
+		const exitCode = reportActionFailure(
+			{
+				error(message) {
+					annotations.push(message);
+				}
+			},
+			error
+		);
+
+		expect({ annotations, exitCode }).toStrictEqual({
+			annotations: [],
+			exitCode: usageExitCode
+		});
 	});
 });

@@ -1,36 +1,146 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import process from 'node:process';
 
-import { workflowCommands } from '@cupboard/shared/github-actions';
+import {
+	parseReporterResults,
+	type ReporterResultEvent,
+	reporterResultEventSchema
+} from '@cupboard/reporter';
+import {
+	type WorkflowCommands,
+	workflowCommands
+} from '@cupboard/shared/github-actions';
+import { z } from 'zod';
 
 import { CommandFailedError, CupboardReportedError } from './errors.ts';
+import { type Environment, requireEnvironment } from './inputs.ts';
 
-const githubActions = workflowCommands();
+export type CupboardResultProtocol = 'result-file' | 'legacy-stderr';
 
-interface ReporterEvent {
-	readonly event: string;
-	readonly name?: string;
-	readonly message?: string;
-	readonly label?: string;
-	readonly value?: string;
+export interface CupboardRunResult {
+	readonly protocol: CupboardResultProtocol;
+	readonly results: readonly ReporterResultEvent[];
+}
+
+export interface CupboardRunDependencies {
+	readonly legacyCommands?: Pick<WorkflowCommands, 'warning'>;
 }
 
 /**
- * Run the cupboard binary, forwarding its output, and turn the line-delimited
- * events it prints on stderr into GitHub annotations: every `warn` becomes a
- * warning, and a failure rejects with the `error` event the binary reported, so
- * the entry point annotates the cause the binary named.
+ * Run the installed cupboard binary, letting its own output (workflow commands,
+ * groups and annotations) stream straight to the runner log. A binary that
+ * supports the result-file protocol records its machine-readable results under
+ * `RUNNER_TEMP`; an older release is driven in JSON mode and its result events
+ * are read from stderr instead. A non-zero exit throws
+ * {@link CupboardReportedError}, carrying whatever results the run recorded.
  */
-export function runCupboard(
+export async function runCupboard(
 	binaryPath: string,
-	arguments_: readonly string[]
-): Promise<void> {
+	arguments_: readonly string[],
+	environment: Environment,
+	dependencies: CupboardRunDependencies = {}
+): Promise<readonly ReporterResultEvent[]> {
+	const protocol = await detectCupboardResultProtocol(binaryPath);
+	const run = await runCupboardWithProtocol(
+		binaryPath,
+		arguments_,
+		environment,
+		protocol,
+		dependencies
+	);
+
+	return run.results;
+}
+
+/** Run cupboard using a result protocol that the caller has already detected. */
+export async function runCupboardWithProtocol(
+	binaryPath: string,
+	arguments_: readonly string[],
+	environment: Environment,
+	protocol: CupboardResultProtocol,
+	dependencies: CupboardRunDependencies = {}
+): Promise<CupboardRunResult> {
+	if (protocol === 'legacy-stderr') {
+		return runLegacyCupboard(
+			binaryPath,
+			arguments_,
+			dependencies.legacyCommands ?? workflowCommands()
+		);
+	}
+
+	const resultFile = path.join(
+		requireEnvironment(environment, 'RUNNER_TEMP'),
+		`cupboard-result-${randomUUID()}.jsonl`
+	);
+
+	const status = await spawnCupboard(binaryPath, [
+		'--output-mode',
+		'github',
+		'--result-file',
+		resultFile,
+		...arguments_
+	]);
+
+	const results = await readResults(resultFile, status);
+
+	if (status !== 0) {
+		throw new CupboardReportedError(status, results, undefined, true);
+	}
+
+	return { protocol: 'result-file', results };
+}
+
+export async function detectCupboardResultProtocol(
+	binaryPath: string
+): Promise<CupboardResultProtocol> {
 	return new Promise((resolve, reject) => {
-		const child = spawn(binaryPath, [...arguments_], {
-			stdio: ['inherit', 'inherit', 'pipe']
+		const child = spawn(binaryPath, ['--help'], {
+			stdio: ['ignore', 'pipe', 'ignore']
 		});
-		const events = new CupboardEventStream((message) => {
-			githubActions.warning(message);
+		let output = '';
+
+		child.stdout.setEncoding('utf8');
+		child.stdout.on('data', (chunk: string) => {
+			output += chunk;
+		});
+
+		child.once('error', (error) => {
+			reject(
+				new CommandFailedError(binaryPath, child.exitCode, error.message, {
+					cause: error
+				})
+			);
+		});
+
+		child.once('close', (status) => {
+			if (status !== 0) {
+				reject(new CommandFailedError(binaryPath, status));
+				return;
+			}
+
+			resolve(
+				/(?:^|\s)--result-file(?:\s|[<=])/mu.test(output)
+					? 'result-file'
+					: 'legacy-stderr'
+			);
+		});
+	});
+}
+
+async function runLegacyCupboard(
+	binaryPath: string,
+	arguments_: readonly string[],
+	commands: Pick<WorkflowCommands, 'warning'>
+): Promise<CupboardRunResult> {
+	const events = new LegacyResultStream((message) => {
+		commands.warning(message);
+	});
+	const status = await new Promise<number | null>((resolve, reject) => {
+		const child = spawn(binaryPath, ['--output-mode', 'json', ...arguments_], {
+			stdio: ['inherit', 'inherit', 'pipe']
 		});
 
 		child.stderr.setEncoding('utf8');
@@ -47,49 +157,77 @@ export function runCupboard(
 			);
 		});
 
-		child.once('close', (code) => {
-			events.flush();
-
-			if (code === 0) {
-				resolve();
-				return;
-			}
-
-			const failure = events.lastError();
-
-			reject(
-				failure === undefined
-					? new CommandFailedError(binaryPath, code)
-					: new CupboardReportedError(failure, code)
-			);
-		});
+		child.once('close', resolve);
 	});
+
+	events.flush();
+
+	if (status !== 0) {
+		throw new CupboardReportedError(
+			status,
+			events.results(),
+			events.lastError()
+		);
+	}
+
+	return { protocol: 'legacy-stderr', results: events.results() };
 }
 
-/**
- * Parses the cupboard reporter's line-delimited JSON: emits a warning for each
- * `warn` event and remembers the last `error` event's message.
- */
-export class CupboardEventStream {
+const legacyValueSchema = z
+	.unknown()
+	.transform((value) => (typeof value === 'string' ? value : undefined));
+const legacyReporterEventSchema = z.looseObject({
+	event: z.string(),
+	name: legacyValueSchema.optional(),
+	message: legacyValueSchema.optional(),
+	label: legacyValueSchema.optional(),
+	value: legacyValueSchema.optional()
+});
+type LegacyReporterEvent = z.output<typeof legacyReporterEventSchema>;
+
+class LegacyResultStream {
 	private buffer = '';
+	private readonly events: ReporterResultEvent[] = [];
 	private lastErrorMessage: string | undefined;
 
 	constructor(private readonly onWarning: (message: string) => void) {}
 
 	private handleLine(line: string): void {
-		const event = parseEvent(line);
+		let value: unknown;
 
-		if (event === undefined) {
+		try {
+			value = JSON.parse(line);
+		} catch {
 			return;
 		}
 
-		if (event.event === 'error') {
-			this.lastErrorMessage = errorMessage(event);
+		const event = legacyReporterEventSchema.safeParse(value);
+
+		if (!event.success) {
 			return;
 		}
 
-		if (event.event === 'warn') {
-			this.onWarning(warningMessage(event));
+		if (event.data.event === 'error') {
+			this.lastErrorMessage = errorMessage(event.data);
+			return;
+		}
+
+		if (event.data.event === 'warn') {
+			this.onWarning(warningMessage(event.data));
+			return;
+		}
+
+		if (event.data.event !== 'result') {
+			return;
+		}
+
+		const parsed = reporterResultEventSchema.safeParse({
+			kind: event.data.kind,
+			data: event.data.data
+		});
+
+		if (parsed.success) {
+			this.events.push(parsed.data);
 		}
 	}
 
@@ -114,49 +252,71 @@ export class CupboardEventStream {
 		this.buffer = '';
 	}
 
+	results(): readonly ReporterResultEvent[] {
+		return this.events;
+	}
+
 	lastError(): string | undefined {
 		return this.lastErrorMessage;
 	}
 }
 
-function errorMessage(event: ReporterEvent): string {
+function errorMessage(event: LegacyReporterEvent): string {
 	return event.message ?? event.name ?? 'cupboard reported a failure';
 }
 
-function warningMessage(event: ReporterEvent): string {
+function warningMessage(event: LegacyReporterEvent): string {
 	const label = event.label ?? event.message ?? 'cupboard reported a warning';
 
 	return event.value === undefined ? label : `${label}: ${event.value}`;
 }
 
-function parseEvent(line: string): ReporterEvent | undefined {
-	const trimmed = line.trim();
+function spawnCupboard(
+	binaryPath: string,
+	arguments_: readonly string[]
+): Promise<number | null> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(binaryPath, [...arguments_], { stdio: 'inherit' });
 
-	if (!trimmed.startsWith('{')) {
-		return undefined;
-	}
+		child.once('error', (error) => {
+			reject(
+				new CommandFailedError(binaryPath, child.exitCode, error.message, {
+					cause: error
+				})
+			);
+		});
 
-	let parsed: unknown;
-
-	try {
-		parsed = JSON.parse(trimmed);
-	} catch {
-		return undefined;
-	}
-
-	if (!isRecord(parsed) || typeof parsed.event !== 'string') {
-		return undefined;
-	}
-
-	return {
-		event: parsed.event,
-		...(typeof parsed.name === 'string' && { name: parsed.name }),
-		...(typeof parsed.message === 'string' && { message: parsed.message }),
-		...(typeof parsed.label === 'string' && { label: parsed.label }),
-		...(typeof parsed.value === 'string' && { value: parsed.value })
-	};
+		child.once('close', (code) => {
+			resolve(code);
+		});
+	});
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null;
+async function readResults(
+	resultFile: string,
+	status: number | null
+): Promise<readonly ReporterResultEvent[]> {
+	return parseReporterResults(await readResultFile(resultFile, status));
+}
+
+// A failed run may exit before it opens the result file at all; treat a missing
+// file as no results in that case, so the exit status is what surfaces. On a
+// clean exit the file is expected, so a read failure propagates.
+async function readResultFile(
+	resultFile: string,
+	status: number | null
+): Promise<string> {
+	try {
+		return await readFile(resultFile, 'utf8');
+	} catch (error) {
+		if (status !== 0 && isFileNotFound(error)) {
+			return '';
+		}
+
+		throw error;
+	}
+}
+
+function isFileNotFound(error: unknown): boolean {
+	return error instanceof Error && 'code' in error && error.code === 'ENOENT';
 }

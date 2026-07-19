@@ -218,7 +218,7 @@ describe('verifyReleaseAttestation', () => {
 				verify: () =>
 					Promise.resolve(verifiedAs(archive.digest, attestationTagCommit))
 			})
-		).resolves.toBeUndefined();
+		).resolves.toBe(attestationTagCommit);
 	});
 
 	it('rejects a bundle built from a different commit', async () => {
@@ -268,7 +268,7 @@ describe('verifyReleaseAttestation', () => {
 						: Promise.resolve(verifiedAs(archive.digest, attestationTagCommit));
 				}
 			})
-		).resolves.toBeUndefined();
+		).resolves.toBe(attestationTagCommit);
 	});
 
 	it('rejects a bundle whose subject does not match the archive', async () => {

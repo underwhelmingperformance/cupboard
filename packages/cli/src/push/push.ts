@@ -14,6 +14,10 @@ import type {
 	AttestationNegotiateRequest,
 	AttestationNegotiateResponse
 } from '@cupboard/protocol/attestations';
+import {
+	type PushSummary,
+	pushSummaryResultKind
+} from '@cupboard/protocol/reports';
 import type {
 	RootSetBody,
 	RootSetResponse,
@@ -521,9 +525,17 @@ async function runPushFlow(
 			isSkip(decision)
 		).length;
 
+		const summary: PushSummary = {
+			uploadedPaths,
+			reusedBlobs,
+			skipped,
+			uploadedBytes,
+			failures
+		};
+
 		reporter.result({
-			kind: 'push-summary',
-			data: { uploadedPaths, reusedBlobs, skipped, uploadedBytes, failures },
+			kind: pushSummaryResultKind,
+			data: summary,
 			rows: [
 				{ label: 'Uploaded paths', value: formatCount(uploadedPaths) },
 				{ label: 'Already cached', value: formatCount(reusedBlobs) },
