@@ -1,3 +1,4 @@
+import type { ReporterResultEvent } from '@cupboard/reporter';
 import {
 	CodedError,
 	genericExitCode,
@@ -181,19 +182,43 @@ export class CommandFailedError extends CodedError {
 }
 
 /**
- * A failure the cupboard binary reported through its own event stream, carrying
- * the message and exit code it named so the entry point annotates them.
+ * The cupboard binary exited non-zero. It reported the cause itself through its
+ * own output, so this carries only the exit status (which the action adopts as
+ * its own) and any result events the run recorded before failing.
  */
 export class CupboardReportedError extends CodedError {
 	constructor(
-		message: string,
-		public readonly status: number | null
+		public readonly status: number | null,
+		public readonly results: readonly ReporterResultEvent[],
+		reportedMessage?: string,
+		public readonly wasReported = false
 	) {
-		super(message);
+		super(reportedMessage ?? `cupboard exited with status ${String(status)}`);
 		this.name = 'CupboardReportedError';
 	}
 
 	override get exitCode(): number {
 		return this.status ?? genericExitCode;
 	}
+}
+
+/**
+ * A `cupboard push` succeeded but recorded no push summary, so the action has no
+ * counts to publish as its outputs. `kinds` lists the result kinds the run did
+ * record, to show what arrived in the summary's place.
+ */
+export class PushSummaryMissingError extends CodedError {
+	constructor(public readonly kinds: readonly string[]) {
+		super('the cupboard push finished without recording a summary result');
+		this.name = 'PushSummaryMissingError';
+	}
+}
+
+export function wasAlreadyReported(error: unknown): boolean {
+	return (
+		typeof error === 'object' &&
+		error !== null &&
+		'wasReported' in error &&
+		error.wasReported === true
+	);
 }

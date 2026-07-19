@@ -60,6 +60,18 @@ outputs:
   cupboard-version:
     description: Resolved cupboard release tag.
     value: ${{ steps.push.outputs.cupboard-version }}
+  uploaded-paths:
+    description: Number of store paths uploaded to the cache.
+    value: ${{ steps.push.outputs.uploaded-paths }}
+  reused-blobs:
+    description: Number of paths already present in the cache and reused.
+    value: ${{ steps.push.outputs.reused-blobs }}
+  skipped-paths:
+    description: Number of paths skipped because nothing needed uploading.
+    value: ${{ steps.push.outputs.skipped-paths }}
+  uploaded-bytes:
+    description: Total number of bytes uploaded to the cache.
+    value: ${{ steps.push.outputs.uploaded-bytes }}
 runs:
   using: composite
   steps:

@@ -3,10 +3,24 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { Nix } from '@cupboard/nix';
+import {
+	type ParsedPushSummary,
+	pushSummaryResultKind,
+	pushSummarySchema
+} from '@cupboard/protocol/reports';
+import {
+	createGithubReporter,
+	type Reporter,
+	type ReporterResultEvent
+} from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { runCupboard } from '../cupboard-run.ts';
-import { InvalidInputError, MissingInputError } from '../errors.ts';
+import {
+	InvalidInputError,
+	MissingInputError,
+	PushSummaryMissingError
+} from '../errors.ts';
 import { type Environment, requireEnvironment, setOutput } from '../inputs.ts';
 import { collectLines, isEnabled, provided } from '../options.ts';
 import {
@@ -161,21 +175,25 @@ export function resolvePushInputs(
 
 export async function pushAction(
 	options: PushOptions,
-	environment: Environment = env
+	environment: Environment = env,
+	reporter: Reporter = createGithubReporter()
 ): Promise<void> {
 	const inputs = resolvePushInputs(options, environment);
 	const installDirectory = path.resolve(inputs.installDirectory);
 
 	await mkdir(installDirectory, { recursive: true });
 
-	const installedCupboard = await installCupboard({
-		installDirectory,
-		releaseRepository: inputs.releaseRepository,
-		version: inputs.version,
-		includePrereleases: inputs.includePrereleases,
-		githubToken: inputs.githubToken,
-		environment
-	});
+	const installedCupboard = await installCupboard(
+		{
+			installDirectory,
+			releaseRepository: inputs.releaseRepository,
+			version: inputs.version,
+			includePrereleases: inputs.includePrereleases,
+			githubToken: inputs.githubToken,
+			environment
+		},
+		reporter
+	);
 
 	const paths = resolveStorePaths(Nix.open(), inputs.paths);
 	const arguments_ = buildPushArguments({
@@ -192,7 +210,38 @@ export async function pushAction(
 
 	await setOutput(environment, 'cupboard-path', installedCupboard.binaryPath);
 	await setOutput(environment, 'cupboard-version', installedCupboard.version);
-	await runCupboard(installedCupboard.binaryPath, arguments_);
+
+	const results = await runCupboard(
+		installedCupboard.binaryPath,
+		arguments_,
+		environment
+	);
+
+	await publishPushOutputs(environment, requirePushSummary(results));
+}
+
+async function publishPushOutputs(
+	environment: Environment,
+	summary: ParsedPushSummary
+): Promise<void> {
+	await setOutput(environment, 'uploaded-paths', String(summary.uploadedPaths));
+	await setOutput(environment, 'reused-blobs', String(summary.reusedBlobs));
+	await setOutput(environment, 'skipped-paths', String(summary.skipped));
+	await setOutput(environment, 'uploaded-bytes', String(summary.uploadedBytes));
+}
+
+// A successful push always records its summary. Its absence means the run did
+// not report what it did, so there is nothing to publish and the action fails.
+function requirePushSummary(
+	results: readonly ReporterResultEvent[]
+): ParsedPushSummary {
+	for (const event of results) {
+		if (event.kind === pushSummaryResultKind) {
+			return pushSummarySchema.parse(event.data);
+		}
+	}
+
+	throw new PushSummaryMissingError(results.map((event) => event.kind));
 }
 
 function resolveStorePaths(nix: Nix, paths: readonly string[]): string[] {

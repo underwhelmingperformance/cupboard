@@ -1,6 +1,7 @@
 import { env } from 'node:process';
 
 import { configureLogging, rootLogger } from '@cupboard/logger';
+import { wasErrorReported } from '@cupboard/reporter';
 import {
 	CodedError,
 	genericExitCode,
@@ -12,9 +13,10 @@ import { Command, CommanderError } from 'commander';
 import { registerAttestCommand } from './commands/attest.ts';
 import { registerPushCommand } from './commands/push.ts';
 import { registerSetupCommand } from './commands/setup.ts';
+import { wasAlreadyReported } from './errors.ts';
 import type { Environment } from './inputs.ts';
 
-type GithubActions = ReturnType<typeof workflowCommands>;
+type GithubActions = Pick<ReturnType<typeof workflowCommands>, 'error'>;
 
 /**
  * The `cupboard-action` command: the composite GitHub Action's `setup`, `push`
@@ -64,7 +66,7 @@ export async function runAction(
 	}
 }
 
-function reportActionFailure(
+export function reportActionFailure(
 	githubActions: GithubActions,
 	error: unknown
 ): number {
@@ -81,12 +83,16 @@ function reportActionFailure(
 	}
 
 	if (error instanceof CodedError) {
-		githubActions.error(error.message);
+		if (!wasAlreadyReported(error) && !wasErrorReported(error)) {
+			githubActions.error(error.message);
+		}
 
 		return error.exitCode;
 	}
 
-	githubActions.error(error instanceof Error ? error.message : String(error));
+	if (!wasErrorReported(error)) {
+		githubActions.error(error instanceof Error ? error.message : String(error));
+	}
 	// The full error, with its stack, goes to the Actions debug log.
 	rootLogger().debug('action failed', { error });
 

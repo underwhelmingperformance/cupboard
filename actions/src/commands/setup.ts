@@ -4,7 +4,7 @@ import path from 'node:path';
 import { env } from 'node:process';
 
 import { NixConfig, renderNetrc } from '@cupboard/nix-store/nix-config';
-import { workflowCommands } from '@cupboard/shared/github-actions';
+import { createGithubReporter, type Reporter } from '@cupboard/reporter';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import type { Command } from 'commander';
 
@@ -31,8 +31,6 @@ import {
 	cacheUrlFor,
 	isHttpUrl
 } from '../substituters.ts';
-
-const githubActions = workflowCommands();
 
 export interface SetupOptions {
 	readonly cupboardVersion?: string;
@@ -178,21 +176,25 @@ export function resolveSetupInputs(
 
 export async function setupAction(
 	options: SetupOptions,
-	environment: Environment = env
+	environment: Environment = env,
+	reporter: Reporter = createGithubReporter()
 ): Promise<void> {
 	const inputs = resolveSetupInputs(options, environment);
 	const installDirectory = path.resolve(inputs.installDirectory);
 
 	await mkdir(installDirectory, { recursive: true });
 
-	const installedCupboard = await installCupboard({
-		installDirectory,
-		releaseRepository: inputs.releaseRepository,
-		version: inputs.version,
-		includePrereleases: inputs.includePrereleases,
-		githubToken: inputs.githubToken,
-		environment
-	});
+	const installedCupboard = await installCupboard(
+		{
+			installDirectory,
+			releaseRepository: inputs.releaseRepository,
+			version: inputs.version,
+			includePrereleases: inputs.includePrereleases,
+			githubToken: inputs.githubToken,
+			environment
+		},
+		reporter
+	);
 
 	if (inputs.addToPath) {
 		await appendEnvironmentFile(
@@ -208,13 +210,16 @@ export async function setupAction(
 		return;
 	}
 
-	await configureNix({ ...inputs, environment });
+	await configureNix({ ...inputs, environment }, reporter);
 }
 
-async function configureNix(inputs: ConfigureNixInputs): Promise<void> {
+async function configureNix(
+	inputs: ConfigureNixInputs,
+	reporter: Reporter
+): Promise<void> {
 	const trustedPublicKey =
 		inputs.trustedPublicKey === ''
-			? await fetchTrustedPublicKey(inputs)
+			? await fetchTrustedPublicKey(inputs, reporter)
 			: inputs.trustedPublicKey;
 	const substituter = cacheUrlFor(inputs.cacheUrl, inputs.cache);
 	const runnerTemporaryDirectory = requireEnvironment(
@@ -263,7 +268,8 @@ function environmentFileBlock(name: string, value: string): string {
 }
 
 async function fetchTrustedPublicKey(
-	inputs: ConfigureNixInputs
+	inputs: ConfigureNixInputs,
+	reporter: Reporter
 ): Promise<string> {
 	const url = cachePublicKeyUrl(inputs.cacheUrl);
 	const response = await retryingFetcher(fetch)(url, {
@@ -281,7 +287,7 @@ async function fetchTrustedPublicKey(
 		throw new CachePublicKeyEmptyResponseError(url);
 	}
 
-	githubActions.warning(
+	reporter.warn(
 		'No trusted-public-key was supplied; trusting the cache signing key from /pubkey for this run.'
 	);
 

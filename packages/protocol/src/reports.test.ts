@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
 	checkDiscrepancySchema,
 	checkReportSchema,
+	pushSummarySchema,
 	verifyReportSchema
 } from './reports.ts';
 
@@ -164,5 +165,74 @@ describe('verifyReportSchema', () => {
 		}
 	])('rejects $name', ({ value }) => {
 		expect(verifyReportSchema.safeParse(value).success).toBe(false);
+	});
+});
+
+describe('pushSummarySchema', () => {
+	const failure = {
+		storePathHash: '0'.repeat(32),
+		storePath: '/nix/store/0000000000000000000000000000000000-foo',
+		stage: 'commit',
+		reason: 'D1 overloaded'
+	};
+
+	it('accepts a summary with failures', () => {
+		const value = {
+			uploadedPaths: 3,
+			reusedBlobs: 2,
+			skipped: 1,
+			uploadedBytes: 4096,
+			failures: [failure]
+		};
+
+		expect(pushSummarySchema.parse(value)).toStrictEqual(value);
+	});
+
+	it('accepts a clean summary with no failures', () => {
+		const value = {
+			uploadedPaths: 0,
+			reusedBlobs: 0,
+			skipped: 0,
+			uploadedBytes: 0,
+			failures: []
+		};
+
+		expect(pushSummarySchema.parse(value)).toStrictEqual(value);
+	});
+
+	it.each([
+		{
+			name: 'a negative count',
+			value: {
+				uploadedPaths: -1,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: []
+			}
+		},
+		{
+			name: 'an unknown failure stage',
+			value: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [{ ...failure, stage: 'surprise' }]
+			}
+		},
+		{
+			name: 'an unknown key',
+			value: {
+				uploadedPaths: 0,
+				reusedBlobs: 0,
+				skipped: 0,
+				uploadedBytes: 0,
+				failures: [],
+				surprise: true
+			}
+		}
+	])('rejects $name', ({ value }) => {
+		expect(pushSummarySchema.safeParse(value).success).toBe(false);
 	});
 });

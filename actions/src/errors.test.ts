@@ -9,6 +9,7 @@ import {
 	CachePublicKeyRequestFailedError,
 	ChecksumMismatchError,
 	CommandFailedError,
+	CupboardReportedError,
 	GithubApiError,
 	InvalidChecksumLineError,
 	InvalidInputError,
@@ -16,6 +17,7 @@ import {
 	MissingChecksumError,
 	MissingInputError,
 	NoReleaseFoundError,
+	PushSummaryMissingError,
 	ReleaseAssetNotFoundError,
 	UnsupportedPlatformError
 } from './errors.ts';
@@ -96,12 +98,39 @@ describe('action errors', () => {
 			'CommandFailedError',
 			new CommandFailedError('cupboard', 1),
 			genericExitCode
+		],
+		['CupboardReportedError', new CupboardReportedError(2, []), 2],
+		[
+			'PushSummaryMissingError',
+			new PushSummaryMissingError(['push-plan']),
+			genericExitCode
 		]
 	])('%s reports its name and exit code', (name, error, exitCode) => {
 		expect({ name: error.name, exitCode: error.exitCode }).toStrictEqual({
 			name,
 			exitCode
 		});
+	});
+});
+
+describe('CupboardReportedError', () => {
+	it('carries the status and recorded results', () => {
+		const results = [{ kind: 'push-summary', data: { uploadedPaths: 0 } }];
+		const error = new CupboardReportedError(2, results);
+
+		expect({
+			status: error.status,
+			exitCode: error.exitCode,
+			results: error.results
+		}).toStrictEqual({ status: 2, exitCode: 2, results });
+	});
+});
+
+describe('PushSummaryMissingError', () => {
+	it('records the kinds the run reported instead of a summary', () => {
+		const error = new PushSummaryMissingError(['push-plan', 'info']);
+
+		expect(error.kinds).toStrictEqual(['push-plan', 'info']);
 	});
 });
 
