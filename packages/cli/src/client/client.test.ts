@@ -578,6 +578,22 @@ describe('CupboardClient.commit', () => {
 });
 
 describe('CupboardClient cache prefix', () => {
+	it('removes every trailing slash before resolving a route', async () => {
+		let requested: string | undefined;
+		const client = new CupboardClient(
+			new URL('https://cupboard.test/t/acme///'),
+			(input) => {
+				requested = requestUrl(input);
+
+				return Promise.resolve(new Response('cupboard-1:key\n'));
+			}
+		);
+
+		await client.publicKey();
+
+		expect(requested).toBe('https://cupboard.test/t/acme/pubkey');
+	});
+
 	it('does not prefix a deployment-wide route', async () => {
 		const { client, captured } = capturingClient(
 			'cupboard-1:k\n',

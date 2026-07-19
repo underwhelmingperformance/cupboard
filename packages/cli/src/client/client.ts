@@ -110,7 +110,7 @@ export class CupboardClient {
 	// would discard the base path, because an absolute path replaces it.
 	private resolve(path: string): URL {
 		const url = new URL(this.baseUrl);
-		url.pathname = `${url.pathname.replace(/\/$/, '')}${path}`;
+		url.pathname = `${url.pathname.replace(/\/+$/, '')}${path}`;
 
 		return url;
 	}

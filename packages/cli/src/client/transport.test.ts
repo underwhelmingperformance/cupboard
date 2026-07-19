@@ -1,14 +1,19 @@
 import { describe, expect, it } from 'vitest';
 
-import { InvalidWorkerUrlError, UnreachableHostError } from '../errors.ts';
+import {
+	InvalidWorkerUrlBaseError,
+	InvalidWorkerUrlError,
+	UnreachableHostError
+} from '../errors.ts';
 
 import { parseWorkerUrl, reachableFetcher } from './transport.ts';
 
 describe('parseWorkerUrl', () => {
-	it('parses a valid URL', () => {
-		expect(parseWorkerUrl('https://cupboard.example.workers.dev').host).toBe(
-			'cupboard.example.workers.dev'
-		);
+	it.each([
+		['a bare host', 'https://cupboard.example.workers.dev'],
+		['a tenant path', 'https://cupboard.example.workers.dev/t/acme']
+	])('parses %s', (_name, value) => {
+		expect(parseWorkerUrl(value).host).toBe('cupboard.example.workers.dev');
 	});
 
 	it.each([
@@ -24,6 +29,26 @@ describe('parseWorkerUrl', () => {
 
 	it('rejects a malformed URL with a typed usage error', () => {
 		expect(() => parseWorkerUrl('not a url')).toThrow(InvalidWorkerUrlError);
+	});
+
+	// Every route resolves under the base's origin and path, so a base
+	// carrying anything else would corrupt or missend the requests built on
+	// it.
+	it.each([
+		['an FTP scheme', 'ftp://cupboard.example.workers.dev/t/acme'],
+		['a file scheme', 'file:///tmp/cupboard'],
+		['a mail scheme', 'mailto:cupboard@example.test'],
+		['a query string', 'https://cupboard.example.workers.dev/t/acme?tab=keys'],
+		['a fragment', 'https://cupboard.example.workers.dev/t/acme#copied'],
+		['an embedded username', 'https://ci@cupboard.example.workers.dev/t/acme'],
+		[
+			'embedded credentials',
+			'https://ci:secret@cupboard.example.workers.dev/t/acme'
+		]
+	])('rejects a URL carrying %s', (_name, value) => {
+		expect(() => parseWorkerUrl(value)).toThrow(
+			new InvalidWorkerUrlBaseError()
+		);
 	});
 });
 
