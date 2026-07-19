@@ -245,6 +245,9 @@ importers:
 
   packages/logger:
     dependencies:
+      '@cupboard/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@logtape/logtape':
         specifier: ^2.2.3
         version: 2.2.4

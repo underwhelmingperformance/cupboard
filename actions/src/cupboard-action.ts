@@ -11,6 +11,7 @@ import path from 'node:path';
 import { arch, env, platform } from 'node:process';
 
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
+import { workflowCommands } from '@cupboard/shared/github-actions';
 import { createOctokitClient } from '@cupboard/shared/octokit';
 import { retryingFetcher } from '@cupboard/shared/retry';
 import {
@@ -22,7 +23,6 @@ import {
 import { slsaSourceCommit } from '@cupboard/shared/slsa';
 import semverValid from 'semver/functions/valid.js';
 
-import * as annotations from './annotations.ts';
 import { runCupboard } from './cupboard-run.ts';
 import {
 	AttestationError,
@@ -38,6 +38,8 @@ import {
 	UnknownCommandError,
 	UnsupportedPlatformError
 } from './errors.ts';
+
+const githubActions = workflowCommands();
 
 type Environment = Readonly<Record<string, string | undefined>>;
 
@@ -625,7 +627,7 @@ export async function verifyReleaseAttestation(
 				sourceRepository: options.releaseRepository
 			});
 
-			annotations.notice(
+			githubActions.notice(
 				`Verified ${archiveName}: built by the ${options.releaseRepository} release workflow from ${tagCommit}.`
 			);
 
@@ -847,7 +849,7 @@ async function fetchTrustedPublicKey(
 		throw new CachePublicKeyError('cache public key response was empty');
 	}
 
-	annotations.warning(
+	githubActions.warning(
 		'No trusted-public-key was supplied; trusting the cache signing key from /pubkey for this run.'
 	);
 
@@ -947,7 +949,7 @@ export async function attestAction(
 	const { subjects, skipped } = attestationSubjects(infos);
 
 	for (const storePath of skipped) {
-		annotations.warning(
+		githubActions.warning(
 			`Not attesting ${storePath}: this machine did not build it, so this run cannot claim its provenance`
 		);
 	}

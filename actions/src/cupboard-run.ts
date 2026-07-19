@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 
-import * as annotations from './annotations.ts';
+import { workflowCommands } from '@cupboard/shared/github-actions';
+
 import { CommandFailedError, CupboardReportedError } from './errors.ts';
+
+const githubActions = workflowCommands();
 
 interface ReporterEvent {
 	readonly event: string;
@@ -27,7 +30,7 @@ export function runCupboard(
 			stdio: ['inherit', 'inherit', 'pipe']
 		});
 		const events = new CupboardEventStream((message) => {
-			annotations.warning(message);
+			githubActions.warning(message);
 		});
 
 		child.stderr.setEncoding('utf8');

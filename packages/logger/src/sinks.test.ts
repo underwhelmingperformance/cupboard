@@ -1,7 +1,12 @@
 import { type LogRecord } from '@logtape/logtape';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { cloudflareSink, jsonLinesSink } from './sinks.ts';
+import {
+	cloudflareSink,
+	type ConsoleLike,
+	githubActionsSink,
+	jsonLinesSink
+} from './sinks.ts';
 
 function record(overrides: Partial<LogRecord> = {}): LogRecord {
 	return {
@@ -15,17 +20,50 @@ function record(overrides: Partial<LogRecord> = {}): LogRecord {
 	};
 }
 
+function fakeConsole(): {
+	target: ConsoleLike;
+	calls: Record<'debug' | 'info' | 'warn' | 'error', unknown[]>;
+} {
+	const calls: Record<'debug' | 'info' | 'warn' | 'error', unknown[]> = {
+		debug: [],
+		info: [],
+		warn: [],
+		error: []
+	};
+
+	return {
+		target: {
+			debug: (payload) => {
+				calls.debug.push(payload);
+			},
+			info: (payload) => {
+				calls.info.push(payload);
+			},
+			warn: (payload) => {
+				calls.warn.push(payload);
+			},
+			error: (payload) => {
+				calls.error.push(payload);
+			}
+		},
+		calls
+	};
+}
+
 describe('cloudflareSink', () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
 
 	it('emits a plain object with a constant msg and indexed fields', () => {
-		const info = vi.spyOn(console, 'info').mockImplementation(vi.fn());
+		const { target, calls } = fakeConsole();
 
-		cloudflareSink()(record({ properties: { status: 200, rowsRead: 5 } }));
+		cloudflareSink(target)(
+			record({ properties: { status: 200, rowsRead: 5 } })
+		);
 
-		expect(info).toHaveBeenCalledWith({
+		expect(calls.info).toHaveLength(1);
+		expect(calls.info[0]).toStrictEqual({
 			level: 'info',
 			category: 'cupboard',
 			msg: 'request finished',
@@ -35,21 +73,23 @@ describe('cloudflareSink', () => {
 	});
 
 	it('routes warnings and errors to the matching console method', () => {
-		const warn = vi.spyOn(console, 'warn').mockImplementation(vi.fn());
-		const error = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		const { target, calls } = fakeConsole();
+		const sink = cloudflareSink(target);
 
-		cloudflareSink()(record({ level: 'warning', message: ['retryable'] }));
-		cloudflareSink()(record({ level: 'fatal', message: ['gone'] }));
+		sink(record({ level: 'warning', message: ['retryable'] }));
+		sink(record({ level: 'fatal', message: ['gone'] }));
 
-		expect(warn).toHaveBeenCalledOnce();
-		expect(error).toHaveBeenCalledOnce();
+		expect({
+			warn: calls.warn.length,
+			error: calls.error.length
+		}).toStrictEqual({ warn: 1, error: 1 });
 	});
 
 	it('explodes an error field into name, message and stack', () => {
-		const error = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		const { target, calls } = fakeConsole();
 		const boom = new Error('boom');
 
-		cloudflareSink()(
+		cloudflareSink(target)(
 			record({
 				level: 'error',
 				message: ['failed'],
@@ -57,7 +97,7 @@ describe('cloudflareSink', () => {
 			})
 		);
 
-		expect(error).toHaveBeenCalledWith(
+		expect(calls.error[0]).toStrictEqual(
 			expect.objectContaining({
 				msg: 'failed',
 				errorName: 'Error',
@@ -68,11 +108,11 @@ describe('cloudflareSink', () => {
 	});
 
 	it('surfaces a wrapped error’s cause chain', () => {
-		const error = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		const { target, calls } = fakeConsole();
 		const root = new Error('D1_ERROR: no such column: reconciled_at');
 		const wrapped = new Error('Failed query: delete from x', { cause: root });
 
-		cloudflareSink()(
+		cloudflareSink(target)(
 			record({
 				level: 'error',
 				message: ['failed'],
@@ -80,7 +120,7 @@ describe('cloudflareSink', () => {
 			})
 		);
 
-		expect(error).toHaveBeenCalledWith(
+		expect(calls.error[0]).toStrictEqual(
 			expect.objectContaining({
 				errorMessage: 'Failed query: delete from x',
 				errorCause: 'Error: D1_ERROR: no such column: reconciled_at',
@@ -90,9 +130,9 @@ describe('cloudflareSink', () => {
 	});
 
 	it('stringifies a non-Error error value', () => {
-		const error = vi.spyOn(console, 'error').mockImplementation(vi.fn());
+		const { target, calls } = fakeConsole();
 
-		cloudflareSink()(
+		cloudflareSink(target)(
 			record({
 				level: 'error',
 				message: ['failed'],
@@ -100,9 +140,86 @@ describe('cloudflareSink', () => {
 			})
 		);
 
-		expect(error).toHaveBeenCalledWith(
+		expect(calls.error[0]).toStrictEqual(
 			expect.objectContaining({ errorMessage: 'nope' })
 		);
+	});
+});
+
+describe('githubActionsSink', () => {
+	let written: string[];
+	let sink: ReturnType<typeof githubActionsSink>;
+
+	beforeEach(() => {
+		written = [];
+		const stream = {
+			write: (chunk: string) => {
+				written.push(chunk);
+				return true;
+			}
+		};
+		sink = githubActionsSink({
+			stdout: stream,
+			environment: { GITHUB_ACTIONS: 'true' }
+		});
+	});
+
+	it.each([
+		{
+			name: 'maps error to an error annotation with the fields appended',
+			overrides: {
+				level: 'error',
+				message: ['boom'],
+				properties: { ray: 'r1' }
+			},
+			expected: ['::error::boom ray=r1\n']
+		},
+		{
+			name: 'maps a fatal record to an error annotation',
+			overrides: { level: 'fatal', message: ['gone'] },
+			expected: ['::error::gone\n']
+		},
+		{
+			name: 'maps warning to a warning annotation',
+			overrides: { level: 'warning', message: ['careful'] },
+			expected: ['::warning::careful\n']
+		},
+		{
+			name: 'maps debug to a debug command',
+			overrides: { level: 'debug', message: ['detail'] },
+			expected: ['::debug::detail\n']
+		},
+		{
+			name: 'maps trace to a debug command',
+			overrides: { level: 'trace', message: ['deep detail'] },
+			expected: ['::debug::deep detail\n']
+		},
+		{
+			name: 'prints info as a plain line, not an annotation',
+			overrides: { level: 'info', message: ['hello'] },
+			expected: ['hello\n']
+		}
+	] as const)('$name', ({ overrides, expected }) => {
+		sink(record(overrides));
+
+		expect(written).toStrictEqual(expected);
+	});
+
+	it('expands an error field into its name, message and stack', () => {
+		const boom = new Error('exploded');
+
+		sink(
+			record({
+				level: 'error',
+				message: ['action dispatch failed'],
+				properties: { error: boom }
+			})
+		);
+
+		const [line] = written;
+		expect(line).toContain('::error::action dispatch failed');
+		expect(line).toContain('errorName=Error');
+		expect(line).toContain('errorMessage=exploded');
 	});
 });
 

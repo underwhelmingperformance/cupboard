@@ -1,7 +1,19 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { rootLogger } from './config.ts';
+import { type LogRecord, resolveSink, rootLogger } from './config.ts';
 import { type Capture, startCapture } from './testing.ts';
+
+function record(overrides: Partial<LogRecord> = {}): LogRecord {
+	return {
+		category: ['cupboard'],
+		level: 'info',
+		message: ['a message'],
+		rawMessage: 'a message',
+		timestamp: 0,
+		properties: {},
+		...overrides
+	};
+}
 
 describe('rootLogger with capture', () => {
 	let capture: Capture | undefined;
@@ -59,5 +71,62 @@ describe('rootLogger with capture', () => {
 			['debug', 'a'],
 			['error', 'unhandled server error']
 		]);
+	});
+});
+
+describe('resolveSink', () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+	});
+
+	it('emits workflow commands under GitHub Actions', () => {
+		const written: string[] = [];
+		const stream = {
+			write: (chunk: string) => {
+				written.push(chunk);
+				return true;
+			}
+		};
+
+		resolveSink({
+			stdout: stream,
+			environment: { GITHUB_ACTIONS: 'true' }
+		})(
+			record({
+				level: 'warning',
+				message: ['careful'],
+				properties: { key: 'value' }
+			})
+		);
+
+		expect(written).toStrictEqual(['::warning::careful key=value\n']);
+	});
+
+	it('emits line-delimited JSON on stderr off GitHub Actions', () => {
+		const written: string[] = [];
+		const stream = {
+			write: (chunk: string) => {
+				written.push(chunk);
+				return true;
+			}
+		};
+
+		resolveSink({ stderr: stream, environment: {} })(
+			record({
+				level: 'info',
+				message: ['hello'],
+				properties: { key: 'value' }
+			})
+		);
+
+		expect(written).toHaveLength(1);
+		expect(JSON.parse(written[0] ?? '')).toStrictEqual({
+			timestamp: 0,
+			level: 'info',
+			category: 'cupboard',
+			msg: 'hello',
+			key: 'value'
+		});
 	});
 });
