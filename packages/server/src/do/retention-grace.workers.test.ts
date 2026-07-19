@@ -2636,23 +2636,27 @@ describe('retention grace facts on the wire', () => {
 		});
 	});
 
-	// A gone pending row's already-present answer applies the same monotonic
-	// extension every other already-present decision does: even when another
-	// push committed the path without a grace policy (so no deadline is stored), the
-	// resent retention-marked entry is this publication's claim on the path.
-	it('extends the grace when a retention-marked entry resolves a row another push committed', async () => {
-		await useTestServer('wire-reconnect-extends');
+	// A gone pending row leaves no durable proof that this session ever
+	// negotiated the upload, so its already-present answer only reports the
+	// stored fact. Extending retention for a path the session did not push is
+	// upload:confirm authority, which a commit socket must not exercise: a
+	// commit-scoped token could otherwise refresh any committed path by
+	// fabricating an unknown uploadId with the path's public identity.
+	it('reports the stored fact without extending when a retention-marked entry resolves a row another push committed', async () => {
+		await useTestServer('wire-reconnect-reports');
 		const { token } = await bootstrap();
-		await addGracePolicy('', dayGraceSeconds);
 
 		const metadata = uploadMetadata({
 			fileSize: narBytes.byteLength,
 			storePathHash: repeated('j'),
-			name: 'reconnect-extends'
+			name: 'reconnect-reports'
 		});
 
-		// The path lands via a push with no matching policy, which stores no deadline.
+		// The path lands before any policy exists, so its commit stores no
+		// deadline; the policy added afterwards is what a wrongful extension
+		// would draw on.
 		await pushPath(token, metadata);
+		await addGracePolicy('', dayGraceSeconds);
 
 		const session = await openCommitSession(token);
 		session.send({
@@ -2669,15 +2673,21 @@ describe('retention grace facts on the wire', () => {
 		const frame = await session.nextFrame();
 		session.socket.close();
 
-		expect(frame).toStrictEqual({
-			ev: 'settled',
-			uploadId: 'reaped-upload',
-			response: {
-				storePathHash: metadata.storePathHash,
-				narHash: metadata.narHash,
-				status: 'already-present'
+		expect({
+			frame,
+			deadlines: await graceDeadlineRows(DEFAULT_CACHE)
+		}).toStrictEqual({
+			frame: {
+				ev: 'settled',
+				uploadId: 'reaped-upload',
+				response: {
+					storePathHash: metadata.storePathHash,
+					narHash: metadata.narHash,
+					status: 'already-present'
+				},
+				grace: {}
 			},
-			grace: { retainUntil: dayAfterStart }
+			deadlines: []
 		});
 	});
 

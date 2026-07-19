@@ -739,7 +739,29 @@ export class NarInfoObjectsService {
 			return undefined;
 		}
 
-		return (await this.hasCommittedReference(cache, row)) ? row : undefined;
+		if (!(await this.hasCommittedReference(cache, row))) {
+			return undefined;
+		}
+
+		const current = this.context.db
+			.select()
+			.from(schema.narInfos)
+			.where(
+				and(
+					eq(schema.narInfos.cache, cache),
+					eq(schema.narInfos.storePathHash, storePathHash)
+				)
+			)
+			.get();
+
+		if (
+			current?.generation !== row.generation ||
+			current.narHash !== row.narHash
+		) {
+			return undefined;
+		}
+
+		return current;
 	}
 
 	// De-materialises this tenant's narinfo object for a hash the global reaper found
