@@ -2,7 +2,9 @@
 	"name": "@cupboard/reporter",
 	"version": "0.0.0",
 	"dependencies": {
-		"pretty-bytes": "^7.1.0"
+		"@cupboard/shared": "workspace:*",
+		"pretty-bytes": "^7.1.0",
+		"zod": "^4.4.3"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",

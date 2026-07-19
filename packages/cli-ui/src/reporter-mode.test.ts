@@ -1,6 +1,6 @@
 import { stderr } from 'node:process';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { resolveReporterMode } from './reporter-mode.ts';
 
@@ -11,14 +11,17 @@ const originalIsTty = Object.getOwnPropertyDescriptor(stderr, 'isTTY');
 describe('resolveReporterMode', () => {
 	beforeEach(() => {
 		// A FORCE_COLOR in the ambient environment (some CI sets it) would otherwise
-		// steer the cases that exercise the lower-precedence signals.
+		// steer the cases that exercise the lower-precedence signals. A runner
+		// setting GITHUB_ACTIONS would likewise steer the TTY cases.
 		delete process.env.FORCE_COLOR;
+		vi.stubEnv('GITHUB_ACTIONS', '');
 	});
 
 	afterEach(() => {
 		restorePreCommit();
 		restoreForceColor();
 		restoreIsTty();
+		vi.unstubAllEnvs();
 	});
 
 	it('lets an explicit output mode override the environment', () => {
@@ -43,6 +46,42 @@ describe('resolveReporterMode', () => {
 
 		expect(resolveReporterMode()).toBe('terminal');
 	});
+
+	it('uses GitHub Actions output under a runner, over a TTY', () => {
+		vi.stubEnv('GITHUB_ACTIONS', 'true');
+		delete process.env.PRE_COMMIT;
+		setIsTty(true);
+
+		expect(resolveReporterMode()).toBe('github');
+	});
+
+	it.each([
+		{ name: 'pre-commit', preCommit: '1', forceColor: undefined, mode: 'json' },
+		{
+			name: 'FORCE_COLOR',
+			preCommit: undefined,
+			forceColor: '1',
+			mode: 'terminal'
+		}
+	] as const)(
+		'lets $name win over a runner',
+		({ preCommit, forceColor, mode }) => {
+			vi.stubEnv('GITHUB_ACTIONS', 'true');
+			setIsTty(false);
+
+			if (preCommit === undefined) {
+				delete process.env.PRE_COMMIT;
+			} else {
+				process.env.PRE_COMMIT = preCommit;
+			}
+
+			if (forceColor !== undefined) {
+				process.env.FORCE_COLOR = forceColor;
+			}
+
+			expect(resolveReporterMode()).toBe(mode);
+		}
+	);
 
 	it.each([
 		{ name: 'FORCE_COLOR=0', value: '0' },

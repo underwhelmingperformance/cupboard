@@ -1,5 +1,5 @@
 import { ConfirmationRequiredError } from '@cupboard/cli-ui';
-import type { Reporter } from '@cupboard/reporter';
+import { markErrorReported, type Reporter } from '@cupboard/reporter';
 import { usageExitCode } from '@cupboard/shared/errors';
 import { type Command, CommanderError } from 'commander';
 import { describe, expect, it } from 'vitest';
@@ -16,6 +16,10 @@ import {
 } from './errors.ts';
 
 const abortExitCode = 130;
+
+function expectCommanderError(value: unknown): asserts value is CommanderError {
+	expect(value).toBeInstanceOf(CommanderError);
+}
 
 describe('cliExitCode', () => {
 	it.each([
@@ -93,6 +97,37 @@ describe('buildProgram', () => {
 				'https://cupboard.example'
 			])
 		).rejects.toBeInstanceOf(CommanderError);
+	});
+
+	it('accepts github as an output mode', async () => {
+		const program = buildProgram();
+		program.configureOutput({
+			writeErr() {
+				return;
+			},
+			writeOut() {
+				return;
+			}
+		});
+
+		let result: unknown;
+		try {
+			await program.parseAsync([
+				'node',
+				'cupboard',
+				'--output-mode',
+				'github',
+				'--help'
+			]);
+			result = { kind: 'parsed' as const };
+		} catch (error_: unknown) {
+			result = error_;
+		}
+
+		// A valid mode is coerced before `--help` displays and exits; an unknown
+		// mode would have thrown a usage error instead of reaching help.
+		expectCommanderError(result);
+		expect(result.code).toBe('commander.helpDisplayed');
 	});
 
 	it('displays help as a usage error for a bare invocation', async () => {
@@ -188,6 +223,10 @@ describe('reportCliFailure', () => {
 		{
 			name: 'a bare invocation with no subcommand',
 			error: new CommanderError(1, 'commander.help', '(outputHelp)')
+		},
+		{
+			name: 'an explicit --version request',
+			error: new CommanderError(0, 'commander.version', '0.0.0')
 		}
 	])(
 		'stays silent when commander merely displayed help ($name)',
@@ -199,6 +238,16 @@ describe('reportCliFailure', () => {
 			expect(errors).toStrictEqual([]);
 		}
 	);
+
+	it('stays silent when a reporter phase already annotated the failure', () => {
+		const { reporter, errors } = fakeReporter();
+		const error = new Error('phase failed');
+
+		markErrorReported(error);
+		reportCliFailure(reporter, error);
+
+		expect(errors).toStrictEqual([]);
+	});
 
 	it('reports a commander usage error', () => {
 		const { reporter, errors } = fakeReporter();
