@@ -457,6 +457,16 @@ async function runPushFlow(
 	// re-drives, so the push summary reads each path's latest outcome once every
 	// phase below has run.
 	const outcomes = new Map<string, CommitOutcome>();
+	// Keyed by store-path hash: the action each path's latest negotiation
+	// chose. A re-drive renegotiates, and the fresh decision can differ from
+	// the first (a reaped reuse may need a real upload), so the summary
+	// counts read these rather than the initial decisions.
+	const effectiveActions = new Map<string, UploadDecision['action']>(
+		negotiation.uploads.map((decision) => [
+			decision.storePathHash,
+			decision.action
+		])
+	);
 	const commitContext: CommitContext = {
 		client,
 		session,
@@ -465,7 +475,10 @@ async function runPushFlow(
 		compressNar,
 		options: commitOptions,
 		hasGraceFacts,
-		onBytes
+		onBytes,
+		onRedriven: (fresh) => {
+			effectiveActions.set(fresh.storePathHash, fresh.action);
+		}
 	};
 
 	try {
@@ -632,15 +645,12 @@ async function runPushFlow(
 			divergent
 		});
 
-		const uploadedPaths = negotiation.uploads.filter((decision) =>
-			isUpload(decision)
+		const actions = effectiveActions.values().toArray();
+		const uploadedPaths = actions.filter(
+			(action) => action === 'upload'
 		).length;
-		const reusedBlobs = negotiation.uploads.filter((decision) =>
-			isReusedBlobCommit(decision)
-		).length;
-		const skipped = negotiation.uploads.filter((decision) =>
-			isSkip(decision)
-		).length;
+		const reusedBlobs = actions.filter((action) => action === 'commit').length;
+		const skipped = actions.filter((action) => action === 'skip').length;
 		const failedStorePathHashes = new Set(
 			failures.map((failure) => failure.storePathHash)
 		);
@@ -966,7 +976,12 @@ function committedOrPendingPath(
 	return {
 		storePathHash,
 		storePath: storePathByHash.get(storePathHash),
-		outcome: isFinal ? 'committed' : 'pending',
+		outcome:
+			outcome.status === 'already-present'
+				? 'already-present'
+				: isFinal
+					? 'committed'
+					: 'pending',
 		...(grace !== undefined && { grace })
 	};
 }
@@ -1389,6 +1404,7 @@ interface CommitContext {
 	readonly options: CommitOptions;
 	readonly hasGraceFacts: boolean;
 	readonly onBytes: (count: number) => void;
+	readonly onRedriven: (fresh: UploadDecision) => void;
 }
 
 // Commits one path over the push's shared session, falling back to a per-path
@@ -1497,6 +1513,8 @@ async function redriveExpiredCommit(
 		);
 	}
 
+	context.onRedriven(fresh);
+
 	if (isReusedBlobCommit(fresh)) {
 		return commitVia(context, commitTarget(fresh, context.hasGraceFacts));
 	}
@@ -1506,7 +1524,7 @@ async function redriveExpiredCommit(
 		return {
 			storePathHash: fresh.storePathHash,
 			narHash: fresh.narHash,
-			status: 'committed',
+			status: 'already-present',
 			settled: Promise.resolve(),
 			...(fresh.grace !== undefined && { grace: fresh.grace })
 		};
