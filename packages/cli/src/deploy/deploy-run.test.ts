@@ -377,7 +377,7 @@ describe('runDeploy', () => {
 				]
 			},
 			'400 CPU limits are not supported',
-			{}
+			new Headers()
 		);
 
 		const planLimitedApi: CloudflareApi = {
