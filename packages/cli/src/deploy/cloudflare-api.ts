@@ -499,7 +499,10 @@ export function createCloudflareApi(
 				return;
 			}
 
-			await client.queues.consumers.update(queueId, existing.consumer_id, body);
+			await client.queues.consumers.update(existing.consumer_id, {
+				...body,
+				queue_id: queueId
+			});
 		},
 
 		async ensureSchedules(scriptName, crons) {
