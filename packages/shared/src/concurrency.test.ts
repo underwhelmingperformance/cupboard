@@ -102,10 +102,14 @@ describe('mapWithConcurrency', () => {
 			return value;
 		});
 
-		void resultPromise.catch(() => {
-			// Settled deliberately below; this only silences the rejection
-			// while the test orchestrates the in-flight work.
-		});
+		void (async () => {
+			try {
+				await resultPromise;
+			} catch {
+				// Settled deliberately below; this only silences the rejection
+				// while the test orchestrates the in-flight work.
+			}
+		})();
 
 		await flushMicrotasks();
 		blocked.resolve(2);
