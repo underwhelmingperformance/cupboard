@@ -1,3 +1,4 @@
+import { type CliUi, type MenuEntry } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type OidcTrustAddBody,
@@ -5,6 +6,7 @@ import {
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
+import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import type { Command } from 'commander';
@@ -23,15 +25,17 @@ import {
 	CacheInfoUnavailableError,
 	CacheInfoUnparsableError,
 	GithubSetupDriftError,
+	GithubSetupOwnerRuleConflictError,
+	GithubSetupRemovalError,
 	GraceTooShortError,
-	ReadCredentialPairError,
-	WorkflowReferenceRetirementConflictError
+	ReadCredentialPairError
 } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 import { type GithubCheckOptions, runGithubCheck } from './github/check.ts';
 import {
 	minimumGraceSeconds,
+	parsePinnedWorkflowReference,
 	pullRequestPrefix,
 	pullRequestViewName,
 	requirePinnedWorkflowReference
@@ -55,7 +59,7 @@ export interface GithubSetupOptions {
 	readonly branch: string;
 	readonly grace: string;
 	readonly workflowRef: string;
-	readonly retireWorkflowRef?: string;
+	readonly yes?: boolean;
 	readonly readUser?: string;
 	readonly readPassword?: string;
 }
@@ -84,10 +88,12 @@ export interface GithubSetupDependencies {
 
 // One converging step's outcome. `drift` means the stored state neither
 // matches what setup would write nor was written: it is reported and left in
-// place for the operator to resolve.
+// place for the operator to resolve. `missing` means setup would create the
+// state but wrote nothing because another step drifted.
 export interface SetupStep {
 	readonly step: string;
-	readonly outcome: 'created' | 'removed' | 'unchanged' | 'drift';
+	readonly outcome:
+		'created' | 'removed' | 'retained' | 'unchanged' | 'drift' | 'missing';
 	readonly detail?: string;
 }
 
@@ -226,262 +232,426 @@ function isRuleMatchingBody(
 	);
 }
 
-// The enabled rules holding the same repository and event pin as `body`.
-function rulesForSameTrigger(
-	rules: readonly OidcTrustSummary[],
-	body: OidcTrustAddBody,
-	trigger: readonly string[]
-): OidcTrustSummary[] {
-	return rules.filter(
-		(rule) =>
-			!rule.disabled &&
-			rule.issuer === body.issuer &&
-			trigger.every((claim) =>
-				isDeepEqual(rule.claims[claim], body.claims[claim])
-			)
-	);
+interface DesiredTrustRule {
+	readonly step: string;
+	readonly kind: 'pull-request' | 'branch';
+	readonly trigger: string;
+	readonly body: OidcTrustAddBody;
+	readonly tokenClaims: Readonly<Record<string, string>>;
 }
 
-function claimsWithoutWorkflowReference(
-	claims: Record<string, unknown>
-): Record<string, unknown> {
-	const { job_workflow_ref: _workflowReference, ...remaining } = claims;
+type ClaimEvaluation = 'match' | 'mismatch' | 'unknown';
 
-	return remaining;
-}
+function evaluateClaim(
+	desired: DesiredTrustRule,
+	claim: string,
+	expected: OidcTrustSummary['claims'][string]
+): ClaimEvaluation {
+	const actual = desired.tokenClaims[claim];
 
-// A previous setup-managed rule has the same matching and issuance shape, but
-// pins a different immutable workflow release. It may coexist while the caller
-// moves between those releases; an absent or pattern-based pin is never treated
-// as a safe overlap.
-function isManagedWorkflowSibling(
-	rule: OidcTrustSummary,
-	body: OidcTrustAddBody
-): boolean {
-	const workflowReference = rule.claims.job_workflow_ref;
-
-	if (typeof workflowReference !== 'string') {
-		return false;
+	if (actual !== undefined) {
+		return isClaimSatisfied(expected, actual) ? 'match' : 'mismatch';
 	}
 
+	if (
+		desired.kind === 'pull-request' &&
+		claim === 'ref' &&
+		typeof expected === 'string'
+	) {
+		// GitHub gives pull-request runs refs of this form.
+		return /^refs\/pull\/[1-9]\d*\/merge$/.test(expected)
+			? 'match'
+			: 'mismatch';
+	}
+
+	return 'unknown';
+}
+
+interface RuleMatchEvaluation {
+	readonly outcome: 'match' | 'possible' | 'no';
+	readonly unknownClaims: readonly string[];
+}
+
+const noMatch: RuleMatchEvaluation = { outcome: 'no', unknownClaims: [] };
+
+// Whether the rule can match a token the desired rule serves: `match` when
+// every configured claim is satisfied by the token's known claims, `possible`
+// when nothing mismatches but some configured claims are not in the token
+// model, `no` on any mismatch.
+function evaluateRuleMatch(
+	rule: OidcTrustSummary,
+	desired: DesiredTrustRule,
+	shouldIncludeWorkflowReference: boolean
+): RuleMatchEvaluation {
+	if (
+		rule.disabled ||
+		rule.issuer !== desired.body.issuer ||
+		rule.audience !== desired.body.audience
+	) {
+		return noMatch;
+	}
+
+	const unknownClaims: string[] = [];
+
+	for (const [claim, expected] of Object.entries(rule.claims)) {
+		if (!shouldIncludeWorkflowReference && claim === 'job_workflow_ref') {
+			continue;
+		}
+
+		const evaluation = evaluateClaim(desired, claim, expected);
+
+		if (evaluation === 'mismatch') {
+			return noMatch;
+		}
+
+		if (evaluation === 'unknown') {
+			unknownClaims.push(claim);
+		}
+	}
+
+	return {
+		outcome: unknownClaims.length > 0 ? 'possible' : 'match',
+		unknownClaims: unknownClaims.toSorted((left, right) =>
+			left.localeCompare(right)
+		)
+	};
+}
+
+interface ClassifiedTrustRule {
+	readonly rule: OidcTrustSummary;
+	readonly triggers: readonly string[];
+	readonly unknownClaims: readonly string[];
+}
+
+// `conflicts` will match the new workflow's tokens and must go before setup
+// proceeds. `uncertain` rules pin claims outside the token model, so setup
+// cannot tell whether they would match; they are only ever removed on an
+// explicit interactive selection. `superseded` rules pin a different workflow
+// reference and may coexist.
+interface TrustRuleClassification {
+	readonly conflicts: readonly ClassifiedTrustRule[];
+	readonly uncertain: readonly ClassifiedTrustRule[];
+	readonly superseded: readonly ClassifiedTrustRule[];
+}
+
+type TrustRuleBucket = 'conflict' | 'uncertain' | 'superseded';
+
+const bucketPrecedence: Record<TrustRuleBucket, number> = {
+	conflict: 2,
+	uncertain: 1,
+	superseded: 0
+};
+
+interface TrustRuleEntry {
+	readonly rule: OidcTrustSummary;
+	readonly triggers: string[];
+	readonly unknownClaims: Set<string>;
+	bucket: TrustRuleBucket;
+}
+
+function classifyTrustRule(
+	rule: OidcTrustSummary,
+	desired: DesiredTrustRule,
+	currentRuleIds: ReadonlySet<string>,
+	entries: Map<string, TrustRuleEntry>
+): void {
+	if (
+		currentRuleIds.has(rule.id) ||
+		evaluateRuleMatch(rule, desired, false).outcome === 'no'
+	) {
+		return;
+	}
+
+	const full = evaluateRuleMatch(rule, desired, true);
+	let bucket: TrustRuleBucket;
+
+	if (full.outcome === 'match') {
+		bucket = 'conflict';
+	} else if (full.outcome === 'possible') {
+		bucket = 'uncertain';
+	} else {
+		const workflowReference = rule.claims.job_workflow_ref;
+
+		if (
+			rule.id === 'owner' ||
+			workflowReference === undefined ||
+			workflowReference === desired.body.claims.job_workflow_ref
+		) {
+			return;
+		}
+
+		bucket = 'superseded';
+	}
+
+	const entry = entries.get(rule.id) ?? {
+		rule,
+		triggers: [],
+		unknownClaims: new Set<string>(),
+		bucket
+	};
+
+	if (!entry.triggers.includes(desired.trigger)) {
+		entry.triggers.push(desired.trigger);
+	}
+
+	for (const claim of full.unknownClaims) {
+		entry.unknownClaims.add(claim);
+	}
+
+	if (bucketPrecedence[bucket] > bucketPrecedence[entry.bucket]) {
+		entry.bucket = bucket;
+	}
+
+	entries.set(rule.id, entry);
+}
+
+function classifyTrustRules(
+	rules: readonly OidcTrustSummary[],
+	desiredRules: readonly DesiredTrustRule[]
+): TrustRuleClassification {
+	const entries = new Map<string, TrustRuleEntry>();
+	const currentRuleIds = new Set(
+		rules
+			.filter(
+				(rule) =>
+					!rule.disabled &&
+					desiredRules.some((desired) => isRuleMatchingBody(rule, desired.body))
+			)
+			.map((rule) => rule.id)
+	);
+
+	for (const desired of desiredRules) {
+		for (const rule of rules) {
+			classifyTrustRule(rule, desired, currentRuleIds, entries);
+		}
+	}
+
+	const inBucket = (bucket: TrustRuleBucket): ClassifiedTrustRule[] =>
+		entries
+			.values()
+			.filter((entry) => entry.bucket === bucket)
+			.map((entry) => ({
+				rule: entry.rule,
+				triggers: [...entry.triggers],
+				unknownClaims:
+					bucket === 'uncertain'
+						? [...entry.unknownClaims].toSorted((left, right) =>
+								left.localeCompare(right)
+							)
+						: []
+			}))
+			.toArray()
+			.toSorted((left, right) => left.rule.id.localeCompare(right.rule.id));
+
+	return {
+		conflicts: inBucket('conflict'),
+		uncertain: inBucket('uncertain'),
+		superseded: inBucket('superseded')
+	};
+}
+
+function isPinnedReference(reference: string): boolean {
 	try {
-		requirePinnedWorkflowReference(workflowReference);
+		parsePinnedWorkflowReference(reference);
+
+		return true;
 	} catch {
 		return false;
 	}
+}
 
-	return (
-		rule.issuer === body.issuer &&
-		rule.audience === body.audience &&
-		isDeepEqual(
-			claimsWithoutWorkflowReference(rule.claims),
-			claimsWithoutWorkflowReference(body.claims)
-		) &&
-		isDeepEqual(rule.permittedGrants, body.permittedGrants)
+function workflowReferenceDescription(
+	claim: OidcTrustSummary['claims'][string] | undefined
+): string {
+	if (typeof claim === 'string') {
+		return claim;
+	}
+
+	if (claim !== undefined) {
+		return `workflow references matching ${claim.pattern}`;
+	}
+
+	return 'any workflow reference';
+}
+
+// The caveat a rule's row and menu entry carry: claims setup cannot evaluate,
+// or a workflow reference that names whatever lands on a branch or movable
+// tag rather than one released version.
+function ruleCaveat(classified: ClassifiedTrustRule): string | undefined {
+	if (classified.unknownClaims.length > 0) {
+		return `setup cannot check ${classified.unknownClaims.join(', ')}`;
+	}
+
+	const workflowReference = classified.rule.claims.job_workflow_ref;
+
+	if (
+		typeof workflowReference === 'string' &&
+		!isPinnedReference(workflowReference)
+	) {
+		return 'trusts future edits to the workflow';
+	}
+
+	return undefined;
+}
+
+function ruleLabel(classified: ClassifiedTrustRule): string {
+	return `${classified.triggers.join(' and ')} (${classified.rule.id})`;
+}
+
+function ruleMenuEntry(classified: ClassifiedTrustRule): MenuEntry<string> {
+	const description = workflowReferenceDescription(
+		classified.rule.claims.job_workflow_ref
 	);
+	const caveat = ruleCaveat(classified);
+
+	return {
+		value: classified.rule.id,
+		label: ruleLabel(classified),
+		hint: caveat === undefined ? description : `${description} (${caveat})`
+	};
 }
 
-function managedWorkflowSiblingReferences(
-	rules: readonly OidcTrustSummary[],
-	body: OidcTrustAddBody,
-	trigger: readonly string[]
-): string[] {
-	return rulesForSameTrigger(rules, body, trigger)
-		.filter((rule) => isManagedWorkflowSibling(rule, body))
-		.map((rule) => rule.claims.job_workflow_ref)
-		.filter(
-			(reference): reference is string =>
-				typeof reference === 'string' &&
-				reference !== body.claims.job_workflow_ref
-		);
+function ruleResultStep(
+	classification: 'conflicting' | 'possibly conflicting' | 'superseded',
+	classified: ClassifiedTrustRule,
+	outcome: 'removed' | 'retained',
+	problem?: string
+): SetupStep {
+	const detail = [
+		classified.triggers.join(' and '),
+		workflowReferenceDescription(classified.rule.claims.job_workflow_ref),
+		ruleCaveat(classified),
+		problem
+	]
+		.filter((part) => part !== undefined)
+		.join('; ');
+
+	return {
+		step: `${classification} trust rule ${classified.rule.id}`,
+		outcome,
+		detail
+	};
 }
 
-async function convergeGracePolicy(
+interface PlannedSetupStep {
+	readonly step: SetupStep;
+	readonly apply?: () => Promise<void>;
+}
+
+async function planGracePolicy(
 	client: GithubSetupClient,
 	graceSeconds: number
-): Promise<SetupStep> {
+): Promise<PlannedSetupStep> {
 	const { policies } = await client.policies.graceList();
 	const existing = policies.find((policy) => policy.cachePrefix === '');
 
 	if (existing === undefined) {
-		await client.policies.graceAdd({ cachePrefix: '', graceSeconds });
-
-		return { step: 'grace policy', outcome: 'created' };
+		return {
+			step: { step: 'grace policy', outcome: 'created' },
+			apply: async () => {
+				await client.policies.graceAdd({ cachePrefix: '', graceSeconds });
+			}
+		};
 	}
 
 	if (existing.graceSeconds === graceSeconds) {
-		return { step: 'grace policy', outcome: 'unchanged' };
+		return { step: { step: 'grace policy', outcome: 'unchanged' } };
 	}
 
 	return {
-		step: 'grace policy',
-		outcome: 'drift',
-		detail: `stored tenant-wide grace is ${String(existing.graceSeconds)}s, setup would write ${String(graceSeconds)}s`
+		step: {
+			step: 'grace policy',
+			outcome: 'drift',
+			detail: `stored tenant-wide grace is ${String(existing.graceSeconds)}s, setup would write ${String(graceSeconds)}s`
+		}
 	};
 }
 
-async function convergeReuseView(
+async function planReuseView(
 	client: GithubSetupClient,
 	destinationPriority: number
-): Promise<SetupStep> {
+): Promise<PlannedSetupStep> {
 	const selectors = [{ kind: 'prefix' as const, pattern: pullRequestPrefix }];
 	const { views } = await client.reuseViews.list();
 	const existing = views.find((view) => view.name === pullRequestViewName);
 
 	if (existing === undefined) {
-		await client.reuseViews.set({
-			name: pullRequestViewName,
-			selectors,
-			priority: destinationPriority + viewPriorityMargin
-		});
-
-		return { step: 'reuse view', outcome: 'created' };
+		return {
+			step: { step: 'reuse view', outcome: 'created' },
+			apply: async () => {
+				await client.reuseViews.set({
+					name: pullRequestViewName,
+					selectors,
+					priority: destinationPriority + viewPriorityMargin
+				});
+			}
+		};
 	}
 
 	if (
 		isDeepEqual([...existing.selectors], selectors) &&
 		existing.priority > destinationPriority
 	) {
-		return { step: 'reuse view', outcome: 'unchanged' };
-	}
-
-	return {
-		step: 'reuse view',
-		outcome: 'drift',
-		detail:
-			existing.priority <= destinationPriority
-				? `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
-				: 'stored selectors differ from the pr- prefix setup would write'
-	};
-}
-
-async function convergeTrustRule(
-	client: GithubSetupClient,
-	rules: OidcTrustListResponse['rules'],
-	step: string,
-	body: OidcTrustAddBody,
-	trigger: readonly string[]
-): Promise<SetupStep> {
-	const sameTrigger = rulesForSameTrigger(rules, body, trigger);
-	const drifted = sameTrigger.find(
-		(rule) =>
-			!isRuleMatchingBody(rule, body) && !isManagedWorkflowSibling(rule, body)
-	);
-
-	if (drifted !== undefined) {
-		return {
-			step,
-			outcome: 'drift',
-			detail: `rule ${drifted.id} covers the same trigger but differs on ${ruleDifferences(drifted, body).join(', ')}; remove it and re-run setup`
-		};
-	}
-
-	const matching = sameTrigger.find((rule) => isRuleMatchingBody(rule, body));
-
-	if (matching !== undefined) {
-		return { step, outcome: 'unchanged' };
-	}
-
-	await client.oidcTrust.add(body);
-
-	return { step, outcome: 'created' };
-}
-
-interface TrustRuleRetirement {
-	readonly step: SetupStep;
-	readonly ruleIds: readonly string[];
-}
-
-function planTrustRuleRetirement(
-	rules: readonly OidcTrustSummary[],
-	step: string,
-	body: OidcTrustAddBody,
-	trigger: readonly string[]
-): TrustRuleRetirement {
-	const workflowReference = body.claims.job_workflow_ref;
-	const candidates = rulesForSameTrigger(rules, body, trigger).filter((rule) =>
-		isDeepEqual(rule.claims.job_workflow_ref, workflowReference)
-	);
-	const drifted = candidates.find((rule) => !isRuleMatchingBody(rule, body));
-
-	if (drifted !== undefined) {
-		return {
-			step: {
-				step,
-				outcome: 'drift',
-				detail: `rule ${drifted.id} pins the retired workflow reference but differs on ${ruleDifferences(drifted, body).join(', ')}; inspect it before removing it explicitly`
-			},
-			ruleIds: []
-		};
-	}
-
-	if (candidates.length === 0) {
-		return {
-			step: {
-				step,
-				outcome: 'unchanged',
-				detail: 'the retired workflow reference is not trusted'
-			},
-			ruleIds: []
-		};
+		return { step: { step: 'reuse view', outcome: 'unchanged' } };
 	}
 
 	return {
 		step: {
-			step,
-			outcome: 'removed',
-			detail: `${String(candidates.length)} rule${candidates.length === 1 ? '' : 's'}`
-		},
-		ruleIds: candidates.map((rule) => rule.id)
+			step: 'reuse view',
+			outcome: 'drift',
+			detail:
+				existing.priority <= destinationPriority
+					? `stored priority ${String(existing.priority)} does not exceed the destination's ${String(destinationPriority)}`
+					: 'stored selectors differ from the pr- prefix setup would write'
+		}
 	};
 }
 
-async function applyTrustRuleRetirement(
+function planTrustRule(
 	client: GithubSetupClient,
-	retirement: TrustRuleRetirement
-): Promise<SetupStep> {
-	for (const id of retirement.ruleIds) {
-		await client.oidcTrust.remove({ id });
+	rules: OidcTrustListResponse['rules'],
+	step: string,
+	body: OidcTrustAddBody
+): PlannedSetupStep {
+	const matching = rules.find(
+		(rule) => !rule.disabled && isRuleMatchingBody(rule, body)
+	);
+
+	if (matching !== undefined) {
+		return { step: { step, outcome: 'unchanged' } };
 	}
 
-	return retirement.step;
+	return {
+		step: { step, outcome: 'created' },
+		apply: async () => {
+			await client.oidcTrust.add(body);
+		}
+	};
 }
 
-// The fields of a same-trigger rule that diverge from what setup would write,
-// so a drift report names what to look at rather than only that something
-// differs.
-function ruleDifferences(
-	rule: OidcTrustSummary,
-	body: OidcTrustAddBody
-): string[] {
-	const differences: string[] = [];
+function reportSetupResult(
+	reporter: Reporter,
+	steps: readonly SetupStep[]
+): void {
+	const rows: ResultRow[] = steps.map((step) => ({
+		label: step.step,
+		value:
+			step.detail === undefined
+				? step.outcome
+				: `${step.outcome}: ${step.detail}`
+	}));
 
-	if (rule.issuer !== body.issuer) {
-		differences.push('issuer');
-	}
-
-	if (rule.audience !== body.audience) {
-		differences.push('audience');
-	}
-
-	if (!isDeepEqual(rule.claims, body.claims)) {
-		differences.push('claims');
-	}
-
-	if (!isDeepEqual(rule.permittedGrants, body.permittedGrants)) {
-		differences.push('grants');
-	}
-
-	return differences;
+	reporter.result({ kind: 'github-setup', data: { steps }, rows });
 }
 
 export async function runGithubSetup(
 	url: string,
 	options: GithubSetupOptions,
-	reporter: Reporter,
+	ui: CliUi,
 	client: GithubSetupClient,
 	dependencies: GithubSetupDependencies = {}
 ): Promise<void> {
+	const reporter = ui.reporter();
 	const resolveRepository = dependencies.lookupRepository ?? lookupRepository;
 	const fetchCacheInfo =
 		dependencies.fetchCacheInfo ?? cacheInfoFetcher(options);
@@ -492,13 +662,6 @@ export async function runGithubSetup(
 	const graceSeconds = parseGrace(options.grace);
 
 	requirePinnedWorkflowReference(options.workflowRef);
-	if (options.retireWorkflowRef !== undefined) {
-		requirePinnedWorkflowReference(options.retireWorkflowRef);
-
-		if (options.retireWorkflowRef === options.workflowRef) {
-			throw new WorkflowReferenceRetirementConflictError(options.workflowRef);
-		}
-	}
 
 	if (graceSeconds < minimumGraceSeconds) {
 		throw new GraceTooShortError(graceSeconds, minimumGraceSeconds);
@@ -520,42 +683,71 @@ export async function runGithubSetup(
 		branch: options.branch,
 		jobWorkflowRef: options.workflowRef
 	});
-	const retiredBodies =
-		options.retireWorkflowRef === undefined
-			? undefined
-			: {
-					pr: githubPrAddBody(url, identity, {
-						repo: options.repo,
-						jobWorkflowRef: options.retireWorkflowRef
-					}),
-					branch: githubBranchAddBody(url, identity, {
-						repo: options.repo,
-						branch: options.branch,
-						jobWorkflowRef: options.retireWorkflowRef
-					})
-				};
+	const repositoryOwner =
+		identity.fullName.split('/', 1)[0] ?? identity.fullName;
+	// The claims a run of the new workflow presents, as far as they are
+	// deterministic. A job that deploys to a GitHub environment presents an
+	// environment-form `sub` instead of the defaults below.
+	const desiredRules: readonly DesiredTrustRule[] = [
+		{
+			step: 'pull-request trust rule',
+			kind: 'pull-request',
+			trigger: 'pull requests',
+			body: prBody,
+			tokenClaims: {
+				repository_id: String(identity.repositoryId),
+				repository_owner_id: String(identity.repositoryOwnerId),
+				repository: identity.fullName,
+				repository_owner: repositoryOwner,
+				sub: `repo:${identity.fullName}:pull_request`,
+				event_name: 'pull_request',
+				ref_type: 'branch',
+				job_workflow_ref: options.workflowRef
+			}
+		},
+		{
+			step: `${options.branch} trust rule`,
+			kind: 'branch',
+			trigger: `${options.branch} pushes`,
+			body: branchBody,
+			tokenClaims: {
+				repository_id: String(identity.repositoryId),
+				repository_owner_id: String(identity.repositoryOwnerId),
+				repository: identity.fullName,
+				repository_owner: repositoryOwner,
+				sub: `repo:${identity.fullName}:ref:refs/heads/${options.branch}`,
+				ref: `refs/heads/${options.branch}`,
+				ref_type: 'branch',
+				job_workflow_ref: options.workflowRef
+			}
+		}
+	];
 	const { rules } = await reporter.phase('Reading trust rules', () =>
 		client.oidcTrust.list()
 	);
-	const previousWorkflowReferences = new Set([
-		...managedWorkflowSiblingReferences(rules, prBody, [
-			'repository_id',
-			'event_name'
-		]),
-		...managedWorkflowSiblingReferences(rules, branchBody, [
-			'repository_id',
-			'ref'
-		])
-	]);
+	const classification = classifyTrustRules(rules, desiredRules);
 
-	if (options.retireWorkflowRef !== undefined) {
-		previousWorkflowReferences.delete(options.retireWorkflowRef);
+	if (
+		[...classification.conflicts, ...classification.uncertain].some(
+			({ rule }) => rule.id === 'owner'
+		)
+	) {
+		throw new GithubSetupOwnerRuleConflictError();
 	}
 
-	if (previousWorkflowReferences.size > 0) {
+	const previousWorkflowReferences = [
+		...new Set(
+			classification.superseded
+				.map(({ rule }) => rule.claims.job_workflow_ref)
+				.filter((reference) => typeof reference === 'string')
+				.filter((reference) => isPinnedReference(reference))
+		)
+	].toSorted((left, right) => left.localeCompare(right));
+
+	if (previousWorkflowReferences.length > 0) {
 		await reporter.phase('Verifying previous workflow references', () =>
 			Promise.all(
-				[...previousWorkflowReferences].map((reference) =>
+				previousWorkflowReferences.map((reference) =>
 					verifyWorkflowReference(reference, lookupOptions)
 				)
 			)
@@ -565,82 +757,204 @@ export async function runGithubSetup(
 	const destination = await reporter.phase('Reading destination priority', () =>
 		fetchCacheInfo(url)
 	);
+	const configurationPlans = await reporter.phase(
+		'Reading tenant configuration',
+		() =>
+			Promise.all([
+				planGracePolicy(client, graceSeconds),
+				planReuseView(client, destination.priority)
+			])
+	);
+	const drifted = configurationPlans.filter(
+		({ step }) => step.outcome === 'drift'
+	);
+
+	if (drifted.length > 0) {
+		const steps = [
+			...configurationPlans.map(({ step }) =>
+				step.outcome === 'created'
+					? {
+							...step,
+							outcome: 'missing' as const,
+							detail: 'setup would create it after the drift is resolved'
+						}
+					: step
+			),
+			...classification.uncertain.map((classified) =>
+				ruleResultStep('possibly conflicting', classified, 'retained')
+			),
+			...classification.superseded.map((classified) =>
+				ruleResultStep('superseded', classified, 'retained')
+			)
+		];
+
+		reportSetupResult(reporter, steps);
+
+		throw new GithubSetupDriftError(drifted.map(({ step }) => step.step));
+	}
+
+	if (classification.conflicts.length > 0) {
+		const outcome = await ui.confirm({
+			message: 'Remove all conflicting trust rules to continue?',
+			detail: classification.conflicts
+				.map(
+					(classified) =>
+						`${ruleLabel(classified)}: ${workflowReferenceDescription(
+							classified.rule.claims.job_workflow_ref
+						)}`
+				)
+				.join('\n')
+		});
+
+		if (outcome !== 'yes') {
+			ui.cancelled('GitHub setup was left unchanged.');
+
+			return;
+		}
+	}
+
+	let uncertainRuleIds = new Set<string>();
+
+	if (
+		classification.uncertain.length > 0 &&
+		options.yes !== true &&
+		ui.interactive
+	) {
+		const selected = await ui.multiSelect({
+			message: 'Remove trust rules that may also match the new workflow?',
+			entries: classification.uncertain.map((classified) =>
+				ruleMenuEntry(classified)
+			),
+			initialValues: []
+		});
+
+		uncertainRuleIds = new Set(selected);
+	}
+
+	const removedRuleIds = new Set([
+		...classification.conflicts.map(({ rule }) => rule.id),
+		...uncertainRuleIds
+	]);
 
 	const steps = await reporter.phase(
 		'Converging tenant configuration',
 		async () => {
-			const grace = await convergeGracePolicy(client, graceSeconds);
-			const reuseView = await convergeReuseView(client, destination.priority);
-			const pullRequestTrust = await convergeTrustRule(
-				client,
-				rules,
-				'pull-request trust rule',
-				prBody,
-				['repository_id', 'event_name']
-			);
-			const branchTrust = await convergeTrustRule(
-				client,
-				rules,
-				`${options.branch} trust rule`,
-				branchBody,
-				['repository_id', 'ref']
-			);
-			const steps = [grace, reuseView, pullRequestTrust, branchTrust];
-
-			if (
-				retiredBodies === undefined ||
-				pullRequestTrust.outcome === 'drift' ||
-				branchTrust.outcome === 'drift'
-			) {
-				return steps;
+			for (const plan of configurationPlans) {
+				await plan.apply?.();
 			}
 
-			const retirePullRequest = planTrustRuleRetirement(
-				rules,
-				'previous pull-request trust rule',
-				retiredBodies.pr,
-				['repository_id', 'event_name']
+			// The new rules go in before the old ones come out, so a failure part
+			// way through never leaves the repository without a matching rule.
+			const remainingRules = rules.filter(
+				(rule) => !removedRuleIds.has(rule.id)
 			);
-			const retireBranch = planTrustRuleRetirement(
-				rules,
-				`previous ${options.branch} trust rule`,
-				retiredBodies.branch,
-				['repository_id', 'ref']
+			const trustPlans = desiredRules.map((desired) =>
+				planTrustRule(client, remainingRules, desired.step, desired.body)
 			);
 
-			if (
-				retirePullRequest.step.outcome === 'drift' ||
-				retireBranch.step.outcome === 'drift'
-			) {
-				return [...steps, retirePullRequest.step, retireBranch.step];
+			await Promise.all(
+				trustPlans
+					.map((plan) => plan.apply)
+					.filter((apply) => apply !== undefined)
+					.map((apply) => apply())
+			);
+
+			const conflictSteps: SetupStep[] = [];
+
+			for (const classified of classification.conflicts) {
+				await client.oidcTrust.remove({ id: classified.rule.id });
+				conflictSteps.push(
+					ruleResultStep('conflicting', classified, 'removed')
+				);
+			}
+
+			for (const classified of classification.uncertain) {
+				if (!uncertainRuleIds.has(classified.rule.id)) {
+					conflictSteps.push(
+						ruleResultStep('possibly conflicting', classified, 'retained')
+					);
+					continue;
+				}
+
+				await client.oidcTrust.remove({ id: classified.rule.id });
+				conflictSteps.push(
+					ruleResultStep('possibly conflicting', classified, 'removed')
+				);
 			}
 
 			return [
-				...steps,
-				await applyTrustRuleRetirement(client, retirePullRequest),
-				await applyTrustRuleRetirement(client, retireBranch)
+				...configurationPlans.map(({ step }) => step),
+				...conflictSteps,
+				...trustPlans.map(({ step }) => step)
 			];
 		}
 	);
+	let supersededRuleIds = new Set<string>();
 
-	const stepRows: ResultRow[] = steps.map((step) => ({
-		label: step.step,
-		value:
-			step.detail === undefined
-				? step.outcome
-				: `${step.outcome}: ${step.detail}`
-	}));
+	if (
+		classification.superseded.length > 0 &&
+		options.yes !== true &&
+		ui.interactive
+	) {
+		const selected = await ui.multiSelect({
+			message: 'Remove superseded trust rules?',
+			entries: classification.superseded.map((classified) =>
+				ruleMenuEntry(classified)
+			),
+			initialValues: []
+		});
 
-	reporter.result({
-		kind: 'github-setup',
-		data: { steps },
-		rows: stepRows
-	});
+		supersededRuleIds = new Set(selected);
+	}
 
-	const drifted = steps.filter((step) => step.outcome === 'drift');
+	const removalFailures = new Map<string, unknown>();
 
-	if (drifted.length > 0) {
-		throw new GithubSetupDriftError(drifted.map((step) => step.step));
+	if (supersededRuleIds.size > 0) {
+		await reporter.phase('Removing superseded trust rules', async () => {
+			const ids = [...supersededRuleIds];
+			const outcomes = await Promise.allSettled(
+				ids.map((id) => client.oidcTrust.remove({ id }))
+			);
+
+			for (const [index, outcome] of outcomes.entries()) {
+				const id = ids[index];
+
+				if (outcome.status === 'rejected' && id !== undefined) {
+					removalFailures.set(id, outcome.reason);
+				}
+			}
+		});
+	}
+
+	for (const classified of classification.superseded) {
+		const { id } = classified.rule;
+
+		if (supersededRuleIds.has(id) && !removalFailures.has(id)) {
+			steps.push(ruleResultStep('superseded', classified, 'removed'));
+			continue;
+		}
+
+		steps.push(
+			ruleResultStep(
+				'superseded',
+				classified,
+				'retained',
+				removalFailures.has(id) ? 'the removal failed' : undefined
+			)
+		);
+	}
+
+	reportSetupResult(reporter, steps);
+
+	if (removalFailures.size > 0) {
+		const failedIds = removalFailures
+			.keys()
+			.toArray()
+			.toSorted((left, right) => left.localeCompare(right));
+
+		throw new GithubSetupRemovalError(failedIds, {
+			cause: removalFailures.values().next().value
+		});
 	}
 }
 
@@ -668,8 +982,8 @@ export function registerGithubCommands(
 			'The exact job_workflow_ref claim to pin, at an immutable release tag or full commit id.'
 		)
 		.option(
-			'--retire-workflow-ref <owner/repo/path@ref>',
-			'Remove setup-managed rules for this previous immutable workflow reference after the new rules are established.'
+			'-y, --yes',
+			'Confirm removing conflicting trust rules; retain every other rule.'
 		)
 		.option(
 			'--read-user <user>',
@@ -680,7 +994,7 @@ export function registerGithubCommands(
 			'Basic read credential for tenants whose reads are private.'
 		)
 		.action(async (url: string, options: GithubSetupOptions) => {
-			const reporter = commandUi(program, programOptions).reporter();
+			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
 				signal: programOptions.signal
@@ -689,7 +1003,7 @@ export function registerGithubCommands(
 			await runGithubSetup(
 				url,
 				options,
-				reporter,
+				ui,
 				{
 					policies: rpc.policies,
 					reuseViews: rpc.reuseViews,

@@ -94,12 +94,13 @@ immutable published release and that the workflow file exists there, so the
 workflow code, the CLI it drives, and the claims the tenant trusts all name one
 release.
 
-Re-running converges: state that already matches is left untouched, and state
-that differs is reported as drift, never replaced. The one additive case is a
-rule from an earlier immutable cupboard release whose remaining claims and
-grants still match setup's shape; setup keeps that rule and adds the new release
-beside it so callers can move without an authority gap. What each piece of this
-configuration is, and the commands to write it by hand, are under
+Re-running converges state that already matches. A different grace policy or
+reuse view is reported as drift and never replaced. Trust-rule differences are
+handled separately: a rule pinned to a different exact workflow reference can
+safely remain even when its other claims or grants differ, while removing the
+rules that can also match the new token must be confirmed. This lets setup add
+the new release beside the old one without an authority gap. What each piece of
+this configuration is, and the commands to write it by hand, are under
 [Manual configuration](#manual-configuration).
 
 One consequence deserves calling out before running it: the grace policy changes
@@ -636,11 +637,9 @@ Routine changes to a working setup, and where each one's state lives.
 
 ### Move to a new cupboard release
 
-Establish the new trust before changing the caller. Keep the old and new tags in
-separate variables so each command names the intended release:
+Establish the new trust before changing the caller:
 
 ```bash
-old_cupboard_version=vX.Y.Z
 new_cupboard_version=vA.B.C
 workflow=underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml
 
@@ -651,26 +650,33 @@ cupboard github check "$tenant" --repo "$repo" \
   --workflow-ref "$workflow@refs/tags/$new_cupboard_version"
 ```
 
-Setup recognises the old setup-managed rules by their otherwise identical claims
-and grants, re-verifies their release reference through GitHub, and adds the new
-immutable reference alongside them. Check then proves that a run carrying the
-new reference can obtain every grant it needs while the old caller still works.
+Setup recognises rules pinned to a different exact workflow reference as
+superseded and safe to retain, even when an older release used different claims
+or grants. It verifies that each retained release reference still resolves on
+GitHub, installs the new rules, then offers the superseded rules for optional
+removal. A superseded rule whose reference is not pinned to a release is
+retained too, flagged in the report because it trusts future edits to the
+workflow. Leave superseded rules unselected while runs using the old reference
+can still be active. Check then proves that a run carrying the new reference can
+obtain every grant it needs while the old caller still works.
 
 Update the caller workflow's `uses:` reference and `cupboard-version` input to
-`$new_cupboard_version`. Once runs using the old reference have finished, retire
-it explicitly:
+`$new_cupboard_version`. Once runs using the old reference have finished, run
+setup again and select the superseded rules for removal:
 
 ```bash
 cupboard github setup "$tenant" --repo "$repo" \
-  --workflow-ref "$workflow@refs/tags/$new_cupboard_version" \
-  --retire-workflow-ref "$workflow@refs/tags/$old_cupboard_version"
+  --workflow-ref "$workflow@refs/tags/$new_cupboard_version"
 ```
 
-Retirement first confirms that both new rules are present. It removes only
-enabled rules that exactly match setup's expected claims and grants for the old
-reference; a drifted rule stops both retirements and must be inspected and
-removed explicitly. Repeat any non-default `--branch` or `--grace` values on
-both setup calls.
+Rules that can also match the new workflow token are conflicts, not superseded
+rules. Setup asks for one confirmation covering every conflict before it changes
+anything; declining leaves the tenant unchanged, and `--yes` confirms an
+unattended run. A rule pinning claims setup cannot check (an `environment` pin,
+say) might not match the new token, so it is never removed unattended: setup
+retains it, reports it as possibly conflicting, and offers it for removal only
+interactively. Repeat any non-default `--branch` or `--grace` values on both
+setup calls.
 
 ### Add a target or a platform
 

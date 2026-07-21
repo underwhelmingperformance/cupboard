@@ -88,6 +88,7 @@ function pickerUi(choice?: string, uiCalls: UiCall[] = []): DeployUi {
 
 			return Promise.resolve(absentValues.choice);
 		},
+		multiSelect: () => Promise.resolve(undefined),
 		editText: (options) => {
 			uiCalls.push({ method: 'editText' });
 			void options;
