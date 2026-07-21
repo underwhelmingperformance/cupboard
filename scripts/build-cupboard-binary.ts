@@ -173,9 +173,9 @@ async function main(): Promise<void> {
 						stdin: {
 							contents: [
 								"import { runCli } from './packages/cli/src/run.ts';",
-								'runCli().then((exitCode: number) => {',
-								'\tprocess.exitCode = exitCode;',
-								'});'
+								'void (async () => {',
+								'\tprocess.exitCode = await runCli();',
+								'})();'
 							].join('\n'),
 							loader: 'ts',
 							resolveDir: process.cwd(),
