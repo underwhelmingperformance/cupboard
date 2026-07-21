@@ -122,6 +122,7 @@ function scriptedUi(script: UiScript = {}): ScriptedUi {
 
 			return Promise.resolve(choice);
 		},
+		multiSelect: () => Promise.resolve(undefined),
 		editText: () => {
 			uiCalls.push({ method: 'editText' });
 			const edit = remainingTextEdits.shift();

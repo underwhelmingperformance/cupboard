@@ -1,4 +1,9 @@
-import { capturingReporter as reporter } from '@cupboard/cli-ui/testing';
+import { type CliUi } from '@cupboard/cli-ui';
+import {
+	capturingReporter,
+	type CliUiScript,
+	fakeCliUi
+} from '@cupboard/cli-ui/testing';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import type {
 	OidcTrustAddBody,
@@ -18,11 +23,11 @@ import {
 	CacheInfoUnavailableError,
 	CliAbortError,
 	GithubSetupDriftError,
+	GithubSetupOwnerRuleConflictError,
+	GithubSetupRemovalError,
 	GraceTooShortError,
 	ReadCredentialPairError,
-	WorkflowReferenceMutableError,
-	WorkflowReferenceNotFoundError,
-	WorkflowReferenceRetirementConflictError
+	WorkflowReferenceMutableError
 } from '../errors.ts';
 
 import {
@@ -46,9 +51,8 @@ const pinnedWorkflowReference =
 	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v1.2.3';
 const previousWorkflowReference =
 	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v1.2.2';
-const retainedWorkflowReference =
-	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v1.2.1';
-
+const movableWorkflowReference =
+	'acme/app/.github/workflows/publish.yml@refs/heads/main';
 const options: GithubSetupOptions = {
 	repo: 'acme/app',
 	branch: 'main',
@@ -179,10 +183,22 @@ const dependencies = {
 	verifyWorkflowReference: () => Promise.resolve()
 };
 
+function reporter(results: ResultRow[][], script: CliUiScript = {}): CliUi {
+	const { ui } = fakeCliUi(script);
+
+	return { ...ui, reporter: () => capturingReporter(results) };
+}
+
 function expectDriftError(
 	error: unknown
 ): asserts error is GithubSetupDriftError {
 	expect(error).toBeInstanceOf(GithubSetupDriftError);
+}
+
+function expectRemovalError(
+	error: unknown
+): asserts error is GithubSetupRemovalError {
+	expect(error).toBeInstanceOf(GithubSetupRemovalError);
 }
 
 describe('runGithubSetup', () => {
@@ -348,9 +364,18 @@ describe('runGithubSetup', () => {
 		});
 	});
 
-	it('adds a new immutable workflow reference alongside the previous rules', async () => {
+	it('retains safe rules for a previous workflow while adding the new rules', async () => {
 		const results: ResultRow[][] = [];
 		const verifiedReferences: string[] = [];
+		const legacyPrBody: OidcTrustAddBody = {
+			...previousPrBody,
+			claims: {
+				repository_id: String(identity.repositoryId),
+				repository_owner_id: String(identity.repositoryOwnerId),
+				job_workflow_ref: previousWorkflowReference
+			},
+			permittedGrants: previousBranchBody.permittedGrants
+		};
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
@@ -361,7 +386,7 @@ describe('runGithubSetup', () => {
 				}
 			],
 			rules: [
-				storedRule('previous-pr', previousPrBody),
+				storedRule('previous-pr', legacyPrBody),
 				storedRule('previous-branch', previousBranchBody)
 			]
 		});
@@ -390,7 +415,15 @@ describe('runGithubSetup', () => {
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
 				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' }
+				{ label: 'main trust rule', value: 'created' },
+				{
+					label: 'superseded trust rule previous-branch',
+					value: `retained: main pushes; ${previousWorkflowReference}`
+				},
+				{
+					label: 'superseded trust rule previous-pr',
+					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+				}
 			],
 			verifiedReferences: [pinnedWorkflowReference, previousWorkflowReference]
 		});
@@ -424,8 +457,12 @@ describe('runGithubSetup', () => {
 		});
 	});
 
-	it('retires the exact previous rules only after the new rules are established', async () => {
+	it('offers safe previous-workflow rules for optional removal after applying', async () => {
 		const results: ResultRow[][] = [];
+		const { ui, captured } = fakeCliUi({
+			interactive: true,
+			multiSelects: [['previous-pr', 'previous-branch']]
+		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
@@ -436,8 +473,6 @@ describe('runGithubSetup', () => {
 				}
 			],
 			rules: [
-				storedRule('current-pr', prBody),
-				storedRule('current-branch', branchBody),
 				storedRule('previous-pr', previousPrBody),
 				storedRule('previous-branch', previousBranchBody)
 			]
@@ -445,7 +480,156 @@ describe('runGithubSetup', () => {
 
 		await runGithubSetup(
 			url,
-			{ ...options, retireWorkflowRef: previousWorkflowReference },
+			options,
+			{ ...ui, reporter: () => capturingReporter(results) },
+			client,
+			dependencies
+		);
+
+		expect({
+			recorded,
+			prompts: captured.multiSelects,
+			outcomes: results[0]
+		}).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: ['previous-branch', 'previous-pr']
+			},
+			prompts: [
+				{
+					message: 'Remove superseded trust rules?',
+					entries: [
+						{
+							value: 'previous-branch',
+							label: 'main pushes (previous-branch)',
+							hint: previousWorkflowReference
+						},
+						{
+							value: 'previous-pr',
+							label: 'pull requests and main pushes (previous-pr)',
+							hint: previousWorkflowReference
+						}
+					],
+					initialValues: []
+				}
+			],
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' },
+				{
+					label: 'superseded trust rule previous-branch',
+					value: `removed: main pushes; ${previousWorkflowReference}`
+				},
+				{
+					label: 'superseded trust rule previous-pr',
+					value: `removed: pull requests and main pushes; ${previousWorkflowReference}`
+				}
+			]
+		});
+	});
+
+	it('cancels before any write when the conflict confirmation is declined', async () => {
+		const conflict = storedRule('conflict', {
+			...prBody,
+			claims: {
+				repository_id: String(identity.repositoryId),
+				repository_owner_id: String(identity.repositoryOwnerId),
+				ref: 'refs/pull/42/merge',
+				job_workflow_ref: pinnedWorkflowReference
+			},
+			permittedGrants: previousPrBody.permittedGrants
+		});
+		const { ui, captured } = fakeCliUi({
+			interactive: true,
+			confirm: 'no'
+		});
+		const { client, recorded } = setupClient({
+			rules: [conflict]
+		});
+
+		await runGithubSetup(url, options, ui, client, dependencies);
+		expect({
+			recorded,
+			confirms: captured.confirms,
+			multiSelects: captured.multiSelects,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: []
+			},
+			confirms: [
+				{
+					message: 'Remove all conflicting trust rules to continue?',
+					detail: `pull requests (conflict): ${pinnedWorkflowReference}`
+				}
+			],
+			multiSelects: [],
+			cancellations: ['GitHub setup was left unchanged.']
+		});
+	});
+
+	it('cancels conflicting-rule removal in a non-interactive run without --yes', async () => {
+		const conflict = storedRule('conflict', {
+			...branchBody,
+			permittedGrants: prBody.permittedGrants
+		});
+		const { ui, captured } = fakeCliUi({});
+		const { client, recorded } = setupClient({ rules: [conflict] });
+
+		await runGithubSetup(url, options, ui, client, dependencies);
+		expect({
+			recorded,
+			confirms: captured.confirms,
+			cancellations: captured.cancellations
+		}).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: []
+			},
+			confirms: [
+				{
+					message: 'Remove all conflicting trust rules to continue?',
+					detail: `main pushes (conflict): ${pinnedWorkflowReference}`
+				}
+			],
+			cancellations: ['GitHub setup was left unchanged.']
+		});
+	});
+
+	it('retains a rule pinning claims setup cannot check in an unattended run', async () => {
+		const results: ResultRow[][] = [];
+		const dispatch = storedRule('dispatch', {
+			...branchBody,
+			claims: {
+				...branchBody.claims,
+				event_name: 'workflow_dispatch'
+			},
+			permittedGrants: prBody.permittedGrants
+		});
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [dispatch]
+		});
+
+		await runGithubSetup(
+			url,
+			{ ...options, yes: true },
 			reporter(results),
 			client,
 			dependencies
@@ -455,34 +639,36 @@ describe('runGithubSetup', () => {
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [],
-				ruleRemoves: ['previous-pr', 'previous-branch']
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: []
 			},
 			outcomes: [
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: 'unchanged' },
-				{ label: 'main trust rule', value: 'unchanged' },
 				{
-					label: 'previous pull-request trust rule',
-					value: 'removed: 1 rule'
+					label: 'possibly conflicting trust rule dispatch',
+					value: `retained: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
 				},
-				{ label: 'previous main trust rule', value: 'removed: 1 rule' }
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' }
 			]
 		});
 	});
 
-	it('retires an unavailable previous reference while verifying retained siblings', async () => {
-		const retainedPrBody = githubPrAddBody(url, identity, {
-			repo: options.repo,
-			jobWorkflowRef: retainedWorkflowReference
+	it('offers rules setup cannot check for optional removal interactively', async () => {
+		const results: ResultRow[][] = [];
+		const dispatch = storedRule('dispatch', {
+			...branchBody,
+			claims: {
+				...branchBody.claims,
+				event_name: 'workflow_dispatch'
+			},
+			permittedGrants: prBody.permittedGrants
 		});
-		const retainedBranchBody = githubBranchAddBody(url, identity, {
-			repo: options.repo,
-			branch: options.branch,
-			jobWorkflowRef: retainedWorkflowReference
+		const { ui, captured } = fakeCliUi({
+			interactive: true,
+			multiSelects: [['dispatch']]
 		});
-		const verifiedReferences: string[] = [];
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
 			views: [
@@ -492,93 +678,65 @@ describe('runGithubSetup', () => {
 					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
 				}
 			],
-			rules: [
-				storedRule('current-pr', prBody),
-				storedRule('current-branch', branchBody),
-				storedRule('previous-pr', previousPrBody),
-				storedRule('previous-branch', previousBranchBody),
-				storedRule('retained-pr', retainedPrBody),
-				storedRule('retained-branch', retainedBranchBody)
-			]
+			rules: [dispatch]
 		});
 
 		await runGithubSetup(
 			url,
-			{ ...options, retireWorkflowRef: previousWorkflowReference },
-			reporter([]),
+			options,
+			{ ...ui, reporter: () => capturingReporter(results) },
 			client,
-			{
-				...dependencies,
-				verifyWorkflowReference(reference) {
-					verifiedReferences.push(reference);
-
-					if (reference === previousWorkflowReference) {
-						return Promise.reject(
-							new WorkflowReferenceNotFoundError(reference)
-						);
-					}
-
-					return Promise.resolve();
-				}
-			}
+			dependencies
 		);
 
-		expect({ recorded, verifiedReferences }).toStrictEqual({
+		expect({
+			recorded,
+			prompts: captured.multiSelects,
+			outcomes: results[0]
+		}).toStrictEqual({
 			recorded: {
 				graceAdds: [],
 				viewSets: [],
-				ruleAdds: [],
-				ruleRemoves: ['previous-pr', 'previous-branch']
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: ['dispatch']
 			},
-			verifiedReferences: [pinnedWorkflowReference, retainedWorkflowReference]
-		});
-	});
-
-	it('does not retire either previous rule when one has drifted', async () => {
-		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
+			prompts: [
 				{
-					name: 'pull-requests',
-					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					message: 'Remove trust rules that may also match the new workflow?',
+					entries: [
+						{
+							value: 'dispatch',
+							label: 'main pushes (dispatch)',
+							hint: `${pinnedWorkflowReference} (setup cannot check event_name)`
+						}
+					],
+					initialValues: []
 				}
 			],
-			rules: [
-				storedRule('current-pr', prBody),
-				storedRule('current-branch', branchBody),
-				storedRule('previous-pr', {
-					...previousPrBody,
-					permittedGrants: previousBranchBody.permittedGrants
-				}),
-				storedRule('previous-branch', previousBranchBody)
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{
+					label: 'possibly conflicting trust rule dispatch',
+					value: `removed: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
+				},
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' }
 			]
 		});
-
-		await expect(
-			runGithubSetup(
-				url,
-				{ ...options, retireWorkflowRef: previousWorkflowReference },
-				reporter([]),
-				client,
-				dependencies
-			)
-		).rejects.toBeInstanceOf(GithubSetupDriftError);
-		expect(recorded.ruleRemoves).toStrictEqual([]);
 	});
 
-	it('refuses to retire the workflow reference setup is establishing', async () => {
-		const { client, recorded } = setupClient({});
+	it('refuses an immutable owner-rule conflict before writing', async () => {
+		const owner = storedRule('owner', {
+			...prBody,
+			claims: { sub: 'repo:acme/app:pull_request' },
+			permittedGrants: [{ type: 'cupboard_wildcard' }]
+		});
+		const { client, recorded } = setupClient({ rules: [owner] });
 
 		await expect(
-			runGithubSetup(
-				url,
-				{ ...options, retireWorkflowRef: options.workflowRef },
-				reporter([]),
-				client,
-				dependencies
-			)
-		).rejects.toBeInstanceOf(WorkflowReferenceRetirementConflictError);
+			runGithubSetup(url, options, reporter([]), client, dependencies)
+		).rejects.toBeInstanceOf(GithubSetupOwnerRuleConflictError);
 		expect(recorded).toStrictEqual({
 			graceAdds: [],
 			viewSets: [],
@@ -587,8 +745,506 @@ describe('runGithubSetup', () => {
 		});
 	});
 
-	it('reports drift without replacing the stored state', async () => {
+	it('ignores an owner rule whose subject names a different repository', async () => {
 		const results: ResultRow[][] = [];
+		const owner = storedRule('owner', {
+			...prBody,
+			claims: { sub: 'repo:acme/infra:ref:refs/heads/main' },
+			permittedGrants: [{ type: 'cupboard_wildcard' }]
+		});
+		const { client, recorded } = setupClient({ rules: [owner] });
+
+		await runGithubSetup(url, options, reporter(results), client, dependencies);
+
+		expect({ recorded, outcomes: results[0] }).toStrictEqual({
+			recorded: {
+				graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
+				viewSets: [
+					{
+						name: 'pull-requests',
+						selectors: [{ kind: 'prefix', pattern: 'pr-' }],
+						priority: 50
+					}
+				],
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: []
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'created' },
+				{ label: 'reuse view', value: 'created' },
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' }
+			]
+		});
+	});
+
+	it('does not offer a disjoint immutable owner rule for cleanup', async () => {
+		const owner = storedRule('owner', {
+			...prBody,
+			claims: { job_workflow_ref: previousWorkflowReference },
+			permittedGrants: [{ type: 'cupboard_wildcard' }]
+		});
+		const { ui, captured } = fakeCliUi({
+			interactive: true,
+			multiSelects: [['owner']]
+		});
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [owner, storedRule('pr', prBody), storedRule('branch', branchBody)]
+		});
+
+		await runGithubSetup(url, options, ui, client, dependencies);
+
+		expect({ recorded, prompts: captured.multiSelects }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: []
+			},
+			prompts: []
+		});
+	});
+
+	it('removes every conflict once the confirmation is accepted', async () => {
+		const results: ResultRow[][] = [];
+		const conflict = storedRule('conflict', {
+			...prBody,
+			permittedGrants: branchBody.permittedGrants
+		});
+		const { ui, captured } = fakeCliUi({
+			interactive: true,
+			confirm: 'yes'
+		});
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [conflict, storedRule('branch', branchBody)]
+		});
+
+		await runGithubSetup(
+			url,
+			options,
+			{ ...ui, reporter: () => capturingReporter(results) },
+			client,
+			dependencies
+		);
+
+		expect({ recorded, confirms: captured.confirms }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [prBody],
+				ruleRemoves: ['conflict']
+			},
+			confirms: [
+				{
+					message: 'Remove all conflicting trust rules to continue?',
+					detail: `pull requests and main pushes (conflict): ${pinnedWorkflowReference}`
+				}
+			]
+		});
+	});
+
+	it('leaves the conflicting rule in place when a rule add fails', async () => {
+		const failure = new Error('rule add failed');
+		const conflict = storedRule('conflict', {
+			...prBody,
+			permittedGrants: branchBody.permittedGrants
+		});
+		const { client, recorded } = setupClient({ rules: [conflict] });
+		const failingClient: GithubSetupClient = {
+			...client,
+			oidcTrust: {
+				...client.oidcTrust,
+				add: () => Promise.reject(failure)
+			}
+		};
+
+		await expect(
+			runGithubSetup(
+				url,
+				options,
+				reporter([], { confirm: 'yes' }),
+				failingClient,
+				dependencies
+			)
+		).rejects.toBe(failure);
+		expect(recorded).toStrictEqual({
+			graceAdds: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			viewSets: [
+				{
+					name: 'pull-requests',
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }],
+					priority: 50
+				}
+			],
+			ruleAdds: [],
+			ruleRemoves: []
+		});
+	});
+
+	it('removes conflicts with --yes, applies new rules and retains safe rules', async () => {
+		const results: ResultRow[][] = [];
+		const conflict = storedRule('conflict', {
+			...prBody,
+			claims: {
+				repository_id: String(identity.repositoryId),
+				repository_owner_id: String(identity.repositoryOwnerId),
+				job_workflow_ref: pinnedWorkflowReference
+			},
+			permittedGrants: previousPrBody.permittedGrants
+		});
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [
+				conflict,
+				storedRule('previous-pr', previousPrBody),
+				storedRule('previous-branch', previousBranchBody)
+			]
+		});
+
+		await runGithubSetup(
+			url,
+			{ ...options, yes: true },
+			reporter(results, { confirm: 'yes' }),
+			client,
+			dependencies
+		);
+
+		expect({
+			recorded,
+			outcomes: results[0]
+		}).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: ['conflict']
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{
+					label: 'conflicting trust rule conflict',
+					value: `removed: pull requests and main pushes; ${pinnedWorkflowReference}`
+				},
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' },
+				{
+					label: 'superseded trust rule previous-branch',
+					value: `retained: main pushes; ${previousWorkflowReference}`
+				},
+				{
+					label: 'superseded trust rule previous-pr',
+					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+				}
+			]
+		});
+	});
+
+	it('warns that a retained rule follows a movable workflow reference', async () => {
+		const results: ResultRow[][] = [];
+		const verifiedReferences: string[] = [];
+		const legacy = storedRule('legacy', {
+			...prBody,
+			claims: {
+				repository_id: String(identity.repositoryId),
+				repository_owner_id: String(identity.repositoryOwnerId),
+				job_workflow_ref: movableWorkflowReference
+			},
+			permittedGrants: prBody.permittedGrants
+		});
+		const { ui, captured } = fakeCliUi({
+			interactive: true,
+			multiSelects: [[]]
+		});
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [legacy]
+		});
+
+		await runGithubSetup(
+			url,
+			options,
+			{ ...ui, reporter: () => capturingReporter(results) },
+			client,
+			{
+				...dependencies,
+				verifyWorkflowReference(reference) {
+					verifiedReferences.push(reference);
+
+					return Promise.resolve();
+				}
+			}
+		);
+
+		expect({
+			recorded,
+			prompts: captured.multiSelects,
+			outcomes: results[0],
+			verifiedReferences
+		}).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: []
+			},
+			prompts: [
+				{
+					message: 'Remove superseded trust rules?',
+					entries: [
+						{
+							value: 'legacy',
+							label: 'pull requests and main pushes (legacy)',
+							hint: `${movableWorkflowReference} (trusts future edits to the workflow)`
+						}
+					],
+					initialValues: []
+				}
+			],
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' },
+				{
+					label: 'superseded trust rule legacy',
+					value: `retained: pull requests and main pushes; ${movableWorkflowReference}; trusts future edits to the workflow`
+				}
+			],
+			verifiedReferences: [pinnedWorkflowReference]
+		});
+	});
+
+	it('reports a rule matching other workflow references instead of skipping it', async () => {
+		const results: ResultRow[][] = [];
+		const verifiedReferences: string[] = [];
+		const legacy: OidcTrustSummary = {
+			id: 'legacy',
+			issuer: prBody.issuer,
+			audience: prBody.audience,
+			claims: {
+				repository_id: String(identity.repositoryId),
+				repository_owner_id: String(identity.repositoryOwnerId),
+				job_workflow_ref: { pattern: 'other/*' }
+			},
+			permittedGrants: prBody.permittedGrants,
+			disabled: false
+		};
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [legacy]
+		});
+
+		await runGithubSetup(url, options, reporter(results), client, {
+			...dependencies,
+			verifyWorkflowReference(reference) {
+				verifiedReferences.push(reference);
+
+				return Promise.resolve();
+			}
+		});
+
+		expect({
+			recorded,
+			outcomes: results[0],
+			verifiedReferences
+		}).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: []
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' },
+				{
+					label: 'superseded trust rule legacy',
+					value:
+						'retained: pull requests and main pushes; workflow references matching other/*'
+				}
+			],
+			verifiedReferences: [pinnedWorkflowReference]
+		});
+	});
+
+	it('reports the applied configuration when a superseded removal fails', async () => {
+		const results: ResultRow[][] = [];
+		const removalFailure = new Error('remove failed');
+		const { ui } = fakeCliUi({
+			interactive: true,
+			multiSelects: [['previous-branch', 'previous-pr']]
+		});
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [
+				storedRule('previous-pr', previousPrBody),
+				storedRule('previous-branch', previousBranchBody)
+			]
+		});
+		const failingClient: GithubSetupClient = {
+			...client,
+			oidcTrust: {
+				...client.oidcTrust,
+				remove: (input) =>
+					input.id === 'previous-pr'
+						? Promise.reject(removalFailure)
+						: client.oidcTrust.remove(input)
+			}
+		};
+
+		let failure: unknown;
+		try {
+			await runGithubSetup(
+				url,
+				options,
+				{ ...ui, reporter: () => capturingReporter(results) },
+				failingClient,
+				dependencies
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectRemovalError(failure);
+		expect({
+			ruleIds: failure.ruleIds,
+			recorded,
+			outcomes: results[0]
+		}).toStrictEqual({
+			ruleIds: ['previous-pr'],
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: ['previous-branch']
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' },
+				{
+					label: 'superseded trust rule previous-branch',
+					value: `removed: main pushes; ${previousWorkflowReference}`
+				},
+				{
+					label: 'superseded trust rule previous-pr',
+					value: `retained: pull requests and main pushes; ${previousWorkflowReference}; the removal failed`
+				}
+			]
+		});
+	});
+
+	it('reports configuration setup would create alongside drift', async () => {
+		const results: ResultRow[][] = [];
+		const { client, recorded } = setupClient({
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 40,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [storedRule('pr', prBody), storedRule('branch', branchBody)]
+		});
+
+		let failure: unknown;
+		try {
+			await runGithubSetup(
+				url,
+				options,
+				reporter(results),
+				client,
+				dependencies
+			);
+		} catch (error) {
+			failure = error;
+		}
+
+		expectDriftError(failure);
+		expect({
+			recorded,
+			steps: failure.steps,
+			outcomes: results[0]
+		}).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [],
+				ruleRemoves: []
+			},
+			steps: ['reuse view'],
+			outcomes: [
+				{
+					label: 'grace policy',
+					value: 'missing: setup would create it after the drift is resolved'
+				},
+				{
+					label: 'reuse view',
+					value:
+						"drift: stored priority 40 does not exceed the destination's 40"
+				}
+			]
+		});
+	});
+
+	it('still reports policy and view drift without changing them', async () => {
+		const results: ResultRow[][] = [];
+		const { ui, captured } = fakeCliUi({
+			interactive: true,
+			multiSelects: [['conflict'], ['previous-pr']]
+		});
+		const conflict = storedRule('conflict', {
+			...prBody,
+			permittedGrants: branchBody.permittedGrants
+		});
 		const { client, recorded } = setupClient({
 			gracePolicies: [{ cachePrefix: '', graceSeconds: 3600 }],
 			views: [
@@ -599,14 +1255,10 @@ describe('runGithubSetup', () => {
 				}
 			],
 			rules: [
-				storedRule('pr', {
-					...prBody,
-					claims: {
-						...prBody.claims,
-						job_workflow_ref: 'other@refs/heads/main'
-					}
-				}),
-				storedRule('branch', branchBody)
+				storedRule('pr', prBody),
+				storedRule('branch', branchBody),
+				conflict,
+				storedRule('previous-pr', previousPrBody)
 			]
 		});
 
@@ -615,7 +1267,7 @@ describe('runGithubSetup', () => {
 			await runGithubSetup(
 				url,
 				options,
-				reporter(results),
+				{ ...ui, reporter: () => capturingReporter(results) },
 				client,
 				dependencies
 			);
@@ -626,8 +1278,9 @@ describe('runGithubSetup', () => {
 		expectDriftError(failure);
 		expect({
 			recorded,
+			prompts: captured.multiSelects,
 			steps: failure.steps,
-			trustRuleRow: results[0]?.[2]
+			outcomes: results[0]
 		}).toStrictEqual({
 			recorded: {
 				graceAdds: [],
@@ -635,72 +1288,50 @@ describe('runGithubSetup', () => {
 				ruleAdds: [],
 				ruleRemoves: []
 			},
-			steps: ['grace policy', 'reuse view', 'pull-request trust rule'],
-			// The drift detail names the diverging fields and the remediation.
-			trustRuleRow: {
-				label: 'pull-request trust rule',
-				value:
-					'drift: rule pr covers the same trigger but differs on claims; remove it and re-run setup'
-			}
-		});
-	});
-	it('reports disallowed same-trigger drift alongside an exact rule', async () => {
-		const results: ResultRow[][] = [];
-		const { client, recorded } = setupClient({
-			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
-			views: [
+			prompts: [],
+			steps: ['grace policy', 'reuse view'],
+			outcomes: [
 				{
-					name: 'pull-requests',
-					priority: 50,
-					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+					label: 'grace policy',
+					value:
+						'drift: stored tenant-wide grace is 3600s, setup would write 86400s'
+				},
+				{
+					label: 'reuse view',
+					value:
+						"drift: stored priority 40 does not exceed the destination's 40"
+				},
+				{
+					label: 'superseded trust rule previous-pr',
+					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
 				}
-			],
-			rules: [
-				storedRule('current-pr', prBody),
-				storedRule('drifted-pr', {
-					...prBody,
-					permittedGrants: branchBody.permittedGrants
-				}),
-				storedRule('current-branch', branchBody)
 			]
-		});
-
-		let failure: unknown;
-		try {
-			await runGithubSetup(
-				url,
-				options,
-				reporter(results),
-				client,
-				dependencies
-			);
-		} catch (error) {
-			failure = error;
-		}
-
-		expectDriftError(failure);
-		expect({
-			recorded,
-			steps: failure.steps,
-			trustRuleRow: results[0]?.[2]
-		}).toStrictEqual({
-			recorded: {
-				graceAdds: [],
-				viewSets: [],
-				ruleAdds: [],
-				ruleRemoves: []
-			},
-			steps: ['pull-request trust rule'],
-			trustRuleRow: {
-				label: 'pull-request trust rule',
-				value:
-					'drift: rule drifted-pr covers the same trigger but differs on grants; remove it and re-run setup'
-			}
 		});
 	});
 });
 
 describe('registerGithubCommands', () => {
+	it('offers generic conflict confirmation without a retirement flag', () => {
+		const program = new Command();
+		registerGithubCommands(program);
+		const github = program.commands.find(
+			(command) => command.name() === 'github'
+		);
+		const setup = github?.commands.find(
+			(command) => command.name() === 'setup'
+		);
+
+		expect(setup?.options.map((option) => option.flags)).toStrictEqual([
+			'--repo <owner/name>',
+			'--branch <name>',
+			'--grace <duration>',
+			'--workflow-ref <owner/repo/path@ref>',
+			'-y, --yes',
+			'--read-user <user>',
+			'--read-password <password>'
+		]);
+	});
+
 	it.each([['setup'], ['check']])(
 		'refuses %s without --workflow-ref',
 		async (subcommand) => {

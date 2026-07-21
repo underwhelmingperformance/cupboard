@@ -9,6 +9,7 @@ import {
 	isCancel,
 	isCI,
 	log,
+	multiselect,
 	note,
 	outro,
 	password,
@@ -86,6 +87,13 @@ export interface MenuEntry<T extends string> {
 	readonly value: T;
 	readonly label: string;
 	readonly hint?: string;
+}
+
+/** The choices and defaults for a multiple-choice prompt. */
+export interface MultiSelectOptions<T extends string> {
+	readonly message: string;
+	readonly entries: readonly MenuEntry<T>[];
+	readonly initialValues?: readonly T[];
 }
 
 /** The outcome of a text edit. */
@@ -207,6 +215,10 @@ export interface CliUi {
 		message: string,
 		entries: readonly MenuEntry<T>[]
 	): Promise<T | undefined>;
+	/** Pick any number of entries; undefined when cancelled or non-interactive. */
+	multiSelect<T extends string>(
+		options: MultiSelectOptions<T>
+	): Promise<readonly T[] | undefined>;
 	/** Edit a single text value. */
 	editText(options: TextEditOptions): Promise<TextEdit>;
 	/**
@@ -397,6 +409,33 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 			// Resolve back through the entries so the value keeps its narrow type.
 			return entries.find((entry) => entry.value === choice)?.value;
+		},
+
+		async multiSelect(options) {
+			if (!isInteractiveRun) {
+				return;
+			}
+
+			const choices = await multiselect<string>({
+				message: options.message,
+				options: options.entries.map((entry) => ({
+					value: entry.value,
+					label: entry.label,
+					...(entry.hint !== undefined && { hint: entry.hint })
+				})),
+				initialValues: [...(options.initialValues ?? [])],
+				required: false
+			});
+
+			if (isCancel(choices)) {
+				return;
+			}
+
+			const selected = new Set(choices);
+
+			return options.entries
+				.filter((entry) => selected.has(entry.value))
+				.map((entry) => entry.value);
 		},
 
 		async editText(options) {

@@ -644,13 +644,34 @@ export class WorkflowReferenceNotFoundError extends CliUsageError {
 	}
 }
 
-export class WorkflowReferenceRetirementConflictError extends CliUsageError {
-	constructor(public readonly reference: string) {
+/**
+ * Optional trust-rule removals failed after the new configuration was already
+ * applied. The result report names each rule that stayed behind; the non-zero
+ * exit tells scripts the cleanup is incomplete.
+ */
+export class GithubSetupRemovalError extends CliError {
+	constructor(
+		public readonly ruleIds: readonly string[],
+		options: { readonly cause: unknown }
+	) {
 		super(
-			'--retire-workflow-ref must name the previous workflow reference, not ' +
-				`the reference setup is establishing: '${reference}'`
+			`The new configuration was applied, but removing ${
+				ruleIds.length === 1 ? 'trust rule' : 'trust rules'
+			} ${ruleIds.join(', ')} failed. ` +
+				'Remove each with `cupboard oidc-trust remove` or re-run setup.',
+			{ cause: options.cause }
 		);
-		this.name = 'WorkflowReferenceRetirementConflictError';
+		this.name = 'GithubSetupRemovalError';
+	}
+}
+
+export class GithubSetupOwnerRuleConflictError extends CliUsageError {
+	constructor() {
+		super(
+			'The immutable owner trust rule can match this GitHub workflow. ' +
+				'Change the deployment owner OIDC configuration before running github setup.'
+		);
+		this.name = 'GithubSetupOwnerRuleConflictError';
 	}
 }
 

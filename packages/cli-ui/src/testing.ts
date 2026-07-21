@@ -11,6 +11,7 @@ import type {
 	ConfirmOptions,
 	ConfirmOutcome,
 	MenuEntry,
+	MultiSelectOptions,
 	PrefixedTextOptions,
 	TextEdit,
 	TextEditOptions
@@ -28,6 +29,7 @@ export interface CliUiCapture {
 	readonly notes: { readonly title: string; readonly body: string }[];
 	readonly data: string[];
 	readonly confirms: ConfirmOptions[];
+	readonly multiSelects: MultiSelectOptions<string>[];
 	readonly results: ResultPayload[];
 	readonly errors: unknown[];
 	readonly opened: string[];
@@ -41,6 +43,7 @@ export interface CliUiScript {
 	readonly interactive?: boolean;
 	readonly confirm?: ConfirmOutcome;
 	readonly menu?: string;
+	readonly multiSelects?: readonly (readonly string[] | undefined)[];
 	readonly editText?: TextEdit;
 	readonly prefixedText?: string;
 	readonly secret?: string;
@@ -84,6 +87,7 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 		notes: [],
 		data: [],
 		confirms: [],
+		multiSelects: [],
 		results: [],
 		errors: [],
 		opened: []
@@ -92,6 +96,7 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 	const recordWarn = (label: string, value?: string): void => {
 		captured.warnings.push(value === undefined ? label : `${label}: ${value}`);
 	};
+	let multiSelectIndex = 0;
 
 	const reporter: Reporter = {
 		phase: (_label, body) =>
@@ -167,6 +172,26 @@ export function fakeCliUi(script: CliUiScript = {}): FakeCliUi {
 			Promise.resolve(
 				entries.find((entry) => entry.value === script.menu)?.value
 			),
+
+		multiSelect: <T extends string>(
+			prompt: MultiSelectOptions<T>
+		): Promise<readonly T[] | undefined> => {
+			captured.multiSelects.push(prompt);
+			const scripted = script.multiSelects?.[multiSelectIndex];
+			multiSelectIndex += 1;
+
+			if (scripted === undefined) {
+				return Promise.resolve(undefined);
+			}
+
+			const selected = new Set(scripted);
+
+			return Promise.resolve(
+				prompt.entries
+					.filter((entry) => selected.has(entry.value))
+					.map((entry) => entry.value)
+			);
+		},
 
 		editText: (_options: TextEditOptions): Promise<TextEdit> =>
 			Promise.resolve(script.editText ?? { kind: 'cancelled' }),

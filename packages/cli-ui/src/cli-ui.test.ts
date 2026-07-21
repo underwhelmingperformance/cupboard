@@ -326,7 +326,8 @@ describe('fakeCliUi', () => {
 		const { ui, captured } = fakeCliUi({
 			interactive: true,
 			confirm: 'yes',
-			menu: 'b'
+			menu: 'b',
+			multiSelects: [['a', 'c']]
 		});
 
 		ui.intro('cupboard');
@@ -336,10 +337,20 @@ describe('fakeCliUi', () => {
 			{ value: 'a', label: 'A' },
 			{ value: 'b', label: 'B' }
 		]);
+		const selected = await ui.multiSelect({
+			message: 'Pick several',
+			entries: [
+				{ value: 'a', label: 'A' },
+				{ value: 'b', label: 'B' },
+				{ value: 'c', label: 'C' }
+			],
+			initialValues: ['b']
+		});
 
-		expect({ confirmed, chosen, captured }).toStrictEqual({
+		expect({ confirmed, chosen, selected, captured }).toStrictEqual({
 			confirmed: 'yes',
 			chosen: 'b',
+			selected: ['a', 'c'],
 			captured: {
 				intros: ['cupboard'],
 				outros: [],
@@ -351,6 +362,17 @@ describe('fakeCliUi', () => {
 				notes: [],
 				data: ['out'],
 				confirms: [{ message: 'Proceed?' }],
+				multiSelects: [
+					{
+						message: 'Pick several',
+						entries: [
+							{ value: 'a', label: 'A' },
+							{ value: 'b', label: 'B' },
+							{ value: 'c', label: 'C' }
+						],
+						initialValues: ['b']
+					}
+				],
 				results: [],
 				errors: [],
 				opened: []
