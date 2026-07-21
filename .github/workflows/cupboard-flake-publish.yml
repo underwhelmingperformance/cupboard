@@ -245,13 +245,13 @@ jobs:
       fallback-count: ${{ steps.plan.outputs.fallback-count }}
       plan-artifact-name: ${{ steps.plan.outputs.plan-artifact-name }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # Checked out at the called workflow's own commit, not `main`, so a
       # tagged or SHA-pinned caller executes matching action code.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -337,11 +337,11 @@ jobs:
       contents: read # check out the flake source
       id-token: write # OIDC token for the cache push and Sigstore signing
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -468,11 +468,11 @@ jobs:
       contents: read # check out the flake source
       id-token: write # OIDC token for the cache push and Sigstore signing
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
@@ -589,11 +589,11 @@ jobs:
       contents: read # check out the flake source
       id-token: write # OIDC token for the cache push and Sigstore signing
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ job.workflow_repository }}
           ref: ${{ job.workflow_sha }}
