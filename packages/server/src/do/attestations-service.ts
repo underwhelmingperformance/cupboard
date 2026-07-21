@@ -718,7 +718,7 @@ export class AttestationsService {
 		}
 
 		for (const path of touchedPaths) {
-			const [cache, storePathHash] = path.split('\0');
+			const [cache, storePathHash] = path.split('\0', 2);
 
 			if (cache === undefined || storePathHash === undefined) {
 				continue;

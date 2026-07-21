@@ -113,7 +113,7 @@ function resolveAuto(
 }
 
 function unixSocketPath(uri: string): string | undefined {
-	const [socket] = uri.slice(unixScheme.length).split('?');
+	const [socket] = uri.slice(unixScheme.length).split('?', 1);
 
 	return socket === undefined || socket === '' ? undefined : socket;
 }

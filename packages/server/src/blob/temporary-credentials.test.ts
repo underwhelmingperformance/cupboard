@@ -53,7 +53,7 @@ function jwtFrom(sessionToken: string): {
 	expect(decoded.startsWith('jwt/')).toBe(true);
 
 	const jwt = decoded.slice('jwt/'.length);
-	const [header = '', payload = '', signature = ''] = jwt.split('.');
+	const [header = '', payload = '', signature = ''] = jwt.split('.', 3);
 
 	return {
 		jwt,

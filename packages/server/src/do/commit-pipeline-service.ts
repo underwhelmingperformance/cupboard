@@ -227,7 +227,7 @@ function isOverQuota(
 	isOwned: boolean,
 	fileSize: number
 ): boolean {
-	if (account.quotaBytes === null || isOwned) {
+	if (isOwned || account.quotaBytes === null) {
 		return false;
 	}
 
@@ -407,7 +407,7 @@ export class CommitPipelineService {
 		// charged the blob and became the owner. Re-probe fresh and retry once; the
 		// charge batch remains the authoritative fence. The same shape as
 		// `materialiseVerified`'s over-quota retry.
-		if (outcome.kind === 'over-quota' && isProbeFromPrefetch) {
+		if (isProbeFromPrefetch && outcome.kind === 'over-quota') {
 			const freshProbe = await this.probeMaterialisation(metadata);
 			outcome = await this.materialiseBatched(logger, {
 				cache,
@@ -1101,7 +1101,7 @@ export class CommitPipelineService {
 				const outcome = outcomes[entry.index];
 				const retainUntil = stored.get(entry.hash);
 
-				if (outcome?.kind === 'materialised' && retainUntil !== undefined) {
+				if (retainUntil !== undefined && outcome?.kind === 'materialised') {
 					outcomes[entry.index] = { ...outcome, graceRetainUntil: retainUntil };
 				}
 			}
@@ -2087,7 +2087,7 @@ export class CommitPipelineService {
 			// otherwise; cancelling it here lets the abandoned call settle promptly
 			// instead of leaving the R2 stream open for the rest of the isolate's
 			// life.
-			if (error instanceof SubrequestTimeoutError && cancelBody !== undefined) {
+			if (cancelBody !== undefined && error instanceof SubrequestTimeoutError) {
 				try {
 					await cancelBody();
 				} catch {

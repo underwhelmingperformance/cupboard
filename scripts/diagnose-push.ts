@@ -468,7 +468,7 @@ export function parseSpanEvent(event: unknown): SpanEvent | undefined {
 	const meta = parsed.data.$metadata;
 	const name = meta.spanName ?? meta.transactionName;
 
-	if (meta.traceId === undefined || name === undefined) {
+	if (name === undefined || meta.traceId === undefined) {
 		return undefined;
 	}
 
@@ -1293,7 +1293,7 @@ async function resolveAccountId(
 
 	const sole = accounts[0];
 
-	if (accounts.length === 1 && sole !== undefined) {
+	if (sole !== undefined && accounts.length === 1) {
 		return sole.id;
 	}
 
@@ -1449,8 +1449,8 @@ async function queryPageWithRetry(
 			const status = telemetryErrorStatus(error);
 
 			if (
-				attempt >= telemetryQueryAttempts ||
 				status === undefined ||
+				attempt >= telemetryQueryAttempts ||
 				!isRetryableTelemetryStatus(status)
 			) {
 				throw error;

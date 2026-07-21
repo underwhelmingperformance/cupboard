@@ -29,7 +29,7 @@ export function hasControlCharacter(value: string): boolean {
 	for (const character of value) {
 		const code = character.codePointAt(0) ?? 0;
 
-		if (code < 0x20 || code === 0x7f) {
+		if (code === 0x7f || code < 0x20) {
 			return true;
 		}
 	}

@@ -23,18 +23,16 @@ export async function fetchWithProbeDeadline<Result>(
 		return consume(response);
 	})();
 	let timer: ReturnType<typeof setTimeout> | undefined;
-	const result = new Promise<Result>((resolve, reject) => {
+	const deadline = new Promise<never>((_resolve, reject) => {
 		timer = setTimeout(() => {
 			const error = new ProbeTimeoutError(url);
 			reject(error);
 			deadlineController.abort(error);
 		}, deadlineMs);
-
-		void pending.then(resolve, reject);
 	});
 
 	try {
-		return await result;
+		return await Promise.race([pending, deadline]);
 	} finally {
 		clearTimeout(timer);
 	}

@@ -372,14 +372,14 @@ describe('runCommitSession', () => {
 			// The entry must not have resolved or rejected yet: it is waiting for the retry.
 			let hasResolved = false;
 			let hasRejected = false;
-			void commit.then(
-				() => {
+			void (async () => {
+				try {
+					await commit;
 					hasResolved = true;
-				},
-				() => {
+				} catch {
 					hasRejected = true;
 				}
-			);
+			})();
 			await Promise.resolve();
 			expect({ hasResolved, hasRejected }).toStrictEqual({
 				hasResolved: false,

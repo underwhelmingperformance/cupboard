@@ -727,7 +727,7 @@ export function runCommitSession(
 					entry.retryTimer = setTimeout(() => {
 						entry.retryTimer = undefined;
 
-						if (outstanding.has(errorUploadId) && isOpened && !isClosed) {
+						if (isOpened && !isClosed && outstanding.has(errorUploadId)) {
 							sendCommits([entry.target]);
 						}
 					}, delay);

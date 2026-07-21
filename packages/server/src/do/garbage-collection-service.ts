@@ -902,7 +902,7 @@ export class GarbageCollectionService {
 			sweepRemaining -= swept.used;
 			pathsSwept += swept.pathsSwept;
 
-			if (swept.complete || sweepRemaining === 0) {
+			if (sweepRemaining === 0 || swept.complete) {
 				break;
 			}
 		}

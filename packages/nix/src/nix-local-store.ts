@@ -48,7 +48,7 @@ export class NixLocalStoreClient implements NixStoreClient {
 		const database = this.open();
 
 		try {
-			return await Promise.resolve(use(database));
+			return await use(database);
 		} finally {
 			database.close();
 		}
