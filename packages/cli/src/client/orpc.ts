@@ -128,9 +128,9 @@ function derivedClient<C extends AnyContractRouter>(
 				}
 
 				if (
+					!isBearerRefreshed &&
 					response.status === unauthorizedStatusCode &&
-					isTokenProvider(credential) &&
-					!isBearerRefreshed
+					isTokenProvider(credential)
 				) {
 					isBearerRefreshed = true;
 					const headers = new Headers(current.headers);

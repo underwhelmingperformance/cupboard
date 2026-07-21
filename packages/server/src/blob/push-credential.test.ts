@@ -18,7 +18,7 @@ const configuration: R2PresignerConfiguration = {
 
 function jwtPayload(sessionToken: string): unknown {
 	const jwt = atob(sessionToken).slice('jwt/'.length);
-	const [, payload = ''] = jwt.split('.');
+	const [, payload = ''] = jwt.split('.', 2);
 	const padded = payload
 		.replaceAll('-', '+')
 		.replaceAll('_', '/')

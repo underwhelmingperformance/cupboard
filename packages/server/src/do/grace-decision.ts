@@ -195,7 +195,7 @@ export function confirmGraceBatch(
 
 			matched.push(...chunkMatched);
 
-			if (chunkMatched.length === 0 || graceSeconds === undefined) {
+			if (graceSeconds === undefined || chunkMatched.length === 0) {
 				return;
 			}
 

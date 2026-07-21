@@ -177,8 +177,8 @@ export class NarInfoObjectsService {
 		}
 
 		if (
-			this.context.offboarding ||
 			row === undefined ||
+			this.context.offboarding ||
 			!(await this.hasCommittedReference(cache, row))
 		) {
 			await this.deleteNarInfoObject(cache, storePathHash);

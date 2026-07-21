@@ -30,7 +30,7 @@ export async function fetchWithProbeDeadline<Result>(
 			deadlineController.abort(error);
 		}, deadlineMs);
 
-		void pending.then(resolve, reject);
+		void pending.then(resolve).catch(reject);
 	});
 
 	try {

@@ -588,7 +588,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				const view = reuseViewNameSchema.safeParse(context.req.param('view'));
 				const storePathHash = parseNarInfoName(context.req.param('name') ?? '');
 
-				if (!view.success || storePathHash === undefined) {
+				if (storePathHash === undefined || !view.success) {
 					return reuseNotFound();
 				}
 
@@ -748,7 +748,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 				...(outcome.grace !== undefined && { grace: outcome.grace })
 			});
 		} catch (error) {
-			if (error instanceof UploadNotFoundError && identity !== undefined) {
+			if (identity !== undefined && error instanceof UploadNotFoundError) {
 				await this.resolveGoneCommit(socket, cache, uploadId, identity);
 				return;
 			}

@@ -94,7 +94,7 @@ export class Nix {
 			throw new NotInNixStoreError(resolved, this.storeDirectory);
 		}
 
-		const [name] = resolved.slice(prefix.length).split('/');
+		const [name] = resolved.slice(prefix.length).split('/', 1);
 
 		if (name === undefined || name === '') {
 			throw new NotInNixStoreError(resolved, this.storeDirectory);

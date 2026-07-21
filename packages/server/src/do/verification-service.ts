@@ -201,7 +201,7 @@ function chunkClaims(
 		const isReuse = pending.r2Key === narObjectKey(metadata.narHash);
 		const cost = isReuse ? 0 : metadata.narSize;
 
-		if (cost > 0 && hasFresh && bytes + cost > maxNarBytes) {
+		if (hasFresh && cost > 0 && bytes + cost > maxNarBytes) {
 			return { claims, truncated: true };
 		}
 
@@ -647,7 +647,7 @@ export class VerificationService {
 		// blob, so the tenant already owns it). Re-probe once with a fresh read and
 		// retry; only a second over-quota result is terminal. The reserve and charge
 		// guards are idempotent, so one retry is safe.
-		if (outcome.kind === 'over-quota' && prefetched !== undefined) {
+		if (prefetched !== undefined && outcome.kind === 'over-quota') {
 			const freshProbe =
 				await this.commitPipeline.probeMaterialisation(metadata);
 			const retried = await this.commitPipeline.materialiseBatched(logger, {

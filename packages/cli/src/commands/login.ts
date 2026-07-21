@@ -54,8 +54,8 @@ export class DeviceGrantNotEnabledError extends CliError {
  */
 export function mapDeviceLoginError(error: unknown, clientId: string): unknown {
 	if (
-		error instanceof DeviceAuthorizationRequestError &&
 		clientId === cloudflareOauthClientId &&
+		error instanceof DeviceAuthorizationRequestError &&
 		[400, 401, 403].includes(error.status)
 	) {
 		return new DeviceGrantNotEnabledError({ cause: error });

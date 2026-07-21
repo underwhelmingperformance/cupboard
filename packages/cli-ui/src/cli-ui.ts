@@ -465,7 +465,7 @@ export function createCliUi(options: CliUiOptions): CliUi {
 
 			const answer = await prompt.prompt();
 
-			return isCancel(answer) || typeof answer !== 'string'
+			return typeof answer !== 'string' || isCancel(answer)
 				? undefined
 				: answer;
 		},
