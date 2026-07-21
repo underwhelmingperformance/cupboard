@@ -188,7 +188,7 @@ export class CacheAdminService {
 	): Promise<CacheRemoveResponse> {
 		const committedCount = this.cacheStorePathCount(cache);
 
-		if (committedCount > 0 && !shouldForce) {
+		if (!shouldForce && committedCount > 0) {
 			throw new CacheNotEmptyError(cache);
 		}
 
