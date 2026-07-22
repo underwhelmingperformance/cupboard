@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 import type { CliUi } from '@cupboard/cli-ui';
+import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	defaultReadUser,
 	type TenantCreateBody,
@@ -28,18 +29,18 @@ import { deploymentUrlArgument } from '../url-argument.ts';
 export interface TenantClient {
 	list(): Promise<TenantListResponse>;
 	create(input: TenantCreateBody): Promise<TenantSummary>;
-	suspend(input: { id: string }): Promise<TenantMutateResponse>;
-	resume(input: { id: string }): Promise<TenantMutateResponse>;
+	suspend(input: { id: TenantId }): Promise<TenantMutateResponse>;
+	resume(input: { id: TenantId }): Promise<TenantMutateResponse>;
 	setReadMode(input: {
-		id: string;
+		id: TenantId;
 		readMode: 'public' | 'private';
 	}): Promise<TenantReadModeResponse>;
 	rotateReadCredential(input: {
-		id: string;
+		id: TenantId;
 		read: { user: string; password: string };
 	}): Promise<TenantReadModeResponse>;
-	clearReadCredential(input: { id: string }): Promise<TenantReadModeResponse>;
-	remove(input: { id: string }): Promise<TenantMutateResponse>;
+	clearReadCredential(input: { id: TenantId }): Promise<TenantReadModeResponse>;
+	remove(input: { id: TenantId }): Promise<TenantMutateResponse>;
 }
 
 interface RotateCredentialOptions {
@@ -255,7 +256,7 @@ export function registerTenantCommands(
 				signal: programOptions.signal
 			});
 
-			await runTenantSuspend(id, ui, rpc.tenants);
+			await runTenantSuspend(tenantIdSchema.parse(id), ui, rpc.tenants);
 		});
 
 	tenant
@@ -272,7 +273,7 @@ export function registerTenantCommands(
 				signal: programOptions.signal
 			});
 
-			await runTenantResume(id, reporter, rpc.tenants);
+			await runTenantResume(tenantIdSchema.parse(id), reporter, rpc.tenants);
 		});
 
 	tenant
@@ -289,7 +290,7 @@ export function registerTenantCommands(
 			});
 
 			await runTenantReadMode(
-				id,
+				tenantIdSchema.parse(id),
 				tenantReadModeSchema.parse(mode),
 				reporter,
 				rpc.tenants
@@ -320,7 +321,12 @@ export function registerTenantCommands(
 				signal: programOptions.signal
 			});
 
-			await runTenantRotateCredential(id, options, reporter, rpc.tenants);
+			await runTenantRotateCredential(
+				tenantIdSchema.parse(id),
+				options,
+				reporter,
+				rpc.tenants
+			);
 		});
 
 	tenant
@@ -337,7 +343,11 @@ export function registerTenantCommands(
 				signal: programOptions.signal
 			});
 
-			await runTenantClearCredential(id, reporter, rpc.tenants);
+			await runTenantClearCredential(
+				tenantIdSchema.parse(id),
+				reporter,
+				rpc.tenants
+			);
 		});
 
 	tenant
@@ -354,7 +364,7 @@ export function registerTenantCommands(
 				signal: programOptions.signal
 			});
 
-			await runTenantRemove(id, ui, rpc.tenants);
+			await runTenantRemove(tenantIdSchema.parse(id), ui, rpc.tenants);
 		});
 }
 
@@ -415,7 +425,7 @@ export async function runTenantList(
 }
 
 export async function runTenantSuspend(
-	id: string,
+	id: TenantId,
 	ui: CliUi,
 	client: TenantClient
 ): Promise<void> {
@@ -442,7 +452,7 @@ export async function runTenantSuspend(
 }
 
 export async function runTenantResume(
-	id: string,
+	id: TenantId,
 	reporter: Reporter,
 	client: Pick<TenantClient, 'resume'>
 ): Promise<void> {
@@ -458,7 +468,7 @@ export async function runTenantResume(
 }
 
 export async function runTenantReadMode(
-	id: string,
+	id: TenantId,
 	readMode: 'public' | 'private',
 	reporter: Reporter,
 	client: Pick<TenantClient, 'setReadMode'>
@@ -475,7 +485,7 @@ export async function runTenantReadMode(
 }
 
 export async function runTenantRotateCredential(
-	id: string,
+	id: TenantId,
 	options: RotateCredentialOptions,
 	reporter: Reporter,
 	client: Pick<TenantClient, 'rotateReadCredential'>
@@ -516,7 +526,7 @@ export async function runTenantRotateCredential(
 }
 
 export async function runTenantClearCredential(
-	id: string,
+	id: TenantId,
 	reporter: Reporter,
 	client: Pick<TenantClient, 'clearReadCredential'>
 ): Promise<void> {
@@ -532,7 +542,7 @@ export async function runTenantClearCredential(
 }
 
 export async function runTenantRemove(
-	id: string,
+	id: TenantId,
 	ui: CliUi,
 	client: TenantClient
 ): Promise<void> {

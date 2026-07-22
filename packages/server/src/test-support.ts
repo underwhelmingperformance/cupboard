@@ -361,7 +361,7 @@ export async function provisionNamedTenant(
 	}
 
 	await refreshTenantMembership(env);
-	await invalidateTenantRow(id);
+	await invalidateTenantRow(tenantIdSchema.parse(id));
 
 	return issuer;
 }
@@ -379,7 +379,7 @@ export async function suspendTenant(id: string): Promise<void> {
 		.set({ status: 'suspended' })
 		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(id)))
 		.run();
-	await invalidateTenantRow(id);
+	await invalidateTenantRow(tenantIdSchema.parse(id));
 }
 
 /**
@@ -395,7 +395,7 @@ export async function offboardTenant(id: string): Promise<void> {
 		.set({ status: 'offboarding' })
 		.where(eq(d1Schema.tenant.id, tenantIdSchema.parse(id)))
 		.run();
-	await invalidateTenantRow(id);
+	await invalidateTenantRow(tenantIdSchema.parse(id));
 	await tenantServer(env, tenantIdSchema.parse(id)).beginOffboard();
 }
 

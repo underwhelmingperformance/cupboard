@@ -135,7 +135,9 @@ describe('layered admission gate', () => {
 		await ensureTenant(database(), createBody('acme'), now);
 		await refreshTenantMembership(env);
 		// The filter still reports the slug, but its marker is gone (a tier-2 miss).
-		await env.TENANT_CACHE.delete(tenantMemberKey('acme'));
+		await env.TENANT_CACHE.delete(
+			tenantMemberKey(tenantIdSchema.parse('acme'))
+		);
 
 		expect(await admit('acme')).toBeUndefined();
 	});
@@ -198,7 +200,9 @@ describe('layered admission gate', () => {
 		await refreshTenantMembership(env);
 		// A create-write that was dropped: the marker is gone though the tenant is
 		// live, so admission 404s until the cron reasserts it.
-		await env.TENANT_CACHE.delete(tenantMemberKey('acme'));
+		await env.TENANT_CACHE.delete(
+			tenantMemberKey(tenantIdSchema.parse('acme'))
+		);
 		const dropped = await admit('acme');
 
 		await refreshTenantMembership(env);

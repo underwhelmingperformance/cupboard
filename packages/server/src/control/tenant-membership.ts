@@ -73,7 +73,7 @@ const tenantEntrySchema = z.object({
 	readVerifier: tenantReadVerifierSchema.optional()
 });
 
-export function tenantMemberKey(slug: string): string {
+export function tenantMemberKey(slug: TenantId): string {
 	return `${memberKeyPrefix}${slug}`;
 }
 
@@ -82,14 +82,14 @@ export function tenantMemberKey(slug: string): string {
 // sound 404: every live tenant's marker is present or reasserted within a tick.
 export async function writeTenantMember(
 	kv: KVNamespace,
-	slug: string
+	slug: TenantId
 ): Promise<void> {
 	await kv.put(tenantMemberKey(slug), '1');
 }
 
 export async function deleteTenantMember(
 	kv: KVNamespace,
-	slug: string
+	slug: TenantId
 ): Promise<void> {
 	await kv.delete(tenantMemberKey(slug));
 }
@@ -102,7 +102,7 @@ type MemberLookup = 'present' | 'absent' | 'error';
 // means "cache unavailable".
 async function lookupTenantMember(
 	kv: KVNamespace,
-	slug: string
+	slug: TenantId
 ): Promise<MemberLookup> {
 	try {
 		const value = await kv.get(tenantMemberKey(slug), {
@@ -118,7 +118,7 @@ async function lookupTenantMember(
 // The membership filter is a binary fuse8: a static, immutable structure with no
 // false negatives, built wholesale from the live slug set and queried read-only,
 // exactly as the cron rebuild and the admission gate use it.
-export function buildMembershipFilter(slugs: readonly string[]): Uint8Array {
+export function buildMembershipFilter(slugs: readonly TenantId[]): Uint8Array {
 	return BinaryFuse8.build(slugs).serialise();
 }
 
@@ -171,7 +171,7 @@ async function loadMembershipFilter(
 	return deserialiseFilter(new Uint8Array(bytes));
 }
 
-function rowCacheKey(slug: string): Request {
+function rowCacheKey(slug: TenantId): Request {
 	return new Request(
 		`https://tenant-row.cupboard.invalid/${encodeURIComponent(slug)}`
 	);
@@ -326,7 +326,7 @@ export async function rebuildMembershipFilter(env: Env): Promise<void> {
 
 async function publishMembershipFilter(
 	env: Env,
-	live: readonly string[]
+	live: readonly TenantId[]
 ): Promise<void> {
 	await env.TENANT_CACHE.put(filterKey, buildMembershipFilter(live));
 	// Drop this colo's cached filter so it refetches the rebuilt one promptly;
@@ -334,7 +334,7 @@ async function publishMembershipFilter(
 	await caches.default.delete(filterCacheKey());
 }
 
-async function liveTenantSlugs(database: Database): Promise<string[]> {
+async function liveTenantSlugs(database: Database): Promise<TenantId[]> {
 	const rows = await database
 		.select({ id: d1Schema.tenant.id })
 		.from(d1Schema.tenant)
@@ -348,7 +348,7 @@ async function liveTenantSlugs(database: Database): Promise<string[]> {
 // credential change made here takes effect without waiting on the row TTL. The
 // control plane calls this when it mutates a tenant. Best-effort and per-colo:
 // other colos refresh on their own TTL.
-export async function invalidateTenantRow(slug: string): Promise<void> {
+export async function invalidateTenantRow(slug: TenantId): Promise<void> {
 	try {
 		await caches.default.delete(rowCacheKey(slug));
 	} catch {

@@ -2,6 +2,7 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	type TenantCreateBody,
 	tenantCreateBodySchema,
@@ -27,6 +28,8 @@ import {
 	runTenantSuspend,
 	type TenantClient
 } from './tenant.ts';
+
+const acmeTenant = tenantIdSchema.parse('acme');
 
 function thrownBy(run: () => unknown): unknown {
 	let thrown: unknown;
@@ -367,7 +370,7 @@ describe('runTenantSuspend / runTenantRemove', () => {
 			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
 			await run(
-				'acme',
+				acmeTenant,
 				ui,
 				tenantClient({
 					[method](input: { id: string }) {
@@ -395,7 +398,7 @@ describe('runTenantSuspend / runTenantRemove', () => {
 		async ({ run, cancelled }) => {
 			const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-			await run('acme', ui, tenantClient({}));
+			await run(acmeTenant, ui, tenantClient({}));
 
 			expect({
 				results: captured.results,
@@ -413,7 +416,7 @@ describe('runTenantResume', () => {
 		const results: ResultRow[][] = [];
 		const calls: { id: string }[] = [];
 
-		await runTenantResume('acme', reporter(results), {
+		await runTenantResume(acmeTenant, reporter(results), {
 			resume(input) {
 				calls.push(input);
 				return Promise.resolve({ id: 'acme', status: 'active' });
@@ -432,7 +435,7 @@ describe('runTenantReadMode', () => {
 		const results: ResultRow[][] = [];
 		const calls: { id: string; readMode: 'public' | 'private' }[] = [];
 
-		await runTenantReadMode('acme', 'public', reporter(results), {
+		await runTenantReadMode(acmeTenant, 'public', reporter(results), {
 			setReadMode(input) {
 				calls.push(input);
 				return Promise.resolve({ id: 'acme', readMode: 'public' });
@@ -455,7 +458,7 @@ describe('runTenantRotateCredential', () => {
 		}[] = [];
 
 		await runTenantRotateCredential(
-			'acme',
+			acmeTenant,
 			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
 			reporter(results),
 			{
@@ -490,7 +493,7 @@ describe('runTenantRotateCredential', () => {
 			read: { user: string; password: string };
 		}[] = [];
 
-		await runTenantRotateCredential('acme', {}, reporter(results), {
+		await runTenantRotateCredential(acmeTenant, {}, reporter(results), {
 			rotateReadCredential(input) {
 				calls.push(input);
 				return Promise.resolve({ id: 'acme', readMode: 'private' });
@@ -531,7 +534,7 @@ describe('runTenantRotateCredential', () => {
 		const results: ResultRow[][] = [];
 
 		await runTenantRotateCredential(
-			'acme',
+			acmeTenant,
 			{ readUser: 'alice', readPassword: 'correct-horse-battery-staple' },
 			reporter(results),
 			{
@@ -560,7 +563,7 @@ describe('runTenantClearCredential', () => {
 		const results: ResultRow[][] = [];
 		const calls: { id: string }[] = [];
 
-		await runTenantClearCredential('acme', reporter(results), {
+		await runTenantClearCredential(acmeTenant, reporter(results), {
 			clearReadCredential(input) {
 				calls.push(input);
 				return Promise.resolve({ id: 'acme', readMode: 'private' });
