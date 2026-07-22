@@ -54,6 +54,7 @@ const previousWorkflowReference =
 	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v1.2.2';
 const movableWorkflowReference =
 	'acme/app/.github/workflows/publish.yml@refs/heads/main';
+const ruleCreated = `created: ${pinnedWorkflowReference}`;
 const options: GithubSetupOptions = {
 	repo: 'acme/app',
 	branch: 'main',
@@ -266,10 +267,10 @@ describe('runGithubSetup', () => {
 			},
 			results: [
 				[
-					{ label: 'grace policy', value: 'created' },
-					{ label: 'reuse view', value: 'created' },
-					{ label: 'pull-request trust rule', value: 'created' },
-					{ label: 'main trust rule', value: 'created' }
+					{ label: 'grace policy', value: 'created: tenant-wide grace 86400s' },
+					{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
+					{ label: 'pull-request trust rule', value: ruleCreated },
+					{ label: 'main trust rule', value: ruleCreated }
 				]
 			]
 		});
@@ -310,8 +311,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
 					value: `retained: main pushes; ${previousWorkflowReference}`
@@ -464,8 +465,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
 					value: `retained: main pushes; ${previousWorkflowReference}`
@@ -568,8 +569,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
 					value: `removed: main pushes; ${previousWorkflowReference}`
@@ -699,8 +700,8 @@ describe('runGithubSetup', () => {
 					label: 'possibly conflicting trust rule dispatch',
 					value: `retained: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
 				},
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' }
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -770,8 +771,8 @@ describe('runGithubSetup', () => {
 					label: 'possibly conflicting trust rule dispatch',
 					value: `removed: main pushes; ${pinnedWorkflowReference}; setup cannot check event_name`
 				},
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' }
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -820,10 +821,10 @@ describe('runGithubSetup', () => {
 				ruleRemoves: []
 			},
 			outcomes: [
-				{ label: 'grace policy', value: 'created' },
-				{ label: 'reuse view', value: 'created' },
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' }
+				{ label: 'grace policy', value: 'created: tenant-wide grace 86400s' },
+				{ label: 'reuse view', value: 'created: pr- caches at priority 50' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated }
 			]
 		});
 	});
@@ -999,8 +1000,8 @@ describe('runGithubSetup', () => {
 					label: 'conflicting trust rule conflict',
 					value: `removed: pull requests and main pushes; ${pinnedWorkflowReference}`
 				},
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
 					value: `retained: main pushes; ${previousWorkflowReference}`
@@ -1084,8 +1085,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule legacy',
 					value: `retained: pull requests and main pushes; ${movableWorkflowReference}; trusts future edits to the workflow`
@@ -1145,8 +1146,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule legacy',
 					value:
@@ -1218,8 +1219,8 @@ describe('runGithubSetup', () => {
 			outcomes: [
 				{ label: 'grace policy', value: 'unchanged' },
 				{ label: 'reuse view', value: 'unchanged' },
-				{ label: 'pull-request trust rule', value: 'created' },
-				{ label: 'main trust rule', value: 'created' },
+				{ label: 'pull-request trust rule', value: ruleCreated },
+				{ label: 'main trust rule', value: ruleCreated },
 				{
 					label: 'superseded trust rule previous-branch',
 					value: `removed: main pushes; ${previousWorkflowReference}`
