@@ -271,16 +271,27 @@ describe('garbage collection sweep cap', () => {
 		await pushPath(token, newlyRetained);
 		await setRoot(token, { name: 'channel', targets: [kept.storePath] });
 
+		// Deleting the alarm does not stop an already-due delivery: the runtime
+		// can still run the handler afterwards, and a delivery that finds the
+		// continuation advances the walk mid-test. Parking the continuation
+		// alongside each alarm deletion makes such a delivery a no-op, so the
+		// walk only moves when this test drives it.
+		let parked: unknown;
+
 		const initial = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
 				await instance.runGarbageCollection(1);
 				const progress = scanProgress(state);
+				parked = await state.storage.get(gcContinuationKey);
+				await state.storage.delete(gcContinuationKey);
 				await state.storage.deleteAlarm();
 
 				return progress;
 			}
 		);
+
+		expect(parked).not.toBeUndefined();
 
 		await setRoot(token, {
 			name: 'channel',
@@ -290,13 +301,21 @@ describe('garbage collection sweep cap', () => {
 		const restarted = await runInDurableObject(
 			currentServer(),
 			async (instance, state) => {
+				if (parked !== undefined) {
+					await state.storage.put(gcContinuationKey, parked);
+				}
+
 				await instance.alarm();
 				const progress = scanProgress(state);
+				parked = await state.storage.get(gcContinuationKey);
+				await state.storage.delete(gcContinuationKey);
 				await state.storage.deleteAlarm();
 
 				return progress;
 			}
 		);
+
+		expect(parked).not.toBeUndefined();
 		const initialRevision = initial?.revision;
 		const restartedRevision = restarted?.revision;
 
@@ -320,6 +339,12 @@ describe('garbage collection sweep cap', () => {
 			}
 		});
 		expect(restartedRevision).toBeGreaterThan(initialRevision ?? 0);
+
+		await runInDurableObject(currentServer(), async (_instance, state) => {
+			if (parked !== undefined) {
+				await state.storage.put(gcContinuationKey, parked);
+			}
+		});
 
 		await vi.waitFor(async () => {
 			await fireAlarm();
