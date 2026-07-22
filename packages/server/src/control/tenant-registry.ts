@@ -1,4 +1,9 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import type {
 	ParsedTenantCreateBody,
 	ParsedTenantReadCredential,
@@ -55,9 +60,9 @@ function toSummary(row: TenantRow): ParsedTenantSummary {
 		id: row.id,
 		status: row.status,
 		readMode: row.readMode,
-		ownerIssuer: row.ownerIssuer,
-		ownerSubject: row.ownerSubject,
-		ownerAudience: row.ownerAudience,
+		ownerIssuer: oidcIssuerSchema.parse(row.ownerIssuer),
+		ownerSubject: oidcSubjectSchema.parse(row.ownerSubject),
+		ownerAudience: oidcAudienceSchema.parse(row.ownerAudience),
 		configVersion: row.configVersion,
 		createdAt: row.createdAt
 	};
@@ -264,7 +269,7 @@ export async function setTenantStatus(
 	}
 
 	if (status === 'offboarding' && existing.status === 'offboarded') {
-		return existing;
+		return toSummary(existing);
 	}
 
 	throw new TenantRetiredError(id);

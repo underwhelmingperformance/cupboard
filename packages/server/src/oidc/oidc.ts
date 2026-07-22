@@ -311,8 +311,11 @@ export class OidcDiscoveryStore {
 	}
 
 	resolve(issuer: string): Promise<ResolvedIssuer> {
+		// Key on the normalised issuer so two spellings of one issuer (a trailing
+		// slash, say) share a single cache entry and a single discovery fetch.
+		const key = IssuerUrl.parse(issuer)?.value ?? issuer;
 		const nowMs = this.now();
-		const cached = this.issuers.get(issuer);
+		const cached = this.issuers.get(key);
 
 		if (
 			cached !== undefined &&
@@ -322,11 +325,11 @@ export class OidcDiscoveryStore {
 		}
 
 		const entry: CachedIssuer = {
-			resolved: this.discover(issuer),
+			resolved: this.discover(key),
 			fetchedAtMs: nowMs
 		};
-		this.issuers.set(issuer, entry);
-		void this.forgetIfFailed(issuer, entry);
+		this.issuers.set(key, entry);
+		void this.forgetIfFailed(key, entry);
 
 		return entry.resolved;
 	}

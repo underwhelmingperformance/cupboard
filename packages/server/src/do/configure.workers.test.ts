@@ -1,4 +1,9 @@
-import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -7,22 +12,16 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { oidcTrust, tenantIdentity } from '../db/schema.ts';
 import { currentServer, fetchPath, resetTestServer } from '../test-support.ts';
 
-function identity(configVersion: number): {
-	tenant: TenantId;
-	issuer: string;
-	audience: string;
-	ownerIssuer: string;
-	ownerSubject: string;
-	ownerAudience: string;
-	configVersion: number;
-} {
+import { type TenantIdentity } from './tenant-identity-service.ts';
+
+function identity(configVersion: number): TenantIdentity {
 	return {
 		tenant: tenantIdSchema.parse('acme'),
-		issuer: 'https://host.test/t/acme',
-		audience: 'https://host.test/t/acme',
-		ownerIssuer: 'https://idp.test',
-		ownerSubject: 'owner',
-		ownerAudience: 'aud',
+		issuer: oidcIssuerSchema.parse('https://host.test/t/acme'),
+		audience: oidcAudienceSchema.parse('https://host.test/t/acme'),
+		ownerIssuer: oidcIssuerSchema.parse('https://idp.test'),
+		ownerSubject: oidcSubjectSchema.parse('owner'),
+		ownerAudience: oidcAudienceSchema.parse('aud'),
 		configVersion
 	};
 }

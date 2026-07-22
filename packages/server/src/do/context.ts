@@ -11,6 +11,11 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	claimMatchSchema,
+	type OidcAudience,
+	oidcAudienceSchema,
+	type OidcIssuer,
+	oidcIssuerSchema,
+	type OidcSubject,
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { type OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
@@ -78,9 +83,9 @@ export const ownerRuleId = 'owner';
 export const storedClaimsSchema = z.record(z.string(), claimMatchSchema);
 
 export interface OwnerConfig {
-	readonly issuer: string;
-	readonly subject: string;
-	readonly audience: string;
+	readonly issuer: OidcIssuer;
+	readonly subject: OidcSubject;
+	readonly audience: OidcAudience;
 }
 
 export interface GarbageCollectionOutcome {
@@ -260,8 +265,8 @@ export function oidcTrustRuleFromRow(
 
 	return {
 		id: row.id,
-		issuer: row.issuer,
-		audience: row.audience,
+		issuer: oidcIssuerSchema.parse(row.issuer),
+		audience: oidcAudienceSchema.parse(row.audience),
 		claims: parseStored(storedClaimsSchema, row.claimsJson, fault),
 		permittedGrants: parseStored(
 			storedPermittedGrantsSchema,

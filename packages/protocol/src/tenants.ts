@@ -1,6 +1,12 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema
+} from './oidc.ts';
+
 export const tenantReadModeSchema = z.enum(['public', 'private']);
 export const tenantStatusSchema = z.enum([
 	'active',
@@ -36,9 +42,9 @@ export type ParsedTenantReadCredential = z.output<
 export const tenantCreateBodySchema = z.strictObject({
 	id: tenantIdSchema,
 	readMode: tenantReadModeSchema,
-	ownerIssuer: z.string().min(1),
-	ownerSubject: z.string().min(1),
-	ownerAudience: z.string().min(1),
+	ownerIssuer: z.string().min(1).brand('OidcIssuer'),
+	ownerSubject: z.string().min(1).brand('OidcSubject'),
+	ownerAudience: z.string().min(1).brand('OidcAudience'),
 	read: tenantReadCredentialSchema.optional(),
 	// The storage quota in bytes; omitted means unlimited. Charged once per tenant
 	// per unique NAR hash, so it bounds the tenant's stored compressed bytes.
@@ -52,9 +58,9 @@ export const tenantSummarySchema = z.strictObject({
 	id: tenantIdSchema,
 	status: tenantStatusSchema,
 	readMode: tenantReadModeSchema,
-	ownerIssuer: z.string(),
-	ownerSubject: z.string(),
-	ownerAudience: z.string(),
+	ownerIssuer: oidcIssuerSchema,
+	ownerSubject: oidcSubjectSchema,
+	ownerAudience: oidcAudienceSchema,
 	configVersion: z.number().int(),
 	createdAt: z.string()
 });

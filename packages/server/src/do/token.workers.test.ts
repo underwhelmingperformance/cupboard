@@ -1,6 +1,9 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	issuedAccessTokenType,
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema,
 	refreshTokenGrantType,
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
@@ -993,11 +996,11 @@ describe('owner rule seeding', () => {
 			async (instance, state) => {
 				await instance.configure({
 					tenant: tenantIdSchema.parse('v1'),
-					issuer: 'cupboard',
-					audience: 'cupboard',
-					ownerIssuer: '',
-					ownerSubject: '',
-					ownerAudience: '',
+					issuer: oidcIssuerSchema.parse('cupboard'),
+					audience: oidcAudienceSchema.parse('cupboard'),
+					ownerIssuer: oidcIssuerSchema.parse(''),
+					ownerSubject: oidcSubjectSchema.parse(''),
+					ownerAudience: oidcAudienceSchema.parse(''),
 					configVersion: 2
 				});
 
@@ -1020,11 +1023,11 @@ describe('owner rule seeding', () => {
 				try {
 					await instance.configure({
 						tenant: tenantIdSchema.parse('v1'),
-						issuer: 'cupboard',
-						audience: 'cupboard',
-						ownerIssuer: 'not-a-url',
-						ownerSubject: 'owner',
-						ownerAudience: 'aud',
+						issuer: oidcIssuerSchema.parse('cupboard'),
+						audience: oidcAudienceSchema.parse('cupboard'),
+						ownerIssuer: oidcIssuerSchema.parse('not-a-url'),
+						ownerSubject: oidcSubjectSchema.parse('owner'),
+						ownerAudience: oidcAudienceSchema.parse('aud'),
 						configVersion: 2
 					});
 				} catch (error_) {

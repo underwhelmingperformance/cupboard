@@ -1,4 +1,12 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
+import {
+	type OidcAudience,
+	oidcAudienceSchema,
+	type OidcIssuer,
+	oidcIssuerSchema,
+	type OidcSubject,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import { eq } from 'drizzle-orm';
 
 import * as schema from '../db/schema.ts';
@@ -12,11 +20,11 @@ const identityId = 'singleton';
 // its admin rule is seeded from, and the monotonic config version that fences it.
 export interface TenantIdentity {
 	readonly tenant: TenantId;
-	readonly issuer: string;
-	readonly audience: string;
-	readonly ownerIssuer: string;
-	readonly ownerSubject: string;
-	readonly ownerAudience: string;
+	readonly issuer: OidcIssuer;
+	readonly audience: OidcAudience;
+	readonly ownerIssuer: OidcIssuer;
+	readonly ownerSubject: OidcSubject;
+	readonly ownerAudience: OidcAudience;
 	readonly configVersion: number;
 }
 
@@ -39,11 +47,11 @@ export class TenantIdentityService {
 
 		return {
 			tenant: row.tenant,
-			issuer: row.issuer,
-			audience: row.audience,
-			ownerIssuer: row.ownerIssuer,
-			ownerSubject: row.ownerSubject,
-			ownerAudience: row.ownerAudience,
+			issuer: oidcIssuerSchema.parse(row.issuer),
+			audience: oidcAudienceSchema.parse(row.audience),
+			ownerIssuer: oidcIssuerSchema.parse(row.ownerIssuer),
+			ownerSubject: oidcSubjectSchema.parse(row.ownerSubject),
+			ownerAudience: oidcAudienceSchema.parse(row.ownerAudience),
 			configVersion: row.configVersion
 		};
 	}

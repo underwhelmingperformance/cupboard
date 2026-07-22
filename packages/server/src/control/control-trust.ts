@@ -4,6 +4,8 @@ import {
 } from '@cupboard/protocol/grants';
 import {
 	claimMatchSchema,
+	oidcAudienceSchema,
+	oidcIssuerSchema,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
@@ -45,8 +47,8 @@ function ruleFromRow(row: ControlTrustRow): OidcTrustRule {
 
 	return {
 		id: row.id,
-		issuer: row.issuer,
-		audience: row.audience,
+		issuer: oidcIssuerSchema.parse(row.issuer),
+		audience: oidcAudienceSchema.parse(row.audience),
 		claims,
 		permittedGrants: parseStored(
 			storedPermittedGrantsSchema,

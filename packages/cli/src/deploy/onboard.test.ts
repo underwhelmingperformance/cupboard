@@ -1,5 +1,11 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import type { ParsedR2CredentialCheck } from '@cupboard/protocol/reports';
+import type { ParsedSignupResponse } from '@cupboard/protocol/signup';
 import type {
 	ParsedMembershipRebuildResponse,
 	ParsedTenantSummary
@@ -406,9 +412,9 @@ function tenantSummary(id: string): ParsedTenantSummary {
 		id: tenantIdSchema.parse(id),
 		status: 'active',
 		readMode: 'public',
-		ownerIssuer: owner.issuer,
-		ownerSubject: owner.subject,
-		ownerAudience: owner.audience,
+		ownerIssuer: oidcIssuerSchema.parse(owner.issuer),
+		ownerSubject: oidcSubjectSchema.parse(owner.subject),
+		ownerAudience: oidcAudienceSchema.parse(owner.audience),
 		configVersion: 1,
 		createdAt: '2026-06-12T00:00:00Z'
 	};
@@ -454,11 +460,7 @@ function orpcRejection(status: number): Error {
 interface ClientScript {
 	/** What `/_version` answers; the deployed build is `v-new`. */
 	readonly versions?: Scripted<string>[];
-	readonly signup?: Scripted<{
-		issuer: string;
-		subject: string;
-		claimed: boolean;
-	}>[];
+	readonly signup?: Scripted<ParsedSignupResponse>[];
 	/** What listing tenants answers; the claim flow always lists first. */
 	readonly lists?: Scripted<ParsedTenantSummary[]>[];
 	readonly creates?: Scripted<ParsedTenantSummary>[];
@@ -548,8 +550,8 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 }
 
 const claimedSignup = {
-	issuer: owner.issuer,
-	subject: owner.subject,
+	issuer: oidcIssuerSchema.parse(owner.issuer),
+	subject: oidcSubjectSchema.parse(owner.subject),
 	claimed: true
 };
 

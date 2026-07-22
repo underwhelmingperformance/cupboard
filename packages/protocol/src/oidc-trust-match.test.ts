@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
+import { oidcAudienceSchema, oidcIssuerSchema } from './oidc.ts';
 import {
 	firstClaimMismatch,
 	matchOidcTrust,
 	type OidcTrustRule
 } from './oidc-trust-match.ts';
 
-const github = 'https://token.actions.githubusercontent.com';
-const audience = 'https://cache.example.workers.dev';
+const github = oidcIssuerSchema.parse(
+	'https://token.actions.githubusercontent.com'
+);
+const audience = oidcAudienceSchema.parse('https://cache.example.workers.dev');
 
 const wildcard: OidcTrustRule['permittedGrants'] = [
 	{ type: 'cupboard_wildcard' }
@@ -25,8 +28,8 @@ function ciGrant(cache: string): OidcTrustRule['permittedGrants'] {
 
 const ownerRule: OidcTrustRule = {
 	id: 'owner',
-	issuer: 'https://accounts.google.com',
-	audience: 'client-id.apps.googleusercontent.com',
+	issuer: oidcIssuerSchema.parse('https://accounts.google.com'),
+	audience: oidcAudienceSchema.parse('client-id.apps.googleusercontent.com'),
 	claims: { sub: 'owner-subject' },
 	permittedGrants: wildcard
 };
