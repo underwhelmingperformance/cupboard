@@ -254,9 +254,9 @@ function evaluateClaim(
 	}
 
 	if (
-		desired.kind === 'pull-request' &&
 		claim === 'ref' &&
-		typeof expected === 'string'
+		typeof expected === 'string' &&
+		desired.kind === 'pull-request'
 	) {
 		// GitHub gives pull-request runs refs of this form.
 		return /^refs\/pull\/[1-9]\d*\/merge$/.test(expected)
@@ -373,8 +373,8 @@ function classifyTrustRule(
 		const workflowReference = rule.claims.job_workflow_ref;
 
 		if (
-			rule.id === 'owner' ||
 			workflowReference === undefined ||
+			rule.id === 'owner' ||
 			workflowReference === desired.body.claims.job_workflow_ref
 		) {
 			return;
@@ -919,7 +919,7 @@ export async function runGithubSetup(
 			for (const [index, outcome] of outcomes.entries()) {
 				const id = ids[index];
 
-				if (outcome.status === 'rejected' && id !== undefined) {
+				if (id !== undefined && outcome.status === 'rejected') {
 					removalFailures.set(id, outcome.reason);
 				}
 			}
