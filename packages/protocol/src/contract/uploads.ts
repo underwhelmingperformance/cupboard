@@ -6,6 +6,7 @@ import {
 	pushIdSchema,
 	uploadConfirmRequestSchema,
 	uploadConfirmResponseSchema,
+	uploadIdSchema,
 	uploadNegotiateRequestSchema,
 	uploadNegotiateResponseSchema,
 	uploadPreviewRequestSchema,
@@ -108,6 +109,6 @@ export const uploadsContract = {
 			resource: { cache: { pending: true, missingDenies: false } }
 		})
 		.route({ method: 'GET', path: '/uploads/{id}/status' })
-		.input(z.strictObject({ id: z.string() }))
+		.input(z.strictObject({ id: uploadIdSchema }))
 		.output(uploadStatusResponseSchema)
 };

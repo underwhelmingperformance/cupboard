@@ -11,7 +11,9 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type CommitResponse,
 	type ParsedUploadGraceFact,
-	type ParsedUploadPathNegotiation
+	type ParsedUploadPathNegotiation,
+	type SessionId,
+	type UploadId
 } from '@cupboard/protocol/upload';
 import { withDeadline } from '@cupboard/shared/timeout';
 import {
@@ -304,8 +306,8 @@ export class CommitPipelineService {
 	// receives the result via the return value, so it is skipped even when the
 	// row still names it.
 	private notifyUploadWaiters(
-		uploadId: string,
-		excludeSessionId: string | null | undefined
+		uploadId: UploadId,
+		excludeSessionId: SessionId | null | undefined
 	): void {
 		const row = this.context.db
 			.select({
@@ -360,14 +362,14 @@ export class CommitPipelineService {
 	private async commitReusedBlob(
 		logger: Logger,
 		cache: StoredCache,
-		uploadId: string,
+		uploadId: UploadId,
 		metadata: ParsedUploadPathNegotiation,
 		graceDecision: GraceDecision | undefined,
 		// The caller's probe of the shared facts, taken alongside its advisory
 		// checks. It may be stale by the gate below; the charge batch is the
 		// authoritative guard.
 		probe: MaterialisationProbe,
-		committingSessionId: string | null | undefined,
+		committingSessionId: SessionId | null | undefined,
 		// Whether the probe was supplied from a batch prefetch. An over-quota outcome
 		// with a prefetched probe may reflect stale `isOwned`: a sibling entry in the
 		// same batch charged the blob first, making the tenant its new owner. Re-probe
@@ -572,7 +574,7 @@ export class CommitPipelineService {
 	private hasLiveRival(
 		cache: StoredCache,
 		narHash: NixSha256HashString,
-		uploadId: string,
+		uploadId: UploadId,
 		nowIso: string
 	): boolean {
 		// A null verdict is an inline commit mid-flight; `committing` and
@@ -1204,7 +1206,7 @@ export class CommitPipelineService {
 	async concedeToWinner(
 		logger: Logger,
 		cache: StoredCache,
-		uploadId: string,
+		uploadId: UploadId,
 		metadata: ParsedUploadPathNegotiation,
 		stagingKey: string,
 		graceDecision?: GraceDecision
@@ -1340,7 +1342,7 @@ export class CommitPipelineService {
 	async commit(
 		logger: Logger,
 		cache: StoredCache,
-		uploadId: string,
+		uploadId: UploadId,
 		// Advisory values a batch caller reads once for the whole message. When
 		// present, `commit` uses them for its probe and quota pre-check and skips its
 		// own D1 reads for those. The charge batch remains the authoritative fence for

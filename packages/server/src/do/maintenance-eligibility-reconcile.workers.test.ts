@@ -2,6 +2,7 @@ import {
 	nixSha256HashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -195,7 +196,7 @@ describe('maintenance reconcile', () => {
 // settles synchronously from the canonical object.
 async function ownedReuseDecision(): Promise<{
 	token: string;
-	uploadId: string;
+	uploadId: UploadId;
 }> {
 	const token = await initialise();
 	const nar = await verifiableNar('coalesced-reconcile');
@@ -337,7 +338,7 @@ async function insertPendingUpload(
 		instance.context.db
 			.insert(schema.pendingUploads)
 			.values({
-				id: 'seed-upload',
+				id: uploadIdSchema.parse('seed-upload'),
 				cache: '',
 				narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 				r2Key: 'staging/seed-upload',

@@ -8,6 +8,7 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import type { SessionId, UploadId } from '@cupboard/protocol/upload';
 import {
 	index,
 	integer,
@@ -66,7 +67,7 @@ export const generationSeq = sqliteTable(
 export const pendingUploads = sqliteTable(
 	'pending_upload',
 	{
-		id: text('id').primaryKey(),
+		id: text('id').$type<UploadId>().primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').notNull(),
@@ -92,7 +93,7 @@ export const pendingUploads = sqliteTable(
 		// the verify pass to route the terminal verdict to the right connection.
 		// Null until a commit attaches its session; re-pointed when a reconnected
 		// socket re-subscribes. Looked up by the upload's id, so it needs no index.
-		sessionId: text('session_id'),
+		sessionId: text('session_id').$type<SessionId>(),
 		// The lease a verify pass takes when it claims this row, so an overlapping
 		// pass (the alarm backstop's duplicate message, the cron crossing a
 		// consumer run) claims nothing already being worked. Null while unclaimed;
@@ -117,7 +118,7 @@ export const pendingUploads = sqliteTable(
 export const pendingAttestations = sqliteTable(
 	'pending_attestation',
 	{
-		id: text('id').primaryKey(),
+		id: text('id').$type<UploadId>().primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),

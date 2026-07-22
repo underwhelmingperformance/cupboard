@@ -2,6 +2,7 @@ import {
 	type NixSha256HashString,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -27,7 +28,7 @@ import {
 } from '../test-support.ts';
 
 async function deferredUpload(): Promise<{
-	uploadId: string;
+	uploadId: UploadId;
 	storePathHash: StorePathHash;
 	narHash: NixSha256HashString;
 }> {

@@ -1,5 +1,6 @@
 import { startCapture } from '@cupboard/logger/testing';
 import { nixSha256HashSchema } from '@cupboard/nix-store/scalars';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -222,7 +223,7 @@ function pendingUpload(
 	index: number
 ): typeof schema.pendingUploads.$inferInsert {
 	return {
-		id: `upload-${String(index)}`,
+		id: uploadIdSchema.parse(`upload-${String(index)}`),
 		cache: '',
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: `staging/upload-${String(index)}`,

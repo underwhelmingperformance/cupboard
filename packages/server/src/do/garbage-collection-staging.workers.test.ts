@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -84,7 +85,10 @@ describe('garbage collection best-effort staging deletes', () => {
 		const realNow = await realUploadInstant();
 		await initialise();
 
-		const reapedKey = stagingObjectKey(testPushId, 'reaped-upload');
+		const reapedKey = stagingObjectKey(
+			testPushId,
+			uploadIdSchema.parse('reaped-upload')
+		);
 		const orphanKey = 'staging/orphan-push/orphan.nar.zst';
 		await env.BLOBS.put(orphanKey, new Uint8Array([1, 2, 3]));
 
@@ -98,7 +102,7 @@ describe('garbage collection best-effort staging deletes', () => {
 				drizzle(state.storage, { schema: { pendingUploads } })
 					.insert(pendingUploads)
 					.values({
-						id: 'reaped-upload',
+						id: uploadIdSchema.parse('reaped-upload'),
 						cache: '',
 						narHash: syntheticNarHash(1),
 						r2Key: reapedKey,

@@ -1,4 +1,5 @@
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -25,7 +26,7 @@ import { type PendingVerification } from './verification-service.ts';
 // prefix is the deferred uploads sorted by id.
 function claimOrder(
 	uploads: readonly {
-		uploadId: string;
+		uploadId: UploadId;
 		r2Key: string;
 		metadata: { narHash: PendingVerification['narHash']; narSize: number };
 	}[]

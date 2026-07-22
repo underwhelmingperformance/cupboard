@@ -23,9 +23,13 @@ import {
 	commitCapabilitiesValue,
 	commitSessionRequestSchema,
 	type ParsedCommitBatchEntry,
+	type SessionId,
+	sessionIdSchema,
 	uploadCapabilitiesHeader,
 	uploadCapabilitiesValue,
-	uploadGraceFactsCapability
+	uploadGraceFactsCapability,
+	type UploadId,
+	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { DurableObject } from 'cloudflare:workers';
@@ -158,7 +162,7 @@ function reuseNotFound(): Response {
 // was opened against and the id the verify pass routes its verdicts to.
 const commitSessionAttachmentSchema = z.object({
 	cache: storedCacheSchema,
-	sessionId: z.string()
+	sessionId: sessionIdSchema
 });
 
 // A storage key marking that a bounded garbage-collection sweep stopped at its
@@ -707,7 +711,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const pair = new WebSocketPair();
 		const client = pair[0];
 		const server = pair[1];
-		const sessionId = crypto.randomUUID();
+		const sessionId = sessionIdSchema.parse(crypto.randomUUID());
 
 		this.ctx.acceptWebSocket(server, [sessionId]);
 		server.serializeAttachment(
@@ -734,8 +738,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		sessionLogger: Logger,
 		socket: WebSocket,
 		cache: StoredCache,
-		sessionId: string,
-		uploadId: string,
+		sessionId: SessionId,
+		uploadId: UploadId,
 		identity?: Pick<
 			ParsedCommitBatchEntry,
 			'storePathHash' | 'narHash' | 'retention'
@@ -831,7 +835,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async resolveGoneCommit(
 		socket: WebSocket,
 		cache: StoredCache,
-		uploadId: string,
+		uploadId: UploadId,
 		identity: Pick<
 			ParsedCommitBatchEntry,
 			'storePathHash' | 'narHash' | 'retention'
@@ -895,8 +899,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private replaySubscribedRow(
 		socket: WebSocket,
 		cache: StoredCache,
-		sessionId: string,
-		uploadId: string,
+		sessionId: SessionId,
+		uploadId: UploadId,
 		row: typeof schema.pendingUploads.$inferSelect
 	): void {
 		if (row.cache !== cache) {
@@ -958,8 +962,8 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private replaySubscribe(
 		socket: WebSocket,
 		cache: StoredCache,
-		sessionId: string,
-		uploadIds: readonly string[]
+		sessionId: SessionId,
+		uploadIds: readonly UploadId[]
 	): void {
 		for (const uploadId of uploadIds) {
 			const row = this.context.db
@@ -990,7 +994,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async replaySubscribeIdentity(
 		socket: WebSocket,
 		cache: StoredCache,
-		sessionId: string,
+		sessionId: SessionId,
 		entries: readonly ParsedCommitBatchEntry[]
 	): Promise<void> {
 		for (const entry of entries) {
@@ -1068,10 +1072,11 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// durable-SQLite reads are synchronous; the resolver is a promise so the
 	// authoriser can stay uniform across resource sources.
 	private pendingCache(id: string): Promise<StoredCache | undefined> {
+		const uploadId = uploadIdSchema.parse(id);
 		const upload = this.context.db
 			.select({ cache: schema.pendingUploads.cache })
 			.from(schema.pendingUploads)
-			.where(eq(schema.pendingUploads.id, id))
+			.where(eq(schema.pendingUploads.id, uploadId))
 			.get();
 
 		if (upload !== undefined) {
@@ -1081,7 +1086,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		const attestation = this.context.db
 			.select({ cache: schema.pendingAttestations.cache })
 			.from(schema.pendingAttestations)
-			.where(eq(schema.pendingAttestations.id, id))
+			.where(eq(schema.pendingAttestations.id, uploadId))
 			.get();
 
 		return Promise.resolve(attestation?.cache);
@@ -1787,7 +1792,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	}
 
 	async recordVerification(
-		uploadId: string,
+		uploadId: UploadId,
 		verification: NarVerification
 	): Promise<void> {
 		await this.initialise();
@@ -1798,7 +1803,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 		);
 	}
 
-	async recordMissingObject(uploadId: string): Promise<void> {
+	async recordMissingObject(uploadId: UploadId): Promise<void> {
 		await this.initialise();
 		await this.metered('record-missing-object', () =>
 			this.afterHotMutation(() =>

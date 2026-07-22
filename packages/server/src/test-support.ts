@@ -46,15 +46,18 @@ import {
 	type CommitSessionRequest,
 	type DeletePathResponse,
 	type ParsedCommitSessionFrame,
+	type ParsedUploadActionDecision,
+	type ParsedUploadCommitDecision,
+	type ParsedUploadDecision,
 	type ParsedUploadPathMetadata,
 	pathDeletionResponseSchema,
 	type StatsResponse,
-	type UploadActionDecision,
 	uploadActionDecisionSchema,
-	type UploadCommitDecision,
 	uploadCommitDecisionSchema,
 	uploadDecisionSchema,
 	uploadGraceFactsCapability,
+	type UploadId,
+	uploadIdSchema,
 	type UploadNegotiateResponse,
 	uploadNegotiateResponseSchema,
 	type UploadPathMetadataFields,
@@ -78,7 +81,7 @@ import { z } from 'zod';
 import migrations from '../drizzle/migrations.js';
 
 import { issueAccessJwt } from './auth/auth.ts';
-import { issuePushId } from './blob/push-id.ts';
+import { issuePushId, pushIdSigningKeySchema } from './blob/push-id.ts';
 import {
 	activeControlKey,
 	ensureControlKey
@@ -1228,7 +1231,10 @@ export async function stageAttestationBundle(
 	uploadId: string,
 	bytes: Uint8Array
 ): Promise<string> {
-	const key = attestationStagingObjectKey(testPushId, uploadId);
+	const key = attestationStagingObjectKey(
+		testPushId,
+		uploadIdSchema.parse(uploadId)
+	);
 	await env.BLOBS.put(key, bytes);
 
 	return key;
@@ -1516,7 +1522,9 @@ function cacheScopedPath(cache: string, suffix: string): string {
 // pool binds) over a fixed nonce, so a negotiated decision's staging key under
 // `staging/<pushId>/` is deterministic to assert. The server verifies it exactly
 // as production would.
-const testPushIdSigningKey = 'test-push-id-signing-key';
+const testPushIdSigningKey = pushIdSigningKeySchema.parse(
+	'test-push-id-signing-key'
+);
 export const testPushId = await issuePushId(
 	testPushIdSigningKey,
 	new Uint8Array(16)
@@ -1742,7 +1750,7 @@ export async function stageDeferredForTenant(
 	token: string,
 	metadata: ParsedUploadPathMetadata,
 	nar?: VerifiableNar
-): Promise<string> {
+): Promise<UploadId> {
 	const negotiated = await tenantWorkerFetch(
 		tenant,
 		`/cache/${WIRE_DEFAULT_CACHE}/uploads`,
@@ -1901,7 +1909,7 @@ export async function openCommitSession(
 // The session stays open across a deferral, so the helper closes it on settle.
 async function settleCommitSession(
 	conversation: CommitConversation,
-	uploadId: string,
+	uploadId: UploadId,
 	runVerification: () => Promise<void>,
 	options: { readonly wait?: boolean }
 ): Promise<CommitResponse> {
@@ -1965,7 +1973,7 @@ async function settleCommitSession(
  */
 export async function commitUpload(
 	token: string,
-	uploadId: string,
+	uploadId: UploadId,
 	cache: string = DEFAULT_CACHE,
 	options: { readonly wait?: boolean } = {}
 ): Promise<CommitResponse> {
@@ -1986,7 +1994,7 @@ export async function commitUpload(
  */
 export async function commitUploadRejection(
 	token: string,
-	uploadId: string,
+	uploadId: UploadId,
 	cache: string = DEFAULT_CACHE
 ): Promise<unknown> {
 	let result:
@@ -2019,7 +2027,7 @@ export async function commitUploadRejection(
 /** As {@link commitUpload}, routed through the Worker like a real client. */
 export async function commitUploadViaWorker(
 	token: string,
-	uploadId: string,
+	uploadId: UploadId,
 	options: {
 		readonly wait?: boolean;
 		readonly tenant?: string;
@@ -2567,7 +2575,7 @@ export async function verifiableNarStored(
  * `'mismatch'`, or `'over-quota'`).
  */
 export async function pendingUploadVerdict(
-	uploadId: string
+	uploadId: UploadId
 ): Promise<string | null | undefined> {
 	return runInDurableObject(currentServer(), (_instance, state) => {
 		const row = drizzle(state.storage, { schema: { pendingUploads } })
@@ -2586,7 +2594,7 @@ export async function pendingUploadVerdict(
  * so tests compare whole snapshots taken either side of the straggler.
  */
 export async function pendingUploadSnapshot(
-	uploadId: string
+	uploadId: UploadId
 ): Promise<{ verdict: string | null; expiresAt: string } | undefined> {
 	return runInDurableObject(currentServer(), (_instance, state) => {
 		const row = drizzle(state.storage, { schema: { pendingUploads } })
@@ -2604,7 +2612,7 @@ export async function pendingUploadSnapshot(
 
 /** Polls a deferred upload's status the way `push --wait` does, by its uploadId. */
 export async function uploadStatus(
-	uploadId: string
+	uploadId: UploadId
 ): Promise<UploadStatusResponse['status']> {
 	const token = await initialise();
 	const response = await authorisedFetch(`/uploads/${uploadId}/status`, token, {
@@ -2623,7 +2631,7 @@ export async function uploadStatus(
 export async function tenantUploadStatus(
 	tenant: TenantId,
 	token: string,
-	uploadId: string
+	uploadId: UploadId
 ): Promise<UploadStatusResponse['status']> {
 	const response = await tenantWorkerFetch(
 		tenant,
@@ -2719,7 +2727,7 @@ export async function deferFreshUpload(
 	seed: string,
 	storePathHash: string
 ): Promise<{
-	uploadId: string;
+	uploadId: UploadId;
 	r2Key: string;
 	metadata: ParsedUploadPathMetadata;
 	nar: VerifiableNar;
@@ -2745,7 +2753,7 @@ export async function deferFreshUpload(
  * the background verify-and-commit pass without a multi-megabyte fixture.
  */
 export async function markUploadPendingVerification(
-	uploadId: string,
+	uploadId: UploadId,
 	stub: DurableObjectStub<CupboardServer> = currentServer()
 ): Promise<void> {
 	await runInDurableObject(stub, (instance, state) => {
@@ -2762,7 +2770,7 @@ export async function markUploadPendingVerification(
 // Plants the `committing` saga marker on a staged upload, the state an inline
 // commit leaves if it crashes after marking commit-in-progress but before it
 // finishes: the verify pass must re-drive it to servable.
-export async function markUploadCommitting(uploadId: string): Promise<void> {
+export async function markUploadCommitting(uploadId: UploadId): Promise<void> {
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		drizzle(state.storage, { schema: { pendingUploads } })
 			.update(pendingUploads)
@@ -2954,7 +2962,7 @@ export function tenantId(name: string): TenantId {
 export function expectSingleUploadDecision(
 	response: UploadNegotiateResponse,
 	metadata: ParsedUploadPathMetadata
-): UploadActionDecision {
+): ParsedUploadActionDecision {
 	const decision = uploadActionDecisionSchema.parse(singleDecision(response));
 	const expectedExpiresAt = uploadExpiryFromNow();
 
@@ -2975,7 +2983,7 @@ export function expectSingleUploadDecision(
 export function expectSingleCommitDecision(
 	response: UploadNegotiateResponse,
 	metadata: ParsedUploadPathMetadata
-): UploadCommitDecision {
+): ParsedUploadCommitDecision {
 	const decision = uploadCommitDecisionSchema.parse(singleDecision(response));
 
 	expect(response.uploads).toStrictEqual([
@@ -2992,7 +3000,7 @@ export function expectSingleCommitDecision(
 
 export function singleDecision(
 	response: UploadNegotiateResponse
-): UploadDecision {
+): ParsedUploadDecision {
 	const [decision] = z.tuple([uploadDecisionSchema]).parse(response.uploads);
 	return uploadDecisionSchema.parse(decision);
 }

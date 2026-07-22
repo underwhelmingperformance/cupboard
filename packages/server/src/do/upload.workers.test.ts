@@ -7,6 +7,7 @@ import {
 	DEFAULT_CACHE,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import {
 	commitCapabilitiesHeader,
 	commitCapabilitiesValue,
@@ -2019,7 +2020,7 @@ describe('upload flow', () => {
 			instance.context.db
 				.insert(schema.pendingUploads)
 				.values({
-					id: 'rival-upload',
+					id: uploadIdSchema.parse('rival-upload'),
 					cache: '',
 					narHash: metadata.narHash,
 					r2Key: 'staging/rival-upload',
@@ -2199,7 +2200,7 @@ describe('upload flow', () => {
 		const token = await initialise();
 
 		// Three distinct deferred uploads: more than one pass holds at a batch of two.
-		const uploadIds: string[] = [];
+		const uploadIds: UploadId[] = [];
 		for (const index of [0, 1, 2]) {
 			const seed = `drain-${String(index)}`;
 			const { metadata, nar } = await verifiablePath(seed, {

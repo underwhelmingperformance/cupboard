@@ -1,5 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import { type NixSha256HashString } from '@cupboard/nix-store/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,7 +26,7 @@ async function deferUpload(
 	token: string,
 	seed: string,
 	storePathHash: string
-): Promise<{ uploadId: string; narHash: NixSha256HashString }> {
+): Promise<{ uploadId: UploadId; narHash: NixSha256HashString }> {
 	const { metadata, nar } = await verifiablePath(seed, {
 		storePathHash,
 		name: seed

@@ -1,3 +1,4 @@
+import { pushIdSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import type { R2PresignerConfiguration } from './presign.ts';
@@ -5,6 +6,7 @@ import {
 	PushCredentialIssuer,
 	pushCredentialTtlSeconds
 } from './push-credential.ts';
+import { pushIdSigningKeySchema } from './push-id.ts';
 
 const now = new Date('2026-06-29T12:00:00.000Z');
 const maxTtlSeconds = 6 * 60 * 60;
@@ -52,7 +54,10 @@ describe('pushCredentialTtlSeconds', () => {
 });
 
 describe('PushCredentialIssuer', () => {
-	const issuer = new PushCredentialIssuer(() => configuration, 'signing-key');
+	const issuer = new PushCredentialIssuer(
+		() => configuration,
+		pushIdSigningKeySchema.parse('signing-key')
+	);
 	const ttlSeconds = 900;
 	const issuedAt = Math.floor(now.getTime() / 1000);
 
@@ -60,7 +65,11 @@ describe('PushCredentialIssuer', () => {
 		// R2 rejects a credential carrying both a scope and an actions claim, so
 		// the push grants by the write-only action set alone and confines it with
 		// the staging prefix.
-		const credential = await issuer.issueFor('push-1', ttlSeconds, now);
+		const credential = await issuer.issueFor(
+			pushIdSchema.parse('push-1'),
+			ttlSeconds,
+			now
+		);
 
 		expect(jwtPayload(credential.sessionToken)).toStrictEqual({
 			bucket: 'cupboard-blobs',

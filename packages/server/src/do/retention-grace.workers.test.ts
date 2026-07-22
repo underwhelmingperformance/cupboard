@@ -13,6 +13,7 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
@@ -1338,7 +1339,7 @@ describe('retention grace at publication', () => {
 			await putNarBytes(winnerDecision.r2Key, nar);
 			// Handles both an immediate settlement and a deferred one that needs a
 			// verification pass; either way, the winner ends up fully committed.
-			await commitUpload(token, winnerDecision.uploadId);
+			await commitUpload(token, uploadIdSchema.parse(winnerDecision.uploadId));
 
 			const loserConversation = await openCommitSession(token);
 
@@ -1406,7 +1407,7 @@ describe('retention grace at publication', () => {
 			pipelineFor(instance.context).concedeToWinner(
 				rootLogger(),
 				DEFAULT_CACHE,
-				'loser-upload',
+				uploadIdSchema.parse('loser-upload'),
 				uploadPathNegotiation(metadata),
 				narObjectKey(metadata.narHash),
 				{ reportsGrace: true, graceSeconds: 3600 }
@@ -1473,7 +1474,7 @@ describe('retention grace at publication', () => {
 					await pipelineFor(instance.context).concedeToWinner(
 						rootLogger(),
 						DEFAULT_CACHE,
-						'loser-upload',
+						uploadIdSchema.parse('loser-upload'),
 						uploadPathNegotiation(metadata),
 						'staging/loser-upload',
 						{ reportsGrace: true, graceSeconds: 3600 }
@@ -1620,7 +1621,7 @@ describe('retention grace at publication', () => {
 				const outcome = await pipelineFor(context).concedeToWinner(
 					rootLogger(),
 					DEFAULT_CACHE,
-					'loser-upload',
+					uploadIdSchema.parse('loser-upload'),
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
 					{ reportsGrace: true, graceSeconds: 3600 }
@@ -1730,7 +1731,7 @@ describe('retention grace at publication', () => {
 				const outcome = await pipelineFor(context).concedeToWinner(
 					rootLogger(),
 					DEFAULT_CACHE,
-					'loser-upload',
+					uploadIdSchema.parse('loser-upload'),
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
 					{ reportsGrace: true, graceSeconds: 3600 }
@@ -1955,7 +1956,7 @@ function failingDeleteBucket(inner: R2Bucket): R2Bucket {
 }
 
 async function pendingRowSnapshot(
-	uploadId: string
+	uploadId: UploadId
 ): Promise<typeof schema.pendingUploads.$inferSelect> {
 	const row = await runInDurableObject(currentServer(), (instance) =>
 		instance.context.db

@@ -70,8 +70,22 @@ export type ParsedUploadPathMetadata = z.output<
 // the signature itself, the schema only bounds the wire format.
 export const pushIdSchema = z
 	.string()
-	.regex(/^[A-Za-z0-9-]{1,128}$/, 'pushId must be url-safe');
-export type ParsedPushId = z.output<typeof pushIdSchema>;
+	.regex(/^[A-Za-z0-9-]{1,128}$/, 'pushId must be url-safe')
+	.brand('PushId');
+export type PushId = z.infer<typeof pushIdSchema>;
+
+// A deferred upload's server-issued opaque id. The server hands it out with the
+// negotiate decision; the client presents it again to commit or poll. It keys
+// the upload's pending row and its private staging object. Opaque: the brand is
+// its only constraint, so it cannot be swapped for another id of the same type.
+export const uploadIdSchema = z.string().brand('UploadId');
+export type UploadId = z.infer<typeof uploadIdSchema>;
+
+// A commit session's server-issued opaque id, one per WebSocket. A pending row
+// records the session waiting on an upload so a verdict routes to the right
+// socket. Branded so it can never stand in for the upload id it sits beside.
+export const sessionIdSchema = z.string().brand('SessionId');
+export type SessionId = z.infer<typeof sessionIdSchema>;
 
 // A temporary R2 S3 credential: the access-key triple a standard S3 client signs
 // with, where to send the requests, and when it stops working. The single
@@ -145,7 +159,7 @@ export const uploadCommitDecisionSchema = z.strictObject({
 	action: z.literal('commit'),
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
-	uploadId: z.string(),
+	uploadId: uploadIdSchema,
 	grace: uploadGraceFactSchema.optional()
 });
 export type ParsedUploadCommitDecision = z.output<
@@ -156,7 +170,7 @@ export const uploadActionDecisionSchema = z.strictObject({
 	action: z.literal('upload'),
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
-	uploadId: z.string(),
+	uploadId: uploadIdSchema,
 	r2Key: z.string(),
 	expiresAt: z.string(),
 	grace: uploadGraceFactSchema.optional()
@@ -278,7 +292,7 @@ export type UploadStatusResponse = z.input<typeof uploadStatusResponseSchema>;
 // one message, and `subscribe` to re-attach a reconnected socket to ids still
 // outstanding; the server answers with a per-id frame whose `ev` mirrors the
 // single-socket protocol's events.
-const uploadIdsSchema = z.array(z.string());
+const uploadIdsSchema = z.array(uploadIdSchema);
 
 // The response header on the commit session's 101 listing the optional ops this
 // server accepts. A client sends `commit-batch` only when the server listed it,
@@ -369,7 +383,7 @@ export const commitCapabilitiesValue = `${commitBatchCapabilityToken},${subscrib
 // bound is a breaking change that requires a new capability token for each op
 // that uses it.
 export const commitBatchEntrySchema = z.strictObject({
-	uploadId: z.string(),
+	uploadId: uploadIdSchema,
 	storePathHash: storePathHashSchema,
 	narHash: nixSha256HashSchema,
 	retention: z.literal(true).optional()
@@ -377,7 +391,7 @@ export const commitBatchEntrySchema = z.strictObject({
 export type ParsedCommitBatchEntry = z.output<typeof commitBatchEntrySchema>;
 
 export const commitSessionRequestSchema = z.discriminatedUnion('op', [
-	z.strictObject({ op: z.literal('commit'), uploadId: z.string() }),
+	z.strictObject({ op: z.literal('commit'), uploadId: uploadIdSchema }),
 	z.strictObject({
 		op: z.literal('commit-batch'),
 		commits: z.array(commitBatchEntrySchema).min(1).max(commitBatchMaxEntries)
@@ -405,26 +419,26 @@ export const commitSessionFrameSchema = z.discriminatedUnion('ev', [
 	// not opt in receives exactly the legacy shapes.
 	z.strictObject({
 		ev: z.literal('settled'),
-		uploadId: z.string(),
+		uploadId: uploadIdSchema,
 		response: commitResponseSchema,
 		grace: uploadGraceFactSchema.optional()
 	}),
 	z.strictObject({
 		ev: z.literal('deferred'),
-		uploadId: z.string(),
+		uploadId: uploadIdSchema,
 		storePathHash: storePathHashSchema,
 		narHash: nixSha256HashSchema,
 		grace: uploadGraceFactSchema.optional()
 	}),
 	z.strictObject({
 		ev: z.literal('verdict'),
-		uploadId: z.string(),
+		uploadId: uploadIdSchema,
 		status: uploadStatusSchema,
 		grace: uploadGraceFactSchema.optional()
 	}),
 	z.strictObject({
 		ev: z.literal('error'),
-		uploadId: z.string(),
+		uploadId: uploadIdSchema,
 		status: z.number().int(),
 		message: z.string()
 	}),

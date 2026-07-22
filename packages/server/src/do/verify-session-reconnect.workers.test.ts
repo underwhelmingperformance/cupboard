@@ -1,3 +1,4 @@
+import { sessionIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { eq } from 'drizzle-orm';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
@@ -60,7 +61,9 @@ describe('verify pass routes verdict to the reconnected session', () => {
 		// a reconnect that happened AFTER the verify pass read the row (phase A) but
 		// before it notified. The pass should re-read the row at notify time and
 		// send to this tag, not the one it captured at phase A.
-		const thirdSessionId = 'third-session-tag-unknown-to-first-two';
+		const thirdSessionId = sessionIdSchema.parse(
+			'third-session-tag-unknown-to-first-two'
+		);
 		await runInDurableObject(currentServer(), (_instance, state) => {
 			drizzle(state.storage, { schema: { pendingUploads } })
 				.update(pendingUploads)

@@ -5,6 +5,7 @@ import {
 	storePathHashSchema,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq, sql } from 'drizzle-orm';
@@ -501,7 +502,7 @@ function pendingUpload(
 	verdict?: typeof schema.pendingUploads.$inferSelect.verdict
 ): typeof schema.pendingUploads.$inferInsert {
 	return {
-		id,
+		id: uploadIdSchema.parse(id),
 		cache: '',
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 		r2Key: `staging/${id}`,
@@ -517,7 +518,7 @@ function pendingAttestation(
 	expiresAt: string
 ): typeof schema.pendingAttestations.$inferInsert {
 	return {
-		id,
+		id: uploadIdSchema.parse(id),
 		cache: '',
 		storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 		digest: sha256HexDigestSchema.parse('b'.repeat(64)),

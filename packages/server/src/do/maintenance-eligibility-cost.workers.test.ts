@@ -5,6 +5,7 @@ import {
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -368,7 +369,7 @@ async function seedPendingUploads(
 			instance.context.db
 				.insert(schema.pendingUploads)
 				.values({
-					id: `${label}-${String(index)}`,
+					id: uploadIdSchema.parse(`${label}-${String(index)}`),
 					cache: '',
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
 					r2Key: `staging/backlog-${String(index)}`,
@@ -425,7 +426,7 @@ async function seedReconcileBacklog(
 			instance.context.db
 				.insert(schema.pendingAttestations)
 				.values({
-					id,
+					id: uploadIdSchema.parse(id),
 					cache: '',
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					digest: sha256HexDigestSchema.parse('b'.repeat(64)),
