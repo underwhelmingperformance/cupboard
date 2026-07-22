@@ -549,7 +549,11 @@ async function planGracePolicy(
 
 	if (existing === undefined) {
 		return {
-			step: { step: 'grace policy', outcome: 'created' },
+			step: {
+				step: 'grace policy',
+				outcome: 'created',
+				detail: `tenant-wide grace ${String(graceSeconds)}s`
+			},
 			apply: async () => {
 				await client.policies.graceAdd({ cachePrefix: '', graceSeconds });
 			}
@@ -579,7 +583,11 @@ async function planReuseView(
 
 	if (existing === undefined) {
 		return {
-			step: { step: 'reuse view', outcome: 'created' },
+			step: {
+				step: 'reuse view',
+				outcome: 'created',
+				detail: `${pullRequestPrefix} caches at priority ${String(destinationPriority + viewPriorityMargin)}`
+			},
 			apply: async () => {
 				await client.reuseViews.set({
 					name: pullRequestViewName,
@@ -624,7 +632,11 @@ function planTrustRule(
 	}
 
 	return {
-		step: { step, outcome: 'created' },
+		step: {
+			step,
+			outcome: 'created',
+			detail: workflowReferenceDescription(body.claims.job_workflow_ref)
+		},
 		apply: async () => {
 			await client.oidcTrust.add(body);
 		}
