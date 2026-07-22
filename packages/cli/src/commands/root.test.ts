@@ -3,12 +3,15 @@ import {
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import type {
-	RootEnsureResponse,
-	RootListResponse,
-	RootRemoveResponse,
-	RootSetResponse,
-	RootSummary
+import {
+	type ParsedRootListResponse,
+	type ParsedRootRemoveResponse,
+	type ParsedRootSetResponse,
+	rootEnsureResponseSchema,
+	rootListResponseSchema,
+	rootRemoveResponseSchema,
+	type RootSummary,
+	rootSummarySchema
 } from '@cupboard/protocol/retention';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -59,7 +62,7 @@ describe('runRootSet', () => {
 	it('addresses the cache, sends the fields, and reports', async () => {
 		const calls: SetRootInput[] = [];
 		const results: ResultRow[][] = [];
-		const response: RootSetResponse = summary({
+		const response = summary({
 			name: 'github:owner/repo/main',
 			expiresAt: '2026-01-08T00:00:00.000Z',
 			targets: [
@@ -136,13 +139,15 @@ describe('runRootSet', () => {
 });
 
 describe('runRootEnsure', () => {
+	const retainedRoot = summary({ name: 'main', targets: [presentTarget()] });
+
 	it.each([
 		{
 			name: 'a retained root',
-			response: {
+			response: rootEnsureResponseSchema.parse({
 				status: 'retained',
-				root: summary({ name: 'main', targets: [presentTarget()] })
-			} satisfies RootEnsureResponse,
+				root: retainedRoot
+			}),
 			expectedRows: [
 				{ label: 'Root', value: 'main' },
 				{ label: 'Status', value: 'retained' },
@@ -151,10 +156,10 @@ describe('runRootEnsure', () => {
 		},
 		{
 			name: 'a build requirement',
-			response: {
+			response: rootEnsureResponseSchema.parse({
 				status: 'build-required',
 				unavailable: [target]
-			} satisfies RootEnsureResponse,
+			}),
 			expectedRows: [
 				{ label: 'Root', value: 'main' },
 				{ label: 'Status', value: 'build required' },
@@ -197,7 +202,7 @@ describe('runRootEnsure', () => {
 describe('runRootList', () => {
 	it('reports a row per root', async () => {
 		const results: ResultRow[][] = [];
-		const response: RootListResponse = {
+		const response = rootListResponseSchema.parse({
 			roots: [
 				summary({ name: 'main', targets: [presentTarget()] }),
 				summary({
@@ -206,7 +211,7 @@ describe('runRootList', () => {
 					targets: [presentTarget()]
 				})
 			]
-		};
+		});
 
 		await runRootList('_default', reporter(results), listClient(response));
 
@@ -242,7 +247,10 @@ describe('runRootRemove', () => {
 	it('removes the root and reports the outcome once confirmed', async () => {
 		const calls: { cacheName: string; name: string }[] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response: RootRemoveResponse = { name: 'pr-123', removed: true };
+		const response = rootRemoveResponseSchema.parse({
+			name: 'pr-123',
+			removed: true
+		});
 
 		await runRootRemove('builds', 'pr-123', ui, removeClient(response, calls));
 
@@ -268,7 +276,10 @@ describe('runRootRemove', () => {
 			'builds',
 			'pr-123',
 			ui,
-			removeClient({ name: 'pr-123', removed: true }, [])
+			removeClient(
+				rootRemoveResponseSchema.parse({ name: 'pr-123', removed: true }),
+				[]
+			)
 		);
 
 		expect({
@@ -289,19 +300,19 @@ function presentTarget(): RootSummary['targets'][number] {
 	};
 }
 
-function summary(overrides: Partial<RootSummary>): RootSummary {
-	return {
+function summary(overrides: Partial<RootSummary>) {
+	return rootSummarySchema.parse({
 		name: 'root',
 		expired: false,
 		createdAt: '2026-01-01T00:00:00.000Z',
 		updatedAt: '2026-01-01T00:00:00.000Z',
 		targets: [],
 		...overrides
-	};
+	});
 }
 
 function setRootClient(
-	response: RootSetResponse,
+	response: ParsedRootSetResponse,
 	calls: SetRootInput[]
 ): Pick<RootClient, 'set'> {
 	return {
@@ -313,14 +324,16 @@ function setRootClient(
 	};
 }
 
-function listClient(response: RootListResponse): Pick<RootClient, 'list'> {
+function listClient(
+	response: ParsedRootListResponse
+): Pick<RootClient, 'list'> {
 	return {
 		list: () => Promise.resolve(response)
 	};
 }
 
 function removeClient(
-	response: RootRemoveResponse,
+	response: ParsedRootRemoveResponse,
 	calls: { cacheName: string; name: string }[]
 ): RootClient {
 	return {

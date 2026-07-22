@@ -6,8 +6,11 @@ import { tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	type TenantCreateBody,
 	tenantCreateBodySchema,
-	type TenantListResponse,
-	type TenantSummary
+	tenantListResponseSchema,
+	tenantMutateResponseSchema,
+	tenantReadModeResponseSchema,
+	type TenantSummary,
+	tenantSummarySchema
 } from '@cupboard/protocol/tenants';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -43,8 +46,8 @@ function thrownBy(run: () => unknown): unknown {
 	return thrown;
 }
 
-function summary(overrides: Partial<TenantSummary>): TenantSummary {
-	return {
+function summary(overrides: Partial<TenantSummary>) {
+	return tenantSummarySchema.parse({
 		id: 'acme',
 		status: 'active',
 		readMode: 'private',
@@ -54,7 +57,7 @@ function summary(overrides: Partial<TenantSummary>): TenantSummary {
 		configVersion: 1,
 		createdAt: '2026-01-01T00:00:00.000Z',
 		...overrides
-	};
+	});
 }
 
 function createBody(): TenantCreateBody {
@@ -71,16 +74,18 @@ function tenantClient(overrides: Partial<TenantClient>): TenantClient {
 	return {
 		list: () => Promise.resolve({ tenants: [] }),
 		create: (input) =>
-			Promise.resolve({
-				id: input.id,
-				status: 'active',
-				readMode: input.readMode,
-				ownerIssuer: input.ownerIssuer,
-				ownerSubject: input.ownerSubject,
-				ownerAudience: input.ownerAudience,
-				configVersion: 1,
-				createdAt: '2026-01-01T00:00:00.000Z'
-			}),
+			Promise.resolve(
+				tenantSummarySchema.parse({
+					id: input.id,
+					status: 'active',
+					readMode: input.readMode,
+					ownerIssuer: input.ownerIssuer,
+					ownerSubject: input.ownerSubject,
+					ownerAudience: input.ownerAudience,
+					configVersion: 1,
+					createdAt: '2026-01-01T00:00:00.000Z'
+				})
+			),
 		suspend: ({ id }) => Promise.resolve({ id, status: 'suspended' }),
 		resume: ({ id }) => Promise.resolve({ id, status: 'active' }),
 		setReadMode: ({ id, readMode }) => Promise.resolve({ id, readMode }),
@@ -310,12 +315,12 @@ describe('parseQuotaBytes', () => {
 describe('runTenantList', () => {
 	it('reports a row per tenant', async () => {
 		const results: ResultRow[][] = [];
-		const response: TenantListResponse = {
+		const response = tenantListResponseSchema.parse({
 			tenants: [
 				summary({ id: 'alpha' }),
 				summary({ id: 'beta', status: 'suspended', readMode: 'public' })
 			]
-		};
+		});
 
 		await runTenantList(reporter(results), {
 			list: () => Promise.resolve(response)
@@ -419,7 +424,9 @@ describe('runTenantResume', () => {
 		await runTenantResume(acmeTenant, reporter(results), {
 			resume(input) {
 				calls.push(input);
-				return Promise.resolve({ id: 'acme', status: 'active' });
+				return Promise.resolve(
+					tenantMutateResponseSchema.parse({ id: 'acme', status: 'active' })
+				);
 			}
 		});
 
@@ -438,7 +445,9 @@ describe('runTenantReadMode', () => {
 		await runTenantReadMode(acmeTenant, 'public', reporter(results), {
 			setReadMode(input) {
 				calls.push(input);
-				return Promise.resolve({ id: 'acme', readMode: 'public' });
+				return Promise.resolve(
+					tenantReadModeResponseSchema.parse({ id: 'acme', readMode: 'public' })
+				);
 			}
 		});
 
@@ -464,7 +473,12 @@ describe('runTenantRotateCredential', () => {
 			{
 				rotateReadCredential(input) {
 					calls.push(input);
-					return Promise.resolve({ id: 'acme', readMode: 'private' });
+					return Promise.resolve(
+						tenantReadModeResponseSchema.parse({
+							id: 'acme',
+							readMode: 'private'
+						})
+					);
 				}
 			}
 		);
@@ -496,7 +510,12 @@ describe('runTenantRotateCredential', () => {
 		await runTenantRotateCredential(acmeTenant, {}, reporter(results), {
 			rotateReadCredential(input) {
 				calls.push(input);
-				return Promise.resolve({ id: 'acme', readMode: 'private' });
+				return Promise.resolve(
+					tenantReadModeResponseSchema.parse({
+						id: 'acme',
+						readMode: 'private'
+					})
+				);
 			}
 		});
 		const readSchema = z.object({
@@ -539,7 +558,12 @@ describe('runTenantRotateCredential', () => {
 			reporter(results),
 			{
 				rotateReadCredential: () =>
-					Promise.resolve({ id: 'acme', readMode: 'public' })
+					Promise.resolve(
+						tenantReadModeResponseSchema.parse({
+							id: 'acme',
+							readMode: 'public'
+						})
+					)
 			}
 		);
 
@@ -566,7 +590,12 @@ describe('runTenantClearCredential', () => {
 		await runTenantClearCredential(acmeTenant, reporter(results), {
 			clearReadCredential(input) {
 				calls.push(input);
-				return Promise.resolve({ id: 'acme', readMode: 'private' });
+				return Promise.resolve(
+					tenantReadModeResponseSchema.parse({
+						id: 'acme',
+						readMode: 'private'
+					})
+				);
 			}
 		});
 

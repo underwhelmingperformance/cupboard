@@ -74,14 +74,15 @@ export const reuseViewSelectorsSchema = z
 	});
 
 // A Nix substituter priority, the same shape as a cache's own
-// `cachePrioritySchema`: a non-negative integer where lower is preferred. Kept
-// as a separate, unbranded schema, since a view's priority is not a cache's
-// priority.
+// `cachePrioritySchema`: a non-negative integer where lower is preferred. A
+// view's priority is its own domain, so it carries its own brand and cannot
+// stand in for a cache's priority.
 export const reuseViewPrioritySchema = z
 	.number()
 	.int()
 	.min(0)
-	.max(Number.MAX_SAFE_INTEGER);
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('ReuseViewPriority');
 export type ReuseViewPriority = z.output<typeof reuseViewPrioritySchema>;
 
 // Ten past the cache registry's own default priority of 40. The anchor is
@@ -123,10 +124,10 @@ export type ParsedReuseViewRemoveResponse = z.output<
 	typeof reuseViewRemoveResponseSchema
 >;
 
-// Buildable wire shapes: schema inputs are unbranded, so callers construct
-// request bodies and the server builds response bodies without issuing
-// brands. The `Parsed…` outputs above are the branded results of a
-// successful parse.
+// The shapes a builder assembles: a schema's input is unbranded, so the CLI
+// constructs a request body and the server a response body from these forms
+// directly. The `Parsed…` outputs above are what a successful parse yields, and
+// code that consumes a validated value takes that branded form.
 export type ReuseViewSelector = z.input<typeof reuseViewSelectorSchema>;
 export type ReuseViewSetBody = z.input<typeof reuseViewSetBodySchema>;
 export type ReuseViewSummary = z.input<typeof reuseViewSummarySchema>;

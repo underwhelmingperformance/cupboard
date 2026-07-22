@@ -2,10 +2,10 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import type {
-	CacheListResponse,
-	CacheRemoveResponse,
-	CacheSummary
+import {
+	cacheListResponseSchema,
+	type CacheRemoveResponse,
+	cacheSummarySchema
 } from '@cupboard/protocol/caches';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -25,7 +25,9 @@ function cacheClient(overrides: Partial<CacheClient>): CacheClient {
 	return {
 		list: () => Promise.resolve({ caches: [] }),
 		put: ({ cacheName, priority }) =>
-			Promise.resolve({ name: cacheName, priority, storePaths: 0 }),
+			Promise.resolve(
+				cacheSummarySchema.parse({ name: cacheName, priority, storePaths: 0 })
+			),
 		remove: ({ params }) =>
 			Promise.resolve({
 				name: params.cacheName,
@@ -52,7 +54,7 @@ describe('parsePriority', () => {
 describe('runCacheList', () => {
 	it('reports a row per cache, labelling the default and its grace state', async () => {
 		const results: ResultRow[][] = [];
-		const response: CacheListResponse = {
+		const response = cacheListResponseSchema.parse({
 			caches: [
 				{ name: '', priority: 40, storePaths: 0, graceManaged: false },
 				{
@@ -64,7 +66,7 @@ describe('runCacheList', () => {
 				},
 				{ name: 'drained', priority: 45, storePaths: 0, graceManaged: true }
 			]
-		};
+		});
 
 		await runCacheList(reporter(results), {
 			list: () => Promise.resolve(response)
@@ -103,11 +105,11 @@ describe('runCacheCreate', () => {
 	it('upserts the cache priority and reports the summary', async () => {
 		const calls: { cacheName: string; priority: number }[] = [];
 		const results: ResultRow[][] = [];
-		const summary: CacheSummary = {
+		const summary = cacheSummarySchema.parse({
 			name: 'builds',
 			priority: 30,
 			storePaths: 0
-		};
+		});
 
 		await runCacheCreate('builds', 30, reporter(results), {
 			put(input) {
@@ -188,9 +190,11 @@ describe('runCacheInspect', () => {
 
 		await runCacheInspect('builds', reporter(results), {
 			list: () =>
-				Promise.resolve({
-					caches: [{ name: 'builds', priority: 30, storePaths: 5 }]
-				})
+				Promise.resolve(
+					cacheListResponseSchema.parse({
+						caches: [{ name: 'builds', priority: 30, storePaths: 5 }]
+					})
+				)
 		});
 
 		expect(results).toStrictEqual([
@@ -207,17 +211,19 @@ describe('runCacheInspect', () => {
 
 		await runCacheInspect('builds', reporter(results), {
 			list: () =>
-				Promise.resolve({
-					caches: [
-						{
-							name: 'builds',
-							priority: 30,
-							storePaths: 5,
-							graceManaged: true,
-							earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
-						}
-					]
-				})
+				Promise.resolve(
+					cacheListResponseSchema.parse({
+						caches: [
+							{
+								name: 'builds',
+								priority: 30,
+								storePaths: 5,
+								graceManaged: true,
+								earliestGraceDeadline: '2026-03-01T00:00:00.000Z'
+							}
+						]
+					})
+				)
 		});
 
 		expect(results).toStrictEqual([

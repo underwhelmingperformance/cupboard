@@ -11,7 +11,8 @@ import {
 	type ParsedUploadGraceFact,
 	retentionMarkerAttribute,
 	retentionMarkerAttributeValue,
-	subscribeIdentityCapability
+	subscribeIdentityCapability,
+	type UploadId
 } from '@cupboard/protocol/upload';
 import { chunk } from '@cupboard/shared/collections';
 import { z } from 'zod';
@@ -78,7 +79,7 @@ export type CommitSocketConnect = (
  * path's durable grace fact instead of none.
  */
 export interface CommitSessionTarget {
-	readonly uploadId: string;
+	readonly uploadId: UploadId;
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
 	readonly retention?: boolean;
@@ -340,7 +341,7 @@ export function runCommitSession(
 	headers: Readonly<Record<string, string>>,
 	options: CommitSessionOptions
 ): CommitSession {
-	const outstanding = new Map<string, SessionEntry>();
+	const outstanding = new Map<UploadId, SessionEntry>();
 	const maxReconnects = options.maxReconnects ?? defaultMaxReconnects;
 	const backoffBase = options.reconnectBackoffMs ?? defaultReconnectBackoffMs;
 
@@ -378,8 +379,8 @@ export function runCommitSession(
 	//
 	// Both structures are cleared on reconnect (openConnection resets them), so
 	// replayOutstanding sends through a fresh window each time.
-	const inFlightChunks = new Map<string, Set<string>>();
-	const uploadIdToChunkKey = new Map<string, string>();
+	const inFlightChunks = new Map<string, Set<UploadId>>();
+	const uploadIdToChunkKey = new Map<UploadId, string>();
 	let pendingBatchChunks: CommitSessionTarget[][] = [];
 
 	const sendBatchChunk = (batch: readonly CommitSessionTarget[]): void => {
@@ -403,7 +404,7 @@ export function runCommitSession(
 		});
 	};
 
-	const releaseChunkForUploadId = (uploadId: string): void => {
+	const releaseChunkForUploadId = (uploadId: UploadId): void => {
 		const chunkKey = uploadIdToChunkKey.get(uploadId);
 
 		if (chunkKey === undefined) {
@@ -547,7 +548,7 @@ export function runCommitSession(
 	};
 
 	const finishEntry = (
-		uploadId: string,
+		uploadId: UploadId,
 		settle: (entry: SessionEntry) => void
 	): void => {
 		const entry = outstanding.get(uploadId);
@@ -866,7 +867,7 @@ export function runCommitSession(
 		reconnectTimer.unref();
 	};
 
-	function armDeadline(uploadId: string): NodeJS.Timeout {
+	function armDeadline(uploadId: UploadId): NodeJS.Timeout {
 		const deadline = setTimeout(() => {
 			finishEntry(uploadId, (entry) => {
 				entry.settleFailed(

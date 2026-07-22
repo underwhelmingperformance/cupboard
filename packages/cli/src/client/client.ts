@@ -21,7 +21,8 @@ import {
 } from '@cupboard/protocol/signup';
 import {
 	commitAcceptCapabilitiesHeader,
-	commitBatchCapability
+	commitBatchCapability,
+	type UploadId
 } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { WebSocket } from 'ws';
@@ -400,7 +401,7 @@ export interface CupboardClientOptions {
  * the server for the path's durable grace fact.
  */
 export interface CommitTarget {
-	readonly uploadId: string;
+	readonly uploadId: UploadId;
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
 	readonly retention?: boolean;

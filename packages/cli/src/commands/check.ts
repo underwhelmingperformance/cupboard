@@ -1,4 +1,7 @@
-import type { CheckDiscrepancy, CheckReport } from '@cupboard/protocol/reports';
+import type {
+	CheckDiscrepancy,
+	ParsedCheckReport
+} from '@cupboard/protocol/reports';
 import { formatCount, type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
@@ -18,7 +21,7 @@ interface CheckOptions {
  * satisfies it by construction.
  */
 export interface CheckClient {
-	run(input: { deep: boolean }): Promise<CheckReport>;
+	run(input: { deep: boolean }): Promise<ParsedCheckReport>;
 }
 
 export function registerCheckCommand(

@@ -13,7 +13,10 @@ import { z } from 'zod';
 
 import { countSchema } from './internal/counts.ts';
 
-// Parsed schema outputs are branded; buildable wire inputs are unbranded.
+// Each wire shape here is declared once and exposed two ways. The plain alias is
+// what a builder assembles: the CLI putting together a request, the server
+// putting together a response. The `Parsed…` output is what a successful parse
+// yields, and code that consumes a validated value takes that branded form.
 
 const isStorePathHashForPath = (value: {
 	readonly storePathHash: string;
@@ -487,9 +490,10 @@ export type ParsedDeletePathResponse = z.output<
 	typeof pathDeletionResponseSchema
 >;
 
-// Buildable wire shapes: schema inputs are unbranded, so callers construct
-// request bodies and the server builds response bodies without issuing brands.
-// The `Parsed…` outputs above are the branded results of a successful parse.
+// The shapes a builder assembles: a schema's input is unbranded, so the CLI
+// constructs a request body and the server a response body from these forms
+// directly. The `Parsed…` outputs above are what a successful parse yields, and
+// code that consumes a validated value takes that branded form.
 export type UploadPathNegotiationFields = z.input<
 	typeof uploadPathNegotiationSchema
 >;

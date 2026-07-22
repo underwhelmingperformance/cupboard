@@ -6,11 +6,7 @@ import {
 	type AuthorizationDetail,
 	type AuthorizationDetails
 } from '@cupboard/protocol/grants';
-import {
-	oidcAudienceSchema,
-	oidcIssuerSchema,
-	type OidcTrustSummary
-} from '@cupboard/protocol/oidc';
+import { type ParsedOidcTrustSummary } from '@cupboard/protocol/oidc';
 import {
 	claimMismatches,
 	firstClaimMismatch,
@@ -62,7 +58,7 @@ export interface GithubCheckClient {
 	readonly policies: Pick<PolicyClient, 'graceList'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list'>;
 	readonly oidcTrust: {
-		list(): Promise<{ rules: OidcTrustSummary[] }>;
+		list(): Promise<{ rules: ParsedOidcTrustSummary[] }>;
 	};
 }
 
@@ -79,11 +75,11 @@ export interface CheckFinding {
 	readonly detail?: string;
 }
 
-function toMatcherRule(summary: OidcTrustSummary): OidcTrustRule {
+function toMatcherRule(summary: ParsedOidcTrustSummary): OidcTrustRule {
 	return {
 		id: summary.id,
-		issuer: oidcIssuerSchema.parse(summary.issuer),
-		audience: oidcAudienceSchema.parse(summary.audience),
+		issuer: summary.issuer,
+		audience: summary.audience,
 		claims: summary.claims,
 		permittedGrants: summary.permittedGrants
 	};

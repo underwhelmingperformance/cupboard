@@ -1,9 +1,9 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import type {
-	ControlKeyListResponse,
-	ControlKeyRetireResponse,
-	ControlKeyRotateResponse,
-	ControlKeySummary
+	ControlKeySummary,
+	ParsedControlKeyListResponse,
+	ParsedControlKeyRetireResponse,
+	ParsedControlKeyRotateResponse
 } from '@cupboard/protocol/control-keys';
 import {
 	formatTimestamp,
@@ -28,9 +28,9 @@ interface RetireOptions {
  * satisfies it by construction.
  */
 export interface ControlKeyClient {
-	list(): Promise<ControlKeyListResponse>;
-	rotate(): Promise<ControlKeyRotateResponse>;
-	retire(input: { kid: string }): Promise<ControlKeyRetireResponse>;
+	list(): Promise<ParsedControlKeyListResponse>;
+	rotate(): Promise<ParsedControlKeyRotateResponse>;
+	retire(input: { kid: string }): Promise<ParsedControlKeyRetireResponse>;
 }
 
 export function registerControlKeyCommands(

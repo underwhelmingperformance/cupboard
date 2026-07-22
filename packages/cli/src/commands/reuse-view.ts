@@ -1,7 +1,10 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import {
-	type ReuseViewListResponse,
-	type ReuseViewRemoveResponse,
+	type ParsedReuseViewListResponse,
+	type ParsedReuseViewRemoveResponse,
+	type ParsedReuseViewSummary,
+	type ReuseViewPriority,
+	reuseViewPrioritySchema,
 	type ReuseViewSelector,
 	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
@@ -21,7 +24,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 export interface ReuseViewSetOptions {
 	readonly exact: readonly string[];
 	readonly prefix: readonly string[];
-	readonly priority?: number;
+	readonly priority?: ReuseViewPriority;
 }
 
 interface ConfirmableOptions {
@@ -34,20 +37,20 @@ interface ConfirmableOptions {
  * satisfies it by construction.
  */
 export interface ReuseViewClient {
-	list(): Promise<ReuseViewListResponse>;
+	list(): Promise<ParsedReuseViewListResponse>;
 	set(input: {
 		name: string;
 		selectors: readonly ReuseViewSelector[];
 		priority?: number;
-	}): Promise<ReuseViewSummary>;
-	remove(input: { name: string }): Promise<ReuseViewRemoveResponse>;
+	}): Promise<ParsedReuseViewSummary>;
+	remove(input: { name: string }): Promise<ParsedReuseViewRemoveResponse>;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
 	return [...previous, value];
 }
 
-export function parsePriority(value: string): number {
+export function parsePriority(value: string): ReuseViewPriority {
 	// Canonical decimal only: a leading zero is as non-canonical as hex or
 	// exponent forms, so it is rejected the same way.
 	if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
@@ -60,7 +63,7 @@ export function parsePriority(value: string): number {
 		throw new InvalidReuseViewPriorityError(value);
 	}
 
-	return priority;
+	return reuseViewPrioritySchema.parse(priority);
 }
 
 // Exacts first, then prefixes, each in the order given: a deterministic
@@ -191,7 +194,7 @@ export async function runReuseViewList(
 export async function runReuseViewSet(
 	name: string,
 	selectors: readonly ReuseViewSelector[],
-	priority: number | undefined,
+	priority: ReuseViewPriority | undefined,
 	reporter: Reporter,
 	client: Pick<ReuseViewClient, 'set'>
 ): Promise<void> {

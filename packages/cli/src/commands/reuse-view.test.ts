@@ -2,11 +2,13 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import type {
-	ReuseViewListResponse,
-	ReuseViewRemoveResponse,
-	ReuseViewSelector,
-	ReuseViewSummary
+import {
+	reuseViewListResponseSchema,
+	reuseViewPrioritySchema,
+	reuseViewRemoveResponseSchema,
+	type ReuseViewSelector,
+	type ReuseViewSummary,
+	reuseViewSummarySchema
 } from '@cupboard/protocol/reuse-views';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -24,7 +26,7 @@ import {
 	selectorsFromOptions
 } from './reuse-view.ts';
 
-const summary: ReuseViewSummary = {
+const summary = reuseViewSummarySchema.parse({
 	name: 'reuse',
 	revision: 1,
 	priority: 50,
@@ -34,7 +36,7 @@ const summary: ReuseViewSummary = {
 	],
 	createdAt: '2026-01-01T00:00:00.000Z',
 	updatedAt: '2026-01-01T00:00:00.000Z'
-};
+});
 
 describe('parsePriority', () => {
 	it('accepts a decimal integer', () => {
@@ -80,7 +82,7 @@ describe('selectorsFromOptions', () => {
 describe('runReuseViewList', () => {
 	it('reports a row per view', async () => {
 		const results: ResultRow[][] = [];
-		const response: ReuseViewListResponse = { views: [summary] };
+		const response = reuseViewListResponseSchema.parse({ views: [summary] });
 
 		await runReuseViewList(reporter(results), {
 			list: () => Promise.resolve(response)
@@ -104,7 +106,8 @@ describe('runReuseViewList', () => {
 		};
 
 		await runReuseViewList(reporter(results), {
-			list: () => Promise.resolve({ views: [view] })
+			list: () =>
+				Promise.resolve(reuseViewListResponseSchema.parse({ views: [view] }))
 		});
 
 		expect(results).toStrictEqual([
@@ -140,7 +143,7 @@ describe('runReuseViewSet', () => {
 				{ kind: 'exact', pattern: 'release' },
 				{ kind: 'prefix', pattern: 'pr-' }
 			] satisfies ReuseViewSelector[],
-			priority: 10,
+			priority: reuseViewPrioritySchema.parse(10),
 			row: {
 				label: 'Selectors',
 				value: 'exact:release, prefix:pr-'
@@ -163,11 +166,11 @@ describe('runReuseViewSet', () => {
 				priority?: number;
 			}[] = [];
 			const results: ResultRow[][] = [];
-			const response: ReuseViewSummary = {
+			const response = reuseViewSummarySchema.parse({
 				...summary,
 				selectors,
 				...(priority !== undefined && { priority })
-			};
+			});
 
 			await runReuseViewSet('reuse', selectors, priority, reporter(results), {
 				set(input) {
@@ -201,10 +204,10 @@ describe('runReuseViewRemove', () => {
 	it('removes a view and reports the outcome once confirmed', async () => {
 		const calls: { name: string }[] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response: ReuseViewRemoveResponse = {
+		const response = reuseViewRemoveResponseSchema.parse({
 			name: 'reuse',
 			removed: true
-		};
+		});
 
 		await runReuseViewRemove('reuse', ui, {
 			remove(input) {
@@ -230,10 +233,10 @@ describe('runReuseViewRemove', () => {
 
 	it('reports not present when the view did not exist', async () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response: ReuseViewRemoveResponse = {
+		const response = reuseViewRemoveResponseSchema.parse({
 			name: 'reuse',
 			removed: false
-		};
+		});
 
 		await runReuseViewRemove('reuse', ui, {
 			remove: () => Promise.resolve(response)
@@ -255,7 +258,10 @@ describe('runReuseViewRemove', () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
 		await runReuseViewRemove('reuse', ui, {
-			remove: () => Promise.resolve({ name: 'reuse', removed: true })
+			remove: () =>
+				Promise.resolve(
+					reuseViewRemoveResponseSchema.parse({ name: 'reuse', removed: true })
+				)
 		});
 
 		expect({

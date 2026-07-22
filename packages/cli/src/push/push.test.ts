@@ -8,10 +8,12 @@ import {
 	rootSetMaxTargets,
 	type RootSetResponse
 } from '@cupboard/protocol/retention';
-import type {
-	UploadNegotiateRequest,
-	UploadPreviewRequest,
-	UploadPreviewResponse
+import {
+	type ParsedUploadPreviewResponse,
+	type UploadNegotiateRequest,
+	uploadNegotiateResponseSchema,
+	type UploadPreviewRequest,
+	uploadPreviewResponseSchema
 } from '@cupboard/protocol/upload';
 import {
 	formatBytes,
@@ -64,7 +66,7 @@ function fallbackCommitResponse() {
 // The default `preview` a mutating-push fixture gets: mutating pushes never
 // call it, so a call here means the flow under test regressed into calling
 // preview instead of negotiate.
-function unexpectedPreviewCall(): Promise<UploadPreviewResponse> {
+function unexpectedPreviewCall(): Promise<ParsedUploadPreviewResponse> {
 	return Promise.reject(
 		new Error('preview should not be called during a mutating push')
 	);
@@ -140,23 +142,25 @@ describe('runPush', () => {
 				negotiate(body) {
 					negotiations.push(body);
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							},
-							{
-								action: 'skip',
-								storePathHash: StorePath.hash(runtimePath),
-								narHash: runtimeDigest.narHash.toString()
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								},
+								{
+									action: 'skip',
+									storePathHash: StorePath.hash(runtimePath),
+									narHash: runtimeDigest.narHash.toString()
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(r2Key, body) {
 					uploads.push({ r2Key, body: await collectReadableStream(body) });
@@ -251,16 +255,18 @@ describe('runPush', () => {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: (body) =>
-					Promise.resolve({
-						uploads: body.paths.map((path) => ({
-							action: 'upload',
-							storePathHash: path.storePathHash,
-							narHash: path.narHash,
-							uploadId: `upload-${path.storePathHash}`,
-							r2Key: `nar/${path.narHash}.nar.zst`,
-							expiresAt: '2026-05-18T12:00:00.000Z'
-						}))
-					}),
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: body.paths.map((path) => ({
+								action: 'upload',
+								storePathHash: path.storePathHash,
+								narHash: path.narHash,
+								uploadId: `upload-${path.storePathHash}`,
+								r2Key: `nar/${path.narHash}.nar.zst`,
+								expiresAt: '2026-05-18T12:00:00.000Z'
+							}))
+						})
+					),
 				async uploadNar(r2Key, body) {
 					running += 1;
 					peak = Math.max(peak, running);
@@ -306,18 +312,20 @@ describe('runPush', () => {
 					negotiations += 1;
 					const uploadId = negotiations === 1 ? 'commit-stale' : 'commit-fresh';
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId,
-								r2Key,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId,
+									r2Key,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(key, body) {
 					await collectReadableStream(body);
@@ -385,30 +393,34 @@ describe('runPush', () => {
 					// time the blob was collected, so the re-negotiate (the tenant's
 					// presence edge credited back) plans a fresh upload.
 					if (negotiations === 1) {
-						return Promise.resolve({
-							uploads: [
-								{
-									action: 'commit',
-									storePathHash: StorePath.hash(appPath),
-									narHash: appDigest.narHash.toString(),
-									uploadId: 'reuse-gone'
-								}
-							]
-						});
+						return Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action: 'commit',
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString(),
+										uploadId: 'reuse-gone'
+									}
+								]
+							})
+						);
 					}
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-fresh',
-								r2Key,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-fresh',
+									r2Key,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(key, body) {
 					await collectReadableStream(body);
@@ -466,30 +478,34 @@ describe('runPush', () => {
 					// verify pass answers absent and the re-negotiate plans a fresh
 					// upload.
 					if (negotiations === 1) {
-						return Promise.resolve({
-							uploads: [
-								{
-									action: 'commit',
-									storePathHash: StorePath.hash(appPath),
-									narHash: appDigest.narHash.toString(),
-									uploadId: 'reuse-absent'
-								}
-							]
-						});
+						return Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action: 'commit',
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString(),
+										uploadId: 'reuse-absent'
+									}
+								]
+							})
+						);
 					}
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-fresh',
-								r2Key,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-fresh',
+									r2Key,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(key, body) {
 					await collectReadableStream(body);
@@ -567,29 +583,33 @@ describe('runPush', () => {
 					// The re-negotiate finds the path already in the store, so the
 					// re-drive needs no fresh upload.
 					if (negotiations === 1) {
-						return Promise.resolve({
-							uploads: [
-								{
-									action: 'upload',
-									storePathHash: StorePath.hash(appPath),
-									narHash: appDigest.narHash.toString(),
-									uploadId: 'upload-defer',
-									r2Key,
-									expiresAt: '2026-05-18T12:00:00.000Z'
-								}
-							]
-						});
+						return Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: [
+									{
+										action: 'upload',
+										storePathHash: StorePath.hash(appPath),
+										narHash: appDigest.narHash.toString(),
+										uploadId: 'upload-defer',
+										r2Key,
+										expiresAt: '2026-05-18T12:00:00.000Z'
+									}
+								]
+							})
+						);
 					}
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'skip',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString()
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'skip',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString()
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(key, body) {
 					await collectReadableStream(body);
@@ -653,20 +673,22 @@ describe('runPush', () => {
 				preview(body) {
 					previews.push(body);
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString()
-							},
-							{
-								action: 'skip',
-								storePathHash: StorePath.hash(runtimePath),
-								narHash: runtimeDigest.narHash.toString()
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadPreviewResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString()
+								},
+								{
+									action: 'skip',
+									storePathHash: StorePath.hash(runtimePath),
+									narHash: runtimeDigest.narHash.toString()
+								}
+							]
+						})
+					);
 				},
 				uploadNar: () => {
 					clientCalls.push({ method: 'uploadNar' });
@@ -743,18 +765,20 @@ describe('runPush', () => {
 						paths: body.paths.map((path) => path.storePath)
 					});
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(_r2Key, body) {
 					clientCalls.push({ method: 'uploadNar' });
@@ -815,16 +839,18 @@ describe('runPush', () => {
 						paths: body.paths.map((path) => path.storePath)
 					});
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'commit',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'reuse-app'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'commit',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'reuse-app'
+								}
+							]
+						})
+					);
 				},
 				uploadNar() {
 					clientCalls.push({ method: 'uploadNar' });
@@ -1356,18 +1382,20 @@ describe('runPush', () => {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					}),
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					),
 				uploadNar: async (_r2Key, body) => {
 					await collectReadableStream(body);
 				},
@@ -1417,18 +1445,20 @@ describe('runPush', () => {
 						paths: body.paths.map((path) => path.storePath)
 					});
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(_r2Key, body) {
 					clientCalls.push({ method: 'uploadNar' });
@@ -1765,13 +1795,15 @@ describe('runPush', () => {
 					negotiate(body) {
 						bodies.push(body);
 
-						return Promise.resolve({
-							uploads: body.paths.map((path) => ({
-								action: 'skip',
-								storePathHash: path.storePathHash,
-								narHash: path.narHash
-							}))
-						});
+						return Promise.resolve(
+							uploadNegotiateResponseSchema.parse({
+								uploads: body.paths.map((path) => ({
+									action: 'skip',
+									storePathHash: path.storePathHash,
+									narHash: path.narHash
+								}))
+							})
+						);
 					}
 				},
 				nix: nixStore({ [appPath]: pathInfo(appPath, appDigest, []) })
@@ -1797,15 +1829,17 @@ describe('runPush', () => {
 				preview(body) {
 					previews.push(body);
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'skip',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString()
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadPreviewResponseSchema.parse({
+							uploads: [
+								{
+									action: 'skip',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString()
+								}
+							]
+						})
+					);
 				},
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
@@ -1945,18 +1979,20 @@ describe('runPush', () => {
 				negotiate() {
 					events.push('negotiate');
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					);
 				},
 				async uploadNar(_r2Key, body) {
 					events.push('uploadNar');
@@ -2005,13 +2041,15 @@ describe('runPush', () => {
 					paths: body.paths.map((path) => path.storePath)
 				});
 
-				return Promise.resolve({
-					uploads: body.paths.map((path) => ({
-						action: 'skip',
-						storePathHash: path.storePathHash,
-						narHash: path.narHash
-					}))
-				});
+				return Promise.resolve(
+					uploadNegotiateResponseSchema.parse({
+						uploads: body.paths.map((path) => ({
+							action: 'skip',
+							storePathHash: path.storePathHash,
+							narHash: path.narHash
+						}))
+					})
+				);
 			},
 			uploadNar() {
 				clientCalls.push({ method: 'uploadNar' });
@@ -2265,26 +2303,28 @@ describe('runPush', () => {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							},
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(runtimePath),
-								narHash: runtimeDigest.narHash.toString(),
-								uploadId: 'upload-runtime',
-								r2Key: `nar/${runtimeDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					}),
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								},
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(runtimePath),
+									narHash: runtimeDigest.narHash.toString(),
+									uploadId: 'upload-runtime',
+									r2Key: `nar/${runtimeDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					),
 				async uploadNar(r2Key, body) {
 					await collectReadableStream(body);
 
@@ -2359,25 +2399,27 @@ describe('runPush', () => {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: (body) =>
-					Promise.resolve({
-						uploads: body.paths.map((path) =>
-							path.storePathHash === StorePath.hash(appPath)
-								? {
-										action: 'skip',
-										storePathHash: path.storePathHash,
-										narHash: path.narHash,
-										grace: { retainUntil: '2026-02-01T00:00:00.000Z' }
-									}
-								: {
-										action: 'upload',
-										storePathHash: path.storePathHash,
-										narHash: path.narHash,
-										uploadId: `upload-${path.storePathHash}`,
-										r2Key: `nar/${path.narHash}.nar.zst`,
-										expiresAt: '2026-05-18T12:00:00.000Z'
-									}
-						)
-					}),
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: body.paths.map((path) =>
+								path.storePathHash === StorePath.hash(appPath)
+									? {
+											action: 'skip',
+											storePathHash: path.storePathHash,
+											narHash: path.narHash,
+											grace: { retainUntil: '2026-02-01T00:00:00.000Z' }
+										}
+									: {
+											action: 'upload',
+											storePathHash: path.storePathHash,
+											narHash: path.narHash,
+											uploadId: `upload-${path.storePathHash}`,
+											r2Key: `nar/${path.narHash}.nar.zst`,
+											expiresAt: '2026-05-18T12:00:00.000Z'
+										}
+							)
+						})
+					),
 				async uploadNar(_r2Key, body) {
 					await collectReadableStream(body);
 				},
@@ -2446,18 +2488,20 @@ describe('runPush', () => {
 			client: {
 				preview: unexpectedPreviewCall,
 				negotiate: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'upload',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'upload-app',
-								r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-								expiresAt: '2026-05-18T12:00:00.000Z'
-							}
-						]
-					}),
+					Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'upload',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'upload-app',
+									r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+									expiresAt: '2026-05-18T12:00:00.000Z'
+								}
+							]
+						})
+					),
 				async uploadNar(_r2Key, body) {
 					await collectReadableStream(body);
 				},
@@ -2525,16 +2569,18 @@ describe('runPush', () => {
 				negotiate(body) {
 					bodies.push({ pushId: 'push-1', ...body });
 
-					return Promise.resolve({
-						uploads: [
-							{
-								action: 'commit',
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								uploadId: 'reuse-app'
-							}
-						]
-					});
+					return Promise.resolve(
+						uploadNegotiateResponseSchema.parse({
+							uploads: [
+								{
+									action: 'commit',
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									uploadId: 'reuse-app'
+								}
+							]
+						})
+					);
 				},
 				commit(target) {
 					commitTargets.push(target);
@@ -2809,16 +2855,18 @@ describe('runPush', () => {
 			client: {
 				negotiate: unexpectedNegotiateCall,
 				preview: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'skip' as const,
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								grace: { graceSeconds: 86_400 }
-							}
-						]
-					}),
+					Promise.resolve(
+						uploadPreviewResponseSchema.parse({
+							uploads: [
+								{
+									action: 'skip' as const,
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									grace: { graceSeconds: 86_400 }
+								}
+							]
+						})
+					),
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
 				setRoot: unexpectedSetRootCall
@@ -2847,16 +2895,18 @@ describe('runPush', () => {
 			client: {
 				negotiate: unexpectedNegotiateCall,
 				preview: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'skip' as const,
-								storePathHash: StorePath.hash(appPath),
-								narHash: appDigest.narHash.toString(),
-								grace: { graceSeconds: 0 }
-							}
-						]
-					}),
+					Promise.resolve(
+						uploadPreviewResponseSchema.parse({
+							uploads: [
+								{
+									action: 'skip' as const,
+									storePathHash: StorePath.hash(appPath),
+									narHash: appDigest.narHash.toString(),
+									grace: { graceSeconds: 0 }
+								}
+							]
+						})
+					),
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
 				setRoot: unexpectedSetRootCall
@@ -2890,15 +2940,17 @@ describe('runPush', () => {
 			client: {
 				negotiate: unexpectedNegotiateCall,
 				preview: () =>
-					Promise.resolve({
-						uploads: [
-							{
-								action: 'skip' as const,
-								storePathHash: StorePath.hash(appPath),
-								narHash: cacheDigest.narHash.toString()
-							}
-						]
-					}),
+					Promise.resolve(
+						uploadPreviewResponseSchema.parse({
+							uploads: [
+								{
+									action: 'skip' as const,
+									storePathHash: StorePath.hash(appPath),
+									narHash: cacheDigest.narHash.toString()
+								}
+							]
+						})
+					),
 				uploadNar: unexpectedUploadNarCall,
 				commit: unexpectedCommitCall,
 				setRoot: unexpectedSetRootCall
@@ -2925,18 +2977,20 @@ function deferredUpload(
 		negotiate() {
 			events.push('negotiate');
 
-			return Promise.resolve({
-				uploads: [
-					{
-						action: 'upload',
-						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
-						uploadId: 'upload-app',
-						r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
-						expiresAt: '2026-05-18T12:00:00.000Z'
-					}
-				]
-			});
+			return Promise.resolve(
+				uploadNegotiateResponseSchema.parse({
+					uploads: [
+						{
+							action: 'upload',
+							storePathHash: StorePath.hash(appPath),
+							narHash: appDigest.narHash.toString(),
+							uploadId: 'upload-app',
+							r2Key: `nar/${appDigest.narHash.toString()}.nar.zst`,
+							expiresAt: '2026-05-18T12:00:00.000Z'
+						}
+					]
+				})
+			);
 		},
 		async uploadNar(_r2Key, body) {
 			events.push('uploadNar');
@@ -3177,13 +3231,15 @@ function skipClient(roots: SetRootCall[], clientCalls: unknown[]): PushClient {
 				paths: body.paths.map((path) => path.storePath)
 			});
 
-			return Promise.resolve({
-				uploads: body.paths.map((path) => ({
-					action: 'skip',
-					storePathHash: path.storePathHash,
-					narHash: path.narHash
-				}))
-			});
+			return Promise.resolve(
+				uploadNegotiateResponseSchema.parse({
+					uploads: body.paths.map((path) => ({
+						action: 'skip',
+						storePathHash: path.storePathHash,
+						narHash: path.narHash
+					}))
+				})
+			);
 		},
 		uploadNar() {
 			clientCalls.push({ method: 'uploadNar' });
@@ -3221,13 +3277,15 @@ function divergentSkipClient(
 				paths: body.paths.map((path) => path.storePath)
 			});
 
-			return Promise.resolve({
-				uploads: body.paths.map((path) => ({
-					action: 'skip' as const,
-					storePathHash: path.storePathHash,
-					narHash: cacheNarHash
-				}))
-			});
+			return Promise.resolve(
+				uploadNegotiateResponseSchema.parse({
+					uploads: body.paths.map((path) => ({
+						action: 'skip' as const,
+						storePathHash: path.storePathHash,
+						narHash: cacheNarHash
+					}))
+				})
+			);
 		}
 	};
 }

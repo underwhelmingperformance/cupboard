@@ -5,7 +5,8 @@ import {
 import {
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
-	type CommitSessionFrame
+	type CommitSessionFrame,
+	uploadIdSchema
 } from '@cupboard/protocol/upload';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -45,7 +46,7 @@ const path = '/cache/_default/commit';
 // The session's jittered reconnect back-off never exceeds this cap, so advancing
 // a fake clock by it fires any pending reconnect.
 const maxBackoffMs = 5000;
-const uploadId = 'upload-app';
+const uploadId = uploadIdSchema.parse('upload-app');
 const target: CommitSessionTarget = { uploadId, storePathHash, narHash };
 
 type ErrorConstructor<T extends Error> = abstract new (
@@ -185,12 +186,12 @@ describe('runCommitSession', () => {
 		const socket = new FakeCommitSocket();
 		const session = openSession(socket);
 		const first = session.commit({
-			uploadId: 'upload-a',
+			uploadId: uploadIdSchema.parse('upload-a'),
 			storePathHash,
 			narHash
 		});
 		const second = session.commit({
-			uploadId: 'upload-b',
+			uploadId: uploadIdSchema.parse('upload-b'),
 			storePathHash,
 			narHash
 		});
@@ -671,7 +672,7 @@ describe('runCommitSession', () => {
 });
 
 function targetFor(id: string): CommitSessionTarget {
-	return { uploadId: id, storePathHash, narHash };
+	return { uploadId: uploadIdSchema.parse(id), storePathHash, narHash };
 }
 
 function batchOp(ids: readonly string[]): string {

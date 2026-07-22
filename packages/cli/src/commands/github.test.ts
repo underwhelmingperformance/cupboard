@@ -5,12 +5,18 @@ import {
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import type {
-	OidcTrustAddBody,
-	OidcTrustSummary
+import {
+	type OidcTrustAddBody,
+	oidcTrustListResponseSchema,
+	type OidcTrustSummary,
+	oidcTrustSummarySchema
 } from '@cupboard/protocol/oidc';
 import type { GracePolicyAddBody } from '@cupboard/protocol/retention';
-import type { ReuseViewSelector } from '@cupboard/protocol/reuse-views';
+import {
+	reuseViewListResponseSchema,
+	type ReuseViewSelector,
+	reuseViewSummarySchema
+} from '@cupboard/protocol/reuse-views';
 import type { ResultRow } from '@cupboard/reporter';
 import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
@@ -81,8 +87,8 @@ const previousBranchBody = githubBranchAddBody(url, identity, {
 	jobWorkflowRef: previousWorkflowReference
 });
 
-function storedRule(id: string, body: OidcTrustAddBody): OidcTrustSummary {
-	return { id, ...body, disabled: false };
+function storedRule(id: string, body: OidcTrustAddBody) {
+	return oidcTrustSummarySchema.parse({ id, ...body, disabled: false });
 }
 
 interface Recorded {
@@ -139,30 +145,37 @@ function setupClient(stored: Stored): {
 		},
 		reuseViews: {
 			list: () =>
-				Promise.resolve({
-					views: (stored.views ?? []).map((view, index) => ({
-						revision: index + 1,
-						createdAt: '2026-01-01T00:00:00.000Z',
-						updatedAt: '2026-01-01T00:00:00.000Z',
-						...view,
-						selectors: [...view.selectors]
-					}))
-				}),
+				Promise.resolve(
+					reuseViewListResponseSchema.parse({
+						views: (stored.views ?? []).map((view, index) => ({
+							revision: index + 1,
+							createdAt: '2026-01-01T00:00:00.000Z',
+							updatedAt: '2026-01-01T00:00:00.000Z',
+							...view,
+							selectors: [...view.selectors]
+						}))
+					})
+				),
 			set(input) {
 				recorded.viewSets.push(input);
 
-				return Promise.resolve({
-					name: input.name,
-					revision: 1,
-					priority: input.priority ?? 50,
-					selectors: [...input.selectors],
-					createdAt: '2026-01-01T00:00:00.000Z',
-					updatedAt: '2026-01-01T00:00:00.000Z'
-				});
+				return Promise.resolve(
+					reuseViewSummarySchema.parse({
+						name: input.name,
+						revision: 1,
+						priority: input.priority ?? 50,
+						selectors: [...input.selectors],
+						createdAt: '2026-01-01T00:00:00.000Z',
+						updatedAt: '2026-01-01T00:00:00.000Z'
+					})
+				);
 			}
 		},
 		oidcTrust: {
-			list: () => Promise.resolve({ rules: stored.rules ?? [] }),
+			list: () =>
+				Promise.resolve(
+					oidcTrustListResponseSchema.parse({ rules: stored.rules ?? [] })
+				),
 			add(input) {
 				recorded.ruleAdds.push(input);
 
@@ -1106,7 +1119,7 @@ describe('runGithubSetup', () => {
 			claims: {
 				repository_id: String(identity.repositoryId),
 				repository_owner_id: String(identity.repositoryOwnerId),
-				job_workflow_ref: { pattern: 'other/*' }
+				job_workflow_ref: { pattern: '^other/.*$' }
 			},
 			permittedGrants: prBody.permittedGrants,
 			disabled: false
@@ -1151,7 +1164,7 @@ describe('runGithubSetup', () => {
 				{
 					label: 'superseded trust rule legacy',
 					value:
-						'retained: pull requests and main pushes; workflow references matching other/*'
+						'retained: pull requests and main pushes; workflow references matching ^other/.*$'
 				}
 			],
 			verifiedReferences: [pinnedWorkflowReference]

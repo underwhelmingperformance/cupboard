@@ -1,7 +1,10 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
-import type { DeletePathResponse } from '@cupboard/protocol/upload';
+import type {
+	DeletePathResponse,
+	ParsedDeletePathResponse
+} from '@cupboard/protocol/upload';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
@@ -25,7 +28,7 @@ export interface DeleteClient {
 	remove(input: {
 		cacheName: string;
 		hash: string;
-	}): Promise<DeletePathResponse>;
+	}): Promise<ParsedDeletePathResponse>;
 }
 
 export function registerDeleteCommand(
