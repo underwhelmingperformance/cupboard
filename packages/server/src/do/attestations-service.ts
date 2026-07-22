@@ -5,6 +5,8 @@ import {
 	predicateTypeSchema,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type StoredCache,
+	storedCacheSchema,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -76,7 +78,7 @@ export class AttestationsService {
 	) {}
 
 	private async finaliseAttach(
-		cache: string,
+		cache: StoredCache,
 		pending: typeof schema.pendingAttestations.$inferSelect,
 		measured: MeasuredAttestationBundle,
 		parsed: ParsedAttestationBundle
@@ -207,7 +209,7 @@ export class AttestationsService {
 	}
 
 	private async pendingUpload(
-		cache: string,
+		cache: StoredCache,
 		uploadId: string
 	): Promise<typeof schema.pendingAttestations.$inferSelect> {
 		const pending = this.context.db
@@ -250,7 +252,7 @@ export class AttestationsService {
 	}
 
 	private async hasOwnBundleReferenceInCache(
-		cache: string,
+		cache: StoredCache,
 		digest: Sha256HexDigest
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
@@ -284,7 +286,7 @@ export class AttestationsService {
 	}
 
 	private async descriptorsFor(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number
 	): Promise<AttestationDescriptor[]> {
@@ -358,7 +360,7 @@ export class AttestationsService {
 	// The `(storePathHash, generation, digest)` keys of this tenant's attestation
 	// edges for `digests`, read set-wise in a handful of chunked queries.
 	private async filedReferenceKeys(
-		cache: string,
+		cache: StoredCache,
 		digests: readonly Sha256HexDigest[]
 	): Promise<Set<string>> {
 		if (digests.length === 0) {
@@ -437,7 +439,7 @@ export class AttestationsService {
 	}
 
 	async negotiate(
-		cache: string,
+		cache: StoredCache,
 		body: ParsedAttestationNegotiateRequest
 	): Promise<AttestationNegotiateResponse> {
 		if (!(await this.context.pushCredentials().verify(body.pushId))) {
@@ -534,7 +536,7 @@ export class AttestationsService {
 	}
 
 	async attach(
-		cache: string,
+		cache: StoredCache,
 		uploadId: string
 	): Promise<AttestationAttachResponse> {
 		const pending = await this.pendingUpload(cache, uploadId);
@@ -584,7 +586,7 @@ export class AttestationsService {
 
 	async handleServeList(
 		request: Request,
-		cache: string,
+		cache: StoredCache,
 		hash: string
 	): Promise<Response> {
 		const storePathHash = parseRequestValue(storePathHashSchema, hash);
@@ -602,7 +604,7 @@ export class AttestationsService {
 
 	async handleServeBundle(
 		request: Request,
-		cache: string,
+		cache: StoredCache,
 		digestParameter: string
 	): Promise<Response> {
 		const digest = parseRequestValue(
@@ -629,7 +631,7 @@ export class AttestationsService {
 	// already resolved the committed generation under the gate passes it in, sparing
 	// the committed-row read; callers without one leave it undefined and it is read.
 	async materialiseList(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation?: number
 	): Promise<void> {
@@ -725,7 +727,7 @@ export class AttestationsService {
 			}
 
 			await this.materialiseList(
-				cache,
+				storedCacheSchema.parse(cache),
 				storePathHashSchema.parse(storePathHash)
 			);
 		}

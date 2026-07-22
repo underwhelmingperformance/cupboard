@@ -1,5 +1,6 @@
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	cacheNameSchema,
 	nixSha256HashSchema,
 	storePathHashSchema,
 	WIRE_DEFAULT_CACHE
@@ -253,7 +254,7 @@ describe('reuse-view narinfo lookup', () => {
 		const storePathHash = storePathHashSchema.parse(path.storePathHash);
 		await runInDurableObject(fixtureWorkerServer(), (instance) => {
 			const target = and(
-				eq(schema.narInfos.cache, 'pr-2'),
+				eq(schema.narInfos.cache, cacheNameSchema.parse('pr-2')),
 				eq(schema.narInfos.storePathHash, storePathHash)
 			);
 			const row = instance.context.db

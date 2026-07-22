@@ -1,5 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import type {
 	RootEnsureResponse,
 	RootListResponse,
@@ -18,7 +18,7 @@ import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient } from '../client/client.ts';
+import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
@@ -106,7 +106,7 @@ export function registerRootCommands(
 				options: RootEnsureOptions
 			) => {
 				const reporter = commandUi(program, programOptions).reporter();
-				const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
+				const cacheName = selectorForCache(storedCacheFor(options.cache));
 				const credential = await authenticateForPush(
 					CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 					{
@@ -172,7 +172,7 @@ export function registerRootCommands(
 				});
 
 				await runRootSet(
-					selectorForCache(options.cache ?? DEFAULT_CACHE),
+					selectorForCache(storedCacheFor(options.cache)),
 					name,
 					targets,
 					options.ttl,
@@ -195,7 +195,7 @@ export function registerRootCommands(
 			});
 
 			await runRootList(
-				selectorForCache(options.cache ?? DEFAULT_CACHE),
+				selectorForCache(storedCacheFor(options.cache)),
 				reporter,
 				rpc.roots
 			);
@@ -216,7 +216,7 @@ export function registerRootCommands(
 			});
 
 			await runRootRemove(
-				selectorForCache(options.cache ?? DEFAULT_CACHE),
+				selectorForCache(storedCacheFor(options.cache)),
 				name,
 				ui,
 				rpc.roots

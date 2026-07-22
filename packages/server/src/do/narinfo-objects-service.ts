@@ -3,6 +3,7 @@ import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
 	referencesSchema,
+	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
@@ -116,7 +117,7 @@ export class NarInfoObjectsService {
 	// the object and fence it.
 	private async chainedPublish(
 		previous: Promise<void> | undefined,
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString,
@@ -156,7 +157,7 @@ export class NarInfoObjectsService {
 	// it: deleted with the row, or re-rendered to the version that superseded
 	// the published one.
 	private async confirmPublishedObjectLocked(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString
@@ -209,7 +210,7 @@ export class NarInfoObjectsService {
 	// what stops a concurrent delete from being undone by re-materialising from a
 	// stale copy.
 	private async materialiseIfRecoverable(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		committedEdges?: readonly CommittedReferenceEdge[]
 	): Promise<void> {
@@ -269,7 +270,7 @@ export class NarInfoObjectsService {
 	// returning false, so a generation the snapshot predates does not cause a
 	// false negative. Without a snapshot it goes directly to the D1 read.
 	private async rowStillCommitted(
-		cache: string,
+		cache: StoredCache,
 		row: NarInfoRow,
 		committedEdges: readonly CommittedReferenceEdge[] | undefined
 	): Promise<boolean> {
@@ -293,7 +294,7 @@ export class NarInfoObjectsService {
 	// materialising the path between them, which would otherwise let the demote delete
 	// a freshly re-materialised object.
 	private async demoteUnbackedLocked(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString
 	): Promise<void> {
@@ -325,7 +326,7 @@ export class NarInfoObjectsService {
 	// bounded fan-out. Publication happens outside the input gate and its normal
 	// post-publish fence repairs or removes an object if the row moved meanwhile.
 	private async repairNarInfoObjects(
-		cache: string,
+		cache: StoredCache,
 		rows: readonly NarInfoRow[]
 	): Promise<void> {
 		await mapWithConcurrency(rows, maxOutgoingConnections, async (row) => {
@@ -354,7 +355,7 @@ export class NarInfoObjectsService {
 	// synchronous SQLite; anything else hands the path to the recovery that
 	// deletes or re-renders the object against the row as the gate sees it.
 	async publishNarInfoObject(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString,
@@ -437,7 +438,7 @@ export class NarInfoObjectsService {
 
 	// Opens its own critical section; callers must be outside one.
 	async ensureNarInfoObject(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash
 	): Promise<void> {
 		await this.context.criticalSection(() =>
@@ -452,7 +453,7 @@ export class NarInfoObjectsService {
 	// Serving, root activation, and root summaries share this so they cannot drift.
 	// Opens its own critical section; callers must be outside one.
 	async isServable(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		committedEdges?: readonly CommittedReferenceEdge[]
 	): Promise<boolean> {
@@ -465,7 +466,7 @@ export class NarInfoObjectsService {
 	// it can check the predicate and act on it (e.g. activate a root) atomically,
 	// without a delete racing across an `await`.
 	async isServableLocked(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		committedEdges?: readonly CommittedReferenceEdge[]
 	): Promise<boolean> {
@@ -479,7 +480,7 @@ export class NarInfoObjectsService {
 	}
 
 	async hasCommittedReference(
-		cache: string,
+		cache: StoredCache,
 		row: typeof schema.narInfos.$inferSelect
 	): Promise<boolean> {
 		const tenant = this.context.requireTenant();
@@ -505,7 +506,7 @@ export class NarInfoObjectsService {
 	// One D1 read per chunk replaces a read per path, so a large negotiate settles
 	// its committed-ness in a handful of queries.
 	async committedReferences(
-		cache: string,
+		cache: StoredCache,
 		rows: readonly NarInfoRow[]
 	): Promise<Set<StorePathHash>> {
 		if (rows.length === 0) {
@@ -526,7 +527,7 @@ export class NarInfoObjectsService {
 	// path can also thread them into {@link isServable} so the gated re-check
 	// settles in memory.
 	async committedReferenceEdges(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<CommittedReferenceEdge[]> {
 		if (storePathHashes.length === 0) {
@@ -561,7 +562,7 @@ export class NarInfoObjectsService {
 	// SQLite in chunks that stay under the bound-parameter cap. A caller pairs
 	// these live rows with {@link committedReferenceEdges} to decide committedness.
 	narInfoRowsFor(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): NarInfoRow[] {
 		if (storePathHashes.length === 0) {
@@ -615,7 +616,7 @@ export class NarInfoObjectsService {
 	// with a bounded fan-out of `head` reads. The caller matches these against its
 	// subsequent row snapshot, so a recommit during the probes fails towards heal.
 	async existingNarInfoObjects(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<ReadonlyMap<StorePathHash, NarInfoObjectMetadata>> {
 		const tenant = this.context.requireTenant();
@@ -649,7 +650,7 @@ export class NarInfoObjectsService {
 	// generation after the asynchronous probes. A missing or stale narinfo object
 	// is repaired when the canonical NAR still exists.
 	async servableNarInfoVersions(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<ReadonlyMap<StorePathHash, NarInfoObjectVersion>> {
 		const hashes = [...new Set(storePathHashes)];
@@ -712,7 +713,7 @@ export class NarInfoObjectsService {
 	// Most callers need only membership; reconnect settlement uses the versioned
 	// form above because it must fence a same-NAR recommit.
 	async servableStorePathHashes(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<ReadonlySet<StorePathHash>> {
 		const versions = await this.servableNarInfoVersions(cache, storePathHashes);
@@ -721,7 +722,7 @@ export class NarInfoObjectsService {
 	}
 
 	async committedNarInfoRow(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash
 	): Promise<typeof schema.narInfos.$inferSelect | undefined> {
 		const row = this.context.db
@@ -774,7 +775,7 @@ export class NarInfoObjectsService {
 	// row is gone, so a partial run converges.
 	// Opens its own critical section; callers must be outside one.
 	async demoteUnbacked(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString
 	): Promise<void> {
@@ -784,7 +785,7 @@ export class NarInfoObjectsService {
 	}
 
 	async putNarInfoObject(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString,
@@ -812,7 +813,7 @@ export class NarInfoObjectsService {
 	// healed on read, so the delete must order behind any abandoned mutation of
 	// the same key, or a zombie could destroy an object a later commit wrote.
 	async deleteNarInfoObject(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash
 	): Promise<void> {
 		const key = narInfoObjectKey(
@@ -829,7 +830,7 @@ export class NarInfoObjectsService {
 	// The bulk form of {@link deleteNarInfoObject}, one ordered R2 delete for a
 	// teardown chunk's paths.
 	async deleteNarInfoObjects(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<void> {
 		if (storePathHashes.length === 0) {

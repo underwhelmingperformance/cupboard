@@ -1,5 +1,6 @@
 import {
 	nixSha256HashSchema,
+	storedCacheSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -79,7 +80,7 @@ export async function insertUnbackedRow(
 		instance.context.db
 			.insert(schema.narInfos)
 			.values({
-				cache,
+				cache: storedCacheSchema.parse(cache),
 				storePathHash: storePathHashSchema.parse(storePathHash),
 				storePath: storePathSchema.parse(`/nix/store/${storePathHash}-first`),
 				narHash: nixSha256HashSchema.parse(narHash),

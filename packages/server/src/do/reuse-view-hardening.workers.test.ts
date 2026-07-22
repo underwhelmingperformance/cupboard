@@ -1,6 +1,7 @@
 import { startCapture } from '@cupboard/logger/testing';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	cacheNameSchema,
 	nixSha256HashSchema,
 	storePathHashSchema,
 	storePathSchema
@@ -44,6 +45,8 @@ import {
 import { type CupboardServer } from './server.ts';
 
 const viewName = reuseViewNameSchema.parse('reuse');
+const pr1Cache = cacheNameSchema.parse('pr-1');
+const pr2Cache = cacheNameSchema.parse('pr-2');
 
 // Drives a lookup on the fixture Worker's Durable Object through a service
 // whose shared-fact reads go through the given D1 plan, so a test can fail
@@ -166,7 +169,7 @@ describe('reuse-view lookup hardening', () => {
 					.delete(schema.narInfos)
 					.where(
 						and(
-							eq(schema.narInfos.cache, 'pr-2'),
+							eq(schema.narInfos.cache, pr2Cache),
 							eq(schema.narInfos.storePathHash, parsed)
 						)
 					)
@@ -350,7 +353,7 @@ describe('reuse-view lookup hardening', () => {
 			.values(
 				Array.from({ length: staleCount }, (_, index) => ({
 					tenant: fixtureTenant,
-					cache: 'pr-1',
+					cache: pr1Cache,
 					storePathHash: parsedHash,
 					generation: live.generation + index + 1,
 					narHash: parsedNarHash
@@ -425,7 +428,7 @@ describe('reuse-view lookup hardening', () => {
 		const narHash = nixSha256HashSchema.parse(path.narHash);
 		await runInDurableObject(fixtureWorkerServer(), (instance) => {
 			const unrelated = Array.from({ length: 200 }, (_, index) => ({
-				cache: 'pr-1',
+				cache: pr1Cache,
 				storePathHash: storePathHashSchema.parse(generatedHash(index)),
 				storePath: storePathSchema.parse(
 					`/nix/store/${generatedHash(index)}-other`
@@ -448,7 +451,7 @@ describe('reuse-view lookup hardening', () => {
 			instance.context.db
 				.insert(schema.narInfos)
 				.values({
-					cache: 'zz-outside',
+					cache: cacheNameSchema.parse('zz-outside'),
 					storePathHash: storePathHashSchema.parse(path.storePathHash),
 					storePath: storePathSchema.parse(path.storePath),
 					narHash,

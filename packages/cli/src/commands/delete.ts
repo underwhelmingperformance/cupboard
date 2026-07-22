@@ -1,11 +1,12 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import type { DeletePathResponse } from '@cupboard/protocol/upload';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { storedCacheFor } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -52,7 +53,7 @@ export function registerDeleteCommand(
 			});
 
 			await runDelete(
-				selectorForCache(options.cache ?? DEFAULT_CACHE),
+				selectorForCache(storedCacheFor(options.cache)),
 				storePath,
 				ui,
 				rpc.paths

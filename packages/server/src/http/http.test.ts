@@ -1,7 +1,14 @@
-import { storePathHashSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	storePathHashSchema,
+	tenantIdSchema
+} from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { isNotModified, narInfoCachePath, narInfoObjectKey } from './http.ts';
+
+const tenant = tenantIdSchema.parse('acme');
+const buildsCache = cacheNameSchema.parse('builds');
 
 const etag = '"abc"';
 const lastModified = 'Thu, 01 Jan 2026 00:00:00 GMT';
@@ -79,8 +86,8 @@ describe('narInfoObjectKey', () => {
 
 	it('namespaces by tenant, bare for the default cache and nested for a named one', () => {
 		expect({
-			default: narInfoObjectKey('acme', hash),
-			named: narInfoObjectKey('acme', hash, 'builds')
+			default: narInfoObjectKey(tenant, hash),
+			named: narInfoObjectKey(tenant, hash, buildsCache)
 		}).toStrictEqual({
 			default: `t/acme/narinfo/${hash}`,
 			named: `t/acme/narinfo/builds/${hash}`
@@ -93,8 +100,8 @@ describe('narInfoCachePath', () => {
 
 	it('carries the tenant prefix, bare for the default cache and nested for a named one', () => {
 		expect({
-			default: narInfoCachePath('acme', hash),
-			named: narInfoCachePath('acme', hash, 'builds')
+			default: narInfoCachePath(tenant, hash),
+			named: narInfoCachePath(tenant, hash, buildsCache)
 		}).toStrictEqual({
 			default: `/t/acme/${hash}.narinfo`,
 			named: `/t/acme/cache/builds/${hash}.narinfo`

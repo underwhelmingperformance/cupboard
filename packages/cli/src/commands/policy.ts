@@ -1,5 +1,5 @@
 import type { CliUi } from '@cupboard/cli-ui';
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import {
 	type GraceCoverageResponse,
 	type GracePolicyAddBody,
@@ -20,7 +20,7 @@ import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient } from '../client/client.ts';
+import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
@@ -218,7 +218,7 @@ export function registerPolicyCommands(
 		)
 		.action(async (url: URL, options: GraceCoverageOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
+			const cacheName = selectorForCache(storedCacheFor(options.cache));
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{

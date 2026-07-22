@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import {
@@ -121,7 +122,7 @@ export class UploadsService {
 	// stay under D1's bound-parameter cap. The DO's own SQLite backs this table,
 	// so the reads are local, but chunking keeps every batched lookup uniform.
 	private existingNarInfos(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Map<StorePathHash, NarInfoRow> {
 		const rows = chunk(storePathHashes, maxInClauseValues).flatMap(
@@ -146,7 +147,7 @@ export class UploadsService {
 	// upload stages its bytes under a private, per-upload key so no client write
 	// can race or overwrite the shared one.
 	private planUpload(
-		cache: string,
+		cache: StoredCache,
 		pushId: string,
 		metadata: ParsedUploadPathNegotiation,
 		existingBlob: ReusableBlob | undefined,
@@ -254,7 +255,7 @@ export class UploadsService {
 	// timer over bytes it is about to bind a fresh reference to; a caller that
 	// only reports what it would do (preview) must never do that.
 	private async classifyClosure(
-		cache: string,
+		cache: StoredCache,
 		body: ClosureRequest,
 		hints: NegotiateHints | undefined,
 		shouldClaim: boolean
@@ -335,7 +336,7 @@ export class UploadsService {
 	// drift the database could not see, so a missing narinfo object is restored
 	// in one re-push and a genuinely lost NAR is removed for the next.
 	async negotiate(
-		cache: string,
+		cache: StoredCache,
 		body: ParsedUploadNegotiateRequest,
 		origin: string,
 		hints: NegotiateHints | undefined,
@@ -478,7 +479,7 @@ export class UploadsService {
 	// upload reports the grace a publication would currently capture. Facts are
 	// always attached, since preview has no legacy shape to preserve.
 	async preview(
-		cache: string,
+		cache: StoredCache,
 		body: ParsedUploadPreviewRequest,
 		hints: NegotiateHints | undefined,
 		shouldReportGrace: boolean
@@ -555,7 +556,7 @@ export class UploadsService {
 	// path precisely to rely on substituting it afterwards. Anything less
 	// confirms false and extends nothing.
 	async confirmPaths(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): Promise<UploadConfirmResponse> {
 		if (storePathHashes.length === 0) {

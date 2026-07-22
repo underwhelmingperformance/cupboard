@@ -1,5 +1,5 @@
 import { type Logger } from '@cupboard/logger';
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import { type StoredCache, type TenantId } from '@cupboard/nix-store/scalars';
 
 import { type TenantEntry } from '../control/tenant-membership.ts';
 
@@ -19,6 +19,6 @@ export interface WorkerHonoEnv {
 		// its status only then, and otherwise reconfirms against D1.
 		tenantEntryFresh: boolean;
 		tenantRest: string;
-		cache: string;
+		cache: StoredCache;
 	};
 }

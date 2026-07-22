@@ -1,4 +1,8 @@
-import { type StorePathHash } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	storedCacheSchema,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { cacheRemoveResponseSchema } from '@cupboard/protocol/caches';
 import { type ParsedUploadPathMetadata } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
@@ -28,6 +32,7 @@ import {
 
 import { teardownEntryPrefix } from './cache-admin-service.ts';
 
+const buildsCache = cacheNameSchema.parse('builds');
 const origin = 'https://cache.example';
 const repeated = (character: string): string => character.repeat(32);
 
@@ -50,7 +55,11 @@ async function narInfoObjectPresent(
 	cache?: string
 ): Promise<boolean> {
 	const object = await env.BLOBS.head(
-		narInfoObjectKey(fixtureTenant, storePathHash, cache)
+		narInfoObjectKey(
+			fixtureTenant,
+			storePathHash,
+			cache === undefined ? undefined : storedCacheSchema.parse(cache)
+		)
 	);
 
 	return object !== null;
@@ -115,7 +124,7 @@ describe('cache teardown', () => {
 		// object, and the remainder is left queued behind the marker. The rows are
 		// gone synchronously; the marker and the queued objects drain on the resume,
 		// whose delivery the pool races, so only the converged state is asserted.
-		await currentServer().runCacheTeardown('builds', origin, 1);
+		await currentServer().runCacheTeardown(buildsCache, origin, 1);
 
 		expect(await rowsRemaining(paths)).toBe(0);
 
@@ -222,7 +231,7 @@ describe('cache teardown', () => {
 		});
 		await pushPath(token, path, 'builds');
 
-		await currentServer().runCacheTeardown('builds', origin, 1);
+		await currentServer().runCacheTeardown(buildsCache, origin, 1);
 
 		await vi.waitFor(async () => {
 			await currentServer().resumeCacheTeardown(1);
@@ -304,7 +313,7 @@ describe('cache teardown', () => {
 		const listKey = attestationListObjectKey(
 			fixtureTenant,
 			path.storePathHash,
-			'builds'
+			buildsCache
 		);
 
 		await env.BLOBS.put(listKey, JSON.stringify({ attestations: [] }));

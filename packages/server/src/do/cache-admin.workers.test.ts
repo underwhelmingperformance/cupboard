@@ -1,4 +1,5 @@
 import {
+	cacheNameSchema,
 	cachePrioritySchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -39,6 +40,7 @@ import {
 } from '../test-support.ts';
 
 const repeated = (character: string): string => character.repeat(32);
+const buildsCache = cacheNameSchema.parse('builds');
 
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
 const earlierLiveDeadline = '2026-03-01T00:00:00.000Z';
@@ -110,23 +112,23 @@ describe('cache registry admin', () => {
 			instance.context.db
 				.update(schema.caches)
 				.set({ graceManaged: true })
-				.where(eq(schema.caches.name, 'builds'))
+				.where(eq(schema.caches.name, buildsCache))
 				.run();
 			instance.context.db
 				.insert(schema.retentionGrace)
 				.values([
 					{
-						cache: 'builds',
+						cache: buildsCache,
 						storePathHash: storePathHashSchema.parse(repeated('a')),
 						retainUntil: laterLiveDeadline
 					},
 					{
-						cache: 'builds',
+						cache: buildsCache,
 						storePathHash: storePathHashSchema.parse(repeated('b')),
 						retainUntil: earlierLiveDeadline
 					},
 					{
-						cache: 'builds',
+						cache: buildsCache,
 						storePathHash: storePathHashSchema.parse(repeated('c')),
 						retainUntil: expiredDeadline
 					}
@@ -179,7 +181,9 @@ describe('cache registry admin', () => {
 						instance.context.db
 							.insert(schema.caches)
 							.values({
-								name: `cache-${String(index).padStart(2, '0')}`,
+								name: cacheNameSchema.parse(
+									`cache-${String(index).padStart(2, '0')}`
+								),
 								priority: cachePrioritySchema.parse(40),
 								createdAt: '2026-01-01T00:00:00.000Z'
 							})
@@ -221,7 +225,7 @@ describe('cache registry admin', () => {
 		);
 		const removed = cacheRemoveResponseSchema.parse(await forced.json());
 		const object = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash, 'builds')
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, buildsCache)
 		);
 		const { caches } = await listCaches(init.token);
 

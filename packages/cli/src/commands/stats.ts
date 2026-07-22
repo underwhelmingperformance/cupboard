@@ -1,9 +1,10 @@
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { formatBytes, formatCount } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { storedCacheFor } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -30,7 +31,7 @@ export function registerStatsCommand(
 
 			const stats = await reporter.phase('Querying cupboard', () =>
 				rpc.stats.cache({
-					cacheName: selectorForCache(options.cache ?? DEFAULT_CACHE)
+					cacheName: selectorForCache(storedCacheFor(options.cache))
 				})
 			);
 

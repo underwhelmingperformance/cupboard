@@ -4,6 +4,7 @@ import {
 	cacheSelectorSchema,
 	DEFAULT_CACHE,
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -43,7 +44,7 @@ export interface ReadContext {
 // prefix is present but malformed or names an invalid cache.
 export function cacheScope(
 	pathname: string
-): undefined | { cache: string; rest: string } {
+): undefined | { cache: StoredCache; rest: string } {
 	const prefix = '/cache/';
 
 	if (!pathname.startsWith(prefix)) {
@@ -159,7 +160,7 @@ export function serveNarInfo(
 	env: Env,
 	ctx: ReadContext,
 	tenant: TenantId,
-	cache: string,
+	cache: StoredCache,
 	storePathHash: StorePathHash,
 	isPrivate: boolean
 ): Promise<Response> {
@@ -179,7 +180,7 @@ export function serveNarInfo(
 export async function missingStorePathHashes(
 	env: Env,
 	tenant: TenantId,
-	cache: string,
+	cache: StoredCache,
 	storePathHashes: readonly StorePathHash[]
 ): Promise<StorePathHash[]> {
 	const unique = [...new Set(storePathHashes)];
@@ -205,7 +206,7 @@ export async function cacheInfoResponse(
 	request: Request,
 	env: Env,
 	tenant: TenantId,
-	cache: string,
+	cache: StoredCache,
 	isPrivate: boolean
 ): Promise<Response> {
 	// The default cache's info is rendered at the edge; a named cache's priority

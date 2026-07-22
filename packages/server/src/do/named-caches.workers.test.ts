@@ -1,4 +1,9 @@
-import { selectorForCache, storePathSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	selectorForCache,
+	storedCacheSchema,
+	storePathSchema
+} from '@cupboard/nix-store/scalars';
 import { gcResponseSchema } from '@cupboard/protocol/retention';
 import {
 	type StatsResponse,
@@ -50,6 +55,8 @@ import { maxNarInfoDeletionsFlushedPerRun } from './deletion-queue-service.ts';
 import { maxPathsSweptPerRun } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
+const buildsCache = cacheNameSchema.parse('builds');
+
 function expectCommitSocketError(
 	error: unknown
 ): asserts error is CommitSocketError {
@@ -63,7 +70,7 @@ async function putRoot(
 	storePath: string
 ): Promise<void> {
 	const response = await authorisedFetch(
-		`/cache/${selectorForCache(cache)}/roots/${name}`,
+		`/cache/${selectorForCache(storedCacheSchema.parse(cache))}/roots/${name}`,
 		token,
 		{
 			body: JSON.stringify({ targets: [storePath] }),
@@ -80,7 +87,7 @@ async function statsForCache(
 	cache: string
 ): Promise<StatsResponse> {
 	const response = await authorisedFetch(
-		`/cache/${selectorForCache(cache)}/stats`,
+		`/cache/${selectorForCache(storedCacheSchema.parse(cache))}/stats`,
 		token
 	);
 
@@ -99,12 +106,13 @@ async function seedCollectablePaths(
 	cache: string,
 	count: number
 ): Promise<void> {
+	const storedCache = storedCacheSchema.parse(cache);
 	const createdAt = new Date().toISOString();
 	const rows = Array.from({ length: count }, (_unused, index) => {
 		const storePathHash = syntheticStorePathHash(index);
 
 		return {
-			cache,
+			cache: storedCache,
 			storePathHash,
 			storePath: storePathSchema.parse(
 				`/nix/store/${storePathHash}-overflow-${String(index)}`
@@ -156,7 +164,7 @@ describe('named caches', () => {
 			narInfoObjectKey(fixtureTenant, metadata.storePathHash)
 		);
 		const buildsObject = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash, 'builds')
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, buildsCache)
 		);
 
 		expect({
@@ -233,7 +241,7 @@ describe('named caches', () => {
 			narInfoObjectKey(fixtureTenant, kept.storePathHash)
 		);
 		const sweptBuilds = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, swept.storePathHash, 'builds')
+			narInfoObjectKey(fixtureTenant, swept.storePathHash, buildsCache)
 		);
 		const sharedNar = await env.BLOBS.head(narObjectKey(narHash));
 
@@ -305,13 +313,14 @@ describe('named caches', () => {
 					.select({ cache: narInfos.cache })
 					.from(narInfos)
 					.all();
+				const bCache = cacheNameSchema.parse('b');
 				const isBCollectablePresent =
 					database
 						.select({ storePathHash: narInfos.storePathHash })
 						.from(narInfos)
 						.where(
 							and(
-								eq(narInfos.cache, 'b'),
+								eq(narInfos.cache, bCache),
 								eq(narInfos.storePathHash, collectableInB.storePathHash)
 							)
 						)

@@ -1,4 +1,5 @@
 import type { Logger } from '@cupboard/logger';
+import type { StoredCache } from '@cupboard/nix-store/scalars';
 import type { VerifyReport } from '@cupboard/protocol/reports';
 
 import type { AccessClaims } from '../auth/auth.ts';
@@ -52,7 +53,7 @@ export interface TenantRpcServices {
 	// origin.
 	runGarbageCollection(
 		logger: Logger,
-		cache: string | undefined,
+		cache: StoredCache | undefined,
 		purgeOrigin: string | undefined
 	): Promise<GarbageCollectionOutcome>;
 	readonly uploads: UploadsService;

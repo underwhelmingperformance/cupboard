@@ -3,6 +3,7 @@ import { narFingerprint } from '@cupboard/nix-store/narinfo';
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -137,7 +138,7 @@ interface CanonicalBlobFacts {
  * {@link CommitPipelineService.materialiseBatched}.
  */
 export interface MaterialiseRequest {
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly metadata: ParsedUploadPathNegotiation;
 	readonly generation: number;
 	readonly probe: MaterialisationProbe;
@@ -358,7 +359,7 @@ export class CommitPipelineService {
 	// a narinfo with no backing object must never be served.
 	private async commitReusedBlob(
 		logger: Logger,
-		cache: string,
+		cache: StoredCache,
 		uploadId: string,
 		metadata: ParsedUploadPathNegotiation,
 		graceDecision: GraceDecision | undefined,
@@ -569,7 +570,7 @@ export class CommitPipelineService {
 	// rival left its reservation dead, with nothing for the verification pass
 	// to arbitrate.
 	private hasLiveRival(
-		cache: string,
+		cache: StoredCache,
 		narHash: NixSha256HashString,
 		uploadId: string,
 		nowIso: string
@@ -624,7 +625,7 @@ export class CommitPipelineService {
 	// so the batch that carries them is also the authoritative status fence.
 	private chargeStatements(
 		tenant: TenantId,
-		cache: string,
+		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		blob: { readonly fileSize: number },
@@ -751,7 +752,7 @@ export class CommitPipelineService {
 	// are ever stranded over quota.
 	private async reserveEdgeAndCharge(
 		tenant: TenantId,
-		cache: string,
+		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
 		generation: number,
 		blob: { readonly fileSize: number }
@@ -803,7 +804,7 @@ export class CommitPipelineService {
 	private async reserveEdgesAndCharge(
 		tenant: TenantId,
 		charges: readonly {
-			readonly cache: string;
+			readonly cache: StoredCache;
 			readonly metadata: ParsedUploadPathNegotiation;
 			readonly generation: number;
 			readonly blob: CanonicalBlobFacts;
@@ -1032,11 +1033,11 @@ export class CommitPipelineService {
 		outcomes: (BatchedMaterialiseOutcome | undefined)[]
 	): void {
 		const settledAt = Date.now();
-		const managedCaches = new Set<string>();
+		const managedCaches = new Set<StoredCache>();
 		const extensions = new Map<
 			string,
 			{
-				readonly cache: string;
+				readonly cache: StoredCache;
 				readonly retainUntil: string;
 				readonly entries: {
 					readonly index: number;
@@ -1202,7 +1203,7 @@ export class CommitPipelineService {
 	// the upload stays live so the verify pass can settle it.
 	async concedeToWinner(
 		logger: Logger,
-		cache: string,
+		cache: StoredCache,
 		uploadId: string,
 		metadata: ParsedUploadPathNegotiation,
 		stagingKey: string,
@@ -1338,7 +1339,7 @@ export class CommitPipelineService {
 
 	async commit(
 		logger: Logger,
-		cache: string,
+		cache: StoredCache,
 		uploadId: string,
 		// Advisory values a batch caller reads once for the whole message. When
 		// present, `commit` uses them for its probe and quota pre-check and skips its
@@ -1662,7 +1663,7 @@ export class CommitPipelineService {
 	// this same commit (`mine`, every signed and rendered field matches) or a
 	// different version that won the path (`lost`).
 	async reserveNarInfoRow(
-		cache: string,
+		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation
 	): Promise<ReserveOutcome> {
 		const clock = new Date();
@@ -1913,7 +1914,7 @@ export class CommitPipelineService {
 	// never shared blob presence, so a superseded or lost generation reads false.
 	// The D1 and R2 reads run outside any critical section.
 	async isGenerationCommitted(
-		cache: string,
+		cache: StoredCache,
 		metadata: ParsedUploadPathNegotiation,
 		generation: number
 	): Promise<boolean> {
@@ -1968,7 +1969,7 @@ export class CommitPipelineService {
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	async reclaimReservedRow(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString

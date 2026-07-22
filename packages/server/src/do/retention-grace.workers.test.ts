@@ -1,7 +1,10 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	cacheNameSchema,
 	DEFAULT_CACHE,
 	rootNameSchema,
+	type StoredCache,
+	storedCacheSchema,
 	storePathHashSchema,
 	storePathSchema,
 	WIRE_DEFAULT_CACHE
@@ -145,6 +148,10 @@ function uploadsServiceFor(context: ServerContext): UploadsService {
 	);
 }
 
+const defaultCache: StoredCache = DEFAULT_CACHE;
+const buildsCache = cacheNameSchema.parse('builds');
+const pr5Cache = cacheNameSchema.parse('pr-5');
+
 // The shared test clock is pinned to 2026-01-01, so these bracket "now".
 const liveDeadline = '2026-06-01T00:00:00.000Z';
 const expiredDeadline = '2025-12-01T00:00:00.000Z';
@@ -158,7 +165,7 @@ async function seedGraceDeadline(
 		instance.context.db
 			.insert(schema.retentionGrace)
 			.values({
-				cache,
+				cache: storedCacheSchema.parse(cache),
 				storePathHash: storePathHashSchema.parse(storePathHash),
 				retainUntil
 			})
@@ -171,7 +178,7 @@ async function markGraceManaged(cache: string): Promise<void> {
 		instance.context.db
 			.update(schema.caches)
 			.set({ graceManaged: true })
-			.where(eq(schema.caches.name, cache))
+			.where(eq(schema.caches.name, storedCacheSchema.parse(cache)))
 			.run();
 	});
 }
@@ -181,7 +188,7 @@ async function graceDeadlines(cache: string): Promise<readonly string[]> {
 		instance.context.db
 			.select({ storePathHash: schema.retentionGrace.storePathHash })
 			.from(schema.retentionGrace)
-			.where(eq(schema.retentionGrace.cache, cache))
+			.where(eq(schema.retentionGrace.cache, storedCacheSchema.parse(cache)))
 			.all()
 			.map((row) => row.storePathHash)
 	);
@@ -394,7 +401,7 @@ describe('retention grace deadlines in garbage collection', () => {
 			instance.context.db
 				.select({ name: schema.caches.name })
 				.from(schema.caches)
-				.where(eq(schema.caches.name, 'builds'))
+				.where(eq(schema.caches.name, buildsCache))
 				.get()
 		);
 
@@ -440,7 +447,7 @@ async function graceDeadlineRows(
 				retainUntil: schema.retentionGrace.retainUntil
 			})
 			.from(schema.retentionGrace)
-			.where(eq(schema.retentionGrace.cache, cache))
+			.where(eq(schema.retentionGrace.cache, storedCacheSchema.parse(cache)))
 			.orderBy(schema.retentionGrace.storePathHash)
 			.all()
 	);
@@ -453,7 +460,7 @@ async function graceManagedMarker(cache: string): Promise<boolean> {
 			instance.context.db
 				.select({ graceManaged: schema.caches.graceManaged })
 				.from(schema.caches)
-				.where(eq(schema.caches.name, cache))
+				.where(eq(schema.caches.name, storedCacheSchema.parse(cache)))
 				.get()?.graceManaged ?? false
 	);
 }
@@ -643,7 +650,7 @@ describe('retention grace transitions', () => {
 				instance.context.db
 					.insert(schema.retentionRoots)
 					.values({
-						cache: DEFAULT_CACHE,
+						cache: defaultCache,
 						name,
 						expiresAt,
 						createdAt: expiresAt,
@@ -653,7 +660,7 @@ describe('retention grace transitions', () => {
 				instance.context.db
 					.insert(schema.retentionRootTargets)
 					.values({
-						cache: DEFAULT_CACHE,
+						cache: defaultCache,
 						rootName: name,
 						storePathHash: path.storePathHash,
 						storePath: path.storePath
@@ -744,7 +751,7 @@ describe('retention grace transitions', () => {
 				instance.context.db
 					.insert(schema.retentionRoots)
 					.values({
-						cache: DEFAULT_CACHE,
+						cache: defaultCache,
 						name: rootName,
 						expiresAt,
 						createdAt: expiresAt,
@@ -754,7 +761,7 @@ describe('retention grace transitions', () => {
 				instance.context.db
 					.insert(schema.retentionRootTargets)
 					.values({
-						cache: DEFAULT_CACHE,
+						cache: defaultCache,
 						rootName,
 						storePathHash: path.storePathHash,
 						storePath: path.storePath
@@ -908,15 +915,15 @@ describe('retention grace transitions', () => {
 
 		const resolved = await runInDurableObject(currentServer(), (instance) => {
 			const service = new RetentionService(instance.context);
-			const withoutPolicies = service.resolveGraceSeconds('pr-5');
+			const withoutPolicies = service.resolveGraceSeconds(pr5Cache);
 
 			service.addGracePolicy({ cachePrefix: '', graceSeconds: 604_800 });
 			service.addGracePolicy({ cachePrefix: 'pr-', graceSeconds: 3600 });
 
 			return {
 				withoutPolicies,
-				prCache: service.resolveGraceSeconds('pr-5'),
-				otherCache: service.resolveGraceSeconds('builds')
+				prCache: service.resolveGraceSeconds(pr5Cache),
+				otherCache: service.resolveGraceSeconds(buildsCache)
 			};
 		});
 
@@ -1695,7 +1702,7 @@ describe('retention grace at publication', () => {
 				await database.insert(d1Schema.blobReference).values(
 					Array.from({ length: 8 }, (_, index) => ({
 						tenant: instance.context.requireTenant(),
-						cache: DEFAULT_CACHE,
+						cache: defaultCache,
 						storePathHash: hash,
 						generation: live.generation + index + 1,
 						narHash: live.narHash
@@ -3378,7 +3385,7 @@ describe('confirming an unretained publication', () => {
 					.insert(schema.narInfos)
 					.values(
 						hashes.slice(start, start + 10).map((storePathHash) => ({
-							cache: DEFAULT_CACHE,
+							cache: defaultCache,
 							storePathHash,
 							storePath: storePathSchema.parse(
 								`/nix/store/${storePathHash}-seeded`

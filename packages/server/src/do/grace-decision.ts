@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { type ParsedUploadGraceFact } from '@cupboard/protocol/upload';
@@ -74,7 +75,7 @@ export function capturedGraceFact(
 // concurrent winner's commit, or a replayed servable verdict.
 export function storedGraceFact(
 	database: ServerContext['db'],
-	cache: string,
+	cache: StoredCache,
 	storePathHash: StorePathHash
 ): ParsedUploadGraceFact {
 	const row = database
@@ -114,7 +115,7 @@ export type ConfirmedGrace =
 export function confirmGrace(
 	context: ServerContext,
 	retention: RetentionService,
-	cache: string,
+	cache: StoredCache,
 	storePathHash: StorePathHash,
 	generation: number,
 	narHash: NixSha256HashString,
@@ -143,7 +144,7 @@ export function confirmGrace(
 export function confirmGraceBatch(
 	context: ServerContext,
 	retention: RetentionService,
-	cache: string,
+	cache: StoredCache,
 	entries: readonly {
 		readonly storePathHash: StorePathHash;
 		readonly generation: number;
@@ -240,7 +241,7 @@ export function confirmGraceBatch(
  */
 export function storedGraceDeadlines(
 	database: ServerContext['db'],
-	cache: string,
+	cache: StoredCache,
 	storePathHashes: readonly StorePathHash[]
 ): Map<StorePathHash, string> {
 	const deadlines = new Map<StorePathHash, string>();

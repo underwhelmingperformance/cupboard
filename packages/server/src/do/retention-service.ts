@@ -1,4 +1,7 @@
-import { type StorePathHash } from '@cupboard/nix-store/scalars';
+import {
+	type StoredCache,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
 	type GraceCoverageResponse,
@@ -38,7 +41,7 @@ export class RetentionService {
 	constructor(private readonly context: ServerContext) {}
 
 	private narinfoBackedHashes(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[],
 		writer: SchemaWriter
 	): StorePathHash[] {
@@ -65,7 +68,7 @@ export class RetentionService {
 	}
 
 	private extendGraceDeadlineEntries(
-		cache: string,
+		cache: StoredCache,
 		entries: readonly {
 			readonly storePathHash: StorePathHash;
 			readonly retainUntil: string;
@@ -147,7 +150,7 @@ export class RetentionService {
 		};
 	}
 
-	resolvePolicyTtl(cache: string, name: string): number | undefined {
+	resolvePolicyTtl(cache: StoredCache, name: string): number | undefined {
 		const policies = this.context.db
 			.select()
 			.from(schema.retentionPolicies)
@@ -216,7 +219,7 @@ export class RetentionService {
 
 	// The coverage answer a grace-mode CI run reads before publishing anything:
 	// the same resolution a publication to the cache would be granted.
-	graceCoverage(cache: string): GraceCoverageResponse {
+	graceCoverage(cache: StoredCache): GraceCoverageResponse {
 		const graceSeconds = this.resolveGraceSeconds(cache);
 
 		return graceSeconds === undefined
@@ -226,7 +229,7 @@ export class RetentionService {
 
 	// The grace in force for a cache: the longest matching cache-name prefix
 	// wins, and the empty prefix matches every cache as the tenant default.
-	resolveGraceSeconds(cache: string): number | undefined {
+	resolveGraceSeconds(cache: StoredCache): number | undefined {
 		return this.context.db
 			.select({
 				cachePrefix: schema.retentionGracePolicies.cachePrefix,
@@ -247,7 +250,7 @@ export class RetentionService {
 	// Takes a writer, not always `this.context.db`, so a caller that must write
 	// this atomically with another statement can pass its transaction handle.
 	extendGraceDeadlines(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[],
 		retainUntil: string,
 		writer: SchemaWriter = this.context.db
@@ -266,7 +269,7 @@ export class RetentionService {
 	// caller that must write this atomically with another statement passes its
 	// transaction handle.
 	markCacheGraceManaged(
-		cache: string,
+		cache: StoredCache,
 		writer: SchemaWriter = this.context.db
 	): void {
 		writer
@@ -284,7 +287,7 @@ export class RetentionService {
 	// transaction handle, so a failure between the two cannot lose the
 	// transition.
 	applyGraceTransition(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[],
 		anchorIso: string,
 		writer: SchemaWriter = this.context.db
@@ -300,7 +303,7 @@ export class RetentionService {
 	// several roots receives the latest candidate deadline, while policy
 	// resolution, narinfo filtering and deadline writes each happen once.
 	applyGraceTransitions(
-		cache: string,
+		cache: StoredCache,
 		transitions: readonly GraceTransition[],
 		writer: SchemaWriter = this.context.db
 	): void {

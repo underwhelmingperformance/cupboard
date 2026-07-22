@@ -1,6 +1,7 @@
 import {
 	type NixSha256HashString,
 	type RootName,
+	type StoredCache,
 	type StorePathHash,
 	type StorePathString
 } from '@cupboard/nix-store/scalars';
@@ -54,7 +55,7 @@ export class RootsService {
 		private readonly narInfoObjects: NarInfoObjectsService
 	) {}
 
-	private writeRoot(cache: string, request: RootSetCommand): StoredRoot {
+	private writeRoot(cache: StoredCache, request: RootSetCommand): StoredRoot {
 		const now = new Date();
 		const nowIso = now.toISOString();
 		// Precedence: an explicit TTL, then a matching retention policy, then the
@@ -147,7 +148,7 @@ export class RootsService {
 	}
 
 	private rootTargetRows(
-		cache: string,
+		cache: StoredCache,
 		name: RootName
 	): readonly { storePathHash: StorePathHash; storePath: StorePathString }[] {
 		return this.context.db
@@ -168,7 +169,7 @@ export class RootsService {
 	// The set of distinct target hashes that would serve, the same predicate the
 	// read path uses.
 	private async servableTargets(
-		cache: string,
+		cache: StoredCache,
 		targets: readonly { storePathHash: StorePathHash }[]
 	): Promise<ReadonlySet<StorePathHash>> {
 		return this.narInfoObjects.servableStorePathHashes(
@@ -184,7 +185,7 @@ export class RootsService {
 	// `retained`: a hash whose row is gone by snapshot time is excluded here the
 	// same as one that never had a row.
 	private async servableTargetIdentities(
-		cache: string,
+		cache: StoredCache,
 		targets: readonly { storePathHash: StorePathHash }[]
 	): Promise<ReadonlyMap<StorePathHash, TargetIdentity>> {
 		const hashes = [...new Set(targets.map((target) => target.storePathHash))];
@@ -211,7 +212,10 @@ export class RootsService {
 	// SQLite read. A delete is row-first and runs under the gate, so a row still
 	// present inside the write gate cannot be mid-delete; this is the cheap
 	// re-check that lets the expensive serve probe run outside the gate.
-	private rowPresent(cache: string, storePathHash: StorePathHash): boolean {
+	private rowPresent(
+		cache: StoredCache,
+		storePathHash: StorePathHash
+	): boolean {
 		return (
 			this.context.db
 				.select({ storePathHash: schema.narInfos.storePathHash })
@@ -232,7 +236,7 @@ export class RootsService {
 	// read, so this settles inside the same critical section as the write it
 	// gates.
 	private mismatchedTargets(
-		cache: string,
+		cache: StoredCache,
 		targets: readonly {
 			storePathHash: StorePathHash;
 			storePath: StorePathString;
@@ -317,7 +321,7 @@ export class RootsService {
 	// how to report it once the gate has closed: a validation error surfaced
 	// only after the section does not reset the Durable Object.
 	private async gatedRootWrite(
-		cache: string,
+		cache: StoredCache,
 		requested: RootSetCommand,
 		expectedIdentities?: ReadonlyMap<StorePathHash, TargetIdentity>
 	): Promise<RootWrite> {
@@ -345,7 +349,7 @@ export class RootsService {
 	}
 
 	async setRoot(
-		cache: string,
+		cache: StoredCache,
 		rootName: RootName,
 		body: ParsedRootSetBody
 	): Promise<RootSetResponse> {
@@ -367,7 +371,7 @@ export class RootsService {
 	}
 
 	async ensureRoot(
-		cache: string,
+		cache: StoredCache,
 		rootName: RootName,
 		body: ParsedRootSetBody
 	): Promise<RootEnsureResponse> {
@@ -405,7 +409,7 @@ export class RootsService {
 		};
 	}
 
-	async listRoots(cache: string): Promise<RootListResponse> {
+	async listRoots(cache: StoredCache): Promise<RootListResponse> {
 		const nowDate = new Date();
 		const now = nowDate.toISOString();
 		const roots = this.context.db
@@ -440,7 +444,7 @@ export class RootsService {
 		};
 	}
 
-	removeRoot(cache: string, name: RootName): RootRemoveResponse {
+	removeRoot(cache: StoredCache, name: RootName): RootRemoveResponse {
 		const released = this.rootTargetRows(cache, name).map(
 			(target) => target.storePathHash
 		);
@@ -488,7 +492,10 @@ export class RootsService {
 	// that fails verification can never become servable, so a root must stop
 	// advertising it; the next push over that root rewrites its targets wholesale.
 	// One delete on the single writer, so it needs no gate.
-	pruneRetentionTargets(cache: string, storePathHash: StorePathHash): void {
+	pruneRetentionTargets(
+		cache: StoredCache,
+		storePathHash: StorePathHash
+	): void {
 		this.context.db
 			.delete(schema.retentionRootTargets)
 			.where(

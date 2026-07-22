@@ -2,6 +2,7 @@ import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
@@ -429,14 +430,25 @@ function rayOf(response: Response): string | undefined {
 	return response.headers.get('cf-ray') ?? undefined;
 }
 
-export function cachePrefixFor(cache: string): string {
-	if (cache === DEFAULT_CACHE) {
-		return '';
+// Resolves a caller's optional cache option to its stored name, rejecting a
+// malformed name so the CLI reports it before a request is built. An absent
+// option and the default alias both resolve to the default cache.
+export function storedCacheFor(cache: string | undefined): StoredCache {
+	if (cache === undefined || cache === DEFAULT_CACHE) {
+		return DEFAULT_CACHE;
 	}
 
-	if (!cacheNameSchema.safeParse(cache).success) {
+	const parsed = cacheNameSchema.safeParse(cache);
+
+	if (!parsed.success) {
 		throw new InvalidCacheNameError(cache);
 	}
 
-	return `/cache/${cache}`;
+	return parsed.data;
+}
+
+export function cachePrefixFor(cache: string): string {
+	const stored = storedCacheFor(cache);
+
+	return stored === DEFAULT_CACHE ? '' : `/cache/${stored}`;
 }

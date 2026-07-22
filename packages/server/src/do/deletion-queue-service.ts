@@ -1,5 +1,6 @@
 import {
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -100,7 +101,7 @@ export class DeletionQueueService {
 	// edge delete targets the exact `(tenant, cache, store_path_hash, generation)`,
 	// so a newer recommitted edge is never touched.
 	private async retireBlobRefEdge(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number,
 		narHash: NixSha256HashString
@@ -220,7 +221,7 @@ export class DeletionQueueService {
 	}
 
 	private clearQueuedNarInfoDeletion(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number
 	): void {
@@ -237,7 +238,7 @@ export class DeletionQueueService {
 	}
 
 	private async retireAttestationRefs(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number
 	): Promise<void> {
@@ -279,7 +280,7 @@ export class DeletionQueueService {
 
 	enqueueNarInfoDeletion(
 		handle: SchemaWriter,
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		narHash: NixSha256HashString,
 		generation: number,
@@ -321,7 +322,7 @@ export class DeletionQueueService {
 		// Group by cache so each cache's slice drains through the batched teardown
 		// retirement, whose generation fence and origin purge match the per-path
 		// form with a bounded number of round-trips per cache.
-		const byCache = new Map<string, TornDownNarInfo[]>();
+		const byCache = new Map<StoredCache, TornDownNarInfo[]>();
 
 		for (const entry of queued) {
 			const entries = byCache.get(entry.cache) ?? [];
@@ -358,7 +359,7 @@ export class DeletionQueueService {
 
 	// Runs inside the caller's critical section; must not open its own.
 	async deleteQueuedNarInfo(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		generation: number,
 		origin?: string
@@ -466,7 +467,7 @@ export class DeletionQueueService {
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	async retireTornDownNarInfos(
-		cache: string,
+		cache: StoredCache,
 		entries: readonly TornDownNarInfo[],
 		origin?: string
 	): Promise<number> {
@@ -636,7 +637,7 @@ export class DeletionQueueService {
 	}
 
 	deleteStorePath(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash,
 		origin: string
 	): Promise<DeletePathResponse> {

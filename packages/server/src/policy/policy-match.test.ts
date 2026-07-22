@@ -1,3 +1,4 @@
+import { storedCacheSchema } from '@cupboard/nix-store/scalars';
 import { describe, expect, it } from 'vitest';
 
 import { mostSpecificPolicy, type RetentionPolicy } from './policy-match.ts';
@@ -43,7 +44,10 @@ describe('mostSpecificPolicy', () => {
 		}
 	])('$name', ({ cache, rootName, ttl }) => {
 		expect(
-			mostSpecificPolicy(policies, { cache, name: rootName })?.ttlSeconds
+			mostSpecificPolicy(policies, {
+				cache: storedCacheSchema.parse(cache),
+				name: rootName
+			})?.ttlSeconds
 		).toBe(ttl);
 	});
 });

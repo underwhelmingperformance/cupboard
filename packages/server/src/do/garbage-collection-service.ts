@@ -1,6 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import {
 	type RootName,
+	type StoredCache,
 	storePathBasenameSchema,
 	type StorePathHash,
 	storePathHashSchema
@@ -75,7 +76,7 @@ export class GarbageCollectionService {
 		private readonly retention: RetentionService
 	) {}
 
-	private currentRevision(cache: string): number {
+	private currentRevision(cache: StoredCache): number {
 		this.context.db
 			.insert(schema.garbageCollectionRevisions)
 			.values({ cache, revision: 0 })
@@ -91,7 +92,7 @@ export class GarbageCollectionService {
 		);
 	}
 
-	private clearScan(cache: string): void {
+	private clearScan(cache: StoredCache): void {
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.garbageCollectionFrontier)
 				.where(eq(schema.garbageCollectionFrontier.cache, cache))
@@ -105,7 +106,7 @@ export class GarbageCollectionService {
 		});
 	}
 
-	private resetScan(cache: string, revision: number): void {
+	private resetScan(cache: StoredCache, revision: number): void {
 		this.context.db.transaction((tx) => {
 			tx.delete(schema.garbageCollectionFrontier)
 				.where(eq(schema.garbageCollectionFrontier.cache, cache))
@@ -138,7 +139,7 @@ export class GarbageCollectionService {
 	}
 
 	private scan(
-		cache: string
+		cache: StoredCache
 	): typeof schema.garbageCollectionScans.$inferSelect {
 		const revision = this.currentRevision(cache);
 		const stored = this.context.db
@@ -166,7 +167,7 @@ export class GarbageCollectionService {
 	}
 
 	private updateScan(
-		cache: string,
+		cache: StoredCache,
 		set: Partial<
 			Pick<
 				typeof schema.garbageCollectionScans.$inferInsert,
@@ -183,12 +184,12 @@ export class GarbageCollectionService {
 			.run();
 	}
 
-	private synchroniseScanRevision(cache: string): void {
+	private synchroniseScanRevision(cache: StoredCache): void {
 		this.updateScan(cache, { revision: this.currentRevision(cache) });
 	}
 
 	private expireRoots(
-		cache: string,
+		cache: StoredCache,
 		now: string
 	): {
 		rootsExpired: number;
@@ -351,7 +352,7 @@ export class GarbageCollectionService {
 	}
 
 	private insertFrontier(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): void {
 		const batches = chunk(storePathHashes, Math.floor(maxInClauseValues / 2));
@@ -366,7 +367,7 @@ export class GarbageCollectionService {
 	}
 
 	private advanceSeed(
-		cache: string,
+		cache: StoredCache,
 		phase: 'roots' | 'grace',
 		cursor: string,
 		budget: number
@@ -422,7 +423,7 @@ export class GarbageCollectionService {
 	}
 
 	private existingMarks(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): ReadonlySet<StorePathHash> {
 		const marks = new Set<StorePathHash>();
@@ -465,7 +466,7 @@ export class GarbageCollectionService {
 	}
 
 	private validateReferencesContainer(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash
 	): void {
 		const shape = this.context.db
@@ -501,7 +502,7 @@ export class GarbageCollectionService {
 	}
 
 	private advanceMark(
-		cache: string,
+		cache: StoredCache,
 		budget: number
 	): { readonly used: number; readonly complete: boolean } {
 		let used = 0;
@@ -621,7 +622,7 @@ export class GarbageCollectionService {
 		return { used, complete: false };
 	}
 
-	private finishMark(cache: string): boolean {
+	private finishMark(cache: StoredCache): boolean {
 		const scan = this.scan(cache);
 		const retained = this.context.db
 			.select({ storePathHash: schema.narInfos.storePathHash })
@@ -650,7 +651,7 @@ export class GarbageCollectionService {
 	}
 
 	private inFlightHashes(
-		cache: string,
+		cache: StoredCache,
 		storePathHashes: readonly StorePathHash[]
 	): ReadonlySet<StorePathHash> {
 		if (storePathHashes.length === 0) {
@@ -704,7 +705,7 @@ export class GarbageCollectionService {
 	}
 
 	private advanceSweep(
-		cache: string,
+		cache: StoredCache,
 		now: string,
 		cursor: string,
 		budget: number
@@ -779,7 +780,7 @@ export class GarbageCollectionService {
 	}
 
 	private collectUnreachable(
-		cache: string,
+		cache: StoredCache,
 		now: string,
 		budget: number
 	): {
@@ -923,7 +924,7 @@ export class GarbageCollectionService {
 
 	// Read only when the sweep would otherwise skip an unreachable cache, so the
 	// common retained case costs no extra row.
-	private cacheGraceManaged(cache: string): boolean {
+	private cacheGraceManaged(cache: StoredCache): boolean {
 		const row = this.context.db
 			.select({ graceManaged: schema.caches.graceManaged })
 			.from(schema.caches)
@@ -1022,7 +1023,7 @@ export class GarbageCollectionService {
 		return keys.length;
 	}
 
-	private tenantSweepCache(): string | undefined {
+	private tenantSweepCache(): StoredCache | undefined {
 		const current = this.context.db
 			.select({ cache: schema.garbageCollectionTenantRuns.cache })
 			.from(schema.garbageCollectionTenantRuns)
@@ -1052,7 +1053,7 @@ export class GarbageCollectionService {
 		return first.cache;
 	}
 
-	private advanceTenantSweep(cache: string): boolean {
+	private advanceTenantSweep(cache: StoredCache): boolean {
 		const next = this.context.db
 			.select({ cache: schema.caches.name })
 			.from(schema.caches)
@@ -1080,7 +1081,7 @@ export class GarbageCollectionService {
 
 	async collectGarbage(
 		logger: Logger,
-		cache?: string,
+		cache?: StoredCache,
 		purgeOrigin?: string,
 		sweepLimit: number = maxPathsSweptPerRun
 	): Promise<GarbageCollectionOutcome> {

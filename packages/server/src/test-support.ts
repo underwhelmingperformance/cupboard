@@ -9,6 +9,7 @@ import {
 	selectorForCache,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	storedCacheSchema,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId,
@@ -1258,7 +1259,7 @@ export async function fileAttestationReference(options: {
 		options.tenant ?? fixtureTenant
 	).reserveAttestationReference(
 		{
-			cache: options.cache ?? DEFAULT_CACHE,
+			cache: storedCacheSchema.parse(options.cache ?? DEFAULT_CACHE),
 			storePathHash: options.storePathHash,
 			generation: options.generation,
 			predicateType: predicateTypeSchema.parse(
@@ -1324,7 +1325,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 	readonly storePathHash: StorePathHash;
 	readonly cache?: string;
 }): Promise<void> {
-	const cache = fields.cache ?? DEFAULT_CACHE;
+	const cache = storedCacheSchema.parse(fields.cache ?? DEFAULT_CACHE);
 
 	await runInDurableObject(currentServer(), (_instance, state) => {
 		const database = drizzle(state.storage, {
@@ -1350,7 +1351,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 
 			const deletion = z
 				.object({
-					cache: z.string(),
+					cache: storedCacheSchema,
 					storePathHash: storePathHashSchema,
 					narHash: nixSha256HashSchema,
 					generation: z.number()
@@ -1508,7 +1509,7 @@ export function fixtureWorkerServer(): DurableObjectStub<CupboardServer> {
 
 /** Prepends the `/cache/<selector>` prefix to a cache-scoped route. */
 function cacheScopedPath(cache: string, suffix: string): string {
-	return `/cache/${selectorForCache(cache)}${suffix}`;
+	return `/cache/${selectorForCache(storedCacheSchema.parse(cache))}${suffix}`;
 }
 
 // A push id signed with the test signing key (the PUSH_ID_SIGNING_KEY the worker
