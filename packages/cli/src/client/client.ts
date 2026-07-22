@@ -1,6 +1,8 @@
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	type NixSha256HashString,
+	type StorePathHash,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
@@ -398,8 +400,8 @@ export interface CupboardClientOptions {
  */
 export interface CommitTarget {
 	readonly uploadId: string;
-	readonly storePathHash: string;
-	readonly narHash: string;
+	readonly storePathHash: StorePathHash;
+	readonly narHash: NixSha256HashString;
 	readonly retention?: boolean;
 }
 

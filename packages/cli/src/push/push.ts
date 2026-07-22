@@ -4,8 +4,10 @@ import { readFile } from 'node:fs/promises';
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
+	nixSha256HashSchema,
 	type Sha256HexDigest,
-	sha256HexDigestSchema
+	sha256HexDigestSchema,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import type {
@@ -1445,8 +1447,8 @@ function commitTarget(
 ): CommitTarget {
 	return {
 		uploadId: decision.uploadId,
-		storePathHash: decision.storePathHash,
-		narHash: decision.narHash,
+		storePathHash: storePathHashSchema.parse(decision.storePathHash),
+		narHash: nixSha256HashSchema.parse(decision.narHash),
 		...(shouldReportGraceFacts && { retention: true as const })
 	};
 }
@@ -1541,8 +1543,8 @@ async function redriveExpiredCommit(
 	if (isSkip(fresh)) {
 		// Already in the store: nothing to verify, so it is servable at once.
 		return {
-			storePathHash: fresh.storePathHash,
-			narHash: fresh.narHash,
+			storePathHash: storePathHashSchema.parse(fresh.storePathHash),
+			narHash: nixSha256HashSchema.parse(fresh.narHash),
 			status: 'already-present',
 			settled: Promise.resolve(),
 			...(fresh.grace !== undefined && { grace: fresh.grace })

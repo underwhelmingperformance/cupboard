@@ -1,7 +1,8 @@
 import { type Logger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
-	type StorePathHash
+	type StorePathHash,
+	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import {
@@ -18,7 +19,6 @@ import * as schema from '../db/schema.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
 import {
 	narInfoObjectKey,
-	narInfoObjectKeyOf,
 	narInfoObjectPrefix,
 	narObjectKey,
 	narObjectKeyPrefix,
@@ -1261,7 +1261,11 @@ export class VerificationService {
 		const startAfter =
 			fromCache === '' && fromHash === ''
 				? undefined
-				: narInfoObjectKeyOf(tenant, fromCache, fromHash);
+				: narInfoObjectKey(
+						tenant,
+						storePathHashSchema.parse(fromHash),
+						fromCache
+					);
 		const presentObjects = await this.presentNarInfoObjects(
 			logger,
 			rows,

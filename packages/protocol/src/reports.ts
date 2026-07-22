@@ -1,4 +1,5 @@
 import {
+	nixSha256HashSchema,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -23,8 +24,8 @@ export type CheckDiscrepancyKind = z.infer<typeof checkDiscrepancyKindSchema>;
 export const checkDiscrepancySchema = z.strictObject({
 	kind: checkDiscrepancyKindSchema,
 	cache: z.string(),
-	storePathHash: z.string(),
-	narHash: z.string()
+	storePathHash: storePathHashSchema,
+	narHash: nixSha256HashSchema
 });
 export type ParsedCheckDiscrepancy = z.output<typeof checkDiscrepancySchema>;
 

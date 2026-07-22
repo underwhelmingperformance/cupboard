@@ -1,3 +1,7 @@
+import {
+	nixSha256HashSchema,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
 import type { CommitSessionFrame } from '@cupboard/protocol/upload';
@@ -451,8 +455,10 @@ function sendFrame(socket: FakeCommitSocket, frame: CommitSessionFrame): void {
 
 describe('CupboardClient.commit', () => {
 	const response = {
-		storePathHash: '0123456789abcdfghijklmnpqrsvwxyz',
-		narHash: `sha256:${'1'.repeat(52)}`,
+		storePathHash: storePathHashSchema.parse(
+			'0123456789abcdfghijklmnpqrsvwxyz'
+		),
+		narHash: nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`),
 		status: 'committed'
 	} as const;
 	const target = (uploadId: string) => ({
