@@ -21,6 +21,7 @@ import {
 } from '../auth/token-store.ts';
 import { CupboardClient } from '../client/client.ts';
 import { controlRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { CupboardHttpError } from '../errors.ts';
 
 import type { CloudflareApi } from './cloudflare-api.ts';
@@ -214,7 +215,7 @@ export interface OnboardOptions {
 	readonly clientFactory?: (url: string) => OnboardClient;
 	readonly cacheSession?: (
 		session: CachedSession,
-		target: string
+		target: URL
 	) => Promise<void>;
 	readonly checkCredentials?: typeof checkR2Credentials;
 	readonly sleep?: (ms: number) => Promise<void>;
@@ -510,9 +511,10 @@ async function resolveDeploymentUrl(
 // The raw endpoints come from the hand-written client; each control call
 // builds a derived client bound to the token issued earlier in the flow.
 function onboardClientFor(url: string, signal?: AbortSignal): OnboardClient {
-	const raw = CupboardClient.fromUrl(url, { signal });
+	const parsed = parseWorkerUrl(url);
+	const raw = CupboardClient.fromUrl(parsed, { signal });
 	const control = (token: string) =>
-		controlRpc(url, { credential: token, signal });
+		controlRpc(parsed, { credential: token, signal });
 
 	return {
 		version: () => raw.version(),
@@ -739,7 +741,7 @@ async function claimAdmin(
 	client: OnboardClient,
 	url: string,
 	proof: { readonly idToken: string; readonly claimSecret: string | undefined },
-	cacheSession: (session: CachedSession, target: string) => Promise<void>
+	cacheSession: (session: CachedSession, target: URL) => Promise<void>
 ): Promise<ClaimResult> {
 	let claim:
 		| undefined
@@ -762,7 +764,10 @@ async function claimAdmin(
 				subjectTokenTypeIdToken
 			);
 
-			await cacheSession(sessionFromTokenResponse(exchanged), url);
+			await cacheSession(
+				sessionFromTokenResponse(exchanged),
+				parseWorkerUrl(url)
+			);
 
 			return {
 				claimed: signup.claimed,

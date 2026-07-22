@@ -11,6 +11,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	InvalidReuseViewPriorityError,
 	ReuseViewSelectorRequiredError
@@ -91,8 +92,8 @@ export function registerReuseViewCommands(
 	reuseView
 		.command('list')
 		.description('List named reuse views.')
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -107,7 +108,7 @@ export function registerReuseViewCommands(
 		.description(
 			'Define or replace a reuse view: its whole selector set is replaced on every call.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'reuse-view name')
 		.option(
 			'--exact <cache>',
@@ -136,7 +137,7 @@ export function registerReuseViewCommands(
 				'    --prefix pr- --exact release'
 			].join('\n')
 		)
-		.action(async (url: string, name: string, options: ReuseViewSetOptions) => {
+		.action(async (url: URL, name: string, options: ReuseViewSetOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, {
@@ -157,10 +158,10 @@ export function registerReuseViewCommands(
 	reuseView
 		.command('remove')
 		.description('Remove a named reuse view.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'reuse-view name')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: string, name: string, options: ConfirmableOptions) => {
+		.action(async (url: URL, name: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

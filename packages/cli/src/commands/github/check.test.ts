@@ -8,6 +8,7 @@ import type {
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
+import { parseWorkerUrl } from '../../client/transport.ts';
 import {
 	CliAbortError,
 	GithubCheckFailedError,
@@ -25,7 +26,7 @@ import {
 	runGithubCheck
 } from './check.ts';
 
-const url = 'https://cupboard.example.workers.dev/t/acme';
+const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
 const pinnedWorkflowReference =
 	'underwhelmingperformance/cupboard/.github/workflows/cupboard-flake-publish.yml@refs/tags/v1.2.3';
 const previousWorkflowReference =
@@ -124,9 +125,9 @@ function checkDependencies(overrides: {
 	return {
 		lookupRepository: () => Promise.resolve(identity),
 		verifyWorkflowReference: () => Promise.resolve(),
-		fetchCacheInfo: (target: string) =>
+		fetchCacheInfo: (target: URL) =>
 			Promise.resolve(
-				target.includes('/reuse/')
+				target.pathname.includes('/reuse/')
 					? new CacheInfo('/nix/store', true, overrides.viewPriority ?? 50)
 					: new CacheInfo('/nix/store', true, 40)
 			)
@@ -285,7 +286,7 @@ describe('runGithubCheck', () => {
 				{
 					...checkDependencies({}),
 					fetchCacheInfo: (target) =>
-						target.includes('/reuse/')
+						target.pathname.includes('/reuse/')
 							? Promise.reject(reason)
 							: Promise.resolve(new CacheInfo('/nix/store', true, 40))
 				}

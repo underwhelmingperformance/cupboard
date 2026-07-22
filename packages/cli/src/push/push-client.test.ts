@@ -20,27 +20,31 @@ describe('pushClientFor', () => {
 				readonly capability: string | null;
 				readonly body: unknown;
 			}[] = [];
-			const client = pushClientFor('https://cupboard.test/t/acme', 'token', {
-				fetcher: async (input, init) => {
-					const request = new Request(input, init);
-					requests.push({
-						url: request.url,
-						method: request.method,
-						capability: request.headers.get(acceptCapabilitiesHeader),
-						body: await request.json()
-					});
+			const client = pushClientFor(
+				new URL('https://cupboard.test/t/acme'),
+				'token',
+				{
+					fetcher: async (input, init) => {
+						const request = new Request(input, init);
+						requests.push({
+							url: request.url,
+							method: request.method,
+							capability: request.headers.get(acceptCapabilitiesHeader),
+							body: await request.json()
+						});
 
-					return Response.json(
-						{ uploads: [] },
-						{
-							headers:
-								responseCapability === undefined
-									? undefined
-									: { [uploadCapabilitiesHeader]: responseCapability }
-						}
-					);
+						return Response.json(
+							{ uploads: [] },
+							{
+								headers:
+									responseCapability === undefined
+										? undefined
+										: { [uploadCapabilitiesHeader]: responseCapability }
+							}
+						);
+					}
 				}
-			});
+			);
 
 			const supported = await client.probeUploadGraceFacts?.('preview');
 

@@ -45,19 +45,19 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
-import { parseWorkerUrl, resilientFetcher } from './transport.ts';
+import { resilientFetcher } from './transport.ts';
 
 export { type AccessCredential, type TokenProvider } from './credentials.ts';
 
 export class CupboardClient {
 	static fromUrl(
-		value: string,
+		value: URL,
 		options: string | CupboardClientOptions = DEFAULT_CACHE
 	): CupboardClient {
 		const resolved = typeof options === 'string' ? { cache: options } : options;
 
 		return new CupboardClient(
-			parseWorkerUrl(value),
+			new URL(value),
 			resilientFetcher(fetch),
 			cachePrefixFor(resolved.cache ?? DEFAULT_CACHE),
 			resolved.signal

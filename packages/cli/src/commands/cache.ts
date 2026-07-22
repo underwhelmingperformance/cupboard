@@ -16,6 +16,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { InvalidCachePriorityError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -69,8 +70,8 @@ export function registerCacheCommands(
 	cache
 		.command('list')
 		.description('List the caches and their priority and size.')
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -83,14 +84,14 @@ export function registerCacheCommands(
 	cache
 		.command('create')
 		.description('Create or update a named cache with the given priority.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'cache name')
 		.option(
 			'--priority <n>',
 			'Nix substituter priority (lower is preferred)',
 			parsePriority
 		)
-		.action(async (url: string, name: string, options: CacheCreateOptions) => {
+		.action(async (url: URL, name: string, options: CacheCreateOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -108,11 +109,11 @@ export function registerCacheCommands(
 	cache
 		.command('remove')
 		.description('Remove a named cache.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'cache name')
 		.option('--force', 'remove even when the cache still holds store paths')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: string, name: string, options: CacheRemoveOptions) => {
+		.action(async (url: URL, name: string, options: CacheRemoveOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -125,9 +126,9 @@ export function registerCacheCommands(
 	cache
 		.command('inspect')
 		.description("Show one cache's priority and size.")
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'cache name')
-		.action(async (url: string, name: string) => {
+		.action(async (url: URL, name: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

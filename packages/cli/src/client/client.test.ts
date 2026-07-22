@@ -607,7 +607,7 @@ describe('CupboardClient cache prefix', () => {
 
 	it('rejects an invalid cache name when building a scoped client', () => {
 		const error = thrownBy(() =>
-			CupboardClient.fromUrl('https://cupboard.test', 'Bad!')
+			CupboardClient.fromUrl(new URL('https://cupboard.test'), 'Bad!')
 		);
 
 		expect(error).toBeInstanceOf(InvalidCacheNameError);

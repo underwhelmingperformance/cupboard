@@ -11,6 +11,9 @@ import { readCachedSession, writeCachedSession } from './token-store.ts';
 const tenant = 'https://cupboard.test/t/acme';
 const other = 'https://cupboard.test/t/beta';
 const host = 'https://cupboard.test';
+const tenantTarget = new URL(tenant);
+const otherTarget = new URL(other);
+const hostTarget = new URL(host);
 
 function encodeJwtSegment(value: object): string {
 	return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -41,10 +44,10 @@ describe('session cache', () => {
 				refreshToken: 'refresh-1'
 			};
 
-			await writeCachedSession(session, tenant);
+			await writeCachedSession(session, tenantTarget);
 
 			expect({
-				session: await readCachedSession(tenant),
+				session: await readCachedSession(tenantTarget),
 				mode: await cachedFileMode(configHome)
 			}).toStrictEqual({ session, mode: 0o600 });
 		}
@@ -55,9 +58,9 @@ describe('session cache', () => {
 		async () => {
 			const session = { accessToken: jwt({ iss: tenant, aud: tenant }) };
 
-			await writeCachedSession(session, tenant);
+			await writeCachedSession(session, tenantTarget);
 
-			expect(await readCachedSession(tenant)).toStrictEqual(session);
+			expect(await readCachedSession(tenantTarget)).toStrictEqual(session);
 		}
 	);
 
@@ -76,7 +79,7 @@ describe('session cache', () => {
 				`${token}\n`
 			);
 
-			expect(await readCachedSession(tenant)).toStrictEqual({
+			expect(await readCachedSession(tenantTarget)).toStrictEqual({
 				accessToken: token
 			});
 		}
@@ -85,7 +88,7 @@ describe('session cache', () => {
 	testWithConfigHome(
 		'returns undefined when no session is cached for the target',
 		async () => {
-			expect(await readCachedSession(tenant)).toBeUndefined();
+			expect(await readCachedSession(tenantTarget)).toBeUndefined();
 		}
 	);
 
@@ -94,10 +97,10 @@ describe('session cache', () => {
 		async () => {
 			await writeCachedSession(
 				{ accessToken: jwt({ iss: tenant, aud: tenant }) },
-				tenant
+				tenantTarget
 			);
 
-			expect(await readCachedSession(other)).toBeUndefined();
+			expect(await readCachedSession(otherTarget)).toBeUndefined();
 		}
 	);
 
@@ -108,10 +111,10 @@ describe('session cache', () => {
 			// target: the issuer binding must refuse it.
 			await writeCachedSession(
 				{ accessToken: jwt({ iss: other, aud: tenant }) },
-				tenant
+				tenantTarget
 			);
 
-			expect(await readCachedSession(tenant)).toBeUndefined();
+			expect(await readCachedSession(tenantTarget)).toBeUndefined();
 		}
 	);
 
@@ -120,10 +123,10 @@ describe('session cache', () => {
 		async () => {
 			await writeCachedSession(
 				{ accessToken: jwt({ iss: tenant, aud: other }) },
-				tenant
+				tenantTarget
 			);
 
-			expect(await readCachedSession(tenant)).toBeUndefined();
+			expect(await readCachedSession(tenantTarget)).toBeUndefined();
 		}
 	);
 
@@ -134,9 +137,9 @@ describe('session cache', () => {
 				accessToken: jwt({ iss: host, aud: 'cupboard-control' })
 			};
 
-			await writeCachedSession(session, host);
+			await writeCachedSession(session, hostTarget);
 
-			expect(await readCachedSession(host)).toStrictEqual(session);
+			expect(await readCachedSession(hostTarget)).toStrictEqual(session);
 		}
 	);
 
@@ -145,9 +148,9 @@ describe('session cache', () => {
 		async () => {
 			const session = { accessToken: jwt({ iss: tenant, aud: tenant }) };
 
-			await writeCachedSession(session, `${tenant}/`);
+			await writeCachedSession(session, new URL(`${tenant}/`));
 
-			expect(await readCachedSession(tenant)).toStrictEqual(session);
+			expect(await readCachedSession(tenantTarget)).toStrictEqual(session);
 		}
 	);
 });

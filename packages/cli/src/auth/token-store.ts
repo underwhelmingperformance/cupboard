@@ -4,6 +4,8 @@ import path from 'node:path';
 import type { ParsedTokenResponse } from '@cupboard/protocol/oidc';
 import { z } from 'zod';
 
+import { canonicalHref } from '../client/transport.ts';
+
 import { decodeJwtPayload } from './jwt.ts';
 import {
 	configDirectory,
@@ -41,17 +43,6 @@ export function sessionFromTokenResponse(
 	};
 }
 
-/**
- * The canonical form of a target URL: a parsed URL with any trailing slash
- * removed, so the same target keys the same cache entry and matches the issuer a
- * tenant issues regardless of how the URL was typed.
- */
-export function normaliseTarget(target: string): string {
-	const url = new URL(target);
-
-	return url.href.replace(/\/+$/, '');
-}
-
 function tokenFilePath(normalisedTarget: string): string {
 	const key = createHash('sha256').update(normalisedTarget).digest('hex');
 
@@ -59,9 +50,11 @@ function tokenFilePath(normalisedTarget: string): string {
 }
 
 export async function readCachedSession(
-	target: string
+	target: URL
 ): Promise<CachedSession | undefined> {
-	const normalised = normaliseTarget(target);
+	// The canonical rendering keys the cache entry and matches the issuer a
+	// tenant writes into its tokens, however the URL was typed.
+	const normalised = canonicalHref(target);
 	const contents = await readSecretFile(tokenFilePath(normalised));
 
 	if (contents === undefined) {
@@ -92,10 +85,10 @@ export async function readCachedSession(
  */
 export async function writeCachedSession(
 	session: CachedSession,
-	target: string
+	target: URL
 ): Promise<void> {
 	await writeSecretFile(
-		tokenFilePath(normaliseTarget(target)),
+		tokenFilePath(canonicalHref(target)),
 		`${JSON.stringify(session)}\n`
 	);
 }

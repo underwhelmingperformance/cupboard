@@ -256,7 +256,7 @@ export function resolvePushInputs(
 		url,
 		paths: options.paths,
 		cache: provided(options.cache) ?? '',
-		audience: provided(options.audience) ?? url,
+		audience: provided(options.audience) ?? '',
 		root: isRetained
 			? (explicitRoot ??
 				`github:${requireEnvironment(environment, 'GITHUB_REPOSITORY')}/${requireEnvironment(environment, 'GITHUB_REF_NAME')}`)
@@ -462,9 +462,11 @@ export function buildPushArguments(
 		...options.paths,
 		'--github-oidc'
 	];
-	const audience = options[options.audience === '' ? 'url' : 'audience'];
-
-	arguments_.push('--audience', audience);
+	// No default here: the CLI derives the audience from the canonical form of
+	// the URL it parses, so one defaulting site serves the whole system.
+	if (options.audience !== '') {
+		arguments_.push('--audience', options.audience);
+	}
 
 	if (options.root !== '') {
 		arguments_.push('--root', options.root);

@@ -31,7 +31,7 @@ export interface PushClientOptions {
  * on the raw client.
  */
 export function pushClientFor(
-	url: string | URL,
+	url: URL,
 	credential: AccessCredential,
 	options: PushClientOptions = {}
 ): PushClient {
@@ -131,10 +131,8 @@ export function pushClientFor(
 		// credentials (or with a 401 on a private tenant), so only a routing
 		// 404 reads as the tenant not being there at all.
 		tenantServes: async () => {
-			const target = new URL(
-				'nix-cache-info',
-				`${url.toString().replace(/\/+$/, '')}/`
-			);
+			const target = new URL(url);
+			target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;
 			const response = await (options.fetcher ?? fetch)(target, {
 				signal: options.signal
 			});

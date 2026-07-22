@@ -184,12 +184,15 @@ describe('cacheSubstituterUrl', () => {
 			expected: 'https://cupboard.example.workers.dev/t/acme/cache/builds'
 		}
 	])('$name', ({ cache, expected, url }) => {
-		expect(cacheSubstituterUrl(url, cache)).toBe(expected);
+		expect(cacheSubstituterUrl(new URL(url), cache)).toBe(expected);
 	});
 
 	it('rejects an invalid cache name', () => {
 		const error = thrownBy(() =>
-			cacheSubstituterUrl('https://cupboard.example.workers.dev', 'Bad!')
+			cacheSubstituterUrl(
+				new URL('https://cupboard.example.workers.dev'),
+				'Bad!'
+			)
 		);
 
 		expect(error).toBeInstanceOf(InvalidCacheNameError);

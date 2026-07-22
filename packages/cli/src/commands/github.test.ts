@@ -16,6 +16,7 @@ import { Command } from 'commander';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it } from 'vitest';
 
+import { parseWorkerUrl } from '../client/transport.ts';
 import {
 	CacheInfoRateLimitedError,
 	CacheInfoServerError,
@@ -40,7 +41,7 @@ import {
 import { githubBranchAddBody, githubPrAddBody } from './oidc-trust.ts';
 import { type RepositoryIdentity } from './oidc-trust/github.ts';
 
-const url = 'https://cupboard.example.workers.dev/t/acme';
+const url = parseWorkerUrl('https://cupboard.example.workers.dev/t/acme');
 const identity: RepositoryIdentity = {
 	repositoryId: 1234,
 	repositoryOwnerId: 5678,
@@ -270,6 +271,55 @@ describe('runGithubSetup', () => {
 					{ label: 'pull-request trust rule', value: 'created' },
 					{ label: 'main trust rule', value: 'created' }
 				]
+			]
+		});
+	});
+
+	it('derives the audience from the tenant URL without its trailing slash', async () => {
+		const results: ResultRow[][] = [];
+		const { client, recorded } = setupClient({
+			gracePolicies: [{ cachePrefix: '', graceSeconds: 86_400 }],
+			views: [
+				{
+					name: 'pull-requests',
+					priority: 50,
+					selectors: [{ kind: 'prefix', pattern: 'pr-' }]
+				}
+			],
+			rules: [
+				storedRule('previous-pr', previousPrBody),
+				storedRule('previous-branch', previousBranchBody)
+			]
+		});
+
+		await runGithubSetup(
+			parseWorkerUrl(`${url}/`),
+			options,
+			reporter(results),
+			client,
+			dependencies
+		);
+
+		expect({ recorded, outcomes: results[0] }).toStrictEqual({
+			recorded: {
+				graceAdds: [],
+				viewSets: [],
+				ruleAdds: [prBody, branchBody],
+				ruleRemoves: []
+			},
+			outcomes: [
+				{ label: 'grace policy', value: 'unchanged' },
+				{ label: 'reuse view', value: 'unchanged' },
+				{ label: 'pull-request trust rule', value: 'created' },
+				{ label: 'main trust rule', value: 'created' },
+				{
+					label: 'superseded trust rule previous-branch',
+					value: `retained: main pushes; ${previousWorkflowReference}`
+				},
+				{
+					label: 'superseded trust rule previous-pr',
+					value: `retained: pull requests and main pushes; ${previousWorkflowReference}`
+				}
 			]
 		});
 	});
@@ -1346,9 +1396,12 @@ describe('registerGithubCommands', () => {
 			registerGithubCommands(program);
 
 			await expect(
-				program.parseAsync(['github', subcommand, url, '--repo', 'acme/app'], {
-					from: 'user'
-				})
+				program.parseAsync(
+					['github', subcommand, url.href, '--repo', 'acme/app'],
+					{
+						from: 'user'
+					}
+				)
 			).rejects.toMatchObject({
 				code: 'commander.missingMandatoryOptionValue'
 			});
@@ -1382,7 +1435,7 @@ describe('cacheInfoFetcher', () => {
 			}
 		);
 
-		const fetched = await fetch('https://cupboard.example/t/acme/');
+		const fetched = await fetch(new URL('https://cupboard.example/t/acme/'));
 
 		expect({ priority: fetched.priority, requests }).toStrictEqual({
 			priority: 40,
@@ -1410,7 +1463,7 @@ describe('cacheInfoFetcher', () => {
 			}
 		);
 
-		await fetch('https://cupboard.example/t/acme');
+		await fetch(new URL('https://cupboard.example/t/acme'));
 
 		expect(authorizations).toStrictEqual([undefined]);
 	});
@@ -1428,7 +1481,7 @@ describe('cacheInfoFetcher', () => {
 
 		let failure: unknown;
 		try {
-			await fetch('https://cupboard.example/t/acme');
+			await fetch(new URL('https://cupboard.example/t/acme'));
 		} catch (error) {
 			failure = error;
 		}
@@ -1459,7 +1512,7 @@ describe('cacheInfoFetcher', () => {
 			);
 
 			await expect(
-				fetch('https://cupboard.example/t/acme')
+				fetch(new URL('https://cupboard.example/t/acme'))
 			).rejects.toBeInstanceOf(error);
 		}
 	);
@@ -1490,7 +1543,7 @@ describe('cacheInfoFetcher', () => {
 			}
 		);
 
-		const fetched = await fetch('https://cupboard.example/t/acme');
+		const fetched = await fetch(new URL('https://cupboard.example/t/acme'));
 
 		expect({ attempts, priority: fetched.priority }).toStrictEqual({
 			attempts: 2,
@@ -1517,7 +1570,7 @@ describe('cacheInfoFetcher', () => {
 		);
 
 		await expect(
-			fetch('https://cupboard.example/t/acme')
+			fetch(new URL('https://cupboard.example/t/acme'))
 		).rejects.toBeInstanceOf(CacheInfoTimeoutError);
 	});
 
@@ -1553,7 +1606,7 @@ describe('cacheInfoFetcher', () => {
 		);
 
 		await expect(
-			fetch('https://cupboard.example/t/acme')
+			fetch(new URL('https://cupboard.example/t/acme'))
 		).rejects.toBeInstanceOf(CacheInfoTimeoutError);
 		expect(signals.map(({ aborted }) => aborted)).toStrictEqual([true]);
 	});
@@ -1573,6 +1626,8 @@ describe('cacheInfoFetcher', () => {
 			}
 		);
 
-		await expect(fetch('https://cupboard.example/t/acme')).rejects.toBe(reason);
+		await expect(
+			fetch(new URL('https://cupboard.example/t/acme'))
+		).rejects.toBe(reason);
 	});
 });

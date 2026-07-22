@@ -14,11 +14,13 @@ import {
 } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { rootEnsureAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl } from '../duration.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -29,7 +31,7 @@ interface RootSetOptions {
 
 interface RootEnsureOptions extends RootSetOptions {
 	readonly githubOidc?: boolean;
-	readonly audience?: string;
+	readonly audience?: Audience;
 }
 
 interface RootOptions {
@@ -78,7 +80,7 @@ export function registerRootCommands(
 			'Retain targets already present in the cache, or report that a build is required. ' +
 				'Both outcomes exit 0; the reported status says which happened.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name, e.g. github:owner/repo/main')
 		.argument('<store-path...>', 'one or more top-level store paths to retain')
 		.option(
@@ -93,11 +95,12 @@ export function registerRootCommands(
 		)
 		.option(
 			'--audience <audience>',
-			'OIDC audience to request with --github-oidc (default: the tenant URL)'
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
 		)
 		.action(
 			async (
-				url: string,
+				url: URL,
 				name: string,
 				targets: string[],
 				options: RootEnsureOptions
@@ -108,7 +111,7 @@ export function registerRootCommands(
 					CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 					{
 						githubOidc: options.githubOidc,
-						audience: options.audience ?? url,
+						audience: options.audience ?? audienceSchema.parse(url),
 						authorizationDetails: rootEnsureAuthorizationDetails({
 							cacheSelector: cacheName,
 							root: name
@@ -134,7 +137,7 @@ export function registerRootCommands(
 	root
 		.command('set')
 		.description('Create or replace a retention root with the given targets.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name, e.g. github:owner/repo/main')
 		.argument('<store-path...>', 'one or more top-level store paths to retain')
 		.option(
@@ -155,7 +158,7 @@ export function registerRootCommands(
 		)
 		.action(
 			async (
-				url: string,
+				url: URL,
 				name: string,
 				targets: string[],
 				options: RootSetOptions
@@ -182,9 +185,9 @@ export function registerRootCommands(
 	root
 		.command('list')
 		.description('List retention roots.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--cache <name>', 'target a named cache rather than the default')
-		.action(async (url: string, options: RootOptions) => {
+		.action(async (url: URL, options: RootOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -201,11 +204,11 @@ export function registerRootCommands(
 	root
 		.command('remove')
 		.description('Remove a retention root.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<name>', 'root name to remove')
 		.option('--cache <name>', 'target a named cache rather than the default')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: string, name: string, options: RootOptions) => {
+		.action(async (url: URL, name: string, options: RootOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

@@ -7,6 +7,7 @@ import { type Reporter } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
 import { commandUi, type ProgramOptions } from '../cli.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { InvalidCacheNameError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
@@ -26,7 +27,7 @@ interface ConfigOptions {
  * URL with a `/cache/<name>` path for a named one. The cache name is validated.
  */
 export function cacheSubstituterUrl(
-	url: string,
+	url: URL,
 	cache: string | undefined
 ): string {
 	if (
@@ -37,7 +38,7 @@ export function cacheSubstituterUrl(
 		throw new InvalidCacheNameError(cache);
 	}
 
-	return cacheUrl(url, cache);
+	return cacheUrl(url.href, cache);
 }
 
 export function runConfig(
@@ -74,7 +75,7 @@ export function registerConfigCommand(
 		.description(
 			"Print Nix substituter configuration suitable for a user's nix.conf."
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<pubkey>', 'Nix trusted-public-keys entry')
 		.option(
 			'--read-user <user>',
@@ -85,7 +86,7 @@ export function registerConfigCommand(
 			'private-read password (or CUPBOARD_READ_PASSWORD)'
 		)
 		.option('--cache <name>', 'configure a named cache rather than the default')
-		.action((url: string, publicKey: string, options: ConfigOptions) => {
+		.action((url: URL, publicKey: string, options: ConfigOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const user = options.readUser ?? env.CUPBOARD_READ_USER;
 			const password = options.readPassword ?? env.CUPBOARD_READ_PASSWORD;

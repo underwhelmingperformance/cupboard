@@ -5,6 +5,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CheckOptions {
@@ -27,9 +28,9 @@ export function registerCheckCommand(
 	program
 		.command('check')
 		.description('Check stored objects against committed metadata.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--deep', 'recompute and compare each stored NAR file hash')
-		.action(async (url: string, options: CheckOptions) => {
+		.action(async (url: URL, options: CheckOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

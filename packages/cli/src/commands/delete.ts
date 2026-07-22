@@ -7,6 +7,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface DeleteOptions {
@@ -33,7 +34,7 @@ export function registerDeleteCommand(
 	program
 		.command('delete')
 		.description('Delete a single store path from the cache.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument(
 			'<store-path>',
 			'store path to delete (e.g. /nix/store/<hash>-<name>)'
@@ -43,7 +44,7 @@ export function registerDeleteCommand(
 			'delete from a named cache rather than the default'
 		)
 		.option('-y, --yes', 'delete without the confirmation prompt')
-		.action(async (url: string, storePath: string, options: DeleteOptions) => {
+		.action(async (url: URL, storePath: string, options: DeleteOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

@@ -15,6 +15,7 @@ import {
 } from '../auth/token-store.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
+import { canonicalHref, parseWorkerUrl } from '../client/transport.ts';
 import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
 import {
 	type CloudflareGrant,
@@ -154,7 +155,8 @@ export function registerLoginCommand(
 		.argument(
 			'<url>',
 			'deployment or tenant URL to sign in to ' +
-				'(e.g. https://cupboard.example.workers.dev or .../t/<slug>)'
+				'(e.g. https://cupboard.example.workers.dev or .../t/<slug>)',
+			parseWorkerUrl
 		)
 		.option('--oidc-issuer <issuer>', 'OIDC issuer URL', cloudflareDashIssuer)
 		.option(
@@ -166,7 +168,7 @@ export function registerLoginCommand(
 			'--headless',
 			'use the device flow instead of opening a browser (for SSH/containers)'
 		)
-		.action(async (url: string, options: LoginOptions) => {
+		.action(async (url: URL, options: LoginOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const client = CupboardClient.fromUrl(url, {
 				signal: programOptions.signal
@@ -246,13 +248,15 @@ export function registerLoginCommand(
 			);
 			await writeCachedSession(sessionFromTokenResponse(exchanged), url);
 
+			const target = canonicalHref(url);
+
 			const storedIn = tokensDirectory();
 
 			reporter.result({
 				kind: 'login',
-				data: { url, scope, storedIn },
+				data: { url: target, scope, storedIn },
 				rows: [
-					{ label: 'Cache URL', value: url },
+					{ label: 'Cache URL', value: target },
 					{ label: 'Session', value: 'admin token cached' },
 					{ label: 'Stored', value: storedIn }
 				]

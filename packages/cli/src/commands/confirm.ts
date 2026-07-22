@@ -13,18 +13,20 @@ import {
 import type { Command } from 'commander';
 
 import { isAbortError } from '../abort.ts';
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { ConfirmIncompleteError, PathsNotConfirmedError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface ConfirmOptions {
 	readonly cache?: string;
 	readonly githubOidc?: boolean;
-	readonly audience?: string;
+	readonly audience?: Audience;
 }
 
 /**
@@ -49,7 +51,7 @@ export function registerConfirmCommand(
 			'Confirm an unretained publication by store path, extending its ' +
 				'retention grace without uploading any bytes.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<store-paths...>', 'store paths already published to the cache')
 		.option(
 			'--cache <name>',
@@ -61,7 +63,8 @@ export function registerConfirmCommand(
 		)
 		.option(
 			'--audience <audience>',
-			'OIDC audience to request with --github-oidc (default: the tenant URL)'
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
 		)
 		.addHelpText(
 			'after',
@@ -73,28 +76,26 @@ export function registerConfirmCommand(
 				'    /nix/store/<hash>-app /nix/store/<hash>-runtime'
 			].join('\n')
 		)
-		.action(
-			async (url: string, storePaths: string[], options: ConfirmOptions) => {
-				const reporter = commandUi(program, programOptions).reporter();
-				const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
-				const credential = await authenticateForPush(
-					CupboardClient.fromUrl(url, { signal: programOptions.signal }),
-					{
-						githubOidc: options.githubOidc,
-						audience: options.audience ?? url,
-						authorizationDetails: confirmAuthorizationDetails({
-							cacheSelector: cacheName
-						})
-					}
-				);
-				const rpc = tenantRpc(url, {
-					credential,
-					signal: programOptions.signal
-				});
+		.action(async (url: URL, storePaths: string[], options: ConfirmOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
+			const credential = await authenticateForPush(
+				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
+				{
+					githubOidc: options.githubOidc,
+					audience: options.audience ?? audienceSchema.parse(url),
+					authorizationDetails: confirmAuthorizationDetails({
+						cacheSelector: cacheName
+					})
+				}
+			);
+			const rpc = tenantRpc(url, {
+				credential,
+				signal: programOptions.signal
+			});
 
-				await runConfirm(cacheName, storePaths, reporter, rpc.uploads);
-			}
-		);
+			await runConfirm(cacheName, storePaths, reporter, rpc.uploads);
+		});
 }
 
 export async function runConfirm(

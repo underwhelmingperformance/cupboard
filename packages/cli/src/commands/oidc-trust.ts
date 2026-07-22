@@ -12,9 +12,11 @@ import {
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc, tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { InvalidClaimError } from '../errors.ts';
 import { deploymentUrlArgument, tenantUrlArgument } from '../url-argument.ts';
 
@@ -34,7 +36,7 @@ export const githubActionsIssuer =
 
 interface GithubPrOptions {
 	readonly repo: string;
-	readonly audience?: string;
+	readonly audience?: Audience;
 	readonly cacheTemplate?: string;
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
@@ -44,7 +46,7 @@ interface GithubPrOptions {
 
 interface GithubTagOptions {
 	readonly repo: string;
-	readonly audience?: string;
+	readonly audience?: Audience;
 	readonly cacheTemplate?: string;
 	readonly rootTemplate?: string;
 	readonly jobWorkflowRef?: string;
@@ -56,7 +58,7 @@ interface GithubBranchOptions {
 	readonly repo: string;
 	readonly branch: string;
 	readonly jobWorkflowRef?: string;
-	readonly audience?: string;
+	readonly audience?: Audience;
 	readonly attest?: boolean;
 }
 
@@ -128,7 +130,7 @@ interface ConfirmableOptions {
 
 interface OidcTrustAddOptions {
 	readonly issuer: string;
-	readonly audience: string;
+	readonly audience: Audience;
 	readonly claim: readonly string[];
 	readonly allow: readonly string[];
 	readonly cache?: string;
@@ -271,7 +273,7 @@ interface OidcTrustPlane {
 	// on the tenant plane.
 	readonly githubPr: boolean;
 	readonly clientFor: (
-		url: string,
+		url: URL,
 		programOptions: ProgramOptions
 	) => OidcTrustClient;
 }
@@ -308,7 +310,7 @@ const controlPlane: OidcTrustPlane = {
 // root `github:<owner>/<repo>/pr-<n>/`, both keyed on the pull-request number
 // captured from the `ref` claim, so one PR cannot reach another's paths.
 export function githubPrAddBody(
-	url: string,
+	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubPrOptions
 ): OidcTrustAddBody {
@@ -334,7 +336,7 @@ export function githubPrAddBody(
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
-		audience: options.audience ?? url,
+		audience: options.audience ?? audienceSchema.parse(url),
 		claims,
 		permittedGrants: [
 			buildCacheGrant({
@@ -362,7 +364,7 @@ export function githubPrAddBody(
 // `github:<owner>/<repo>/<name>/`, both keyed on the tag captured from the
 // `ref` claim.
 export function githubTagAddBody(
-	url: string,
+	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubTagOptions
 ): OidcTrustAddBody {
@@ -385,7 +387,7 @@ export function githubTagAddBody(
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
-		audience: options.audience ?? url,
+		audience: options.audience ?? audienceSchema.parse(url),
 		claims,
 		permittedGrants: [
 			buildCacheGrant({
@@ -413,7 +415,7 @@ export function githubTagAddBody(
 // workflow cannot match. Pinning the workflow file with `--workflow` is an
 // optional extra restriction on top of that.
 export function githubBranchAddBody(
-	url: string,
+	url: URL,
 	identity: RepositoryIdentity,
 	options: GithubBranchOptions
 ): OidcTrustAddBody {
@@ -429,7 +431,7 @@ export function githubBranchAddBody(
 
 	return buildAddBody({
 		issuer: githubActionsIssuer,
-		audience: options.audience ?? url,
+		audience: options.audience ?? audienceSchema.parse(url),
 		claims,
 		permittedGrants: [
 			buildCacheGrant({
@@ -465,8 +467,8 @@ function buildOidcTrustCommands(
 	oidcTrust
 		.command('list')
 		.description('List the configured trust rules and what each one trusts.')
-		.argument('<url>', plane.urlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 
 			await runOidcTrustList(reporter, plane.clientFor(url, programOptions));
@@ -477,9 +479,9 @@ function buildOidcTrustCommands(
 		.description(
 			'Show one trust rule in full: the token it accepts and the access it grants.'
 		)
-		.argument('<url>', plane.urlArgument)
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
 		.argument('<id>', 'trust rule id')
-		.action(async (url: string, id: string) => {
+		.action(async (url: URL, id: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
 
 			await runOidcTrustShow(
@@ -494,9 +496,13 @@ function buildOidcTrustCommands(
 		.description(
 			'Add a trust rule by hand: the issuer and claims a token must carry, and the access to grant.'
 		)
-		.argument('<url>', plane.urlArgument)
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
 		.requiredOption('--issuer <issuer>', 'OIDC issuer URL')
-		.requiredOption('--audience <audience>', 'expected token audience')
+		.requiredOption(
+			'--audience <audience>',
+			'expected token audience',
+			parseAudience
+		)
 		.option(
 			'--claim <key=value>',
 			'a claim the token must match exactly (repeatable)',
@@ -558,7 +564,7 @@ function buildOidcTrustCommands(
 				'    --cache-template pr-{pr} --root same-as-cache'
 			].join('\n')
 		)
-		.action(async (url: string, options: OidcTrustAddOptions) => {
+		.action(async (url: URL, options: OidcTrustAddOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 
 			await runOidcTrustAdd(
@@ -574,11 +580,12 @@ function buildOidcTrustCommands(
 			.description(
 				"Trust a GitHub repository's pull-request builds to push to a short-lived cache of their own, one per pull request."
 			)
-			.argument('<url>', plane.urlArgument)
+			.argument('<url>', plane.urlArgument, parseWorkerUrl)
 			.requiredOption('--repo <owner/name>', 'the GitHub repository')
 			.option(
 				'--audience <audience>',
-				'expected token audience (default: the tenant URL)'
+				'expected token audience (default: the tenant URL)',
+				parseAudience
 			)
 			.option(
 				'--cache-template <template>',
@@ -607,7 +614,7 @@ function buildOidcTrustCommands(
 					'    --repo acme/infra'
 				].join('\n')
 			)
-			.action(async (url: string, options: GithubPrOptions) => {
+			.action(async (url: URL, options: GithubPrOptions) => {
 				const reporter = commandUi(program, programOptions).reporter();
 				const identity = await reporter.phase('Resolving repository', () =>
 					lookupRepository(options.repo)
@@ -625,11 +632,12 @@ function buildOidcTrustCommands(
 			.description(
 				"Trust a GitHub repository's tag builds to push to a cache named for the tag, one per release."
 			)
-			.argument('<url>', plane.urlArgument)
+			.argument('<url>', plane.urlArgument, parseWorkerUrl)
 			.requiredOption('--repo <owner/name>', 'the GitHub repository')
 			.option(
 				'--audience <audience>',
-				'expected token audience (default: the tenant URL)'
+				'expected token audience (default: the tenant URL)',
+				parseAudience
 			)
 			.option(
 				'--cache-template <template>',
@@ -658,7 +666,7 @@ function buildOidcTrustCommands(
 					'    --repo acme/infra'
 				].join('\n')
 			)
-			.action(async (url: string, options: GithubTagOptions) => {
+			.action(async (url: URL, options: GithubTagOptions) => {
 				const reporter = commandUi(program, programOptions).reporter();
 				const identity = await reporter.phase('Resolving repository', () =>
 					lookupRepository(options.repo)
@@ -676,7 +684,7 @@ function buildOidcTrustCommands(
 			.description(
 				"Trust pushes to one branch of a GitHub repository to publish to this tenant's default cache."
 			)
-			.argument('<url>', plane.urlArgument)
+			.argument('<url>', plane.urlArgument, parseWorkerUrl)
 			.requiredOption('--repo <owner/name>', 'the GitHub repository')
 			.requiredOption(
 				'--branch <name>',
@@ -688,7 +696,8 @@ function buildOidcTrustCommands(
 			)
 			.option(
 				'--audience <audience>',
-				'expected token audience (default: the tenant URL)'
+				'expected token audience (default: the tenant URL)',
+				parseAudience
 			)
 			.option(
 				'--no-attest',
@@ -706,7 +715,7 @@ function buildOidcTrustCommands(
 					'    --job-workflow-ref acme/infra/.github/workflows/cupboard-publish.yml@refs/heads/main'
 				].join('\n')
 			)
-			.action(async (url: string, options: GithubBranchOptions) => {
+			.action(async (url: URL, options: GithubBranchOptions) => {
 				const reporter = commandUi(program, programOptions).reporter();
 				const identity = await reporter.phase('Resolving repository', () =>
 					lookupRepository(options.repo)
@@ -725,10 +734,10 @@ function buildOidcTrustCommands(
 		.description(
 			'Disable a trust rule by id, so the CI it trusts can no longer authenticate.'
 		)
-		.argument('<url>', plane.urlArgument)
+		.argument('<url>', plane.urlArgument, parseWorkerUrl)
 		.argument('<id>', 'trust rule id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 
 			await runOidcTrustRemove(id, ui, plane.clientFor(url, programOptions));

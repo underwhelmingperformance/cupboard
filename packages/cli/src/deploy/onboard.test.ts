@@ -474,11 +474,8 @@ interface ScriptedClient {
 	readonly createdBodies: unknown[];
 	readonly membershipRebuildTokens: string[];
 	readonly controlCheckTokens: string[];
-	readonly cachedSessions: { session: CachedSession; target: string }[];
-	readonly cacheSession: (
-		session: CachedSession,
-		target: string
-	) => Promise<void>;
+	readonly cachedSessions: { session: CachedSession; target: URL }[];
+	readonly cacheSession: (session: CachedSession, target: URL) => Promise<void>;
 }
 
 function scriptedClient(script: ClientScript): ScriptedClient {
@@ -494,7 +491,7 @@ function scriptedClient(script: ClientScript): ScriptedClient {
 	const createdBodies: unknown[] = [];
 	const membershipRebuildTokens: string[] = [];
 	const controlCheckTokens: string[] = [];
-	const cachedSessions: { session: CachedSession; target: string }[] = [];
+	const cachedSessions: { session: CachedSession; target: URL }[] = [];
 
 	return {
 		urls,
@@ -719,7 +716,7 @@ describe('onboardDeployment', () => {
 			cachedSessions: [
 				{
 					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
-					target: 'https://cache.example.com'
+					target: new URL('https://cache.example.com')
 				}
 			],
 			successes: ['You are now the admin of this deployment (cf-user-1).']
@@ -766,7 +763,7 @@ describe('onboardDeployment', () => {
 			cachedSessions: [
 				{
 					session: { accessToken: 'admin-jwt', refreshToken: 'refresh-1' },
-					target: 'https://cache.example.com'
+					target: new URL('https://cache.example.com')
 				}
 			]
 		});
