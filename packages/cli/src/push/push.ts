@@ -4,10 +4,8 @@ import { readFile } from 'node:fs/promises';
 import { Nix, type NixValidPathInfo } from '@cupboard/nix';
 import { implicitPinName } from '@cupboard/nix-store/retention';
 import {
-	nixSha256HashSchema,
 	type Sha256HexDigest,
-	sha256HexDigestSchema,
-	storePathHashSchema
+	sha256HexDigestSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import type {
@@ -28,12 +26,12 @@ import {
 	type RootSummary
 } from '@cupboard/protocol/retention';
 import {
-	type UploadDecision,
+	type ParsedUploadDecision,
+	type ParsedUploadNegotiateResponse,
+	type ParsedUploadPreviewDecision,
+	type ParsedUploadPreviewResponse,
 	type UploadNegotiateRequest,
-	type UploadNegotiateResponse,
-	type UploadPreviewDecision,
-	type UploadPreviewRequest,
-	type UploadPreviewResponse
+	type UploadPreviewRequest
 } from '@cupboard/protocol/upload';
 import {
 	formatBytes,
@@ -112,10 +110,10 @@ export const defaultUploadConcurrency = 6;
 export interface PushClient {
 	negotiate(
 		body: Omit<UploadNegotiateRequest, 'pushId'>
-	): Promise<UploadNegotiateResponse>;
+	): Promise<ParsedUploadNegotiateResponse>;
 	// The read-only twin `--dry-run` drives instead of negotiate: no pushId to
 	// carry, since a dry run never requests an upload credential.
-	preview(body: UploadPreviewRequest): Promise<UploadPreviewResponse>;
+	preview(body: UploadPreviewRequest): Promise<ParsedUploadPreviewResponse>;
 	// A no-path request checks whether the server acknowledges grace-aware
 	// upload reporting without creating upload state.
 	probeUploadGraceFacts?(kind: 'negotiate' | 'preview'): Promise<boolean>;
@@ -154,8 +152,8 @@ export interface PushAttestationSource {
 
 export type ReadAttestationBundle = (path: string) => Promise<Uint8Array>;
 
-type UploadDecisionOf<A extends UploadDecision['action']> = Extract<
-	UploadDecision,
+type UploadDecisionOf<A extends ParsedUploadDecision['action']> = Extract<
+	ParsedUploadDecision,
 	{ action: A }
 >;
 
@@ -194,7 +192,7 @@ async function requireUploadGraceFacts(
 async function negotiateUpload(
 	client: PushClient,
 	paths: Omit<UploadNegotiateRequest, 'pushId'>['paths']
-): Promise<UploadNegotiateResponse> {
+): Promise<ParsedUploadNegotiateResponse> {
 	return client.negotiate({ paths });
 }
 
@@ -214,7 +212,7 @@ async function negotiateUpload(
 async function previewUpload(
 	client: PushClient,
 	paths: UploadPreviewRequest['paths']
-): Promise<UploadPreviewResponse> {
+): Promise<ParsedUploadPreviewResponse> {
 	try {
 		return await client.preview({ paths });
 	} catch (error) {
@@ -465,7 +463,7 @@ async function runPushFlow(
 	// chose. A re-drive renegotiates, and the fresh decision can differ from
 	// the first (a reaped reuse may need a real upload), so the summary
 	// counts read these rather than the initial decisions.
-	const effectiveActions = new Map<string, UploadDecision['action']>(
+	const effectiveActions = new Map<string, ParsedUploadDecision['action']>(
 		negotiation.uploads.map((decision) => [
 			decision.storePathHash,
 			decision.action
@@ -914,7 +912,7 @@ function hasGraceFact(
 // stored, unstretched, or the policy the cache resolves when none is stored
 // yet, which a real push's already-present decision would extend into a
 // deadline.
-function previewPathRow(decision: UploadPreviewDecision): ResultRow {
+function previewPathRow(decision: ParsedUploadPreviewDecision): ResultRow {
 	if (decision.grace?.retainUntil !== undefined) {
 		return {
 			label: decision.storePathHash,
@@ -948,7 +946,7 @@ function previewPathRow(decision: UploadPreviewDecision): ResultRow {
 // the preview shows at least one path with a grace fact, except for an
 // unretained plan, whose rows always render.
 function previewPathRows(
-	decisions: readonly UploadPreviewDecision[],
+	decisions: readonly ParsedUploadPreviewDecision[],
 	retention: RetentionPlan
 ): readonly ResultRow[] {
 	if (
@@ -1425,7 +1423,7 @@ interface CommitContext {
 	readonly options: CommitOptions;
 	readonly hasGraceFacts: boolean;
 	readonly onBytes: (count: number) => void;
-	readonly onRedriven: (fresh: UploadDecision) => void;
+	readonly onRedriven: (fresh: ParsedUploadDecision) => void;
 }
 
 // Commits one path over the push's shared session, falling back to a per-path
@@ -1447,8 +1445,8 @@ function commitTarget(
 ): CommitTarget {
 	return {
 		uploadId: decision.uploadId,
-		storePathHash: storePathHashSchema.parse(decision.storePathHash),
-		narHash: nixSha256HashSchema.parse(decision.narHash),
+		storePathHash: decision.storePathHash,
+		narHash: decision.narHash,
 		...(shouldReportGraceFacts && { retention: true as const })
 	};
 }
@@ -1543,8 +1541,8 @@ async function redriveExpiredCommit(
 	if (isSkip(fresh)) {
 		// Already in the store: nothing to verify, so it is servable at once.
 		return {
-			storePathHash: storePathHashSchema.parse(fresh.storePathHash),
-			narHash: nixSha256HashSchema.parse(fresh.narHash),
+			storePathHash: fresh.storePathHash,
+			narHash: fresh.narHash,
 			status: 'already-present',
 			settled: Promise.resolve(),
 			...(fresh.grace !== undefined && { grace: fresh.grace })
@@ -1602,7 +1600,7 @@ interface DivergentSkip {
 
 function divergentSkips(
 	closure: readonly NixValidPathInfo[],
-	decisions: readonly (UploadDecision | UploadPreviewDecision)[]
+	decisions: readonly (ParsedUploadDecision | ParsedUploadPreviewDecision)[]
 ): ReadonlyMap<string, DivergentSkip> {
 	const localByStorePathHash = new Map<string, NixValidPathInfo>(
 		closure.map((info) => [StorePath.hash(info.storePath), info])
@@ -1689,20 +1687,20 @@ function findNegotiatedPath(
 }
 
 function isSkip(
-	decision: UploadDecision
-): decision is Extract<UploadDecision, { action: 'skip' }> {
+	decision: ParsedUploadDecision
+): decision is Extract<ParsedUploadDecision, { action: 'skip' }> {
 	return decision.action === 'skip';
 }
 
 function isUpload(
-	decision: UploadDecision
-): decision is Extract<UploadDecision, { action: 'upload' }> {
+	decision: ParsedUploadDecision
+): decision is Extract<ParsedUploadDecision, { action: 'upload' }> {
 	return decision.action === 'upload';
 }
 
 function isReusedBlobCommit(
-	decision: UploadDecision
-): decision is Extract<UploadDecision, { action: 'commit' }> {
+	decision: ParsedUploadDecision
+): decision is Extract<ParsedUploadDecision, { action: 'commit' }> {
 	return decision.action === 'commit';
 }
 

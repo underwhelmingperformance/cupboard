@@ -1,6 +1,9 @@
 import { type S3ClientConfig } from '@aws-sdk/client-s3';
 import { type Options } from '@aws-sdk/lib-storage';
-import { type PushCredential } from '@cupboard/protocol/upload';
+import {
+	type ParsedPushCredential,
+	pushCredentialSchema
+} from '@cupboard/protocol/upload';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { awsCredentials, r2BlobUploader } from './r2-upload.ts';
@@ -18,7 +21,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('@aws-sdk/client-s3', () => ({ S3Client: mocks.S3Client }));
 vi.mock('@aws-sdk/lib-storage', () => ({ Upload: mocks.Upload }));
 
-const credential: PushCredential = {
+const credential = pushCredentialSchema.parse({
 	pushId: 'push-1',
 	accessKeyId: 'access-key',
 	secretAccessKey: 'secret-key',
@@ -26,7 +29,7 @@ const credential: PushCredential = {
 	endpoint: 'https://acct.r2.cloudflarestorage.com',
 	bucket: 'cupboard-blobs',
 	expiresAt: '2026-06-29T12:10:00.000Z'
-};
+});
 
 const expectedIdentity = {
 	accessKeyId: 'access-key',
@@ -51,7 +54,7 @@ describe('r2BlobUploader', () => {
 	const partBytes = 8 * 1024 * 1024;
 
 	it('builds a path-style auto-region S3 client whose credentials resolver renews through the provider', async () => {
-		const provider = vi.fn<() => Promise<PushCredential>>(() =>
+		const provider = vi.fn<() => Promise<ParsedPushCredential>>(() =>
 			Promise.resolve(credential)
 		);
 
@@ -83,7 +86,7 @@ describe('r2BlobUploader', () => {
 	});
 
 	it('streams the body to the requested key and awaits the managed upload', async () => {
-		const provider = vi.fn<() => Promise<PushCredential>>(() =>
+		const provider = vi.fn<() => Promise<ParsedPushCredential>>(() =>
 			Promise.resolve(credential)
 		);
 		const body = new ReadableStream<Uint8Array>();

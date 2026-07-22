@@ -3,10 +3,13 @@ import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
 	type OidcTrustAddBody,
 	type OidcTrustListResponse,
-	type OidcTrustRemoveResponse,
-	type OidcTrustSummary
+	type OidcTrustSummary,
+	type ParsedOidcTrustListResponse,
+	type ParsedOidcTrustRemoveResponse,
+	type ParsedOidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { isClaimSatisfied } from '@cupboard/protocol/oidc-trust-match';
+import { reuseViewPrioritySchema } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import { basicAuthHeader } from '@cupboard/shared/http';
 import type { Command } from 'commander';
@@ -79,9 +82,9 @@ export interface GithubSetupClient {
 	readonly policies: Pick<PolicyClient, 'graceList' | 'graceAdd'>;
 	readonly reuseViews: Pick<ReuseViewClient, 'list' | 'set'>;
 	readonly oidcTrust: {
-		list(): Promise<OidcTrustListResponse>;
-		add(input: OidcTrustAddBody): Promise<OidcTrustSummary>;
-		remove(input: { id: string }): Promise<OidcTrustRemoveResponse>;
+		list(): Promise<ParsedOidcTrustListResponse>;
+		add(input: OidcTrustAddBody): Promise<ParsedOidcTrustSummary>;
+		remove(input: { id: string }): Promise<ParsedOidcTrustRemoveResponse>;
 	};
 }
 
@@ -614,7 +617,9 @@ async function planReuseView(
 				await client.reuseViews.set({
 					name: pullRequestViewName,
 					selectors,
-					priority: destinationPriority + viewPriorityMargin
+					priority: reuseViewPrioritySchema.parse(
+						destinationPriority + viewPriorityMargin
+					)
 				});
 			}
 		};

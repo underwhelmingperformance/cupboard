@@ -4,7 +4,10 @@ import {
 } from '@cupboard/nix-store/scalars';
 import type { TokenResponse } from '@cupboard/protocol/oidc';
 import type { SignupResponse } from '@cupboard/protocol/signup';
-import type { CommitSessionFrame } from '@cupboard/protocol/upload';
+import {
+	type CommitSessionFrame,
+	uploadIdSchema
+} from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -462,7 +465,7 @@ describe('CupboardClient.commit', () => {
 		status: 'committed'
 	} as const;
 	const target = (uploadId: string) => ({
-		uploadId,
+		uploadId: uploadIdSchema.parse(uploadId),
 		storePathHash: response.storePathHash,
 		narHash: response.narHash
 	});

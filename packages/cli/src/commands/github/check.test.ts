@@ -1,9 +1,13 @@
 import { capturingReporter as reporter } from '@cupboard/cli-ui/testing';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
-import type { OidcTrustSummary } from '@cupboard/protocol/oidc';
-import type {
-	ReuseViewSelector,
-	ReuseViewSummary
+import {
+	oidcTrustListResponseSchema,
+	type OidcTrustSummary
+} from '@cupboard/protocol/oidc';
+import {
+	reuseViewListResponseSchema,
+	type ReuseViewSelector,
+	type ReuseViewSummary
 } from '@cupboard/protocol/reuse-views';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -112,10 +116,17 @@ function checkClient(overrides: {
 		},
 		reuseViews: {
 			list: () =>
-				Promise.resolve({ views: overrides.views ?? [pullRequestView()] })
+				Promise.resolve(
+					reuseViewListResponseSchema.parse({
+						views: overrides.views ?? [pullRequestView()]
+					})
+				)
 		},
 		oidcTrust: {
-			list: () => Promise.resolve({ rules: overrides.rules ?? [] })
+			list: () =>
+				Promise.resolve(
+					oidcTrustListResponseSchema.parse({ rules: overrides.rules ?? [] })
+				)
 		}
 	};
 }

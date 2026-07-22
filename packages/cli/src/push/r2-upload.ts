@@ -1,6 +1,6 @@
 import { S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
-import { type PushCredential } from '@cupboard/protocol/upload';
+import { type ParsedPushCredential } from '@cupboard/protocol/upload';
 
 // 8 MiB parts, above R2's 5 MiB multipart minimum: a NAR that compresses smaller
 // goes in one PutObject, a larger one streams as multipart, bounding memory to
@@ -10,7 +10,7 @@ const partBytes = 8 * 1024 * 1024;
 // Re-fetches the push's credential. The S3 client calls it when it has no
 // credential yet and again once the cached one nears expiry, so a long push
 // renews mid-upload without the caller driving the refresh.
-export type CredentialProvider = () => Promise<PushCredential>;
+export type CredentialProvider = () => Promise<ParsedPushCredential>;
 
 // Streams one compressed NAR to R2; the managed upload chooses single PutObject
 // or multipart by size on its own.
@@ -19,7 +19,7 @@ export type BlobUploader = (
 	body: ReadableStream<Uint8Array>
 ) => Promise<void>;
 
-export function awsCredentials(credential: PushCredential): {
+export function awsCredentials(credential: ParsedPushCredential): {
 	readonly accessKeyId: string;
 	readonly secretAccessKey: string;
 	readonly sessionToken: string;

@@ -1,4 +1,7 @@
-import { type PushCredential } from '@cupboard/protocol/upload';
+import {
+	type ParsedPushCredential,
+	type PushId
+} from '@cupboard/protocol/upload';
 
 import { type CredentialProvider } from './r2-upload.ts';
 
@@ -6,8 +9,8 @@ import { type CredentialProvider } from './r2-upload.ts';
 // renewal stays under the same staging prefix. The first call passes none and
 // the server signs a fresh id.
 export type IssuePushCredential = (
-	pushId: string | undefined
-) => Promise<PushCredential>;
+	pushId: PushId | undefined
+) => Promise<ParsedPushCredential>;
 
 export interface CredentialSessionOptions {
 	/** Re-issue once the credential is within this long of expiry. */
@@ -20,7 +23,7 @@ export interface CredentialSessionOptions {
 // R2 credential bound to it.
 export interface CredentialSession {
 	/** The signed push id every negotiate names, issued on first use. */
-	pushId(): Promise<string>;
+	pushId(): Promise<PushId>;
 	/** The provider the uploader signs with; re-issues as the credential expires. */
 	readonly provider: CredentialProvider;
 }
@@ -42,14 +45,14 @@ export function credentialSession(
 	const refreshMarginMs = options.refreshMarginMs ?? defaultRefreshMarginMs;
 	const now = options.now ?? (() => Date.now());
 
-	let pushId: string | undefined;
-	let cached: PushCredential | undefined;
-	let inFlight: Promise<PushCredential> | undefined;
+	let pushId: PushId | undefined;
+	let cached: ParsedPushCredential | undefined;
+	let inFlight: Promise<ParsedPushCredential> | undefined;
 
-	const isFresh = (credential: PushCredential): boolean =>
+	const isFresh = (credential: ParsedPushCredential): boolean =>
 		new Date(credential.expiresAt).getTime() - now() > refreshMarginMs;
 
-	const issueAndCache = async (): Promise<PushCredential> => {
+	const issueAndCache = async (): Promise<ParsedPushCredential> => {
 		try {
 			const credential = await issue(pushId);
 			pushId = credential.pushId;

@@ -5,9 +5,10 @@ import {
 	type ClaimMatch,
 	type OidcTrustAddBody,
 	oidcTrustAddBodySchema,
-	type OidcTrustListResponse,
-	type OidcTrustRemoveResponse,
-	type OidcTrustSummary
+	type OidcTrustSummary,
+	type ParsedOidcTrustListResponse,
+	type ParsedOidcTrustRemoveResponse,
+	type ParsedOidcTrustSummary
 } from '@cupboard/protocol/oidc';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
@@ -147,10 +148,10 @@ interface OidcTrustAddOptions {
  * satisfies it by construction.
  */
 export interface OidcTrustClient {
-	list(): Promise<OidcTrustListResponse>;
-	get(input: { id: string }): Promise<OidcTrustSummary>;
-	add(input: OidcTrustAddBody): Promise<OidcTrustSummary>;
-	remove(input: { id: string }): Promise<OidcTrustRemoveResponse>;
+	list(): Promise<ParsedOidcTrustListResponse>;
+	get(input: { id: string }): Promise<ParsedOidcTrustSummary>;
+	add(input: OidcTrustAddBody): Promise<ParsedOidcTrustSummary>;
+	remove(input: { id: string }): Promise<ParsedOidcTrustRemoveResponse>;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {

@@ -1,10 +1,10 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { selectorForCache } from '@cupboard/nix-store/scalars';
 import type {
-	RootEnsureResponse,
-	RootListResponse,
-	RootRemoveResponse,
-	RootSetResponse,
+	ParsedRootEnsureResponse,
+	ParsedRootListResponse,
+	ParsedRootRemoveResponse,
+	ParsedRootSetResponse,
 	RootSummary
 } from '@cupboard/protocol/retention';
 import {
@@ -50,18 +50,18 @@ export interface RootClient {
 		name: string;
 		targets: string[];
 		ttlSeconds?: number;
-	}): Promise<RootSetResponse>;
+	}): Promise<ParsedRootSetResponse>;
 	ensure(input: {
 		cacheName: string;
 		name: string;
 		targets: string[];
 		ttlSeconds?: number;
-	}): Promise<RootEnsureResponse>;
-	list(input: { cacheName: string }): Promise<RootListResponse>;
+	}): Promise<ParsedRootEnsureResponse>;
+	list(input: { cacheName: string }): Promise<ParsedRootListResponse>;
 	remove(input: {
 		cacheName: string;
 		name: string;
-	}): Promise<RootRemoveResponse>;
+	}): Promise<ParsedRootRemoveResponse>;
 }
 
 export function registerRootCommands(

@@ -2,12 +2,12 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import type {
-	KeyListResponse,
-	KeyRetireResponse,
-	KeyRotateResponse,
-	SigningKeyStage,
-	SigningKeySummary
+import {
+	keyListResponseSchema,
+	keyRetireResponseSchema,
+	keyRotateResponseSchema,
+	type SigningKeyStage,
+	type SigningKeySummary
 } from '@cupboard/protocol/keys';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -36,15 +36,18 @@ function keyClient(overrides: Partial<KeyClient>): KeyClient {
 	return {
 		list: () => Promise.resolve({ keys: [] }),
 		rotate: () =>
-			Promise.resolve({
-				rotated: summary({
-					id: uuid,
-					publicKey: 'cupboard-2:cHVi',
-					stage: 'publication'
-				}),
-				keys: []
-			}),
-		retire: ({ id }) => Promise.resolve({ id, stage: 'absent' }),
+			Promise.resolve(
+				keyRotateResponseSchema.parse({
+					rotated: summary({
+						id: uuid,
+						publicKey: 'cupboard-2:cHVi',
+						stage: 'publication'
+					}),
+					keys: []
+				})
+			),
+		retire: ({ id }) =>
+			Promise.resolve(keyRetireResponseSchema.parse({ id, stage: 'absent' })),
 		...overrides
 	};
 }
@@ -62,12 +65,12 @@ describe('describeStage', () => {
 describe('runKeyList', () => {
 	it('reports a row per key', async () => {
 		const results: ResultRow[][] = [];
-		const response: KeyListResponse = {
+		const response = keyListResponseSchema.parse({
 			keys: [
 				summary({ id: 'active', publicKey: 'cupboard-1:k1', stage: 'signing' }),
 				summary({ id: uuid, publicKey: 'cupboard-2:k2', stage: 'publication' })
 			]
-		};
+		});
 
 		await runKeyList(reporter(results), {
 			list: () => Promise.resolve(response)
@@ -101,7 +104,7 @@ describe('runKeyRotate', () => {
 	it('rotates, reports the new key, and prints migration guidance', async () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
-		const response: KeyRotateResponse = {
+		const response = keyRotateResponseSchema.parse({
 			rotated: summary({
 				id: uuid,
 				publicKey: 'cupboard-2:k2',
@@ -111,7 +114,7 @@ describe('runKeyRotate', () => {
 				summary({ id: 'active', publicKey: 'cupboard-1:k1' }),
 				summary({ id: uuid, publicKey: 'cupboard-2:k2' })
 			]
-		};
+		});
 
 		await runKeyRotate(reporter(results, infos), {
 			rotate: () => Promise.resolve(response)
@@ -152,7 +155,7 @@ describe('runKeyRetire', () => {
 		'retires to $stage once confirmed',
 		async ({ stage, stageValue, infos }) => {
 			const calls: { id: string }[] = [];
-			const response: KeyRetireResponse = { id: 'active', stage };
+			const response = keyRetireResponseSchema.parse({ id: 'active', stage });
 			const { ui, captured } = fakeCliUi({ confirm: 'yes' });
 
 			await runKeyRetire(

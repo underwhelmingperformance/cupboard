@@ -1,9 +1,10 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import type {
-	CacheListResponse,
-	CacheRemoveResponse,
-	CacheSummary
+	CacheSummary,
+	ParsedCacheListResponse,
+	ParsedCacheRemoveResponse,
+	ParsedCacheSummary
 } from '@cupboard/protocol/caches';
 import {
 	formatCount,
@@ -35,12 +36,15 @@ interface CacheRemoveOptions {
  * satisfies it by construction.
  */
 export interface CacheClient {
-	list(): Promise<CacheListResponse>;
-	put(input: { cacheName: string; priority: number }): Promise<CacheSummary>;
+	list(): Promise<ParsedCacheListResponse>;
+	put(input: {
+		cacheName: string;
+		priority: number;
+	}): Promise<ParsedCacheSummary>;
 	remove(input: {
 		params: { cacheName: string };
 		query?: { force?: boolean };
-	}): Promise<CacheRemoveResponse>;
+	}): Promise<ParsedCacheRemoveResponse>;
 }
 
 export function parsePriority(value: string): number {

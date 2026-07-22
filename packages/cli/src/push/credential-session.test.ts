@@ -1,12 +1,16 @@
-import { type PushCredential } from '@cupboard/protocol/upload';
+import {
+	type ParsedPushCredential,
+	type PushCredential,
+	pushCredentialSchema
+} from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import { credentialSession } from './credential-session.ts';
 
 function credential(
 	overrides: Partial<PushCredential> & { expiresAt: string }
-): PushCredential {
-	return {
+) {
+	return pushCredentialSchema.parse({
 		pushId: 'push-1',
 		accessKeyId: 'access',
 		secretAccessKey: 'secret',
@@ -14,7 +18,7 @@ function credential(
 		endpoint: 'https://acct.r2.cloudflarestorage.com',
 		bucket: 'cupboard-blobs',
 		...overrides
-	};
+	});
 }
 
 const base = Date.parse('2026-06-30T12:00:00.000Z');
@@ -82,7 +86,7 @@ describe('credentialSession', () => {
 	it('shares one in-flight issue across concurrent callers', async () => {
 		let calls = 0;
 		const { promise: issued, resolve: resolveIssue } =
-			Promise.withResolvers<PushCredential>();
+			Promise.withResolvers<ParsedPushCredential>();
 		const session = credentialSession(
 			() => {
 				calls += 1;

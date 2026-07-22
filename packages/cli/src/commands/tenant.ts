@@ -4,11 +4,12 @@ import type { CliUi } from '@cupboard/cli-ui';
 import { type TenantId, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	defaultReadUser,
+	type ParsedTenantListResponse,
+	type ParsedTenantMutateResponse,
+	type ParsedTenantReadModeResponse,
+	type ParsedTenantSummary,
 	type TenantCreateBody,
 	tenantCreateBodySchema,
-	type TenantListResponse,
-	type TenantMutateResponse,
-	type TenantReadModeResponse,
 	tenantReadModeSchema,
 	type TenantSummary
 } from '@cupboard/protocol/tenants';
@@ -27,20 +28,22 @@ import { deploymentUrlArgument } from '../url-argument.ts';
  * satisfies it by construction.
  */
 export interface TenantClient {
-	list(): Promise<TenantListResponse>;
-	create(input: TenantCreateBody): Promise<TenantSummary>;
-	suspend(input: { id: TenantId }): Promise<TenantMutateResponse>;
-	resume(input: { id: TenantId }): Promise<TenantMutateResponse>;
+	list(): Promise<ParsedTenantListResponse>;
+	create(input: TenantCreateBody): Promise<ParsedTenantSummary>;
+	suspend(input: { id: TenantId }): Promise<ParsedTenantMutateResponse>;
+	resume(input: { id: TenantId }): Promise<ParsedTenantMutateResponse>;
 	setReadMode(input: {
 		id: TenantId;
 		readMode: 'public' | 'private';
-	}): Promise<TenantReadModeResponse>;
+	}): Promise<ParsedTenantReadModeResponse>;
 	rotateReadCredential(input: {
 		id: TenantId;
 		read: { user: string; password: string };
-	}): Promise<TenantReadModeResponse>;
-	clearReadCredential(input: { id: TenantId }): Promise<TenantReadModeResponse>;
-	remove(input: { id: TenantId }): Promise<TenantMutateResponse>;
+	}): Promise<ParsedTenantReadModeResponse>;
+	clearReadCredential(input: {
+		id: TenantId;
+	}): Promise<ParsedTenantReadModeResponse>;
+	remove(input: { id: TenantId }): Promise<ParsedTenantMutateResponse>;
 }
 
 interface RotateCredentialOptions {

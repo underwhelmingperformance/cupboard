@@ -1,6 +1,9 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import { InvalidStorePathError } from '@cupboard/nix-store/errors';
-import type { DeletePathResponse } from '@cupboard/protocol/upload';
+import {
+	type DeletePathResponse,
+	pathDeletionResponseSchema
+} from '@cupboard/protocol/upload';
 import { describe, expect, it } from 'vitest';
 
 import { type DeleteClient, describeNarOutcome, runDelete } from './delete.ts';
@@ -48,11 +51,13 @@ function recordingClient(): {
 			remove(input) {
 				calls.push(input);
 
-				return Promise.resolve({
-					storePathHash: input.hash,
-					deleted: true,
-					narScheduledForDeletion: false
-				});
+				return Promise.resolve(
+					pathDeletionResponseSchema.parse({
+						storePathHash: input.hash,
+						deleted: true,
+						narScheduledForDeletion: false
+					})
+				);
 			}
 		}
 	};
@@ -109,11 +114,13 @@ describe('runDelete', () => {
 				remove(input) {
 					calls.push(input);
 
-					return Promise.resolve({
-						storePathHash: input.hash,
-						deleted: false,
-						narScheduledForDeletion: false
-					});
+					return Promise.resolve(
+						pathDeletionResponseSchema.parse({
+							storePathHash: input.hash,
+							deleted: false,
+							narScheduledForDeletion: false
+						})
+					);
 				}
 			});
 			outcome = { value: undefined };

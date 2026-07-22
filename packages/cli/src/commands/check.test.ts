@@ -1,4 +1,7 @@
-import type { CheckReport } from '@cupboard/protocol/reports';
+import {
+	checkReportSchema,
+	type ParsedCheckReport
+} from '@cupboard/protocol/reports';
 import type { Reporter, ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
@@ -85,7 +88,7 @@ function reporter(captured: Captured): Reporter {
 }
 
 function checkClient(
-	report: CheckReport,
+	report: ParsedCheckReport,
 	calls: { deep: boolean }[]
 ): CheckClient {
 	return {
@@ -103,12 +106,12 @@ describe('runCheck', () => {
 	it('reports the counts and a clean bill of health', async () => {
 		const calls: { deep: boolean }[] = [];
 		const captured: Captured = { results: [], infos: [], warnings: [] };
-		const report: CheckReport = {
+		const report = checkReportSchema.parse({
 			narInfosChecked: 3,
 			narBlobsChecked: 2,
 			complete: true,
 			discrepancies: []
-		};
+		});
 
 		await runCheck(false, reporter(captured), checkClient(report, calls));
 
@@ -132,7 +135,7 @@ describe('runCheck', () => {
 	it('forwards a deep check and warns once per discrepancy', async () => {
 		const calls: { deep: boolean }[] = [];
 		const captured: Captured = { results: [], infos: [], warnings: [] };
-		const report: CheckReport = {
+		const report = checkReportSchema.parse({
 			narInfosChecked: 2,
 			narBlobsChecked: 1,
 			complete: false,
@@ -150,7 +153,7 @@ describe('runCheck', () => {
 					narHash
 				}
 			]
-		};
+		});
 
 		await runCheck(true, reporter(captured), checkClient(report, calls));
 

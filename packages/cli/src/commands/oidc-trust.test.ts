@@ -2,10 +2,11 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import type {
-	OidcTrustAddBody,
-	OidcTrustListResponse,
-	OidcTrustSummary
+import {
+	type OidcTrustAddBody,
+	oidcTrustListResponseSchema,
+	type OidcTrustSummary,
+	oidcTrustSummarySchema
 } from '@cupboard/protocol/oidc';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -84,8 +85,8 @@ const ciGrant: OidcTrustSummary['permittedGrants'][number] = {
 const ciGrantRow =
 	'cache owner-ci: upload:negotiate, upload:status, upload:commit';
 
-function summary(overrides: Partial<OidcTrustSummary>): OidcTrustSummary {
-	return {
+function summary(overrides: Partial<OidcTrustSummary>) {
+	return oidcTrustSummarySchema.parse({
 		id: 'rule-1',
 		issuer: 'https://token.actions.githubusercontent.com',
 		audience: 'https://cache.example.workers.dev',
@@ -93,7 +94,7 @@ function summary(overrides: Partial<OidcTrustSummary>): OidcTrustSummary {
 		permittedGrants: [ciGrant],
 		disabled: false,
 		...overrides
-	};
+	});
 }
 
 function trustClient(overrides: Partial<OidcTrustClient>): OidcTrustClient {
@@ -109,7 +110,7 @@ function trustClient(overrides: Partial<OidcTrustClient>): OidcTrustClient {
 describe('runOidcTrustList', () => {
 	it('reports a row per rule, flagging disabled ones', async () => {
 		const results: ResultRow[][] = [];
-		const response: OidcTrustListResponse = {
+		const response = oidcTrustListResponseSchema.parse({
 			rules: [
 				summary({
 					id: 'owner',
@@ -118,7 +119,7 @@ describe('runOidcTrustList', () => {
 				}),
 				summary({ id: 'rule-1', disabled: true })
 			]
-		};
+		});
 
 		await runOidcTrustList(reporter(results), {
 			list: () => Promise.resolve(response)

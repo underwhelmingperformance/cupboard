@@ -1,14 +1,16 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { selectorForCache } from '@cupboard/nix-store/scalars';
 import {
-	type GraceCoverageResponse,
 	type GracePolicyAddBody,
-	type GracePolicyListResponse,
-	type GracePolicyRemoveResponse,
 	type GracePolicySummary,
+	type ParsedGraceCoverageResponse,
+	type ParsedGracePolicyListResponse,
+	type ParsedGracePolicyRemoveResponse,
+	type ParsedGracePolicySummary,
+	type ParsedRetentionPolicyListResponse,
+	type ParsedRetentionPolicyRemoveResponse,
+	type ParsedRetentionPolicySummary,
 	type RetentionPolicyAddBody,
-	type RetentionPolicyListResponse,
-	type RetentionPolicyRemoveResponse,
 	type RetentionPolicyScope,
 	retentionPolicyScopeSchema,
 	type RetentionPolicySummary
@@ -52,13 +54,15 @@ interface ConfirmableOptions {
  * satisfies it by construction.
  */
 export interface PolicyClient {
-	list(): Promise<RetentionPolicyListResponse>;
-	add(input: RetentionPolicyAddBody): Promise<RetentionPolicySummary>;
-	remove(input: { id: string }): Promise<RetentionPolicyRemoveResponse>;
-	graceList(): Promise<GracePolicyListResponse>;
-	graceAdd(input: GracePolicyAddBody): Promise<GracePolicySummary>;
-	graceRemove(input: { id: string }): Promise<GracePolicyRemoveResponse>;
-	graceCoverage(input: { cacheName: string }): Promise<GraceCoverageResponse>;
+	list(): Promise<ParsedRetentionPolicyListResponse>;
+	add(input: RetentionPolicyAddBody): Promise<ParsedRetentionPolicySummary>;
+	remove(input: { id: string }): Promise<ParsedRetentionPolicyRemoveResponse>;
+	graceList(): Promise<ParsedGracePolicyListResponse>;
+	graceAdd(input: GracePolicyAddBody): Promise<ParsedGracePolicySummary>;
+	graceRemove(input: { id: string }): Promise<ParsedGracePolicyRemoveResponse>;
+	graceCoverage(input: {
+		cacheName: string;
+	}): Promise<ParsedGraceCoverageResponse>;
 }
 
 function parseScope(value: string): RetentionPolicyScope {

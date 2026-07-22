@@ -15,7 +15,7 @@ export const buildReceiptSchema = z.object({
 	subjects: z.array(buildSubjectSchema)
 });
 
-// The unbranded construction shape: `build.ts` assembles receipts directly
-// and never parses its own output. Reading a receipt back goes through
+// The shape `build.ts` assembles a receipt in: it writes receipts directly, so
+// this is the unbranded input form. Reading a receipt back goes through
 // `buildReceiptSchema.parse`, whose output carries the branded hash.
 export type BuildReceipt = z.input<typeof buildReceiptSchema>;

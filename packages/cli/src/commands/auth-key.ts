@@ -1,9 +1,9 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import type {
-	AuthKeyListResponse,
-	AuthKeyRetireResponse,
-	AuthKeyRotateResponse,
-	AuthKeySummary
+	AuthKeySummary,
+	ParsedAuthKeyListResponse,
+	ParsedAuthKeyRetireResponse,
+	ParsedAuthKeyRotateResponse
 } from '@cupboard/protocol/keys';
 import {
 	formatTimestamp,
@@ -28,9 +28,9 @@ interface RetireOptions {
  * satisfies it by construction.
  */
 export interface AuthKeyClient {
-	list(): Promise<AuthKeyListResponse>;
-	rotate(): Promise<AuthKeyRotateResponse>;
-	retire(input: { kid: string }): Promise<AuthKeyRetireResponse>;
+	list(): Promise<ParsedAuthKeyListResponse>;
+	rotate(): Promise<ParsedAuthKeyRotateResponse>;
+	retire(input: { kid: string }): Promise<ParsedAuthKeyRetireResponse>;
 }
 
 export function registerAuthKeyCommands(

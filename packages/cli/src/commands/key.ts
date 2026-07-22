@@ -1,8 +1,8 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import type {
-	KeyListResponse,
-	KeyRetireResponse,
-	KeyRotateResponse,
+	ParsedKeyListResponse,
+	ParsedKeyRetireResponse,
+	ParsedKeyRotateResponse,
 	SigningKeyStage,
 	SigningKeySummary
 } from '@cupboard/protocol/keys';
@@ -25,9 +25,9 @@ interface RetireOptions {
  * satisfies it by construction.
  */
 export interface KeyClient {
-	list(): Promise<KeyListResponse>;
-	rotate(): Promise<KeyRotateResponse>;
-	retire(input: { id: string }): Promise<KeyRetireResponse>;
+	list(): Promise<ParsedKeyListResponse>;
+	rotate(): Promise<ParsedKeyRotateResponse>;
+	retire(input: { id: string }): Promise<ParsedKeyRetireResponse>;
 }
 
 export function registerKeyCommands(

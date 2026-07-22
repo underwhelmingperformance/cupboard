@@ -2,14 +2,14 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
-import type {
-	GracePolicyListResponse,
-	GracePolicyRemoveResponse,
-	GracePolicySummary,
-	RetentionPolicyAddBody,
-	RetentionPolicyListResponse,
-	RetentionPolicyRemoveResponse,
-	RetentionPolicySummary
+import {
+	type GracePolicyListResponse,
+	type GracePolicyRemoveResponse,
+	type GracePolicySummary,
+	type RetentionPolicyAddBody,
+	retentionPolicyListResponseSchema,
+	type RetentionPolicyRemoveResponse,
+	retentionPolicySummarySchema
 } from '@cupboard/protocol/retention';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -28,7 +28,10 @@ import {
 function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 	return {
 		list: () => Promise.resolve({ policies: [] }),
-		add: (body) => Promise.resolve({ id: 'p1', ...body }),
+		add: (body) =>
+			Promise.resolve(
+				retentionPolicySummarySchema.parse({ id: 'p1', ...body })
+			),
 		remove: ({ id }) => Promise.resolve({ id, removed: false }),
 		graceList: () => Promise.resolve({ policies: [] }),
 		graceAdd: (body) => Promise.resolve({ id: 'g1', createdAt: '', ...body }),
@@ -41,7 +44,7 @@ function policyClient(overrides: Partial<PolicyClient>): PolicyClient {
 describe('runPolicyList', () => {
 	it('reports a row per policy', async () => {
 		const results: ResultRow[][] = [];
-		const response: RetentionPolicyListResponse = {
+		const response = retentionPolicyListResponseSchema.parse({
 			policies: [
 				{
 					id: 'p1',
@@ -50,7 +53,7 @@ describe('runPolicyList', () => {
 					ttlSeconds: 604_800
 				}
 			]
-		};
+		});
 
 		await runPolicyList(reporter(results), {
 			list: () => Promise.resolve(response)
@@ -80,12 +83,12 @@ describe('runPolicyAdd', () => {
 	it('builds a cache-scoped body and reports the policy', async () => {
 		const calls: RetentionPolicyAddBody[] = [];
 		const results: ResultRow[][] = [];
-		const summary: RetentionPolicySummary = {
+		const summary = retentionPolicySummarySchema.parse({
 			id: 'p1',
 			scope: 'cache',
 			pattern: 'builds',
 			ttlSeconds: 1_209_600
-		};
+		});
 
 		await runPolicyAdd('cache', 'builds', 1_209_600, reporter(results), {
 			add(body) {

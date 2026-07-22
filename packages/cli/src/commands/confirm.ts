@@ -1,6 +1,7 @@
 import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
+	type ParsedUploadConfirmResponse,
 	type UploadConfirmedPath,
 	uploadConfirmMaxPaths,
 	type UploadConfirmResponse
@@ -38,7 +39,7 @@ export interface ConfirmClient {
 	confirm(input: {
 		cacheName: string;
 		storePathHashes: string[];
-	}): Promise<UploadConfirmResponse>;
+	}): Promise<ParsedUploadConfirmResponse>;
 }
 
 export function registerConfirmCommand(

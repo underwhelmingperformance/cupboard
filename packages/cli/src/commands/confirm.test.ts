@@ -1,9 +1,10 @@
 import { fakeCliUi } from '@cupboard/cli-ui/testing';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
+	type ParsedUploadConfirmResponse,
 	type UploadConfirmedPath,
 	uploadConfirmMaxPaths,
-	type UploadConfirmResponse
+	uploadConfirmResponseSchema
 } from '@cupboard/protocol/upload';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -27,7 +28,7 @@ const runtimePath = '/nix/store/3123456789abcdfghijklmnpqrsvwxyz-runtime';
 const appHash = StorePath.hash(appPath);
 const runtimeHash = StorePath.hash(runtimePath);
 
-function confirmClient(response: UploadConfirmResponse): ConfirmClient {
+function confirmClient(response: ParsedUploadConfirmResponse): ConfirmClient {
 	return { confirm: () => Promise.resolve(response) };
 }
 
@@ -80,7 +81,7 @@ describe('runConfirm', () => {
 		}
 	])('reports a row for $name', async ({ path, row }) => {
 		const { ui, captured } = fakeCliUi();
-		const response: UploadConfirmResponse = { paths: [path] };
+		const response = uploadConfirmResponseSchema.parse({ paths: [path] });
 
 		try {
 			await runConfirm(
@@ -102,12 +103,12 @@ describe('runConfirm', () => {
 
 	it('exits non-zero naming every unconfirmed path when any path is not confirmed', async () => {
 		const { ui } = fakeCliUi();
-		const response: UploadConfirmResponse = {
+		const response = uploadConfirmResponseSchema.parse({
 			paths: [
 				{ storePathHash: appHash, confirmed: true, grace: {} },
 				{ storePathHash: runtimeHash, confirmed: false }
 			]
-		};
+		});
 
 		let error: unknown;
 
@@ -131,9 +132,9 @@ describe('runConfirm', () => {
 
 	it('does not throw when every path confirms', async () => {
 		const { ui } = fakeCliUi();
-		const response: UploadConfirmResponse = {
+		const response = uploadConfirmResponseSchema.parse({
 			paths: [{ storePathHash: appHash, confirmed: true, grace: {} }]
-		};
+		});
 
 		await expect(
 			runConfirm('_default', [appPath], ui.reporter(), confirmClient(response))
@@ -161,13 +162,15 @@ describe('runConfirm', () => {
 						return Promise.reject(rejection);
 					}
 
-					return Promise.resolve({
-						paths: input.storePathHashes.map((storePathHash) => ({
-							storePathHash,
-							confirmed: true,
-							grace: {}
-						}))
-					});
+					return Promise.resolve(
+						uploadConfirmResponseSchema.parse({
+							paths: input.storePathHashes.map((storePathHash) => ({
+								storePathHash,
+								confirmed: true,
+								grace: {}
+							}))
+						})
+					);
 				}
 			});
 		} catch (error_: unknown) {
@@ -206,13 +209,15 @@ describe('runConfirm', () => {
 					return Promise.reject(abort);
 				}
 
-				return Promise.resolve({
-					paths: input.storePathHashes.map((storePathHash) => ({
-						storePathHash,
-						confirmed: true,
-						grace: {}
-					}))
-				});
+				return Promise.resolve(
+					uploadConfirmResponseSchema.parse({
+						paths: input.storePathHashes.map((storePathHash) => ({
+							storePathHash,
+							confirmed: true,
+							grace: {}
+						}))
+					})
+				);
 			}
 		});
 
@@ -238,13 +243,15 @@ describe('runConfirm', () => {
 			confirm(input) {
 				calls.push(input.storePathHashes);
 
-				return Promise.resolve({
-					paths: input.storePathHashes.map((storePathHash) => ({
-						storePathHash,
-						confirmed: true,
-						grace: {}
-					}))
-				});
+				return Promise.resolve(
+					uploadConfirmResponseSchema.parse({
+						paths: input.storePathHashes.map((storePathHash) => ({
+							storePathHash,
+							confirmed: true,
+							grace: {}
+						}))
+					})
+				);
 			}
 		});
 

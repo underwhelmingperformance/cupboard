@@ -6,6 +6,7 @@ import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	uploadActionDecisionSchema,
 	uploadDecisionSchema,
+	type UploadId,
 	type UploadPathNegotiationFields
 } from '@cupboard/protocol/upload';
 import { expect } from 'vitest';
@@ -87,7 +88,7 @@ export async function pushStorePaths(
 }
 
 export interface NegotiatedUpload {
-	readonly uploadId: string;
+	readonly uploadId: UploadId;
 	readonly r2Key: string;
 	readonly storePathHash: StorePathHash;
 	readonly narHash: NixSha256HashString;
