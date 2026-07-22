@@ -1,5 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
 import { StatusCodes } from 'http-status-codes';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -58,7 +59,7 @@ function byCodeUnit(a: string, b: string): number {
 // background verify pass must reach.
 async function stageDeferredForNewTenant(
 	id: string
-): Promise<{ readonly token: string; readonly uploadId: string }> {
+): Promise<{ readonly token: string; readonly uploadId: UploadId }> {
 	const issuer = await provisionNamedTenant(id);
 	const token = await issueTokenForTenant(
 		testServerFor(id),

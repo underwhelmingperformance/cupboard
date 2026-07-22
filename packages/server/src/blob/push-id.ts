@@ -4,6 +4,15 @@
 // signed, and the server keeps no per-push state to check it against. The domain
 // prefix versions the construction so a future scheme can be told apart.
 
+import { type PushId, pushIdSchema } from '@cupboard/protocol/upload';
+import { z } from 'zod';
+
+// The HMAC secret the server signs and checks push ids with, read from the
+// PUSH_ID_SIGNING_KEY binding. Branded so a bare string can never stand in for
+// the signing key at a call that expects it.
+export const pushIdSigningKeySchema = z.string().brand('PushIdSigningKey');
+export type PushIdSigningKey = z.infer<typeof pushIdSigningKeySchema>;
+
 const pushIdDomain = 'cupboard/push-id/v1';
 const nonceByteLength = 16;
 const hmacByteLength = 32;
@@ -17,7 +26,7 @@ function toHex(bytes: Uint8Array): string {
 	);
 }
 
-async function hmacKey(secret: string): Promise<CryptoKey> {
+async function hmacKey(secret: PushIdSigningKey): Promise<CryptoKey> {
 	return crypto.subtle.importKey(
 		'raw',
 		textEncoder.encode(secret),
@@ -56,16 +65,18 @@ function isConstantTimeEqual(a: string, b: string): boolean {
  * issuing service can supply fresh randomness while tests stay deterministic.
  */
 export async function issuePushId(
-	secret: string,
+	secret: PushIdSigningKey,
 	nonce: Uint8Array
-): Promise<string> {
+): Promise<PushId> {
 	const nonceHex = toHex(nonce);
 
-	return `${nonceHex}${await tagFor(await hmacKey(secret), nonceHex)}`;
+	return pushIdSchema.parse(
+		`${nonceHex}${await tagFor(await hmacKey(secret), nonceHex)}`
+	);
 }
 
 /** Signs a push id over a fresh random nonce. */
-export async function createPushId(secret: string): Promise<string> {
+export async function createPushId(secret: PushIdSigningKey): Promise<PushId> {
 	return issuePushId(
 		secret,
 		crypto.getRandomValues(new Uint8Array(nonceByteLength))
@@ -74,7 +85,7 @@ export async function createPushId(secret: string): Promise<string> {
 
 /** Whether the push id carries a tag this secret would have produced. */
 export async function verifyPushId(
-	secret: string,
+	secret: PushIdSigningKey,
 	pushId: string
 ): Promise<boolean> {
 	if (pushId.length !== pushIdLength || !/^[0-9a-f]+$/.test(pushId)) {

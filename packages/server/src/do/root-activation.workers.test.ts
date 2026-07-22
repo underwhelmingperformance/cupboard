@@ -1,4 +1,5 @@
 import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { eq } from 'drizzle-orm';
@@ -35,7 +36,7 @@ import {
 
 type PendingRow = typeof pendingUploads.$inferSelect;
 
-async function snapshotPendingRow(uploadId: string): Promise<PendingRow> {
+async function snapshotPendingRow(uploadId: UploadId): Promise<PendingRow> {
 	const row = await runInDurableObject(currentServer(), (_instance, state) =>
 		drizzle(state.storage, { schema: { pendingUploads } })
 			.select()

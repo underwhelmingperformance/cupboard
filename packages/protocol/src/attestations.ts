@@ -6,7 +6,7 @@ import {
 } from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
-import { pushIdSchema } from './upload.ts';
+import { pushIdSchema, uploadIdSchema } from './upload.ts';
 
 export const attestationDescriptorSchema = z.strictObject({
 	digest: sha256HexDigestSchema,
@@ -54,7 +54,7 @@ export const attestationUploadDecisionSchema = z.strictObject({
 	action: z.literal('upload'),
 	storePathHash: storePathHashSchema,
 	digest: sha256HexDigestSchema,
-	uploadId: z.string(),
+	uploadId: uploadIdSchema,
 	r2Key: z.string(),
 	expiresAt: z.string()
 });

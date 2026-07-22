@@ -9,7 +9,9 @@ import { type VerifyReport } from '@cupboard/protocol/reports';
 import {
 	type ParsedUploadGraceFact,
 	type ParsedUploadPathNegotiation,
-	type ParsedUploadStatusResponse
+	type ParsedUploadStatusResponse,
+	type SessionId,
+	type UploadId
 } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, asc, eq, gt, inArray, isNull, lte, or, sql } from 'drizzle-orm';
@@ -99,7 +101,7 @@ type ReconcileOutcome = 'removed' | 'restored' | 'unchanged';
  * was first promoted, so the consumer skips the decode for it.
  */
 export interface PendingVerification {
-	readonly uploadId: string;
+	readonly uploadId: UploadId;
 	readonly r2Key: string;
 	readonly narHash: NixSha256HashString;
 	readonly narSize: number;
@@ -133,7 +135,7 @@ export type PromotionState = 'promote' | 'already-promoted';
 // One upload's verdict, carried back to the DO so a whole batch settles in a
 // single RPC.
 export interface VerificationResult {
-	readonly uploadId: string;
+	readonly uploadId: UploadId;
 	readonly verdict: VerificationVerdict;
 }
 
@@ -243,9 +245,9 @@ export class VerificationService {
 	// row is already gone, which means the upload cleared while this pass was
 	// working it and the captured id is as good as any.
 	private currentSessionId(
-		uploadId: string,
-		captured: string | null
-	): string | null {
+		uploadId: UploadId,
+		captured: SessionId | null
+	): SessionId | null {
 		const row = this.context.db
 			.select({ sessionId: schema.pendingUploads.sessionId })
 			.from(schema.pendingUploads)
@@ -378,7 +380,7 @@ export class VerificationService {
 	// row, a lost path, or a failed verdict). A batch pass collects the survivors,
 	// reads their probe facts once, then materialises them from memory.
 	private async prepareRecordedVerdict(
-		uploadId: string,
+		uploadId: UploadId,
 		verification: NarVerification,
 		promotion: PromotionState
 	): Promise<PreparedSettle | undefined> {
@@ -1139,7 +1141,7 @@ export class VerificationService {
 	// selection that chose them, so no other claim can interleave. Only the
 	// rows actually handed out are leased: the selection's sentinel row and any
 	// rows a cap excluded stay claimable.
-	private leaseRows(uploadIds: readonly string[], now: Date): void {
+	private leaseRows(uploadIds: readonly UploadId[], now: Date): void {
 		if (uploadIds.length === 0) {
 			return;
 		}
@@ -1154,7 +1156,7 @@ export class VerificationService {
 	// Frees a claimed row the pass working it is abandoning unsettled (a
 	// transient fault), so the next pass need not wait the lease out. A crashed
 	// pass never reaches this; its rows free at lease expiry.
-	private releaseLease(uploadId: string): void {
+	private releaseLease(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({ claimedAt: sql`null` })
@@ -1555,7 +1557,7 @@ export class VerificationService {
 	// safe.
 	async recordVerification(
 		logger: Logger,
-		uploadId: string,
+		uploadId: UploadId,
 		verification: NarVerification,
 		promotion: PromotionState = 'promote'
 	): Promise<void> {
@@ -1681,7 +1683,7 @@ export class VerificationService {
 	// canonical object, whose disappearance says nothing against the client's
 	// upload: the row is dropped and its waiters told `absent`, the answer that
 	// re-drives the push through a fresh negotiate and upload.
-	async recordMissingObject(uploadId: string): Promise<void> {
+	async recordMissingObject(uploadId: UploadId): Promise<void> {
 		const pending = this.context.db
 			.select()
 			.from(schema.pendingUploads)

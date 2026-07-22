@@ -2,7 +2,11 @@ import {
 	type NixSha256HashString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
-import { type ParsedUploadPathNegotiation } from '@cupboard/protocol/upload';
+import {
+	type ParsedUploadPathNegotiation,
+	type SessionId,
+	type UploadId
+} from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 
@@ -116,7 +120,7 @@ export class UploadStateService {
 		return new Set(states.keys());
 	}
 
-	clearPendingUpload(uploadId: string): void {
+	clearPendingUpload(uploadId: UploadId): void {
 		this.context.db
 			.delete(schema.pendingUploads)
 			.where(eq(schema.pendingUploads.id, uploadId))
@@ -129,7 +133,7 @@ export class UploadStateService {
 	// survive; only a per-upload staging key is removed. It awaits R2 I/O, so it is
 	// called outside any critical section.
 	async clearPendingUploadAndStaging(
-		uploadId: string,
+		uploadId: UploadId,
 		r2Key: string,
 		narHash: NixSha256HashString
 	): Promise<void> {
@@ -143,7 +147,7 @@ export class UploadStateService {
 	// Marking is a (re-)drive: any verify lease on the row belongs to a pass
 	// that no longer speaks for it, and the pass this drive requests must not
 	// wait that lease out.
-	markUploadPending(uploadId: string): void {
+	markUploadPending(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({ verdict: 'pending', claimedAt: sql`null` })
@@ -154,7 +158,7 @@ export class UploadStateService {
 	// Records the commit session waiting on an upload, so the verify pass can
 	// route its verdict to that connection. A no-op for a row that is gone (a bad
 	// id, or one already settled and cleared).
-	attachSession(uploadId: string, sessionId: string): void {
+	attachSession(uploadId: UploadId, sessionId: SessionId): void {
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({ sessionId })
@@ -165,7 +169,7 @@ export class UploadStateService {
 	// Marks an inline commit in progress before it reserves the narinfo row, so a
 	// crash mid-commit leaves a durable saga marker the verify pass re-drives rather
 	// than a null-verdict upload indistinguishable from one still awaiting its bytes.
-	markUploadCommitting(uploadId: string): void {
+	markUploadCommitting(uploadId: UploadId): void {
 		this.context.db
 			.update(schema.pendingUploads)
 			.set({ verdict: 'committing', claimedAt: sql`null` })
@@ -180,7 +184,7 @@ export class UploadStateService {
 	// distinguished so a quota rejection is not misreported as bad content. Synchronous
 	// inline outcomes return at commit and need no retained verdict.
 	async markUploadTerminal(
-		uploadId: string,
+		uploadId: UploadId,
 		r2Key: string,
 		narHash: NixSha256HashString,
 		verdict: 'servable' | 'mismatch' | 'over-quota'

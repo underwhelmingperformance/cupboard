@@ -10,8 +10,11 @@ import {
 	type ParsedUploadPathNegotiation,
 	type ParsedUploadPreviewRequest,
 	type PushCredential,
+	type PushId,
 	type UploadConfirmResponse,
 	type UploadDecision,
+	type UploadId,
+	uploadIdSchema,
 	type UploadNegotiateResponse,
 	type UploadPreviewResponse,
 	type UploadStatusResponse
@@ -148,12 +151,12 @@ export class UploadsService {
 	// can race or overwrite the shared one.
 	private planUpload(
 		cache: StoredCache,
-		pushId: string,
+		pushId: PushId,
 		metadata: ParsedUploadPathNegotiation,
 		existingBlob: ReusableBlob | undefined,
 		graceDecision: GraceDecision
 	): UploadDecision {
-		const uploadId = crypto.randomUUID();
+		const uploadId = uploadIdSchema.parse(crypto.randomUUID());
 		const now = new Date();
 		const expiresAt = new Date(now.getTime() + uploadTtlMs);
 		const pendingMetadata:
@@ -319,7 +322,7 @@ export class UploadsService {
 	// Derived from the durable per-upload verdict: a row that is gone is
 	// `absent`; otherwise the terminal `servable`/`mismatch`/`over-quota`, or `pending`
 	// while it still verifies (a null or in-flight verdict).
-	uploadStatus(uploadId: string): UploadStatusResponse {
+	uploadStatus(uploadId: UploadId): UploadStatusResponse {
 		const pending = this.context.db
 			.select({ verdict: schema.pendingUploads.verdict })
 			.from(schema.pendingUploads)
@@ -624,7 +627,7 @@ export class UploadsService {
 	// the credential for that push, having checked it signed the id.
 	async issuePushCredential(
 		tokenExpiresAt: Date,
-		pushId?: string
+		pushId?: PushId
 	): Promise<PushCredential> {
 		const now = new Date();
 		const ttlSeconds = pushCredentialTtlSeconds(tokenExpiresAt, now);

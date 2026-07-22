@@ -3,6 +3,7 @@ import {
 	type NixSha256HashString,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
@@ -35,7 +36,7 @@ async function stageDeferred(nar: {
 	readonly narSize: number;
 	readonly fileHash: NixSha256HashString;
 	readonly narBytes: Uint8Array;
-}): Promise<string> {
+}): Promise<UploadId> {
 	const metadata = uploadMetadata({
 		storePathHash: 'a'.repeat(32),
 		references: [],
@@ -114,8 +115,10 @@ describe('deferred upload status', () => {
 	});
 
 	it('reports absent for an unknown upload', async () => {
-		expect(await uploadStatus('00000000-0000-0000-0000-000000000000')).toBe(
-			'absent'
-		);
+		expect(
+			await uploadStatus(
+				uploadIdSchema.parse('00000000-0000-0000-0000-000000000000')
+			)
+		).toBe('absent');
 	});
 });

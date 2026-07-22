@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { createPushId, issuePushId, verifyPushId } from './push-id.ts';
+import {
+	createPushId,
+	issuePushId,
+	pushIdSigningKeySchema,
+	verifyPushId
+} from './push-id.ts';
 
-const secret = 'parent-secret';
+const secret = pushIdSigningKeySchema.parse('parent-secret');
 const nonce = Uint8Array.from({ length: 16 }, (_, index) => index);
 
 describe('push id', () => {
@@ -36,7 +41,10 @@ describe('push id', () => {
 			genuine: await verifyPushId(secret, pushId),
 			tamperedTag: await verifyPushId(secret, tamperedTag),
 			tamperedNonce: await verifyPushId(secret, tamperedNonce),
-			wrongSecret: await verifyPushId('other-secret', pushId),
+			wrongSecret: await verifyPushId(
+				pushIdSigningKeySchema.parse('other-secret'),
+				pushId
+			),
 			tooShort: await verifyPushId(secret, pushId.slice(0, -1)),
 			notHex: await verifyPushId(secret, `Z${pushId.slice(1)}`)
 		}).toStrictEqual({

@@ -1,10 +1,15 @@
-import type { PushCredential } from '@cupboard/protocol/upload';
+import type { PushCredential, PushId } from '@cupboard/protocol/upload';
 
 import { PushIdSigningKeyMissingError } from '../errors.ts';
 import { stagingPushPrefix } from '../http/http.ts';
 
 import type { R2PresignerConfiguration } from './presign.ts';
-import { createPushId, verifyPushId } from './push-id.ts';
+import {
+	createPushId,
+	type PushIdSigningKey,
+	pushIdSigningKeySchema,
+	verifyPushId
+} from './push-id.ts';
 import {
 	createR2TemporaryCredentials,
 	pushUploadActions
@@ -33,14 +38,14 @@ export interface PushIdSigningEnv {
 	readonly PUSH_ID_SIGNING_KEY: string | undefined;
 }
 
-export function pushIdSigningKey(env: PushIdSigningEnv): string {
+export function pushIdSigningKey(env: PushIdSigningEnv): PushIdSigningKey {
 	const key = env.PUSH_ID_SIGNING_KEY ?? '';
 
 	if (key === '') {
 		throw new PushIdSigningKeyMissingError();
 	}
 
-	return key;
+	return pushIdSigningKeySchema.parse(key);
 }
 
 /**
@@ -54,14 +59,14 @@ export class PushCredentialIssuer {
 	// fault when the R2 credentials are absent.
 	constructor(
 		private readonly configuration: () => R2PresignerConfiguration,
-		private readonly signingKey: string
+		private readonly signingKey: PushIdSigningKey
 	) {}
 
 	// Re-issues a credential for an existing push id, the refresh path: the prefix
 	// is unchanged, so the new credential still covers the bytes the push has
 	// already staged.
 	async issueFor(
-		pushId: string,
+		pushId: PushId,
 		ttlSeconds: number,
 		now: Date
 	): Promise<PushCredential> {
@@ -86,7 +91,7 @@ export class PushCredentialIssuer {
 		return this.issueFor(await createPushId(this.signingKey), ttlSeconds, now);
 	}
 
-	verify(pushId: string): Promise<boolean> {
+	verify(pushId: PushId): Promise<boolean> {
 		return verifyPushId(this.signingKey, pushId);
 	}
 }

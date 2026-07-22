@@ -9,6 +9,7 @@ import {
 	storePathHashSchema,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import type { PushId, UploadId } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 
 import { sha256HexBytes } from '../crypto/crypto.ts';
@@ -119,7 +120,7 @@ export function attestationListObjectKey(
 // push. The server verifies the bytes here, then promotes them into the shared
 // `nar/<narHash>` key, so the canonical object only ever holds confirmed content
 // and no client ever writes it directly.
-export function stagingObjectKey(pushId: string, uploadId: string): string {
+export function stagingObjectKey(pushId: PushId, uploadId: UploadId): string {
 	return `staging/${pushId}/${uploadId}.nar.zst`;
 }
 
@@ -128,13 +129,13 @@ export function stagingObjectKey(pushId: string, uploadId: string): string {
 export const stagingPrefix = 'staging/';
 
 // The prefix a push's staging objects share, the scope of its upload credential.
-export function stagingPushPrefix(pushId: string): string {
+export function stagingPushPrefix(pushId: PushId): string {
 	return `${stagingPrefix}${pushId}/`;
 }
 
 export function attestationStagingObjectKey(
-	pushId: string,
-	uploadId: string
+	pushId: PushId,
+	uploadId: UploadId
 ): string {
 	return `staging/${pushId}/attestations/${uploadId}`;
 }

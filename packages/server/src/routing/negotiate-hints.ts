@@ -6,6 +6,7 @@ import {
 	storePathHashSchema,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import { pushIdSchema } from '@cupboard/protocol/upload';
 import { and, eq, inArray } from 'drizzle-orm';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
 import { z } from 'zod';
@@ -31,7 +32,7 @@ const hintPathSchema = z.object({
 	storePathHash: storePathHashSchema
 });
 const lenientNegotiateBodySchema = z.object({
-	pushId: z.string(),
+	pushId: pushIdSchema,
 	paths: z.array(hintPathSchema).min(1).max(hintPathCap)
 });
 

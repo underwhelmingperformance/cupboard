@@ -18,6 +18,7 @@ import {
 	type AttestationNegotiateResponse,
 	type ParsedAttestationNegotiateRequest
 } from '@cupboard/protocol/attestations';
+import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import {
 	decodeDsseStatement,
@@ -210,7 +211,7 @@ export class AttestationsService {
 
 	private async pendingUpload(
 		cache: StoredCache,
-		uploadId: string
+		uploadId: UploadId
 	): Promise<typeof schema.pendingAttestations.$inferSelect> {
 		const pending = this.context.db
 			.select()
@@ -504,7 +505,7 @@ export class AttestationsService {
 				continue;
 			}
 
-			const uploadId = crypto.randomUUID();
+			const uploadId = uploadIdSchema.parse(crypto.randomUUID());
 			const now = new Date();
 			const expiresAt = new Date(now.getTime() + 15 * 60 * 1000);
 			const r2Key = attestationStagingObjectKey(body.pushId, uploadId);
@@ -537,7 +538,7 @@ export class AttestationsService {
 
 	async attach(
 		cache: StoredCache,
-		uploadId: string
+		uploadId: UploadId
 	): Promise<AttestationAttachResponse> {
 		const pending = await this.pendingUpload(cache, uploadId);
 

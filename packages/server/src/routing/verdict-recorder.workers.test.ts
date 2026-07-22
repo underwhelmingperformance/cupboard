@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { describe, expect, it, vi } from 'vitest';
 
 import { type VerificationResult } from '../do/verification-service.ts';
@@ -6,7 +7,10 @@ import { type VerificationResult } from '../do/verification-service.ts';
 import { VerdictRecorder } from './scheduled.ts';
 
 function verdict(uploadId: string): VerificationResult {
-	return { uploadId, verdict: { kind: 'promoted' } };
+	return {
+		uploadId: uploadIdSchema.parse(uploadId),
+		verdict: { kind: 'promoted' }
+	};
 }
 
 describe('VerdictRecorder', () => {

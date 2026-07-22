@@ -6,6 +6,7 @@ import {
 	attestationNegotiateRequestSchema,
 	attestationNegotiateResponseSchema
 } from '../attestations.ts';
+import { uploadIdSchema } from '../upload.ts';
 
 import { baseProcedure } from './base.ts';
 
@@ -41,6 +42,8 @@ export const attestationsContract = {
 			method: 'POST',
 			path: '/cache/{cacheName}/attestations/{id}/attach'
 		})
-		.input(z.strictObject({ cacheName: cacheSelectorSchema, id: z.string() }))
+		.input(
+			z.strictObject({ cacheName: cacheSelectorSchema, id: uploadIdSchema })
+		)
 		.output(attestationAttachResponseSchema)
 };

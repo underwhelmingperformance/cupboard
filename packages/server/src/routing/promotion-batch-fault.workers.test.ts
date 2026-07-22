@@ -1,4 +1,5 @@
 import { rootLogger } from '@cupboard/logger';
+import type { UploadId } from '@cupboard/protocol/upload';
 import { env } from 'cloudflare:workers';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -31,7 +32,7 @@ async function deferReuseUpload(
 	firstSeed: string,
 	firstStorePathHash: string,
 	secondStorePathHash: string
-): Promise<{ uploadId: string; narHash: string }> {
+): Promise<{ uploadId: UploadId; narHash: string }> {
 	const nar = await verifiableNar(firstSeed);
 	const first = uploadMetadata({
 		name: firstSeed,
