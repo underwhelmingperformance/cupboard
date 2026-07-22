@@ -2,6 +2,7 @@ import type { Command } from 'commander';
 
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 export function registerPubkeyCommand(
@@ -13,8 +14,8 @@ export function registerPubkeyCommand(
 		.description(
 			'Print the current public signing key for this cupboard deployment.'
 		)
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const client = CupboardClient.fromUrl(url, {
 				signal: programOptions.signal

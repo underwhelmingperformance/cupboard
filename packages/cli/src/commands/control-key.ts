@@ -15,6 +15,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 interface RetireOptions {
@@ -45,8 +46,8 @@ export function registerControlKeyCommands(
 	controlKey
 		.command('list')
 		.description('List the control-plane signing-key set.')
-		.argument('<url>', deploymentUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -61,8 +62,8 @@ export function registerControlKeyCommands(
 		.description(
 			'Add a new active control key and schedule the previous one for retirement.'
 		)
-		.argument('<url>', deploymentUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -77,10 +78,10 @@ export function registerControlKeyCommands(
 		.description(
 			'Retire a superseded control key once its tokens have expired.'
 		)
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<kid>', 'control key id')
 		.option('-y, --yes', 'retire without the confirmation prompt')
-		.action(async (url: string, kid: string, options: RetireOptions) => {
+		.action(async (url: URL, kid: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

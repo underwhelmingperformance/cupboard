@@ -15,6 +15,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RetireOptions {
@@ -43,8 +44,8 @@ export function registerAuthKeyCommands(
 	authKey
 		.command('list')
 		.description('List the auth signing-key set.')
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -59,8 +60,8 @@ export function registerAuthKeyCommands(
 		.description(
 			'Add a new active auth key and schedule the previous one for retirement.'
 		)
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -73,10 +74,10 @@ export function registerAuthKeyCommands(
 	authKey
 		.command('retire')
 		.description('Retire a superseded auth key once its tokens have expired.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<kid>', 'auth key id')
 		.option('-y, --yes', 'retire without the confirmation prompt')
-		.action(async (url: string, kid: string, options: RetireOptions) => {
+		.action(async (url: URL, kid: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

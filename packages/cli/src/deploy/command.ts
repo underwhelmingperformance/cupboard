@@ -8,6 +8,7 @@ import { StatusCodes } from 'http-status-codes';
 
 import { delayMs, isAbortError, throwIfAborted } from '../abort.ts';
 import { CupboardClient } from '../client/client.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { CliError } from '../errors.ts';
 
 import { buildArtifactFromTree, type DeploymentArtifact } from './artifact.ts';
@@ -1396,7 +1397,7 @@ async function deployFlow(
 			}
 
 			try {
-				const live = await CupboardClient.fromUrl(url, {
+				const live = await CupboardClient.fromUrl(parseWorkerUrl(url), {
 					signal: runtimeOptions.signal
 				}).version();
 				context.fact('live', live);

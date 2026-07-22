@@ -4,7 +4,9 @@ import type {
 } from '@cupboard/protocol/oidc';
 import { describe, expect, it } from 'vitest';
 
+import { audienceSchema } from '../audience.ts';
 import { CupboardClient } from '../client/client.ts';
+import { canonicalHref } from '../client/transport.ts';
 import type { CloudflareGrant } from '../deploy/cloudflare-oauth.ts';
 import { CupboardHttpError, OwnerLoginRequiredError } from '../errors.ts';
 import { testWithConfigHome } from '../test-support.ts';
@@ -63,7 +65,8 @@ function federatingClient(): CupboardClient {
 	});
 }
 
-const target = 'https://cupboard.test';
+const target = new URL('https://cupboard.test');
+const audience = audienceSchema.parse('https://cache.example.workers.dev');
 
 function encodeJwtSegment(value: object): string {
 	return Buffer.from(JSON.stringify(value)).toString('base64url');
@@ -77,8 +80,10 @@ describe('authenticateGithubOidc', () => {
 	it('federates a subject token into a write token, caching and refreshing it', async () => {
 		const provider = await authenticateGithubOidc(
 			federatingClient(),
-			'https://cache.example.workers.dev',
-			{ environment: githubEnvironment }
+			audience,
+			{
+				environment: githubEnvironment
+			}
 		);
 
 		const eager = await provider.get();
@@ -97,7 +102,7 @@ describe('authenticateForPush', () => {
 	it('federates via GitHub OIDC when --github-oidc is given', async () => {
 		const provider = await authenticateForPush(federatingClient(), {
 			githubOidc: true,
-			audience: 'https://cache.example.workers.dev',
+			audience,
 			environment: githubEnvironment
 		});
 
@@ -108,7 +113,7 @@ describe('authenticateForPush', () => {
 		'otherwise uses the cached owner session, prompting a login when absent',
 		async () => {
 			const provider = await authenticateForPush(federatingClient(), {
-				audience: 'https://cache.example.workers.dev'
+				audience
 			});
 
 			const outcome = await (async () => {
@@ -137,7 +142,9 @@ const farFuture = 4_000_000_000;
 const past = 1_000_000_000;
 
 function accessToken(name: string, expSeconds: number): string {
-	return jwt({ iss: target, aud: target, exp: expSeconds, name });
+	const issuer = canonicalHref(target);
+
+	return jwt({ iss: issuer, aud: issuer, exp: expSeconds, name });
 }
 
 function tokenResponse(name: string): ParsedTokenResponse {

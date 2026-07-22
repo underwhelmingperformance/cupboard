@@ -8,6 +8,7 @@ import { CliAbortError, CupboardHttpError } from '../errors.ts';
 
 import type { TokenProvider } from './credentials.ts';
 import { controlRpc, tenantRpc } from './orpc.ts';
+import { parseWorkerUrl } from './transport.ts';
 
 interface CapturedRequest {
 	readonly url: string;
@@ -78,7 +79,7 @@ describe('tenantRpc', () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ caches: [] })
 		]);
-		const rpc = tenantRpc('https://cupboard.test/t/acme', {
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 			credential: 'admin-token',
 			fetcher
 		});
@@ -100,7 +101,9 @@ describe('tenantRpc', () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ caches: [] })
 		]);
-		const rpc = tenantRpc('https://cupboard.test/t/acme///', { fetcher });
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme///'), {
+			fetcher
+		});
 
 		await rpc.caches.list();
 
@@ -113,7 +116,7 @@ describe('tenantRpc', () => {
 		const { fetcher, captured } = capturingFetcher([]);
 		const controller = new AbortController();
 		controller.abort(new CliAbortError());
-		const rpc = tenantRpc('https://cupboard.test', {
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: 'admin-token',
 			signal: controller.signal,
 			fetcher
@@ -132,7 +135,7 @@ describe('tenantRpc', () => {
 			() => new Response('Unauthorised\n', { status: 401 }),
 			() => Response.json({ caches: [] })
 		]);
-		const rpc = tenantRpc('https://cupboard.test', {
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: provider,
 			fetcher
 		});
@@ -152,7 +155,7 @@ describe('tenantRpc', () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => new Response('Unauthorised\n', { status: 401 })
 		]);
-		const rpc = tenantRpc('https://cupboard.test', {
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: 'static-token',
 			fetcher
 		});
@@ -188,7 +191,7 @@ describe('tenantRpc', () => {
 				badGateway,
 				() => Response.json({ caches: [] })
 			]);
-			const rpc = tenantRpc('https://cupboard.test/t/acme', {
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 				credential: 'admin-token',
 				fetcher
 			});
@@ -214,7 +217,7 @@ describe('tenantRpc', () => {
 			const { fetcher, captured } = capturingFetcher(
 				Array.from({ length: 5 }, () => badGateway)
 			);
-			const rpc = tenantRpc('https://cupboard.test/t/acme', {
+			const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 				credential: 'admin-token',
 				fetcher
 			});
@@ -248,7 +251,7 @@ describe('tenantRpc', () => {
 
 	it('does not retry a 500, surfacing its decoded message at once', async () => {
 		const { fetcher, captured } = capturingFetcher([internalError]);
-		const rpc = tenantRpc('https://cupboard.test/t/acme', {
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 			credential: 'admin-token',
 			fetcher
 		});
@@ -292,7 +295,7 @@ describe('tenantRpc', () => {
 					}
 				)
 		]);
-		const rpc = tenantRpc('https://cupboard.test/t/acme', {
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test/t/acme'), {
 			credential: 'admin-token',
 			fetcher
 		});
@@ -313,7 +316,7 @@ describe('tenantRpc', () => {
 		const { fetcher } = capturingFetcher([
 			() => Response.json({ caches: [{ name: 'builds' }] })
 		]);
-		const rpc = tenantRpc('https://cupboard.test', {
+		const rpc = tenantRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: 'admin-token',
 			fetcher
 		});
@@ -342,7 +345,7 @@ describe('controlRpc', () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ tenants: [] })
 		]);
-		const rpc = controlRpc('https://cupboard.test', {
+		const rpc = controlRpc(parseWorkerUrl('https://cupboard.test'), {
 			credential: 'admin-token',
 			fetcher
 		});
@@ -364,7 +367,9 @@ describe('controlRpc', () => {
 		const { fetcher, captured } = capturingFetcher([
 			() => Response.json({ tenants: [] })
 		]);
-		const rpc = controlRpc('https://cupboard.test///', { fetcher });
+		const rpc = controlRpc(parseWorkerUrl('https://cupboard.test///'), {
+			fetcher
+		});
 
 		await rpc.tenants.list();
 

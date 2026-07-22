@@ -280,7 +280,7 @@ export function resolvePlanInputs(
 		readUser,
 		readPassword,
 		reuseView: provided(options.reuseView) ?? '',
-		audience: provided(options.audience) ?? url,
+		audience: provided(options.audience) ?? '',
 		cupboardPath,
 		optimise: isEnabled('optimise', options.optimise, true),
 		intermediateRetention,
@@ -626,10 +626,12 @@ async function ensureRoot(
 		inputs.url,
 		root,
 		...storePaths,
-		'--github-oidc',
-		'--audience',
-		inputs.audience
+		'--github-oidc'
 	];
+
+	if (inputs.audience !== '') {
+		arguments_.push('--audience', inputs.audience);
+	}
 
 	if (inputs.cache !== '') {
 		arguments_.push('--cache', inputs.cache);
@@ -723,10 +725,12 @@ export async function verifyGraceCoverage(
 		'policy',
 		'grace-coverage',
 		inputs.url,
-		'--github-oidc',
-		'--audience',
-		inputs.audience
+		'--github-oidc'
 	];
+
+	if (inputs.audience !== '') {
+		arguments_.push('--audience', inputs.audience);
+	}
 
 	if (inputs.cache !== '') {
 		arguments_.push('--cache', inputs.cache);
@@ -823,10 +827,12 @@ export async function confirmDestinationIntermediates(
 		'confirm',
 		inputs.url,
 		...storePaths,
-		'--github-oidc',
-		'--audience',
-		inputs.audience
+		'--github-oidc'
 	];
+
+	if (inputs.audience !== '') {
+		arguments_.push('--audience', inputs.audience);
+	}
 
 	if (inputs.cache !== '') {
 		arguments_.push('--cache', inputs.cache);

@@ -17,6 +17,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { controlRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { deploymentUrlArgument } from '../url-argument.ts';
 
 /**
@@ -162,7 +163,7 @@ export function registerTenantCommands(
 	tenant
 		.command('create')
 		.description('Provision a new tenant.')
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.requiredOption('--owner-issuer <issuer>', 'the owner OIDC issuer')
 		.requiredOption('--owner-subject <subject>', 'the owner OIDC subject')
@@ -200,7 +201,7 @@ export function registerTenantCommands(
 				'    --owner-audience <audience>'
 			].join('\n')
 		)
-		.action(async (url: string, id: string, options: CreateOptions) => {
+		.action(async (url: URL, id: string, options: CreateOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -230,8 +231,8 @@ export function registerTenantCommands(
 	tenant
 		.command('list')
 		.description('List provisioned tenants.')
-		.argument('<url>', deploymentUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -244,10 +245,10 @@ export function registerTenantCommands(
 	tenant
 		.command('suspend')
 		.description('Suspend a tenant: new writes stop, reads stop after the TTL.')
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'suspend without the confirmation prompt')
-		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -262,9 +263,9 @@ export function registerTenantCommands(
 		.description(
 			'Resume a suspended tenant: reads and writes are allowed again.'
 		)
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
-		.action(async (url: string, id: string) => {
+		.action(async (url: URL, id: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -277,10 +278,10 @@ export function registerTenantCommands(
 	tenant
 		.command('read-mode')
 		.description("Set a tenant's read mode.")
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.argument('<mode>', 'public or private')
-		.action(async (url: string, id: string, mode: string) => {
+		.action(async (url: URL, id: string, mode: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -300,7 +301,7 @@ export function registerTenantCommands(
 		.description(
 			"Set a private cache's read credential, generating a password by default."
 		)
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.option(
 			'--read-user <user>',
@@ -310,28 +311,26 @@ export function registerTenantCommands(
 			'--read-password <password>',
 			'the Basic-auth password a private cache requires from readers (default: auto)'
 		)
-		.action(
-			async (url: string, id: string, options: RotateCredentialOptions) => {
-				const reporter = commandUi(program, programOptions).reporter();
-				const rpc = controlRpc(url, {
-					credential: cachedOwnerProvider(url, {
-						signal: programOptions.signal
-					}),
+		.action(async (url: URL, id: string, options: RotateCredentialOptions) => {
+			const reporter = commandUi(program, programOptions).reporter();
+			const rpc = controlRpc(url, {
+				credential: cachedOwnerProvider(url, {
 					signal: programOptions.signal
-				});
+				}),
+				signal: programOptions.signal
+			});
 
-				await runTenantRotateCredential(id, options, reporter, rpc.tenants);
-			}
-		);
+			await runTenantRotateCredential(id, options, reporter, rpc.tenants);
+		});
 
 	tenant
 		.command('clear-credential')
 		.description(
 			"Clear a tenant's read credential; a private cache then fails closed."
 		)
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
-		.action(async (url: string, id: string) => {
+		.action(async (url: URL, id: string) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -345,10 +344,10 @@ export function registerTenantCommands(
 		.command('remove')
 		.alias('delete')
 		.description('Begin offboarding a tenant.')
-		.argument('<url>', deploymentUrlArgument)
+		.argument('<url>', deploymentUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'tenant slug')
 		.option('-y, --yes', 'offboard without the confirmation prompt')
-		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = controlRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

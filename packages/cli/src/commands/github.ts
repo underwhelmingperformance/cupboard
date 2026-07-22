@@ -17,6 +17,7 @@ import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { resilientFetcher } from '../client/transport.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace } from '../duration.ts';
 import {
 	CacheInfoRateLimitedError,
@@ -81,7 +82,7 @@ export interface GithubSetupClient {
 
 export interface GithubSetupDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
-	readonly fetchCacheInfo?: (url: string) => Promise<CacheInfo>;
+	readonly fetchCacheInfo?: (url: URL) => Promise<CacheInfo>;
 	readonly verifyWorkflowReference?: typeof verifyPinnedWorkflowReference;
 	readonly signal?: AbortSignal;
 }
@@ -119,7 +120,7 @@ const cacheInfoTimeoutMs = 30_000;
 export function cacheInfoFetcher(
 	options: ReadCredentialOptions,
 	dependencies: CacheInfoFetcherDependencies = {}
-): (url: string) => Promise<CacheInfo> {
+): (url: URL) => Promise<CacheInfo> {
 	if (
 		(options.readUser === undefined) !==
 		(options.readPassword === undefined)
@@ -134,8 +135,9 @@ export function cacheInfoFetcher(
 	const fetcher = resilientFetcher(dependencies.fetch);
 	const timeoutMs = dependencies.timeoutMs ?? cacheInfoTimeoutMs;
 
-	return async (url: string) => {
-		const target = `${url.replace(/\/+$/, '')}/nix-cache-info`;
+	return async (url: URL) => {
+		const target = new URL(url);
+		target.pathname = `${target.pathname.replace(/\/+$/u, '')}/nix-cache-info`;
 		const timeoutSignal = AbortSignal.timeout(timeoutMs);
 		const signal =
 			options.signal === undefined
@@ -645,7 +647,7 @@ function reportSetupResult(
 }
 
 export async function runGithubSetup(
-	url: string,
+	url: URL,
 	options: GithubSetupOptions,
 	ui: CliUi,
 	client: GithubSetupClient,
@@ -973,7 +975,7 @@ export function registerGithubCommands(
 		.description(
 			'Write the tenant-side configuration for cache-aware flake publishing: the grace policy, the pull-request reuse view and both trust rules, idempotently.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption('--repo <owner/name>', 'GitHub repository to trust.')
 		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
 		.option('--grace <duration>', 'Tenant-wide retention grace period.', '24h')
@@ -993,7 +995,7 @@ export function registerGithubCommands(
 			'--read-password <password>',
 			'Basic read credential for tenants whose reads are private.'
 		)
-		.action(async (url: string, options: GithubSetupOptions) => {
+		.action(async (url: URL, options: GithubSetupOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -1026,7 +1028,7 @@ export function registerGithubCommands(
 		.description(
 			'Verify the invariants a publishing run depends on before its first CI run: trust-rule matching and grant coverage, grace coverage, reuse-view definition and priority, and root-prefix nesting.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.requiredOption('--repo <owner/name>', 'GitHub repository to verify.')
 		.option('--branch <name>', 'Branch whose pushes publish.', 'main')
 		.requiredOption(
@@ -1045,7 +1047,7 @@ export function registerGithubCommands(
 			'--read-password <password>',
 			'Basic read credential for tenants whose reads are private.'
 		)
-		.action(async (url: string, options: GithubCheckOptions) => {
+		.action(async (url: URL, options: GithubCheckOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

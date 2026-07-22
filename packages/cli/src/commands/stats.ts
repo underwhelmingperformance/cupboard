@@ -5,6 +5,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface StatsOptions {
@@ -18,9 +19,9 @@ export function registerStatsCommand(
 	program
 		.command('stats')
 		.description('Show objects referenced by a cache.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option('--cache <name>', 'report on a named cache rather than the default')
-		.action(async (url: string, options: StatsOptions) => {
+		.action(async (url: URL, options: StatsOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -66,8 +67,8 @@ export function registerStatsCommand(
 	program
 		.command('usage')
 		.description('Show tenant-wide charged storage usage.')
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

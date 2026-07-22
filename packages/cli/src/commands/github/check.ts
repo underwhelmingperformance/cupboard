@@ -1,4 +1,5 @@
 import { type CacheInfo } from '@cupboard/nix-store/cache-info';
+import { reuseViewUrl } from '@cupboard/nix-store/cache-url';
 import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import { isGrantPermittedByRule } from '@cupboard/protocol/grant-match';
 import {
@@ -18,6 +19,7 @@ import { type ReuseViewSelector } from '@cupboard/protocol/reuse-views';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 
 import { isAbortError } from '../../abort.ts';
+import { audienceSchema } from '../../audience.ts';
 import {
 	confirmAuthorizationDetails,
 	pushAuthorizationDetails,
@@ -62,7 +64,7 @@ export interface GithubCheckClient {
 
 export interface GithubCheckDependencies {
 	readonly lookupRepository?: typeof lookupRepository;
-	readonly fetchCacheInfo: (url: string) => Promise<CacheInfo>;
+	readonly fetchCacheInfo: (url: URL) => Promise<CacheInfo>;
 	readonly verifyWorkflowReference?: typeof verifyPinnedWorkflowReference;
 	readonly signal?: AbortSignal;
 }
@@ -78,13 +80,13 @@ export interface CheckFinding {
 // their grant bindings, so the grant checks request the matching pr-1 cache
 // and root.
 function pullRequestClaims(
-	url: string,
+	url: URL,
 	identity: RepositoryIdentity,
 	workflowReference: string
 ): OidcClaims {
 	return {
 		iss: githubActionsIssuer,
-		aud: url,
+		aud: audienceSchema.parse(url),
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
 		event_name: 'pull_request',
@@ -94,14 +96,14 @@ function pullRequestClaims(
 }
 
 function branchClaims(
-	url: string,
+	url: URL,
 	identity: RepositoryIdentity,
 	branch: string,
 	workflowReference: string
 ): OidcClaims {
 	return {
 		iss: githubActionsIssuer,
-		aud: url,
+		aud: audienceSchema.parse(url),
 		repository_id: String(identity.repositoryId),
 		repository_owner_id: String(identity.repositoryOwnerId),
 		event_name: 'push',
@@ -321,9 +323,9 @@ function hasPullRequestViewSelectors(
 }
 
 async function checkReuseView(
-	url: string,
+	url: URL,
 	client: GithubCheckClient,
-	fetchCacheInfo: (url: string) => Promise<CacheInfo>
+	fetchCacheInfo: (url: URL) => Promise<CacheInfo>
 ): Promise<CheckFinding> {
 	const check = 'reuse view';
 	const { views } = await client.reuseViews.list();
@@ -350,7 +352,7 @@ async function checkReuseView(
 
 	try {
 		view = await fetchCacheInfo(
-			`${url.replace(/\/$/, '')}/reuse/${pullRequestViewName}`
+			new URL(reuseViewUrl(url.href, pullRequestViewName))
 		);
 	} catch (error) {
 		if (isAbortError(error)) {
@@ -405,7 +407,7 @@ function checkRootPrefix(
 }
 
 export async function runGithubCheck(
-	url: string,
+	url: URL,
 	options: GithubCheckOptions,
 	reporter: Reporter,
 	client: GithubCheckClient,

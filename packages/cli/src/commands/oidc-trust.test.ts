@@ -10,6 +10,7 @@ import type {
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
 
+import { parseWorkerUrl } from '../client/transport.ts';
 import { InvalidClaimError } from '../errors.ts';
 
 import {
@@ -31,6 +32,7 @@ const identity: RepositoryIdentity = {
 	fullName: 'acme/infra'
 };
 const tenantUrl = 'https://cache.example.workers.dev/t/acme';
+const tenantBase = parseWorkerUrl(tenantUrl);
 const uploadActions = [
 	'upload:negotiate',
 	'upload:status',
@@ -296,7 +298,7 @@ describe('claimsForAdd', () => {
 describe('githubPrAddBody', () => {
 	it('grants push, root and attestation by default, scoped to the per-PR cache and root', () => {
 		expect(
-			githubPrAddBody(tenantUrl, identity, { repo: 'acme/infra' })
+			githubPrAddBody(tenantBase, identity, { repo: 'acme/infra' })
 		).toStrictEqual({
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: tenantUrl,
@@ -317,14 +319,14 @@ describe('githubPrAddBody', () => {
 	});
 
 	it('pins the pull-request event so the rule matches only PR tokens', () => {
-		const body = githubPrAddBody(tenantUrl, identity, { repo: 'acme/infra' });
+		const body = githubPrAddBody(tenantBase, identity, { repo: 'acme/infra' });
 
 		expect(body.claims.event_name).toBe('pull_request');
 	});
 
 	it('omits attestation operations when --no-attest is given', () => {
 		expect(
-			githubPrAddBody(tenantUrl, identity, {
+			githubPrAddBody(tenantBase, identity, {
 				repo: 'acme/infra',
 				attest: false
 			})
@@ -351,7 +353,7 @@ describe('githubPrAddBody', () => {
 describe('githubTagAddBody', () => {
 	it('grants push, root and attestation by default, scoped to the per-tag cache and root', () => {
 		expect(
-			githubTagAddBody(tenantUrl, identity, { repo: 'acme/infra' })
+			githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' })
 		).toStrictEqual({
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: tenantUrl,
@@ -372,14 +374,14 @@ describe('githubTagAddBody', () => {
 	});
 
 	it('pins the tag ref type so the rule matches only tag tokens', () => {
-		const body = githubTagAddBody(tenantUrl, identity, { repo: 'acme/infra' });
+		const body = githubTagAddBody(tenantBase, identity, { repo: 'acme/infra' });
 
 		expect(body.claims.ref_type).toBe('tag');
 	});
 
 	it('omits attestation operations when --no-attest is given', () => {
 		expect(
-			githubTagAddBody(tenantUrl, identity, {
+			githubTagAddBody(tenantBase, identity, {
 				repo: 'acme/infra',
 				attest: false
 			})
@@ -406,7 +408,7 @@ describe('githubTagAddBody', () => {
 describe('githubBranchAddBody', () => {
 	it('gates the branch via the ref claim and matches the workflow file at any ref', () => {
 		expect(
-			githubBranchAddBody(tenantUrl, identity, {
+			githubBranchAddBody(tenantBase, identity, {
 				repo: 'acme/infra',
 				branch: 'main',
 				jobWorkflowRef: 'acme/infra/.github/workflows/cupboard-publish.yml'
@@ -440,7 +442,7 @@ describe('githubBranchAddBody', () => {
 	});
 
 	it('matches the job_workflow_ref exactly when the value carries an @ref', () => {
-		const body = githubBranchAddBody(tenantUrl, identity, {
+		const body = githubBranchAddBody(tenantBase, identity, {
 			repo: 'acme/infra',
 			branch: 'release',
 			jobWorkflowRef:
@@ -468,7 +470,7 @@ describe('githubBranchAddBody', () => {
 	});
 
 	it('gates only the branch when no job_workflow_ref is given', () => {
-		const body = githubBranchAddBody(tenantUrl, identity, {
+		const body = githubBranchAddBody(tenantBase, identity, {
 			repo: 'acme/infra',
 			branch: 'main'
 		});
@@ -510,11 +512,11 @@ describe('claim rendering', () => {
 
 describe('githubPrAddBody job_workflow_ref', () => {
 	it('adds the claim as a pattern or exact match, mirroring the value', () => {
-		const anyReference = githubPrAddBody(tenantUrl, identity, {
+		const anyReference = githubPrAddBody(tenantBase, identity, {
 			repo: 'acme/infra',
 			jobWorkflowRef: 'acme/infra/.github/workflows/publish.yml'
 		});
-		const exactReference = githubPrAddBody(tenantUrl, identity, {
+		const exactReference = githubPrAddBody(tenantBase, identity, {
 			repo: 'acme/infra',
 			jobWorkflowRef: 'acme/infra/.github/workflows/publish.yml@refs/heads/main'
 		});

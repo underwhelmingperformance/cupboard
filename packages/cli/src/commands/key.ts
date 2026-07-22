@@ -12,6 +12,7 @@ import type { Command } from 'commander';
 import { cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface RetireOptions {
@@ -40,8 +41,8 @@ export function registerKeyCommands(
 	key
 		.command('list')
 		.description('List the signing key set.')
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -54,8 +55,8 @@ export function registerKeyCommands(
 	key
 		.command('rotate')
 		.description('Add a new signing key, opening a rotation window.')
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -68,10 +69,10 @@ export function registerKeyCommands(
 	key
 		.command('retire')
 		.description('Retire a signing key one stage at a time.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<id>', "key id: a rotated key's UUID, or 'active'")
 		.option('-y, --yes', 'retire without the confirmation prompt')
-		.action(async (url: string, id: string, options: RetireOptions) => {
+		.action(async (url: URL, id: string, options: RetireOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

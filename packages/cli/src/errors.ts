@@ -51,6 +51,13 @@ export class InvalidPolicyScopeError extends CliUsageError {
 	}
 }
 
+export class InvalidAudienceError extends CliUsageError {
+	constructor(public readonly value: string) {
+		super(`Invalid --audience (expected a non-empty string): ${value}`);
+		this.name = 'InvalidAudienceError';
+	}
+}
+
 export class InvalidClaimError extends CliUsageError {
 	constructor(public readonly value: string) {
 		super(`Invalid --claim (expected key=value): ${value}`);
@@ -496,7 +503,7 @@ export class ReuseViewSelectorRequiredError extends CliUsageError {
 
 export class CacheInfoUnavailableError extends CliError {
 	constructor(
-		public readonly target: string,
+		public readonly target: URL,
 		public readonly status: number
 	) {
 		super(`${target} answered HTTP ${String(status)}`);
@@ -505,7 +512,7 @@ export class CacheInfoUnavailableError extends CliError {
 }
 
 export class CacheInfoRateLimitedError extends CliError {
-	constructor(public readonly target: string) {
+	constructor(public readonly target: URL) {
 		super(`${target} rate limited the nix-cache-info request`);
 		this.name = 'CacheInfoRateLimitedError';
 	}
@@ -517,7 +524,7 @@ export class CacheInfoRateLimitedError extends CliError {
 
 export class CacheInfoServerError extends CliError {
 	constructor(
-		public readonly target: string,
+		public readonly target: URL,
 		public readonly status: number
 	) {
 		super(
@@ -533,7 +540,7 @@ export class CacheInfoServerError extends CliError {
 
 export class CacheInfoTimeoutError extends CliError {
 	constructor(
-		public readonly target: string,
+		public readonly target: URL,
 		public readonly timeoutMs: number,
 		options: { readonly cause: unknown }
 	) {
@@ -551,7 +558,7 @@ export class CacheInfoTimeoutError extends CliError {
 
 export class CacheInfoUnparsableError extends CliError {
 	constructor(
-		public readonly target: string,
+		public readonly target: URL,
 		options: { readonly cause: unknown }
 	) {
 		super(`${target} did not answer with a parsable nix-cache-info body`, {

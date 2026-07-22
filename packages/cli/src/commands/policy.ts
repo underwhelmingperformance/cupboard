@@ -16,11 +16,13 @@ import {
 import { formatCount, type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
 
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush, cachedOwnerProvider } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { parseGrace, parseTtl } from '../duration.ts';
 import { InvalidPolicyScopeError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
@@ -37,7 +39,7 @@ interface PolicyAddGraceOptions {
 interface GraceCoverageOptions {
 	readonly cache?: string;
 	readonly githubOidc?: boolean;
-	readonly audience?: string;
+	readonly audience?: Audience;
 }
 
 interface ConfirmableOptions {
@@ -80,8 +82,8 @@ export function registerPolicyCommands(
 	policy
 		.command('list')
 		.description('List retention policies and retention grace policies.')
-		.argument('<url>', tenantUrlArgument)
-		.action(async (url: string) => {
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
+		.action(async (url: URL) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -95,7 +97,7 @@ export function registerPolicyCommands(
 	policy
 		.command('add')
 		.description('Add a retention policy.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<scope>', 'cache | root-name-prefix')
 		.argument('<pattern>', 'a cache name, or a root-name prefix')
 		.requiredOption(
@@ -115,7 +117,7 @@ export function registerPolicyCommands(
 		)
 		.action(
 			async (
-				url: string,
+				url: URL,
 				scope: string,
 				pattern: string,
 				options: PolicyAddOptions
@@ -141,10 +143,10 @@ export function registerPolicyCommands(
 	policy
 		.command('remove')
 		.description('Remove a retention policy by id.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'policy id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -159,7 +161,7 @@ export function registerPolicyCommands(
 		.description(
 			'Add or update a retention grace policy for a cache-name prefix.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option(
 			'--cache-prefix <prefix>',
 			'cache-name prefix to match (default: the empty string, the tenant-wide default)',
@@ -180,7 +182,7 @@ export function registerPolicyCommands(
 				'    --cache-prefix pr- --grace 24h'
 			].join('\n')
 		)
-		.action(async (url: string, options: PolicyAddGraceOptions) => {
+		.action(async (url: URL, options: PolicyAddGraceOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),
@@ -200,7 +202,7 @@ export function registerPolicyCommands(
 		.description(
 			'Report whether a grace policy covers a cache and the grace a publication to it would resolve.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.option(
 			'--cache <name>',
 			'report coverage of a named cache rather than the default'
@@ -211,16 +213,17 @@ export function registerPolicyCommands(
 		)
 		.option(
 			'--audience <audience>',
-			'OIDC audience to request with --github-oidc (default: the tenant URL)'
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
 		)
-		.action(async (url: string, options: GraceCoverageOptions) => {
+		.action(async (url: URL, options: GraceCoverageOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
 			const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{
 					githubOidc: options.githubOidc,
-					audience: options.audience ?? url,
+					audience: options.audience ?? audienceSchema.parse(url),
 					authorizationDetails: confirmAuthorizationDetails({
 						cacheSelector: cacheName
 					})
@@ -237,10 +240,10 @@ export function registerPolicyCommands(
 	policy
 		.command('remove-grace')
 		.description('Remove a retention grace policy by id.')
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<id>', 'grace policy id')
 		.option('-y, --yes', 'remove without the confirmation prompt')
-		.action(async (url: string, id: string, options: ConfirmableOptions) => {
+		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 			const rpc = tenantRpc(url, {
 				credential: cachedOwnerProvider(url, { signal: programOptions.signal }),

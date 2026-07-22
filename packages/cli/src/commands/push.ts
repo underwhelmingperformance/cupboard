@@ -2,6 +2,7 @@ import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import type { Command } from 'commander';
 
+import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import {
 	previewAuthorizationDetails,
 	pushAuthorizationDetails
@@ -9,6 +10,7 @@ import {
 import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient } from '../client/client.ts';
+import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl, parseWaitTimeout } from '../duration.ts';
 import {
 	AttestationsDisabledError,
@@ -22,7 +24,7 @@ import { tenantUrlArgument } from '../url-argument.ts';
 
 interface PushOptions {
 	readonly githubOidc?: boolean;
-	readonly audience?: string;
+	readonly audience?: Audience;
 	readonly root?: string;
 	readonly ttl?: number;
 	readonly cache?: string;
@@ -107,7 +109,7 @@ export function registerPushCommand(
 		.description(
 			'Push one or more store paths to the configured cupboard cache.'
 		)
-		.argument('<url>', tenantUrlArgument)
+		.argument('<url>', tenantUrlArgument, parseWorkerUrl)
 		.argument('<paths...>', 'Nix store paths to push')
 		.option(
 			'--github-oidc',
@@ -115,7 +117,8 @@ export function registerPushCommand(
 		)
 		.option(
 			'--audience <audience>',
-			'OIDC audience to request with --github-oidc (default: the tenant URL)'
+			'OIDC audience to request with --github-oidc (default: the tenant URL)',
+			parseAudience
 		)
 		.option(
 			'--root <name>',
@@ -177,7 +180,7 @@ export function registerPushCommand(
 				'    --no-retain'
 			].join('\n')
 		)
-		.action(async (url: string, paths: string[], options: PushOptions) => {
+		.action(async (url: URL, paths: string[], options: PushOptions) => {
 			if (options.attest === false && options.attestation.length > 0) {
 				throw new AttestationsDisabledError();
 			}
@@ -193,7 +196,7 @@ export function registerPushCommand(
 			const cacheSelector = selectorForCache(options.cache ?? DEFAULT_CACHE);
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
-				audience: options.audience ?? url,
+				audience: options.audience ?? audienceSchema.parse(url),
 				authorizationDetails: pushCommandAuthorizationDetails(
 					options,
 					cacheSelector

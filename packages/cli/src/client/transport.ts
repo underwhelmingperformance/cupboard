@@ -50,6 +50,17 @@ export function parseWorkerUrl(value: string | URL): URL {
 }
 
 /**
+ * Renders a Worker URL for exact-string contexts: an OIDC audience claim, a
+ * stored trust rule's audience, a session-store key. `URL#href` adds a
+ * trailing slash to a bare origin, so two references to the same deployment
+ * could render as different strings; stripping trailing slashes gives every
+ * URL one rendering, the form the workflows and docs use.
+ */
+export function canonicalHref(url: URL): string {
+	return url.href.replace(/\/+$/u, '');
+}
+
+/**
  * Wrap a fetcher so a network-level failure (DNS lookup, refused connection)
  * surfaces as a typed {@link UnreachableHostError} naming the host. An abort
  * is a `DOMException`, not a `TypeError`, so it propagates unchanged.

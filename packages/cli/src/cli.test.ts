@@ -61,14 +61,14 @@ describe('cliExitCode', () => {
 		{
 			name: 'a rate-limited cache-info response',
 			error: new CacheInfoRateLimitedError(
-				'https://cupboard.example/nix-cache-info'
+				new URL('https://cupboard.example/nix-cache-info')
 			),
 			expected: transientExitCode
 		},
 		{
 			name: 'an unavailable cache-info response',
 			error: new CacheInfoServerError(
-				'https://cupboard.example/nix-cache-info',
+				new URL('https://cupboard.example/nix-cache-info'),
 				StatusCodes.SERVICE_UNAVAILABLE
 			),
 			expected: transientExitCode

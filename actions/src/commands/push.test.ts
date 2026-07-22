@@ -46,8 +46,6 @@ describe('buildPushArguments', () => {
 			'/nix/store/a',
 			'/nix/store/b',
 			'--github-oidc',
-			'--audience',
-			'https://cache.example.test',
 			'--root',
 			'github:owner/repo/main',
 			'--cache',
@@ -91,7 +89,7 @@ describe('resolvePushInputs', () => {
 		url,
 		paths: [storePath],
 		cache: '',
-		audience: url,
+		audience: '',
 		root: 'github:owner/repo/main',
 		ttl: '',
 		retain: true,
@@ -221,8 +219,6 @@ describe('buildPushArguments unretained', () => {
 			'https://cache.example.test',
 			'/nix/store/a',
 			'--github-oidc',
-			'--audience',
-			'https://cache.example.test',
 			'--no-retain'
 		]);
 	});

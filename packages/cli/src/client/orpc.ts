@@ -25,7 +25,7 @@ import {
 	isTokenProvider,
 	resolveBearer
 } from './credentials.ts';
-import { parseWorkerUrl, reachableFetcher } from './transport.ts';
+import { reachableFetcher } from './transport.ts';
 
 /**
  * The tenant admin client, derived entirely from the contract: every
@@ -62,10 +62,10 @@ export type ControlRpc = JsonifiedClient<
  * behaviour of the hand-written client.
  */
 export function tenantRpc(
-	baseUrl: string | URL,
+	baseUrl: URL,
 	options: TenantRpcOptions = {}
 ): TenantRpc {
-	return derivedClient(tenantContract, parseWorkerUrl(baseUrl), options);
+	return derivedClient(tenantContract, new URL(baseUrl), options);
 }
 
 /**
@@ -73,10 +73,10 @@ export function tenantRpc(
  * contract's procedures live under its `/control` prefix.
  */
 export function controlRpc(
-	baseUrl: string | URL,
+	baseUrl: URL,
 	options: TenantRpcOptions = {}
 ): ControlRpc {
-	const url = parseWorkerUrl(baseUrl);
+	const url = new URL(baseUrl);
 	url.pathname = `${url.pathname.replace(/\/$/, '')}/control`;
 
 	return derivedClient(controlContract, url, options);

@@ -4,6 +4,7 @@ import {
 	subjectTokenTypeIdToken
 } from '@cupboard/protocol/oidc';
 
+import { type Audience } from '../audience.ts';
 import { CupboardClient, type TokenProvider } from '../client/client.ts';
 import { type CredentialChain, freshIdToken } from '../deploy/auth.ts';
 import {
@@ -41,10 +42,10 @@ type GrantChain = Pick<
 export interface OwnerSessionDependencies {
 	readonly client?: SessionTokenClient;
 	readonly grantChain?: GrantChain;
-	readonly readSession?: (target: string) => Promise<CachedSession | undefined>;
+	readonly readSession?: (target: URL) => Promise<CachedSession | undefined>;
 	readonly writeSession?: (
 		session: CachedSession,
-		target: string
+		target: URL
 	) => Promise<void>;
 	readonly now?: () => number;
 	/** Aborts the token fetch the provider makes, so Ctrl-C is prompt. */
@@ -63,7 +64,7 @@ const accessTokenFreshnessMarginMs = 30 * 1000;
  * surface as a prompt to run `cupboard login` again.
  */
 export function cachedOwnerProvider(
-	target: string,
+	target: URL,
 	dependencies: OwnerSessionDependencies = {}
 ): TokenProvider {
 	const client =
@@ -177,7 +178,7 @@ function isGrantRefusal(error: unknown): boolean {
  */
 export async function authenticateGithubOidc(
 	client: CupboardClient,
-	audience: string,
+	audience: Audience,
 	options: {
 		readonly environment?: GithubOidcEnvironment;
 		readonly authorizationDetails?: AuthorizationDetails;
@@ -196,7 +197,7 @@ export async function authenticateGithubOidc(
 
 export interface PushAuthOptions {
 	readonly githubOidc?: boolean;
-	readonly audience: string;
+	readonly audience: Audience;
 	readonly environment?: GithubOidcEnvironment;
 	// The grant the push requests; a CI (claim-bound) exchange must name it.
 	readonly authorizationDetails?: AuthorizationDetails;
@@ -217,7 +218,7 @@ export function authenticateForPush(
 		});
 	}
 
-	return Promise.resolve(cachedOwnerProvider(client.baseUrl.href));
+	return Promise.resolve(cachedOwnerProvider(client.baseUrl));
 }
 
 class GithubOidcTokenProvider implements TokenProvider {
