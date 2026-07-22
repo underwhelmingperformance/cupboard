@@ -3,7 +3,9 @@ import {
 	type CacheName,
 	type CachePriority,
 	cachePrioritySchema,
-	DEFAULT_CACHE
+	DEFAULT_CACHE,
+	type StoredCache,
+	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import {
@@ -40,13 +42,13 @@ export class CacheAdminService {
 		private readonly deletionQueue: DeletionQueueService
 	) {}
 
-	private teardownKey(cache: string): string {
+	private teardownKey(cache: StoredCache): string {
 		return `${teardownEntryPrefix}${cache}`;
 	}
 
 	// Whether any teardown deletion for this cache is still queued, so the drain
 	// re-arms only while there is more to retire.
-	private hasQueuedDeletions(cache: string): boolean {
+	private hasQueuedDeletions(cache: StoredCache): boolean {
 		const row = this.context.db
 			.select({ cache: schema.narInfoDeletions.cache })
 			.from(schema.narInfoDeletions)
@@ -64,7 +66,7 @@ export class CacheAdminService {
 	//
 	// Runs inside the caller's critical section; must not open its own.
 	private async drainTeardownChunk(
-		cache: string,
+		cache: StoredCache,
 		origin: string,
 		limit: number
 	): Promise<number> {
@@ -86,7 +88,7 @@ export class CacheAdminService {
 
 	// Deadlines are ISO-8601 UTC strings, so lexicographic min is chronological
 	// min and the string comparison against "now" selects only live rows.
-	private earliestLiveGraceDeadline(cache: string): string | undefined {
+	private earliestLiveGraceDeadline(cache: StoredCache): string | undefined {
 		const now = new Date().toISOString();
 		const row = this.context.db
 			.select({ earliest: min(schema.retentionGrace.retainUntil) })
@@ -103,7 +105,7 @@ export class CacheAdminService {
 	}
 
 	/** Renders a cache's nix-cache-info body from its registry priority. */
-	cacheInfoBody(cache: string): string {
+	cacheInfoBody(cache: StoredCache): string {
 		const row = this.context.db
 			.select({ priority: schema.caches.priority })
 			.from(schema.caches)
@@ -210,7 +212,7 @@ export class CacheAdminService {
 		};
 	}
 
-	cacheStorePathCount(cache: string): number {
+	cacheStorePathCount(cache: StoredCache): number {
 		const result = this.context.db
 			.select({ count: count() })
 			.from(schema.narInfos)
@@ -220,7 +222,7 @@ export class CacheAdminService {
 		return result?.count ?? 0;
 	}
 
-	cacheSummary(cache: string, priority: CachePriority): CacheSummary {
+	cacheSummary(cache: StoredCache, priority: CachePriority): CacheSummary {
 		const managed = this.context.db
 			.select({ graceManaged: schema.caches.graceManaged })
 			.from(schema.caches)
@@ -237,7 +239,7 @@ export class CacheAdminService {
 		};
 	}
 
-	loadOrCreateCache(cache: string): void {
+	loadOrCreateCache(cache: StoredCache): void {
 		// The default cache is seeded at init; a named cache is registered with
 		// the default priority on first write and adjusted later via PUT /caches.
 		if (cache === DEFAULT_CACHE) {
@@ -260,7 +262,7 @@ export class CacheAdminService {
 	// The next cache awaiting (more) teardown drain and the origin to purge its edge
 	// cache with, or undefined when none remain. The alarm claims one per firing.
 	async claimTeardown(): Promise<
-		{ cache: string; origin: string } | undefined
+		{ cache: StoredCache; origin: string } | undefined
 	> {
 		const entries = await this.context.ctx.storage.list<string>({
 			prefix: teardownEntryPrefix,
@@ -268,7 +270,10 @@ export class CacheAdminService {
 		});
 
 		for (const [key, origin] of entries) {
-			return { cache: key.slice(teardownEntryPrefix.length), origin };
+			return {
+				cache: storedCacheSchema.parse(key.slice(teardownEntryPrefix.length)),
+				origin
+			};
 		}
 
 		return undefined;
@@ -295,7 +300,7 @@ export class CacheAdminService {
 	// relies on. The reaper later collects the now-unreferenced shared blobs. The
 	// optional limit caps the first chunk for tests, mirroring the resume.
 	tearDownCache(
-		cache: string,
+		cache: StoredCache,
 		origin: string,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {
@@ -386,7 +391,7 @@ export class CacheAdminService {
 	// optional limit is a test parameter, mirroring {@link runGarbageCollection}. The
 	// caller re-arms the alarm while any marker remains.
 	async resumeTeardownPass(
-		cache: string,
+		cache: StoredCache,
 		origin: string,
 		limit: number = maxPathsTornDownPerRun
 	): Promise<void> {

@@ -1,6 +1,7 @@
 import {
 	nixSha256HashSchema,
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema,
 	type TenantId
@@ -49,7 +50,7 @@ export async function computeNegotiateHints(
 	request: Request,
 	env: Env,
 	tenant: TenantId,
-	cache: string | undefined
+	cache: StoredCache | undefined
 ): Promise<NegotiateHints | undefined> {
 	if (request.headers.get('authorization') === null) {
 		return undefined;
@@ -98,7 +99,7 @@ export async function computeNegotiateHints(
 async function readHints(
 	database: ReturnType<typeof drizzleD1<typeof d1Schema>>,
 	tenant: TenantId,
-	cache: string | undefined,
+	cache: StoredCache | undefined,
 	narHashes: readonly NixSha256HashString[],
 	storePathHashes: readonly StorePathHash[]
 ): Promise<NegotiateHints> {

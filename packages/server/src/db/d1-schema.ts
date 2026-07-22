@@ -2,6 +2,7 @@ import {
 	type NixSha256HashString,
 	type PredicateType,
 	type Sha256HexDigest,
+	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -50,7 +51,7 @@ export const blobReference = sqliteTable(
 	'blob_ref',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
-		cache: text('cache').notNull(),
+		cache: text('cache').$type<StoredCache>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull()
@@ -249,7 +250,7 @@ export const attestationReference = sqliteTable(
 	'attestation_ref',
 	{
 		tenant: text('tenant').$type<TenantId>().notNull(),
-		cache: text('cache').notNull(),
+		cache: text('cache').$type<StoredCache>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		generation: integer('generation').notNull(),
 		predicateType: text('predicate_type').$type<PredicateType>().notNull(),

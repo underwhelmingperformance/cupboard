@@ -1,3 +1,4 @@
+import { type StoredCache } from '@cupboard/nix-store/scalars';
 import {
 	type StatsResponse,
 	type UsageResponse
@@ -12,7 +13,7 @@ import { type ServerContext } from './context.ts';
 export class StatsService {
 	constructor(private readonly context: ServerContext) {}
 
-	async stats(cache: string): Promise<StatsResponse> {
+	async stats(cache: StoredCache): Promise<StatsResponse> {
 		const tenant = this.context.requireTenant();
 		const storePaths = this.context.db
 			.select({ count: count() })

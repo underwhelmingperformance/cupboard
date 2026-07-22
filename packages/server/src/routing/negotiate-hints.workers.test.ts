@@ -1,3 +1,4 @@
+import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
 import {
 	acceptCapabilitiesHeader,
 	type ParsedUploadPathMetadata,
@@ -107,13 +108,13 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths: [path] }),
 			env,
 			fixtureTenant,
-			'_default'
+			DEFAULT_CACHE
 		);
 		const forged = await computeNegotiateHints(
 			probeRequest({ pushId: 'a'.repeat(96), paths: [path] }),
 			env,
 			fixtureTenant,
-			'_default'
+			DEFAULT_CACHE
 		);
 
 		expect({ signed, forged }).toStrictEqual({
@@ -133,7 +134,7 @@ describe('computing negotiate hints', () => {
 			),
 			env,
 			fixtureTenant,
-			'_default'
+			DEFAULT_CACHE
 		);
 
 		expect(hints).toStrictEqual({
@@ -148,7 +149,7 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths: [path] }, {}),
 			env,
 			fixtureTenant,
-			'_default'
+			DEFAULT_CACHE
 		);
 
 		expect(hints).toBeUndefined();
@@ -159,7 +160,7 @@ describe('computing negotiate hints', () => {
 			probeRequest('{not json'),
 			env,
 			fixtureTenant,
-			'_default'
+			DEFAULT_CACHE
 		);
 
 		expect(hints).toBeUndefined();
@@ -171,7 +172,7 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths }),
 			env,
 			fixtureTenant,
-			'_default'
+			DEFAULT_CACHE
 		);
 
 		expect(hints).toBeUndefined();
@@ -188,7 +189,7 @@ describe('computing negotiate hints', () => {
 			probeRequest({ pushId: testPushId, paths: [path] }),
 			faultyEnv,
 			fixtureTenant,
-			'_default'
+			DEFAULT_CACHE
 		);
 
 		expect(hints).toBeUndefined();

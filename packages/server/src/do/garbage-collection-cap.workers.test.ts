@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import { DEFAULT_CACHE, type StoredCache } from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,6 +28,7 @@ import { maxPathsSweptPerRun } from './garbage-collection-service.ts';
 import { gcContinuationKey } from './server.ts';
 
 const repeated = (character: string): string => character.repeat(32);
+const defaultCache: StoredCache = DEFAULT_CACHE;
 const tenantWideContinuation = {
 	scope: 'tenant',
 	sweepLimit: maxPathsSweptPerRun
@@ -42,7 +43,7 @@ async function continuation(): Promise<unknown> {
 async function seedNarInfoDeletions(count: number): Promise<void> {
 	const createdAt = new Date().toISOString();
 	const rows = Array.from({ length: count }, (_unused, index) => ({
-		cache: DEFAULT_CACHE,
+		cache: defaultCache,
 		storePathHash: syntheticStorePathHash(index),
 		narHash: syntheticNarHash(index),
 		generation: 1,

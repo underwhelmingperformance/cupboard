@@ -2,6 +2,7 @@ import {
 	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	rootNameSchema,
+	type StoredCache,
 	storePathHashSchema,
 	storePathSchema
 } from '@cupboard/nix-store/scalars';
@@ -42,6 +43,7 @@ import { RootsService } from './roots-service.ts';
 import { type CupboardServer } from './server.ts';
 
 const rootName = rootNameSchema.parse('main');
+const defaultCache: StoredCache = DEFAULT_CACHE;
 const nixBase32Alphabet = '0123456789abcdfghijklmnpqrsvwxyz';
 
 function indexedStorePathHash(index: number) {
@@ -355,7 +357,7 @@ describe('root ensure hardening', () => {
 						.values(
 							references.map(({ storePathHash }) => ({
 								tenant: fixtureTenant,
-								cache: DEFAULT_CACHE,
+								cache: defaultCache,
 								storePathHash,
 								generation: source.generation,
 								narHash: source.narHash

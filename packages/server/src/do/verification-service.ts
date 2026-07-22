@@ -1,6 +1,7 @@
 import { type Logger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -56,7 +57,7 @@ type NarInfoRow = typeof schema.narInfos.$inferSelect;
 // row from a reserved-but-unverified one (which reserve-at-commit also leaves in
 // `nar_infos`) without a per-row D1 read.
 function edgeKey(
-	cache: string,
+	cache: StoredCache,
 	storePathHash: string,
 	generation: number,
 	narHash: string
@@ -231,7 +232,7 @@ export class VerificationService {
 		// a root set at commit over a still-verifying target does not keep a dead
 		// reference. Injected because the roots service is constructed after this one.
 		private readonly pruneRetentionTargets: (
-			cache: string,
+			cache: StoredCache,
 			storePathHash: StorePathHash
 		) => void
 	) {}
@@ -885,7 +886,7 @@ export class VerificationService {
 	}
 
 	private narInfoRow(
-		cache: string,
+		cache: StoredCache,
 		storePathHash: StorePathHash
 	): NarInfoRow | undefined {
 		return this.context.db

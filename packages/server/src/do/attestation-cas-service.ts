@@ -2,6 +2,7 @@ import {
 	type PredicateType,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type StoredCache,
 	type StorePathHash,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
@@ -24,7 +25,7 @@ export interface MeasuredAttestationBundle {
 }
 
 export interface AttestationReference {
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly storePathHash: StorePathHash;
 	readonly generation: number;
 	readonly predicateType: PredicateType;

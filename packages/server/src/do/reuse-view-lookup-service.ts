@@ -2,12 +2,12 @@ import { type Logger } from '@cupboard/logger';
 import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
-	DEFAULT_CACHE,
+	cacheFromSelector,
+	cacheSelectorSchema,
 	type NixSha256HashString,
 	referencesSchema,
 	type StorePathHash,
-	type TenantId,
-	WIRE_DEFAULT_CACHE
+	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
 import { type ParsedReuseViewName } from '@cupboard/protocol/reuse-views';
@@ -121,10 +121,9 @@ function selectorCondition(selector: {
 	pattern: string;
 }): SQL | undefined {
 	if (selector.kind === 'exact') {
-		const cache =
-			selector.pattern === WIRE_DEFAULT_CACHE
-				? DEFAULT_CACHE
-				: selector.pattern;
+		const cache = cacheFromSelector(
+			cacheSelectorSchema.parse(selector.pattern)
+		);
 
 		return eq(schema.narInfos.cache, cache);
 	}
@@ -133,9 +132,11 @@ function selectorCondition(selector: {
 		return undefined;
 	}
 
+	// The bounds are cache-name prefixes, not resolved cache names, so they
+	// address the column's raw ordering rather than a `StoredCache` value.
 	return and(
-		gte(schema.narInfos.cache, selector.pattern),
-		lt(schema.narInfos.cache, prefixUpperBound(selector.pattern))
+		gte(schema.narInfos.cache, sql`${selector.pattern}`),
+		lt(schema.narInfos.cache, sql`${prefixUpperBound(selector.pattern)}`)
 	);
 }
 
@@ -221,10 +222,9 @@ export class ReuseViewLookupService {
 		const hashMatch = eq(schema.narInfos.storePathHash, storePathHash);
 
 		if (selector.kind === 'exact') {
-			const cache =
-				selector.pattern === WIRE_DEFAULT_CACHE
-					? DEFAULT_CACHE
-					: selector.pattern;
+			const cache = cacheFromSelector(
+				cacheSelectorSchema.parse(selector.pattern)
+			);
 
 			return this.context.db
 				.select()
@@ -233,12 +233,17 @@ export class ReuseViewLookupService {
 				.all();
 		}
 
+		// The bounds are cache-name prefixes, not resolved cache names, so they
+		// address the column's raw ordering rather than a `StoredCache` value.
 		const cacheRange =
 			selector.pattern === ''
 				? undefined
 				: and(
-						gte(schema.narInfos.cache, selector.pattern),
-						lt(schema.narInfos.cache, prefixUpperBound(selector.pattern))
+						gte(schema.narInfos.cache, sql`${selector.pattern}`),
+						lt(
+							schema.narInfos.cache,
+							sql`${prefixUpperBound(selector.pattern)}`
+						)
 					);
 
 		return this.context.db

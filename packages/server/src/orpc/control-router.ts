@@ -1,4 +1,5 @@
 import { type Logger } from '@cupboard/logger';
+import { type StoredCache } from '@cupboard/nix-store/scalars';
 import { controlContract } from '@cupboard/protocol/contract';
 import { implement } from '@orpc/server';
 
@@ -28,7 +29,7 @@ import { bridgedError } from './error-bridge.ts';
 
 // The control plane has no pending-upload rows; resource resolution never needs
 // a pending-cache lookup, so the resolver always reports absence.
-const noPendingCache = (): Promise<string | undefined> =>
+const noPendingCache = (): Promise<StoredCache | undefined> =>
 	Promise.resolve(undefined);
 
 /** What a control procedure needs: the request (for auth and the public origin), the Worker env, and the request logger. */

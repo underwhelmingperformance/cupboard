@@ -2,6 +2,7 @@ import { rootLogger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
 	type StorePathHash,
+	type TenantId,
 	tenantIdSchema
 } from '@cupboard/nix-store/scalars';
 import { env } from 'cloudflare:workers';
@@ -70,7 +71,7 @@ async function committedTenantPath(seed: string) {
 }
 
 async function narInfoPresent(
-	tenant: string,
+	tenant: TenantId,
 	storePathHash: StorePathHash
 ): Promise<boolean> {
 	const object = await env.BLOBS.head(narInfoObjectKey(tenant, storePathHash));

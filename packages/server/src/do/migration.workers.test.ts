@@ -1,4 +1,9 @@
-import { storePathHashSchema } from '@cupboard/nix-store/scalars';
+import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
+	type StoredCache,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
@@ -20,6 +25,8 @@ import {
 	testServerFor,
 	useTestServer
 } from '../test-support.ts';
+
+const defaultCache: StoredCache = DEFAULT_CACHE;
 
 const insertSigningKey =
 	"INSERT INTO signing_key (id, private_jwk_json, public_key, created_at) VALUES ('active', '{}', 'cupboard-1:cHVi', '2026-01-01T00:00:00.000Z')";
@@ -127,7 +134,7 @@ describe('migrations', () => {
 	it('migrates and round-trips the verification cursor', async () => {
 		const cursor = {
 			id: 'active',
-			cache: 'builds',
+			cache: cacheNameSchema.parse('builds'),
 			lastStorePathHash: 'a'.repeat(32),
 			updatedAt: '2026-01-01T00:00:00.000Z'
 		};
@@ -182,7 +189,7 @@ describe('migrations', () => {
 
 	it('gains the retention grace table and cache marker at the latest migration', async () => {
 		const deadline = {
-			cache: '',
+			cache: defaultCache,
 			storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 			retainUntil: '2026-06-01T00:00:00.000Z'
 		};

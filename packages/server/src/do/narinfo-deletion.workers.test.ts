@@ -1,7 +1,9 @@
 import {
+	cacheNameSchema,
 	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	type NixSha256HashString,
+	type StoredCache,
 	type StorePathHash,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -41,6 +43,8 @@ import {
 import { NarInfoObjectsService } from './narinfo-objects-service.ts';
 
 const selectDeletions = 'SELECT cache, store_path_hash FROM narinfo_deletion';
+const defaultCache: StoredCache = DEFAULT_CACHE;
+const buildsCache = cacheNameSchema.parse('builds');
 
 // A distinct queued teardown deletion per index, in ascending store-path-hash
 // order.
@@ -84,7 +88,7 @@ async function seedQueuedDeletions(
 				.insert(narInfoDeletions)
 				.values(
 					batch.map((entry) => ({
-						cache: DEFAULT_CACHE,
+						cache: defaultCache,
 						storePathHash: entry.storePathHash,
 						narHash: entry.narHash,
 						generation: entry.generation,
@@ -130,8 +134,8 @@ describe('narinfo deletion queue', () => {
 				drizzle(state.storage, { schema: { narInfoDeletions } })
 					.insert(narInfoDeletions)
 					.values([
-						{ cache: '', storePathHash: hash, narHash, createdAt },
-						{ cache: 'builds', storePathHash: hash, narHash, createdAt }
+						{ cache: defaultCache, storePathHash: hash, narHash, createdAt },
+						{ cache: buildsCache, storePathHash: hash, narHash, createdAt }
 					])
 					.run();
 			}
@@ -142,7 +146,7 @@ describe('narinfo deletion queue', () => {
 			'default narinfo'
 		);
 		await env.BLOBS.put(
-			narInfoObjectKey(fixtureTenant, hash, 'builds'),
+			narInfoObjectKey(fixtureTenant, hash, buildsCache),
 			'builds narinfo'
 		);
 
@@ -158,7 +162,7 @@ describe('narinfo deletion queue', () => {
 			narInfoObjectKey(fixtureTenant, hash)
 		);
 		const namedObject = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, hash, 'builds')
+			narInfoObjectKey(fixtureTenant, hash, buildsCache)
 		);
 
 		expect({

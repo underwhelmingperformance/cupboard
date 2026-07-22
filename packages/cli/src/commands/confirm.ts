@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type UploadConfirmedPath,
@@ -17,7 +17,7 @@ import { type Audience, audienceSchema, parseAudience } from '../audience.ts';
 import { confirmAuthorizationDetails } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient } from '../client/client.ts';
+import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { ConfirmIncompleteError, PathsNotConfirmedError } from '../errors.ts';
@@ -78,7 +78,7 @@ export function registerConfirmCommand(
 		)
 		.action(async (url: URL, storePaths: string[], options: ConfirmOptions) => {
 			const reporter = commandUi(program, programOptions).reporter();
-			const cacheName = selectorForCache(options.cache ?? DEFAULT_CACHE);
+			const cacheName = selectorForCache(storedCacheFor(options.cache));
 			const credential = await authenticateForPush(
 				CupboardClient.fromUrl(url, { signal: programOptions.signal }),
 				{

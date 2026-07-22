@@ -140,13 +140,26 @@ export const cacheSelectorSchema = z.union([
 ]);
 export type CacheSelector = z.output<typeof cacheSelectorSchema>;
 
+/**
+ * The stored name of the cache a request addresses: a named cache's
+ * `CacheName`, or `DEFAULT_CACHE` (the empty string) for the default. This is
+ * the resolved form the interior carries once a wire selector has been mapped
+ * back to storage, distinct from the raw `string` a column or path segment
+ * arrives as.
+ */
+export const storedCacheSchema = z.union([
+	z.literal(DEFAULT_CACHE),
+	cacheNameSchema
+]);
+export type StoredCache = z.output<typeof storedCacheSchema>;
+
 /** The stored cache name a wire selector addresses. */
-export function cacheFromSelector(selector: CacheSelector): string {
+export function cacheFromSelector(selector: CacheSelector): StoredCache {
 	return selector === WIRE_DEFAULT_CACHE ? DEFAULT_CACHE : selector;
 }
 
 /** The wire selector addressing a stored cache name. */
-export function selectorForCache(cache: string): string {
+export function selectorForCache(cache: StoredCache): CacheSelector {
 	return cache === DEFAULT_CACHE ? WIRE_DEFAULT_CACHE : cache;
 }
 

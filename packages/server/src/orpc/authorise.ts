@@ -1,6 +1,7 @@
 import {
 	cacheSelectorSchema,
-	selectorForCache
+	selectorForCache,
+	type StoredCache
 } from '@cupboard/nix-store/scalars';
 import { type AuthzMeta, type ResourceSpec } from '@cupboard/protocol/contract';
 import {
@@ -14,7 +15,9 @@ import { type AccessClaims } from '../auth/auth.ts';
 import { InsufficientScopeError } from '../errors.ts';
 
 /** Resolves the cache a pending upload or attestation row was opened against. */
-export type PendingCacheResolver = (id: string) => Promise<string | undefined>;
+export type PendingCacheResolver = (
+	id: string
+) => Promise<StoredCache | undefined>;
 
 function inputField(input: unknown, name: string): string | undefined {
 	const direct = z.looseObject({ [name]: z.string() }).safeParse(input);

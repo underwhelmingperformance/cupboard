@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import {
 	acceptCapabilitiesHeader,
 	uploadCapabilitiesHeader,
@@ -6,7 +6,11 @@ import {
 } from '@cupboard/protocol/upload';
 import { StatusCodes } from 'http-status-codes';
 
-import { cachePrefixFor, CupboardClient } from '../client/client.ts';
+import {
+	cachePrefixFor,
+	CupboardClient,
+	storedCacheFor
+} from '../client/client.ts';
 import { type AccessCredential } from '../client/credentials.ts';
 import { tenantRpc } from '../client/orpc.ts';
 import { resilientFetcher } from '../client/transport.ts';
@@ -35,7 +39,7 @@ export function pushClientFor(
 	credential: AccessCredential,
 	options: PushClientOptions = {}
 ): PushClient {
-	const cache = options.cache ?? DEFAULT_CACHE;
+	const cache = storedCacheFor(options.cache);
 	const cacheName = selectorForCache(cache);
 	const baseFetcher = options.fetcher ?? fetch;
 	let hasUploadGraceFacts = false;

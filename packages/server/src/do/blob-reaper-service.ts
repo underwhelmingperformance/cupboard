@@ -2,6 +2,7 @@ import { type Logger } from '@cupboard/logger';
 import {
 	type NixSha256HashString,
 	type Sha256HexDigest,
+	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 import { mapWithConcurrency } from '@cupboard/shared/concurrency';
@@ -37,7 +38,7 @@ import {
 // them to the owning tenant's Durable Object, the single writer of that tenant's
 // objects.
 export interface DemoteTarget {
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly storePathHash: StorePathHash;
 }
 

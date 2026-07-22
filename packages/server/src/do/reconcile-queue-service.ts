@@ -1,4 +1,7 @@
-import { type StorePathHash } from '@cupboard/nix-store/scalars';
+import {
+	type StoredCache,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
 
 import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -9,7 +12,7 @@ import { type ServerContext } from './context.ts';
 // returns without hitting R2 and a large closure spreads its probes across
 // firings within the per-invocation subrequest cap.
 export interface ReconcileTarget {
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly storePathHash: StorePathHash;
 }
 

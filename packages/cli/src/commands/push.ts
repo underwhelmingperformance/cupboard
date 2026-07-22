@@ -1,4 +1,4 @@
-import { DEFAULT_CACHE, selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import type { Command } from 'commander';
 
@@ -9,7 +9,7 @@ import {
 } from '../auth/attenuate.ts';
 import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
-import { CupboardClient } from '../client/client.ts';
+import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
 import { parseTtl, parseWaitTimeout } from '../duration.ts';
 import {
@@ -193,7 +193,7 @@ export function registerPushCommand(
 				signal: programOptions.signal
 			});
 
-			const cacheSelector = selectorForCache(options.cache ?? DEFAULT_CACHE);
+			const cacheSelector = selectorForCache(storedCacheFor(options.cache));
 			const token = await authenticateForPush(raw, {
 				githubOidc: options.githubOidc,
 				audience: options.audience ?? audienceSchema.parse(url),

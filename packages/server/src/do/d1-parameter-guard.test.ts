@@ -8,6 +8,7 @@
 // widens a chunk or embeds an extra parameter breaks this test before it breaks
 // any request in production.
 import {
+	cacheNameSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
@@ -59,7 +60,7 @@ const stubD1 = {
 
 const database = drizzle(stubD1, { schema: d1Schema });
 const tenant = tenantIdSchema.parse('fixture-tenant');
-const cache = 'builds';
+const cache = cacheNameSchema.parse('builds');
 const now = '2024-01-01T00:00:00.000Z';
 
 // A syntactically valid NAR hash; value does not matter for param-count checks.

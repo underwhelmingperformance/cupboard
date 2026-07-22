@@ -1,7 +1,10 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	cacheNameSchema,
+	DEFAULT_CACHE,
 	nixSha256HashSchema,
 	type NixSha256HashString,
+	type StoredCache,
 	storePathHashSchema,
 	type TenantId,
 	tenantIdSchema
@@ -55,6 +58,7 @@ import { runBlobReaper, runCronTick, runOffboardSweep } from './scheduled.ts';
 // collected by the global reaper.
 
 const tenantCounter = { next: 0 };
+const defaultCache: StoredCache = DEFAULT_CACHE;
 
 async function admittable(slug: string): Promise<boolean> {
 	const ctx = createExecutionContext();
@@ -273,7 +277,7 @@ describe('offboarding drain', () => {
 			.values([
 				{
 					tenant: id,
-					cache: '',
+					cache: defaultCache,
 					storePathHash,
 					generation: 0,
 					narHash: nixSha256HashSchema.parse(
@@ -282,7 +286,7 @@ describe('offboarding drain', () => {
 				},
 				{
 					tenant: id,
-					cache: 'builds',
+					cache: cacheNameSchema.parse('builds'),
 					storePathHash,
 					generation: 1,
 					narHash: nixSha256HashSchema.parse(
@@ -291,7 +295,7 @@ describe('offboarding drain', () => {
 				},
 				{
 					tenant: id,
-					cache: 'tests',
+					cache: cacheNameSchema.parse('tests'),
 					storePathHash,
 					generation: 2,
 					narHash: nixSha256HashSchema.parse(

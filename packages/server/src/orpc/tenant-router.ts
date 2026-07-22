@@ -1,5 +1,8 @@
 import { type Logger } from '@cupboard/logger';
-import { cacheFromSelector } from '@cupboard/nix-store/scalars';
+import {
+	cacheFromSelector,
+	type StoredCache
+} from '@cupboard/nix-store/scalars';
 import { tenantContract } from '@cupboard/protocol/contract';
 import { type VerifyReport } from '@cupboard/protocol/reports';
 import { type GcResponse } from '@cupboard/protocol/retention';
@@ -268,7 +271,7 @@ async function collectGarbage(
 	logger: Logger,
 	request: Request,
 	services: TenantRpcServices,
-	cache?: string
+	cache?: StoredCache
 ): Promise<GcResponse> {
 	const { origin } = new URL(request.url);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;

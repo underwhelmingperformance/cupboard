@@ -1,6 +1,7 @@
 import {
 	DEFAULT_CACHE,
 	selectorForCache,
+	storedCacheSchema,
 	WIRE_DEFAULT_CACHE
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
@@ -84,7 +85,7 @@ async function previewUploads(
 	readonly body: UploadPreviewResponse;
 }> {
 	const response = await authorisedFetch(
-		`/cache/${selectorForCache(cache)}/uploads/preview`,
+		`/cache/${selectorForCache(storedCacheSchema.parse(cache))}/uploads/preview`,
 		token,
 		{
 			body: JSON.stringify({
@@ -133,6 +134,8 @@ async function sideEffectSnapshot(cache: string): Promise<{
 	readonly graceManaged: boolean;
 	readonly reconcileKeys: readonly string[];
 }> {
+	const storedCache = storedCacheSchema.parse(cache);
+
 	return runInDurableObject(currentServer(), async (instance) => {
 		const pendingUploadCount = instance.context.db
 			.select({ id: schema.pendingUploads.id })
@@ -144,14 +147,14 @@ async function sideEffectSnapshot(cache: string): Promise<{
 				retainUntil: schema.retentionGrace.retainUntil
 			})
 			.from(schema.retentionGrace)
-			.where(eq(schema.retentionGrace.cache, cache))
+			.where(eq(schema.retentionGrace.cache, storedCache))
 			.orderBy(schema.retentionGrace.storePathHash)
 			.all();
 		const isGraceManaged =
 			instance.context.db
 				.select({ graceManaged: schema.caches.graceManaged })
 				.from(schema.caches)
-				.where(eq(schema.caches.name, cache))
+				.where(eq(schema.caches.name, storedCache))
 				.get()?.graceManaged ?? false;
 		const reconciling = await new ReconcileQueueService(
 			instance.context

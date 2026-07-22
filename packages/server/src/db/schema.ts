@@ -3,6 +3,7 @@ import {
 	type NixSha256HashString,
 	type RootName,
 	type Sha256HexDigest,
+	type StoredCache,
 	type StorePathHash,
 	type StorePathString,
 	type TenantId
@@ -19,7 +20,7 @@ import {
 export const narInfos = sqliteTable(
 	'narinfo',
 	{
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
@@ -55,7 +56,7 @@ export const narInfos = sqliteTable(
 export const generationSeq = sqliteTable(
 	'generation_seq',
 	{
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		nextGeneration: integer('next_generation').notNull().default(0)
 	},
@@ -66,7 +67,7 @@ export const pendingUploads = sqliteTable(
 	'pending_upload',
 	{
 		id: text('id').primaryKey(),
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		r2Key: text('r2_key').notNull(),
 		metadataJson: text('metadata_json').notNull(),
@@ -117,7 +118,7 @@ export const pendingAttestations = sqliteTable(
 	'pending_attestation',
 	{
 		id: text('id').primaryKey(),
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
 		r2Key: text('r2_key').notNull(),
@@ -132,7 +133,7 @@ export const pendingAttestations = sqliteTable(
 export const narInfoDeletions = sqliteTable(
 	'narinfo_deletion',
 	{
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
 		// The generation of the narinfo version this deletion captured, so the D1
@@ -223,7 +224,7 @@ export const signingKeys = sqliteTable('signing_key', {
 export const retentionRoots = sqliteTable(
 	'retention_root',
 	{
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		name: text('name').$type<RootName>().notNull(),
 		expiresAt: text('expires_at'),
 		createdAt: text('created_at').notNull(),
@@ -245,7 +246,7 @@ export const retentionRoots = sqliteTable(
 export const retentionRootTargets = sqliteTable(
 	'retention_root_target',
 	{
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		rootName: text('root_name').$type<RootName>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		storePath: text('store_path').$type<StorePathString>().notNull()
@@ -266,7 +267,7 @@ export const retentionRootTargets = sqliteTable(
 export const retentionGrace = sqliteTable(
 	'retention_grace',
 	{
-		cache: text('cache').notNull().default(''),
+		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		retainUntil: text('retain_until').notNull()
 	},
@@ -283,13 +284,13 @@ export const retentionGrace = sqliteTable(
 export const garbageCollectionRevisions = sqliteTable(
 	'garbage_collection_revision',
 	{
-		cache: text('cache').primaryKey(),
+		cache: text('cache').$type<StoredCache>().primaryKey(),
 		revision: integer('revision').notNull().default(0)
 	}
 );
 
 export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
-	cache: text('cache').primaryKey(),
+	cache: text('cache').$type<StoredCache>().primaryKey(),
 	revision: integer('revision').notNull(),
 	phase: text('phase', {
 		enum: ['expire-roots', 'expire-grace', 'roots', 'grace', 'mark', 'sweep']
@@ -305,7 +306,7 @@ export const garbageCollectionScans = sqliteTable('garbage_collection_scan', {
 export const garbageCollectionFrontier = sqliteTable(
 	'garbage_collection_frontier',
 	{
-		cache: text('cache').notNull(),
+		cache: text('cache').$type<StoredCache>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -314,7 +315,7 @@ export const garbageCollectionFrontier = sqliteTable(
 export const garbageCollectionMarks = sqliteTable(
 	'garbage_collection_mark',
 	{
-		cache: text('cache').notNull(),
+		cache: text('cache').$type<StoredCache>().notNull(),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull()
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
@@ -327,12 +328,12 @@ export const garbageCollectionTenantRuns = sqliteTable(
 	'garbage_collection_tenant_run',
 	{
 		id: integer('id').primaryKey(),
-		cache: text('cache').notNull()
+		cache: text('cache').$type<StoredCache>().notNull()
 	}
 );
 
 export const caches = sqliteTable('cache', {
-	name: text('name').primaryKey(),
+	name: text('name').$type<StoredCache>().primaryKey(),
 	priority: integer('priority').$type<CachePriority>().notNull(),
 	// Set when the first grace-policy event applies to this cache and never
 	// cleared while the cache exists: the empty-cache collection guard stays off
@@ -375,7 +376,7 @@ export const retentionGracePolicies = sqliteTable(
 // the lowest hash of the first cache.
 export const verificationCursor = sqliteTable('verification_cursor', {
 	id: text('id').primaryKey(),
-	cache: text('cache').notNull().default(''),
+	cache: text('cache').$type<StoredCache>().notNull().default(''),
 	lastStorePathHash: text('last_store_path_hash'),
 	updatedAt: text('updated_at').notNull()
 });

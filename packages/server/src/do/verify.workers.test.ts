@@ -1,3 +1,4 @@
+import { cacheNameSchema } from '@cupboard/nix-store/scalars';
 import type { VerifyReport } from '@cupboard/protocol/reports';
 import { verifyReportSchema } from '@cupboard/protocol/reports';
 import { runInDurableObject } from 'cloudflare:test';
@@ -24,6 +25,8 @@ import {
 	uploadMetadata,
 	useTestServer
 } from '../test-support.ts';
+
+const buildsCache = cacheNameSchema.parse('builds');
 
 const healthy = {
 	scanned: 1,
@@ -140,12 +143,12 @@ describe('background verification', () => {
 
 		await pushPath(token, metadata, 'builds');
 		await env.BLOBS.delete(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash, 'builds')
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, buildsCache)
 		);
 
 		const report = await runVerify(token);
 		const restored = await env.BLOBS.head(
-			narInfoObjectKey(fixtureTenant, metadata.storePathHash, 'builds')
+			narInfoObjectKey(fixtureTenant, metadata.storePathHash, buildsCache)
 		);
 
 		expect({ report, restored: restored !== null }).toStrictEqual({

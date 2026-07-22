@@ -4,8 +4,10 @@ import {
 	type NixSha256HashString,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
+	type StoredCache,
 	type StorePathHash,
-	storePathHashSchema
+	storePathHashSchema,
+	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { StatusCodes } from 'http-status-codes';
 
@@ -87,9 +89,9 @@ export function casObjectKey(digest: Sha256HexDigest): string {
 }
 
 export function attestationListCachePath(
-	tenant: string,
+	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: string = DEFAULT_CACHE
+	cache: StoredCache = DEFAULT_CACHE
 ): string {
 	const suffix =
 		cache === DEFAULT_CACHE
@@ -100,9 +102,9 @@ export function attestationListCachePath(
 }
 
 export function attestationListObjectKey(
-	tenant: string,
+	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: string = DEFAULT_CACHE
+	cache: StoredCache = DEFAULT_CACHE
 ): string {
 	const suffix =
 		cache === DEFAULT_CACHE
@@ -143,9 +145,9 @@ export function attestationStagingObjectKey(
 // this, so a narinfo's cached copy is keyed per tenant and two tenants sharing a
 // host never collide on the same store-path hash.
 export function narInfoCachePath(
-	tenant: string,
+	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: string = DEFAULT_CACHE
+	cache: StoredCache = DEFAULT_CACHE
 ): string {
 	const suffix =
 		cache === DEFAULT_CACHE
@@ -164,14 +166,14 @@ export function narInfoCachePath(
 
 // The R2 prefix under which all of a tenant's narinfo objects live, across every
 // cache. A reconcile lists this to find the present objects for a batch.
-export function narInfoObjectPrefix(tenant: string): string {
+export function narInfoObjectPrefix(tenant: TenantId): string {
 	return `t/${tenant}/narinfo/`;
 }
 
 export function narInfoObjectKey(
-	tenant: string,
+	tenant: TenantId,
 	storePathHash: StorePathHash,
-	cache: string = DEFAULT_CACHE
+	cache: StoredCache = DEFAULT_CACHE
 ): string {
 	const suffix =
 		cache === DEFAULT_CACHE ? storePathHash : `${cache}/${storePathHash}`;

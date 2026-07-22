@@ -4,7 +4,9 @@ import {
 	cacheFromSelector,
 	cachePrioritySchema,
 	cacheSelectorSchema,
-	DEFAULT_CACHE
+	DEFAULT_CACHE,
+	type StoredCache,
+	storedCacheSchema
 } from '@cupboard/nix-store/scalars';
 import { zstdDecompressionStream } from '@cupboard/nix-store/zstd';
 import {
@@ -155,7 +157,7 @@ function reuseNotFound(): Response {
 // What a commit session socket carries across a hibernation wake: the cache it
 // was opened against and the id the verify pass routes its verdicts to.
 const commitSessionAttachmentSchema = z.object({
-	cache: z.string(),
+	cache: storedCacheSchema,
 	sessionId: z.string()
 });
 
@@ -172,7 +174,7 @@ const garbageCollectionContinuationSchema = z.discriminatedUnion('scope', [
 	}),
 	z.object({
 		scope: z.literal('cache'),
-		cache: z.string(),
+		cache: storedCacheSchema,
 		sweepLimit: garbageCollectionSweepLimitSchema
 	})
 ]);
@@ -205,7 +207,7 @@ function parseGarbageCollectionContinuations(
 }
 
 function garbageCollectionContinuation(
-	cache: string | undefined,
+	cache: StoredCache | undefined,
 	sweepLimit: number
 ): GarbageCollectionContinuation {
 	return cache === undefined
@@ -697,7 +699,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// the socket so the message handlers have them after a hibernation wake. The
 	// guard authenticates the upgrade as plain HTTP before any socket exists; each
 	// `commit` is authorised by the cache the session was opened against.
-	private commitSession(request: Request, cache: string): Response {
+	private commitSession(request: Request, cache: StoredCache): Response {
 		if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') {
 			throw new CommitUpgradeRequiredError();
 		}
@@ -731,7 +733,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private async runSessionCommit(
 		sessionLogger: Logger,
 		socket: WebSocket,
-		cache: string,
+		cache: StoredCache,
 		sessionId: string,
 		uploadId: string,
 		identity?: Pick<
@@ -828,7 +830,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// publication.
 	private async resolveGoneCommit(
 		socket: WebSocket,
-		cache: string,
+		cache: StoredCache,
 		uploadId: string,
 		identity: Pick<
 			ParsedCommitBatchEntry,
@@ -892,7 +894,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// differ only in how they answer a row that is gone.
 	private replaySubscribedRow(
 		socket: WebSocket,
-		cache: string,
+		cache: StoredCache,
 		sessionId: string,
 		uploadId: string,
 		row: typeof schema.pendingUploads.$inferSelect
@@ -955,7 +957,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// precisely through the `subscribe-identity` op instead.
 	private replaySubscribe(
 		socket: WebSocket,
-		cache: string,
+		cache: StoredCache,
 		sessionId: string,
 		uploadIds: readonly string[]
 	): void {
@@ -987,7 +989,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// path now holding other bytes) answers `absent`.
 	private async replaySubscribeIdentity(
 		socket: WebSocket,
-		cache: string,
+		cache: StoredCache,
 		sessionId: string,
 		entries: readonly ParsedCommitBatchEntry[]
 	): Promise<void> {
@@ -1065,7 +1067,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// id-only routes the authoriser cannot read a cache from the path. The
 	// durable-SQLite reads are synchronous; the resolver is a promise so the
 	// authoriser can stay uniform across resource sources.
-	private pendingCache(id: string): Promise<string | undefined> {
+	private pendingCache(id: string): Promise<StoredCache | undefined> {
 		const upload = this.context.db
 			.select({ cache: schema.pendingUploads.cache })
 			.from(schema.pendingUploads)
@@ -1342,7 +1344,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// persisted so the alarm resumes the same work with the bound it started with.
 	private async sweepGarbageOnce(
 		sweepLimit: number = maxPathsSweptPerRun,
-		cache?: string
+		cache?: StoredCache
 	): Promise<void> {
 		const continuation = garbageCollectionContinuation(cache, sweepLimit);
 
@@ -1406,7 +1408,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// request meter and the oRPC maintenance hook the interactive request carries.
 	private sweepGarbageInteractive(
 		logger: Logger,
-		cache: string | undefined,
+		cache: StoredCache | undefined,
 		purgeOrigin: string | undefined
 	): Promise<GarbageCollectionOutcome> {
 		return this.runExclusiveMaintenance('gc', () =>
@@ -1653,7 +1655,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// drain chunk so a test can force the over-cap, alarm-resumed path without
 	// pushing a whole cap's worth of paths, mirroring {@link runGarbageCollection}.
 	async runCacheTeardown(
-		cache: string,
+		cache: StoredCache,
 		origin: string,
 		limit?: number
 	): Promise<void> {

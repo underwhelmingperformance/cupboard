@@ -1,3 +1,4 @@
+import type { StoredCache } from '@cupboard/nix-store/scalars';
 import type { RetentionPolicyScope } from '@cupboard/protocol/retention';
 
 export interface RetentionPolicy {
@@ -7,7 +8,7 @@ export interface RetentionPolicy {
 }
 
 interface RootTarget {
-	readonly cache: string;
+	readonly cache: StoredCache;
 	readonly name: string;
 }
 
