@@ -10,6 +10,22 @@ import {
 } from './grants.ts';
 import { isAllowedIssuerUrl, IssuerUrl } from './oidc-issuer.ts';
 
+// The issuer, subject and audience of an OIDC identity travel together wherever
+// trust is configured or matched. Each carries a distinct brand so the compiler
+// rejects a call that passes them in the wrong order. Branding is type-level
+// only, so these forms parse whatever a live deployment already persisted or
+// issued; the ingress schemas that accept a client-supplied value narrow it,
+// while these plain forms brand a stored or reflected value without
+// re-validating it.
+export const oidcIssuerSchema = z.string().brand('OidcIssuer');
+export type OidcIssuer = z.infer<typeof oidcIssuerSchema>;
+
+export const oidcSubjectSchema = z.string().brand('OidcSubject');
+export type OidcSubject = z.infer<typeof oidcSubjectSchema>;
+
+export const oidcAudienceSchema = z.string().brand('OidcAudience');
+export type OidcAudience = z.infer<typeof oidcAudienceSchema>;
+
 // A configured claim is matched either exactly (the token's claim must equal the
 // string) or against an anchored RE2 pattern (the claim must match it in full).
 // The pattern form lets a rule pin part of a claim and leave the rest open, for
@@ -108,8 +124,9 @@ export const oidcTrustAddBodySchema = z.strictObject({
 			isAllowedIssuerUrl,
 			'issuer must be an https URL (http only for loopback)'
 		)
-		.transform((value) => IssuerUrl.parse(value)?.value ?? value),
-	audience: z.string().min(1),
+		.transform((value) => IssuerUrl.parse(value)?.value ?? value)
+		.brand('OidcIssuer'),
+	audience: z.string().min(1).brand('OidcAudience'),
 	claims: z
 		.record(z.string().min(1), claimMatchSchema)
 		.refine(
@@ -123,8 +140,8 @@ export type ParsedOidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;
 
 export const oidcTrustSummarySchema = z.strictObject({
 	id: z.string(),
-	issuer: z.string(),
-	audience: z.string(),
+	issuer: oidcIssuerSchema,
+	audience: oidcAudienceSchema,
 	claims: z.record(z.string(), claimMatchSchema),
 	permittedGrants: z.array(permittedGrantSchema),
 	display: oidcTrustDisplaySchema.optional(),

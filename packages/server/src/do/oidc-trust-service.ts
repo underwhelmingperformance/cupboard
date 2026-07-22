@@ -1,4 +1,8 @@
 import {
+	type OidcAudience,
+	type OidcIssuer,
+	oidcIssuerSchema,
+	type OidcSubject,
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
@@ -63,9 +67,9 @@ export class OidcTrustService {
 	}
 
 	private validatedOwner(
-		issuer: string,
-		subject: string,
-		audience: string
+		issuer: OidcIssuer,
+		subject: OidcSubject,
+		audience: OidcAudience
 	): OwnerConfig | undefined {
 		// A binding may be absent or empty when no owner is configured (e.g. in
 		// local development); either way there is no rule to seed.
@@ -81,7 +85,11 @@ export class OidcTrustService {
 			throw new OwnerConfigurationInvalidError(issuer);
 		}
 
-		return { issuer: issuerUrl.value, subject, audience };
+		return {
+			issuer: oidcIssuerSchema.parse(issuerUrl.value),
+			subject,
+			audience
+		};
 	}
 
 	private async verifyInboundOnce(

@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { oidcIssuerSchema, oidcSubjectSchema } from './oidc.ts';
+
 // The bootstrap signup claim. A caller presents an external OIDC subject token and,
 // in hosted mode, the deployment's single-use claim secret. A non-strict object
 // ignores any extra fields a generic OAuth client might send.
@@ -14,8 +16,8 @@ export type SignupRequest = z.input<typeof signupRequestSchema>;
 // this call performed the claim (false for an idempotent re-claim by the same
 // principal).
 export const signupResponseSchema = z.strictObject({
-	issuer: z.string(),
-	subject: z.string(),
+	issuer: oidcIssuerSchema,
+	subject: oidcSubjectSchema,
 	claimed: z.boolean()
 });
 export type ParsedSignupResponse = z.output<typeof signupResponseSchema>;

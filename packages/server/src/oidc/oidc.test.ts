@@ -573,6 +573,27 @@ describe('OidcDiscoveryStore', () => {
 		]);
 	});
 
+	it('keys the cache on the normalised issuer, so two spellings share one fetch', async () => {
+		const requested: string[] = [];
+		const fetcher: typeof fetch = (input) => {
+			requested.push(requestUrl(input));
+
+			return Promise.resolve(
+				Response.json({
+					issuer,
+					jwks_uri: 'https://accounts.example.com/jwks',
+					id_token_signing_alg_values_supported: ['RS256']
+				})
+			);
+		};
+		const store = new OidcDiscoveryStore({ now: () => 0, fetcher });
+
+		await store.resolve(issuer);
+		await store.resolve(`${issuer}/`);
+
+		expect({ requested }).toStrictEqual({ requested: [metadataUrl] });
+	});
+
 	it('dedupes concurrent first loads into a single discovery fetch', async () => {
 		const requested: string[] = [];
 		const fetcher: typeof fetch = (input) => {

@@ -6,7 +6,11 @@ import {
 	type AuthorizationDetail,
 	type AuthorizationDetails
 } from '@cupboard/protocol/grants';
-import { type OidcTrustSummary } from '@cupboard/protocol/oidc';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	type OidcTrustSummary
+} from '@cupboard/protocol/oidc';
 import {
 	claimMismatches,
 	firstClaimMismatch,
@@ -78,8 +82,8 @@ export interface CheckFinding {
 function toMatcherRule(summary: OidcTrustSummary): OidcTrustRule {
 	return {
 		id: summary.id,
-		issuer: summary.issuer,
-		audience: summary.audience,
+		issuer: oidcIssuerSchema.parse(summary.issuer),
+		audience: oidcAudienceSchema.parse(summary.audience),
 		claims: summary.claims,
 		permittedGrants: summary.permittedGrants
 	};

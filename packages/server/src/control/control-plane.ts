@@ -1,6 +1,8 @@
 import { type TenantId } from '@cupboard/nix-store/scalars';
 import {
 	issuedAccessTokenType,
+	oidcAudienceSchema,
+	oidcIssuerSchema,
 	subjectTokenTypeIdToken,
 	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
@@ -480,12 +482,12 @@ export async function controlTenantCreate(
 	// avoiding an admitted-but-unconfigured tenant.
 	const now = new Date();
 	const summary = await ensureTenant(database, body, now.toISOString());
-	const issuer = `${origin}/t/${summary.id}`;
+	const issuer = oidcIssuerSchema.parse(`${origin}/t/${summary.id}`);
 
 	await tenantServer(env, summary.id).configure({
 		tenant: summary.id,
 		issuer,
-		audience: issuer,
+		audience: oidcAudienceSchema.parse(issuer),
 		ownerIssuer: summary.ownerIssuer,
 		ownerSubject: summary.ownerSubject,
 		ownerAudience: summary.ownerAudience,

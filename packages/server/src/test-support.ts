@@ -21,6 +21,11 @@ import {
 	type AuthorizationDetails,
 	authorizationDetailsSchema
 } from '@cupboard/protocol/grants';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	oidcSubjectSchema
+} from '@cupboard/protocol/oidc';
 import type {
 	RootListResponse,
 	RootRemoveResponse,
@@ -167,9 +172,17 @@ export const testBase = new Date('2026-01-01T00:00:00.000Z');
 // The owner identity the fixture tenant is provisioned with, matching the
 // triple the admin-token and trust-rule tests issue their subject tokens for.
 export const fixtureOwner = {
-	issuer: 'https://accounts.google.com',
-	subject: 'owner-subject',
-	audience: 'client-id.apps.googleusercontent.com'
+	issuer: oidcIssuerSchema.parse('https://accounts.google.com'),
+	subject: oidcSubjectSchema.parse('owner-subject'),
+	audience: oidcAudienceSchema.parse('client-id.apps.googleusercontent.com')
+} as const;
+
+// The owner triple a tenant provisioned without an owner carries: every field
+// is empty, so no owner rule is seeded.
+const emptyOwner = {
+	ownerIssuer: oidcIssuerSchema.parse(''),
+	ownerSubject: oidcSubjectSchema.parse(''),
+	ownerAudience: oidcAudienceSchema.parse('')
 } as const;
 
 const harness = {
@@ -339,11 +352,9 @@ export async function provisionNamedTenant(
 	if (options.configure !== false) {
 		await stub.configure({
 			tenant: id,
-			issuer,
-			audience: issuer,
-			ownerIssuer: '',
-			ownerSubject: '',
-			ownerAudience: '',
+			issuer: oidcIssuerSchema.parse(issuer),
+			audience: oidcAudienceSchema.parse(issuer),
+			...emptyOwner,
 			configVersion
 		});
 	}
@@ -449,8 +460,8 @@ async function configureFixtureTenant(
 
 	await stub.configure({
 		tenant: fixtureTenant,
-		issuer,
-		audience: issuer,
+		issuer: oidcIssuerSchema.parse(issuer),
+		audience: oidcAudienceSchema.parse(issuer),
 		ownerIssuer: fixtureOwner.issuer,
 		ownerSubject: fixtureOwner.subject,
 		ownerAudience: fixtureOwner.audience,
