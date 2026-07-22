@@ -1,3 +1,7 @@
+import type {
+	NixSha256HashString,
+	StorePathHash
+} from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	uploadActionDecisionSchema,
@@ -85,8 +89,8 @@ export async function pushStorePaths(
 export interface NegotiatedUpload {
 	readonly uploadId: string;
 	readonly r2Key: string;
-	readonly storePathHash: string;
-	readonly narHash: string;
+	readonly storePathHash: StorePathHash;
+	readonly narHash: NixSha256HashString;
 	readonly compressed: Uint8Array;
 }
 

@@ -1,4 +1,8 @@
 import {
+	type NixSha256HashString,
+	type StorePathHash
+} from '@cupboard/nix-store/scalars';
+import {
 	commitBatchCapability,
 	commitBatchMaxEntries,
 	commitCapabilitiesHeader,
@@ -75,8 +79,8 @@ export type CommitSocketConnect = (
  */
 export interface CommitSessionTarget {
 	readonly uploadId: string;
-	readonly storePathHash: string;
-	readonly narHash: string;
+	readonly storePathHash: StorePathHash;
+	readonly narHash: NixSha256HashString;
 	readonly retention?: boolean;
 }
 
@@ -117,8 +121,8 @@ export interface CommitSessionOptions {
  * reuse or inline commit (`committed`) `settled` is already resolved.
  */
 export interface CommitOutcome {
-	readonly storePathHash: string;
-	readonly narHash: string;
+	readonly storePathHash: StorePathHash;
+	readonly narHash: NixSha256HashString;
 	readonly status: 'committed' | 'pending' | 'already-present';
 	readonly settled: Promise<void>;
 	// The retention grace fact this outcome's frame carried, present only when

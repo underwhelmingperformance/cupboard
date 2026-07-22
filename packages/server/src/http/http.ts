@@ -168,26 +168,15 @@ export function narInfoObjectPrefix(tenant: string): string {
 	return `t/${tenant}/narinfo/`;
 }
 
-// The narinfo object key from plain string components, so a listing cursor
-// (stored as text) can build the same key a `StorePathHash` would without a
-// cast. {@link narInfoObjectKey} is the typed entry point over this.
-export function narInfoObjectKeyOf(
-	tenant: string,
-	cache: string,
-	storePathHash: string
-): string {
-	const suffix =
-		cache === DEFAULT_CACHE ? storePathHash : `${cache}/${storePathHash}`;
-
-	return `${narInfoObjectPrefix(tenant)}${suffix}`;
-}
-
 export function narInfoObjectKey(
 	tenant: string,
 	storePathHash: StorePathHash,
 	cache: string = DEFAULT_CACHE
 ): string {
-	return narInfoObjectKeyOf(tenant, cache, storePathHash);
+	const suffix =
+		cache === DEFAULT_CACHE ? storePathHash : `${cache}/${storePathHash}`;
+
+	return `${narInfoObjectPrefix(tenant)}${suffix}`;
 }
 
 export function parseNarName(name: string): NixSha256HashString | undefined {

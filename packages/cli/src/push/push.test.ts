@@ -55,7 +55,7 @@ const compressedNarBytes = Buffer.from('compressed nar');
 function fallbackCommitResponse() {
 	return {
 		storePathHash: StorePath.hash(appPath),
-		narHash: appDigest.narHash.toString(),
+		narHash: appDigest.narHash.value,
 		status: 'committed' as const,
 		settled: Promise.resolve()
 	};
@@ -166,7 +166,7 @@ describe('runPush', () => {
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'committed',
 						settled: Promise.resolve()
 					});
@@ -600,7 +600,7 @@ describe('runPush', () => {
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'pending' as const,
 						settled: absentVerdict
 					});
@@ -765,7 +765,7 @@ describe('runPush', () => {
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'pending',
 						settled: Promise.resolve()
 					});
@@ -836,7 +836,7 @@ describe('runPush', () => {
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'committed',
 						settled: Promise.resolve()
 					});
@@ -1013,7 +1013,7 @@ describe('runPush', () => {
 				commit() {
 					return Promise.resolve({
 						storePathHash: appHash,
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'pending' as const,
 						settled: Promise.resolve()
 					});
@@ -1374,7 +1374,7 @@ describe('runPush', () => {
 				commit: () =>
 					Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'committed',
 						settled: Promise.resolve()
 					}),
@@ -1967,7 +1967,7 @@ describe('runPush', () => {
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'committed',
 						settled: Promise.resolve()
 					});
@@ -2095,7 +2095,7 @@ describe('runPush', () => {
 					// verification verdict arrives.
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'committed',
 						settled: Promise.resolve()
 					});
@@ -2204,7 +2204,7 @@ describe('runPush', () => {
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'pending' as const,
 						settled: failedVerdict
 					});
@@ -2299,7 +2299,7 @@ describe('runPush', () => {
 
 					return Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'committed',
 						settled: Promise.resolve()
 					});
@@ -2384,7 +2384,7 @@ describe('runPush', () => {
 				commit: () =>
 					Promise.resolve({
 						storePathHash: StorePath.hash(runtimePath),
-						narHash: runtimeDigest.narHash.toString(),
+						narHash: runtimeDigest.narHash.value,
 						status: 'committed',
 						settled: Promise.resolve()
 					}),
@@ -2464,7 +2464,7 @@ describe('runPush', () => {
 				commit: () =>
 					Promise.resolve({
 						storePathHash: StorePath.hash(appPath),
-						narHash: appDigest.narHash.toString(),
+						narHash: appDigest.narHash.value,
 						status: 'pending',
 						settled: Promise.resolve(),
 						grace: { graceSeconds: 900 }
@@ -2947,7 +2947,7 @@ function deferredUpload(
 
 			return Promise.resolve({
 				storePathHash: StorePath.hash(appPath),
-				narHash: appDigest.narHash.toString(),
+				narHash: appDigest.narHash.value,
 				status: 'pending' as const,
 				settled: Promise.resolve()
 			});

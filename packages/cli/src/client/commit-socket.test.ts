@@ -1,4 +1,8 @@
 import {
+	nixSha256HashSchema,
+	storePathHashSchema
+} from '@cupboard/nix-store/scalars';
+import {
 	commitBatchMaxEntries,
 	commitCapabilitiesValue,
 	type CommitSessionFrame
@@ -33,8 +37,10 @@ function commitOp(uploadId: string): string {
 	return JSON.stringify({ op: 'commit', uploadId });
 }
 
-const storePathHash = '0123456789abcdfghijklmnpqrsvwxyz';
-const narHash = `sha256:${'1'.repeat(52)}`;
+const storePathHash = storePathHashSchema.parse(
+	'0123456789abcdfghijklmnpqrsvwxyz'
+);
+const narHash = nixSha256HashSchema.parse(`sha256:${'1'.repeat(52)}`);
 const path = '/cache/_default/commit';
 // The session's jittered reconnect back-off never exceeds this cap, so advancing
 // a fake clock by it fires any pending reconnect.
