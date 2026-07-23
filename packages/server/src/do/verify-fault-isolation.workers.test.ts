@@ -166,7 +166,7 @@ describe('batched verify fault isolation', () => {
 		// Every upload's promote fails, in the consumer (falling each verdict back
 		// to plain verified) and again in the settle, so a full batch reaches the
 		// apply step but settles nothing.
-		const failingKeys = new Set([
+		const failingKeys = new Set<string>([
 			narObjectKey(first.narHash),
 			narObjectKey(second.narHash)
 		]);

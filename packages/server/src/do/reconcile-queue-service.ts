@@ -3,6 +3,8 @@ import {
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
 
+import { type RequestOrigin, requestOriginSchema } from '../http/http.ts';
+
 import { chunk } from './bulk.ts';
 import { type ServerContext } from './context.ts';
 
@@ -51,7 +53,7 @@ export class ReconcileQueueService {
 	// Records the targets and the push origin, then arms an immediate alarm. Empty
 	// input neither writes nor arms.
 	async enqueue(
-		origin: string,
+		origin: RequestOrigin,
 		targets: readonly ReconcileTarget[]
 	): Promise<void> {
 		if (targets.length === 0) {
@@ -81,8 +83,16 @@ export class ReconcileQueueService {
 		});
 	}
 
-	origin(): Promise<string | undefined> {
-		return this.context.ctx.storage.get<string>(reconcileOriginKey);
+	// A stored row holds a plain origin string, so the value is minted through
+	// the schema on read. A malformed or absent value reconciles without an edge
+	// purge.
+	async origin(): Promise<RequestOrigin | undefined> {
+		const stored =
+			await this.context.ctx.storage.get<string>(reconcileOriginKey);
+		const parsed =
+			stored === undefined ? undefined : requestOriginSchema.safeParse(stored);
+
+		return parsed?.success === true ? parsed.data : undefined;
 	}
 
 	async clearKeys(keys: readonly string[]): Promise<void> {

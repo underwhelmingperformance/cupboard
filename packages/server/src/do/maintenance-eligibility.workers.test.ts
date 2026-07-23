@@ -16,6 +16,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import { currentServer, resetTestServer } from '../test-support.ts';
 
@@ -507,7 +508,7 @@ function pendingUpload(
 		id: uploadIdSchema.parse(id),
 		cache: '',
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
-		r2Key: `staging/${id}`,
+		r2Key: r2ObjectKeySchema.parse(`staging/${id}`),
 		metadataJson: '{}',
 		createdAt: '2026-01-01T00:00:00.000Z',
 		expiresAt,
@@ -524,7 +525,7 @@ function pendingAttestation(
 		cache: '',
 		storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 		digest: sha256HexDigestSchema.parse('b'.repeat(64)),
-		r2Key: `staging/attestations/${id}`,
+		r2Key: r2ObjectKeySchema.parse(`staging/attestations/${id}`),
 		createdAt: '2026-01-01T00:00:00.000Z',
 		expiresAt
 	};

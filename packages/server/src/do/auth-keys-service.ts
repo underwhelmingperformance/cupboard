@@ -27,6 +27,7 @@ import {
 	TenantNotConfiguredError,
 	UnauthenticatedError
 } from '../errors.ts';
+import { type RequestOrigin } from '../http/http.ts';
 
 import { type AuthKey, type ServerContext } from './context.ts';
 import {
@@ -166,7 +167,9 @@ export class AuthKeysService {
 	// no identity until one has been assigned. The endpoints are built from
 	// the request's own path-based URL, which provisioning stamps as the issuer, so
 	// the advertised issuer equals the `iss` of a token this tenant issues.
-	authorizationServerMetadata(origin: string): AuthorizationServerMetadata {
+	authorizationServerMetadata(
+		origin: RequestOrigin
+	): AuthorizationServerMetadata {
 		const base = `${origin}/t/${this.context.requireTenant()}`;
 
 		return {

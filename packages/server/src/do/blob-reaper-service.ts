@@ -22,7 +22,12 @@ import {
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
 import * as d1Schema from '../db/d1-schema.ts';
-import { blobReaperGraceMs, casObjectKey, narObjectKey } from '../http/http.ts';
+import {
+	blobReaperGraceMs,
+	casObjectKey,
+	narObjectKey,
+	type R2ObjectKey
+} from '../http/http.ts';
 
 import {
 	batchNonEmpty,
@@ -168,7 +173,7 @@ export class BlobReaperService {
 			)
 			.limit(limit)
 			.all();
-		const removedKeys: string[] = [];
+		const removedKeys: R2ObjectKey[] = [];
 		const referencedHashes = this.d1
 			.select({ narHash: d1Schema.blobReference.narHash })
 			.from(d1Schema.blobReference);
@@ -270,7 +275,7 @@ export class BlobReaperService {
 			)
 			.limit(limit)
 			.all();
-		const removedKeys: string[] = [];
+		const removedKeys: R2ObjectKey[] = [];
 		const referencedDigests = this.d1
 			.select({ digest: d1Schema.attestationReference.digest })
 			.from(d1Schema.attestationReference);

@@ -7,7 +7,7 @@ import {
 	UploadedObjectNotFoundError,
 	UploadedObjectSizeMismatchError
 } from '../errors.ts';
-import { narObjectKey } from '../http/http.ts';
+import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 // The subset of an R2 object the commit step verifies before trusting it: its
 // byte length and the SHA-256 the store computed on upload.
@@ -34,7 +34,7 @@ export interface ExpectedNarBlob {
 export function verifyStoredBlob(
 	object: UploadedObject | undefined,
 	expected: ExpectedNarBlob,
-	r2Key: string = narObjectKey(expected.narHash)
+	r2Key: R2ObjectKey = narObjectKey(expected.narHash)
 ): void {
 	if (object === undefined) {
 		throw new UploadedObjectNotFoundError(r2Key);

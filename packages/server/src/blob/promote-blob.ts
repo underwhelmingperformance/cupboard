@@ -7,7 +7,7 @@ import { type DrizzleD1Database } from 'drizzle-orm/d1';
 import * as d1Schema from '../db/d1-schema.ts';
 import { type CanonicalBlob, canonicalBlobOf } from '../do/upload-metadata.ts';
 import { UploadedObjectNotFoundError } from '../errors.ts';
-import { narObjectKey } from '../http/http.ts';
+import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 /** The verified upload a promotion binds to its canonical object. */
 export interface PromotionTarget {
@@ -17,7 +17,7 @@ export interface PromotionTarget {
 
 async function ensureCanonicalObject(
 	blobs: R2Bucket,
-	stagingKey: string,
+	stagingKey: R2ObjectKey,
 	narHash: NixSha256HashString,
 	// The blob facts verify derived for a fresh upload. A reuse promotes against
 	// an already-canonical object and derives them from it, so it passes none.
@@ -81,7 +81,7 @@ async function ensureCanonicalObject(
 export async function promoteVerifiedBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,
-	stagingKey: string,
+	stagingKey: R2ObjectKey,
 	target: PromotionTarget,
 	blob: CanonicalBlob | undefined
 ): Promise<CanonicalBlob> {
@@ -124,7 +124,7 @@ export type BlobStateUpsert = BatchItem<'sqlite'> & {
 export async function stagePromotedBlob(
 	d1: DrizzleD1Database<typeof d1Schema>,
 	blobs: R2Bucket,
-	stagingKey: string,
+	stagingKey: R2ObjectKey,
 	target: PromotionTarget,
 	blob: CanonicalBlob | undefined
 ): Promise<StagedBlobPromotion> {

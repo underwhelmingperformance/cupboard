@@ -5,7 +5,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import {
+	narInfoObjectKey,
+	narObjectKey,
+	r2ObjectKeySchema
+} from '../http/http.ts';
 import { verifyTenant } from '../routing/scheduled.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
@@ -57,7 +61,7 @@ describe('recording a promoted verdict', () => {
 		await promoteVerifiedBlob(
 			d1,
 			env.BLOBS,
-			upload.r2Key,
+			r2ObjectKeySchema.parse(upload.r2Key),
 			{ narHash: metadata.narHash, narSize: metadata.narSize },
 			{ fileHash: nar.fileHash, fileSize: nar.narBytes.byteLength }
 		);

@@ -13,7 +13,7 @@ import { and, eq, inArray, sql } from 'drizzle-orm';
 import { promoteVerifiedBlob } from '../blob/promote-blob.ts';
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narObjectKey } from '../http/http.ts';
+import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 import { chunk, maxInClauseValues, maxOutgoingConnections } from './bulk.ts';
 import { type ServerContext } from './context.ts';
@@ -134,7 +134,7 @@ export class UploadStateService {
 	// called outside any critical section.
 	async clearPendingUploadAndStaging(
 		uploadId: UploadId,
-		r2Key: string,
+		r2Key: R2ObjectKey,
 		narHash: NixSha256HashString
 	): Promise<void> {
 		if (r2Key !== narObjectKey(narHash)) {
@@ -185,7 +185,7 @@ export class UploadStateService {
 	// inline outcomes return at commit and need no retained verdict.
 	async markUploadTerminal(
 		uploadId: UploadId,
-		r2Key: string,
+		r2Key: R2ObjectKey,
 		narHash: NixSha256HashString,
 		verdict: 'servable' | 'mismatch' | 'over-quota'
 	): Promise<void> {
@@ -266,7 +266,7 @@ export class UploadStateService {
 	// {@link promoteVerifiedBlob} for the write-once and crash-recovery
 	// contract.
 	promoteStagingBlob(
-		stagingKey: string,
+		stagingKey: R2ObjectKey,
 		metadata: ParsedUploadPathNegotiation,
 		blob: CanonicalBlob | undefined
 	): Promise<CanonicalBlob> {

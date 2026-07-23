@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
 
 import * as schema from '../db/schema.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
 import {
 	currentServer,
 	initialise,
@@ -226,7 +227,7 @@ function pendingUpload(
 		id: uploadIdSchema.parse(`upload-${String(index)}`),
 		cache: '',
 		narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
-		r2Key: `staging/upload-${String(index)}`,
+		r2Key: r2ObjectKeySchema.parse(`staging/upload-${String(index)}`),
 		metadataJson: '{}',
 		createdAt: '2026-01-01T00:00:00.000Z',
 		expiresAt: '2026-01-02T00:00:00.000Z'

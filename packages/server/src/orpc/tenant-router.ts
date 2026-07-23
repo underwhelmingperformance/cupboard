@@ -10,7 +10,11 @@ import { uploadGraceFactsCapability } from '@cupboard/protocol/upload';
 import { implement } from '@orpc/server';
 
 import { hasAcceptedCapability } from '../http/capabilities.ts';
-import { internalOrigin, verificationBatchSize } from '../http/http.ts';
+import {
+	internalOrigin,
+	requestOriginSchema,
+	verificationBatchSize
+} from '../http/http.ts';
 
 import { authoriseRequest } from './authorise.ts';
 import { type TenantOrpcContext, type TenantRpcServices } from './context.ts';
@@ -58,11 +62,13 @@ export const tenantRouter = os.router({
 			context.services.cacheAdmin.putCache(input.cacheName, input.priority)
 		),
 		remove: os.caches.remove.handler(({ input, context }) => {
-			const requestUrl = new URL(context.request.url);
+			const origin = requestOriginSchema.parse(
+				new URL(context.request.url).origin
+			);
 			return context.services.cacheAdmin.removeCache(
 				input.params.cacheName,
 				input.query.force,
-				requestUrl.origin
+				origin
 			);
 		})
 	},
@@ -183,11 +189,13 @@ export const tenantRouter = os.router({
 	},
 	paths: {
 		remove: os.paths.remove.handler(({ input, context }) => {
-			const requestUrl = new URL(context.request.url);
+			const origin = requestOriginSchema.parse(
+				new URL(context.request.url).origin
+			);
 			return context.services.deletionQueue.deleteStorePath(
 				cacheFromSelector(input.cacheName),
 				input.hash,
-				requestUrl.origin
+				origin
 			);
 		})
 	},
@@ -217,14 +225,16 @@ export const tenantRouter = os.router({
 			)
 		),
 		negotiate: os.uploads.negotiate.handler(({ input, context }) => {
-			const requestUrl = new URL(context.request.url);
+			const origin = requestOriginSchema.parse(
+				new URL(context.request.url).origin
+			);
 			return context.services.uploads.negotiate(
 				cacheFromSelector(input.cacheName),
 				{
 					pushId: input.pushId,
 					paths: input.paths
 				},
-				requestUrl.origin,
+				origin,
 				context.services.takeNegotiateHints(context.request),
 				hasAcceptedCapability(context.request, uploadGraceFactsCapability)
 			);
@@ -273,7 +283,7 @@ async function collectGarbage(
 	services: TenantRpcServices,
 	cache?: StoredCache
 ): Promise<GcResponse> {
-	const { origin } = new URL(request.url);
+	const origin = requestOriginSchema.parse(new URL(request.url).origin);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const outcome = await services.runGarbageCollection(
 		logger,
@@ -302,7 +312,7 @@ async function runVerify(
 	services: TenantRpcServices,
 	limit: number | undefined
 ): Promise<VerifyReport> {
-	const { origin } = new URL(request.url);
+	const origin = requestOriginSchema.parse(new URL(request.url).origin);
 	const purgeOrigin = origin === internalOrigin ? undefined : origin;
 	const batch = Math.min(limit ?? verificationBatchSize, verificationBatchSize);
 

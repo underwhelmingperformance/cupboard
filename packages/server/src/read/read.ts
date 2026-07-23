@@ -19,11 +19,15 @@ import { readWithOneRetry } from '../db/transient.ts';
 import { maxOutgoingConnections } from '../do/bulk.ts';
 import { SharedFactsUnavailableError } from '../errors.ts';
 import {
+	type EdgeCacheKey,
+	edgeCacheKeySchema,
 	isNotModified,
-	narInfoCachePath,
+	narInfoCacheKey,
 	narInfoObjectKey,
 	narObjectKey,
 	notFoundResponse,
+	type R2ObjectKey,
+	requestOriginSchema,
 	TextBody,
 	textResponse
 } from '../http/http.ts';
@@ -164,14 +168,14 @@ export function serveNarInfo(
 	storePathHash: StorePathHash,
 	isPrivate: boolean
 ): Promise<Response> {
-	const { origin } = new URL(request.url);
+	const origin = requestOriginSchema.parse(new URL(request.url).origin);
 
 	return serveR2(
 		request,
 		env,
 		ctx,
 		narInfoObjectKey(tenant, storePathHash, cache),
-		`${origin}${narInfoCachePath(tenant, storePathHash, cache)}`,
+		narInfoCacheKey(origin, tenant, storePathHash, cache),
 		narInfoHeaders,
 		!isPrivate
 	);
@@ -230,12 +234,15 @@ export async function cacheInfoResponse(
 	return new Response(response.body, { status: response.status, headers });
 }
 
-function narCacheKey(tenant: TenantId, narHash: NixSha256HashString): string {
+function narCacheKey(
+	tenant: TenantId,
+	narHash: NixSha256HashString
+): EdgeCacheKey {
 	const cacheKeyUrl = new URL(
 		`t/${tenant}/${narObjectKey(narHash)}`,
 		'https://cupboard-nar-cache.invalid/'
 	);
-	return cacheKeyUrl.href;
+	return edgeCacheKeySchema.parse(cacheKeyUrl.href);
 }
 
 // `authorize`, when provided, gates access to a shared object. It runs before
@@ -246,8 +253,8 @@ async function serveR2(
 	request: Request,
 	env: Env,
 	ctx: ReadContext,
-	key: string,
-	cacheKey: string,
+	key: R2ObjectKey,
+	cacheKey: EdgeCacheKey,
 	headersFor: (object: R2Object) => Headers,
 	isPublicCache: boolean,
 	authorize?: () => Promise<boolean>

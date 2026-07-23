@@ -1,4 +1,5 @@
 import { SubrequestTimeoutError } from '../errors.ts';
+import { type R2ObjectKey } from '../http/http.ts';
 
 import { boundedSubrequest } from './deadline.ts';
 
@@ -85,7 +86,7 @@ export class ObjectWriteOrder {
 	 * behind it.
 	 */
 	async write<T>(
-		keys: readonly string[],
+		keys: readonly R2ObjectKey[],
 		mutate: () => Promise<T>
 	): Promise<T> {
 		await this.settleOutstanding(keys);

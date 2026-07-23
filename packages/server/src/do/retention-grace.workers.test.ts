@@ -35,7 +35,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
-import { narInfoObjectKey, narObjectKey } from '../http/http.ts';
+import {
+	narInfoObjectKey,
+	narObjectKey,
+	r2ObjectKeySchema,
+	requestOriginSchema
+} from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	authorisedFetch,
@@ -1484,7 +1489,7 @@ describe('retention grace at publication', () => {
 						DEFAULT_CACHE,
 						uploadIdSchema.parse('loser-upload'),
 						uploadPathNegotiation(metadata),
-						'staging/loser-upload',
+						r2ObjectKeySchema.parse('staging/loser-upload'),
 						{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
 					);
 
@@ -2363,7 +2368,7 @@ describe('retention grace facts on the wire', () => {
 						pushId: testPushId,
 						paths: [uploadPathNegotiation(path)]
 					},
-					'https://cupboard.example',
+					requestOriginSchema.parse('https://cupboard.example'),
 					undefined,
 					shouldReportGrace
 				);

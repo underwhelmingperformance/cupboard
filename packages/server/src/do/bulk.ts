@@ -4,7 +4,7 @@ import { mapWithConcurrency } from '@cupboard/shared/concurrency';
 import { type BatchItem } from 'drizzle-orm/batch';
 import { type DrizzleD1Database } from 'drizzle-orm/d1';
 
-import { narObjectKey } from '../http/http.ts';
+import { narObjectKey, type R2ObjectKey } from '../http/http.ts';
 
 export { chunk } from '@cupboard/shared/collections';
 
@@ -28,7 +28,7 @@ export const maxR2DeleteKeys = 1000;
  */
 export async function deleteObjects(
 	bucket: R2Bucket,
-	keys: readonly string[]
+	keys: readonly R2ObjectKey[]
 ): Promise<void> {
 	for (const batch of chunk(keys, maxR2DeleteKeys)) {
 		await bucket.delete(batch);

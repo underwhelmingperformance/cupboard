@@ -56,6 +56,8 @@ import { hasAcceptedCapability } from '../http/capabilities.ts';
 import { serverErrorHandler } from '../http/error-response.ts';
 import {
 	parseNarInfoName,
+	type RequestOrigin,
+	requestOriginSchema,
 	textResponse,
 	verificationBatchSize
 } from '../http/http.ts';
@@ -654,11 +656,9 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 			})
 		);
 		this.app.get('/.well-known/oauth-authorization-server', (context) => {
-			const requestUrl = new URL(context.req.url);
+			const origin = requestOriginSchema.parse(new URL(context.req.url).origin);
 
-			return context.json(
-				this.authKeys.authorizationServerMetadata(requestUrl.origin)
-			);
+			return context.json(this.authKeys.authorizationServerMetadata(origin));
 		});
 
 		// The commit endpoint is a WebSocket: the upgrade request carries the
@@ -1414,7 +1414,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	private sweepGarbageInteractive(
 		logger: Logger,
 		cache: StoredCache | undefined,
-		purgeOrigin: string | undefined
+		purgeOrigin: RequestOrigin | undefined
 	): Promise<GarbageCollectionOutcome> {
 		return this.runExclusiveMaintenance('gc', () =>
 			this.runGarbagePass(
@@ -1430,7 +1430,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// a deferral after it starts must request its own pass.
 	private verifyInteractive(
 		logger: Logger,
-		purgeOrigin: string | undefined,
+		purgeOrigin: RequestOrigin | undefined,
 		limit: number
 	): Promise<VerifyReport> {
 		return this.runExclusiveMaintenance('verify', () => {
@@ -1661,7 +1661,7 @@ export class CupboardServer extends DurableObject<RuntimeEnv> {
 	// pushing a whole cap's worth of paths, mirroring {@link runGarbageCollection}.
 	async runCacheTeardown(
 		cache: StoredCache,
-		origin: string,
+		origin: RequestOrigin,
 		limit?: number
 	): Promise<void> {
 		await this.initialise();

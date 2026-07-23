@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import * as d1Schema from '../db/d1-schema.ts';
 import * as schema from '../db/schema.ts';
+import { r2ObjectKeySchema } from '../http/http.ts';
 import { fixtureTenant } from '../routing/tenant-routing.test-support.ts';
 import {
 	bootstrap,
@@ -341,7 +342,7 @@ async function insertPendingUpload(
 				id: uploadIdSchema.parse('seed-upload'),
 				cache: '',
 				narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
-				r2Key: 'staging/seed-upload',
+				r2Key: r2ObjectKeySchema.parse('staging/seed-upload'),
 				metadataJson: '{}',
 				createdAt: '2026-01-01T00:00:00.000Z',
 				expiresAt: '2026-06-01T00:00:00.000Z',

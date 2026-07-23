@@ -25,6 +25,8 @@ import {
 	unique
 } from 'drizzle-orm/sqlite-core';
 
+import type { R2ObjectKey } from '../http/http.ts';
+
 export const narInfos = sqliteTable(
 	'narinfo',
 	{
@@ -83,7 +85,7 @@ export const pendingUploads = sqliteTable(
 		id: text('id').$type<UploadId>().primaryKey(),
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		narHash: text('nar_hash').$type<NixSha256HashString>().notNull(),
-		r2Key: text('r2_key').notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		metadataJson: text('metadata_json').notNull(),
 		createdAt: text('created_at').notNull(),
 		expiresAt: text('expires_at').notNull(),
@@ -135,7 +137,7 @@ export const pendingAttestations = sqliteTable(
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
 		digest: text('digest').$type<Sha256HexDigest>().notNull(),
-		r2Key: text('r2_key').notNull(),
+		r2Key: text('r2_key').$type<R2ObjectKey>().notNull(),
 		createdAt: text('created_at').notNull(),
 		expiresAt: text('expires_at').notNull()
 	},

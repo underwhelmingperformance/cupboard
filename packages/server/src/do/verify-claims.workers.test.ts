@@ -3,7 +3,11 @@ import type { UploadId } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { narObjectKey, verifyClaimLeaseMs } from '../http/http.ts';
+import {
+	narObjectKey,
+	r2ObjectKeySchema,
+	verifyClaimLeaseMs
+} from '../http/http.ts';
 import {
 	commitPath,
 	currentServer,
@@ -35,7 +39,7 @@ function claimOrder(
 		.toSorted((left, right) => byCodeUnit(left.uploadId, right.uploadId))
 		.map((upload) => ({
 			uploadId: upload.uploadId,
-			r2Key: upload.r2Key,
+			r2Key: r2ObjectKeySchema.parse(upload.r2Key),
 			narHash: upload.metadata.narHash,
 			narSize: upload.metadata.narSize,
 			reuse: false
