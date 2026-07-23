@@ -1,4 +1,4 @@
-import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { authKeyIdSchema, tenantIdSchema } from '@cupboard/nix-store/scalars';
 import { oc } from '@orpc/contract';
 import { z } from 'zod';
 
@@ -11,7 +11,8 @@ import {
 	oidcTrustAddBodySchema,
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
-	oidcTrustSummarySchema
+	oidcTrustSummarySchema,
+	trustRuleIdSchema
 } from '../oidc.ts';
 import { controlCheckReportSchema } from '../reports.ts';
 import {
@@ -61,7 +62,7 @@ export const controlContract = {
 		retire: controlProcedure
 			.meta({ requires: 'control-key:retire' })
 			.route({ method: 'POST', path: '/keys/retire/{kid}' })
-			.input(z.strictObject({ kid: z.string() }))
+			.input(z.strictObject({ kid: authKeyIdSchema }))
 			.output(controlKeyRetireResponseSchema)
 	},
 
@@ -162,7 +163,7 @@ export const controlContract = {
 		get: controlProcedure
 			.meta({ requires: 'control-oidc-trust:read' })
 			.route({ method: 'GET', path: '/oidc-trust/{id}' })
-			.input(z.strictObject({ id: z.string() }))
+			.input(z.strictObject({ id: trustRuleIdSchema }))
 			.output(oidcTrustSummarySchema),
 
 		add: controlProcedure
@@ -174,7 +175,7 @@ export const controlContract = {
 		remove: controlProcedure
 			.meta({ requires: 'control-oidc-trust:remove' })
 			.route({ method: 'DELETE', path: '/oidc-trust/{id}' })
-			.input(z.strictObject({ id: z.string() }))
+			.input(z.strictObject({ id: trustRuleIdSchema }))
 			.output(oidcTrustRemoveResponseSchema)
 	}
 };

@@ -2,10 +2,12 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
-	AuthKeyListResponse,
-	AuthKeyRotateResponse,
-	AuthKeySummary
+	AuthKeySummary,
+	ParsedAuthKeyListResponse,
+	ParsedAuthKeyRotateResponse,
+	ParsedAuthKeySummary
 } from '@cupboard/protocol/keys';
 import type { ResultRow } from '@cupboard/reporter';
 import { describe, expect, it } from 'vitest';
@@ -17,12 +19,14 @@ import {
 	runAuthKeyRotate
 } from './auth-key.ts';
 
-function summary(overrides: Partial<AuthKeySummary>): AuthKeySummary {
+function summary(overrides: Partial<AuthKeySummary>): ParsedAuthKeySummary {
+	const { kid = 'kid-1', ...rest } = overrides;
+
 	return {
-		kid: 'kid-1',
+		kid: authKeyIdSchema.parse(kid),
 		createdAt: '2026-01-01T00:00:00.000Z',
 		active: true,
-		...overrides
+		...rest
 	};
 }
 
@@ -31,7 +35,7 @@ function authKeyClient(overrides: Partial<AuthKeyClient>): AuthKeyClient {
 		list: () => Promise.resolve({ keys: [] }),
 		rotate: () =>
 			Promise.resolve({
-				rotated: 'kid-1',
+				rotated: authKeyIdSchema.parse('kid-1'),
 				keys: []
 			}),
 		retire: ({ kid }) => Promise.resolve({ kid, retired: false }),
@@ -42,7 +46,7 @@ function authKeyClient(overrides: Partial<AuthKeyClient>): AuthKeyClient {
 describe('runAuthKeyList', () => {
 	it('reports a row per live key, flagging the active one', async () => {
 		const results: ResultRow[][] = [];
-		const response: AuthKeyListResponse = {
+		const response: ParsedAuthKeyListResponse = {
 			keys: [
 				summary({
 					kid: 'kid-old',
@@ -89,10 +93,10 @@ describe('runAuthKeyRotate', () => {
 	it('rotates and reports the scheduled retirement', async () => {
 		const results: ResultRow[][] = [];
 		const infos: string[] = [];
-		const response: AuthKeyRotateResponse = {
-			rotated: 'kid-new',
+		const response: ParsedAuthKeyRotateResponse = {
+			rotated: authKeyIdSchema.parse('kid-new'),
 			retiring: {
-				kid: 'kid-old',
+				kid: authKeyIdSchema.parse('kid-old'),
 				scheduledRetireAt: '2026-01-01T00:20:30.000Z'
 			},
 			keys: [
@@ -133,10 +137,10 @@ describe('runAuthKeyRetire', () => {
 	])('reports retired=$retired once confirmed', async ({ retired, value }) => {
 		const calls: { kid: string }[] = [];
 		const { ui, captured } = fakeCliUi({ confirm: 'yes' });
-		const response = { kid: 'kid-old', retired };
+		const response = { kid: authKeyIdSchema.parse('kid-old'), retired };
 
 		await runAuthKeyRetire(
-			'kid-old',
+			authKeyIdSchema.parse('kid-old'),
 			ui,
 			authKeyClient({
 				retire(input) {
@@ -164,7 +168,11 @@ describe('runAuthKeyRetire', () => {
 	it('leaves the key in place when the confirmation is declined', async () => {
 		const { ui, captured } = fakeCliUi({ confirm: 'no' });
 
-		await runAuthKeyRetire('kid-old', ui, authKeyClient({}));
+		await runAuthKeyRetire(
+			authKeyIdSchema.parse('kid-old'),
+			ui,
+			authKeyClient({})
+		);
 
 		expect({
 			results: captured.results,

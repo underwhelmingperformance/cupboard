@@ -1,13 +1,18 @@
 import { isPatternMatch } from './capture.ts';
 import { type OidcTrustDisplay, type PermittedGrant } from './grants.ts';
-import { type ClaimMatch, type OidcAudience, type OidcIssuer } from './oidc.ts';
+import {
+	type ClaimMatch,
+	type OidcAudience,
+	type OidcIssuer,
+	type TrustRuleId
+} from './oidc.ts';
 import { IssuerUrl } from './oidc-issuer.ts';
 
 // A trust rule reduced to what matching and issuance need. The DO reads enabled
 // rows from `oidc_trust`, parses `claims_json`/`permitted_grants_json`, and
 // passes them here; disabled rows are filtered out before matching.
 export interface OidcTrustRule {
-	readonly id: string;
+	readonly id: TrustRuleId;
 	readonly issuer: OidcIssuer;
 	readonly audience: OidcAudience;
 	readonly claims: Readonly<Record<string, ClaimMatch>>;

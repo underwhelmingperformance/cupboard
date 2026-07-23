@@ -1,3 +1,4 @@
+import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import { and, desc, eq, exists, isNotNull, isNull, lte, ne } from 'drizzle-orm';
 import type { DrizzleD1Database } from 'drizzle-orm/d1';
 
@@ -19,21 +20,21 @@ type Database = DrizzleD1Database<typeof d1Schema>;
 
 // The key that currently issues control tokens: its kid and unwrapped private JWK.
 export interface ControlSigningKey {
-	readonly kid: string;
+	readonly kid: AuthKeyId;
 	readonly privateJwk: JsonWebKey;
 }
 
 // A control key as the admin surface sees it: its kid and whether it is retired.
 export interface ControlKeySummary {
-	readonly kid: string;
+	readonly kid: AuthKeyId;
 	readonly retired: boolean;
 	readonly scheduledRetireAt?: string;
 }
 
 export interface ControlKeyRotation {
-	readonly kid: string;
+	readonly kid: AuthKeyId;
 	readonly retiring?: {
-		readonly kid: string;
+		readonly kid: AuthKeyId;
 		readonly scheduledRetireAt: string;
 	};
 }
@@ -65,7 +66,7 @@ export async function ensureControlKey(
 		.insert(d1Schema.controlAuthKey)
 		.values({
 			id: bootstrapId,
-			kid: crypto.randomUUID(),
+			kid: authKeyIdSchema.parse(crypto.randomUUID()),
 			publicJwkJson: JSON.stringify(publicJwk),
 			wrappedPrivateJwk: await wrapControlPrivateJwk(
 				wrappingSecret,
@@ -163,7 +164,7 @@ export async function rotateControlKey(
 ): Promise<ControlKeyRotation> {
 	const outgoing = await activeControlKey(database, wrappingSecret);
 	const { privateJwk, publicJwk } = await generateAuthKeyPair();
-	const kid = crypto.randomUUID();
+	const kid = authKeyIdSchema.parse(crypto.randomUUID());
 	const scheduledRetireAt = scheduledAccessKeyRetireAt(new Date(now));
 
 	await database.batch([
@@ -199,7 +200,7 @@ export async function rotateControlKey(
 // and changes nothing.
 export async function retireControlKey(
 	database: Database,
-	kid: string,
+	kid: AuthKeyId,
 	now: string
 ): Promise<boolean> {
 	const anotherLiveKey = database

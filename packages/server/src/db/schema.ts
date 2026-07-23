@@ -1,4 +1,6 @@
 import {
+	type AuthKeyId,
+	authKeyIdSchema,
 	type CachePriority,
 	type NixSha256HashString,
 	type RootName,
@@ -8,6 +10,7 @@ import {
 	type StorePathString,
 	type TenantId
 } from '@cupboard/nix-store/scalars';
+import type { TrustRuleId } from '@cupboard/protocol/oidc';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
 import {
 	index,
@@ -156,7 +159,10 @@ export const authKeys = sqliteTable(
 		id: text('id').primaryKey(),
 		// The JWKS key id carried in each issued token's header so a verifier can
 		// pick the right key across a rotation. Always populated on key creation.
-		kid: text('kid').notNull().default(''),
+		kid: text('kid')
+			.$type<AuthKeyId>()
+			.notNull()
+			.default(authKeyIdSchema.parse('')),
 		privateJwkJson: text('private_jwk_json').notNull(),
 		publicJwkJson: text('public_jwk_json').notNull(),
 		createdAt: text('created_at').notNull(),
@@ -185,7 +191,7 @@ export const refreshTokens = sqliteTable(
 	{
 		id: text('id').primaryKey(),
 		secretHash: text('secret_hash').notNull(),
-		ruleId: text('rule_id').notNull(),
+		ruleId: text('rule_id').$type<TrustRuleId>().notNull(),
 		subject: text('subject').notNull(),
 		createdAt: text('created_at').notNull(),
 		expiresAt: text('expires_at').notNull()
@@ -391,7 +397,7 @@ export const verificationCursor = sqliteTable('verification_cursor', {
 // human-facing provenance a preset pins. `disabled_at` soft-disables a rule
 // without losing the audit row.
 export const oidcTrust = sqliteTable('oidc_trust', {
-	id: text('id').primaryKey(),
+	id: text('id').$type<TrustRuleId>().primaryKey(),
 	issuer: text('issuer').notNull(),
 	audience: text('audience').notNull(),
 	claimsJson: text('claims_json').notNull().default('{}'),

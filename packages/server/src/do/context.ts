@@ -1,5 +1,6 @@
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
+	type AuthKeyId,
 	type NixSha256HashString,
 	type RootName,
 	type TenantId
@@ -16,7 +17,8 @@ import {
 	type OidcIssuer,
 	oidcIssuerSchema,
 	type OidcSubject,
-	type OidcTrustSummary
+	type OidcTrustSummary,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { type OidcTrustRule } from '@cupboard/protocol/oidc-trust-match';
 import {
@@ -74,7 +76,7 @@ export type SchemaWriter =
 
 // The owner's admin trust rule is seeded under a fixed id from deploy config;
 // the admin CRUD uses generated ids, so it never collides with this one.
-export const ownerRuleId = 'owner';
+export const ownerRuleId = trustRuleIdSchema.parse('owner');
 
 // A stored claim value is an exact string or a `{ pattern }` match, the same
 // shape the admin contract accepts and stores. Reading must admit every value
@@ -103,7 +105,7 @@ export interface GarbageCollectionOutcome {
 // non-retired key verifies and is published in the JWKS. Retiring sets
 // `retired`, dropping the key from issuing, verification and the JWKS at once.
 export interface AuthKey {
-	readonly kid: string;
+	readonly kid: AuthKeyId;
 	readonly privateJwk: JsonWebKey;
 	readonly publicJwk: JsonWebKey;
 	readonly createdAt: string;

@@ -1,4 +1,7 @@
-import { signingKeyIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	authKeyIdSchema,
+	signingKeyIdSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 import {
@@ -47,7 +50,7 @@ export const keysContract = {
 		retire: baseProcedure
 			.meta({ requires: 'auth-key:retire', maintenance: true })
 			.route({ method: 'POST', path: '/keys/auth/retire/{kid}' })
-			.input(z.strictObject({ kid: z.string() }))
+			.input(z.strictObject({ kid: authKeyIdSchema }))
 			.output(authKeyRetireResponseSchema)
 	}
 };

@@ -1,3 +1,4 @@
+import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import type {
 	AuthKeyListResponse,
 	AuthKeyRotateResponse
@@ -244,7 +245,7 @@ describe('auth-key rotation', () => {
 					.insert(authKeys)
 					.values({
 						id: 'active',
-						kid: '',
+						kid: authKeyIdSchema.parse(''),
 						privateJwkJson: JSON.stringify(pair.privateJwk),
 						publicJwkJson: JSON.stringify(pair.publicJwk),
 						createdAt: '2026-01-01T00:00:00.000Z'

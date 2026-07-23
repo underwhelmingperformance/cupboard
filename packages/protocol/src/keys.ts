@@ -1,4 +1,7 @@
-import { signingKeyIdSchema } from '@cupboard/nix-store/scalars';
+import {
+	authKeyIdSchema,
+	signingKeyIdSchema
+} from '@cupboard/nix-store/scalars';
 import { z } from 'zod';
 
 // A key signs new narinfos (`signing`), is advertised from `/pubkey` while
@@ -38,7 +41,7 @@ export type ParsedKeyRetireResponse = z.output<typeof keyRetireResponseSchema>;
 // The auth-token signing keys. `active` marks the key that currently issues;
 // every listed key still verifies and is published in the JWKS.
 export const authKeySummarySchema = z.strictObject({
-	kid: z.string(),
+	kid: authKeyIdSchema,
 	createdAt: z.string(),
 	active: z.boolean(),
 	scheduledRetireAt: z.string().optional()
@@ -53,10 +56,10 @@ export type ParsedAuthKeyListResponse = z.output<
 >;
 
 export const authKeyRotateResponseSchema = z.strictObject({
-	rotated: z.string(),
+	rotated: authKeyIdSchema,
 	retiring: z
 		.strictObject({
-			kid: z.string(),
+			kid: authKeyIdSchema,
 			scheduledRetireAt: z.string()
 		})
 		.optional(),
@@ -67,7 +70,7 @@ export type ParsedAuthKeyRotateResponse = z.output<
 >;
 
 export const authKeyRetireResponseSchema = z.strictObject({
-	kid: z.string(),
+	kid: authKeyIdSchema,
 	retired: z.boolean()
 });
 export type ParsedAuthKeyRetireResponse = z.output<

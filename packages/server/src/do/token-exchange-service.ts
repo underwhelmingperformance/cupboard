@@ -7,7 +7,8 @@ import {
 	subjectTokenTypeJwt,
 	tokenExchangeGrantType,
 	tokenRequestSchema,
-	type TokenResponse
+	type TokenResponse,
+	type TrustRuleId
 } from '@cupboard/protocol/oidc';
 import {
 	firstClaimMismatch,
@@ -351,7 +352,7 @@ export class TokenExchangeService {
 	}
 
 	private async issueRefreshToken(
-		ruleId: string,
+		ruleId: TrustRuleId,
 		subject: string
 	): Promise<string> {
 		const id = crypto.randomUUID();

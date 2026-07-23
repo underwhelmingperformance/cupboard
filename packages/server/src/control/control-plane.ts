@@ -1,4 +1,4 @@
-import { type TenantId } from '@cupboard/nix-store/scalars';
+import { type AuthKeyId, type TenantId } from '@cupboard/nix-store/scalars';
 import {
 	issuedAccessTokenType,
 	oidcAudienceSchema,
@@ -13,7 +13,8 @@ import {
 	type OidcTrustListResponse,
 	type OidcTrustRemoveResponse,
 	type OidcTrustSummary,
-	type ParsedOidcTrustAddBody
+	type ParsedOidcTrustAddBody,
+	type TrustRuleId
 } from '@cupboard/protocol/oidc';
 import {
 	matchOidcTrust,
@@ -414,8 +415,8 @@ export function controlKeyRotate(env: Env): Promise<ControlKeyRotation> {
 
 export async function controlKeyRetire(
 	env: Env,
-	kid: string
-): Promise<{ kid: string; retired: boolean }> {
+	kid: AuthKeyId
+): Promise<{ kid: AuthKeyId; retired: boolean }> {
 	const now = new Date();
 	const isRetired = await retireControlKey(
 		controlDatabase(env),
@@ -447,7 +448,7 @@ export function controlOidcTrustList(env: Env): Promise<OidcTrustListResponse> {
 
 export function controlOidcTrustGet(
 	env: Env,
-	id: string
+	id: TrustRuleId
 ): Promise<OidcTrustSummary> {
 	return getControlTrust(controlDatabase(env), id);
 }
@@ -462,7 +463,7 @@ export function controlOidcTrustAdd(
 
 export function controlOidcTrustRemove(
 	env: Env,
-	id: string
+	id: TrustRuleId
 ): Promise<OidcTrustRemoveResponse> {
 	const now = new Date();
 	return removeControlTrust(controlDatabase(env), id, now.toISOString());

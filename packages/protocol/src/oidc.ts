@@ -26,6 +26,13 @@ export type OidcSubject = z.infer<typeof oidcSubjectSchema>;
 export const oidcAudienceSchema = z.string().brand('OidcAudience');
 export type OidcAudience = z.infer<typeof oidcAudienceSchema>;
 
+// A trust rule's id. The seeded owner rule keeps the literal id `owner`; every
+// other rule is created with a random UUID, so the brand does not narrow the
+// format. It is type-level only, branding a value the store or a response already
+// holds without re-validating it.
+export const trustRuleIdSchema = z.string().brand('TrustRuleId');
+export type TrustRuleId = z.infer<typeof trustRuleIdSchema>;
+
 // A configured claim is matched either exactly (the token's claim must equal the
 // string) or against an anchored RE2 pattern (the claim must match it in full).
 // The pattern form lets a rule pin part of a claim and leave the rest open, for
@@ -139,7 +146,7 @@ export const oidcTrustAddBodySchema = z.strictObject({
 export type ParsedOidcTrustAddBody = z.output<typeof oidcTrustAddBodySchema>;
 
 export const oidcTrustSummarySchema = z.strictObject({
-	id: z.string(),
+	id: trustRuleIdSchema,
 	issuer: oidcIssuerSchema,
 	audience: oidcAudienceSchema,
 	claims: z.record(z.string(), claimMatchSchema),
@@ -157,7 +164,7 @@ export type ParsedOidcTrustListResponse = z.output<
 >;
 
 export const oidcTrustRemoveResponseSchema = z.strictObject({
-	id: z.string(),
+	id: trustRuleIdSchema,
 	removed: z.boolean()
 });
 export type ParsedOidcTrustRemoveResponse = z.output<

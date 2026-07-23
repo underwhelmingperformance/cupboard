@@ -4,6 +4,7 @@ import {
 	type StoredCache,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { runInDurableObject } from 'cloudflare:test';
 import { drizzle } from 'drizzle-orm/durable-sqlite';
 import { describe, expect, it } from 'vitest';
@@ -399,7 +400,7 @@ describe('migrations', () => {
 
 	it('migrates and round-trips an OIDC trust rule', async () => {
 		const rule = {
-			id: 'r1',
+			id: trustRuleIdSchema.parse('r1'),
 			issuer: 'https://token.actions.githubusercontent.com',
 			audience: 'https://cache.example.workers.dev',
 			claimsJson: JSON.stringify({ repository_id: '1234' }),

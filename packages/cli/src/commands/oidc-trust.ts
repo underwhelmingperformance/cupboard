@@ -8,7 +8,9 @@ import {
 	type OidcTrustSummary,
 	type ParsedOidcTrustListResponse,
 	type ParsedOidcTrustRemoveResponse,
-	type ParsedOidcTrustSummary
+	type ParsedOidcTrustSummary,
+	type TrustRuleId,
+	trustRuleIdSchema
 } from '@cupboard/protocol/oidc';
 import { type Reporter, type ResultRow } from '@cupboard/reporter';
 import type { Command } from 'commander';
@@ -149,9 +151,9 @@ interface OidcTrustAddOptions {
  */
 export interface OidcTrustClient {
 	list(): Promise<ParsedOidcTrustListResponse>;
-	get(input: { id: string }): Promise<ParsedOidcTrustSummary>;
+	get(input: { id: TrustRuleId }): Promise<ParsedOidcTrustSummary>;
 	add(input: OidcTrustAddBody): Promise<ParsedOidcTrustSummary>;
-	remove(input: { id: string }): Promise<ParsedOidcTrustRemoveResponse>;
+	remove(input: { id: TrustRuleId }): Promise<ParsedOidcTrustRemoveResponse>;
 }
 
 function collect(value: string, previous: readonly string[]): string[] {
@@ -484,7 +486,7 @@ function buildOidcTrustCommands(
 			const reporter = commandUi(program, programOptions).reporter();
 
 			await runOidcTrustShow(
-				id,
+				trustRuleIdSchema.parse(id),
 				reporter,
 				plane.clientFor(url, programOptions)
 			);
@@ -739,7 +741,11 @@ function buildOidcTrustCommands(
 		.action(async (url: URL, id: string, options: ConfirmableOptions) => {
 			const ui = commandUi(program, programOptions, { assumeYes: options.yes });
 
-			await runOidcTrustRemove(id, ui, plane.clientFor(url, programOptions));
+			await runOidcTrustRemove(
+				trustRuleIdSchema.parse(id),
+				ui,
+				plane.clientFor(url, programOptions)
+			);
 		});
 }
 
@@ -776,7 +782,7 @@ export async function runOidcTrustAdd(
 }
 
 export async function runOidcTrustShow(
-	id: string,
+	id: TrustRuleId,
 	reporter: Reporter,
 	client: Pick<OidcTrustClient, 'get'>
 ): Promise<void> {
@@ -792,7 +798,7 @@ export async function runOidcTrustShow(
 }
 
 export async function runOidcTrustRemove(
-	id: string,
+	id: TrustRuleId,
 	ui: CliUi,
 	client: OidcTrustClient
 ): Promise<void> {

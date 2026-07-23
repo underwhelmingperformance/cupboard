@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { oidcAudienceSchema, oidcIssuerSchema } from './oidc.ts';
+import {
+	oidcAudienceSchema,
+	oidcIssuerSchema,
+	trustRuleIdSchema
+} from './oidc.ts';
 import {
 	firstClaimMismatch,
 	matchOidcTrust,
@@ -27,21 +31,21 @@ function ciGrant(cache: string): OidcTrustRule['permittedGrants'] {
 }
 
 const ownerRule: OidcTrustRule = {
-	id: 'owner',
+	id: trustRuleIdSchema.parse('owner'),
 	issuer: oidcIssuerSchema.parse('https://accounts.google.com'),
 	audience: oidcAudienceSchema.parse('client-id.apps.googleusercontent.com'),
 	claims: { sub: 'owner-subject' },
 	permittedGrants: wildcard
 };
 const repoRule: OidcTrustRule = {
-	id: 'repo',
+	id: trustRuleIdSchema.parse('repo'),
 	issuer: github,
 	audience,
 	claims: { repository_owner_id: '5678' },
 	permittedGrants: ciGrant('owner-ci')
 };
 const exactRepoRule: OidcTrustRule = {
-	id: 'exact-repo',
+	id: trustRuleIdSchema.parse('exact-repo'),
 	issuer: github,
 	audience,
 	claims: { repository_owner_id: '5678', repository_id: '1234' },
@@ -130,7 +134,7 @@ describe('matchOidcTrust', () => {
 
 	it('matches a claim against a configured pattern', () => {
 		const patternRule: OidcTrustRule = {
-			id: 'pattern',
+			id: trustRuleIdSchema.parse('pattern'),
 			issuer: github,
 			audience,
 			claims: {
@@ -171,14 +175,14 @@ describe('matchOidcTrust', () => {
 
 	it('breaks an equal-specificity tie by id, regardless of row order', () => {
 		const ownerClaimRule: OidcTrustRule = {
-			id: 'rule-b',
+			id: trustRuleIdSchema.parse('rule-b'),
 			issuer: github,
 			audience,
 			claims: { repository_owner_id: '5678' },
 			permittedGrants: ciGrant('ci-b')
 		};
 		const actorClaimRule: OidcTrustRule = {
-			id: 'rule-a',
+			id: trustRuleIdSchema.parse('rule-a'),
 			issuer: github,
 			audience,
 			claims: { actor: 'ci' },
@@ -199,14 +203,14 @@ describe('matchOidcTrust', () => {
 
 	it('prefers an interactive rule over a same-specificity CI rule on a tie', () => {
 		const interactiveRule: OidcTrustRule = {
-			id: 'zzz-owner',
+			id: trustRuleIdSchema.parse('zzz-owner'),
 			issuer: github,
 			audience,
 			claims: { sub: 'shared' },
 			permittedGrants: wildcard
 		};
 		const ciRule: OidcTrustRule = {
-			id: 'aaa-ci',
+			id: trustRuleIdSchema.parse('aaa-ci'),
 			issuer: github,
 			audience,
 			claims: { actor: 'ci' },
@@ -224,14 +228,14 @@ describe('matchOidcTrust', () => {
 
 	it('prefers the interactive rule even over a more specific CI rule', () => {
 		const interactiveRule: OidcTrustRule = {
-			id: 'owner',
+			id: trustRuleIdSchema.parse('owner'),
 			issuer: github,
 			audience,
 			claims: { sub: 'owner-subject' },
 			permittedGrants: wildcard
 		};
 		const specificCiRule: OidcTrustRule = {
-			id: 'ci',
+			id: trustRuleIdSchema.parse('ci'),
 			issuer: github,
 			audience,
 			claims: { sub: 'owner-subject', actor: 'ci' },
@@ -254,7 +258,7 @@ describe('matchOidcTrust', () => {
 
 describe('firstClaimMismatch', () => {
 	const rule: OidcTrustRule = {
-		id: 'branch',
+		id: trustRuleIdSchema.parse('branch'),
 		issuer: github,
 		audience,
 		claims: {

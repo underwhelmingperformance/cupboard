@@ -1,4 +1,5 @@
 import { tenantIdSchema } from '@cupboard/nix-store/scalars';
+import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import {
 	oidcAudienceSchema,
 	oidcIssuerSchema,
@@ -46,7 +47,7 @@ describe('configure RPC', () => {
 				const owner = drizzle(state.storage, { schema: { oidcTrust } })
 					.select()
 					.from(oidcTrust)
-					.where(eq(oidcTrust.id, 'owner'))
+					.where(eq(oidcTrust.id, trustRuleIdSchema.parse('owner')))
 					.get();
 
 				return {

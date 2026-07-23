@@ -4,7 +4,8 @@ import {
 	oidcTrustAddBodySchema,
 	oidcTrustListResponseSchema,
 	oidcTrustRemoveResponseSchema,
-	oidcTrustSummarySchema
+	oidcTrustSummarySchema,
+	trustRuleIdSchema
 } from '../oidc.ts';
 
 import { baseProcedure } from './base.ts';
@@ -18,7 +19,7 @@ export const oidcTrustContract = {
 	get: baseProcedure
 		.meta({ requires: 'oidc-trust:read' })
 		.route({ method: 'GET', path: '/oidc-trust/{id}' })
-		.input(z.strictObject({ id: z.string() }))
+		.input(z.strictObject({ id: trustRuleIdSchema }))
 		.output(oidcTrustSummarySchema),
 
 	add: baseProcedure
@@ -30,6 +31,6 @@ export const oidcTrustContract = {
 	remove: baseProcedure
 		.meta({ requires: 'oidc-trust:remove' })
 		.route({ method: 'DELETE', path: '/oidc-trust/{id}' })
-		.input(z.strictObject({ id: z.string() }))
+		.input(z.strictObject({ id: trustRuleIdSchema }))
 		.output(oidcTrustRemoveResponseSchema)
 };

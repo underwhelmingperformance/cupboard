@@ -1,10 +1,12 @@
 import { startCapture } from '@cupboard/logger/testing';
 import {
+	authKeyIdSchema,
 	nixSha256HashSchema,
 	rootNameSchema,
 	sha256HexDigestSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
+import { trustRuleIdSchema } from '@cupboard/protocol/oidc';
 import { uploadIdSchema } from '@cupboard/protocol/upload';
 import { runInDurableObject } from 'cloudflare:test';
 import { StatusCodes } from 'http-status-codes';
@@ -273,7 +275,7 @@ async function seedRefreshTokens(count: number, label: string): Promise<void> {
 				.values({
 					id: `${label}-${String(index)}`,
 					secretHash: 'hash',
-					ruleId: 'rule',
+					ruleId: trustRuleIdSchema.parse('rule'),
 					subject: 'subject',
 					createdAt: '2026-01-01T00:00:00.000Z',
 					// Far-future expiry so the sweep deletes none and the read count is the
@@ -457,7 +459,7 @@ async function seedReconcileBacklog(
 				.insert(schema.authKeys)
 				.values({
 					id,
-					kid: id,
+					kid: authKeyIdSchema.parse(id),
 					privateJwkJson: '{}',
 					publicJwkJson: '{}',
 					createdAt: '2026-01-01T00:00:00.000Z',

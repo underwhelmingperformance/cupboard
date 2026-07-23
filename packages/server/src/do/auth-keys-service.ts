@@ -1,3 +1,4 @@
+import { type AuthKeyId, authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import {
 	type AuthKeyListResponse,
 	type AuthKeyRetireResponse,
@@ -98,7 +99,7 @@ export class AuthKeysService {
 		}
 
 		const generated = await generateAuthKeyPair();
-		const kid = crypto.randomUUID();
+		const kid = authKeyIdSchema.parse(crypto.randomUUID());
 		const createdAt = new Date();
 		const createdAtIso = createdAt.toISOString();
 
@@ -131,8 +132,8 @@ export class AuthKeysService {
 		};
 	}
 
-	private backfillAuthKeyKid(id: string): string {
-		const kid = crypto.randomUUID();
+	private backfillAuthKeyKid(id: string): AuthKeyId {
+		const kid = authKeyIdSchema.parse(crypto.randomUUID());
 
 		this.context.db
 			.update(schema.authKeys)
@@ -229,7 +230,7 @@ export class AuthKeysService {
 		// section, which must not interleave with a concurrent rotation or a
 		// verification reading the key set.
 		const generated = await generateAuthKeyPair();
-		const kid = crypto.randomUUID();
+		const kid = authKeyIdSchema.parse(crypto.randomUUID());
 		const rotatedAt = new Date();
 		const scheduledRetireAt = scheduledAccessKeyRetireAt(rotatedAt);
 
@@ -261,7 +262,7 @@ export class AuthKeysService {
 		});
 	}
 
-	async retireAuthKey(kid: string): Promise<AuthKeyRetireResponse> {
+	async retireAuthKey(kid: AuthKeyId): Promise<AuthKeyRetireResponse> {
 		// The last-key check and the retirement share one critical section so two
 		// concurrent retirements cannot both see themselves as safe. A refused
 		// retirement is returned as an outcome and thrown afterwards: throwing

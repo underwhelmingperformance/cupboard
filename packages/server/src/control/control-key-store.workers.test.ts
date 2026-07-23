@@ -1,3 +1,4 @@
+import { authKeyIdSchema } from '@cupboard/nix-store/scalars';
 import { byCodeUnit } from '@cupboard/nix-store/store-path';
 import { env } from 'cloudflare:workers';
 import { drizzle as drizzleD1 } from 'drizzle-orm/d1';
@@ -220,7 +221,8 @@ describe('control key store', () => {
 			// an unknown key) must resolve quietly: the post-update read finds it not
 			// live, so it is the idempotent branch, not the last-live-key refusal that
 			// would wrongly fire when exactly one key remains.
-			const kid = target === 'retired' ? firstKid : 'nonexistent';
+			const kid =
+				target === 'retired' ? firstKid : authKeyIdSchema.parse('nonexistent');
 
 			await expect(retireControlKey(database, kid, t2)).resolves.toBe(false);
 

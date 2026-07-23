@@ -1,4 +1,5 @@
 import {
+	authKeyIdSchema,
 	nixSha256HashSchema,
 	rootNameSchema,
 	sha256HexDigestSchema,
@@ -352,16 +353,16 @@ describe('maintenance eligibility projection', () => {
 				.values([
 					authKey({
 						id: 'old-retired',
-						kid: 'old-retired',
+						kid: authKeyIdSchema.parse('old-retired'),
 						scheduledRetireAt: '2026-01-02T00:00:00.000Z',
 						retiredAt: '2026-01-02T00:01:00.000Z'
 					}),
 					authKey({
 						id: 'old-live',
-						kid: 'old-live',
+						kid: authKeyIdSchema.parse('old-live'),
 						scheduledRetireAt: '2026-01-03T00:00:00.000Z'
 					}),
-					authKey({ id: 'active', kid: 'active' })
+					authKey({ id: 'active', kid: authKeyIdSchema.parse('active') })
 				])
 				.run();
 
@@ -533,7 +534,7 @@ function authKey(
 ): typeof schema.authKeys.$inferInsert {
 	return {
 		id: 'key',
-		kid: 'key',
+		kid: authKeyIdSchema.parse('key'),
 		privateJwkJson: '{}',
 		publicJwkJson: '{}',
 		createdAt: '2026-01-01T00:00:00.000Z',
