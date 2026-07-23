@@ -85,6 +85,17 @@ export const ttlSecondsSchema = z
 	.brand('TtlSeconds');
 export type TtlSeconds = z.infer<typeof ttlSecondsSchema>;
 
+// A retention-grace window in seconds: it shares the root TTL's upper bound but
+// admits zero, since a grace policy may configure a zero grace where a root TTL
+// cannot. Its own brand keeps a grace window from crossing with a root TTL.
+export const graceSecondsSchema = z
+	.number()
+	.int()
+	.min(0)
+	.max(rootTtlMaxSeconds)
+	.brand('GraceSeconds');
+export type GraceSeconds = z.infer<typeof graceSecondsSchema>;
+
 export const predicateTypeSchema = z
 	.string()
 	.min(1)
@@ -187,6 +198,18 @@ export const cachePrioritySchema = z
 	.max(Number.MAX_SAFE_INTEGER)
 	.brand('CachePriority');
 export type CachePriority = z.infer<typeof cachePrioritySchema>;
+
+// A narinfo version, sourced from `generation_seq` on each (re)commit and
+// captured by the D1 reference edge, so a stale deletion compares against it and
+// can never remove a newer recommitted edge. Its own brand keeps it from
+// crossing with sizes, counts, or a reuse-view revision.
+export const narInfoGenerationSchema = z
+	.number()
+	.int()
+	.min(0)
+	.max(Number.MAX_SAFE_INTEGER)
+	.brand('NarInfoGeneration');
+export type NarInfoGeneration = z.infer<typeof narInfoGenerationSchema>;
 
 export const compressionSchema = z.literal('zstd');
 

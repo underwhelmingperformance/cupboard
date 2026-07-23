@@ -10,7 +10,10 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import { byCodeUnit, StorePath } from '@cupboard/nix-store/store-path';
-import { type ParsedReuseViewName } from '@cupboard/protocol/reuse-views';
+import {
+	type ParsedReuseViewName,
+	type ReuseViewRevision
+} from '@cupboard/protocol/reuse-views';
 import {
 	and,
 	eq,
@@ -57,7 +60,7 @@ type CandidateRow = typeof schema.narInfos.$inferSelect;
 
 interface GateSnapshot {
 	readonly tenant: TenantId;
-	readonly revision: number;
+	readonly revision: ReuseViewRevision;
 	readonly candidates: readonly CandidateRow[];
 }
 

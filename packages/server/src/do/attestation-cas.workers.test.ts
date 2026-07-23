@@ -1,5 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	narInfoGenerationSchema,
 	predicateTypeSchema,
 	sha256HexDigestSchema,
 	storePathHashSchema
@@ -259,7 +260,7 @@ describe('attestation CAS lifecycle', () => {
 		await currentServer().removeAttestationReference({
 			cache: '',
 			storePathHash: storePathHashSchema.parse('d'.repeat(32)),
-			generation: 0,
+			generation: narInfoGenerationSchema.parse(0),
 			predicateType,
 			digest: sha256HexDigestSchema.parse(first.digest)
 		});
@@ -267,7 +268,7 @@ describe('attestation CAS lifecycle', () => {
 		await currentServer().removeAttestationReference({
 			cache: '',
 			storePathHash: storePathHashSchema.parse('f'.repeat(32)),
-			generation: 0,
+			generation: narInfoGenerationSchema.parse(0),
 			predicateType,
 			digest: sha256HexDigestSchema.parse(first.digest)
 		});
@@ -308,7 +309,7 @@ describe('attestation CAS lifecycle', () => {
 			{
 				cache: '',
 				storePathHash,
-				generation: 0,
+				generation: narInfoGenerationSchema.parse(0),
 				predicateType,
 				digest: measured.digest
 			},
@@ -368,7 +369,7 @@ describe('attestation CAS lifecycle', () => {
 		await currentServer().removeAttestationReference({
 			cache: '',
 			storePathHash,
-			generation: 0,
+			generation: narInfoGenerationSchema.parse(0),
 			predicateType,
 			digest: sha256HexDigestSchema.parse(live.digest)
 		});

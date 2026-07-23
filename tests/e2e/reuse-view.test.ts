@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
+import { cachePrioritySchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import { describe, expect, it } from 'vitest';
 
@@ -86,7 +87,11 @@ describe('Nix substitution through a reuse view', () => {
 						requireSigs: true
 					});
 
-					const expectedCacheInfo = new CacheInfo('/nix/store', true, 50);
+					const expectedCacheInfo = new CacheInfo(
+						'/nix/store',
+						true,
+						cachePrioritySchema.parse(50)
+					);
 
 					expect({
 						substituted: await readFile(target.physicalPath(storePath), 'utf8'),

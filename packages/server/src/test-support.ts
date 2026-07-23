@@ -5,6 +5,7 @@ import {
 	type AuthKeyId,
 	authKeyIdSchema,
 	DEFAULT_CACHE,
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
@@ -1270,7 +1271,7 @@ export async function fileAttestationReference(options: {
 		{
 			cache: storedCacheSchema.parse(options.cache ?? DEFAULT_CACHE),
 			storePathHash: options.storePathHash,
-			generation: options.generation,
+			generation: narInfoGenerationSchema.parse(options.generation),
 			predicateType: predicateTypeSchema.parse(
 				options.predicateType ?? 'https://slsa.dev/provenance/v1'
 			),
@@ -1388,7 +1389,7 @@ export async function queueUnflushedNarInfoDeletion(fields: {
 					cache: deletion.cache,
 					storePathHash: deletion.storePathHash,
 					narHash: deletion.narHash,
-					generation: deletion.generation,
+					generation: narInfoGenerationSchema.parse(deletion.generation),
 					createdAt: createdAt.toISOString()
 				})
 				.onConflictDoNothing()
@@ -1410,7 +1411,7 @@ export async function seedNarInfoDeletion(fields: {
 				cache: DEFAULT_CACHE,
 				storePathHash: fields.storePathHash,
 				narHash: fields.narHash,
-				generation: fields.generation,
+				generation: narInfoGenerationSchema.parse(fields.generation),
 				createdAt: createdAt.toISOString()
 			})
 			.onConflictDoNothing()
@@ -1476,12 +1477,14 @@ export async function deleteBlobReferenceEdge(
 	storePathHash: StorePathHash,
 	generation: number
 ): Promise<void> {
+	const captured = narInfoGenerationSchema.parse(generation);
+
 	await drizzleD1(env.CUPBOARD_DB, { schema: { blobReference } })
 		.delete(blobReference)
 		.where(
 			and(
 				eq(blobReference.storePathHash, storePathHash),
-				eq(blobReference.generation, generation)
+				eq(blobReference.generation, captured)
 			)
 		)
 		.run();
@@ -2795,6 +2798,8 @@ export async function seedReservedNarInfo(
 		const database = drizzle(state.storage, {
 			schema: { generationSeq, narInfos }
 		});
+		const reserved = narInfoGenerationSchema.parse(generation);
+		const nextGeneration = narInfoGenerationSchema.parse(generation + 1);
 
 		database
 			.insert(narInfos)
@@ -2808,7 +2813,7 @@ export async function seedReservedNarInfo(
 				deriver: metadata.deriver,
 				ca: metadata.ca,
 				sigsJson: '[]',
-				generation,
+				generation: reserved,
 				createdAt: '2026-01-01T00:00:00.000Z'
 			})
 			.run();
@@ -2817,11 +2822,11 @@ export async function seedReservedNarInfo(
 			.values({
 				cache: '',
 				storePathHash: metadata.storePathHash,
-				nextGeneration: generation + 1
+				nextGeneration
 			})
 			.onConflictDoUpdate({
 				target: [generationSeq.cache, generationSeq.storePathHash],
-				set: { nextGeneration: generation + 1 }
+				set: { nextGeneration }
 			})
 			.run();
 	});

@@ -2,6 +2,9 @@ import {
 	type AuthKeyId,
 	authKeyIdSchema,
 	type CachePriority,
+	type GraceSeconds,
+	type NarInfoGeneration,
+	narInfoGenerationSchema,
 	type NixSha256HashString,
 	type RootName,
 	type Sha256HexDigest,
@@ -11,6 +14,7 @@ import {
 	type TenantId
 } from '@cupboard/nix-store/scalars';
 import type { TrustRuleId } from '@cupboard/protocol/oidc';
+import type { ReuseViewRevision } from '@cupboard/protocol/reuse-views';
 import type { SessionId, UploadId } from '@cupboard/protocol/upload';
 import {
 	index,
@@ -36,7 +40,10 @@ export const narInfos = sqliteTable(
 		// The narinfo version, sourced from `generation_seq` on each (re)commit and
 		// captured by the D1 reference edge, so a stale deletion compares against it
 		// and can never remove a newer recommitted edge.
-		generation: integer('generation').notNull().default(0),
+		generation: integer('generation')
+			.$type<NarInfoGeneration>()
+			.notNull()
+			.default(narInfoGenerationSchema.parse(0)),
 		createdAt: text('created_at').notNull()
 	},
 	(table) => [
@@ -62,7 +69,10 @@ export const generationSeq = sqliteTable(
 	{
 		cache: text('cache').$type<StoredCache>().notNull().default(''),
 		storePathHash: text('store_path_hash').$type<StorePathHash>().notNull(),
-		nextGeneration: integer('next_generation').notNull().default(0)
+		nextGeneration: integer('next_generation')
+			.$type<NarInfoGeneration>()
+			.notNull()
+			.default(narInfoGenerationSchema.parse(0))
 	},
 	(table) => [primaryKey({ columns: [table.cache, table.storePathHash] })]
 );
@@ -143,7 +153,10 @@ export const narInfoDeletions = sqliteTable(
 		// The generation of the narinfo version this deletion captured, so the D1
 		// reference edge it retires is targeted by exact `(…, generation)` and a
 		// replayed deletion compares against the live row before acting.
-		generation: integer('generation').notNull().default(0),
+		generation: integer('generation')
+			.$type<NarInfoGeneration>()
+			.notNull()
+			.default(narInfoGenerationSchema.parse(0)),
 		createdAt: text('created_at').notNull()
 	},
 	(table) => [
@@ -369,7 +382,7 @@ export const retentionGracePolicies = sqliteTable(
 	{
 		id: text('id').primaryKey(),
 		cachePrefix: text('cache_prefix').notNull(),
-		graceSeconds: integer('grace_seconds').notNull(),
+		graceSeconds: integer('grace_seconds').$type<GraceSeconds>().notNull(),
 		createdAt: text('created_at').notNull()
 	},
 	(table) => [
@@ -414,7 +427,7 @@ export const oidcTrust = sqliteTable('oidc_trust', {
 // view's selectors is a delete-and-reinsert under one name.
 export const reuseViews = sqliteTable('reuse_view', {
 	name: text('name').primaryKey(),
-	revision: integer('revision').notNull(),
+	revision: integer('revision').$type<ReuseViewRevision>().notNull(),
 	priority: integer('priority').notNull(),
 	createdAt: text('created_at').notNull(),
 	updatedAt: text('updated_at').notNull()
@@ -437,5 +450,5 @@ export const reuseViewSelectors = sqliteTable(
 // from no change at all) depends on that guarantee holding.
 export const reuseViewRevisionSeq = sqliteTable('reuse_view_revision_seq', {
 	name: text('name').primaryKey(),
-	nextRevision: integer('next_revision').notNull()
+	nextRevision: integer('next_revision').$type<ReuseViewRevision>().notNull()
 });

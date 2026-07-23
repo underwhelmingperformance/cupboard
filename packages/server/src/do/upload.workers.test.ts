@@ -5,6 +5,7 @@ import { NixSha256Hash } from '@cupboard/nix-store/hash';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	DEFAULT_CACHE,
+	narInfoGenerationSchema,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
 import { type UploadId, uploadIdSchema } from '@cupboard/protocol/upload';
@@ -1587,7 +1588,9 @@ describe('upload flow', () => {
 			.spyOn(NarInfoObjectsService.prototype, 'committedNarInfoRow')
 			.mockResolvedValue({
 				...committedNarInfoRow,
-				generation: committedNarInfoRow.generation + 1
+				generation: narInfoGenerationSchema.parse(
+					committedNarInfoRow.generation + 1
+				)
 			});
 
 		const session = await openCommitSession(token);

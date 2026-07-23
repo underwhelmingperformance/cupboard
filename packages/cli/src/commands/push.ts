@@ -1,4 +1,4 @@
-import { selectorForCache } from '@cupboard/nix-store/scalars';
+import { selectorForCache, type TtlSeconds } from '@cupboard/nix-store/scalars';
 import { type AuthorizationDetails } from '@cupboard/protocol/grants';
 import type { Command } from 'commander';
 
@@ -11,7 +11,11 @@ import { authenticateForPush } from '../auth/auth.ts';
 import { commandUi, type ProgramOptions } from '../cli.ts';
 import { CupboardClient, storedCacheFor } from '../client/client.ts';
 import { parseWorkerUrl } from '../client/transport.ts';
-import { parseTtl, parseWaitTimeout } from '../duration.ts';
+import {
+	parseTtl,
+	parseWaitTimeout,
+	type WaitTimeoutSeconds
+} from '../duration.ts';
 import {
 	AttestationsDisabledError,
 	InvalidUploadConcurrencyError,
@@ -26,10 +30,10 @@ interface PushOptions {
 	readonly githubOidc?: boolean;
 	readonly audience?: Audience;
 	readonly root?: string;
-	readonly ttl?: number;
+	readonly ttl?: TtlSeconds;
 	readonly cache?: string;
 	readonly wait?: boolean;
-	readonly waitTimeout?: number;
+	readonly waitTimeout?: WaitTimeoutSeconds;
 	readonly attest?: boolean;
 	readonly attestation: readonly string[];
 	readonly uploadConcurrency?: number;

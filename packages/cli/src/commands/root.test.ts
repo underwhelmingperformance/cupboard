@@ -2,6 +2,7 @@ import {
 	capturingReporter as reporter,
 	fakeCliUi
 } from '@cupboard/cli-ui/testing';
+import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { StorePath } from '@cupboard/nix-store/store-path';
 import {
 	type ParsedRootListResponse,
@@ -78,7 +79,7 @@ describe('runRootSet', () => {
 			'_default',
 			'github:owner/repo/main',
 			[target],
-			604_800,
+			ttlSecondsSchema.parse(604_800),
 			reporter(results),
 			setRootClient(response, calls)
 		);
@@ -174,7 +175,7 @@ describe('runRootEnsure', () => {
 			'_default',
 			'main',
 			[target],
-			604_800,
+			ttlSecondsSchema.parse(604_800),
 			reporter(results),
 			{
 				ensure(input) {

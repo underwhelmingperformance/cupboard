@@ -1,4 +1,5 @@
 import {
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	storePathHashSchema
@@ -37,7 +38,7 @@ export type BlobStateHint = z.infer<typeof blobStateHintSchema>;
 // direction.
 export const committedEdgeHintSchema = z.object({
 	storePathHash: storePathHashSchema,
-	generation: z.number().int().nonnegative(),
+	generation: narInfoGenerationSchema,
 	narHash: nixSha256HashSchema
 });
 export type CommittedEdgeHint = z.infer<typeof committedEdgeHintSchema>;

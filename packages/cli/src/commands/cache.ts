@@ -1,5 +1,9 @@
 import type { CliUi } from '@cupboard/cli-ui';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
+import {
+	type CachePriority,
+	cachePrioritySchema
+} from '@cupboard/nix-store/scalars';
 import type {
 	CacheSummary,
 	ParsedCacheListResponse,
@@ -22,7 +26,7 @@ import { InvalidCachePriorityError } from '../errors.ts';
 import { tenantUrlArgument } from '../url-argument.ts';
 
 interface CacheCreateOptions {
-	readonly priority?: number;
+	readonly priority?: CachePriority;
 }
 
 interface CacheRemoveOptions {
@@ -47,7 +51,7 @@ export interface CacheClient {
 	}): Promise<ParsedCacheRemoveResponse>;
 }
 
-export function parsePriority(value: string): number {
+export function parsePriority(value: string): CachePriority {
 	// Canonical decimal only: a leading zero is as non-canonical as hex or
 	// exponent forms, so it is rejected the same way.
 	if (!/^(?:0|[1-9]\d*)$/u.test(value)) {
@@ -60,7 +64,7 @@ export function parsePriority(value: string): number {
 		throw new InvalidCachePriorityError(value);
 	}
 
-	return priority;
+	return cachePrioritySchema.parse(priority);
 }
 
 export function registerCacheCommands(
@@ -161,7 +165,7 @@ export async function runCacheList(
 
 export async function runCacheCreate(
 	name: string,
-	priority: number,
+	priority: CachePriority,
 	reporter: Reporter,
 	client: Pick<CacheClient, 'put'>
 ): Promise<void> {

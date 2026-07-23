@@ -1,4 +1,5 @@
 import {
+	type GraceSeconds,
 	type StoredCache,
 	type StorePathHash
 } from '@cupboard/nix-store/scalars';
@@ -229,7 +230,7 @@ export class RetentionService {
 
 	// The grace in force for a cache: the longest matching cache-name prefix
 	// wins, and the empty prefix matches every cache as the tenant default.
-	resolveGraceSeconds(cache: StoredCache): number | undefined {
+	resolveGraceSeconds(cache: StoredCache): GraceSeconds | undefined {
 		return this.context.db
 			.select({
 				cachePrefix: schema.retentionGracePolicies.cachePrefix,

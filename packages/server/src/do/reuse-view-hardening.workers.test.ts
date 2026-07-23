@@ -2,6 +2,7 @@ import { startCapture } from '@cupboard/logger/testing';
 import { NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	cacheNameSchema,
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	storePathHashSchema,
 	storePathSchema
@@ -355,7 +356,9 @@ describe('reuse-view lookup hardening', () => {
 					tenant: fixtureTenant,
 					cache: pr1Cache,
 					storePathHash: parsedHash,
-					generation: live.generation + index + 1,
+					generation: narInfoGenerationSchema.parse(
+						live.generation + index + 1
+					),
 					narHash: parsedNarHash
 				}))
 			)

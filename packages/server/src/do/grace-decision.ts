@@ -1,4 +1,7 @@
 import {
+	type GraceSeconds,
+	graceSecondsSchema,
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	type StoredCache,
 	type StorePathHash
@@ -21,7 +24,7 @@ import { type RetentionService } from './retention-service.ts';
 // lasting deadline.
 export const graceDecisionSchema = z.strictObject({
 	reportsGrace: z.boolean(),
-	graceSeconds: z.number().int().min(0).optional()
+	graceSeconds: graceSecondsSchema.optional()
 });
 
 export type GraceDecision = z.output<typeof graceDecisionSchema>;
@@ -33,7 +36,7 @@ const storedGraceDecisionSchema = z.union([
 	z
 		.strictObject({
 			plan: z.boolean(),
-			graceSeconds: z.number().int().min(0).optional()
+			graceSeconds: graceSecondsSchema.optional()
 		})
 		.transform(({ plan, graceSeconds }) => ({
 			reportsGrace: plan,
@@ -117,9 +120,9 @@ export function confirmGrace(
 	retention: RetentionService,
 	cache: StoredCache,
 	storePathHash: StorePathHash,
-	generation: number,
+	generation: NarInfoGeneration,
 	narHash: NixSha256HashString,
-	graceSeconds: number | undefined
+	graceSeconds: GraceSeconds | undefined
 ): ConfirmedGrace {
 	const facts = confirmGraceBatch(
 		context,
@@ -147,10 +150,10 @@ export function confirmGraceBatch(
 	cache: StoredCache,
 	entries: readonly {
 		readonly storePathHash: StorePathHash;
-		readonly generation: number;
+		readonly generation: NarInfoGeneration;
 		readonly narHash: NixSha256HashString;
 	}[],
-	graceSeconds: number | undefined
+	graceSeconds: GraceSeconds | undefined
 ): Map<StorePathHash, ParsedUploadGraceFact> {
 	// One deadline for the whole batch, computed up front so every matched row
 	// reports the same extension.

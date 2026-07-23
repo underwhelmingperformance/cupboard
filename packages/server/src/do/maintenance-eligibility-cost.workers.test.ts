@@ -1,6 +1,7 @@
 import { startCapture } from '@cupboard/logger/testing';
 import {
 	authKeyIdSchema,
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	rootNameSchema,
 	sha256HexDigestSchema,
@@ -161,7 +162,7 @@ async function seedNarInfoDeletions(
 					cache: '',
 					storePathHash: storePathHashSchema.parse('a'.repeat(32)),
 					narHash: nixSha256HashSchema.parse(`sha256:${'0'.repeat(52)}`),
-					generation: generationOffset + index,
+					generation: narInfoGenerationSchema.parse(generationOffset + index),
 					createdAt: '2026-01-01T00:00:00.000Z'
 				})
 				.run();

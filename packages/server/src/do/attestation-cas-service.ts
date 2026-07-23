@@ -1,4 +1,5 @@
 import {
+	type NarInfoGeneration,
 	type PredicateType,
 	type Sha256HexDigest,
 	sha256HexDigestSchema,
@@ -27,7 +28,7 @@ export interface MeasuredAttestationBundle {
 export interface AttestationReference {
 	readonly cache: StoredCache;
 	readonly storePathHash: StorePathHash;
-	readonly generation: number;
+	readonly generation: NarInfoGeneration;
 	readonly predicateType: PredicateType;
 	readonly digest: Sha256HexDigest;
 }

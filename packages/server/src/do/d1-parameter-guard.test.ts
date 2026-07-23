@@ -9,6 +9,7 @@
 // any request in production.
 import {
 	cacheNameSchema,
+	narInfoGenerationSchema,
 	nixSha256HashSchema,
 	type NixSha256HashString,
 	predicateTypeSchema,
@@ -89,7 +90,10 @@ function fencedEdgeFilter(count: number) {
 			...Array.from({ length: count }, () =>
 				and(
 					eq(d1Schema.blobReference.storePathHash, testStorePathHash),
-					eq(d1Schema.blobReference.generation, 0)
+					eq(
+						d1Schema.blobReference.generation,
+						narInfoGenerationSchema.parse(0)
+					)
 				)
 			)
 		)
@@ -177,7 +181,7 @@ describe('D1 bound-parameter guard', () => {
 				() => ({
 					cache,
 					storePathHash: testStorePathHash,
-					generation: 0
+					generation: narInfoGenerationSchema.parse(0)
 				})
 			);
 			const inBatch = or(...rows.map((row) => blobReferenceMatch(row)));
@@ -194,7 +198,7 @@ describe('D1 bound-parameter guard', () => {
 				() => ({
 					cache,
 					storePathHash: testStorePathHash,
-					generation: 0,
+					generation: narInfoGenerationSchema.parse(0),
 					predicateType: predicateTypeSchema.parse(
 						'https://slsa.dev/provenance/v1'
 					),

@@ -1,9 +1,11 @@
 import { type NarInfo } from '@cupboard/nix-store/narinfo';
 import {
 	type AuthKeyId,
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	type RootName,
-	type TenantId
+	type TenantId,
+	type TtlSeconds
 } from '@cupboard/nix-store/scalars';
 import { type ResolvedRootTarget } from '@cupboard/nix-store/store-path';
 import {
@@ -116,7 +118,7 @@ export interface AuthKey {
 export interface RootSetCommand {
 	readonly name: RootName;
 	readonly targets: readonly ResolvedRootTarget[];
-	readonly ttlSeconds: number | undefined;
+	readonly ttlSeconds: TtlSeconds | undefined;
 }
 
 // The outcome of reserving a narinfo row: `reserved` when this commit inserted
@@ -124,8 +126,8 @@ export interface RootSetCommand {
 // commit already holds it (a concurrent winner or this same upload re-driven),
 // `lost` when a different narinfo version holds it.
 export type ReserveOutcome =
-	| { kind: 'reserved'; generation: number }
-	| { kind: 'mine'; generation: number }
+	| { kind: 'reserved'; generation: NarInfoGeneration }
+	| { kind: 'mine'; generation: NarInfoGeneration }
 	| { kind: 'lost'; narHash: NixSha256HashString };
 
 // The outcome of materialising a reserved narinfo: `materialised` on success,

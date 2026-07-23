@@ -1,6 +1,10 @@
 import { capturingReporter as reporter } from '@cupboard/cli-ui/testing';
 import { CacheInfo } from '@cupboard/nix-store/cache-info';
 import {
+	cachePrioritySchema,
+	graceSecondsSchema
+} from '@cupboard/nix-store/scalars';
+import {
 	oidcTrustListResponseSchema,
 	type OidcTrustSummary
 } from '@cupboard/protocol/oidc';
@@ -102,14 +106,17 @@ function checkClient(overrides: {
 									{
 										id: 'grace-0',
 										cachePrefix: '',
-										graceSeconds: overrides.graceSeconds,
+										graceSeconds: graceSecondsSchema.parse(
+											overrides.graceSeconds
+										),
 										createdAt: '2026-01-01T00:00:00.000Z'
 									}
 								]),
 						...(overrides.extraPolicies ?? []).map((policy, index) => ({
 							id: `grace-extra-${String(index)}`,
 							createdAt: '2026-01-01T00:00:00.000Z',
-							...policy
+							...policy,
+							graceSeconds: graceSecondsSchema.parse(policy.graceSeconds)
 						}))
 					]
 				})
@@ -140,8 +147,12 @@ function checkDependencies(overrides: {
 		fetchCacheInfo: (target: URL) =>
 			Promise.resolve(
 				target.pathname.includes('/reuse/')
-					? new CacheInfo('/nix/store', true, overrides.viewPriority ?? 50)
-					: new CacheInfo('/nix/store', true, 40)
+					? new CacheInfo(
+							'/nix/store',
+							true,
+							cachePrioritySchema.parse(overrides.viewPriority ?? 50)
+						)
+					: new CacheInfo('/nix/store', true, cachePrioritySchema.parse(40))
 			)
 	};
 }
@@ -300,7 +311,13 @@ describe('runGithubCheck', () => {
 					fetchCacheInfo: (target) =>
 						target.pathname.includes('/reuse/')
 							? Promise.reject(reason)
-							: Promise.resolve(new CacheInfo('/nix/store', true, 40))
+							: Promise.resolve(
+									new CacheInfo(
+										'/nix/store',
+										true,
+										cachePrioritySchema.parse(40)
+									)
+								)
 				}
 			)
 		).rejects.toBe(reason);

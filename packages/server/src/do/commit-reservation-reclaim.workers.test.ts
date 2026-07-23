@@ -1,5 +1,6 @@
 import { rootLogger } from '@cupboard/logger';
 import {
+	narInfoGenerationSchema,
 	type NixSha256HashString,
 	storePathHashSchema
 } from '@cupboard/nix-store/scalars';
@@ -81,7 +82,9 @@ describe('committed narinfo identity', () => {
 
 							instance.context.db
 								.update(schema.narInfos)
-								.set({ generation: row.generation + 1 })
+								.set({
+									generation: narInfoGenerationSchema.parse(row.generation + 1)
+								})
 								.where(
 									eq(schema.narInfos.storePathHash, metadata.storePathHash)
 								)
@@ -366,7 +369,7 @@ async function seedEdge(
 			tenant: instance.context.requireTenant(),
 			cache: '',
 			storePathHash: storePathHashSchema.parse('r4'.repeat(16)),
-			generation,
+			generation: narInfoGenerationSchema.parse(generation),
 			narHash
 		});
 	});
@@ -440,7 +443,7 @@ describe('reclaimReservedRow answers from the live row identity', () => {
 					pipelineFor(instance.context).reclaimReservedRow(
 						'',
 						metadata.storePathHash,
-						7,
+						narInfoGenerationSchema.parse(7),
 						metadata.narHash
 					)
 				)
@@ -486,7 +489,7 @@ describe('reclaimReservedRow answers from the live row identity', () => {
 				pipelineFor(instance.context).reclaimReservedRow(
 					'',
 					metadata.storePathHash,
-					7,
+					narInfoGenerationSchema.parse(7),
 					metadata.narHash
 				)
 			)

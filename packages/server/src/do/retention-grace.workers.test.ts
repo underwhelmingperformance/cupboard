@@ -2,6 +2,8 @@ import { rootLogger } from '@cupboard/logger';
 import {
 	cacheNameSchema,
 	DEFAULT_CACHE,
+	graceSecondsSchema,
+	narInfoGenerationSchema,
 	rootNameSchema,
 	type StoredCache,
 	storedCacheSchema,
@@ -427,7 +429,7 @@ async function addGracePolicy(
 		(instance) =>
 			new RetentionService(instance.context).addGracePolicy({
 				cachePrefix,
-				graceSeconds
+				graceSeconds: graceSecondsSchema.parse(graceSeconds)
 			}).id
 	);
 }
@@ -471,7 +473,7 @@ describe('retention grace transitions', () => {
 
 	// The shared clock starts at 2026-01-01T00:00:00Z, so a 24-hour grace from a
 	// transition processed immediately lands on the next midnight.
-	const dayGraceSeconds = 86_400;
+	const dayGraceSeconds = graceSecondsSchema.parse(86_400);
 	const dayAfterStart = '2026-01-02T00:00:00.000Z';
 
 	it('grants deadlines to the targets a replacement releases', async () => {
@@ -918,8 +920,14 @@ describe('retention grace transitions', () => {
 			const service = new RetentionService(instance.context);
 			const withoutPolicies = service.resolveGraceSeconds(pr5Cache);
 
-			service.addGracePolicy({ cachePrefix: '', graceSeconds: 604_800 });
-			service.addGracePolicy({ cachePrefix: 'pr-', graceSeconds: 3600 });
+			service.addGracePolicy({
+				cachePrefix: '',
+				graceSeconds: graceSecondsSchema.parse(604_800)
+			});
+			service.addGracePolicy({
+				cachePrefix: 'pr-',
+				graceSeconds: graceSecondsSchema.parse(3600)
+			});
 
 			return {
 				withoutPolicies,
@@ -939,7 +947,7 @@ describe('retention grace transitions', () => {
 describe('retention grace at publication', () => {
 	beforeEach(resetTestServer);
 
-	const dayGraceSeconds = 86_400;
+	const dayGraceSeconds = graceSecondsSchema.parse(86_400);
 	const dayAfterStart = '2026-01-02T00:00:00.000Z';
 
 	it('normalises grace decisions across a rolling deployment', () => {
@@ -1410,7 +1418,7 @@ describe('retention grace at publication', () => {
 				uploadIdSchema.parse('loser-upload'),
 				uploadPathNegotiation(metadata),
 				narObjectKey(metadata.narHash),
-				{ reportsGrace: true, graceSeconds: 3600 }
+				{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
 			)
 		);
 
@@ -1477,7 +1485,7 @@ describe('retention grace at publication', () => {
 						uploadIdSchema.parse('loser-upload'),
 						uploadPathNegotiation(metadata),
 						'staging/loser-upload',
-						{ reportsGrace: true, graceSeconds: 3600 }
+						{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
 					);
 
 					return 'settled' as const;
@@ -1624,7 +1632,7 @@ describe('retention grace at publication', () => {
 					uploadIdSchema.parse('loser-upload'),
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
-					{ reportsGrace: true, graceSeconds: 3600 }
+					{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
 				);
 
 				return { outcome, hasMoved };
@@ -1705,7 +1713,9 @@ describe('retention grace at publication', () => {
 						tenant: instance.context.requireTenant(),
 						cache: defaultCache,
 						storePathHash: hash,
-						generation: live.generation + index + 1,
+						generation: narInfoGenerationSchema.parse(
+							live.generation + index + 1
+						),
 						narHash: live.narHash
 					}))
 				);
@@ -1734,7 +1744,7 @@ describe('retention grace at publication', () => {
 					uploadIdSchema.parse('loser-upload'),
 					uploadPathNegotiation(metadata),
 					narObjectKey(metadata.narHash),
-					{ reportsGrace: true, graceSeconds: 3600 }
+					{ reportsGrace: true, graceSeconds: graceSecondsSchema.parse(3600) }
 				);
 
 				return { outcome, bumpCount };
@@ -1995,7 +2005,7 @@ describe('retention grace facts on the wire', () => {
 		await clearBlobStorage();
 	});
 
-	const dayGraceSeconds = 86_400;
+	const dayGraceSeconds = graceSecondsSchema.parse(86_400);
 	const dayAfterStart = '2026-01-02T00:00:00.000Z';
 	const shouldReportGrace = true;
 
@@ -2974,7 +2984,7 @@ describe('confirming an unretained publication', () => {
 
 	// The shared clock starts at 2026-01-01T00:00:00Z, so a 24-hour grace from a
 	// confirmation processed immediately lands on the next midnight.
-	const dayGraceSeconds = 86_400;
+	const dayGraceSeconds = graceSecondsSchema.parse(86_400);
 	const dayAfterStart = '2026-01-02T00:00:00.000Z';
 
 	it('extends a confirmed path to now+grace and reports the deadline', async () => {
@@ -3394,7 +3404,7 @@ describe('confirming an unretained publication', () => {
 							narHash,
 							narSize: narBytes.byteLength,
 							referencesJson: '[]',
-							generation: 1,
+							generation: narInfoGenerationSchema.parse(1),
 							createdAt: '2026-01-01T00:00:00.000Z'
 						}))
 					)
@@ -3408,10 +3418,10 @@ describe('confirming an unretained publication', () => {
 				DEFAULT_CACHE,
 				hashes.map((storePathHash) => ({
 					storePathHash,
-					generation: 1,
+					generation: narInfoGenerationSchema.parse(1),
 					narHash
 				})),
-				86_400
+				graceSecondsSchema.parse(86_400)
 			);
 			const transactionCount = transactions.mock.calls.length;
 

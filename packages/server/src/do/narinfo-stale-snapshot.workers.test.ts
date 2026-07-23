@@ -1,4 +1,7 @@
-import { DEFAULT_CACHE } from '@cupboard/nix-store/scalars';
+import {
+	DEFAULT_CACHE,
+	narInfoGenerationSchema
+} from '@cupboard/nix-store/scalars';
 import { runInDurableObject } from 'cloudflare:test';
 import { env } from 'cloudflare:workers';
 import { and, eq } from 'drizzle-orm';
@@ -67,7 +70,7 @@ describe('isServable with a stale committed-edges snapshot', () => {
 		await runInDurableObject(currentServer(), (instance) => {
 			instance.context.db
 				.update(schema.narInfos)
-				.set({ generation: 1 })
+				.set({ generation: narInfoGenerationSchema.parse(1) })
 				.where(
 					and(
 						eq(schema.narInfos.cache, DEFAULT_CACHE),
@@ -78,7 +81,7 @@ describe('isServable with a stale committed-edges snapshot', () => {
 
 			instance.context.db
 				.update(schema.generationSeq)
-				.set({ nextGeneration: 2 })
+				.set({ nextGeneration: narInfoGenerationSchema.parse(2) })
 				.where(
 					and(
 						eq(schema.generationSeq.cache, DEFAULT_CACHE),
@@ -96,7 +99,7 @@ describe('isServable with a stale committed-edges snapshot', () => {
 				tenant: fixtureTenant,
 				cache: DEFAULT_CACHE,
 				storePathHash: metadata.storePathHash,
-				generation: 1,
+				generation: narInfoGenerationSchema.parse(1),
 				narHash: metadata.narHash
 			})
 			.onConflictDoNothing()

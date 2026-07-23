@@ -1,3 +1,4 @@
+import { ttlSecondsSchema } from '@cupboard/nix-store/scalars';
 import { Command } from 'commander';
 import { describe, expect, it } from 'vitest';
 
@@ -21,7 +22,7 @@ describe('validateRetentionChoice', () => {
 		},
 		{
 			name: '--no-retain combined with --ttl',
-			options: { retain: false, ttl: 1_209_600 },
+			options: { retain: false, ttl: ttlSecondsSchema.parse(1_209_600) },
 			error: NoRetainConflictError
 		},
 		{

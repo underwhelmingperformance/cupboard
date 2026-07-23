@@ -1,5 +1,6 @@
 import { type Logger } from '@cupboard/logger';
 import {
+	type NarInfoGeneration,
 	type NixSha256HashString,
 	type StoredCache,
 	type StorePathHash,
@@ -61,7 +62,7 @@ type NarInfoRow = typeof schema.narInfos.$inferSelect;
 function edgeKey(
 	cache: StoredCache,
 	storePathHash: string,
-	generation: number,
+	generation: NarInfoGeneration,
 	narHash: string
 ): string {
 	return `${cache}\0${storePathHash}\0${String(generation)}\0${narHash}`;
@@ -144,7 +145,7 @@ export interface VerificationResult {
 interface PreparedSettle {
 	readonly pending: typeof schema.pendingUploads.$inferSelect;
 	readonly metadata: ParsedUploadPathNegotiation;
-	readonly generation: number;
+	readonly generation: NarInfoGeneration;
 }
 
 // Whether a row is still awaiting its verdict. A terminal row is retained
@@ -432,7 +433,7 @@ export class VerificationService {
 	private async reservePendingRow(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation
-	): Promise<number | undefined> {
+	): Promise<NarInfoGeneration | undefined> {
 		const reserved = await this.commitPipeline.reserveNarInfoRow(
 			pending.cache,
 			metadata
@@ -460,7 +461,7 @@ export class VerificationService {
 	private async finaliseIfAlreadyCommitted(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number
+		generation: NarInfoGeneration
 	): Promise<boolean> {
 		const isCommitted = await this.commitPipeline.isGenerationCommitted(
 			pending.cache,
@@ -513,7 +514,7 @@ export class VerificationService {
 		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number,
+		generation: NarInfoGeneration,
 		verification: NarVerification,
 		promotion: PromotionState,
 		prefetched?: PrefetchedMaterialisationFacts
@@ -546,7 +547,7 @@ export class VerificationService {
 	private async promoteForCommit(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number,
+		generation: NarInfoGeneration,
 		verification: NarVerification,
 		promotion: PromotionState
 	): Promise<boolean> {
@@ -604,7 +605,7 @@ export class VerificationService {
 		logger: Logger,
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number,
+		generation: NarInfoGeneration,
 		prefetched?: PrefetchedMaterialisationFacts
 	): Promise<void> {
 		// Probed after the promote, which is what makes the canonical object and
@@ -809,7 +810,7 @@ export class VerificationService {
 	private async failReservedUpload(
 		pending: typeof schema.pendingUploads.$inferSelect,
 		metadata: ParsedUploadPathNegotiation,
-		generation: number,
+		generation: NarInfoGeneration,
 		verdict: 'mismatch' | 'over-quota' = 'mismatch'
 	): Promise<void> {
 		const reclaim = await this.context.criticalSection(() =>
